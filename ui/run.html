@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mercury — Run</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1><a href="/">⚡ Mercury</a></h1>
+  <span class="muted" id="run-title">run</span>
+  <span class="spacer"></span>
+  <span class="user" id="user-label"></span>
+  <button class="secondary small" id="logout-btn">logout</button>
+</header>
+
+<main>
+  <div id="error-box" class="error-banner hidden"></div>
+
+  <div class="card">
+    <div class="row" style="margin-bottom:10px">
+      <h2 style="margin:0" class="mono" id="run-id"></h2>
+      <span id="status-badge"></span>
+      <span class="spacer" style="flex:1"></span>
+      <button class="secondary small" id="cancel-btn">cancel</button>
+      <button class="secondary small" id="retry-btn">retry</button>
+    </div>
+    <p id="run-task" style="margin:0 0 12px"></p>
+    <div class="detail-grid">
+      <div>
+        <h2 class="section">Run</h2>
+        <dl class="kv">
+          <dt>Agent</dt><dd id="f-agent"></dd>
+          <dt>Attempt</dt><dd id="f-attempt"></dd>
+          <dt>Retry of</dt><dd id="f-retryof"></dd>
+          <dt>Repository</dt><dd id="f-repo"></dd>
+          <dt>Branch</dt><dd id="f-branch"></dd>
+          <dt>Created</dt><dd id="f-created"></dd>
+          <dt>Started</dt><dd id="f-started"></dd>
+          <dt>Completed</dt><dd id="f-completed"></dd>
+          <dt>Duration</dt><dd id="f-duration"></dd>
+          <dt>Error</dt><dd id="f-error"></dd>
+          <dt>Commits</dt><dd id="f-commits"></dd>
+          <dt>PR</dt><dd id="f-pr"></dd>
+        </dl>
+      </div>
+      <div>
+        <h2 class="section">Skills</h2>
+        <div class="skills" id="skills"></div>
+        <h2 class="section">Constraints</h2>
+        <dl class="kv" id="f-constraints"></dl>
+      </div>
+    </div>
+  </div>
+
+  <div id="input-panel" class="hidden">
+    <h3 id="input-title">Input required</h3>
+    <p id="input-message" class="muted"></p>
+    <div id="input-controls"></div>
+  </div>
+
+  <h2 class="section">Event timeline <span class="muted" id="live-indicator"></span></h2>
+  <div id="timeline"></div>
+</main>
+
+<script type="module" src="/run.js"></script>
+</body>
+</html>

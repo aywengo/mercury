@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mercury — Runs</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>⚡ Mercury</h1>
+  <span class="muted">durable coding orchestration</span>
+  <span class="spacer"></span>
+  <span class="user" id="user-label"></span>
+  <button class="secondary small hidden" id="logout-btn">logout</button>
+</header>
+
+<main>
+  <div id="login" class="hidden">
+    <h2>Sign in</h2>
+    <p class="muted">Enter your Mercury API token (the value after <code>Bearer</code>).</p>
+    <input id="token-input" type="password" placeholder="tok-..." autocomplete="off">
+    <p style="margin-top:12px"><button id="login-btn">Sign in</button></p>
+    <p class="hint">Tokens are configured server-side via <code>MERCURY_API_TOKENS="token:owner,..."</code>. On sign-in the token is exchanged for an <code>HttpOnly</code> session cookie — it is not stored in this browser.</p>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="card">
+      <h2 style="margin-top:0">New run</h2>
+      <div class="grid2">
+        <div>
+          <label class="muted">Task</label><br>
+          <textarea id="task" rows="3" style="width:100%" placeholder="e.g. Fix the failing integration tests and prepare a PR"></textarea>
+        </div>
+        <div>
+          <label class="muted">Repository</label><br>
+          <input id="repo" type="text" style="width:100%" placeholder="/path/to/repo or git url">
+          <label class="muted">Base branch</label><br>
+          <input id="branch" type="text" style="width:100%" value="main">
+          <label class="muted">Agent</label><br>
+          <select id="agent" style="width:100%">
+            <option value="primeagent">primeagent</option>
+            <option value="fake">fake</option>
+          </select>
+        </div>
+      </div>
+      <p style="margin-top:10px"><button id="create-btn">Create run</button></p>
+    </div>
+
+    <div class="row" style="margin-bottom:10px">
+      <h2 style="margin:0; font-size:16px">Runs</h2>
+      <span class="spacer" style="flex:1"></span>
+      <select id="status-filter">
+        <option value="">all statuses</option>
+        <option value="QUEUED">QUEUED</option>
+        <option value="STARTING">STARTING</option>
+        <option value="RUNNING">RUNNING</option>
+        <option value="NEEDS_INPUT">NEEDS_INPUT</option>
+        <option value="COMPLETED">COMPLETED</option>
+        <option value="FAILED">FAILED</option>
+        <option value="CANCELLED">CANCELLED</option>
+        <option value="TIMED_OUT">TIMED_OUT</option>
+      </select>
+      <button class="secondary small" id="refresh-btn">refresh</button>
+    </div>
+    <div id="error-box" class="error-banner hidden"></div>
+    <div class="card">
+      <table class="runs">
+        <thead>
+          <tr><th>Run</th><th>Task</th><th>Repo</th><th>Agent</th><th>Status</th><th>Created</th><th>Duration</th></tr>
+        </thead>
+        <tbody id="runs-body"></tbody>
+      </table>
+      <p id="empty" class="muted hidden" style="text-align:center; padding:20px">No runs yet — create one above.</p>
+    </div>
+  </div>
+</main>
+
+<script type="module" src="/index.js"></script>
+</body>
+</html>

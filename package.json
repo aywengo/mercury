@@ -1,0 +1,27 @@
+{
+  "name": "mercury",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mercury - durable long-running coding orchestration for PrimeAgent (see Mercury.md)",
+  "type": "module",
+  "engines": {
+    "node": ">=23.6"
+  },
+  "scripts": {
+    "dev": "node src/cli.ts dev",
+    "server": "node src/cli.ts server",
+    "worker": "node src/cli.ts worker",
+    "gc": "node src/cli.ts gc",
+    "migrate": "node src/cli.ts migrate",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-timeout=60000 'test/*.test.ts'"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.3"
+  }
+}

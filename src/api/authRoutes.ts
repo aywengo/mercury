@@ -1,0 +1,76 @@
+// Public auth endpoints: session login/logout/identity (Mercury.md section 24).
+//
+//   POST /api/auth/login   { token }  -> issues mercury_session cookie (HttpOnly)
+//   POST /api/auth/logout  (cookie)   -> deletes session, clears cookie
+//   GET  /api/auth/me                       -> { ownerId, isAdmin } | 401
+//
+// Mounted at /api/auth BEFORE the gated /api router, so login is reachable
+// without any credential. Login is additionally rate-limited by the caller
+// (see server.ts). The 401 body is generic on purpose: it must not reveal
+// whether a submitted token is known to the server.
+
+import { Router, type Request, type Response } from 'express';
+import { randomBytes } from 'node:crypto';
+import {
+  SESSION_COOKIE,
+  SESSION_TTL_MS,
+  parseCookies,
+  sessionClearCookie,
+  type SessionStore,
+} from './sessions.ts';
+
+export interface AuthRoutesDeps {
+  tokens: Map<string, string>;
+  adminToken: string | null;
+  sessions: SessionStore;
+}
+
+function resolveCredential(tokens: Map<string, string>, adminToken: string | null, token: string): { ownerId: string; isAdmin: boolean } | null {
+  if (!token) return null;
+  if (adminToken && token === adminToken) return { ownerId: '*', isAdmin: true };
+  const ownerId = tokens.get(token);
+  return ownerId ? { ownerId, isAdmin: false } : null;
+}
+
+export function createAuthRoutes(deps: AuthRoutesDeps): Router {
+  const router = Router();
+
+  router.post('/login', (req: Request, res: Response) => {
+    const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+    const auth = resolveCredential(deps.tokens, deps.adminToken, token);
+    if (!auth) {
+      // Generic error (no 'token not found' vs 'empty token' distinction).
+      res.status(401).json({ error: 'invalid token' });
+      return;
+    }
+    // 256-bit random session id; stored server-side (sessions.ts).
+    const sid = randomBytes(32).toString('hex');
+    deps.sessions.set(sid, {
+      ownerId: auth.ownerId,
+      isAdmin: auth.isAdmin,
+      expiresAt: Date.now() + SESSION_TTL_MS,
+    });
+    res.setHeader(
+      'Set-Cookie',
+      `${SESSION_COOKIE}=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+    );
+    res.json({ ok: true, ownerId: auth.ownerId, isAdmin: auth.isAdmin });
+  });
+
+  router.post('/logout', (req: Request, res: Response) => {
+    const sid = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+    if (sid) deps.sessions.delete(sid);
+    res.setHeader('Set-Cookie', sessionClearCookie());
+    res.json({ ok: true });
+  });
+
+  router.get('/me', (req: Request, res: Response) => {
+    if (!req.auth) {
+      res.status(401).json({ error: 'authentication required' });
+      return;
+    }
+    res.json({ ownerId: req.auth.ownerId, isAdmin: req.auth.isAdmin });
+  });
+
+  return router;
+}

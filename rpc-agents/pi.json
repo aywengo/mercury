@@ -1,0 +1,17 @@
+{
+  "id": "pi",
+  "description": "Pi Agent (pi.dev) \u2014 minimal terminal coding harness (Earendil)",
+  "command": "pi",
+  "args": [],
+  "protocol": {
+    "modeFlag": "--mode",
+    "modeValue": "rpc"
+  },
+  "eventMap": {},
+  "input": {
+    "enabled": true
+  },
+  "resume": {
+    "enabled": true
+  }
+}

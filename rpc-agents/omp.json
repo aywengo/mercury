@@ -1,0 +1,23 @@
+{
+  "id": "omp",
+  "description": "Oh my Pi (omp.sh) \u2014 coding agent with IDE wired in (Stencil Labs)",
+  "command": "omp",
+  "args": [],
+  "protocol": {
+    "modeFlag": "--mode",
+    "modeValue": "rpc",
+    "ignoreEventTypes": [
+      "negotiate_protocol",
+      "ready",
+      "subagent_lifecycle",
+      "host_tool_call"
+    ]
+  },
+  "eventMap": {},
+  "input": {
+    "enabled": true
+  },
+  "resume": {
+    "enabled": true
+  }
+}

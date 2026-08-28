@@ -1,0 +1,24 @@
+[Unit]
+Description=Mercury API server (durable run orchestration for PrimeAgent)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mercury
+Group=mercury
+WorkingDirectory=/opt/mercury
+EnvironmentFile=/etc/mercury/mercury.env
+ExecStart=/usr/bin/env node src/cli.ts server
+Restart=on-failure
+RestartSec=5
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mercury /var/lib/mercury
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

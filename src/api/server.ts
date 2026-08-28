@@ -1,0 +1,146 @@
+// Express application + HTTP server (Mercury.md sections 7, 15, 24).
+
+import express, { type Express } from 'express';
+import type { Server } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import type { EventStore } from '../events/eventStore.ts';
+import type { EventStream } from '../events/eventStream.ts';
+import type { RunQueue } from '../queue/runQueue.ts';
+import type { RunService } from '../runs/runService.ts';
+import { createAuthMiddleware } from './auth.ts';
+import { createRoutes } from './routes.ts';
+import { createAuthRoutes } from './authRoutes.ts';
+import { createRateLimiter } from './rateLimit.ts';
+import { createSessionStore, type SessionStore } from './sessions.ts';
+
+// Dashboard UI (Mercury.md section 23): static SPA served at /.
+// The UI authenticates with a session cookie (POST /api/auth/login);
+// the /api routes remain the only data surface.
+const UI_DIR = resolve(import.meta.dirname, '..', '..', 'ui');
+
+export interface RateLimitConfig {
+  windowMs: number;
+  max: number;
+}
+
+export interface ServerDeps {
+  runService: RunService;
+  events: EventStore;
+  stream: EventStream;
+  apiTokens: Map<string, string>;
+  adminToken: string | null;
+  /** Optional session store override (default: in-memory Map, see sessions.ts). */
+  sessions?: SessionStore;
+  /** Optional run queue for the /healthz/workers endpoint (worker health, Mercury.md section 25). */
+  queue?: RunQueue;
+  /** Optional rate-limit overrides (defaults: login 10/min, run creation 30/min). */
+  rateLimits?: {
+    login?: RateLimitConfig;
+    createRun?: RateLimitConfig;
+  };
+}
+
+// Defaults for the two protected route groups (Mercury.md section 24).
+const DEFAULT_LOGIN_LIMIT: RateLimitConfig = { windowMs: 60_000, max: 10 }; // 10/min per IP
+const DEFAULT_CREATE_RUN_LIMIT: RateLimitConfig = { windowMs: 60_000, max: 30 }; // 30/min per owner+IP
+
+export function createApp(deps: ServerDeps): Express {
+  const app = express();
+  const sessions = deps.sessions ?? createSessionStore();
+
+  // Dashboard UI static assets are public (no secrets); data access is gated via /api.
+  app.use(express.static(UI_DIR, { index: 'index.html' }));
+
+  app.use(express.json({ limit: '1mb' }));
+  // Credential resolution only (bearer token or session cookie); never blocks.
+  app.use(createAuthMiddleware(deps.apiTokens, deps.adminToken, sessions));
+
+  app.get('/healthz', (_req, res) => {
+    res.json({ ok: true, ts: new Date().toISOString() });
+  });
+
+  // Worker health (public like /healthz, Mercury.md section 25): active workers
+  // derived from lease ownership plus the current queue backlog depth.
+  app.get('/healthz/workers', (_req, res) => {
+    if (!deps.queue) {
+      res.status(503).json({ error: 'queue not configured' });
+      return;
+    }
+    res.json({
+      workers: deps.queue.activeLeases(),
+      queueDepth: deps.queue.queuedCount(),
+    });
+  });
+
+  // Brute-force protection for the token exchange (per IP; login is public).
+  const loginLimiter = createRateLimiter({
+    group: 'auth-login',
+    methods: ['POST'],
+    windowMs: deps.rateLimits?.login?.windowMs ?? DEFAULT_LOGIN_LIMIT.windowMs,
+    max: deps.rateLimits?.login?.max ?? DEFAULT_LOGIN_LIMIT.max,
+  });
+  app.post('/api/auth/login', loginLimiter);
+  app.use('/api/auth', createAuthRoutes({ tokens: deps.apiTokens, adminToken: deps.adminToken, sessions }));
+
+  // Run-creation limit (per owner+IP; req.auth is already resolved).
+  const createRunLimiter = createRateLimiter({
+    group: 'create-run',
+    methods: ['POST'],
+    windowMs: deps.rateLimits?.createRun?.windowMs ?? DEFAULT_CREATE_RUN_LIMIT.windowMs,
+    max: deps.rateLimits?.createRun?.max ?? DEFAULT_CREATE_RUN_LIMIT.max,
+  });
+  app.post('/api/runs', createRunLimiter);
+
+  app.use('/api', createRoutes({ runService: deps.runService, events: deps.events, stream: deps.stream }));
+
+  app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    res.status(500).json({ error: err.message });
+  });
+
+  return app;
+}
+
+export interface StartServerOpts {
+  /** Bind address. Default 127.0.0.1 (secure default; set 0.0.0.0 to expose). */
+  host?: string;
+  /** TLS: if provided, serve https with this cert/key (file paths). */
+  tls?: { cert: string; key: string };
+}
+
+export interface StartedServer {
+  close: () => Promise<void>;
+  /** Base URL the server listens on (http:// or https://). */
+  url: string;
+}
+
+export function startServer(deps: ServerDeps, port: number, opts: StartServerOpts = {}): Promise<StartedServer> {
+  const app = createApp(deps);
+  const host = opts.host ?? '127.0.0.1';
+  let cert: string | undefined;
+  let key: string | undefined;
+  if (opts.tls) {
+    // Read up front so a missing/unreadable file fails fast (before listen).
+    cert = readFileSync(opts.tls.cert, 'utf8');
+    key = readFileSync(opts.tls.key, 'utf8');
+  }
+  return new Promise((resolve) => {
+    let server: Server;
+    if (opts.tls) {
+      server = createHttpsServer({ cert, key }, app).listen(port, host, () => {
+        resolve({
+          close: () => new Promise<void>((res) => server.close(() => res())),
+          url: `https://${host}:${port}`,
+        });
+      });
+    } else {
+      server = app.listen(port, host, () => {
+        resolve({
+          close: () => new Promise<void>((res) => server.close(() => res())),
+          url: `http://${host}:${port}`,
+        });
+      });
+    }
+  });
+}
