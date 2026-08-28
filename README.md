@@ -45,6 +45,10 @@ Worker (separate process)
     ↓
 AgentAdapter
     ├── PrimeAgentAdapter (prime-agent --mode rpc, real protocol)
+    ├── HermesAgentAdapter (hermes chat -Q, text)
+    ├── LocalAgentAdapter (declarative local CLI configs)
+    ├── RemoteAgentAdapter (declarative remote HTTP API configs)
+    ├── RpcAgentAdapter (declarative RPC JSONL configs: pi / omp / ...)
     └── FakeAgentAdapter (deterministic, for tests)
     ↓
 selected Skills (.agents/skills, snapshotted per Run)
@@ -318,7 +322,7 @@ constraint run directly on the host.
 
 ## Testing
 
-`npm test` — 180 tests, no network, no LLM APIs (PrimeAgentAdapter is tested against a mock RPC server speaking the real protocol):
+`npm test` — 183 tests, no network, no LLM APIs (PrimeAgentAdapter is tested against a mock RPC server speaking the real protocol):
 
 - state machine (valid/invalid transitions, terminal states)
 - secret redaction

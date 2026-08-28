@@ -3,7 +3,7 @@
 Get Mercury running in under five minutes and submit your first coding Run.
 
 Mercury is the durable orchestration layer for PrimeAgent: you submit a task, get a `runId`,
-close the browser, and the Run keeps executing in the background. Full spec: [`../Mercury.md`](../Mercury.md).
+close the browser, and the Run keeps executing in the background.
 
 ---
 
@@ -130,5 +130,5 @@ Full reference: `README.md` → Configuration.
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # 112 tests, no network, no LLM
+npm test            # 183 tests, no network, no LLM
 ```
