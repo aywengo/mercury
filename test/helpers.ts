@@ -38,6 +38,8 @@ export interface TestEnv {
 
 export function makeEnv(opts: {
   fakeScript?: FakeAgentConfig['script'];
+  /** Redactor for the EventStore (production wiring passes one; tests default to none). */
+  redactor?: import('../src/domain/redact.ts').Redactor;
   workspaceMode?: 'git-worktree' | 'copy';
   repoDir?: string;
   workerEnabled?: boolean;
@@ -57,7 +59,7 @@ export function makeEnv(opts: {
   const dir = mkdtempSync(join(tmpdir(), 'mercury-test-'));
   const db = openDatabase(join(dir, 'test.db'));
   const runs = new RunStore(db);
-  const events = new EventStore(db);
+  const events = new EventStore(db, opts.redactor);
   const queue = new RunQueue(db, runs);
   const skills = new SkillRegistry(SKILLS_DIR);
   const workspace = new WorkspaceManager({

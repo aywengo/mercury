@@ -53,7 +53,7 @@ async function main(): Promise<void> {
 
   const db = openDatabase(config.dbPath);
   const runs = new RunStore(db);
-  const events = new EventStore(db);
+  const events = new EventStore(db, redactor);
   const queue = new RunQueue(db, runs);
   const skills = new SkillRegistry(SKILLS_DIR);
   const selector = createSkillSelector();
