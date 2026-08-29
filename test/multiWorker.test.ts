@@ -325,7 +325,7 @@ test('CLI wiring: /healthz/workers returns 200 when started via cli.ts server (i
   const port = 3900 + Math.floor(Math.random() * 500);
   const env = {
     ...process.env,
-    MERCURY_DB_PATH: join(dir, 'test.db'),
+    MERCURY_DB: join(dir, 'test.db'),
     MERCURY_WORKSPACE_BASE: join(dir, 'ws'),
     MERCURY_API_TOKENS: 'tok-alice:alice',
     MERCURY_PORT: String(port),
@@ -356,5 +356,63 @@ test('CLI wiring: /healthz/workers returns 200 when started via cli.ts server (i
   } finally {
     proc.kill('SIGTERM');
     await new Promise((r) => proc.once('exit', r));
+  }
+});
+
+test('CLI wiring: backlog alert webhook fires when configured via env (issue #5)', async () => {
+  const { spawn } = await import('node:child_process');
+  const { mkdtempSync } = await import('node:fs');
+  const webhook = await startWebhookServer();
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-cli-alert-'));
+  const port = 4400 + Math.floor(Math.random() * 500);
+  const env = {
+    ...process.env,
+    MERCURY_DB: join(dir, 'test.db'),
+    MERCURY_WORKSPACE_BASE: join(dir, 'ws'),
+    MERCURY_API_TOKENS: 'tok-alice:alice',
+    MERCURY_BACKLOG_ALERT_THRESHOLD: '1',
+    MERCURY_ALERT_WEBHOOK_URL: webhook.url,
+    MERCURY_POLL_MS: '50',
+  };
+  // enqueue runs BEFORE the worker starts (single-writer: avoid two SQLite
+  // connections racing; the worker claims one run, leaving depth 1 >= threshold 1)
+  const { openDatabase } = await import('../src/db/database.ts');
+  const { RunStore } = await import('../src/runs/runStore.ts');
+  const { RunService } = await import('../src/runs/runService.ts');
+  const { SkillRegistry } = await import('../src/skills/skillRegistry.ts');
+  const { createSkillSelector } = await import('../src/skills/skillSelector.ts');
+  const { EventStore } = await import('../src/events/eventStore.ts');
+  {
+    const db = openDatabase(join(dir, 'test.db'));
+    const runs = new RunStore(db);
+    const events = new EventStore(db);
+    const skills = new SkillRegistry(join(import.meta.dirname, '..', '.agents', 'skills'));
+    const runService = new RunService({
+      db, runs, events, skills,
+      selector: createSkillSelector(),
+      knownAgents: ['fake'],
+      defaultMaxDurationMs: 60_000,
+      defaultMaxRetries: 0,
+    });
+    runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    runService.create({ ownerId: 'alice', task: 'y', agent: 'fake' });
+    db.close();
+  }
+  const proc = spawn(process.execPath, ['src/cli.ts', 'worker'], {
+    cwd: join(import.meta.dirname, '..'),
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    // the worker should claim one run and fire the backlog alert
+    await waitFor(() => webhook.hits.length > 0, 10_000);
+    const hit = webhook.hits[0];
+    assert.equal(hit.path, '/hook');
+    assert.equal(hit.body.type ?? hit.body.queueDepth !== undefined, true);
+    assert.ok((hit.body as { queueDepth?: number }).queueDepth !== undefined);
+  } finally {
+    proc.kill('SIGTERM');
+    await new Promise((r) => proc.once('exit', r));
+    await webhook.close();
   }
 });

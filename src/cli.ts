@@ -142,6 +142,8 @@ async function main(): Promise<void> {
       stuckCheckIntervalMs: config.stuckCheckIntervalMs,
       retryBackoffMs: config.retryBackoffMs,
       maxRetries: config.maxRetries,
+      backlogAlertThreshold: config.backlogAlertThreshold,
+      alertWebhookUrl: config.alertWebhookUrl,
       sandbox,
     });
     worker.start();
