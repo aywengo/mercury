@@ -166,7 +166,7 @@ async function main(): Promise<void> {
   if (cmd === 'server' || cmd === 'dev') {
     stream.start();
     const server = await startServer(
-      { runService, events, stream, apiTokens: config.apiTokens, adminToken: config.adminToken },
+      { runService, events, stream, queue, apiTokens: config.apiTokens, adminToken: config.adminToken },
       config.port,
       { host: config.bindHost, tls: config.tls ?? undefined },
     );
