@@ -77,7 +77,10 @@ export class SandboxManager {
   /** True when the run requests isolation (constraints that need a container). */
   requiresSandbox(run: Run): boolean {
     const c = run.constraints;
-    return Boolean(c.resourceLimits || (c.allowedNetworks && c.allowedNetworks.length > 0));
+    // `allowedNetworks` present (even as an empty array) requests isolation:
+    // empty = no network (--network none), non-empty = bridge. Only an absent
+    // field means "no network policy" -> no container.
+    return Boolean(c.resourceLimits || c.allowedNetworks !== undefined);
   }
 
   /**
@@ -101,7 +104,7 @@ export class SandboxManager {
     if (limits.memory) args.push('--memory', limits.memory);
     if (limits.disk) args.push('--storage-opt', `size=${limits.disk}`);
     // Network policy.
-    args.push(networks.length === 0 ? '--network' : '--network', networks.length === 0 ? 'none' : 'bridge');
+    args.push('--network', networks.length === 0 ? 'none' : 'bridge');
     // Environment passthrough for the agent (API keys etc. are inherited by the
     // worker; the container needs the same env to talk to providers).
     args.push('--env', 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin');

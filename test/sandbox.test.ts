@@ -40,7 +40,7 @@ test('requiresSandbox: true only when constraints request isolation', () => {
   const sb = new SandboxManager({ runtime: 'docker' });
   assert.equal(sb.requiresSandbox(makeRun()), false);
   assert.equal(sb.requiresSandbox(makeRun({ constraints: { maxDurationMs: 1000, maxRetries: 0, resourceLimits: { cpu: '1' } } })), true);
-  assert.equal(sb.requiresSandbox(makeRun({ constraints: { maxDurationMs: 1000, maxRetries: 0, allowedNetworks: [] } })), false);
+  assert.equal(sb.requiresSandbox(makeRun({ constraints: { maxDurationMs: 1000, maxRetries: 0, allowedNetworks: [] } })), true);
   assert.equal(sb.requiresSandbox(makeRun({ constraints: { maxDurationMs: 1000, maxRetries: 0, allowedNetworks: ['api.example.com'] } })), true);
 });
 
