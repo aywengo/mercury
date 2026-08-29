@@ -146,7 +146,7 @@ export class Worker {
       const sandbox = this.deps.sandbox;
       if (sandbox && sandbox.requiresSandbox(run)) {
         if (!(await sandbox.available())) {
-          throw new Error('Run requests sandboxed execution (resourceLimits/allowedNetworks) but no container runtime is available (install docker/podman or set MERCURY_SANDBOX_RUNTIME=none to disable)');
+          throw new Error('Run requests sandboxed execution (resourceLimits/allowedNetworks) but no container runtime is available (install docker/podman, or configure the worker without a sandbox runtime to disable sandboxing)');
         }
       }
 
