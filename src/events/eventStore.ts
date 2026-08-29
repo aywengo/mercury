@@ -4,6 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tx } from '../db/database.ts';
 import type { MercuryEvent } from '../domain/types.ts';
+import type { Redactor } from '../domain/redact.ts';
 
 export interface EventRow {
   id: string;
@@ -16,10 +17,12 @@ export interface EventRow {
 
 export class EventStore {
   private db: DatabaseSync;
+  private redactor: Redactor | null;
   private appendListeners = new Set<(runId: string, event: MercuryEvent) => void>();
 
-  constructor(db: DatabaseSync) {
+  constructor(db: DatabaseSync, redactor?: Redactor) {
     this.db = db;
+    this.redactor = redactor ?? null;
   }
 
   /** Register a callback invoked after every append (in-process push hook). */
@@ -37,17 +40,22 @@ export class EventStore {
         .prepare('SELECT COALESCE(MAX(sequence), 0) AS max_seq FROM events WHERE run_id = ?')
         .get(runId) as { max_seq: number };
       const sequence = row.max_seq + 1;
+      // Secrets are redacted at the single write choke point (Mercury.md section 24):
+      // every event (agent messages, tool args, errors) passes through append().
+      // Payloads must be JSON-serializable plain values (objects/arrays/strings/
+      // numbers/booleans/null); non-plain values (Date, Buffer) are not preserved.
+      const safePayload = this.redactor ? this.redactor.redactJson(payload) : payload;
       const event: MercuryEvent = {
         id: 'evt_' + randomUUID().replace(/-/g, '').slice(0, 16),
         runId,
         type,
         sequence,
         timestamp: new Date().toISOString(),
-        payload,
+        payload: safePayload,
       };
       this.db
         .prepare('INSERT INTO events (id, run_id, type, sequence, timestamp, payload_json) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(event.id, runId, type, sequence, event.timestamp, JSON.stringify(payload));
+        .run(event.id, runId, type, sequence, event.timestamp, JSON.stringify(safePayload));
       for (const listener of [...this.appendListeners]) {
         try {
           listener(runId, event);

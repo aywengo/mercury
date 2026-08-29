@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeEnv } from './helpers.ts';
+import { makeEnv, waitFor } from './helpers.ts';
 import { EventStream } from '../src/events/eventStream.ts';
+import { EventStore } from '../src/events/eventStore.ts';
+import { createRedactor } from '../src/domain/redact.ts';
 
 test('events persist with monotonic sequences across appends', () => {
   const env = makeEnv({ workerEnabled: false });
@@ -35,6 +37,61 @@ test('list with after cursor returns only newer events', () => {
   }
 });
 
+test('append redacts secrets in payloads when a redactor is configured (issue #3)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    // Direct append without a redactor (test env default): stored as-is.
+    env.events.append(run.id, 'agent.message', { text: 'key=sk-12345' });
+    // A redactor-equipped store must redact on append.
+    const red = createRedactor(['super-secret']);
+    const store = new EventStore(env.db, red);
+    store.append(run.id, 'tool.failed', {
+      error: 'boom super-secret',
+      args: { api_key: 'api_key=sk-abc', bearer: 'Authorization: Bearer abc123.def456' },
+    });
+    const all = env.events.list(run.id);
+    const toolFailed = all.find((e) => e.type === 'tool.failed')!;
+    const payload = toolFailed.payload as { error: string; args: { api_key: string; bearer: string } };
+    assert.equal(payload.error, 'boom [REDACTED]');
+    assert.equal(payload.args.api_key, 'api_key= [REDACTED]');
+    assert.equal(payload.args.bearer, 'Authorization: [REDACTED]');
+    // The unredacted append is untouched.
+    const msg = all.find((e) => e.type === 'agent.message')!;
+    assert.equal((msg.payload as { text: string }).text, 'key=sk-12345');
+  } finally {
+    env.close();
+  }
+});
+
+
+test('worker-appended events are redacted end-to-end with a redactor-equipped store (issue #3)', async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const repo = mkdtempSync(join(tmpdir(), 'mercury-redact-e2e-'));
+  const env = makeEnv({
+    redactor: createRedactor(['super-secret']),
+    fakeScript: [
+      { event: { type: 'agent.message', payload: { text: 'the key is super-secret' } } },
+      { event: { type: 'tool.failed', payload: { error: 'api_key=sk-12345' } } },
+    ],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake',
+      repository: { localPath: repo },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 10_000);
+    const all = env.events.list(run.id);
+    const msg = all.find((e) => e.type === 'agent.message')!;
+    assert.equal((msg.payload as { text: string }).text, 'the key is [REDACTED]');
+    const toolFailed = all.find((e) => e.type === 'tool.failed')!;
+    assert.equal((toolFailed.payload as { error: string }).error, 'api_key= [REDACTED]');
+  } finally {
+    env.close();
+  }
+});
 
 test('append hook delivers events to subscribers immediately (in-process push)', async () => {
   const env = makeEnv({ workerEnabled: false });
