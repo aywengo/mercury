@@ -317,3 +317,44 @@ test('lease loss: worker aborts execution and requeues the run', async () => {
     env.close();
   }
 });
+
+test('CLI wiring: /healthz/workers returns 200 when started via cli.ts server (issue #4)', async () => {
+  const { spawn } = await import('node:child_process');
+  const { mkdtempSync } = await import('node:fs');
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-cli-healthz-'));
+  const port = 3900 + Math.floor(Math.random() * 500);
+  const env = {
+    ...process.env,
+    MERCURY_DB_PATH: join(dir, 'test.db'),
+    MERCURY_WORKSPACE_BASE: join(dir, 'ws'),
+    MERCURY_API_TOKENS: 'tok-alice:alice',
+    MERCURY_PORT: String(port),
+    MERCURY_BIND_HOST: '127.0.0.1',
+  };
+  const proc = spawn(process.execPath, ['src/cli.ts', 'server'], {
+    cwd: join(import.meta.dirname, '..'),
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    // wait for the server to come up
+    let ok = false;
+    for (let i = 0; i < 40; i++) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/healthz`);
+        if (res.status === 200) { ok = true; break; }
+      } catch {
+        await sleep(250);
+      }
+    }
+    assert.ok(ok, 'server did not start');
+    const res = await fetch(`http://127.0.0.1:${port}/healthz/workers`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { workers: unknown[]; queueDepth: number };
+    assert.ok(Array.isArray(body.workers));
+    assert.equal(typeof body.queueDepth, 'number');
+  } finally {
+    proc.kill('SIGTERM');
+    await new Promise((r) => proc.once('exit', r));
+  }
+});
