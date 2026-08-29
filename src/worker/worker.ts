@@ -325,6 +325,11 @@ export class Worker {
           await adapter.cancel(run.id);
           break;
         }
+        if (handled === 'cancelled') {
+          cancelled = true;
+          await adapter.cancel(run.id);
+          break;
+        }
       }
 
       // Lease lost: another worker may already be re-executing the run, so do not
@@ -352,8 +357,9 @@ export class Worker {
 
   /**
    * Handle one agent event. Returns 'lease-lost' if the lease was lost while
-   * waiting for human input, or 'input-timeout' if the wait exceeded the
-   * configured input timeout (Mercury.md section 19).
+   * waiting for human input, 'input-timeout' if the wait exceeded the
+   * configured input timeout, or 'cancelled' if the run was cancelled while
+   * waiting (Mercury.md section 19).
    */
   private async handleAgentEvent(
     run: Run,
@@ -361,7 +367,7 @@ export class Worker {
     ev: AgentEvent,
     skills: ResolvedSkill[],
     lost: LeaseLostSignal,
-  ): Promise<'ok' | 'lease-lost' | 'input-timeout'> {
+  ): Promise<'ok' | 'lease-lost' | 'input-timeout' | 'cancelled'> {
     const log = this.logger(run.id);
     if (ev.type === 'input.required') {
       this.deps.events.append(run.id, 'input.required', ev.payload);
@@ -372,6 +378,10 @@ export class Worker {
       if (outcome.kind === 'input-timeout') {
         log.warn({ inputTimeoutMs: this.deps.inputTimeoutMs }, 'input wait timed out');
         return 'input-timeout';
+      }
+      if (outcome.kind === 'cancelled') {
+        log.info({}, 'run cancelled while waiting for input');
+        return 'cancelled';
       }
       this.deps.events.append(run.id, 'input.received', { value: outcome.input.value });
       this.deps.runs.transition(run.id, 'RUNNING');
@@ -397,13 +407,14 @@ export class Worker {
 
   /**
    * Poll for human input in arrival order (concurrent requests are presented
-   * in order). Resolves with the input, or a marker if the lease was lost or
-   * the input timeout (section 19) expired.
+   * in order). Resolves with the input, or a marker if the lease was lost, the
+   * input timeout (section 19) expired, or the run was cancelled while waiting.
    */
   private async waitForInput(runId: string, lost: LeaseLostSignal): Promise<
     | { kind: 'input'; input: AgentInput }
     | { kind: 'lease-lost' }
     | { kind: 'input-timeout' }
+    | { kind: 'cancelled' }
   > {
     const db = this.deps.db;
     const deadline = this.deps.inputTimeoutMs > 0 ? Date.now() + this.deps.inputTimeoutMs : null;
@@ -416,9 +427,14 @@ export class Worker {
         lastId = row.id;
         return { kind: 'input', input: { value: JSON.parse(row.input_json), at: new Date().toISOString() } };
       }
+      // Precedence within one poll window: an already-queued input wins over a
+      // concurrent cancel; the input deadline wins over cancellation. Both are
+      // defensible outcomes and the windows are small (inputPollMs).
       if (deadline !== null && Date.now() >= deadline) return { kind: 'input-timeout' };
+      if (this.deps.runs.isCancellationRequested(runId)) return { kind: 'cancelled' };
       await Promise.race([sleep(this.deps.inputPollMs), lost.promise]);
       if (lost.fired) return { kind: 'lease-lost' };
+      if (this.deps.runs.isCancellationRequested(runId)) return { kind: 'cancelled' };
     }
     throw new Error('Worker stopped while waiting for input');
   }

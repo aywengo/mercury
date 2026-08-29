@@ -102,6 +102,39 @@ test('cancellation: RUNNING -> CANCELLED', async () => {
   }
 });
 
+test('cancellation: NEEDS_INPUT -> CANCELLED promptly (issue #1)', async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const repo = mkdtempSync(join(tmpdir(), 'mercury-cancel-input-'));
+  const env = makeEnv({
+    inputTimeoutMs: 30_000, // long timeout; cancel must win well before it
+    fakeScript: [
+      { input: { question: 'Continue?', choices: ['yes', 'no'] } },
+      { event: { type: 'agent.message', payload: { text: 'after input' } } },
+    ],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake',
+      repository: { localPath: repo },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'NEEDS_INPUT', 10_000);
+    const t0 = Date.now();
+    env.runService.cancel(run.id, 'alice', false);
+    await waitFor(() => env.runs.get(run.id)!.status === 'CANCELLED', 10_000);
+    const elapsed = Date.now() - t0;
+    // Cancel must be honored promptly, not after the 30s input timeout.
+    assert.ok(elapsed < 5_000, `cancel during NEEDS_INPUT took ${elapsed}ms (expected < 5000ms)`);
+    const types = env.events.list(run.id).map((e) => e.type);
+    assert.ok(types.includes('run.cancelling'));
+    assert.ok(types.includes('run.cancelled'));
+    assert.ok(!types.includes('input.received'));
+  } finally {
+    env.close();
+  }
+});
+
 test('human input: NEEDS_INPUT -> input -> RUNNING -> COMPLETED', async () => {
   const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
