@@ -283,6 +283,37 @@ test('lease expiry: active run -> FAILED (infrastructure), queued -> requeued', 
   }
 });
 
+test('lease expiry: reaped run gets a terminal run.failed event (issue #6)', async () => {
+  const env = makeEnv({ workerEnabled: true, pollMs: 10 });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.queue.claim('w1', 60_000);
+    // simulate crash: expire the lease and mark RUNNING
+    env.db.prepare('UPDATE runs SET lease_expires_at = ? WHERE id = ?').run(new Date(Date.now() - 1000).toISOString(), run.id);
+    env.db.prepare("UPDATE runs SET status = 'RUNNING', started_at = ? WHERE id = ?").run(new Date(Date.now() - 5000).toISOString(), run.id);
+    // the worker loop reaps the expired lease and appends the terminal event
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    const events = env.events.list(run.id);
+    const types = events.map((e) => e.type);
+    const failedEvts = events.filter((e) => e.type === 'run.failed');
+    assert.equal(failedEvts.length, 1, `expected exactly one run.failed, got ${failedEvts.length}`);
+    // the terminal event is the last in the timeline
+    assert.equal(types[types.length - 1], 'run.failed');
+    const failedEvt = failedEvts[0];
+    const payload = failedEvt.payload as { kind: string; durationMs: number | null };
+    assert.equal(payload.kind, 'infrastructure');
+    assert.equal(typeof payload.durationMs, 'number');
+    // the run row carries the error + kind
+    const row = env.runs.get(run.id)!;
+    assert.equal(row.error, 'Worker lease expired (worker crash?)');
+    assert.equal(row.errorKind, 'infrastructure');
+    // an error event precedes run.failed (uniform with other failure paths)
+    assert.ok(types.includes('error'));
+  } finally {
+    env.close();
+  }
+});
+
 test('auto-retry on infrastructure failure (workspace missing)', async () => {
   const env = makeEnv({
     workerEnabled: false,
