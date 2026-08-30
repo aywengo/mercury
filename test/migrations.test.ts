@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { openDatabase, MIGRATIONS } from '../src/db/database.ts';
+import { openDatabase, MIGRATIONS, BUSY_TIMEOUT_MS } from '../src/db/database.ts';
 
 test('migration v3: idempotency keys become owner-scoped with backfill (issue #8)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'mercury-migrate-v3-'));
@@ -72,7 +72,7 @@ test('openDatabase sets a busy_timeout (issue #38)', () => {
   try {
     const db = openDatabase(dbPath);
     const row = db.prepare('PRAGMA busy_timeout').get() as { timeout: number };
-    assert.ok(row.timeout > 0, `expected busy_timeout > 0, got ${row.timeout}`);
+    assert.equal(row.timeout, BUSY_TIMEOUT_MS, 'busy_timeout must match BUSY_TIMEOUT_MS');
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -108,8 +108,9 @@ test('concurrent writer waits for the lock instead of failing with SQLITE_BUSY (
       workerData: { path: dbPath, iso },
     });
     const started = Date.now();
-    // release the lock shortly after the worker starts waiting
-    const release = setTimeout(() => db1.exec('COMMIT'), 500);
+    // release the lock shortly after the worker starts waiting (500ms << BUSY_TIMEOUT_MS)
+    const releaseMs = 500;
+    const release = setTimeout(() => db1.exec('COMMIT'), releaseMs);
     const result = await new Promise<{ ok: boolean; err?: string }>((resolve, reject) => {
       worker.once('message', resolve);
       worker.once('error', reject);
@@ -119,8 +120,11 @@ test('concurrent writer waits for the lock instead of failing with SQLITE_BUSY (
     assert.ok(result.ok, `db2 write failed: ${result.err}`);
     const r2 = db1.prepare('SELECT id FROM runs WHERE id = ?').get('r2') as { id: string };
     assert.equal(r2.id, 'r2', 'second writer committed after the lock was released');
-    assert.ok(elapsed >= 400, `waited ${elapsed}ms (expected to block on the lock)`);
-    assert.ok(elapsed < 5_000, `waited ${elapsed}ms (busy_timeout should cap the wait)`);
+    // The write must have blocked on the lock (not raced past it). Corner: on an
+    // extremely slow machine worker startup could exceed releaseMs, making this a
+    // no-op proof — observed startup is ~80ms, so the floor still holds in practice.
+    assert.ok(elapsed >= releaseMs - 100, `waited ${elapsed}ms (expected to block on the lock)`);
+    assert.ok(elapsed < BUSY_TIMEOUT_MS, `waited ${elapsed}ms (busy_timeout should cap the wait)`);
     db1.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
