@@ -88,6 +88,51 @@ export class EventStore {
       .get(runId) as { last_ts: string | null };
     return row.last_ts;
   }
+
+  /**
+   * Retroactive redaction (issue #18): re-run redactJson over every persisted
+   * event payload. Events written before write-time redaction existed may
+   * contain secrets; this one-shot backfill rewrites them in place.
+   * Returns the number of rows whose payload actually changed.
+   */
+  backfillRedact(): number {
+    const redactor = this.redactor;
+    if (!redactor) return 0;
+    // Keyset paging: never materialize the whole events table (production DBs
+    // can be multi-GB). Each chunk runs in its own transaction, so a crash
+    // mid-pass is safe to re-run (idempotent). Rows written between a chunk's
+    // SELECT and COMMIT are skipped — acceptable for a one-shot backfill.
+    const CHUNK = 1000;
+    let changed = 0;
+    let lastId = '';
+    for (;;) {
+      const rows = this.db
+        .prepare('SELECT id, payload_json FROM events WHERE id > ? ORDER BY id ASC LIMIT ?')
+        .all(lastId, CHUNK) as unknown as { id: string; payload_json: string }[];
+      if (rows.length === 0) break;
+      lastId = rows[rows.length - 1].id;
+      tx(this.db, () => {
+        const update = this.db.prepare('UPDATE events SET payload_json = ? WHERE id = ?');
+        for (const row of rows) {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(row.payload_json);
+          } catch {
+            continue; // leave malformed rows untouched
+          }
+          const redacted = redactor.redactJson(parsed);
+          const next = JSON.stringify(redacted);
+          // Compare against the parsed-then-re-serialized form so formatting-only
+          // differences (whitespace, key order) don't count as changes.
+          if (next !== JSON.stringify(parsed)) {
+            update.run(next, row.id);
+            changed++;
+          }
+        }
+      });
+    }
+    return changed;
+  }
 }
 
 function rowToEvent(row: EventRow): MercuryEvent {

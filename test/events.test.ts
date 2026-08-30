@@ -168,3 +168,67 @@ test('event payloads survive JSON round-trip', () => {
     env.close();
   }
 });
+
+test('backfillRedact rewrites persisted events containing secrets (issue #18)', () => {
+  // store without a redactor: secrets persist as-is
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.events.append(run.id, 'agent.message', { text: 'token=abc123def' });
+    env.events.append(run.id, 'tool.started', { tool: 'bash', args: 'Bearer xyz789' });
+    env.events.append(run.id, 'agent.message', { text: 'no secrets here' });
+    const before = env.events.list(run.id);
+    const msg = before.find((e) => e.type === 'agent.message' && (e.payload as { text: string }).text === 'token=abc123def');
+    assert.ok(msg, 'secret-bearing event persisted');
+
+    // a redacted store over the same DB backfills
+    const redacted = new EventStore(env.db, createRedactor());
+    const changed = redacted.backfillRedact();
+    assert.ok(changed >= 2, `expected >=2 changed rows, got ${changed}`);
+
+    const after = env.events.list(run.id);
+    const redactedMsg = after.find((e) => e.type === 'agent.message' && (e.payload as { text: string }).text.includes('token='));
+    assert.ok(redactedMsg, 'event still present');
+    assert.ok(!(redactedMsg.payload as { text: string }).text.includes('abc123def'), 'secret removed');
+    assert.ok((redactedMsg.payload as { text: string }).text.includes('[REDACTED]'), 'redacted marker present');
+    // unchanged rows are untouched
+    const clean = after.find((e) => e.type === 'agent.message' && (e.payload as { text: string }).text === 'no secrets here');
+    assert.ok(clean, 'clean event unchanged');
+  } finally {
+    env.close();
+  }
+});
+
+test('backfillRedact with no redactor is a no-op', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.events.append(run.id, 'agent.message', { text: 'token=abc123def' });
+    const changed = env.events.backfillRedact(); // env.events has no redactor
+    assert.equal(changed, 0);
+  } finally {
+    env.close();
+  }
+});
+
+test('backfillRedact skips malformed rows and is idempotent (issue #18)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.events.append(run.id, 'agent.message', { text: 'token=abc123def' });
+    // inject a malformed payload row directly
+    env.db.prepare('INSERT INTO events (id, run_id, type, sequence, timestamp, payload_json) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('evt_malformed', run.id, 'agent.message', 999, new Date().toISOString(), '{not json');
+    const redacted = new EventStore(env.db, createRedactor());
+    const changed = redacted.backfillRedact();
+    assert.equal(changed, 1, 'only the secret-bearing row changes');
+    // malformed row untouched
+    const malformed = env.db.prepare('SELECT payload_json FROM events WHERE id = ?').get('evt_malformed') as { payload_json: string };
+    assert.equal(malformed.payload_json, '{not json');
+    // second pass is a no-op (idempotent)
+    const again = redacted.backfillRedact();
+    assert.equal(again, 0);
+  } finally {
+    env.close();
+  }
+});

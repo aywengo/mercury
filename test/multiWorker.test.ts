@@ -357,6 +357,41 @@ test('CLI wiring: /healthz/workers returns 200 when started via cli.ts server (i
     await new Promise((r) => proc.once('exit', r));
   }
 });
+test('CLI wiring: redact-events backfills persisted secrets (issue #18)', async () => {
+  const { spawn } = await import('node:child_process');
+  const { mkdtempSync } = await import('node:fs');
+  const { openDatabase } = await import('../src/db/database.ts');
+  const { EventStore } = await import('../src/events/eventStore.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-cli-redact-'));
+  const dbPath = join(dir, 'test.db');
+  // seed a DB with a secret-bearing event (no redactor)
+  const db = openDatabase(dbPath);
+  const events = new EventStore(db);
+  events.append('run-1', 'agent.message', { text: 'token=abc123def' });
+  db.close();
+  // run the CLI backfill
+  const proc = spawn(process.execPath, ['src/cli.ts', 'redact-events'], {
+    cwd: join(import.meta.dirname, '..'),
+    env: { ...process.env, MERCURY_DB: dbPath },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const out = await new Promise<string>((resolve, reject) => {
+    let acc = '';
+    proc.stdout.on('data', (d) => { acc += String(d); });
+    proc.stderr.on('data', (d) => { acc += String(d); });
+    proc.on('exit', (code) => (code === 0 ? resolve(acc) : reject(new Error(`exit ${code}: ${acc}`))));
+  });
+  assert.match(out, /retroactive redaction complete/);
+  // verify the event is redacted
+  const db2 = openDatabase(dbPath);
+  const events2 = new EventStore(db2);
+  const all = events2.list('run-1');
+  const msg = all.find((e) => e.type === 'agent.message');
+  assert.ok(msg, 'event present');
+  assert.ok(!(msg.payload as { text: string }).text.includes('abc123def'), 'secret removed');
+  db2.close();
+});
+
 
 test('CLI wiring: backlog alert webhook fires when configured via env (issue #5)', async () => {
   const { spawn } = await import('node:child_process');

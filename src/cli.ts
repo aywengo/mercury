@@ -1,4 +1,4 @@
-// Mercury CLI: dev (API + embedded worker), server (API only), worker, migrate.
+// Mercury CLI: dev (API + embedded worker), server (API only), worker, migrate, redact-events.
 // The web server does NOT execute agent processes unless MERCURY_EMBEDDED_WORKER=true
 // (dev mode) — production runs `mercury server` and `mercury worker` separately.
 
@@ -45,6 +45,15 @@ async function main(): Promise<void> {
   if (cmd === 'migrate') {
     const db = openDatabase(config.dbPath);
     logger.info({ db: config.dbPath }, 'migrations applied');
+    db.close();
+    return;
+  }
+
+  if (cmd === 'redact-events') {
+    const db = openDatabase(config.dbPath);
+    const events = new EventStore(db, redactor);
+    const changed = events.backfillRedact();
+    logger.info({ db: config.dbPath, changed }, 'retroactive redaction complete');
     db.close();
     return;
   }
@@ -193,7 +202,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  console.error('usage: mercury <dev|server|worker|gc|migrate>');
+  console.error('usage: mercury <dev|server|worker|gc|migrate|redact-events>');
   process.exit(1);
 }
 
