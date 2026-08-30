@@ -6,6 +6,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isTerminal } from '../domain/stateMachine.ts';
+import type { Redactor } from '../domain/redact.ts';
 import type {
   AgentAdapter, AgentEvent, AgentExit, AgentInput, Run, RunContext, ResolvedSkill,
 } from '../domain/types.ts';
@@ -37,6 +38,8 @@ export interface WorkerDeps {
   backlogAlertThreshold?: number;
   /** Webhook URL for backlog alerts (MERCURY_ALERT_WEBHOOK_URL). Default null (log only). */
   alertWebhookUrl?: string | null;
+  /** Optional secret redactor; run error messages are redacted at write time (issue #36). */
+  redactor?: Redactor;
   /** Maximum time a run may wait for human input (MERCURY_INPUT_TIMEOUT_MS); 0 = no limit. */
   inputTimeoutMs: number;
   /** Runs in RUNNING/NEEDS_INPUT with no event activity beyond this are alerted (MERCURY_STUCK_RUN_THRESHOLD_MS); 0 = disabled. */
@@ -232,7 +235,8 @@ export class Worker {
       const outcome = await this.drive(run, adapter, handle, skills, startedAt);
       await this.finalize(run, outcome, skills);
     } catch (err) {
-      const message = String(err instanceof Error ? err.message : err);
+      const raw = String(err instanceof Error ? err.message : err);
+      const message = this.deps.redactor ? this.deps.redactor.redact(raw) : raw;
       log.error({ error: message }, 'run execution failed');
       this.deps.runs.setError(run.id, message, 'infrastructure');
       this.deps.events.append(run.id, 'error', { message });
@@ -529,7 +533,7 @@ export class Worker {
     }
 
     // FAILED
-    const error = outcome.error ?? 'Agent failed';
+    const error = this.deps.redactor ? this.deps.redactor.redact(outcome.error ?? 'Agent failed') : (outcome.error ?? 'Agent failed');
     this.deps.runs.setError(run.id, error, 'agent');
     this.deps.events.append(run.id, 'error', { message: error });
     this.deps.events.append(run.id, 'run.failed', {

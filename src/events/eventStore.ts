@@ -131,6 +131,51 @@ export class EventStore {
         }
       });
     }
+    // run_inputs.input_json (user-submitted input; issue #36)
+    let lastInputId = '';
+    for (;;) {
+      const rows = this.db
+        .prepare('SELECT id, input_json FROM run_inputs WHERE id > ? ORDER BY id ASC LIMIT ?')
+        .all(lastInputId, CHUNK) as unknown as { id: string; input_json: string }[];
+      if (rows.length === 0) break;
+      lastInputId = rows[rows.length - 1].id;
+      tx(this.db, () => {
+        const update = this.db.prepare('UPDATE run_inputs SET input_json = ? WHERE id = ?');
+        for (const row of rows) {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(row.input_json);
+          } catch {
+            continue; // leave malformed rows untouched
+          }
+          const redacted = redactor.redactJson(parsed);
+          const next = JSON.stringify(redacted);
+          if (next !== JSON.stringify(parsed)) {
+            update.run(next, row.id);
+            changed++;
+          }
+        }
+      });
+    }
+    // runs.error (worker crash / agent failure messages; issue #36)
+    let lastRunId = '';
+    for (;;) {
+      const rows = this.db
+        .prepare('SELECT id, error FROM runs WHERE id > ? AND error IS NOT NULL ORDER BY id ASC LIMIT ?')
+        .all(lastRunId, CHUNK) as unknown as { id: string; error: string }[];
+      if (rows.length === 0) break;
+      lastRunId = rows[rows.length - 1].id;
+      tx(this.db, () => {
+        const update = this.db.prepare('UPDATE runs SET error = ? WHERE id = ?');
+        for (const row of rows) {
+          const redacted = redactor.redact(row.error);
+          if (redacted !== row.error) {
+            update.run(redacted, row.id);
+            changed++;
+          }
+        }
+      });
+    }
     return changed;
   }
 }

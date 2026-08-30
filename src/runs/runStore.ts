@@ -117,7 +117,7 @@ export class RunStore {
     return { runs: page, nextCursor };
   }
 
-  transition(id: string, to: RunStatus, extra?: Partial<Run>): Run {
+  transition(id: string, to: RunStatus, extra?: Partial<Omit<Run, 'error' | 'errorKind'>>): Run {
     const run = this.get(id);
     if (!run) throw new Error(`Run ${id} not found`);
     assertTransition(run.status, to);

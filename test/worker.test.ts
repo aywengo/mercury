@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeEnv, makeGitRepo, waitFor, sleep } from './helpers.ts';
+import { createRedactor } from '../src/domain/redact.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, RunContext } from '../src/domain/types.ts';
 
 test('happy path: create -> queue -> run -> events -> completed', async () => {
@@ -580,6 +581,64 @@ test('p11: retry falls back to start() when the adapter has no resume support', 
     await waitFor(() => env.runs.get(retry.id)!.status === 'FAILED', 10_000);
     // FakeAgentAdapter has no resume → worker used start() (fresh attempt).
     assert.equal(env.runs.get(retry.id)!.attempt, 2);
+  } finally {
+    env.close();
+  }
+});
+
+test('worker redacts secrets in run error messages (issue #36)', async () => {
+  const throwing = {
+    async start(): Promise<AgentHandle> {
+      throw new Error('workspace setup failed: token=abc123def');
+    },
+    async resume(): Promise<AgentHandle> { throw new Error('no resume'); },
+    async sendInput(): Promise<void> {},
+    async cancel(): Promise<void> {},
+    async terminate(): Promise<void> {},
+  } as unknown as AgentAdapter;
+  const env = makeEnv({
+    workerEnabled: false,
+    redactor: createRedactor([]),
+    adapters: { fake: throwing },
+  });
+  try {
+    const repo = mkdtempSync(join(tmpdir(), 'mercury-redact-'));
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo } });
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    const final = env.runs.get(run.id)!;
+    assert.equal(final.errorKind, 'infrastructure');
+    assert.ok(final.error, 'error set');
+    assert.ok(!final.error.includes('abc123def'), 'secret removed from runs.error');
+    assert.ok(final.error.includes('[REDACTED]'), 'redacted marker present');
+    // the error event is redacted too (events already redact at append)
+    const errEv = env.events.list(run.id).find((e) => e.type === 'error');
+    assert.ok(errEv, 'error event present');
+    assert.ok(!JSON.stringify(errEv.payload).includes('abc123def'), 'event secret removed');
+  } finally {
+    env.close();
+  }
+});
+
+test('agent failure redacts runs.error at finalize (issue #36, site 2)', async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const repo = mkdtempSync(join(tmpdir(), 'mercury-fail2-'));
+  const env = makeEnv({
+    redactor: createRedactor([]),
+    fakeScript: [{ fail: true }],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake',
+      repository: { localPath: repo },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    const final = env.runs.get(run.id)!;
+    assert.equal(final.errorKind, 'agent');
+    assert.ok(final.error, 'error set');
+    assert.ok(final.error.includes('Agent exited with code'), 'derived error message present');
   } finally {
     env.close();
   }
