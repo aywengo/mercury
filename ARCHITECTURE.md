@@ -1481,6 +1481,11 @@ flowchart TD
 7. ~~Expand skill library~~ — **done**: 11 skills (added documentation, deployment, frontend).
 8. ~~Deployment packaging~~ — **done**: `deploy/` with systemd units (server + worker), SQLite backup script with retention, logrotate config, ops guide.
 9. ~~Daemon-based agent sessions~~ — **implemented behind `MERCURY_AGENT_MODE=daemon`** (RPC remains default); verify against the real daemon before relying on it.
+10. **Crew — agent preset store** — **design only, not implemented**: versioned role
+   presets (instruction, skills, MCP servers, constraints, bounded loops/graphs) for roles
+   like `reviewer`, `system-architect`, `kubernetes`, `kafka`, `gcp-sre`, `aws-sre`;
+   uploaded from the dashboard and kept in a GitHub repository. Design + phased roadmap:
+   [`docs/crew-design.md`](docs/crew-design.md).
 
 
 ## Phase 1 — Durable Runs ✅
