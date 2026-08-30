@@ -1,5 +1,5 @@
 // Shared RPC/daemon event translation -> Mercury domain events.
-// Used by PrimeAgentAdapter (RPC mode) and DaemonAgentAdapter (daemon mode).
+// Used by PrimeAgentAdapter, RpcAgentAdapter and DaemonAgentAdapter.
 //
 // Event mapping (agent protocol -> Mercury):
 //   message_update (text_delta)  -> accumulated; emitted as agent.message on message_end
