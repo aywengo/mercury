@@ -232,3 +232,28 @@ test('backfillRedact skips malformed rows and is idempotent (issue #18)', () => 
     env.close();
   }
 });
+
+test('backfillRedact covers run_inputs.input_json and runs.error (issue #36)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    // simulate pre-fix rows: unredacted input + error
+    env.db.prepare('INSERT INTO run_inputs (id, run_id, input_json, created_at) VALUES (?, ?, ?, ?)')
+      .run('inp_secret1', run.id, JSON.stringify({ text: 'api_key=sk-12345' }), new Date().toISOString());
+    env.db.prepare('UPDATE runs SET error = ? WHERE id = ?').run('worker crashed: Bearer abc123.def456', run.id);
+
+    const redacted = new EventStore(env.db, createRedactor());
+    const changed = redacted.backfillRedact();
+    assert.ok(changed >= 2, `expected >=2 changed rows, got ${changed}`);
+
+    const input = env.db.prepare('SELECT input_json FROM run_inputs WHERE id = ?').get('inp_secret1') as { input_json: string };
+    assert.ok(!input.input_json.includes('sk-12345'), 'input secret removed');
+    assert.ok(input.input_json.includes('[REDACTED]'), 'input redacted marker present');
+
+    const row = env.db.prepare('SELECT error FROM runs WHERE id = ?').get(run.id) as { error: string };
+    assert.ok(!row.error.includes('abc123.def456'), 'error secret removed');
+    assert.ok(row.error.includes('[REDACTED]'), 'error redacted marker present');
+  } finally {
+    env.close();
+  }
+});

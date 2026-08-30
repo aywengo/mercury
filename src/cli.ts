@@ -118,6 +118,7 @@ async function main(): Promise<void> {
     knownAgents: Object.keys(adapters),
     defaultMaxDurationMs: 60 * 60 * 1000,
     defaultMaxRetries: config.maxRetries,
+    redactor,
   });
 
   const stream = new EventStream(db, events, config.pollMs);
@@ -148,6 +149,7 @@ async function main(): Promise<void> {
       inputPollMs: config.inputPollMs,
       inputTimeoutMs: config.inputTimeoutMs,
       stuckRunThresholdMs: config.stuckRunThresholdMs,
+      redactor,
       stuckCheckIntervalMs: config.stuckCheckIntervalMs,
       retryBackoffMs: config.retryBackoffMs,
       backlogAlertThreshold: config.backlogAlertThreshold,

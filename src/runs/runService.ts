@@ -4,6 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tx } from '../db/database.ts';
 import { isTerminal } from '../domain/stateMachine.ts';
+import type { Redactor } from '../domain/redact.ts';
 import type { RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
 import { EventStore } from '../events/eventStore.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
@@ -31,6 +32,8 @@ export interface RunServiceDeps {
   knownAgents: string[];
   defaultMaxDurationMs: number;
   defaultMaxRetries: number;
+  /** Optional secret redactor; input values are redacted at write time (issue #36). */
+  redactor?: Redactor;
 }
 
 export class RunService {
@@ -169,9 +172,10 @@ export class RunService {
     if (run.status !== 'NEEDS_INPUT') {
       throw new Error(`Run is not waiting for input (status: ${run.status})`);
     }
+    const safeValue = this.deps.redactor ? this.deps.redactor.redactJson(value) : value;
     this.deps.db
       .prepare('INSERT INTO run_inputs (id, run_id, input_json, created_at) VALUES (?, ?, ?, ?)')
-      .run('inp_' + randomUUID().replace(/-/g, '').slice(0, 16), runId, JSON.stringify(value), new Date().toISOString());
+      .run('inp_' + randomUUID().replace(/-/g, '').slice(0, 16), runId, JSON.stringify(safeValue), new Date().toISOString());
   }
 
   cancel(runId: string, ownerId: string, isAdmin: boolean): Run {

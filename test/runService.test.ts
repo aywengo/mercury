@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeEnv, waitFor } from './helpers.ts';
 import type { RunConstraints } from '../src/domain/types.ts';
+import { createRedactor } from '../src/domain/redact.ts';
 
 test('create run: QUEUED, stable id, events persisted', () => {
   const env = makeEnv({ workerEnabled: false });
@@ -314,6 +315,23 @@ test('create rejects malformed constraints (issue #28)', () => {
       constraints: { maxRetries: 0, maxDurationMs: 60_000, resourceLimits: { cpu: '1' }, allowedNetworks: [] },
     });
     assert.ok(run.id);
+  } finally {
+    env.close();
+  }
+});
+
+test('submitInput redacts secrets at write time (issue #36)', () => {
+  const env = makeEnv({ workerEnabled: false, redactor: createRedactor(['hush']) });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    // move to NEEDS_INPUT via the legal transition chain
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING');
+    env.runs.transition(run.id, 'NEEDS_INPUT');
+    env.runService.submitInput(run.id, 'alice', false, { text: 'keep hush quiet' });
+    const row = env.db.prepare('SELECT input_json FROM run_inputs WHERE run_id = ?').get(run.id) as { input_json: string };
+    assert.ok(!row.input_json.includes('hush'), 'secret removed from input_json');
+    assert.ok(row.input_json.includes('[REDACTED]'), 'redacted marker present');
   } finally {
     env.close();
   }

@@ -80,6 +80,7 @@ export function makeEnv(opts: {
     knownAgents: Object.keys(adapters),
     defaultMaxDurationMs: 60_000,
     defaultMaxRetries: opts.maxRetries ?? 2,
+    redactor: opts.redactor,
   });
   const logger = opts.logger ? createLogger(createRedactor([]), 'debug') : nullLogger;
   const worker = new Worker({
@@ -102,6 +103,7 @@ export function makeEnv(opts: {
     stuckCheckIntervalMs: opts.stuckCheckIntervalMs ?? 60_000,
     retryBackoffMs: opts.retryBackoffMs ?? 50,
     sandbox: opts.sandbox,
+    redactor: opts.redactor,
   });
   if (opts.workerEnabled !== false) worker.start();
 
