@@ -83,6 +83,25 @@ test('copy mode: symlinked extra repo is copied, not symlinked (issue #7)', asyn
     env.close();
   }
 });
+test('recordCommits returns full commit SHAs, not --oneline subjects (issue #14)', async () => {
+  const env = makeEnv({ workerEnabled: false, workspaceMode: 'git-worktree' }); // has .git
+  try {
+    const repo = makeGitRepo(join(env.dir, 'commits-repo'));
+    const run = makeRun(env, {
+      id: 'run_commits',
+      repository: { localPath: repo },
+    });
+    const ws = await env.workspace.create(run);
+    const commits = await env.workspace.recordCommits(ws.path);
+    assert.ok(commits.length >= 1, 'expected at least one commit');
+    for (const c of commits) {
+      assert.match(c, /^[0-9a-f]{40}$/, `expected a full SHA, got '${c}'`);
+    }
+  } finally {
+    env.close();
+  }
+});
+
 
 test('copy mode: symlinked source path resolves before copy (issue #7)', async () => {
   const env = makeEnv({ workerEnabled: false, workspaceMode: 'copy' });

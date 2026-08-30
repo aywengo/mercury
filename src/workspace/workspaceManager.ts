@@ -190,7 +190,10 @@ export class WorkspaceManager {
 
   async recordCommits(workspacePath: string): Promise<string[]> {
     try {
-      const { stdout } = await execFileP('git', ['-C', workspacePath, 'log', '--oneline', '-n', '20']);
+      // Full SHAs, not --oneline display strings: finalCommits is documented as
+      // commit identifiers (run.finalCommits, shown in the UI); consumers need
+      // extractable SHAs rather than display strings.
+      const { stdout } = await execFileP('git', ['-C', workspacePath, 'log', '--format=%H', '-n', '20']);
       return stdout.split('\n').map((l) => l.trim()).filter(Boolean);
     } catch {
       return [];
