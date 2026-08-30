@@ -151,6 +151,29 @@ test('retry rejects non-terminal and completed runs', () => {
     env.close();
   }
 });
+test('retry throws once per-run maxRetries is exhausted (issue #9)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'x',
+      agent: 'fake',
+      constraints: { maxRetries: 1 },
+    });
+    // attempt 1 -> FAILED, retry -> attempt 2 (allowed: 1 retry)
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+    const retried = env.runService.retry(run.id, 'alice', false);
+    assert.equal(retried.attempt, 2);
+    // attempt 2 -> FAILED, retry -> throws (cap reached)
+    env.runs.transition(retried.id, 'STARTING');
+    env.runs.transition(retried.id, 'FAILED', { completedAt: new Date().toISOString() });
+    assert.throws(() => env.runService.retry(retried.id, 'alice', false), /Max retries reached/);
+  } finally {
+    env.close();
+  }
+});
+
 
 test('submitInput only allowed in NEEDS_INPUT', () => {
   const env = makeEnv({ workerEnabled: false });

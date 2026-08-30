@@ -101,7 +101,6 @@ export function makeEnv(opts: {
     stuckRunThresholdMs: opts.stuckRunThresholdMs ?? 0,
     stuckCheckIntervalMs: opts.stuckCheckIntervalMs ?? 60_000,
     retryBackoffMs: opts.retryBackoffMs ?? 50,
-    maxRetries: opts.maxRetries ?? 2,
     sandbox: opts.sandbox,
   });
   if (opts.workerEnabled !== false) worker.start();

@@ -141,7 +141,6 @@ async function main(): Promise<void> {
       stuckRunThresholdMs: config.stuckRunThresholdMs,
       stuckCheckIntervalMs: config.stuckCheckIntervalMs,
       retryBackoffMs: config.retryBackoffMs,
-      maxRetries: config.maxRetries,
       backlogAlertThreshold: config.backlogAlertThreshold,
       alertWebhookUrl: config.alertWebhookUrl,
       sandbox,
