@@ -279,3 +279,53 @@ test('backfillRedact leaves malformed input_json untouched (issue #36)', () => {
     env.close();
   }
 });
+
+test('backfillRedact covers runs.task and runs.repository_json (issue #43)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    // simulate pre-fix rows: unredacted task + credentialed repo URLs (primary + extras)
+    env.db.prepare('UPDATE runs SET task = ?, repository_json = ?, repositories_json = ? WHERE id = ?')
+      .run(
+        'use token=sk-12345 in the script',
+        JSON.stringify({ localPath: 'https://user:abc123.def@example.com/repo.git' }),
+        JSON.stringify([{ localPath: 'https://user:xyz789.ghi@example.com/extra.git' }]),
+        run.id,
+      );
+
+    const redacted = new EventStore(env.db, createRedactor());
+    const changed = redacted.backfillRedact();
+    assert.ok(changed >= 3, `expected >=3 changed rows, got ${changed}`);
+
+    const row = env.db.prepare('SELECT task, repository_json, repositories_json FROM runs WHERE id = ?').get(run.id) as { task: string; repository_json: string; repositories_json: string };
+    assert.ok(!row.task.includes('sk-12345'), 'task secret removed');
+    assert.ok(row.task.includes('[REDACTED]'), 'task redacted marker present');
+    assert.ok(!row.repository_json.includes('abc123.def'), 'repository secret removed');
+    assert.ok(row.repository_json.includes('[REDACTED]'), 'repository redacted marker present');
+    assert.ok(!row.repositories_json.includes('xyz789.ghi'), 'repositories secret removed');
+    assert.ok(row.repositories_json.includes('[REDACTED]'), 'repositories redacted marker present');
+
+    // idempotent: a second pass changes nothing
+    const changed2 = redacted.backfillRedact();
+    assert.equal(changed2, 0, `second pass should change 0 rows, got ${changed2}`);
+  } finally {
+    env.close();
+  }
+});
+
+test('backfillRedact leaves malformed repository_json untouched (issue #43)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.db.prepare('UPDATE runs SET repository_json = ? WHERE id = ?').run('not-json{{', run.id);
+
+    const redacted = new EventStore(env.db, createRedactor());
+    const changed = redacted.backfillRedact();
+    assert.equal(changed, 0, 'malformed row must not be touched');
+
+    const row = env.db.prepare('SELECT repository_json FROM runs WHERE id = ?').get(run.id) as { repository_json: string };
+    assert.equal(row.repository_json, 'not-json{{', 'malformed row unchanged');
+  } finally {
+    env.close();
+  }
+});

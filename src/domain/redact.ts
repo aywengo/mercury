@@ -4,6 +4,8 @@ const DEFAULT_PATTERNS: RegExp[] = [
   /Bearer\s+[A-Za-z0-9._~+/=-]+/gi,
   /(api[_-]?key|apikey|token|secret|password|passwd|authorization)\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]+/gi,
   /xox[baprs]-[A-Za-z0-9-]+/g,
+  // URL-embedded credentials (https://user:pass@host/...; issue #43)
+  /\/\/[^\/\s:@]+:[^\/\s@]+@/g,
 ];
 
 export interface Redactor {

@@ -85,12 +85,16 @@ export class RunService {
     const repository = input.repository ?? (repositories?.[0] ?? {});
 
     const now = new Date().toISOString();
+    // Task text and repo URLs can embed secrets (issue #43); redact at write time.
+    const safeTask = this.deps.redactor ? this.deps.redactor.redact(input.task) : input.task;
+    const safeRepository = this.deps.redactor ? this.deps.redactor.redactJson(repository) as RepositoryContext : repository;
+    const safeRepositories = this.deps.redactor && repositories ? this.deps.redactor.redactJson(repositories) as RepositoryContext[] : repositories;
     const run: Run = {
       id: newRunId(),
       ownerId: input.ownerId,
-      task: input.task,
-      repository,
-      repositories,
+      task: safeTask,
+      repository: safeRepository,
+      repositories: safeRepositories,
       workspaceBranch: null,
       workspacePath: null,
       agent,
