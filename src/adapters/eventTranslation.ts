@@ -1,5 +1,5 @@
 // Shared RPC/daemon event translation -> Mercury domain events.
-// Used by PrimeAgentAdapter (RPC mode) and DaemonAgentAdapter (daemon mode).
+// Used by PrimeAgentAdapter, RpcAgentAdapter and DaemonAgentAdapter.
 //
 // Event mapping (agent protocol -> Mercury):
 //   message_update (text_delta)  -> accumulated; emitted as agent.message on message_end
@@ -29,6 +29,28 @@ export interface RpcEvent {
 }
 
 export const DIALOG_METHODS = new Set(['select', 'confirm', 'input', 'editor']);
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Build the extension_ui_response payload shared by all agent adapters.
+ * Shape: { id, value } / { id, confirmed } / { id, cancelled } (issue #30).
+ */
+export function buildExtensionUiResponse(
+  requestId: string,
+  method: string,
+  value: unknown,
+): Record<string, unknown> {
+  if (isRecord(value) && value.cancelled === true) {
+    return { id: requestId, cancelled: true };
+  }
+  if (method === 'confirm') {
+    return { id: requestId, confirmed: value === true || value === 'true' || value === 'yes' || value === 'y' };
+  }
+  return { id: requestId, value };
+}
 
 /** Stateful translator: buffers text deltas and tracks the pending dialog request. */
 export class EventTranslator {

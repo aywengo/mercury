@@ -19,7 +19,7 @@ import type {
   AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run, RunConstraints, RunContext,
 } from '../domain/types.ts';
 import { RpcClient, type RpcEvent } from './rpc/rpcClient.ts';
-import { EventTranslator } from './eventTranslation.ts';
+import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
 import type { LocalAgentEventMap } from './localAgentAdapter.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 
@@ -322,16 +322,7 @@ export class RpcAgentAdapter implements AgentAdapter {
     if (!pending) throw new Error(`Run ${runId} is not waiting for input`);
     const { requestId, method } = pending;
     session.translator.clearPending();
-    const value = input.value;
-    let response: Record<string, unknown>;
-    if (isRecord(value) && value.cancelled === true) {
-      response = { id: requestId, cancelled: true };
-    } else if (method === 'confirm') {
-      response = { id: requestId, confirmed: value === true || value === 'true' || value === 'yes' || value === 'y' };
-    } else {
-      response = { id: requestId, value };
-    }
-    session.client.sendExtensionUiResponse(response);
+    session.client.sendExtensionUiResponse(buildExtensionUiResponse(requestId, method, input.value));
   }
 
   async cancel(runId: string): Promise<void> {
@@ -459,6 +450,3 @@ function readSessionPath(workspacePath: string): string | null {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
