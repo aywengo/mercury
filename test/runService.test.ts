@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeEnv, waitFor } from './helpers.ts';
+import type { RunConstraints } from '../src/domain/types.ts';
 
 test('create run: QUEUED, stable id, events persisted', () => {
   const env = makeEnv({ workerEnabled: false });
@@ -235,6 +236,51 @@ test('idempotency-key race: UNIQUE violation returns the existing run (issue #24
     // no duplicate run was created
     const all = env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 10 });
     assert.equal(all.runs.filter((r) => r.task === 'x').length, 1);
+  } finally {
+    env.close();
+  }
+});
+
+test('create rejects malformed constraints (issue #28)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  const loose = (c: Record<string, unknown>) => c as unknown as Partial<RunConstraints>;
+  try {
+    // non-numeric maxRetries
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ maxRetries: 'abc' }) }),
+      /maxRetries must be a finite integer/,
+    );
+    // fractional maxDurationMs
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ maxDurationMs: 1.5 }) }),
+      /maxDurationMs must be a finite integer/,
+    );
+    // negative maxRetries
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ maxRetries: -1 }) }),
+      /maxRetries must be >= 0/,
+    );
+    // unknown constraint key
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ bogus: 1 }) }),
+      /Unknown constraint: bogus/,
+    );
+    // malformed resourceLimits
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ resourceLimits: { gpu: '1' } }) }),
+      /Unknown resourceLimits key: gpu/,
+    );
+    // malformed allowedNetworks
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ allowedNetworks: ['ok', 42] }) }),
+      /allowedNetworks must be an array of strings/,
+    );
+    // valid constraints still accepted (0 is legitimate)
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake',
+      constraints: { maxRetries: 0, maxDurationMs: 60_000, resourceLimits: { cpu: '1' }, allowedNetworks: [] },
+    });
+    assert.ok(run.id);
   } finally {
     env.close();
   }
