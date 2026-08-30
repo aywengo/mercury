@@ -40,6 +40,11 @@ export class RunService {
     this.deps = deps;
   }
 
+  /** Registered agent ids (the adapters wired at startup). */
+  listAgents(): string[] {
+    return [...this.deps.knownAgents];
+  }
+
   create(input: CreateRunInput): Run {
     if (!input.task || input.task.trim().length === 0) {
       throw new Error('task is required');

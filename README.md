@@ -83,6 +83,7 @@ live Mercury updates (SSE with ?after= reconnect)
 | `POST /api/auth/logout` | Delete the session, clear the cookie |
 | `GET /api/auth/me` | Current identity `{ownerId, isAdmin}` (401 without a valid credential) |
 | `POST /api/runs` | Create a Run (supports `Idempotency-Key` header; rate-limited 30/min/owner+IP) |
+| `GET /api/agents` | Registered agent ids for the UI dropdown `{ agents: string[] }` |
 | `GET /api/runs` | List Runs (`owner`, `status`, `limit`, `cursor`) |
 | `GET /api/runs/:runId` | Run detail + selected skills |
 | `POST /api/runs/:runId/input` | Answer a pending human-input request |
