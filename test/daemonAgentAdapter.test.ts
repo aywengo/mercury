@@ -281,3 +281,19 @@ test('daemon: context file written into workspace', async () => {
     await adapter.cancel(context.run.id);
   }
 });
+
+test('daemon: sendInput throws when no live session (issue #30)', async () => {
+  const { context, workspacePath } = makeContext();
+  const adapter = spawnAdapter({
+    MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'),
+    MOCK_DAEMON_MODE: 'input',
+  });
+  try {
+    await assert.rejects(
+      () => adapter.sendInput('no-such-run', { value: 'x', at: new Date().toISOString() }),
+      /No live agent session/,
+    );
+  } finally {
+    await adapter.cancel(context.run.id);
+  }
+});

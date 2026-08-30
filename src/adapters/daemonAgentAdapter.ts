@@ -22,7 +22,7 @@ import type {
   AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext,
 } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
-import { EventTranslator } from './eventTranslation.ts';
+import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
 
 const CONTEXT_FILE = '.mercury-context.json';
 const SESSION_DIR_NAME = '.mercury-sessions';
@@ -249,21 +249,11 @@ export class DaemonAgentAdapter implements AgentAdapter {
 
   async sendInput(runId: string, input: AgentInput): Promise<void> {
     const session = this.sessions.get(runId);
-    const pending = session?.translator.pending;
-    if (!session?.socket || !pending) return;
-    // Same RPC response shape as rpcClient.sendExtensionUiResponse: the daemon
-    // resolves the dialog from { id, value } / { id, confirmed } / { id, cancelled }.
+    if (!session?.socket) throw new Error(`No live agent session for run ${runId}`);
+    const pending = session.translator.pending;
+    if (!pending) throw new Error(`Run ${runId} is not waiting for input`);
     const { requestId, method } = pending;
-    const value = input.value;
-    let response: Record<string, unknown>;
-    if (isRecord(value) && value.cancelled === true) {
-      response = { id: requestId, cancelled: true };
-    } else if (method === 'confirm') {
-      response = { id: requestId, confirmed: value === true || value === 'true' || value === 'yes' || value === 'y' };
-    } else {
-      response = { id: requestId, value };
-    }
-    session.socket.write(frame({ type: 'extension_ui_response', ...response }));
+    session.socket.write(frame({ type: 'extension_ui_response', ...buildExtensionUiResponse(requestId, method, input.value) }));
     session.translator.clearPending();
   }
 
@@ -334,6 +324,3 @@ function readFrame(socket: Socket): Promise<Buffer> {
 }
 
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
