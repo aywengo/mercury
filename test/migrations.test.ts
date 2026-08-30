@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { openDatabase, MIGRATIONS } from '../src/db/database.ts';
+import { openDatabase, MIGRATIONS, BUSY_TIMEOUT_MS } from '../src/db/database.ts';
 
 test('migration v3: idempotency keys become owner-scoped with backfill (issue #8)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'mercury-migrate-v3-'));
@@ -61,6 +61,71 @@ test('migration v3: idempotency keys become owner-scoped with backfill (issue #8
     assert.deepEqual(versions2.map((v) => v.version), [1, 2, 3]);
     db2.close();
     db3.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('openDatabase sets a busy_timeout (issue #38)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-busy-'));
+  const dbPath = join(dir, 'test.db');
+  try {
+    const db = openDatabase(dbPath);
+    const row = db.prepare('PRAGMA busy_timeout').get() as { timeout: number };
+    assert.equal(row.timeout, BUSY_TIMEOUT_MS, 'busy_timeout must match BUSY_TIMEOUT_MS');
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('concurrent writer waits for the lock instead of failing with SQLITE_BUSY (issue #38)', async () => {
+  const { Worker } = await import('node:worker_threads');
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-busy2-'));
+  const dbPath = join(dir, 'test.db');
+  try {
+    const db1 = openDatabase(dbPath);
+    const iso = new Date().toISOString();
+    db1.exec('BEGIN IMMEDIATE');
+    db1.prepare('INSERT INTO runs (id, owner_id, task, repository_json, agent, status, attempt, constraints_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run('r1', 'alice', 'x', '{}', 'fake', 'QUEUED', 0, '{}', iso);
+    // db2 (separate connection, separate thread) writes while db1 holds the lock;
+    // busy_timeout must make it wait, not fail immediately with SQLITE_BUSY.
+    const workerSrc = `
+      import { parentPort, workerData } from 'node:worker_threads';
+      import { openDatabase } from ${JSON.stringify(new URL('../src/db/database.ts', import.meta.url).href)};
+      const db = openDatabase(workerData.path);
+      try {
+        db.prepare('INSERT INTO runs (id, owner_id, task, repository_json, agent, status, attempt, constraints_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run('r2', 'alice', 'x', '{}', 'fake', 'QUEUED', 0, '{}', workerData.iso);
+        parentPort.postMessage({ ok: true });
+      } catch (e) {
+        parentPort.postMessage({ ok: false, err: String(e instanceof Error ? e.message : e) });
+      }
+      db.close();
+    `;
+    const worker = new Worker(new URL(`data:text/javascript;base64,${Buffer.from(workerSrc).toString('base64')}`), {
+      workerData: { path: dbPath, iso },
+    });
+    const started = Date.now();
+    // release the lock shortly after the worker starts waiting (500ms << BUSY_TIMEOUT_MS)
+    const releaseMs = 500;
+    const release = setTimeout(() => db1.exec('COMMIT'), releaseMs);
+    const result = await new Promise<{ ok: boolean; err?: string }>((resolve, reject) => {
+      worker.once('message', resolve);
+      worker.once('error', reject);
+    });
+    clearTimeout(release);
+    const elapsed = Date.now() - started;
+    assert.ok(result.ok, `db2 write failed: ${result.err}`);
+    const r2 = db1.prepare('SELECT id FROM runs WHERE id = ?').get('r2') as { id: string };
+    assert.equal(r2.id, 'r2', 'second writer committed after the lock was released');
+    // The write must have blocked on the lock (not raced past it). Corner: on an
+    // extremely slow machine worker startup could exceed releaseMs, making this a
+    // no-op proof — observed startup is ~80ms, so the floor still holds in practice.
+    assert.ok(elapsed >= releaseMs - 100, `waited ${elapsed}ms (expected to block on the lock)`);
+    assert.ok(elapsed < BUSY_TIMEOUT_MS, `waited ${elapsed}ms (busy_timeout should cap the wait)`);
+    db1.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
