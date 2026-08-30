@@ -176,6 +176,51 @@ export class EventStore {
         }
       });
     }
+    // runs.task (user-submitted task text; issue #43)
+    let lastTaskId = '';
+    for (;;) {
+      const rows = this.db
+        .prepare('SELECT id, task FROM runs WHERE id > ? ORDER BY id ASC LIMIT ?')
+        .all(lastTaskId, CHUNK) as unknown as { id: string; task: string }[];
+      if (rows.length === 0) break;
+      lastTaskId = rows[rows.length - 1].id;
+      tx(this.db, () => {
+        const update = this.db.prepare('UPDATE runs SET task = ? WHERE id = ?');
+        for (const row of rows) {
+          const redacted = redactor.redact(row.task);
+          if (redacted !== row.task) {
+            update.run(redacted, row.id);
+            changed++;
+          }
+        }
+      });
+    }
+    // runs.repository_json (repo URLs can embed credentials; issue #43)
+    let lastRepoId = '';
+    for (;;) {
+      const rows = this.db
+        .prepare('SELECT id, repository_json FROM runs WHERE id > ? ORDER BY id ASC LIMIT ?')
+        .all(lastRepoId, CHUNK) as unknown as { id: string; repository_json: string }[];
+      if (rows.length === 0) break;
+      lastRepoId = rows[rows.length - 1].id;
+      tx(this.db, () => {
+        const update = this.db.prepare('UPDATE runs SET repository_json = ? WHERE id = ?');
+        for (const row of rows) {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(row.repository_json);
+          } catch {
+            continue; // leave malformed rows untouched
+          }
+          const redacted = redactor.redactJson(parsed);
+          const next = JSON.stringify(redacted);
+          if (next !== JSON.stringify(parsed)) {
+            update.run(next, row.id);
+            changed++;
+          }
+        }
+      });
+    }
     return changed;
   }
 }

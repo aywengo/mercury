@@ -23,3 +23,11 @@ test('redacts nested JSON values', () => {
   const out = r.redactJson({ a: 'hush', b: { c: 'keep hush quiet' }, d: ['hush'] });
   assert.deepEqual(out, { a: '[REDACTED]', b: { c: 'keep [REDACTED] quiet' }, d: ['[REDACTED]'] });
 });
+
+test('redacts URL-embedded credentials (issue #43)', () => {
+  const r = createRedactor([]);
+  const out = r.redact('clone https://user:supersecret@example.com/repo.git now');
+  assert.ok(!out.includes('supersecret'), 'credential removed');
+  assert.ok(out.includes('[REDACTED]'), 'redacted marker present');
+  assert.ok(out.includes('example.com/repo.git'), 'host and path preserved');
+});

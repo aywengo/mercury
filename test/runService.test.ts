@@ -336,3 +336,24 @@ test('submitInput redacts secrets at write time (issue #36)', () => {
     env.close();
   }
 });
+
+test('create redacts task and repository URL at write time (issue #43)', () => {
+  const env = makeEnv({ workerEnabled: false, redactor: createRedactor(['hush']) });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'use token hush in the script',
+      agent: 'fake',
+      repository: { localPath: 'https://user:hush@example.com/repo.git' },
+    });
+    assert.ok(!run.task.includes('hush'), 'task secret removed');
+    assert.ok(run.task.includes('[REDACTED]'), 'task redacted marker present');
+    assert.ok(!JSON.stringify(run.repository).includes('hush'), 'repository secret removed');
+    // persisted form is redacted too
+    const row = env.db.prepare('SELECT task, repository_json FROM runs WHERE id = ?').get(run.id) as { task: string; repository_json: string };
+    assert.ok(!row.task.includes('hush'), 'persisted task secret removed');
+    assert.ok(!row.repository_json.includes('hush'), 'persisted repository secret removed');
+  } finally {
+    env.close();
+  }
+});
