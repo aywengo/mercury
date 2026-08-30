@@ -106,25 +106,37 @@ export class RunService {
       prUrl: null,
     };
 
-    tx(this.deps.db, () => {
-      this.deps.runs.insert(run);
-      for (const skill of resolved) {
-        this.deps.db
-          .prepare('INSERT INTO run_skills (run_id, skill_id, skill_version, skill_hash, snapshot_json) VALUES (?, ?, ?, ?, ?)')
-          .run(run.id, skill.id, skill.version, skill.hash, JSON.stringify(skill));
+    try {
+      tx(this.deps.db, () => {
+        this.deps.runs.insert(run);
+        for (const skill of resolved) {
+          this.deps.db
+            .prepare('INSERT INTO run_skills (run_id, skill_id, skill_version, skill_hash, snapshot_json) VALUES (?, ?, ?, ?, ?)')
+            .run(run.id, skill.id, skill.version, skill.hash, JSON.stringify(skill));
+        }
+        if (input.idempotencyKey) {
+          this.deps.db
+            .prepare('INSERT INTO idempotency_keys (owner, key, run_id, created_at) VALUES (?, ?, ?, ?)')
+            .run(input.ownerId, input.idempotencyKey, run.id, now);
+        }
+        this.deps.events.append(run.id, 'run.created', { runId: run.id, agent, status: 'QUEUED' });
+        this.deps.events.append(run.id, 'run.queued', { runId: run.id });
+        for (const skill of resolved) {
+          this.deps.events.append(run.id, 'skill.selected', { skill: skill.id, version: skill.version, hash: skill.hash });
+        }
+      });
+      return run;
+    } catch (err) {
+      // Check-then-insert race (issue #24): a concurrent POST with the same
+      // (owner, key) may have won between our dedup SELECT and this INSERT.
+      // The tx rolled back (no partial run); return the winner's run instead
+      // of surfacing a raw UNIQUE-constraint 400.
+      if (input.idempotencyKey && isUniqueViolation(err)) {
+        const existing = this.findByIdempotencyKey(input.ownerId, input.idempotencyKey);
+        if (existing) return existing;
       }
-      if (input.idempotencyKey) {
-        this.deps.db
-          .prepare('INSERT INTO idempotency_keys (owner, key, run_id, created_at) VALUES (?, ?, ?, ?)')
-          .run(input.ownerId, input.idempotencyKey, run.id, now);
-      }
-      this.deps.events.append(run.id, 'run.created', { runId: run.id, agent, status: 'QUEUED' });
-      this.deps.events.append(run.id, 'run.queued', { runId: run.id });
-      for (const skill of resolved) {
-        this.deps.events.append(run.id, 'skill.selected', { skill: skill.id, version: skill.version, hash: skill.hash });
-      }
-    });
-    return run;
+      throw err;
+    }
   }
 
   get(runId: string, ownerId: string, isAdmin: boolean): Run | null {
@@ -211,4 +223,8 @@ export class RunService {
       .get(ownerId, key) as { run_id: string } | undefined;
     return row ? this.deps.runs.get(row.run_id) : null;
   }
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return err instanceof Error && /UNIQUE constraint failed/.test(err.message);
 }
