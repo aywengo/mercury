@@ -3,7 +3,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 
-const MIGRATIONS: string[] = [
+export const MIGRATIONS: string[] = [
   // v1: initial schema
   `
   CREATE TABLE IF NOT EXISTS runs (
@@ -70,6 +70,25 @@ const MIGRATIONS: string[] = [
   // backward compatibility with rows created before this migration.
   `
   ALTER TABLE runs ADD COLUMN repositories_json TEXT;
+  `,
+  // v3: owner-scoped idempotency keys (issue #8). The key alone was global, so
+  // one user could retrieve another user's run by reusing their key. Rebuild the
+  // table with PRIMARY KEY (owner, key); pre-existing rows are backfilled from
+  // runs.owner_id so the real owner keeps idempotency across the migration
+  // (rows whose run is missing fall back to 'unknown').
+  `
+  CREATE TABLE idempotency_keys_v3 (
+    owner TEXT NOT NULL,
+    key TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (owner, key)
+  );
+  INSERT INTO idempotency_keys_v3 (owner, key, run_id, created_at)
+    SELECT COALESCE(r.owner_id, 'unknown'), ik.key, ik.run_id, ik.created_at
+    FROM idempotency_keys ik LEFT JOIN runs r ON r.id = ik.run_id;
+  DROP TABLE idempotency_keys;
+  ALTER TABLE idempotency_keys_v3 RENAME TO idempotency_keys;
   `,
 ];
 

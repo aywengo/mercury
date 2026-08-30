@@ -45,7 +45,7 @@ export class RunService {
       throw new Error('task is required');
     }
     if (input.idempotencyKey) {
-      const existing = this.findByIdempotencyKey(input.idempotencyKey);
+      const existing = this.findByIdempotencyKey(input.ownerId, input.idempotencyKey);
       if (existing) return existing;
     }
     const agent = input.agent ?? 'primeagent';
@@ -110,8 +110,8 @@ export class RunService {
       }
       if (input.idempotencyKey) {
         this.deps.db
-          .prepare('INSERT INTO idempotency_keys (key, run_id, created_at) VALUES (?, ?, ?)')
-          .run(input.idempotencyKey, run.id, now);
+          .prepare('INSERT INTO idempotency_keys (owner, key, run_id, created_at) VALUES (?, ?, ?, ?)')
+          .run(input.ownerId, input.idempotencyKey, run.id, now);
       }
       this.deps.events.append(run.id, 'run.created', { runId: run.id, agent, status: 'QUEUED' });
       this.deps.events.append(run.id, 'run.queued', { runId: run.id });
@@ -200,10 +200,10 @@ export class RunService {
     return this.deps.runs.get(created.id)!;
   }
 
-  private findByIdempotencyKey(key: string): Run | null {
-    const row = this.deps.db.prepare('SELECT run_id FROM idempotency_keys WHERE key = ?').get(key) as
-      | { run_id: string }
-      | undefined;
+  private findByIdempotencyKey(ownerId: string, key: string): Run | null {
+    const row = this.deps.db
+      .prepare('SELECT run_id FROM idempotency_keys WHERE owner = ? AND key = ?')
+      .get(ownerId, key) as { run_id: string } | undefined;
     return row ? this.deps.runs.get(row.run_id) : null;
   }
 }
