@@ -57,8 +57,8 @@ flowchart TD
     Mercury --> A3[select Agent]
     Mercury --> A4[select Skills]
     Mercury --> A5[schedule execution]
-    Mercury --> A6[persist state/events]
-    Mercury --> A7[present progress/results]
+    Mercury --> A6["persist state/events"]
+    Mercury --> A7["present progress/results"]
     A7 --> User
     Mercury --> PrimeAgent[PrimeAgent]
     PrimeAgent --> P1[inspect]
@@ -66,7 +66,8 @@ flowchart TD
     PrimeAgent --> P3[modify]
     PrimeAgent --> P4[test]
     PrimeAgent --> P5[review]
-    PrimeAgent --> P6[commit / PR]```
+    PrimeAgent --> P6["commit / PR"]
+```
 
 
 
@@ -161,7 +162,8 @@ flowchart TD
     PrimeAgentAdapter --> Context[skills + run context]
     Context --> PrimeAgent[PrimeAgent]
     PrimeAgent --> Workspace[isolated workspace]
-    Workspace --> Git[Git repository]```
+    Workspace --> Git[Git repository]
+```
 
 ---
 
@@ -214,8 +216,9 @@ flowchart TD
     agent --> skills[select skills]
     skills --> schedule[schedule]
     schedule --> observe[observe execution]
-    observe --> handle[handle input/cancellation]
-    handle --> finalize[finalize Run]```
+    observe --> handle["handle input/cancellation"]
+    handle --> finalize[finalize Run]
+```
 
 The orchestrator SHOULD NOT directly edit source code.
 
@@ -345,7 +348,8 @@ stateDiagram-v2
     COMPLETED --> [*]
     FAILED --> [*]
     CANCELLED --> [*]
-    TIMED_OUT --> [*]```
+    TIMED_OUT --> [*]
+```
 
 The diagram shows the main path. The complete transition table:
 
@@ -494,7 +498,8 @@ Initial implementation:
 
 ```mermaid
 flowchart TD
-    AgentAdapter[AgentAdapter] --> PrimeAgentAdapter[PrimeAgentAdapter]```
+    AgentAdapter[AgentAdapter] --> PrimeAgentAdapter[PrimeAgentAdapter]
+```
 
 Implemented adapters (see `docs/agent-adapters.md`):
 
@@ -567,29 +572,30 @@ Example:
 
 ```mermaid
 flowchart TD
-    agents[.agents/] --> skills[skills/]
-    skills --> planning[planning/]
-    planning --> planning_md[SKILL.md]
-    skills --> repo_analysis[repository-analysis/]
-    repo_analysis --> repo_md[SKILL.md]
-    skills --> frontend[frontend/]
-    frontend --> frontend_md[SKILL.md]
-    skills --> backend[backend/]
-    backend --> backend_md[SKILL.md]
-    skills --> testing[testing/]
-    testing --> testing_md[SKILL.md]
-    testing --> scripts[scripts/]
-    scripts --> verify_sh[verify.sh]
-    skills --> debugging[debugging/]
-    debugging --> debugging_md[SKILL.md]
-    skills --> security[security-review/]
-    security --> security_md[SKILL.md]
-    skills --> code_review[code-review/]
-    code_review --> code_review_md[SKILL.md]
-    skills --> git_pr[git-pr/]
-    git_pr --> git_pr_md[SKILL.md]
-    skills --> documentation[documentation/]
-    documentation --> documentation_md[SKILL.md]```
+    agents[".agents/"] --> skills["skills/"]
+    skills --> planning["planning/"]
+    planning --> planning_md["SKILL.md"]
+    skills --> repo_analysis["repository-analysis/"]
+    repo_analysis --> repo_md["SKILL.md"]
+    skills --> frontend["frontend/"]
+    frontend --> frontend_md["SKILL.md"]
+    skills --> backend["backend/"]
+    backend --> backend_md["SKILL.md"]
+    skills --> testing["testing/"]
+    testing --> testing_md["SKILL.md"]
+    testing --> scripts["scripts/"]
+    scripts --> verify_sh["verify.sh"]
+    skills --> debugging["debugging/"]
+    debugging --> debugging_md["SKILL.md"]
+    skills --> security["security-review/"]
+    security --> security_md["SKILL.md"]
+    skills --> code_review["code-review/"]
+    code_review --> code_review_md["SKILL.md"]
+    skills --> git_pr["git-pr/"]
+    git_pr --> git_pr_md["SKILL.md"]
+    skills --> documentation["documentation/"]
+    documentation --> documentation_md["SKILL.md"]
+```
 
 A skill may contain:
 
@@ -676,7 +682,8 @@ flowchart TD
     planning --> frontend[frontend]
     frontend --> testing[testing]
     testing --> code_review[code-review]
-    code_review --> git_pr[git-pr]```
+    code_review --> git_pr[git-pr]
+```
 
 Initial automatic selection SHOULD be deterministic and easy to debug.
 
@@ -699,7 +706,8 @@ flowchart TD
     Task[Task] --> Detection[Capability detection]
     Detection --> Resolution[Skill resolution]
     Resolution --> SmallSet[small relevant skill set]
-    SmallSet --> PrimeAgent[PrimeAgent]```
+    SmallSet --> PrimeAgent[PrimeAgent]
+```
 
 This reduces noise, context consumption and unintended behavior.
 
@@ -718,7 +726,8 @@ flowchart TD
     PrimeAgent[PrimeAgent] --> planning[planning skill]
     PrimeAgent --> backend[backend skill]
     PrimeAgent --> testing[testing skill]
-    PrimeAgent --> git_pr[git-pr skill]```
+    PrimeAgent --> git_pr[git-pr skill]
+```
 
 may remain a single Run.
 
@@ -896,16 +905,17 @@ Conceptually:
 ```mermaid
 flowchart TD
     POST["POST /runs"] --> PersistRun[Persist Run]
-    PersistRun --> PersistCreated[Persist run.created]
+    PersistRun --> PersistCreated["Persist run.created"]
     PersistCreated --> Enqueue[Durably enqueue]
     Enqueue --> Claim[Worker claims Run]
     Claim --> Lease[Acquire execution lease]
     Lease --> CreateWorkspace[Create workspace]
     CreateWorkspace --> ResolveSkills[Resolve skills]
     ResolveSkills --> Start["PrimeAgentAdapter.start()"]
-    Start --> Events[events → Event Store]
-    Start --> Status[status → Run Store]
-    Start --> Files[files → Workspace]```
+    Start --> Events["events → Event Store"]
+    Start --> Status["status → Run Store"]
+    Start --> Files["files → Workspace"]
+```
 
 Multiple workers MUST NOT execute the same Run concurrently.
 
@@ -938,10 +948,11 @@ Example:
 
 ```mermaid
 flowchart TD
-    repo[repo/] --> main[main]
-    worktrees[worktrees/] --> run1[run_01/]
-    worktrees --> run2[run_02/]
-    worktrees --> run3[run_03/]```
+    repo["repo/"] --> main[main]
+    worktrees["worktrees/"] --> run1["run_01/"]
+    worktrees --> run2["run_02/"]
+    worktrees --> run3["run_03/"]
+```
 
 Never permit unrelated Runs to modify the same Git working tree concurrently.
 
@@ -987,7 +998,8 @@ State transition:
 ```mermaid
 stateDiagram-v2
     RUNNING --> NEEDS_INPUT
-    NEEDS_INPUT --> RUNNING: human response```
+    NEEDS_INPUT --> RUNNING: human response
+```
 
 Input endpoint:
 
@@ -1016,7 +1028,8 @@ flowchart TD
     SignalAgent --> Stop[stop new tool operations]
     Stop --> Graceful[graceful exit]
     Stop --> Force[force terminate after timeout]
-    Force --> Cancelled[CANCELLED]```
+    Force --> Cancelled[CANCELLED]
+```
 
 Cancellation while `QUEUED` or `STARTING` removes the Run from the queue without starting the agent.
 
@@ -1194,7 +1207,8 @@ flowchart TD
     Task --> P3["✓ debugging"]
     Task --> P4["● testing"]
     Task --> P5["○ security-review"]
-    Task --> P6["○ git-pr"]```
+    Task --> P6["○ git-pr"]
+```
 
 Do not make raw stdout the primary UI representation.
 
@@ -1300,9 +1314,10 @@ Conceptually:
 
 ```mermaid
 flowchart TD
-    AGENTS[AGENTS.md] --> Knowledge[project knowledge]
+    AGENTS["AGENTS.md"] --> Knowledge[project knowledge]
     AGENTS --> References[references]
-    References --> Skills[.agents/skills/]```
+    References --> Skills[".agents/skills/"]
+```
 
 ---
 
@@ -1381,7 +1396,8 @@ Use a deterministic fake agent.
 ```mermaid
 flowchart TD
     AgentAdapter[AgentAdapter] --> PrimeAgentAdapter[PrimeAgentAdapter]
-    AgentAdapter --> FakeAgentAdapter[FakeAgentAdapter]```
+    AgentAdapter --> FakeAgentAdapter[FakeAgentAdapter]
+```
 
 Normal automated tests MUST NOT require a real PrimeAgent invocation.
 
@@ -1423,7 +1439,8 @@ flowchart TD
     Emit --> Persist[events persist]
     Persist --> Completed[COMPLETED]
     Completed --> Reconnect[client reconnects]
-    Reconnect --> History[entire history remains available]```
+    Reconnect --> History[entire history remains available]
+```
 
 ---
 
@@ -1995,7 +2012,8 @@ flowchart TD
     Commits --> Events
     PR --> Events
     Events --> Mercury
-    Mercury --> Surfaces[Chat / UI / Dashboard]```
+    Mercury --> Surfaces["Chat / UI / Dashboard"]
+```
 
 The architectural invariant is:
 
