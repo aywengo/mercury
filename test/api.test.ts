@@ -113,6 +113,44 @@ test('idempotency-key returns same run', async () => {
   }
 });
 
+test('idempotency-key is owner-scoped: same key, different owner -> different runs (issue #8)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice'], ['tok-bob', 'bob']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const body = JSON.stringify({ task: 'x', agent: 'fake' });
+      const alice = await fetch(`${base}/api/runs`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer tok-alice', 'content-type': 'application/json', 'idempotency-key': 'shared' },
+        body,
+      });
+      const bob = await fetch(`${base}/api/runs`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer tok-bob', 'content-type': 'application/json', 'idempotency-key': 'shared' },
+        body,
+      });
+      const ja = (await alice.json()) as { runId: string };
+      const jb = (await bob.json()) as { runId: string };
+      assert.notEqual(ja.runId, jb.runId);
+      // same owner + same key still dedups
+      const alice2 = await fetch(`${base}/api/runs`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer tok-alice', 'content-type': 'application/json', 'idempotency-key': 'shared' },
+        body,
+      });
+      const ja2 = (await alice2.json()) as { runId: string };
+      assert.equal(ja2.runId, ja.runId);
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
 test('SSE stream delivers events and supports reconnect via after', async () => {
   const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
