@@ -4,6 +4,9 @@ Durable long-running coding orchestration for PrimeAgent — a working vertical 
 
 Mercury owns intent, orchestration, state and interaction. PrimeAgent (or any agent backend behind an `AgentAdapter`) owns coding execution. The central abstraction is a durable **Run** whose lifetime does not depend on any browser, HTTP, WebSocket, SSE or chat connection.
 
+> **Note:** [`../Mercury.md`](../Mercury.md) is the design spec. Its status numbers are
+> historical; this README (and `npm test`) is the source of truth for current test counts.
+
 ## Quickstart
 
 **New here? Start with [`QUICKSTART.md`](QUICKSTART.md)** — prerequisites, install, first Run in
@@ -322,7 +325,7 @@ constraint run directly on the host.
 
 ## Testing
 
-`npm test` — 183 tests, no network, no LLM APIs (PrimeAgentAdapter is tested against a mock RPC server speaking the real protocol):
+`npm test` — 201 tests, no network, no LLM APIs (PrimeAgentAdapter is tested against a mock RPC server speaking the real protocol):
 
 - state machine (valid/invalid transitions, terminal states)
 - secret redaction
