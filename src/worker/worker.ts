@@ -11,7 +11,7 @@ import type {
 } from '../domain/types.ts';
 import type { EventStore } from '../events/eventStore.ts';
 import type { Logger } from '../logger.ts';
-import { RunQueue } from '../queue/runQueue.ts';
+import { RunQueue, LEASE_EXPIRED_ERROR } from '../queue/runQueue.ts';
 import type { RunService } from '../runs/runService.ts';
 import { RunStore } from '../runs/runStore.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
@@ -105,7 +105,25 @@ export class Worker {
   private async loop(): Promise<void> {
     while (this.running) {
       try {
-        this.deps.queue.reapExpiredLeases();
+        // Reap expired leases (worker crash). Active runs are marked FAILED by the
+        // queue; append the terminal event here so the audit trail stays complete
+        // (the queue has no EventStore access). The queue only reports runs this
+        // worker actually transitioned (changes === 1), so no duplicate events.
+        const reaped = this.deps.queue.reapExpiredLeases();
+        if (reaped.failed.length > 0) {
+          this.log('warn', 'reaped runs with expired leases', { runIds: reaped.failed });
+        }
+        for (const runId of reaped.failed) {
+          const row = this.deps.runs.get(runId);
+          const durationMs = row?.startedAt ? Date.now() - Date.parse(row.startedAt) : null;
+          this.deps.events.append(runId, 'error', { message: LEASE_EXPIRED_ERROR });
+          this.deps.events.append(runId, 'run.failed', {
+            runId,
+            error: LEASE_EXPIRED_ERROR,
+            kind: 'infrastructure',
+            durationMs,
+          });
+        }
         const run = this.deps.queue.claim(this.deps.workerId, this.deps.leaseMs);
         this.checkBacklog();
         if (run) {

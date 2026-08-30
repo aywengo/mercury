@@ -2,8 +2,12 @@
 // Claim is atomic: UPDATE ... WHERE status='QUEUED' AND lease not held.
 
 import type { DatabaseSync } from 'node:sqlite';
+import { tx } from '../db/database.ts';
 import type { Run } from '../domain/types.ts';
 import { RunStore, type RunRow, rowToRun } from '../runs/runStore.ts';
+
+/** Error recorded when a run's lease expires (worker crash); shared with the worker's event payload. */
+export const LEASE_EXPIRED_ERROR = 'Worker lease expired (worker crash?)';
 
 export class RunQueue {
   private db: DatabaseSync;
@@ -89,22 +93,28 @@ export class RunQueue {
       .all(nowIso) as unknown as RunRow[];
     const requeued: string[] = [];
     const failed: string[] = [];
-    for (const row of expired) {
-      if (row.status === 'QUEUED') {
-        this.db
-          .prepare('UPDATE runs SET lease_owner = NULL, lease_expires_at = NULL WHERE id = ?')
-          .run(row.id);
-        requeued.push(row.id);
-      } else {
-        this.db
-          .prepare(
-            `UPDATE runs SET status = 'FAILED', error = ?, error_kind = 'infrastructure', completed_at = ?
-             WHERE id = ? AND status = ?`,
-          )
-          .run('Worker lease expired (worker crash?)', nowIso, row.id, row.status);
-        failed.push(row.id);
+    // All-or-nothing: if the loop throws (e.g. SQLITE_BUSY under concurrent
+    // writers), no partial reaping is left behind with events missing.
+    tx(this.db, () => {
+      for (const row of expired) {
+        if (row.status === 'QUEUED') {
+          const res = this.db
+            .prepare('UPDATE runs SET lease_owner = NULL, lease_expires_at = NULL WHERE id = ?')
+            .run(row.id);
+          if (res.changes === 1) requeued.push(row.id);
+        } else {
+          const res = this.db
+            .prepare(
+              `UPDATE runs SET status = 'FAILED', error = ?, error_kind = 'infrastructure', completed_at = ?
+               WHERE id = ? AND status = ?`,
+            )
+            .run(LEASE_EXPIRED_ERROR, nowIso, row.id, row.status);
+          // Only report runs this worker actually transitioned (a concurrent
+          // reaper or the owning worker's finalize may have won the race).
+          if (res.changes === 1) failed.push(row.id);
+        }
       }
-    }
+    });
     return { requeued, failed };
   }
 
