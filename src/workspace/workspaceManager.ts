@@ -5,7 +5,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Run, Workspace } from '../domain/types.ts';
 
@@ -74,7 +74,9 @@ export class WorkspaceManager {
       if (existsSync(dest)) rmSync(dest, { recursive: true, force: true });
       if (repo.localPath && !repo.url) {
         if (!existsSync(repo.localPath)) throw new Error(`localPath not found: ${repo.localPath}`);
-        cpSync(repo.localPath, dest, {
+        // Same symlink handling as createCopy: without realpathSync, cpSync would
+        // create repos/<name> as a symlink to the source (isolation leak).
+        cpSync(realpathSync(repo.localPath), dest, {
           recursive: true,
           filter: (src) => !src.split(/[\/]/).includes('.git'),
         });
@@ -127,11 +129,15 @@ export class WorkspaceManager {
     const source = run.repository.localPath ?? run.repository.url;
     if (!source) throw new Error('Workspace requires repository.localPath (copy mode)');
     if (!existsSync(source)) throw new Error(`localPath not found: ${source}`);
+    // Resolve symlinks (e.g. /tmp -> /private/tmp on macOS): cpSync copies a
+    // symlinked source as a symlink by default, which collides with the
+    // pre-created destination directory (EEXIST).
+    const resolved = realpathSync(source);
     const branch = `agent/${run.id}`;
     const dest = join(this.cfg.baseDir, 'worktrees', run.id);
     if (existsSync(dest)) rmSync(dest, { recursive: true, force: true });
     mkdirSync(dest, { recursive: true });
-    cpSync(source, dest, {
+    cpSync(resolved, dest, {
       recursive: true,
       filter: (src) => !src.split(/[\\/]/).includes('.git'),
     });

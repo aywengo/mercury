@@ -2,7 +2,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeEnv, makeGitRepo, sleep } from './helpers.ts';
 import { WorkspaceGC } from '../src/workspace/workspaceGC.ts';
@@ -61,6 +61,51 @@ test('multi-repo: extra repositories are cloned under workspace/repos/', async (
     env.close();
   }
 });
+test('copy mode: symlinked extra repo is copied, not symlinked (issue #7)', async () => {
+  const env = makeEnv({ workerEnabled: false, workspaceMode: 'copy' });
+  try {
+    const main = makeGitRepo(join(env.dir, 'main-repo'));
+    const libReal = makeGitRepo(join(env.dir, 'lib-real'));
+    const libLink = join(env.dir, 'lib-link');
+    symlinkSync(libReal, libLink);
+    const run = makeRun(env, {
+      id: 'run_extra_symlink',
+      repository: { localPath: main },
+      repositories: [{ localPath: libLink }],
+    });
+    const ws = await env.workspace.create(run);
+    const reposLib = join(ws.path, 'repos', 'lib-link');
+    assert.ok(existsSync(join(reposLib, 'README.md')), 'extra repo copied');
+    // repos/<name> is a real directory, not a symlink to the source (isolation)
+    assert.ok(statSync(reposLib).isDirectory());
+    assert.ok(!lstatSync(reposLib).isSymbolicLink());
+  } finally {
+    env.close();
+  }
+});
+
+test('copy mode: symlinked source path resolves before copy (issue #7)', async () => {
+  const env = makeEnv({ workerEnabled: false, workspaceMode: 'copy' });
+  try {
+    const real = join(env.dir, 'real-repo');
+    mkdirSync(real, { recursive: true });
+    writeFileSync(join(real, 'file.txt'), 'hello');
+    const link = join(env.dir, 'link-repo');
+    symlinkSync(real, link);
+    const run = makeRun(env, {
+      id: 'run_symlink',
+      repository: { localPath: link },
+    });
+    const ws = await env.workspace.create(run);
+    assert.ok(existsSync(join(ws.path, 'file.txt')));
+    assert.equal(ws.mode, 'copy');
+    // the workspace is a real directory (not a symlink to the source)
+    assert.ok(statSync(ws.path).isDirectory());
+  } finally {
+    env.close();
+  }
+});
+
 
 test('multi-repo: repositories[]-only run derives primary from first entry without duplicating it', async () => {
   const env = makeEnv({ workerEnabled: false, workspaceMode: 'copy' });
