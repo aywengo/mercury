@@ -1,5 +1,6 @@
 // Mercury CLI: dev (API + embedded worker), server (API only), worker, migrate, redact-events
-// (retroactive secret redaction: events.payload_json, run_inputs.input_json, runs.error).
+// (retroactive secret redaction: events.payload_json, run_inputs.input_json, runs.error,
+// runs.task, runs.repository_json, runs.repositories_json).
 // The web server does NOT execute agent processes unless MERCURY_EMBEDDED_WORKER=true
 // (dev mode) — production runs `mercury server` and `mercury worker` separately.
 
@@ -206,7 +207,7 @@ async function main(): Promise<void> {
   }
 
   console.error('usage: mercury <dev|server|worker|gc|migrate|redact-events>');
-console.error('redact-events: retroactive secret redaction of events.payload_json, run_inputs.input_json, runs.error');
+console.error('redact-events: retroactive secret redaction of events.payload_json, run_inputs.input_json, runs.error, runs.task, runs.repository_json, runs.repositories_json');
   process.exit(1);
 }
 

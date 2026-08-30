@@ -31,3 +31,14 @@ test('redacts URL-embedded credentials (issue #43)', () => {
   assert.ok(out.includes('[REDACTED]'), 'redacted marker present');
   assert.ok(out.includes('example.com/repo.git'), 'host and path preserved');
 });
+
+test('URL-credential pattern has no false positives (issue #43)', () => {
+  const r = createRedactor([]);
+  // host:port, user-only, ssh, plain https, windows path, TODO comment — untouched
+  assert.equal(r.redact('https://example.com:8443/path?q=1'), 'https://example.com:8443/path?q=1');
+  assert.equal(r.redact('https://user@github.com/org/repo.git'), 'https://user@github.com/org/repo.git');
+  assert.equal(r.redact('ssh://git@github.com/org/repo.git'), 'ssh://git@github.com/org/repo.git');
+  assert.equal(r.redact('https://gitlab.com/group/proj.git'), 'https://gitlab.com/group/proj.git');
+  assert.equal(r.redact('C:\\Users\\me\\repo'), 'C:\\Users\\me\\repo');
+  assert.equal(r.redact('// TODO: fix this'), '// TODO: fix this');
+});

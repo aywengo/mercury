@@ -338,21 +338,26 @@ test('submitInput redacts secrets at write time (issue #36)', () => {
 });
 
 test('create redacts task and repository URL at write time (issue #43)', () => {
-  const env = makeEnv({ workerEnabled: false, redactor: createRedactor(['hush']) });
+  // no literal secrets configured: only the default patterns (incl. the new
+  // URL-credential regex) can catch these
+  const env = makeEnv({ workerEnabled: false, redactor: createRedactor([]) });
   try {
     const run = env.runService.create({
       ownerId: 'alice',
-      task: 'use token hush in the script',
+      task: 'use token=sk-12345 in the script',
       agent: 'fake',
-      repository: { localPath: 'https://user:hush@example.com/repo.git' },
+      repository: { localPath: 'https://user:pass123@example.com/repo.git' },
+      repositories: [{ localPath: 'https://user:pass456@example.com/extra.git' }],
     });
-    assert.ok(!run.task.includes('hush'), 'task secret removed');
+    assert.ok(!run.task.includes('sk-12345'), 'task secret removed');
     assert.ok(run.task.includes('[REDACTED]'), 'task redacted marker present');
-    assert.ok(!JSON.stringify(run.repository).includes('hush'), 'repository secret removed');
+    assert.ok(!JSON.stringify(run.repository).includes('pass123'), 'repository secret removed');
+    assert.ok(!JSON.stringify(run.repositories).includes('pass456'), 'repositories secret removed');
     // persisted form is redacted too
-    const row = env.db.prepare('SELECT task, repository_json FROM runs WHERE id = ?').get(run.id) as { task: string; repository_json: string };
-    assert.ok(!row.task.includes('hush'), 'persisted task secret removed');
-    assert.ok(!row.repository_json.includes('hush'), 'persisted repository secret removed');
+    const row = env.db.prepare('SELECT task, repository_json, repositories_json FROM runs WHERE id = ?').get(run.id) as { task: string; repository_json: string; repositories_json: string };
+    assert.ok(!row.task.includes('sk-12345'), 'persisted task secret removed');
+    assert.ok(!row.repository_json.includes('pass123'), 'persisted repository secret removed');
+    assert.ok(!row.repositories_json.includes('pass456'), 'persisted repositories secret removed');
   } finally {
     env.close();
   }

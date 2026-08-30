@@ -221,6 +221,32 @@ export class EventStore {
         }
       });
     }
+    // runs.repositories_json (additional repos, v2 column; issue #43)
+    let lastReposId = '';
+    for (;;) {
+      const rows = this.db
+        .prepare('SELECT id, repositories_json FROM runs WHERE id > ? AND repositories_json IS NOT NULL ORDER BY id ASC LIMIT ?')
+        .all(lastReposId, CHUNK) as unknown as { id: string; repositories_json: string }[];
+      if (rows.length === 0) break;
+      lastReposId = rows[rows.length - 1].id;
+      tx(this.db, () => {
+        const update = this.db.prepare('UPDATE runs SET repositories_json = ? WHERE id = ?');
+        for (const row of rows) {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(row.repositories_json);
+          } catch {
+            continue; // leave malformed rows untouched
+          }
+          const redacted = redactor.redactJson(parsed);
+          const next = JSON.stringify(redacted);
+          if (next !== JSON.stringify(parsed)) {
+            update.run(next, row.id);
+            changed++;
+          }
+        }
+      });
+    }
     return changed;
   }
 }
