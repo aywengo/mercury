@@ -230,7 +230,6 @@ function isUniqueViolation(err: unknown): boolean {
   return err instanceof Error && /UNIQUE constraint failed/.test(err.message);
 }
 
-
 const NUMERIC_CONSTRAINT_KEYS = ['maxDurationMs', 'maxRetries', 'maxTokens', 'maxCost'] as const;
 const CONSTRAINT_KEYS = new Set(['maxDurationMs', 'maxRetries', 'maxTokens', 'maxCost', 'resourceLimits', 'allowedNetworks']);
 
@@ -249,6 +248,9 @@ function validateConstraints(c: Record<string, unknown>): void {
     }
     if (v < 0) {
       throw new Error(`constraint ${key} must be >= 0`);
+    }
+    if (v > Number.MAX_SAFE_INTEGER) {
+      throw new Error(`constraint ${key} must be <= ${Number.MAX_SAFE_INTEGER}`);
     }
   }
   const rl = c.resourceLimits;
