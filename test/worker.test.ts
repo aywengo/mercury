@@ -619,3 +619,27 @@ test('worker redacts secrets in run error messages (issue #36)', async () => {
     env.close();
   }
 });
+
+test('agent failure redacts runs.error at finalize (issue #36, site 2)', async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const repo = mkdtempSync(join(tmpdir(), 'mercury-fail2-'));
+  const env = makeEnv({
+    redactor: createRedactor([]),
+    fakeScript: [{ fail: true }],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake',
+      repository: { localPath: repo },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    const final = env.runs.get(run.id)!;
+    assert.equal(final.errorKind, 'agent');
+    assert.ok(final.error, 'error set');
+    assert.ok(final.error.includes('Agent exited with code'), 'derived error message present');
+  } finally {
+    env.close();
+  }
+});

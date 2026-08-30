@@ -253,6 +253,28 @@ test('backfillRedact covers run_inputs.input_json and runs.error (issue #36)', (
     const row = env.db.prepare('SELECT error FROM runs WHERE id = ?').get(run.id) as { error: string };
     assert.ok(!row.error.includes('abc123.def456'), 'error secret removed');
     assert.ok(row.error.includes('[REDACTED]'), 'error redacted marker present');
+
+    // idempotent: a second pass changes nothing
+    const changed2 = redacted.backfillRedact();
+    assert.equal(changed2, 0, `second pass should change 0 rows, got ${changed2}`);
+  } finally {
+    env.close();
+  }
+});
+
+test('backfillRedact leaves malformed input_json untouched (issue #36)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.db.prepare('INSERT INTO run_inputs (id, run_id, input_json, created_at) VALUES (?, ?, ?, ?)')
+      .run('inp_bad1', run.id, '{not valid json', new Date().toISOString());
+
+    const redacted = new EventStore(env.db, createRedactor());
+    const changed = redacted.backfillRedact();
+    assert.equal(changed, 0, 'malformed row must not be touched');
+
+    const row = env.db.prepare('SELECT input_json FROM run_inputs WHERE id = ?').get('inp_bad1') as { input_json: string };
+    assert.equal(row.input_json, '{not valid json', 'malformed row unchanged');
   } finally {
     env.close();
   }

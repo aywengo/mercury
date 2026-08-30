@@ -103,6 +103,10 @@ export class RunQueue {
             .run(row.id);
           if (res.changes === 1) requeued.push(row.id);
         } else {
+          // NOTE: this raw-SQL error write bypasses the redactor (issue #36).
+          // Safe only because LEASE_EXPIRED_ERROR is a static constant with no
+          // dynamic content; if it is ever parameterized (worker id, run detail),
+          // route it through a redacting path (RunStore.setError + redactor).
           const res = this.db
             .prepare(
               `UPDATE runs SET status = 'FAILED', error = ?, error_kind = 'infrastructure', completed_at = ?

@@ -235,7 +235,8 @@ export class Worker {
       const outcome = await this.drive(run, adapter, handle, skills, startedAt);
       await this.finalize(run, outcome, skills);
     } catch (err) {
-      const message = this.deps.redactor ? this.deps.redactor.redact(String(err instanceof Error ? err.message : err)) : String(err instanceof Error ? err.message : err);
+      const raw = String(err instanceof Error ? err.message : err);
+      const message = this.deps.redactor ? this.deps.redactor.redact(raw) : raw;
       log.error({ error: message }, 'run execution failed');
       this.deps.runs.setError(run.id, message, 'infrastructure');
       this.deps.events.append(run.id, 'error', { message });
