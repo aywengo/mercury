@@ -49,6 +49,7 @@ export class RunService {
     if (!input.task || input.task.trim().length === 0) {
       throw new Error('task is required');
     }
+    if (input.constraints) validateConstraints(input.constraints);
     if (input.idempotencyKey) {
       const existing = this.findByIdempotencyKey(input.ownerId, input.idempotencyKey);
       if (existing) return existing;
@@ -227,4 +228,49 @@ export class RunService {
 
 function isUniqueViolation(err: unknown): boolean {
   return err instanceof Error && /UNIQUE constraint failed/.test(err.message);
+}
+
+const NUMERIC_CONSTRAINT_KEYS = ['maxDurationMs', 'maxRetries', 'maxTokens', 'maxCost'] as const;
+const CONSTRAINT_KEYS = new Set(['maxDurationMs', 'maxRetries', 'maxTokens', 'maxCost', 'resourceLimits', 'allowedNetworks']);
+
+/** Validate a client-supplied constraints object (issue #28). */
+function validateConstraints(c: Record<string, unknown>): void {
+  for (const key of Object.keys(c)) {
+    if (!CONSTRAINT_KEYS.has(key)) {
+      throw new Error(`Unknown constraint: ${key}`);
+    }
+  }
+  for (const key of NUMERIC_CONSTRAINT_KEYS) {
+    const v = c[key];
+    if (v === undefined) continue;
+    if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) {
+      throw new Error(`constraint ${key} must be a finite integer`);
+    }
+    if (v < 0) {
+      throw new Error(`constraint ${key} must be >= 0`);
+    }
+    if (v > Number.MAX_SAFE_INTEGER) {
+      throw new Error(`constraint ${key} must be <= ${Number.MAX_SAFE_INTEGER}`);
+    }
+  }
+  const rl = c.resourceLimits;
+  if (rl !== undefined) {
+    if (typeof rl !== 'object' || rl === null || Array.isArray(rl)) {
+      throw new Error('constraint resourceLimits must be an object');
+    }
+    for (const [k, v] of Object.entries(rl)) {
+      if (!['cpu', 'memory', 'disk'].includes(k)) {
+        throw new Error(`Unknown resourceLimits key: ${k}`);
+      }
+      if (typeof v !== 'string') {
+        throw new Error(`resourceLimits.${k} must be a string`);
+      }
+    }
+  }
+  const an = c.allowedNetworks;
+  if (an !== undefined) {
+    if (!Array.isArray(an) || an.some((x) => typeof x !== 'string')) {
+      throw new Error('constraint allowedNetworks must be an array of strings');
+    }
+  }
 }
