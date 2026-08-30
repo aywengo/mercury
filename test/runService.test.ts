@@ -208,3 +208,34 @@ test('list filters by owner and status with pagination', () => {
 test('waitFor helper sanity', async () => {
   await waitFor(() => true);
 });
+
+test('idempotency-key race: UNIQUE violation returns the existing run (issue #24)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    // first run with the key
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', idempotencyKey: 'race-key' });
+    // Simulate a concurrent POST winning between create()'s dedup SELECT and
+    // INSERT: patch the SELECT so it misses (as if the winner had not yet
+    // committed), while the key row exists in the table — the INSERT then hits
+    // UNIQUE and the catch must recover by re-reading the existing run.
+    const origPrepare = env.db.prepare.bind(env.db);
+    let dedupMissed = false;
+    env.db.prepare = ((sql: string) => {
+      const stmt = origPrepare(sql);
+      // the FIRST idempotency-key lookup (the dedup SELECT) misses; the catch's
+      // re-read (second lookup) must still see the row
+      if (!dedupMissed && /FROM idempotency_keys/.test(sql)) {
+        dedupMissed = true;
+        return { ...stmt, get: () => undefined };
+      }
+      return stmt;
+    }) as typeof env.db.prepare;
+    const result = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', idempotencyKey: 'race-key' });
+    assert.equal(result.id, run.id, 'returns the existing run instead of throwing');
+    // no duplicate run was created
+    const all = env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 10 });
+    assert.equal(all.runs.filter((r) => r.task === 'x').length, 1);
+  } finally {
+    env.close();
+  }
+});
