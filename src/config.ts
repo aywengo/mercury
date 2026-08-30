@@ -34,8 +34,6 @@ export interface Config {
   backlogAlertThreshold: number;
   /** Optional webhook URL for backlog alerts (MERCURY_ALERT_WEBHOOK_URL); null disables. */
   alertWebhookUrl: string | null;
-  /** Worker health self-report interval in ms (MERCURY_WORKER_HEALTH_INTERVAL_MS). */
-  workerHealthIntervalMs: number;
   /** Agent execution mode: 'rpc' (default, subprocess per Run) or 'daemon' (resident sessions). */
   agentMode: 'rpc' | 'daemon';
   /** Container runtime for sandboxed execution (MERCURY_SANDBOX_RUNTIME: docker|podman|none). */
@@ -100,7 +98,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     gcIntervalMs: num(env.MERCURY_GC_INTERVAL_MS, 60 * 60 * 1000),
     backlogAlertThreshold: num(env.MERCURY_BACKLOG_ALERT_THRESHOLD, 10),
     alertWebhookUrl: env.MERCURY_ALERT_WEBHOOK_URL ?? null,
-    workerHealthIntervalMs: num(env.MERCURY_WORKER_HEALTH_INTERVAL_MS, 30_000),
     agentMode: env.MERCURY_AGENT_MODE === 'daemon' ? 'daemon' : 'rpc',
     sandboxRuntime: env.MERCURY_SANDBOX_RUNTIME ?? null,
     sandboxImage: env.MERCURY_SANDBOX_IMAGE ?? null,
