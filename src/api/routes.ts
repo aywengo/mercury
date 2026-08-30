@@ -19,6 +19,11 @@ export function createRoutes(deps: RoutesDeps): Router {
   const router = Router();
   router.use(requireAuth);
 
+  // GET /api/agents — registered agent ids for the UI dropdown
+  router.get('/agents', (_req: Request, res: Response) => {
+    res.json({ agents: deps.runService.listAgents() });
+  });
+
   // POST /api/runs
   router.post('/runs', (req: Request, res: Response) => {
     const body = req.body ?? {};

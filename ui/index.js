@@ -13,11 +13,29 @@ function showLogin() {
   $('user-label').textContent = '';
 }
 
+async function loadAgents() {
+  try {
+    const { agents } = await api('/api/agents');
+    if (!Array.isArray(agents)) return; // defensive: keep the static options
+    const select = $('agent');
+    select.innerHTML = '';
+    for (const a of agents) {
+      const opt = document.createElement('option');
+      opt.value = a;
+      opt.textContent = a;
+      select.appendChild(opt);
+    }
+  } catch {
+    // keep the static options as a fallback
+  }
+}
+
 function showApp() {
   $('login').classList.add('hidden');
   $('app').classList.remove('hidden');
   $('logout-btn').classList.remove('hidden');
   $('user-label').textContent = user?.isAdmin ? 'admin' : user?.ownerId || '';
+  loadAgents();
   loadRuns();
 }
 

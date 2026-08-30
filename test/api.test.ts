@@ -151,6 +151,32 @@ test('idempotency-key is owner-scoped: same key, different owner -> different ru
   }
 });
 
+test('GET /api/agents returns the registered agent ids (issue #13)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const res = await fetch(`${base}/api/agents`, {
+        headers: { authorization: 'Bearer tok-alice' },
+      });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { agents: string[] };
+      assert.ok(Array.isArray(body.agents));
+      assert.ok(body.agents.includes('fake'), `expected 'fake' in ${body.agents.join(',')}`);
+      // matches what RunService accepts
+      const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: body.agents[0] });
+      assert.ok(run.id);
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
 test('SSE stream delivers events and supports reconnect via after', async () => {
   const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
