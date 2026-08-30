@@ -92,10 +92,17 @@ export const MIGRATIONS: string[] = [
   `,
 ];
 
+export const BUSY_TIMEOUT_MS = 5_000;
+
 export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
+  // Concurrent API + worker processes share the DB file (WAL). Without a busy
+  // timeout (default 0), a writer that hits an in-flight tx from the other
+  // process fails immediately with SQLITE_BUSY ('database is locked') instead
+  // of waiting for the lock (issue #38).
+  db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
   migrate(db);
   return db;
 }

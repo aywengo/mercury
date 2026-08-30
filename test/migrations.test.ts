@@ -65,3 +65,64 @@ test('migration v3: idempotency keys become owner-scoped with backfill (issue #8
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('openDatabase sets a busy_timeout (issue #38)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-busy-'));
+  const dbPath = join(dir, 'test.db');
+  try {
+    const db = openDatabase(dbPath);
+    const row = db.prepare('PRAGMA busy_timeout').get() as { timeout: number };
+    assert.ok(row.timeout > 0, `expected busy_timeout > 0, got ${row.timeout}`);
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('concurrent writer waits for the lock instead of failing with SQLITE_BUSY (issue #38)', async () => {
+  const { Worker } = await import('node:worker_threads');
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-busy2-'));
+  const dbPath = join(dir, 'test.db');
+  try {
+    const db1 = openDatabase(dbPath);
+    const iso = new Date().toISOString();
+    db1.exec('BEGIN IMMEDIATE');
+    db1.prepare('INSERT INTO runs (id, owner_id, task, repository_json, agent, status, attempt, constraints_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run('r1', 'alice', 'x', '{}', 'fake', 'QUEUED', 0, '{}', iso);
+    // db2 (separate connection, separate thread) writes while db1 holds the lock;
+    // busy_timeout must make it wait, not fail immediately with SQLITE_BUSY.
+    const workerSrc = `
+      import { parentPort, workerData } from 'node:worker_threads';
+      import { openDatabase } from ${JSON.stringify(new URL('../src/db/database.ts', import.meta.url).href)};
+      const db = openDatabase(workerData.path);
+      try {
+        db.prepare('INSERT INTO runs (id, owner_id, task, repository_json, agent, status, attempt, constraints_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run('r2', 'alice', 'x', '{}', 'fake', 'QUEUED', 0, '{}', workerData.iso);
+        parentPort.postMessage({ ok: true });
+      } catch (e) {
+        parentPort.postMessage({ ok: false, err: String(e instanceof Error ? e.message : e) });
+      }
+      db.close();
+    `;
+    const worker = new Worker(new URL(`data:text/javascript;base64,${Buffer.from(workerSrc).toString('base64')}`), {
+      workerData: { path: dbPath, iso },
+    });
+    const started = Date.now();
+    // release the lock shortly after the worker starts waiting
+    const release = setTimeout(() => db1.exec('COMMIT'), 500);
+    const result = await new Promise<{ ok: boolean; err?: string }>((resolve, reject) => {
+      worker.once('message', resolve);
+      worker.once('error', reject);
+    });
+    clearTimeout(release);
+    const elapsed = Date.now() - started;
+    assert.ok(result.ok, `db2 write failed: ${result.err}`);
+    const r2 = db1.prepare('SELECT id FROM runs WHERE id = ?').get('r2') as { id: string };
+    assert.equal(r2.id, 'r2', 'second writer committed after the lock was released');
+    assert.ok(elapsed >= 400, `waited ${elapsed}ms (expected to block on the lock)`);
+    assert.ok(elapsed < 5_000, `waited ${elapsed}ms (busy_timeout should cap the wait)`);
+    db1.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
