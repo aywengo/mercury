@@ -93,7 +93,6 @@ function makeWorker(
     stuckRunThresholdMs: opts.stuckRunThresholdMs ?? 0,
     stuckCheckIntervalMs: opts.stuckCheckIntervalMs ?? 60_000,
     retryBackoffMs: 50,
-    maxRetries: 2,
     backlogAlertThreshold: opts.backlogAlertThreshold,
     alertWebhookUrl: opts.alertWebhookUrl,
   });

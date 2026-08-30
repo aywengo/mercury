@@ -33,7 +33,6 @@ export interface WorkerDeps {
   pollMs: number;
   inputPollMs: number;
   retryBackoffMs: number;
-  maxRetries: number;
   /** Queue depth that triggers backlog alerts (MERCURY_BACKLOG_ALERT_THRESHOLD). Default 10. */
   backlogAlertThreshold?: number;
   /** Webhook URL for backlog alerts (MERCURY_ALERT_WEBHOOK_URL). Default null (log only). */
@@ -546,9 +545,12 @@ export class Worker {
 
   private async maybeAutoRetry(run: Run, kind: 'infrastructure' | 'agent'): Promise<void> {
     if (kind !== 'infrastructure') return; // agent/task failures: manual retry only
-    if (run.attempt > this.deps.maxRetries) return; // maxRetries = retries allowed after the initial attempt
+    // Honor the per-run constraint (set at create time, defaulting to the global
+    // config value); maxRetries = retries allowed after the initial attempt.
+    const maxRetries = run.constraints.maxRetries;
+    if (run.attempt > maxRetries) return;
     const log = this.logger(run.id);
-    log.info({ attempt: run.attempt, maxRetries: this.deps.maxRetries }, 'scheduling automatic retry');
+    log.info({ attempt: run.attempt, maxRetries }, 'scheduling automatic retry');
     await sleep(this.deps.retryBackoffMs * run.attempt);
     try {
       this.deps.runService.retry(run.id, run.ownerId, true, { auto: true });

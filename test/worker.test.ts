@@ -341,6 +341,58 @@ test('auto-retry on infrastructure failure (workspace missing)', async () => {
     env.close();
   }
 });
+test('auto-retry honors per-run maxRetries: 0 disables retry (issue #9)', async () => {
+  const env = makeEnv({
+    workerEnabled: false,
+    maxRetries: 2, // global allows retries
+    retryBackoffMs: 30,
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'x',
+      agent: 'fake',
+      repository: { localPath: '/nonexistent/path' },
+      constraints: { maxRetries: 0 }, // per-run: no auto-retry
+    });
+    env.worker.start();
+    await waitFor(() => {
+      const r = env.runs.get(run.id)!;
+      return r.status === 'FAILED' && r.errorKind === 'infrastructure';
+    }, 10_000);
+    // give any (wrong) auto-retry a chance to fire
+    await sleep(200);
+    const all = env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 10 });
+    assert.ok(!all.runs.some((r) => r.retryOf === run.id), 'no retry run should exist');
+  } finally {
+    env.close();
+  }
+});
+
+test('auto-retry honors per-run maxRetries above the global default (issue #9)', async () => {
+  const env = makeEnv({
+    workerEnabled: false,
+    maxRetries: 1, // global allows 1 retry
+    retryBackoffMs: 30,
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'x',
+      agent: 'fake',
+      repository: { localPath: '/nonexistent/path' },
+      constraints: { maxRetries: 3 }, // per-run: up to 3 retries
+    });
+    env.worker.start();
+    // first retry (attempt 2) should appear despite global maxRetries: 1
+    await waitFor(() => {
+      const all = env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 10 });
+      return all.runs.some((r) => r.retryOf === run.id && r.attempt === 2);
+    }, 10_000);
+  } finally {
+    env.close();
+  }
+});
 
 test('retry reuses the original base commit (section 21)', async () => {
   // unique temp dir (mkdtemp): a fixed name would leave a repo behind, and the
