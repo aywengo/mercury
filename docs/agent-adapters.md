@@ -3,7 +3,7 @@
 How Mercury drives other coding agents, and the design for the generic
 `LocalAgentAdapter` and `RemoteAgentAdapter`.
 
-Spec context: [Mercury.md](../Mercury.md) §8 (Agent Adapter), §9 (Run Context),
+Spec context: [ARCHITECTURE.md](../ARCHITECTURE.md) §8 (Agent Adapter), §9 (Run Context),
 §14 (events), §16 (durable execution), §29 (testing).
 
 ---
@@ -462,7 +462,7 @@ resume: { flag: "--resume", sessionIdSource: "event", sessionIdPath: "session_id
   stdin/file, input round-trip (stdin/flag/prompt-file), cancel (SIGTERM/stdin),
   spawn failure, agent failure, terminate, json/text output, resume (event/stdout
   sources), config validation, registry loading.
-- **No real agent required in tests** (Mercury.md §29).
+- **No real agent required in tests** (ARCHITECTURE.md §29).
 
 ---
 
@@ -572,7 +572,7 @@ resume?(runId):           if the vendor supports it (e.g. Devin sessions persist
 ### 5.3 Credential & security rules
 
 - Credentials come from `api.auth.envVar` (secret manager / env), **never** from
-  Run records, events, logs, or browser responses (Mercury.md §24).
+  Run records, events, logs, or browser responses (ARCHITECTURE.md §24).
 - The workspace never contains platform-wide credentials — only the scoped
   vendor token for the target repository.
 - Webhook endpoints verify the shared secret before accepting events.
@@ -759,7 +759,7 @@ resume: { enabled: true }
   input.required → extension_ui_response), cancel (abort command), resume
   (session-dir persistence), spawn failure, agent failure, vendor-extras
   tolerance, config validation, registry loading.
-- **No real agent required in tests** (Mercury.md §29).
+- **No real agent required in tests** (ARCHITECTURE.md §29).
 
 ### 6.6 Registry & wiring
 
@@ -841,7 +841,7 @@ previous 1h max-duration timeout).
 5. `resume()` (where supported) continues the same session; otherwise retry-from-scratch.
 6. Timeout → `TIMED_OUT`; infrastructure failure → `FAILED` (kind `infrastructure`, auto-retry).
 7. Credentials never appear in events, logs, or browser responses.
-8. Tests run without the real agent (mock fixture), per Mercury.md §29.
+8. Tests run without the real agent (mock fixture), per ARCHITECTURE.md §29.
 9. `tsc` clean; full suite green.
 
 ---

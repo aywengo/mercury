@@ -1,10 +1,10 @@
 # Mercury
 
-Durable long-running coding orchestration for PrimeAgent — a working vertical slice of the architecture in [`../Mercury.md`](../Mercury.md).
+Durable long-running coding orchestration for PrimeAgent — a working vertical slice of the architecture in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 Mercury owns intent, orchestration, state and interaction. PrimeAgent (or any agent backend behind an `AgentAdapter`) owns coding execution. The central abstraction is a durable **Run** whose lifetime does not depend on any browser, HTTP, WebSocket, SSE or chat connection.
 
-> **Note:** [`../Mercury.md`](../Mercury.md) is the design spec. Its status numbers are
+> **Note:** [`ARCHITECTURE.md`](ARCHITECTURE.md) is the design spec. Its status numbers are
 > historical; this README (and `npm test`) is the source of truth for current test counts.
 
 ## Quickstart
@@ -290,8 +290,8 @@ hermes chat -Q --query-file - --in <workspace> [-s <skill>]... [--max-turns N] [
   - `extension_ui_request` (select/confirm/input/editor) → `input.required`; the human answer is sent back as `extension_ui_response` (Mercury' `NEEDS_INPUT` flow)
   - `agent_end` → run completion (exit code 0)
   - `compaction_*` / `auto_retry_*` → informational `agent.message` events
-- **session persistence**: each Run's session JSONL is stored under `<workspace>/.mercury-sessions/`; the path is recorded in `.mercury-session-path` so a Run can be resumed via `--resume <sessionFile>` (Mercury.md §16)
-- **trace context**: the agent process is spawned with `MERCURY_RUN_ID` / `MERCURY_TRACE_ID` (the Run ID) and `MERCURY_WORKER_ID` so agent logs correlate back to the Run and worker (Mercury.md §25)
+- **session persistence**: each Run's session JSONL is stored under `<workspace>/.mercury-sessions/`; the path is recorded in `.mercury-session-path` so a Run can be resumed via `--resume <sessionFile>` (ARCHITECTURE.md §16)
+- **trace context**: the agent process is spawned with `MERCURY_RUN_ID` / `MERCURY_TRACE_ID` (the Run ID) and `MERCURY_WORKER_ID` so agent logs correlate back to the Run and worker (ARCHITECTURE.md §25)
 - **cancellation**: cooperative `abort` command, then SIGTERM / SIGKILL after a grace period
 - **timeout**: SIGTERM / SIGKILL via `terminate()`, producing `TIMED_OUT`
 
@@ -309,7 +309,7 @@ The RPC client (`src/adapters/rpc/`) implements the protocol directly: strict LF
 ## Workspace isolation
 
 - `git-worktree` (default): base repo cloned once under `workspaces/repos/`, each Run gets `workspaces/worktrees/run_<id>` on branch `agent/run_<id>` pinned to the base commit.
-- The resolved base commit is persisted on the Run record, so a retry reuses the exact base (Mercury.md §21) instead of re-resolving a moved branch.
+- The resolved base commit is persisted on the Run record, so a retry reuses the exact base (ARCHITECTURE.md §21) instead of re-resolving a moved branch.
 - `copy`: recursive copy of a local template (for non-git sources / tests).
 - Multi-repo Runs (roadmap #6): extra `repositories[]` are cloned under `<workspace>/repos/<name>`; the primary is `repository` (or the first list entry) and is never duplicated under `repos/`.
 - Workspaces are retained after completion for inspection; cleanup/retention policy is an ops concern (see Workspace GC).

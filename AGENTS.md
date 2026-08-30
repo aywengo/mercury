@@ -1,7 +1,7 @@
 # AGENTS.md — mercury
 
 Mercury is the durable orchestration layer for long-running PrimeAgent coding Runs.
-Architecture and full spec: [`../Mercury.md`](../Mercury.md). This file is the short operating guide.
+Architecture and full spec: [`ARCHITECTURE.md`](ARCHITECTURE.md). This file is the short operating guide.
 
 ## What this is
 
