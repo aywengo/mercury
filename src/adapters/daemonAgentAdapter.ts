@@ -251,12 +251,19 @@ export class DaemonAgentAdapter implements AgentAdapter {
     const session = this.sessions.get(runId);
     const pending = session?.translator.pending;
     if (!session?.socket || !pending) return;
-    const msg = {
-      type: 'extension_ui_response',
-      requestId: pending.requestId,
-      response: input.value,
-    };
-    session.socket.write(frame(msg));
+    // Same RPC response shape as rpcClient.sendExtensionUiResponse: the daemon
+    // resolves the dialog from { id, value } / { id, confirmed } / { id, cancelled }.
+    const { requestId, method } = pending;
+    const value = input.value;
+    let response: Record<string, unknown>;
+    if (isRecord(value) && value.cancelled === true) {
+      response = { id: requestId, cancelled: true };
+    } else if (method === 'confirm') {
+      response = { id: requestId, confirmed: value === true || value === 'true' || value === 'yes' || value === 'y' };
+    } else {
+      response = { id: requestId, value };
+    }
+    session.socket.write(frame({ type: 'extension_ui_response', ...response }));
     session.translator.clearPending();
   }
 
@@ -324,4 +331,9 @@ function readFrame(socket: Socket): Promise<Buffer> {
     socket.on('data', onData);
     socket.once('error', reject);
   });
+}
+
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

@@ -15,6 +15,7 @@ if (!socketPath) {
   process.exit(1);
 }
 const mode = process.env.MOCK_DAEMON_MODE ?? 'happy';
+const method = process.env.MOCK_DAEMON_METHOD ?? 'select';
 const logPath = process.env.MOCK_DAEMON_LOG;
 const log = (msg) => { if (logPath) appendFileSync(logPath, msg + '\n'); };
 
@@ -60,7 +61,7 @@ function handleCommand(socket, cmd) {
       return;
     }
     if (mode === 'input') {
-      socket.write(frame({ type: 'extension_ui_request', id: 'req-1', method: 'select', title: 'Question', message: 'Continue?', options: [{ label: 'yes', value: 'yes' }, { label: 'no', value: 'no' }] }));
+      socket.write(frame({ type: 'extension_ui_request', id: 'req-1', method, title: 'Question', message: 'Continue?', options: [{ label: 'yes', value: 'yes' }, { label: 'no', value: 'no' }] }));
       socket.write(frame({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'waiting for input' } }));
       return;
     }

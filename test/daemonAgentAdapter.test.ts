@@ -125,6 +125,129 @@ test('daemon: input request -> response -> completion', async () => {
   }
 });
 
+test('daemon: sendInput writes the RPC response shape { id, value } (issue #10)', async () => {
+  const { context, workspacePath } = makeContext();
+  const logPath = join(workspacePath, 'daemon.log');
+  const adapter = spawnAdapter({
+    MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'),
+    MOCK_DAEMON_MODE: 'input',
+    MOCK_DAEMON_LOG: logPath,
+  });
+  try {
+    const handle = await adapter.start(context);
+    // wait for input.required
+    const inputPromise = new Promise<{ type: string; payload: unknown }>((resolve) => {
+      (async () => {
+        for await (const ev of handle.events) {
+          if (ev.type === 'input.required') { resolve({ type: ev.type, payload: ev.payload }); return; }
+          if (ev.type === '__done__') { resolve({ type: '__none__', payload: {} }); return; }
+        }
+      })();
+    });
+    const inputEvent = await inputPromise;
+    assert.equal(inputEvent.type, 'input.required');
+    const payload = inputEvent.payload as { requestId: string };
+    await adapter.sendInput(context.run.id, { value: 'yes', at: new Date().toISOString() });
+    // drain the rest so the session completes
+    for await (const ev of handle.events) {
+      if (ev.type === '__done__') break;
+    }
+    await handle.exit;
+    // the mock logs the exact frame it received
+    const log = readFileSync(logPath, 'utf8');
+    const line = log.split('\n').find((l) => l.startsWith('input response: '));
+    assert.ok(line, 'expected an input response log line');
+    const frame = JSON.parse(line!.slice('input response: '.length)) as Record<string, unknown>;
+    assert.equal(frame.type, 'extension_ui_response');
+    assert.equal(frame.id, payload.requestId);
+    assert.equal(frame.value, 'yes');
+    assert.equal(frame.requestId, undefined, 'old requestId key must be gone');
+    assert.equal(frame.response, undefined, 'old response key must be gone');
+  } finally {
+    await adapter.cancel(context.run.id);
+  }
+});
+test('daemon: sendInput confirm method coerces to { id, confirmed } (issue #10)', async () => {
+  const { context, workspacePath } = makeContext();
+  const logPath = join(workspacePath, 'daemon.log');
+  const adapter = spawnAdapter({
+    MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'),
+    MOCK_DAEMON_MODE: 'input',
+    MOCK_DAEMON_METHOD: 'confirm',
+    MOCK_DAEMON_LOG: logPath,
+  });
+  try {
+    const handle = await adapter.start(context);
+    const inputPromise = new Promise<{ type: string; payload: unknown }>((resolve) => {
+      (async () => {
+        for await (const ev of handle.events) {
+          if (ev.type === 'input.required') { resolve({ type: ev.type, payload: ev.payload }); return; }
+          if (ev.type === '__done__') { resolve({ type: '__none__', payload: {} }); return; }
+        }
+      })();
+    });
+    const inputEvent = await inputPromise;
+    assert.equal(inputEvent.type, 'input.required');
+    const payload = inputEvent.payload as { requestId: string };
+    await adapter.sendInput(context.run.id, { value: 'yes', at: new Date().toISOString() });
+    for await (const ev of handle.events) {
+      if (ev.type === '__done__') break;
+    }
+    await handle.exit;
+    const log = readFileSync(logPath, 'utf8');
+    const line = log.split('\n').find((l) => l.startsWith('input response: '));
+    assert.ok(line, 'expected an input response log line');
+    const frame = JSON.parse(line!.slice('input response: '.length)) as Record<string, unknown>;
+    assert.equal(frame.type, 'extension_ui_response');
+    assert.equal(frame.id, payload.requestId);
+    assert.equal(frame.confirmed, true);
+    assert.equal(frame.value, undefined);
+  } finally {
+    await adapter.cancel(context.run.id);
+  }
+});
+
+test('daemon: sendInput cancelled passthrough writes { id, cancelled } (issue #10)', async () => {
+  const { context, workspacePath } = makeContext();
+  const logPath = join(workspacePath, 'daemon.log');
+  const adapter = spawnAdapter({
+    MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'),
+    MOCK_DAEMON_MODE: 'input',
+    MOCK_DAEMON_LOG: logPath,
+  });
+  try {
+    const handle = await adapter.start(context);
+    const inputPromise = new Promise<{ type: string; payload: unknown }>((resolve) => {
+      (async () => {
+        for await (const ev of handle.events) {
+          if (ev.type === 'input.required') { resolve({ type: ev.type, payload: ev.payload }); return; }
+          if (ev.type === '__done__') { resolve({ type: '__none__', payload: {} }); return; }
+        }
+      })();
+    });
+    const inputEvent = await inputPromise;
+    assert.equal(inputEvent.type, 'input.required');
+    const payload = inputEvent.payload as { requestId: string };
+    await adapter.sendInput(context.run.id, { value: { cancelled: true }, at: new Date().toISOString() });
+    for await (const ev of handle.events) {
+      if (ev.type === '__done__') break;
+    }
+    await handle.exit;
+    const log = readFileSync(logPath, 'utf8');
+    const line = log.split('\n').find((l) => l.startsWith('input response: '));
+    assert.ok(line, 'expected an input response log line');
+    const frame = JSON.parse(line!.slice('input response: '.length)) as Record<string, unknown>;
+    assert.equal(frame.type, 'extension_ui_response');
+    assert.equal(frame.id, payload.requestId);
+    assert.equal(frame.cancelled, true);
+    assert.equal(frame.value, undefined);
+  } finally {
+    await adapter.cancel(context.run.id);
+  }
+});
+
+
+
 test('daemon: abort cancels the session', async () => {
   const { context, workspacePath } = makeContext();
   const adapter = spawnAdapter({ MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock') });
