@@ -155,7 +155,6 @@ QUEUED → STARTING → RUNNING ⇄ NEEDS_INPUT → COMPLETED / FAILED / CANCELL
 | `MERCURY_BACKLOG_ALERT_THRESHOLD` | `10` | Queue depth that triggers a backlog alert |
 | `MERCURY_ALERT_WEBHOOK_URL` | — | Webhook for backlog + stuck-run alerts (fire-and-forget); unset = log only |
 | `MERCURY_GC_INTERVAL_MS` | `3600000` | Worker workspace-GC pass interval |
-| `MERCURY_WORKER_HEALTH_INTERVAL_MS` | `30000` | Worker self-report interval for `/healthz/workers` |
 | `MERCURY_AGENT_MODE` | `rpc` | `rpc` (subprocess per Run) or `daemon` (resident sessions) |
 | `MERCURY_HERMES_CMD` | `hermes` | Hermes Agent binary for the `hermes` agent id |
 | `MERCURY_HERMES_ARGS` | — | Extra args for `hermes chat` (e.g. `--ignore-user-config`) |
