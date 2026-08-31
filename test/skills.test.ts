@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compareSkillIds, SkillRegistry } from '../src/skills/skillRegistry.ts';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { assertSafeSkillId, compareSkillIds, resolveContained, SkillRegistry } from '../src/skills/skillRegistry.ts';
 import { createSkillSelector, KEYWORDS } from '../src/skills/skillSelector.ts';
 import { SKILLS_DIR } from './helpers.ts';
 
@@ -33,6 +36,61 @@ test('registry orders ids with the canonical comparator (issue #81)', () => {
   const tricky = ['a_b', 'a-b', 'a.b', 'a1', 'aB', 'aa', 'ab'];
   assert.deepEqual([...tricky].sort(compareSkillIds), [...tricky].sort());
   assert.equal(compareSkillIds('a-b', 'a_b'), -1);
+});
+
+test('skill ids cannot escape the registry root (issue #58)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-trav-'));
+  try {
+    // A skill living OUTSIDE the registry root, holding content that must never be
+    // readable through the registry. On the base commit resolve(['../outside']) returned
+    // this directory's files -- including SECRET.txt -- so `skills: ["../../../../x"]` in
+    // an API request body was an arbitrary-directory read, and writeSkills then copied
+    // the whole tree into the run workspace.
+    const outside = join(dir, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(
+      join(outside, 'SKILL.md'),
+      '---\nname: outside\nversion: 1.0.0\ndescription: d\ncapabilities: [a]\n---\n\n# Outside\n',
+    );
+    writeFileSync(join(outside, 'SECRET.txt'), 'top-secret-content');
+    const root = join(dir, 'registry');
+    mkdirSync(join(root, 'good'), { recursive: true });
+    writeFileSync(
+      join(root, 'good', 'SKILL.md'),
+      '---\nname: good\nversion: 1.0.0\ndescription: d\ncapabilities: [a]\n---\n\n# Good\n',
+    );
+
+    const reg = new SkillRegistry(root);
+    assert.deepEqual(reg.resolve(['good']).map((s) => s.id), ['good'], 'legitimate ids must still resolve');
+
+    for (const bad of ['../outside', '../../../../etc', '..', '../outside/', 'good/../../outside', '', '.', 'a/b']) {
+      assert.throws(() => reg.resolve([bad]), /Unsafe skill id/, `expected ${JSON.stringify(bad)} to be rejected`);
+    }
+    // the leaked file is genuinely reachable on the filesystem, so a passing assertion
+    // above means containment worked rather than the fixture being empty
+    assert.equal(readFileSync(join(outside, 'SECRET.txt'), 'utf8'), 'top-secret-content');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resolveContained refuses paths that escape the root (issue #58)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-contain-'));
+  try {
+    assert.equal(resolveContained(dir, 'a/b.md'), join(dir, 'a', 'b.md'));
+    assert.throws(() => resolveContained(dir, '../escape'), /escapes/);
+    assert.throws(() => resolveContained(dir, 'a/../../escape'), /escapes/);
+    // A sibling whose name merely shares a prefix with the root is not inside it. This is
+    // the classic startsWith-without-separator bug: /root-evil passes a bare
+    // startsWith('/root') check but is not contained by /root.
+    const nested = join(dir, 'root');
+    mkdirSync(nested, { recursive: true });
+    assert.throws(() => resolveContained(nested, '../root-evil'), /escapes/);
+    assert.equal(assertSafeSkillId('issue-fix-loop'), 'issue-fix-loop');
+    assert.throws(() => assertSafeSkillId('../x'), /Unsafe skill id/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('registry resolves skills with content and hash', () => {

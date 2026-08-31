@@ -3,8 +3,45 @@
 
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import type { ResolvedSkill } from '../domain/types.ts';
+
+/**
+ * A skill id must be one safe path segment (issue #58).
+ *
+ * Ids arrive from the API (`body.skills`) and are joined onto the registry root, so
+ * before this check `skills: ["../../../../somewhere"]` resolved to any directory on
+ * the host that happened to contain a SKILL.md -- and writeSkills then copied that
+ * whole tree into the run workspace. That is an arbitrary-directory read, not a
+ * malformed-input error.
+ *
+ * Excluding separators is what actually does the work: "." and ".." cannot match
+ * because the id must start alphanumeric, and no "/" or "\" can appear at all.
+ */
+const SAFE_SKILL_ID = /^[a-z0-9][a-z0-9._-]*$/;
+
+export function assertSafeSkillId(id: string): string {
+  if (typeof id !== 'string' || !SAFE_SKILL_ID.test(id)) {
+    throw new Error(`Unsafe skill id: ${JSON.stringify(id)}`);
+  }
+  return id;
+}
+
+/**
+ * Resolve `rel` inside `root`, refusing anything that escapes it (issue #58).
+ * Used for the per-file relative paths a resolved skill carries, which are built
+ * from directory listings rather than user input -- containment here is defence in
+ * depth, so a future caller that does take them from input cannot reintroduce the
+ * traversal.
+ */
+export function resolveContained(root: string, rel: string): string {
+  const absRoot = resolve(root);
+  const abs = resolve(absRoot, rel);
+  if (abs !== absRoot && !abs.startsWith(absRoot + sep)) {
+    throw new Error(`Path escapes ${absRoot}: ${JSON.stringify(rel)}`);
+  }
+  return abs;
+}
 
 export interface SkillMeta {
   id: string;
@@ -53,7 +90,8 @@ export class SkillRegistry {
   }
 
   private resolveOne(id: string): ResolvedSkill {
-    const dir = join(this.rootDir, id);
+    // Contained, not merely joined (issue #58).
+    const dir = resolveContained(this.rootDir, assertSafeSkillId(id));
     const skillPath = join(dir, 'SKILL.md');
     if (!exists(skillPath)) {
       throw new Error(`Skill not found: ${id} (expected ${skillPath})`);
