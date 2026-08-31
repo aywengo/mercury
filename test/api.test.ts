@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createApp } from '../src/api/server.ts';
+import { closeServer, createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { makeEnv, waitFor, sleep } from './helpers.ts';
 import type { Express } from 'express';
@@ -342,4 +342,64 @@ test('admin token can see all runs', async () => {
   } finally {
     env.close();
   }
+});
+
+test('closeServer() does not stall on a long-lived SSE connection (issue #52)', async () => {
+  // The bug: server.close() resolves only once every connection has ended, and the run
+  // event stream is long-lived by design. So any dashboard with a run open stalled
+  // shutdown until systemd escalated to SIGKILL. This holds a stream open the same way
+  // the real endpoint does -- headers flushed, body never ended -- and asserts close()
+  // still returns promptly.
+  const { createServer } = await import('node:http');
+  const srv = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+    res.write(': keepalive\n\n');
+    // deliberately never res.end(): this is an SSE stream with a subscriber attached
+  });
+  srv.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve) => srv.once('listening', () => resolve()));
+  const port = (srv.address() as { port: number }).port;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/runs/run_x/events`);
+    // read one chunk so the connection is definitely established and held open
+    const reader = res.body?.getReader();
+    await reader?.read();
+
+    const started = Date.now();
+    // Race the close against a deadline instead of awaiting it. Awaiting alone would make a
+    // regression HANG the runner (the whole point of the bug is that close() never resolves),
+    // which reads as an unrelated timeout rather than a failure. Winning the race is the
+    // assertion.
+    const deadline = new Promise<'stalled'>((resolve) => setTimeout(() => resolve('stalled'), 10_000));
+    const outcome = await Promise.race([closeServer(srv).then(() => 'closed' as const), deadline]);
+    const elapsed = Date.now() - started;
+    assert.equal(outcome, 'closed', 'close() never resolved while an SSE stream was open -- that is issue #52');
+    assert.ok(elapsed >= 1_000, `close() returned in ${elapsed}ms, before the grace period had a chance to drain normal requests`);
+  } finally {
+    try {
+      srv.closeAllConnections();
+    } catch {
+      /* already forced closed */
+    }
+  }
+});
+
+test('closeServer() is safe when the server closes before the grace period (issue #52)', async () => {
+  // No long-lived connections, so `server.close()` wins the race and there is nothing to
+  // force. Copilot predicted ERR_SERVER_NOT_RUNNING here; it does not reproduce on the
+  // supported range (engines node >=23.6; verified a no-op on v26.7.0). This test pins the
+  // behaviour that matters -- shutdown resolves rather than rejects -- and is deliberately
+  // NOT described as catching that throw, because it does not: forcing unconditionally
+  // passes it too. Called twice to pin idempotence as well.
+  const { createServer } = await import('node:http');
+  const srv = createServer((_req, res) => res.end('ok'));
+  srv.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve) => srv.once('listening', () => resolve()));
+  const port = (srv.address() as { port: number }).port;
+  const res = await fetch(`http://127.0.0.1:${port}/`);
+  await res.text(); // a normal request that completes, so no connection is left held open
+  // must resolve rather than throw
+  await closeServer(srv);
+  // and a second close must not resurrect the throw either
+  await closeServer(srv);
 });

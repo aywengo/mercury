@@ -115,6 +115,54 @@ export interface StartedServer {
   url: string;
 }
 
+/**
+ * Grace period between stopping admission and forcing sockets shut (issue #52).
+ * Long enough for an ordinary JSON request to finish, short enough that a stalled
+ * dashboard tab cannot hold a deploy open -- systemd escalates to SIGKILL at 90s.
+ */
+const SHUTDOWN_GRACE_MS = 2_000;
+
+/**
+ * Close a listening server without waiting forever on long-lived connections.
+ *
+ * `server.close()` stops admitting new connections but resolves only once every existing
+ * one has ended. The SSE run stream (`GET /api/runs/:id/events`) is long-lived BY DESIGN
+ * and is never ended from the server side, so awaiting `close()` alone meant that any
+ * dashboard with a run open stalled shutdown until systemd escalated to SIGKILL -- and a
+ * SIGKILL'd worker then strands its in-flight runs (issue #51).
+ *
+ * So: stop admitting, give ordinary in-flight requests a short grace period, then force
+ * the remaining sockets closed and await the real close. Forcing is what makes shutdown
+ * bounded; the grace period is what keeps it from cutting off normal requests.
+ */
+export async function closeServer(server: Server): Promise<void> {
+  const closed = new Promise<void>((resolve) => {
+    server.close(() => resolve());
+  });
+  // unref so a grace timer is never itself a reason for the process to stay alive.
+  const grace = new Promise<'grace'>((resolve) => {
+    setTimeout(() => resolve('grace'), SHUTDOWN_GRACE_MS).unref?.();
+  });
+  const winner = await Promise.race([closed.then(() => 'closed' as const), grace]);
+  if (winner === 'grace') {
+    // Only force when the grace period actually won: if `closed` resolved first there is
+    // nothing left to force, and skipping is the honest expression of intent.
+    //
+    // Copilot flagged this as a crash (ERR_SERVER_NOT_RUNNING making shutdown reject). That
+    // does NOT reproduce on the supported range -- engines is node >=23.6, and on v26.7.0
+    // closeAllConnections() on an already-closed server is a silent no-op, verified directly.
+    // The try/catch stays as cheap insurance against a version where it is not, not because
+    // a failure was observed; the accompanying test therefore asserts "does not reject", not
+    // "catches a throw it cannot produce".
+    try {
+      server.closeAllConnections();
+    } catch {
+      // already fully closed; nothing to force
+    }
+  }
+  await closed;
+}
+
 export function startServer(deps: ServerDeps, port: number, opts: StartServerOpts = {}): Promise<StartedServer> {
   const app = createApp(deps);
   const host = opts.host ?? '127.0.0.1';
@@ -130,14 +178,14 @@ export function startServer(deps: ServerDeps, port: number, opts: StartServerOpt
     if (opts.tls) {
       server = createHttpsServer({ cert, key }, app).listen(port, host, () => {
         resolve({
-          close: () => new Promise<void>((res) => server.close(() => res())),
+          close: () => closeServer(server),
           url: `https://${host}:${port}`,
         });
       });
     } else {
       server = app.listen(port, host, () => {
         resolve({
-          close: () => new Promise<void>((res) => server.close(() => res())),
+          close: () => closeServer(server),
           url: `http://${host}:${port}`,
         });
       });
