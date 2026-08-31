@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { makeEnv, waitFor } from './helpers.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { EventStore } from '../src/events/eventStore.ts';
+import { EVENT_TYPES } from '../src/domain/types.ts';
+import { readdirSync, readFileSync } from 'node:fs';
 import { createRedactor } from '../src/domain/redact.ts';
 
 test('events persist with monotonic sequences across appends', () => {
@@ -328,4 +330,64 @@ test('backfillRedact leaves malformed repository_json untouched (issue #43)', ()
   } finally {
     env.close();
   }
+});
+
+test('append rejects event types outside the EVENT_TYPES whitelist (issue #60)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    assert.throws(() => env.events.append(run.id, 'not.a.type', {}), /Unknown event type/);
+    // The two types the worker already appended while missing from the whitelist.
+    for (const t of ['lease.lost', 'sandbox.enabled']) {
+      env.events.append(run.id, t, {});
+    }
+    const types = env.events.list(run.id).map((e) => e.type);
+    assert.ok(types.includes('lease.lost') && types.includes('sandbox.enabled'));
+    // nothing was persisted for the rejected type
+    assert.equal(env.events.list(run.id).filter((e) => e.type === 'not.a.type').length, 0);
+  } finally {
+    env.close();
+  }
+});
+
+test('an agent-controlled event type cannot inject an SSE frame (issue #50)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    // routes.ts writes `event: <type>` raw. A type carrying a blank line therefore ends
+    // the current frame and starts a forged one, visible to every subscriber of the run.
+    const injection = 'agent.message\ndata: {"sequence":9999,"type":"run.completed"}\n\nevent: pwned';
+    assert.throws(() => env.events.append(run.id, injection, { text: 'x' }), /Unknown event type/);
+    // A newline alone is enough to break the frame, so it must be refused too.
+    assert.throws(() => env.events.append(run.id, 'agent.message\n', {}), /Unknown event type/);
+    // run.created etc. already exist, so assert on the injection specifically rather than
+    // on the total: no event carries the forged type, and no payload gained the forged line.
+    const persisted = env.events.list(run.id);
+    assert.equal(persisted.filter((e) => e.type.startsWith('agent.message')).length, 0);
+    assert.ok(!persisted.some((e) => JSON.stringify(e.payload).includes('pwned')));
+  } finally {
+    env.close();
+  }
+});
+
+test('EVENT_TYPES covers every type src/ actually appends (issue #60 drift guard)', () => {
+  // #60 was two types appended by the worker that were never in the whitelist, so the
+  // documented event contract did not describe what Mercury emits. This guard fails on
+  // the next such addition, which is the only cheap way to keep the set honest.
+  const src = new URL('../src/', import.meta.url);
+  const offenders: string[] = [];
+  const walk = (dir: URL): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const url = new URL(entry.name + (entry.isDirectory() ? '/' : ''), dir);
+      if (entry.isDirectory()) walk(url);
+      else if (entry.name.endsWith('.ts')) {
+        const text = readFileSync(url, 'utf8');
+        for (const m of text.matchAll(/events\.append\(\s*[^,]+,\s*'([^']+)'\s*,/g)) {
+          if (!EVENT_TYPES.has(m[1])) offenders.push(`${entry.name}: ${m[1]}`);
+        }
+      }
+    }
+  };
+  walk(src);
+  assert.deepEqual(offenders, [], `appended types missing from EVENT_TYPES: ${offenders.join(', ')}`);
 });

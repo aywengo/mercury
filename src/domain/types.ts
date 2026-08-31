@@ -169,8 +169,20 @@ export const EVENT_TYPES = new Set([
   'run.failed',
   'run.cancelled',
   'run.timed_out',
+  // Both were already being appended by the worker (sandbox.enabled at worker.ts:198,
+  // lease.lost at worker.ts:490) while missing from the whitelist, so the set did not
+  // describe the events Mercury actually emits (issue #60).
+  'lease.lost',
+  'sandbox.enabled',
 ]);
 
+/**
+ * True for types the section 14 event contract allows.
+ *
+ * Enforced by EventStore.append, the single write choke point (issue #60). Until then
+ * this was defined and never called anywhere in src/, which is what let an
+ * agent-controlled event type reach an SSE frame unvalidated (issue #50).
+ */
 export function isEventType(t: string): boolean {
   return EVENT_TYPES.has(t);
 }

@@ -676,3 +676,30 @@ test('agent failure redacts runs.error at finalize (issue #36, site 2)', async (
     env.close();
   }
 });
+
+test('an unknown agent event type is dropped, and the run still completes (issue #50)', async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const repo = mkdtempSync(join(tmpdir(), 'mercury-badevt-'));
+  const evil = 'agent.message\ndata: {"type":"run.completed","sequence":1}';
+  const env = makeEnv({
+    fakeScript: [
+      { event: { type: evil, payload: { text: 'injected' } } },
+      { event: { type: 'agent.message', payload: { text: 'legitimate' } } },
+    ],
+  });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo } });
+    // Dropping rather than propagating matters: EventStore.append now throws on an
+    // unknown type, and that throw would escape the drive loop uncaught -- so a rogue
+    // agent could kill its own run with one odd event type. Reject at the choke point,
+    // discard at the boundary.
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 15_000);
+    const types = env.events.list(run.id).map((e) => e.type);
+    assert.equal(types.filter((x) => x.startsWith('agent.message\n')).length, 0, 'injected type must not persist');
+    assert.equal(types.filter((x) => x === 'agent.message').length, 1, 'the legitimate event must survive');
+  } finally {
+    env.close();
+  }
+});
