@@ -622,7 +622,14 @@ export class Worker {
       // duplicate agent spend; merely releasing the lease would have stranded the run in
       // RUNNING forever (see RunQueue.releaseLease).
       const requeued = this.deps.queue.requeueForShutdown(run.id, this.deps.workerId);
-      log.warn({ requeued }, 'worker shutting down; run requeued for the next worker');
+      // Branch on the result rather than logging 'requeued' with a boolean field next to it:
+      // an operator reading shutdown logs greps the message, and a run that was NOT requeued
+      // (lease taken concurrently, or the run went terminal) needs to be findable.
+      if (requeued) {
+        log.warn({ requeued: true }, 'worker shutting down; run requeued for the next worker');
+      } else {
+        log.warn({ status: current.status }, 'worker shutting down; run not requeueable, leaving it as is');
+      }
       // No terminal event and no transition: the run is not finished, it is waiting again.
       // execute()'s finally still calls releaseLease, which is now a no-op here because the
       // run is QUEUED (non-terminal) and requeueForShutdown already cleared the lease.

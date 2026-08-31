@@ -231,7 +231,23 @@ async function main(): Promise<void> {
       db.close();
       process.exit(0);
     };
+    // Idempotent, with escalation. Both SIGINT and SIGTERM are registered and either can
+    // arrive twice -- an operator pressing Ctrl-C again, or `systemctl restart` while a
+    // shutdown is already draining. Two concurrent shutdown() calls would race two
+    // db.close() calls and two process.exit() calls, and whichever finished last would win the
+    // exit code arbitrarily.
+    //
+    // A repeat signal exits immediately instead of waiting out the grace period. That is what
+    // the operator is asking for, and it is safe: the run stays RUNNING, the lease expires,
+    // and the reaper/retry path is the documented backstop -- the same outcome a grace-period
+    // expiry already produces.
+    let shutdownStarted = false;
     const onSignal = (signal: string): void => {
+      if (shutdownStarted) {
+        logger.warn({ signal }, 'shutdown already in progress; exiting immediately (in-flight runs go to the reaper)');
+        process.exit(1);
+      }
+      shutdownStarted = true;
       void shutdown().catch((err) => {
         logger.error({ error: String(err) }, 'shutdown failed');
         process.exit(1);
