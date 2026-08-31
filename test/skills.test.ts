@@ -24,10 +24,15 @@ test('registry orders ids with the canonical comparator (issue #81)', () => {
   // Assert the order production actually produces. Re-sorting before comparing,
   // as this test used to, hides a registry that sorts with a different comparator.
   assert.deepEqual(ids, [...ids].sort(compareSkillIds));
-  // Pin which comparator is canonical. Code-unit order puts 'a-b' before 'a_b';
-  // localeCompare does the opposite, so this pair fails if anyone reverts it.
+  // Pin the comparator to code-unit order using only locale-free values.
+  // Array.sort() with no comparator is specified as UTF-16 code-unit order, and
+  // compareSkillIds is plain `<`, so both sides are deterministic everywhere.
+  // This assertion used to also check what localeCompare returned for the same
+  // pair; that value varies with locale and ICU build, so the test could fail in CI
+  // while the production comparator was correct.
+  const tricky = ['a_b', 'a-b', 'a.b', 'a1', 'aB', 'aa', 'ab'];
+  assert.deepEqual([...tricky].sort(compareSkillIds), [...tricky].sort());
   assert.equal(compareSkillIds('a-b', 'a_b'), -1);
-  assert.equal('a-b'.localeCompare('a_b'), 1);
 });
 
 test('registry resolves skills with content and hash', () => {
