@@ -30,11 +30,18 @@ git-worktree workspaces, `prime-agent --mode rpc`).
 ## Bounded command execution
 
 Bound every command. A hung command is indistinguishable from a slow one, and an
-unbounded wait has cost more wall-clock here than any actual bug in this repo.
+unbounded wait has cost more wall-clock time here than any actual bug in this repo.
 
 - **`timeout` does not exist on macOS.** `timeout 120 npm test` exits `127`
-  (`command not found`) and looks exactly like a hang. Use `gtimeout` (coreutils) or
-  `subprocess.run(cmd, shell=True, timeout=N)` from Python.
+  (`command not found`) and looks exactly like a hang. Use `gtimeout` (coreutils), or
+  bound it in Python without a shell:
+
+  ```python
+  subprocess.run(["npm", "test"], cwd=repo, capture_output=True, text=True, timeout=180)
+  ```
+
+  Pass an argument list rather than a string. `shell=True` adds a shell you do not need
+  and turns any interpolated value into a command-injection surface.
 - **Expected runtimes:** `npm run typecheck` ~10s, `npm test` ~25s, one test file 1-5s.
   Past ~2 minutes it is a hang, not slowness — stop and find the cause instead of waiting.
 - **Bound commands in subagents too, and make them report before they finish.** Two
