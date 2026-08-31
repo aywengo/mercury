@@ -548,6 +548,19 @@ test('requeueForShutdown only requeues runs this worker owns (issue #51)', () =>
     env.runs.transition(done.id, 'COMPLETED');
     assert.equal(env.queue.requeueForShutdown(done.id, 'w1'), false, 'a completed run must not be resurrected');
     assert.equal(env.runs.get(done.id)!.status, 'COMPLETED');
+
+    // The shutdown/cancellation race: if the user cancels at the same moment stop() fires,
+    // drive() can return SHUTDOWN for a run the database already calls CANCELLED. Requeueing
+    // there would resurrect a run the user deliberately stopped and re-execute it -- the
+    // exact class of bug #47 was. The status filter is what prevents it, so it is pinned here
+    // rather than relied upon.
+    const cancelled = env.runService.create({ ownerId: 'alice', task: 'z', agent: 'fake' });
+    env.queue.claim('w1', 60_000);
+    env.runs.transition(cancelled.id, 'STARTING');
+    env.runs.transition(cancelled.id, 'RUNNING');
+    env.runs.transition(cancelled.id, 'CANCELLED');
+    assert.equal(env.queue.requeueForShutdown(cancelled.id, 'w1'), false, 'a cancelled run must never be requeued');
+    assert.equal(env.runs.get(cancelled.id)!.status, 'CANCELLED', 'cancellation must survive a concurrent shutdown');
   } finally {
     env.close();
   }
