@@ -376,18 +376,24 @@ test('EVENT_TYPES covers every type src/ actually appends (issue #60 drift guard
   // the next such addition, which is the only cheap way to keep the set honest.
   const src = new URL('../src/', import.meta.url);
   const offenders: string[] = [];
-  const walk = (dir: URL): void => {
+  // Both quote styles, so a call site written with double quotes cannot slip past the
+  // guard. Paths are reported relative to src/ so the failure stays locatable when two
+  // directories hold files of the same name (Copilot on #93).
+  const CALL = /events\.append\(\s*[^,]+,\s*(?:'([^']+)'|"([^"]+)")\s*,/g;
+  const walk = (dir: URL, rel: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const url = new URL(entry.name + (entry.isDirectory() ? '/' : ''), dir);
-      if (entry.isDirectory()) walk(url);
+      const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(url, relPath);
       else if (entry.name.endsWith('.ts')) {
         const text = readFileSync(url, 'utf8');
-        for (const m of text.matchAll(/events\.append\(\s*[^,]+,\s*'([^']+)'\s*,/g)) {
-          if (!EVENT_TYPES.has(m[1])) offenders.push(`${entry.name}: ${m[1]}`);
+        for (const m of text.matchAll(CALL)) {
+          const type = m[1] ?? m[2];
+          if (!EVENT_TYPES.has(type)) offenders.push(`${relPath}: ${type}`);
         }
       }
     }
   };
-  walk(src);
+  walk(src, '');
   assert.deepEqual(offenders, [], `appended types missing from EVENT_TYPES: ${offenders.join(', ')}`);
 });

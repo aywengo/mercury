@@ -169,9 +169,10 @@ export const EVENT_TYPES = new Set([
   'run.failed',
   'run.cancelled',
   'run.timed_out',
-  // Both were already being appended by the worker (sandbox.enabled at worker.ts:198,
-  // lease.lost at worker.ts:490) while missing from the whitelist, so the set did not
-  // describe the events Mercury actually emits (issue #60).
+  // Both were already being appended by the worker -- sandbox.enabled when a run's
+  // sandbox policy is applied, lease.lost when a lost lease is finalised -- while
+  // missing from the whitelist, so the set did not describe the events Mercury actually
+  // emits (issue #60). A test now fails if any append uses a type absent from this set.
   'lease.lost',
   'sandbox.enabled',
 ]);
