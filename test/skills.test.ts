@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { compareSkillIds, SkillRegistry } from '../src/skills/skillRegistry.ts';
-import { createSkillSelector } from '../src/skills/skillSelector.ts';
+import { createSkillSelector, KEYWORDS } from '../src/skills/skillSelector.ts';
 import { SKILLS_DIR } from './helpers.ts';
 
 test('registry lists all skills', () => {
@@ -114,6 +114,29 @@ test('short capability terms match words, not substrings (Copilot on #84)', () =
     'repository-analysis no longer matches the stem "analysis"');
   assert.deepEqual(selector.select('write a database migration', available, 4), ['implementation'],
     'implementation no longer matches the stem "migration"');
+});
+
+test('selector KEYWORDS and the skill registry agree (issue #79)', () => {
+  const reg = new SkillRegistry(SKILLS_DIR);
+  const skills = reg.list();
+  const ids = new Set(skills.map((s) => s.id));
+
+  // Stale direction. A KEYWORDS key for a skill that was renamed or deleted is never
+  // consulted at runtime -- the entry is simply dead -- so nothing else can surface it.
+  for (const key of Object.keys(KEYWORDS)) {
+    assert.ok(ids.has(key), `KEYWORDS has an entry for unknown skill '${key}'`);
+  }
+
+  // Missing direction. A skill with neither capabilities nor a KEYWORDS entry scores 0
+  // for every task, which is how #78 went unnoticed. Stated as OR because capabilities
+  // are the primary signal since #78 and KEYWORDS is only an override. This overlaps
+  // the #80 metadata test for the real library, but fails for a different reason: #80
+  // reports bad authoring in a SKILL.md, this reports a selector that cannot reach a
+  // skill even when its metadata looks fine.
+  for (const skill of skills) {
+    const scoreable = skill.capabilities.length > 0 || (KEYWORDS[skill.id]?.length ?? 0) > 0;
+    assert.ok(scoreable, `${skill.id} has no capabilities and no KEYWORDS entry`);
+  }
 });
 
 test('a skill does not score on a task that never mentions it (issue #78)', () => {
