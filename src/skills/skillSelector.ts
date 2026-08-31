@@ -52,6 +52,31 @@ function termsFor(skill: SkillMeta): string[] {
   return [...terms];
 }
 
+// Terms of three characters or fewer are complete words or abbreviations, not stems,
+// and raw substring matching lets them fire inside unrelated ordinary words: the 'ui'
+// in 'suite' and 'building', the 'pr' in 'prepare' and 'production', the 'add' in
+// 'metadata'. Longer terms stay substring-matched deliberately, because KEYWORDS holds
+// stems on purpose. The limit is 3 and not 4 because of one term: 'test'. At 4 it would
+// need a word boundary, so 'run the tests' stops matching and testing is reached only
+// through FALLBACK -- measured, not assumed. 'analy'->'analysis' and
+// 'migrat'->'migration' still survive at 4 or 5; 'test' is what pins the value.
+const SHORT_TERM_MAX = 3;
+
+const boundaryPatterns = new Map<string, RegExp>();
+function escapeForPattern(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function termMatches(term: string, lowerTask: string): boolean {
+  if (term.length > SHORT_TERM_MAX) return lowerTask.includes(term);
+  let pattern = boundaryPatterns.get(term);
+  if (!pattern) {
+    pattern = new RegExp(`(^|[^a-z0-9])${escapeForPattern(term)}($|[^a-z0-9])`);
+    boundaryPatterns.set(term, pattern);
+  }
+  return pattern.test(lowerTask);
+}
+
 export interface SkillSelector {
   select(task: string, available: SkillMeta[], maxSkills: number): string[];
 }
@@ -65,7 +90,7 @@ export function createSkillSelector(): SkillSelector {
         const keywords = termsFor(skill);
         let score = 0;
         for (const kw of keywords) {
-          if (lower.includes(kw)) score += 1;
+          if (termMatches(kw, lower)) score += 1;
         }
         if (score > 0) scored.push({ id: skill.id, score });
       }

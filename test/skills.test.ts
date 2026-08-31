@@ -92,6 +92,30 @@ test('every skill is reachable by automatic selection (issue #78)', () => {
   }
 });
 
+test('short capability terms match words, not substrings (Copilot on #84)', () => {
+  const reg = new SkillRegistry(SKILLS_DIR);
+  const selector = createSkillSelector();
+  const available = reg.list();
+  // 'ui' is a frontend capability. Raw substring matching made it fire inside
+  // ordinary words, so a task about test suites pulled in the frontend skill.
+  assert.ok(!selector.select('fix the failing test suite', available, 4).includes('frontend'),
+    'frontend matched a task whose only "ui" is inside the word "suite"');
+  assert.ok(selector.select('add a settings page to the dashboard UI', available, 4).includes('frontend'),
+    'frontend failed to match a task that does name the UI');
+  // Longer terms stay substring-matched on purpose -- they are stems, not words.
+  // Asserted with deepEqual, not includes: planning, implementation, testing and git-pr
+  // are the FALLBACK set, so an `includes` check on those passes even when nothing
+  // scored at all. Exact results are the only way to prove the stem actually matched.
+  assert.deepEqual(selector.select('run the tests', available, 4), ['testing'],
+    'testing no longer matches the stem "tests"');
+  assert.deepEqual(selector.select('plan the rollout', available, 4), ['planning'],
+    'planning no longer matches the stem "planning"');
+  assert.deepEqual(selector.select('perform an analysis of the codebase', available, 4), ['repository-analysis'],
+    'repository-analysis no longer matches the stem "analysis"');
+  assert.deepEqual(selector.select('write a database migration', available, 4), ['implementation'],
+    'implementation no longer matches the stem "migration"');
+});
+
 test('a skill does not score on a task that never mentions it (issue #78)', () => {
   const reg = new SkillRegistry(SKILLS_DIR);
   const selector = createSkillSelector();
