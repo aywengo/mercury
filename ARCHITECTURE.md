@@ -1478,7 +1478,7 @@ flowchart TD
 4. ~~Push-based event fan-out~~ — **done**: in-process push via an EventStore append hook + adaptive poller (250 ms idle / 2 s after a push); cross-process push (worker → server HTTP callback) is the remaining scale path.
 5. ~~Multi-worker deployment~~ — **done**: queue backlog alerting (log + optional webhook, `MERCURY_BACKLOG_ALERT_THRESHOLD` / `MERCURY_ALERT_WEBHOOK_URL`), `GET /healthz/workers` (active leases + queue depth), lease-loss recovery (abort + requeue), 4 tests.
 6. ~~Multi-repository Runs~~ — **done**: `repositories[]` in the Run model (backward compatible), API accepts `repositories` or `repository`, workspace clones/copies additional repos under `repos/`, GC cleans them, 5 tests.
-7. ~~Expand skill library~~ — **done**: 11 skills (added documentation, deployment, frontend).
+7. ~~Expand skill library~~ — **done**: 12 skills (added documentation, deployment, frontend, issue-fix-loop).
 8. ~~Deployment packaging~~ — **done**: `deploy/` with systemd units (server + worker), SQLite backup script with retention, logrotate config, ops guide.
 9. ~~Daemon-based agent sessions~~ — **implemented behind `MERCURY_AGENT_MODE=daemon`** (RPC remains default); verify against the real daemon before relying on it.
 10. **Crew — agent preset store** — **design only, not implemented**: versioned role
@@ -1649,7 +1649,7 @@ observability                (structured logs, durations, backlog + stuck-run al
 # 31. PrimeAgent Implementation Instructions
 
 > **Status (2026-08-26):** this mission is **complete**. The vertical slice lives at
-> [.](.) — 32 source files, 11 skills, 112 passing tests, `tsc` clean.
+> [.](.) — 32 source files, 12 skills, 112 passing tests, `tsc` clean.
 > Verified end-to-end: durable Runs, SQLite-backed queue + leases, git-worktree
 > isolation, real `prime-agent --mode rpc` integration (event translation,
 > human-in-the-loop via `extension_ui_request/response`, session persistence +
