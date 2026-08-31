@@ -873,3 +873,47 @@ test('worker releases the adapter session on the failure path too (issues #62, #
     env.close();
   }
 });
+
+test('a throwing adapter dispose() must not strand the lease (issue #62, #97)', async () => {
+  // dispose() sits in the same finally as releaseLease(), before it. Copilot's review point:
+  // cleanup code that throws would skip releaseLease and strand the lease. A leaked session is
+  // strictly better than a stranded run, so dispose failures are logged and swallowed.
+  const repo = makeGitRepo(join(tmpdir(), `mercury-dispose-throw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`));
+  const env = makeEnv({
+    workspaceMode: 'copy',
+    repoDir: repo,
+    fakeScript: [{ event: { type: 'agent.message', payload: { text: 'ok' } } }],
+  });
+  try {
+    const inner = env.adapters.fake;
+    const hostile: AgentAdapter = {
+      start: (ctx) => inner.start(ctx),
+      sendInput: (id, input) => inner.sendInput(id, input),
+      cancel: (id) => inner.cancel(id),
+      dispose() {
+        throw new Error('dispose exploded');
+      },
+    };
+    // Swap the entry in place rather than registering a new agent name: RunService validates
+    // the agent against a fixed knownAgents list, and the worker resolves
+    // adapters[run.agent] at execution time, so replacing the existing 'fake' key is enough.
+    env.adapters.fake = hostile;
+
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo, baseBranch: 'main' },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 20_000);
+
+    // The run must still finish normally...
+    assert.equal(env.runs.get(run.id)!.status, 'COMPLETED');
+    // ...and releaseLease must still have run. If dispose()'s throw escaped the finally, the
+    // departed worker would still be recorded as the lease owner.
+    const row = env.db
+      .prepare('SELECT lease_owner, lease_expires_at FROM runs WHERE id = ?')
+      .get(run.id) as { lease_owner: string | null; lease_expires_at: string | null };
+    assert.equal(row.lease_owner, null, `lease not released after a throwing dispose(): ${JSON.stringify(row)}`);
+    assert.equal(row.lease_expires_at, null);
+  } finally {
+    env.close();
+  }
+});
