@@ -2,9 +2,117 @@
 // (Mercury.md sections 10-11, 28).
 
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import type { ResolvedSkill } from '../domain/types.ts';
+
+/**
+ * A skill id must be one safe path segment (issue #58).
+ *
+ * Ids arrive from the API (`body.skills`) and are joined onto the registry root, so
+ * before this check `skills: ["../../../../somewhere"]` resolved to any directory on
+ * the host that happened to contain a SKILL.md -- and writeSkills then copied that
+ * whole tree into the run workspace. That is an arbitrary-directory read, not a
+ * malformed-input error.
+ *
+ * Excluding separators is what actually does the work: "." and ".." cannot match
+ * because the id must start alphanumeric, and no "/" or "\" can appear at all.
+ */
+const SAFE_SKILL_ID = /^[a-z0-9][a-z0-9._-]*$/;
+
+export function assertSafeSkillId(id: string): string {
+  if (typeof id !== 'string' || !SAFE_SKILL_ID.test(id)) {
+    throw new Error(`Unsafe skill id: ${JSON.stringify(id)}`);
+  }
+  return id;
+}
+
+/**
+ * Resolve symlinks on the longest existing prefix of `abs` and re-append the rest.
+ * The destination of a write usually does not exist yet, so realpathSync on it would
+ * throw; walking up to the nearest existing ancestor is what lets containment apply
+ * to paths about to be created.
+ */
+function realpathNearest(abs: string): string {
+  const missing: string[] = [];
+  let cur = abs;
+  for (;;) {
+    try {
+      return missing.length === 0 ? realpathSync(cur) : join(realpathSync(cur), ...missing);
+    } catch {
+      const parent = dirname(cur);
+      if (parent === cur) return abs; // reached the filesystem root with nothing existing
+      missing.unshift(basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+/** True when `abs` is `root` itself or strictly below it, on already-realpathed paths. */
+function isContained(realRoot: string, abs: string): boolean {
+  // Compare against root + separator, not root alone. A bare startsWith(root) treats a
+  // sibling named `/root-evil` as if it were inside `/root`. Also avoids building `//`
+  // when root is the filesystem root itself, which would reject every child of `/`.
+  const prefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
+  return abs === realRoot || abs.startsWith(prefix);
+}
+
+/**
+ * Resolve `rel` inside `root`, refusing anything that escapes it (issue #58).
+ *
+ * Used for the per-file relative paths a resolved skill carries, and for both halves of
+ * the destination in writeSkills -- containment there is defence in depth, so a future
+ * caller that takes them from input cannot reintroduce the traversal.
+ *
+ * Containment is checked twice: lexically, then through symlinks. The lexical check
+ * alone is not enough, because a run workspace is a git worktree of a repo that may be
+ * untrusted, and git happily checks out `.agents/skills` as a symlink. Lexical
+ * containment would then approve a path whose real target is anywhere on the host,
+ * turning writeSkills into a write primitive outside the workspace.
+ *
+ * Both sides go through realpath. Resolving only the target would break every path
+ * under a symlinked root -- on macOS /tmp is a symlink to /private/tmp, so a
+ * /tmp/... root would reject its own children.
+ */
+export function resolveContained(root: string, rel: string): string {
+  const absRoot = resolve(root);
+  const abs = resolve(absRoot, rel);
+  if (!isContained(absRoot, abs)) {
+    throw new Error(`Path escapes ${absRoot}: ${JSON.stringify(rel)}`);
+  }
+  const realRoot = realpathNearest(absRoot);
+  const realAbs = realpathNearest(abs);
+  if (!isContained(realRoot, realAbs)) {
+    throw new Error(`Path escapes ${realRoot} through a symlink: ${JSON.stringify(rel)}`);
+  }
+  assertNoSymlinkBelow(absRoot, abs);
+  return abs;
+}
+
+/**
+ * Refuse if the root itself, or any component between it and `abs`, is a symlink.
+ *
+ * The realpath containment above cannot catch this on its own: if the root's own last
+ * component is a symlink, realpath resolves it and the attacker's target *becomes* the
+ * root, so the target is trivially "contained". That is sound for a root an operator
+ * chose, and unsound here, where the root is `workspace/.agents/skills` and its last
+ * component is created by checking out a repo that may be untrusted. So the root's own
+ * component and everything below it must not be symlinks, while symlinks in the root's
+ * ANCESTRY stay allowed -- /tmp is a symlink on macOS and must keep working.
+ */
+function assertNoSymlinkBelow(root: string, abs: string): void {
+  const rel = relative(root, abs);
+  const chain = [root, ...(rel === '' ? [] : rel.split(sep).map((part, i) => join(root, ...rel.split(sep).slice(0, i + 1))))];
+  for (const step of chain) {
+    let link: string;
+    try {
+      link = readlinkSync(step);
+    } catch {
+      continue; // does not exist yet, so it cannot be a symlink
+    }
+    throw new Error(`Path component is a symlink, refusing to follow it: ${step} -> ${link}`);
+  }
+}
 
 export interface SkillMeta {
   id: string;
@@ -37,6 +145,14 @@ export class SkillRegistry {
       .filter((d) => d.isDirectory())
       .map((d) => d.name)
       .filter((id) => exists(join(this.rootDir, id, 'SKILL.md')))
+      // Skip directories whose name is not a safe skill id (issue #58). Without this,
+      // list() can hand back ids that resolve() now rejects, and the auto-selection path
+      // (runService: selector.select(task, skills.list(), 4) -> skills.resolve(ids)) would
+      // throw out of run creation. A stray `.hidden`, `Code-Review` or `my skill`
+      // directory -- or a stray `.DS_Store` tree -- must not make every run fail to
+      // create. Skipping rather than throwing keeps one odd directory from taking down the
+      // whole registry; all 12 shipped skills comply.
+      .filter((id) => SAFE_SKILL_ID.test(id))
       .map((id) => this.readMeta(id))
       .sort((a, b) => compareSkillIds(a.id, b.id));
   }
@@ -53,7 +169,8 @@ export class SkillRegistry {
   }
 
   private resolveOne(id: string): ResolvedSkill {
-    const dir = join(this.rootDir, id);
+    // Contained, not merely joined (issue #58).
+    const dir = resolveContained(this.rootDir, assertSafeSkillId(id));
     const skillPath = join(dir, 'SKILL.md');
     if (!exists(skillPath)) {
       throw new Error(`Skill not found: ${id} (expected ${skillPath})`);

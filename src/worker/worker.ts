@@ -6,6 +6,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isTerminal } from '../domain/stateMachine.ts';
+import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts';
 import type { Redactor } from '../domain/redact.ts';
 import type {
   AgentAdapter, AgentEvent, AgentExit, AgentInput, Run, RunContext, ResolvedSkill,
@@ -656,12 +657,24 @@ export class Worker {
   }
 }
 
-async function writeSkills(workspacePath: string, skills: ResolvedSkill[]): Promise<void> {
+/**
+ * Copy resolved skills into the run workspace. Exported for tests: this is the WRITE side
+ * of issue #58 and its guard needs a regression test of its own, rather than inheriting
+ * coverage from the read side. (issue #58, review finding N1)
+ */
+export async function writeSkills(workspacePath: string, skills: ResolvedSkill[]): Promise<void> {
   const { mkdirSync, writeFileSync } = await import('node:fs');
   const { join } = await import('node:path');
+  const skillsRoot = join(workspacePath, '.agents', 'skills');
   for (const skill of skills) {
+    // Both halves of the destination are contained (issue #58). skill.id used to be
+    // interpolated straight into the path, so a resolved skill carrying a traversal id
+    // would have been written anywhere the worker could write, not just into the
+    // workspace. The registry now rejects such ids, but this is the write side and
+    // should not depend on the read side having been correct.
+    const skillDir = resolveContained(skillsRoot, assertSafeSkillId(skill.id));
     for (const [rel, content] of Object.entries(skill.files)) {
-      const dest = join(workspacePath, '.agents', 'skills', skill.id, rel);
+      const dest = resolveContained(skillDir, rel);
       mkdirSync(join(dest, '..'), { recursive: true });
       writeFileSync(dest, content);
     }

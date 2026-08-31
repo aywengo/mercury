@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compareSkillIds, SkillRegistry } from '../src/skills/skillRegistry.ts';
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { assertSafeSkillId, compareSkillIds, resolveContained, SkillRegistry } from '../src/skills/skillRegistry.ts';
+import { writeSkills } from '../src/worker/worker.ts';
 import { createSkillSelector, KEYWORDS } from '../src/skills/skillSelector.ts';
 import { SKILLS_DIR } from './helpers.ts';
 
@@ -33,6 +37,107 @@ test('registry orders ids with the canonical comparator (issue #81)', () => {
   const tricky = ['a_b', 'a-b', 'a.b', 'a1', 'aB', 'aa', 'ab'];
   assert.deepEqual([...tricky].sort(compareSkillIds), [...tricky].sort());
   assert.equal(compareSkillIds('a-b', 'a_b'), -1);
+});
+
+test('skill ids cannot escape the registry root (issue #58)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-trav-'));
+  try {
+    // A skill living OUTSIDE the registry root, holding content that must never be
+    // readable through the registry. On the base commit resolve(['../outside']) returned
+    // this directory's files -- including SECRET.txt -- so `skills: ["../../../../x"]` in
+    // an API request body was an arbitrary-directory read, and writeSkills then copied
+    // the whole tree into the run workspace.
+    const outside = join(dir, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(
+      join(outside, 'SKILL.md'),
+      '---\nname: outside\nversion: 1.0.0\ndescription: d\ncapabilities: [a]\n---\n\n# Outside\n',
+    );
+    writeFileSync(join(outside, 'SECRET.txt'), 'top-secret-content');
+    const root = join(dir, 'registry');
+    mkdirSync(join(root, 'good'), { recursive: true });
+    writeFileSync(
+      join(root, 'good', 'SKILL.md'),
+      '---\nname: good\nversion: 1.0.0\ndescription: d\ncapabilities: [a]\n---\n\n# Good\n',
+    );
+
+    const reg = new SkillRegistry(root);
+    assert.deepEqual(reg.resolve(['good']).map((s) => s.id), ['good'], 'legitimate ids must still resolve');
+
+    for (const bad of ['../outside', '../../../../etc', '..', '../outside/', 'good/../../outside', '', '.', 'a/b']) {
+      assert.throws(() => reg.resolve([bad]), /Unsafe skill id/, `expected ${JSON.stringify(bad)} to be rejected`);
+    }
+    // the leaked file is genuinely reachable on the filesystem, so a passing assertion
+    // above means containment worked rather than the fixture being empty
+    assert.equal(readFileSync(join(outside, 'SECRET.txt'), 'utf8'), 'top-secret-content');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resolveContained refuses paths that escape the root (issue #58)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-contain-'));
+  try {
+    assert.equal(resolveContained(dir, 'a/b.md'), join(dir, 'a', 'b.md'));
+    assert.throws(() => resolveContained(dir, '../escape'), /escapes/);
+    assert.throws(() => resolveContained(dir, 'a/../../escape'), /escapes/);
+    // A sibling whose name merely shares a prefix with the root is not inside it. This is
+    // the classic startsWith-without-separator bug: /root-evil passes a bare
+    // startsWith('/root') check but is not contained by /root.
+    const nested = join(dir, 'root');
+    mkdirSync(nested, { recursive: true });
+    assert.throws(() => resolveContained(nested, '../root-evil'), /escapes/);
+    assert.equal(assertSafeSkillId('issue-fix-loop'), 'issue-fix-loop');
+    assert.throws(() => assertSafeSkillId('../x'), /Unsafe skill id/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('containment survives a symlinked skills directory (issue #58, Copilot on #92)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-sym-'));
+  try {
+    const outside = join(dir, 'outside');
+    mkdirSync(outside, { recursive: true });
+
+    // A run workspace is a git worktree of a repo that may be untrusted, and git checks
+    // out symlinks happily. So `.agents/skills` itself can be a symlink, and lexical
+    // containment would approve a destination whose real target is anywhere on the host.
+    const ws = join(dir, 'workspace');
+    mkdirSync(join(ws, '.agents'), { recursive: true });
+    symlinkSync(outside, join(ws, '.agents', 'skills'));
+    assert.throws(
+      () => resolveContained(join(ws, '.agents', 'skills'), 'my-skill/NOTES.md'),
+      /symlink/,
+      'a symlinked skills root must not be followed',
+    );
+
+    // Same for an intermediate component below the root.
+    const ws2 = join(dir, 'ws2');
+    mkdirSync(join(ws2, '.agents', 'skills', 'real'), { recursive: true });
+    symlinkSync(outside, join(ws2, '.agents', 'skills', 'link'));
+    assert.throws(() => resolveContained(join(ws2, '.agents', 'skills'), 'link/NOTES.md'), /symlink|escapes/);
+
+    // A real directory below the root is unaffected.
+    assert.equal(
+      resolveContained(join(ws2, '.agents', 'skills'), 'real/SKILL.md'),
+      join(ws2, '.agents', 'skills', 'real', 'SKILL.md'),
+    );
+
+    // Symlinks in the root's ANCESTRY must stay allowed: on macOS /tmp is a symlink to
+    // /private/tmp, so resolving only the target would reject every path under it.
+    assert.equal(resolveContained(tmpdir(), 'a/b.md'), join(tmpdir(), 'a', 'b.md'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('containment works when the root is the filesystem root (Copilot on #92)', () => {
+  // `absRoot + sep` becomes `//` when the root is `/`, so a naive prefix check rejects
+  // every child of `/`. `/usr` is a real directory on macOS and Linux; `/etc` is a
+  // symlink on macOS and is therefore refused, which is the safe direction.
+  assert.equal(resolveContained('/', 'usr'), '/usr');
+  assert.equal(resolveContained('/', 'usr/share'), '/usr/share');
 });
 
 test('registry resolves skills with content and hash', () => {
@@ -169,4 +274,55 @@ test('automatic selection falls back when nothing matches', () => {
   const selector = createSkillSelector();
   const picked = selector.select('zzz qqq www', reg.list(), 4);
   assert.ok(picked.length > 0);
+});
+
+test('writeSkills refuses a traversal skill id or file path (issue #58, review N1)', async () => {
+  // The write side is the more dangerous half: the read side only leaks a listing, this
+  // one places bytes. It is unreachable through the registry today, so it needs a test of
+  // its own -- otherwise a refactor that feeds writeSkills from a persisted snapshot
+  // instead of re-resolving ids would silently reopen #58 with nothing failing.
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-writeskills-'));
+  try {
+    const ws = join(dir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    const skill = (id: string, files: Record<string, string>) => ({
+      id, version: '1.0.0', description: 'd', capabilities: ['a'],
+      path: join(dir, 'src', 'SKILL.md'), content: '# x', files, hash: 'h',
+    });
+
+    await assert.rejects(() => writeSkills(ws, [skill('../../pwned-id', { 'NOTES.md': 'x' })]), /Unsafe skill id|escapes/);
+    await assert.rejects(() => writeSkills(ws, [skill('good', { '../../pwned-rel.md': 'x' })]), /escapes/);
+    await assert.rejects(() => writeSkills(ws, [skill('good', { '../../../tmp/pwned-abs.md': 'x' })]), /escapes/);
+    assert.equal(existsSync(join(dir, 'pwned-id')), false, 'nothing may land outside the workspace');
+    assert.equal(existsSync(join(dir, 'pwned-rel.md')), false, 'nothing may land outside the workspace');
+    assert.equal(existsSync(join(dir, '..', 'pwned-abs.md')), false, 'nothing may land outside the workspace');
+
+    // the legitimate shape still writes, into the workspace
+    await writeSkills(ws, [skill('good', { 'SKILL.md': '# good', 'refs/a.md': 'a' })]);
+    assert.equal(readFileSync(join(ws, '.agents', 'skills', 'good', 'SKILL.md'), 'utf8'), '# good');
+    assert.equal(readFileSync(join(ws, '.agents', 'skills', 'good', 'refs', 'a.md'), 'utf8'), 'a');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('list() never returns a directory name that resolve() would reject (issue #58, review N3)', () => {
+  // Auto-selection does selector.select(task, skills.list(), 4) then skills.resolve(ids).
+  // Once resolve() rejects unsafe ids, an unsafe directory name would throw out of run
+  // creation -- so one stray directory would fail every run.
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-listfilter-'));
+  try {
+    const meta = (n: string) => `---\nname: ${n}\nversion: 1.0.0\ndescription: d\ncapabilities: [a]\n---\n\n# x\n`;
+    for (const d of ['good', 'issue-fix-loop', 'Code-Review', 'my skill', '.hidden']) {
+      mkdirSync(join(dir, d), { recursive: true });
+      writeFileSync(join(dir, d, 'SKILL.md'), meta(d));
+    }
+    const reg = new SkillRegistry(dir);
+    const listed = reg.list().map((m) => m.id);
+    assert.deepEqual(listed, ['good', 'issue-fix-loop'], 'unsafe directory names must be skipped');
+    // the property that actually matters: whatever list() returns, resolve() accepts
+    assert.deepEqual(reg.resolve(listed).map((s) => s.id), listed, 'resolve(list()) must not throw');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
