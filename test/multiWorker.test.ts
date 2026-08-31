@@ -680,3 +680,35 @@ test('a failed event append rolls the reap back rather than leaving a FAILED run
     env.close();
   }
 });
+
+test('a skipped run releases the lease it already holds (issue #71)', async () => {
+  // The ownership guard at the top of execute() returned BEFORE the try/finally that owns
+  // releaseLease, so a run cancelled between claim and execute kept lease_owner and
+  // lease_expires_at forever. Nothing revisits it: the reaper only selects non-terminal
+  // statuses, and a skipped run is terminal by definition.
+  const env = makeEnv({ workerEnabled: false });
+  const w = makeWorker(env, { workerId: 'skipper' });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    // Claim it as this worker, then cancel it -- the exact interleaving the guard exists for.
+    const claimed = env.queue.claim('skipper', 60_000);
+    assert.equal(claimed?.id, run.id);
+    env.runs.transition(run.id, 'CANCELLED');
+    assert.equal(env.runs.get(run.id)!.leaseOwner, 'skipper', 'precondition: this worker holds the lease');
+
+    // execute() is private; the skip path is only reachable through the claim loop, which
+    // cannot be interrupted between claim and execute without a race. Calling it directly
+    // keeps the test deterministic instead of sleeping on a window.
+    await (w as unknown as { execute(r: typeof run): Promise<void> }).execute(run);
+
+    assert.equal(env.runs.get(run.id)!.status, 'CANCELLED', 'skipping must not alter the run');
+    const row = env.db
+      .prepare('SELECT lease_owner, lease_expires_at FROM runs WHERE id = ?')
+      .get(run.id) as { lease_owner: string | null; lease_expires_at: string | null };
+    assert.equal(row.lease_owner, null, `skipped run kept its lease: ${JSON.stringify(row)}`);
+    assert.equal(row.lease_expires_at, null);
+  } finally {
+    w.stop();
+   env.close();
+  }
+});
