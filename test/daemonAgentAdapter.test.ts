@@ -255,6 +255,10 @@ test('daemon: abort cancels the session', async () => {
   await adapter.cancel(context.run.id);
   const exit = await handle.exit;
   assert.ok(exit.code !== 0 || exit.signal === 'SIGTERM');
+  // Pin the REASON, not just "it failed somehow". cancel() settles before touching the socket
+  // precisely so a synchronous socket error cannot win the race and report SIGPIPE/failed for
+  // what was a deliberate user cancellation.
+  assert.equal(exit.reason, 'cancelled', `a deliberate cancel must report 'cancelled', got ${JSON.stringify(exit)}`);
 });
 
 test('daemon: spawn failure surfaces as failed exit', async () => {

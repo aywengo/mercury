@@ -276,10 +276,17 @@ export class DaemonAgentAdapter implements AgentAdapter {
     if (!session?.socket) return;
     session.cancelled = true;
     session.done = true;
+    // Settle BEFORE touching the socket, for the same reason terminate() does (see issue #55):
+    // the 'close' and 'error' handlers settle the exit as SIGPIPE/failed, and `write` on a
+    // socket that is already broken can fire 'error' synchronously. Settling afterwards then
+    // loses the race and reports 'failed' for what was a deliberate cancellation.
+    //
+    // The abort frame is still sent -- settleExit only resolves a promise, it does not close
+    // anything -- so the daemon still learns the run was cancelled rather than dropped.
+    settleExit(session, { code: 130, signal: 'SIGTERM', reason: 'cancelled' });
     session.socket.write(frame({ type: 'abort' }));
     session.socket.destroy();
     session.proc?.kill('SIGTERM');
-    settleExit(session, { code: 130, signal: 'SIGTERM', reason: 'cancelled' });
   }
 
   async resume(runId: string, _context?: RunContext): Promise<AgentHandle> {
