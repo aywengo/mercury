@@ -703,3 +703,79 @@ test('an unknown agent event type is dropped, and the run still completes (issue
     env.close();
   }
 });
+
+/**
+ * Adapter that records whether the worker ever called terminate() on the handle.
+ * The point is to observe cleanup the worker used to skip entirely: a successful run
+ * never terminated its agent, and a run that threw mid-drive unwound past cleanup.
+ */
+class RecordingAdapter implements AgentAdapter {
+  terminateCalls = 0;
+  cancelCalls = 0;
+  mode: 'ok' | 'throw-midway';
+  constructor(mode: 'ok' | 'throw-midway' = 'ok') {
+    this.mode = mode;
+  }
+  async start(context: RunContext): Promise<AgentHandle> {
+    const self = this;
+    const events = (async function* (): AsyncGenerator<AgentEvent> {
+      yield { type: 'agent.message', payload: { text: 'first' } };
+      if (self.mode === 'throw-midway') throw new Error('agent stream exploded mid-run');
+    })();
+    return {
+      runId: context.run.id,
+      events,
+      exit: new Promise<AgentExit>((resolve) => {
+        setTimeout(() => resolve({ code: 0, signal: null, reason: 'completed' }), 5);
+      }),
+      terminate: async () => {
+        self.terminateCalls += 1;
+      },
+    };
+  }
+  async sendInput(): Promise<void> {}
+  async cancel(): Promise<void> {
+    this.cancelCalls += 1;
+  }
+}
+
+test('a successful run terminates its agent handle (issue #46)', async () => {
+  const repo = mkdtempSync(join(tmpdir(), 'mercury-term-ok-'));
+  const adapter = new RecordingAdapter('ok');
+  const env = makeEnv({ workerEnabled: false, adapters: { fake: adapter } });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo } });
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 10_000);
+    await waitFor(() => adapter.terminateCalls === 1, 3_000);
+    // The success path used to break out of the drive loop, await an already-resolved exit,
+    // finalize, and never stop the client -- one live `prime-agent --mode rpc` per completed
+    // run, forever. Ownership now sits in execute()'s finally.
+    assert.equal(adapter.terminateCalls, 1, 'the success path must terminate the handle exactly once');
+  } finally {
+    env.worker.stop();
+    env.close();
+  }
+});
+
+test('a run that throws mid-drive still terminates its agent handle (issue #47)', async () => {
+  const repo = mkdtempSync(join(tmpdir(), 'mercury-term-throw-'));
+  const adapter = new RecordingAdapter('throw-midway');
+  const env = makeEnv({ workerEnabled: false, adapters: { fake: adapter } });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo } });
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    // The status flips to FAILED inside the catch, and terminate() runs after it in the
+    // finally, so wait on the cleanup itself rather than reading it the instant the status
+    // lands. Without the fix this never becomes true and the wait fails.
+    await waitFor(() => adapter.terminateCalls === 1, 3_000);
+    // This is the shape of the cancel race: the drive loop throws, and any throw used to
+    // unwind before a terminate() call, leaving a live agent writing into a workspace
+    // nobody was watching. Cleanup must not depend on how the loop exited.
+    assert.equal(adapter.terminateCalls, 1, 'the throwing path must still terminate the handle');
+  } finally {
+    env.worker.stop();
+    env.close();
+  }
+});

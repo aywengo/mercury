@@ -10,7 +10,7 @@ import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts'
 import type { Redactor } from '../domain/redact.ts';
 import { isEventType } from '../domain/types.ts';
 import type {
-  AgentAdapter, AgentEvent, AgentExit, AgentInput, Run, RunContext, ResolvedSkill,
+  AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run, RunContext, ResolvedSkill,
 } from '../domain/types.ts';
 import type { EventStore } from '../events/eventStore.ts';
 import type { Logger } from '../logger.ts';
@@ -158,6 +158,13 @@ export class Worker {
     }
     log.info({ agent: run.agent, attempt: run.attempt }, 'executing run');
 
+    // Declared out here so the finally can reach it (issues #46, #47). The agent handle is
+    // the one resource in this method that outlives a throw, and until now nothing owned it:
+    // terminate() was called only on the timeout path, so a successful run left the RPC
+    // process running and a run that threw on a state transition unwound past any cleanup,
+    // leaving a live agent writing into a workspace nobody was watching.
+    let handle: AgentHandle | null = null;
+
     try {
       // QUEUED -> STARTING
       this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
@@ -212,7 +219,6 @@ export class Worker {
       // session when the adapter supports it. The parent's session file lives in
       // the parent's workspace (.mercury-session-path); fall back to a fresh
       // start() when resume is unavailable or fails (e.g. no session file).
-      let handle: Awaited<ReturnType<AgentAdapter['start']>>;
       if (run.retryOf && typeof adapter.resume === 'function') {
         const parent = this.deps.runs.get(run.retryOf);
         const parentSessionFile = parent?.workspacePath
@@ -240,12 +246,40 @@ export class Worker {
       const raw = String(err instanceof Error ? err.message : err);
       const message = this.deps.redactor ? this.deps.redactor.redact(raw) : raw;
       log.error({ error: message }, 'run execution failed');
-      this.deps.runs.setError(run.id, message, 'infrastructure');
-      this.deps.events.append(run.id, 'error', { message });
-      this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
-      this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
-      await this.maybeAutoRetry(run, 'infrastructure');
+      // Skip the failure bookkeeping when the run is already terminal (issue #47). On the
+      // cancel race the drive loop's transition to RUNNING throws, and this block then threw
+      // a SECOND time on the invalid `CANCELLED -> FAILED`, unwinding before any cleanup --
+      // which is how a cancelled run kept a live agent writing into its workspace. The
+      // cancellation already recorded the outcome, so overwriting it is both wrong and fatal.
+      const settled = this.deps.runs.get(run.id);
+      if (settled && isTerminal(settled.status)) {
+        log.warn({ status: settled.status }, 'run already terminal; skipping failure bookkeeping');
+      } else {
+        this.deps.runs.setError(run.id, message, 'infrastructure');
+        this.deps.events.append(run.id, 'error', { message });
+        this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
+        this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+        await this.maybeAutoRetry(run, 'infrastructure');
+      }
     } finally {
+      // Terminate on EVERY exit path -- success, cancellation, timeout, lease loss, and the
+      // throwing one (issues #46, #47). Ownership lives here rather than in each error branch
+      // so that no new early return or throw can reintroduce the leak.
+      //
+      // Before this, the success path never terminated at all (one live `prime-agent --mode
+      // rpc` per completed run), and on the cancel race the second invalid-transition throw
+      // in the catch below unwound before any terminate() call, leaving the agent running.
+      //
+      // Runs before releaseLease: we want the process gone before another worker can claim
+      // the run. Failures are logged, not propagated -- nothing downstream can act on them
+      // here, and letting one throw would skip releaseLease and strand the lease.
+      if (handle) {
+        try {
+          await handle.terminate();
+        } catch (termErr) {
+          log.warn({ error: String(termErr instanceof Error ? termErr.message : termErr) }, 'agent terminate failed');
+        }
+      }
       this.deps.queue.releaseLease(run.id, this.deps.workerId);
     }
   }
