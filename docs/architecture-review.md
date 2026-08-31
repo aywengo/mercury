@@ -43,6 +43,27 @@ are listed separately in [Unverified](#unverified) and are not counted in the to
 Two findings were confirmed by **empirical measurement** rather than reading alone: H4
 (a runnable `node:sqlite` race test) and the test-suite state in M11.
 
+### Known process failures, and how they were caught
+
+Two errors were made and corrected during this review. They are recorded because they
+bear on how much weight to give the findings, and because the failure mode is easy to
+repeat.
+
+1. **A completion status was mistaken for a delivered result.** All five reviewers
+   reported `completed`, but four had sent no reply and had stopped mid-analysis. Trusting
+   the status alone produced a false claim that their reports were in hand. The remedy was
+   to read the raw rollouts, which is also how the substance behind most of this document
+   was recovered.
+2. **A scratch path was written into a durable artifact.** The appendix originally told
+   readers to run a script that existed only in a temporary working directory, so the
+   reproduction could not be followed. It was replaced with the self-contained script now
+   inlined, and that script was re-run before committing.
+
+The shared lesson: **verify against current state before asserting or persisting.** A
+status field, a remembered result, or a path that resolves today is not evidence that the
+thing will exist for the next reader. Both errors were caught by checking rather than
+recalling, and both survived into output that had already been shared.
+
 ---
 
 ## Findings — High
