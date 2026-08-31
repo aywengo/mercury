@@ -403,3 +403,146 @@ test('closeServer() is safe when the server closes before the grace period (issu
   // and a second close must not resurrect the throw either
   await closeServer(srv);
 });
+
+
+/** Response shape of GET /api/runs/:runId/events (issue #54). */
+type EventsPage = {
+  // `payload` is genuinely `unknown` here: the endpoint returns every event type, and only
+  // agent.message carries `{ i }`. Narrow at the point of use instead of pretending the
+  // whole page shares one shape.
+  events: { sequence: number; type: string; payload: unknown }[];
+  lastSequence: number;
+  nextCursor: number;
+  hasMore: boolean;
+};
+
+test('events endpoint pages completely; a >1000-event run is not silently truncated (issue #54)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const created = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers, body: JSON.stringify({ task: 'x', agent: 'fake' }),
+      });
+      assert.equal(created.status, 201);
+      const { runId } = (await created.json()) as { runId: string };
+      // Creating a run already wrote events of its own (run.created, run.queued, one
+      // skill.selected per auto-selected skill), so page the real total rather than assuming
+      // the run starts empty.
+      const baseline = env.events.list(runId).length;
+      const APPENDED = 2_500; // > the 1000-row page cap, and not a multiple of it
+      for (let i = 1; i <= APPENDED; i++) env.events.append(runId, 'agent.message', { i });
+      const TOTAL = baseline + APPENDED;
+
+      // Page exactly the way the dashboard now does.
+      const seen: number[] = [];   // the appended events, in order
+      let pagedAll = 0;            // every event the paging walked past
+      let cursor = 0;
+      let pages = 0;
+      for (;;) {
+        const res = await fetch(`${base}/api/runs/${runId}/events?after=${cursor}`, { headers });
+        assert.equal(res.status, 200);
+        const body = (await res.json()) as EventsPage;
+        pagedAll += body.events.length;
+        for (const e of body.events) if (e.type === 'agent.message') seen.push((e.payload as { i: number }).i);
+        pages += 1;
+        // The heart of the bug: on a truncated page the run's true maximum is far ahead of
+        // what was returned. Resuming from `lastSequence` would skip the rest.
+        if (pages === 1) {
+          assert.equal(body.events.length, 1000, 'first page must be capped at 1000');
+          assert.ok(baseline < 1000, 'baseline must stay inside the first page for the next assertion to mean anything');
+          assert.equal(body.lastSequence, TOTAL, 'lastSequence is the TRUE max, i.e. the wrong resume point');
+          assert.equal(body.nextCursor, 1000, 'nextCursor must be the last sequence actually returned');
+          assert.equal(body.hasMore, true);
+        }
+        if (typeof body.nextCursor !== 'number' || body.nextCursor <= cursor) break;
+        cursor = body.nextCursor;
+        if (!body.hasMore) break;
+        assert.ok(pages < 20, 'paging must terminate');
+      }
+      assert.equal(pagedAll, TOTAL, `paged ${pagedAll} of ${TOTAL} events -- history was lost`);
+      assert.deepEqual(seen, Array.from({ length: APPENDED }, (_, i) => i + 1), 'every appended event, in order, no gaps');
+      assert.equal(pages, Math.ceil(TOTAL / 1000));
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('events endpoint reports no more pages once caught up (issue #54)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const created = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers, body: JSON.stringify({ task: 'x', agent: 'fake' }),
+      });
+      assert.equal(created.status, 201);
+      const { runId } = (await created.json()) as { runId: string };
+      const baseline = env.events.list(runId).length;
+      for (let i = 1; i <= 5; i++) env.events.append(runId, 'agent.message', { i });
+      const res = await fetch(`${base}/api/runs/${runId}/events?after=0`, { headers });
+      const body = (await res.json()) as EventsPage;
+      assert.equal(body.events.length, baseline + 5, 'a run under the page cap comes back whole');
+      assert.equal(body.hasMore, false, 'a complete page must not claim there is more');
+      assert.equal(body.nextCursor, body.lastSequence);
+
+      // and past the end: empty page, no progress, hasMore false -- the loop guard depends
+      // on this rather than on the client detecting an empty array.
+      const tail = (await (await fetch(`${base}/api/runs/${runId}/events?after=${body.lastSequence}`, { headers })).json()) as EventsPage;
+      assert.deepEqual(tail.events, []);
+      assert.equal(tail.hasMore, false);
+      assert.equal(tail.nextCursor, body.lastSequence, 'an empty page must not move the cursor backwards');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('events endpoint clamps an explicit limit instead of treating 0 as absent (issue #54)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const created = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers, body: JSON.stringify({ task: 'x', agent: 'fake' }),
+      });
+      const { runId } = (await created.json()) as { runId: string };
+      const baseline = env.events.list(runId).length;
+      for (let i = 1; i <= 20; i++) env.events.append(runId, 'agent.message', { i });
+      const TOTAL = baseline + 20;
+
+      const page = async (q: string): Promise<EventsPage> =>
+        (await (await fetch(`${base}/api/runs/${runId}/events?${q}`, { headers })).json()) as EventsPage;
+
+      // `?limit=0` must mean "as small as possible", not "give me the maximum".
+      assert.equal((await page('after=0&limit=0')).events.length, 1, 'limit=0 must clamp to 1, not expand to 1000');
+      assert.equal((await page('after=0&limit=-5')).events.length, 1, 'a negative limit must clamp to 1');
+      assert.equal((await page('after=0&limit=3')).events.length, 3, 'a valid limit is honoured');
+      assert.equal((await page(`after=0&limit=${TOTAL + 500}`)).events.length, TOTAL, 'an oversized limit clamps to the cap');
+      // Non-numeric falls back to the default rather than to 1 or to a throw.
+      assert.equal((await page('after=0&limit=abc')).events.length, TOTAL, 'a non-numeric limit uses the default');
+      assert.equal((await page('after=0')).events.length, TOTAL, 'absent limit uses the default');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});

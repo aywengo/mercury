@@ -28,10 +28,25 @@ async function loadRun() {
   const data = await api('/api/runs/' + encodeURIComponent(runId));
   run = data.run;
   renderRun(data.run, data.skills || []);
-  // load events after the last known sequence
-  const ev = await api('/api/runs/' + encodeURIComponent(runId) + '/events?after=' + lastSeq);
-  for (const e of ev.events || []) appendEvent(e);
-  lastSeq = ev.lastSequence || 0;
+  // Page through history until caught up (issue #54).
+  //
+  // The endpoint returns at most 1000 events per call, and `lastSequence` is the run's TRUE
+  // maximum -- not the last event in the page. The old code did `lastSeq = ev.lastSequence`,
+  // so on a 5000-event run it rendered events 1-1000, set lastSeq = 5000, and subscribed from
+  // there: events 1001-4999 were never fetched and never rendered, with no error and nothing
+  // on screen to indicate it. Silent history loss on exactly the long-running runs this
+  // product exists for.
+  //
+  // Resume from `nextCursor` (the last sequence actually returned) instead, and keep going
+  // while the server says there is more.
+  for (;;) {
+    const ev = await api('/api/runs/' + encodeURIComponent(runId) + '/events?after=' + lastSeq);
+    for (const e of ev.events || []) appendEvent(e);
+    const next = typeof ev.nextCursor === 'number' ? ev.nextCursor : lastSeq;
+    if (next <= lastSeq) break; // no forward progress: stop rather than spin forever
+    lastSeq = next;
+    if (!ev.hasMore) break;
+  }
   connectSse();
 }
 

@@ -109,8 +109,28 @@ export function createRoutes(deps: RoutesDeps): Router {
       return;
     }
     const afterSeq = Number(req.query.after ?? 0) || 0;
-    const events = deps.events.list(run.id, afterSeq);
-    res.json({ events, lastSequence: deps.events.lastSequence(run.id) });
+    // EventStore.list caps a page at 1000 rows. The cap is fine; what was not fine was
+    // telling the client the run's TRUE maximum sequence alongside a truncated page and
+    // letting it resume from that (issue #54).
+    // Parse explicitly rather than with `|| 1000`: that treats a legitimate `?limit=0` as
+    // absent and silently expands it to the maximum, which is the opposite of what the
+    // caller asked for. Default only when the param is missing or not a number.
+    const rawLimit = req.query.limit === undefined ? 1000 : Number(req.query.limit);
+    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 1000) : 1000;
+    const events = deps.events.list(run.id, afterSeq, limit);
+    const lastSequence = deps.events.lastSequence(run.id);
+    // The resume point is the last sequence actually RETURNED, not the run's maximum. A
+    // client that pages from here sees every event; a client that pages from `lastSequence`
+    // skips whatever the cap left out.
+    const nextCursor = events.length > 0 ? events[events.length - 1].sequence : afterSeq;
+    res.json({
+      events,
+      /** The run's true maximum sequence. Informational (the UI shows "N events"); NOT a
+       *  safe resume point when the page is truncated. Use `nextCursor`. */
+      lastSequence,
+      nextCursor,
+      hasMore: nextCursor < lastSequence,
+    });
   });
 
   // GET /api/runs/:runId/stream  (SSE)
