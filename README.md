@@ -365,7 +365,7 @@ constraint run directly on the host.
 3. ~~Push-based event fan-out~~ — done: in-process push via EventStore append hook + adaptive poller (cross-process push remains the scale path)
 4. ~~Multi-worker deployment~~ — done: backlog alerting (+ optional webhook), `/healthz/workers`, lease-loss recovery
 5. ~~Multi-repository Runs~~ — done: `repositories[]` in the Run model, API + workspace support
-6. ~~Expand skill library~~ — done: 11 skills (added documentation, deployment, frontend)
+6. ~~Expand skill library~~ — done: 12 skills (added documentation, deployment, frontend, issue-fix-loop)
 7. ~~Deployment packaging~~ — done: systemd units, backup script, logrotate, ops guide in `deploy/`
 8. Daemon-based agent sessions — implemented behind `MERCURY_AGENT_MODE=daemon` (RPC remains default); verify against the real daemon before relying on it
 9. ~~Sandboxed execution (containers)~~ — done: `SandboxManager` enforces `resourceLimits` + `allowedNetworks` via docker/podman; fails closed when a constrained Run has no runtime

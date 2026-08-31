@@ -8,9 +8,13 @@ test('registry lists all skills', () => {
   const reg = new SkillRegistry(SKILLS_DIR);
   const list = reg.list();
   const ids = list.map((s) => s.id).sort();
+  // Add a skill directory -> add its id here. Exact enumeration is deliberate: a
+  // derived expectation moves with the registry and cannot see a skill added, dropped,
+  // or losing its SKILL.md. Discovery logic itself is not covered here -- see #79.
   assert.deepEqual(ids, [
     'code-review', 'debugging', 'deployment', 'documentation', 'frontend', 'git-pr',
-    'implementation', 'planning', 'repository-analysis', 'security-review', 'testing',
+    'implementation', 'issue-fix-loop', 'planning', 'repository-analysis',
+    'security-review', 'testing',
   ]);
 });
 
