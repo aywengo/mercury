@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { isTerminal } from '../domain/stateMachine.ts';
 import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts';
 import type { Redactor } from '../domain/redact.ts';
+import { isEventType } from '../domain/types.ts';
 import type {
   AgentAdapter, AgentEvent, AgentExit, AgentInput, Run, RunContext, ResolvedSkill,
 } from '../domain/types.ts';
@@ -422,7 +423,21 @@ export class Worker {
       this.deps.events.append(run.id, 'git.pr', ev.payload);
       return 'ok';
     }
-    // generic structured event passthrough (validated)
+    // Generic structured event passthrough.
+    //
+    // The old comment here read "(validated)" and nothing validated it. `ev.type` comes
+    // from the adapter, so it is agent- and repository-controlled, and routes.ts writes
+    // it raw into `event: <type>` in an SSE frame: a type containing a blank line injects
+    // arbitrary frames into every subscriber of the run (issue #50).
+    //
+    // EventStore.append now rejects unknown types, which closes the injection for every
+    // caller. Dropping here as well is deliberate, not redundant: append throwing would
+    // propagate out of the drive loop uncaught, so a rogue agent could kill its own run
+    // by emitting one odd event type. Reject at the choke point; discard at the boundary.
+    if (!isEventType(ev.type)) {
+      log.warn({ type: ev.type }, 'dropping agent event with an unknown type');
+      return 'ok';
+    }
     this.deps.events.append(run.id, ev.type, ev.payload);
     return 'ok';
   }

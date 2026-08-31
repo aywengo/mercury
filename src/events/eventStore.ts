@@ -3,7 +3,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tx } from '../db/database.ts';
-import type { MercuryEvent } from '../domain/types.ts';
+import { isEventType, type MercuryEvent } from '../domain/types.ts';
 import type { Redactor } from '../domain/redact.ts';
 
 export interface EventRow {
@@ -33,8 +33,21 @@ export class EventStore {
     };
   }
 
-  /** Append an event; sequence is assigned by the DB (single writer). */
+  /**
+   * Append an event; sequence is assigned by the DB (single writer).
+   *
+   * `type` must be in EVENT_TYPES. This is the only place all events pass through, so it
+   * is where the section 14 contract is enforced (issue #60). The check is not cosmetic:
+   * the worker forwards `ev.type` from the adapter, and routes.ts writes that type raw
+   * into an SSE frame as `event: <type>`. A type containing a blank line therefore lets an
+   * agent, or a compromised repository driving one, inject arbitrary SSE frames into every
+   * subscriber of the run (issue #50). Rejecting at the choke point closes it for every
+   * present and future caller, not only for the one that was reported.
+   */
   append(runId: string, type: string, payload: unknown): MercuryEvent {
+    if (!isEventType(type)) {
+      throw new Error('Unknown event type: ' + JSON.stringify(type));
+    }
     return tx(this.db, () => {
       const row = this.db
         .prepare('SELECT COALESCE(MAX(sequence), 0) AS max_seq FROM events WHERE run_id = ?')
