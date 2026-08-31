@@ -255,6 +255,10 @@ test('daemon: abort cancels the session', async () => {
   await adapter.cancel(context.run.id);
   const exit = await handle.exit;
   assert.ok(exit.code !== 0 || exit.signal === 'SIGTERM');
+  // Pin the REASON, not just "it failed somehow". cancel() settles before touching the socket
+  // precisely so a synchronous socket error cannot win the race and report SIGPIPE/failed for
+  // what was a deliberate user cancellation.
+  assert.equal(exit.reason, 'cancelled', `a deliberate cancel must report 'cancelled', got ${JSON.stringify(exit)}`);
 });
 
 test('daemon: spawn failure surfaces as failed exit', async () => {
@@ -317,3 +321,55 @@ test('daemon: sendInput throws when not waiting for input (issue #30)', async ()
     await adapter.cancel(context.run.id);
   }
 });
+
+test('daemon: terminate() settles the exit promise instead of leaving it pending (issue #55)', async () => {
+  // The bug: terminate() set `done = true`, and every exit handler in this adapter was
+  // guarded on `done`, so none of them would settle afterwards. handle.exit NEVER resolved.
+  // The worker then sat in Promise.race([handle.exit, sleep(10_000)]) for the full timeout and
+  // reported an invented SIGKILL/terminated exit instead of the real one.
+  //
+  // `ignore` mode acks the prompt and then emits nothing, so nothing else can settle the exit
+  // -- terminate() is the only candidate.
+  const { context, workspacePath } = makeContext();
+  const adapter = spawnAdapter({
+    MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'),
+    MOCK_DAEMON_MODE: 'ignore',
+  });
+  try {
+    const handle = await adapter.start(context);
+
+    await handle.terminate();
+
+    // Race against a deadline rather than awaiting: the bug IS that this promise never
+    // settles, so a plain await would hang the runner instead of failing it. The bound is far
+    // below the worker's 10s fabrication timeout -- that gap is the user-visible win.
+    const TIMEOUT_MS = 5_000;
+    const settledIn = Date.now();
+    const outcome = await Promise.race([
+      handle.exit.then((exit) => ({ kind: 'settled' as const, exit })),
+      new Promise<{ kind: 'hung' }>((resolve) => setTimeout(() => resolve({ kind: 'hung' }), TIMEOUT_MS)),
+    ]);
+
+    // assert.fail returns never, so this narrows the union for the lines below.
+    if (outcome.kind === 'hung') {
+      assert.fail(`handle.exit never resolved after terminate() -- the worker would stall `
+        + `${TIMEOUT_MS}ms+ and invent an exit reason instead of the real one`);
+    }
+
+    const elapsed = Date.now() - settledIn;
+    assert.ok(elapsed < TIMEOUT_MS, `exit settled only after ${elapsed}ms`);
+    // The reason must be the real one, not the worker's fabricated SIGKILL fallback.
+    assert.equal(outcome.exit.reason, 'terminated', `expected the real 'terminated' reason, got ${JSON.stringify(outcome.exit)}`);
+  } finally {
+    await adapter.cancel(context.run.id);
+  }
+});
+
+// NOTE (issue #55): an idempotency test for settleExit was written and deliberately
+// removed. It asserted that tearing down after a natural end left the exit reason as
+// 'completed', but that assertion CANNOT fail: a Promise ignores every resolve() after
+// the first, so deleting the `if (session.exitSettled) return` guard left the test green.
+// A test that cannot fail is worse than no test, because it reads as coverage. The guard
+// is kept as defence in depth; the behaviour that actually matters -- terminate() settling
+// the exit at all -- is covered by the test above, which does fail when the settle is
+// removed.

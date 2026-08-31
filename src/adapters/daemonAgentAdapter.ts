@@ -59,6 +59,20 @@ interface DaemonSession {
 
 const DONE: AgentEvent = { type: '__done__', payload: {} };
 
+/**
+ * Resolve the run's exit promise exactly once.
+ *
+ * Guards on `exitSettled` ALONE, never on `done`. `done` is set by terminate() and cancel()
+ * while the exit is still unresolved, so a guard that consults it refuses to settle on
+ * precisely the paths that need it most (issue #55). Same shape as settleExit() in
+ * primeAgentAdapter.ts, which already gets this right.
+ */
+function settleExit(session: DaemonSession, exit: AgentExit): void {
+  if (session.exitSettled) return;
+  session.exitSettled = true;
+  session.exitResolve(exit);
+}
+
 export class DaemonAgentAdapter implements AgentAdapter {
   private cmd: string;
   private opts: DaemonAgentAdapterOptions;
@@ -140,18 +154,12 @@ export class DaemonAgentAdapter implements AgentAdapter {
       process.stderr.write(`[daemon] ${d.toString()}`);
     });
     proc.on('error', (err) => {
-      if (!session.done && !session.exitSettled) {
-        session.done = true;
-        session.exitSettled = true;
-        session.exitResolve({ code: 127, signal: null, reason: 'failed' });
-      }
+      session.done = true;
+      settleExit(session, { code: 127, signal: null, reason: 'failed' });
     });
     proc.on('exit', (code, signal) => {
-      if (!session.done && !session.exitSettled) {
-        session.done = true;
-        session.exitSettled = true;
-        session.exitResolve({ code: code ?? 1, signal, reason: code === 0 ? 'completed' : 'failed' });
-      }
+      session.done = true;
+      settleExit(session, { code: code ?? 1, signal, reason: code === 0 ? 'completed' : 'failed' });
     });
 
     // Wait for the socket to appear, connect, and consume the hello frame.
@@ -176,17 +184,17 @@ export class DaemonAgentAdapter implements AgentAdapter {
         this.handleFrame(session, frame);
       }
     });
+    // These two guarded on `!session.done` alone -- never on exitSettled -- so they could
+    // call exitResolve a second time after agent.end had already settled the exit. The
+    // promise ignores a repeat resolve so the outcome was usually harmless, but it made the
+    // settlement rule differ per site, which is how terminate() ended up settling nothing.
     socket.on('close', () => {
-      if (!session.done) {
-        session.done = true;
-        session.exitResolve({ code: null, signal: 'SIGPIPE', reason: 'failed' });
-      }
+      session.done = true;
+      settleExit(session, { code: null, signal: 'SIGPIPE', reason: 'failed' });
     });
     socket.on('error', () => {
-      if (!session.done) {
-        session.done = true;
-        session.exitResolve({ code: null, signal: 'SIGPIPE', reason: 'failed' });
-      }
+      session.done = true;
+      settleExit(session, { code: null, signal: 'SIGPIPE', reason: 'failed' });
     });
 
     return this.makeHandle(session);
@@ -205,11 +213,8 @@ export class DaemonAgentAdapter implements AgentAdapter {
       this.push(session, ev);
       if (ev.type === 'agent.end') {
         // Agent finished; resolve the exit promise (the daemon keeps the socket open).
-        if (!session.done && !session.exitSettled) {
-          session.done = true;
-          session.exitSettled = true;
-          session.exitResolve({ code: Number((msg.result ?? 0)), signal: null, reason: 'completed' });
-        }
+        session.done = true;
+        settleExit(session, { code: Number((msg.result ?? 0)), signal: null, reason: 'completed' });
       }
     }
   }
@@ -241,6 +246,15 @@ export class DaemonAgentAdapter implements AgentAdapter {
         session.terminated = true;
         session.cancelled = true;
         session.done = true;
+        // Settle BEFORE tearing the socket down. terminate() sets `done`, and every exit
+        // handler here was guarded on `done`, so none of them would settle afterwards:
+        // handle.exit never resolved and the worker sat in
+        // Promise.race([handle.exit, sleep(10_000)]) for the full timeout, then reported an
+        // invented SIGKILL/terminated exit instead of this one (issue #55).
+        //
+        // Settling first also fixes the reported reason. socket.destroy() fires 'close',
+        // which would otherwise race to settle the exit as SIGPIPE/failed.
+        settleExit(session, { code: null, signal: 'SIGTERM', reason: 'terminated' });
         session.socket?.destroy();
         session.proc?.kill('SIGTERM');
       },
@@ -262,13 +276,17 @@ export class DaemonAgentAdapter implements AgentAdapter {
     if (!session?.socket) return;
     session.cancelled = true;
     session.done = true;
+    // Settle BEFORE touching the socket, for the same reason terminate() does (see issue #55):
+    // the 'close' and 'error' handlers settle the exit as SIGPIPE/failed, and `write` on a
+    // socket that is already broken can fire 'error' synchronously. Settling afterwards then
+    // loses the race and reports 'failed' for what was a deliberate cancellation.
+    //
+    // The abort frame is still sent -- settleExit only resolves a promise, it does not close
+    // anything -- so the daemon still learns the run was cancelled rather than dropped.
+    settleExit(session, { code: 130, signal: 'SIGTERM', reason: 'cancelled' });
     session.socket.write(frame({ type: 'abort' }));
     session.socket.destroy();
     session.proc?.kill('SIGTERM');
-    if (!session.exitSettled) {
-      session.exitSettled = true;
-      session.exitResolve({ code: 130, signal: 'SIGTERM', reason: 'cancelled' });
-    }
   }
 
   async resume(runId: string, _context?: RunContext): Promise<AgentHandle> {
