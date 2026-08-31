@@ -4,6 +4,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { tx } from '../db/database.ts';
 import type { Run } from '../domain/types.ts';
+import { isTerminal } from '../domain/stateMachine.ts';
 import { RunStore, type RunRow, rowToRun } from '../runs/runStore.ts';
 
 /** Error recorded when a run's lease expires (worker crash); shared with the worker's event payload. */
@@ -48,10 +49,56 @@ export class RunQueue {
     return res.changes === 1;
   }
 
+  /**
+   * Drop this worker's lease. Only does anything once the run is TERMINAL (issue #51).
+   *
+   * Clearing the lease on a still-active run strands it permanently, and this used to be a
+   * silent footgun rather than a documented one: releaseLease sets lease_expires_at to NULL,
+   * while reapExpiredLeases only selects rows with `lease_expires_at IS NOT NULL`. A
+   * STARTING/RUNNING/NEEDS_INPUT run with a NULL lease is therefore invisible to the reaper
+   * forever, and is not claimable either because its status is not QUEUED. Verified directly:
+   *
+   *   after releaseLease:  {"status":"RUNNING","leaseOwner":null,"leaseExpiresAt":null}
+   *   reaper after +10min: {"requeued":[],"failed":[]}
+   *   another worker can claim it: NO -> run is stuck
+   *
+   * Every legitimate caller (execute()'s finally) runs after finalize, so the run is already
+   * terminal in the normal case and this guard is a no-op. What it prevents is the tempting
+   * shortcut of calling releaseLease from a shutdown path -- which is exactly what issue #51
+   * proposed, and which would have converted "fails after 60s and auto-retries" into "stuck
+   * in RUNNING forever, no reaper, no retry, no operator signal".
+   *
+   * An active run that needs its lease dropped must be REQUEUED instead: see
+   * requeueForShutdown and requeueLostLease.
+   */
   releaseLease(runId: string, workerId: string): void {
+    const row = this.runs.get(runId);
+    if (!row || !isTerminal(row.status)) return;
     this.db
       .prepare('UPDATE runs SET lease_owner = NULL, lease_expires_at = NULL WHERE id = ? AND lease_owner = ?')
       .run(runId, workerId);
+  }
+
+  /**
+   * Hand an active run back to the queue because this worker is shutting down (issue #51).
+   *
+   * Same shape as requeueLostLease but matching `lease_owner = ?`: on a graceful shutdown the
+   * current worker IS the owner, whereas requeueLostLease deliberately matches `!= ?` because
+   * a lost lease means somebody else took over. Without this, SIGTERM left in-flight runs
+   * RUNNING until lease expiry (60s default), where the reaper marked them
+   * FAILED(infrastructure) and they were auto-retried -- every deploy turned running work
+   * into spurious infrastructure failures and duplicate agent spend.
+   */
+  requeueForShutdown(runId: string, workerId: string): boolean {
+    const res = this.db
+      .prepare(
+        `UPDATE runs
+         SET status = 'QUEUED', lease_owner = NULL, lease_expires_at = NULL, started_at = NULL
+         WHERE id = ? AND lease_owner = ?
+           AND status IN ('STARTING', 'RUNNING', 'NEEDS_INPUT')`,
+      )
+      .run(runId, workerId);
+    return res.changes === 1;
   }
 
   /** Number of runs currently QUEUED (queue backlog; Mercury.md section 25 alerting). */

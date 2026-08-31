@@ -450,3 +450,174 @@ test('CLI wiring: backlog alert webhook fires when configured via env (issue #5)
     await webhook.close();
   }
 });
+
+test('worker.stop() hands an in-flight run back to the queue instead of failing it (issue #51)', async () => {
+  const repoDir = makeGitRepo(join(envDir(), 'repo-shutdown'));
+  const env = makeEnv({
+    workerEnabled: false,
+    fakeScript: [
+      { event: { type: 'agent.message', payload: { text: 'first' } }, delayMs: 1_200 },
+      { event: { type: 'agent.message', payload: { text: 'second' } } },
+    ],
+  });
+  const a = makeWorker(env, { workerId: 'shutting-down' });
+  const b = makeWorker(env, { workerId: 'successor' });
+  try {
+    a.start();
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repoDir } });
+    await waitFor(() => env.runs.get(run.id)!.status === 'RUNNING', 10_000);
+
+    // This is a deploy. Before the fix the process just exited here, the run stayed RUNNING
+    // until the lease expired ~60s later, the reaper recorded FAILED(infrastructure), and the
+    // run was auto-retried -- spurious failures plus duplicate agent spend on every restart.
+    a.stop();
+
+    await waitFor(() => env.runs.get(run.id)!.status === 'QUEUED', 10_000);
+    assert.equal(env.runs.get(run.id)!.errorKind, null, 'a graceful handback must not record an infrastructure failure');
+    const row = env.db.prepare('SELECT lease_owner, lease_expires_at FROM runs WHERE id = ?').get(run.id) as
+      { lease_owner: string | null; lease_expires_at: string | null };
+    assert.equal(row.lease_owner, null, 'the requeued run must not keep the departed worker as owner');
+    assert.equal(row.lease_expires_at, null);
+
+    // The point of requeueing: somebody else can pick it up immediately, not after a lease expiry.
+    b.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 15_000);
+    assert.equal(env.runs.get(run.id)!.attempt, 1, 'a handback is not a retry');
+  } finally {
+    a.stop();
+    b.stop();
+    env.close();
+  }
+});
+
+test('releaseLease does not strand a still-active run (issue #51)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.queue.claim('w1', 60_000);
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING');
+
+    // Clearing the lease on an active run used to be possible and catastrophic: the reaper
+    // only selects rows with lease_expires_at IS NOT NULL, so the run became invisible to it
+    // forever while remaining unclaimable (status is not QUEUED).
+    env.queue.releaseLease(run.id, 'w1');
+    assert.equal(env.runs.get(run.id)!.leaseOwner, 'w1', 'releaseLease must be a no-op while the run is active');
+
+    // The property that matters is RECOVERABILITY, not that nothing happened. Because the
+    // lease is still live, the reaper can still see the run once it expires. Before the guard
+    // this same call at +10min found nothing at all -- the run was invisible forever.
+    const { failed, requeued } = env.queue.reapExpiredLeases(Date.now() + 10 * 60_000);
+    assert.deepEqual(requeued, []);
+    assert.deepEqual(failed, [run.id], 'the run must still be visible to the reaper, i.e. recoverable');
+    assert.equal(env.runs.get(run.id)!.status, 'FAILED');
+    assert.equal(env.runs.get(run.id)!.errorKind, 'infrastructure');
+
+    // Once terminal, releasing still works -- that is the normal path from execute()'s finally.
+    const other = env.runService.create({ ownerId: 'alice', task: 'z', agent: 'fake' });
+    env.queue.claim('w1', 60_000);
+    env.runs.transition(other.id, 'STARTING');
+    env.runs.transition(other.id, 'RUNNING');
+    env.runs.transition(other.id, 'COMPLETED');
+    env.queue.releaseLease(other.id, 'w1');
+    assert.equal(env.runs.get(other.id)!.leaseOwner, null, 'a terminal run must still have its lease released');
+  } finally {
+    env.close();
+  }
+});
+
+test('requeueForShutdown only requeues runs this worker owns (issue #51)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const mine = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.queue.claim('w1', 60_000);
+    env.runs.transition(mine.id, 'STARTING');
+    env.runs.transition(mine.id, 'RUNNING');
+
+    // A non-owner must not be able to hand somebody else's run back.
+    assert.equal(env.queue.requeueForShutdown(mine.id, 'w2'), false, 'only the owner may requeue on shutdown');
+    assert.equal(env.runs.get(mine.id)!.status, 'RUNNING');
+
+    assert.equal(env.queue.requeueForShutdown(mine.id, 'w1'), true);
+    assert.equal(env.runs.get(mine.id)!.status, 'QUEUED');
+    // and a terminal run is left alone
+    const done = env.runService.create({ ownerId: 'alice', task: 'y', agent: 'fake' });
+    env.queue.claim('w1', 60_000);
+    env.runs.transition(done.id, 'STARTING');
+    env.runs.transition(done.id, 'RUNNING');
+    env.runs.transition(done.id, 'COMPLETED');
+    assert.equal(env.queue.requeueForShutdown(done.id, 'w1'), false, 'a completed run must not be resurrected');
+    assert.equal(env.runs.get(done.id)!.status, 'COMPLETED');
+
+    // The shutdown/cancellation race: if the user cancels at the same moment stop() fires,
+    // drive() can return SHUTDOWN for a run the database already calls CANCELLED. Requeueing
+    // there would resurrect a run the user deliberately stopped and re-execute it -- the
+    // exact class of bug #47 was. The status filter is what prevents it, so it is pinned here
+    // rather than relied upon.
+    const cancelled = env.runService.create({ ownerId: 'alice', task: 'z', agent: 'fake' });
+    env.queue.claim('w1', 60_000);
+    env.runs.transition(cancelled.id, 'STARTING');
+    env.runs.transition(cancelled.id, 'RUNNING');
+    env.runs.transition(cancelled.id, 'CANCELLED');
+    assert.equal(env.queue.requeueForShutdown(cancelled.id, 'w1'), false, 'a cancelled run must never be requeued');
+    assert.equal(env.runs.get(cancelled.id)!.status, 'CANCELLED', 'cancellation must survive a concurrent shutdown');
+  } finally {
+    env.close();
+  }
+});
+
+test('shutdown terminates the agent BEFORE requeueing (issue #51)', async () => {
+  // Why this ordering matters: finalize() requeues, and a requeued run is QUEUED with no
+  // lease, so it is instantly claimable. If the agent process is still alive at that moment,
+  // the successor worker starts a SECOND agent against the same workspace while the first is
+  // still writing into it. The finally block in execute() does terminate, but it runs after
+  // finalize -- so on this path the guarantee the finally documents was not actually held.
+  const repoDir = makeGitRepo(join(envDir(), 'repo-term-order'));
+  const env = makeEnv({
+    workerEnabled: false,
+    fakeScript: [
+      { event: { type: 'agent.message', payload: { text: 'first' } }, delayMs: 1_500 },
+      { event: { type: 'agent.message', payload: { text: 'second' } } },
+    ],
+  });
+
+  let runId = '';
+  const observed: string[] = [];
+  const fake = env.adapters.fake;
+  const innerStart = fake.start.bind(fake);
+  fake.start = (async (ctx: Parameters<typeof innerStart>[0]) => {
+    const handle = await innerStart(ctx);
+    const innerTerminate = handle.terminate.bind(handle);
+    handle.terminate = async () => {
+      // First terminate only: the finally block terminates again and that no-op must not
+      // overwrite the ordering evidence.
+      if (observed.length === 0) observed.push(env.runs.get(ctx.run.id)?.status ?? 'missing');
+      return innerTerminate();
+    };
+    return handle;
+  }) as typeof fake.start;
+
+  const w = makeWorker(env, { workerId: 'ordered-shutdown' });
+  try {
+    w.start();
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repoDir } });
+    runId = run.id;
+    await waitFor(() => env.runs.get(runId)!.status === 'RUNNING', 10_000);
+
+    w.stop();
+    await waitFor(() => env.runs.get(runId)!.status === 'QUEUED', 10_000);
+
+    assert.ok(observed.length > 0, 'the agent must be terminated during a graceful shutdown at all');
+    // The run must still be owned/active when the agent is killed. If this reads 'QUEUED',
+    // the requeue beat the terminate and the double-agent window is open.
+    assert.equal(
+      observed[0],
+      'RUNNING',
+      `agent was terminated while the run was ${observed[0]}; it must still be RUNNING, `
+        + 'otherwise the run is already claimable by another worker while this agent is alive',
+    );
+  } finally {
+    w.stop();
+    env.close();
+  }
+});

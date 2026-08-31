@@ -12,6 +12,13 @@ EnvironmentFile=/etc/mercury/mercury.env
 ExecStart=/usr/bin/env node src/cli.ts worker
 Restart=on-failure
 RestartSec=5
+# Give the worker room to shut down gracefully (issue #51). On SIGTERM it stops claiming,
+# signals its in-flight run to terminate the agent and requeue itself, and waits up to
+# MERCURY_SHUTDOWN_GRACE_MS (30s default) for that to finish. systemd's default of 90s would
+# also work, but naming it here keeps the two numbers visibly coupled: if the in-process grace
+# is ever raised, this must rise with it, or SIGKILL wins the race and the graceful path --
+# and the requeue -- never runs.
+TimeoutStopSec=45
 # Hardening
 NoNewPrivileges=true
 PrivateTmp=true
