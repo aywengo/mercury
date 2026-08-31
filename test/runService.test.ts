@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { openDatabase } from '../src/db/database.ts';
 import { makeEnv, waitFor } from './helpers.ts';
 import type { RunConstraints } from '../src/domain/types.ts';
 import { createRedactor } from '../src/domain/redact.ts';
@@ -358,6 +360,80 @@ test('create redacts task and repository URL at write time (issue #43)', () => {
     assert.ok(!row.task.includes('sk-12345'), 'persisted task secret removed');
     assert.ok(!row.repository_json.includes('pass123'), 'persisted repository secret removed');
     assert.ok(!row.repositories_json.includes('pass456'), 'persisted repositories secret removed');
+  } finally {
+    env.close();
+  }
+});
+
+test('a concurrent cancellation is not silently overwritten by a later transition (issue #48)', async () => {
+  const { Worker } = await import('node:worker_threads');
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING');
+    const dbPath = join(env.dir, 'test.db');
+
+    // A second connection cancels the run and holds the write lock open. WAL does not
+    // block readers, so the contender below still reads RUNNING and passes
+    // assertTransition, while its UPDATE is forced to wait until AFTER the cancellation
+    // commits. That is exactly the interleaving the old read -> validate -> unconditional
+    // UPDATE lost: it wrote COMPLETED over CANCELLED and nothing complained.
+    const holder = openDatabase(dbPath);
+    holder.exec('BEGIN IMMEDIATE');
+    holder.prepare("UPDATE runs SET status = 'CANCELLED' WHERE id = ?").run(run.id);
+
+    const workerSrc = `
+      import { parentPort, workerData } from 'node:worker_threads';
+      import { openDatabase } from ${JSON.stringify(new URL('../src/db/database.ts', import.meta.url).href)};
+      import { RunStore } from ${JSON.stringify(new URL('../src/runs/runStore.ts', import.meta.url).href)};
+      const db = openDatabase(workerData.path);
+      try {
+        new RunStore(db).transition(workerData.id, 'COMPLETED');
+        parentPort.postMessage({ ok: true });
+      } catch (e) {
+        parentPort.postMessage({ ok: false, err: String(e instanceof Error ? e.message : e) });
+      }
+      db.close();
+    `;
+    const worker = new Worker(new URL(`data:text/javascript;base64,${Buffer.from(workerSrc).toString('base64')}`), {
+      workerData: { path: dbPath, id: run.id },
+    });
+    // Hold long enough that the worker has certainly read RUNNING and is parked on the
+    // write lock, then let the cancellation land first.
+    //
+    // The release is idempotent and runs from a finally block (Copilot on #90). If the
+    // worker rejects, or an assertion below throws, a bare clearTimeout would leave this
+    // connection holding a write transaction open -- so the failure path would leak a
+    // locked database into every later test on this file rather than reporting one
+    // failure. Same hazard this repo's own shutdown findings are about.
+    let lockOpen = true;
+    const unlock = () => {
+      if (!lockOpen) return;
+      lockOpen = false;
+      try {
+        holder.exec('COMMIT');
+      } catch {
+        // transaction already finished; nothing to release
+      }
+    };
+    const release = setTimeout(unlock, 400);
+    try {
+      const result = await new Promise<{ ok: boolean; err?: string }>((resolve, reject) => {
+        worker.once('message', resolve);
+        worker.once('error', reject);
+      });
+      unlock();
+
+      assert.ok(!result.ok, 'transition should have lost the race, but it committed');
+      assert.match(result.err ?? '', /lost a race/);
+      assert.equal(env.runs.get(run.id)!.status, 'CANCELLED', 'the cancellation must survive');
+    } finally {
+      clearTimeout(release);
+      unlock();
+      holder.close();
+      await worker.terminate();
+    }
   } finally {
     env.close();
   }

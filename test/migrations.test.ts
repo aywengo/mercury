@@ -166,18 +166,38 @@ test('read-then-write transaction waits for the lock instead of failing instantl
     });
     const started = Date.now();
     const releaseMs = 500;
-    const release = setTimeout(() => db1.exec('COMMIT'), releaseMs);
-    const result = await new Promise<{ ok: boolean; sequence?: number; err?: string }>((resolve, reject) => {
-      worker.once('message', resolve);
-      worker.once('error', reject);
-    });
-    clearTimeout(release);
-    const elapsed = Date.now() - started;
-    assert.ok(result.ok, `append failed while another writer held the lock: ${result.err}`);
-    assert.equal(result.sequence, 2, 'sequence assigned after the row held by db1');
-    assert.ok(elapsed >= releaseMs - 100, `waited ${elapsed}ms (expected to block on the lock)`);
-    assert.ok(elapsed < BUSY_TIMEOUT_MS, `waited ${elapsed}ms (busy_timeout should cap the wait)`);
-    db1.close();
+    // Idempotent release driven from a finally block (Copilot on #90). Without it, a
+    // worker rejection or a failing assertion leaves db1 holding an open write
+    // transaction, so the failure path leaks a locked database into everything that
+    // follows instead of reporting one failure.
+    let lockOpen = true;
+    const unlock = () => {
+      if (!lockOpen) return;
+      lockOpen = false;
+      try {
+        db1.exec('COMMIT');
+      } catch {
+        // transaction already finished; nothing to release
+      }
+    };
+    const release = setTimeout(unlock, releaseMs);
+    try {
+      const result = await new Promise<{ ok: boolean; sequence?: number; err?: string }>((resolve, reject) => {
+        worker.once('message', resolve);
+        worker.once('error', reject);
+      });
+      unlock();
+      const elapsed = Date.now() - started;
+      assert.ok(result.ok, `append failed while another writer held the lock: ${result.err}`);
+      assert.equal(result.sequence, 2, 'sequence assigned after the row held by db1');
+      assert.ok(elapsed >= releaseMs - 100, `waited ${elapsed}ms (expected to block on the lock)`);
+      assert.ok(elapsed < BUSY_TIMEOUT_MS, `waited ${elapsed}ms (busy_timeout should cap the wait)`);
+    } finally {
+      clearTimeout(release);
+      unlock();
+      db1.close();
+      await worker.terminate();
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

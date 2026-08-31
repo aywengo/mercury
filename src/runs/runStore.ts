@@ -130,8 +130,23 @@ export class RunStore {
         params.push(v === null ? null : typeof v === 'object' ? JSON.stringify(v) : (v as string | number));
       }
     }
-    params.push(id);
-    this.db.prepare(`UPDATE runs SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+    // Guard the write on the status we just validated (issue #48). Without it this
+    // was read -> assertTransition -> unconditional UPDATE, so two concurrent
+    // transitions could both read RUNNING, both pass validation, and last-write-wins:
+    // a CANCELLED run could be silently overwritten by COMPLETED. The state machine
+    // was correct in isolation and unenforced at the only place that matters.
+    // A conditional write also needs issue #49's BEGIN IMMEDIATE to be useful --
+    // under a deferred BEGIN the write could fail outright instead of waiting.
+    params.push(id, run.status);
+    const result = this.db
+      .prepare(`UPDATE runs SET ${sets.join(', ')} WHERE id = ? AND status = ?`)
+      .run(...params);
+    if (result.changes !== 1) {
+      const current = this.get(id);
+      throw new Error(
+        `Run ${id} transition ${run.status} -> ${to} lost a race: status is now ${current?.status ?? 'gone'}`,
+      );
+    }
     const updated = this.get(id);
     if (!updated) throw new Error(`Run ${id} disappeared after transition`);
     return updated;
