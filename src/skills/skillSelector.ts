@@ -17,7 +17,7 @@ import { compareSkillIds, type SkillMeta } from './skillRegistry.ts';
 // Exported so a test can check it against the registry (issue #79). A key naming a
 // skill that was renamed or deleted is never consulted at runtime, so without that
 // check a stale entry is invisible.
-export const KEYWORDS: Record<string, string[]> = {
+export const KEYWORDS: Readonly<Partial<Record<string, readonly string[]>>> = {
   planning: ['plan', 'roadmap', 'design', 'architecture', 'approach', 'outline'],
   'repository-analysis': ['inspect', 'analy', 'understand', 'explore', 'codebase', 'repository', 'onboard'],
   implementation: ['implement', 'build', 'create', 'add', 'feature', 'fix', 'change', 'write', 'upgrade', 'migrat'],
