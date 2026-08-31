@@ -260,6 +260,24 @@ export class Worker {
         handle = await adapter.start(context);
       }
       const outcome = await this.drive(run, adapter, handle, skills, startedAt);
+      // Kill the agent BEFORE handing the run back to the queue (issue #51).
+      //
+      // finalize() requeues on the SHUTDOWN path, and a requeued run is QUEUED with no lease
+      // -- instantly claimable. The finally block below also terminates, but it runs AFTER
+      // finalize, so on this path the window was open: another worker could claim the run and
+      // start a second agent against a workspace this agent was still writing into. The
+      // finally's own comment states the intent ("we want the process gone before another
+      // worker can claim the run"); finalize() had quietly moved that guarantee earlier.
+      //
+      // terminate() is idempotent (it sets `terminated` before acting), so the finally's call
+      // is a no-op after this one.
+      if (outcome.status === 'SHUTDOWN' && handle) {
+        try {
+          await handle.terminate();
+        } catch (termErr) {
+          log.warn({ error: String(termErr instanceof Error ? termErr.message : termErr) }, 'agent terminate before requeue failed');
+        }
+      }
       await this.finalize(run, outcome, skills);
     } catch (err) {
       const raw = String(err instanceof Error ? err.message : err);

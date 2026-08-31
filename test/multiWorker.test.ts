@@ -565,3 +565,59 @@ test('requeueForShutdown only requeues runs this worker owns (issue #51)', () =>
     env.close();
   }
 });
+
+test('shutdown terminates the agent BEFORE requeueing (issue #51)', async () => {
+  // Why this ordering matters: finalize() requeues, and a requeued run is QUEUED with no
+  // lease, so it is instantly claimable. If the agent process is still alive at that moment,
+  // the successor worker starts a SECOND agent against the same workspace while the first is
+  // still writing into it. The finally block in execute() does terminate, but it runs after
+  // finalize -- so on this path the guarantee the finally documents was not actually held.
+  const repoDir = makeGitRepo(join(envDir(), 'repo-term-order'));
+  const env = makeEnv({
+    workerEnabled: false,
+    fakeScript: [
+      { event: { type: 'agent.message', payload: { text: 'first' } }, delayMs: 1_500 },
+      { event: { type: 'agent.message', payload: { text: 'second' } } },
+    ],
+  });
+
+  let runId = '';
+  const observed: string[] = [];
+  const fake = env.adapters.fake;
+  const innerStart = fake.start.bind(fake);
+  fake.start = (async (ctx: Parameters<typeof innerStart>[0]) => {
+    const handle = await innerStart(ctx);
+    const innerTerminate = handle.terminate.bind(handle);
+    handle.terminate = async () => {
+      // First terminate only: the finally block terminates again and that no-op must not
+      // overwrite the ordering evidence.
+      if (observed.length === 0) observed.push(env.runs.get(ctx.run.id)?.status ?? 'missing');
+      return innerTerminate();
+    };
+    return handle;
+  }) as typeof fake.start;
+
+  const w = makeWorker(env, { workerId: 'ordered-shutdown' });
+  try {
+    w.start();
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repoDir } });
+    runId = run.id;
+    await waitFor(() => env.runs.get(runId)!.status === 'RUNNING', 10_000);
+
+    w.stop();
+    await waitFor(() => env.runs.get(runId)!.status === 'QUEUED', 10_000);
+
+    assert.ok(observed.length > 0, 'the agent must be terminated during a graceful shutdown at all');
+    // The run must still be owned/active when the agent is killed. If this reads 'QUEUED',
+    // the requeue beat the terminate and the double-agent window is open.
+    assert.equal(
+      observed[0],
+      'RUNNING',
+      `agent was terminated while the run was ${observed[0]}; it must still be RUNNING, `
+        + 'otherwise the run is already claimable by another worker while this agent is alive',
+    );
+  } finally {
+    w.stop();
+    env.close();
+  }
+});
