@@ -177,10 +177,14 @@ export class Worker {
     if (!current || isTerminal(current.status) || current.status !== 'QUEUED' || current.leaseOwner !== this.deps.workerId) {
       log.warn({ status: current?.status ?? 'missing', leaseOwner: current?.leaseOwner ?? null }, 'skipping run: not owned or no longer queued');
       // Release before returning (issue #71). This return sits ABOVE the try/finally that
-      // owns releaseLease, so a skipped run -- typically one cancelled between claim and
-      // execute -- kept lease_owner and lease_expires_at forever. Nothing ever revisits it:
-      // the reaper only selects non-terminal statuses, and the run is terminal by definition
-      // of being skipped here. The claim was ours, so dropping it is ours to do.
+      // owns releaseLease, so a skipped run kept lease_owner and lease_expires_at forever.
+      //
+      // The case that leaks is a TERMINAL skip -- typically a run cancelled between claim and
+      // execute. Nothing ever revisits those: the reaper only selects non-terminal statuses,
+      // and a terminal run is not claimable, so the stale lease is permanent. The guard also
+      // fires for non-terminal runs that are no longer QUEUED or are owned by someone else;
+      // those are recoverable by other means, and releaseLease leaves them alone anyway
+      // (it no-ops unless the run is terminal). The claim was ours, so dropping it is ours.
       //
       // releaseLease is safe on every branch of the guard above: it matches
       // `lease_owner = ?` with OUR worker id, so a run owned by another worker is untouched,

@@ -684,8 +684,10 @@ test('a failed event append rolls the reap back rather than leaving a FAILED run
 test('a skipped run releases the lease it already holds (issue #71)', async () => {
   // The ownership guard at the top of execute() returned BEFORE the try/finally that owns
   // releaseLease, so a run cancelled between claim and execute kept lease_owner and
-  // lease_expires_at forever. Nothing revisits it: the reaper only selects non-terminal
-  // statuses, and a skipped run is terminal by definition.
+  // lease_expires_at forever. Nothing revisits a TERMINAL skipped run: the reaper only selects
+  // non-terminal statuses, and a terminal run is not claimable. (The guard also skips
+  // non-terminal runs that moved on or belong to another worker -- those do not leak, and this
+  // test covers the terminal case that does.)
   const env = makeEnv({ workerEnabled: false });
   const w = makeWorker(env, { workerId: 'skipper' });
   try {
