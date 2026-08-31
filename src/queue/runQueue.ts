@@ -129,14 +129,14 @@ export class RunQueue {
   /**
    * Reap runs whose lease expired (worker crashed).
    * QUEUED -> lease cleared (re-claimable). Active -> FAILED (infrastructure), per Mercury.md section 17.
-   */
-  /**
+   *
    * @param onFailed invoked INSIDE the transaction, once per run this reaper actually
    *   transitioned to FAILED. Issue #61: the caller used to append the `error` and
    *   `run.failed` events AFTER this transaction committed, so a crash in that window left a
    *   run marked FAILED with no failure event at all -- the timeline silently contradicted the
    *   state, and an operator reading the run saw it stop with no explanation. Events and the
-   *   state they describe must become visible together.
+   *   state they describe must become visible together. If the callback throws, the whole reap
+   *   rolls back, leaving the run RUNNING with its lease intact so it stays recoverable.
    *
    *   Safe to call EventStore.append from here: tx() is re-entrant (it tracks depth per
    *   connection), so the nested BEGIN joins this transaction instead of erroring.
