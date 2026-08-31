@@ -69,6 +69,17 @@ git-worktree workspaces, `prime-agent --mode rpc`).
 - `test/helpers.ts::makeEnv` builds an isolated temp-dir env (own SQLite, fake worker). Close it
   in `finally`.
 
+## Fixing issues
+
+Fix tracked issues with the per-issue loop in
+[`.agents/skills/issue-fix-loop/SKILL.md`](.agents/skills/issue-fix-loop/SKILL.md):
+analyze root cause → implement at the choke point with a regression test
+(prove it fails without the fix) → one PR per issue (`fix/issue-<N>-<slug>`,
+`Fixes #N`) → independent sub-agent review → address or waive every comment
+(with a reason) or file a new issue → merge. Hard rules: one issue → one PR;
+unrelated review findings become new issues, never PR scope creep; work in
+priority order (security first within a tier).
+
 ## Common mistakes
 
 - Assuming `run.repositories` includes the primary — it does not; `run.repository` is primary.
