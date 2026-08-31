@@ -46,6 +46,19 @@ export interface Config {
   sandboxRuntime: string | null;
   /** Container image for sandboxed execution (MERCURY_SANDBOX_IMAGE). */
   sandboxImage: string | null;
+  /**
+   * Environment variables forwarded into the sandbox container
+   * (MERCURY_SANDBOX_ENV, comma-separated). Unset -> the built-in allowlist of model
+   * provider keys. Set to empty -> forward nothing but PATH. Never a copy of the
+   * worker's environment: the container runs untrusted agents.
+   */
+  sandboxEnv: string[] | null;
+  /**
+   * Whether the host storage driver honours `--storage-opt size=`
+   * (MERCURY_SANDBOX_DISK_LIMITS=true). Off by default because the common
+   * overlay2-on-ext4 docker install rejects the flag outright.
+   */
+  sandboxDiskLimits: boolean;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
 
@@ -108,6 +121,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     agentMode: env.MERCURY_AGENT_MODE === 'daemon' ? 'daemon' : 'rpc',
     sandboxRuntime: env.MERCURY_SANDBOX_RUNTIME ?? null,
     sandboxImage: env.MERCURY_SANDBOX_IMAGE ?? null,
+    sandboxEnv:
+      env.MERCURY_SANDBOX_ENV === undefined
+        ? null
+        : env.MERCURY_SANDBOX_ENV.split(',').map((v) => v.trim()).filter(Boolean),
+    sandboxDiskLimits: env.MERCURY_SANDBOX_DISK_LIMITS === 'true',
     logLevel: (env.MERCURY_LOG_LEVEL as Config['logLevel']) ?? 'info',
   };
 }
