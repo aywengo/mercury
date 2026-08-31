@@ -76,7 +76,12 @@ async function main(): Promise<void> {
   });
 
   const workerId = `worker-${process.pid}`;
-  const sandbox = new SandboxManager({ runtime: process.env.MERCURY_SANDBOX_RUNTIME });
+  const sandbox = new SandboxManager({
+    runtime: process.env.MERCURY_SANDBOX_RUNTIME,
+    image: config.sandboxImage ?? undefined,
+    envAllowlist: config.sandboxEnv ?? undefined,
+    diskLimitsSupported: config.sandboxDiskLimits,
+  });
   const adapters: Record<string, import('./adapters/agentAdapter.ts').AgentAdapter> = {
     primeagent: config.agentMode === 'daemon'
       ? new DaemonAgentAdapter(config.primeAgentCmd, { args: config.primeAgentArgs, sandbox, workerId })

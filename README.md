@@ -167,7 +167,9 @@ QUEUED → STARTING → RUNNING ⇄ NEEDS_INPUT → COMPLETED / FAILED / CANCELL
 | `MERCURY_REMOTE_AGENTS_DIR` | `./remote-agents` | Directory of JSON `RemoteAgentConfig` files; each file registers a declarative remote API agent (see `docs/agent-adapters.md` §5) |
 | `MERCURY_RPC_AGENTS_DIR` | `./rpc-agents` | Directory of JSON `RpcAgentConfig` files; each file registers a declarative RPC-protocol agent — `pi`, `omp`, or any CLI speaking the RPC JSONL family (see `docs/agent-adapters.md` §6) |
 | `MERCURY_SANDBOX_RUNTIME` | — | `docker` or `podman` to run the agent in a container with resource/network limits; `none` disables |
-| `MERCURY_SANDBOX_IMAGE` | — | Container image for sandboxed execution |
+| `MERCURY_SANDBOX_IMAGE` | — | Container image for sandboxed execution; must contain the agent binary and git (see Sandboxed execution) |
+| `MERCURY_SANDBOX_ENV` | provider keys | Comma-separated env vars forwarded into the container. Empty = forward nothing but `PATH`. Never a copy of the worker's environment |
+| `MERCURY_SANDBOX_DISK_LIMITS` | `false` | Set `true` only when the host storage driver honours `--storage-opt size=` |
 
 ## Local CLI agents (LocalAgentAdapter)
 
@@ -322,6 +324,39 @@ inside a container with the Run's cpu/memory/disk limits and network policy (`no
 otherwise bridge). The worker **fails closed**: a Run that requests isolation but has no
 runtime available is FAILED at setup instead of silently running unsandboxed. Runs without the
 constraint run directly on the host.
+
+### Image requirements
+
+Nothing verifies these, and each failure looks unrelated to the sandbox, so build the image
+yourself and point `MERCURY_SANDBOX_IMAGE` at it. The image MUST contain:
+
+1. **the agent binary** the Run's adapter invokes. The default `node:22-bookworm-slim` does
+   **not** contain `prime-agent`, so sandboxed runs fail with `executable not found` — an error
+   that mentions neither the sandbox nor the image.
+2. a compatible Node runtime for that binary;
+3. **git**, because the workspace mount is committed from inside the container.
+
+### Environment passthrough
+
+The container runs **untrusted** agents, so its environment is an allowlist, never a copy of the
+worker's. By default only model-provider keys are forwarded (`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`,
+`XAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `HF_TOKEN`, `AZURE_OPENAI_API_KEY`,
+`AZURE_OPENAI_ENDPOINT`, `AWS_BEARER_TOKEN_BEDROCK`) — and only those actually set.
+
+Forwarding them means **the container can spend your inference budget**; that is the trade, and
+the reason this is an allowlist. `MERCURY_SANDBOX_ENV` overrides the list; set it to empty to
+forward nothing but `PATH` (sandboxed runs then cannot authenticate). `MERCURY_*`, `GH_TOKEN`,
+`GITHUB_TOKEN`, `GIT_*` and broad cloud credentials are **refused regardless of configuration** —
+an over-broad `MERCURY_SANDBOX_ENV` will not hand over the service.
+
+### Disk limits are off by default
+
+`docker run --storage-opt size=` is honoured only on overlay2-on-**xfs**, btrfs, zfs or
+devicemapper. On the default overlay2-on-ext4 install docker **rejects the flag**, so the Run
+dies before the agent starts with an error naming neither disk nor Mercury. Mercury therefore
+does not emit the flag unless you set `MERCURY_SANDBOX_DISK_LIMITS=true`, and fails a Run that
+requests `resourceLimits.disk` with an explanation instead.
 
 ## Testing
 
