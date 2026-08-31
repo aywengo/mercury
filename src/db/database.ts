@@ -138,7 +138,15 @@ export function tx<T>(db: DatabaseSync, fn: () => T): T {
       txDepths.set(db, depth);
     }
   }
-  db.exec('BEGIN');
+  // IMMEDIATE, not deferred (issue #49). A deferred BEGIN takes the write lock
+  // lazily, so a transaction that reads and then writes -- which is every
+  // EventStore.append, since it reads MAX(sequence) before inserting -- has to
+  // UPGRADE its read lock to a write lock. SQLite returns SQLITE_BUSY immediately
+  // on that upgrade instead of honouring PRAGMA busy_timeout, so a competing
+  // writer makes the append throw in ~0ms despite the 5s timeout configured at
+  // openDatabase(). BEGIN IMMEDIATE takes the write lock up front, so the same
+  // contention waits (and succeeds) instead of failing.
+  db.exec('BEGIN IMMEDIATE');
   txDepths.set(db, 1);
   try {
     const result = fn();
