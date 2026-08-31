@@ -130,3 +130,55 @@ test('concurrent writer waits for the lock instead of failing with SQLITE_BUSY (
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('read-then-write transaction waits for the lock instead of failing instantly (issue #49)', async () => {
+  const { Worker } = await import('node:worker_threads');
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-defer-'));
+  const dbPath = join(dir, 'test.db');
+  try {
+    const db1 = openDatabase(dbPath);
+    db1.exec('BEGIN IMMEDIATE');
+    db1
+      .prepare('INSERT INTO events (id, run_id, type, sequence, timestamp, payload_json) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('evt_hold', 'r1', 'run.queued', 1, new Date().toISOString(), '{}');
+    // The test above writes first, which takes the write lock at the first statement and
+    // so does honour busy_timeout even under a deferred BEGIN -- it passes either way and
+    // never caught this. EventStore.append is different: it reads MAX(sequence) and then
+    // INSERTs. Under a deferred BEGIN the read takes a SHARED lock and the INSERT must
+    // UPGRADE it, and SQLite answers that upgrade with SQLITE_BUSY immediately without
+    // consulting PRAGMA busy_timeout. So this append used to throw in ~0ms while db1 still
+    // held the lock, despite the 5s timeout configured in openDatabase().
+    const workerSrc = `
+      import { parentPort, workerData } from 'node:worker_threads';
+      import { openDatabase } from ${JSON.stringify(new URL('../src/db/database.ts', import.meta.url).href)};
+      import { EventStore } from ${JSON.stringify(new URL('../src/events/eventStore.ts', import.meta.url).href)};
+      const db = openDatabase(workerData.path);
+      try {
+        const ev = new EventStore(db).append('r1', 'agent.message', { n: 1 });
+        parentPort.postMessage({ ok: true, sequence: ev.sequence });
+      } catch (e) {
+        parentPort.postMessage({ ok: false, err: String(e instanceof Error ? e.message : e) });
+      }
+      db.close();
+    `;
+    const worker = new Worker(new URL(`data:text/javascript;base64,${Buffer.from(workerSrc).toString('base64')}`), {
+      workerData: { path: dbPath },
+    });
+    const started = Date.now();
+    const releaseMs = 500;
+    const release = setTimeout(() => db1.exec('COMMIT'), releaseMs);
+    const result = await new Promise<{ ok: boolean; sequence?: number; err?: string }>((resolve, reject) => {
+      worker.once('message', resolve);
+      worker.once('error', reject);
+    });
+    clearTimeout(release);
+    const elapsed = Date.now() - started;
+    assert.ok(result.ok, `append failed while another writer held the lock: ${result.err}`);
+    assert.equal(result.sequence, 2, 'sequence assigned after the row held by db1');
+    assert.ok(elapsed >= releaseMs - 100, `waited ${elapsed}ms (expected to block on the lock)`);
+    assert.ok(elapsed < BUSY_TIMEOUT_MS, `waited ${elapsed}ms (busy_timeout should cap the wait)`);
+    db1.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
