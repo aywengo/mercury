@@ -137,6 +137,18 @@ export interface AgentAdapter {
    *  retries, `resumeSessionFile` (the parent run's persisted session file).
    *  Returns a handle to drive, like start(). */
   resume?(runId: string, context?: RunContext): Promise<AgentHandle>;
+  /**
+   * Drop any per-run state the adapter keeps. Called by the worker AFTER handle.terminate()
+   * has resolved, on every exit path (issues #62, #97).
+   *
+   * The ordering is load-bearing and must not be "optimised". Adapters look the session up by
+   * runId inside terminate(), so pruning earlier -- for instance when the exit promise settles
+   * -- makes terminate() find nothing and return without stopping the process. That is exactly
+   * the leak #46 fixed: a live `prime-agent --mode rpc` left behind per completed run.
+   * Settling the exit and releasing the session are different moments; only the second is safe
+   * to prune at.
+   */
+  dispose?(runId: string): void;
 }
 
 // Allowed Mercury event types (Mercury.md section 14).

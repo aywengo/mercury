@@ -101,6 +101,13 @@ export class FakeAgentAdapter implements AgentAdapter {
     }
   }
 
+  /** Release per-run state once the worker is finished with the run (issues #62, #97). */
+  dispose(runId: string): void {
+    this.inputs.delete(runId);
+    this.inputWaiters.delete(runId);
+    this.cancelled.delete(runId);
+  }
+
   async cancel(runId: string): Promise<void> {
     this.cancelled.add(runId);
     this.resolveInputWaiters(runId);

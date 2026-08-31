@@ -280,6 +280,24 @@ export class Worker {
           log.warn({ error: String(termErr instanceof Error ? termErr.message : termErr) }, 'agent terminate failed');
         }
       }
+      // Release the adapter's per-run state LAST (issues #62, #97). Every adapter keyed a
+      // session by runId and nothing ever removed it, so a long-lived worker accumulated one
+      // Session -- run row, RPC client, stderr buffer, event queue -- per run for the lifetime
+      // of the process.
+      //
+      // This MUST come after terminate(): adapters resolve the session by runId inside
+      // terminate(), so pruning first makes terminate() find nothing and return without
+      // stopping the process, which is the exact leak #46 fixed.
+      //
+      // Guarded for the same reason terminate() is, two lines above: this is cleanup-only code
+      // and sits before releaseLease(), so a throw from any adapter's dispose() -- now or in a
+      // future adapter -- would skip releaseLease and strand the lease. A leaked session is
+      // strictly better than a stranded run, so failures are logged and swallowed.
+      try {
+        this.deps.adapters[run.agent]?.dispose?.(run.id);
+      } catch (disposeErr) {
+        log.warn({ error: String(disposeErr instanceof Error ? disposeErr.message : disposeErr) }, 'adapter dispose failed');
+      }
       this.deps.queue.releaseLease(run.id, this.deps.workerId);
     }
   }

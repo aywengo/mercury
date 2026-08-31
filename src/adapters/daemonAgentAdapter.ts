@@ -271,6 +271,15 @@ export class DaemonAgentAdapter implements AgentAdapter {
     session.translator.clearPending();
   }
 
+  /**
+   * Release per-run state once the worker is finished with the run (issues #62, #97).
+   * The worker calls this after handle.terminate() has resolved; see AgentAdapter.dispose
+   * for why pruning any earlier reintroduces the #46 process leak.
+   */
+  dispose(runId: string): void {
+    this.sessions.delete(runId);
+  }
+
   async cancel(runId: string): Promise<void> {
     const session = this.sessions.get(runId);
     if (!session?.socket) return;
