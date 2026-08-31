@@ -401,17 +401,39 @@ test('a concurrent cancellation is not silently overwritten by a later transitio
     });
     // Hold long enough that the worker has certainly read RUNNING and is parked on the
     // write lock, then let the cancellation land first.
-    const release = setTimeout(() => holder.exec('COMMIT'), 400);
-    const result = await new Promise<{ ok: boolean; err?: string }>((resolve, reject) => {
-      worker.once('message', resolve);
-      worker.once('error', reject);
-    });
-    clearTimeout(release);
-    holder.close();
+    //
+    // The release is idempotent and runs from a finally block (Copilot on #90). If the
+    // worker rejects, or an assertion below throws, a bare clearTimeout would leave this
+    // connection holding a write transaction open -- so the failure path would leak a
+    // locked database into every later test on this file rather than reporting one
+    // failure. Same hazard this repo's own shutdown findings are about.
+    let lockOpen = true;
+    const unlock = () => {
+      if (!lockOpen) return;
+      lockOpen = false;
+      try {
+        holder.exec('COMMIT');
+      } catch {
+        // transaction already finished; nothing to release
+      }
+    };
+    const release = setTimeout(unlock, 400);
+    try {
+      const result = await new Promise<{ ok: boolean; err?: string }>((resolve, reject) => {
+        worker.once('message', resolve);
+        worker.once('error', reject);
+      });
+      unlock();
 
-    assert.ok(!result.ok, 'transition should have lost the race, but it committed');
-    assert.match(result.err ?? '', /lost a race/);
-    assert.equal(env.runs.get(run.id)!.status, 'CANCELLED', 'the cancellation must survive');
+      assert.ok(!result.ok, 'transition should have lost the race, but it committed');
+      assert.match(result.err ?? '', /lost a race/);
+      assert.equal(env.runs.get(run.id)!.status, 'CANCELLED', 'the cancellation must survive');
+    } finally {
+      clearTimeout(release);
+      unlock();
+      holder.close();
+      await worker.terminate();
+    }
   } finally {
     env.close();
   }
