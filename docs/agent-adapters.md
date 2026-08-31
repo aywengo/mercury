@@ -830,6 +830,36 @@ true; await adapter.cancel(run.id); break`). Worker test: a hanging mock agent
 + `POST /cancel` → run reaches CANCELLED promptly (E2E verified: 0.3s vs the
 previous 1h max-duration timeout).
 
+### Findings (architecture review, 2026-08-31) — ⚠️ open
+
+The full review lives in [`architecture-review.md`](architecture-review.md). The findings
+below touch the adapter layer or the contract every adapter shares. Each was verified
+directly in source at commit `d005fad`; none is asserted on a reviewer's authority.
+
+| Issue | Sev | Finding | Where |
+| --- | --- | --- | --- |
+| [#46](https://github.com/aywengo/mercury/issues/46) | High | Successful run leaks the agent process — the exit promise is settled on `agent.end` but the client is never stopped; `terminate()` is only reached on timeout. | `primeAgentAdapter.ts:176-181` |
+| [#47](https://github.com/aywengo/mercury/issues/47) | High | A cancelled run can keep being executed and written to: the second throw in the catch unwinds before any `terminate()`, so the agent survives and keeps editing a cancelled workspace. | `worker.ts:237-245` |
+| [#55](https://github.com/aywengo/mercury/issues/55) | High | Daemon `terminate()` sets `done = true` but never settles the exit, so the process-exit handler refuses to and the worker fabricates a `SIGKILL` exit after a 10 s stall. `cancel()` in the same file does it correctly. | `daemonAgentAdapter.ts:240-246` |
+| [#68](https://github.com/aywengo/mercury/issues/68) | Med | `readFrame` discards every byte after the first frame in a chunk, so pipelined frames are silently dropped; the `error` listener is also never removed. | `daemonAgentAdapter.ts:308-324` |
+| [#62](https://github.com/aywengo/mercury/issues/62) | Med | The per-run `sessions` Map is never pruned — no `.delete` anywhere in `src/adapters/`. Session objects and buffers live for the worker's lifetime. | `primeAgentAdapter.ts:78,120` |
+| [#50](https://github.com/aywengo/mercury/issues/50) | High | SSE frame injection: adapters may emit arbitrary event types and the worker passes them through unvalidated into the SSE frame. The adapter layer is the producer; enforcement belongs at the write choke point. | `worker.ts:425`, `routes.ts:134` |
+| [#60](https://github.com/aywengo/mercury/issues/60) | Med | The `EVENT_TYPES` contract is unenforced (`isEventType()` is never called) and two internally-appended types are not even in the set. Directly enables #50. | `types.ts:141-175` |
+| [#56](https://github.com/aywengo/mercury/issues/56) | High | The sandbox forwards only `PATH` despite a comment promising environment passthrough, so any sandboxed adapter run fails at the first provider call. Affects the `sandbox` row in §7. | `sandboxManager.ts:109-111` |
+| [#74](https://github.com/aywengo/mercury/issues/74) | — | Remediation plan and dependency order for all review findings. Read before starting work: severity order is not the right order. | — |
+
+**The pattern worth acting on.** #46, #47, #55 and #62 are one bug class — exit settlement
+and session lifetime — hand-rolled across five adapters with three different answers, one
+of them wrong. That is a correctness argument for the shared adapter base class
+(spawn, stderr buffering, exit settlement, session lifetime), not a tidiness one.
+[#30](https://github.com/aywengo/mercury/issues/30) already tracks the same duplication in
+the `extension_ui_response` shape and should be folded into that work rather than fixed
+separately.
+
+**New adapters should assume these are open.** Until #46/#55 land, an adapter that settles
+its exit before stopping its process leaks. Until #50/#60 land, an adapter emitting an
+unrecognised event type has it persisted and streamed verbatim.
+
 ---
 
 ## 8. Acceptance criteria (per adapter)
