@@ -1,14 +1,11 @@
 // AgentAdapter contract (Mercury.md section 8).
 // Mercury MUST NOT call agent-specific APIs outside this boundary.
+//
+// The interface itself lives in src/domain/types.ts, which is what the worker and every
+// adapter implement against. This module used to declare its OWN copy, and the two drifted:
+// `dispose` (issues #62, #97) had to be added in both places or the worker would not see it,
+// which is a trap for the next person to extend the contract. Re-export instead.
 
-import type { AgentHandle, AgentInput, RunContext } from '../domain/types.ts';
+import type { AgentAdapter } from '../domain/types.ts';
 
-export interface AgentAdapter {
-  start(context: RunContext): Promise<AgentHandle>;
-  sendInput(runId: string, input: AgentInput): Promise<void>;
-  cancel(runId: string): Promise<void>;
-  /** Resume a run's agent session (worker retry path). Returns a handle to drive. */
-  resume?(runId: string, context?: RunContext): Promise<AgentHandle>;
-}
-
-export type { AgentHandle, AgentInput, RunContext };
+export type { AgentAdapter };

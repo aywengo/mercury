@@ -280,6 +280,15 @@ export class Worker {
           log.warn({ error: String(termErr instanceof Error ? termErr.message : termErr) }, 'agent terminate failed');
         }
       }
+      // Release the adapter's per-run state LAST (issues #62, #97). Every adapter keyed a
+      // session by runId and nothing ever removed it, so a long-lived worker accumulated one
+      // Session -- run row, RPC client, stderr buffer, event queue -- per run for the lifetime
+      // of the process.
+      //
+      // This MUST come after terminate(): adapters resolve the session by runId inside
+      // terminate(), so pruning first makes terminate() find nothing and return without
+      // stopping the process, which is the exact leak #46 fixed.
+      this.deps.adapters[run.agent]?.dispose?.(run.id);
       this.deps.queue.releaseLease(run.id, this.deps.workerId);
     }
   }

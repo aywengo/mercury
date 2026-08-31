@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeEnv, makeGitRepo, waitFor, sleep } from './helpers.ts';
+import { PrimeAgentAdapter } from '../src/adapters/primeAgentAdapter.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, RunContext } from '../src/domain/types.ts';
 
@@ -776,6 +777,99 @@ test('a run that throws mid-drive still terminates its agent handle (issue #47)'
     assert.equal(adapter.terminateCalls, 1, 'the throwing path must still terminate the handle');
   } finally {
     env.worker.stop();
+    env.close();
+  }
+});
+
+// --- session pruning (issues #62, #97) -------------------------------------
+//
+// Every adapter keyed a Session by runId and nothing ever removed it, so a long-lived worker
+// accumulated one Session -- run row, RPC client, stderr buffer, event queue -- per run for the
+// lifetime of the process. The fix is adapter.dispose(runId), called by the worker's finally.
+//
+// The ordering is the interesting part: adapters resolve the session by runId INSIDE
+// terminate(), so pruning before terminate() makes it find nothing and return without stopping
+// the process -- reintroducing the #46 leak. These tests pin both halves together, because a
+// test that only checked the map would pass while silently re-opening the leak.
+
+const MOCK_RPC = join(import.meta.dirname, 'fixtures', 'mock-prime-agent-rpc.mjs');
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Adapters keep `sessions` private; at runtime it is an ordinary property. */
+function sessionKeys(adapter: object): string[] {
+  return [...((adapter as unknown as { sessions: Map<string, unknown> }).sessions?.keys() ?? [])];
+}
+
+test('worker releases the adapter session AFTER stopping the process (issues #62, #97)', async () => {
+  const repo = makeGitRepo(join(tmpdir(), `mercury-dispose-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`));
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-dispose-pid-'));
+  const pidFile = join(dir, 'pid');
+  process.env.MOCK_RPC_MODE = 'happy';
+  process.env.MOCK_RPC_PID_FILE = pidFile;
+  const adapter = new PrimeAgentAdapter(MOCK_RPC, { args: [] });
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, adapters: { primeagent: adapter } });
+  let pid = 0;
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'primeagent', repository: { localPath: repo, baseBranch: 'main' },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 20_000);
+
+    pid = Number(readFileSync(pidFile, 'utf8'));
+    assert.ok(Number.isInteger(pid) && pid > 0, 'the fixture must record its pid');
+
+    // Half 1 -- #46 must not come back. dispose() runs after terminate(), so terminate() still
+    // finds its session and stops the process.
+    const deadline = Date.now() + 5_000;
+    while (alive(pid) && Date.now() < deadline) await sleep(25);
+    assert.ok(!alive(pid), `RPC process ${pid} survived the run: dispose() reordered before terminate()`);
+
+    // Half 2 -- #62/#97: the session is actually released.
+    assert.ok(!sessionKeys(adapter).includes(run.id),
+      `adapter still holds a session for completed run ${run.id}; the map grows without bound`);
+  } finally {
+    // Reap unconditionally: a leaked child keeps the parent's stdio open and the runner HANGS
+    // instead of reporting a failure (learned the hard way in #46).
+    if (pid > 0) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // already gone, which is the expected case
+      }
+    }
+    env.close();
+    delete process.env.MOCK_RPC_MODE;
+    delete process.env.MOCK_RPC_PID_FILE;
+  }
+});
+
+test('worker releases the adapter session on the failure path too (issues #62, #97)', async () => {
+  // The success path is the easy one. dispose() lives in execute()'s finally, so a failing run
+  // must release it as well -- otherwise a crash loop leaks one Session per attempt, which is
+  // the worst case for a long-lived worker.
+  const repo = makeGitRepo(join(tmpdir(), `mercury-dispose-fail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`));
+  const env = makeEnv({
+    workspaceMode: 'copy',
+    repoDir: repo,
+    fakeScript: [{ fail: true }],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo, baseBranch: 'main' },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 20_000);
+    const fake = env.adapters.fake as unknown as { inputs: Map<string, unknown>; inputWaiters: Map<string, unknown> };
+    assert.ok(!fake.inputs.has(run.id), 'per-run inputs must be released after a failed run');
+    assert.ok(!fake.inputWaiters.has(run.id), 'per-run input waiters must be released after a failed run');
+  } finally {
     env.close();
   }
 });
