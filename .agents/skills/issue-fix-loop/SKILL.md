@@ -1,6 +1,6 @@
 ---
 name: issue-fix-loop
-version: 1.0.0
+version: 1.1.0
 description: Fix a tracked issue through the proven per-issue loop — root-cause analysis, scoped fix with regression test, one PR, independent sub-agent review, merge. Use when fixing a GitHub issue or any bug tracked as a unit of work.
 capabilities: [bugfix, issue, pull-request, review, workflow, regression]
 ---
@@ -13,6 +13,13 @@ creep in the current PR.
 
 Work issues in priority order (`priority: high` -> `medium` -> `low`;
 security-tagged issues first within a tier).
+
+Priority is a tie-breaker, not a schedule. Dependency order beats priority
+order: a fix that other fixes depend on goes first even when it ranks lower
+in severity or lacks a `security` tag. Before starting, check whether the
+repo tracks a dependency/remediation issue and follow its order over
+severity order; when a dependency is not recorded anywhere, add it to the
+issue as a `blocked by` note rather than leaving it in prose.
 
 ## The loop
 
@@ -35,11 +42,15 @@ security-tagged issues first within a tier).
    - Repeat review until all comments are addressed.
 6. **Merge** — merge, close the issue, record the closing PR/commit.
 
-Then pick up the next open issue by priority.
+Then pick up the next open issue by priority, after the dependency check
+above.
 
 ## Rules of thumb
 
 - One issue -> one PR. Unrelated work -> new issue.
+- Dependency order beats priority order. Confirm the base your fix relies on
+  is already merged; a guard added on top of an unfixed prerequisite is
+  unreliable even when it reads correct and passes its own test.
 - A regression test must be proven: it fails on the base, passes on the fix.
 - Fix at the single choke point so future callers cannot bypass it.
 - Waived findings need a one-line reason; do not silently drop them.
