@@ -178,6 +178,20 @@ test('worker fail-closed: run requesting isolation without runtime fails', async
 
 // --- environment passthrough and disk-limit portability (issue #56) ---------
 
+/**
+ * Restore process.env IN PLACE. `process.env = saved` swaps the object out, so anything that
+ * captured a reference to the original (a module-level destructure, a long-lived child's env
+ * template) keeps the stale one, and mutations leak into tests that ran already.
+ */
+function restoreEnv(saved: Record<string, string | undefined>): void {
+  for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+  for (const [key, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
+
+
 const LIMITS = { maxDurationMs: 1000, maxRetries: 0, resourceLimits: { cpu: '1' } };
 
 function envFlags(args: string[]): string[] {
@@ -205,7 +219,7 @@ test('buildCommand: forwards allowlisted provider credentials, not just PATH (is
     assert.ok(!flags.some((f) => f.includes('should-not-appear')), 'a var outside the allowlist must never be forwarded');
     assert.ok(flags.some((f) => f.startsWith('PATH=')), 'PATH is still pinned');
   } finally {
-    process.env = saved;
+    restoreEnv(saved);
   }
 });
 
@@ -231,7 +245,7 @@ test('buildCommand: never forwards Mercury secrets even when explicitly allowlis
     assert.ok(!flags.some((f) => f.startsWith('GH_TOKEN=')), 'source-control credentials must not be forwarded');
     assert.ok(!flags.some((f) => f.includes('admin-secret') || f.includes('ghp_secret')), 'a secret value leaked');
   } finally {
-    process.env = saved;
+    restoreEnv(saved);
   }
 });
 
@@ -244,7 +258,7 @@ test('buildCommand: an explicitly empty allowlist forwards nothing but PATH (iss
     assert.deepEqual(flags.filter((f) => !f.startsWith('PATH=')), [],
       'an operator narrowing the allowlist to nothing must get exactly that');
   } finally {
-    process.env = saved;
+    restoreEnv(saved);
   }
 });
 
@@ -274,4 +288,48 @@ test('buildCommand: disk limit is passed once the host declares support (issue #
   const i = args.indexOf('--storage-opt');
   assert.ok(i >= 0, 'the flag must be passed when the host supports it');
   assert.equal(args[i + 1], 'size=5G');
+});
+
+test('buildCommand: blocks cloud and infra credential families even when allowlisted (issue #56)', () => {
+  // The docs claimed "broad cloud credentials" were refused while the code blocked only
+  // AWS_ACCESS/AWS_SECRET -- so AWS_SESSION_TOKEN, Azure service-principal secrets and the
+  // ADC path file all slipped through an operator's allowlist. The block is family-wide now,
+  // and this pins the families rather than individual names.
+  const saved = { ...process.env };
+  try {
+    for (const k of ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
+                     'AZURE_CLIENT_SECRET', 'GOOGLE_APPLICATION_CREDENTIALS', 'KUBECONFIG',
+                     'GITHUB_TOKEN', 'GH_TOKEN', 'SSH_AUTH_SOCK', 'TF_VAR_db_password',
+                     'MERCURY_ADMIN_TOKEN']) {
+      process.env[k] = `secret-${k}`;
+    }
+    const sb = new SandboxManager({
+      runtime: 'docker',
+      // Hostile config: allowlist every one of them on purpose.
+      envAllowlist: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
+        'AZURE_CLIENT_SECRET', 'GOOGLE_APPLICATION_CREDENTIALS', 'KUBECONFIG', 'GITHUB_TOKEN',
+        'GH_TOKEN', 'SSH_AUTH_SOCK', 'TF_VAR_db_password', 'MERCURY_ADMIN_TOKEN'],
+    });
+    const flags = envFlags(sb.buildCommand(makeRun({ constraints: LIMITS }), 'prime-agent', []).args);
+    const leaked = flags.filter((f) => f.includes('secret-'));
+    assert.deepEqual(leaked, [], `credential families leaked: ${JSON.stringify(leaked)}`);
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test('buildCommand: PATH stays pinned even if an operator allowlists it (issue #56)', () => {
+  // Two `--env PATH=` flags would make docker honour the LAST one, silently replacing the
+  // pinned value with the host PATH.
+  const saved = { ...process.env };
+  try {
+    process.env.PATH = '/host/path/that/should/not/leak';
+    const sb = new SandboxManager({ runtime: 'docker', envAllowlist: ['PATH'] });
+    const flags = envFlags(sb.buildCommand(makeRun({ constraints: LIMITS }), 'prime-agent', []).args);
+    const pathFlags = flags.filter((f) => f.startsWith('PATH='));
+    assert.equal(pathFlags.length, 1, `PATH must appear exactly once, got ${JSON.stringify(pathFlags)}`);
+    assert.ok(!pathFlags[0].includes('should-not-leak'), 'the pinned PATH must not be overridden');
+  } finally {
+    restoreEnv(saved);
+  }
 });

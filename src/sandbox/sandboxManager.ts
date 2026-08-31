@@ -82,21 +82,32 @@ const DEFAULT_IMAGE = 'node:22-bookworm-slim';
 const DEFAULT_ENV_ALLOWLIST = [
   'ANTHROPIC_API_KEY',
   'OPENAI_API_KEY',
-  'GOOGLE_API_KEY',
   'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
   'DEEPSEEK_API_KEY',
   'MISTRAL_API_KEY',
   'XAI_API_KEY',
   'GROQ_API_KEY',
   'OPENROUTER_API_KEY',
   'HF_TOKEN',
-  'AZURE_OPENAI_API_KEY',
-  'AZURE_OPENAI_ENDPOINT',
-  'AWS_BEARER_TOKEN_BEDROCK',
 ];
 
 /** Never forwarded regardless of configuration: these compromise Mercury itself. */
-const NEVER_FORWARD = [/^MERCURY_/, /^GH_TOKEN$/, /^GITHUB_TOKEN$/, /^GIT_/, /^AWS_SECRET/, /^AWS_ACCESS/];
+const NEVER_FORWARD = [
+  // Mercury's own configuration: admin token, API tokens, the database path, webhook URLs.
+  /^MERCURY_/,
+  // Source control: an untrusted agent must not be able to push, or read the operator's repos.
+  /^GH_/, /^GITHUB_/, /^GIT_/,
+  // Cloud account credentials. Note this is deliberately family-wide, which is why the
+  // provider-specific inference keys that used to live in the default allowlist
+  // (AWS_BEARER_TOKEN_BEDROCK, AZURE_OPENAI_API_KEY/_ENDPOINT) were REMOVED from it: they
+  // cannot coexist with a family-wide block, and pretending otherwise is how the docs ended up
+  // promising more than the code did. Operators who need Bedrock or Azure OpenAI must add the
+  // exact variable to MERCURY_SANDBOX_ENV and accept that it is forwarded.
+  /^AWS_/, /^AZURE_/, /^GOOGLE_APPLICATION_/, /^GOOGLE_CLOUD/, /^CLOUDSDK_/, /^GCLOUD_/,
+  // Infrastructure and CI secrets that are never needed for inference.
+  /^KUBE/, /^SSH_/, /^DOCKER_/, /^Terraform/i, /^TF_VAR_/, /^CIRCLE_/, /^TN_/, /^DIGITALOCEAN_/,
+];
 
 /**
  * Image requirements the sandbox depends on, and which nothing verifies (issue #56).
@@ -223,6 +234,10 @@ export class SandboxManager {
   private forwardedEnv(): Record<string, string> {
     const out: Record<string, string> = {};
     for (const key of this.envAllowlist) {
+      // PATH is pinned explicitly in buildCommand. Forwarding it a second time would emit two
+      // `--env PATH=` flags, and docker honours the LAST one -- so an operator adding PATH to
+      // the allowlist could silently replace the pinned value.
+      if (key === 'PATH') continue;
       if (NEVER_FORWARD.some((re) => re.test(key))) continue;
       const value = process.env[key];
       if (value !== undefined) out[key] = value;

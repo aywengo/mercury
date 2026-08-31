@@ -339,16 +339,28 @@ yourself and point `MERCURY_SANDBOX_IMAGE` at it. The image MUST contain:
 ### Environment passthrough
 
 The container runs **untrusted** agents, so its environment is an allowlist, never a copy of the
-worker's. By default only model-provider keys are forwarded (`ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`,
-`XAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `HF_TOKEN`, `AZURE_OPENAI_API_KEY`,
-`AZURE_OPENAI_ENDPOINT`, `AWS_BEARER_TOKEN_BEDROCK`) — and only those actually set.
+worker's. By default only model-provider keys are forwarded (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`GOOGLE_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `XAI_API_KEY`,
+`GROQ_API_KEY`, `OPENROUTER_API_KEY`, `HF_TOKEN`) — and only those actually set.
 
 Forwarding them means **the container can spend your inference budget**; that is the trade, and
 the reason this is an allowlist. `MERCURY_SANDBOX_ENV` overrides the list; set it to empty to
-forward nothing but `PATH` (sandboxed runs then cannot authenticate). `MERCURY_*`, `GH_TOKEN`,
-`GITHUB_TOKEN`, `GIT_*` and broad cloud credentials are **refused regardless of configuration** —
-an over-broad `MERCURY_SANDBOX_ENV` will not hand over the service.
+forward nothing but `PATH` (sandboxed runs then cannot authenticate).
+
+**Refused regardless of configuration** — an over-broad `MERCURY_SANDBOX_ENV` cannot re-enable
+these, and `PATH` is always ignored in the allowlist because it is pinned:
+
+| prefix | why |
+| --- | --- |
+| `MERCURY_*` | admin token, API tokens, database path, webhook URLs |
+| `GH_*`, `GITHUB_*`, `GIT_*` | an untrusted agent must not push, or read the operator's repos |
+| `AWS_*`, `AZURE_*`, `GOOGLE_APPLICATION_*`, `GOOGLE_CLOUD*`, `CLOUDSDK_*`, `GCLOUD_*` | cloud account credentials |
+| `KUBE*`, `SSH_*`, `DOCKER_*`, `TF_VAR_*`, `TERRAFORM*`, `CIRCLE_*`, `TN_*`, `DIGITALOCEAN_*` | infrastructure and CI secrets, never needed for inference |
+
+Because the cloud families are blocked wholesale, **Bedrock and Azure OpenAI are not in the
+default list.** If you need them, add the exact variable to `MERCURY_SANDBOX_ENV` and accept
+that it is forwarded — the block is on the *account-level* credential families, and a
+family-wide block cannot also exempt individual keys inside itself without becoming a lie.
 
 ### Disk limits are off by default
 
