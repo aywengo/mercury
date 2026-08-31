@@ -419,14 +419,55 @@ be confirmed in source:
 
 ## Appendix — reproduction
 
-H4, the measured transaction race:
+H4, the measured transaction race. Self-contained — save as `race.mjs` and run
+`node race.mjs` (needs only Node; no dependencies):
 
-```bash
-mkdir -p /tmp/seqrace && cd /tmp/seqrace   # seed a WAL DB with UNIQUE(run_id, sequence)
-node upgrade2.mjs
-# parent holds a write tx for a fixed 1.2s, busy_timeout = 5000
-#   deferred: FAIL after  300ms  msg=database is locked
-#   immediate: OK  seq=1 after 1256ms
+```js
+import { DatabaseSync } from 'node:sqlite';
+import { spawn } from 'node:child_process';
+const DB = '/tmp/seqrace.db', mode = process.argv[2];
+
+if (!mode) {                                   // parent: seed, hold a write lock 1.2s
+  const s = new DatabaseSync(DB);
+  s.exec('PRAGMA journal_mode = WAL;');
+  s.exec('CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, run_id TEXT, ' +
+         'sequence INTEGER, UNIQUE(run_id, sequence));');
+  s.exec("INSERT OR IGNORE INTO events VALUES ('seed','r1',0);"); s.close();
+  const par = new DatabaseSync(DB);
+  par.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+  par.exec('BEGIN IMMEDIATE');
+  par.prepare('INSERT OR IGNORE INTO events VALUES (?,?,?)').run('hold','r2',0);
+  setTimeout(() => { try { par.exec('COMMIT'); } catch {} }, 1200);
+  const out = [];
+  await Promise.all(['deferred','immediate'].map(m => new Promise(r => {
+    const c = spawn(process.execPath, [import.meta.filename, m]);
+    c.stdout.on('data', d => out.push(d.toString().trim())); c.on('exit', r);
+  })));
+  console.log(out.join('\n')); process.exit(0);
+}
+
+const db = new DatabaseSync(DB);
+db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+const t0 = Date.now();
+try {
+  db.exec(mode === 'immediate' ? 'BEGIN IMMEDIATE' : 'BEGIN');
+  const r = db.prepare('SELECT COALESCE(MAX(sequence),0) m FROM events WHERE run_id=?').get('r1');
+  if (mode === 'deferred') { const w = Date.now() + 300; while (Date.now() < w) {} }
+  db.prepare('INSERT INTO events VALUES (?,?,?)').run(mode, 'r1', r.m + 1);
+  db.exec('COMMIT');
+  console.log(`${mode}: OK  seq=${r.m + 1}  after ${Date.now() - t0}ms`);
+} catch (e) {
+  console.log(`${mode}: FAIL after ${Date.now() - t0}ms  msg=${e.message}  (busy_timeout is 5000ms)`);
+}
+```
+
+Observed output (timings vary by run; the shape does not). The deferred form gives up
+almost immediately despite a 5 s timeout, while the immediate form waits for the lock and
+succeeds:
+
+```text
+deferred : FAIL after  ~300ms  msg=database is locked  (busy_timeout is 5000ms)
+immediate: OK  seq=1  after ~1200ms
 ```
 
 Test suite state (M11), from the project's own environment:
