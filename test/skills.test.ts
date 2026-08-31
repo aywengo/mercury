@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertSafeSkillId, compareSkillIds, resolveContained, SkillRegistry } from '../src/skills/skillRegistry.ts';
+import { writeSkills } from '../src/worker/worker.ts';
 import { createSkillSelector, KEYWORDS } from '../src/skills/skillSelector.ts';
 import { SKILLS_DIR } from './helpers.ts';
 
@@ -273,4 +274,55 @@ test('automatic selection falls back when nothing matches', () => {
   const selector = createSkillSelector();
   const picked = selector.select('zzz qqq www', reg.list(), 4);
   assert.ok(picked.length > 0);
+});
+
+test('writeSkills refuses a traversal skill id or file path (issue #58, review N1)', async () => {
+  // The write side is the more dangerous half: the read side only leaks a listing, this
+  // one places bytes. It is unreachable through the registry today, so it needs a test of
+  // its own -- otherwise a refactor that feeds writeSkills from a persisted snapshot
+  // instead of re-resolving ids would silently reopen #58 with nothing failing.
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-writeskills-'));
+  try {
+    const ws = join(dir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    const skill = (id: string, files: Record<string, string>) => ({
+      id, version: '1.0.0', description: 'd', capabilities: ['a'],
+      path: join(dir, 'src', 'SKILL.md'), content: '# x', files, hash: 'h',
+    });
+
+    await assert.rejects(() => writeSkills(ws, [skill('../../pwned-id', { 'NOTES.md': 'x' })]), /Unsafe skill id|escapes/);
+    await assert.rejects(() => writeSkills(ws, [skill('good', { '../../pwned-rel.md': 'x' })]), /escapes/);
+    await assert.rejects(() => writeSkills(ws, [skill('good', { '../../../tmp/pwned-abs.md': 'x' })]), /escapes/);
+    assert.equal(existsSync(join(dir, 'pwned-id')), false, 'nothing may land outside the workspace');
+    assert.equal(existsSync(join(dir, 'pwned-rel.md')), false, 'nothing may land outside the workspace');
+    assert.equal(existsSync(join(dir, '..', 'pwned-abs.md')), false, 'nothing may land outside the workspace');
+
+    // the legitimate shape still writes, into the workspace
+    await writeSkills(ws, [skill('good', { 'SKILL.md': '# good', 'refs/a.md': 'a' })]);
+    assert.equal(readFileSync(join(ws, '.agents', 'skills', 'good', 'SKILL.md'), 'utf8'), '# good');
+    assert.equal(readFileSync(join(ws, '.agents', 'skills', 'good', 'refs', 'a.md'), 'utf8'), 'a');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('list() never returns a directory name that resolve() would reject (issue #58, review N3)', () => {
+  // Auto-selection does selector.select(task, skills.list(), 4) then skills.resolve(ids).
+  // Once resolve() rejects unsafe ids, an unsafe directory name would throw out of run
+  // creation -- so one stray directory would fail every run.
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-listfilter-'));
+  try {
+    const meta = (n: string) => `---\nname: ${n}\nversion: 1.0.0\ndescription: d\ncapabilities: [a]\n---\n\n# x\n`;
+    for (const d of ['good', 'issue-fix-loop', 'Code-Review', 'my skill', '.hidden']) {
+      mkdirSync(join(dir, d), { recursive: true });
+      writeFileSync(join(dir, d, 'SKILL.md'), meta(d));
+    }
+    const reg = new SkillRegistry(dir);
+    const listed = reg.list().map((m) => m.id);
+    assert.deepEqual(listed, ['good', 'issue-fix-loop'], 'unsafe directory names must be skipped');
+    // the property that actually matters: whatever list() returns, resolve() accepts
+    assert.deepEqual(reg.resolve(listed).map((s) => s.id), listed, 'resolve(list()) must not throw');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -28,13 +28,6 @@ export function assertSafeSkillId(id: string): string {
 }
 
 /**
- * Resolve `rel` inside `root`, refusing anything that escapes it (issue #58).
- * Used for the per-file relative paths a resolved skill carries, which are built
- * from directory listings rather than user input -- containment here is defence in
- * depth, so a future caller that does take them from input cannot reintroduce the
- * traversal.
- */
-/**
  * Resolve symlinks on the longest existing prefix of `abs` and re-append the rest.
  * The destination of a write usually does not exist yet, so realpathSync on it would
  * throw; walking up to the nearest existing ancestor is what lets containment apply
@@ -152,6 +145,14 @@ export class SkillRegistry {
       .filter((d) => d.isDirectory())
       .map((d) => d.name)
       .filter((id) => exists(join(this.rootDir, id, 'SKILL.md')))
+      // Skip directories whose name is not a safe skill id (issue #58). Without this,
+      // list() can hand back ids that resolve() now rejects, and the auto-selection path
+      // (runService: selector.select(task, skills.list(), 4) -> skills.resolve(ids)) would
+      // throw out of run creation. A stray `.hidden`, `Code-Review` or `my skill`
+      // directory -- or a stray `.DS_Store` tree -- must not make every run fail to
+      // create. Skipping rather than throwing keeps one odd directory from taking down the
+      // whole registry; all 12 shipped skills comply.
+      .filter((id) => SAFE_SKILL_ID.test(id))
       .map((id) => this.readMeta(id))
       .sort((a, b) => compareSkillIds(a.id, b.id));
   }

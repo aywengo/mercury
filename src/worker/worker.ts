@@ -657,7 +657,12 @@ export class Worker {
   }
 }
 
-async function writeSkills(workspacePath: string, skills: ResolvedSkill[]): Promise<void> {
+/**
+ * Copy resolved skills into the run workspace. Exported for tests: this is the WRITE side
+ * of issue #58 and its guard needs a regression test of its own, rather than inheriting
+ * coverage from the read side. (issue #58, review finding N1)
+ */
+export async function writeSkills(workspacePath: string, skills: ResolvedSkill[]): Promise<void> {
   const { mkdirSync, writeFileSync } = await import('node:fs');
   const { join } = await import('node:path');
   const skillsRoot = join(workspacePath, '.agents', 'skills');
