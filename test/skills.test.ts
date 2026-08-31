@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertSafeSkillId, compareSkillIds, resolveContained, SkillRegistry } from '../src/skills/skillRegistry.ts';
@@ -91,6 +91,52 @@ test('resolveContained refuses paths that escape the root (issue #58)', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('containment survives a symlinked skills directory (issue #58, Copilot on #92)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-sym-'));
+  try {
+    const outside = join(dir, 'outside');
+    mkdirSync(outside, { recursive: true });
+
+    // A run workspace is a git worktree of a repo that may be untrusted, and git checks
+    // out symlinks happily. So `.agents/skills` itself can be a symlink, and lexical
+    // containment would approve a destination whose real target is anywhere on the host.
+    const ws = join(dir, 'workspace');
+    mkdirSync(join(ws, '.agents'), { recursive: true });
+    symlinkSync(outside, join(ws, '.agents', 'skills'));
+    assert.throws(
+      () => resolveContained(join(ws, '.agents', 'skills'), 'my-skill/NOTES.md'),
+      /symlink/,
+      'a symlinked skills root must not be followed',
+    );
+
+    // Same for an intermediate component below the root.
+    const ws2 = join(dir, 'ws2');
+    mkdirSync(join(ws2, '.agents', 'skills', 'real'), { recursive: true });
+    symlinkSync(outside, join(ws2, '.agents', 'skills', 'link'));
+    assert.throws(() => resolveContained(join(ws2, '.agents', 'skills'), 'link/NOTES.md'), /symlink|escapes/);
+
+    // A real directory below the root is unaffected.
+    assert.equal(
+      resolveContained(join(ws2, '.agents', 'skills'), 'real/SKILL.md'),
+      join(ws2, '.agents', 'skills', 'real', 'SKILL.md'),
+    );
+
+    // Symlinks in the root's ANCESTRY must stay allowed: on macOS /tmp is a symlink to
+    // /private/tmp, so resolving only the target would reject every path under it.
+    assert.equal(resolveContained(tmpdir(), 'a/b.md'), join(tmpdir(), 'a', 'b.md'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('containment works when the root is the filesystem root (Copilot on #92)', () => {
+  // `absRoot + sep` becomes `//` when the root is `/`, so a naive prefix check rejects
+  // every child of `/`. `/usr` is a real directory on macOS and Linux; `/etc` is a
+  // symlink on macOS and is therefore refused, which is the safe direction.
+  assert.equal(resolveContained('/', 'usr'), '/usr');
+  assert.equal(resolveContained('/', 'usr/share'), '/usr/share');
 });
 
 test('registry resolves skills with content and hash', () => {
