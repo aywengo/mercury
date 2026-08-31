@@ -27,6 +27,25 @@ node src/cli.ts gc  # one workspace retention/quota GC pass
 Environment: everything is `MERCURY_*` in `src/config.ts`. Defaults are safe (bind `127.0.0.1`,
 git-worktree workspaces, `prime-agent --mode rpc`).
 
+## Bounded command execution
+
+Bound every command. A hung command is indistinguishable from a slow one, and an
+unbounded wait has cost more wall-clock here than any actual bug in this repo.
+
+- **`timeout` does not exist on macOS.** `timeout 120 npm test` exits `127`
+  (`command not found`) and looks exactly like a hang. Use `gtimeout` (coreutils) or
+  `subprocess.run(cmd, shell=True, timeout=N)` from Python.
+- **Expected runtimes:** `npm run typecheck` ~10s, `npm test` ~25s, one test file 1-5s.
+  Past ~2 minutes it is a hang, not slowness — stop and find the cause instead of waiting.
+- **Bound commands in subagents too, and make them report before they finish.** Two
+  review subagents here ran 40-124 tool calls and produced zero report text; one blocked
+  until it was cancelled. A bounded command that fails leaves something to read; an
+  unbounded one leaves nothing.
+- **Write the report to a file before the last verification step**, so a timeout still
+  leaves a usable result behind.
+- Prefer a single test file over the whole suite while iterating; run the full suite once
+  at the end.
+
 ## Layout
 
 | Path | Owns |
@@ -89,3 +108,7 @@ priority order (security first within a tier).
 - Adding a Run API without owner-scoping (non-admin callers see only their Runs; 404, not 403).
 - Committing real secrets: events/logs pass through the redactor, and skills must not contain
   credentials.
+- Running a long command without a timeout, especially in a subagent — see *Bounded command
+  execution*. `timeout` is not available on macOS, so the command appears to hang instead of
+  failing.
+- Staging with `git add -A`, which sweeps in untracked scratch files. Stage explicit paths.
