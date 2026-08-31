@@ -87,3 +87,21 @@ test('UI JS modules parse (syntax check)', async () => {
   assert.equal(typeof mod.api, 'function');
   assert.equal(typeof mod.sse, 'function');
 });
+
+test('run.js pages event history from the returned cursor, not the run maximum (issue #54)', () => {
+  // The dashboard has no DOM harness here (this file is smoke-only by convention), so this
+  // pins the specific mistake rather than simulating the browser. The API contract that makes
+  // the loop correct is covered properly in api.test.ts; this guards against the one-line
+  // regression that caused the silent history loss.
+  const raw = readFileSync(join(UI_DIR, 'run.js'), 'utf8');
+  // Strip comments first: the file documents the old buggy line verbatim, and matching it
+  // there made this guard fail on correct code.
+  const src = raw.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(
+    !/lastSeq\s*=\s*(ev|data|res)\.lastSequence/.test(src),
+    'run.js must not advance lastSeq from lastSequence: it is the run TRUE maximum, so a '
+      + 'truncated first page makes the UI subscribe past everything it never fetched',
+  );
+  assert.match(src, /nextCursor/, 'run.js must resume from the per-page cursor');
+  assert.match(src, /hasMore/, 'run.js must keep paging while the server reports more');
+});
