@@ -1,7 +1,7 @@
 // Deterministic automatic skill selection (Mercury.md section 12.2).
 // Keyword scoring against skill capabilities/description; no semantic retrieval.
 
-import type { SkillMeta } from './skillRegistry.ts';
+import { compareSkillIds, type SkillMeta } from './skillRegistry.ts';
 
 const KEYWORDS: Record<string, string[]> = {
   planning: ['plan', 'roadmap', 'design', 'architecture', 'approach', 'outline'],
@@ -35,7 +35,7 @@ export function createSkillSelector(): SkillSelector {
         }
         if (score > 0) scored.push({ id: skill.id, score });
       }
-      scored.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+      scored.sort((a, b) => b.score - a.score || compareSkillIds(a.id, b.id));
       const picked = scored.slice(0, maxSkills).map((s) => s.id);
       return picked.length > 0 ? picked : FALLBACK.filter((id) => available.some((a) => a.id === id));
     },
