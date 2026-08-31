@@ -63,8 +63,16 @@ test('every skill declares usable metadata (issue #80)', () => {
     const where = `${skill.id} (SKILL.md metadata)`;
     assert.match(skill.version, /^\d+\.\d+\.\d+$/, `${where}: version must be semver, got '${skill.version}'`);
     assert.notEqual(skill.version, '0.0.0', `${where}: version is the missing-frontmatter default`);
-    assert.ok(skill.description.length > 0, `${where}: description is empty`);
+    // Trimmed checks, not bare length checks. parseFrontmatter() turns
+    // `capabilities: []` into [''] -- the bracket-list branch splits without the
+    // .filter(Boolean) the plain-string branch has -- and leaves
+    // `description: "   "` as three spaces. Both passed a `.length > 0` guard while
+    // being unusable (Copilot on #83).
+    assert.ok(skill.description.trim().length > 0, `${where}: description is empty or whitespace-only`);
     assert.ok(skill.capabilities.length > 0, `${where}: capabilities is empty`);
+    for (const capability of skill.capabilities) {
+      assert.ok(capability.trim().length > 0, `${where}: capability entry is blank`);
+    }
   }
 });
 
