@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createApp } from '../src/api/server.ts';
+import { closeServer, createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
-import { closeServer } from '../src/api/server.ts';
 import { makeEnv, waitFor, sleep } from './helpers.ts';
 import type { Express } from 'express';
 
@@ -383,4 +382,24 @@ test('closeServer() does not stall on a long-lived SSE connection (issue #52)', 
       /* already forced closed */
     }
   }
+});
+
+test('closeServer() is safe when the server closes before the grace period (issue #52)', async () => {
+  // No long-lived connections, so `server.close()` wins the race and there is nothing to
+  // force. Copilot predicted ERR_SERVER_NOT_RUNNING here; it does not reproduce on the
+  // supported range (engines node >=23.6; verified a no-op on v26.7.0). This test pins the
+  // behaviour that matters -- shutdown resolves rather than rejects -- and is deliberately
+  // NOT described as catching that throw, because it does not: forcing unconditionally
+  // passes it too. Called twice to pin idempotence as well.
+  const { createServer } = await import('node:http');
+  const srv = createServer((_req, res) => res.end('ok'));
+  srv.listen(0, '127.0.0.1');
+  await new Promise<void>((resolve) => srv.once('listening', () => resolve()));
+  const port = (srv.address() as { port: number }).port;
+  const res = await fetch(`http://127.0.0.1:${port}/`);
+  await res.text(); // a normal request that completes, so no connection is left held open
+  // must resolve rather than throw
+  await closeServer(srv);
+  // and a second close must not resurrect the throw either
+  await closeServer(srv);
 });

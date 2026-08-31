@@ -140,11 +140,26 @@ export async function closeServer(server: Server): Promise<void> {
     server.close(() => resolve());
   });
   // unref so a grace timer is never itself a reason for the process to stay alive.
-  const grace = new Promise<void>((resolve) => {
-    setTimeout(resolve, SHUTDOWN_GRACE_MS).unref?.();
+  const grace = new Promise<'grace'>((resolve) => {
+    setTimeout(() => resolve('grace'), SHUTDOWN_GRACE_MS).unref?.();
   });
-  await Promise.race([closed, grace]);
-  server.closeAllConnections();
+  const winner = await Promise.race([closed.then(() => 'closed' as const), grace]);
+  if (winner === 'grace') {
+    // Only force when the grace period actually won: if `closed` resolved first there is
+    // nothing left to force, and skipping is the honest expression of intent.
+    //
+    // Copilot flagged this as a crash (ERR_SERVER_NOT_RUNNING making shutdown reject). That
+    // does NOT reproduce on the supported range -- engines is node >=23.6, and on v26.7.0
+    // closeAllConnections() on an already-closed server is a silent no-op, verified directly.
+    // The try/catch stays as cheap insurance against a version where it is not, not because
+    // a failure was observed; the accompanying test therefore asserts "does not reject", not
+    // "catches a throw it cannot produce".
+    try {
+      server.closeAllConnections();
+    } catch {
+      // already fully closed; nothing to force
+    }
+  }
   await closed;
 }
 
