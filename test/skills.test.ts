@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SkillRegistry } from '../src/skills/skillRegistry.ts';
+import { compareSkillIds, SkillRegistry } from '../src/skills/skillRegistry.ts';
 import { createSkillSelector } from '../src/skills/skillSelector.ts';
 import { SKILLS_DIR } from './helpers.ts';
 
 test('registry lists all skills', () => {
   const reg = new SkillRegistry(SKILLS_DIR);
   const list = reg.list();
-  const ids = list.map((s) => s.id).sort();
+  const ids = list.map((s) => s.id).sort(compareSkillIds);
   // Add a skill directory -> add its id here. Exact enumeration is deliberate: a
   // derived expectation moves with the registry and cannot see a skill added, dropped,
   // or losing its SKILL.md. Discovery logic itself is not covered here -- see #79.
@@ -16,6 +16,23 @@ test('registry lists all skills', () => {
     'implementation', 'issue-fix-loop', 'planning', 'repository-analysis',
     'security-review', 'testing',
   ]);
+});
+
+test('registry orders ids with the canonical comparator (issue #81)', () => {
+  const reg = new SkillRegistry(SKILLS_DIR);
+  const ids = reg.list().map((s) => s.id);
+  // Assert the order production actually produces. Re-sorting before comparing,
+  // as this test used to, hides a registry that sorts with a different comparator.
+  assert.deepEqual(ids, [...ids].sort(compareSkillIds));
+  // Pin the comparator to code-unit order using only locale-free values.
+  // Array.sort() with no comparator is specified as UTF-16 code-unit order, and
+  // compareSkillIds is plain `<`, so both sides are deterministic everywhere.
+  // This assertion used to also check what localeCompare returned for the same
+  // pair; that value varies with locale and ICU build, so the test could fail in CI
+  // while the production comparator was correct.
+  const tricky = ['a_b', 'a-b', 'a.b', 'a1', 'aB', 'aa', 'ab'];
+  assert.deepEqual([...tricky].sort(compareSkillIds), [...tricky].sort());
+  assert.equal(compareSkillIds('a-b', 'a_b'), -1);
 });
 
 test('registry resolves skills with content and hash', () => {

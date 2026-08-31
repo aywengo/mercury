@@ -13,6 +13,17 @@ export interface SkillMeta {
   capabilities: string[];
 }
 
+/**
+ * Canonical ordering for skill ids (issue #81). Single source of truth so the
+ * registry, the selector tie-break and the tests cannot order the same list
+ * differently. Deliberately code-unit order rather than `localeCompare`: the
+ * latter is locale- and ICU-build-sensitive, so an id containing punctuation or
+ * upper case could sort one way on a developer machine and another in CI.
+ */
+export function compareSkillIds(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 export class SkillRegistry {
   private rootDir: string;
 
@@ -27,7 +38,7 @@ export class SkillRegistry {
       .map((d) => d.name)
       .filter((id) => exists(join(this.rootDir, id, 'SKILL.md')))
       .map((id) => this.readMeta(id))
-      .sort((a, b) => a.id.localeCompare(b.id));
+      .sort((a, b) => compareSkillIds(a.id, b.id));
   }
 
   resolve(ids: string[]): ResolvedSkill[] {
