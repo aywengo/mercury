@@ -256,7 +256,13 @@ export class PrimeAgentAdapter implements AgentAdapter {
 
   async terminate(runId: string): Promise<void> {
     const session = this.sessions.get(runId);
-    if (!session || session.terminated || session.done) return;
+    // Guard on `terminated` alone, NOT `done` (issue #46). `done` is already true on the
+    // success path: `agent.end` settles the exit promise and marks the session done while
+    // the RPC process is still running. Returning early there -- which is what this did --
+    // meant the worker's cleanup could never reach stop(), so every successful run leaked a
+    // live `prime-agent --mode rpc` process. stop() is idempotent (it returns immediately
+    // when there is no child), so running it after a natural exit is harmless.
+    if (!session || session.terminated) return;
     session.terminated = true;
     session.done = true; // onExit must not resolve with 'failed' while we stop
     await session.client?.stop();

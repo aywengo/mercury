@@ -267,3 +267,58 @@ test('trace context: run/worker ids are exported to the agent process env (secti
     adapter.cancel(runId).catch(() => {});
   }
 });
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test('terminate() stops the RPC process after a normal agent_end (issue #46)', async () => {
+  // The core of #46. `agent_end` settles the exit promise while this RPC process is still
+  // alive reading stdin, so "the run completed" says nothing about the process. terminate()
+  // used to bail out on `session.done` -- already true here -- so stop() was unreachable from
+  // the completion path and every successful run leaked a live process.
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-pid-'));
+  const pidFile = join(dir, 'pid');
+  process.env.MOCK_RPC_MODE = 'happy';
+  process.env.MOCK_RPC_PID_FILE = pidFile;
+  const adapter = new PrimeAgentAdapter(MOCK, { args: [] });
+  let pid = 0;
+  try {
+    const { context } = makeContext({ run: makeRun({ id: 'run_leak' }) });
+    const handle = await adapter.start(context);
+    const { exit } = await collectAll(handle);
+    assert.equal(exit.reason, 'completed');
+
+    pid = Number(readFileSync(pidFile, 'utf8'));
+    assert.ok(Number.isInteger(pid) && pid > 0, 'fixture must record its pid');
+    // Asserting the process is STILL alive here is deliberate: it pins the precondition that
+    // made this a leak, so the test cannot silently degrade into a no-op if the fixture ever
+    // starts exiting on its own.
+    assert.ok(alive(pid), 'the RPC process should still be running after agent_end (this is the leak)');
+
+    await handle.terminate();
+
+    const deadline = Date.now() + 5_000;
+    while (alive(pid) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(!alive(pid), `RPC process ${pid} survived terminate(); it leaked`);
+  } finally {
+    // Reap the child unconditionally. If the fix regresses, the leaked process keeps the
+    // parent's stdio pipes open and the test runner hangs instead of reporting a failure --
+    // verified: with the original `|| session.done` guard restored, this file never exits.
+    // Killing it here turns that regression into a clean assertion failure.
+    if (pid > 0) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // already gone, which is the expected case
+      }
+    }
+    delete process.env.MOCK_RPC_MODE;
+    delete process.env.MOCK_RPC_PID_FILE;
+  }
+});

@@ -12,6 +12,8 @@
 //
 // MOCK_RPC_SESSION_FILE: path reported by get_state.
 // MOCK_RPC_ARGV_FILE:     write the spawned argv (minus node/script) here.
+// MOCK_RPC_PID_FILE:      write process.pid here, so a test can tell whether the RPC
+//                         process actually died (see issue #46).
 // MOCK_RPC_ENV_FILE:      write a subset of the spawned env (MERCURY_*) here.
 // MOCK_RPC_VENDOR_EXTRAS: '1' = emit omp-style vendor frames (ready,
 //                         negotiate_protocol) at startup to prove they are ignored.
@@ -22,6 +24,11 @@ const mode = process.env.MOCK_RPC_MODE ?? 'happy';
 const vendorExtras = process.env.MOCK_RPC_VENDOR_EXTRAS === '1';
 const sessionFile = process.env.MOCK_RPC_SESSION_FILE ?? '/tmp/mock-session.jsonl';
 const argvFile = process.env.MOCK_RPC_ARGV_FILE;
+// Lets a test observe whether the RPC process actually died. Needed to prove the fix for
+// issue #46: the adapter resolves the exit promise on `agent_end` while this process is
+// still alive reading stdin, so "the run completed" says nothing about the process.
+const pidFile = process.env.MOCK_RPC_PID_FILE;
+if (pidFile) writeFileSync(pidFile, String(process.pid));
 const logFile = process.env.MOCK_RPC_LOG;
 function log(msg) {
   if (!logFile) return;
