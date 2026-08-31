@@ -132,11 +132,11 @@ export class Worker {
         // queue; append the terminal event here so the audit trail stays complete
         // (the queue has no EventStore access). The queue only reports runs this
         // worker actually transitioned (changes === 1), so no duplicate events.
-        const reaped = this.deps.queue.reapExpiredLeases();
-        if (reaped.failed.length > 0) {
-          this.log('warn', 'reaped runs with expired leases', { runIds: reaped.failed });
-        }
-        for (const runId of reaped.failed) {
+        // The failure events are appended from INSIDE the reap transaction (issue #61).
+        // They used to be appended here, after reapExpiredLeases() had committed, so a crash
+        // between the two left the run FAILED with no `error` and no `run.failed` event --
+        // the state said it failed and the timeline said nothing happened.
+        const reaped = this.deps.queue.reapExpiredLeases(Date.now(), (runId) => {
           const row = this.deps.runs.get(runId);
           const durationMs = row?.startedAt ? Date.now() - Date.parse(row.startedAt) : null;
           this.deps.events.append(runId, 'error', { message: LEASE_EXPIRED_ERROR });
@@ -146,6 +146,9 @@ export class Worker {
             kind: 'infrastructure',
             durationMs,
           });
+        });
+        if (reaped.failed.length > 0) {
+          this.log('warn', 'reaped runs with expired leases', { runIds: reaped.failed });
         }
         const run = this.deps.queue.claim(this.deps.workerId, this.deps.leaseMs);
         this.checkBacklog();

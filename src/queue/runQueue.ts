@@ -130,7 +130,21 @@ export class RunQueue {
    * Reap runs whose lease expired (worker crashed).
    * QUEUED -> lease cleared (re-claimable). Active -> FAILED (infrastructure), per Mercury.md section 17.
    */
-  reapExpiredLeases(now = Date.now()): { requeued: string[]; failed: string[] } {
+  /**
+   * @param onFailed invoked INSIDE the transaction, once per run this reaper actually
+   *   transitioned to FAILED. Issue #61: the caller used to append the `error` and
+   *   `run.failed` events AFTER this transaction committed, so a crash in that window left a
+   *   run marked FAILED with no failure event at all -- the timeline silently contradicted the
+   *   state, and an operator reading the run saw it stop with no explanation. Events and the
+   *   state they describe must become visible together.
+   *
+   *   Safe to call EventStore.append from here: tx() is re-entrant (it tracks depth per
+   *   connection), so the nested BEGIN joins this transaction instead of erroring.
+   */
+  reapExpiredLeases(
+    now = Date.now(),
+    onFailed?: (runId: string) => void,
+  ): { requeued: string[]; failed: string[] } {
     const nowIso = new Date(now).toISOString();
     const expired = this.db
       .prepare(
@@ -176,7 +190,12 @@ export class RunQueue {
             .run(LEASE_EXPIRED_ERROR, nowIso, row.id, row.status);
           // Only report runs this worker actually transitioned (a concurrent
           // reaper or the owning worker's finalize may have won the race).
-          if (res.changes === 1) failed.push(row.id);
+          if (res.changes === 1) {
+            failed.push(row.id);
+            // Inside the tx, deliberately: see the onFailed contract above. If it throws, the
+            // whole reap rolls back rather than leaving a FAILED run whose events never landed.
+            onFailed?.(row.id);
+          }
         }
       }
     });

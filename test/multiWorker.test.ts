@@ -621,3 +621,62 @@ test('shutdown terminates the agent BEFORE requeueing (issue #51)', async () => 
     env.close();
   }
 });
+
+test('reap writes the FAILED state and its events atomically (issue #61)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.queue.claim('w1', 60_000);
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING');
+
+    const { failed } = env.queue.reapExpiredLeases(Date.now() + 10 * 60_000, (runId) => {
+      env.events.append(runId, 'error', { message: 'lease expired' });
+      env.events.append(runId, 'run.failed', { runId, error: 'lease expired', kind: 'infrastructure' });
+    });
+    assert.deepEqual(failed, [run.id]);
+    assert.equal(env.runs.get(run.id)!.status, 'FAILED');
+    const types = env.events.list(run.id).map((e) => e.type);
+    assert.ok(types.includes('error'), `the FAILED run has no error event: ${types.join(',')}`);
+    assert.ok(types.includes('run.failed'), `the FAILED run has no run.failed event: ${types.join(',')}`);
+  } finally {
+    env.close();
+  }
+});
+
+test('a failed event append rolls the reap back rather than leaving a FAILED run with no events (issue #61)', async () => {
+  // This is the whole point of #61. Before the fix the events were appended AFTER the
+  // transaction committed, so any failure in that window -- a crash, a busy database, a throw
+  // from a listener -- produced a run marked FAILED whose timeline claimed nothing happened.
+  // An operator reading it saw a run stop dead with no explanation and no failure record.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.queue.claim('w1', 60_000);
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING');
+    const eventsBefore = env.events.list(run.id).length;
+
+    assert.throws(
+      () =>
+        env.queue.reapExpiredLeases(Date.now() + 10 * 60_000, () => {
+          throw new Error('event store exploded');
+        }),
+      /event store exploded/,
+      'the callback error must propagate',
+    );
+
+    // Rolled back: the run is still RUNNING (and still owned), so a later reap or the owning
+    // worker can still settle it correctly. It is NOT in the contradictory state.
+    const after = env.runs.get(run.id)!;
+    assert.equal(after.status, 'RUNNING', `reap did not roll back: status is ${after.status}`);
+    assert.equal(after.leaseOwner, 'w1', 'the lease must also be restored by the rollback');
+    assert.equal(
+      env.events.list(run.id).length,
+      eventsBefore,
+      'no partial events may survive a rolled-back reap',
+    );
+  } finally {
+    env.close();
+  }
+});
