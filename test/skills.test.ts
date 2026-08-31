@@ -76,6 +76,36 @@ test('every skill declares usable metadata (issue #80)', () => {
   }
 });
 
+test('every skill is reachable by automatic selection (issue #78)', () => {
+  const reg = new SkillRegistry(SKILLS_DIR);
+  const selector = createSkillSelector();
+  const available = reg.list();
+  assert.ok(available.length > 0, 'registry found no skills');
+  for (const skill of available) {
+    // A task that names a skill's own capabilities must be able to select it.
+    // Scoring used to come only from a KEYWORDS map keyed by skill id, so a skill
+    // with no entry scored 0 against every task and could never be picked -- four of
+    // twelve were unreachable, silently. Capabilities are now the primary signal.
+    const task = `please handle: ${skill.capabilities.join(', ')}`;
+    const picked = selector.select(task, available, available.length);
+    assert.ok(picked.includes(skill.id), `${skill.id} unreachable for task: ${task}`);
+  }
+});
+
+test('a skill does not score on a task that never mentions it (issue #78)', () => {
+  const reg = new SkillRegistry(SKILLS_DIR);
+  const selector = createSkillSelector();
+  const available = reg.list();
+  // Guards the other half of the bug. Scoring once added +0.5 for any term found in
+  // the skill's own id/description/capabilities. That term does not depend on the
+  // task, so it was a per-skill constant: enough terms and every skill scored on
+  // every task, which ranked verbose metadata above relevance.
+  const picked = selector.select('zzz qqq nothing matches this at all', available, 4);
+  for (const id of ['frontend', 'deployment', 'documentation', 'security-review']) {
+    assert.ok(!picked.includes(id), `${id} scored on a task that never mentions it`);
+  }
+});
+
 test('automatic selection is deterministic and keyword-based', () => {
   const reg = new SkillRegistry(SKILLS_DIR);
   const selector = createSkillSelector();
