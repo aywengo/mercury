@@ -112,7 +112,11 @@ export function createRoutes(deps: RoutesDeps): Router {
     // EventStore.list caps a page at 1000 rows. The cap is fine; what was not fine was
     // telling the client the run's TRUE maximum sequence alongside a truncated page and
     // letting it resume from that (issue #54).
-    const limit = Math.min(Math.max(Number(req.query.limit ?? 1000) || 1000, 1), 1000);
+    // Parse explicitly rather than with `|| 1000`: that treats a legitimate `?limit=0` as
+    // absent and silently expands it to the maximum, which is the opposite of what the
+    // caller asked for. Default only when the param is missing or not a number.
+    const rawLimit = req.query.limit === undefined ? 1000 : Number(req.query.limit);
+    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 1000) : 1000;
     const events = deps.events.list(run.id, afterSeq, limit);
     const lastSequence = deps.events.lastSequence(run.id);
     // The resume point is the last sequence actually RETURNED, not the run's maximum. A

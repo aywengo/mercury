@@ -407,7 +407,10 @@ test('closeServer() is safe when the server closes before the grace period (issu
 
 /** Response shape of GET /api/runs/:runId/events (issue #54). */
 type EventsPage = {
-  events: { sequence: number; type: string; payload: { i: number } }[];
+  // `payload` is genuinely `unknown` here: the endpoint returns every event type, and only
+  // agent.message carries `{ i }`. Narrow at the point of use instead of pretending the
+  // whole page shares one shape.
+  events: { sequence: number; type: string; payload: unknown }[];
   lastSequence: number;
   nextCursor: number;
   hasMore: boolean;
@@ -444,7 +447,7 @@ test('events endpoint pages completely; a >1000-event run is not silently trunca
         assert.equal(res.status, 200);
         const body = (await res.json()) as EventsPage;
         pagedAll += body.events.length;
-        for (const e of body.events) if (e.type === 'agent.message') seen.push(e.payload.i);
+        for (const e of body.events) if (e.type === 'agent.message') seen.push((e.payload as { i: number }).i);
         pages += 1;
         // The heart of the bug: on a truncated page the run's true maximum is far ahead of
         // what was returned. Resuming from `lastSequence` would skip the rest.
@@ -499,6 +502,42 @@ test('events endpoint reports no more pages once caught up (issue #54)', async (
       assert.deepEqual(tail.events, []);
       assert.equal(tail.hasMore, false);
       assert.equal(tail.nextCursor, body.lastSequence, 'an empty page must not move the cursor backwards');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('events endpoint clamps an explicit limit instead of treating 0 as absent (issue #54)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const created = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers, body: JSON.stringify({ task: 'x', agent: 'fake' }),
+      });
+      const { runId } = (await created.json()) as { runId: string };
+      const baseline = env.events.list(runId).length;
+      for (let i = 1; i <= 20; i++) env.events.append(runId, 'agent.message', { i });
+      const TOTAL = baseline + 20;
+
+      const page = async (q: string): Promise<EventsPage> =>
+        (await (await fetch(`${base}/api/runs/${runId}/events?${q}`, { headers })).json()) as EventsPage;
+
+      // `?limit=0` must mean "as small as possible", not "give me the maximum".
+      assert.equal((await page('after=0&limit=0')).events.length, 1, 'limit=0 must clamp to 1, not expand to 1000');
+      assert.equal((await page('after=0&limit=-5')).events.length, 1, 'a negative limit must clamp to 1');
+      assert.equal((await page('after=0&limit=3')).events.length, 3, 'a valid limit is honoured');
+      assert.equal((await page(`after=0&limit=${TOTAL + 500}`)).events.length, TOTAL, 'an oversized limit clamps to the cap');
+      // Non-numeric falls back to the default rather than to 1 or to a throw.
+      assert.equal((await page('after=0&limit=abc')).events.length, TOTAL, 'a non-numeric limit uses the default');
+      assert.equal((await page('after=0')).events.length, TOTAL, 'absent limit uses the default');
     } finally {
       await srv.close();
       closeStream();
