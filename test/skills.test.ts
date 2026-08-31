@@ -76,6 +76,60 @@ test('every skill declares usable metadata (issue #80)', () => {
   }
 });
 
+test('every skill is reachable by automatic selection (issue #78)', () => {
+  const reg = new SkillRegistry(SKILLS_DIR);
+  const selector = createSkillSelector();
+  const available = reg.list();
+  assert.ok(available.length > 0, 'registry found no skills');
+  for (const skill of available) {
+    // A task that names a skill's own capabilities must be able to select it.
+    // Scoring used to come only from a KEYWORDS map keyed by skill id, so a skill
+    // with no entry scored 0 against every task and could never be picked -- four of
+    // twelve were unreachable, silently. Capabilities are now the primary signal.
+    const task = `please handle: ${skill.capabilities.join(', ')}`;
+    const picked = selector.select(task, available, available.length);
+    assert.ok(picked.includes(skill.id), `${skill.id} unreachable for task: ${task}`);
+  }
+});
+
+test('short capability terms match words, not substrings (Copilot on #84)', () => {
+  const reg = new SkillRegistry(SKILLS_DIR);
+  const selector = createSkillSelector();
+  const available = reg.list();
+  // 'ui' is a frontend capability. Raw substring matching made it fire inside
+  // ordinary words, so a task about test suites pulled in the frontend skill.
+  assert.ok(!selector.select('fix the failing test suite', available, 4).includes('frontend'),
+    'frontend matched a task whose only "ui" is inside the word "suite"');
+  assert.ok(selector.select('add a settings page to the dashboard UI', available, 4).includes('frontend'),
+    'frontend failed to match a task that does name the UI');
+  // Longer terms stay substring-matched on purpose -- they are stems, not words.
+  // Asserted with deepEqual, not includes: planning, implementation, testing and git-pr
+  // are the FALLBACK set, so an `includes` check on those passes even when nothing
+  // scored at all. Exact results are the only way to prove the stem actually matched.
+  assert.deepEqual(selector.select('run the tests', available, 4), ['testing'],
+    'testing no longer matches the stem "tests"');
+  assert.deepEqual(selector.select('plan the rollout', available, 4), ['planning'],
+    'planning no longer matches the stem "planning"');
+  assert.deepEqual(selector.select('perform an analysis of the codebase', available, 4), ['repository-analysis'],
+    'repository-analysis no longer matches the stem "analysis"');
+  assert.deepEqual(selector.select('write a database migration', available, 4), ['implementation'],
+    'implementation no longer matches the stem "migration"');
+});
+
+test('a skill does not score on a task that never mentions it (issue #78)', () => {
+  const reg = new SkillRegistry(SKILLS_DIR);
+  const selector = createSkillSelector();
+  const available = reg.list();
+  // Guards the other half of the bug. Scoring once added +0.5 for any term found in
+  // the skill's own id/description/capabilities. That term does not depend on the
+  // task, so it was a per-skill constant: enough terms and every skill scored on
+  // every task, which ranked verbose metadata above relevance.
+  const picked = selector.select('zzz qqq nothing matches this at all', available, 4);
+  for (const id of ['frontend', 'deployment', 'documentation', 'security-review']) {
+    assert.ok(!picked.includes(id), `${id} scored on a task that never mentions it`);
+  }
+});
+
 test('automatic selection is deterministic and keyword-based', () => {
   const reg = new SkillRegistry(SKILLS_DIR);
   const selector = createSkillSelector();
