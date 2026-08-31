@@ -16,6 +16,12 @@ export interface Config {
   primeAgentArgs: string[];
   embeddedWorker: boolean;
   leaseMs: number;
+  /**
+   * How long a SIGTERM'd worker waits (issue #51) for its in-flight run to terminate the
+   * agent and requeue itself before closing the database anyway. Must stay well under
+   * systemd's TimeoutStopSec so the reaper is only a backstop, never the normal path.
+   */
+  shutdownGraceMs: number;
   leaseHeartbeatMs: number;
   pollMs: number;
   maxRetries: number;
@@ -85,6 +91,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     primeAgentArgs: parseArgs(env.MERCURY_PRIMEAGENT_ARGS),
     embeddedWorker: env.MERCURY_EMBEDDED_WORKER === 'true',
     leaseMs: num(env.MERCURY_LEASE_MS, 60_000),
+    shutdownGraceMs: num(env.MERCURY_SHUTDOWN_GRACE_MS, 30_000),
     leaseHeartbeatMs: num(env.MERCURY_LEASE_HEARTBEAT_MS, 15_000),
     pollMs: num(env.MERCURY_POLL_MS, 250),
     maxRetries: num(env.MERCURY_MAX_RETRIES, 2),

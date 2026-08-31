@@ -12,6 +12,10 @@ EnvironmentFile=/etc/mercury/mercury.env
 ExecStart=/usr/bin/env node src/cli.ts server
 Restart=on-failure
 RestartSec=5
+# The API server force-closes lingering SSE subscribers after a 2s grace period (issue #52),
+# so shutdown is bounded in-process. This is the outer bound: without it, a dashboard holding
+# an event stream open could stall `systemctl stop` until SIGKILL.
+TimeoutStopSec=15
 # Hardening
 NoNewPrivileges=true
 PrivateTmp=true

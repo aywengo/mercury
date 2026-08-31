@@ -133,6 +133,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Hoisted so the SIGTERM/SIGINT handler below can reach it. The handler previously could
+  // not -- `worker` was scoped to the block that built it -- which is precisely why it did
+  // nothing but close the database (issue #51).
+  let workerRef: Worker | null = null;
+
   if (cmd === 'worker' || (cmd === 'dev' && config.embeddedWorker)) {
     const worker = new Worker({
       db,
@@ -158,6 +163,7 @@ async function main(): Promise<void> {
       alertWebhookUrl: config.alertWebhookUrl,
       sandbox,
     });
+    workerRef = worker;
     worker.start();
     logger.info({}, 'worker started');
 
@@ -197,12 +203,42 @@ async function main(): Promise<void> {
   }
 
   if (cmd === 'worker') {
-    const shutdown = (): void => {
+    // Graceful shutdown (issue #51). The old handler was `db.close(); process.exit(0)`: it
+    // never stopped the worker, never terminated the agent, and never handed the run back.
+    // In-flight runs therefore stayed RUNNING until the lease expired (~60s), were reaped as
+    // FAILED(infrastructure), and were auto-retried -- every deploy converted running work
+    // into spurious infrastructure failures and duplicate agent spend.
+    //
+    // Order matters:
+    //   1. stop() -- stop claiming, and signal any run in flight to hand itself back.
+    //   2. wait (bounded) for that run to terminate its agent and requeue itself. Its own
+    //      finally does the terminate, so waiting here is what makes the agent stop before
+    //      the process does (issue #46).
+    //   3. only then close the database.
+    // Bounded, because a wedged agent must not turn a deploy into a hang; systemd escalates
+    // to SIGKILL at TimeoutStopSec and the lease/reaper path is the backstop.
+    const shutdown = async (): Promise<void> => {
+      const graceMs = config.shutdownGraceMs;
+      logger.info({ graceMs }, 'worker shutting down');
+      workerRef?.stop();
+      const deadline = Date.now() + graceMs;
+      while (workerRef && workerRef.activeCount() > 0 && Date.now() < deadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      }
+      if (workerRef && workerRef.activeCount() > 0) {
+        logger.warn({ active: workerRef.activeCount() }, 'shutdown grace expired with runs still active; leaving them to the reaper');
+      }
       db.close();
       process.exit(0);
     };
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
+    const onSignal = (signal: string): void => {
+      void shutdown().catch((err) => {
+        logger.error({ error: String(err) }, 'shutdown failed');
+        process.exit(1);
+      });
+    };
+    process.on('SIGINT', onSignal);
+    process.on('SIGTERM', onSignal);
     return;
   }
 

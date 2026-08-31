@@ -54,6 +54,10 @@ export interface WorkerDeps {
 
 export class Worker {
   private running = false;
+  // Set by stop(). Unlike `running`, which only stops the claim loop from picking up NEW
+  // runs, this also tells a run already being driven to hand itself back (issue #51).
+  private shuttingDown = false;
+  private shutdownSignals = new Set<LeaseLostSignal>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private active = new Set<string>();
   private deps: WorkerDeps;
@@ -99,11 +103,26 @@ export class Worker {
     this.timer = null;
     if (this.stuckTimer) clearInterval(this.stuckTimer);
     this.stuckTimer = null;
+    // Wake the drive loop of any run in flight so it can requeue itself (issue #51).
+    // Without this, stop() only prevented NEW claims: the in-flight run kept driving an
+    // agent whose process the shutting-down process was about to abandon, and its lease was
+    // left to expire so the reaper failed the run and auto-retried it.
+    this.shuttingDown = true;
+    for (const sig of [...this.shutdownSignals]) sig.signal();
     this.log('info', 'worker stopped', { workerId: this.deps.workerId });
   }
 
   isActive(runId: string): boolean {
     return this.active.has(runId);
+  }
+
+  /**
+   * How many runs this worker is still driving. A shutdown handler needs this to know when
+   * it is safe to close the database: stop() only signals, and the in-flight run still has
+   * to terminate its agent and requeue itself before the connection can go away (issue #51).
+   */
+  activeCount(): number {
+    return this.active.size;
   }
 
   private async loop(): Promise<void> {
@@ -308,7 +327,7 @@ export class Worker {
     handle: Awaited<ReturnType<AgentAdapter['start']>>,
     skills: ResolvedSkill[],
     startedAt: string,
-  ): Promise<{ status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | 'LEASE_LOST'; exit: AgentExit; error?: string; reason?: string }> {
+  ): Promise<{ status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | 'LEASE_LOST' | 'SHUTDOWN'; exit: AgentExit; error?: string; reason?: string }> {
     const log = this.logger(run.id);
     const startedMs = Date.parse(startedAt);
     const maxDurationMs = run.constraints.maxDurationMs;
@@ -316,6 +335,7 @@ export class Worker {
     let timedOut = false;
     let inputTimedOut = false;
     let leaseLost = false;
+    let shuttingDown = false;
 
     // Lease heartbeat: if the renewal fails, we no longer own the lease (another
     // worker took the run over, or the run was reaped). Signal the drive loop to
@@ -333,6 +353,12 @@ export class Worker {
     // while the agent hangs; poll the cancellation flag so POST /cancel is honored
     // promptly instead of waiting for the max-duration timeout.
     const cancelSignal = createCancellationSignal(() => this.deps.runs.isCancellationRequested(run.id), 100);
+
+    // Graceful-shutdown signal (issue #51). Registered on the worker so stop() can raise it
+    // while this loop is parked in iterator.next(), and always unregistered in the finally.
+    const shutdown = createLeaseLostSignal();
+    if (this.shuttingDown) shutdown.signal();
+    this.shutdownSignals.add(shutdown);
 
     try {
       const iterator = handle.events[Symbol.asyncIterator]();
@@ -369,10 +395,22 @@ export class Worker {
           value: undefined as AgentEvent | undefined,
           cancelled: true,
         }));
-        const next = await Promise.race([iterator.next(), timeoutRace, leaseRace, cancelRace]);
+        const shutdownRace = shutdown.promise.then(() => ({
+          done: false,
+          value: undefined as AgentEvent | undefined,
+          shuttingDown: true,
+        }));
+        const next = await Promise.race([iterator.next(), timeoutRace, leaseRace, cancelRace, shutdownRace]);
         timeoutSleep.cancel();
         if ((next as { cancelled?: boolean }).cancelled) {
           cancelled = true;
+          await adapter.cancel(run.id);
+          break;
+        }
+        if ((next as { shuttingDown?: boolean }).shuttingDown) {
+          shuttingDown = true;
+          // Cooperative stop: the agent is ended, and the run goes back to QUEUED in
+          // finalize() so whoever starts next re-executes it.
           await adapter.cancel(run.id);
           break;
         }
@@ -407,6 +445,12 @@ export class Worker {
         }
       }
 
+      // Shutting down: do not wait on the cancelled agent's exit, and do not record a
+      // failure -- the run is being handed back, not abandoned (issue #51).
+      if (shuttingDown) {
+        return { status: 'SHUTDOWN', exit: { code: null, signal: 'SIGTERM', reason: 'terminated' } };
+      }
+
       // Lease lost: another worker may already be re-executing the run, so do not
       // block on the (cancelled) agent's exit; requeue happens in finalize().
       if (leaseLost) {
@@ -427,6 +471,8 @@ export class Worker {
     } finally {
       clearInterval(heartbeat);
       cancelSignal.cancel();
+      // Must be unregistered or a stopped worker accumulates one resolver per run forever.
+      this.shutdownSignals.delete(shutdown);
     }
   }
 
@@ -530,7 +576,7 @@ export class Worker {
 
   private async finalize(
     run: Run,
-    outcome: { status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | 'LEASE_LOST'; exit: AgentExit; error?: string; reason?: string },
+    outcome: { status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | 'LEASE_LOST' | 'SHUTDOWN'; exit: AgentExit; error?: string; reason?: string },
     skills: ResolvedSkill[],
   ): Promise<void> {
     const log = this.logger(run.id);
@@ -549,6 +595,21 @@ export class Worker {
       agentDurationMs: startedMs !== null ? finishedMs - startedMs : null,
       totalMs: finishedMs - createdMs,
     };
+
+    if (outcome.status === 'SHUTDOWN') {
+      // Graceful shutdown (issue #51): hand the run back to the queue rather than failing it.
+      // The alternative behaviours were both wrong -- leaving it RUNNING meant the lease
+      // expired ~60s later and the reaper recorded FAILED(infrastructure) and auto-retried,
+      // so every deploy turned in-flight work into spurious infrastructure failures and
+      // duplicate agent spend; merely releasing the lease would have stranded the run in
+      // RUNNING forever (see RunQueue.releaseLease).
+      const requeued = this.deps.queue.requeueForShutdown(run.id, this.deps.workerId);
+      log.warn({ requeued }, 'worker shutting down; run requeued for the next worker');
+      // No terminal event and no transition: the run is not finished, it is waiting again.
+      // execute()'s finally still calls releaseLease, which is now a no-op here because the
+      // run is QUEUED (non-terminal) and requeueForShutdown already cleared the lease.
+      return;
+    }
 
     if (outcome.status === 'LEASE_LOST') {
       // Another worker took the run over (or it was reaped). Put it back in the
