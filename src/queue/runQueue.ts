@@ -107,9 +107,23 @@ export class RunQueue {
           // Safe only because LEASE_EXPIRED_ERROR is a static constant with no
           // dynamic content; if it is ever parameterized (worker id, run detail),
           // route it through a redacting path (RunStore.setError + redactor).
+          // Clearing the lease here is the whole point of this statement (issue #53).
+          // Marking the run FAILED while leaving lease_owner pointing at the dead worker
+          // made the lease-loss recovery path unreachable in three linked ways:
+          //   - renewLease matches `WHERE lease_owner = ?`, so it kept returning true and
+          //     the owning worker never set leaseLost;
+          //   - requeueLostLease requires `lease_owner != ?`, so it was unreachable;
+          //   - the worker therefore kept driving the agent -- burning compute and model
+          //     spend on a run the database already called FAILED -- and then threw on an
+          //     invalid state transition at finalize.
+          // With the lease cleared, renewLease returns false and the abort path that
+          // already exists lights up. Requeue still declines (the run is terminal), which
+          // finalize already handles by leaving it FAILED; making the run resumable again
+          // is M3, not this.
           const res = this.db
             .prepare(
-              `UPDATE runs SET status = 'FAILED', error = ?, error_kind = 'infrastructure', completed_at = ?
+              `UPDATE runs SET status = 'FAILED', error = ?, error_kind = 'infrastructure', completed_at = ?,
+                      lease_owner = NULL, lease_expires_at = NULL
                WHERE id = ? AND status = ?`,
             )
             .run(LEASE_EXPIRED_ERROR, nowIso, row.id, row.status);

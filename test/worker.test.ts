@@ -284,6 +284,39 @@ test('lease expiry: active run -> FAILED (infrastructure), queued -> requeued', 
   }
 });
 
+test('a reaped active run loses its lease, so the dead worker stops renewing it (issue #53)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.queue.claim('w1', 60_000);
+    assert.equal(env.queue.renewLease(run.id, 'w1', 60_000), true, 'the owner renews normally while healthy');
+    // Expire the lease only after that renewal, since renewing pushes lease_expires_at out.
+    env.db.prepare('UPDATE runs SET lease_expires_at = ? WHERE id = ?').run(new Date(Date.now() - 1000).toISOString(), run.id);
+    env.db.prepare("UPDATE runs SET status = 'RUNNING' WHERE id = ?").run(run.id);
+
+    // Before the fix the reaper marked the run FAILED but left lease_owner pointing at
+    // the dead worker. renewLease matches `WHERE lease_owner = ?`, so it kept answering
+    // true: the worker never learned it had lost the run, kept driving the agent, and
+    // then threw on an invalid transition at finalize.
+    const { failed } = env.queue.reapExpiredLeases();
+    assert.deepEqual(failed, [run.id]);
+
+    const row = env.db.prepare('SELECT lease_owner, lease_expires_at FROM runs WHERE id = ?').get(run.id) as
+      { lease_owner: string | null; lease_expires_at: string | null };
+    assert.equal(row.lease_owner, null, 'the reaper must clear lease_owner');
+    assert.equal(row.lease_expires_at, null, 'the reaper must clear lease_expires_at');
+    assert.equal(env.queue.renewLease(run.id, 'w1', 60_000), false, 'the dead worker must no longer be able to renew');
+    assert.equal(env.queue.renewLease(run.id, 'w2', 60_000), false, 'a live lease is required to renew, not just a row');
+
+    // Documents the boundary with M3: the run is terminal, so the existing requeue path
+    // declines. The worker handles this by leaving it FAILED; making it resumable is M3.
+    assert.equal(env.queue.requeueLostLease(run.id, 'w1'), false);
+    assert.equal(env.runs.get(run.id)!.status, 'FAILED');
+  } finally {
+    env.close();
+  }
+});
+
 test('lease expiry: reaped run gets a terminal run.failed event (issue #6)', async () => {
   const env = makeEnv({ workerEnabled: true, pollMs: 10 });
   try {
