@@ -955,3 +955,148 @@ test('control: the abort assertion in the lease-loss test can actually fail (iss
     env.close();
   }
 });
+
+// --- issue #137: the stuck-run scan must reach the OLDEST runs, not the newest ----------------
+//
+// The check used to be `list({ status, limit: 200 })` per status. RunStore.list is
+// `ORDER BY created_at DESC` and the caller discarded nextCursor, so past 200 live runs the scan
+// covered the 200 NEWEST -- and a run becomes stuck by being old and quiet. The safety net did not
+// degrade under load, it inverted. Every test here therefore uses MORE than 200 runs; with fewer,
+// the bug is not reachable and the test cannot fail.
+
+const OVER_CAP = 260; // > the old limit of 200, so truncation is observable
+
+/** Insert `n` RUNNING runs directly, oldest first, and return their ids oldest-first. */
+function seedRunningRuns(env: ReturnType<typeof makeEnv>, n: number, ageMs: number): string[] {
+  const now = Date.now();
+  const ids: string[] = [];
+  const ins = env.db.prepare(
+    `INSERT INTO runs (id, owner_id, task, repository_json, agent, status, attempt, constraints_json, created_at, started_at)
+     VALUES (?, 'alice', ?, '{}', 'fake', 'RUNNING', 1, '{}', ?, ?)`,
+  );
+  for (let i = 0; i < n; i++) {
+    // i = 0 is the OLDEST by ageMs; each later one is 1s newer.
+    const at = new Date(now - ageMs + i * 1000).toISOString();
+    const id = `run_seed_${String(i).padStart(4, '0')}`;
+    ins.run(id, `seed ${i}`, at, at);
+    ids.push(id);
+  }
+  return ids;
+}
+
+/** Give a run an event timestamped now, so it is NOT idle. */
+function touchRun(env: ReturnType<typeof makeEnv>, runId: string): void {
+  env.db
+    .prepare(
+      `INSERT INTO events (id, run_id, type, sequence, timestamp, payload_json)
+       VALUES (?, ?, 'agent.message', 1, ?, '{"text":"alive"}')`,
+    )
+    .run(`evt_${runId}`, runId, new Date().toISOString());
+}
+
+test('listIdle reaches runs beyond the old 200-row cap (issue #137)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const ageMs = 10 * 60 * 60 * 1000; // 10 hours
+    const ids = seedRunningRuns(env, OVER_CAP, ageMs);
+    const oldest = ids[0];
+    // Everything except the oldest is kept alive by a recent event. Only the oldest is idle.
+    for (const id of ids.slice(1)) touchRun(env, id);
+
+    const idleBefore = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1 hour threshold
+    const found = env.runs.listIdle(['RUNNING', 'NEEDS_INPUT'], idleBefore);
+
+    assert.ok(
+      found.some((r) => r.id === oldest),
+      `the OLDEST run must be reported; found ${found.length} ids, oldest present=${found.some((r) => r.id === oldest)}`,
+    );
+    assert.deepEqual(found.map((r) => r.id), [oldest], 'only the idle run should be reported');
+
+    // Positive control proving the test can fail: the query the check used to run, on the same data.
+    // It returns exactly 200 rows and they are the NEWEST 200, so the oldest is not among them.
+    const { runs: legacy, nextCursor } = env.runs.list({ status: 'RUNNING', limit: 200 });
+    assert.equal(legacy.length, 200, 'the old call is capped at 200');
+    assert.ok(nextCursor, 'the old call had a nextCursor the caller discarded');
+    assert.ok(
+      !legacy.some((r) => r.id === oldest),
+      'control broken: the old capped scan would have had to MISS the oldest run for this test to mean anything',
+    );
+  } finally {
+    env.close();
+  }
+});
+
+test('listIdle reports every idle run, not the first page of them (issue #137)', () => {
+  // The cap was not merely mis-ordered; it also bounded HOW MANY stuck runs could ever be reported.
+  // 250 simultaneously-stuck runs must all come back.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const ids = seedRunningRuns(env, 250, 10 * 60 * 60 * 1000);
+    const idleBefore = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const found = env.runs.listIdle(['RUNNING', 'NEEDS_INPUT'], idleBefore);
+    assert.equal(found.length, 250, `all 250 idle runs must be reported, got ${found.length}`);
+    assert.deepEqual(new Set(found.map((r) => r.id)), new Set(ids), 'the same set of runs');
+  } finally {
+    env.close();
+  }
+});
+
+test('POSITIVE CONTROL: a run with recent activity is never reported idle (issue #137)', async () => {
+  // Without this, an implementation that reported EVERY running run would pass both tests above.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const ids = seedRunningRuns(env, OVER_CAP, 10 * 60 * 60 * 1000);
+    for (const id of ids) touchRun(env, id); // ALL of them alive
+    const idleBefore = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    assert.deepEqual(env.runs.listIdle(['RUNNING', 'NEEDS_INPUT'], idleBefore), [],
+      'no run here is idle; none may be reported');
+
+    // And a run with NO events at all falls back to started_at/created_at, matching the old JS
+    // definition. A run created a moment ago must never look idle.
+    const fresh = env.runService.create({ ownerId: 'alice', task: 'fresh', agent: 'fake' });
+    assert.deepEqual(env.runs.listIdle(['QUEUED', 'RUNNING'], idleBefore).map((r) => r.id), [],
+      'a just-created run is not idle');
+    assert.equal(env.runs.get(fresh.id)!.status, 'QUEUED');
+  } finally {
+    env.close();
+  }
+});
+
+test('the stuck check alerts on the OLDEST run when more than 200 are running (issue #137)', async () => {
+  // End to end, because a store-level test cannot prove the worker actually calls the new query.
+  // 260 RUNNING runs are seeded directly (the worker only claims QUEUED runs, so it leaves them
+  // alone). Only the OLDEST is idle; the other 259 are kept alive by a recent event. The old capped,
+  // newest-first scan could not have reported it.
+  const webhook = await startWebhookServer();
+  const spy = makeSpyLogger();
+  const env = makeEnv({ workerEnabled: false });
+  const worker = makeWorker(env, {
+    pollMs: 10,
+    stuckRunThresholdMs: 60 * 60 * 1000, // 1 hour
+    stuckCheckIntervalMs: 50,
+    alertWebhookUrl: webhook.url,
+    logger: spy.root,
+  });
+  try {
+    const ageMs = 10 * 60 * 60 * 1000; // 10 hours old
+    const ids = seedRunningRuns(env, OVER_CAP, ageMs);
+    const oldest = ids[0];
+    for (const id of ids.slice(1)) touchRun(env, id);
+
+    worker.start();
+    await waitFor(() => webhook.hits.some((h) => h.body.type === 'stuck_runs'), 15_000);
+    const hit = webhook.hits.find((h) => h.body.type === 'stuck_runs')!;
+    const reported = (hit.body.runs as { runId: string; status: string; idleMs: number }[]);
+
+    assert.ok(
+      reported.some((r) => r.runId === oldest),
+      `the oldest of ${OVER_CAP} running runs must be alerted on; got ${JSON.stringify(reported)}`,
+    );
+    assert.equal(reported.length, 1, `only the idle run may be reported, got ${reported.length}`);
+    assert.ok(reported[0].idleMs >= 60 * 60 * 1000, 'reported idleMs must reflect the real gap');
+  } finally {
+    worker.stop();
+    await webhook.close();
+    env.close();
+  }
+});

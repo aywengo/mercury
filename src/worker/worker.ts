@@ -825,17 +825,16 @@ export class Worker {
     if (thresholdMs <= 0) return;
     const now = Date.now();
 
+    // One query, threshold in the WHERE clause. This used to be list({ status, limit: 200 }) per
+    // status -- newest first, cursor discarded -- so past 200 live runs the oldest and quietest runs,
+    // which are precisely the stuck ones, were never examined (issue #137).
+    const STUCK_STATUSES = ['RUNNING', 'NEEDS_INPUT'] as const;
+    const idleBefore = new Date(now - thresholdMs).toISOString();
     const stuck: { runId: string; status: string; idleMs: number }[] = [];
-    for (const status of ['RUNNING', 'NEEDS_INPUT'] as const) {
-      const { runs } = this.deps.runs.list({ status, limit: 200 });
-      for (const run of runs) {
-        const lastActivity = this.deps.events.lastActivity(run.id);
-        const refMs = lastActivity
-          ? Date.parse(lastActivity)
-          : Date.parse(run.startedAt ?? run.createdAt);
-        const idleMs = now - refMs;
-        if (idleMs >= thresholdMs) stuck.push({ runId: run.id, status, idleMs });
-      }
+    for (const run of this.deps.runs.listIdle(STUCK_STATUSES, idleBefore)) {
+      const lastActivity = this.deps.events.lastActivity(run.id);
+      const refMs = Date.parse(lastActivity ?? run.startedAt ?? run.createdAt);
+      stuck.push({ runId: run.id, status: run.status, idleMs: now - refMs });
     }
     if (stuck.length === 0) return;
 
