@@ -4,9 +4,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assertSafeSkillId, compareSkillIds, resolveContained, SkillRegistry } from '../src/skills/skillRegistry.ts';
+import { assertSafeSkillId, compareSkillIds, resolveContained, SkillRegistry, type SkillMeta } from '../src/skills/skillRegistry.ts';
 import { writeSkills } from '../src/worker/worker.ts';
-import { createSkillSelector, KEYWORDS } from '../src/skills/skillSelector.ts';
+import { createSkillSelector, KEYWORDS, termMatches, termsForSkill } from '../src/skills/skillSelector.ts';
 import { SKILLS_DIR } from './helpers.ts';
 
 test('registry lists all skills', () => {
@@ -420,4 +420,96 @@ test('no locale-dependent comparator remains in the skill registry (issue #86)',
     .replace(/^\s*\/\/.*$/gm, '');
   assert.doesNotMatch(src, /localeCompare/,
     'localeCompare is locale- and ICU-sensitive; use compareSkillIds so ordering has one answer');
+});
+
+// --- term matching: substring artifacts and singular/plural (issues #87, #88) ---
+
+test('a complete-word term does not fire inside an unrelated longer word (issue #88)', () => {
+  const reg = new SkillRegistry(SKILLS_DIR);
+  const avail = reg.list();
+  const sel = createSkillSelector();
+  // Each task contains a skill term only as an accidental substring of another English word.
+  const cases: [string, string][] = [
+    ['model a secretary role in the users table', 'security-review'], // secret < secretary
+    ['moderate the community forum page', 'testing'],                  // unit < community
+    ['handle the emergency shutdown path', 'git-pr'],                  // merge < emergency
+    ['document the committee approval process', 'git-pr'],             // commit < committee
+    ['render tissue sample results in the viewer', 'issue-fix-loop'],  // issue < tissue
+    ['sort by the greatest value first', 'testing'],                   // test < greatest
+    ['render the plant inventory page', 'planning'],                   // plan < plant
+  ];
+  for (const [task, wrong] of cases) {
+    const picked = sel.select(task, avail, 4);
+    // FALLBACK may still return these ids when NOTHING matches; what must not happen is the skill
+    // scoring a term hit. Assert on the score, not on membership, or the fallback hides the bug.
+    const scored = avail
+      .map((sk) => ({ id: sk.id, hits: termsWithHits(sk, task) }))
+      .find((x) => x.id === wrong);
+    assert.deepEqual(scored?.hits ?? [], [],
+      `"${task}" matched ${wrong} via ${JSON.stringify(scored?.hits)} -- substring artifact`);
+    assert.ok(Array.isArray(picked));
+  }
+});
+
+test('singular task text reaches a plural capability and vice versa (issue #87)', () => {
+  const reg = new SkillRegistry(SKILLS_DIR);
+  const avail = reg.list();
+  const sel = createSkillSelector();
+  // The issue's minimal pair: identical except one letter, previously different results.
+  assert.deepEqual(
+    sel.select('write the runbook for restoring from backup', avail, 4),
+    sel.select('write the runbooks for restoring from backup', avail, 4),
+    'singular and plural task text must select the same skills',
+  );
+  assert.ok(sel.select('write the runbook for restoring from backup', avail, 4).includes('documentation'),
+    'documentation declares the plural capability "runbooks"; the singular must still reach it');
+  // The reverse direction already worked and must keep working.
+  assert.deepEqual(
+    sel.select('update the README', avail, 4),
+    sel.select('update the READMEs', avail, 4),
+  );
+});
+
+test('declared stems still match by prefix (issue #88 regression guard)', () => {
+  // The reason substring matching exists at all. If a stem is removed from STEM_TERMS it becomes
+  // boundary-anchored and stops matching its real usages, silently making a skill unreachable.
+  const reg = new SkillRegistry(SKILLS_DIR);
+  const avail = reg.list();
+  const sel = createSkillSelector();
+  const stems: [string, string][] = [
+    ['migrate the schema', 'implementation'],      // 'migrat'
+    ['perform the data migration step', 'implementation'],
+    ['analyze the codebase structure', 'repository-analysis'], // 'analy'
+    ['check for vulnerability in the parser', 'security-review'], // 'vulnerab'
+  ];
+  for (const [task, expected] of stems) {
+    assert.ok(sel.select(task, avail, 4).includes(expected),
+      `stem-based term no longer matches "${task}" -> ${expected}`);
+  }
+});
+/** Which of a skill's scoring terms hit the task.
+ *
+ * Uses the production matcher and the production term list rather than a copy of them: a helper
+ * that re-implements termMatches can drift from the real one and keep the test green while the
+ * bug it was written to catch comes back.
+ */
+function termsWithHits(skill: SkillMeta, task: string): string[] {
+  return termsForSkill(skill).filter((term) => termMatches(term, task.toLowerCase()));
+}
+
+test('plural folding does not invent shorter terms from abbreviations (issue #88 review)', () => {
+  // 'css' and 'xss' end in 's' but are abbreviations, not plurals. Stripping the 's' produced base
+  // terms 'cs' and 'xs', which are not words but now MATCHED bare 'cs'/'xs' in task text -- firing
+  // security-review on unrelated prose.
+  assert.equal(termMatches('css', 'the cs module'), false, 'css must not match a bare cs');
+  assert.equal(termMatches('xss', 'the xs value'), false, 'xss must not match a bare xs');
+  // The abbreviations themselves still match.
+  assert.equal(termMatches('css', 'fix the css'), true);
+  assert.equal(termMatches('xss', 'an xss bug'), true);
+  // Real plurals still fold both ways.
+  assert.equal(termMatches('runbooks', 'write the runbook'), true);
+  assert.equal(termMatches('runbook', 'write the runbooks'), true);
+  // (e?s)? requires the 's', so a bare 'e' suffix never matches.
+  assert.equal(termMatches('plan', 'the plane'), false);
+  assert.equal(termMatches('push', 'git push'), true);
 });

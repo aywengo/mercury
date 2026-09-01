@@ -66,20 +66,67 @@ function termsFor(skill: SkillMeta): string[] {
 // 'migrat'->'migration' still survive at 4 or 5; 'test' is what pins the value.
 const SHORT_TERM_MAX = 3;
 
+/**
+ * Terms that are intentional word PREFIXES rather than complete words (issues #87, #88).
+ *
+ * These are the only terms substring-matched above SHORT_TERM_MAX. Everything else is a complete
+ * word and gets word boundaries, because substring matching a complete word is what made 13 of 13
+ * off-domain tasks pick the wrong skill: 'secret' fired inside 'secretary', 'unit' inside
+ * 'community', 'merge' inside 'emergency', 'commit' inside 'committee', 'test' inside 'greatest',
+ * 'plan' inside 'plant', 'auth' inside 'author'.
+ *
+ * The old rule was purely length-based (substring above 3 chars), which conflated two different
+ * things that happen to be similar lengths: stems like 'migrat' that MUST substring-match to work
+ * at all, and complete words like 'test' that must NOT. Length cannot separate them -- 'migrat' is
+ * 6 and 'secret' is 6 -- so the distinction has to be stated.
+ *
+ * Adding a term here is a deliberate choice to accept that it will fire inside unrelated words.
+ */
+/** Below this length a trailing 's' is part of the term, not a plural marker ('css', 'xss'). */
+const PLURAL_STRIP_MIN = 4;
+
+const STEM_TERMS = new Set(['analy', 'migrat', 'vulnerab']);
+
 const boundaryPatterns = new Map<string, RegExp>();
 function escapeForPattern(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function termMatches(term: string, lowerTask: string): boolean {
-  if (term.length > SHORT_TERM_MAX) return lowerTask.includes(term);
+/**
+ * Match a term against the lowercased task.
+ *
+ * Complete words are anchored to word boundaries and tolerate a plural on either side (issue #87):
+ * the capability 'runbooks' previously failed to match "write the runbook for restoring from
+ * backup" while matching "...the runbooks...", because scoring asked whether the TASK contained
+ * the capability, and a singular task can never contain a plural capability. The reverse direction
+ * already worked by accident, since 'README' is a substring of 'READMEs'.
+ *
+ * A stem is matched as a bare substring, which is the whole point of writing it truncated.
+ */
+export function termMatches(term: string, lowerTask: string): boolean {
+  if (term.length > SHORT_TERM_MAX && STEM_TERMS.has(term)) return lowerTask.includes(term);
   let pattern = boundaryPatterns.get(term);
   if (!pattern) {
-    pattern = new RegExp(`(^|[^a-z0-9])${escapeForPattern(term)}($|[^a-z0-9])`);
+    // Fold a trailing 's' so one pattern covers both directions of the singular/plural mismatch
+    // ('runbooks' must reach a task that says 'runbook'). Only when the remainder is long enough
+    // to plausibly be a singular word: 'css' and 'xss' end in 's' but are abbreviations, and
+    // stripping gives 'cs' and 'xs' -- terms that never occur, so the pattern would match a bare
+    // 'cs' or 'xs' in task text and fire security-review on unrelated words.
+    const stripS = term.endsWith('s') && term.length - 1 >= PLURAL_STRIP_MIN;
+    const base = stripS ? term.slice(0, -1) : term;
+    // (e?s)? requires the 's', so it accepts 'push'/'pushes' and 'runbook'/'runbooks' but NOT a
+    // bare 'e': 'plane' does not match 'plan'. It does accept a few non-words ('pushs'), which is
+    // harmless in a scoring heuristic; the alternative, a real stemmer, would make selection depend
+    // on an algorithm nobody reading the skill file can predict.
+    const plural = stripS ? 's?' : '(e?s)?';
+    pattern = new RegExp(`(^|[^a-z0-9])${escapeForPattern(base)}${plural}($|[^a-z0-9])`);
     boundaryPatterns.set(term, pattern);
   }
   return pattern.test(lowerTask);
 }
+
+/** The scoring terms for a skill (capabilities + hyphen variants + KEYWORDS). */
+export function termsForSkill(skill: SkillMeta): string[] { return termsFor(skill); }
 
 export interface SkillSelector {
   select(task: string, available: SkillMeta[], maxSkills: number): string[];
