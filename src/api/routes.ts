@@ -225,11 +225,20 @@ export function createRoutes(deps: RoutesDeps): Router {
     res.write(`event: hello\ndata: {"runId":"${run.id}","after":${afterSeq}}\n\n`);
 
     let closed = false;
+    // Declared before subscribe() and assigned after, because subscribe() now delivers the backlog
+    // SYNCHRONOUSLY: a backlog containing a terminal event calls send() -> end() before this handler
+    // has finished wiring. With these as `const` declared further down, end() reached them in their
+    // temporal dead zone and threw out of the middle of subscribe() -- which left the response
+    // neither written nor ended, and the request hanging rather than failing.
+    let unsubscribe: () => void = () => {};
+    let keepalive: ReturnType<typeof setInterval> | undefined;
+    let backstop: ReturnType<typeof setTimeout> | undefined;
+
     const end = (): void => {
       if (closed) return;
       closed = true;
-      clearInterval(keepalive);
-      clearTimeout(backstop);
+      if (keepalive) clearInterval(keepalive);
+      if (backstop) clearTimeout(backstop);
       unsubscribe();
       res.end();
     };
@@ -244,17 +253,34 @@ export function createRoutes(deps: RoutesDeps): Router {
       if (events.some((ev) => TERMINAL_EVENT_TYPES.has(ev.type))) end();
     };
 
-    const unsubscribe = deps.stream.subscribe(run.id, afterSeq, send);
-    const keepalive = setInterval(() => {
+    const unsubscribeFn = deps.stream.subscribe(run.id, afterSeq, send);
+    unsubscribe = unsubscribeFn;
+    // The backlog may already have ended us inside the call above. Nothing below may be armed on a
+    // response that is finished: an interval created after end() ran is unreachable by the close
+    // handler, and the subscription itself is registered after delivery, so it must be dropped here
+    // or every stream that ends during its own backlog leaks a subscriber holding a closure over a
+    // finished response.
+    if (closed) {
+      unsubscribeFn();
+      return;
+    }
+    keepalive = setInterval(() => {
       res.write(': keepalive\n\n');
     }, 15_000);
 
-    // Backstop for the case send() cannot see: the client reconnects with ?after= already past the
-    // terminal event, so no further event will ever arrive to trigger the end above. Without this
+    // Backstop for the one case send() cannot see: the client reconnects with ?after= already past
+    // the terminal event, so no further event will ever arrive to trigger the end above. Without it
     // the keepalive interval keeps the socket open forever (issue #73 L6) -- which is what made
     // server shutdown need closeAllConnections() to avoid hanging until SIGKILL (issue #52).
-    // Armed only for runs already terminal at open time, so a live run is never cut short.
-    const backstop = isTerminal(run.status) ? setTimeout(end, STREAM_CLOSE_GRACE_MS) : undefined;
+    //
+    // The condition is "already caught up", not merely "the run is terminal". readAfter() pages at
+    // 500 rows, so a terminal run with a long tail can still have history pending when subscribe()
+    // returns; arming a fixed timer over an undrained backlog truncates it, cutting the stream off
+    // mid-history while still reporting a clean close. Anything still pending is delivered by the
+    // poller, and the terminal row inside that backlog ends the stream through send() as usual.
+    if (isTerminal(run.status) && afterSeq >= deps.events.lastSequence(run.id)) {
+      backstop = setTimeout(end, STREAM_CLOSE_GRACE_MS);
+    }
 
     req.on('close', () => {
       clearInterval(keepalive);

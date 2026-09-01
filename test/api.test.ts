@@ -702,6 +702,30 @@ test('both list endpoints share one limit parser (issue #101)', () => {
 // a server full of finished runs could not shut down without closeAllConnections().
 
 /** Read an SSE response to completion, or fail loudly. Never awaits indefinitely. */
+/**
+ * Event sequences carried by an SSE body, in arrival order.
+ *
+ * Parses frames instead of regexing them: an earlier version matched `^data: \{"id":.*"sequence":`
+ * which silently encoded JSON.stringify property order. Frames that are not events -- the `hello`
+ * frame, keepalive comments -- have no numeric `sequence` and drop out.
+ */
+function sequencesOf(sse: string): number[] {
+  const out: number[] = [];
+  for (const line of sse.split('\n')) {
+    if (!line.startsWith('data: ')) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line.slice('data: '.length));
+    } catch {
+      continue;
+    }
+    if (parsed && typeof parsed === 'object' && typeof (parsed as { sequence?: unknown }).sequence === 'number') {
+      out.push((parsed as { sequence: number }).sequence);
+    }
+  }
+  return out;
+}
+
 async function readToEnd(url: string, headers: Record<string, string>, timeoutMs: number): Promise<string> {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
@@ -727,6 +751,57 @@ async function readToEnd(url: string, headers: Record<string, string>, timeoutMs
   }
 }
 
+test('a stream opened with after=0 delivers every sequence with no gap (issue #133)', async () => {
+  // The invariant that was broken: EventStream.subscribe() left the backlog to the poller, while the
+  // append hook advanced the subscription cursor for every event it pushed. Events appended before
+  // the subscription existed were therefore skipped by the hook AND then made invisible to the poller
+  // by the moved cursor -- so a client could receive the tail of a run and never its beginning.
+  // Observed on main: a stream opened with ?after=0 delivered sequences 14-18 and nothing before.
+  //
+  // Asserting contiguity rather than "contains run.started": the old code satisfied a presence
+  // check for the tail events while still dropping the prefix.
+  const repo = tempDir('mercury-sse-gap-');
+  const env = makeEnv({
+    fakeScript: [
+      { event: { type: 'agent.message', payload: { text: 'a' } } },
+      { event: { type: 'agent.message', payload: { text: 'b' } } },
+      { event: { type: 'agent.message', payload: { text: 'c' } } },
+    ],
+  });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const created = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake', repository: { localPath: repo } }),
+      });
+      const { runId } = (await created.json()) as { runId: string };
+      await waitFor(() => env.runs.get(runId)!.status === 'COMPLETED', 10_000);
+
+      const data = await readToEnd(`${base}/api/runs/${runId}/stream`, headers, 8_000);
+      // Parse the frames rather than regexing them: the previous pattern assumed "id" was the first
+    // key and "sequence" came next, so it encoded JSON.stringify property order and would break on
+    // a harmless serialisation refactor while still asserting nothing about the payload.
+    const delivered = sequencesOf(data);
+      const lastSeq = env.events.lastSequence(runId);
+
+      assert.ok(delivered.length > 3, `expected a real event set, got ${delivered.length}`);
+      assert.equal(delivered[0], 1, `stream must start at sequence 1 for after=0, got ${delivered[0]}`);
+      assert.equal(delivered.at(-1), lastSeq, 'stream must reach the terminal event');
+      const expected = [...Array(lastSeq).keys()].map((i) => i + 1);
+      assert.deepEqual(delivered, expected, 'every sequence exactly once, in order, with no gap');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
 test('an SSE stream on a terminal run is closed by the server (issue #73 L6)', async () => {
   const repo = tempDir('mercury-sse-term-');
   const env = makeEnv({ fakeScript: [{ event: { type: 'agent.message', payload: { text: 'hi' } } }] });
@@ -749,6 +824,104 @@ test('an SSE stream on a terminal run is closed by the server (issue #73 L6)', a
     } finally {
       await srv.close();
       closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('a terminal run with a backlog longer than one page is not truncated by the close backstop', async () => {
+  // readAfter() caps a read at 500 rows, so subscribe() returning does NOT mean the backlog is
+  // drained. The close backstop used to be armed for every already-terminal run, on the assumption
+  // that a terminal run has nothing left to send. With a long tail that assumption is false, and the
+  // timer ended the stream mid-history while still closing it cleanly -- silent truncation that
+  // looks like success to the client.
+  //
+  // Cadence is set explicitly so the drain provably outlasts STREAM_CLOSE_GRACE_MS (2s) rather than
+  // depending on ambient machine load: 1100 events is three pages, and at 1500ms per poll the final
+  // page lands at ~3s.
+  const TOTAL = 1100;
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'long tail', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING');
+    for (let i = 1; i <= TOTAL; i++) {
+      env.events.append(run.id, 'agent.message', { text: `e${i}` });
+    }
+    env.events.append(run.id, 'run.completed', { ok: true });
+    env.runs.transition(run.id, 'COMPLETED');
+    const last = env.events.lastSequence(run.id);
+    assert.ok(last > 1000, `fixture needs more than one 500-row page, got ${last}`);
+
+    const streamHub = new EventStream(env.db, env.events, 1_500, 1_500);
+    streamHub.start();
+    const app = createApp({
+      runService: env.runService, events: env.events, stream: streamHub,
+      apiTokens: new Map([['tok-alice', 'alice']]), adminToken: null,
+    });
+    const srv = await listen(app);
+    try {
+      const data = await readToEnd(
+        `http://127.0.0.1:${srv.port}/api/runs/${run.id}/stream?after=0`,
+        { authorization: 'Bearer tok-alice' },
+        20_000,
+      );
+      const delivered = sequencesOf(data);
+      assert.equal(delivered.length, last,
+        `backstop truncated the stream: got ${delivered.length} of ${last} events`);
+      assert.deepEqual(delivered, [...Array(last).keys()].map((i) => i + 1),
+        'delivered sequences must be contiguous 1..N');
+      assert.ok(data.includes('event: run.completed'), 'the terminal event must reach the client');
+    } finally {
+      await srv.close();
+      streamHub.stop();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('a stream closed during its own backlog leaves no subscriber behind (issue #133)', async () => {
+  // subscribe() delivers the backlog before registering, so a backlog containing the terminal event
+  // ends the response from INSIDE subscribe(). The handler must then drop the subscription it
+  // registers on the way out, or every terminal-run stream leaks a subscriber holding a closure over
+  // a finished response -- invisible from outside, and it grows with scrape traffic.
+  const repo = tempDir('mercury-sse-leak-');
+  const env = makeEnv({ fakeScript: [{ event: { type: 'agent.message', payload: { text: 'hi' } } }] });
+  try {
+    const streamHub = new EventStream(env.db, env.events, 10);
+    streamHub.start();
+    const app = createApp({
+      runService: env.runService, events: env.events, stream: streamHub,
+      apiTokens: new Map([['tok-alice', 'alice']]), adminToken: null,
+    });
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const runIds: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const created = await fetch(`${base}/api/runs`, {
+          method: 'POST', headers,
+          body: JSON.stringify({ task: `x${i}`, agent: 'fake', repository: { localPath: repo } }),
+        });
+        const { runId } = (await created.json()) as { runId: string };
+        runIds.push(runId);
+      }
+      await waitFor(() => env.runs.get(runIds[2])!.status === 'COMPLETED', 10_000);
+      assert.equal(streamHub.subscriptionCount, 0, 'no streams open yet');
+
+      // Each opens on an already-terminal run, so each ends during its own backlog delivery.
+      for (const runId of runIds) {
+        const data = await readToEnd(`${base}/api/runs/${runId}/stream`, headers, 8_000);
+        assert.ok(data.includes('event: run.completed'), 'history must still be delivered');
+      }
+      assert.equal(streamHub.subscriptionCount, 0,
+        `every closed stream must unsubscribe; ${streamHub.subscriptionCount} subscriber(s) leaked`);
+    } finally {
+      await srv.close();
+      streamHub.stop();
     }
   } finally {
     env.close();

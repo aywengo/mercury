@@ -137,6 +137,48 @@ test('append hook only delivers to matching run subscriptions', async () => {
   }
 });
 
+test('subscribe delivers the existing backlog even with the poller never started (issue #133)', async () => {
+  // Regression for real event loss. subscribe() used to only register the subscription and leave
+  // the backlog to poll(). That was not merely slow: the append hook advances the subscription
+  // cursor for every event it pushes, so events appended BEFORE the subscription were skipped by
+  // the hook and then made invisible to poll() by the advanced cursor. A client could receive the
+  // tail of a run and never its beginning -- observed on main as a stream opened with ?after=0
+  // delivering sequences 14-18 and nothing before.
+  //
+  // start() is deliberately never called, so there is no poller and no hook: the ONLY way these
+  // events can reach the subscriber is the backlog read in subscribe(). A test that allowed the
+  // poller to run would pass either way depending on timing, which is exactly why the bug survived.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    for (const text of ['one', 'two', 'three']) {
+      env.events.append(run.id, 'agent.message', { text });
+    }
+    const lastSeq = env.events.lastSequence(run.id);
+    assert.ok(lastSeq >= 3, `fixture should have written >=3 events, got ${lastSeq}`);
+
+    const stream = new EventStream(env.db, env.events, 10, 10);
+    const received: number[] = [];
+    stream.subscribe(run.id, 0, (events) => {
+      for (const e of events) received.push(e.sequence);
+    });
+
+    assert.deepEqual(received, [...Array(lastSeq).keys()].map((i) => i + 1),
+      'subscribe() must hand over every already-persisted sequence, in order, synchronously');
+
+    // A partial cursor must resume exactly where it left off, with no gap and no repeat.
+    const resumed: number[] = [];
+    stream.subscribe(run.id, 2, (events) => {
+      for (const e of events) resumed.push(e.sequence);
+    });
+    assert.deepEqual(resumed, [...Array(lastSeq - 2).keys()].map((i) => i + 3),
+      'resuming from after=2 must start at 3');
+    stream.stop();
+  } finally {
+    env.close();
+  }
+});
+
 test('poller catches events appended by another process (cross-process fallback)', async () => {
   const env = makeEnv({ workerEnabled: false });
   try {
