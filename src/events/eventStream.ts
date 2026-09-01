@@ -6,6 +6,19 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { MercuryEvent } from '../domain/types.ts';
 import type { EventStore } from './eventStore.ts';
+import { nullLogger, type Logger } from '../logger.ts';
+
+/**
+ * Error detail that survives the logger.
+ *
+ * The logger serialises fields with JSON.stringify, and `message`/`stack` are NOT enumerable on an
+ * Error -- measured, `JSON.stringify({ err })` yields `{"err":{}}`. Passing the raw error would have
+ * made every line added here say nothing but "an error happened", which is the exact blindness this
+ * issue is about.
+ */
+function describeError(err: unknown): string {
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+}
 
 interface Subscription {
   runId: string;
@@ -24,12 +37,29 @@ export class EventStream {
   private fastMs: number;
   private slowMs: number;
   private detachHook: (() => void) | null = null;
+  private log: Logger;
+  /**
+   * runIds whose most recent poll read failed. Read failures are logged on the edges of a streak
+   * rather than once per tick -- a busy or closed database fails every subscriber every 250 ms, which
+   * would bury everything else the process logs -- and the streak is tracked PER RUN on purpose. A
+   * single global flag cleared by the first successful read would make one healthy subscriber log a
+   * "recovery" every tick while a poisoned row kept failing another run, so the recovery line would be
+   * describing a run that never recovered.
+   */
+  private failingReads = new Set<string>();
 
-  constructor(db: DatabaseSync, store: EventStore, fastMs = FAST_MS, slowMs = SLOW_MS) {
+  constructor(
+    db: DatabaseSync,
+    store: EventStore,
+    fastMs = FAST_MS,
+    slowMs = SLOW_MS,
+    logger: Logger = nullLogger,
+  ) {
     this.db = db;
     this.store = store;
     this.fastMs = fastMs;
     this.slowMs = slowMs;
+    this.log = logger;
   }
 
   start(): void {
@@ -53,6 +83,7 @@ export class EventStream {
     this.detachHook?.();
     this.detachHook = null;
     this.subs.clear();
+    this.failingReads.clear();
   }
 
   /**
@@ -134,17 +165,54 @@ export class EventStream {
     this.timer = setInterval(() => this.poll(), this.slowMs);
   }
 
+  /**
+   * One poll tick for every subscriber.
+   *
+   * The two failure sources here are NOT the same failure and must not share a handler. This used to
+   * be one `catch {}` around the whole body with a comment claiming the subscription was dropped --
+   * nothing was dropped, nothing was logged, and the subscription was retried forever (issue #139).
+   *
+   *   - readAfter() throwing is the DATABASE's fault: a busy or closed handle, and it hits every
+   *     subscriber on that tick. Dropping all of them would convert a transient into a mass SSE
+   *     disconnect, so the subscription is kept and retried on the next tick.
+   *   - onEvents() throwing is the SUBSCRIBER's fault: that callback owns a client response and a
+   *     throw means the stream behind it is gone. Keeping it means retrying a dead client forever.
+   *     So exactly that subscription is dropped.
+   */
   private poll(): void {
     let anyNew = false;
     for (const sub of [...this.subs]) {
+      let events: MercuryEvent[];
       try {
-        const events = this.readAfter(sub.runId, sub.afterSeq);
-        if (events.length === 0) continue;
-        anyNew = true;
-        sub.afterSeq = events[events.length - 1].sequence;
+        events = this.readAfter(sub.runId, sub.afterSeq);
+      } catch (err) {
+        // Transient and shared across subscribers, so keep the subscription. Logged on the leading
+        // edge of this run's failure streak only -- see failingReads.
+        if (!this.failingReads.has(sub.runId)) {
+          this.failingReads.add(sub.runId);
+          this.log.error(
+            { err: describeError(err), runId: sub.runId, subs: this.subs.size },
+            'event poll read failed; retrying',
+          );
+        }
+        continue;
+      }
+      if (this.failingReads.delete(sub.runId)) {
+        this.log.info({ runId: sub.runId }, 'event poll read recovered');
+      }
+      if (events.length === 0) continue;
+      anyNew = true;
+      sub.afterSeq = events[events.length - 1].sequence;
+      try {
         sub.onEvents(events);
-      } catch {
-        // drop failing subscription on next poll
+      } catch (err) {
+        // Dead client: drop this one subscriber and say so. This is the only place that can observe
+        // a delivery failure at all, so a silent handler here means nobody ever learns.
+        this.subs.delete(sub);
+        this.log.error(
+          { err: describeError(err), runId: sub.runId },
+          'event subscriber dropped after delivery failure',
+        );
       }
     }
     // Back to fast cadence when the poll found nothing new (idle).

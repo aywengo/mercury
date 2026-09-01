@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeEnv, tempDir, waitFor } from './helpers.ts';
+import { createLogger } from '../src/logger.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { EventStore } from '../src/events/eventStore.ts';
 import { EVENT_TYPES } from '../src/domain/types.ts';
@@ -437,4 +438,243 @@ test('EVENT_TYPES covers every type src/ actually appends (issue #60 drift guard
   };
   walk(src, '');
   assert.deepEqual(offenders, [], `appended types missing from EVENT_TYPES: ${offenders.join(', ')}`);
+});
+// --- issue #139: poll() must not swallow errors ---------------------------------------------
+//
+// These drive the POLL path, not the in-process append hook, by appending through a SECOND EventStore
+// over the same connection. That is the situation poll() exists for (in production the worker is a
+// separate process, so the hook never fires), and it is the only way to reach the code under test:
+// appending through the stream's own EventStore fires the hook synchronously and never enters poll().
+//
+// Every stream is stopped in `finally`. A started EventStream holds a live setInterval, so a test
+// that fails before its inline stop() keeps the process alive forever -- which is exactly how this
+// first draft hung the file instead of failing it.
+
+type Logged = { level: string; msg: string; fields: Record<string, unknown> };
+
+function capturingLogger(): { log: ReturnType<typeof createLogger>; lines: Logged[] } {
+  const lines: Logged[] = [];
+  const log = createLogger(createRedactor([]), 'debug', (line) => {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    lines.push({
+      level: parsed.level as string,
+      msg: parsed.msg as string,
+      fields: parsed, // the whole record: the point is often in the fields, not the message
+    });
+  });
+  return { log, lines };
+}
+
+/** Sequence of the newest persisted event, so a subscribe() after it delivers NO backlog. */
+function cursor(env: { events: EventStore }, runId: string): number {
+  const all = env.events.list(runId);
+  return all.length ? all[all.length - 1].sequence : 0;
+}
+
+test('a subscriber whose delivery throws is dropped and logged, not retried forever (issue #139)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  const peer = new EventStore(env.db); // its appends do not fire the stream's hook
+  const { log, lines } = capturingLogger();
+  let stream: EventStream | null = null;
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    stream = new EventStream(env.db, env.events, 10, 10, log);
+    stream.start();
+
+    let calls = 0;
+    // Subscribe PAST the existing rows: subscribe() delivers its backlog synchronously, so a handler
+    // that throws would otherwise throw out of subscribe() and never reach poll().
+    stream.subscribe(run.id, cursor(env, run.id), () => {
+      calls += 1;
+      throw new Error('client socket is gone');
+    });
+    assert.equal(stream.subscriptionCount, 1, 'precondition: one live subscriber');
+
+    peer.append(run.id, 'agent.message', { text: 'deliver me' });
+    await waitFor(() => stream!.subscriptionCount === 0, 5_000);
+
+    assert.ok(calls > 0, 'the delivery callback must have been attempted at least once');
+    const drop = lines.find((l) => l.level === 'error' && l.msg.includes('subscriber dropped'));
+    assert.ok(drop, `expected a drop logged at error level, got ${JSON.stringify(lines)}`);
+    // The message alone is not enough: the logger JSON-serialises fields, and Error.message is not
+    // enumerable, so a raw { err } logs as {} and the line says nothing about what failed.
+    assert.match(
+      String(drop.fields.err),
+      /client socket is gone/,
+      `the error detail must survive serialisation, got ${JSON.stringify(drop.fields)}`,
+    );
+
+    // Dropped means DROPPED: further events must not re-invoke it.
+    const callsAtDrop = calls;
+    peer.append(run.id, 'agent.message', { text: 'and me' });
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(calls, callsAtDrop, 'a dropped subscriber must never be called again');
+  } finally {
+    stream?.stop();
+    env.close();
+  }
+});
+
+test('one throwing subscriber does not disturb the others (issue #139)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  const peer = new EventStore(env.db);
+  let stream: EventStream | null = null;
+  try {
+    const runBad = env.runService.create({ ownerId: 'alice', task: 'bad', agent: 'fake' });
+    const runGood = env.runService.create({ ownerId: 'alice', task: 'good', agent: 'fake' });
+    stream = new EventStream(env.db, env.events, 10, 10, capturingLogger().log);
+    stream.start();
+    const got: string[] = [];
+    stream.subscribe(runBad.id, cursor(env, runBad.id), () => {
+      throw new Error('dead client');
+    });
+    stream.subscribe(runGood.id, cursor(env, runGood.id), (events) => {
+      for (const e of events) got.push(e.type);
+    });
+    assert.equal(stream.subscriptionCount, 2);
+
+    peer.append(runBad.id, 'agent.message', { text: 'boom' });
+    peer.append(runGood.id, 'agent.message', { text: 'fine' });
+
+    await waitFor(() => stream!.subscriptionCount === 1, 5_000);
+    assert.ok(got.includes('agent.message'), 'the healthy subscriber must still receive');
+
+    // And it must keep working AFTER its neighbour was dropped, not only before.
+    peer.append(runGood.id, 'tool.started', { tool: 'bash' });
+    await waitFor(() => got.includes('tool.started'), 5_000);
+    assert.equal(stream.subscriptionCount, 1, 'exactly the throwing subscriber was removed');
+  } finally {
+    stream?.stop();
+    env.close();
+  }
+});
+
+test('POSITIVE CONTROL: a healthy subscriber survives many poll ticks (issue #139)', async () => {
+  // The other tests here all assert removal or retention of something. Without one asserting that a
+  // healthy stream is NEVER dropped, an implementation that dropped every subscriber on every tick
+  // would satisfy them all.
+  const env = makeEnv({ workerEnabled: false });
+  const peer = new EventStore(env.db);
+  const { log, lines } = capturingLogger();
+  let stream: EventStream | null = null;
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    stream = new EventStream(env.db, env.events, 5, 5, log);
+    stream.start();
+    const got: number[] = [];
+    stream.subscribe(run.id, cursor(env, run.id), (events) => {
+      for (const e of events) got.push(e.sequence);
+    });
+    for (let i = 0; i < 5; i++) peer.append(run.id, 'agent.message', { text: `m${i}` });
+    await waitFor(() => got.length >= 5, 5_000);
+    await new Promise((r) => setTimeout(r, 150)); // many more ticks, all of them empty
+
+    assert.equal(stream.subscriptionCount, 1, 'a healthy subscriber must never be dropped');
+    const errs = lines.filter((l) => l.level === 'error');
+    assert.equal(errs.length, 0, `no errors expected, got ${JSON.stringify(errs)}`);
+  } finally {
+    stream?.stop();
+    env.close();
+  }
+});
+
+test('a failed event READ keeps the subscriber, logs once, and recovers (issue #139)', async () => {
+  // A read failure is the database's fault and hits every subscriber at once, so it must NOT be
+  // handled like a dead client. A row with unparseable payload_json makes readAfter() throw while
+  // leaving the connection usable -- the only way to produce, and then clear, a read failure in a
+  // test. Recovery is asserted because "log once per streak" is only correct if the streak ends.
+  const env = makeEnv({ workerEnabled: false });
+  const peer = new EventStore(env.db);
+  const { log, lines } = capturingLogger();
+  let stream: EventStream | null = null;
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    stream = new EventStream(env.db, env.events, 5, 5, log);
+    stream.start();
+    const got: number[] = [];
+    stream.subscribe(run.id, cursor(env, run.id), (events) => {
+      for (const e of events) got.push(e.sequence);
+    });
+
+    // Append and corrupt in ONE synchronous block. The poll runs on a timer, and a timer cannot
+    // interleave with synchronous code, so this guarantees the stream's first read of the row is the
+    // corrupt one. Corrupting after a waitFor would race the poll and, worse, could corrupt a row the
+    // cursor had already moved past -- which fails silently instead of failing the test.
+    peer.append(run.id, 'agent.message', { text: 'poison' });
+    const poisoned = env.events.list(run.id).slice(-1)[0].sequence;
+    env.db.prepare("UPDATE events SET payload_json = '{' WHERE run_id = ? AND sequence = ?").run(run.id, poisoned);
+    assert.equal(got.length, 0, 'precondition: the corrupt row has not been delivered yet');
+
+    const readErrors = () => lines.filter((l) => l.msg.includes('poll read failed')).length;
+    await waitFor(() => readErrors() >= 1, 5_000);
+    const firstErr = lines.find((l) => l.msg.includes('poll read failed'))!;
+    assert.match(
+      String(firstErr.fields.err),
+      /SyntaxError|JSON/,
+      `a read failure must say why, got ${JSON.stringify(firstErr.fields)}`,
+    );
+    await waitFor(() => readErrors() >= 1, 5_000);
+    const afterFirst = readErrors();
+    await new Promise((r) => setTimeout(r, 200)); // ~40 more ticks at 5ms
+
+    assert.equal(stream.subscriptionCount, 1, 'a read failure must not drop the subscriber');
+    assert.equal(readErrors(), afterFirst, `read failures must log once per streak, saw ${readErrors()}`);
+
+    // Clear the fault: the SAME subscription must resume, with nothing skipped.
+    env.db
+      .prepare("UPDATE events SET payload_json = '{\"text\":\"healed\"}' WHERE run_id = ? AND sequence = ?")
+      .run(run.id, poisoned);
+    await waitFor(() => lines.some((l) => l.msg.includes('poll read recovered')), 5_000);
+    assert.ok(got.includes(poisoned), 'the event is still delivered after recovery -- nothing was skipped');
+    assert.equal(stream.subscriptionCount, 1);
+  } finally {
+    stream?.stop();
+    env.close();
+  }
+});
+
+test('a poisoned run does not make a healthy run log recoveries (issue #139 review)', async () => {
+  // Two runs, one with an undecodable row and one healthy, sharing one poll loop. With a single
+  // global "was failing" flag cleared by the first successful read, the healthy run's every-tick
+  // success would emit a recovery line while the poisoned run kept failing -- so the log would both
+  // spam and describe a recovery that never happened. Streaks are per run for exactly this reason.
+  const env = makeEnv({ workerEnabled: false });
+  const peer = new EventStore(env.db);
+  const { log, lines } = capturingLogger();
+  let stream: EventStream | null = null;
+  try {
+    const runBad = env.runService.create({ ownerId: 'alice', task: 'bad', agent: 'fake' });
+    const runGood = env.runService.create({ ownerId: 'alice', task: 'good', agent: 'fake' });
+    stream = new EventStream(env.db, env.events, 5, 5, log);
+    stream.start();
+    const good: number[] = [];
+    stream.subscribe(runBad.id, cursor(env, runBad.id), () => {});
+    stream.subscribe(runGood.id, cursor(env, runGood.id), (events) => {
+      for (const e of events) good.push(e.sequence);
+    });
+
+    // Poison only runBad, in the same synchronous block as the append so no poll can see it first.
+    peer.append(runBad.id, 'agent.message', { text: 'poison' });
+    const badSeq = env.events.list(runBad.id).slice(-1)[0].sequence;
+    env.db.prepare("UPDATE events SET payload_json = '{' WHERE run_id = ? AND sequence = ?").run(runBad.id, badSeq);
+    // And keep runGood genuinely healthy across many ticks.
+    peer.append(runGood.id, 'agent.message', { text: 'fine' });
+
+    await waitFor(() => lines.some((l) => l.msg.includes('poll read failed')), 5_000);
+    await waitFor(() => good.length >= 1, 5_000);
+    await new Promise((r) => setTimeout(r, 200)); // ~40 more ticks: bad keeps failing, good keeps succeeding
+
+    const failures = lines.filter((l) => l.msg.includes('poll read failed'));
+    const recoveries = lines.filter((l) => l.msg.includes('poll read recovered'));
+    assert.equal(failures.length, 1, `one failure per failing run, saw ${failures.length}`);
+    assert.equal(
+      recoveries.length,
+      0,
+      `a run that never failed must not log a recovery, saw ${recoveries.length}: ${JSON.stringify(recoveries)}`,
+    );
+    assert.equal(stream.subscriptionCount, 2, 'neither subscription may be dropped by a read failure');
+  } finally {
+    stream?.stop();
+    env.close();
+  }
 });
