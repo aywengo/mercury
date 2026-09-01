@@ -130,6 +130,7 @@ QUEUED → STARTING → RUNNING ⇄ NEEDS_INPUT → COMPLETED / FAILED / CANCELL
 - Cancellation is cooperative first (`run.cancelling` → adapter `cancel()` → SIGTERM), forceful after a grace period.
 - Timeouts (`maxDurationMs`) produce `TIMED_OUT`; input timeouts produce `TIMED_OUT` with reason `input-timeout`.
 - Infrastructure failures auto-retry with backoff up to `maxRetries`; agent/task failures are manual-retry only.
+- Shutdown is graceful on SIGTERM, and the two processes are bounded separately. The **API** stops admitting connections, gives ordinary in-flight requests a fixed 2 s grace, then force-closes the rest — necessary because SSE streams are long-lived by design and would otherwise stall every deploy until SIGKILL. The **worker** stops claiming, lets the in-flight Run terminate its agent and requeue itself (bounded by `MERCURY_SHUTDOWN_GRACE_MS`), then closes the database. Past either bound the Run is recovered by lease reaping rather than clean requeue. A second SIGTERM exits immediately, which is safe for the same reason.
 
 ## Configuration (env)
 
@@ -174,6 +175,11 @@ QUEUED → STARTING → RUNNING ⇄ NEEDS_INPUT → COMPLETED / FAILED / CANCELL
 | `MERCURY_SANDBOX_IMAGE` | — | Container image for sandboxed execution; must contain the agent binary and git (see Sandboxed execution) |
 | `MERCURY_SANDBOX_ENV` | provider keys | Comma-separated env vars forwarded into the container. Empty = forward nothing but `PATH`. Never a copy of the worker's environment |
 | `MERCURY_SANDBOX_DISK_LIMITS` | `false` | Set `true` only when the host storage driver honours `--storage-opt size=` |
+| `MERCURY_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`. Structured JSON to stdout, consumed by journald |
+| `MERCURY_POLL_MS` | `250` | Worker claim-loop interval when the queue is idle |
+| `MERCURY_INPUT_POLL_MS` | `200` | How often the worker polls for queued human input |
+| `MERCURY_SHUTDOWN_GRACE_MS` | `30000` | **Worker only.** On SIGTERM, how long to wait for the in-flight Run to terminate its agent and hand itself back before giving up and leaving it to the reaper. Keep it **below** `mercury-worker.service`'s `TimeoutStopSec` (45 s), or systemd sends SIGKILL first and the Run is reaped as a crashed lease. The API's own drain is a separate fixed 2 s (`SHUTDOWN_GRACE_MS` in `src/api/server.ts`), bounded by `mercury.service`'s `TimeoutStopSec` (15 s) |
+| `MERCURY_BACKLOG_CHECK_INTERVAL_MS` | `60000` | How often queue-backlog alerting runs. On its own timer, so a multi-hour Run cannot suppress it |
 
 ## Local CLI agents (LocalAgentAdapter)
 
@@ -384,7 +390,7 @@ requests `resourceLimits.disk` with an explanation instead.
 - run service (create, idempotency, cancel, retry, ownership, pagination)
 - events (monotonic sequences, cursor reads, JSON round-trip)
 - worker (happy path with real git worktree, agent failure, cancellation, human input, input timeout, run timeout, retry base-commit pinning, duplicate-claim prevention, lease expiry, auto-retry)
-- multi-worker (backlog alerting + webhook, `/healthz/workers`, lease-loss requeue, stuck-run detection + webhook)
+- multi-worker (backlog alerting + webhook, `/healthz/workers`, expired-lease reaping — an active run becomes FAILED, it is **not** requeued — stuck-run detection + webhook)
 - API (bearer + session-cookie auth, owner scoping, admin, login/logout/me, rate limiting 429, SSE live + reconnect, cancel/input via HTTP)
 - JSONL framing (strict LF-only, U+2028/U+2029 inside strings, chunk splits, overflow)
 - RPC client (get_state, prompt streaming, extension UI round trip, send timeout, spawn failure)
@@ -393,6 +399,9 @@ requests `resourceLimits.disk` with an explanation instead.
 - DaemonAgentAdapter (RPC-over-socket against a mock daemon: prompt/events/completion, input round trip, abort, spawn failure)
 - Dashboard UI (static assets served without auth, API still token-gated, UI modules parse)
 - Workspace GC (retention expiry, quota eviction, active-run protection, orphan cleanup, git-worktree removal, multi-repo extras + primary dedupe)
+- `/metrics` (auth gating, aggregate correctness, cumulative `+Inf` histogram invariants, bounded label cardinality, Prometheus family-name collisions, and that the `events(type)` index is actually used by the planner)
+- Operations guards (backup script integrity check + restore, deploy docs path/ordering agreement, systemd hardening stays fail-closed)
+- Test hygiene (no test may create a temp dir without registering it for teardown, so the suite cannot leak temp dirs again)
 
 ## Known limitations
 
@@ -423,12 +432,12 @@ Setting a depth also makes `req.secure` honour `X-Forwarded-Proto`, so the sessi
 1. ~~Real auth (offline)~~ — done: HttpOnly session cookies, rate limiting, `127.0.0.1` bind default, optional TLS. Next: OIDC/SSO to replace the token→owner map
 2. ~~Workspace retention/GC job~~ — done: retention + quota + orphan cleanup, `mercury gc`, hourly worker pass
 3. ~~Push-based event fan-out~~ — done: in-process push via EventStore append hook + adaptive poller (cross-process push remains the scale path)
-4. ~~Multi-worker deployment~~ — done: backlog alerting (+ optional webhook), `/healthz/workers`, lease-loss recovery
+4. ~~Multi-worker deployment~~ — done: backlog alerting (+ optional webhook), `/healthz/workers`, expired-lease reaping (one owner: `reapExpiredLeases`; an active run goes FAILED/infrastructure and recovers by retry-as-new-run, never by requeue)
 5. ~~Multi-repository Runs~~ — done: `repositories[]` in the Run model, API + workspace support
 6. ~~Expand skill library~~ — done: 12 skills (added documentation, deployment, frontend, issue-fix-loop)
-7. ~~Deployment packaging~~ — done: systemd units, backup script, logrotate, ops guide in `deploy/`
+7. ~~Deployment packaging~~ — done: systemd units, integrity-checking backup/restore script, ops guide in `deploy/` (logs go to journald, so `logrotate` is not used and the config that implied otherwise was removed)
 8. Daemon-based agent sessions — implemented behind `MERCURY_AGENT_MODE=daemon` (RPC remains default); verify against the real daemon before relying on it
 9. ~~Sandboxed execution (containers)~~ — done: `SandboxManager` enforces `resourceLimits` + `allowedNetworks` via docker/podman; fails closed when a constrained Run has no runtime
-10. ~~Input timeout + observability~~ — done: configurable `MERCURY_INPUT_TIMEOUT_MS` (`TIMED_OUT` reason `input-timeout`), stuck-run alerting, queue-wait/duration metrics, and run/worker trace env (`MERCURY_RUN_ID`/`MERCURY_TRACE_ID`/`MERCURY_WORKER_ID`) propagated to the agent process
+10. ~~Input timeout + observability~~ — done: configurable `MERCURY_INPUT_TIMEOUT_MS` (`TIMED_OUT` reason `input-timeout`), stuck-run alerting, `GET /metrics` in Prometheus format (run duration, queue wait, status gauges, worker/lease state), and run/worker trace env (`MERCURY_RUN_ID`/`MERCURY_TRACE_ID`/`MERCURY_WORKER_ID`) propagated to the agent process
 11. Cross-process event push (worker → server) for multi-host scale — remaining
 12. OIDC/SSO identity to replace the token→owner map — remaining

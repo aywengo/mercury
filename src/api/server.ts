@@ -218,7 +218,9 @@ export interface StartedServer {
 /**
  * Grace period between stopping admission and forcing sockets shut (issue #52).
  * Long enough for an ordinary JSON request to finish, short enough that a stalled
- * dashboard tab cannot hold a deploy open -- systemd escalates to SIGKILL at 90s.
+ * dashboard tab cannot hold a deploy open. The hard bound is the unit, not this number:
+ * `deploy/mercury.service` sets `TimeoutStopSec=15`, so systemd escalates to SIGKILL 15s
+ * after SIGTERM. (An earlier revision of this comment said 90s, which matched no unit.)
  */
 const SHUTDOWN_GRACE_MS = 2_000;
 
