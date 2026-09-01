@@ -952,10 +952,16 @@ test('failure bookkeeping is all-or-nothing, not four independent writes (issue 
     }) as typeof env.events.append;
 
     const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo } });
-    // Give the worker time to reach finalize and fail there.
-    await sleep(2_500);
 
-    assert.ok(poisonedCount > 0, 'the injected failure must actually fire, or this proves nothing');
+    // Wait on the thing the test depends on rather than on the clock. A fixed sleep here is both
+    // slow and flaky: under CI load the worker may not have reached finalize in time, and on an
+    // idle machine it wastes seconds.
+    //
+    // Wait for TWO attempts, not one. The first throw comes from finalize()'s agent-failure branch;
+    // it unwinds into execute()'s catch, which attempts the same four writes for an infrastructure
+    // failure. Asserting after only the first would race the second attempt mid-flight and could
+    // observe a state that was still about to change.
+    await waitFor(() => poisonedCount >= 2, 10_000);
 
     const after = env.runs.get(run.id)!;
     // The decisive assertions: nothing partial survived.
