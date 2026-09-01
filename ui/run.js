@@ -2,7 +2,7 @@
 
 import {
   api, logout, currentUser, esc, fmtTime, fmtDuration, statusClass,
-  repoLabel, shortId, pretty, sse,
+  repoLabel, shortId, pretty, sse, safeUrl,
 } from './app.js';
 
 const $ = (id) => document.getElementById(id);
@@ -67,7 +67,19 @@ function renderRun(r, skills) {
   $('f-commits').innerHTML = (r.finalCommits || []).length
     ? r.finalCommits.map((c) => `<div class="mono">${esc(c)}</div>`).join('')
     : '—';
-  $('f-pr').innerHTML = r.prUrl ? `<a href="${esc(r.prUrl)}" target="_blank">${esc(r.prUrl)}</a>` : '—';
+  // href is scheme-validated, not merely escaped (issue #57): esc() cannot stop `javascript:`
+  // because the scheme is a valid attribute value. rel=noopener blocks the reverse-tabnabbing
+  // channel that target=_blank otherwise opens onto a page the agent chose.
+  // A rejected URL is still SHOWN, as inert text -- hiding it outright would let a malicious agent
+  // make a PR link silently vanish and leave whoever is watching the run guessing.
+  if (r.prUrl) {
+    const safe = safeUrl(r.prUrl);
+    $('f-pr').innerHTML = safe
+      ? `<a href="${esc(safe)}" target="_blank" rel="noopener noreferrer">${esc(r.prUrl)}</a>`
+      : `<span class="mono" title="not a http(s) URL, link disabled">${esc(r.prUrl)} (not linked)</span>`;
+  } else {
+    $('f-pr').innerHTML = '—';
+  }
 
   $('skills').innerHTML = skills.map((s) =>
     `<span class="skill-chip">${esc(s.id)} <span class="v">v${esc(s.version)}</span></span>`
