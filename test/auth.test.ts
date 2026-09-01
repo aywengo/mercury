@@ -367,9 +367,16 @@ test('session store: lazy expiry drops expired sessions on access', () => {
 
 // --- session cookie `Secure` flag (issue #64) -------------------------------
 
+/**
+ * The Set-Cookie value under test.
+ *
+ * `getSetCookie()` rather than `get('set-cookie')`: the latter returns a single string with
+ * multiple cookies comma-joined, which would silently concatenate the session cookie with any
+ * other cookie the response sets. There is exactly one Set-Cookie here today so both work, but
+ * the array API is the one that stays correct if that changes.
+ */
 function setCookie(res: globalThis.Response): string {
-  const raw = res.headers.get('set-cookie') ?? '';
-  return Array.isArray(raw) ? raw[0] : raw;
+  return res.headers.getSetCookie()[0] ?? '';
 }
 
 async function loginAndGetCookie(port: number, headers: Record<string, string> = {}): Promise<string> {
