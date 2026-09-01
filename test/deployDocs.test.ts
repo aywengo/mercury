@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 // deploy/README.md path consistency (issue #70).
@@ -10,6 +11,7 @@ import { join } from 'node:path';
 // the guide agree with each other.
 import { readFileSync } from 'node:fs';
 
+const DEPLOY = join(import.meta.dirname, '..', 'deploy');
 const README = readFileSync(join(import.meta.dirname, '..', 'deploy', 'README.md'), 'utf8');
 const UNITS = ['mercury.service', 'mercury-worker.service']
   .map((f) => readFileSync(join(import.meta.dirname, '..', 'deploy', f), 'utf8'));
@@ -86,4 +88,38 @@ test('the guide creates the config file before enabling the services (issue #70 
   // And the guide must say so, not merely happen to be ordered correctly.
   assert.match(README, /before[\s\S]{0,120}systemctl enable --now|BEFORE enabling/i,
     'the guide must state that the config file is required before enabling');
+});
+
+// Issue #73 L4 and L10: shipped deploy configuration that cannot do what it claims.
+
+test('no logrotate config is shipped, because nothing writes log files (issue #73 L4)', () => {
+  // The app logs JSON to stdout/stderr and systemd captures it in the journal, so the logrotate
+  // config that used to ship here rotated /var/log/mercury/*.log -- a directory nothing ever wrote
+  // to. It looked like log management and was inert. Removed rather than documented: a config file
+  // that provably cannot act is a liability, not a convenience.
+  assert.equal(existsSync(join(DEPLOY, 'logrotate.conf')), false,
+    'logrotate config must not ship; rotation belongs to journald');
+  // And the guide must not tell anyone to install it.
+  assert.doesNotMatch(README, /cp\s+logrotate\.conf/, 'the install steps must not reference logrotate');
+  // The replacement has to be stated, not merely implied by an absence.
+  assert.match(README, /journalctl -u mercury-worker/, 'the guide must say where the logs actually go');
+  assert.match(README, /journald\.conf|SystemMaxUse/, 'the guide must name what does the rotating');
+});
+
+test('the sandbox/docker conflict has an opt-in drop-in, and the baseline stays hardened (issue #73 L10)', () => {
+  const dropin = join(DEPLOY, 'mercury-worker-sandbox.conf');
+  assert.ok(existsSync(dropin), 'an opt-in drop-in for the docker socket must ship');
+  const body = readFileSync(dropin, 'utf8');
+  assert.match(body, /ReadWritePaths=.*\/var\/run\/docker\.sock/, 'it must re-permit the socket path');
+
+  // The point of the split is that the DEFAULT stays strict. If the socket were added to the main
+  // unit this test would pass while the hardening was quietly gone.
+  for (const unit of ['mercury.service', 'mercury-worker.service']) {
+    const text = readFileSync(join(DEPLOY, unit), 'utf8');
+    assert.match(text, /^ProtectSystem=strict$/m, `${unit} must keep ProtectSystem=strict`);
+    assert.doesNotMatch(text, /docker\.sock/, `${unit} must not grant docker access by default`);
+    assert.match(text, /^TimeoutStopSec=\d+$/m, `${unit} must bound shutdown (issue #51/#52)`);
+  }
+  // Discoverability: an opt-in nobody can find is equivalent to no support at all.
+  assert.match(README, /mercury-worker-sandbox\.conf/, 'the guide must name the drop-in');
 });

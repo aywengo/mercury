@@ -1,6 +1,7 @@
 # Mercury deployment
 
-Systemd units, backup script and logrotate config for running Mercury as a service.
+Systemd units and a backup script for running Mercury as a service. Logs go to journald;
+there is no logrotate config because there is nothing on disk to rotate.
 
 ## Configuration file (required)
 
@@ -42,7 +43,6 @@ sudo useradd --system --home /opt/mercury --shell /usr/sbin/nologin mercury
 sudo mkdir -p /opt/mercury /var/lib/mercury /etc/mercury
 sudo cp -r /path/to/mercury/* /opt/mercury/
 sudo cp mercury.service mercury-worker.service /etc/systemd/system/
-sudo cp logrotate.conf /etc/logrotate.d/mercury
 sudo systemctl daemon-reload
 
 # Requires /etc/mercury/mercury.env (created in the previous section); the units fail closed without it.
@@ -79,6 +79,41 @@ sudo systemctl start mercury mercury-worker
 Backups are verified at creation time by `backup.sh` (`PRAGMA integrity_check`), and the script
 refuses to run without `sqlite3` rather than falling back to `cp` -- see the comments in
 `deploy/backup.sh` for why copying a WAL-mode database is not a backup.
+
+## Logs
+
+Both units log JSON to stdout/stderr, which systemd captures in the journal:
+
+```bash
+journalctl -u mercury-worker -f
+```
+
+Rotation, retention and compression are journald's job, configured in `journald.conf`
+(`SystemMaxUse`, `MaxRetentionSec`) -- not logrotate's. A `logrotate.conf` shipped here previously
+rotated `/var/log/mercury/*.log`, a directory nothing ever wrote to, so it silently did nothing
+(issue #73 L4). It has been removed rather than documented, because a config file that provably
+cannot do anything is a maintenance liability, not a convenience.
+
+If you redirect output to files instead, you take on rotation yourself; the units as shipped do not.
+
+## Container sandbox under a hardened unit
+
+`mercury-worker.service` sets `ProtectSystem=strict`, which mounts the filesystem read-only. That
+is deliberate, and it is incompatible with the container sandbox: talking to the Docker daemon
+means writing to `/var/run/docker.sock`, which a read-only root blocks. A run that asks for
+isolation therefore fails closed rather than running unsandboxed -- the correct failure direction,
+but not one you want to discover in production.
+
+If you use `resourceLimits`/`allowedNetworks` (the sandbox), install the drop-in:
+
+```bash
+sudo mkdir -p /etc/systemd/system/mercury-worker.service.d
+sudo cp mercury-worker-sandbox.conf /etc/systemd/system/mercury-worker.service.d/
+sudo systemctl daemon-reload && sudo systemctl restart mercury-worker
+```
+
+It relaxes only what the docker socket requires and is NOT installed by default: the hardened
+baseline is the right default for deployments that do not sandbox.
 
 ## Notes
 
