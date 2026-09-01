@@ -222,8 +222,6 @@ export function createRoutes(deps: RoutesDeps): Router {
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
-    res.write(`event: hello\ndata: {"runId":"${run.id}","after":${afterSeq}}\n\n`);
-
     let closed = false;
     // Declared before subscribe() and assigned after, because subscribe() now delivers the backlog
     // SYNCHRONOUSLY: a backlog containing a terminal event calls send() -> end() before this handler
@@ -240,53 +238,98 @@ export function createRoutes(deps: RoutesDeps): Router {
       if (keepalive) clearInterval(keepalive);
       if (backstop) clearTimeout(backstop);
       unsubscribe();
-      res.end();
-    };
-
-    const send = (events: { type: string; sequence: number; payload: unknown }[]): void => {
-      for (const ev of events) {
-        res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
+      // res.end() throws on a destroyed socket, which is the usual reason this path runs at all.
+      // Nothing can act on it, and letting it escape here would surface as an uncaught exception.
+      try {
+        res.end();
+      } catch {
+        /* already gone */
       }
-      // A terminal event is the last thing a run ever appends, so the stream has said everything
-      // it has to say. End after the batch is written rather than inside the loop, so a terminal
-      // event sharing a batch with earlier events still delivers all of them first.
-      if (events.some((ev) => TERMINAL_EVENT_TYPES.has(ev.type))) end();
     };
 
-    const unsubscribeFn = deps.stream.subscribe(run.id, afterSeq, send);
-    unsubscribe = unsubscribeFn;
-    // The backlog may already have ended us inside the call above. Nothing below may be armed on a
-    // response that is finished: an interval created after end() ran is unreachable by the close
-    // handler, and the subscription itself is registered after delivery, so it must be dropped here
-    // or every stream that ends during its own backlog leaks a subscriber holding a closure over a
-    // finished response.
-    if (closed) {
-      unsubscribeFn();
-      return;
-    }
-    keepalive = setInterval(() => {
-      res.write(': keepalive\n\n');
-    }, 15_000);
+    /**
+     * Close the stream and record why. NOT sendError(): that ends in res.status(500).json(), and
+     * headers are already on the wire by the time any of these paths can be reached, so calling it
+     * here would raise a second failure while trying to report the first. Once headers are out the
+     * only correct action is to close, and the log line is the only remaining evidence (issue #143).
+     */
+    const fail = (err: unknown, where: string): void => {
+      deps.logger?.error(
+        {
+          runId: run.id,
+          where,
+          err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+        },
+        'SSE stream failed; closing',
+      );
+      end();
+    };
 
-    // Backstop for the one case send() cannot see: the client reconnects with ?after= already past
-    // the terminal event, so no further event will ever arrive to trigger the end above. Without it
-    // the keepalive interval keeps the socket open forever (issue #73 L6) -- which is what made
-    // server shutdown need closeAllConnections() to avoid hanging until SIGKILL (issue #52).
-    //
-    // The condition is "already caught up", not merely "the run is terminal". readAfter() pages at
-    // 500 rows, so a terminal run with a long tail can still have history pending when subscribe()
-    // returns; arming a fixed timer over an undrained backlog truncates it, cutting the stream off
-    // mid-history while still reporting a clean close. Anything still pending is delivered by the
-    // poller, and the terminal row inside that backlog ends the stream through send() as usual.
-    if (isTerminal(run.status) && afterSeq >= deps.events.lastSequence(run.id)) {
-      backstop = setTimeout(end, STREAM_CLOSE_GRACE_MS);
-    }
+    // Registered after fail() so the closure is never read in its temporal dead zone, and before any
+    // write: a response failure surfaces as an 'error' EVENT rather than a throw. Measured on Node 26
+    // -- writing to a destroyed socket returns normally, and writing after res.end() returns normally
+    // and THEN emits 'error'. An 'error' event with no listener is an uncaught exception, reproduced as
+    // process exit 77 on a bare http.ServerResponse. This listener, not the try/catch below, is what
+    // stops a broken SSE client from taking the process down (issue #143).
+    res.on('error', (err: unknown) => fail(err, 'response stream error'));
 
-    req.on('close', () => {
-      clearInterval(keepalive);
-      clearTimeout(backstop);
-      unsubscribe();
-    });
+    try {
+      res.write(`event: hello\ndata: {"runId":"${run.id}","after":${afterSeq}}\n\n`);
+
+      const send = (events: { type: string; sequence: number; payload: unknown }[]): void => {
+        for (const ev of events) {
+          res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
+        }
+        // A terminal event is the last thing a run ever appends, so the stream has said everything
+        // it has to say. End after the batch is written rather than inside the loop, so a terminal
+        // event sharing a batch with earlier events still delivers all of them first.
+        if (events.some((ev) => TERMINAL_EVENT_TYPES.has(ev.type))) end();
+      };
+
+      const unsubscribeFn = deps.stream.subscribe(run.id, afterSeq, send);
+      unsubscribe = unsubscribeFn;
+      // The backlog may already have ended us inside the call above. Nothing below may be armed on a
+      // response that is finished: an interval created after end() ran is unreachable by the close
+      // handler, and the subscription itself is registered after delivery, so it must be dropped here
+      // or every stream that ends during its own backlog leaks a subscriber holding a closure over a
+      // finished response.
+      if (closed) {
+        unsubscribeFn();
+        return;
+      }
+      keepalive = setInterval(() => {
+        // No try/catch here on purpose. res.write() does not throw on a destroyed socket or after
+        // end(); it reports through the 'error' event, which fail() already handles. A guard that
+        // cannot fire is worse than none: it implies a hazard that was measured not to exist.
+        res.write(': keepalive\n\n');
+      }, 15_000);
+
+      // Backstop for the one case send() cannot see: the client reconnects with ?after= already past
+      // the terminal event, so no further event will ever arrive to trigger the end above. Without it
+      // the keepalive interval keeps the socket open forever (issue #73 L6) -- which is what made
+      // server shutdown need closeAllConnections() to avoid hanging until SIGKILL (issue #52).
+      //
+      // The condition is "already caught up", not merely "the run is terminal". readAfter() pages at
+      // 500 rows, so a terminal run with a long tail can still have history pending when subscribe()
+      // returns; arming a fixed timer over an undrained backlog truncates it, cutting the stream off
+      // mid-history while still reporting a clean close. Anything still pending is delivered by the
+      // poller, and the terminal row inside that backlog ends the stream through send() as usual.
+      if (isTerminal(run.status) && afterSeq >= deps.events.lastSequence(run.id)) {
+        backstop = setTimeout(end, STREAM_CLOSE_GRACE_MS);
+      }
+
+      req.on('close', () => {
+        clearInterval(keepalive);
+        clearTimeout(backstop);
+        unsubscribe();
+      });
+    } catch (err) {
+      // subscribe() delivers its backlog synchronously and rethrows if anything in it throws, so a
+      // read failure (a corrupt payload_json row, or a database fault) escapes HERE, after headers
+      // are already on the wire. Express' default handler would then try to render a 500 on a sent
+      // response. Closing is the only correct action, and the log line is the only evidence left.
+      fail(err, 'stream setup');
+    }
   });
 
   return router;

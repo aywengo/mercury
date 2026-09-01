@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { closeServer, createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { makeEnv, sleep, tempDir, waitFor } from './helpers.ts';
+import { createLogger } from '../src/logger.ts';
+import { createRedactor } from '../src/domain/redact.ts';
 import type { Express } from 'express';
 
 function makeApi(env: ReturnType<typeof makeEnv>, tokens: [string, string][] = [['tok-alice', 'alice']], admin?: string) {
@@ -1057,4 +1059,116 @@ test('a stream closes promptly when the run finishes while it is open (issue #73
   } finally {
     env.close();
   }
+});
+
+// --- issue #143: the SSE handler must survive a failure after headers are sent ----------------
+
+function logCapture() {
+  const lines: { level: string; msg: string }[] = [];
+  const logger = createLogger(createRedactor([]), 'debug', (line) => {
+    const p = JSON.parse(line) as { level: string; msg: string };
+    lines.push({ level: p.level, msg: p.msg });
+  });
+  return { logger, lines };
+}
+
+test('a stream whose backlog read throws closes and logs instead of escaping to Express (issue #143)', async () => {
+  // The reachable trigger is a row the backlog read cannot decode: readAfter() throws, subscribe()
+  // rethrows, and it does so AFTER writeHead(200). Express' default handler would then try to render
+  // a 500 on a response whose headers are already on the wire. The handler must close the stream and
+  // log, and the request must not hang.
+  const env = makeEnv({ workerEnabled: false });
+  const { logger, lines } = logCapture();
+  const streamHub = new EventStream(env.db, env.events, 10);
+  streamHub.start();
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.events.append(run.id, 'agent.message', { text: 'undecodable' });
+    const target = env.events.list(run.id).slice(-1)[0].sequence;
+    env.db.prepare("UPDATE events SET payload_json = '{' WHERE run_id = ? AND sequence = ?").run(run.id, target);
+
+    const app = createApp({
+      runService: env.runService, events: env.events, stream: streamHub,
+      apiTokens: new Map([['tok-alice', 'alice']]), adminToken: null, logger,
+    });
+    const srv = await listen(app);
+    try {
+      // readToEnd() fails with "still open after Nms" if the handler leaves the response dangling.
+      const data = await readToEnd(
+        `http://127.0.0.1:${srv.port}/api/runs/${run.id}/stream?after=0`,
+        { authorization: 'Bearer tok-alice' },
+        6_000,
+      );
+      assert.ok(data.includes('event: hello'), 'headers and the hello frame were already sent');
+      assert.ok(!data.includes('undecodable'), 'the unreadable event cannot be delivered');
+    } finally {
+      await srv.close();
+    }
+
+    assert.ok(
+      lines.some((l) => l.level === 'error' && l.msg.includes('SSE stream failed')),
+      `expected the failure to be logged, got ${JSON.stringify(lines)}`,
+    );
+    assert.equal(streamHub.subscriptionCount, 0, 'a failed stream must not leave a subscriber behind');
+  } finally {
+    streamHub.stop();
+    env.close();
+  }
+});
+
+test('POSITIVE CONTROL: a healthy stream closes cleanly and logs no failure (issue #143)', async () => {
+  // Without this, a handler that logged-and-closed on EVERY stream would pass the test above.
+  const repo = tempDir('mercury-sse-healthy-');
+  const env = makeEnv({ fakeScript: [{ event: { type: 'agent.message', payload: { text: 'hi' } } }] });
+  const { logger, lines } = logCapture();
+  const streamHub = new EventStream(env.db, env.events, 10);
+  streamHub.start();
+  try {
+    const app = createApp({
+      runService: env.runService, events: env.events, stream: streamHub,
+      apiTokens: new Map([['tok-alice', 'alice']]), adminToken: null, logger,
+    });
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const created = await fetch(`${base}/api/runs`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer tok-alice', 'content-type': 'application/json' },
+        body: JSON.stringify({ task: 'x', agent: 'fake', repository: { localPath: repo } }),
+      });
+      const { runId } = (await created.json()) as { runId: string };
+      await waitFor(() => env.runs.get(runId)!.status === 'COMPLETED', 10_000);
+
+      const data = await readToEnd(`${base}/api/runs/${runId}/stream`, { authorization: 'Bearer tok-alice' }, 8_000);
+      assert.ok(data.includes('event: run.completed'), 'the terminal event must still reach the client');
+    } finally {
+      await srv.close();
+    }
+    const errs = lines.filter((l) => l.level === 'error');
+    assert.equal(errs.length, 0, `a healthy stream must log nothing, got ${JSON.stringify(errs)}`);
+    assert.equal(streamHub.subscriptionCount, 0);
+  } finally {
+    streamHub.stop();
+    env.close();
+  }
+});
+
+test('the SSE handler registers a response error listener (issue #143)', () => {
+  // A SOURCE guard, and labelled as one: the hazard it protects against could not be triggered
+  // through the product in a test, so this at least stops the line being dropped silently.
+  //
+  // It matters because a response failure surfaces as an 'error' EVENT rather than a throw. Measured
+  // on Node 26: res.write() to a destroyed socket returns normally, and res.write() after res.end()
+  // also returns normally and then emits 'error'. An 'error' event with no listener is an uncaught
+  // exception -- reproduced as process exit 77 on a bare http.ServerResponse. No try/catch can see it.
+  const src = readFileSync(join(import.meta.dirname, '..', 'src', 'api', 'routes.ts'), 'utf8');
+  const start = src.indexOf("router.get('/runs/:runId/stream'");
+  assert.ok(start >= 0, 'SSE route not found');
+  const end = src.indexOf('\n  });', start);
+  assert.ok(end > start, 'SSE route body not terminated');
+  const body = src
+    .slice(start, end)
+    .replace(/\/\*[\s\S]*?\*\//g, '') // block comments
+    .replace(/^\s*\/\/.*$/gm, ''); // line comments -- a comment mentioning the listener must not pass
+  assert.match(body, /res\.on\(\s*'error'/, 'the SSE handler must listen for response errors');
 });
