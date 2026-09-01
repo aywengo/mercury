@@ -1,5 +1,5 @@
 import { test } from 'node:test';
-import assert from 'node:assert/strict';
+import assert, { AssertionError } from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { closeServer, createApp } from '../src/api/server.ts';
@@ -695,4 +695,193 @@ test('both list endpoints share one limit parser (issue #101)', () => {
   assert.equal(calls.length, 2, `expected exactly 2 parseLimit call sites, found ${calls.length}`);
   assert.doesNotMatch(src, /Number\(req\.query\.limit[^)]*\)\s*\|\|/,
     'the `Number(...) || default` idiom must not come back for limit parsing');
+});
+
+// Issue #73 L6. Nothing used to close an SSE stream when its run reached a terminal status: the
+// 15s keepalive kept the socket open until the CLIENT gave up. That is the mechanism behind #52 --
+// a server full of finished runs could not shut down without closeAllConnections().
+
+/** Read an SSE response to completion, or fail loudly. Never awaits indefinitely. */
+async function readToEnd(url: string, headers: Record<string, string>, timeoutMs: number): Promise<string> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { headers, signal: ac.signal });
+    assert.equal(res.status, 200);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let data = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return data; // the SERVER ended the stream
+      data += decoder.decode(value, { stream: true });
+    }
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') {
+      throw new AssertionError({ message: `stream was still open after ${timeoutMs}ms; the server never closed it` });
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    ac.abort();
+  }
+}
+
+test('an SSE stream on a terminal run is closed by the server (issue #73 L6)', async () => {
+  const repo = tempDir('mercury-sse-term-');
+  const env = makeEnv({ fakeScript: [{ event: { type: 'agent.message', payload: { text: 'hi' } } }] });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const created = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake', repository: { localPath: repo } }),
+      });
+      const { runId } = (await created.json()) as { runId: string };
+      await waitFor(() => env.runs.get(runId)!.status === 'COMPLETED', 10_000);
+
+      // Opening a stream AFTER the run finished must still deliver history, then close.
+      const data = await readToEnd(`${base}/api/runs/${runId}/stream`, headers, 8_000);
+      assert.ok(data.includes('event: run.completed'), 'history must still be delivered before closing');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('a reconnect past the last event still closes rather than streaming forever (issue #73 L6)', async () => {
+  // The case the terminal-event check cannot see: ?after= is already past run.completed, so no
+  // event will ever arrive to trigger the close. Only the grace backstop ends this stream.
+  const repo = tempDir('mercury-sse-after-');
+  const env = makeEnv({ fakeScript: [{ event: { type: 'agent.message', payload: { text: 'hi' } } }] });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const created = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake', repository: { localPath: repo } }),
+      });
+      const { runId } = (await created.json()) as { runId: string };
+      await waitFor(() => env.runs.get(runId)!.status === 'COMPLETED', 10_000);
+      const lastSeq = env.events.lastSequence(runId);
+
+      const t0 = Date.now();
+      const data = await readToEnd(`${base}/api/runs/${runId}/stream?after=${lastSeq}`, headers, 8_000);
+      const elapsed = Date.now() - t0;
+      assert.equal(data.includes('event: run.completed'), false, 'nothing after the cursor should be replayed');
+      assert.ok(elapsed < 7_000, `closed only at ${elapsed}ms -- too close to the 8s deadline to be the backstop`);
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('a stream on a RUNNING run is not cut short by the terminal-run backstop (issue #73 L6)', async () => {
+  // Positive control. Both tests above assert a stream CLOSES; without this one, closing every
+  // stream immediately would satisfy them. A live run must keep streaming.
+  const repo = tempDir('mercury-sse-live-');
+  const env = makeEnv({
+    // Long enough that the run is still RUNNING well past STREAM_CLOSE_GRACE_MS (2s); 2.5s was
+    // too short and the run finished before the assertion could observe it mid-flight.
+    fakeScript: [{ event: { type: 'agent.message', payload: { text: 'slow' } }, delayMs: 8_000 }],
+  });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const created = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake', repository: { localPath: repo } }),
+      });
+      const { runId } = (await created.json()) as { runId: string };
+      await waitFor(() => env.runs.get(runId)!.status === 'RUNNING', 10_000);
+
+      const ac = new AbortController();
+      const res = await fetch(`${base}/api/runs/${runId}/stream`, { headers, signal: ac.signal });
+      const reader = res.body!.getReader();
+      // Survive well past STREAM_CLOSE_GRACE_MS while the run is still going.
+      await sleep(3_000);
+      assert.equal(env.runs.get(runId)!.status, 'RUNNING', 'the run must still be in flight for this to mean anything');
+      const first = await Promise.race([
+        reader.read(),
+        sleep(2_000).then(() => ({ done: 'timeout' as const, value: undefined })),
+      ]);
+      assert.notEqual(first.done, true, 'a live run\'s stream must not be closed by the backstop');
+      ac.abort();
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('a stream closes promptly when the run finishes while it is open (issue #73 L6)', async () => {
+  // The case the terminal-event check exists for, and the one the dashboard actually does: open the
+  // stream while the run is RUNNING, then the run completes. The grace backstop is armed ONLY for
+  // runs already terminal at open time, so nothing else closes this stream -- without the
+  // terminal-event check it stays open until the client gives up, which is the original L6 bug.
+  const repo = tempDir('mercury-sse-live-close-');
+  const env = makeEnv({
+    fakeScript: [{ event: { type: 'agent.message', payload: { text: 'working' } }, delayMs: 600 }],
+  });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const created = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake', repository: { localPath: repo } }),
+      });
+      const { runId } = (await created.json()) as { runId: string };
+      await waitFor(() => env.runs.get(runId)!.status === 'RUNNING', 10_000);
+
+      const ac = new AbortController();
+      const t0 = Date.now();
+      const res = await fetch(`${base}/api/runs/${runId}/stream`, { headers, signal: ac.signal });
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let data = '';
+      let closedByServer = false;
+      // Well under STREAM_CLOSE_GRACE_MS: a close arriving here can only come from the terminal
+      // event, not from the backstop.
+      const deadline = sleep(3_000).then(() => ({ done: false as const, timedOut: true }));
+      for (;;) {
+        const r = await Promise.race([reader.read(), deadline]);
+        if ('timedOut' in r) break;
+        if (r.done) { closedByServer = true; break; }
+        data += decoder.decode(r.value, { stream: true });
+      }
+      const elapsed = Date.now() - t0;
+      ac.abort();
+
+      assert.ok(closedByServer, `server left the stream open for ${elapsed}ms after the run finished; ` +
+        'the terminal event must close it');
+      assert.ok(data.includes('event: run.completed'), 'the terminal event itself must still be delivered');
+      assert.ok(elapsed < 2_500, `closed at ${elapsed}ms, which is at/after the 2s grace window, so this ` +
+        'was the backstop rather than the terminal-event close');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
 });
