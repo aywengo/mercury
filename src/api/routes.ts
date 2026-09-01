@@ -5,6 +5,7 @@ import type { EventStore } from '../events/eventStore.ts';
 import type { EventStream } from '../events/eventStream.ts';
 import type { RunService } from '../runs/runService.ts';
 import type { RunStatus } from '../domain/types.ts';
+import { isTerminal } from '../domain/stateMachine.ts';
 import { requireAuth } from './auth.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.ts';
 import type { Logger } from '../logger.ts';
@@ -75,6 +76,22 @@ export function parseLimit(raw: unknown, def: number, max: number): number {
 }
 
 const VALID_STATUSES = new Set<RunStatus>(['QUEUED', 'STARTING', 'RUNNING', 'NEEDS_INPUT', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT']);
+
+/**
+ * Event types after which a run can never append again, so an SSE stream has said everything it
+ * has to say. Leaving the socket open on a finished run buys nothing and was the mechanism behind
+ * the shutdown hang in #52. Keyed on event TYPES rather than derived from TERMINAL_STATUSES
+ * because the stream observes events, not statuses.
+ */
+const TERMINAL_EVENT_TYPES = new Set(['run.completed', 'run.failed', 'run.cancelled', 'run.timed_out']);
+
+/**
+ * How long a stream opened on an ALREADY-terminal run waits for its backlog before closing. The
+ * EventStream poller runs at 250ms, so this spans several poll cycles; the backlog normally
+ * arrives and closes the stream through send() long before this fires. It exists only for the
+ * reconnect case where ?after= is already past the terminal event and nothing more will arrive.
+ */
+const STREAM_CLOSE_GRACE_MS = 2_000;
 
 export function createRoutes(deps: RoutesDeps): Router {
   const router = Router();
@@ -207,10 +224,24 @@ export function createRoutes(deps: RoutesDeps): Router {
     });
     res.write(`event: hello\ndata: {"runId":"${run.id}","after":${afterSeq}}\n\n`);
 
+    let closed = false;
+    const end = (): void => {
+      if (closed) return;
+      closed = true;
+      clearInterval(keepalive);
+      clearTimeout(backstop);
+      unsubscribe();
+      res.end();
+    };
+
     const send = (events: { type: string; sequence: number; payload: unknown }[]): void => {
       for (const ev of events) {
         res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
       }
+      // A terminal event is the last thing a run ever appends, so the stream has said everything
+      // it has to say. End after the batch is written rather than inside the loop, so a terminal
+      // event sharing a batch with earlier events still delivers all of them first.
+      if (events.some((ev) => TERMINAL_EVENT_TYPES.has(ev.type))) end();
     };
 
     const unsubscribe = deps.stream.subscribe(run.id, afterSeq, send);
@@ -218,8 +249,16 @@ export function createRoutes(deps: RoutesDeps): Router {
       res.write(': keepalive\n\n');
     }, 15_000);
 
+    // Backstop for the case send() cannot see: the client reconnects with ?after= already past the
+    // terminal event, so no further event will ever arrive to trigger the end above. Without this
+    // the keepalive interval keeps the socket open forever (issue #73 L6) -- which is what made
+    // server shutdown need closeAllConnections() to avoid hanging until SIGKILL (issue #52).
+    // Armed only for runs already terminal at open time, so a live run is never cut short.
+    const backstop = isTerminal(run.status) ? setTimeout(end, STREAM_CLOSE_GRACE_MS) : undefined;
+
     req.on('close', () => {
       clearInterval(keepalive);
+      clearTimeout(backstop);
       unsubscribe();
     });
   });
