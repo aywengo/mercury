@@ -31,3 +31,28 @@ test('numeric env vars parse normally when valid', () => {
   assert.equal(cfg.port, 8080);
   assert.equal(cfg.maxRetries, 0);
 });
+
+test('MERCURY_TRUST_PROXY defaults to 0 and rejects unsafe values (issue #65)', () => {
+  // Trusting the whole X-Forwarded-For chain lets a client invent its own source address and
+  // get a fresh rate-limit bucket per request, which is worse than no limiting. So anything
+  // that is not a non-negative integer must land on 0 (trust nothing), and a bad value must
+  // not crash the API at boot.
+  assert.equal(loadConfig({}).trustProxy, 0, 'unset -> trust nothing');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '' }).trustProxy, 0, 'empty -> trust nothing');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '   ' }).trustProxy, 0, 'blank -> trust nothing');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: 'true' }).trustProxy, 0, 'boolean-ish is not a depth');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '1.5' }).trustProxy, 0, 'fractional depth rejected');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '-1' }).trustProxy, 0, 'negative depth rejected');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: 'Infinity' }).trustProxy, 0, 'unbounded depth rejected');
+  // Number() accepts these and they are integers >= 0, so an isInteger/`>= 0` guard alone would
+  // wave them through -- silently trusting 16 or 1000 hops from what looks like a typo.
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '0x10' }).trustProxy, 0, 'hex must not mean 16 hops');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '1e3' }).trustProxy, 0, 'exponent must not mean 1000 hops');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '0b11' }).trustProxy, 0, 'binary literal rejected');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '+1' }).trustProxy, 0, 'sign prefix rejected');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '1_000' }).trustProxy, 0, 'numeric separator rejected');
+  // Valid depths pass through.
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '0' }).trustProxy, 0);
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '1' }).trustProxy, 1);
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '2' }).trustProxy, 2);
+});

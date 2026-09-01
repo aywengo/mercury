@@ -56,6 +56,24 @@ export interface Config {
   /** Force `Secure` on the session cookie (MERCURY_COOKIE_SECURE=true). */
   cookieSecure: boolean;
   /**
+   * Number of reverse-proxy hops to trust (MERCURY_TRUST_PROXY). Default 0 = trust NONE,
+   * which is the only safe value when the API is exposed directly (issue #65).
+   *
+   * With 0, Express takes `req.ip` from the socket, so behind a proxy every client shares one
+   * rate-limit bucket: legitimate users collectively exhaust the login budget and lock each
+   * other out, while an attacker inside that shared bucket is barely throttled at all.
+   *
+   * Set to the number of proxies in front of the API (typically 1 for nginx/Caddy on the same
+   * host, 2 for a CDN plus a local proxy). Express then derives `req.ip` from the right-hand
+   * side of `X-Forwarded-For`, peeling exactly that many hops.
+   *
+   * Do NOT set this to `true`/"trust everything": that lets any client invent its own source IP
+   * and walk straight around the per-IP limits. Depth is the safe form of this setting, which
+   * is why it is a number and not a boolean. The accepted text is decimal digits only: `0x10`
+   * and `1e3` parse as integers, and would otherwise mean 16 and 1000 trusted hops.
+   */
+  trustProxy: number;
+  /**
    * Whether the host storage driver honours `--storage-opt size=`
    * (MERCURY_SANDBOX_DISK_LIMITS=true). Off by default because the common
    * overlay2-on-ext4 docker install rejects the flag outright.
@@ -129,6 +147,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         : env.MERCURY_SANDBOX_ENV.split(',').map((v) => v.trim()).filter(Boolean),
     sandboxDiskLimits: env.MERCURY_SANDBOX_DISK_LIMITS === 'true',
     cookieSecure: env.MERCURY_COOKIE_SECURE === 'true',
+    // Non-numeric or negative input falls back to 0 (trust nothing) rather than throwing:
+    // a typo in this knob must not take the API down at boot, and 0 is the safe direction.
+    trustProxy: (() => {
+      const raw = env.MERCURY_TRUST_PROXY?.trim();
+      if (!raw) return 0;
+      // Strict decimal digits only. Number() is far too permissive for this knob: it accepts
+      // '0x10' (16) and '1e3' (1000), both of which are integers >= 0 and so would survive a
+      // Number.isInteger check while silently trusting 16 or 1000 proxy hops -- the exact
+      // over-trust this whole guard exists to prevent, arriving via a typo rather than intent.
+      return /^\d+$/.test(raw) ? Number(raw) : 0;
+    })(),
     logLevel: (env.MERCURY_LOG_LEVEL as Config['logLevel']) ?? 'info',
   };
 }

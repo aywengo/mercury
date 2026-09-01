@@ -13,6 +13,7 @@ type ApiOpts = {
   admin?: string;
   rateLimits?: { login?: { windowMs: number; max: number }; createRun?: { windowMs: number; max: number } };
   cookieSecure?: boolean;
+  trustProxy?: number;
 };
 
 function makeApi(env: ReturnType<typeof makeEnv>, opts: ApiOpts = {}) {
@@ -26,6 +27,7 @@ function makeApi(env: ReturnType<typeof makeEnv>, opts: ApiOpts = {}) {
     adminToken: opts.admin ?? null,
     rateLimits: opts.rateLimits,
     cookieSecure: opts.cookieSecure,
+    trustProxy: opts.trustProxy,
   });
   return { app, close: () => stream.stop() };
 }
@@ -451,5 +453,61 @@ test('the logout cookie carries the same Secure flag as the login cookie (issue 
     await srv.close();
     close();
     env.close();
+  }
+});
+
+// --- trusted-proxy depth and rate-limit keying (issue #65) ------------------
+
+// The limiter keys on req.ip. With no trusted proxy Express resolves that to the socket peer,
+// which behind a reverse proxy is the PROXY -- so every client behind it shares one bucket.
+// That fails in both directions at once: ordinary users collectively burn the login budget and
+// lock each other out, while an attacker sharing that bucket is barely throttled.
+
+async function loginFrom(port: number, clientIp: string): Promise<number> {
+  const res = await fetch(`http://127.0.0.1:${port}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': clientIp },
+    body: JSON.stringify({ token: 'tok-alice' }),
+  });
+  return res.status;
+}
+
+test('without a trusted proxy, distinct clients share one rate-limit bucket (issue #65)', async () => {
+  // Characterises the DEFAULT, which is the safe-but-blunt direct-bind case: X-Forwarded-For is
+  // ignored entirely, so two different clients are indistinguishable. Asserted rather than
+  // assumed, because it is what makes the depth knob opt-in and non-surprising.
+  const env = makeEnv({ workerEnabled: false });
+  const { app, close } = makeApi(env, { rateLimits: { login: { windowMs: 60_000, max: 2 } } });
+  const srv = await listen(app);
+  try {
+    assert.equal(await loginFrom(srv.port, '203.0.113.1'), 200);
+    assert.equal(await loginFrom(srv.port, '203.0.113.1'), 200);
+    // A DIFFERENT client, but the same bucket, because req.ip is the proxy's address.
+    assert.equal(
+      await loginFrom(srv.port, '198.51.100.99'), 429,
+      'unrelated client must not inherit another client bucket while depth is unset',
+    );
+  } finally {
+    await srv.close(); close(); env.close();
+  }
+});
+
+test('with trustProxy=1, distinct clients get independent rate-limit buckets (issue #65)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  const { app, close } = makeApi(env, {
+    rateLimits: { login: { windowMs: 60_000, max: 2 } },
+    trustProxy: 1,
+  });
+  const srv = await listen(app);
+  try {
+    assert.equal(await loginFrom(srv.port, '203.0.113.1'), 200);
+    assert.equal(await loginFrom(srv.port, '203.0.113.1'), 200);
+    // Same two requests from client A exhausted A's bucket; client B must be untouched.
+    assert.equal(await loginFrom(srv.port, '198.51.100.99'), 200, 'client B must get its own bucket');
+    // ...and A is still limited on its own key, so the fix narrows the bucket, it does not
+    // remove the limit.
+    assert.equal(await loginFrom(srv.port, '203.0.113.1'), 429);
+  } finally {
+    await srv.close(); close(); env.close();
   }
 });
