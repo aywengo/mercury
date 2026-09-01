@@ -64,6 +64,11 @@ export function sendError(res: Response, err: unknown, logger?: Logger): void {
  */
 export function parseLimit(raw: unknown, def: number, max: number): number {
   if (raw === undefined) return def;
+  // `?limit=` arrives as the empty string, and Number('') is 0 -- so without this an empty param
+  // means "one row" rather than "I did not specify". Whitespace-only is the same case.
+  if (typeof raw === 'string' && raw.trim() === '') return def;
+  // A repeated param (`?limit=3&limit=5`) arrives as an array; Number() of that is NaN and falls
+  // through to the default below, which is the right answer for an ambiguous request.
   const n = Number(raw);
   if (!Number.isFinite(n)) return def;
   return Math.min(Math.max(Math.trunc(n), 1), max);

@@ -670,6 +670,12 @@ test('GET /api/runs clamps an explicit limit instead of treating 0 as absent (is
       assert.equal((await list('limit=2000')).runs.length, 12, 'an oversized limit clamps to the cap (12 exist)');
       assert.equal((await list('limit=abc')).runs.length, 12, 'a non-numeric limit uses the default');
       assert.equal((await list('')).runs.length, 12, 'absent limit uses the default');
+      // `?limit=` is an empty param, not a request for zero. Number('') === 0, so without an
+      // explicit empty check this silently becomes a one-row page.
+      assert.equal((await list('limit=')).runs.length, 12, 'an EMPTY limit param uses the default, not 1');
+      assert.equal((await list('limit=%20')).runs.length, 12, 'a whitespace-only limit uses the default');
+      // A repeated param is ambiguous; Number(['3','5']) is NaN, so it must fall back to default.
+      assert.equal((await list('limit=3&limit=5')).runs.length, 12, 'a repeated limit uses the default');
       // Fractional input must truncate rather than reach SQL as a float.
       assert.equal((await list('limit=2.9')).runs.length, 2, 'a fractional limit truncates');
     } finally {
