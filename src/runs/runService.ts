@@ -245,15 +245,21 @@ const CONSTRAINT_KEYS = new Set(['maxDurationMs', 'maxRetries', 'budgetTokens', 
 // Renamed by issue #63 because max* implied enforcement that does not exist. Rejecting them with a
 // migration message (rather than the generic "Unknown constraint") is deliberate: a stale client
 // would otherwise get an error that names neither the new spelling nor the reason.
-const RENAMED_CONSTRAINTS: Record<string, string> = {
+const RENAMED_CONSTRAINTS: Record<string, string> = Object.assign(Object.create(null), {
   maxTokens: 'budgetTokens',
   maxCost: 'budgetCost',
-};
+});
 
 /** Validate a client-supplied constraints object (issue #28). */
 function validateConstraints(c: Record<string, unknown>): void {
   for (const key of Object.keys(c)) {
-    const renamed = RENAMED_CONSTRAINTS[key];
+    // Object.hasOwn, not a bare index: a plain object literal inherits from Object.prototype, so
+    // `RENAMED_CONSTRAINTS['toString']` returns the toString FUNCTION, which is truthy. A client
+    // sending `{ toString: 1 }` would then get "constraint toString was renamed to function
+    // toString() { [native code] }..." instead of the correct "Unknown constraint: toString".
+    // Verified against node: toString, constructor, valueOf, hasOwnProperty and __proto__ all
+    // resolve to something truthy through the prototype chain.
+    const renamed = Object.hasOwn(RENAMED_CONSTRAINTS, key) ? RENAMED_CONSTRAINTS[key] : undefined;
     if (renamed) {
       throw new ValidationError(
         `constraint ${key} was renamed to ${renamed}: it is recorded but not enforced, so the ` +

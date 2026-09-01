@@ -274,6 +274,16 @@ test('create rejects malformed constraints (issue #28)', () => {
       () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ bogus: 1 }) }),
       /Unknown constraint: bogus/,
     );
+    // Inherited Object.prototype keys must read as unknown, not as a rename. A bare
+    // RENAMED_CONSTRAINTS[key] lookup resolves 'toString' to the toString function, which is
+    // truthy, and produced a nonsense "renamed to function toString()" error.
+    for (const protoKey of ['toString', 'constructor', 'valueOf', 'hasOwnProperty']) {
+      assert.throws(
+        () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ [protoKey]: 1 }) }),
+        new RegExp(`Unknown constraint: ${protoKey}`),
+        `${protoKey} must be rejected as unknown, not treated as a renamed constraint`,
+      );
+    }
     // malformed resourceLimits
     assert.throws(
       () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ resourceLimits: { gpu: '1' } }) }),
@@ -498,7 +508,7 @@ test('budget constraints are recorded, not enforced, and reject the old max* nam
   }
 });
 
-test('nothing in src/ reads the budget constraints, so they cannot be called enforced (issue #63)', () => {
+test('worker.ts does not read the budget constraints, so they cannot be called enforced (issue #63)', () => {
   // This is the assertion that keeps the rename honest. If someone adds enforcement, this test
   // should be DELETED and the fields renamed back to max* -- leaving them named budget* while
   // enforced would be the mirror image of the original lie.
