@@ -3,7 +3,7 @@
 //   4-byte big-endian length prefix + JSON payload per frame.
 // First frame on connect is a daemon_hello (ignored by the client).
 // Then it accepts RPC commands (prompt/abort/get_state) and emits events.
-// Modes via MOCK_DAEMON_MODE: happy (default) | input | fail | hang | ignore
+// Modes via MOCK_DAEMON_MODE: happy (default) | input | fail | hang | ignore | pipeline
 // Env: MOCK_DAEMON_SOCKET (required), MOCK_DAEMON_LOG (optional debug log path)
 
 import { createServer } from 'node:net';
@@ -26,9 +26,29 @@ function frame(obj) {
   return Buffer.concat([header, payload]);
 }
 
+const HELLO = { kind: 'outbound', outboundType: 'daemon_hello', payloadEncoding: 'jsonl', protocol: { name: 'prime-agent.daemon', version: 7 } };
+
 const server = createServer((socket) => {
   log('client connected');
-  socket.write(frame({ kind: 'outbound', outboundType: 'daemon_hello', payloadEncoding: 'jsonl', protocol: { name: 'prime-agent.daemon', version: 7 } }));
+  if (mode === 'pipeline') {
+    // Issue #68: TCP has no frame boundaries, so a daemon may legally coalesce the hello with
+    // whatever it sends next into a single write. Emit hello + 4 further frames as ONE write so
+    // the test is deterministic rather than relying on Node happening to batch separate writes.
+    // A client that reads one frame per `data` event and discards the tail loses all 4 silently.
+    socket.write(Buffer.concat([
+      frame(HELLO),
+      frame({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'alpha' } }),
+      frame({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'beta' } }),
+      frame({ type: 'message_end' }),
+      frame({ type: 'agent_end', result: 0 }),
+    ]));
+    // Half-close so the adapter sees EOF once it has consumed everything. The agent_end above
+    // already settled the exit as completed, so the close handler must not overwrite that.
+    socket.on('error', () => {});
+    socket.end();
+    return;
+  }
+  socket.write(frame(HELLO));
   let buffer = Buffer.alloc(0);
   socket.on('data', (chunk) => {
     buffer = Buffer.concat([buffer, chunk]);
