@@ -400,6 +400,14 @@ telemetry the later stages need.*
 The worker and API run as two systemd units on one host. A datagram Unix socket gives them a
 zero-config, filesystem-permissioned, loopback-only channel.
 
+That premise is not an assumption about some future deployment; it is what `deploy/` installs today.
+`mercury.service` (`node src/cli.ts server`) and `mercury-worker.service` (`node src/cli.ts worker`)
+both declare `User=mercury`, `WorkingDirectory=/opt/mercury` and
+`EnvironmentFile=/etc/mercury/mercury.env`. So the two processes are on one host, run as one user, and
+resolve the same `MERCURY_DB` — which is simultaneously why Stage 1 is easy and why §7 is hard. The
+same shared file that makes a local socket unnecessary to secure is the file that cannot be shared
+across hosts.
+
 ```mermaid
 sequenceDiagram
     participant Wk as Worker
@@ -515,9 +523,11 @@ storm collapses naturally. A design that fetched exactly the notified sequence w
 
 ## 11. Security
 
-- **No new network listener in Stage 1.** A Unix socket with mode `0600`/`0660` and a dedicated group
-  is the access control. Nothing is added to the TCP surface, so nothing new can be misconfigured as
-  public.
+- **No new network listener in Stage 1.** File mode on the socket is the access control, and it is
+  sufficient without any group setup: both units already run as `User=mercury`, so `0600` on a socket
+  owned by that user admits exactly the worker and the API and nothing else. Nothing is added to the
+  TCP surface, so nothing new can be misconfigured as public — which is the actual point, given that
+  this codebase has already had to fix a public-by-default surface once.
 - **Stage 2** uses the existing Postgres connection and its TLS/auth.
 - **Option A / §8.4** would require a new inbound endpoint. If built, it must be authenticated like
   `/api` (not public like `/healthz`), bound to an internal interface, and rate-limited. `/metrics`
