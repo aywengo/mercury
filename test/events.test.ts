@@ -678,3 +678,219 @@ test('a poisoned run does not make a healthy run log recoveries (issue #139 revi
     env.close();
   }
 });
+// --- issue #138: the cursor must advance only after delivery --------------------------------
+//
+// All three delivery paths used to set `sub.afterSeq` BEFORE handing the events over. A throw
+// partway through a batch therefore forfeited the rest of it: poll() reads `WHERE sequence >
+// afterSeq`, so the skipped rows were never returned again. What "not lost" means differs per path,
+// and each test states which:
+//
+//   push hook  -- the subscriber is DROPPED, so recovery is a reconnect using the client's own
+//                 cursor. It cannot be recovered in place: the cursor is one scalar and the next
+//                 successful push moves past the refused sequence. (EventStore.append() does swallow
+//                 listener failures, so the append survives -- the subscription does not.)
+//   subscribe() backlog -- the throw rethrows to the caller and the subscription is never
+//                 registered, so recovery is a RECONNECT with the original ?after=. That is the
+//                 documented contract; what must hold is that the rows are still readable.
+//   poll()     -- issue #143 drops the dead subscriber, so again recovery is a reconnect.
+//
+// The trade-off is deliberate: at-least-once. A duplicated row is cosmetic, a missing one is a lie.
+
+test('a throw during a pushed event does not lose it (issue #138)', async () => {
+  // The in-process push path: append through the stream's OWN store so the hook fires.
+  const env = makeEnv({ workerEnabled: false });
+  let stream: EventStream | null = null;
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    const start = env.events.list(run.id).slice(-1)[0].sequence;
+    stream = new EventStream(env.db, env.events, 5, 5);
+    stream.start();
+    const delivered: number[] = [];
+    let refused = false;
+    stream.subscribe(run.id, start, (events) => {
+      for (const e of events) {
+        if (e.sequence === start + 3 && !refused) {
+          refused = true;
+          throw new Error('client died mid-write');
+        }
+        delivered.push(e.sequence);
+      }
+    });
+
+    for (let i = 1; i <= 6; i++) env.events.append(run.id, 'agent.message', { text: `m${i}` });
+
+    // The refused event cannot be recovered in place: the cursor is one scalar and the successful
+    // pushes for 4,5,6 move past it. So the subscriber must be DROPPED, which is what lets the
+    // client's own lastSeq drive a reconnect that re-reads the gap.
+    await waitFor(() => stream!.subscriptionCount === 0, 5_000);
+    assert.ok(refused, 'precondition: the handler must actually have thrown once');
+
+    const again: number[] = [];
+    stream.subscribe(run.id, start, (events) => {
+      for (const e of events) again.push(e.sequence);
+    });
+    const want = [1, 2, 3, 4, 5, 6].map((i) => start + i);
+    assert.deepEqual(
+      [...again].sort((a, b) => a - b),
+      want,
+      `a reconnect must recover every event including the refused one, got ${JSON.stringify(again)}`,
+    );
+  } finally {
+    stream?.stop();
+    env.close();
+  }
+});
+
+test('a throw during a backlog page leaves the whole page readable for a reconnect (issue #138)', async () => {
+  // The batch path, the expensive one: one throw used to lose the remainder of a 500-row page.
+  const env = makeEnv({ workerEnabled: false });
+  let stream: EventStream | null = null;
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    const start = env.events.list(run.id).slice(-1)[0].sequence;
+    const want: number[] = [];
+    for (let i = 1; i <= 5; i++) {
+      env.events.append(run.id, 'agent.message', { text: `b${i}` });
+      want.push(start + i);
+    }
+
+    stream = new EventStream(env.db, env.events, 5, 5);
+    stream.start();
+    const first: number[] = [];
+    let refused = false;
+    try {
+      stream.subscribe(run.id, start, (events) => {
+        for (const e of events) {
+          if (e.sequence === start + 2 && !refused) {
+            refused = true;
+            throw new Error('client died mid-write');
+          }
+          first.push(e.sequence);
+        }
+      });
+      assert.fail('subscribe() must rethrow when the backlog handler throws (issue #143 relies on it)');
+    } catch (err) {
+      assert.match(String((err as Error).message), /client died mid-write/);
+    }
+    assert.ok(refused, 'precondition: the handler must actually have thrown');
+    assert.deepEqual(first, [start + 1], 'only the events written before the throw count as delivered');
+
+    // The client reconnects with the SAME ?after= it had. Nothing may have been forfeited.
+    const again: number[] = [];
+    stream.subscribe(run.id, start, (events) => {
+      for (const e of events) again.push(e.sequence);
+    });
+    assert.deepEqual(
+      [...again].sort((a, b) => a - b),
+      want,
+      `a reconnect must recover the entire page, got ${JSON.stringify(again)}`,
+    );
+  } finally {
+    stream?.stop();
+    env.close();
+  }
+});
+
+test('a throw during a poll delivery drops the subscriber but not the events (issue #138)', async () => {
+  // Poll path: #143 removes the dead subscriber, so the guarantee here is that the cursor never
+  // claimed what was refused -- a reconnect still sees everything.
+  const env = makeEnv({ workerEnabled: false });
+  const peer = new EventStore(env.db); // second store: the hook does not fire, so poll() delivers
+  let stream: EventStream | null = null;
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    const start = env.events.list(run.id).slice(-1)[0].sequence;
+    stream = new EventStream(env.db, env.events, 5, 5);
+    stream.start();
+    const got: number[] = [];
+    stream.subscribe(run.id, start, (events) => {
+      for (const e of events) {
+        if (e.sequence === start + 2) throw new Error('client died mid-write');
+        got.push(e.sequence);
+      }
+    });
+    for (let i = 1; i <= 4; i++) peer.append(run.id, 'agent.message', { text: `p${i}` });
+
+    await waitFor(() => stream!.subscriptionCount === 0, 5_000); // dropped by #143
+
+    const again: number[] = [];
+    stream.subscribe(run.id, start, (events) => {
+      for (const e of events) again.push(e.sequence);
+    });
+    const want = [1, 2, 3, 4].map((i) => start + i);
+    assert.deepEqual(
+      [...again].sort((a, b) => a - b),
+      want,
+      `a reconnect must still see every event, got ${JSON.stringify(again)}`,
+    );
+  } finally {
+    stream?.stop();
+    env.close();
+  }
+});
+
+test('POSITIVE CONTROL: a healthy subscriber receives each event exactly once (issue #138)', async () => {
+  // The fix trades loss for possible duplication, so it must not duplicate on the happy path --
+  // otherwise "at-least-once" has quietly become "every poll tick, forever".
+  const env = makeEnv({ workerEnabled: false });
+  const peer = new EventStore(env.db);
+  let stream: EventStream | null = null;
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    const start = env.events.list(run.id).slice(-1)[0].sequence;
+    stream = new EventStream(env.db, env.events, 5, 5);
+    stream.start();
+    const delivered: number[] = [];
+    stream.subscribe(run.id, start, (events) => {
+      for (const e of events) delivered.push(e.sequence);
+    });
+    for (let i = 1; i <= 6; i++) peer.append(run.id, 'agent.message', { text: `m${i}` });
+    await waitFor(() => delivered.length >= 6, 5_000);
+    await new Promise((r) => setTimeout(r, 150)); // many idle ticks that could re-send
+
+    const dupes = delivered.filter((s, i) => delivered.indexOf(s) !== i);
+    assert.deepEqual(dupes, [], `a healthy stream must not receive duplicates, got ${JSON.stringify(delivered)}`);
+    assert.deepEqual(
+      [...delivered].sort((a, b) => a - b),
+      [1, 2, 3, 4, 5, 6].map((i) => start + i),
+      'every event exactly once',
+    );
+  } finally {
+    stream?.stop();
+    env.close();
+  }
+});
+
+test('a throwing push subscriber does not starve the others (issue #138)', async () => {
+  // The hook looped over every subscriber with no per-subscriber handling, so the first throw
+  // propagated out of the whole callback (EventStore swallows it at the listener level) and every
+  // subscriber registered after the bad one silently received nothing -- for the rest of the run.
+  // Same isolation the poll path already had; the push path did not.
+  const env = makeEnv({ workerEnabled: false });
+  let stream: EventStream | null = null;
+  try {
+    const runBad = env.runService.create({ ownerId: 'alice', task: 'bad', agent: 'fake' });
+    const runGood = env.runService.create({ ownerId: 'alice', task: 'good', agent: 'fake' });
+    stream = new EventStream(env.db, env.events, 5, 5);
+    stream.start();
+    const good: string[] = [];
+    // Subscribe the bad one FIRST so it is the one that throws first in the loop.
+    stream.subscribe(runBad.id, env.events.list(runBad.id).slice(-1)[0].sequence, () => {
+      throw new Error('dead client');
+    });
+    stream.subscribe(runGood.id, env.events.list(runGood.id).slice(-1)[0].sequence, (events) => {
+      for (const e of events) good.push(e.type);
+    });
+
+    env.events.append(runBad.id, 'agent.message', { text: 'boom' });
+    env.events.append(runGood.id, 'agent.message', { text: 'fine' });
+    env.events.append(runGood.id, 'tool.started', { tool: 'bash' });
+
+    await waitFor(() => good.includes('tool.started'), 5_000);
+    assert.ok(good.includes('agent.message'), 'the healthy subscriber must receive from the start');
+    assert.equal(stream.subscriptionCount, 1, 'only the throwing subscriber is removed');
+  } finally {
+    stream?.stop();
+    env.close();
+  }
+});

@@ -2,6 +2,15 @@
 // DB poller as the cross-process fallback (worker may be a separate process).
 // Cadence: 250 ms idle; after a push, 2 s (the poller only exists to catch events
 // appended by other processes). Reconnect via ?after=<sequence> (Mercury.md §15).
+//
+// CURSOR RULE -- every delivery path in this file hands the events to the subscriber BEFORE moving
+// `sub.afterSeq`, and never the other way round. The cursor is the only record of what the client has,
+// so claiming a batch was delivered before it was accepted forfeits the rest of it permanently: poll()
+// reads `WHERE sequence > afterSeq` and the skipped rows are never returned again. This is the rule
+// docs/cross-process-event-push.md states for push in general, and issue #133 was a lost event prefix
+// caused by breaking it. Consequence, accepted deliberately: a failed delivery can re-send events the
+// client already saw, because the cursor never got that far. A duplicated timeline row is a cosmetic
+// bug; a missing one is a lie.
 
 import type { DatabaseSync } from 'node:sqlite';
 import type { MercuryEvent } from '../domain/types.ts';
@@ -69,8 +78,25 @@ export class EventStream {
       for (const sub of [...this.subs]) {
         if (sub.runId !== runId) continue;
         if (event.sequence <= sub.afterSeq) continue;
-        sub.afterSeq = event.sequence;
-        sub.onEvents([event]);
+        try {
+          // Deliver first, then advance (cursor rule at the top of this file).
+          sub.onEvents([event]);
+          sub.afterSeq = event.sequence;
+        } catch (err) {
+          // Advancing after delivery is NOT enough on this path. The cursor is a single scalar, so
+          // the NEXT successful push moves it past the refused sequence and poll() -- which reads
+          // `WHERE sequence > afterSeq` -- can never return it. Measured: refusing sequence 3 of six
+          // still delivered [1,2,4,5,6] and lost 3 permanently, with the subscription alive.
+          //
+          // So a push-path throw is treated exactly like a poll-path one (issue #143): the
+          // subscriber is dead, drop it and say so. The client's own lastSeq is what a reconnect
+          // resends from, so dropping is what actually converts silent loss into recovery.
+          this.subs.delete(sub);
+          this.log.error(
+            { err: describeError(err), runId, sequence: event.sequence },
+            'event subscriber dropped after delivery failure',
+          );
+        }
       }
       this.slowDown();
     });
@@ -118,8 +144,11 @@ export class EventStream {
     const sub: Subscription = { runId, afterSeq, onEvents };
     const backlog = this.readAfter(runId, afterSeq);
     if (backlog.length > 0) {
-      sub.afterSeq = backlog[backlog.length - 1].sequence;
+      // Deliver first, then advance. A throw here propagates to the caller (src/api/routes.ts
+      // handles it per issue #143); leaving the cursor where it started is what lets a reconnect with
+      // the ORIGINAL ?after= re-read the whole page instead of losing it (issue #138).
       onEvents(backlog);
+      sub.afterSeq = backlog[backlog.length - 1].sequence;
     }
     this.subs.add(sub);
     return () => {
@@ -202,9 +231,11 @@ export class EventStream {
       }
       if (events.length === 0) continue;
       anyNew = true;
-      sub.afterSeq = events[events.length - 1].sequence;
       try {
+        // Advance only once the batch is accepted. Advancing first meant a throw partway through a
+        // page silently forfeited the rest of it for the life of the subscription (issue #138).
         sub.onEvents(events);
+        sub.afterSeq = events[events.length - 1].sequence;
       } catch (err) {
         // Dead client: drop this one subscriber and say so. This is the only place that can observe
         // a delivery failure at all, so a silent handler here means nobody ever learns.
