@@ -920,3 +920,83 @@ test('a throwing adapter dispose() must not strand the lease (issue #62, #97)', 
     env.close();
   }
 });
+
+test('failure bookkeeping is all-or-nothing, not four independent writes (issue #106)', async () => {
+  // The reaper path got this guarantee in #105; this is the worker's own failure path, which the
+  // issue's title covered but that PR deliberately did not.
+  //
+  // Method: make the run.failed append throw. Under the old code setError and the `error` event had
+  // ALREADY committed as separate transactions, so the run was left with error text recorded and no
+  // run.failed event -- the self-contradictory record the issue describes. With all four writes in
+  // one transaction, the earlier writes must roll back with it.
+  //
+  // run.failed is poisoned on EVERY call, not once: the throw unwinds into execute()'s catch, which
+  // performs the same four writes for an infrastructure failure. Allowing the retry would let that
+  // path legitimately write FAILED, and the test would then fail for the wrong reason.
+  const repo = mkdtempSync(join(tmpdir(), 'mercury-atomic-fail-'));
+  const env = makeEnv({
+    fakeScript: [
+      { event: { type: 'agent.message', payload: { text: 'about to fail' } } },
+      { fail: true },
+    ],
+  });
+  const realAppend = env.events.append.bind(env.events);
+  let poisonedCount = 0;
+  try {
+    env.events.append = ((runId: string, type: string, payload: unknown) => {
+      if (type === 'run.failed') {
+        poisonedCount++;
+        throw new Error('injected failure mid-bookkeeping');
+      }
+      return realAppend(runId, type, payload);
+    }) as typeof env.events.append;
+
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo } });
+
+    // Wait on the thing the test depends on rather than on the clock. A fixed sleep here is both
+    // slow and flaky: under CI load the worker may not have reached finalize in time, and on an
+    // idle machine it wastes seconds.
+    //
+    // Wait for TWO attempts, not one. The first throw comes from finalize()'s agent-failure branch;
+    // it unwinds into execute()'s catch, which attempts the same four writes for an infrastructure
+    // failure. Asserting after only the first would race the second attempt mid-flight and could
+    // observe a state that was still about to change.
+    await waitFor(() => poisonedCount >= 2, 10_000);
+
+    const after = env.runs.get(run.id)!;
+    // The decisive assertions: nothing partial survived.
+    assert.notEqual(after.status, 'FAILED',
+      'BUG: status reached FAILED although the bookkeeping transaction did not complete');
+    assert.ok(!after.error,
+      `BUG: error text survived a rolled-back transaction (error=${JSON.stringify(after.error)})`);
+    assert.equal(after.errorKind ?? null, null, 'errorKind must not be set either');
+    const types = env.events.list(run.id).map((e) => e.type);
+    assert.ok(!types.includes('run.failed'), 'the failed append must not be present');
+    assert.ok(!types.includes('error'),
+      'BUG: an `error` event committed while run.failed did not -- partial write');
+  } finally {
+    env.events.append = realAppend;
+    env.close();
+  }
+});
+
+test('both failure-bookkeeping sites are wrapped in a transaction (issue #106)', () => {
+  // The behavioural test above covers finalize()'s agent-failure branch, which is reachable through
+  // the fake adapter. The execute() catch branch (infrastructure failure) needs the drive loop to
+  // throw rather than the agent to fail, which no adapter script produces -- so this pins the
+  // structure instead. Weaker than the behavioural test, and deliberately honest about it: it
+  // proves the wrap exists, not that it commits atomically.
+  const src = readFileSync(join(import.meta.dirname, '..', 'src', 'worker', 'worker.ts'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+  const wrapped = src.match(/tx\(this\.deps\.db, \(\) => \{[\s\S]*?setError[\s\S]*?'run\.failed'[\s\S]*?transition[\s\S]*?\}\)/g) ?? [];
+  assert.equal(wrapped.length, 2,
+    `expected both failure paths wrapped in tx(), found ${wrapped.length}`);
+  // maybeAutoRetry must stay OUTSIDE each transaction: it is async, tx() is sync, and a retry run
+  // must not be rolled back together with the failure record that caused it. Checked per-block --
+  // scanning the whole file would also match the legitimate call on the line AFTER the block.
+  for (const [i, block] of wrapped.entries()) {
+    assert.ok(!block.includes('maybeAutoRetry'),
+      `bookkeeping transaction ${i} must not contain maybeAutoRetry`);
+  }
+});
