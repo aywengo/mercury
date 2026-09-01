@@ -53,9 +53,13 @@ jobs:
       - name: Test
         run: npm test
 
-  # Guards the thing that actually regressed in #67: a fresh clone with no install must produce a
-  # clear, actionable failure rather than a confusing module-resolution stack. If this ever starts
-  # passing silently, someone has made tests depend on an uninstalled dependency again.
+  # Guards the diagnostic that #67 was about: a fresh clone with no install fails with a clear
+  # ERR_MODULE_NOT_FOUND rather than something confusing.
+  #
+  # If this job ever goes red because `npm test` PASSED, that means the tests no longer need
+  # anything from node_modules -- express has stopped being imported on the path the tests take,
+  # or the API/auth surface has been dropped. Either way the guard is no longer testing what it
+  # claims to and should be deleted or rewritten, not "fixed" by inverting the check.
   uninstalled-checkout-fails-clearly:
     runs-on: ubuntu-latest
     needs: []
