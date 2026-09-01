@@ -25,6 +25,13 @@ cd mercury
 npm install
 ```
 
+`npm install` is required before **either** `npm test` or `npm run typecheck`, not just before
+running the server. Without `node_modules`, `npm run typecheck` exits 127 with `tsc: command not
+found`, and `npm test` runs but fails 4 files (`api`, `auth`, `multiWorker`, `ui`) with
+`ERR_MODULE_NOT_FOUND: express` -- so the whole authentication and authorization surface looks
+broken when only the install is missing. CI installs dependencies first; see
+`.github/workflows/ci.yml`.
+
 ## 3. Start the server (dev mode: API + worker in one process)
 
 ```bash
@@ -131,4 +138,5 @@ Full reference: `README.md` → Configuration.
 ```bash
 npm run typecheck   # tsc --noEmit
 npm test            # full suite, no network, no LLM
+>>>>>>> 2beb563 (ci: install dependencies before typecheck and test (issue #67))
 ```
