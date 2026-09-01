@@ -260,14 +260,3 @@ export class SandboxManager {
 }
 
 /** Resolve the sandbox runtime binary path (used by tests and CLI). */
-export async function detectRuntime(): Promise<SandboxRuntime | null> {
-  for (const name of ['docker', 'podman']) {
-    try {
-      const { stdout } = await execFileP(name, ['--version'], { timeout: 5_000 });
-      if (stdout) return { name, path: name };
-    } catch {
-      // try next
-    }
-  }
-  return null;
-}

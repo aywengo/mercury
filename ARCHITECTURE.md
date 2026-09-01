@@ -343,8 +343,10 @@ stateDiagram-v2
     RUNNING --> TIMED_OUT: time limit
     NEEDS_INPUT --> CANCELLED: user cancels
     NEEDS_INPUT --> TIMED_OUT: input timeout
-    %% resume edge only where the adapter supports it (see §16)
-    CANCELLED --> RUNNING: resume (adapter-supported)
+    %% No CANCELLED --> RUNNING edge. TRANSITIONS[CANCELLED] is empty and no adapter implements
+    %% resume-from-cancelled, so CANCELLED is terminal here as in the table below. §16's resume()
+    %% is a different thing: it continues an agent SESSION on a NEW retry Run (retryOf), it does
+    %% not move an existing cancelled Run back to RUNNING.
     COMPLETED --> [*]
     FAILED --> [*]
     CANCELLED --> [*]

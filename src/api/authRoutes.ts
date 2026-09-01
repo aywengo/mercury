@@ -9,6 +9,7 @@
 // (see server.ts). The 401 body is generic on purpose: it must not reveal
 // whether a submitted token is known to the server.
 
+import { timingSafeEqual } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import { randomBytes } from 'node:crypto';
 import {
@@ -33,9 +34,23 @@ export interface AuthRoutesDeps {
   cookieSecure?: boolean;
 }
 
+/**
+ * Constant-time secret comparison. `timingSafeEqual` throws on unequal lengths, so the lengths are
+ * compared first -- that leaks only the token's length, not any prefix byte, which is the standard
+ * trade-off. `===` short-circuits on the first differing byte, so a caller able to measure response
+ * timing could walk the admin token one byte at a time. Over a network that is a hard attack to
+ * pull off, which is why this was filed Low; it is cheap enough that there is no reason to leave it.
+ */
+function secretsEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
 function resolveCredential(tokens: Map<string, string>, adminToken: string | null, token: string): { ownerId: string; isAdmin: boolean } | null {
   if (!token) return null;
-  if (adminToken && token === adminToken) return { ownerId: '*', isAdmin: true };
+  if (adminToken && secretsEqual(token, adminToken)) return { ownerId: '*', isAdmin: true };
   const ownerId = tokens.get(token);
   return ownerId ? { ownerId, isAdmin: false } : null;
 }

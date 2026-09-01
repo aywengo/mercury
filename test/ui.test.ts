@@ -202,3 +202,32 @@ test('run.js renders the canonical URL as the link text, not the raw input (issu
   assert.doesNotMatch(code, /rel="noopener noreferrer"[^>]*>\$\{esc\(r\.prUrl\)\}/,
     'a live link must not display the raw untrusted URL');
 });
+
+test('no field that builds markup assigns it through textContent (issue #73 L7)', () => {
+  // textContent renders HTML as literal text. The retry-of link showed readers
+  // `<a href="/run.html?run=...">` instead of a link. Every other markup field in run.js uses
+  // innerHTML with esc(), so this was a one-line inconsistency; assert the rule so the next
+  // field added the same way fails instead of shipping.
+  const offenders: string[] = [];
+  for (const f of ['run.js', 'index.js', 'app.js']) {
+    const src = readFileSync(join(UI_DIR, f), 'utf8');
+    // Strip line comments: this file documents the rule in prose, and a comment mentioning
+    // textContent must not be reported as a violation of it.
+    const code = src.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+    for (const line of code.split('\n')) {
+      if (/\.textContent\s*=/.test(line) && /<[a-zA-Z][^>]*>/.test(line)) offenders.push(`${f}: ${line.trim()}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `markup assigned via textContent renders as literal text:\n${offenders.join('\n')}`);
+});
+
+test('the retry-of field renders an anchor, not escaped markup (issue #73 L7)', () => {
+  const src = readFileSync(join(UI_DIR, 'run.js'), 'utf8');
+  const line = src.split('\n').find((l) => l.includes("'f-retryof'"));
+  assert.ok(line, 'f-retryof must be rendered');
+  assert.match(line, /\.innerHTML\s*=/, 'f-retryof must use innerHTML so the anchor renders');
+  // The label must still be escaped -- switching to innerHTML is only safe if it is.
+  const block = src.slice(src.indexOf("'f-retryof'"), src.indexOf("'f-retryof'") + 400);
+  assert.match(block, /esc\(shortId\(/, 'the link label must stay escaped once innerHTML can parse it');
+  assert.match(block, /encodeURIComponent\(/, 'the run id in the href must stay percent-encoded');
+});
