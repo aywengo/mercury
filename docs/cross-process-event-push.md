@@ -1,8 +1,11 @@
 # Cross-process event push — design
 
 **Status:** proposal. **Scope:** design only; no implementation is included.
-**Related:** [`architecture-review.md`](architecture-review.md) (M16); issue #133, closed by PR #134 and
-on `main` as of `f9bb44d`; README "Recommended next steps" item 11.
+**Related:** [`architecture-review-round-1.md`](architecture-review-round-1.md) (finding M16, and the
+standing requirement it leaves on any cross-process design);
+[`architecture-review.md`](architecture-review.md) (round 2 — R2-2 and R2-3 are in this same file's
+delivery path and should be fixed before any push mechanism is layered on it); issue #133, closed by
+PR #134 and on `main` as of `f9bb44d`; README "Recommended next steps" item 11.
 
 ---
 
