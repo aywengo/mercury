@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { closeServer, createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { makeEnv, waitFor, sleep } from './helpers.ts';
@@ -642,4 +644,52 @@ test('an unclassified internal failure returns 500 without leaking its message (
   } finally {
     env.close();
   }
+});
+
+test('GET /api/runs clamps an explicit limit instead of treating 0 as absent (issue #101)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      for (let i = 0; i < 12; i++) {
+        await fetch(`${base}/api/runs`, {
+          method: 'POST', headers, body: JSON.stringify({ task: `task ${i}`, agent: 'fake' }),
+        });
+      }
+      const list = async (q: string): Promise<{ runs: unknown[] }> =>
+        (await (await fetch(`${base}/api/runs?${q}`, { headers })).json()) as { runs: unknown[] };
+
+      // The bug was `Number(req.query.limit ?? 50) || 50`: 0 is falsy, so the smallest possible
+      // page silently became a 50-row one.
+      assert.equal((await list('limit=0')).runs.length, 1, 'limit=0 must clamp to 1, not expand to 50');
+      assert.equal((await list('limit=-5')).runs.length, 1, 'a negative limit must clamp to 1');
+      assert.equal((await list('limit=3')).runs.length, 3, 'a valid limit is honoured');
+      assert.equal((await list('limit=2000')).runs.length, 12, 'an oversized limit clamps to the cap (12 exist)');
+      assert.equal((await list('limit=abc')).runs.length, 12, 'a non-numeric limit uses the default');
+      assert.equal((await list('')).runs.length, 12, 'absent limit uses the default');
+      // Fractional input must truncate rather than reach SQL as a float.
+      assert.equal((await list('limit=2.9')).runs.length, 2, 'a fractional limit truncates');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('both list endpoints share one limit parser (issue #101)', () => {
+  // The two endpoints had drifted: #54 fixed the events one and left this one on `|| 50`.
+  // Pinning the shared call stops a third copy of the expression appearing.
+  const src = readFileSync(join(import.meta.dirname, '..', 'src', 'api', 'routes.ts'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+  // Exclude the declaration itself: `function parseLimit(` also contains the call shape.
+  const calls = src.match(/(?<!function\s)parseLimit\(/g) ?? [];
+  assert.equal(calls.length, 2, `expected exactly 2 parseLimit call sites, found ${calls.length}`);
+  assert.doesNotMatch(src, /Number\(req\.query\.limit[^)]*\)\s*\|\|/,
+    'the `Number(...) || default` idiom must not come back for limit parsing');
 });

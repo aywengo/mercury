@@ -50,6 +50,25 @@ export function sendError(res: Response, err: unknown, logger?: Logger): void {
   res.status(500).json({ error: 'internal error' });
 }
 
+/**
+ * Parse a `?limit=` query parameter into a bounded page size.
+ *
+ * Shared by GET /api/runs and GET /api/runs/:id/events (issue #101) because the two endpoints had
+ * drifted: the events endpoint was fixed for `limit=0` while the list endpoint still used
+ * `Number(x ?? 50) || 50`. That `|| 50` is the bug -- 0 is falsy, so a caller asking for the
+ * SMALLEST page gets a medium one. Defaulting must key off "absent or not a number", never off
+ * falsiness.
+ *
+ * The floor is 1, not 0: a zero-row page has no way to express "there is more", so a client
+ * paging on it would either stop early or spin. Clamping to 1 makes the response honest instead.
+ */
+export function parseLimit(raw: unknown, def: number, max: number): number {
+  if (raw === undefined) return def;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return def;
+  return Math.min(Math.max(Math.trunc(n), 1), max);
+}
+
 const VALID_STATUSES = new Set<RunStatus>(['QUEUED', 'STARTING', 'RUNNING', 'NEEDS_INPUT', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT']);
 
 export function createRoutes(deps: RoutesDeps): Router {
@@ -86,7 +105,7 @@ export function createRoutes(deps: RoutesDeps): Router {
     const status = typeof req.query.status === 'string' && VALID_STATUSES.has(req.query.status as RunStatus)
       ? (req.query.status as RunStatus)
       : undefined;
-    const limit = Math.min(Number(req.query.limit ?? 50) || 50, 200);
+    const limit = parseLimit(req.query.limit, 50, 200);
     const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
     const { runs, nextCursor } = deps.runService.list({
       ownerId: req.auth!.ownerId,
@@ -149,11 +168,8 @@ export function createRoutes(deps: RoutesDeps): Router {
     // EventStore.list caps a page at 1000 rows. The cap is fine; what was not fine was
     // telling the client the run's TRUE maximum sequence alongside a truncated page and
     // letting it resume from that (issue #54).
-    // Parse explicitly rather than with `|| 1000`: that treats a legitimate `?limit=0` as
-    // absent and silently expands it to the maximum, which is the opposite of what the
-    // caller asked for. Default only when the param is missing or not a number.
-    const rawLimit = req.query.limit === undefined ? 1000 : Number(req.query.limit);
-    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 1000) : 1000;
+    // Shared parser (issue #101); see parseLimit for why this must not use `|| 1000`.
+    const limit = parseLimit(req.query.limit, 1000, 1000);
     const events = deps.events.list(run.id, afterSeq, limit);
     const lastSequence = deps.events.lastSequence(run.id);
     // The resume point is the last sequence actually RETURNED, not the run's maximum. A
