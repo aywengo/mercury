@@ -1090,34 +1090,50 @@ test('the backlog timer and alert path work with no runs at all (issue #73 L2 co
 // keeps the event loop alive past `TimeoutStopSec=45`, converting a graceful shutdown into a
 // SIGKILL -- the exact failure mode issue #51 was raised to remove.
 test('a run whose agent stream throws leaves no pending timer (issue #67)', async () => {
-  const activeTimers = () =>
-    ((process as unknown as { getActiveResourcesInfo(): string[] }).getActiveResourcesInfo() ?? [])
-      .filter((r) => r === 'Timeout').length;
+  // getActiveResourcesInfo exists on the runtimes this project declares (engines: node >=23.6) but
+  // is not part of the documented public API, so a cast plus a presence check rather than a bare
+  // cast: if it is ever absent the test must skip with a reason, not throw a TypeError and be read
+  // as a product failure.
+  const probe = process as unknown as { getActiveResourcesInfo?: () => string[] };
+  if (typeof probe.getActiveResourcesInfo !== 'function') {
+    console.log('SKIP: process.getActiveResourcesInfo() unavailable on this runtime');
+    return;
+  }
+  const activeTimers = () => (probe.getActiveResourcesInfo?.() ?? []).filter((r) => r === 'Timeout').length;
 
   const repo = makeGitRepo(tempDir('mercury-timer-leak-'));
   const adapter = new RecordingAdapter('throw-midway');
   const env = makeEnv({ workerEnabled: false, adapters: { fake: adapter } });
   try {
     const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo } });
-    // Baseline is sampled AFTER start so the worker's own heartbeat and poll timers are already
-    // counted; the assertion is then about what the run ADDS, not about how many timers exist.
+
+    // Baseline is taken BEFORE the worker starts and the comparison is made AFTER it stops.
+    //
+    // Sampling after the run reached FAILED -- the obvious thing to write -- is unsound: the leak
+    // happens DURING the run, so the baseline can already contain the leaked timers and the
+    // assertion then compares the leak against itself and passes with the bug present. It happened
+    // to fail correctly under mutation here only because retries kept adding timers after the
+    // sample, which is retry timing, not a property of the fix.
+    //
+    // Bracketing the worker's whole lifetime removes that ambiguity and also removes the need to
+    // reason about which of the worker's own timers should be forgiven: stop() clears the heartbeat
+    // and the poll timer, so anything long-lived still pending afterwards was left behind by a run.
+    const baseline = activeTimers();
     env.worker.start();
     await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
-    const baseline = activeTimers();
+    // Let any auto-retry attempts run to completion; each one would leak its own timer.
+    await sleep(500);
+    env.worker.stop();
+    await sleep(100);
 
-    // Give any leaked timer a chance to be observed. It is not cleared by anything downstream, so
-    // if it leaked it is still pending here; if cleanup works it was cleared at the race.
-    await sleep(250);
     const after = activeTimers();
-
-    // One timer of slack covers the run's own in-flight bookkeeping. Without the fix this grows by
-    // one per attempted retry (measured: baseline+3 on the default retry policy), each for the full
-    // remaining max-duration.
     assert.ok(
-      after <= baseline + 1,
-      `pending timers grew from ${baseline} to ${after} after a throwing run: the drive loop's ` +
-        `cancellableSleep timer was not released on the rejection path. Each leak holds the event ` +
-        `loop open for the full remaining max-duration.`,
+      after <= baseline,
+      `pending timers went from ${baseline} (before the worker started) to ${after} (after it ` +
+        `stopped) across one throwing run: the drive loop's cancellableSleep timer was not released ` +
+        `on the rejection path. Each leak holds the event loop open for the full remaining ` +
+        `max-duration, which is what pushed worker.test.ts past the per-file test timeout and what ` +
+        `would push a real worker past TimeoutStopSec into SIGKILL.`,
     );
   } finally {
     env.worker.stop();
