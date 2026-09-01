@@ -88,6 +88,24 @@ Two things did not go as planned, and both changed what this document is allowed
 
 Where a finding rests on reading rather than execution, it says so.
 
+### Coverage
+
+Stated because a review that does not say what it skipped is not falsifiable.
+
+| Area | Lines | Depth |
+| --- | --- | --- |
+| `src/worker/` | 989 | full read of claim/execute/drive/finalize/alerts |
+| `src/adapters/` | 3,595 | duplication measured across all six; per-adapter internals not re-derived (see [Not re-examined](#not-re-examined)) |
+| `src/events/` | 432 | full read; both findings executed |
+| `src/api/` | 942 | full read of routes, auth, rateLimit; `server.ts` read for shutdown and trust proxy |
+| `src/queue/`, `src/runs/`, `src/db/` | 940 | full read of claim/reap/lease/transition/list |
+| `src/metrics/` | 382 | full read; monotonicity precondition re-verified by `grep` |
+| `src/workspace/` | 581 | GC deletion paths traced to their bound — **sound**, deletes cannot escape `baseDir/worktrees/` |
+| `src/skills/` | 428 | containment helpers and the `realpathNearest` walk re-checked — **sound**; the `for (;;)` terminates at the filesystem root |
+| `src/sandbox/`, `src/domain/` | 639 | read for status-set consistency only |
+| `ui/` | 854 | read for logic; **not typechecked** — see [Not re-examined](#not-re-examined) |
+| `deploy/`, `test/` | — | read for claims made here, not reviewed as a deliverable |
+
 ---
 
 ## Findings — High
