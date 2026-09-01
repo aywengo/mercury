@@ -1,5 +1,6 @@
 import { test } from 'node:test';
-import { NotFoundError } from '../src/domain/errors.ts';import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
+import { NotFoundError } from '../src/domain/errors.ts';
 import { join } from 'node:path';
 import { openDatabase } from '../src/db/database.ts';
 import { makeEnv, waitFor } from './helpers.ts';

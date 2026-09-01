@@ -326,3 +326,36 @@ test('list() never returns a directory name that resolve() would reject (issue #
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('containment errors do not disclose absolute paths (issue #66)', () => {
+  // These errors reach an HTTP client via ValidationError -> 400. The original #58 wording
+  // interpolated the absolute skill root and the symlink target, which hands an attacker the
+  // on-disk layout for free -- the exact thing the containment work exists to protect. Asserted
+  // structurally (no leading-/ path fragment) rather than by exact wording, so rewording the
+  // message cannot silently reintroduce the leak.
+  const ws = mkdtempSync(join(tmpdir(), 'mercury-skilldisc-'));
+  try {
+    const outside = mkdtempSync(join(tmpdir(), 'mercury-skilldisc-out-'));
+    writeFileSync(join(outside, 'SECRET.txt'), 'top secret');
+    mkdirSync(join(ws, '.agents'), { recursive: true });
+    const root = join(ws, '.agents', 'skills');
+    symlinkSync(outside, root);
+
+    const messages: string[] = [];
+    assert.throws(() => resolveContained(root, 'SECRET.txt'), (err: unknown) => {
+      messages.push(err instanceof Error ? err.message : String(err));
+      return /symlink|escape/i.test(messages[messages.length - 1]);
+    }, 'the symlinked root must still be refused');
+
+    for (const msg of messages) {
+      // Any absolute-path-looking fragment is a disclosure, including the macOS /var ->
+      // /private/var form the temp dirs resolve to.
+      const leak = msg.match(/(?:^|\s)\/[^\s"']+/);
+      assert.ok(!leak, `error message discloses an absolute path: ${msg}`);
+      assert.ok(!msg.includes(ws), `error message discloses the workspace path: ${msg}`);
+      assert.ok(!msg.includes(outside), `error message discloses the symlink target: ${msg}`);
+    }
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
