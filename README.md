@@ -166,6 +166,7 @@ QUEUED → STARTING → RUNNING ⇄ NEEDS_INPUT → COMPLETED / FAILED / CANCELL
 | `MERCURY_LOCAL_AGENTS_DIR` | `./local-agents` | Directory of JSON `LocalAgentConfig` files; each file registers a declarative local CLI agent (see `docs/agent-adapters.md` §4) |
 | `MERCURY_REMOTE_AGENTS_DIR` | `./remote-agents` | Directory of JSON `RemoteAgentConfig` files; each file registers a declarative remote API agent (see `docs/agent-adapters.md` §5) |
 | `MERCURY_RPC_AGENTS_DIR` | `./rpc-agents` | Directory of JSON `RpcAgentConfig` files; each file registers a declarative RPC-protocol agent — `pi`, `omp`, or any CLI speaking the RPC JSONL family (see `docs/agent-adapters.md` §6) |
+| `MERCURY_TRUST_PROXY` | `0` | Number of reverse-proxy hops to trust for client-IP attribution. Set to the proxy count (usually `1`) when the API sits behind nginx/Caddy, otherwise every client shares one rate-limit bucket. **Never set it to "trust everything"** — see Behind a reverse proxy |
 | `MERCURY_COOKIE_SECURE` | `false` | Force `Secure` on the session cookie. Only needed behind a TLS-terminating proxy that does **not** forward `X-Forwarded-Proto`; otherwise encryption is detected per request |
 | `MERCURY_SANDBOX_RUNTIME` | — | `docker` or `podman` to run the agent in a container with resource/network limits; `none` disables |
 | `MERCURY_SANDBOX_IMAGE` | — | Container image for sandboxed execution; must contain the agent binary and git (see Sandboxed execution) |
@@ -394,6 +395,15 @@ requests `resourceLimits.disk` with an explanation instead.
 ## Known limitations
 
 - Auth: the `MERCURY_API_TOKENS` token→owner map remains the identity source; dashboard sessions are in-memory (lost on restart); OIDC/SSO is still future work.
+- **The API is single-process.** Login and run-creation rate limits are fixed-window counters in the process's own memory, and dashboard sessions live in an in-memory `Map`. Running two API instances behind a load balancer therefore gives each instance its own independent limits and its own session table: a session created on one node is unknown to the other (spurious logouts), and an attacker gets `N × max` request budget across `N` nodes. Horizontal scaling needs both moved to shared storage (e.g. SQLite/Redis) first. `MERCURY_TRUST_PROXY` fixes attribution *within* a process; it does not make the API scalable.
+
+### Behind a reverse proxy
+
+Set `MERCURY_TRUST_PROXY` to the number of proxy hops in front of the API (`1` for nginx/Caddy on the same host, `2` for a CDN plus a local proxy). Without it Express takes `req.ip` from the socket, which is the proxy's own address, so **every client behind that proxy shares a single rate-limit bucket** — legitimate users collectively exhaust the login budget and lock each other out, while an attacker inside that shared bucket is barely throttled.
+
+Use a depth, not blanket trust. `trust proxy = true` makes Express accept the whole `X-Forwarded-For` chain, so a client can append its own fake hop and receive a fresh bucket per request — strictly worse than no limiting. A depth peels exactly N addresses off the right-hand end, which is the part a real proxy appended and a client cannot overwrite. `MERCURY_TRUST_PROXY` only accepts non-negative integers for this reason; anything else falls back to `0`.
+
+Setting a depth also makes `req.secure` honour `X-Forwarded-Proto`, so the session cookie picks up `Secure` automatically (see `MERCURY_COOKIE_SECURE`).
 - `PrimeAgentAdapter` uses `prime-agent --mode rpc` (subprocess). The daemon API (`prime-agent send` / `send_message` to resident sessions) is a possible future path for sharing long-lived agent sessions across Runs.
 - SSE fan-out is in-process push (EventStore append hook) plus an adaptive DB poller (250 ms idle / 2 s after a push) as the cross-process fallback. Push between separate server and worker processes (worker → server callback) is the remaining scale path.
 - Resource limits (`cpu`/`memory`/`disk`) and egress policy (`allowedNetworks`) are enforced via a container runtime when `MERCURY_SANDBOX_RUNTIME` is set (see Sandboxed execution); without a runtime, constrained Runs fail closed instead of running unsandboxed.

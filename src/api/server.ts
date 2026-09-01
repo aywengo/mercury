@@ -46,6 +46,19 @@ export interface ServerDeps {
    * detected per request (issue #64).
    */
   cookieSecure?: boolean;
+  /**
+   * Number of reverse-proxy hops to trust for client-IP attribution (issue #65). Default 0.
+   *
+   * This is what the rate limiter's correctness depends on: it keys on `req.ip`, and with no
+   * trusted proxy Express resolves that to the socket peer -- the proxy itself -- so every
+   * client behind that proxy shares a single bucket.
+   *
+   * A number, deliberately not a boolean. `trust proxy = true` makes Express accept the entire
+   * `X-Forwarded-For` chain, so a client can append its own fake hop and get a fresh bucket per
+   * request, which is worse than no limiting at all. Depth peels exactly N hops off the right,
+   * so a client cannot invent an address that survives the peel.
+   */
+  trustProxy?: number;
 }
 
 // Defaults for the two protected route groups (Mercury.md section 24).
@@ -55,6 +68,11 @@ const DEFAULT_CREATE_RUN_LIMIT: RateLimitConfig = { windowMs: 60_000, max: 30 };
 export function createApp(deps: ServerDeps): Express {
   const app = express();
   const sessions = deps.sessions ?? createSessionStore();
+
+  // Set before any middleware that reads req.ip. Default (0 / undefined) leaves Express on its
+  // own default of trusting nothing, so a direct bind keeps per-socket limits.
+  const trustProxy = deps.trustProxy ?? 0;
+  if (trustProxy > 0) app.set('trust proxy', trustProxy);
 
   // Dashboard UI static assets are public (no secrets); data access is gated via /api.
   app.use(express.static(UI_DIR, { index: 'index.html' }));

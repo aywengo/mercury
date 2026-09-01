@@ -202,6 +202,9 @@ async function main(): Promise<void> {
         // deployment still sent the session id in cleartext over plain http. Encryption is
         // detected per request; this only forces it for proxies that do not forward the proto.
         cookieSecure: config.cookieSecure,
+        // Issue #65: the rate limiter keys on req.ip. Behind a proxy that is the proxy's own
+        // address unless we say how many hops to trust, so all clients share one bucket.
+        trustProxy: config.trustProxy,
       },
       config.port,
       { host: config.bindHost, tls: config.tls ?? undefined },
