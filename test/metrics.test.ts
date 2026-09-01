@@ -9,6 +9,7 @@ import { escapeLabelValue, renderPrometheus } from '../src/metrics/prometheus.ts
 import { makeEnv } from './helpers.ts';
 import type { ErrorKind, RunStatus } from '../src/domain/types.ts';
 import type { Express } from 'express';
+import { ACTIVE_WORK_STATUSES, isTerminal, LEASE_HOLDING_STATUSES, STUCK_CANDIDATE_STATUSES, TERMINAL_STATUSES } from '../src/domain/stateMachine.ts';
 
 const T0 = Date.parse('2026-01-01T00:00:00.000Z');
 const iso = (offsetMs: number) => new Date(T0 + offsetMs).toISOString();
@@ -451,5 +452,117 @@ test('lease expiry is non-negative because one clock feeds both calls', () => {
       'expected two clocks to produce a negative remaining time');
   } finally {
     env.close();
+  }
+});
+
+// --- issue #141: NEEDS_INPUT must count as live everywhere a lease is read ----------------------
+//
+// Four subsystems each decided which statuses count as live and gave three different answers.
+// activeLeases was the outlier: it omitted NEEDS_INPUT while the reaper included it, so a worker
+// parked on a human -- still holding its lease and a live agent process -- reported nothing.
+
+test('activeLeases counts a run parked in NEEDS_INPUT (issue #141)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    seedRun(env, { id: 'parked', status: 'NEEDS_INPUT', created: 0, started: 0,
+      leaseOwner: 'w1', leaseExpires: 60_000 });
+    const leases = env.queue.activeLeases(T0);
+    assert.equal(leases.length, 1, 'a worker whose only run awaits input is still working');
+    assert.equal(leases[0].workerId, 'w1');
+    assert.equal(leases[0].activeRuns, 1);
+  } finally {
+    env.close();
+  }
+});
+
+test('a worker whose only run needs input is visible on /metrics (issue #141)', () => {
+  // The consequence the finding names: zero workers and zero claimed runs while holding a live
+  // lease, and a lease gauge blind to the lease most likely to be near expiry.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    seedRun(env, { id: 'parked', status: 'NEEDS_INPUT', created: 0, started: 0,
+      leaseOwner: 'w1', leaseExpires: 60_000 });
+    const now = T0;
+    const leases = env.queue.activeLeases(now);
+    const m = collectMetrics(env.db, { leases, now });
+    assert.equal(m.workers, 1, 'one worker is alive and holding a lease');
+    assert.equal(m.claimedRuns, 1, 'and it has one claimed run');
+    assert.notEqual(m.leaseExpiresInSeconds, null,
+      'the lease gauge must see a NEEDS_INPUT lease; it is the one most likely to be near expiry');
+    assert.ok(m.leaseExpiresInSeconds! >= 0, 'and must not go negative on the shared clock');
+
+    // Positive control: with the run terminal instead, the worker genuinely is gone. Without this
+    // an implementation that counted EVERY status would pass the assertions above.
+    env.runs.transition('parked', 'FAILED');
+    const after = env.queue.activeLeases(now);
+    assert.deepEqual(after, [], 'a terminal run must not keep a worker alive');
+    const m2 = collectMetrics(env.db, { leases: after, now });
+    assert.equal(m2.workers, 0);
+    assert.equal(m2.claimedRuns, 0);
+  } finally {
+    env.close();
+  }
+});
+
+test('a QUEUED run holding a lease is NOT reported as an active worker (issue #141)', () => {
+  // The other half of the distinction, pinned behaviourally rather than only as a set membership.
+  // RunQueue.claim sets lease_owner and lease_expires_at BEFORE the run transitions to STARTING, so
+  // this state is reachable on every claim, not just after a crash. Counting it would inflate
+  // mercury_workers with queue depth. It must still be reaped, which is why the reaper's set is
+  // wider than the active-worker set -- the two differ on QUEUED on purpose.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    seedRun(env, { id: 'claimed-not-started', status: 'QUEUED', created: 0, started: null,
+      leaseOwner: 'w1', leaseExpires: 60_000 });
+    const leases = env.queue.activeLeases(T0);
+    assert.deepEqual(leases, [], 'a QUEUED run is queue depth, not a live worker');
+    const m = collectMetrics(env.db, { leases, now: T0 });
+    assert.equal(m.workers, 0);
+    assert.equal(m.claimedRuns, 0);
+
+    // And the reaper DOES see it -- otherwise this run would be invisible to every subsystem, which
+    // would make the narrow active-worker set a bug rather than a distinction.
+    const reaped = env.queue.reapExpiredLeases(T0 + 61_000);
+    assert.deepEqual(reaped.requeued, ['claimed-not-started'],
+      'an expired lease on a QUEUED run must still be reaped');
+  } finally {
+    env.close();
+  }
+});
+
+test('the live-status sets agree and are derived from the machine (issue #141)', () => {
+  // The finding's table, pinned. The sets are allowed to DIFFER -- a QUEUED run holds a lease but is
+  // not evidence of a live worker, and a STARTING run is a lease-expiry case rather than a stuck one
+  // -- but the differences must be declared, not accidental. Before this, activeLeases disagreed with
+  // the reaper about NEEDS_INPUT for no stated reason.
+  assert.deepEqual([...LEASE_HOLDING_STATUSES].sort(),
+    ['NEEDS_INPUT', 'QUEUED', 'RUNNING', 'STARTING'], 'a lease exists in every non-terminal status');
+  assert.deepEqual([...ACTIVE_WORK_STATUSES].sort(),
+    ['NEEDS_INPUT', 'RUNNING', 'STARTING'], 'QUEUED is not evidence of a live worker');
+  assert.deepEqual([...STUCK_CANDIDATE_STATUSES].sort(),
+    ['NEEDS_INPUT', 'RUNNING'], 'STARTING is a lease-expiry case, not an idle-agent one');
+
+  // Derived, not restated. LEASE_HOLDING_STATUSES must equal "everything the machine says is not
+  // terminal", computed here from the machine's OWN predicate rather than from the constant. If
+  // someone swaps the derivation for a hardcoded list, or adds a status to the machine and forgets
+  // this test, the two disagree.
+  const everyStatus: RunStatus[] = [
+    'QUEUED', 'STARTING', 'RUNNING', 'NEEDS_INPUT', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT',
+  ];
+  assert.deepEqual([...LEASE_HOLDING_STATUSES].sort(),
+    everyStatus.filter((s) => !isTerminal(s)).sort(),
+    'LEASE_HOLDING_STATUSES must stay equal to the non-terminal half of the machine');
+  // The enumeration above must itself stay complete, or the check above is vacuous.
+  for (const t of TERMINAL_STATUSES) {
+    assert.ok(everyStatus.includes(t), `this test's status list is missing terminal status ${t}`);
+  }
+  assert.equal(LEASE_HOLDING_STATUSES.length + TERMINAL_STATUSES.length, everyStatus.length,
+    'every status must be either lease-holding or terminal; a new status needs adding here');
+
+  // And each set is a subset of the one above it, so no set can invent a status.
+  for (const smaller of [ACTIVE_WORK_STATUSES, STUCK_CANDIDATE_STATUSES]) {
+    for (const s of smaller) {
+      assert.ok(LEASE_HOLDING_STATUSES.includes(s), `${s} must be lease-holding`);
+    }
   }
 });

@@ -4,7 +4,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { tx } from '../db/database.ts';
 import type { Run } from '../domain/types.ts';
-import { isTerminal, shutdownRequeueSources } from '../domain/stateMachine.ts';
+import { ACTIVE_WORK_STATUSES, isTerminal, LEASE_HOLDING_STATUSES, shutdownRequeueSources } from '../domain/stateMachine.ts';
 import { RunStore, type RunRow, rowToRun } from '../runs/runStore.ts';
 
 /** Error recorded when a run's lease expires (worker crash); shared with the worker's event payload. */
@@ -157,9 +157,9 @@ export class RunQueue {
     const expired = this.db
       .prepare(
         `SELECT * FROM runs WHERE lease_expires_at IS NOT NULL AND lease_expires_at < ?
-         AND status IN ('QUEUED', 'STARTING', 'RUNNING', 'NEEDS_INPUT')`,
+         AND status IN (${placeholdersFor(LEASE_HOLDING_STATUSES)})`,
       )
-      .all(nowIso) as unknown as RunRow[];
+      .all(nowIso, ...LEASE_HOLDING_STATUSES) as unknown as RunRow[];
     const requeued: string[] = [];
     const failed: string[] = [];
     // All-or-nothing: if the loop throws (e.g. SQLITE_BUSY under concurrent
@@ -212,8 +212,13 @@ export class RunQueue {
 
   /**
    * Active lease owners for worker health reporting (GET /healthz/workers,
-   * Mercury.md section 25): distinct lease_owner over RUNNING/STARTING runs with
-   * unexpired leases, grouped with counts and the oldest (soonest-expiring) lease.
+   * Mercury.md section 25): distinct lease_owner over ACTIVE_WORK_STATUSES runs with unexpired
+   * leases, grouped with counts and the oldest (soonest-expiring) lease.
+   *
+   * The status set is DERIVED, not listed here. It used to be `('RUNNING','STARTING')`, which omitted
+   * NEEDS_INPUT: a worker whose only run was parked waiting on a human reported zero workers and
+   * zero claimed runs while holding a live lease and a live agent process, and the lease gauge was
+   * blind to the lease most likely to be near expiry (issue #141).
    */
   activeLeases(now = Date.now()): ActiveLease[] {
     const nowIso = new Date(now).toISOString();
@@ -221,13 +226,15 @@ export class RunQueue {
       .prepare(
         `SELECT lease_owner, COUNT(*) AS active_runs, MIN(lease_expires_at) AS oldest_expires
          FROM runs
-         WHERE status IN ('RUNNING', 'STARTING')
+         WHERE status IN (${placeholdersFor(ACTIVE_WORK_STATUSES)})
            AND lease_owner IS NOT NULL
            AND (lease_expires_at IS NULL OR lease_expires_at > ?)
          GROUP BY lease_owner
          ORDER BY lease_owner ASC`,
       )
-      .all(nowIso) as { lease_owner: string; active_runs: number; oldest_expires: string | null }[];
+      // Statuses bind BEFORE the timestamp: the IN (...) list appears first in the statement and
+      // SQLite binds positionally, not by name.
+      .all(...ACTIVE_WORK_STATUSES, nowIso) as { lease_owner: string; active_runs: number; oldest_expires: string | null }[];
     return rows.map((r) => ({
       workerId: r.lease_owner,
       activeRuns: Number(r.active_runs),
@@ -240,6 +247,11 @@ export interface ActiveLease {
   workerId: string;
   activeRuns: number;
   oldestLeaseExpiresAt: string | null;
+}
+
+/** `?, ?, ?` for an IN (...) list. Values are still bound as parameters, never interpolated. */
+function placeholdersFor(statuses: readonly string[]): string {
+  return statuses.map(() => '?').join(', ');
 }
 
 export { rowToRun };

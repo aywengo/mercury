@@ -5,7 +5,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { isTerminal } from '../domain/stateMachine.ts';
+import { isTerminal, STUCK_CANDIDATE_STATUSES } from '../domain/stateMachine.ts';
 import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts';
 import type { Redactor } from '../domain/redact.ts';
 import { isEventType } from '../domain/types.ts';
@@ -828,7 +828,9 @@ export class Worker {
     // One query, threshold in the WHERE clause. This used to be list({ status, limit: 200 }) per
     // status -- newest first, cursor discarded -- so past 200 live runs the oldest and quietest runs,
     // which are precisely the stuck ones, were never examined (issue #137).
-    const STUCK_STATUSES = ['RUNNING', 'NEEDS_INPUT'] as const;
+    // Derived from the state machine alongside activeLeases and the reaper, so the three can no
+    // longer give three different answers about which statuses count as live (issue #141).
+    const STUCK_STATUSES = STUCK_CANDIDATE_STATUSES;
     const idleBefore = new Date(now - thresholdMs).toISOString();
     const stuck: { runId: string; status: string; idleMs: number }[] = [];
     for (const run of this.deps.runs.listIdle(STUCK_STATUSES, idleBefore)) {
