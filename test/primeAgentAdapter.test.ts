@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PrimeAgentAdapter } from '../src/adapters/primeAgentAdapter.ts';
@@ -320,5 +320,98 @@ test('terminate() stops the RPC process after a normal agent_end (issue #46)', a
     }
     delete process.env.MOCK_RPC_MODE;
     delete process.env.MOCK_RPC_PID_FILE;
+  }
+});
+
+test('a traversal skill id is rejected before the agent is spawned (issue #95)', async () => {
+  // Defence in depth: SkillRegistry.resolve validates ids today, but primeAgentAdapter turns
+  // skill.id into a path handed to a child process, and join() does NOT contain --
+  // join(ws, '.agents', 'skills', '../../etc') escapes the workspace silently. The adapter must
+  // not depend on its caller having validated.
+  const { context, workspacePath } = makeContext();
+  const evil: ResolvedSkill = {
+    id: '../../outside',
+    version: '1.0.0',
+    description: 'x',
+    capabilities: [],
+    path: '/unused',
+    content: '# x\n',
+    files: { 'SKILL.md': '# x\n' },
+    hash: 'abc',
+  };
+  const argvFile = join(workspacePath, 'argv-evil.json');
+  process.env.MOCK_RPC_ARGV_FILE = argvFile;
+  const adapter = new PrimeAgentAdapter(MOCK, { args: [] });
+  try {
+    await assert.rejects(
+      () => adapter.start({ ...context, skills: [evil] }),
+      /Unsafe skill id/,
+      'a `..` skill id must be refused, not joined into a path',
+    );
+    // The agent must never be spawned. Note what this does NOT claim: start() writes the run
+    // context file (.mercury-context.json) before it ever looks at skills, so that write still
+    // happens. The guarantee is about the child process, not about the whole call being atomic.
+    assert.equal(existsSync(argvFile), false, 'the agent must never be spawned for an unsafe skill id');
+  } finally {
+    delete process.env.MOCK_RPC_ARGV_FILE;
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});
+
+test('an absolute-path skill id is rejected too (issue #95)', async () => {
+  // join() also discards everything before an absolute segment:
+  // join(ws, '.agents', 'skills', '/etc/cron.d') === '/etc/cron.d'.
+  const { context, workspacePath } = makeContext();
+  const evil: ResolvedSkill = {
+    id: '/etc/cron.d',
+    version: '1.0.0',
+    description: 'x',
+    capabilities: [],
+    path: '/unused',
+    content: '# x\n',
+    files: { 'SKILL.md': '# x\n' },
+    hash: 'abc',
+  };
+  const adapter = new PrimeAgentAdapter(MOCK, { args: [] });
+  try {
+    await assert.rejects(
+      () => adapter.start({ ...context, skills: [evil] }),
+      /Unsafe skill id/,
+      'an absolute skill id must be refused',
+    );
+  } finally {
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});
+
+test('a skills directory that is a symlink out of the workspace is refused (issue #95)', async () => {
+  // A safe id is not the only escape. The workspace is a checkout of a repo that may be untrusted,
+  // so `.agents/skills` can itself arrive as a symlink to anywhere on the host; joining a perfectly
+  // well-formed id onto it resolves outside the workspace. Same reasoning as issue #58.
+  const { context, workspacePath } = makeContext();
+  const outside = mkdtempSync(join(tmpdir(), 'mercury-symlink-target-'));
+  mkdirSync(join(outside, 'testing'), { recursive: true });
+  // workspace/.agents/skills -> <outside>
+  mkdirSync(join(workspacePath, '.agents'), { recursive: true });
+  symlinkSync(outside, join(workspacePath, '.agents', 'skills'));
+
+  const ok: ResolvedSkill = {
+    id: 'testing',  // completely well-formed
+    version: '1.0.0', description: 'x', capabilities: [], path: '/unused',
+    content: '# x\n', files: { 'SKILL.md': '# x\n' }, hash: 'abc',
+  };
+  const argvFile = join(workspacePath, 'argv-symlink.json');
+  process.env.MOCK_RPC_ARGV_FILE = argvFile;
+  const adapter = new PrimeAgentAdapter(MOCK, { args: [] });
+  try {
+    await assert.rejects(
+      () => adapter.start({ ...context, skills: [ok] }),
+      /escapes the skill root|symlink/i,
+      'a symlinked skills root must be refused even for a safe id',
+    );
+    assert.equal(existsSync(argvFile), false, 'no agent may be spawned against an escaping path');
+  } finally {
+    delete process.env.MOCK_RPC_ARGV_FILE;
+    adapter.cancel(context.run.id).catch(() => {});
   }
 });
