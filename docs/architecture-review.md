@@ -335,10 +335,17 @@ Both alert paths measure a **cluster-global** quantity and dedupe with **per-pro
 - `checkStuckRuns` lists runs with no `lease_owner` filter, so every worker examines every run in the
   cluster and POSTs its own webhook for the same stuck run.
 
-`deploy/` ships a single worker unit, but multi-worker is a supported topology — there is a dedicated
-`test/multiWorker.test.ts`, and `/metrics` exposes a worker count precisely because more than one is
-expected. On a 4-worker deployment the operator gets 4× the alerts for a single incident, which is how
-alerting gets muted and then ignored.
+**Multi-worker is engineered for, even though no document says to do it.** `deploy/` ships one
+`mercury-worker.service` and neither `deploy/README.md` nor `ARCHITECTURE.md` mentions running more than
+one. But the whole design contends for that case: leases exist because workers race, `claim()` is a
+compare-and-swap against other claimers, `activeLeases()` groups by `lease_owner` in the plural, there is
+a dedicated `test/multiWorker.test.ts`, and `/metrics` exposes a worker count. On a 4-worker deployment
+the operator gets 4× the alerts for one incident, which is how alerting gets muted and then ignored.
+
+That gap is itself worth noting: the alerting path was written as if single-worker while the storage
+path was written as if multi-worker. The findings in this document that come from status-set divergence
+([R2-5](#the-status-set-has-no-owner)) have the same shape — different subsystems, different implicit
+answers to the same question.
 
 **How confirmed:** read both methods and the flag's declaration; no ownership or leader guard exists.
 
