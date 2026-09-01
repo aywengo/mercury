@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server as HttpServer } from 'node:http';
+import type { ChildProcess } from 'node:child_process';
 import type { Express } from 'express';
 import { createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
@@ -102,6 +103,49 @@ function makeWorker(
     // production default -- otherwise they wait 60s for an alert they used to get in ~20ms.
     backlogCheckIntervalMs: opts.backlogCheckIntervalMs ?? opts.pollMs ?? 20,
     alertWebhookUrl: opts.alertWebhookUrl,
+  });
+}
+
+/**
+ * Terminate a spawned CLI child and wait for it, without being able to hang.
+ *
+ * `await new Promise((r) => proc.once('exit', r))` never settles when the child has ALREADY
+ * exited -- `exit` is not re-emitted for a dead child -- so on every path where the server died
+ * (bad config, port in use) the cleanup awaited forever and the file hit the 180s test timeout
+ * instead of reporting the real failure. Escalates to SIGKILL after the grace period so a child
+ * that ignores SIGTERM cannot wedge the suite either.
+ */
+async function stopChild(proc: ChildProcess, graceMs = 5_000): Promise<void> {
+  if (!proc.connected && proc.exitCode !== null) return;
+  if (proc.exitCode !== null) return;
+  proc.kill('SIGTERM');
+  const exited = await Promise.race([
+    new Promise<boolean>((r) => proc.once('exit', () => r(true))),
+    sleep(graceMs).then(() => false),
+  ]);
+  if (!exited && proc.exitCode === null) {
+    proc.kill('SIGKILL');
+    await Promise.race([new Promise<void>((r) => proc.once('exit', () => r())), sleep(graceMs)]);
+  }
+}
+
+/**
+ * Ask the OS for a free port by binding 0 and releasing it immediately.
+ *
+ * This used to be `3900 + Math.floor(Math.random() * 500)`. A guess can collide with any other
+ * listener on the host -- including a child this suite leaked earlier -- and the collision was
+ * indistinguishable from a slow start, because the child's stderr was piped and never read.
+ * Binding 0 hands back a port the kernel believes is free. The release/rebind window is still a
+ * race, so the caller must also fail fast when the child dies rather than wait out its budget.
+ */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address() as { port: number };
+      probe.close(() => resolve(port));
+    });
   });
 }
 
@@ -374,7 +418,7 @@ test('lease loss: worker aborts and touches NOTHING, leaving the run to its new 
 test('CLI wiring: /healthz/workers returns 200 when started via cli.ts server (issue #4)', async () => {
   const { spawn } = await import('node:child_process');
   const dir = tempDir('mercury-cli-healthz-');
-  const port = 3900 + Math.floor(Math.random() * 500);
+  const port = await freePort();
   const env = {
     ...process.env,
     MERCURY_DB: join(dir, 'test.db'),
@@ -388,26 +432,41 @@ test('CLI wiring: /healthz/workers returns 200 when started via cli.ts server (i
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  // Capture the child's output BEFORE waiting. The pipe exists but was never read, so a bind
+  // failure or a config error left the assertion with nothing to say but "server did not start".
+  const output: string[] = [];
+  proc.stderr.on('data', (c: Buffer) => output.push(c.toString()));
+  proc.stdout.on('data', (c: Buffer) => output.push(c.toString()));
+  let exitCode: number | null = null;
+  proc.once('exit', (code) => { exitCode = code; });
+
   try {
-    // wait for the server to come up
     let ok = false;
-    for (let i = 0; i < 40; i++) {
+    // Sleep on EVERY iteration. The sleep used to sit inside `catch`, so a listener answering
+    // anything other than 200 consumed all 40 attempts with no delay at all -- measured at 287ms
+    // for the whole loop instead of 10s. The budget now means what it looks like.
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline && exitCode === null) {
       try {
         const res = await fetch(`http://127.0.0.1:${port}/healthz`);
         if (res.status === 200) { ok = true; break; }
       } catch {
-        await sleep(250);
+        // not listening yet
       }
+      await sleep(250);
     }
-    assert.ok(ok, 'server did not start');
+    assert.ok(
+      ok,
+      `server did not start (exit=${exitCode}). Child output:\n` +
+        output.join('').slice(-4_000),
+    );
     const res = await fetch(`http://127.0.0.1:${port}/healthz/workers`);
     assert.equal(res.status, 200);
     const body = (await res.json()) as { workers: unknown[]; queueDepth: number };
     assert.ok(Array.isArray(body.workers));
     assert.equal(typeof body.queueDepth, 'number');
   } finally {
-    proc.kill('SIGTERM');
-    await new Promise((r) => proc.once('exit', r));
+    await stopChild(proc);
   }
 });
 test('CLI wiring: redact-events backfills persisted secrets (issue #18)', async () => {
@@ -449,7 +508,6 @@ test('CLI wiring: backlog alert webhook fires when configured via env (issue #5)
   const { spawn } = await import('node:child_process');
   const webhook = await startWebhookServer();
   const dir = tempDir('mercury-cli-alert-');
-  const port = 4400 + Math.floor(Math.random() * 500);
   const env = {
     ...process.env,
     MERCURY_DB: join(dir, 'test.db'),
@@ -513,8 +571,7 @@ test('CLI wiring: backlog alert webhook fires when configured via env (issue #5)
     assert.equal(hit.body.type ?? hit.body.queueDepth !== undefined, true);
     assert.ok((hit.body as { queueDepth?: number }).queueDepth !== undefined);
   } finally {
-    proc.kill('SIGTERM');
-    await new Promise((r) => proc.once('exit', r));
+    await stopChild(proc);
     await webhook.close();
   }
 });
