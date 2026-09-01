@@ -250,7 +250,7 @@ The same bearer token is resolved twice, by two functions that do not share code
 
 | Path | Resolves via | Admin comparison |
 | --- | --- | --- |
-| `POST /api/auth/login` (dashboard) | `resolveCredential()` in `authRoutes.ts:51-56` | `secretsEqual` → `timingSafeEqual` |
+| `POST /api/auth/login` (dashboard) | `resolveCredential()` in `authRoutes.ts:50-56` | `secretsEqual` → `timingSafeEqual` |
 | **every `/api/*` request** | inline in `createAuthMiddleware`, `auth.ts:38` | `token === adminToken` |
 
 Round 1 filed this as L5 and #124 fixed it — in `authRoutes.ts` only. The middleware that gates the
@@ -318,14 +318,14 @@ reaper knows that. `activeLeases` does not. Consequences, all on `/metrics`:
 
 **Fix.** Add `NEEDS_INPUT` to `activeLeases`. Better, derive all four sets from one place —
 `shutdownRequeueSources` already proves this is possible by generating SQL from `TRANSITIONS`, and the
-comment at `runQueue.ts:104-110` explains that doing so was the entire point of issue #59. The same
+comment at `runQueue.ts:93-95` explains that doing so was the entire point of issue #59. The same
 argument applies here verbatim and was not carried across.
 
 ### R2-6. Every worker sends its own copy of every alert
 
 **Issue:** [#142](https://github.com/aywengo/mercury/issues/142)
 
-`src/worker/worker.ts:71`, `:785-800`, `:823-862`
+`src/worker/worker.ts:71-72`, `:785-800`, `:823-862`
 
 Both alert paths measure a **cluster-global** quantity and dedupe with **per-process** state:
 
@@ -352,10 +352,10 @@ a guarantee it does not provide.
 
 **Issue:** [#143](https://github.com/aywengo/mercury/issues/143)
 
-`src/api/routes.ts:214-289`
+`src/api/routes.ts:212-292`
 
 `/runs/:runId/stream` is the only route in the file without a `try`/`catch`. It calls
-`res.writeHead(200, …)` at `:222`, then `deps.stream.subscribe(...)` at `:256` — and `subscribe()`
+`res.writeHead(200, …)` at `:219`, then `deps.stream.subscribe(...)` at `:256` — and `subscribe()`
 rethrows if the backlog handler throws, which R2-2 proves it can. The throw escapes to Express's default
 handler, which attempts a 500 response on a response whose headers are already sent.
 
