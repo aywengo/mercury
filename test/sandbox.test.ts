@@ -2,12 +2,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync } from 'node:fs';
+import { writeFileSync, chmodSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { SandboxManager } from '../src/sandbox/sandboxManager.ts';
 import type { Run } from '../src/domain/types.ts';
+import { tempDir } from './helpers.ts';
 
 function makeRun(overrides: Partial<Run> = {}): Run {
   return {
@@ -142,7 +143,7 @@ test('PrimeAgentAdapter does not wrap when no isolation requested', async () => 
 
 test('worker fail-closed: run requesting isolation without runtime fails', async () => {
   const { makeEnv } = await import('./helpers.ts');
-  const repoDir = mkdtempSync(join(tmpdir(), 'mercury-sandbox-repo-'));
+  const repoDir = tempDir('mercury-sandbox-repo-');
   execFileSync('git', ['init', '-q', repoDir]);
   execFileSync('git', ['-C', repoDir, 'config', 'user.email', 't@t']);
   execFileSync('git', ['-C', repoDir, 'config', 'user.name', 't']);

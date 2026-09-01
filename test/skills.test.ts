@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertSafeSkillId, compareSkillIds, resolveContained, SkillRegistry, type SkillMeta } from '../src/skills/skillRegistry.ts';
 import { writeSkills } from '../src/worker/worker.ts';
 import { createSkillSelector, KEYWORDS, termMatches, termsForSkill } from '../src/skills/skillSelector.ts';
-import { SKILLS_DIR } from './helpers.ts';
+import { SKILLS_DIR, tempDir } from './helpers.ts';
 
 test('registry lists all skills', () => {
   const reg = new SkillRegistry(SKILLS_DIR);
@@ -41,7 +41,7 @@ test('registry orders ids with the canonical comparator (issue #81)', () => {
 });
 
 test('skill ids cannot escape the registry root (issue #58)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-trav-'));
+  const dir = tempDir('mercury-trav-');
   try {
     // A skill living OUTSIDE the registry root, holding content that must never be
     // readable through the registry. On the base commit resolve(['../outside']) returned
@@ -77,7 +77,7 @@ test('skill ids cannot escape the registry root (issue #58)', () => {
 });
 
 test('resolveContained refuses paths that escape the root (issue #58)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-contain-'));
+  const dir = tempDir('mercury-contain-');
   try {
     assert.equal(resolveContained(dir, 'a/b.md'), join(dir, 'a', 'b.md'));
     assert.throws(() => resolveContained(dir, '../escape'), /escapes/);
@@ -96,7 +96,7 @@ test('resolveContained refuses paths that escape the root (issue #58)', () => {
 });
 
 test('containment survives a symlinked skills directory (issue #58, Copilot on #92)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-sym-'));
+  const dir = tempDir('mercury-sym-');
   try {
     const outside = join(dir, 'outside');
     mkdirSync(outside, { recursive: true });
@@ -282,7 +282,7 @@ test('writeSkills refuses a traversal skill id or file path (issue #58, review N
   // one places bytes. It is unreachable through the registry today, so it needs a test of
   // its own -- otherwise a refactor that feeds writeSkills from a persisted snapshot
   // instead of re-resolving ids would silently reopen #58 with nothing failing.
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-writeskills-'));
+  const dir = tempDir('mercury-writeskills-');
   try {
     const ws = join(dir, 'workspace');
     mkdirSync(ws, { recursive: true });
@@ -311,7 +311,7 @@ test('list() never returns a directory name that resolve() would reject (issue #
   // Auto-selection does selector.select(task, skills.list(), 4) then skills.resolve(ids).
   // Once resolve() rejects unsafe ids, an unsafe directory name would throw out of run
   // creation -- so one stray directory would fail every run.
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-listfilter-'));
+  const dir = tempDir('mercury-listfilter-');
   try {
     const meta = (n: string) => `---\nname: ${n}\nversion: 1.0.0\ndescription: d\ncapabilities: [a]\n---\n\n# x\n`;
     for (const d of ['good', 'issue-fix-loop', 'Code-Review', 'my skill', '.hidden']) {
@@ -334,9 +334,9 @@ test('containment errors do not disclose absolute paths (issue #66)', () => {
   // on-disk layout for free -- the exact thing the containment work exists to protect. Asserted
   // structurally (no leading-/ path fragment) rather than by exact wording, so rewording the
   // message cannot silently reintroduce the leak.
-  const ws = mkdtempSync(join(tmpdir(), 'mercury-skilldisc-'));
+  const ws = tempDir('mercury-skilldisc-');
   try {
-    const outside = mkdtempSync(join(tmpdir(), 'mercury-skilldisc-out-'));
+    const outside = tempDir('mercury-skilldisc-out-');
     writeFileSync(join(outside, 'SECRET.txt'), 'top secret');
     mkdirSync(join(ws, '.agents'), { recursive: true });
     const root = join(ws, '.agents', 'skills');
@@ -366,7 +366,7 @@ test('skill hash is independent of host locale (issue #86)', () => {
   // host locale and ICU build, so a skill with more than one file could hash differently on a
   // developer machine and on CI. Files differing only by punctuation are enough: locale sorts
   // '_' < '-' < '.', code-unit order sorts '-' < '.' < '_'.
-  const root = mkdtempSync(join(tmpdir(), 'mercury-skillhash-'));
+  const root = tempDir('mercury-skillhash-');
   const dir = join(root, 'punct');
   mkdirSync(join(dir, 'references'), { recursive: true });
   writeFileSync(join(dir, 'SKILL.md'),

@@ -5,11 +5,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HermesAgentAdapter } from '../src/adapters/hermesAgentAdapter.ts';
 import type { AgentExit, Run, RunContext, ResolvedSkill } from '../src/domain/types.ts';
+import { tempDir, tempFile } from './helpers.ts';
 
 const MOCK = join(import.meta.dirname, 'fixtures', 'mock-hermes-agent.mjs');
 
@@ -47,7 +48,7 @@ function makeContext(opts: { run?: Run; skills?: ResolvedSkill[] } = {}): {
   context: RunContext;
   workspacePath: string;
 } {
-  const workspacePath = mkdtempSync(join(tmpdir(), 'mercury-hermes-'));
+  const workspacePath = tempDir('mercury-hermes-');
   const run = opts.run ?? makeRun();
   const context: RunContext = {
     run,
@@ -91,8 +92,8 @@ test('happy path: final response -> agent.message, exit completed', async () => 
 });
 
 test('argv construction: task via stdin, skills, budgets, yolo, accept-hooks, --in', async () => {
-  const argvFile = join(tmpdir(), `hermes-argv-${Date.now()}.json`);
-  const envFile = join(tmpdir(), `hermes-env-${Date.now()}.json`);
+  const argvFile = tempFile('hermes-argv', 'json');
+  const envFile = tempFile('hermes-env', 'json');
   const { context, workspacePath } = makeContext({
     skills: [
       { id: 'git-pr', version: '1', description: '', capabilities: [], path: '', content: '', hash: '', files: {} },
@@ -144,7 +145,7 @@ test('session id captured from stderr for resume', async () => {
 });
 
 test('resume: respawns with --resume <sessionId>', async () => {
-  const argvFile = join(tmpdir(), `hermes-resume-${Date.now()}.json`);
+  const argvFile = tempFile('hermes-resume', 'json');
   const { context } = makeContext();
   const a = adapter({ env: { MOCK_HERMES_SESSION: 'sess-abc123', MOCK_HERMES_ARGV_FILE: argvFile } });
   const handle = await a.start(context);

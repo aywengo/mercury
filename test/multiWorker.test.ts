@@ -9,7 +9,7 @@ import { createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { Worker } from '../src/worker/worker.ts';
 import { nullLogger, type Logger, type LogFields } from '../src/logger.ts';
-import { makeEnv, makeGitRepo, waitFor, sleep } from './helpers.ts';
+import { makeEnv, makeGitRepo, sleep, tempDir, waitFor } from './helpers.ts';
 import { canTransition, shutdownRequeueSources } from '../src/domain/stateMachine.ts';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -19,8 +19,9 @@ const TERMINAL = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT']);
 // --- helpers ---------------------------------------------------------------
 
 function envDir(): string {
-  // system temp dir (not the repo) so tests never litter the checkout
-  return join(tmpdir(), `mercury-mw-${Math.random().toString(16).slice(2)}`);
+  // system temp dir (not the repo) so tests never litter the checkout. tempDir() registers the
+  // path for removal when this file finishes (issue #73 L8).
+  return tempDir('mercury-mw-');
 }
 
 function makeSpyLogger(): { root: Logger; warns: { fields: Record<string, unknown>; msg: string }[]; errors: { fields: Record<string, unknown>; msg: string }[] } {
@@ -372,8 +373,7 @@ test('lease loss: worker aborts and touches NOTHING, leaving the run to its new 
 });
 test('CLI wiring: /healthz/workers returns 200 when started via cli.ts server (issue #4)', async () => {
   const { spawn } = await import('node:child_process');
-  const { mkdtempSync } = await import('node:fs');
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-cli-healthz-'));
+  const dir = tempDir('mercury-cli-healthz-');
   const port = 3900 + Math.floor(Math.random() * 500);
   const env = {
     ...process.env,
@@ -412,10 +412,9 @@ test('CLI wiring: /healthz/workers returns 200 when started via cli.ts server (i
 });
 test('CLI wiring: redact-events backfills persisted secrets (issue #18)', async () => {
   const { spawn } = await import('node:child_process');
-  const { mkdtempSync } = await import('node:fs');
   const { openDatabase } = await import('../src/db/database.ts');
   const { EventStore } = await import('../src/events/eventStore.ts');
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-cli-redact-'));
+  const dir = tempDir('mercury-cli-redact-');
   const dbPath = join(dir, 'test.db');
   // seed a DB with a secret-bearing event (no redactor)
   const db = openDatabase(dbPath);
@@ -448,9 +447,8 @@ test('CLI wiring: redact-events backfills persisted secrets (issue #18)', async 
 
 test('CLI wiring: backlog alert webhook fires when configured via env (issue #5)', async () => {
   const { spawn } = await import('node:child_process');
-  const { mkdtempSync } = await import('node:fs');
   const webhook = await startWebhookServer();
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-cli-alert-'));
+  const dir = tempDir('mercury-cli-alert-');
   const port = 4400 + Math.floor(Math.random() * 500);
   const env = {
     ...process.env,

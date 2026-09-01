@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { openDatabase, MIGRATIONS, BUSY_TIMEOUT_MS } from '../src/db/database.ts';
+import { tempDir } from './helpers.ts';
 
 test('migration v3: idempotency keys become owner-scoped with backfill (issue #8)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-migrate-v3-'));
+  const dir = tempDir('mercury-migrate-v3-');
   const dbPath = join(dir, 'test.db');
   try {
     // Seed a pre-v3 database: v1 + v2 applied, runs + global idempotency keys.
@@ -67,7 +68,7 @@ test('migration v3: idempotency keys become owner-scoped with backfill (issue #8
 });
 
 test('openDatabase sets a busy_timeout (issue #38)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-busy-'));
+  const dir = tempDir('mercury-busy-');
   const dbPath = join(dir, 'test.db');
   try {
     const db = openDatabase(dbPath);
@@ -81,7 +82,7 @@ test('openDatabase sets a busy_timeout (issue #38)', () => {
 
 test('concurrent writer waits for the lock instead of failing with SQLITE_BUSY (issue #38)', async () => {
   const { Worker } = await import('node:worker_threads');
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-busy2-'));
+  const dir = tempDir('mercury-busy2-');
   const dbPath = join(dir, 'test.db');
   try {
     const db1 = openDatabase(dbPath);
@@ -133,7 +134,7 @@ test('concurrent writer waits for the lock instead of failing with SQLITE_BUSY (
 
 test('read-then-write transaction waits for the lock instead of failing instantly (issue #49)', async () => {
   const { Worker } = await import('node:worker_threads');
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-defer-'));
+  const dir = tempDir('mercury-defer-');
   const dbPath = join(dir, 'test.db');
   try {
     const db1 = openDatabase(dbPath);

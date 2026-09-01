@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { closeServer, createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
-import { makeEnv, waitFor, sleep } from './helpers.ts';
+import { makeEnv, sleep, tempDir, waitFor } from './helpers.ts';
 import type { Express } from 'express';
 
 function makeApi(env: ReturnType<typeof makeEnv>, tokens: [string, string][] = [['tok-alice', 'alice']], admin?: string) {
@@ -180,10 +180,9 @@ test('GET /api/agents returns the registered agent ids (issue #13)', async () =>
 });
 
 test('SSE stream delivers events and supports reconnect via after', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-sse-'));
+  const repo = tempDir('mercury-sse-');
   const env = makeEnv({
     fakeScript: [
       { event: { type: 'agent.message', payload: { text: 'first' } } },
@@ -249,10 +248,9 @@ test('SSE stream delivers events and supports reconnect via after', async () => 
 });
 
 test('cancel via API', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-cancel-api-'));
+  const repo = tempDir('mercury-cancel-api-');
   // Long delay keeps the run in RUNNING with ample margin so the cancel request
   // cannot race the agent to completion (a completed run would correctly 400).
   const env = makeEnv({
@@ -284,10 +282,9 @@ test('cancel via API', async () => {
 });
 
 test('input via API', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-input-api-'));
+  const repo = tempDir('mercury-input-api-');
   const env = makeEnv({
     fakeScript: [
       { input: { question: 'Continue?', choices: ['yes', 'no'] } },

@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -15,6 +15,7 @@ import {
 } from '../src/adapters/localAgentAdapter.ts';
 import { LocalAgentRegistry } from '../src/adapters/localAgentRegistry.ts';
 import type { AgentExit, Run, RunContext, ResolvedSkill } from '../src/domain/types.ts';
+import { tempDir, tempFile } from './helpers.ts';
 
 const MOCK = join(import.meta.dirname, 'fixtures', 'mock-local-agent.mjs');
 
@@ -52,7 +53,7 @@ function makeContext(opts: { run?: Run; skills?: ResolvedSkill[] } = {}): {
   context: RunContext;
   workspacePath: string;
 } {
-  const workspacePath = mkdtempSync(join(tmpdir(), 'mercury-local-'));
+  const workspacePath = tempDir('mercury-local-');
   const run = opts.run ?? makeRun();
   const context: RunContext = {
     run,
@@ -125,8 +126,8 @@ test('happy path: jsonl events mapped to Mercury events, exit completed', async 
 });
 
 test('argv construction: task flag, skills flags, sandbox policy flags', async () => {
-  const argvFile = join(tmpdir(), `argv-${Date.now()}.json`);
-  const envFile = join(tmpdir(), `env-${Date.now()}.json`);
+  const argvFile = tempFile('argv', 'json');
+  const envFile = tempFile('env', 'json');
   const { context } = makeContext({
     skills: [
       { id: 'git-pr', version: '1', description: '', capabilities: [], path: '', content: '', hash: '', files: {} },
@@ -156,7 +157,7 @@ test('argv construction: task flag, skills flags, sandbox policy flags', async (
 });
 
 test('task via stdin mode', async () => {
-  const argvFile = join(tmpdir(), `argv-stdin-${Date.now()}.json`);
+  const argvFile = tempFile('argv-stdin', 'json');
   const { context } = makeContext();
   const adapter = new LocalAgentAdapter(jsonlConfig({
     taskInput: { mode: 'stdin' },
@@ -171,7 +172,7 @@ test('task via stdin mode', async () => {
 });
 
 test('task via file mode: task written to workspace, flag points at it', async () => {
-  const argvFile = join(tmpdir(), `argv-file-${Date.now()}.json`);
+  const argvFile = tempFile('argv-file', 'json');
   const { context, workspacePath } = makeContext();
   const adapter = new LocalAgentAdapter(jsonlConfig({
     taskInput: { mode: 'file', flag: '--task-file', filePath: 'task.txt' },
@@ -302,7 +303,7 @@ test('text output: lines become agent.message events', async () => {
 });
 
 test('resume: respawns with --resume <sessionId> captured from events', async () => {
-  const argvFile = join(tmpdir(), `argv-resume-${Date.now()}.json`);
+  const argvFile = tempFile('argv-resume', 'json');
   const { context } = makeContext();
   const adapter = new LocalAgentAdapter(jsonlConfig({ args: [MOCK], env: { MOCK_LOCAL_ARGV_FILE: argvFile } }));
   const handle = await adapter.start(context);
@@ -343,7 +344,7 @@ test('resume unsupported -> throws', async () => {
 });
 
 test('flag-mode input: agent exits waiting, sendInput respawns with answer flag', async () => {
-  const argvFile = join(tmpdir(), `argv-flag-${Date.now()}.json`);
+  const argvFile = tempFile('argv-flag', 'json');
   const { context } = makeContext();
   const adapter = new LocalAgentAdapter(jsonlConfig({
     args: [MOCK],
@@ -422,7 +423,7 @@ test('config validation rejects bad configs', () => {
 });
 
 test('registry: loads JSON configs from a directory', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-agents-'));
+  const dir = tempDir('mercury-agents-');
   writeFileSync(join(dir, 'my-agent.json'), JSON.stringify(jsonlConfig()));
   writeFileSync(join(dir, 'not-a-config.txt'), 'ignored');
   const registry = new LocalAgentRegistry(dir);
@@ -437,14 +438,14 @@ test('registry: missing dir -> no agents', () => {
 });
 
 test('registry: invalid config file -> throws with file path', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-agents-'));
+  const dir = tempDir('mercury-agents-');
   writeFileSync(join(dir, 'bad.json'), JSON.stringify({ id: 'bad' }));
   const registry = new LocalAgentRegistry(dir);
   assert.throws(() => registry.load(), /bad.json/);
 });
 
 test('session id from stdout regex (resume.sessionIdSource=stdout)', async () => {
-  const argvFile = join(tmpdir(), `argv-resume2-${Date.now()}.json`);
+  const argvFile = tempFile('argv-resume2', 'json');
   const { context } = makeContext();
   const adapter = new LocalAgentAdapter(jsonlConfig({
     args: [MOCK],

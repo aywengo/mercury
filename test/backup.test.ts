@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync, readFileSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -8,6 +8,7 @@ import { join } from 'node:path';
 // behaviour that matters is the FAILURE path: refusing to run rather than producing a plausible
 // looking file (issue #69).
 import { execFileSync } from 'node:child_process';
+import { tempDir } from './helpers.ts';
 
 
 /**
@@ -40,7 +41,7 @@ function runBackup(env: Record<string, string>): { code: number; out: string } {
 }
 
 test('backup.sh refuses to run without sqlite3 instead of falling back to cp (issue #69)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-backup-nosqlite-'));
+  const dir = tempDir('mercury-backup-nosqlite-');
   const db = join(dir, 'mercury.db');
   writeFileSync(db, 'not really a database, and that is the point');
   const backupDir = join(dir, 'backups');
@@ -65,7 +66,7 @@ test('backup.sh produces a verified backup when sqlite3 is available (issue #69)
     return;
   }
   assert.ok(sqlite3, 'sqlite3 present');
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-backup-ok-'));
+  const dir = tempDir('mercury-backup-ok-');
   const db = join(dir, 'mercury.db');
   const backupDir = join(dir, 'backups');
   // Build a real WAL-mode database through the app's own driver, so the fixture matches what the
@@ -100,7 +101,7 @@ test('a failed .backup leaves no partial file behind (issue #69 review)', () => 
   // sqlite3 exists, but the database is unreadable, so .backup itself fails partway. `set -e`
   // would exit and leave a truncated $OUT named exactly like a good backup, which retention would
   // then keep.
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-backup-partial-'));
+  const dir = tempDir('mercury-backup-partial-');
   const db = join(dir, 'mercury.db');
   // A file that is not a database: sqlite3 opens it, then fails on the backup step.
   writeFileSync(db, 'this is definitely not an sqlite database file');

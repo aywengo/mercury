@@ -6,7 +6,7 @@
 import { test, after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -16,6 +16,7 @@ import {
 } from '../src/adapters/remoteAgentAdapter.ts';
 import { RemoteAgentRegistry } from '../src/adapters/remoteAgentRegistry.ts';
 import type { AgentExit, Run, RunContext, ResolvedSkill } from '../src/domain/types.ts';
+import { tempDir, tempFile } from './helpers.ts';
 
 const MOCK = join(import.meta.dirname, 'fixtures', 'mock-remote-agent.mjs');
 
@@ -89,7 +90,7 @@ function makeContext(opts: { run?: Run; skills?: ResolvedSkill[] } = {}): {
   context: RunContext;
   workspacePath: string;
 } {
-  const workspacePath = mkdtempSync(join(tmpdir(), 'mercury-remote-'));
+  const workspacePath = tempDir('mercury-remote-');
   const run = opts.run ?? makeRun();
   const context: RunContext = {
     run,
@@ -174,7 +175,7 @@ test('happy path: create -> poll -> complete with mapped events', async () => {
 });
 
 test('createTask body templating: {task} and {workspace} placeholders', async () => {
-  const logFile = join(tmpdir(), `remote-log-${Date.now()}.jsonl`);
+  const logFile = tempFile('remote-log', 'jsonl');
   const { port } = await startMockServer({ MOCK_REMOTE_MODE: 'happy', MOCK_REMOTE_LOG: logFile });
   const { context, workspacePath } = makeContext();
   const adapter = new RemoteAgentAdapter(devinConfig(port));
@@ -188,7 +189,7 @@ test('createTask body templating: {task} and {workspace} placeholders', async ()
 });
 
 test('auth header: bearer token sent on every request', async () => {
-  const logFile = join(tmpdir(), `remote-auth-${Date.now()}.jsonl`);
+  const logFile = tempFile('remote-auth', 'jsonl');
   const { port } = await startMockServer({
     MOCK_REMOTE_MODE: 'happy',
     MOCK_REMOTE_REQUIRE_AUTH: '1',
@@ -239,7 +240,7 @@ test('credential never appears in events or run payloads', async () => {
 });
 
 test('input round-trip: ask -> input.required -> sendInput -> agent continues', async () => {
-  const inputFile = join(tmpdir(), `remote-input-${Date.now()}.jsonl`);
+  const inputFile = tempFile('remote-input', 'jsonl');
   const { port } = await startMockServer({ MOCK_REMOTE_MODE: 'input', MOCK_REMOTE_INPUT_FILE: inputFile });
   const { context } = makeContext();
   const adapter = new RemoteAgentAdapter(devinConfig(port, {
@@ -273,7 +274,7 @@ test('input round-trip: ask -> input.required -> sendInput -> agent continues', 
 });
 
 test('cancel: POST cancel endpoint, exit reason cancelled', async () => {
-  const cancelFile = join(tmpdir(), `remote-cancel-${Date.now()}.txt`);
+  const cancelFile = tempFile('remote-cancel', 'txt');
   const { port } = await startMockServer({ MOCK_REMOTE_MODE: 'hang', MOCK_REMOTE_CANCEL_FILE: cancelFile });
   const { context } = makeContext();
   const adapter = new RemoteAgentAdapter(devinConfig(port));
@@ -343,7 +344,7 @@ test('transient API failure: keeps polling and completes', async () => {
 });
 
 test('resume: re-attaches to the existing task id without creating a new task', async () => {
-  const logFile = join(tmpdir(), `remote-resume-${Date.now()}.jsonl`);
+  const logFile = tempFile('remote-resume', 'jsonl');
   const { port } = await startMockServer({ MOCK_REMOTE_MODE: 'happy', MOCK_REMOTE_LOG: logFile });
   const { context } = makeContext();
   const adapter = new RemoteAgentAdapter(devinConfig(port));
@@ -390,7 +391,7 @@ test('config validation rejects bad configs', () => {
 
 test('registry: loads JSON configs from a directory', async () => {
   const { port } = await startMockServer({ MOCK_REMOTE_MODE: 'happy' });
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-remote-agents-'));
+  const dir = tempDir('mercury-remote-agents-');
   writeFileSync(join(dir, 'devin.json'), JSON.stringify(devinConfig(port)));
   writeFileSync(join(dir, 'not-a-config.txt'), 'ignored');
   const registry = new RemoteAgentRegistry(dir);
@@ -406,7 +407,7 @@ test('registry: missing dir -> no agents', () => {
 });
 
 test('registry: invalid config file -> throws with file path', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-remote-agents-'));
+  const dir = tempDir('mercury-remote-agents-');
   writeFileSync(join(dir, 'bad.json'), JSON.stringify({ id: 'bad' }));
   const registry = new RemoteAgentRegistry(dir);
   assert.throws(() => registry.load(), /bad.json/);

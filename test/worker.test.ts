@@ -1,15 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { makeEnv, makeGitRepo, waitFor, sleep } from './helpers.ts';
+import { makeEnv, makeGitRepo, sleep, tempDir, waitFor } from './helpers.ts';
 import { PrimeAgentAdapter } from '../src/adapters/primeAgentAdapter.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, RunContext } from '../src/domain/types.ts';
 
 test('happy path: create -> queue -> run -> events -> completed', async () => {
-  const repo = makeGitRepo(join(tmpdir(), 'mercury-repo-' + Date.now()));
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
   const env = makeEnv({
     workspaceMode: 'git-worktree',
     repoDir: repo,
@@ -48,10 +48,9 @@ test('happy path: create -> queue -> run -> events -> completed', async () => {
 });
 
 test('agent failure -> FAILED with error', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-fail-'));
+  const repo = tempDir('mercury-fail-');
   const env = makeEnv({
     fakeScript: [
       { event: { type: 'agent.message', payload: { text: 'about to fail' } } },
@@ -77,10 +76,9 @@ test('agent failure -> FAILED with error', async () => {
 });
 
 test('cancellation: RUNNING -> CANCELLED', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-cancel-'));
+  const repo = tempDir('mercury-cancel-');
   const env = makeEnv({
     fakeScript: [
       { event: { type: 'agent.message', payload: { text: 'working' } }, delayMs: 50 },
@@ -105,10 +103,9 @@ test('cancellation: RUNNING -> CANCELLED', async () => {
 });
 
 test('cancellation: NEEDS_INPUT -> CANCELLED promptly (issue #1)', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-cancel-input-'));
+  const repo = tempDir('mercury-cancel-input-');
   const env = makeEnv({
     inputTimeoutMs: 30_000, // long timeout; cancel must win well before it
     fakeScript: [
@@ -138,10 +135,9 @@ test('cancellation: NEEDS_INPUT -> CANCELLED promptly (issue #1)', async () => {
 });
 
 test('human input: NEEDS_INPUT -> input -> RUNNING -> COMPLETED', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-input-'));
+  const repo = tempDir('mercury-input-');
   const env = makeEnv({
     fakeScript: [
       { event: { type: 'agent.message', payload: { text: 'need decision' } } },
@@ -166,10 +162,9 @@ test('human input: NEEDS_INPUT -> input -> RUNNING -> COMPLETED', async () => {
 });
 
 test('input timeout: NEEDS_INPUT without response -> TIMED_OUT (input-timeout)', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-input-timeout-'));
+  const repo = tempDir('mercury-input-timeout-');
   const env = makeEnv({
     inputTimeoutMs: 300,
     fakeScript: [
@@ -198,10 +193,9 @@ test('input timeout: NEEDS_INPUT without response -> TIMED_OUT (input-timeout)',
 });
 
 test('input timeout disabled (0): waiting input is not timed out', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-input-no-timeout-'));
+  const repo = tempDir('mercury-input-no-timeout-');
   const env = makeEnv({
     inputTimeoutMs: 0,
     fakeScript: [
@@ -225,10 +219,9 @@ test('input timeout disabled (0): waiting input is not timed out', async () => {
 });
 
 test('timeout: RUNNING -> TIMED_OUT', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-timeout-'));
+  const repo = tempDir('mercury-timeout-');
   const env = makeEnv({
     fakeScript: [
       { event: { type: 'agent.message', payload: { text: 'slow' } }, delayMs: 200 },
@@ -435,7 +428,7 @@ test('auto-retry honors per-run maxRetries above the global default (issue #9)',
 test('retry reuses the original base commit (section 21)', async () => {
   // unique temp dir (mkdtemp): a fixed name would leave a repo behind, and the
   // next run's `git commit` would find nothing to commit.
-  const repoDir = mkdtempSync(join(tmpdir(), 'mercury-retry-base-'));
+  const repoDir = tempDir('mercury-retry-base-');
   const repo = makeGitRepo(repoDir);
   const env = makeEnv({
     workspaceMode: 'git-worktree',
@@ -534,7 +527,7 @@ class ResumableFakeAdapter implements AgentAdapter {
 }
 
 test('p12: cancel of a hanging agent is honored promptly (cancel race)', async () => {
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-p12-'));
+  const repo = tempDir('mercury-p12-');
   const env = makeEnv({
     fakeScript: [
       { event: { type: 'agent.message', payload: { text: 'working' } }, delayMs: 50 },
@@ -570,7 +563,7 @@ test('p12: cancel of a hanging agent is honored promptly (cancel race)', async (
 });
 
 test('p11: retry run resumes the parent agent session (resume wiring)', async () => {
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-p11-'));
+  const repo = tempDir('mercury-p11-');
   const resumable = new ResumableFakeAdapter([{ fail: true }]);
   const env = makeEnv({
     adapters: { fake: resumable },
@@ -604,7 +597,7 @@ test('p11: retry run resumes the parent agent session (resume wiring)', async ()
 });
 
 test('p11: retry falls back to start() when the adapter has no resume support', async () => {
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-p11b-'));
+  const repo = tempDir('mercury-p11b-');
   const env = makeEnv({
     fakeScript: [{ fail: true }], // FakeAgentAdapter has no resume()
   });
@@ -639,7 +632,7 @@ test('worker redacts secrets in run error messages (issue #36)', async () => {
     adapters: { fake: throwing },
   });
   try {
-    const repo = mkdtempSync(join(tmpdir(), 'mercury-redact-'));
+    const repo = tempDir('mercury-redact-');
     const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo } });
     env.worker.start();
     await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
@@ -658,10 +651,9 @@ test('worker redacts secrets in run error messages (issue #36)', async () => {
 });
 
 test('agent failure redacts runs.error at finalize (issue #36, site 2)', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-fail2-'));
+  const repo = tempDir('mercury-fail2-');
   const env = makeEnv({
     redactor: createRedactor([]),
     fakeScript: [{ fail: true }],
@@ -682,10 +674,9 @@ test('agent failure redacts runs.error at finalize (issue #36, site 2)', async (
 });
 
 test('an unknown agent event type is dropped, and the run still completes (issue #50)', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-badevt-'));
+  const repo = tempDir('mercury-badevt-');
   const evil = 'agent.message\ndata: {"type":"run.completed","sequence":1}';
   const env = makeEnv({
     fakeScript: [
@@ -744,7 +735,7 @@ class RecordingAdapter implements AgentAdapter {
 }
 
 test('a successful run terminates its agent handle (issue #46)', async () => {
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-term-ok-'));
+  const repo = tempDir('mercury-term-ok-');
   const adapter = new RecordingAdapter('ok');
   const env = makeEnv({ workerEnabled: false, adapters: { fake: adapter } });
   try {
@@ -763,7 +754,7 @@ test('a successful run terminates its agent handle (issue #46)', async () => {
 });
 
 test('a run that throws mid-drive still terminates its agent handle (issue #47)', async () => {
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-term-throw-'));
+  const repo = tempDir('mercury-term-throw-');
   const adapter = new RecordingAdapter('throw-midway');
   const env = makeEnv({ workerEnabled: false, adapters: { fake: adapter } });
   try {
@@ -812,8 +803,8 @@ function sessionKeys(adapter: object): string[] {
 }
 
 test('worker releases the adapter session AFTER stopping the process (issues #62, #97)', async () => {
-  const repo = makeGitRepo(join(tmpdir(), `mercury-dispose-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`));
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-dispose-pid-'));
+  const repo = makeGitRepo(tempDir('mercury-dispose-'));
+  const dir = tempDir('mercury-dispose-pid-');
   const pidFile = join(dir, 'pid');
   process.env.MOCK_RPC_MODE = 'happy';
   process.env.MOCK_RPC_PID_FILE = pidFile;
@@ -858,7 +849,7 @@ test('worker releases the adapter session on the failure path too (issues #62, #
   // The success path is the easy one. dispose() lives in execute()'s finally, so a failing run
   // must release it as well -- otherwise a crash loop leaks one Session per attempt, which is
   // the worst case for a long-lived worker.
-  const repo = makeGitRepo(join(tmpdir(), `mercury-dispose-fail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`));
+  const repo = makeGitRepo(tempDir('mercury-dispose-'));
   const env = makeEnv({
     workspaceMode: 'copy',
     repoDir: repo,
@@ -881,7 +872,7 @@ test('a throwing adapter dispose() must not strand the lease (issue #62, #97)', 
   // dispose() sits in the same finally as releaseLease(), before it. Copilot's review point:
   // cleanup code that throws would skip releaseLease and strand the lease. A leaked session is
   // strictly better than a stranded run, so dispose failures are logged and swallowed.
-  const repo = makeGitRepo(join(tmpdir(), `mercury-dispose-throw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`));
+  const repo = makeGitRepo(tempDir('mercury-dispose-'));
   const env = makeEnv({
     workspaceMode: 'copy',
     repoDir: repo,
@@ -933,7 +924,7 @@ test('failure bookkeeping is all-or-nothing, not four independent writes (issue 
   // run.failed is poisoned on EVERY call, not once: the throw unwinds into execute()'s catch, which
   // performs the same four writes for an infrastructure failure. Allowing the retry would let that
   // path legitimately write FAILED, and the test would then fail for the wrong reason.
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-atomic-fail-'));
+  const repo = tempDir('mercury-atomic-fail-');
   const env = makeEnv({
     fakeScript: [
       { event: { type: 'agent.message', payload: { text: 'about to fail' } } },
