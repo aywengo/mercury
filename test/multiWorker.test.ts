@@ -1100,3 +1100,47 @@ test('the stuck check alerts on the OLDEST run when more than 200 are running (i
     env.close();
   }
 });
+
+test('a run idle by EXACTLY the threshold is reported (issue #137 boundary)', () => {
+  // Copilot's review. The rule this replaced was `idleMs >= thresholdMs`, which rearranges to
+  // `ref <= now - thresholdMs`. The first version of listIdle used a strict `<`, which drops a run
+  // whose last activity lands exactly on the boundary -- a silent behavioural regression against the
+  // code being replaced, reproduced before it was fixed.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const thresholdMs = 60 * 60 * 1000;
+    const idleBefore = new Date(Date.now() - thresholdMs).toISOString();
+    const ins = env.db.prepare(
+      `INSERT INTO runs (id, owner_id, task, repository_json, agent, status, attempt, constraints_json, created_at, started_at)
+       VALUES (?, 'alice', ?, '{}', 'fake', 'RUNNING', 1, '{}', ?, ?)`,
+    );
+    ins.run('exact-boundary', 'on the boundary', idleBefore, idleBefore); // == idleBefore exactly
+    const oneMsOlder = new Date(Date.parse(idleBefore) - 1).toISOString();
+    ins.run('just-older', 'past the boundary', oneMsOlder, oneMsOlder);
+    const oneMsNewer = new Date(Date.parse(idleBefore) + 1).toISOString();
+    ins.run('just-newer', 'inside the window', oneMsNewer, oneMsNewer);
+
+    const found = env.runs.listIdle(['RUNNING'], idleBefore).map((r) => r.id).sort();
+    assert.deepEqual(found, ['exact-boundary', 'just-older'],
+      'the boundary itself is stuck; one millisecond inside the window is not');
+  } finally {
+    env.close();
+  }
+});
+
+test('listIdle with no limit reports idle runs past the old default of 500 (issue #137)', () => {
+  // Copilot's review again: the method was documented as unbounded while still applying LIMIT 500.
+  // An alert that quietly reported the first 500 idle runs is the same bug this method exists to fix.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const N = 520; // > the limit the first version defaulted to
+    seedRunningRuns(env, N, 10 * 60 * 60 * 1000);
+    const idleBefore = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    assert.equal(env.runs.listIdle(['RUNNING'], idleBefore).length, N,
+      'no limit means no limit');
+    // An explicit limit still bounds, so the option remains usable where a cap is the requirement.
+    assert.equal(env.runs.listIdle(['RUNNING'], idleBefore, 100).length, 100);
+  } finally {
+    env.close();
+  }
+});
