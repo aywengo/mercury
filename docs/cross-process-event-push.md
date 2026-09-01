@@ -170,7 +170,7 @@ so every event travels by the poll edge.
 | --- | --- | --- |
 | `FAST_MS` | 250 ms | `src/events/eventStream.ts` — idle poll cadence |
 | `SLOW_MS` | 2 000 ms | `src/events/eventStream.ts` — cadence after any push |
-| `STREAM_CLOSE_GRACE_MS` | 2 000 ms | `src/api/routes.ts` — terminal-run stream backstop |
+| `STREAM_CLOSE_GRACE_MS` | 2 000 ms | `src/api/routes.ts` — backstop for a terminal run that is already caught up |
 | `BUSY_TIMEOUT_MS` | 5 000 ms | `src/db/database.ts` |
 
 Worst-case cross-process latency is therefore ~2 s, and it is worst exactly when the system is
@@ -463,7 +463,7 @@ stateDiagram-v2
     Streaming --> Streaming: notification -> SELECT -> write -> cursor advances
     Streaming --> Closed: terminal event written
     Streaming --> Closed: client disconnect
-    Streaming --> Closed: terminal-run grace backstop
+    Streaming --> Closed: grace backstop, caught-up terminal run only
     Closed --> [*]
     note right of Streaming
       The ONLY thing that advances the cursor is
