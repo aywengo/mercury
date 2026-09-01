@@ -187,8 +187,26 @@ export class SkillRegistry {
     const files: Record<string, string> = {};
     collectFiles(dir, dir, files);
     const content = files['SKILL.md'] ?? '';
+    // Code-unit ordering via compareSkillIds, NOT localeCompare (issue #86).
+    //
+    // localeCompare depends on the host locale and the ICU build, so two hosts can order the same
+    // set of paths differently. collectFiles() is recursive, so any skill with more than one file
+    // can hash differently on two machines from byte-identical content -- files differing only by
+    // punctuation or case are enough (locale puts '-' below '.' while code-unit order puts '.'
+    // below '-').
+    //
+    // This matters because the hash is an audit artifact, not an internal detail: it is persisted
+    // to run_skills.skill_hash, emitted in skill.selected events, and handed to the adapters. A
+    // host-dependent hash means "which skill version did this run use" has no single answer, and a
+    // canary comparison across hosts reports a difference that is only the locale.
+    //
+    // Reusing compareSkillIds rather than inlining `a < b` keeps one canonical ordering for the
+    // whole registry, which is why that helper exists.
     const hash = createHash('sha256')
-      .update(Object.entries(files).sort(([a], [b]) => a.localeCompare(b)).map(([p, c]) => `${p}\0${c}`).join('\0'))
+      .update(Object.entries(files)
+        .sort(([a], [b]) => compareSkillIds(a, b))
+        .map(([p, c]) => `${p}\0${c}`)
+        .join('\0'))
       .digest('hex');
     return {
       id,
