@@ -234,7 +234,7 @@ needs:
 
 | Command | Required fields | Notes |
 | --- | --- | --- |
-| `create` | `noSession` or `sessionPath`, optional `config`, `lifecycle` | Returns the `activeSessionId` |
+| `create` | `noSession` or `sessionPath`, optional `config`, `lifecycle` | Returns a session summary in `data`; its `activeSessionId` is the handle |
 | `attach` | `activeSessionId`, client metadata | Attaches this client to a live session |
 | `reattach` | `activeSessionId`, `targetActiveSessionId` | Recovery after a client restart |
 | `prompt` | **`activeSessionId`**, `message` | The field the adapter omits |
@@ -341,8 +341,19 @@ worker socket; fail with a message saying so rather than silently mis-parsing.
 ```
 
 `protocol.version` must be `min(hello.protocol.version, MERCURY_SUPPORTED_VERSION)`, not a literal 7.
-Responses correlate by `commandId`; the adapter currently discards all of them with
-`if (msg.type === "response") return;`, which is why nothing can report a rejected command today.
+
+Responses come in exactly two shapes, and both must be handled:
+
+```jsonc
+{ "id": "c1", "type": "response", "command": "create", "success": true,  "data": { … } }
+{ "id": "c1", "type": "response", "command": "create", "success": false,
+  "error": "…", "errorInfo": { "code": "session_already_active", … } }
+```
+
+The adapter currently discards every one of them with `if (msg.type === "response") return;`. That is
+why nothing in the failure table in §8 can be reported today: the daemon does answer, sometimes with a
+precise `errorInfo.code`, and the adapter throws the answer away. Correlate on `id`, and surface
+`success: false` as a run failure carrying the daemon's own error text.
 
 **Fail fast (G3).** If the hello's `protocol.name` is not `prime-agent.daemon`, or its version is
 outside the supported range, or a required capability is absent, `start()` must reject with a message
