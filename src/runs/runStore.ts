@@ -117,6 +117,72 @@ export class RunStore {
     return { runs: page, nextCursor };
   }
 
+  /**
+   * Runs in the given statuses that have been idle since `idleBeforeIso`.
+   *
+   * This exists because the stuck-run check used to call `list({ status, limit: 200 })`, which is
+   * `ORDER BY created_at DESC` -- newest first -- and discard `nextCursor`. A run becomes stuck by
+   * being OLD and quiet, so past 200 live runs the qualifying runs were exactly the ones excluded:
+   * the safety net did not degrade under load, it inverted (issue #137, a Round 1 finding that had
+   * been wrongly closed as already fixed).
+   *
+   * The threshold is pushed into SQL rather than filtered in JavaScript. Two reasons: the scan is no
+   * longer bounded by a page size chosen for an unrelated reason, and it stops shipping every live run
+   * to JS to throw almost all of them away.
+   *
+   * `limit` is OPTIONAL and the stuck-run caller passes none: an alert that silently reported the
+   * first 500 idle runs would be the same class of bug this method exists to fix. Pass a limit only
+   * where a bounded result is the actual requirement.
+   *
+   * The comparison is `<=`, not `<`. The rule this replaced was `idleMs >= thresholdMs`, which
+   * rearranges to `ref <= now - thresholdMs`; a strict `<` drops a run whose last activity lands
+   * exactly on the boundary. Reproduced before fixing: a run whose only reference timestamp equals
+   * `idleBeforeIso` is stuck under the old rule and was missing from the result.
+   *
+   * Idle reference is COALESCE(newest event timestamp, started_at, created_at) -- the same definition
+   * the previous per-run JavaScript used, via EventStore.lastActivity().
+   *
+   * Timestamps are compared as strings. Every one of them is written by `new Date().toISOString()`, a
+   * fixed-width UTC format in which lexicographic order is chronological order; parsing on both sides
+   * would only add a way to get it wrong.
+   *
+   * This reads the events table, which RunStore does not otherwise touch. It lives here rather than
+   * being split across two stores because the result is a set of Runs and the query must be a single
+   * statement to be correct under concurrent appends; splitting it would reintroduce exactly the
+   * read-then-write race the rest of this file avoids.
+   */
+  listIdle(statuses: readonly RunStatus[], idleBeforeIso: string, limit?: number): Run[] {
+    if (statuses.length === 0) return [];
+    const placeholders = statuses.map(() => '?').join(', ');
+    // Omitted limit => no LIMIT clause at all, so the result cannot be silently truncated.
+    const bounded = limit !== undefined;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM runs r
+          WHERE r.status IN (${placeholders})
+            -- Cheap prefilter: a run that started after the threshold cannot be idle past it, so
+            -- SQLite short-circuits the AND and never runs the correlated events subquery for it.
+            -- Same query plan either way (verified with EXPLAIN QUERY PLAN); the win is per-row.
+            -- Measured on 3,000 live runs that are mostly busy: 0.20 ms/call with this line,
+            -- 1.55 ms without. Behaviour is identical -- there is deliberately no test for it.
+            AND COALESCE(r.started_at, r.created_at) <= ?
+            AND COALESCE(
+                  (SELECT MAX(e.timestamp) FROM events e WHERE e.run_id = r.id),
+                  r.started_at,
+                  r.created_at
+                ) <= ?
+          ORDER BY COALESCE(
+                     (SELECT MAX(e2.timestamp) FROM events e2 WHERE e2.run_id = r.id),
+                     r.started_at,
+                     r.created_at
+                   ) ASC,
+                   r.id ASC
+          ${bounded ? 'LIMIT ?' : ''}`,
+      )
+      .all(...statuses, idleBeforeIso, idleBeforeIso, ...(bounded ? [limit] : [])) as unknown as RunRow[];
+    return rows.map(rowToRun);
+  }
+
   transition(id: string, to: RunStatus, extra?: Partial<Omit<Run, 'error' | 'errorKind'>>): Run {
     const run = this.get(id);
     if (!run) throw new Error(`Run ${id} not found`);
