@@ -582,6 +582,20 @@ followed: every fix in this table went through a branch and a PR.
 
 ---
 
+## Follow-on design
+
+Two items survived remediation as design work rather than defects, and both are now written up:
+
+- **Cross-process event push for multi-host scale** —
+  [`cross-process-event-push.md`](cross-process-event-push.md). Relevant to this review because
+  M16 (races simulated rather than multi-process) is a standing requirement on any design there:
+  the cross-process path is currently untested by construction, so a push design must be validated
+  with a real spawned worker process and not an in-process SQL insert.
+- **Role presets ("crews")** — [`crew-design.md`](crew-design.md). Its Phase 0 dependency was the
+  skill path containment work in #58, which landed as step 2 above.
+
+---
+
 ## Unverified
 
 Claims raised during review that this document does **not** assert, because they could not
