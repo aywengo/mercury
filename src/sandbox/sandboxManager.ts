@@ -259,4 +259,3 @@ export class SandboxManager {
   }
 }
 
-/** Resolve the sandbox runtime binary path (used by tests and CLI). */
