@@ -3,11 +3,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DaemonAgentAdapter } from '../src/adapters/daemonAgentAdapter.ts';
 import type { Run, RunContext, ResolvedSkill } from '../src/domain/types.ts';
+import { tempDir } from './helpers.ts';
 
 const MOCK = join(import.meta.dirname, 'fixtures', 'mock-prime-agent-daemon.mjs');
 
@@ -43,7 +44,7 @@ function makeContext(opts: { run?: Run; skills?: ResolvedSkill[]; env?: Record<s
   context: RunContext;
   workspacePath: string;
 } {
-  const workspacePath = mkdtempSync(join(tmpdir(), 'mercury-daemon-'));
+  const workspacePath = tempDir('mercury-daemon-');
   const run = opts.run ?? makeRun();
   const context: RunContext = {
     run,

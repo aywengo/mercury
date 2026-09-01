@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeEnv, waitFor } from './helpers.ts';
+import { makeEnv, tempDir, waitFor } from './helpers.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { EventStore } from '../src/events/eventStore.ts';
 import { EVENT_TYPES } from '../src/domain/types.ts';
@@ -68,10 +68,9 @@ test('append redacts secrets in payloads when a redactor is configured (issue #3
 
 
 test('worker-appended events are redacted end-to-end with a redactor-equipped store (issue #3)', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-redact-e2e-'));
+  const repo = tempDir('mercury-redact-e2e-');
   const env = makeEnv({
     redactor: createRedactor(['super-secret']),
     fakeScript: [

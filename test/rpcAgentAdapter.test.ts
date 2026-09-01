@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -16,6 +16,7 @@ import {
 } from '../src/adapters/rpcAgentAdapter.ts';
 import { RpcAgentRegistry } from '../src/adapters/rpcAgentRegistry.ts';
 import type { AgentExit, Run, RunContext, ResolvedSkill } from '../src/domain/types.ts';
+import { tempDir } from './helpers.ts';
 
 const MOCK = join(import.meta.dirname, 'fixtures', 'mock-prime-agent-rpc.mjs');
 
@@ -53,7 +54,7 @@ function makeContext(opts: { run?: Run; skills?: ResolvedSkill[] } = {}): {
   context: RunContext;
   workspacePath: string;
 } {
-  const workspacePath = mkdtempSync(join(tmpdir(), 'mercury-rpc-'));
+  const workspacePath = tempDir('mercury-rpc-');
   const run = opts.run ?? makeRun();
   const context: RunContext = {
     run,
@@ -376,7 +377,7 @@ test('config validation rejects bad configs', () => {
 });
 
 test('registry: loads JSON configs from a directory', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-rpc-agents-'));
+  const dir = tempDir('mercury-rpc-agents-');
   writeFileSync(join(dir, 'pi.json'), JSON.stringify(piConfig()));
   writeFileSync(join(dir, 'not-a-config.txt'), 'ignored');
   const registry = new RpcAgentRegistry(dir);
@@ -391,7 +392,7 @@ test('registry: missing dir -> no agents', () => {
 });
 
 test('registry: invalid config file -> throws with file path', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-rpc-agents-'));
+  const dir = tempDir('mercury-rpc-agents-');
   writeFileSync(join(dir, 'bad.json'), JSON.stringify({ id: 'bad' }));
   const registry = new RpcAgentRegistry(dir);
   assert.throws(() => registry.load(), /bad.json/);

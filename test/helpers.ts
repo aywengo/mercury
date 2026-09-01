@@ -1,9 +1,10 @@
 // Shared test environment: temp dir, in-memory DB, stores, worker, fake agent.
 
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { after } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { openDatabase } from '../src/db/database.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import { createLogger, nullLogger } from '../src/logger.ts';
@@ -153,3 +154,51 @@ export async function waitFor(
 export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+/**
+ * A temp dir that is removed when the whole test file finishes.
+ *
+ * Fixture repos were created with bare `mkdtempSync` and never removed (issue #73 L8): every run
+ * of the suite left ~40 git repos plus their worktrees behind in the system temp dir. `makeEnv`
+ * already cleaned its own directory in `close()`, so this covers the remaining direct callers.
+ *
+ * Registered against the test runner's file-level `after()` rather than threaded through each test
+ * as `t.after(...)`. That would have been the more precise scope, but it needs a `t` parameter
+ * added to ~40 test callbacks across 11 files for no behavioural gain -- these are read-only
+ * fixture repos, so holding them until the file ends is equivalent in practice and keeps the diff
+ * to the call sites that actually allocate.
+ *
+ * The teardown also runs for a file that aborts partway, which per-test cleanup inside a `finally`
+ * would not guarantee.
+ */
+const leakedDirs = new Set<string>();
+
+export function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  leakedDirs.add(dir);
+  return dir;
+}
+
+/**
+ * A path for a single loose temp FILE (argv dumps, RPC logs, env captures), removed with the
+ * same file-level teardown as tempDir(). Several adapter tests wrote these straight into the
+ * system temp dir with a Date.now() suffix, so each run left another dozen files behind.
+ */
+export function tempFile(prefix: string, ext = ''): string {
+  const file = join(mkdtempSync(join(tmpdir(), `${prefix}-`)), `${prefix}${ext}`);
+  leakedDirs.add(dirname(file));
+  return file;
+}
+
+after(() => {
+  for (const dir of leakedDirs) {
+    // force: true -- git marks objects and worktree metadata read-only, so a plain recursive
+    // remove fails on them on some platforms.
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // A cleanup failure must not fail a test that passed; the dir is in the temp dir anyway.
+    }
+  }
+  leakedDirs.clear();
+});

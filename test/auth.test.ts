@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { createApp } from '../src/api/server.ts';
 import { createSessionStore } from '../src/api/sessions.ts';
 import { EventStream } from '../src/events/eventStream.ts';
-import { makeEnv, waitFor } from './helpers.ts';
+import { makeEnv, tempDir, waitFor } from './helpers.ts';
 import type { Express } from 'express';
 
 type ApiOpts = {
@@ -233,10 +233,9 @@ test('admin token can log in to an admin session', async () => {
 });
 
 test('SSE stream works with cookie auth', async () => {
-  const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const repo = mkdtempSync(join(tmpdir(), 'mercury-sse-cookie-'));
+  const repo = tempDir('mercury-sse-cookie-');
   const env = makeEnv({
     fakeScript: [
       { event: { type: 'agent.message', payload: { text: 'first' } } },

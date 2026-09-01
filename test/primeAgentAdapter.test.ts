@@ -4,11 +4,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PrimeAgentAdapter } from '../src/adapters/primeAgentAdapter.ts';
 import type { Run, RunContext, ResolvedSkill } from '../src/domain/types.ts';
+import { tempDir } from './helpers.ts';
 
 const MOCK = join(import.meta.dirname, 'fixtures', 'mock-prime-agent-rpc.mjs');
 
@@ -44,7 +45,7 @@ function makeContext(opts: { run?: Run; skills?: ResolvedSkill[]; env?: Record<s
   context: RunContext;
   workspacePath: string;
 } {
-  const workspacePath = mkdtempSync(join(tmpdir(), 'mercury-adapter-'));
+  const workspacePath = tempDir('mercury-adapter-');
   const run = opts.run ?? makeRun();
   const context: RunContext = {
     run,
@@ -282,7 +283,7 @@ test('terminate() stops the RPC process after a normal agent_end (issue #46)', a
   // alive reading stdin, so "the run completed" says nothing about the process. terminate()
   // used to bail out on `session.done` -- already true here -- so stop() was unreachable from
   // the completion path and every successful run leaked a live process.
-  const dir = mkdtempSync(join(tmpdir(), 'mercury-pid-'));
+  const dir = tempDir('mercury-pid-');
   const pidFile = join(dir, 'pid');
   process.env.MOCK_RPC_MODE = 'happy';
   process.env.MOCK_RPC_PID_FILE = pidFile;
@@ -389,7 +390,7 @@ test('a skills directory that is a symlink out of the workspace is refused (issu
   // so `.agents/skills` can itself arrive as a symlink to anywhere on the host; joining a perfectly
   // well-formed id onto it resolves outside the workspace. Same reasoning as issue #58.
   const { context, workspacePath } = makeContext();
-  const outside = mkdtempSync(join(tmpdir(), 'mercury-symlink-target-'));
+  const outside = tempDir('mercury-symlink-target-');
   mkdirSync(join(outside, 'testing'), { recursive: true });
   // workspace/.agents/skills -> <outside>
   mkdirSync(join(workspacePath, '.agents'), { recursive: true });
