@@ -141,9 +141,9 @@ test('/metrics reports run counts, durations and queue wait', async () => {
       const body = await res.text();
       const m = parse(body);
 
-      assert.equal(get(m, 'mercury_runs', { status: 'COMPLETED' }), 1);
-      assert.equal(get(m, 'mercury_runs', { status: 'FAILED' }), 1);
-      assert.equal(get(m, 'mercury_runs', { status: 'QUEUED' }), 1);
+      assert.equal(get(m, 'mercury_runs_in_status', { status: 'COMPLETED' }), 1);
+      assert.equal(get(m, 'mercury_runs_in_status', { status: 'FAILED' }), 1);
+      assert.equal(get(m, 'mercury_runs_in_status', { status: 'QUEUED' }), 1);
 
       // 90s falls in the "<120" band and NOT in "<60"; 400s in "<600" and not "<300".
       assert.equal(get(m, 'mercury_run_duration_seconds_bucket', { status: 'COMPLETED', le: '60' }), 0);
@@ -264,7 +264,7 @@ test('label values are escaped so a value cannot forge metric lines', () => {
   // name it, and an earlier version of this assertion counted those too and failed on correct code.
   assert.equal(samples.filter((l) => l.startsWith('mercury_runs_total')).length, 1,
     'the injected text must not create a second series');
-  assert.ok(samples.some((l) => l.startsWith('mercury_runs{')), 'the hostile status must still be emitted, escaped');
+  assert.ok(samples.some((l) => l.startsWith('mercury_runs_in_status{')), 'the hostile status must still be emitted, escaped');
 });
 
 test('metrics output carries no unbounded label values', () => {
@@ -347,11 +347,51 @@ test('every status and error kind is exported even when the database is empty', 
   try {
     const body = renderPrometheus(collectMetrics(env.db));
     for (const st of ['QUEUED', 'RUNNING', 'COMPLETED', 'TIMED_OUT']) {
-      assert.match(body, new RegExp(`mercury_runs\\{status="${st}"\\} 0`), `${st} must be present at zero, not absent`);
+      assert.match(body, new RegExp(`mercury_runs_in_status\\{status="${st}"\\} 0`), `${st} must be present at zero, not absent`);
     }
     for (const kind of ['infrastructure', 'agent', 'task']) {
       assert.match(body, new RegExp(`mercury_run_errors_total\\{kind="${kind}"\\} 0`), `${kind} must be present at zero`);
     }
+  } finally {
+    env.close();
+  }
+});
+
+test('metric family names do not collide after Prometheus suffix normalisation', () => {
+  // Prometheus derives a family name by STRIPPING the mandatory suffixes (_total on counters,
+  // _bucket/_sum/_count on histograms). Two metrics whose names differ only by such a suffix are
+  // the SAME family with conflicting TYPEs, and the whole scrape is rejected -- not just the one
+  // metric. This is invisible to per-line assertions: every line is individually valid.
+  //
+  // It bit the first version of this exporter, which exposed a gauge `mercury_runs` alongside the
+  // counter `mercury_runs_total`. The official prometheus_client parser reported the family
+  // `mercury_runs` twice; a real Prometheus would have refused the scrape.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    seedRun(env, { id: 'x', status: 'COMPLETED', created: 0, started: 1000, completed: 61_000 });
+    const body = renderPrometheus(collectMetrics(env.db));
+
+    const SUFFIXES = ['_total', '_bucket', '_sum', '_count'];
+    const declared = new Map<string, string>(); // family -> TYPE
+    const violations: string[] = [];
+
+    for (const line of body.split('\n')) {
+      if (line.startsWith('# TYPE ')) {
+        const [, , name, type] = line.split(/\s+/);
+        const family = SUFFIXES.reduce((n, suf) => (n.endsWith(suf) ? n.slice(0, -suf.length) : n), name);
+        const prev = declared.get(family);
+        if (prev && prev !== type) violations.push(`${family}: declared as both ${prev} and ${type}`);
+        declared.set(family, type);
+        continue;
+      }
+      if (!line || line.startsWith('#')) continue;
+      const name = line.slice(0, line.search(/[\s{]/));
+      const family = SUFFIXES.reduce((n, suf) => (n.endsWith(suf) ? n.slice(0, -suf.length) : n), name);
+      const type = declared.get(family);
+      if (!type) violations.push(`${name}: sample for undeclared family "${family}"`);
+    }
+    assert.deepEqual(violations, [], `exposition would be rejected: ${violations.join('; ')}`);
+    assert.ok(declared.size >= 7, `expected the full metric set, saw ${declared.size} families`);
   } finally {
     env.close();
   }

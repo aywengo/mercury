@@ -62,9 +62,15 @@ function writeCounter(out: string[], name: string, help: string, series: Array<[
 export function renderPrometheus(m: MetricsSnapshot): string {
   const out: string[] = [];
 
+  // NOT named mercury_runs. Prometheus normalises a counter's mandatory _total suffix away when it
+  // forms the metric family name, so a gauge called mercury_runs and a counter called
+  // mercury_runs_total both arrive as the family mercury_runs with conflicting TYPEs, and the
+  // scrape is rejected outright. Found by parsing the output with the official prometheus_client
+  // parser, which reported mercury_runs twice -- something no per-line assertion can see, because
+  // every individual line is perfectly well formed.
   writeGauge(
     out,
-    'mercury_runs',
+    'mercury_runs_in_status',
     'Runs currently in each status.',
     Object.entries(m.runsByStatus)
       .sort(([a], [b]) => (a < b ? -1 : 1))
