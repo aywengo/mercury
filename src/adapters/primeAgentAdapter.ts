@@ -26,6 +26,7 @@ import type {
 import { RpcClient, type RpcEvent } from './rpc/rpcClient.ts';
 import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
+import { assertSafeSkillId } from '../skills/skillRegistry.ts';
 
 const SESSION_DIR_NAME = '.mercury-sessions';
 const SESSION_PATH_FILE = '.mercury-session-path';
@@ -145,7 +146,17 @@ export class PrimeAgentAdapter implements AgentAdapter {
 
     const skillArgs: string[] = [];
     for (const skill of context.skills) {
-      skillArgs.push('--skill', join(workspacePath, '.agents', 'skills', skill.id));
+      // Defence in depth (issue #95). Skill ids are already validated by SkillRegistry.resolve,
+      // which is what normally populates context.skills -- but this line turns skill.id into a
+      // filesystem path handed to a child process, and it is the only place outside the registry
+      // that does so. A context built by any other route (a future replay path, a test double, a
+      // retry that rehydrates stored ids without re-resolving) would otherwise get an unvalidated
+      // `..` straight into the path.
+      //
+      // join() does not contain: join(ws, '.agents', 'skills', '../../etc') escapes the workspace
+      // silently. assertSafeSkillId rejects anything not matching ^[a-z0-9][a-z0-9._-]*$, so the
+      // path cannot leave the skills directory regardless of who produced the id.
+      skillArgs.push('--skill', join(workspacePath, '.agents', 'skills', assertSafeSkillId(skill.id)));
     }
 
     const spawnCmd = this.wrapForSandbox(context, [

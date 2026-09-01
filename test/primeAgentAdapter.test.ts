@@ -322,3 +322,62 @@ test('terminate() stops the RPC process after a normal agent_end (issue #46)', a
     delete process.env.MOCK_RPC_PID_FILE;
   }
 });
+
+test('a traversal skill id is rejected before the agent is spawned (issue #95)', async () => {
+  // Defence in depth: SkillRegistry.resolve validates ids today, but primeAgentAdapter turns
+  // skill.id into a path handed to a child process, and join() does NOT contain --
+  // join(ws, '.agents', 'skills', '../../etc') escapes the workspace silently. The adapter must
+  // not depend on its caller having validated.
+  const { context, workspacePath } = makeContext();
+  const evil: ResolvedSkill = {
+    id: '../../outside',
+    version: '1.0.0',
+    description: 'x',
+    capabilities: [],
+    path: '/unused',
+    content: '# x\n',
+    files: { 'SKILL.md': '# x\n' },
+    hash: 'abc',
+  };
+  const argvFile = join(workspacePath, 'argv-evil.json');
+  process.env.MOCK_RPC_ARGV_FILE = argvFile;
+  const adapter = new PrimeAgentAdapter(MOCK, { args: [] });
+  try {
+    await assert.rejects(
+      () => adapter.start({ ...context, skills: [evil] }),
+      /Unsafe skill id/,
+      'a `..` skill id must be refused, not joined into a path',
+    );
+    // Nothing may reach the workspace and no agent may have been spawned.
+    assert.equal(existsSync(argvFile), false, 'the agent must never be spawned for an unsafe skill id');
+  } finally {
+    delete process.env.MOCK_RPC_ARGV_FILE;
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});
+
+test('an absolute-path skill id is rejected too (issue #95)', async () => {
+  // join() also discards everything before an absolute segment:
+  // join(ws, '.agents', 'skills', '/etc/cron.d') === '/etc/cron.d'.
+  const { context, workspacePath } = makeContext();
+  const evil: ResolvedSkill = {
+    id: '/etc/cron.d',
+    version: '1.0.0',
+    description: 'x',
+    capabilities: [],
+    path: '/unused',
+    content: '# x\n',
+    files: { 'SKILL.md': '# x\n' },
+    hash: 'abc',
+  };
+  const adapter = new PrimeAgentAdapter(MOCK, { args: [] });
+  try {
+    await assert.rejects(
+      () => adapter.start({ ...context, skills: [evil] }),
+      /Unsafe skill id/,
+      'an absolute skill id must be refused',
+    );
+  } finally {
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});
