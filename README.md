@@ -439,5 +439,7 @@ Setting a depth also makes `req.secure` honour `X-Forwarded-Proto`, so the sessi
 8. Daemon-based agent sessions — implemented behind `MERCURY_AGENT_MODE=daemon` (RPC remains default); verify against the real daemon before relying on it
 9. ~~Sandboxed execution (containers)~~ — done: `SandboxManager` enforces `resourceLimits` + `allowedNetworks` via docker/podman; fails closed when a constrained Run has no runtime
 10. ~~Input timeout + observability~~ — done: configurable `MERCURY_INPUT_TIMEOUT_MS` (`TIMED_OUT` reason `input-timeout`), stuck-run alerting, `GET /metrics` in Prometheus format (run duration, queue wait, status gauges, worker/lease state), and run/worker trace env (`MERCURY_RUN_ID`/`MERCURY_TRACE_ID`/`MERCURY_WORKER_ID`) propagated to the agent process
-11. Cross-process event push (worker → server) for multi-host scale — remaining
+11. Cross-process event push (worker → server) for multi-host scale — remaining. Designed in
+    [`docs/cross-process-event-push.md`](docs/cross-process-event-push.md): polling stays the correctness
+    mechanism and push is advisory; the multi-host blocker is storage, not transport.
 12. OIDC/SSO identity to replace the token→owner map — remaining
