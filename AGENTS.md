@@ -67,6 +67,7 @@ unbounded wait has cost more wall-clock time here than any actual bug in this re
 | `src/sandbox/` | Container (docker/podman) resource/network limits; fail-closed |
 | `src/api/` | Routes, auth (token/cookie), sessions, rate limiting |
 | `src/skills/` | Filesystem skill registry + deterministic auto-selection |
+| `src/metrics/` | `/metrics` projection: SQL aggregates over runs/events + Prometheus text format |
 | `.agents/skills/` | The skill library (one `SKILL.md` per skill; no credentials) |
 | `ui/` | Static dashboard SPA (list, details, SSE timeline, cancel/retry/input) |
 | `deploy/` | systemd units, backup script, logrotate, ops guide |

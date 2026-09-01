@@ -9,12 +9,15 @@ import type { EventStore } from '../events/eventStore.ts';
 import type { EventStream } from '../events/eventStream.ts';
 import type { RunQueue } from '../queue/runQueue.ts';
 import type { RunService } from '../runs/runService.ts';
-import { createAuthMiddleware } from './auth.ts';
+import { createAuthMiddleware, requireAuth } from './auth.ts';
 import { createRoutes, sendError } from './routes.ts';
 import { createAuthRoutes } from './authRoutes.ts';
 import { createRateLimiter } from './rateLimit.ts';
 import { createSessionStore, type SessionStore } from './sessions.ts';
 import type { Logger } from '../logger.ts';
+import type { DatabaseSync } from 'node:sqlite';
+import { collectMetrics } from '../metrics/collect.ts';
+import { renderPrometheus } from '../metrics/prometheus.ts';
 
 // Dashboard UI (Mercury.md section 23): static SPA served at /.
 // The UI authenticates with a session cookie (POST /api/auth/login);
@@ -62,6 +65,15 @@ export interface ServerDeps {
   trustProxy?: number;
   /** Optional structured logger; used to record the real cause of a 500 (issue #66). */
   logger?: Logger;
+  /**
+   * Database handle for the /metrics aggregate queries (issue #131).
+   *
+   * Passed directly rather than reached through RunStore/EventStore/RunQueue because all three
+   * hold their handle private. Widening three classes to expose `db` would let any future caller
+   * run arbitrary SQL through a store that is supposed to own its queries; one extra dependency
+   * on the server is the cheaper boundary.
+   */
+  db?: DatabaseSync;
 }
 
 // Defaults for the two protected route groups (Mercury.md section 24).
@@ -99,6 +111,37 @@ export function createApp(deps: ServerDeps): Express {
       workers: deps.queue.activeLeases(),
       queueDepth: deps.queue.queuedCount(),
     });
+  });
+
+  // Prometheus scrape target (issue #131).
+  //
+  // AUTH POSTURE: behind requireAuth, unlike /healthz and /healthz/workers which are public.
+  // That split is deliberate and follows what each surface reveals. The health endpoints expose a
+  // live, ephemeral count -- how many workers hold leases right now -- which is what an external
+  // uptime prober needs and little else. /metrics exposes the accumulated operational profile of
+  // the whole system: run volume, duration distribution, failure rates by kind, and how often
+  // isolation is being requested. That is enough to characterise the workload and its growth, so
+  // it sits behind the same gate as /api.
+  //
+  // This costs nothing operationally: Prometheus supports `authorization` credentials natively,
+  // so a bearer token is one line in scrape_config. If a deployment would rather expose metrics on
+  // a private interface instead, the answer is a reverse proxy in front of this path -- not
+  // removing the gate, which would silently widen exposure for everyone.
+  app.get('/metrics', requireAuth, (req, res) => {
+    if (!deps.db) {
+      res.status(503).json({ error: 'metrics not configured' });
+      return;
+    }
+    try {
+      const leases = deps.queue?.activeLeases();
+      res.type('text/plain; version=0.0.4; charset=utf-8');
+      res.send(renderPrometheus(collectMetrics(deps.db, { leases })));
+    } catch (err) {
+      // A metrics scrape must not surface internals, and must not take down the scraper's loop
+      // with a 500 body it will re-parse as a parse error.
+      deps.logger?.error({ err: String(err) }, 'metrics collection failed');
+      res.status(500).json({ error: 'metrics unavailable' });
+    }
   });
 
   // Brute-force protection for the token exchange (per IP; login is public).

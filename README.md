@@ -91,7 +91,9 @@ live Mercury updates (SSE with ?after= reconnect)
 | `POST /api/runs/:runId/retry` | New Run referencing the original (`retryOf`) |
 | `GET /api/runs/:runId/events` | Historical events (`?after=<sequence>`) |
 | `GET /api/runs/:runId/stream` | SSE live stream (`?after=<sequence>` for reconnect) |
-| `GET /healthz` | Liveness |
+| `GET /healthz` | Liveness (public) |
+| `GET /healthz/workers` | Live lease holders + queue depth (public) |
+| `GET /metrics` | Prometheus text exposition (issue #131). **Authenticated**, unlike the health endpoints: it exposes accumulated run volume, duration distribution, failure kinds and sandbox usage rather than a momentary liveness bit. Point Prometheus `authorization` at an API token. |
 
 Authenticated endpoints accept **either** `Authorization: Bearer <token>` (API clients, curl, CI) **or** the `mercury_session` cookie issued by `POST /api/auth/login` (dashboard). Tokens map to owners via `MERCURY_API_TOKENS="token:owner,..."`; `MERCURY_ADMIN_TOKEN` sees all Runs. `POST /api/runs` is additionally rate-limited (default 30/min per owner+IP) and `POST /api/auth/login` (default 10/min per IP) — over-limit requests get `429` with `Retry-After`. `GET /healthz` and the static dashboard assets are public. The token→owner map remains the identity source (OIDC/SSO is the planned replacement).
 
