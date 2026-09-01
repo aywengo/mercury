@@ -128,7 +128,10 @@ async function main(): Promise<void> {
     redactor,
   });
 
-  const stream = new EventStream(db, events, config.pollMs);
+  // The logger matters here: poll() is the only place that can observe an SSE delivery failure or a
+  // failed event read, and both are logged rather than swallowed (issue #139). Without it the default
+  // nullLogger would keep the silence this fixes.
+  const stream = new EventStream(db, events, config.pollMs, undefined, logger.child({ c: 'events' }));
 
   if (cmd === 'gc') {
     const report = await gc.run();

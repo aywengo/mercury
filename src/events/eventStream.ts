@@ -6,6 +6,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { MercuryEvent } from '../domain/types.ts';
 import type { EventStore } from './eventStore.ts';
+import { nullLogger, type Logger } from '../logger.ts';
 
 interface Subscription {
   runId: string;
@@ -24,12 +25,26 @@ export class EventStream {
   private fastMs: number;
   private slowMs: number;
   private detachHook: (() => void) | null = null;
+  private log: Logger;
+  /**
+   * True while the poll loop is inside a streak of read failures. Used only to log the first
+   * failure and the recovery, instead of once per tick: a busy or closed database fails every
+   * subscriber every 250 ms, which would bury everything else the process logs.
+   */
+  private readFailing = false;
 
-  constructor(db: DatabaseSync, store: EventStore, fastMs = FAST_MS, slowMs = SLOW_MS) {
+  constructor(
+    db: DatabaseSync,
+    store: EventStore,
+    fastMs = FAST_MS,
+    slowMs = SLOW_MS,
+    logger: Logger = nullLogger,
+  ) {
     this.db = db;
     this.store = store;
     this.fastMs = fastMs;
     this.slowMs = slowMs;
+    this.log = logger;
   }
 
   start(): void {
@@ -134,17 +149,49 @@ export class EventStream {
     this.timer = setInterval(() => this.poll(), this.slowMs);
   }
 
+  /**
+   * One poll tick for every subscriber.
+   *
+   * The two failure sources here are NOT the same failure and must not share a handler. This used to
+   * be one `catch {}` around the whole body with a comment claiming the subscription was dropped --
+   * nothing was dropped, nothing was logged, and the subscription was retried forever (issue #139).
+   *
+   *   - readAfter() throwing is the DATABASE's fault: a busy or closed handle, and it hits every
+   *     subscriber on that tick. Dropping all of them would convert a transient into a mass SSE
+   *     disconnect, so the subscription is kept and retried on the next tick.
+   *   - onEvents() throwing is the SUBSCRIBER's fault: that callback owns a client response and a
+   *     throw means the stream behind it is gone. Keeping it means retrying a dead client forever.
+   *     So exactly that subscription is dropped.
+   */
   private poll(): void {
     let anyNew = false;
     for (const sub of [...this.subs]) {
+      let events: MercuryEvent[];
       try {
-        const events = this.readAfter(sub.runId, sub.afterSeq);
-        if (events.length === 0) continue;
-        anyNew = true;
-        sub.afterSeq = events[events.length - 1].sequence;
+        events = this.readAfter(sub.runId, sub.afterSeq);
+      } catch (err) {
+        // Transient and shared across subscribers, so keep the subscription. Logged on the leading
+        // edge of a failure streak only -- see readFailing.
+        if (!this.readFailing) {
+          this.readFailing = true;
+          this.log.error({ err, runId: sub.runId, subs: this.subs.size }, 'event poll read failed; retrying');
+        }
+        continue;
+      }
+      if (this.readFailing) {
+        this.readFailing = false;
+        this.log.info({ runId: sub.runId }, 'event poll read recovered');
+      }
+      if (events.length === 0) continue;
+      anyNew = true;
+      sub.afterSeq = events[events.length - 1].sequence;
+      try {
         sub.onEvents(events);
-      } catch {
-        // drop failing subscription on next poll
+      } catch (err) {
+        // Dead client: drop this one subscriber and say so. This is the only place that can observe
+        // a delivery failure at all, so a silent handler here means nobody ever learns.
+        this.subs.delete(sub);
+        this.log.error({ err, runId: sub.runId }, 'event subscriber dropped after delivery failure');
       }
     }
     // Back to fast cadence when the poll found nothing new (idle).
