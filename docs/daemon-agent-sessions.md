@@ -482,8 +482,9 @@ until an operator opts in.
 - **A framing golden test — no daemon required.** Encode a hello the way `private-framing.js` does,
   feed it to the adapter's reader, and assert it parses. This is the single cheapest test that catches
   mismatch #1, and unlike the contract test it runs in CI on a machine with no `prime-agent` installed,
-  which matters because the contract test is exactly the one that gets skipped. The bytes are stable
-  enough to pin: a 75-byte header and a payload of any size, since only the two leading `u32`s matter.
+  which matters because the contract test is exactly the one that gets skipped. Only the two leading
+  `u32`s matter, so the fixture can use any header and payload; the assertion is that the reader yields
+  the payload rather than swallowing the frame.
 - **A fixture-fidelity guard.** The mock must be derived from the real protocol, not maintained by
   hand. Minimum viable version: assert the mock's framing constants and hello shape match a recorded
   transcript from the real daemon, so the two cannot drift apart silently.
@@ -501,7 +502,7 @@ until an operator opts in.
 ## 12. Open questions
 
 1. **Per-run session or shared session?** One session per run is the obvious mapping and forfeits
-   reuse; a pool keyed by repository would amortise startup but makes cross-run context leakage a
+   reuse; a pool keyed by repository would amortize startup but makes cross-run context leakage a
    security question. Unresolved.
 2. **Multi-tenancy.** Does one supervisor per uid break owner isolation, given `prompt`/`kill`/
    `execute_bash` on any session in it? This may be the constraint that decides whether daemon mode can
