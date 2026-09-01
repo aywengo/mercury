@@ -205,6 +205,8 @@ async function main(): Promise<void> {
         // Issue #65: the rate limiter keys on req.ip. Behind a proxy that is the proxy's own
         // address unless we say how many hops to trust, so all clients share one bucket.
         trustProxy: config.trustProxy,
+        // Records the real cause of a 500, which is deliberately not sent to the client.
+        logger,
       },
       config.port,
       { host: config.bindHost, tls: config.tls ?? undefined },

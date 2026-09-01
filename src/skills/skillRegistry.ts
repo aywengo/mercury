@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import type { ResolvedSkill } from '../domain/types.ts';
+import { ValidationError } from '../domain/errors.ts';
 
 /**
  * A skill id must be one safe path segment (issue #58).
@@ -22,7 +23,7 @@ const SAFE_SKILL_ID = /^[a-z0-9][a-z0-9._-]*$/;
 
 export function assertSafeSkillId(id: string): string {
   if (typeof id !== 'string' || !SAFE_SKILL_ID.test(id)) {
-    throw new Error(`Unsafe skill id: ${JSON.stringify(id)}`);
+    throw new ValidationError(`Unsafe skill id: ${JSON.stringify(id)}`);
   }
   return id;
 }
@@ -78,12 +79,12 @@ export function resolveContained(root: string, rel: string): string {
   const absRoot = resolve(root);
   const abs = resolve(absRoot, rel);
   if (!isContained(absRoot, abs)) {
-    throw new Error(`Path escapes ${absRoot}: ${JSON.stringify(rel)}`);
+    throw new ValidationError(`Skill path escapes the skill root: ${JSON.stringify(rel)}`);
   }
   const realRoot = realpathNearest(absRoot);
   const realAbs = realpathNearest(abs);
   if (!isContained(realRoot, realAbs)) {
-    throw new Error(`Path escapes ${realRoot} through a symlink: ${JSON.stringify(rel)}`);
+    throw new ValidationError(`Skill path escapes the skill root through a symlink: ${JSON.stringify(rel)}`);
   }
   assertNoSymlinkBelow(absRoot, abs);
   return abs;
@@ -102,15 +103,22 @@ export function resolveContained(root: string, rel: string): string {
  */
 function assertNoSymlinkBelow(root: string, abs: string): void {
   const rel = relative(root, abs);
-  const chain = [root, ...(rel === '' ? [] : rel.split(sep).map((part, i) => join(root, ...rel.split(sep).slice(0, i + 1))))];
-  for (const step of chain) {
-    let link: string;
+  const parts = rel === '' ? [] : rel.split(sep);
+  // Walk by RELATIVE component and resolve to an absolute path only for the syscall. Keeping the
+  // relative form for the message is deliberate (issue #66): this error reaches an HTTP client,
+  // and both the walked path and the symlink target can be absolute, which would hand back the
+  // on-disk layout the containment work exists to hide. The symlink TARGET is withheld for the
+  // same reason -- it is server state, and the client already has everything it needs from the
+  // relative component it supplied.
+  for (let i = 0; i <= parts.length; i++) {
+    const step = i === 0 ? root : join(root, ...parts.slice(0, i));
+    const label = i === 0 ? '<skill root>' : parts.slice(0, i).join('/');
     try {
-      link = readlinkSync(step);
+      readlinkSync(step);
     } catch {
       continue; // does not exist yet, so it cannot be a symlink
     }
-    throw new Error(`Path component is a symlink, refusing to follow it: ${step} -> ${link}`);
+    throw new ValidationError(`Skill path component is a symlink, refusing to follow it: ${JSON.stringify(label)}`);
   }
 }
 
@@ -173,7 +181,7 @@ export class SkillRegistry {
     const dir = resolveContained(this.rootDir, assertSafeSkillId(id));
     const skillPath = join(dir, 'SKILL.md');
     if (!exists(skillPath)) {
-      throw new Error(`Skill not found: ${id} (expected ${skillPath})`);
+      throw new ValidationError(`Skill not found: ${JSON.stringify(id)}`);
     }
     const meta = this.readMeta(id);
     const files: Record<string, string> = {};
