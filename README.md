@@ -166,7 +166,7 @@ QUEUED → STARTING → RUNNING ⇄ NEEDS_INPUT → COMPLETED / FAILED / CANCELL
 | `MERCURY_LOCAL_AGENTS_DIR` | `./local-agents` | Directory of JSON `LocalAgentConfig` files; each file registers a declarative local CLI agent (see `docs/agent-adapters.md` §4) |
 | `MERCURY_REMOTE_AGENTS_DIR` | `./remote-agents` | Directory of JSON `RemoteAgentConfig` files; each file registers a declarative remote API agent (see `docs/agent-adapters.md` §5) |
 | `MERCURY_RPC_AGENTS_DIR` | `./rpc-agents` | Directory of JSON `RpcAgentConfig` files; each file registers a declarative RPC-protocol agent — `pi`, `omp`, or any CLI speaking the RPC JSONL family (see `docs/agent-adapters.md` §6) |
-| `MERCURY_TRUST_PROXY` | `0` | Number of reverse-proxy hops to trust for client-IP attribution. Set to the proxy count (usually `1`) when the API sits behind nginx/Caddy, otherwise every client shares one rate-limit bucket. **Never set it to "trust everything"** — see Behind a reverse proxy |
+| `MERCURY_TRUST_PROXY` | `0` | Number of reverse-proxy hops to trust for client-IP attribution. Set to the proxy count (usually `1`) when the API sits behind nginx/Caddy, otherwise every client shares one rate-limit bucket. Decimal digits only; anything else falls back to `0` — see Behind a reverse proxy |
 | `MERCURY_COOKIE_SECURE` | `false` | Force `Secure` on the session cookie. Only needed behind a TLS-terminating proxy that does **not** forward `X-Forwarded-Proto`; otherwise encryption is detected per request |
 | `MERCURY_SANDBOX_RUNTIME` | — | `docker` or `podman` to run the agent in a container with resource/network limits; `none` disables |
 | `MERCURY_SANDBOX_IMAGE` | — | Container image for sandboxed execution; must contain the agent binary and git (see Sandboxed execution) |

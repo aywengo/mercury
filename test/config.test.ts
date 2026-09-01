@@ -44,6 +44,13 @@ test('MERCURY_TRUST_PROXY defaults to 0 and rejects unsafe values (issue #65)', 
   assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '1.5' }).trustProxy, 0, 'fractional depth rejected');
   assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '-1' }).trustProxy, 0, 'negative depth rejected');
   assert.equal(loadConfig({ MERCURY_TRUST_PROXY: 'Infinity' }).trustProxy, 0, 'unbounded depth rejected');
+  // Number() accepts these and they are integers >= 0, so an isInteger/`>= 0` guard alone would
+  // wave them through -- silently trusting 16 or 1000 hops from what looks like a typo.
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '0x10' }).trustProxy, 0, 'hex must not mean 16 hops');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '1e3' }).trustProxy, 0, 'exponent must not mean 1000 hops');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '0b11' }).trustProxy, 0, 'binary literal rejected');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '+1' }).trustProxy, 0, 'sign prefix rejected');
+  assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '1_000' }).trustProxy, 0, 'numeric separator rejected');
   // Valid depths pass through.
   assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '0' }).trustProxy, 0);
   assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '1' }).trustProxy, 1);

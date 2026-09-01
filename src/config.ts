@@ -69,7 +69,8 @@ export interface Config {
    *
    * Do NOT set this to `true`/"trust everything": that lets any client invent its own source IP
    * and walk straight around the per-IP limits. Depth is the safe form of this setting, which
-   * is why it is a number and not a boolean.
+   * is why it is a number and not a boolean. The accepted text is decimal digits only: `0x10`
+   * and `1e3` parse as integers, and would otherwise mean 16 and 1000 trusted hops.
    */
   trustProxy: number;
   /**
@@ -149,10 +150,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // Non-numeric or negative input falls back to 0 (trust nothing) rather than throwing:
     // a typo in this knob must not take the API down at boot, and 0 is the safe direction.
     trustProxy: (() => {
-      const raw = env.MERCURY_TRUST_PROXY;
-      if (raw === undefined || raw.trim() === '') return 0;
-      const n = Number(raw);
-      return Number.isInteger(n) && n >= 0 ? n : 0;
+      const raw = env.MERCURY_TRUST_PROXY?.trim();
+      if (!raw) return 0;
+      // Strict decimal digits only. Number() is far too permissive for this knob: it accepts
+      // '0x10' (16) and '1e3' (1000), both of which are integers >= 0 and so would survive a
+      // Number.isInteger check while silently trusting 16 or 1000 proxy hops -- the exact
+      // over-trust this whole guard exists to prevent, arriving via a typo rather than intent.
+      return /^\d+$/.test(raw) ? Number(raw) : 0;
     })(),
     logLevel: (env.MERCURY_LOG_LEVEL as Config['logLevel']) ?? 'info',
   };
