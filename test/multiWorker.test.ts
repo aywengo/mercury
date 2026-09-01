@@ -10,6 +10,7 @@ import { EventStream } from '../src/events/eventStream.ts';
 import { Worker } from '../src/worker/worker.ts';
 import { nullLogger, type Logger, type LogFields } from '../src/logger.ts';
 import { makeEnv, makeGitRepo, waitFor, sleep } from './helpers.ts';
+import { canTransition, shutdownRequeueSources } from '../src/domain/stateMachine.ts';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -279,13 +280,25 @@ test('GET /healthz/workers reports active workers and queue depth', async () => 
   }
 });
 
-test('lease loss: worker aborts execution and requeues the run', async () => {
-  const repoDir = makeGitRepo(join(envDir(), 'repo-lease'));
+// Shared by the lease-loss test and its positive control below, so the two cannot drift apart.
+// If the window ever becomes too short for the delayed event to land, the control fails loudly
+// instead of the absence assertion quietly becoming vacuous.
+const ABORT_PROBE_DELAY_MS = 300;
+const ABORT_PROBE_WINDOW_MS = 900;
+
+test('lease loss: worker aborts and touches NOTHING, leaving the run to its new owner (issue #59)', async () => {
+  const repoDir = makeGitRepo(join(envDir(), 'repo-lease-59'));
   const env = makeEnv({
     workerEnabled: false,
     fakeScript: [
-      { event: { type: 'agent.message', payload: { text: 'first' } }, delayMs: 1_500 },
-      { event: { type: 'agent.message', payload: { text: 'second' } } },
+      // 'first' lands immediately so there is something to compare against.
+      // 'second' is delayed just long enough to still be pending when the lease is stolen
+      // (~100ms heartbeat), but SHORT enough that it would definitely have arrived during the
+      // observation window below if the agent were never aborted. An absence assertion is only
+      // evidence when the thing absent had time to show up: the original 3_000ms delay against a
+      // 400ms window passed even with the abort removed, i.e. it asserted nothing.
+      { event: { type: 'agent.message', payload: { text: 'first' } } },
+      { event: { type: 'agent.message', payload: { text: 'second' } }, delayMs: ABORT_PROBE_DELAY_MS },
     ],
   });
   const spy = makeSpyLogger();
@@ -295,28 +308,48 @@ test('lease loss: worker aborts execution and requeues the run', async () => {
     const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repoDir } });
     await waitFor(() => env.runs.get(run.id)!.status === 'RUNNING', 10_000);
 
-    // simulate another worker taking the run over (lease stolen)
+    // Simulate a takeover: 'other-worker' now holds the lease.
     env.db.prepare('UPDATE runs SET lease_owner = ? WHERE id = ?').run('other-worker', run.id);
+    const leaseBefore = env.runs.get(run.id)!.leaseExpiresAt;
 
-    // the worker detects it on the next heartbeat, aborts, and requeues; the run is
-    // then re-executed by the (still owning) worker and completes. The requeue window
-    // is milliseconds, so wait for the re-execution to finish and inspect the events.
-    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 15_000);
-    const final = env.runs.get(run.id)!;
-    assert.equal(final.attempt, 1); // requeued, not a retry chain
-    const list = env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 10 });
-    assert.equal(list.runs.length, 1);
-    const types = env.events.list(run.id).map((e) => e.type);
-    assert.equal(types.filter((t) => t === 'run.started').length, 2);
-    assert.equal(types.filter((t) => t === 'run.completed').length, 1);
-    assert.ok(types.includes('lease.lost'));
-    assert.ok(spy.warns.some((w) => w.msg === 'lease lost during execution'));
+    // The worker notices on the next heartbeat and aborts.
+    await waitFor(() => spy.warns.some((w) => w.msg === 'lease lost during execution'), 5_000);
+    await waitFor(() => env.events.list(run.id).some((e) => e.type === 'lease.lost'), 5_000);
+
+    // The contract that matters: we no longer own the run, so we must not change it.
+    // Before issue #59 this asserted the opposite -- that the losing worker requeued the
+    // run. That "rescue" is the bug: it cleared the LIVE owner's lease and reset an
+    // actively-executing run to QUEUED, so a third worker could claim it while the second
+    // was still running. Two agents, one workspace.
+    const after = env.runs.get(run.id)!;
+    assert.equal(after.status, 'RUNNING', 'a worker that lost its lease must not change run status');
+    assert.equal(after.leaseOwner, 'other-worker', 'a worker that lost its lease must not clear the new owner');
+    assert.equal(after.leaseExpiresAt, leaseBefore, 'a worker that lost its lease must not reset the lease expiry');
+    assert.equal(env.events.list(run.id).filter((e) => e.type === 'run.started').length, 1,
+      'the run must not be restarted by the worker that lost it');
+
+    // It must also stop driving the agent: the scripted 'second' event (delayed 300ms) never
+    // gets emitted. The window is 3x that delay, so a worker that failed to abort would emit it.
+    await sleep(ABORT_PROBE_WINDOW_MS);
+    const texts = env.events.list(run.id)
+      .filter((e) => e.type === 'agent.message')
+      .map((e) => (e.payload as { text?: string }).text);
+    assert.ok(texts.includes('first'), 'the agent did emit before the abort');
+    assert.ok(!texts.includes('second'), 'the agent must be aborted once the lease is lost');
+
+    // Recovery still works, via the ONE sanctioned path: the lease expires, the reaper marks
+    // it FAILED(infrastructure) per section 6, and retry-as-new-run takes over per section 21.
+    env.db.prepare('UPDATE runs SET lease_expires_at = ? WHERE id = ?')
+      .run(new Date(Date.now() - 1000).toISOString(), run.id);
+    const { failed } = env.queue.reapExpiredLeases();
+    assert.deepEqual(failed, [run.id], 'the reaper must still recover a run abandoned by its owner');
+    assert.equal(env.runs.get(run.id)!.status, 'FAILED');
+    assert.equal(env.runs.get(run.id)!.errorKind, 'infrastructure');
   } finally {
     worker.stop();
     env.close();
   }
 });
-
 test('CLI wiring: /healthz/workers returns 200 when started via cli.ts server (issue #4)', async () => {
   const { spawn } = await import('node:child_process');
   const { mkdtempSync } = await import('node:fs');
@@ -712,5 +745,114 @@ test('a skipped run releases the lease it already holds (issue #71)', async () =
   } finally {
     w.stop();
    env.close();
+  }
+});
+
+test('a worker with no lease cannot requeue a run another worker is executing (issue #59)', () => {
+  // Direct unit-level proof of the bug that requeueLostLease allowed. It matched
+  // `lease_owner IS NOT NULL AND lease_owner != ?`, so it acted on runs owned by somebody
+  // else -- the exact opposite of the safety its doc comment claimed.
+  const repoDir = makeGitRepo(join(envDir(), 'repo-theft-59'));
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repoDir } });
+    assert.ok(env.queue.claim('worker-B', 60_000));
+    env.runs.transition(run.id, 'STARTING', {});
+    env.runs.transition(run.id, 'RUNNING', {});
+    const before = env.runs.get(run.id)!;
+    assert.equal(before.leaseOwner, 'worker-B');
+    assert.equal(before.status, 'RUNNING');
+
+    // The method is gone. This is a RUNTIME property lookup, not a type check -- the cast to
+    // Record<string, unknown> deliberately erases the type, so re-adding the method would still
+    // typecheck and this assertion is what catches it. (A compile-time guard would need a
+    // `// @ts-expect-error` on a direct call, which fails the build the moment the method returns;
+    // that is the stronger check, so it is done here as well.)
+    const queue = env.queue as unknown as Record<string, unknown>;
+    assert.equal(queue.requeueLostLease, undefined,
+      'requeueLostLease must not come back: it requeued runs whose lease was live elsewhere');
+
+    // And the surviving requeue is owner-scoped: worker-A holding nothing cannot touch it.
+    assert.equal(env.queue.requeueForShutdown(run.id, 'worker-A'), false,
+      'a non-owner must never requeue another worker\'s run');
+    const after = env.runs.get(run.id)!;
+    assert.equal(after.status, 'RUNNING', 'status must be untouched by a non-owner');
+    assert.equal(after.leaseOwner, 'worker-B', 'the live owner\'s lease must be untouched');
+
+    // Compile-time half. `@ts-expect-error` requires the next line to be an error: while
+    // requeueLostLease does not exist it is one, and the moment anyone re-adds the method the
+    // directive becomes unused and `tsc --noEmit` fails the build. That is the check the runtime
+    // assertion above cannot provide.
+    // @ts-expect-error requeueLostLease was removed by issue #59 and must stay removed
+    void (env.queue.requeueLostLease as unknown);
+  } finally {
+    env.close();
+  }
+});
+
+test('requeueForShutdown derives its status filter from the state machine (issue #59)', () => {
+  // The complaint in #59 was not that the old hardcoded filter was wrong -- it was that nothing
+  // would have noticed if the machine and the SQL diverged. This pins the coupling.
+  const sources = shutdownRequeueSources();
+  assert.deepEqual([...sources].sort(), ['NEEDS_INPUT', 'RUNNING', 'STARTING'],
+    'exactly the active states may requeue on shutdown');
+  // Terminal states must never be requeue sources: that is the resurrection guard.
+  for (const t of ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const) {
+    assert.equal(canTransition(t, 'QUEUED'), false, `${t} must never transition back to QUEUED`);
+  }
+  // QUEUED -> QUEUED would be a self-loop and is not declared.
+  assert.equal(canTransition('QUEUED', 'QUEUED'), false);
+
+  // Behavioural half: a terminal run is declined even by its own recorded owner.
+  const repoDir = makeGitRepo(join(envDir(), 'repo-drift-59'));
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repoDir } });
+    assert.ok(env.queue.claim('w1', 60_000));
+    env.runs.transition(run.id, 'STARTING', {});
+    env.runs.transition(run.id, 'RUNNING', {});
+    env.runs.transition(run.id, 'COMPLETED', { completedAt: new Date().toISOString() });
+    assert.equal(env.queue.requeueForShutdown(run.id, 'w1'), false,
+      'a completed run must never be requeued');
+    assert.equal(env.runs.get(run.id)!.status, 'COMPLETED');
+  } finally {
+    env.close();
+  }
+});
+
+test('control: the abort assertion in the lease-loss test can actually fail (issue #59)', async () => {
+  // Positive control. The lease-loss test asserts 'second' is ABSENT to prove the agent was
+  // aborted. An absence assertion is only evidence if the thing absent had time to arrive, and
+  // the original version failed that bar: it delayed 'second' by 3_000ms and watched for 400ms,
+  // so it passed even with the abort deleted.
+  //
+  // This runs the IDENTICAL script and observation window with no lease theft, and requires
+  // 'second' to show up. If someone lengthens the delay or shortens the window until the absence
+  // check becomes vacuous again, this test fails instead of silently weakening the other one.
+  const repoDir = makeGitRepo(join(envDir(), 'repo-abort-control-59'));
+  const env = makeEnv({
+    workerEnabled: false,
+    fakeScript: [
+      { event: { type: 'agent.message', payload: { text: 'first' } } },
+      { event: { type: 'agent.message', payload: { text: 'second' } }, delayMs: ABORT_PROBE_DELAY_MS },
+    ],
+  });
+  const worker = makeWorker(env, { workerId: 'control-worker', leaseHeartbeatMs: 100 });
+  try {
+    worker.start();
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repoDir } });
+    await waitFor(() => env.runs.get(run.id)!.status === 'RUNNING', 10_000);
+    // Same 900ms window the lease-loss test uses, and nobody touches the lease.
+    await sleep(ABORT_PROBE_WINDOW_MS);
+    const texts = env.events.list(run.id)
+      .filter((e) => e.type === 'agent.message')
+      .map((e) => (e.payload as { text?: string }).text);
+    assert.ok(texts.includes('first'), 'control: first emitted');
+    assert.ok(texts.includes('second'),
+      'control: second MUST arrive within the observation window, otherwise the absence '
+      + 'assertion in the lease-loss test proves nothing');
+  } finally {
+    worker.stop();
+    env.close();
   }
 });
