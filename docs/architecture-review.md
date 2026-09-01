@@ -38,9 +38,9 @@ no test covers it.
 _Updated after remediation. Findings are listed in this document's own numbering; each links to the_
 _issue that tracked it and the PR that closed it._
 
-**39 findings: 37 resolved, 1 already fixed before it was reached, 1 split.** No finding remains open.
+**39 findings: 38 resolved, 1 already fixed before it was reached.** No finding remains open.
 
-The split is L11, which bundled two claims: the logger-redaction test gap was a real defect and is fixed; the missing metrics endpoint is a feature request and now lives in [#131](https://github.com/aywengo/mercury/issues/131) rather than in a defect checklist.
+L11 bundled two claims and both are now closed: the logger-redaction test gap was a real defect, fixed in [#130](https://github.com/aywengo/mercury/pull/130); the missing metrics endpoint was a feature request, tracked as [#131](https://github.com/aywengo/mercury/issues/131) and shipped in [#132](https://github.com/aywengo/mercury/pull/132).
 
 Verified as a whole rather than per-PR: `main` runs **340 tests, 0 failures, 0 cancelled** in ~28 s with `npm run typecheck` clean on node v26.7.0.
 
@@ -83,7 +83,7 @@ Verified as a whole rather than per-PR: `main` runs **340 tests, 0 failures, 0 c
 | L8 | Temp-dir leaks in tests | [#73](https://github.com/aywengo/mercury/issues/73) | [#125](https://github.com/aywengo/mercury/pull/125) | ✅ resolved — 131 per run → 0; 26,409 accumulated dirs deleted; guard added |
 | L9 | Doc drift on test counts | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
 | L10 | systemd hardening blocks the docker sandbox | [#73](https://github.com/aywengo/mercury/issues/73) | [#129](https://github.com/aywengo/mercury/pull/129) | ✅ resolved — opt-in drop-in; baseline stays `ProtectSystem=strict` (fail-closed was already the right direction) |
-| L11 | No metrics endpoint + logger redaction untested | [#73](https://github.com/aywengo/mercury/issues/73) | [#130](https://github.com/aywengo/mercury/pull/130) | ◐ split — redaction gap fixed in [#130](https://github.com/aywengo/mercury/pull/130); metrics endpoint moved to [#131](https://github.com/aywengo/mercury/issues/131) as an enhancement |
+| L11 | No metrics endpoint + logger redaction untested | [#73](https://github.com/aywengo/mercury/issues/73) | [#130](https://github.com/aywengo/mercury/pull/130) | ✅ resolved — redaction gap in [#130](https://github.com/aywengo/mercury/pull/130); metrics endpoint shipped in [#132](https://github.com/aywengo/mercury/pull/132) |
 | L12 | §6 diagram has a phantom `CANCELLED --> RUNNING` edge | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
 
 ### Held, not fixed: M11

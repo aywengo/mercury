@@ -90,6 +90,20 @@ export const MIGRATIONS: string[] = [
   DROP TABLE idempotency_keys;
   ALTER TABLE idempotency_keys_v3 RENAME TO idempotency_keys;
   `,
+  // v4: index on events.type, for the /metrics sandbox-enablement count (issue #131).
+  //
+  // events is the largest table (every run appends many rows) and it had only
+  // idx_events_run_seq, keyed on (run_id, sequence) and therefore useless for a predicate on
+  // type alone. The sandbox count was a full scan of every event ever recorded -- tolerable in
+  // a one-off query, not on an endpoint a scraper hits every 15 seconds.
+  //
+  // type is low-cardinality, which normally argues against an index, but that argument is about
+  // selectivity for a LARGE MATCHING SET. The value being counted here is rare, so the seek is
+  // the win. (run_id) is included so the index also covers the COUNT(DISTINCT run_id) and the
+  // count never touches the events table itself.
+  `
+  CREATE INDEX IF NOT EXISTS idx_events_type ON events(type, run_id);
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

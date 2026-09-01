@@ -9,12 +9,15 @@ import type { EventStore } from '../events/eventStore.ts';
 import type { EventStream } from '../events/eventStream.ts';
 import type { RunQueue } from '../queue/runQueue.ts';
 import type { RunService } from '../runs/runService.ts';
-import { createAuthMiddleware } from './auth.ts';
+import { createAuthMiddleware, requireAuth } from './auth.ts';
 import { createRoutes, sendError } from './routes.ts';
 import { createAuthRoutes } from './authRoutes.ts';
 import { createRateLimiter } from './rateLimit.ts';
 import { createSessionStore, type SessionStore } from './sessions.ts';
 import type { Logger } from '../logger.ts';
+import type { DatabaseSync } from 'node:sqlite';
+import { collectMetrics } from '../metrics/collect.ts';
+import { renderPrometheus } from '../metrics/prometheus.ts';
 
 // Dashboard UI (Mercury.md section 23): static SPA served at /.
 // The UI authenticates with a session cookie (POST /api/auth/login);
@@ -62,6 +65,15 @@ export interface ServerDeps {
   trustProxy?: number;
   /** Optional structured logger; used to record the real cause of a 500 (issue #66). */
   logger?: Logger;
+  /**
+   * Database handle for the /metrics aggregate queries (issue #131).
+   *
+   * Passed directly rather than reached through RunStore/EventStore/RunQueue because all three
+   * hold their handle private. Widening three classes to expose `db` would let any future caller
+   * run arbitrary SQL through a store that is supposed to own its queries; one extra dependency
+   * on the server is the cheaper boundary.
+   */
+  db?: DatabaseSync;
 }
 
 // Defaults for the two protected route groups (Mercury.md section 24).
@@ -99,6 +111,57 @@ export function createApp(deps: ServerDeps): Express {
       workers: deps.queue.activeLeases(),
       queueDepth: deps.queue.queuedCount(),
     });
+  });
+
+  // Prometheus scrape target (issue #131).
+  //
+  // AUTH POSTURE: behind requireAuth, unlike /healthz and /healthz/workers which are public.
+  // That split is deliberate and follows what each surface reveals. The health endpoints expose a
+  // live, ephemeral count -- how many workers hold leases right now -- which is what an external
+  // uptime prober needs and little else. /metrics exposes the accumulated operational profile of
+  // the whole system: run volume, duration distribution, failure rates by kind, and how often
+  // isolation is being requested. That is enough to characterise the workload and its growth, so
+  // it sits behind the same gate as /api.
+  //
+  // This costs nothing operationally: Prometheus supports `authorization` credentials natively,
+  // so a bearer token is one line in scrape_config. If a deployment would rather expose metrics on
+  // a private interface instead, the answer is a reverse proxy in front of this path -- not
+  // removing the gate, which would silently widen exposure for everyone.
+  app.get('/metrics', requireAuth, (req, res) => {
+    if (!deps.db) {
+      res.status(503).json({ error: 'metrics not configured' });
+      return;
+    }
+    try {
+      // ONE clock reading for both calls. activeLeases(now) decides liveness with `expires_at > now`
+      // and collectMetrics then derives seconds-until-expiry from the same instant, so the value is
+      // positive by construction. Reading Date.now() twice let the second reading land after a lease
+      // expired, which reported a NEGATIVE "seconds until expiry" -- and a negative value on a gauge
+      // whose alert is `mercury_lease_expires_in_seconds < 10` reads as a lease that expired long
+      // ago rather than one that just did. Clamping to zero would have hidden the symptom while
+      // leaving two clocks in play.
+      const now = Date.now();
+      const leases = deps.queue?.activeLeases(now);
+      // setHeader + end, not res.type() + res.send(). Express's send() re-serialises the header and
+      // reorders the media parameters to `text/plain; charset=utf-8; version=0.0.4`. That is
+      // equivalent per RFC 2045 (parameters are a set, not a sequence) and Prometheus's own parser
+      // accepts it, but the exposition format spec documents one order and scrapers that match the
+      // header as a string reject the other. end() is raw Node http and leaves the header alone.
+      res.setHeader('content-type', 'text/plain; version=0.0.4; charset=utf-8');
+      res.end(renderPrometheus(collectMetrics(deps.db, { leases, now })));
+    } catch (err) {
+      // A metrics scrape must not surface internals. Log name, message and stack the same way
+      // sendError() does for unclassified errors (routes.ts): coercing with String(err) keeps the
+      // message but throws away the stack, which is the part that says where it actually failed.
+      deps.logger?.error(
+        {
+          err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
+        },
+        'metrics collection failed',
+      );
+      res.status(500).json({ error: 'metrics unavailable' });
+    }
   });
 
   // Brute-force protection for the token exchange (per IP; login is public).

@@ -41,7 +41,10 @@ test('migration v3: idempotency keys become owner-scoped with backfill (issue #8
     // Open with current code: v3 applies, backfills owner from runs.owner_id.
     const db2 = openDatabase(dbPath);
     const versions = db2.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as { version: number }[];
-    assert.deepEqual(versions.map((v) => v.version), [1, 2, 3]);
+    // Assert v3 APPLIED rather than pinning the exact list. This test is about the owner-scoping
+    // backfill; an exact [1,2,3] made it fail for every later migration, which is a false alarm
+    // about a different migration's correctness.
+    assert.deepEqual(versions.map((v) => v.version).slice(0, 3), [1, 2, 3], 'v1..v3 must all be applied');
     const rows = db2.prepare('SELECT owner, key, run_id FROM idempotency_keys ORDER BY key').all() as {
       owner: string; key: string; run_id: string;
     }[];
@@ -59,7 +62,8 @@ test('migration v3: idempotency keys become owner-scoped with backfill (issue #8
     // Reopening is a no-op (idempotent).
     const db3 = openDatabase(dbPath);
     const versions2 = db3.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as { version: number }[];
-    assert.deepEqual(versions2.map((v) => v.version), [1, 2, 3]);
+    // Same set as before the reopen: that is what "reopening is a no-op" means.
+    assert.deepEqual(versions2.map((v) => v.version), versions.map((v) => v.version), 'reopen must not re-apply anything');
     db2.close();
     db3.close();
   } finally {
