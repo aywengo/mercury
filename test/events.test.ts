@@ -685,8 +685,10 @@ test('a poisoned run does not make a healthy run log recoveries (issue #139 revi
 // afterSeq`, so the skipped rows were never returned again. What "not lost" means differs per path,
 // and each test states which:
 //
-//   push hook  -- EventStore.append() already swallows listener failures, so the subscription
-//                 survives; the cursor stays behind and the next poll re-reads the event.
+//   push hook  -- the subscriber is DROPPED, so recovery is a reconnect using the client's own
+//                 cursor. It cannot be recovered in place: the cursor is one scalar and the next
+//                 successful push moves past the refused sequence. (EventStore.append() does swallow
+//                 listener failures, so the append survives -- the subscription does not.)
 //   subscribe() backlog -- the throw rethrows to the caller and the subscription is never
 //                 registered, so recovery is a RECONNECT with the original ?after=. That is the
 //                 documented contract; what must hold is that the rows are still readable.
