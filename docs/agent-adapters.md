@@ -835,11 +835,19 @@ true; await adapter.cancel(run.id); break`). Worker test: a hanging mock agent
 + `POST /cancel` → run reaches CANCELLED promptly (E2E verified: 0.3s vs the
 previous 1h max-duration timeout).
 
-### Findings (architecture review, 2026-08-31) — ⚠️ open
+### Findings (architecture review round 1, 2026-08-31) — ✅ all closed
 
-The full review lives in [`architecture-review.md`](architecture-review.md). The findings
-below touch the adapter layer or the contract every adapter shares. Each was verified
-directly in source at commit `d005fad`; none is asserted on a reviewer's authority.
+These are recorded here because they define the contract every adapter must honour, not because any
+of them is still open. **All were fixed and merged**; the per-finding disposition, the PR that closed
+each one, and two cases where the review's own conclusion turned out to be wrong are in
+[Round 1 — archived](architecture-review-round-1.md). The current backlog is
+[Round 2](architecture-review.md), whose adapter-layer finding is
+[R2-4](architecture-review.md#r2-4-two-credential-resolution-implementations-and-the-security-fix-reached-only-one)
+adjacent but in `src/api/`, not here.
+
+Each finding below was verified directly in source at commit `d005fad`; none was asserted on a
+reviewer's authority. The `Where` column cites that commit and has not been re-pointed, so line
+numbers refer to code that has since moved.
 
 | Issue | Sev | Finding | Where |
 | --- | --- | --- | --- |
@@ -861,9 +869,21 @@ of them wrong. That is a correctness argument for the shared adapter base class
 the `extension_ui_response` shape and should be folded into that work rather than fixed
 separately.
 
-**New adapters should assume these are open.** Until #46/#55 land, an adapter that settles
-its exit before stopping its process leaks. Until #50/#60 land, an adapter emitting an
-unrecognised event type has it persisted and streamed verbatim.
+**What a new adapter must still do, now that these are closed.** The fixes moved the obligations
+rather than removing them:
+
+- The worker terminates the handle and calls `dispose(runId)` on **every** exit path
+  (`worker.ts:350-388`). An adapter must therefore make `terminate()` idempotent and `dispose()`
+  safe to call after it, and must key per-run state by `runId` so `dispose()` can actually find it.
+- Exit settlement must be guarded on its own `exitSettled` flag and never on `done`. That is the
+  #55 lesson and the best-commented part of the adapter layer.
+- Event types are rejected at the write choke point (`eventStore.ts:47-50` throws), and the worker
+  additionally discards them at the boundary (`worker.ts:605-608`) so that one odd event type from a
+  rogue agent cannot throw out of the drive loop and kill its own run. The discard is logged at warn
+  with the offending type, so it is diagnosable — but the event is still gone. Register new types in
+  `EVENT_TYPES` as part of adding them.
+- Skill ids are contained before use, so `--skill` arguments an adapter builds cannot escape the
+  workspace, but an adapter that joins skill paths itself must route through the same helper.
 
 ---
 

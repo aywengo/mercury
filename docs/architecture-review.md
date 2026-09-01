@@ -1,679 +1,739 @@
-# Mercury — Architecture & Design Review
+# Mercury — Architecture & Design Review · Round 2
 
-Reviewed at commit `d005fad` (`main`), 2026-08-31. Node v26.7.0.
-Scope: all of `src/` (7,262 lines of TypeScript), `ui/`, `test/`, `deploy/`,
-measured against [`ARCHITECTURE.md`](../ARCHITECTURE.md).
+Reviewed at commit `6e7a035` (`main`). Node v26.7.0.
+Scope: all of `src/` (9,256 lines of TypeScript), `ui/` (854), `test/` (10,259), `deploy/`, and the
+four documents under `docs/`, measured against [`ARCHITECTURE.md`](../ARCHITECTURE.md).
 
-Companion: [`docs/crew-design.md`](crew-design.md) (the Crew feature design, which
-depends on several findings below).
+**Previous round:** [Round 1 — archived](architecture-review-round-1.md). Its 39 findings are closed
+and dispositioned there; nothing below repeats them. This file is the current backlog.
 
 ---
 
 ## Verdict
 
-The architecture is sound and the specification is better than most. The layering
-holds: `src/domain/` is pure, the state machine is small and explicit, and
-PrimeAgent-specific knowledge really is confined to `src/adapters/`. The declarative
-registry pattern (`rpc-agents/*.json` → `RpcAgentAdapter`) is the best idea in the
-codebase — adding an agent is a JSON file, not a class.
+Round 1 found that the specification was sound and the implementation failed to enforce it. That
+assessment still holds, and the remediation largely delivered: the fixes are real, they are commented
+with the reasoning that produced them, and spot-checking the hard ones (lease ownership, shutdown
+ordering, transaction atomicity, event paging) found them to do what they claim.
 
-The defects follow one remarkably uniform pattern: **the spec states a rule correctly,
-and the implementation checks it non-atomically, or not at all, or checks it in a test
-but not in production.** Eleven High findings reduce to four root causes, and almost
-all of them are enforcement gaps rather than design errors. That is a good place to be:
-the fixes are local and the target behaviour is already written down.
+What Round 2 found is a different class of problem. **Three closures did not hold**, and in each the
+record is more confident than the code. The pattern is consistent: **the symptom was fixed and the
+record claims the cause was addressed.**
 
-The single most consequential finding is **H9** — the dashboard silently loses run
-history beyond 1,000 events. It is invisible, it breaks the product's core promise, and
-no test covers it.
+- **L3** was recorded as "already fixed before being reached". It was never fixed. The cap is still in
+  the source, and it is biased so that the runs most likely to be stuck are the ones never examined.
+  → [R2-1](#r2-1-stuck-run-detection-never-looks-at-the-runs-most-likely-to-be-stuck)
+- **L5** (constant-time admin token comparison) was fixed at one of its two call sites. The unfixed one
+  is the path every API request takes. → [R2-4](#r2-4-two-credential-resolution-implementations-and-the-security-fix-reached-only-one)
+- **Remediation step 9** promised a "shared adapter base for spawn / stderr / exit settlement / session
+  lifetime" and is marked ✅. No base exists. Six adapters still hand-roll exit settlement and five of
+  the six functions are byte-identical. The three PRs in that row fixed the three bugs, one adapter at
+  a time. → [R2-12](#r2-12-the-shared-adapter-base-was-reported-delivered-and-never-built-six-copies-of-the-same-fix-remain)
 
-> **This verdict is the review as written, not the current state.** For what has since
-> been fixed, held, or found to be wrong in this document itself, see
-> [Resolution status](#resolution-status) directly below.
+Separately, **M11/L10/L4/L6/L8/L11** were all genuinely resolved, but the prose describing them was
+frozen mid-remediation and contradicted the table beneath it. A reader who trusted the prose would
+conclude daemon mode was unsafe to enable and the backlog was unmonitored. Neither is now true.
+
+Beyond that, the new findings cluster in one place: **the SSE path advances its cursor before delivery
+is known to have succeeded**, which is the same mistake as issue #133 in a different function, and
+directly contradicts the invariant written into `docs/cross-process-event-push.md`. The mechanism is
+proven below; a production trigger is not, and the finding is graded accordingly.
+
+The most useful thing this round produced is the [status-set table](#the-status-set-has-no-owner). Four
+subsystems each hardcode their own list of "live" run statuses and no two agree. That single
+inconsistency generates two of the findings below and will generate more.
+
+One finding arrived by being blocked by it. A **docs-only** PR failed CI on a test whose startup budget
+was not real, whose child's stderr was piped and never read, and whose cleanup **hangs** whenever the
+child has already exited — destroying the assertion that had just failed. →
+[R2-13](#r2-13-the-cli-wiring-tests-startup-budget-is-not-real-its-cause-is-unread-and-its-cleanup-can-hang).
+It is graded Low because it touches no production code, and it is the highest-value Low here: a suite
+that fails on unrelated changes trains people to re-run CI rather than read it.
+
+### Tracking
+
+Every finding below is filed. None is fixed at the time of writing.
+
+| ID | Finding | Sev | Issue |
+| --- | --- | --- | --- |
+| R2-1 | Stuck-run scan skips the oldest runs | High | [#137](https://github.com/aywengo/mercury/issues/137) |
+| R2-2 | Cursor advances before delivery succeeds | Medium | [#138](https://github.com/aywengo/mercury/issues/138) |
+| R2-3 | `poll()` swallows every error; comment lies about it | Medium | [#139](https://github.com/aywengo/mercury/issues/139) |
+| R2-4 | Two credential-resolution paths, one unfixed | Medium | [#140](https://github.com/aywengo/mercury/issues/140) |
+| R2-5 | `activeLeases()` omits `NEEDS_INPUT` | Medium | [#141](https://github.com/aywengo/mercury/issues/141) |
+| R2-6 | Every worker re-sends every alert | Medium | [#142](https://github.com/aywengo/mercury/issues/142) |
+| R2-7 | SSE handler has no error handling after headers | Medium | [#143](https://github.com/aywengo/mercury/issues/143) |
+| R2-8 | Rate-limiter map unbounded, sweep O(n) | Low | [#144](https://github.com/aywengo/mercury/issues/144) |
+| R2-9 | SSE writes ignore backpressure | Low | [#145](https://github.com/aywengo/mercury/issues/145) |
+| R2-10 | One poll query per subscriber | Low | [#146](https://github.com/aywengo/mercury/issues/146) |
+| R2-12 | Shared adapter base never built; 6 copies of one fix | Medium | [#148](https://github.com/aywengo/mercury/issues/148) |
+| R2-13 | CLI-wiring test budget is fake, cause unread, cleanup can hang | Low | [#149](https://github.com/aywengo/mercury/issues/149) |
+| R2-11 | `slowDown()` fires with no subscribers | Low | not filed — already Stage 0 in [cross-process-event-push.md](cross-process-event-push.md) |
+
+**Suggested order.** R2-3 and R2-7 first: they are small, and they are what would make R2-2 visible
+instead of silent. Then R2-2. R2-1 is independent and the highest severity. R2-4, R2-5 and R2-6 are
+each a single-file change plus a test.
 
 ---
 
-## Resolution status
+## Method, and what I could not do
 
-_Updated after remediation. Findings are listed in this document's own numbering; each links to the_
-_issue that tracked it and the PR that closed it._
+Every finding below was read in source at `6e7a035` and, where a claim is numerical or behavioral,
+**executed**. Each reproduction is inlined in
+[Appendix — reproduction](#appendix--reproduction) and was run on this commit.
 
-**39 findings: 38 resolved, 1 already fixed before it was reached.** No finding remains open.
+Two things did not go as planned, and both changed what this document is allowed to claim:
 
-L11 bundled two claims and both are now closed: the logger-redaction test gap was a real defect, fixed in [#130](https://github.com/aywengo/mercury/pull/130); the missing metrics endpoint was a feature request, tracked as [#131](https://github.com/aywengo/mercury/issues/131) and shipped in [#132](https://github.com/aywengo/mercury/pull/132).
+- **Parallel reviewer subagents were unavailable.** Every model the host listed failed to spawn
+  (`unavailable, unauthenticated, or expired`), and the default model produces no report text at all.
+  Round 1 hit the same wall and reached the same conclusion: findings must be re-verified in source by
+  the author. Nothing below rests on a delegated report.
+- **One of my own hypotheses was wrong and is reported as wrong.** I predicted that a client
+  disconnecting mid-backlog would make `res.write` throw, crash the worker, or leak a subscriber. I
+  tested it against a real HTTP server with a real socket destroyed mid-stream: no uncaught exception,
+  and the subscriber was cleaned up correctly. That is why **R2-2 is graded Medium and not High** — the
+  ordering defect is real and proven in isolation, but I could not produce a caller that trips it.
 
-Verified as a whole rather than per-PR: `main` runs **340 tests, 0 failures, 0 cancelled** in ~28 s with `npm run typecheck` clean on node v26.7.0.
+Where a finding rests on reading rather than execution, it says so.
 
-| ID | Finding | Issue | PR | Status |
-| --- | --- | --- | --- | --- |
-| H1 | Every successful run leaks the agent process | [#46](https://github.com/aywengo/mercury/issues/46) | [#96](https://github.com/aywengo/mercury/pull/96) | ✅ resolved |
-| H2 | A cancelled run can keep being executed and written to | [#47](https://github.com/aywengo/mercury/issues/47) | [#96](https://github.com/aywengo/mercury/pull/96) | ✅ resolved |
-| H3 | `RunStore.transition` can lose a cancellation | [#48](https://github.com/aywengo/mercury/issues/48) | [#90](https://github.com/aywengo/mercury/pull/90) | ✅ resolved |
-| H4 | `busy_timeout` does not protect event appends | [#49](https://github.com/aywengo/mercury/issues/49) | [#89](https://github.com/aywengo/mercury/pull/89) | ✅ resolved |
-| H5 | SSE frame injection via unvalidated event type | [#50](https://github.com/aywengo/mercury/issues/50) | [#93](https://github.com/aywengo/mercury/pull/93) | ✅ resolved |
-| H6 | Every deploy fails in-flight runs and auto-retries them | [#51](https://github.com/aywengo/mercury/issues/51) | [#99](https://github.com/aywengo/mercury/pull/99) | ✅ resolved |
-| H7 | Server shutdown hangs until SIGKILL | [#52](https://github.com/aywengo/mercury/issues/52) | [#98](https://github.com/aywengo/mercury/pull/98) | ✅ resolved |
-| H8 | The lease-loss recovery path is effectively dead code | [#53](https://github.com/aywengo/mercury/issues/53) | [#94](https://github.com/aywengo/mercury/pull/94) | ✅ resolved |
-| H9 | Dashboard silently loses run history beyond 1,000 events | [#54](https://github.com/aywengo/mercury/issues/54) | [#100](https://github.com/aywengo/mercury/pull/100) | ✅ resolved |
-| H10 | Daemon adapter `terminate()` never settles the exit promise | [#55](https://github.com/aywengo/mercury/issues/55) | [#102](https://github.com/aywengo/mercury/pull/102) | ✅ resolved |
-| H11 | Sandbox does not pass environment, despite saying it does | [#56](https://github.com/aywengo/mercury/issues/56) | [#104](https://github.com/aywengo/mercury/pull/104) | ✅ resolved |
-| M1 | Stored XSS via `prUrl` | [#57](https://github.com/aywengo/mercury/issues/57) | [#114](https://github.com/aywengo/mercury/pull/114) | ✅ resolved |
-| M2 | Skill ids are caller-controlled and uncontained | [#58](https://github.com/aywengo/mercury/issues/58) | [#92](https://github.com/aywengo/mercury/pull/92) | ✅ resolved |
-| M3 | `requeueLostLease` bypasses the state machine | [#59](https://github.com/aywengo/mercury/issues/59) | [#115](https://github.com/aywengo/mercury/pull/115) | ✅ resolved |
-| M4 | The §14 event whitelist is decorative | [#60](https://github.com/aywengo/mercury/issues/60) | [#93](https://github.com/aywengo/mercury/pull/93) | ✅ resolved |
-| M5 | State and events are not atomic | [#61](https://github.com/aywengo/mercury/issues/61) | [#105](https://github.com/aywengo/mercury/pull/105) | ✅ resolved |
-| M6 | Unbounded `sessions` Map | [#62](https://github.com/aywengo/mercury/issues/62) | [#103](https://github.com/aywengo/mercury/pull/103) | ✅ resolved |
-| M7 | `maxTokens` / `maxCost` are decorative | [#63](https://github.com/aywengo/mercury/issues/63) | [#118](https://github.com/aywengo/mercury/pull/118) | ✅ resolved |
-| M8 | Session cookie has no `Secure` flag | [#64](https://github.com/aywengo/mercury/issues/64) | [#108](https://github.com/aywengo/mercury/pull/108) | ✅ resolved |
-| M9 | Rate limiting collapses behind a reverse proxy | [#65](https://github.com/aywengo/mercury/issues/65) | [#109](https://github.com/aywengo/mercury/pull/109) | ✅ resolved |
-| M10 | Wrong status codes and internal leakage | [#66](https://github.com/aywengo/mercury/issues/66) | [#110](https://github.com/aywengo/mercury/pull/110) | ✅ resolved |
-| M11 | CI never installs dependencies, so the whole API/auth surface is unrunnable there | [#67](https://github.com/aywengo/mercury/issues/67) | [#112](https://github.com/aywengo/mercury/pull/112) | ✅ resolved — `npm ci` added; all three checks green, incl. a job asserting the *uninstalled* failure stays legible |
-| M12 | `readFrame` silently drops pipelined frames | [#68](https://github.com/aywengo/mercury/issues/68) | [#111](https://github.com/aywengo/mercury/pull/111) | ✅ resolved |
-| M13 | Backup fallback can silently produce a torn backup | [#69](https://github.com/aywengo/mercury/issues/69) | [#120](https://github.com/aywengo/mercury/pull/120) | ✅ resolved |
-| M14 | Deploy path mismatch trap | [#70](https://github.com/aywengo/mercury/issues/70) | [#121](https://github.com/aywengo/mercury/pull/121) | ✅ resolved |
-| M15 | Lease leak on the skip path | [#71](https://github.com/aywengo/mercury/issues/71) | [#107](https://github.com/aywengo/mercury/pull/107) | ✅ resolved |
-| M16 | Races are simulated, not multi-process | [#72](https://github.com/aywengo/mercury/issues/72) | [#113](https://github.com/aywengo/mercury/pull/113) | ✅ resolved |
-| L1 | `detectRuntime()` is dead code | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
-| L2 | Backlog alerts stall during runs | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
-| L3 | Stuck-run detection caps at 200 per status | — | — | ✔ already fixed |
-| L4 | Shipped logrotate config is a no-op | [#73](https://github.com/aywengo/mercury/issues/73) | [#129](https://github.com/aywengo/mercury/pull/129) | ✅ resolved — **deleted**, not documented; the app logs to journald, which already rotates |
-| L5 | Admin token compared with `===` | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
-| L6 | SSE streams stay open for terminal runs | [#73](https://github.com/aywengo/mercury/issues/73) | [#128](https://github.com/aywengo/mercury/pull/128) | ✅ resolved — close on terminal event + grace backstop for reconnects |
-| L7 | Retry-of link renders as literal markup | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
-| L8 | Temp-dir leaks in tests | [#73](https://github.com/aywengo/mercury/issues/73) | [#125](https://github.com/aywengo/mercury/pull/125) | ✅ resolved — 131 per run → 0; 26,409 accumulated dirs deleted; guard added |
-| L9 | Doc drift on test counts | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
-| L10 | systemd hardening blocks the docker sandbox | [#73](https://github.com/aywengo/mercury/issues/73) | [#129](https://github.com/aywengo/mercury/pull/129) | ✅ resolved — opt-in drop-in; baseline stays `ProtectSystem=strict` (fail-closed was already the right direction) |
-| L11 | No metrics endpoint + logger redaction untested | [#73](https://github.com/aywengo/mercury/issues/73) | [#130](https://github.com/aywengo/mercury/pull/130) | ✅ resolved — redaction gap in [#130](https://github.com/aywengo/mercury/pull/130); metrics endpoint shipped in [#132](https://github.com/aywengo/mercury/pull/132) |
-| L12 | §6 diagram has a phantom `CANCELLED --> RUNNING` edge | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
+### Coverage
 
-### Held, not fixed: M11
+Stated because a review that does not say what it skipped is not falsifiable.
 
-PR #112 adds CI that installs dependencies, which is the correct fix, but it cannot be
-verified here: `get_pull_request_status` reports `state: pending` with **zero checks** on
-every PR in this private repository, `gh` is installed but the available `GITHUB_TOKEN` is
-rejected, and the GitHub API surface in use exposes no workflow-runs tool. Merging a change
-whose whole purpose is to make tests run, without being able to see those tests run, would
-replace an unknown with a false certainty. It is left open deliberately.
-
-### Already fixed before being reached: L3
-
-The `LIMIT 200` on stuck-run detection was gone by the time the item was picked up. Recorded
-rather than silently dropped, because "we fixed this" and "this was fixed by something else"
-are different claims.
-
-### Partial: L10
-
-`TimeoutStopSec` is now present in both units (it arrived with the H6 graceful-shutdown work),
-so the shutdown half of this finding is closed. The remaining half — `ProtectSystem=strict`
-with no docker socket access makes the container sandbox unusable under the shipped units —
-is untouched and is grouped with L4 as deploy-config work.
-
-### Still open in #73: L4, L6, L8, L11
-
-- **L4** — the app logs JSON to stdout only, so the shipped `logrotate.conf` rotates files
-  nothing writes. The config now carries a "file-based logging deployments" caveat, but the
-  finding stands: shipping it by default is misleading.
-- **L6** — #98 bounded server shutdown, which was the dangerous consequence, but nothing
-  server-side closes a stream when its run reaches a terminal status. Streams still linger
-  until the client disconnects.
-- **L8** — temp-dir leaks across 11 test files (68 `mkdtempSync`, no `rmSync`). Mechanical,
-  broad, and worth doing as its own change rather than folded into others.
-- **L11** — no metrics endpoint. This is a feature gap rather than a defect: durations and
-  queue-wait exist as event payloads and worker liveness as `/healthz/workers`. It should
-  probably leave the defect backlog and become its own enhancement.
-
-### Found during remediation, not in the original review
-
-Fixing a finding repeatedly surfaced adjacent defects that were filed and fixed rather than
-folded in silently:
-
-| Issue | Found while fixing | PR |
+| Area | Lines | Depth |
 | --- | --- | --- |
-| [#95](https://github.com/aywengo/mercury/issues/95) | `--skill` path join in `PrimeAgentAdapter` unguarded (defence in depth found while fixing M2) | [#117](https://github.com/aywengo/mercury/pull/117) |
-| [#106](https://github.com/aywengo/mercury/issues/106) | Failure bookkeeping still non-atomic on the worker paths, not just the reaper (found while fixing M5) | [#119](https://github.com/aywengo/mercury/pull/119) |
-| [#101](https://github.com/aywengo/mercury/issues/101) | `GET /api/runs` read `limit=0` as absent (found while fixing H9) | [#116](https://github.com/aywengo/mercury/pull/116) |
-| [#86](https://github.com/aywengo/mercury/issues/86) | Skill content hash was locale-dependent | [#122](https://github.com/aywengo/mercury/pull/122) |
-| [#87](https://github.com/aywengo/mercury/issues/87) | Singular task text missed a plural capability | [#123](https://github.com/aywengo/mercury/pull/123) |
-| [#88](https://github.com/aywengo/mercury/issues/88) | Substring scoring fired wrong skills from innocent words | [#123](https://github.com/aywengo/mercury/pull/123) |
-| [#78](https://github.com/aywengo/mercury/issues/78) | 4 of 12 skills could never be auto-selected | [#84](https://github.com/aywengo/mercury/pull/84) |
-| [#79](https://github.com/aywengo/mercury/issues/79) | No test that selector KEYWORDS and the registry agree | [#85](https://github.com/aywengo/mercury/pull/85) |
-| [#80](https://github.com/aywengo/mercury/issues/80) | A skill could ship with broken frontmatter undetected | [#83](https://github.com/aywengo/mercury/pull/83) |
-| [#81](https://github.com/aywengo/mercury/issues/81) | Skill ids sorted with two different comparators | [#82](https://github.com/aywengo/mercury/pull/82) |
-| [#76](https://github.com/aywengo/mercury/issues/76) | `skills.test.ts` failed on main | [#77](https://github.com/aywengo/mercury/pull/77) |
-
-### What the process produced, stated plainly
-
-Two review conclusions in this document turned out to be wrong or incomplete on contact with
-the code, and both changed the fix:
-
-- **H8 / M3.** The review asked for the lease-loss path to be repaired. Reading it closely
-  showed it was worse than described: it matched `lease_owner != ?`, so it fired when
-  *another* worker held the lease and cleared theirs, producing two agents on one workspace.
-  The correct fix was deletion, not repair — one recovery path (the reaper) instead of two
-  racing ones. See §6.1 of `ARCHITECTURE.md`.
-- **M7.** The review framed unenforced limits as a missing enforcement. Enforcement is not
-  implementable without per-run usage reporting, which no adapter produces and no event type
-  carries. The honest fix was to rename them `budget*` and document them as recorded-only, so
-  the name stops implying a guarantee. Renaming left all 297 tests green: the fields had
-  **zero** coverage.
-
-Reviewer findings on the fix PRs caught defects in the fixes themselves, including a phishing
-vector in the M1 fix (link text showing a trusted host while the href pointed elsewhere), a
-partial backup file left behind on failure in M13, a root-owned database in the M13 restore
-runbook, and a prototype-chain lookup in M7's migration error message.
-
-Two tests were found to be passing for reasons unrelated to what they claimed. The CLI backlog
-alert test (#5) created runs with no repository, so both failed instantly and the alert only
-appeared because depth was transiently correct at the sampling instant; it never exercised a
-real backlog. A `detectRuntime` test asserted `null || docker || podman`, which is true for
-every possible outcome. Both are noted where they were fixed.
-
-
----
-
-## Method and confidence
-
-Five reviewers examined core persistence, the worker, the adapters, the API/UI, and
-tests/operations in parallel. **Four of the five were cut off before writing a report**,
-and two of those four had their output degrade partway through. Only one produced a
-complete report.
-
-Every finding below was therefore re-verified directly in source by the author of this
-review. Nothing is asserted on a reviewer's authority. Claims that could not be verified
-are listed separately in [Unverified](#unverified) and are not counted in the totals.
-
-Two findings were confirmed by **empirical measurement** rather than reading alone: H4
-(a runnable `node:sqlite` race test) and the test-suite state in M11.
-
-### Known process failures, and how they were caught
-
-Two errors were made and corrected during this review. They are recorded because they
-bear on how much weight to give the findings, and because the failure mode is easy to
-repeat.
-
-1. **A completion status was mistaken for a delivered result.** All five reviewers
-   reported `completed`, but four had sent no reply and had stopped mid-analysis. Trusting
-   the status alone produced a false claim that their reports were in hand. The remedy was
-   to read the raw rollouts, which is also how the substance behind most of this document
-   was recovered.
-2. **A scratch path was written into a durable artifact.** The appendix originally told
-   readers to run a script that existed only in a temporary working directory, so the
-   reproduction could not be followed. It was replaced with the self-contained script now
-   inlined, and that script was re-run before committing.
-
-The shared lesson: **verify against current state before asserting or persisting.** A
-status field, a remembered result, or a path that resolves today is not evidence that the
-thing will exist for the next reader. Both errors were caught by checking rather than
-recalling, and both survived into output that had already been shared.
+| `src/worker/` | 989 | full read of claim/execute/drive/finalize/alerts |
+| `src/adapters/` | 3,595 | duplication measured across all six; per-adapter internals not re-derived (see [Not re-examined](#not-re-examined)) |
+| `src/events/` | 432 | full read; both findings executed |
+| `src/api/` | 942 | full read of routes, auth, rateLimit; `server.ts` read for shutdown and trust proxy |
+| `src/queue/`, `src/runs/`, `src/db/` | 940 | full read of claim/reap/lease/transition/list |
+| `src/metrics/` | 382 | full read; monotonicity precondition re-verified by `grep` |
+| `src/workspace/` | 581 | GC deletion paths traced to their bound — **sound**, deletes cannot escape `baseDir/worktrees/` |
+| `src/skills/` | 428 | containment helpers and the `realpathNearest` walk re-checked — **sound**; the `for (;;)` terminates at the filesystem root |
+| `src/sandbox/`, `src/domain/` | 639 | read for status-set consistency only |
+| `ui/` | 854 | read for logic; **not typechecked** — see [Not re-examined](#not-re-examined) |
+| `deploy/`, `test/` | — | read for claims made here, not reviewed as a deliverable |
 
 ---
 
 ## Findings — High
 
-### H1. Every successful run leaks the agent process
+### R2-1. Stuck-run detection never looks at the runs most likely to be stuck
 
-`src/adapters/primeAgentAdapter.ts:176-181` resolves the exit promise on `agent.end`.
-The comment in the code admits the consequence:
+**Issue:** [#137](https://github.com/aywengo/mercury/issues/137)
+
+`src/worker/worker.ts:829-831`
 
 ```ts
-// Agent finished; resolve the exit promise (the RPC process may stay alive).
-session.done = true;
-session.exitResolve({ code, signal: null, reason: ... });
+for (const status of ['RUNNING', 'NEEDS_INPUT'] as const) {
+  const { runs } = this.deps.runs.list({ status, limit: 200 });
 ```
 
-`client.stop()` is reachable only from `cancel()` (`:252`) and `terminate()` (`:262`).
-The worker calls `terminate()` only on timeout (`worker.ts:295`, `:332`). The success
-path breaks the drive loop, awaits an already-resolved exit, and finalizes.
+`RunStore.list` (`src/runs/runStore.ts:110`) is `ORDER BY created_at DESC, id DESC LIMIT ?` — newest
+first — and returns a `nextCursor` that this caller discards. There is no cursor loop and no
+`hasMore` check. So the scan covers the **200 most recently created** runs per status and silently
+ignores the rest.
 
-**Impact:** a long-lived worker accumulates one live `prime-agent --mode rpc` process per
-completed run.
+The bias is the whole problem. A run becomes stuck by being old and quiet. Sorting newest-first means
+that once a deployment has more than 200 runs in these statuses, the runs that qualify are precisely
+the ones excluded. The safety net does not degrade gracefully under load; it inverts.
 
-**Fix:** settle the exit *and* stop the client on the completion path; make termination
-the worker's responsibility in a `finally`, not an error-path special case.
-
-### H2. A cancelled run can keep being executed and written to
-
-Interleaving: worker reads `QUEUED`; user cancels; worker writes `STARTING`; cancel
-writes `CANCELLED`. The worker is now driving an agent on a run the database calls
-cancelled. Its next `transition` to `RUNNING` throws; the catch at
-`worker.ts:237-245` appends failure events and then calls `transition(FAILED)`, which
-throws again because `CANCELLED → FAILED` is invalid. That second throw unwinds **before
-any `terminate()` call**. The `finally` releases the lease; the agent survives.
-
-**Impact:** a live agent writing into the workspace of a cancelled run that nobody is
-watching. Worse than H1 — not an idle process but an active writer on stale state.
-
-**Fix:** guard the drive loop on the run's persisted status, and terminate the handle on
-every exit path including the throwing one.
-
-### H3. `RunStore.transition` can lose a cancellation
-
-`src/runs/runStore.ts:120-138` performs read → `assertTransition` → `UPDATE` with no
-transaction, no `WHERE status = ?` guard, and no lease-owner check. Two concurrent
-transitions can both read `RUNNING`, both pass validation, and last-write-wins.
-
-**Impact:** `CANCELLED` can be silently overwritten by `COMPLETED`. The state machine is
-correct in isolation and unenforced where it matters, which is the worst combination.
-
-**Fix:** conditional update — `UPDATE runs SET status = ? WHERE id = ? AND status = ?` —
-then check `changes === 1` and fail loudly otherwise.
-
-### H4. `busy_timeout` does not protect event appends
-
-`EventStore.append` assigns `sequence` by read-then-insert (`eventStore.ts:36-58`) inside
-a **deferred** transaction (`tx()` uses `db.exec('BEGIN')`, `database.ts:141`). In WAL
-mode, `busy_timeout` does not apply to a deferred→write upgrade.
-
-Measured against real `node:sqlite`, with a competing writer holding the lock for 1.2 s
-and `busy_timeout = 5000`:
+**Measured.** 260 runs forced to `RUNNING` with a 10-hour-old `started_at`, then the exact call above:
 
 ```text
-deferred : FAIL after  300 ms   msg=database is locked
-immediate: OK  seq=1 after 1256 ms
+totalRunning:              260
+examinedByStuckCheck:      200
+runsNeverExamined:          60
+oldestExaminedCreationRank: 60      # examined = ranks 60..259, i.e. the newest 200
+nextCursorFromList:  "RETURNED but checkStuckRuns ignores it (no pagination loop)"
 ```
 
-The deferred form gave up in 300 ms despite a 5 s timeout. The comment at
-`database.ts:101-104` describes `busy_timeout` as the fix for exactly this class of
-failure (issue #38), but it does not cover this path.
+**How confirmed:** executed against the real `RunStore` on this commit.
 
-**Corroboration:** the repository's own concurrency test uses the correct primitive —
-`test/migrations.test.ts:89` executes `BEGIN IMMEDIATE`, while production `tx()` at
-`database.ts:141` uses deferred `BEGIN`. The right primitive is known and simply not
-used in production.
+**This is a reopened Round 1 finding.** Round 1 listed it as L3 and closed it as "already fixed before
+being reached", asserting the `LIMIT 200` "was gone by the time the item was picked up". It was not
+gone. The archive now records the correction.
 
-`UNIQUE (run_id, sequence)` (`database.ts:51`) prevents duplicate sequence numbers, so
-ordering stays correct, but the append throws and nothing anywhere retries it. Two
-processes genuinely contend here: the API appends `run.cancelling` / `run_inputs`
-(`runService.ts:181-197`) while the worker appends agent events for the same run
-(`worker.ts:394-425`).
-
-**Fix:** `BEGIN IMMEDIATE` in `tx()`. One line. It is also a prerequisite for H3, M3 and
-M5 — atomic guards are pointless if the transaction fails instantly instead of waiting.
-
-### H5. SSE frame injection via unvalidated event type
-
-`worker.ts:425` appends `ev.type` straight from the adapter under a comment reading
-*"generic structured event passthrough (validated)"* — it is not validated.
-`EventStore.append` performs no type check. `isEventType()` (`types.ts:174`) is defined
-and **never called anywhere in `src/`**. `routes.ts:134` then writes the type raw:
-
-```ts
-res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
-```
-
-**Impact:** an agent, or a compromised repository driving one, that emits an event type
-containing `\n\n` can inject arbitrary SSE frames into every subscriber of that run.
-
-**Fix:** enforce the `EVENT_TYPES` whitelist at the single write choke point
-(`EventStore.append`), which is already positioned to do it. See M4.
-
-### H6. Every deploy fails in-flight runs and auto-retries them
-
-`src/cli.ts:199-205` — the worker's SIGTERM handler is `db.close(); process.exit(0)`. It
-never calls `worker.stop()` (which exists at `worker.ts:94` but is **never called from
-`cli.ts`**), never terminates the running agent, and never releases leases. Neither
-systemd unit sets `TimeoutStopSec`, so there is no shutdown budget either.
-
-**Impact:** in-flight runs stay `RUNNING` until lease expiry (60 s default), are reaped as
-`FAILED(infrastructure)`, and are then auto-retried. Every restart converts running work
-into spurious infrastructure failures and duplicate agent spend.
-
-### H7. Server shutdown hangs until SIGKILL
-
-`src/cli.ts:188-195` awaits `server.close()`, which waits for open connections. SSE
-streams are long-lived by design and never close server-side, and there is no
-`closeAllConnections()`.
-
-**Impact:** any dashboard with a run open stalls shutdown until systemd escalates.
-
-### H8. The lease-loss recovery path is effectively dead code
-
-ARCHITECTURE.md roadmap item 5 claims *"lease-loss recovery (abort + requeue)"* is done.
-It is wired but unreachable in the scenario it exists for:
-
-1. `reapExpiredLeases` marks an expired `STARTING`/`RUNNING`/`NEEDS_INPUT` run as `FAILED`
-   but **does not clear `lease_owner`** (`runQueue.ts:110-113`).
-2. `renewLease` matches `WHERE id = ? AND lease_owner = ?` (`runQueue.ts:46`). The owner
-   never changed, so it keeps returning `true` and the worker never sets `leaseLost`.
-3. `requeueLostLease` requires `lease_owner IS NOT NULL AND lease_owner != ?`
-   (`runQueue.ts:75`). Nothing changes a running run's owner, so this is only reachable
-   via itself — circular.
-
-**Impact:** worker A's lease expires (GC pause, slow heartbeat, clock skew), the reaper
-records `FAILED`, and worker A keeps driving the agent — burning compute and model spend
-on a run the database already calls failed — then throws on an invalid transition at
-finalize.
-
-**Fix:** clear `lease_owner` / `lease_expires_at` in the reap failure branch. That makes
-`renewLease` return false and lights up the abort path that already exists.
-
-### H9. The dashboard silently loses run history beyond 1,000 events
-
-`ui/run.js:32-34`:
-
-```js
-const ev = await api('/api/runs/' + runId + '/events?after=' + lastSeq);
-for (const e of ev.events || []) appendEvent(e);
-lastSeq = ev.lastSequence || 0;   // true max sequence, not max of the returned page
-connectSse();
-```
-
-`EventStore.list` caps at `limit = 1000` (`eventStore.ts:70`) and the route passes no
-limit and returns no cursor — but `lastSequence` is the run's true maximum. For a run
-with 5,000 events the UI renders 1–1000, sets `lastSeq = 5000`, subscribes from there,
-and **events 1001–4999 are never fetched and never rendered**.
-
-**Impact:** silent history loss on exactly the long-running runs Mercury exists to serve.
-Violates §15 steps 2–3 and Definition of Done #14 ("Mercury reconstructs the complete
-Run"). No test covers it.
-
-**Fix:** advance from the last *returned* sequence and page until caught up; expose a
-cursor from the events endpoint.
-
-### H10. The daemon adapter's `terminate` never settles the exit promise
-
-`daemonAgentAdapter.ts:240-246` sets `terminated`, `cancelled`, `done = true`, destroys
-the socket and kills the process, but never sets `exitSettled` or calls `exitResolve`.
-The process-exit handler at `:150` is guarded by `if (!session.done && !session.exitSettled)`
-— and `done` is now `true`, so it refuses to settle. `handle.exit` never resolves.
-
-The worker then falls through to `Promise.race([handle.exit, sleep(10_000)…])`
-(`worker.ts:363-366`) and fabricates `{ code: null, signal: 'SIGKILL', reason: 'terminated' }`
-after a full 10 seconds. `cancel()` in the same file (`:268-270`) settles correctly, so
-this is an internal inconsistency rather than a deliberate design.
-
-**Mitigation:** this is the non-default `MERCURY_AGENT_MODE=daemon` path, which
-ARCHITECTURE.md roadmap item 9 already flags as unverified against a real daemon.
-
-### H11. The sandbox does not pass environment, despite saying it does
-
-`sandboxManager.ts:109-111`:
-
-```ts
-// Environment passthrough for the agent (API keys etc. are inherited by the
-// worker; the container needs the same env to talk to providers).
-args.push('--env', 'PATH=/usr/local/sbin:...');
-```
-
-The comment promises passthrough; the code forwards only `PATH`, and `buildCommand`
-returns `env: {}`.
-
-**Impact:** a sandboxed run cannot authenticate to any provider — every constrained run
-fails at the first model call. Related: `--storage-opt size=` (`:103`) is unsupported on
-common overlay2/ext4 docker setups, so requesting a disk limit makes `docker run` fail
-outright; and the default image contains no `prime-agent` binary.
-
-The container sandbox is well-designed on paper and largely non-functional in practice.
-This matters for the Crew design, which *requires* sandbox for `untrusted` presets.
+**Fix.** Page the scan: loop on `nextCursor` until exhausted, or replace the two status queries with
+one indexed query that selects `status IN (...) AND <idle predicate>` in SQL and pushes the threshold
+into the `WHERE` clause. The second is better — it stops shipping 200 rows to JavaScript to discard
+almost all of them, and it makes the threshold a single named value. Either way, add a test with
+**more than 200** runs in which the oldest is the stuck one; a test with fewer than 200 cannot fail.
 
 ---
 
 ## Findings — Medium
 
-| ID | Finding | Evidence |
+### R2-2. The event cursor advances before delivery succeeds
+
+**Issue:** [#138](https://github.com/aywengo/mercury/issues/138)
+
+`src/events/eventStream.ts:42-43`, `:90-91`, `:144-145`
+
+All three delivery paths set the cursor first and hand the events over second:
+
+```ts
+sub.afterSeq = event.sequence;                 // :42  append hook
+sub.onEvents([event]);
+
+sub.afterSeq = backlog[backlog.length - 1].sequence;   // :90  subscribe() backlog
+onEvents(backlog);
+
+sub.afterSeq = events[events.length - 1].sequence;     // :144 poll()
+sub.onEvents(events);
+```
+
+If `onEvents` throws partway through a batch, the cursor already claims the whole batch was delivered.
+`poll()` reads `WHERE sequence > afterSeq`, so the remainder is never re-read. The loss is permanent for
+the life of that subscription.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant DB as events table
+    participant ES as EventStream
+    participant CB as send() in routes.ts
+    participant CL as browser
+    Note over DB: backlog holds sequences 1-5
+    ES->>ES: readAfter(0) returns 1-5
+    ES->>ES: afterSeq = 5  <-- cursor set BEFORE delivery
+    ES->>CB: onEvents([1,2,3,4,5])
+    CB->>CL: write event 1
+    CB--xCB: throws on event 2
+    Note over ES: cursor already says 5
+    ES->>DB: poll: WHERE sequence > 5
+    DB-->>ES: no rows
+    Note over CL: events 2-5 lost permanently<br/>no error, no log, no gap marker
+```
+
+**Measured — single-event push path.** Handler throws on sequence 3:
+
+```text
+appended:    [1, 2, 3, 4, 5, 6]
+delivered:   [1, 4, 5, 6]
+permanentlyLost: [3]
+```
+
+**Measured — batch backlog path.** Five events already in the database, handler throws on sequence 2:
+
+```text
+backlogInDb:       [1, 2, 3, 4, 5]
+delivered:         [1]
+permanentlyLost:   [2, 3, 4, 5]
+```
+
+One throw loses four fifths of the page. `subscribe()` also rethrows, which is what makes R2-7 reachable.
+
+**Why this is the right thing to be worried about** is not that `onEvents` can throw — it is that this
+repository already decided the rule. `docs/cross-process-event-push.md` states that push must never own
+the cursor and that the cursor advances only when bytes have been handed to the client, and issue #133
+was a lost event prefix caused by exactly that. The invariant is written down and this file does not
+follow it.
+
+**Blast radius, stated honestly.** The dashboard tracks its own `lastSeq` and reconnects with it
+(`ui/run.js:157-165`), so a reconnect recovers lost events. But the client reconnects **only on an SSE
+error**. A silent drop with the connection alive — the server sends a keepalive every 15 s, so the
+socket looks healthy — leaves a permanent hole in the timeline. If the lost event is the terminal one,
+`stopSse()` never fires, `loadRun()` never refreshes, and the UI stays "running" forever; that also
+re-opens L6, since the server-side stream then never closes.
+
+**What I could not show.** A caller that actually throws. I ran a real server, opened a stream against a
+1,200-event backlog, and destroyed the client socket after the first chunk: no uncaught exception, and
+the subscriber was removed correctly. Node returns `false` from `res.write` on a destroyed socket rather
+than throwing. So this is a latent defect with a proven mechanism and no demonstrated trigger, graded
+Medium on that basis rather than High.
+
+**Fix.** Advance the cursor after `onEvents` returns, in all three places. In `subscribe()` and `poll()`
+that means the caller must be re-entrant-safe against re-delivery, which it already is: `send()` writes
+duplicates rather than losing them, and the UI filters on `data.sequence > lastSeq`. Prefer
+at-least-once over at-most-once — a duplicated timeline row is a cosmetic bug, a missing one is a lie.
+
+### R2-3. `poll()` swallows every error, and its comment describes behavior that does not exist
+
+**Issue:** [#139](https://github.com/aywengo/mercury/issues/139)
+
+`src/events/eventStream.ts:146-148`
+
+```ts
+      } catch {
+        // drop failing subscription on next poll
+      }
+```
+
+The `catch` body is empty. Nothing is dropped: the subscription stays in `this.subs` and is retried on
+every tick, forever. The comment asserts a recovery policy that is not implemented.
+
+This is the mechanism that would make R2-2 self-healing if the comment were true, and it is why the
+ordering bug is invisible rather than loud: any throw from `send()` is discarded with no log line, on a
+path where a log line is the only way anyone would ever learn.
+
+**How confirmed:** read, plus the R2-2 single-event run — after the handler threw on sequence 3, the
+same subscription went on receiving 4, 5 and 6, which is only possible if it was never dropped.
+
+**Fix.** Either implement the comment (drop the subscription, log it, decrement `subscriptionCount`) or
+delete the comment. Do not leave the two disagreeing. A `catch {}` with no log on the only path that
+observes delivery failure should be treated as a bug regardless of intent.
+
+### R2-4. Two credential-resolution implementations, and the security fix reached only one
+
+**Issue:** [#140](https://github.com/aywengo/mercury/issues/140)
+
+`src/api/auth.ts:38` versus `src/api/authRoutes.ts:52`
+
+The same bearer token is resolved twice, by two functions that do not share code:
+
+| Path | Resolves via | Admin comparison |
 | --- | --- | --- |
-| M1 | **Stored XSS via `prUrl`.** `esc()` escapes `&<>"'` but not the URL scheme, so a `git.pr` event carrying `javascript:` yields a clickable payload. `prUrl` is agent- and repo-controlled. | `ui/run.js:55`, `ui/app.js:132-136` |
-| M2 | **Skill ids are caller-controlled and uncontained.** `body.skills` flows straight through, and `resolveOne` does `join(rootDir, id)` with no containment. `skills: ["../../../../somewhere"]` resolves wherever a `SKILL.md` exists, and `writeSkills` then copies that whole tree into the workspace — an arbitrary-directory read. | `src/api/routes.ts:37`, `src/skills/skillRegistry.ts:45`, `src/worker/worker.ts:659-668` |
-| M3 | **`requeueLostLease` bypasses the state machine.** Raw SQL `SET status = 'QUEUED'` from `STARTING`/`RUNNING`/`NEEDS_INPUT`, but `RUNNING → QUEUED` is not a legal transition and `assertTransition` is never called. It also contradicts §21, which says retry creates a *new* run with a fresh `runId`; requeue reuses the same `runId` and `attempt`. Two contradictory recovery semantics exist, and the one bypassing validation is wired to the lease path. | `src/queue/runQueue.ts:73-76`, `src/domain/stateMachine.ts:8` |
-| M4 | **The §14 event whitelist is decorative.** `isEventType()` is never called; `append()` validates nothing; and two types the worker already appends — `lease.lost`, `sandbox.enabled` — are not in the whitelist at all. Root cause of H5. | `src/domain/types.ts:141-175`, `src/events/eventStore.ts:36` |
-| M5 | **State and events are not atomic.** `reapExpiredLeases` commits `FAILED` inside its transaction, then the worker appends `error` and `run.failed` *after* it commits. A crash in that window leaves a run marked `FAILED` with no failure event. §14.1 requires atomicity. | `src/queue/runQueue.ts:98`, `src/worker/worker.ts:114-126` |
-| M6 | **Unbounded `sessions` Map.** Set per run, never deleted anywhere in `src/adapters/`. Session objects and buffers live for the worker's lifetime. | `src/adapters/primeAgentAdapter.ts:78,120` |
-| M7 | **`maxTokens` / `maxCost` are decorative.** Stored and validated, never read by the worker. Callers believe budgets apply. Crew presets would inherit this silently-broken behaviour. | `src/runs/runService.ts:73-74,241` |
-| M8 | **Session cookie has no `Secure` flag**, unconditionally — including when TLS is enabled via `MERCURY_TLS_*`. `HttpOnly` and `SameSite=Strict` are correct. | `src/api/authRoutes.ts:55`, `src/api/sessions.ts:66` |
-| M9 | **Rate limiting collapses behind a reverse proxy.** `trust proxy` is never set, so `req.ip` is the proxy address and every client shares one bucket — legitimate users lock each other out while an attacker sharing the bucket is not meaningfully throttled. The limiter is also fixed-window, in-memory and per-process. | `src/api/server.ts`, `src/api/rateLimit.ts:1` |
-| M10 | **Wrong status codes and internal leakage.** A catch-all returns `400` with `String(err.message)` for every handler error, so a database failure is reported as a client error and internal messages reach the browser. AGENTS.md requires `404` for foreign runs; `GET /api/runs/:id` complies but `cancel`/`retry`/`input` return `400 "Run not found"`. | `src/api/routes.ts` catch blocks, `src/api/server.ts:98-100` |
-| M11 | **The entire API/auth surface is untestable as checked out.** `node_modules` is absent and 4 of 202 tests fail with `ERR_MODULE_NOT_FOUND: express` — `api`, `auth`, `multiWorker`, `ui`. That is all authentication and authorization coverage. Nothing documents `npm install` as required. Measured: `tests 202 / pass 198 / fail 4`, 12.5 s. | `package.json`, `src/api/server.ts` |
-| M12 | **`readFrame` silently drops pipelined frames.** It resolves with `buffer.subarray(4, 4 + len)` and discards everything after the first frame in that chunk, then starts a fresh buffer. Length-prefixed framing must preserve the remainder. It also registers `socket.once('error', reject)` and never removes it. | `src/adapters/daemonAgentAdapter.ts:308-324` |
-| M13 | **Backup fallback can silently produce a torn backup.** `cp` is unsafe for a live WAL database — it can capture the DB without its `-wal` file. Restore never removes stale `-wal`/`-shm` files, which can corrupt the restored database. No `PRAGMA integrity_check` verification. | `deploy/backup.sh:19-21`, `deploy/README.md:27-32` |
-| M14 | **Deploy path mismatch trap.** App defaults are `./mercury.db` and `./workspaces` under `/opt/mercury`, but the backup cron targets `/var/lib/mercury/mercury.db`. `EnvironmentFile` is mandatory (no `-` prefix) and the ops guide never spells out the required repointing. | `src/config.ts:76,80`, `deploy/README.md:24` |
-| M15 | **Lease leak on the skip path.** The ownership guard returns at `worker.ts:155`, but the `try {` owning the lease-releasing `finally` starts at `:159`. A skipped run — including one cancelled between claim and execute — keeps `lease_owner` permanently, since `reapExpiredLeases` only selects non-terminal statuses. | `src/worker/worker.ts:152-159` |
-| M16 | **Races are simulated, not multi-process.** Duplicate-claim uses two `claim()` calls on one in-process queue; the idempotency race fakes the interleaving; the "cross-process" poller test does a direct SQL insert in-process. The exact API-vs-worker append contention in H4 is therefore untested. | `test/worker.test.ts:253-268`, `test/runService.test.ts:214-243`, `test/events.test.ts:139-158` |
+| `POST /api/auth/login` (dashboard) | `resolveCredential()` in `authRoutes.ts:50-56` | `secretsEqual` → `timingSafeEqual` |
+| **every `/api/*` request** | inline in `createAuthMiddleware`, `auth.ts:38` | `token === adminToken` |
+
+Round 1 filed this as L5 and #124 fixed it — in `authRoutes.ts` only. The middleware that gates the
+entire API still uses `===`. The comment on the fixed copy describes the vulnerability precisely:
+
+> `===` short-circuits on the first differing byte, so a caller able to measure response timing could
+> walk the admin token one byte at a time.
+
+That sentence is true of `auth.ts:38` today, and that is the higher-traffic of the two paths.
+
+**How confirmed:** read both files; `grep` for `timingSafeEqual` and for `=== adminToken` shows exactly
+one site fixed and one not.
+
+**Fix.** Export `resolveCredential` from one module and have both callers use it. The duplication is the
+root cause — the timing comparison is just the defect it has already produced. Two implementations of
+credential resolution that can drift is the finding; the `===` is the symptom.
+
+### R2-5. `activeLeases()` is the only subsystem that does not consider `NEEDS_INPUT`
+
+**Issue:** [#141](https://github.com/aywengo/mercury/issues/141)
+
+`src/queue/runQueue.ts:224`
+
+```mermaid
+flowchart LR
+    SM["state machine<br/>TRANSITIONS"]
+    subgraph DERIVED["Generated from the machine"]
+      RS["requeueForShutdown<br/>SQL filter"]
+    end
+    subgraph HARDCODED["Handcoded, three different answers"]
+      RP["reapExpiredLeases<br/>QUEUED STARTING RUNNING NEEDS_INPUT"]
+      ST["checkStuckRuns<br/>RUNNING NEEDS_INPUT"]
+      AL["activeLeases<br/>RUNNING STARTING"]
+    end
+    SM -.->|only this one is derived| RS
+    AL ==>|"NEEDS_INPUT missing"| GAP["metrics blind spot<br/>R2-5"]
+    ST ==>|"no pagination"| GAP2["stuck-run blindness<br/>R2-1"]
+    style AL fill:#8b0000,color:#fff
+    style GAP fill:#8b0000,color:#fff
+    style GAP2 fill:#8b0000,color:#fff
+    style SM fill:#1f4d3d,color:#fff
+```
+
+Four subsystems each hardcode which run statuses count as live. They do not agree:
+
+| Subsystem | QUEUED | STARTING | RUNNING | NEEDS_INPUT |
+| --- | :-: | :-: | :-: | :-: |
+| `reapExpiredLeases` (`runQueue.ts`) | yes | yes | yes | yes |
+| `requeueForShutdown` (generated from the state machine) | no | yes | yes | yes |
+| `checkStuckRuns` (`worker.ts:829`) | no | no | yes | yes |
+| **`activeLeases` (`runQueue.ts:224`)** | **no** | **yes** | **yes** | **no** |
+
+A run in `NEEDS_INPUT` holds its lease — the worker is parked in `waitForInput` still owning it — and the
+reaper knows that. `activeLeases` does not. Consequences, all on `/metrics`:
+
+- `mercury_workers` and `mercury_claimed_runs` under-report. A worker whose only run is waiting for input
+  reports **zero workers and zero claimed runs** while holding a live lease and a live agent process.
+- `mercury_lease_seconds_remaining` ignores `NEEDS_INPUT` entirely, so the lease that is most likely to be
+  close to expiry — one parked on a human who has not answered — is the one the gauge cannot see.
+
+`test/metrics.test.ts` never mentions `NEEDS_INPUT`, so nothing pins this.
+
+**How confirmed:** read all four status sets and tabulated them; confirmed the worker transitions to
+`NEEDS_INPUT` at `worker.ts:565` without releasing the lease.
+
+**Fix.** Add `NEEDS_INPUT` to `activeLeases`. Better, derive all four sets from one place —
+`shutdownRequeueSources` already proves this is possible by generating SQL from `TRANSITIONS`, and the
+comment at `runQueue.ts:93-95` explains that doing so was the entire point of issue #59. The same
+argument applies here verbatim and was not carried across.
+
+### R2-6. Every worker sends its own copy of every alert
+
+**Issue:** [#142](https://github.com/aywengo/mercury/issues/142)
+
+`src/worker/worker.ts:71-72`, `:785-800`, `:823-862`
+
+Both alert paths measure a **cluster-global** quantity and dedupe with **per-process** state:
+
+- `checkBacklog` reads `queue.queuedCount()` — the whole queue — and gates on `private backlogAlerted`,
+  whose comment claims it "prevents spam". It prevents one worker from spamming. With N workers it
+  produces N alerts for one backlog, because each worker owns an independent flag.
+- `checkStuckRuns` lists runs with no `lease_owner` filter, so every worker examines every run in the
+  cluster and POSTs its own webhook for the same stuck run.
+
+**Multi-worker is engineered for, even though no document says to do it.** `deploy/` ships one
+`mercury-worker.service` and neither `deploy/README.md` nor `ARCHITECTURE.md` mentions running more than
+one. But the whole design contends for that case: leases exist because workers race, `claim()` is a
+compare-and-swap against other claimers, `activeLeases()` groups by `lease_owner` in the plural, there is
+a dedicated `test/multiWorker.test.ts`, and `/metrics` exposes a worker count. On a 4-worker deployment
+the operator gets 4× the alerts for one incident, which is how alerting gets muted and then ignored.
+
+That gap is itself worth noting: the alerting path was written as if single-worker while the storage
+path was written as if multi-worker. The findings in this document that come from status-set divergence
+([R2-5](#the-status-set-has-no-owner)) have the same shape — different subsystems, different implicit
+answers to the same question.
+
+**How confirmed:** read both methods and the flag's declaration; no ownership or leader guard exists.
+
+**Fix.** Either scope the work to the owner (`WHERE lease_owner = ?` for stuck runs, which also makes
+each worker responsible for its own) or elect one alerting worker. Scoping is cheaper and also fixes the
+"worker A alerts about a run it cannot act on" confusion. Backlog depth has no owner, so that one needs a
+leader or a shared dedupe row; if that is judged not worth it, fix the comment, which currently promises
+a guarantee it does not provide.
+
+### R2-7. The SSE route handler has no error handling, after it has already sent headers
+
+**Issue:** [#143](https://github.com/aywengo/mercury/issues/143)
+
+`src/api/routes.ts:212-292`
+
+`/runs/:runId/stream` is the only route in the file without a `try`/`catch`. It calls
+`res.writeHead(200, …)` at `:219`, then `deps.stream.subscribe(...)` at `:256` — and `subscribe()`
+rethrows if the backlog handler throws, which R2-2 proves it can. The throw escapes to Express's default
+handler, which attempts a 500 response on a response whose headers are already sent.
+
+**How confirmed:** read the handler (no `try` in its body, unlike every sibling route); confirmed the
+rethrow by execution in the R2-2 batch reproduction, which printed
+`subscribe() rethrew: Error: res.write threw (client gone)`.
+
+**Fix.** Wrap the post-headers section, and on error call `end()` rather than delegating to Express —
+once headers are out, the only correct action is to close the stream. This also gives R2-3's log line
+somewhere to live.
+
+---
+
+### R2-12. The shared adapter base was reported delivered and never built; six copies of the same fix remain
+
+**Issue:** [#148](https://github.com/aywengo/mercury/issues/148)
+
+Round 1's root cause analysis was unambiguous:
+
+> Exit settlement is hand-rolled in five adapters with three different answers, one of them wrong. …
+> This is also the strongest argument for a shared adapter base class handling spawn, stderr buffering,
+> exit settlement and session lifetime. That is a **correctness** argument, not an aesthetic one: the
+> same bug is reproduced five times.
+
+Its remediation table then promised exactly that, as step 9:
+
+> | 9 | Shared adapter base for spawn / stderr / exit settlement / session lifetime | H10, M6, M12 | ✅ #102, #103, #111 |
+
+**No shared base exists.** `src/adapters/agentAdapter.ts` is an 11-line type re-export. The three PRs
+patched the three bugs per adapter: #102 touched only `daemonAgentAdapter.ts`, #111 touched only
+`daemonAgentAdapter.ts`, and #103 added `dispose()` to all six adapters individually. The row is
+accurate about the bugs and wrong about the fix.
+
+**Measured.** There are six `settleExit` functions — one per adapter — and five of them are
+**byte-identical**:
+
+```text
+hermes vs local   100%      prime  vs remote  100%
+hermes vs prime   100%      local  vs rpc     100%
+hermes vs rpc     100%      daemon vs the rest 80%  (differs only: DaemonSession vs Session)
+```
+
+```ts
+function settleExit(session: Session, exit: AgentExit): void {
+  if (session.exitSettled) return;
+  session.exitSettled = true;
+  session.exitResolve(exit);
+}
+```
+
+The same shape repeats for the rest of the contract step 9 named: `exitSettled: boolean` +
+`exitResolve: (exit: AgentExit) => void` declared identically in all six; a `sessions` Map in six; a
+`terminated` flag in six; a `done` flag in six.
+
+**Why this matters now rather than eventually.** `docs/agent-adapters.md` §9 lists **six more adapters**
+as planned work — Codex, ClaudeCode, Gemini, Aider, OpenHands, Devin. Each will re-implement exit
+settlement, session lifetime and the terminated/done discipline from scratch, inheriting none of the six
+fixes, and the next H10 will be found in whichever one gets it wrong. That is the exact mechanism round 1
+described, still available.
+
+**How confirmed:** `grep` for any shared settle/spawn/session helper across `src/` returns only the six
+per-adapter copies plus the worker's unrelated `settleDespite`; pairwise `difflib` similarity over the
+extracted function bodies; the file lists of #102, #103 and #111 from the GitHub API.
+
+**Fix.** Extract one module owning exit settlement, the session map, and spawn/stderr buffering; convert
+the six adapters to use it; then add a guard test asserting a new adapter cannot declare its own
+`exitResolve`. The refactor is mechanical — five of six bodies are already identical — and doing it
+before the seventh adapter is far cheaper than after.
+
+
+### R2-13. The CLI-wiring test's startup budget is not real, its cause is unread, and its cleanup can hang
+
+`test/multiWorker.test.ts`, the test named *"CLI wiring: /healthz/workers returns 200 when started via
+cli.ts server (issue #4)"* (lines 374-412 at `6e7a035`; #150 rewrites this block, so the name is the
+stable handle) — found by being **blocked by it**: it failed `test (node 24.x)` on a docs-only PR whose
+identical tree passed on `node 23.6.0`, and whose previous head passed both.
+
+```ts
+for (let i = 0; i < 40; i++) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/healthz`);
+    if (res.status === 200) { ok = true; break; }
+  } catch {
+    await sleep(250);              // sleep is INSIDE catch
+  }
+}
+assert.ok(ok, 'server did not start');
+```
+
+**Three defects, and a fourth found while proving them.**
+
+1. **The 10 s budget is only spent while the port is closed.** A listener answering anything other than
+   200 consumes all 40 attempts with no delay. **Measured: 40 attempts in 23 ms** against a 503
+   responder, instead of 10 s. The allowance looks like 10 s and usually is not.
+2. **The assertion cannot report the cause.** `stdio` pipes stderr and the test never reads it.
+   **Reproduced** with an invalid `MERCURY_PORT`: the child logs
+   `mercury api listening  port 3000` — it silently fell back to the default — while the test polls
+   3900+ and prints nothing but `server did not start`. The reason was in the pipe the whole time.
+3. **The port is guessed, not acquired.** `3900 + Math.floor(Math.random() * 500)`, no bind check. The
+   sibling test — *"CLI wiring: backlog alert webhook fires when configured via env (issue #5)"* —
+   computes `4400 + random*500` and **never uses it**: dead code.
+4. **The cleanup hangs whenever the child is already dead**, which is the interesting case:
+
+   ```ts
+   proc.kill('SIGTERM');
+   await new Promise((r) => proc.once('exit', r));   // never settles for an exited child
+   ```
+
+   `exit` is not re-emitted for a dead child. **Proven by execution:** a race against a 2 s deadline
+   returns `NEVER SETTLED`; the replacement returns in **0 ms**. So on the failure paths that matter —
+   bad config, port in use — cleanup awaits forever, the file hits the **180 s** test timeout, and the
+   assertion that had already failed is destroyed. The CI failure that led here was the *lucky* path
+   where the child was still alive.
+
+**Why CI actually failed.** 10038 ms ≈ 40 × 250 ms, so `fetch` threw every time and nothing was
+listening for the full 10 s. `node src/cli.ts server` cold-starts by type-stripping the whole
+application (~9,256 lines) on a runner already running the rest of the suite in parallel per-file
+processes. A fixed 10 s wall on that is the flake.
+
+**Graded Low, labelled `priority: medium`.** The distinction is deliberate: severity here is production
+blast radius, and this touches no production code. The label is *urgency* — it blocked a release, and
+defect 4 destroys the diagnostic exactly when a real failure needs one. A suite that fails on unrelated
+changes is an architecture problem regardless, because it trains people to re-run CI rather than read it.
+
+**Not a defect, checked before filing.** `num()` falling back to the default for a non-numeric
+`MERCURY_PORT` (defect 2's mechanism) is deliberate and asserted by *"numeric env vars fall back to
+defaults when non-numeric (issue #21)"* in `test/config.test.ts` — a documented fail-to-default policy, and the listening port is logged at boot.
+
+**Fix.** Land the sleep outside `catch`, capture child output into the assertion message, acquire the
+port by binding 0, and replace both `once('exit')` awaits with a `stopChild()` that returns immediately
+if the child is gone and escalates SIGTERM → SIGKILL after a grace period. Shipped in #150.
 
 ---
 
 ## Findings — Low
 
-| ID | Finding | Evidence |
-| --- | --- | --- |
-| L1 | `detectRuntime()` is dead code — exported, never referenced outside its own file. | `src/sandbox/sandboxManager.ts` |
-| L2 | Backlog alerts stall during runs: `checkBacklog()` shares a loop iteration with `await this.execute(run)`, so a multi-hour run suppresses backlog alerting for its duration — against §25. | `src/worker/worker.ts:130` |
-| L3 | Stuck-run detection caps at 200 per status; runs beyond that are never examined. | `src/worker/worker.ts:616` |
-| L4 | Shipped logrotate config is a no-op — the app logs JSON to stdout only, so nothing writes `/var/log/mercury/*.log`. | `deploy/logrotate.conf`, `src/logger.ts:29-30` |
-| L5 | Admin token compared with `===` — not constant-time. Theoretical over a network. | `src/api/authRoutes.ts` |
-| L6 | SSE streams stay open for terminal runs; nothing server-side closes them. Also the mechanism behind H7. | `src/api/routes.ts:120-145` |
-| L7 | `run.js:44` assigns markup via `textContent`, so the retry-of link renders as literal `<a href=...>`. Display bug, not XSS. | `ui/run.js:44` |
-| L8 | Temp-dir leaks in tests: 13 `mkdtempSync` with 0 `rmSync` in `worker.test.ts`; same pattern in localAgentAdapter, primeAgentAdapter, hermes, api, multiWorker. | `test/worker.test.ts` |
-| L9 | Doc drift on test counts: `ARCHITECTURE.md` says 112, `QUICKSTART.md:133` and `README.md:328` say 201, actual is 202. | `ARCHITECTURE.md`, `QUICKSTART.md:133` |
-| L10 | systemd hardening as shipped blocks the docker sandbox (`ProtectSystem=strict`, no socket access); no `TimeoutStopSec` in either unit. | `deploy/mercury-worker.service:13-14` |
-| L11 | No metrics endpoint. Durations and queue-wait exist only as event payloads; worker-death detection relies on scraping `/healthz/workers`. Logger redaction is itself untested. | `src/api/server.ts:60-75`, `src/logger.ts:24-30` |
-| L12 | Spec self-inconsistency: the §6 mermaid diagram includes `CANCELLED --> RUNNING: resume`, but the "complete transition table" below it omits that edge and the code makes `CANCELLED` terminal. No adapter implements resume-from-cancelled. Deleting the edge is cheaper than implementing it. | `ARCHITECTURE.md` §6, `src/domain/stateMachine.ts` |
+### R2-8. Rate-limiter bucket map grows without bound and the sweep frees nothing
+
+**Issue:** [#144](https://github.com/aywengo/mercury/issues/144)
+
+`src/api/rateLimit.ts:30`, `:54-58`
+
+`sweep()` deletes only buckets whose window has elapsed, and it runs only once `buckets.size >= 10_000` —
+after which it runs on **every request that introduces a new key**. When key churn outruns the window,
+the sweep frees nothing, the map grows without bound, and each new-key request pays an `O(size)` scan.
+
+**Measured** — 40,000 distinct keys inside one 60 s window:
+
+```text
+cumulativeMs: { first_5k: 3, first_10k: 4, first_20k: 531, first_40k: 2492 }
+ms/req first 5k   = 0.0006
+ms/req 20k -> 40k = 0.0980      slowdown = 163x
+```
+
+Cost per request grows linearly in map size, so total cost is quadratic.
+
+**The obvious attack does not work, and I checked.** I expected `MERCURY_TRUST_PROXY=1` to let a caller
+mint keys via `X-Forwarded-For`. It does not: Express takes the hop counted from the **right**, so with a
+real proxy appending the true client address, `req.ip` is the real address. Verified against Express with
+`trust proxy = 1` — sending `X-Forwarded-For: 203.0.113.140, 198.51.100.7` yielded `req.ip =
+198.51.100.7`. Triggering this therefore needs many genuine source addresses, or a `trustProxy` depth set
+higher than the real hop count. Graded Low for that reason.
+
+**Fix.** Bound the map with an LRU or a periodic timed sweep independent of the insert path, and cap the
+number of distinct keys per window.
+
+### R2-9. SSE writes ignore backpressure
+
+**Issue:** [#145](https://github.com/aywengo/mercury/issues/145)
+
+`src/api/routes.ts:246-253` — `send()` loops `res.write(...)` over up to 500 events and discards the
+return value. A client that stops reading leaves Node buffering the socket without limit. Authenticated,
+so not the worst exposure, but one browser tab on a run with a large backlog is enough to make the server
+hold the whole backlog in memory. Fix: on `false`, stop and resume on `drain`, or drop the subscription.
+
+### R2-10. `poll()` issues one query per subscriber, with no dedup by run
+
+**Issue:** [#146](https://github.com/aywengo/mercury/issues/146)
+
+`src/events/eventStream.ts:139-149` — each subscription gets its own `readAfter` every tick. Ten tabs on
+one run is ten identical `SELECT … LIMIT 500` queries four times a second. Group subscriptions by
+`runId` and read once.
+
+### R2-11. `slowDown()` fires on every append, including with no subscribers
+
+`src/events/eventStream.ts:45` — the call sits outside the subscriber loop, so any event on any run drops
+the poller to the 2 s cadence, and the cadence is slowest exactly when the system is busiest. Already
+analyzed and given a Stage 0 fix in `docs/cross-process-event-push.md`; listed here so the backlog is
+complete, not as new work.
 
 ---
 
-## Root cause analysis
+## The status set has no owner
 
-Thirty-nine findings (11 High, 16 Medium, 12 Low) reduce to four causes. Fixing the cause closes the group; fixing
-individual findings does not.
+Worth separating from the finding list because it generates findings rather than being one.
 
-### 1. Nothing owns process, connection and session lifecycle
+Four places hardcode "which statuses count as live" and three different answers are in use
+(the table is in [R2-5](#r2-5-activeleases-is-the-only-subsystem-that-does-not-consider-needs_input)).
+Round 1 already solved this exact shape of problem once: `requeueForShutdown` had a hardcoded status list
+that happened to be correct, issue #59 called that out as correct "only by coincidence", and the fix
+generates the SQL filter from `TRANSITIONS` so it cannot drift.
 
-H1, H2, H6, H7, H10, M6, L6.
-
-Exit settlement is hand-rolled in five adapters with three different answers, one of them
-wrong. Shutdown handlers close a database and exit. The worker has a `stop()` method that
-nothing ever calls. SSE connections are opened and never closed server-side.
-
-This is also the strongest argument for a shared adapter base class handling spawn,
-stderr buffering, exit settlement and session lifetime. That is a **correctness**
-argument, not an aesthetic one: the same bug is reproduced five times.
-
-### 2. Check-then-act without atomic guards
-
-H3, H4, H8, M3, M5, M15, M16.
-
-The pattern repeats: read state, validate it in JavaScript, write it back unconditionally.
-`transition` validates then writes without a status guard. The lease system infers
-ownership from a field that the failure path never clears. State and events are written
-in separate transactions. And the transaction primitive itself fails instantly under
-contention instead of waiting, so even correct guards would be unreliable.
-
-**H4 is the prerequisite for this whole group.** Atomic guards are pointless if the
-transaction throws `database is locked` in 300 ms.
-
-### 3. No validation at trust boundaries
-
-H5, M1, M2, M4, M8, M9, M10.
-
-Agent-produced data (event types, PR URLs, skill ids) is treated as trusted when it
-crosses into the browser and into the filesystem. The event whitelist exists but is never
-applied — and is not even obeyed internally. Error messages are forwarded verbatim.
-
-### 4. Silent data loss in the user-facing path
-
-H9, H11, M7, M13.
-
-The most dangerous category, because nothing surfaces it. History is truncated with no
-error. Sandbox env is documented but absent. Budgets are stored but ignored. Backups can
-be torn and nothing verifies them. Each of these would look "green" in a demo.
+That solution exists, is documented, and was not applied to the three other places that need it. The
+`NEEDS_INPUT` blind spot in `/metrics` is what the un-fixed copies look like.
 
 ---
 
-## Specification vs implementation
+## What Round 1 got right
 
-| Spec | Implementation |
-| --- | --- |
-| §6 *"Invalid transitions SHOULD be rejected"* | Rejected in `canTransition`, but the check is not atomic with the write (H3) and `requeueLostLease` bypasses it entirely (M3) |
-| §6 *"A worker receiving a terminal Run MUST NOT execute it again"* | Checked at `worker.ts:152-156` — correct — but a cancel landing *after* the check is not caught (H2) |
-| §14 *"events MUST be persisted before, or atomically with, broadcasting"* | Reap commits state, appends events afterwards (M5) |
-| §14 event type list | Not enforced; two internal types not even in the list (M4) |
-| §14.1 *"sequence assigned by a single writer"* | `UNIQUE` constraint holds the invariant, but concurrent appends throw rather than wait (H4) |
-| §15 *"fetch historical events, then subscribe from last observed sequence"* | Advances from the true max instead of the last returned page (H9) |
-| §17 *"worker MUST verify it holds the lease"* | Verified at entry; lease loss during execution is undetectable by construction (H8) |
-| §21 *"retry creates a new Run with a fresh runId"* | Also requeues the same runId via raw SQL (M3) |
-| §24 *"secrets redacted from events and logs"* | Redaction is genuinely well implemented at the write choke point; the logger path is untested (L11) |
-| §24 *"resourceLimits enforced by container"* | Wired and fail-closed, but non-functional in practice (H11) |
-| Roadmap item 5 *"lease-loss recovery (abort + requeue)"* | Implemented and unreachable (H8) |
+Verified rather than assumed, because a review that only lists defects misrepresents a codebase.
 
----
-
-## What is genuinely good
-
-Worth stating plainly, because the finding list could otherwise misrepresent the codebase.
-
-- **Skill content snapshots.** `SkillRegistry.resolveOne` returns files plus a sha256
-  hash, persisted per run. That is real reproducibility, not version pinning, and it is
-  the pattern the Crew design reuses.
-- **Fail-closed posture.** The sandbox refuses to start a constrained run with no runtime
-  (`worker.ts:169`) rather than running it unconstrained. Correct instinct, even where the
-  implementation is broken.
-- **Redaction at a single choke point.** Every event passes through `append()`, so secret
-  scrubbing cannot be bypassed by forgetting a call site. Recent history (issues #36, #43)
-  shows this being maintained deliberately.
-- **Test discipline.** 52 uses of a condition-polling `waitFor()` against only 5 raw
-  sleeps repo-wide; real RPC JSONL protocol fixtures; a genuine cross-thread
-  `SQLITE_BUSY` test; `finally` cleanup in 130 places. Above average.
-- **The entry guard at `worker.ts:152-156`** implements the §17 MUST exactly — non-terminal
-  *and* lease ownership. It is the one place in the lease machinery where the spec is
-  honoured precisely.
-- **The spec is honest about what it does not promise.** §16 explicitly refuses to
-  checkpoint agent in-flight state; §13 keeps skills as guidance rather than an enforced
-  pipeline. Resisting that overreach is a design maturity signal.
+- **Shutdown ordering is correct.** `cli.ts:244-257` stops claiming, then **bounded-waits on
+  `activeCount()`** before closing the database, and a second signal exits immediately with the reaper as
+  the documented backstop. I expected `activeCount()` to be an unobserved getter; it is awaited.
+- **`releaseLease` is guarded by terminality with the reasoning written down** (`runQueue.ts:47-80`),
+  including the measurement that shows why clearing a lease on an active run strands it forever.
+- **`requeueLostLease` stayed deleted**, with the proof of what it did preserved at `runQueue.ts:118-131`.
+- **`BEGIN IMMEDIATE`, conditional transitions, and the re-entrant `tx()`** are all in place, and the
+  failure-bookkeeping writes are inside one transaction at both sites (`worker.ts:342-347`).
+- **`parseLimit`** (`routes.ts:53-69`) handles absent, empty, whitespace, non-numeric, repeated and
+  out-of-range values, and the comment explains why the floor is 1 rather than 0.
+- **The metrics module documents its own preconditions** — why the histograms are legitimately monotonic,
+  why `strftime('%s')` rather than `julianday`, why `le` is inclusive — and `grep` confirms there is still
+  no `DELETE FROM` anywhere in `src/`, which is the assumption those histograms rest on.
 
 ---
 
-## Remediation sequence
+## Not re-examined
 
-Ordered by dependency, not severity. Each step is independently shippable.
-
-The ordering was the point of this table, and it held up: doing step 1 (`BEGIN IMMEDIATE`)
-before step 3 was load-bearing, because a conditional `UPDATE ... WHERE status = ?` is only
-atomic once the write lock is taken up front. Shipping them the other way round would have
-produced guards that looked correct and were not.
-
-| Step | Change | Unblocks | Status |
-| --- | --- | --- | --- |
-| 1 | `BEGIN IMMEDIATE` in `tx()` (`database.ts:141`) | H4; makes every guard in group 2 actually hold | ✅ #89 |
-| 2 | Path containment helper, wired into `writeSkills` and skill resolution | M2; also a blocking prerequisite for Crew Phase 5 | ✅ #92, #117 |
-| 3 | Conditional `transition` (`WHERE id = ? AND status = ?`, check `changes`) | H3 | ✅ #90 |
-| 4 | Enforce `EVENT_TYPES` in `EventStore.append`; add `lease.lost`, `sandbox.enabled` to the set | H5, M4 | ✅ #93 |
-| 5 | Clear `lease_owner` in the reap failure branch | H8 | ✅ #94, #115 |
-| 6 | Terminate the handle on *every* worker exit path, including the throwing one; guard the drive loop on persisted status | H1, H2 | ✅ #96 |
-| 7 | Graceful shutdown: `worker.stop()` + lease release + `closeAllConnections()` + `TimeoutStopSec` | H6, H7, L10 | ✅ #98, #99, #129 |
-| 8 | Page events from the last *returned* sequence; add a cursor to the events endpoint | H9 | ✅ #100, #116 |
-| 9 | Shared adapter base for spawn / stderr / exit settlement / session lifetime | H10, M6, M12 | ✅ #102, #103, #111 |
-| 10 | Sandbox env passthrough, disk-limit portability, image contents | H11 | ✅ #104 |
-| 11 | `Secure` cookie when TLS is on; `trust proxy`; 404 for foreign runs; stop leaking `err.message` | M8, M9, M10 | ✅ #108, #109, #110 |
-| 12 | CI installs dependencies so the API surface is actually tested | M11, M16 | ⏸ #112 held; ✅ #113 |
-
-Steps 1-5 are each small, local, and testable. Steps 6-9 are the real work.
-
-Two deviations from this table, both deliberate:
-
-- **Step 5 became a deletion, not a repair.** The lease-loss path was worse than the review
-  described — it cleared *another* worker's lease — so `requeueLostLease` was removed and the
-  reaper made the single recovery path. See §6.1 of `ARCHITECTURE.md`.
-- **Step 12 is only half landed.** The multi-process contention tests (#113) merged; the CI
-  that installs dependencies (#112) is held because its checks cannot be observed on this
-  private repository. See [Held, not fixed: M11](#held-not-fixed-m11).
-
-**Recommendation on process:** findings in group 3 are security issues in a public
-repository. Fix them on a branch with the usual review, not by pushing to `main`. This was
-followed: every fix in this table went through a branch and a PR.
-
----
-
-## Follow-on design
-
-Two items survived remediation as design work rather than defects, and both are now written up:
-
-- **Cross-process event push for multi-host scale** —
-  [`cross-process-event-push.md`](cross-process-event-push.md). Relevant to this review because
-  M16 (races simulated rather than multi-process) is a standing requirement on any design there:
-  the cross-process path is currently untested by construction, so a push design must be validated
-  with a real spawned worker process and not an in-process SQL insert.
-- **Role presets ("crews")** — [`crew-design.md`](crew-design.md). Its Phase 0 dependency was the
-  skill path containment work in #58, which landed as step 2 above.
-
----
+- **`DaemonAgentAdapter` protocol correctness.** Assessed exhaustively against the real daemon in
+  [daemon-agent-sessions.md](daemon-agent-sessions.md); that document supersedes anything that could be
+  said here.
+- **Multi-host / cross-process event transport.** Design-only in
+  [cross-process-event-push.md](cross-process-event-push.md); no implementation exists to review.
+- **`ui/` type safety.** `ui/` is outside the tsconfig program (`allowJs` off), so `npm run typecheck`
+  proves nothing about 854 lines of browser JavaScript. This round read it for logic only. A standing
+  gap, not a new one.
 
 ## Unverified
 
-Claims raised during review that this document does **not** assert, because they could not
-be confirmed in source:
+Claims raised during this round that the document does **not** assert:
 
-- A specific LOC saving from adapter deduplication. The duplication is real and
-  structural (session maps, exit settlement, `done` discipline, spawn and stderr handling
-  across five adapters); the number was not measured.
-- Whether `docker`'s `--storage-opt size=` failure affects the deployment actually in use,
-  which depends on the host storage driver.
+- That any production caller can make `send()` throw. Tested against a real server and a destroyed
+  socket; it did not. R2-2 is graded on the mechanism, not on a demonstrated trigger.
+- Whether the rate-limiter growth is reachable on the deployment actually in use, which depends on
+  `MERCURY_TRUST_PROXY` and the real proxy hop count.
+- Whether alert duplication has been observed. It is derived from the code, not from an incident report.
 
 ---
 
 ## Appendix — reproduction
 
-H4, the measured transaction race. Self-contained — save as `race.mjs` and run
-`node race.mjs` (needs only Node; no dependencies):
+Three scripts, each run on `6e7a035`. They are written to be pasted into a file under `test/` or
+`src/` and deleted afterwards; none of them mutate the repository.
 
-```js
-import { DatabaseSync } from 'node:sqlite';
-import { spawn } from 'node:child_process';
-const DB = '/tmp/seqrace.db', mode = process.argv[2];
+**1. R2-1 — the stuck-run scan skips the oldest runs.**
 
-if (!mode) {                                   // parent: seed, hold a write lock 1.2s
-  const s = new DatabaseSync(DB);
-  s.exec('PRAGMA journal_mode = WAL;');
-  s.exec('CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, run_id TEXT, ' +
-         'sequence INTEGER, UNIQUE(run_id, sequence));');
-  s.exec("INSERT OR IGNORE INTO events VALUES ('seed','r1',0);"); s.close();
-  const par = new DatabaseSync(DB);
-  par.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
-  par.exec('BEGIN IMMEDIATE');
-  par.prepare('INSERT OR IGNORE INTO events VALUES (?,?,?)').run('hold','r2',0);
-  setTimeout(() => { try { par.exec('COMMIT'); } catch {} }, 1200);
-  const out = [];
-  await Promise.all(['deferred','immediate'].map(m => new Promise(r => {
-    const c = spawn(process.execPath, [import.meta.filename, m]);
-    c.stdout.on('data', d => out.push(d.toString().trim())); c.on('exit', r);
-  })));
-  console.log(out.join('\n')); process.exit(0);
+```ts
+import { openDatabase } from '../src/db/database.ts';
+import { RunStore } from '../src/runs/runStore.ts';
+const db = openDatabase(':memory:');
+const store = new RunStore(db);
+const N = 260, now = Date.now(), ids: string[] = [];
+for (let i = 0; i < N; i++) {
+  const id = 'run' + String(i).padStart(4, '0');
+  ids.push(id);
+  store.insert({
+    id, ownerId: 'o', task: 't' + i,
+    repository: { url: 'https://example.com/a.git', ref: 'main' }, repositories: [],
+    workspaceBranch: 'b', workspacePath: '/tmp/x', agent: 'fake', status: 'RUNNING',
+    attempt: 1, retryOf: null, error: null, errorKind: null,
+    constraints: { maxDurationMs: 3600000, maxRetries: 0 },
+    createdAt: new Date(now - (N - i) * 60000).toISOString(),
+    startedAt: new Date(now - 10 * 3600e3).toISOString(), completedAt: null,
+    leaseOwner: 'w1', leaseExpiresAt: new Date(now + 600000).toISOString(),
+    cancellationRequestedAt: null, finalCommits: [], prUrl: null,
+  });
 }
+// exactly what checkStuckRuns does
+const { runs, nextCursor } = store.list({ status: 'RUNNING', limit: 200 });
+const seen = new Set(runs.map((r) => r.id));
+console.log({
+  examined: runs.length,
+  neverExamined: ids.filter((id) => !seen.has(id)).length,
+  oldestExaminedRank: ids.findIndex((id) => seen.has(id)),   // 60 -> the 60 oldest are skipped
+  nextCursorIgnored: nextCursor !== null,
+});
+```
 
-const db = new DatabaseSync(DB);
-db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
-const t0 = Date.now();
+**2. R2-2 — one throw loses the rest of the page.**
+
+```ts
+import { openDatabase } from '../src/db/database.ts';
+import { EventStore } from '../src/events/eventStore.ts';
+import { EventStream } from '../src/events/eventStream.ts';
+const db = openDatabase(':memory:');
+const store = new EventStore(db);
+const stream = new EventStream(db, store, 20, 20);
+stream.start();
+for (let i = 1; i <= 5; i++) store.append('run1', 'agent.message', { n: i });
+const delivered: number[] = [];
+let boom = false;
 try {
-  db.exec(mode === 'immediate' ? 'BEGIN IMMEDIATE' : 'BEGIN');
-  const r = db.prepare('SELECT COALESCE(MAX(sequence),0) m FROM events WHERE run_id=?').get('r1');
-  if (mode === 'deferred') { const w = Date.now() + 300; while (Date.now() < w) {} }
-  db.prepare('INSERT INTO events VALUES (?,?,?)').run(mode, 'r1', r.m + 1);
-  db.exec('COMMIT');
-  console.log(`${mode}: OK  seq=${r.m + 1}  after ${Date.now() - t0}ms`);
-} catch (e) {
-  console.log(`${mode}: FAIL after ${Date.now() - t0}ms  msg=${e.message}  (busy_timeout is 5000ms)`);
+  stream.subscribe('run1', 0, (evs) => {
+    for (const e of evs) {
+      if (!boom && e.sequence === 2) { boom = true; throw new Error('write failed'); }
+      delivered.push(e.sequence);
+    }
+  });
+} catch (e) { console.log('subscribe rethrew:', String(e)); }
+await new Promise((r) => setTimeout(r, 300));   // many poll ticks
+stream.stop();
+console.log({ delivered, lost: [1,2,3,4,5].filter((s) => !delivered.includes(s)) });
+// -> delivered [1], lost [2,3,4,5]
+```
+
+**3. R2-8 — sweep cost once the map passes the threshold.**
+
+```ts
+import { createRateLimiter } from './rateLimit.ts';
+const lim = createRateLimiter({ windowMs: 60_000, max: 5, group: 'auth-login' });
+const req = (ip: string) => new Promise<void>((resolve) => {
+  const rq: any = { ip, method: 'POST', auth: undefined };
+  const rs: any = { set(){ return rs; }, status(){ return rs; }, json(){ resolve(); } };
+  lim(rq, rs, () => resolve());
+});
+const marks: Record<string, number> = {}; const t0 = performance.now();
+for (let i = 0; i < 40_000; i++) {
+  await req(`10.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`);
+  if (i === 4_999) marks.first_5k = Math.round(performance.now() - t0);
+  if (i === 19_999) marks.first_20k = Math.round(performance.now() - t0);
+  if (i === 39_999) marks.first_40k = Math.round(performance.now() - t0);
 }
+console.log(marks);   // 3ms / 531ms / 2492ms -> 163x per-request slowdown
 ```
 
-Observed output (timings vary by run; the shape does not). The deferred form gives up
-almost immediately despite a 5 s timeout, while the immediate form waits for the lock and
-succeeds:
-
-```text
-deferred : FAIL after  ~300ms  msg=database is locked  (busy_timeout is 5000ms)
-immediate: OK  seq=1  after ~1200ms
-```
-
-Test suite state (M11), from the project's own environment:
-
-```bash
-cd /Users/roman/devops/mercury
-npm run typecheck   # tsc: command not found (exit 127) — node_modules absent
-npm test            # tests 202 / pass 198 / fail 4 / 12.5s
-                    # all 4 failures: ERR_MODULE_NOT_FOUND 'express'
-                    # failing: api, auth, multiWorker, ui
-```
-
-Dead whitelist check (M4):
-
-```bash
-grep -rn "isEventType" src/    # only the definition at types.ts:174 — never called
-```
+**4. R2-2 trigger test — negative result, reported as such.** Start the real app with a 1,200-event
+backlog, open `/api/runs/:id/stream` on a raw `net` socket, destroy the socket after the first chunk,
+wait, then read `stream.subscriptionCount`. Observed: no `uncaughtException`, and the subscriber count
+returned to 0. The disconnect path is handled correctly.
