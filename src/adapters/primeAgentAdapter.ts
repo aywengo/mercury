@@ -26,7 +26,7 @@ import type {
 import { RpcClient, type RpcEvent } from './rpc/rpcClient.ts';
 import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
-import { assertSafeSkillId } from '../skills/skillRegistry.ts';
+import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts';
 
 const SESSION_DIR_NAME = '.mercury-sessions';
 const SESSION_PATH_FILE = '.mercury-session-path';
@@ -155,8 +155,19 @@ export class PrimeAgentAdapter implements AgentAdapter {
       //
       // join() does not contain: join(ws, '.agents', 'skills', '../../etc') escapes the workspace
       // silently. assertSafeSkillId rejects anything not matching ^[a-z0-9][a-z0-9._-]*$, so the
-      // path cannot leave the skills directory regardless of who produced the id.
-      skillArgs.push('--skill', join(workspacePath, '.agents', 'skills', assertSafeSkillId(skill.id)));
+      // id cannot carry a traversal of its own.
+      //
+      // resolveContained is still required on top of that, because a safe id is not the only way to
+      // escape: the workspace is a checkout of a repo that may be untrusted, so `.agents/skills`
+      // itself can arrive as a SYMLINK pointing anywhere on the host. A validated id joined onto
+      // that symlink resolves outside the workspace with nothing wrong about the id. This is the
+      // same reasoning as issue #58, whose resolveContained already documents that the last
+      // component of such a root is created by checking out an untrusted repo.
+      //
+      // Ancestry symlinks stay allowed (macOS resolves /tmp to /private/tmp), so this rejects only
+      // a symlink at or below the workspace, not a workspace that happens to live under one.
+      const skillPath = resolveContained(workspacePath, join('.agents', 'skills', assertSafeSkillId(skill.id)));
+      skillArgs.push('--skill', skillPath);
     }
 
     const spawnCmd = this.wrapForSandbox(context, [
