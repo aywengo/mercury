@@ -330,6 +330,23 @@ Multi-host deployment is blocked before transport is reached:
 The last two are documented as scaling blockers. The first three are the harder ones, and they are
 storage, not transport.
 
+This is not an opinion about Mercury; it is a documented property of WAL, quoted from SQLite itself
+([wal.html](https://www.sqlite.org/wal.html)):
+
+> All processes using a database must be on the same host computer; WAL does not work over a network
+> filesystem.
+
+and, giving the reason:
+
+> This is why the write-ahead log implementation will not work on a network filesystem.
+
+The first sentence is the multi-host blocker stated in SQLite's own words: WAL requires every process
+touching the database to be on one host. Mercury's worker and API are exactly such processes, so the
+current topology is single-host by storage constraint, not by choice — and no event transport changes
+that. ([atomiccommit.html](https://www.sqlite.org/atomiccommit.html) goes further and advises avoiding
+SQLite on network filesystems at all, because locking is subtly broken on some implementations even
+when it appears to work.)
+
 **Consequence for this design:** the transport work should be sequenced so that it is *useful before*
 Postgres and *not wasted by* Postgres. That is what the staging below achieves. Do not build the
 multi-host transport first; it would be a load-bearing component of a system that still cannot run
@@ -413,7 +430,7 @@ Option A expensive.
 ### 8.3 Stage 2 — Postgres `LISTEN / NOTIFY`
 
 Adopted when Postgres is adopted, for the storage reason. `NOTIFY` on a channel per run (or one
-channel plus a run id in the payload, since `NOTIFY` payload is capped at 8000 bytes) replaces the
+channel plus a run id in the payload, since the `NOTIFY` payload must be shorter than 8000 bytes in the default configuration) replaces the
 Unix socket with no change to the surrounding logic, because the surrounding logic already treats
 notifications as advisory and re-reads from the database.
 
@@ -562,8 +579,8 @@ passed in the full suite and failed in isolation. Requirements:
 
 1. **What is the actual latency budget?** If "under 1 s" is acceptable, Stage 0 finishes the problem
    and Stages 1–2 are unnecessary. This should be answered with measurement before code.
-2. **Per-run channels or one channel plus run id?** Matters only for Stage 2; `NOTIFY` payload is
-   capped at 8000 bytes and per-run channels consume a channel slot per listener.
+2. **Per-run channels or one channel plus run id?** Matters only for Stage 2; the `NOTIFY` payload must stay under
+   8000 bytes in the default configuration, and per-run channels consume a channel slot per listener.
 3. **Should the API coalesce wake-ups per run per tick?** Almost certainly yes (§10, last row), but it
    interacts with how quickly a very chatty run should reach a browser.
 4. **Does the dashboard need per-event latency, or is aggregate lag enough?** Determines whether lag is
