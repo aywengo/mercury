@@ -51,6 +51,10 @@ export function makeEnv(opts: {
   stuckRunThresholdMs?: number;
   stuckCheckIntervalMs?: number;
   logger?: boolean;
+  /** Capture worker log lines instead of discarding them (issue #73 L2 backlog timing test). */
+  logCapture?: (level: 'debug' | 'info' | 'warn' | 'error', msg: string, fields: Record<string, unknown>) => void;
+  backlogAlertThreshold?: number;
+  backlogCheckIntervalMs?: number;
   sandbox?: import('../src/sandbox/sandboxManager.ts').SandboxManager;
   primeagent?: { cmd: string; args?: string[] };
   /** Extra adapters to register (merged over the built-in fake). */
@@ -83,6 +87,16 @@ export function makeEnv(opts: {
     redactor: opts.redactor,
   });
   const logger = opts.logger ? createLogger(createRedactor([]), 'debug') : nullLogger;
+  // A capturing Logger must forward child() or the worker's per-run logger drops the capture.
+  const captureLogger: typeof logger | null = opts.logCapture
+    ? {
+        debug: (f, m) => opts.logCapture!('debug', m, f),
+        info: (f, m) => opts.logCapture!('info', m, f),
+        warn: (f, m) => opts.logCapture!('warn', m, f),
+        error: (f, m) => opts.logCapture!('error', m, f),
+        child: () => captureLogger!,
+      }
+    : null;
   const worker = new Worker({
     db,
     runs,
@@ -92,7 +106,9 @@ export function makeEnv(opts: {
     workspace,
     adapters,
     runService,
-    logger,
+    logger: captureLogger ?? logger,
+    backlogAlertThreshold: opts.backlogAlertThreshold,
+    backlogCheckIntervalMs: opts.backlogCheckIntervalMs,
     workerId: 'test-worker',
     leaseMs: opts.leaseMs ?? 60_000,
     leaseHeartbeatMs: 5_000,

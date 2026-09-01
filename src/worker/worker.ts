@@ -39,6 +39,10 @@ export interface WorkerDeps {
   retryBackoffMs: number;
   /** Queue depth that triggers backlog alerts (MERCURY_BACKLOG_ALERT_THRESHOLD). Default 10. */
   backlogAlertThreshold?: number;
+  /** How often backlog depth is sampled (ms). Default 60_000. Must be its own timer: the claim
+   *  loop is blocked for the whole duration of a run, so backlog checks driven from there go
+   *  silent exactly when a busy queue is longest-running. */
+  backlogCheckIntervalMs?: number;
   /** Webhook URL for backlog alerts (MERCURY_ALERT_WEBHOOK_URL). Default null (log only). */
   alertWebhookUrl?: string | null;
   /** Optional secret redactor; run error messages are redacted at write time (issue #36). */
@@ -67,6 +71,7 @@ export class Worker {
   /** Stateful alert flag: true while the backlog is at/above threshold (prevents spam). */
   private backlogAlerted = false;
   private stuckTimer: ReturnType<typeof setInterval> | null = null;
+  private backlogTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(deps: WorkerDeps) {
     this.deps = deps;
@@ -95,6 +100,16 @@ export class Worker {
       );
       this.stuckTimer.unref?.();
     }
+    // Backlog alerting gets its own timer for the same reason stuck-run checks do (AGENTS.md:
+    // "periodic work that must run *while* a Run executes" needs its own timer). Driven from the
+    // claim loop it was sampled once per iteration, and an iteration is `await this.execute(run)`
+    // -- so a single multi-hour run suppressed backlog alerting for its entire duration, which is
+    // precisely when the queue is most likely to be backed up.
+    this.backlogTimer = setInterval(
+      () => this.checkBacklog(),
+      this.deps.backlogCheckIntervalMs ?? 60_000,
+    );
+    this.backlogTimer.unref?.();
     void this.loop();
   }
 
@@ -104,6 +119,8 @@ export class Worker {
     this.timer = null;
     if (this.stuckTimer) clearInterval(this.stuckTimer);
     this.stuckTimer = null;
+    if (this.backlogTimer) clearInterval(this.backlogTimer);
+    this.backlogTimer = null;
     // Wake the drive loop of any run in flight so it can requeue itself (issue #51).
     // Without this, stop() only prevented NEW claims: the in-flight run kept driving an
     // agent whose process the shutting-down process was about to abandon, and its lease was
@@ -152,7 +169,7 @@ export class Worker {
           this.log('warn', 'reaped runs with expired leases', { runIds: reaped.failed });
         }
         const run = this.deps.queue.claim(this.deps.workerId, this.deps.leaseMs);
-        this.checkBacklog();
+        // Backlog sampling moved to this.backlogTimer (issue #73 L2); it must not live here.
         if (run) {
           this.active.add(run.id);
           try {
@@ -759,7 +776,7 @@ export class Worker {
   }
 
   /**
-   * Queue backlog alerting (Mercury.md section 25). Checked after every poll.
+   * Queue backlog alerting (Mercury.md section 25). Driven by this.backlogTimer.
    * Alert fires once per crossing of the threshold (stateful; resets when the
    * backlog drops below it). Webhook POST is fire-and-forget (5s timeout).
    */

@@ -72,6 +72,7 @@ function makeWorker(
     inputTimeoutMs?: number;
     stuckRunThresholdMs?: number;
     stuckCheckIntervalMs?: number;
+    backlogCheckIntervalMs?: number;
     logger?: Logger;
   } = {},
 ): Worker {
@@ -95,6 +96,10 @@ function makeWorker(
     stuckCheckIntervalMs: opts.stuckCheckIntervalMs ?? 60_000,
     retryBackoffMs: 50,
     backlogAlertThreshold: opts.backlogAlertThreshold,
+    // Backlog sampling moved onto its own timer (issue #73 L2). These tests were written against
+    // the old per-poll sampling, so keep them sampling at poll cadence rather than the 60s
+    // production default -- otherwise they wait 60s for an alert they used to get in ~20ms.
+    backlogCheckIntervalMs: opts.backlogCheckIntervalMs ?? opts.pollMs ?? 20,
     alertWebhookUrl: opts.alertWebhookUrl,
   });
 }
@@ -138,32 +143,44 @@ test('backlog alert: warn + webhook once per threshold crossing, resets below', 
   const repoDir = makeGitRepo(join(envDir(), 'repo-bk'));
   const env = makeEnv({
     workerEnabled: false,
-    fakeScript: [{ event: { type: 'agent.message', payload: { text: 'fast' } } }],
+    // A slow-enough fake keeps the queue genuinely deep. With instant runs the queue drained below
+    // the threshold within a tick or two of the sampler, so the first alert was a race against the
+    // check interval and this test was intermittently timing out waiting for it.
+    fakeScript: [{ event: { type: 'agent.message', payload: { text: 'slow' } }, delayMs: 250 }],
   });
   const worker = makeWorker(env, { backlogAlertThreshold: 2, alertWebhookUrl: webhook.url, logger: spy.root });
   try {
     worker.start();
     const createRun = (task: string) => env.runService.create({ ownerId: 'alice', task, agent: 'fake', repository: { localPath: repoDir } });
-    const a = createRun('a');
-    const b = createRun('b');
+    // Five runs against threshold 2, not two. With exactly threshold-many runs the worker can claim
+    // one before the sampler ever ticks, so depth is never OBSERVED at the threshold and the alert
+    // becomes a race -- which is how this test was intermittently timing out. A queue deeper than
+    // the threshold stays above it while a run is in flight.
+    //
+    // It also strengthens the dedupe assertion: depth remains >= threshold across many sampler
+    // ticks, so "exactly one alert" now proves the once-per-crossing latch holds under repeated
+    // sampling rather than merely proving the sampler only ran once.
+    const BATCH = 5;
+    const mkBatch = (tag: string) => Array.from({ length: BATCH }, (_, i) => createRun(`${tag}${i}`));
 
-    // 2 queued >= threshold 2 -> exactly one alert
+    const first = mkBatch('a');
+
+    // depth >= 2 -> exactly one alert
     await waitFor(() => webhook.hits.length === 1, 10_000);
     await waitFor(() => spy.warns.some((w) => w.msg === 'queue backlog above threshold'), 1_000);
     await sleep(300);
-    assert.equal(webhook.hits.length, 1);
+    assert.equal(webhook.hits.length, 1, 'one alert per threshold crossing, not one per sample');
     assert.equal(spy.warns.filter((w) => w.msg === 'queue backlog above threshold').length, 1);
 
-    // drain: worker claims and completes a, then b
-    await waitFor(() => [a, b].every((r) => env.runs.get(r.id)!.status === 'COMPLETED'), 10_000);
+    // drain: worker claims and completes all five
+    await waitFor(() => first.every((r) => env.runs.get(r.id)!.status === 'COMPLETED'), 20_000);
     // below threshold -> reset
     await waitFor(() => env.queue.queuedCount() === 0, 5_000);
     await sleep(300);
-    assert.equal(webhook.hits.length, 1);
+    assert.equal(webhook.hits.length, 1, 'no further alerts while the queue stays below threshold');
 
     // cross again -> second alert
-    const c = createRun('c');
-    const d = createRun('d');
+    const second = mkBatch('c');
     await waitFor(() => webhook.hits.length === 2, 10_000);
     assert.equal(spy.warns.filter((w) => w.msg === 'queue backlog above threshold').length, 2);
 
@@ -177,7 +194,10 @@ test('backlog alert: warn + webhook once per threshold crossing, resets below', 
     }
 
     // let everything settle so the env can close cleanly
-    await waitFor(() => [a, b, c, d].every((r) => TERMINAL.has(env.runs.get(r.id)!.status)), 20_000);
+    await waitFor(
+      () => [...first, ...second].every((r) => TERMINAL.has(env.runs.get(r.id)!.status)),
+      30_000,
+    );
   } finally {
     worker.stop();
     await webhook.close();
@@ -437,9 +457,13 @@ test('CLI wiring: backlog alert webhook fires when configured via env (issue #5)
     MERCURY_DB: join(dir, 'test.db'),
     MERCURY_WORKSPACE_BASE: join(dir, 'ws'),
     MERCURY_API_TOKENS: 'tok-alice:alice',
-    MERCURY_BACKLOG_ALERT_THRESHOLD: '1',
+    MERCURY_BACKLOG_ALERT_THRESHOLD: '2',
     MERCURY_ALERT_WEBHOOK_URL: webhook.url,
     MERCURY_POLL_MS: '50',
+    // Backlog sampling moved onto its own timer (issue #73 L2) with a 60s production default.
+    // This test proves the CLI wires the alert path end to end, so it sets the interval knob
+    // rather than waiting a minute for the first tick.
+    MERCURY_BACKLOG_CHECK_INTERVAL_MS: '50',
   };
   // enqueue runs BEFORE the worker starts (single-writer: avoid two SQLite
   // connections racing; the worker claims one run, leaving depth 1 >= threshold 1)
@@ -461,8 +485,21 @@ test('CLI wiring: backlog alert webhook fires when configured via env (issue #5)
       defaultMaxDurationMs: 60_000,
       defaultMaxRetries: 0,
     });
-    runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
-    runService.create({ ownerId: 'alice', task: 'y', agent: 'fake' });
+    // Real repos, and a slow-enough fake, so the backlog is genuine. These runs previously had no
+    // repository at all: both failed instantly with "Workspace requires repository.url or
+    // repository.localPath", the queue drained to zero in about a millisecond, and the alert only
+    // appeared because the old code sampled backlog depth synchronously right after claim(), while
+    // depth was transiently 1. That test passed for the wrong reason. With sampling on its own
+    // timer it needs a queue that is actually deep.
+    const { makeGitRepo } = await import('./helpers.ts');
+    const repo = makeGitRepo(join(dir, 'cli-repo'));
+    // Six runs at threshold 2, not two at threshold 1. The fake adapter finishes almost instantly,
+    // so with only two runs the queue drops below the threshold within a tick or two and the alert
+    // becomes a race against the 50ms sampler. A deeper queue keeps depth >= 2 across several
+    // workspace builds, so the backlog is durably above threshold instead of momentarily so.
+    for (let i = 0; i < 6; i++) {
+      runService.create({ ownerId: 'alice', task: `x${i}`, agent: 'fake', repository: { localPath: repo, baseBranch: 'main' } });
+    }
     db.close();
   }
   const proc = spawn(process.execPath, ['src/cli.ts', 'worker'], {

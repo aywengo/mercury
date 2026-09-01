@@ -38,6 +38,7 @@ export interface Config {
   gcIntervalMs: number;
   /** Queue backlog depth that triggers an alert (MERCURY_BACKLOG_ALERT_THRESHOLD). */
   backlogAlertThreshold: number;
+  backlogCheckIntervalMs: number;
   /** Optional webhook URL for backlog alerts (MERCURY_ALERT_WEBHOOK_URL); null disables. */
   alertWebhookUrl: string | null;
   /** Agent execution mode: 'rpc' (default, subprocess per Run) or 'daemon' (resident sessions). */
@@ -137,6 +138,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     workspaceQuotaBytes: num(env.MERCURY_WORKSPACE_QUOTA_BYTES, 10 * 1024 * 1024 * 1024),
     gcIntervalMs: num(env.MERCURY_GC_INTERVAL_MS, 60 * 60 * 1000),
     backlogAlertThreshold: num(env.MERCURY_BACKLOG_ALERT_THRESHOLD, 10),
+    backlogCheckIntervalMs: num(env.MERCURY_BACKLOG_CHECK_INTERVAL_MS, 60_000),
     alertWebhookUrl: env.MERCURY_ALERT_WEBHOOK_URL ?? null,
     agentMode: env.MERCURY_AGENT_MODE === 'daemon' ? 'daemon' : 'rpc',
     sandboxRuntime: env.MERCURY_SANDBOX_RUNTIME ?? null,
