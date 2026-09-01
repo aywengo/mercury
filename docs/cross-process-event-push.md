@@ -133,7 +133,6 @@ SQLite's locking assumes a POSIX local filesystem, and WAL mode in particular is
 on shared storage. Adding a push channel does not change that, and would leave a system that looks
 horizontally scaled while still being unable to run two hosts.
 
-
 ---
 
 ## 4. Current architecture (as built)
@@ -313,7 +312,6 @@ cost is not paid for by the current scale.
 | Ops burden | medium | none | high (but paid by storage) | high |
 | Fits single-PC deploy | poorly | **yes** | no | no |
 
-
 ---
 
 ## 7. The prerequisite: storage, stated plainly
@@ -377,9 +375,19 @@ flowchart TD
 2. **Poll only runs someone is watching.** The poller already iterates subscriptions, so this is
    mostly about not paying for runs with no subscribers — which it already does — and about making
    the query cheap.
-3. **Cover the read.** `events(run_id, sequence)` is already the `UNIQUE (run_id, sequence)` index, so
-   `SELECT … WHERE run_id = ? AND sequence > ? ORDER BY sequence` is an index range scan. Verify with
-   `EXPLAIN QUERY PLAN` in a test, the way the `/metrics` index is guarded.
+3. **Cover the read — already covered, and measured.** The poll query is
+   `SELECT * FROM events WHERE run_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT 500`. Against a
+   migrated database with 5 000 events, `EXPLAIN QUERY PLAN` gives:
+
+   ```text
+   SEARCH events USING INDEX idx_events_run_seq (run_id=? AND sequence>?)
+   ```
+
+   A single range search, no `USE TEMP B-TREE FOR ORDER BY` — the index supplies the order as well as
+   the filter. Note it is the explicit `idx_events_run_seq ON events(run_id, sequence)`, not the
+   `UNIQUE (run_id, sequence)` autoindex, that the planner picks. So Stage 0 needs no new index here;
+   what it needs is a guard test pinning this plan, the way `test/metrics.test.ts` already pins the
+   `/metrics` index plan.
 4. **Expose lag.** Two counters on `/metrics`: `mercury_event_poll_lag_seconds` (age of the newest
    row the poller just delivered) and `mercury_event_poll_iterations_total`. Without these, a silent
    regression to 2 s latency is invisible — which is P7.
@@ -432,9 +440,10 @@ Option A expensive.
 ### 8.3 Stage 2 — Postgres `LISTEN / NOTIFY`
 
 Adopted when Postgres is adopted, for the storage reason. `NOTIFY` on a channel per run (or one
-channel plus a run id in the payload, since the `NOTIFY` payload must be shorter than 8000 bytes in the default configuration) replaces the
-Unix socket with no change to the surrounding logic, because the surrounding logic already treats
-notifications as advisory and re-reads from the database.
+channel plus a run id in the payload, since the `NOTIFY` payload must be shorter than 8000
+bytes in the default configuration) replaces the Unix socket with no change to the
+surrounding logic, because that logic already treats notifications as advisory and re-reads
+from the database.
 
 This is why the staging is not wasted work: Stage 1's handler contract — *notification arrives, read
 from DB, deliver, then advance cursor* — is exactly Stage 2's handler.
@@ -479,9 +488,8 @@ stateDiagram-v2
 - **Reconnect is unchanged:** `?after=<last sequence the client saw>`. Recovery is a database read, so
   it works whether or not any notification channel is alive.
 - **Backlog first, then live.** `subscribe()` reads persisted rows and delivers them before
-  registering (on `main` since `f9bb44d`). Any notification arriving during that window is harmless
-  because the cursor is already past
-  those rows.
+  registering (on `main` since `f9bb44d`). Any notification arriving during that window is harmless,
+  because the cursor is already past those rows.
 - **Terminal close stays.** A terminal event ends the stream; the grace backstop covers a reconnect
   that starts past the terminal event.
 
@@ -529,7 +537,10 @@ storm collapses naturally. A design that fetched exactly the notified sequence w
 | `mercury_event_wakeup_drops_total` | counter | notifications lost; must be non-zero-tolerated but alert-worthy if it climbs |
 | `mercury_sse_streams_active` | gauge | subscriber set size; catches a leak like the one #133 nearly introduced |
 
-`EventStream.subscriptionCount` covers the last of these. It is on `main` since `f9bb44d`, added with the leak regression test for #133, because a stream that fails to unsubscribe is otherwise invisible from outside the process. It is a getter over the live subscriber set rather than a metric, so wiring it through to `/metrics` is the remaining step.
+`EventStream.subscriptionCount` covers the last of these. It is on `main` since `f9bb44d`, added with
+the leak regression test for #133, because a stream that fails to unsubscribe is otherwise invisible
+from outside the process. It is a getter over the live subscriber set rather than a metric, so wiring
+it through to `/metrics` is the remaining step.
 
 ---
 
@@ -582,8 +593,9 @@ passed in the full suite and failed in isolation. Requirements:
 
 1. **What is the actual latency budget?** If "under 1 s" is acceptable, Stage 0 finishes the problem
    and Stages 1–2 are unnecessary. This should be answered with measurement before code.
-2. **Per-run channels or one channel plus run id?** Matters only for Stage 2; the `NOTIFY` payload must stay under
-   8000 bytes in the default configuration, and per-run channels consume a channel slot per listener.
+2. **Per-run channels or one channel plus run id?** Matters only for Stage 2; the `NOTIFY` payload
+   must stay under 8000 bytes in the default configuration, and per-run channels consume a channel
+   slot per listener.
 3. **Should the API coalesce wake-ups per run per tick?** Almost certainly yes (§10, last row), but it
    interacts with how quickly a very chatty run should reach a browser.
 4. **Does the dashboard need per-event latency, or is aggregate lag enough?** Determines whether lag is
