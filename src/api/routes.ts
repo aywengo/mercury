@@ -258,7 +258,12 @@ export function createRoutes(deps: RoutesDeps): Router {
         {
           runId: run.id,
           where,
+          // Name+message only, because the logger JSON-serialises fields and Error.message is not
+          // enumerable -- a raw { err } logs as {}. The stack goes separately, matching sendError():
+          // this is the last evidence a post-headers failure leaves, and a message alone does not say
+          // where it came from.
           err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
         },
         'SSE stream failed; closing',
       );

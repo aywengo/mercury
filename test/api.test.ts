@@ -1064,10 +1064,10 @@ test('a stream closes promptly when the run finishes while it is open (issue #73
 // --- issue #143: the SSE handler must survive a failure after headers are sent ----------------
 
 function logCapture() {
-  const lines: { level: string; msg: string }[] = [];
+  const lines: { level: string; msg: string; fields: Record<string, unknown> }[] = [];
   const logger = createLogger(createRedactor([]), 'debug', (line) => {
-    const p = JSON.parse(line) as { level: string; msg: string };
-    lines.push({ level: p.level, msg: p.msg });
+    const p = JSON.parse(line) as Record<string, unknown>;
+    lines.push({ level: p.level as string, msg: p.msg as string, fields: p });
   });
   return { logger, lines };
 }
@@ -1105,9 +1105,20 @@ test('a stream whose backlog read throws closes and logs instead of escaping to 
       await srv.close();
     }
 
-    assert.ok(
-      lines.some((l) => l.level === 'error' && l.msg.includes('SSE stream failed')),
-      `expected the failure to be logged, got ${JSON.stringify(lines)}`,
+    const failure = lines.find((l) => l.level === 'error' && l.msg.includes('SSE stream failed'));
+    assert.ok(failure, `expected the failure to be logged, got ${JSON.stringify(lines)}`);
+    // Once headers are out this log line is the ONLY evidence the failure ever existed, so it has to
+    // carry the cause and not just the fact of it: name+message (Error fields are not enumerable, so
+    // a raw { err } would serialise to {}) plus the stack, matching what sendError() records.
+    assert.match(
+      String(failure.fields.err),
+      /SyntaxError/,
+      `the log must name the cause, got ${JSON.stringify(failure.fields)}`,
+    );
+    assert.match(
+      String(failure.fields.stack ?? ''),
+      /at /,
+      `the log must carry a stack, got ${JSON.stringify(failure.fields)}`,
     );
     assert.equal(streamHub.subscriptionCount, 0, 'a failed stream must not leave a subscriber behind');
   } finally {
@@ -1153,6 +1164,54 @@ test('POSITIVE CONTROL: a healthy stream closes cleanly and logs no failure (iss
   }
 });
 
+/**
+ * Remove comments from TypeScript source for a guard that matches on code.
+ *
+ * Inline `//` must be handled too, not just whole-line comments: otherwise a line like
+ * `res.end(); // res.on('error')` satisfies a guard looking for the listener while the code never
+ * registers it. Stripping is quote-aware so a `//` inside a string literal (a URL, a header value)
+ * is not mistaken for a comment start.
+ */
+function stripComments(code: string): string {
+  const out: string[] = [];
+  let i = 0;
+  let quote: string | null = null;
+  while (i < code.length) {
+    const c = code[i];
+    const next = code[i + 1];
+    if (quote) {
+      out.push(c);
+      if (c === '\\' && next !== undefined) {
+        out.push(next);
+        i += 2;
+        continue;
+      }
+      if (c === quote) quote = null;
+      i += 1;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      quote = c;
+      out.push(c);
+      i += 1;
+      continue;
+    }
+    if (c === '/' && next === '/') {
+      while (i < code.length && code[i] !== '\n') i += 1;
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      i += 2;
+      while (i < code.length && !(code[i] === '*' && code[i + 1] === '/')) i += 1;
+      i += 2;
+      continue;
+    }
+    out.push(c);
+    i += 1;
+  }
+  return out.join('');
+}
+
 test('the SSE handler registers a response error listener (issue #143)', () => {
   // A SOURCE guard, and labelled as one: the hazard it protects against could not be triggered
   // through the product in a test, so this at least stops the line being dropped silently.
@@ -1166,9 +1225,6 @@ test('the SSE handler registers a response error listener (issue #143)', () => {
   assert.ok(start >= 0, 'SSE route not found');
   const end = src.indexOf('\n  });', start);
   assert.ok(end > start, 'SSE route body not terminated');
-  const body = src
-    .slice(start, end)
-    .replace(/\/\*[\s\S]*?\*\//g, '') // block comments
-    .replace(/^\s*\/\/.*$/gm, ''); // line comments -- a comment mentioning the listener must not pass
+  const body = stripComments(src.slice(start, end));
   assert.match(body, /res\.on\(\s*'error'/, 'the SSE handler must listen for response errors');
 });
