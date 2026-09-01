@@ -9,9 +9,8 @@
 // (see server.ts). The 401 body is generic on purpose: it must not reveal
 // whether a submitted token is known to the server.
 
-import { timingSafeEqual } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   SESSION_COOKIE,
   SESSION_TTL_MS,
