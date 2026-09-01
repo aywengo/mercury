@@ -436,7 +436,11 @@ Setting a depth also makes `req.secure` honour `X-Forwarded-Proto`, so the sessi
 5. ~~Multi-repository Runs~~ — done: `repositories[]` in the Run model, API + workspace support
 6. ~~Expand skill library~~ — done: 12 skills (added documentation, deployment, frontend, issue-fix-loop)
 7. ~~Deployment packaging~~ — done: systemd units, integrity-checking backup/restore script, ops guide in `deploy/` (logs go to journald, so `logrotate` is not used and the config that implied otherwise was removed)
-8. Daemon-based agent sessions — implemented behind `MERCURY_AGENT_MODE=daemon` (RPC remains default); verify against the real daemon before relying on it
+8. Daemon-based agent sessions — `MERCURY_AGENT_MODE=daemon` exists but **does not work against a
+    real daemon**: it disagrees with PrimeAgent 0.8.1 on framing, command envelope, session identity
+    and which socket to use, while all 12 of its tests pass against a mock that shares its wrong
+    assumptions. RPC remains the default and the only working path. Analysis and fix order:
+    [`docs/daemon-agent-sessions.md`](docs/daemon-agent-sessions.md).
 9. ~~Sandboxed execution (containers)~~ — done: `SandboxManager` enforces `resourceLimits` + `allowedNetworks` via docker/podman; fails closed when a constrained Run has no runtime
 10. ~~Input timeout + observability~~ — done: configurable `MERCURY_INPUT_TIMEOUT_MS` (`TIMED_OUT` reason `input-timeout`), stuck-run alerting, `GET /metrics` in Prometheus format (run duration, queue wait, status gauges, worker/lease state), and run/worker trace env (`MERCURY_RUN_ID`/`MERCURY_TRACE_ID`/`MERCURY_WORKER_ID`) propagated to the agent process
 11. Cross-process event push (worker → server) for multi-host scale — remaining. Designed in

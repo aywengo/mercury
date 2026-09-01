@@ -69,6 +69,11 @@ worker → spawn <agent> --mode rpc (or socket) → typed protocol → AgentEven
   vendors (mitigated by the generic `RpcAgentAdapter`, Phase 10).
 - **Used by**: PrimeAgent (RPC + daemon), Pi Agent (`pi --mode rpc`), Oh my Pi
   (`omp --mode rpc`), and any future RPC-protocol agent.
+- **Caveat**: the daemon half of this pattern is currently broken against the real
+  PrimeAgent daemon — the adapter and its mock agree on a protocol the daemon does not
+  speak. Verified against PrimeAgent 0.8.1 (daemon protocol v7) in
+  [`daemon-agent-sessions.md`](daemon-agent-sessions.md), which also documents the real
+  supervisor/worker topology and the correct JSONL command envelope. RPC mode is unaffected.
 
 ### Pattern C — Remote HTTP API
 
