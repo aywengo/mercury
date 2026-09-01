@@ -110,7 +110,13 @@ test('the sandbox/docker conflict has an opt-in drop-in, and the baseline stays 
   const dropin = join(DEPLOY, 'mercury-worker-sandbox.conf');
   assert.ok(existsSync(dropin), 'an opt-in drop-in for the docker socket must ship');
   const body = readFileSync(dropin, 'utf8');
-  assert.match(body, /ReadWritePaths=.*\/var\/run\/docker\.sock/, 'it must re-permit the socket path');
+  const rw = body.match(/^ReadWritePaths=(.+)$/m)?.[1] ?? '';
+  assert.ok(rw.includes('/var/run/docker.sock'), 'it must re-permit the socket path');
+  // systemd APPENDS list-type settings from drop-ins, so restating the unit's own paths is
+  // redundant -- and it reads as though this opt-in file owned them, which invites someone to
+  // delete the line from the main unit later.
+  assert.ok(!rw.includes('/opt/mercury') && !rw.includes('/var/lib/mercury'),
+    `the drop-in must add only what it is for, but ReadWritePaths is "${rw}"`);
 
   // The point of the split is that the DEFAULT stays strict. If the socket were added to the main
   // unit this test would pass while the hardening was quietly gone.
