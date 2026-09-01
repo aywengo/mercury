@@ -16,16 +16,23 @@ assessment still holds, and the remediation largely delivered: the fixes are rea
 with the reasoning that produced them, and spot-checking the hard ones (lease ownership, shutdown
 ordering, transaction atomicity, event paging) found them to do what they claim.
 
-What Round 2 found is a different class of problem. **Three of the closed findings are not actually
-closed**, and in each case the closing record is more confident than the code:
+What Round 2 found is a different class of problem. **Three closures did not hold**, and in each the
+record is more confident than the code. The pattern is consistent: **the symptom was fixed and the
+record claims the cause was addressed.**
 
 - **L3** was recorded as "already fixed before being reached". It was never fixed. The cap is still in
   the source, and it is biased so that the runs most likely to be stuck are the ones never examined.
+  → [R2-1](#r2-1-stuck-run-detection-never-looks-at-the-runs-most-likely-to-be-stuck)
 - **L5** (constant-time admin token comparison) was fixed at one of its two call sites. The unfixed one
-  is the path every API request takes.
-- **M11/L10/L4/L6/L8/L11** were all genuinely resolved, but the prose describing them was frozen
-  mid-remediation and contradicted the table beneath it. A reader who trusted the prose would conclude
-  daemon mode was unsafe to enable and the backlog was unmonitored. Neither is now true.
+  is the path every API request takes. → [R2-4](#r2-4-two-credential-resolution-implementations-and-the-security-fix-reached-only-one)
+- **Remediation step 9** promised a "shared adapter base for spawn / stderr / exit settlement / session
+  lifetime" and is marked ✅. No base exists. Six adapters still hand-roll exit settlement and five of
+  the six functions are byte-identical. The three PRs in that row fixed the three bugs, one adapter at
+  a time. → [R2-12](#r2-12-the-shared-adapter-base-was-reported-delivered-and-never-built-six-copies-of-the-same-fix-remain)
+
+Separately, **M11/L10/L4/L6/L8/L11** were all genuinely resolved, but the prose describing them was
+frozen mid-remediation and contradicted the table beneath it. A reader who trusted the prose would
+conclude daemon mode was unsafe to enable and the backlog was unmonitored. Neither is now true.
 
 Beyond that, the new findings cluster in one place: **the SSE path advances its cursor before delivery
 is known to have succeeded**, which is the same mistake as issue #133 in a different function, and
@@ -52,6 +59,7 @@ Every finding below is filed. None is fixed at the time of writing.
 | R2-8 | Rate-limiter map unbounded, sweep O(n) | Low | [#144](https://github.com/aywengo/mercury/issues/144) |
 | R2-9 | SSE writes ignore backpressure | Low | [#145](https://github.com/aywengo/mercury/issues/145) |
 | R2-10 | One poll query per subscriber | Low | [#146](https://github.com/aywengo/mercury/issues/146) |
+| R2-12 | Shared adapter base never built; 6 copies of one fix | Medium | [#148](https://github.com/aywengo/mercury/issues/148) |
 | R2-11 | `slowDown()` fires with no subscribers | Low | not filed — already Stage 0 in [cross-process-event-push.md](cross-process-event-push.md) |
 
 **Suggested order.** R2-3 and R2-7 first: they are small, and they are what would make R2-2 visible
@@ -373,6 +381,64 @@ rethrow by execution in the R2-2 batch reproduction, which printed
 **Fix.** Wrap the post-headers section, and on error call `end()` rather than delegating to Express —
 once headers are out, the only correct action is to close the stream. This also gives R2-3's log line
 somewhere to live.
+
+---
+
+### R2-12. The shared adapter base was reported delivered and never built; six copies of the same fix remain
+
+**Issue:** [#148](https://github.com/aywengo/mercury/issues/148)
+
+Round 1's root cause analysis was unambiguous:
+
+> Exit settlement is hand-rolled in five adapters with three different answers, one of them wrong. …
+> This is also the strongest argument for a shared adapter base class handling spawn, stderr buffering,
+> exit settlement and session lifetime. That is a **correctness** argument, not an aesthetic one: the
+> same bug is reproduced five times.
+
+Its remediation table then promised exactly that, as step 9:
+
+> | 9 | Shared adapter base for spawn / stderr / exit settlement / session lifetime | H10, M6, M12 | ✅ #102, #103, #111 |
+
+**No shared base exists.** `src/adapters/agentAdapter.ts` is an 11-line type re-export. The three PRs
+patched the three bugs per adapter: #102 touched only `daemonAgentAdapter.ts`, #111 touched only
+`daemonAgentAdapter.ts`, and #103 added `dispose()` to all six adapters individually. The row is
+accurate about the bugs and wrong about the fix.
+
+**Measured.** There are six `settleExit` functions — one per adapter — and five of them are
+**byte-identical**:
+
+```text
+hermes vs local   100%      prime  vs remote  100%
+hermes vs prime   100%      local  vs rpc     100%
+hermes vs rpc     100%      daemon vs the rest 80%  (differs only: DaemonSession vs Session)
+```
+
+```ts
+function settleExit(session: Session, exit: AgentExit): void {
+  if (session.exitSettled) return;
+  session.exitSettled = true;
+  session.exitResolve(exit);
+}
+```
+
+The same shape repeats for the rest of the contract step 9 named: `exitSettled: boolean` +
+`exitResolve: (exit: AgentExit) => void` declared identically in all six; a `sessions` Map in six; a
+`terminated` flag in six; a `done` flag in six.
+
+**Why this matters now rather than eventually.** `docs/agent-adapters.md` §9 lists **six more adapters**
+as planned work — Codex, ClaudeCode, Gemini, Aider, OpenHands, Devin. Each will re-implement exit
+settlement, session lifetime and the terminated/done discipline from scratch, inheriting none of the six
+fixes, and the next H10 will be found in whichever one gets it wrong. That is the exact mechanism round 1
+described, still available.
+
+**How confirmed:** `grep` for any shared settle/spawn/session helper across `src/` returns only the six
+per-adapter copies plus the worker's unrelated `settleDespite`; pairwise `difflib` similarity over the
+extracted function bodies; the file lists of #102, #103 and #111 from the GitHub API.
+
+**Fix.** Extract one module owning exit settlement, the session map, and spawn/stderr buffering; convert
+the six adapters to use it; then add a guard test asserting a new adapter cannot declare its own
+`exitResolve`. The refactor is mechanical — five of six bodies are already identical — and doing it
+before the seventh adapter is far cheaper than after.
 
 ---
 
