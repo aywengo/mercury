@@ -95,8 +95,10 @@ function renderRun(r, skills) {
   $('f-constraints').innerHTML = [
     ['Max duration', c.maxDurationMs ? Math.round(c.maxDurationMs / 1000) + 's' : '—'],
     ['Max retries', c.maxRetries ?? '—'],
-    ['Max tokens', c.maxTokens ?? '—'],
-    ['Max cost', c.maxCost ?? '—'],
+    // Recorded only, not enforced (issue #63). Labelled as a budget rather than a limit so the
+    // dashboard does not imply the run will be stopped when it is exceeded.
+    ['Budget tokens (not enforced)', c.budgetTokens ?? '—'],
+    ['Budget cost (not enforced)', c.budgetCost ?? '—'],
     ['Resource limits', c.resourceLimits ? pretty(c.resourceLimits) : '—'],
     ['Allowed networks', c.allowedNetworks ? c.allowedNetworks.join(', ') : '—'],
   ].map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');

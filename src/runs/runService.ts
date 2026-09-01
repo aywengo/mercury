@@ -71,8 +71,8 @@ export class RunService {
     const constraints: RunConstraints = {
       maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
       maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
-      maxTokens: input.constraints?.maxTokens,
-      maxCost: input.constraints?.maxCost,
+      budgetTokens: input.constraints?.budgetTokens,
+      budgetCost: input.constraints?.budgetCost,
       resourceLimits: input.constraints?.resourceLimits,
       allowedNetworks: input.constraints?.allowedNetworks,
     };
@@ -239,12 +239,27 @@ function isUniqueViolation(err: unknown): boolean {
   return err instanceof Error && /UNIQUE constraint failed/.test(err.message);
 }
 
-const NUMERIC_CONSTRAINT_KEYS = ['maxDurationMs', 'maxRetries', 'maxTokens', 'maxCost'] as const;
-const CONSTRAINT_KEYS = new Set(['maxDurationMs', 'maxRetries', 'maxTokens', 'maxCost', 'resourceLimits', 'allowedNetworks']);
+const NUMERIC_CONSTRAINT_KEYS = ['maxDurationMs', 'maxRetries', 'budgetTokens', 'budgetCost'] as const;
+const CONSTRAINT_KEYS = new Set(['maxDurationMs', 'maxRetries', 'budgetTokens', 'budgetCost', 'resourceLimits', 'allowedNetworks']);
+
+// Renamed by issue #63 because max* implied enforcement that does not exist. Rejecting them with a
+// migration message (rather than the generic "Unknown constraint") is deliberate: a stale client
+// would otherwise get an error that names neither the new spelling nor the reason.
+const RENAMED_CONSTRAINTS: Record<string, string> = {
+  maxTokens: 'budgetTokens',
+  maxCost: 'budgetCost',
+};
 
 /** Validate a client-supplied constraints object (issue #28). */
 function validateConstraints(c: Record<string, unknown>): void {
   for (const key of Object.keys(c)) {
+    const renamed = RENAMED_CONSTRAINTS[key];
+    if (renamed) {
+      throw new ValidationError(
+        `constraint ${key} was renamed to ${renamed}: it is recorded but not enforced, so the ` +
+        `max* name implied a guarantee that does not exist`,
+      );
+    }
     if (!CONSTRAINT_KEYS.has(key)) {
       throw new ValidationError(`Unknown constraint: ${key}`);
     }
@@ -252,8 +267,13 @@ function validateConstraints(c: Record<string, unknown>): void {
   for (const key of NUMERIC_CONSTRAINT_KEYS) {
     const v = c[key];
     if (v === undefined) continue;
-    if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) {
-      throw new ValidationError(`constraint ${key} must be a finite integer`);
+    // budgetCost is a money amount, so fractional values are the normal case: `budgetCost: 2.5`
+    // means two dollars and fifty cents. Requiring an integer here made the field unable to
+    // express any non-whole budget, rejecting exactly the values it exists to accept. The other
+    // three are genuine counts/durations and stay integer-only.
+    const integral = key !== 'budgetCost';
+    if (typeof v !== 'number' || !Number.isFinite(v) || (integral && !Number.isInteger(v))) {
+      throw new ValidationError(`constraint ${key} must be a finite ${integral ? 'integer' : 'number'}`);
     }
     if (v < 0) {
       throw new ValidationError(`constraint ${key} must be >= 0`);

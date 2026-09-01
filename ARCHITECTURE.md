@@ -567,11 +567,18 @@ interface RunContext {
 interface RunConstraints {
   maxDurationMs: number;
   maxRetries: number;
-  maxTokens?: number;          // token budget, if enforced
-  maxCost?: number;            // cost budget, if enforced
+  budgetTokens?: number;       // RECORDED ONLY -- not enforced (see below)
+  budgetCost?: number;         // RECORDED ONLY -- not enforced (see below)
   resourceLimits?: { cpu?: string; memory?: string; disk?: string };
   allowedNetworks?: string[];  // egress policy; empty = no network
 }
+
+**`budgetTokens` and `budgetCost` are recorded, not enforced.** No adapter reports token or cost
+usage, so there is nothing to compare a budget against while a Run executes. They were formerly
+`maxTokens`/`maxCost`, which sat beside two genuinely enforced `max*` fields (`maxDurationMs` and
+`maxRetries`, both read by the worker) and so read as promises that were never kept. Enforcement
+requires per-run usage reporting from every adapter; if that is ever added, enforcement belongs in
+the drive loop next to the `maxDurationMs` deadline and the fields should be renamed back to `max*`.
 ```
 
 It should contain everything needed to execute the task without depending on the original client connection.
