@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -358,4 +359,65 @@ test('containment errors do not disclose absolute paths (issue #66)', () => {
   } finally {
     rmSync(ws, { recursive: true, force: true });
   }
+});
+
+test('skill hash is independent of host locale (issue #86)', () => {
+  // Byte-identical skill content must produce one hash on every host. localeCompare depends on the
+  // host locale and ICU build, so a skill with more than one file could hash differently on a
+  // developer machine and on CI. Files differing only by punctuation are enough: locale sorts
+  // '_' < '-' < '.', code-unit order sorts '-' < '.' < '_'.
+  const root = mkdtempSync(join(tmpdir(), 'mercury-skillhash-'));
+  const dir = join(root, 'punct');
+  mkdirSync(join(dir, 'references'), { recursive: true });
+  writeFileSync(join(dir, 'SKILL.md'),
+    '---\nversion: 1.0.0\ndescription: d\ncapabilities: [x]\n---\n# T\n');
+  writeFileSync(join(dir, 'references', 'a-b.md'), 'a-b\n');
+  writeFileSync(join(dir, 'references', 'a.b.md'), 'a.b\n');
+  writeFileSync(join(dir, 'references', 'a_b.md'), 'a_b\n');
+
+  let hash: string;
+  try {
+  const reg = new SkillRegistry(root);
+  hash = reg.resolve(['punct'])[0].hash;
+
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // Pinned, computed from the code-unit ordering of these exact paths:
+  //   SKILL.md | references/a-b.md | references/a.b.md | references/a_b.md
+  // If this changes, the hash function changed -- which silently rewrites the meaning of every
+  // run_skills.skill_hash row and skill.selected event already stored.
+  const files: Record<string, string> = {
+    'SKILL.md': '---\nversion: 1.0.0\ndescription: d\ncapabilities: [x]\n---\n# T\n',
+    'references/a-b.md': 'a-b\n',
+    'references/a.b.md': 'a.b\n',
+    'references/a_b.md': 'a_b\n',
+  };
+  const expected = createHash('sha256')
+    .update(Object.entries(files)
+      .sort(([a], [b]) => compareSkillIds(a, b))
+      .map(([f, c]) => `${f}\0${c}`)
+      .join('\0'))
+    .digest('hex');
+  assert.equal(hash, expected, 'hash must use the canonical code-unit ordering');
+
+  // And prove the two orderings really do disagree for this input -- otherwise the assertion above
+  // would pass under localeCompare too and prove nothing.
+  const localeHash = createHash('sha256')
+    .update(Object.entries(files)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([f, c]) => `${f}\0${c}`)
+      .join('\0'))
+    .digest('hex');
+  assert.notEqual(hash, localeHash,
+    'this fixture no longer distinguishes the two comparators; pick paths whose locale and code-unit orders differ');
+});
+
+test('no locale-dependent comparator remains in the skill registry (issue #86)', () => {
+  const src = readFileSync(join(import.meta.dirname, '..', 'src', 'skills', 'skillRegistry.ts'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+  assert.doesNotMatch(src, /localeCompare/,
+    'localeCompare is locale- and ICU-sensitive; use compareSkillIds so ordering has one answer');
 });
