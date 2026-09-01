@@ -171,8 +171,8 @@ export interface CrewPreset {
     defaults?: Partial<RunConstraints>;
     ceilings?: {                 // hard limits this role must never exceed
       maxDurationMs?: number;
-      maxTokens?: number;
-      maxCost?: number;
+      budgetTokens?: number;   // recorded only, not enforced (issue #63)
+      budgetCost?: number;     // recorded only, not enforced (issue #63)
       allowedNetworks?: string[];
     };
   };
@@ -467,11 +467,14 @@ above the system default, and `allowedNetworks` is intersected with the preset c
 rather than unioned — an empty preset ceiling means no network, matching the sandbox
 rule that an empty `allowedNetworks` means `--network none` (`sandboxManager.ts:15`).
 
-**Known gap this design inherits.** `maxTokens` and `maxCost` are stored and validated
-(`runService.ts:73-74`, `:241`) but never enforced anywhere in the worker. A preset that
-sets a token budget today gets a silently ignored field. Phase 4 pairs crew budgets
-with real enforcement, and until then the dashboard must render these as "recorded, not
-enforced" rather than implying they work.
+**Constraint naming resolved (issue #63).** `budgetTokens` and `budgetCost` are stored
+and validated but **not enforced** anywhere in the worker: no adapter reports token or cost
+usage, so there is nothing to compare a budget against mid-run. They used to be called
+`maxTokens`/`maxCost`, sitting beside two genuinely enforced `max*` fields, which made a
+silently ignored field look like a ceiling. They are now named `budget*`, documented as
+recorded-only, and the dashboard labels them "(not enforced)". Phase 4 still owns pairing
+crew budgets with real enforcement; what changed is that the field no longer claims to work
+before it does.
 
 ### 7.3 Workspace materialisation
 
@@ -869,8 +872,9 @@ Land these before any upload path exists.
 1. Path containment helper `src/workspace/containment.ts`:
    `assertInside(root, rel)` rejecting absolute paths, `..`, and symlinks. Wire it into
    `writeSkills()` (`worker.ts:659`) and add a regression test with a `../` member name.
-2. Constraint enforcement gap: either enforce `maxTokens`/`maxCost` or mark them
-   explicitly advisory. Crew presets depend on ceilings being real.
+2. ~~Constraint enforcement gap~~ — **done (issue #63)**: renamed to
+   `budgetTokens`/`budgetCost` and documented as recorded-only. Crew presets still depend
+   on ceilings being real, so Phase 4 must add usage reporting before budgets can gate.
 3. Decide the transaction posture for concurrent event appends (see note below), since
    `crew.selected` adds another writer to the same path.
 
@@ -1000,9 +1004,10 @@ most speculative and can slip without weakening anything above it.
    for long runs; passing full event history between stages would be quadratic.
 5. **Model pinning.** Whether `agent.model` should be a ceiling as well as a default, so a
    shared role cannot be run with an unexpectedly expensive model.
-6. **Enforcement of `maxTokens`/`maxCost`.** Phase 0 asks whether to enforce or rename.
-   Renaming to `budgetTokens`/`budgetCost` with "recorded only" semantics is honest;
-   enforcement needs per-run usage reporting from adapters, which does not exist yet.
+6. ~~Enforcement of `maxTokens`/`maxCost`~~ — **renamed (issue #63)** to
+   `budgetTokens`/`budgetCost`, recorded-only. Still open: enforcement, which needs per-run
+   usage reporting from adapters. A crew preset can record a budget today but cannot stop a
+   run that exceeds it.
 
 ---
 

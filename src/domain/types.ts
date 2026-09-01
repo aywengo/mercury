@@ -20,10 +20,20 @@ export interface RepositoryContext {
 }
 
 export interface RunConstraints {
+  // maxDurationMs and maxRetries are ENFORCED (worker.ts reads both).
+  //
+  // budgetTokens / budgetCost are RECORDED ONLY (issue #63). Nothing enforces them: no adapter
+  // reports token or cost usage, so there is nothing to compare a budget against mid-run. They
+  // were previously named maxTokens / maxCost, which sat next to two genuinely enforced max*
+  // fields and so read as promises. Renaming is the honest fix; enforcement needs per-run usage
+  // reporting from every adapter, which does not exist.
+  //
+  // If usage reporting is ever added, enforcement belongs in the drive loop next to the
+  // maxDurationMs deadline, and these should be renamed back to max* at that point.
   maxDurationMs: number;
   maxRetries: number;
-  maxTokens?: number;
-  maxCost?: number;
+  budgetTokens?: number;
+  budgetCost?: number;
   resourceLimits?: { cpu?: string; memory?: string; disk?: string };
   allowedNetworks?: string[];
 }

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { NotFoundError } from '../src/domain/errors.ts';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDatabase } from '../src/db/database.ts';
 import { makeEnv, waitFor } from './helpers.ts';
@@ -273,6 +274,16 @@ test('create rejects malformed constraints (issue #28)', () => {
       () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ bogus: 1 }) }),
       /Unknown constraint: bogus/,
     );
+    // Inherited Object.prototype keys must read as unknown, not as a rename. A bare
+    // RENAMED_CONSTRAINTS[key] lookup resolves 'toString' to the toString function, which is
+    // truthy, and produced a nonsense "renamed to function toString()" error.
+    for (const protoKey of ['toString', 'constructor', 'valueOf', 'hasOwnProperty']) {
+      assert.throws(
+        () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ [protoKey]: 1 }) }),
+        new RegExp(`Unknown constraint: ${protoKey}`),
+        `${protoKey} must be rejected as unknown, not treated as a renamed constraint`,
+      );
+    }
     // malformed resourceLimits
     assert.throws(
       () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ resourceLimits: { gpu: '1' } }) }),
@@ -442,4 +453,67 @@ test('a concurrent cancellation is not silently overwritten by a later transitio
   } finally {
     env.close();
   }
+});
+
+test('budget constraints are recorded, not enforced, and reject the old max* names (issue #63)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  const loose = (c: unknown) => c as unknown as Partial<RunConstraints>;
+  try {
+    // The old names are rejected with a message that names the replacement, rather than the
+    // generic "Unknown constraint" that would leave a stale client guessing.
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ maxTokens: 1000 }) }),
+      /maxTokens was renamed to budgetTokens.*not enforced/,
+    );
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ maxCost: 5 }) }),
+      /maxCost was renamed to budgetCost.*not enforced/,
+    );
+
+    // The new names are accepted and stored verbatim.
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake',
+      constraints: loose({ budgetTokens: 50_000, budgetCost: 2.5 }),
+    });
+    assert.equal(run.constraints.budgetTokens, 50_000);
+    // A money budget must accept cents. Integer-only validation rejected 2.5, which is the normal
+    // way to express a two-dollar-fifty cap -- the field could not state its own common case.
+    assert.equal(run.constraints.budgetCost, 2.5, 'budgetCost must accept fractional amounts');
+    // And they are recorded ONLY: nothing downstream reads them, which is the whole point of the
+    // rename. Asserting the absence here is what stops the max* name coming back without
+    // enforcement being added alongside it.
+    assert.equal((run.constraints as unknown as Record<string, unknown>).maxTokens, undefined);
+    assert.equal((run.constraints as unknown as Record<string, unknown>).maxCost, undefined);
+
+    // Still validated as numbers -- the rename does not remove validation.
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ budgetTokens: 'lots' }) }),
+      /budgetTokens must be a finite integer/,
+    );
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ budgetCost: -1 }) }),
+      /budgetCost must be >= 0/,
+    );
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ budgetCost: NaN }) }),
+      /budgetCost must be a finite number/,
+    );
+    // budgetTokens stays integral (a token count is a count); budgetCost does not.
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ budgetTokens: 1.5 }) }),
+      /budgetTokens must be a finite integer/,
+    );
+  } finally {
+    env.close();
+  }
+});
+
+test('worker.ts does not read the budget constraints, so they cannot be called enforced (issue #63)', () => {
+  // This is the assertion that keeps the rename honest. If someone adds enforcement, this test
+  // should be DELETED and the fields renamed back to max* -- leaving them named budget* while
+  // enforced would be the mirror image of the original lie.
+  const src = readFileSync(join(import.meta.dirname, '..', 'src', 'worker', 'worker.ts'), 'utf8');
+  assert.doesNotMatch(src, /budgetTokens|budgetCost/,
+    'worker.ts now reads the budget constraints -- either enforce them properly and rename back '
+    + 'to maxTokens/maxCost, or delete this test with a reason');
 });
