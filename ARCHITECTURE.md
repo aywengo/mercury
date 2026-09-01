@@ -1507,7 +1507,7 @@ flowchart TD
 6. ~~Multi-repository Runs~~ — **done**: `repositories[]` in the Run model (backward compatible), API accepts `repositories` or `repository`, workspace clones/copies additional repos under `repos/`, GC cleans them, 5 tests.
 7. ~~Expand skill library~~ — **done**: 12 skills (added documentation, deployment, frontend, issue-fix-loop).
 8. ~~Deployment packaging~~ — **done**: `deploy/` with systemd units (server + worker), SQLite backup script with retention, logrotate config, ops guide.
-9. ~~Daemon-based agent sessions~~ — **implemented behind `MERCURY_AGENT_MODE=daemon`** (RPC remains default); verify against the real daemon before relying on it.
+9. **Daemon-based agent sessions** — an adapter exists behind `MERCURY_AGENT_MODE=daemon` but is **not functional against a real daemon**: verified against PrimeAgent 0.8.1 (daemon protocol v7), it disagrees on frame layout, command envelope, session identity and socket choice, while its 12 tests pass against a mock that shares those assumptions. RPC remains the default and the only working path. See [`docs/daemon-agent-sessions.md`](docs/daemon-agent-sessions.md).
 10. **Crew — agent preset store** — **design only, not implemented**: versioned role
    presets (instruction, skills, MCP servers, constraints, bounded loops/graphs) for roles
    like `reviewer`, `system-architect`, `kubernetes`, `kafka`, `gcp-sre`, `aws-sre`;
