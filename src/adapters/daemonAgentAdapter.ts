@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createConnection, type Socket } from 'node:net';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type {
   AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext,
 } from '../domain/types.ts';
@@ -67,12 +68,6 @@ const DONE: AgentEvent = { type: '__done__', payload: {} };
  * precisely the paths that need it most (issue #55). Same shape as settleExit() in
  * primeAgentAdapter.ts, which already gets this right.
  */
-function settleExit(session: DaemonSession, exit: AgentExit): void {
-  if (session.exitSettled) return;
-  session.exitSettled = true;
-  session.exitResolve(exit);
-}
-
 export class DaemonAgentAdapter implements AgentAdapter {
   private cmd: string;
   private opts: DaemonAgentAdapterOptions;
@@ -122,15 +117,10 @@ export class DaemonAgentAdapter implements AgentAdapter {
       done: false,
       cancelled: false,
       terminated: false,
-      exitSettled: false,
       queue: [],
       waiters: [],
-      exitPromise: undefined as unknown as Promise<AgentExit>,
-      exitResolve: undefined as unknown as (exit: AgentExit) => void,
+        ...createExitGate(),
     };
-    session.exitPromise = new Promise<AgentExit>((resolve) => {
-      session.exitResolve = resolve;
-    });
     this.sessions.set(runId, session);
 
     const socketPath = join(sessionDir, 'daemon.sock');

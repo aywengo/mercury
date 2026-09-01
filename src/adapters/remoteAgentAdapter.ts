@@ -4,6 +4,7 @@
 // Everything is declarative config: base URL, auth, create/get/events/input/
 // cancel endpoints, polling, event mapping. No per-agent code.
 
+import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type {
   AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext,
 } from '../domain/types.ts';
@@ -238,18 +239,13 @@ export class RemoteAgentAdapter implements AgentAdapter {
       done: false,
       cancelled: false,
       terminated: false,
-      exitSettled: false,
       queue: [],
       waiters: [],
-      exitPromise: undefined as unknown as Promise<AgentExit>,
-      exitResolve: undefined as unknown as (exit: AgentExit) => void,
+        ...createExitGate(),
       emittedEvents: 0,
       pollAbort: null,
       lastError: null,
     };
-    session.exitPromise = new Promise<AgentExit>((resolve) => {
-      session.exitResolve = resolve;
-    });
     this.sessions.set(runId, session);
 
     // 1. create the remote task
@@ -421,28 +417,20 @@ export class RemoteAgentAdapter implements AgentAdapter {
         done: false,
         cancelled: false,
         terminated: false,
-        exitSettled: false,
         queue: [],
         waiters: [],
-        exitPromise: undefined as unknown as Promise<AgentExit>,
-        exitResolve: undefined as unknown as (exit: AgentExit) => void,
+        ...createExitGate(),
         emittedEvents: 0,
         pollAbort: null,
         lastError: null,
       };
-      session.exitPromise = new Promise<AgentExit>((resolve) => {
-        session!.exitResolve = resolve;
-      });
       this.sessions.set(runId, session);
     }
     if (!session.taskId) throw new Error(`No remote task id for run ${runId}; use retry-from-scratch`);
     session.done = false;
     session.cancelled = false;
     session.terminated = false;
-    session.exitSettled = false;
-    session.exitPromise = new Promise<AgentExit>((resolve) => {
-      session.exitResolve = resolve;
-    });
+    rearmExitGate(session);
     this.startPolling(session);
 
     return {
@@ -461,12 +449,6 @@ function finish(session: Session, exit: AgentExit): void {
   session.done = true;
   for (const waiter of session.waiters.splice(0)) waiter(DONE);
   settleExit(session, exit);
-}
-
-function settleExit(session: Session, exit: AgentExit): void {
-  if (session.exitSettled) return;
-  session.exitSettled = true;
-  session.exitResolve(exit);
 }
 
 function push(session: Session, ev: AgentEvent): void {

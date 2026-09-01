@@ -8,6 +8,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type {
   AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext,
 } from '../domain/types.ts';
@@ -231,18 +232,13 @@ export class LocalAgentAdapter implements AgentAdapter {
       done: false,
       cancelled: false,
       terminated: false,
-      exitSettled: false,
       queue: [],
       waiters: [],
-      exitPromise: undefined as unknown as Promise<AgentExit>,
-      exitResolve: undefined as unknown as (exit: AgentExit) => void,
+        ...createExitGate(),
       sessionId: null,
       stdoutBuf: '',
       waitingForInput: false,
     };
-    session.exitPromise = new Promise<AgentExit>((resolve) => {
-      session.exitResolve = resolve;
-    });
     this.sessions.set(runId, session);
 
     const spawnCmd = this.wrapForSandbox(context, argv);
@@ -546,18 +542,13 @@ export class LocalAgentAdapter implements AgentAdapter {
         done: false,
         cancelled: false,
         terminated: false,
-        exitSettled: false,
         queue: [],
         waiters: [],
-        exitPromise: undefined as unknown as Promise<AgentExit>,
-        exitResolve: undefined as unknown as (exit: AgentExit) => void,
+        ...createExitGate(),
         sessionId: null,
         stdoutBuf: '',
         waitingForInput: false,
       };
-      session.exitPromise = new Promise<AgentExit>((resolve) => {
-        session!.exitResolve = resolve;
-      });
       this.sessions.set(runId, session);
     }
     const cfg = session.config.resume;
@@ -575,10 +566,7 @@ export class LocalAgentAdapter implements AgentAdapter {
     session.done = false;
     session.cancelled = false;
     session.terminated = false;
-    session.exitSettled = false;
-    session.exitPromise = new Promise<AgentExit>((resolve) => {
-      session.exitResolve = resolve;
-    });
+    rearmExitGate(session);
 
     const argv = [...(session.config.args ?? []), cfg.flag, sessionId];
     const traceEnv: Record<string, string> = { MERCURY_RUN_ID: runId, MERCURY_TRACE_ID: runId };
@@ -601,12 +589,6 @@ function finishCompleted(session: Session): void {
   session.done = true;
   for (const waiter of session.waiters.splice(0)) waiter(DONE);
   settleExit(session, { code: 0, signal: null, reason: 'completed' });
-}
-
-function settleExit(session: Session, exit: AgentExit): void {
-  if (session.exitSettled) return;
-  session.exitSettled = true;
-  session.exitResolve(exit);
 }
 
 function push(session: Session, ev: AgentEvent): void {

@@ -15,6 +15,7 @@
 
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type {
   AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run, RunConstraints, RunContext,
 } from '../domain/types.ts';
@@ -184,10 +185,11 @@ export class RpcAgentAdapter implements AgentAdapter {
       for (const translated of session.translator.translate(ev)) {
         push(session, translated);
         if (translated.type === 'agent.end' && !session.exitSettled) {
+          // Settlement goes through the shared helper rather than repeating its guard inline
+          // (issue #148). `done` keeps its original position under the same condition.
           session.done = true;
-          session.exitSettled = true;
           const code = (translated.payload as { code?: number }).code ?? 0;
-          session.exitResolve({ code, signal: null, reason: code === 0 ? 'completed' : 'failed' });
+          settleExit(session, { code, signal: null, reason: code === 0 ? 'completed' : 'failed' });
         }
       }
     });
@@ -235,15 +237,10 @@ export class RpcAgentAdapter implements AgentAdapter {
       done: false,
       cancelled: false,
       terminated: false,
-      exitSettled: false,
       queue: [],
       waiters: [],
-      exitPromise: undefined as unknown as Promise<AgentExit>,
-      exitResolve: undefined as unknown as (exit: AgentExit) => void,
+        ...createExitGate(),
     };
-    session.exitPromise = new Promise<AgentExit>((resolve) => {
-      session.exitResolve = resolve;
-    });
     this.sessions.set(runId, session);
     return session;
   }
@@ -442,12 +439,6 @@ function eventsGenerator(session: Session): AsyncGenerator<AgentEvent> {
       }
     }
   })();
-}
-
-function settleExit(session: Session, exit: AgentExit): void {
-  if (session.exitSettled) return;
-  session.exitSettled = true;
-  session.exitResolve(exit);
 }
 
 function push(session: Session, ev: AgentEvent): void {

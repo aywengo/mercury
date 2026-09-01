@@ -20,6 +20,7 @@
 
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type {
   AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run, RunConstraints, RunContext,
 } from '../domain/types.ts';
@@ -109,15 +110,10 @@ export class PrimeAgentAdapter implements AgentAdapter {
       done: false,
       cancelled: false,
       terminated: false,
-      exitSettled: false,
       queue: [],
       waiters: [],
-      exitPromise: undefined as unknown as Promise<AgentExit>,
-      exitResolve: undefined as unknown as (exit: AgentExit) => void,
+        ...createExitGate(),
     };
-    session.exitPromise = new Promise<AgentExit>((resolve) => {
-      session.exitResolve = resolve;
-    });
     this.sessions.set(runId, session);
     return session;
   }
@@ -197,10 +193,11 @@ export class PrimeAgentAdapter implements AgentAdapter {
         push(session, translated);
         if (translated.type === 'agent.end' && !session.exitSettled) {
           // Agent finished; resolve the exit promise (the RPC process may stay alive).
+          // `done` is set under the same guard as before; settlement then goes through the shared
+          // helper instead of repeating its first-writer-wins check inline (issue #148).
           session.done = true;
-          session.exitSettled = true;
           const code = (translated.payload as { code?: number }).code ?? 0;
-          session.exitResolve({ code, signal: null, reason: code === 0 ? 'completed' : 'failed' });
+          settleExit(session, { code, signal: null, reason: code === 0 ? 'completed' : 'failed' });
         }
       }
     });
@@ -347,10 +344,11 @@ export class PrimeAgentAdapter implements AgentAdapter {
         push(session, translated);
         if (translated.type === 'agent.end' && !session.exitSettled) {
           // Agent finished; resolve the exit promise (the RPC process may stay alive).
+          // `done` is set under the same guard as before; settlement then goes through the shared
+          // helper instead of repeating its first-writer-wins check inline (issue #148).
           session.done = true;
-          session.exitSettled = true;
           const code = (translated.payload as { code?: number }).code ?? 0;
-          session.exitResolve({ code, signal: null, reason: code === 0 ? 'completed' : 'failed' });
+          settleExit(session, { code, signal: null, reason: code === 0 ? 'completed' : 'failed' });
         }
       }
     });
@@ -404,12 +402,6 @@ function eventsGenerator(session: Session): AsyncGenerator<AgentEvent> {
       }
     }
   })();
-}
-
-function settleExit(session: Session, exit: AgentExit): void {
-  if (session.exitSettled) return;
-  session.exitSettled = true;
-  session.exitResolve(exit);
 }
 
 function push(session: Session, ev: AgentEvent): void {
