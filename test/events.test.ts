@@ -894,3 +894,214 @@ test('a throwing push subscriber does not starve the others (issue #138)', async
     env.close();
   }
 });
+
+// --- issue #146: one poll read per (run, cursor), not one per subscriber ------------------------
+//
+// poll() used to call readAfter() once per Subscription. Ten tabs on one run issued ten identical
+// `SELECT ... LIMIT 500` four times a second and got back the same rows. These tests count reads.
+
+/** Run exactly one poll() tick synchronously, so read counts are not a race with the timer. */
+function pollOnce(stream: EventStream): void {
+  (stream as unknown as { poll: () => void }).poll();
+}
+
+/** Count readAfter() calls on a live stream by wrapping the instance method. */
+function countReads(stream: EventStream): { reads: () => number; reset: () => void } {
+  const target = stream as unknown as {
+    readAfter: (runId: string, after: number) => unknown[];
+  };
+  const original = target.readAfter.bind(stream);
+  let n = 0;
+  target.readAfter = (runId: string, after: number) => {
+    n += 1;
+    return original(runId, after);
+  };
+  return { reads: () => n, reset: () => { n = 0; } };
+}
+
+test('a run with two cursors does not log a recovery that did not happen (issue #146)', () => {
+  // Grouping by (runId, cursor) means ONE run can occupy several groups in a single tick. The failure
+  // streak is keyed by runId, so clearing it from whichever group read cleanly logged "recovered" while
+  // another group on the same run was still failing -- then "failed" again next tick. That is the exact
+  // log spam the streak tracker exists to prevent, reintroduced by the grouping.
+  const env = makeEnv({ workerEnabled: false });
+  const peer = new EventStore(env.db); // its appends do not fire the stream's push hook
+  const { log, lines } = capturingLogger();
+  let stream: EventStream | null = null;
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    peer.append(run.id, 'agent.message', { i: 1 });
+    stream = new EventStream(env.db, env.events, 5, 5, log);
+
+    // A subscribes first, so its backlog read succeeds and it parks at the current head. The run's own
+    // lifecycle events occupy the early sequences, so "the head" is NOT sequence 1 -- the lagging cursor
+    // has to be constructed relative to the real head, not assumed.
+    stream.subscribe(run.id, 0, () => {});
+    peer.append(run.id, 'agent.message', { i: 2 });
+    peer.append(run.id, 'agent.message', { i: 3 });
+    // Capture the head BEFORE poisoning: cursor() reads through EventStore.list(), which is exactly the
+    // call that throws on a corrupt payload.
+    const head = cursor(env, run.id);
+    // Poison the OLDEST row A still has to read. Reads from A's cursor throw; reads from the head do
+    // not touch that row at all.
+    const poisonSeq = head - 1;
+    env.db.prepare("UPDATE events SET payload_json = '{' WHERE run_id = ? AND sequence = ?").run(run.id, poisonSeq);
+    // B sits at the head, so its group always reads cleanly.
+    stream.subscribe(run.id, head, () => {});
+
+    const failed = () => lines.filter((l) => l.msg.includes('poll read failed')).length;
+    const recovered = () => lines.filter((l) => l.msg.includes('poll read recovered')).length;
+
+    for (let i = 0; i < 5; i++) pollOnce(stream!);
+
+    assert.equal(failed(), 1, 'the leading edge of the streak logs once');
+    assert.equal(recovered(), 0, 'a clean read on another cursor must not claim recovery');
+    assert.equal((stream as unknown as { failingReads: Set<string> }).failingReads.has(run.id), true,
+      'the run is still failing and must still be tracked as failing');
+
+    // POSITIVE CONTROL: once the row is readable, recovery IS reported. Without this, "recovered is
+    // never logged" would pass even if the recovery path were deleted outright.
+    env.db.prepare(`UPDATE events SET payload_json = '{"i":2}' WHERE run_id = ? AND sequence = ?`).run(run.id, poisonSeq);
+    for (let i = 0; i < 3; i++) pollOnce(stream!);
+    assert.equal(recovered(), 1, 'a genuinely recovered run must still be reported as recovered');
+    assert.equal((stream as unknown as { failingReads: Set<string> }).failingReads.has(run.id), false);
+  } finally {
+    stream?.stop();
+    env.close();
+  }
+});
+
+test('ten subscribers on one run cost ONE poll read (issue #146)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    // A second store: appending through it does not fire the push hook, so delivery goes through
+    // poll() -- which is the path being measured.
+    const writer = new EventStore(env.db);
+    const run = env.runService.create({ ownerId: 'alice', task: 'fan-out', agent: 'fake' });
+    writer.append(run.id, 'agent.message', { i: 1 });
+    const caughtUp = env.events.lastSequence(run.id);
+
+    const stream = new EventStream(env.db, env.events, 10, 10);
+    const counter = countReads(stream);
+    const seen: number[][] = [];
+    for (let i = 0; i < 10; i++) {
+      stream.subscribe(run.id, caughtUp, (evs) => { seen.push(evs.map((e) => e.sequence)); });
+    }
+
+    counter.reset(); // subscribe() reads the backlog; only poll() reads are under test
+    for (let i = 2; i <= 4; i++) writer.append(run.id, 'agent.message', { i });
+    // One synchronous tick. Driving the timer instead made the expected count depend on how many
+    // ticks had fired by the time the assertion ran -- 6 where 3 was expected -- which measures the
+    // scheduler, not the grouping.
+    pollOnce(stream);
+    assert.equal(seen.length, 10, 'every subscriber was served by the single tick');
+    assert.equal(counter.reads(), 1,
+      `10 subscriptions at the same cursor must share one read, got ${counter.reads()}`);
+    // And sharing the read must not mean sharing a subset.
+    assert.equal(new Set(seen.map((x) => x.join(','))).size, 1,
+      'every subscriber must receive the same batch');
+    assert.equal(seen[0].length, 3, 'the whole batch, not a partial page');
+  } finally {
+    env.close();
+  }
+});
+
+test('POSITIVE CONTROL: different runs still read separately (issue #146)', async () => {
+  // Grouping by (run, cursor) rather than by tick is deliberate: a lazier "one read per tick" would
+  // pass the fan-out test above while silently delivering run A's events to run B's subscribers.
+  //
+  // Cursor divergence within one run is NOT asserted here. subscribe() delivers the backlog
+  // synchronously and advances the cursor, so two subscribers on one run converge to the same cursor
+  // before poll() ever runs -- an earlier version of this test expected three groups and got two,
+  // which was the implementation being correct and the fixture being wrong. Per-subscriber cursors
+  // are covered by the issue #133 and #138 tests.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const writer = new EventStore(env.db);
+    const runs = [1, 2, 3].map((n) => {
+      const r = env.runService.create({ ownerId: 'alice', task: `r${n}`, agent: 'fake' });
+      writer.append(r.id, 'agent.message', { i: 1 });
+      return r;
+    });
+
+    const stream = new EventStream(env.db, env.events, 10, 10);
+    const counter = countReads(stream);
+    for (const r of runs) stream.subscribe(r.id, env.events.lastSequence(r.id), () => {});
+
+    counter.reset();
+    for (const r of runs) writer.append(r.id, 'agent.message', { i: 2 });
+    pollOnce(stream);
+    assert.equal(counter.reads(), 3,
+      `three runs must issue three reads in one tick, got ${counter.reads()}`);
+  } finally {
+    env.close();
+  }
+});
+
+test('POSITIVE CONTROL: two cursors on one run read separately and get their own batches (issue #146)', async () => {
+  // The gap that grouping by runId ALONE would slip through: it would read once from the slowest
+  // cursor and hand everyone else that same page. Cursors converge easily (subscribe() delivers the
+  // backlog and advances), so divergence has to be constructed: subscribe A early, let events pile up,
+  // then subscribe B already caught up. Now A and B genuinely sit at different cursors.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const writer = new EventStore(env.db);
+    const run = env.runService.create({ ownerId: 'alice', task: 'divergent', agent: 'fake' });
+    writer.append(run.id, 'agent.message', { i: 1 });
+
+    const stream = new EventStream(env.db, env.events, 10, 10);
+    const aSeen: number[][] = [];
+    const bSeen: number[][] = [];
+    stream.subscribe(run.id, 0, (e) => aSeen.push(e.map((x) => x.sequence))); // A advances to 1
+    for (let i = 2; i <= 6; i++) writer.append(run.id, 'agent.message', { i });
+    // Capture B's cursor AFTER the appends, so B really is at the head and A is the only one behind.
+    const caughtUp = env.events.lastSequence(run.id);
+    stream.subscribe(run.id, caughtUp, (e) => bSeen.push(e.map((x) => x.sequence)));
+
+    const counter = countReads(stream);
+    counter.reset();
+    pollOnce(stream);
+
+    assert.equal(counter.reads(), 2,
+      `A at cursor 1 and B at the head are different groups; got ${counter.reads()} reads`);
+    // Sequences include the lifecycle events the run service appends itself, so assert against the
+    // store rather than a hand-count of the fixture's own appends.
+    const last = env.events.lastSequence(run.id);
+    // aSeen accumulates BOTH the synchronous backlog from subscribe() (sequence 1) and the poll
+    // delivery (everything after it).
+    assert.deepEqual(aSeen.flat(), Array.from({ length: last }, (_, k) => k + 1),
+      'the lagging subscriber gets everything after its cursor, across both deliveries');
+    assert.deepEqual(bSeen, [], 'the caught-up subscriber must NOT be handed the lagging one\'s page');
+  } finally {
+    env.close();
+  }
+});
+
+test('POSITIVE CONTROL: one throwing subscriber does not starve the others in its group (issue #146)', async () => {
+  // Sharing a read makes the delivery loop shared too, so the per-subscriber isolation from issue
+  // #138 has to survive the refactor.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const writer = new EventStore(env.db);
+    const run = env.runService.create({ ownerId: 'alice', task: 'thrower', agent: 'fake' });
+    writer.append(run.id, 'agent.message', { i: 1 });
+    const caughtUp = env.events.lastSequence(run.id);
+
+    const stream = new EventStream(env.db, env.events, 10, 10);
+    let healthy = 0;
+    stream.subscribe(run.id, caughtUp, () => { throw new Error('dead client'); });
+    stream.subscribe(run.id, caughtUp, () => { healthy += 1; });
+
+    writer.append(run.id, 'agent.message', { i: 2 });
+    stream.start();
+    try {
+      await waitFor(() => healthy >= 1, 5_000);
+      await waitFor(() => stream.subscriptionCount === 1, 5_000);
+      assert.equal(stream.subscriptionCount, 1, 'only the throwing subscriber is dropped');
+    } finally {
+      stream.stop();
+    }
+  } finally {
+    env.close();
+  }
+});

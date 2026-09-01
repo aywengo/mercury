@@ -210,42 +210,81 @@ export class EventStream {
    */
   private poll(): void {
     let anyNew = false;
-    for (const sub of [...this.subs]) {
+
+    // Group subscriptions that would issue the IDENTICAL read, so N tabs on one run cost one query
+    // instead of N (issue #146). Ten subscribers on one run were ten `SELECT ... LIMIT 500` four
+    // times a second, all returning the same rows.
+    //
+    // Grouped by (runId, cursor) and NOT by runId alone. A run's subscribers each carry their own
+    // cursor, and reading once for the whole run means reading from the SLOWEST one: everyone else
+    // would then get nothing until that subscriber had paged through its backlog, because readAfter()
+    // caps a page at 500 rows from the cursor it was given. That trades a delivery property for a
+    // performance one. Grouping on the cursor pair dedupes the case the finding describes -- fresh
+    // subscribers on the same run are always at the same cursor -- and changes nothing else.
+    const groups = new Map<string, { runId: string; afterSeq: number; subs: Subscription[] }>();
+    for (const sub of this.subs) {
+      const key = `${sub.runId}\u0000${sub.afterSeq}`;
+      const g = groups.get(key);
+      if (g) g.subs.push(sub);
+      else groups.set(key, { runId: sub.runId, afterSeq: sub.afterSeq, subs: [sub] });
+    }
+
+    // A run can appear in SEVERAL groups in one tick, one per distinct cursor, so the failure streak
+    // cannot be cleared by whichever group succeeds first. Doing that logged "recovered" while another
+    // group on the same run was still failing, then "failed" again on the next tick -- the exact spam
+    // this streak tracker exists to prevent. Collect the tick's outcome per run and settle each streak
+    // once, after the loop.
+    const failedRuns = new Set<string>();
+    const okRuns = new Set<string>();
+
+    for (const group of groups.values()) {
       let events: MercuryEvent[];
       try {
-        events = this.readAfter(sub.runId, sub.afterSeq);
+        events = this.readAfter(group.runId, group.afterSeq);
+        okRuns.add(group.runId);
       } catch (err) {
-        // Transient and shared across subscribers, so keep the subscription. Logged on the leading
+        // Transient and shared across subscribers, so keep the subscriptions. Logged on the leading
         // edge of this run's failure streak only -- see failingReads.
-        if (!this.failingReads.has(sub.runId)) {
-          this.failingReads.add(sub.runId);
+        failedRuns.add(group.runId);
+        if (!this.failingReads.has(group.runId)) {
+          this.failingReads.add(group.runId);
           this.log.error(
-            { err: describeError(err), runId: sub.runId, subs: this.subs.size },
+            { err: describeError(err), runId: group.runId, subs: this.subs.size },
             'event poll read failed; retrying',
           );
         }
         continue;
       }
-      if (this.failingReads.delete(sub.runId)) {
-        this.log.info({ runId: sub.runId }, 'event poll read recovered');
-      }
       if (events.length === 0) continue;
       anyNew = true;
-      try {
-        // Advance only once the batch is accepted. Advancing first meant a throw partway through a
-        // page silently forfeited the rest of it for the life of the subscription (issue #138).
-        sub.onEvents(events);
-        sub.afterSeq = events[events.length - 1].sequence;
-      } catch (err) {
-        // Dead client: drop this one subscriber and say so. This is the only place that can observe
-        // a delivery failure at all, so a silent handler here means nobody ever learns.
-        this.subs.delete(sub);
-        this.log.error(
-          { err: describeError(err), runId: sub.runId },
-          'event subscriber dropped after delivery failure',
-        );
+      // One read, many deliveries -- but each delivery stays isolated. A subscriber that throws owns a
+      // client response, so it is dropped on its own; failing to isolate here let one bad subscriber
+      // starve every later subscriber (issue #138).
+      for (const sub of group.subs) {
+        try {
+          // Advance only once the batch is accepted. Advancing first meant a throw partway through a
+          // page silently forfeited the rest of it for the life of the subscription (issue #138).
+          sub.onEvents(events);
+          sub.afterSeq = events[events.length - 1].sequence;
+        } catch (err) {
+          // Dead client: drop this one subscriber and say so. This is the only place that can observe
+          // a delivery failure at all, so a silent handler here means nobody ever learns.
+          this.subs.delete(sub);
+          this.log.error(
+            { err: describeError(err), runId: group.runId },
+            'event subscriber dropped after delivery failure',
+          );
+        }
       }
     }
+    for (const runId of okRuns) {
+      // Only a run whose every group read cleanly has recovered.
+      if (failedRuns.has(runId)) continue;
+      if (this.failingReads.delete(runId)) {
+        this.log.info({ runId }, 'event poll read recovered');
+      }
+    }
+
     // Back to fast cadence when the poll found nothing new (idle).
     if (!anyNew && this.timer) {
       clearInterval(this.timer);
