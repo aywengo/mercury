@@ -52,22 +52,19 @@ test('URL-credential pattern has no false positives (issue #43)', () => {
 
 import { createLogger } from '../src/logger.ts';
 
-/** Capture what a Logger writes, without depending on a real terminal. */
+/**
+ * Collect what a Logger writes, without touching process.stdout/stderr.
+ *
+ * The earlier version of this helper monkey-patched process.stdout.write. That is hazardous rather
+ * than merely inelegant: the node test runner patches the same function to report results, so a
+ * capture that left a stub in place swallowed the runner's own output and the file reported
+ * "1 test passed" having executed none of its tests. A sink parameter observes the logger without
+ * editing a global the harness owns.
+ */
 function captureLogs(fn: (log: ReturnType<typeof createLogger>) => void): string {
-  const writes: string[] = [];
-  const realOut = process.stdout.write.bind(process.stdout);
-  const realErr = process.stderr.write.bind(process.stderr);
-  // warn/error go to stderr and the rest to stdout, so both must be captured or a level change
-  // silently loses the lines under test.
-  (process.stdout as unknown as { write: (c: string) => boolean }).write = (c: string) => { writes.push(c); return true; };
-  (process.stderr as unknown as { write: (c: string) => boolean }).write = (c: string) => { writes.push(c); return true; };
-  try {
-    fn(createLogger(createRedactor(['hunter2']), 'debug'));
-  } finally {
-    (process.stdout as unknown as { write: unknown }).write = realOut;
-    (process.stderr as unknown as { write: unknown }).write = realErr;
-  }
-  return writes.join('');
+  const lines: string[] = [];
+  fn(createLogger(createRedactor(['hunter2']), 'debug', (line) => lines.push(line)));
+  return lines.join('');
 }
 
 test('the logger redacts secrets in the message text', () => {
