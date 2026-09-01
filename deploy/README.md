@@ -2,24 +2,11 @@
 
 Systemd units, backup script and logrotate config for running Mercury as a service.
 
-## Install
-
-```bash
-sudo useradd --system --home /opt/mercury --shell /usr/sbin/nologin mercury
-sudo mkdir -p /opt/mercury /var/lib/mercury /etc/mercury
-sudo cp -r /path/to/mercury/* /opt/mercury/
-sudo cp mercury.service mercury-worker.service /etc/systemd/system/
-sudo cp logrotate.conf /etc/logrotate.d/mercury
-sudo systemctl daemon-reload
-sudo systemctl enable --now mercury mercury-worker
-```
-
 ## Configuration file (required)
 
 Both units declare `EnvironmentFile=/etc/mercury/mercury.env` **without a leading `-`**, so systemd
-refuses to start the service if the file is missing. It is not optional.
-
-Create it before `systemctl enable --now`:
+refuses to start the service if the file is missing. It is not optional, and it must exist before
+the `systemctl enable --now` above.
 
 ```bash
 # /etc/mercury/mercury.env
@@ -33,6 +20,8 @@ sudo chown mercury:mercury /etc/mercury/mercury.env
 sudo chmod 600 /etc/mercury/mercury.env   # it holds API tokens
 sudo mkdir -p /var/lib/mercury/workspaces
 sudo chown -R mercury:mercury /var/lib/mercury
+# If the services were already started without this file, restart them so they pick it up:
+sudo systemctl restart mercury mercury-worker
 ```
 
 **Why these two lines are not optional extras.** The application defaults are *relative*:
@@ -45,6 +34,20 @@ disagree.
 
 If you choose a different location, it must be changed in **three** places that have to agree:
 `mercury.env`, the backup cron line, and the restore commands below.
+
+## Install
+
+```bash
+sudo useradd --system --home /opt/mercury --shell /usr/sbin/nologin mercury
+sudo mkdir -p /opt/mercury /var/lib/mercury /etc/mercury
+sudo cp -r /path/to/mercury/* /opt/mercury/
+sudo cp mercury.service mercury-worker.service /etc/systemd/system/
+sudo cp logrotate.conf /etc/logrotate.d/mercury
+sudo systemctl daemon-reload
+
+# Requires /etc/mercury/mercury.env (created in the previous section); the units fail closed without it.
+sudo systemctl enable --now mercury mercury-worker
+```
 
 ## Backup
 
