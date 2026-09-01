@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert, { AssertionError } from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import net from 'node:net';
 import { join } from 'node:path';
 import { closeServer, createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
@@ -22,9 +23,22 @@ function makeApi(env: ReturnType<typeof makeEnv>, tokens: [string, string][] = [
   return { app, stream, close: () => stream.stop() };
 }
 
-async function listen(app: Express): Promise<{ port: number; close: () => Promise<void> }> {
+async function listen(
+  app: Express, opts: { socketBufferSize?: number } = {},
+): Promise<{ port: number; close: () => Promise<void> }> {
   return new Promise((resolve) => {
     const server = app.listen(0, () => {
+      // Shrink the SERVER-side kernel send buffer so res.write() reliably returns false against a
+      // stalled client. Without this, loopback buffers absorb a whole test's worth of events, the
+      // backpressure path is never taken, and a backpressure test is silently vacuous -- which is
+      // exactly how one passed while the bug it targets was still in the code.
+      if (opts.socketBufferSize) {
+        server.on('connection', (s) => {
+          try {
+            (s as unknown as { setBufferSize(n: number): void }).setBufferSize(opts.socketBufferSize!);
+          } catch { /* best effort: the test then depends on host buffer sizes */ }
+        });
+      }
       const addr = server.address() as { port: number };
       resolve({
         port: addr.port,
@@ -1227,4 +1241,211 @@ test('the SSE handler registers a response error listener (issue #143)', () => {
   assert.ok(end > start, 'SSE route body not terminated');
   const body = stripComments(src.slice(start, end));
   assert.match(body, /res\.on\(\s*'error'/, 'the SSE handler must listen for response errors');
+});
+
+// --- issue #145: SSE must not buffer a backlog for a client that is not reading -----------------
+
+/**
+ * Open the SSE endpoint on a raw socket and never read a byte of the body.
+ *
+ * The socket buffers are shrunk before connecting so backpressure is applied quickly and the test does
+ * not depend on the host's default (often multi-megabyte, auto-tuned) loopback buffers. Without that,
+ * a small backlog fits entirely inside the kernel and the server never observes a full write buffer --
+ * which made the first version of this test prove nothing at all.
+ */
+function openSseAndNeverRead(port: number, path: string, token: string): {
+  bytesSeen: () => number; destroy: () => void;
+} {
+  const socket = net.connect({ port, host: '127.0.0.1' });
+  let bytes = 0;
+  socket.on('data', (b) => { bytes += b.length; socket.pause(); }); // counted, never drained
+  socket.once('connect', () => {
+    // Present at runtime since Node 12 but missing from this @types/node, hence the cast. Best
+    // effort: if it is unavailable the test still works, just depends on host buffer sizes.
+    try { (socket as unknown as { setBufferSize(n: number): void }).setBufferSize(4096); } catch { /* best effort */ }
+    socket.write(
+      `GET ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${token}\r\n` +
+      `Accept: text/event-stream\r\n\r\n`,
+    );
+  });
+  return { bytesSeen: () => bytes, destroy: () => socket.destroy() };
+}
+
+/**
+ * Open the SSE endpoint, read nothing for `pauseMs`, then read everything to the end.
+ *
+ * The pause is what makes the SERVER hit its highWaterMark and set `paused`; the resume is what makes
+ * it observe 'drain'. Neither half is observable from the other tests: during the synchronous backlog
+ * delivery the server never yields to the event loop, so a client that pauses cannot be serviced until
+ * that page finishes -- which is also why the pending queue is bounded by one 500-row page rather than
+ * by how long the client stalls.
+ */
+function openSsePauseThenResume(
+  port: number, path: string, token: string, pauseMs: number, deadlineMs = 20_000,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ port, host: '127.0.0.1' });
+    let buf = '';
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      socket.destroy();
+      resolve(buf);
+    };
+    // Resolve with whatever arrived rather than hanging forever. A server that never flushes its queue
+    // leaves the stream open, and without this the failure surfaces as a 60s test timeout instead of a
+    // message naming the missing events.
+    const deadline = setTimeout(finish, deadlineMs);
+    socket.once('connect', () => {
+      try { (socket as unknown as { setBufferSize(n: number): void }).setBufferSize(4096); } catch { /* best effort */ }
+      socket.write(
+        `GET ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${token}\r\n` +
+        `Accept: text/event-stream\r\n\r\n`,
+      );
+      socket.pause(); // the server must notice us stop reading
+      setTimeout(() => {
+        socket.on('data', (b) => { buf += b.toString('utf8'); });
+        socket.on('end', finish);
+        socket.on('close', finish);
+        socket.on('error', (e) => { if (!settled) { settled = true; reject(e); } });
+        socket.resume();
+      }, pauseMs);
+    });
+    socket.on('error', (e) => { if (!settled) { settled = true; reject(e); } });
+  });
+}
+
+test('a client that pauses and then resumes receives every event exactly once (issue #145)', async () => {
+  // The resume path is where the subtle half of this fix lives. res.write() returning false means
+  // "accepted, please stop", NOT "rejected" -- so the paused event must NOT be re-queued, and the
+  // queued ones must all go out after 'drain'. Getting either wrong duplicates events or drops them,
+  // and neither existing test can see it: one never reads at all, the other never stops reading.
+  // Payloads are padded so the socket buffer fills within a handful of writes, and the server's send
+  // buffer is shrunk below, so the pause is FORCED rather than hoped for. TOTAL stays well under
+  // MAX_PENDING (1000) so this client is paused and resumed, not aborted.
+  const TOTAL = 600;
+  const PAD = 'x'.repeat(4_096);
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'stalling client', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING');
+    for (let i = 1; i <= TOTAL; i++) env.events.append(run.id, 'agent.message', { i, pad: PAD });
+    env.events.append(run.id, 'run.completed', { ok: true });
+    env.runs.transition(run.id, 'COMPLETED');
+    const last = env.events.lastSequence(run.id);
+
+    const hub = new EventStream(env.db, env.events, 20, 20);
+    hub.start();
+    const app = createApp({
+      runService: env.runService, events: env.events, stream: hub,
+      apiTokens: new Map([['tok-alice', 'alice']]), adminToken: null,
+    });
+    const srv = await listen(app, { socketBufferSize: 2_048 });
+    try {
+      const data = await openSsePauseThenResume(
+        srv.port, `/api/runs/${run.id}/stream?after=0`, 'tok-alice', 40,
+      );
+      const delivered = sequencesOf(data);
+      // Compare against the STORE, not a hand-count: lifecycle transitions append events of their own.
+      assert.deepEqual(delivered, Array.from({ length: last }, (_, k) => k + 1),
+        `a pause must neither drop nor duplicate: got ${delivered.length} of ${last}`);
+      assert.ok(data.includes('event: run.completed'), 'the terminal event must survive a pause');
+    } finally {
+      await srv.close();
+      hub.stop();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('an SSE client that stops reading is dropped instead of buffered (issue #145)', async () => {
+  // Asserted from the SERVER side, deliberately. The client socket is paused, so it cannot observe the
+  // close: a paused Node socket does not emit 'end' or 'close' until it reads, and the whole point is
+  // that it never reads again. What is observable, and is the actual contract, is that the server
+  // stopped buffering and released the subscription -- which also releases the closure over the
+  // response and the backlog.
+  const TOTAL = 2_000;
+  const PAD = 'x'.repeat(4_096);
+  const env = makeEnv({ workerEnabled: false });
+  const { logger, lines } = logCapture();
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'wedged client', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING');
+    for (let i = 1; i <= TOTAL; i++) env.events.append(run.id, 'agent.message', { i, pad: PAD });
+
+    const hub = new EventStream(env.db, env.events, 20, 20);
+    hub.start();
+    const app = createApp({
+      runService: env.runService, events: env.events, stream: hub,
+      apiTokens: new Map([['tok-alice', 'alice']]), adminToken: null, logger,
+    });
+    const srv = await listen(app);
+    const client = openSseAndNeverRead(srv.port, `/api/runs/${run.id}/stream?after=0`, 'tok-alice');
+    try {
+      await waitFor(
+        () => lines.some((l) => l.msg === 'SSE client is not reading; closing the stream so the backlog is not buffered in memory'),
+        20_000,
+      );
+      assert.equal(hub.subscriptionCount, 0,
+        'the wedged subscriber must be released, not left holding the backlog');
+
+      // And it stopped early: a client that reads receives the whole ~8 MB backlog (see the control).
+      const totalBytes = TOTAL * PAD.length;
+      assert.ok(client.bytesSeen() < totalBytes,
+        `must not have delivered the whole backlog; saw ${client.bytesSeen()} of ~${totalBytes} bytes`);
+    } finally {
+      client.destroy();
+      await srv.close();
+      hub.stop();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('POSITIVE CONTROL: a client that keeps reading is NOT closed by the backpressure guard (issue #145)', async () => {
+  // Without this, a guard that closed every stream would pass the test above.
+  const TOTAL = 3_000;
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'healthy client', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING');
+    for (let i = 1; i <= TOTAL; i++) env.events.append(run.id, 'agent.message', { i });
+    // Terminal so the server ends the stream and readToEnd() returns. TOTAL is well past
+    // MAX_PENDING, so a reading client must still get everything: pausing must never drop data.
+    env.events.append(run.id, 'run.completed', { ok: true });
+    env.runs.transition(run.id, 'COMPLETED');
+
+    const hub = new EventStream(env.db, env.events, 20, 20);
+    hub.start();
+    const app = createApp({
+      runService: env.runService, events: env.events, stream: hub,
+      apiTokens: new Map([['tok-alice', 'alice']]), adminToken: null,
+    });
+    const srv = await listen(app);
+    try {
+      const data = await readToEnd(
+        `http://127.0.0.1:${srv.port}/api/runs/${run.id}/stream?after=0`,
+        { authorization: 'Bearer tok-alice' }, 25_000);
+      const seqs = sequencesOf(data);
+      // Compare against the store's own sequence, not TOTAL: the lifecycle transitions append their
+      // own events, so the stream legitimately carries more than TOTAL. Asserting TOTAL here looked
+      // like a duplicate-delivery bug for a few minutes and was neither.
+      const last = env.events.lastSequence(run.id);
+      assert.equal(seqs.length, last, `a reading client must get all ${last}, got ${seqs.length}`);
+      assert.equal(new Set(seqs).size, last, 'exactly once each -- no duplicates under pause/drain');
+      assert.ok(seqs.every((v, i) => i === 0 || v >= seqs[i - 1]), 'delivered in non-decreasing order');
+    } finally {
+      await srv.close();
+      hub.stop();
+    }
+  } finally {
+    env.close();
+  }
 });
