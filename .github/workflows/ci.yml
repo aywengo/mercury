@@ -56,10 +56,13 @@ jobs:
   # Guards the diagnostic that #67 was about: a fresh clone with no install fails with a clear
   # ERR_MODULE_NOT_FOUND rather than something confusing.
   #
-  # If this job ever goes red because `npm test` PASSED, that means the tests no longer need
-  # anything from node_modules -- express has stopped being imported on the path the tests take,
-  # or the API/auth surface has been dropped. Either way the guard is no longer testing what it
-  # claims to and should be deleted or rewritten, not "fixed" by inverting the check.
+  # Today this passes because `npm test` exits 1 with ERR_MODULE_NOT_FOUND (express, via
+  # src/api/server.ts) when node_modules is absent. So if this job ever goes red because `npm test`
+  # PASSED, the only reading is that the tests stopped needing anything from node_modules at all --
+  # express is no longer imported on the path the tests take, or the API/auth surface has been
+  # dropped from the glob. That is the guard going VACUOUS, not the bug coming back: it would be
+  # proving nothing while still reporting green. Delete or rewrite it in that case; do NOT "fix" it
+  # by inverting the check, which would turn a vacuous guard into a wrong one.
   uninstalled-checkout-fails-clearly:
     runs-on: ubuntu-latest
     needs: []
