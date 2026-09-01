@@ -17,6 +17,7 @@ import type { Logger } from '../logger.ts';
 import { RunQueue, LEASE_EXPIRED_ERROR } from '../queue/runQueue.ts';
 import type { RunService } from '../runs/runService.ts';
 import { RunStore } from '../runs/runStore.ts';
+import { tx } from '../db/database.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { WorkspaceManager } from '../workspace/workspaceManager.ts';
 
@@ -309,10 +310,24 @@ export class Worker {
       if (settled && isTerminal(settled.status)) {
         log.warn({ status: settled.status }, 'run already terminal; skipping failure bookkeeping');
       } else {
-        this.deps.runs.setError(run.id, message, 'infrastructure');
-        this.deps.events.append(run.id, 'error', { message });
-        this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
-        this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+        // One transaction (issue #106). These were four independent writes, so a crash or a
+        // SQLITE_BUSY between any two left a run whose record contradicted itself: an error with
+        // no run.failed event, FAILED with no error text, or an error recorded while the status
+        // was still RUNNING. The UI and any alerting read status and events together, so each of
+        // those is a state an operator cannot interpret. This is the same contradiction #61
+        // described, on the path #105 did not cover.
+        //
+        // EventStore.append and RunStore writes are both re-entrant under tx() (depth-tracked),
+        // so nesting inside an outer transaction is safe.
+        //
+        // maybeAutoRetry stays OUTSIDE: it is async, tx() is synchronous, and creating a retry
+        // run is a separate decision that must not roll back the failure record it responds to.
+        tx(this.deps.db, () => {
+          this.deps.runs.setError(run.id, message, 'infrastructure');
+          this.deps.events.append(run.id, 'error', { message });
+          this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
+          this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+        });
         await this.maybeAutoRetry(run, 'infrastructure');
       }
     } finally {
@@ -711,15 +726,18 @@ export class Worker {
 
     // FAILED
     const error = this.deps.redactor ? this.deps.redactor.redact(outcome.error ?? 'Agent failed') : (outcome.error ?? 'Agent failed');
-    this.deps.runs.setError(run.id, error, 'agent');
-    this.deps.events.append(run.id, 'error', { message: error });
-    this.deps.events.append(run.id, 'run.failed', {
-      runId: run.id,
-      error,
-      kind: 'agent',
-      durationMs: durations.agentDurationMs,
+    // One transaction, for the same reason as the infrastructure path above (issue #106).
+    tx(this.deps.db, () => {
+      this.deps.runs.setError(run.id, error, 'agent');
+      this.deps.events.append(run.id, 'error', { message: error });
+      this.deps.events.append(run.id, 'run.failed', {
+        runId: run.id,
+        error,
+        kind: 'agent',
+        durationMs: durations.agentDurationMs,
+      });
+      this.deps.runs.transition(run.id, 'FAILED', { completedAt: now });
     });
-    this.deps.runs.transition(run.id, 'FAILED', { completedAt: now });
     log.error({ error, ...durations }, 'run failed');
     await this.maybeAutoRetry(run, 'agent');
   }
