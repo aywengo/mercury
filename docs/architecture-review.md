@@ -9,6 +9,76 @@ and dispositioned there; nothing below repeats them. This file is the current ba
 
 ---
 
+## Status of this round
+
+Recorded at `origin/main` = `ea9670e`. Every row below was re-derived from the repository at that
+commit, not from notes: merged rows are confirmed ancestors of `origin/main`, and unshipped rows are
+confirmed present locally and absent from `origin/main`.
+
+Round 1's archive carries a row that claimed a shared adapter base had been delivered when it had not
+(see [R2-12](#r2-12-the-shared-adapter-base-was-reported-delivered-and-never-built-six-copies-of-the-same-fix-remain)).
+This table exists so the same failure cannot be repeated against this round: **state is only recorded
+where it can be pointed at.**
+
+| Finding | Issue | State | Evidence |
+| --- | --- | --- | --- |
+| R2-1 stuck-run scan reached the newest 200 | [#137](https://github.com/aywengo/mercury/issues/137) | **merged** | `82f489e` |
+| R2-2 cursor advanced before delivery | [#138](https://github.com/aywengo/mercury/issues/138) | **merged** | `3db8484` |
+| R2-3 `poll()` swallowed every error | [#139](https://github.com/aywengo/mercury/issues/139) | **merged** | `751a2ea` |
+| R2-4 two credential resolvers | [#140](https://github.com/aywengo/mercury/issues/140) | **merged** | `6ae37bc` |
+| R2-5 `activeLeases()` ignored `NEEDS_INPUT` | [#141](https://github.com/aywengo/mercury/issues/141) | **merged** | `ea9670e` |
+| R2-6 every worker sent its own alert | [#142](https://github.com/aywengo/mercury/issues/142) | coded, **not shipped** | `478071f` (PR #157 open) |
+| R2-7 SSE route had no error handling | [#143](https://github.com/aywengo/mercury/issues/143) | **merged** | `a4a73ac` |
+| R2-8 rate-limiter map unbounded | [#144](https://github.com/aywengo/mercury/issues/144) | coded, **not shipped** | `df665c7` |
+| R2-9 SSE ignored backpressure | [#145](https://github.com/aywengo/mercury/issues/145) | coded, **not shipped** | `e384c7a` |
+| R2-10 one poll read per subscriber | [#146](https://github.com/aywengo/mercury/issues/146) | coded, **not shipped** | `71a4a9c` |
+| R2-11 `slowDown()` fires with no subscribers | — | coded, **not shipped** | `26fa007`, no issue filed — see below |
+| R2-12 shared adapter base never built | [#148](https://github.com/aywengo/mercury/issues/148) | coded, **not shipped** | `18a8d27` |
+| R2-13 CLI-wiring test flake | [#149](https://github.com/aywengo/mercury/issues/149) | **merged**; issue closure verified separately | `df67aa6` (PR #150) |
+
+Seven findings are merged. Six are coded and reviewed but cannot be pushed. None is left open.
+
+### One closure caveat worth stating
+
+Six of the seven merged issues carry `Closes #N` in their squashed commit, so GitHub closed them on
+merge. **#149 does not** — PR #150's squash message references only `(#150)`, so nothing closed it. The
+fix is on `main`; the issue would have stayed open indefinitely. It is closed manually, with a comment
+naming the commit, rather than left to a keyword that was never written.
+
+This is the same failure mode as Round 1's phantom step 9, arriving from an unexpected direction: not a
+fix claimed but absent, but a fix present and its bookkeeping quietly incomplete.
+
+### R2-11 — why it is still open, and what the earlier wording got wrong
+
+The original text said this finding was *"Already analyzed and given a Stage 0 fix in
+`docs/cross-process-event-push.md`; listed here so the backlog is complete, not as new work."* That
+phrasing invited the reader to conclude a fix existed. **It does not.** Re-checked at `ea9670e`:
+`src/events/eventStream.ts:101` still calls `this.slowDown()` immediately after the subscriber loop
+closes and inside the append hook, so any event on any run still drops the poller to the slow cadence
+whether or not anyone is listening.
+
+What `docs/cross-process-event-push.md` contains is a **design** for the fix, not the fix, and at
+`ea9670e` the behaviour is unchanged: `eventStream.ts:101` still calls `this.slowDown()` unconditionally.
+
+It has since been fixed on a branch (`26fa007`, not merged, no issue filed). The condition is now whether
+push actually **served** the event — delivered it to at least one subscriber — so an append nobody
+subscribed to, an append to a run nobody watches, and an append whose only subscriber threw all leave the
+backstop at its fast cadence.
+
+The original reason for leaving it unfiled was that the effect is cadence only (no event is lost, no state
+is wrong) and that the cross-process work would replace this poller entirely. The second half of that
+reasoning does not hold: it argues for leaving any defect that some hypothetical future change might
+remove, and that change is an unimplemented design. The fix is four lines, so it was made.
+
+### What "coded, not shipped" means
+
+The five unshipped fixes are complete: each has a regression test that fails without it, each was
+reviewed after being written, and all five merge onto `ea9670e` together with typecheck clean and the
+full suite green. They are blocked on credentials for the remote, not on work. They are listed as
+**not shipped** rather than resolved, because a fix nobody can run is not a fix.
+
+---
+
 ## Verdict
 
 Round 1 found that the specification was sound and the implementation failed to enforce it. That
@@ -80,7 +150,7 @@ each a single-file change plus a test.
 
 Every finding below was read in source at `6e7a035` and, where a claim is numerical or behavioral,
 **executed**. Each reproduction is inlined in
-[Appendix — reproduction](#appendix--reproduction) and was run on this commit.
+[Appendix — reproduction](#appendix-reproduction) and was run on this commit.
 
 Two things did not go as planned, and both changed what this document is allowed to claim:
 
