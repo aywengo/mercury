@@ -110,6 +110,49 @@ export class RunQueue {
     return res.changes === 1;
   }
 
+  /**
+   * Claim the right to emit a given alert, across the WHOLE cluster (issue #142).
+   *
+   * Returns true for at most one worker per `intervalMs`. Both alert paths measure a cluster-global
+   * quantity -- queue depth, and runs stuck with no owner filter -- and deduped with a per-process
+   * boolean, so a 4-worker deployment sent 4 copies of one incident.
+   *
+   * One atomic statement, so two workers racing cannot both win. SQLite serialises writers (WAL plus
+   * busy_timeout), and the ON CONFLICT ... WHERE means the loser's UPDATE is skipped rather than
+   * queued: `changes === 0` is the "someone else already alerted" answer.
+   *
+   * The claim is deliberately NOT released. An alert has no lease to hand back; the interval is what
+   * bounds repeats.
+   */
+  claimAlert(key: string, workerId: string, intervalMs: number, now = Date.now()): boolean {
+    const nowIso = new Date(now).toISOString();
+    const staleBeforeIso = new Date(now - intervalMs).toISOString();
+    const res = this.db
+      .prepare(
+        `INSERT INTO alert_claims (key, claimed_at, worker_id) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE
+           SET claimed_at = excluded.claimed_at, worker_id = excluded.worker_id
+          WHERE alert_claims.claimed_at <= ?`,
+      )
+      .run(key, nowIso, workerId, staleBeforeIso);
+    return res.changes === 1;
+  }
+
+  /**
+   * Release an alert claim held by this worker, so the NEXT episode can alert again (issue #142).
+   *
+   * Without this, a time-window claim would swallow a genuinely new episode: the backlog drains and
+   * refills minutes later, and the floor silently suppresses the second alert. An existing test caught
+   * exactly that. The claim therefore models the EPISODE, not a time window -- the interval passed to
+   * claimAlert is only a floor for a worker that JOINS an episode already in progress.
+   *
+   * Scoped to worker_id so a worker that never won the claim cannot delete somebody else's.
+   */
+  releaseAlert(key: string, workerId: string): boolean {
+    const res = this.db.prepare('DELETE FROM alert_claims WHERE key = ? AND worker_id = ?').run(key, workerId);
+    return res.changes === 1;
+  }
+
   /** Number of runs currently QUEUED (queue backlog; Mercury.md section 25 alerting). */
   queuedCount(): number {
     const row = this.db.prepare('SELECT COUNT(*) AS n FROM runs WHERE status = \'QUEUED\'').get() as { n: number };

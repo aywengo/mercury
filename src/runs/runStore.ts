@@ -151,11 +151,20 @@ export class RunStore {
    * statement to be correct under concurrent appends; splitting it would reintroduce exactly the
    * read-then-write race the rest of this file avoids.
    */
-  listIdle(statuses: readonly RunStatus[], idleBeforeIso: string, limit?: number): Run[] {
+  listIdle(
+    statuses: readonly RunStatus[],
+    idleBeforeIso: string,
+    limit?: number,
+    leaseOwner?: string,
+  ): Run[] {
     if (statuses.length === 0) return [];
     const placeholders = statuses.map(() => '?').join(', ');
     // Omitted limit => no LIMIT clause at all, so the result cannot be silently truncated.
     const bounded = limit !== undefined;
+    // Owner scoping (issue #142): without it every worker examines every run in the cluster and each
+    // POSTs its own webhook for the same stuck run. Scoped, each worker reports only what it can act
+    // on, and the duplication cannot happen regardless of how many workers are running.
+    const scoped = leaseOwner !== undefined;
     const rows = this.db
       .prepare(
         `SELECT * FROM runs r
@@ -171,6 +180,7 @@ export class RunStore {
                   r.started_at,
                   r.created_at
                 ) <= ?
+          ${scoped ? 'AND r.lease_owner = ?' : ''}
           ORDER BY COALESCE(
                      (SELECT MAX(e2.timestamp) FROM events e2 WHERE e2.run_id = r.id),
                      r.started_at,
@@ -179,7 +189,13 @@ export class RunStore {
                    r.id ASC
           ${bounded ? 'LIMIT ?' : ''}`,
       )
-      .all(...statuses, idleBeforeIso, idleBeforeIso, ...(bounded ? [limit] : [])) as unknown as RunRow[];
+      .all(
+        ...statuses,
+        idleBeforeIso,
+        idleBeforeIso,
+        ...(scoped ? [leaseOwner] : []),
+        ...(bounded ? [limit] : []),
+      ) as unknown as RunRow[];
     return rows.map(rowToRun);
   }
 

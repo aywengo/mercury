@@ -39,6 +39,14 @@ export interface WorkerDeps {
   retryBackoffMs: number;
   /** Queue depth that triggers backlog alerts (MERCURY_BACKLOG_ALERT_THRESHOLD). Default 10. */
   backlogAlertThreshold?: number;
+  /**
+   * Minimum spacing between backlog alerts ACROSS THE WHOLE CLUSTER (ms). Default 15 minutes.
+   * Enforced by a database row, not by process memory, so it holds however many workers run
+   * (issue #142).
+   */
+  backlogAlertRepeatMs?: number;
+  /** Minimum spacing between alerts for the SAME stuck run, across the cluster (ms). Default 15 min. */
+  stuckAlertRepeatMs?: number;
   /** How often backlog depth is sampled (ms). Default 60_000. Must be its own timer: the claim
    *  loop is blocked for the whole duration of a run, so backlog checks driven from there go
    *  silent exactly when a busy queue is longest-running. */
@@ -68,14 +76,33 @@ export class Worker {
   private deps: WorkerDeps;
   private backlogAlertThreshold: number;
   private alertWebhookUrl: string | null;
-  /** Stateful alert flag: true while the backlog is at/above threshold (prevents spam). */
+  /**
+   * Stateful alert flag: true while the backlog is at/above threshold.
+   *
+   * Per-process, so it prevents ONE worker from re-alerting on every tick. It never prevented N
+   * workers from each sending their own copy of the same backlog alert (issue #142) -- that needs the
+   * shared claim in RunQueue.claimAlert, which decides which of the workers that observed the same
+   * rising edge is allowed to speak.
+   */
   private backlogAlerted = false;
+  /**
+   * Cluster-wide floor between backlog alerts, enforced in the database rather than in this process.
+   * Only consulted on a rising edge, so in practice it exists to stop a worker that JOINS mid-episode
+   * from re-alerting about a backlog the cluster already reported.
+   */
+  private backlogRepeatIntervalMs: number;
+  /** Floor between alerts for the SAME stuck run, cluster-wide (issue #142). */
+  private stuckAlertRepeatMs: number;
+  /** Run ids this worker currently holds a stuck-run alert claim for, so recovery can release them. */
+  private stuckAlerted = new Set<string>();
   private stuckTimer: ReturnType<typeof setInterval> | null = null;
   private backlogTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(deps: WorkerDeps) {
     this.deps = deps;
     this.backlogAlertThreshold = deps.backlogAlertThreshold ?? 10;
+    this.backlogRepeatIntervalMs = deps.backlogAlertRepeatMs ?? 15 * 60 * 1000;
+    this.stuckAlertRepeatMs = deps.stuckAlertRepeatMs ?? 15 * 60 * 1000;
     this.alertWebhookUrl = deps.alertWebhookUrl ?? null;
   }
 
@@ -787,15 +814,25 @@ export class Worker {
     if (depth >= this.backlogAlertThreshold) {
       if (!this.backlogAlerted) {
         this.backlogAlerted = true;
+        // The log stays per-worker. N log lines from N workers is the diagnostic that lets you see
+        // the whole cluster agreed; the finding is about the WEBHOOK, where N copies of one incident
+        // is what gets an operator muting the channel.
         this.log('warn', 'queue backlog above threshold', { queueDepth: depth, threshold: this.backlogAlertThreshold });
-        if (this.alertWebhookUrl) {
+        // Queue depth has no owner, so unlike stuck runs this cannot be scoped -- it needs a shared
+        // claim. The per-process flag above still gives episode-edge detection; this decides which of
+        // the workers that saw the same edge is allowed to speak.
+        if (this.alertWebhookUrl && this.deps.queue.claimAlert('backlog', this.deps.workerId, this.backlogRepeatIntervalMs)) {
           this.postBacklogAlert(depth).catch((err) => {
             this.log('error', 'backlog alert webhook failed', { error: String(err) });
           });
         }
       }
     } else if (this.backlogAlerted) {
+      // Episode over. Release the cluster-wide claim so the NEXT crossing alerts, otherwise the
+      // repeat floor would swallow a genuinely new backlog that arrives inside the interval.
+      // Only the worker that won the claim has a row to delete; for the others this is a no-op.
       this.backlogAlerted = false;
+      if (this.alertWebhookUrl) this.deps.queue.releaseAlert('backlog', this.deps.workerId);
     }
   }
 
@@ -831,10 +868,30 @@ export class Worker {
     const STUCK_STATUSES = ['RUNNING', 'NEEDS_INPUT'] as const;
     const idleBefore = new Date(now - thresholdMs).toISOString();
     const stuck: { runId: string; status: string; idleMs: number }[] = [];
-    for (const run of this.deps.runs.listIdle(STUCK_STATUSES, idleBefore)) {
+    const stillStuck = new Set<string>();
+    // Scoped to this worker's own leases. Unscoped, every worker examined every run in the cluster
+    // and each POSTed its own webhook for the same stuck run (issue #142). A run whose worker DIED is
+    // not lost by scoping: its lease expires and the reaper takes it to FAILED(infrastructure), which
+    // is the path section 6 sanctions. Scoping also removes the "worker A alerts about a run it
+    // cannot act on" confusion.
+    for (const run of this.deps.runs.listIdle(STUCK_STATUSES, idleBefore, undefined, this.deps.workerId)) {
       const lastActivity = this.deps.events.lastActivity(run.id);
       const refMs = Date.parse(lastActivity ?? run.startedAt ?? run.createdAt);
+      stillStuck.add(run.id);
+      // One alert per stuck run, cluster-wide. Scoping alone was not enough: this loop runs every
+      // stuckCheckIntervalMs and had NO dedupe whatsoever, so a single worker re-alerted about the
+      // same run on every tick -- measured at 9 webhook posts in 480 ms. The claim is released once
+      // the run stops being stuck (below), so a run that goes stuck twice alerts twice.
+      if (!this.deps.queue.claimAlert(`stuck:${run.id}`, this.deps.workerId, this.stuckAlertRepeatMs, now)) continue;
+      this.stuckAlerted.add(run.id);
       stuck.push({ runId: run.id, status: run.status, idleMs: now - refMs });
+    }
+    // Release claims for runs that recovered, so a later stuck episode is not muted by the repeat
+    // floor. Only this worker's own claims are touched.
+    for (const runId of [...this.stuckAlerted]) {
+      if (stillStuck.has(runId)) continue;
+      this.stuckAlerted.delete(runId);
+      this.deps.queue.releaseAlert(`stuck:${runId}`, this.deps.workerId);
     }
     if (stuck.length === 0) return;
 
