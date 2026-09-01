@@ -185,7 +185,11 @@ export function tempDir(prefix: string): string {
  * system temp dir with a Date.now() suffix, so each run left another dozen files behind.
  */
 export function tempFile(prefix: string, ext = ''): string {
-  const file = join(mkdtempSync(join(tmpdir(), `${prefix}-`)), `${prefix}${ext}`);
+  // Normalise the dot. Callers pass 'json' as well as '.json', and concatenating bare gave names
+  // like "hermes-argvjson". The tests read the file back by the returned path so nothing failed,
+  // which is exactly why the helper has to be right rather than the call sites lucky.
+  const suffix = ext ? (ext.startsWith('.') ? ext : `.${ext}`) : '';
+  const file = join(mkdtempSync(join(tmpdir(), `${prefix}-`)), `${prefix}${suffix}`);
   leakedDirs.add(dirname(file));
   return file;
 }

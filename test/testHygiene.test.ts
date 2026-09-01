@@ -3,6 +3,7 @@
 // entries in the system temp dir, and 26k+ had accumulated on one development machine.
 
 import { test } from 'node:test';
+import { tempFile } from './helpers.ts';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -18,9 +19,26 @@ function testSources(): Map<string, string> {
   return out;
 }
 
-/** Strip line comments so prose that mentions a pattern is not reported as using it. */
+/**
+ * Strip comments so prose that mentions a pattern is not reported as using it.
+ *
+ * Full-line comments are dropped outright. Trailing comments are dropped only when the `//` is
+ * preceded by whitespace and sits OUTSIDE a string literal -- counted by whether the prefix has an
+ * even number of unescaped quotes. Without that check a URL or a Windows-style path inside a string
+ * would be truncated mid-line.
+ */
 function codeOnly(src: string): string {
-  return src.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+  return src
+    .split('\n')
+    .filter((l) => !l.trim().startsWith('//'))
+    .map((l) => {
+      const i = l.search(/\s\/\//);
+      if (i < 0) return l;
+      const before = l.slice(0, i);
+      const quotes = (before.match(/(?<!\\)['"`]/g) ?? []).length;
+      return quotes % 2 === 0 ? before : l;
+    })
+    .join('\n');
 }
 
 test('test files allocate temp paths only through the helpers (issue #73 L8)', () => {
@@ -61,4 +79,29 @@ test('the guard itself is not vacuous', () => {
   assert.match(codeOnly(aliased), re, 'the matcher must catch an aliased import, not just the call form');
   const commented = `// const d = ${word}('/tmp/x');`;
   assert.doesNotMatch(codeOnly(commented), re, 'commented occurrences must be ignored');
+});
+
+test('tempFile normalises the extension separator (issue #73 L8 review)', () => {
+  // Callers pass both 'json' and '.json'. Concatenating bare produced "hermes-argvjson": the tests
+  // still passed because they read the file back by the returned path, so nothing but the name was
+  // wrong -- the kind of defect that only shows up when a human or a glob looks at the file.
+  const bare = tempFile('hygiene-bare', 'json');
+  const dotted = tempFile('hygiene-dotted', '.json');
+  assert.ok(bare.endsWith('.json'), `expected a dotted extension, got ${bare}`);
+  assert.ok(dotted.endsWith('.json'), `expected a dotted extension, got ${dotted}`);
+  assert.ok(!/\wjson$/.test(bare.replace(/\.json$/, 'x')), 'no doubled-up extension');
+});
+
+test('the guard ignores an identifier inside a trailing comment (issue #73 L8 review)', () => {
+  // codeOnly() originally dropped only whole-line comments, so a line ending in a comment that
+  // mentioned the forbidden identifier would have failed the build.
+  const word = ['mkdtemp', 'Sync'].join('');
+  const commented = `const d = tempDir('x'); // not ${word}, just a note`;
+  assert.doesNotMatch(codeOnly(commented), new RegExp('\\b' + word + '\\b'),
+    'a trailing comment must not make a clean line look dirty');
+  // And a string containing // must survive, or the stripper would corrupt real code.
+  const url = "const u = 'https://example.com/a';";
+  assert.equal(codeOnly(url), url, 'a // inside a string literal must not truncate the line');
+  // Real code must still be caught.
+  assert.match(codeOnly(`const d = ${word}('/tmp/x');`), new RegExp('\\b' + word + '\\b'));
 });
