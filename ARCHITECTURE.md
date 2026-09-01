@@ -368,6 +368,7 @@ The diagram shows the main path. The complete transition table:
 | NEEDS_INPUT | CANCELLED | user cancels while waiting |
 | STARTING / RUNNING / NEEDS_INPUT | FAILED | unrecoverable infrastructure failure (e.g. lease expiry without recovery) |
 | STARTING / RUNNING / NEEDS_INPUT | TIMED_OUT | execution time limit or input timeout exceeded |
+| STARTING / RUNNING / NEEDS_INPUT | QUEUED | the **owning** worker is shutting down gracefully (§6.1) |
 
 All state transitions MUST be persisted.
 
@@ -385,6 +386,23 @@ TIMED_OUT
 A worker receiving a terminal Run MUST NOT execute it again.
 
 Retry is not a state transition: it creates a new Run (see §21).
+
+### 6.1 The one exception to single-pass: graceful shutdown
+
+`STARTING / RUNNING / NEEDS_INPUT -> QUEUED` is permitted **only** when the worker that currently
+holds the lease is shutting down. The Run is not finished and no work was lost, so failing it would
+turn every deploy into spurious `FAILED(infrastructure)` records and duplicate agent spend; merely
+releasing the lease would strand the Run in `RUNNING` forever, because the reaper only selects rows
+with a non-NULL `lease_expires_at`.
+
+This exception is deliberately narrow, and MUST NOT be widened to lease loss. A worker that has
+**lost** its lease no longer owns the Run and MUST NOT alter its status or clear its lease: another
+worker may be executing it, and requeueing hands it to a third. Lease-expiry recovery belongs
+solely to the reaper, which takes the `-> FAILED` row above and then retry-as-new-run per §21.
+
+`RunQueue.requeueForShutdown` is the only implementation of this edge and is scoped to
+`lease_owner = ?`. Its set of source states is generated from the state machine rather than
+restated, so the two cannot drift.
 
 ---
 

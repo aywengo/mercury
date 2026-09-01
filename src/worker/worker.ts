@@ -487,7 +487,8 @@ export class Worker {
       }
 
       // Lease lost: another worker may already be re-executing the run, so do not
-      // block on the (cancelled) agent's exit; requeue happens in finalize().
+      // block on the (cancelled) agent's exit. finalize() records the loss and touches
+      // nothing else -- the run belongs to whoever holds the lease now (issue #59).
       if (leaseLost) {
         return { status: 'LEASE_LOST', exit: { code: null, signal: 'SIGTERM', reason: 'terminated' } };
       }
@@ -654,15 +655,20 @@ export class Worker {
     }
 
     if (outcome.status === 'LEASE_LOST') {
-      // Another worker took the run over (or it was reaped). Put it back in the
-      // queue so it executes exactly once, on the worker that holds the lease now.
-      const requeued = this.deps.queue.requeueLostLease(run.id, this.deps.workerId);
-      this.deps.events.append(run.id, 'lease.lost', { runId: run.id, requeued });
-      if (requeued) {
-        log.warn({ status: current.status }, 'lease lost; run requeued for another worker');
-      } else {
-        log.warn({ status: current.status }, 'lease lost; run no longer requeueable, leaving it as is');
-      }
+      // We no longer own this run, so we change nothing about it (issue #59).
+      //
+      // This used to call queue.requeueLostLease, which reset the run to QUEUED and cleared the
+      // lease of whoever held it. When another worker had legitimately taken the run over, that
+      // let this (zombie) worker hand a run to a THIRD worker while the second was still executing
+      // it -- two agents writing one workspace. Requeueing was the wrong action for exactly the
+      // case that triggered it: the condition `lease_owner != me` means somebody else owns it.
+      //
+      // reapExpiredLeases is the single recovery path and already does the right thing: it marks
+      // the run FAILED with error_kind=infrastructure, which section 6 sanctions for lease expiry,
+      // and retry-as-new-run then takes over per section 21. Our only job is to stop driving the
+      // agent (done in drive()) and leave an operator-visible trace.
+      this.deps.events.append(run.id, 'lease.lost', { runId: run.id, requeued: false });
+      log.warn({ status: current.status }, 'lease lost; stopping without touching run state (reaper owns recovery)');
       return;
     }
 

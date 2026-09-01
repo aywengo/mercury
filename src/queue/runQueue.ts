@@ -4,7 +4,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { tx } from '../db/database.ts';
 import type { Run } from '../domain/types.ts';
-import { isTerminal } from '../domain/stateMachine.ts';
+import { isTerminal, shutdownRequeueSources } from '../domain/stateMachine.ts';
 import { RunStore, type RunRow, rowToRun } from '../runs/runStore.ts';
 
 /** Error recorded when a run's lease expires (worker crash); shared with the worker's event payload. */
@@ -69,7 +69,7 @@ export class RunQueue {
    * in RUNNING forever, no reaper, no retry, no operator signal".
    *
    * An active run that needs its lease dropped must be REQUEUED instead: see
-   * requeueForShutdown and requeueLostLease.
+   * requeueForShutdown. (Lease loss is NOT such a caller: the reaper owns that.)
    */
   releaseLease(runId: string, workerId: string): void {
     const row = this.runs.get(runId);
@@ -82,22 +82,31 @@ export class RunQueue {
   /**
    * Hand an active run back to the queue because this worker is shutting down (issue #51).
    *
-   * Same shape as requeueLostLease but matching `lease_owner = ?`: on a graceful shutdown the
-   * current worker IS the owner, whereas requeueLostLease deliberately matches `!= ?` because
-   * a lost lease means somebody else took over. Without this, SIGTERM left in-flight runs
-   * RUNNING until lease expiry (60s default), where the reaper marked them
-   * FAILED(infrastructure) and they were auto-retried -- every deploy turned running work
-   * into spurious infrastructure failures and duplicate agent spend.
+   * Matches `lease_owner = ?`: only the worker that actually holds the run may hand it back. That
+   * scoping is what separates this from the removed requeueLostLease -- a shutdown requeue is the
+   * owner returning its own run, not a bystander resetting somebody else's.
+   *
+   * Without this, SIGTERM left in-flight runs RUNNING until lease expiry (60s default), where the
+   * reaper marked them FAILED(infrastructure) and they were auto-retried -- every deploy turned
+   * running work into spurious infrastructure failures and duplicate agent spend.
+   *
+   * The status filter is GENERATED from the state machine (issue #59) rather than hardcoded, so
+   * this cannot requeue from a state the §6 machine does not allow. The previous version hardcoded
+   * ('STARTING','RUNNING','NEEDS_INPUT') and never consulted the machine at all, which is the
+   * "bypasses the state machine" complaint: the write was in fact safe today, but only by
+   * coincidence, and nothing would have noticed the machine and the SQL diverging.
    */
   requeueForShutdown(runId: string, workerId: string): boolean {
+    const sources = shutdownRequeueSources();
+    const placeholders = sources.map(() => '?').join(', ');
     const res = this.db
       .prepare(
         `UPDATE runs
          SET status = 'QUEUED', lease_owner = NULL, lease_expires_at = NULL, started_at = NULL
          WHERE id = ? AND lease_owner = ?
-           AND status IN ('STARTING', 'RUNNING', 'NEEDS_INPUT')`,
+           AND status IN (${placeholders})`,
       )
-      .run(runId, workerId);
+      .run(runId, workerId, ...sources);
     return res.changes === 1;
   }
 
@@ -107,24 +116,23 @@ export class RunQueue {
     return Number(row.n);
   }
 
-  /**
-   * Requeue a run whose lease was lost (renew failed: owner changed, lease cleared,
-   * or the run was reaped). Resume-from-scratch is the documented recovery path for
-   * non-checkpointable agent state (Mercury.md section 16).
-   * Returns true if the run was moved back to QUEUED; false if it was already
-   * terminal or no longer in a requeueable state.
-   */
-  requeueLostLease(runId: string, fromWorker: string): boolean {
-    const res = this.db
-      .prepare(
-        `UPDATE runs
-         SET status = 'QUEUED', lease_owner = NULL, lease_expires_at = NULL, started_at = NULL
-         WHERE id = ? AND lease_owner IS NOT NULL AND lease_owner != ?
-           AND status IN ('STARTING', 'RUNNING', 'NEEDS_INPUT')`,
-      )
-      .run(runId, fromWorker);
-    return res.changes === 1;
-  }
+  // requeueLostLease was REMOVED here (issue #59). Do not reintroduce it.
+  //
+  // It ran `SET status = 'QUEUED' ... WHERE lease_owner IS NOT NULL AND lease_owner != ?`, i.e.
+  // it acted on a run whose lease belonged to SOMEONE ELSE. Proven on main 397f1b5: a worker with
+  // no lease at all took a RUNNING run owned by an actively-executing worker and left it
+  //
+  //   status = RUNNING -> QUEUED,  lease_owner = worker-B -> null
+  //
+  // so a third worker could claim a run that a second worker was still executing: two agents, one
+  // workspace, one set of git worktree writes. Its doc comment claimed the opposite ("executes
+  // exactly once, on the worker that holds the lease now") while the SQL cleared that worker's
+  // lease, and it cited section 16 to justify a same-runId requeue that section 21 forbids
+  // ("Retry ... creates a new Run with a fresh runId").
+  //
+  // Lease-expiry recovery has exactly one owner: reapExpiredLeases, which takes the path section 6
+  // sanctions (FAILED with error_kind=infrastructure, then retry-as-new-run). A worker that loses
+  // its lease no longer owns the run and must not touch its state; see Worker.finalize.
 
   /**
    * Reap runs whose lease expired (worker crashed).
@@ -173,7 +181,7 @@ export class RunQueue {
           // made the lease-loss recovery path unreachable in three linked ways:
           //   - renewLease matches `WHERE lease_owner = ?`, so it kept returning true and
           //     the owning worker never set leaseLost;
-          //   - requeueLostLease requires `lease_owner != ?`, so it was unreachable;
+          //   - the run could never be resumed, since nothing else cleared the stale owner;
           //   - the worker therefore kept driving the agent -- burning compute and model
           //     spend on a run the database already called FAILED -- and then threw on an
           //     invalid state transition at finalize.

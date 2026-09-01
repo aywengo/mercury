@@ -309,9 +309,12 @@ test('a reaped active run loses its lease, so the dead worker stops renewing it 
     assert.equal(env.queue.renewLease(run.id, 'w1', 60_000), false, 'the dead worker must no longer be able to renew');
     assert.equal(env.queue.renewLease(run.id, 'w2', 60_000), false, 'a live lease is required to renew, not just a row');
 
-    // Documents the boundary with M3: the run is terminal, so the existing requeue path
+    // Documents the boundary with M3: the run is terminal, so the remaining requeue path
     // declines. The worker handles this by leaving it FAILED; making it resumable is M3.
-    assert.equal(env.queue.requeueLostLease(run.id, 'w1'), false);
+    // (This used to assert on requeueLostLease, removed by issue #59 -- it requeued runs whose
+    // lease belonged to another live worker. requeueForShutdown is owner-scoped and terminal-safe,
+    // so it carries the same "terminal runs are never resurrected" boundary.)
+    assert.equal(env.queue.requeueForShutdown(run.id, 'w1'), false);
     assert.equal(env.runs.get(run.id)!.status, 'FAILED');
   } finally {
     env.close();
