@@ -43,6 +43,13 @@ The most useful thing this round produced is the [status-set table](#the-status-
 subsystems each hardcode their own list of "live" run statuses and no two agree. That single
 inconsistency generates two of the findings below and will generate more.
 
+One finding arrived by being blocked by it. A **docs-only** PR failed CI on a test whose startup budget
+was not real, whose child's stderr was piped and never read, and whose cleanup **hangs** whenever the
+child has already exited — destroying the assertion that had just failed. →
+[R2-13](#r2-13-the-cli-wiring-tests-startup-budget-is-not-real-its-cause-is-unread-and-its-cleanup-can-hang).
+It is graded Low because it touches no production code, and it is the highest-value Low here: a suite
+that fails on unrelated changes trains people to re-run CI rather than read it.
+
 ### Tracking
 
 Every finding below is filed. None is fixed at the time of writing.
@@ -60,6 +67,7 @@ Every finding below is filed. None is fixed at the time of writing.
 | R2-9 | SSE writes ignore backpressure | Low | [#145](https://github.com/aywengo/mercury/issues/145) |
 | R2-10 | One poll query per subscriber | Low | [#146](https://github.com/aywengo/mercury/issues/146) |
 | R2-12 | Shared adapter base never built; 6 copies of one fix | Medium | [#148](https://github.com/aywengo/mercury/issues/148) |
+| R2-13 | CLI-wiring test budget is fake, cause unread, cleanup can hang | Low | [#149](https://github.com/aywengo/mercury/issues/149) |
 | R2-11 | `slowDown()` fires with no subscribers | Low | not filed — already Stage 0 in [cross-process-event-push.md](cross-process-event-push.md) |
 
 **Suggested order.** R2-3 and R2-7 first: they are small, and they are what would make R2-2 visible
@@ -457,6 +465,69 @@ extracted function bodies; the file lists of #102, #103 and #111 from the GitHub
 the six adapters to use it; then add a guard test asserting a new adapter cannot declare its own
 `exitResolve`. The refactor is mechanical — five of six bodies are already identical — and doing it
 before the seventh adapter is far cheaper than after.
+
+
+### R2-13. The CLI-wiring test's startup budget is not real, its cause is unread, and its cleanup can hang
+
+`test/multiWorker.test.ts`, the test named *"CLI wiring: /healthz/workers returns 200 when started via
+cli.ts server (issue #4)"* (lines 374-412 at `6e7a035`; #150 rewrites this block, so the name is the
+stable handle) — found by being **blocked by it**: it failed `test (node 24.x)` on a docs-only PR whose
+identical tree passed on `node 23.6.0`, and whose previous head passed both.
+
+```ts
+for (let i = 0; i < 40; i++) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/healthz`);
+    if (res.status === 200) { ok = true; break; }
+  } catch {
+    await sleep(250);              // sleep is INSIDE catch
+  }
+}
+assert.ok(ok, 'server did not start');
+```
+
+**Three defects, and a fourth found while proving them.**
+
+1. **The 10 s budget is only spent while the port is closed.** A listener answering anything other than
+   200 consumes all 40 attempts with no delay. **Measured: 40 attempts in 23 ms** against a 503
+   responder, instead of 10 s. The allowance looks like 10 s and usually is not.
+2. **The assertion cannot report the cause.** `stdio` pipes stderr and the test never reads it.
+   **Reproduced** with an invalid `MERCURY_PORT`: the child logs
+   `mercury api listening  port 3000` — it silently fell back to the default — while the test polls
+   3900+ and prints nothing but `server did not start`. The reason was in the pipe the whole time.
+3. **The port is guessed, not acquired.** `3900 + Math.floor(Math.random() * 500)`, no bind check. The
+   sibling test — *"CLI wiring: backlog alert webhook fires when configured via env (issue #5)"* —
+   computes `4400 + random*500` and **never uses it**: dead code.
+4. **The cleanup hangs whenever the child is already dead**, which is the interesting case:
+
+   ```ts
+   proc.kill('SIGTERM');
+   await new Promise((r) => proc.once('exit', r));   // never settles for an exited child
+   ```
+
+   `exit` is not re-emitted for a dead child. **Proven by execution:** a race against a 2 s deadline
+   returns `NEVER SETTLED`; the replacement returns in **0 ms**. So on the failure paths that matter —
+   bad config, port in use — cleanup awaits forever, the file hits the **180 s** test timeout, and the
+   assertion that had already failed is destroyed. The CI failure that led here was the *lucky* path
+   where the child was still alive.
+
+**Why CI actually failed.** 10038 ms ≈ 40 × 250 ms, so `fetch` threw every time and nothing was
+listening for the full 10 s. `node src/cli.ts server` cold-starts by type-stripping the whole
+application (~9,256 lines) on a runner already running the rest of the suite in parallel per-file
+processes. A fixed 10 s wall on that is the flake.
+
+**Graded Low, labelled `priority: medium`.** The distinction is deliberate: severity here is production
+blast radius, and this touches no production code. The label is *urgency* — it blocked a release, and
+defect 4 destroys the diagnostic exactly when a real failure needs one. A suite that fails on unrelated
+changes is an architecture problem regardless, because it trains people to re-run CI rather than read it.
+
+**Not a defect, checked before filing.** `num()` falling back to the default for a non-numeric
+`MERCURY_PORT` (defect 2's mechanism) is deliberate and asserted by *"numeric env vars fall back to
+defaults when non-numeric (issue #21)"* in `test/config.test.ts` — a documented fail-to-default policy, and the listening port is logged at boot.
+
+**Fix.** Land the sleep outside `catch`, capture child output into the assertion message, acquire the
+port by binding 0, and replace both `once('exit')` awaits with a `stopChild()` that returns immediately
+if the child is gone and escalates SIGTERM → SIGKILL after a grace period. Shipped in #150.
 
 ---
 
