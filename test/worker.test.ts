@@ -1018,7 +1018,7 @@ test('a backlog that develops DURING a run is still alerted on (issue #73 L2)', 
     },
   });
   try {
-    const repo = makeGitRepo(mkdtempSync(join(tmpdir(), 'mercury-backlog-l2-')));
+    const repo = makeGitRepo(tempDir('mercury-backlog-l2-'));
     const mk = () =>
       env.runService.create({ ownerId: 'alice', task: 't', agent: 'fake', repository: { localPath: repo, baseBranch: 'main' } });
 
@@ -1074,6 +1074,51 @@ test('the backlog timer and alert path work with no runs at all (issue #73 L2 co
     env.worker.start();
     await waitFor(() => alerts.length > 0, 5_000);
     assert.ok(alerts.length > 0, 'the backlog timer must fire and the alert must be observable');
+  } finally {
+    env.worker.stop();
+    env.close();
+  }
+});
+
+// Issue #67. The drive loop races each `iterator.next()` against a `cancellableSleep(remaining)`
+// timer that is only released by cancel(). When the agent stream THROWS, the race rejects, the
+// await propagates, and a `cancel()` written as the following statement never runs -- so a timer
+// for the full remaining run duration (60s by default) outlives the run.
+//
+// This is not a test-hygiene problem. It held the node process open for ~60s after every such run,
+// which (a) blew the 60s per-file `--test-timeout` and turned CI red, and (b) on a real worker
+// keeps the event loop alive past `TimeoutStopSec=45`, converting a graceful shutdown into a
+// SIGKILL -- the exact failure mode issue #51 was raised to remove.
+test('a run whose agent stream throws leaves no pending timer (issue #67)', async () => {
+  const activeTimers = () =>
+    ((process as unknown as { getActiveResourcesInfo(): string[] }).getActiveResourcesInfo() ?? [])
+      .filter((r) => r === 'Timeout').length;
+
+  const repo = makeGitRepo(tempDir('mercury-timer-leak-'));
+  const adapter = new RecordingAdapter('throw-midway');
+  const env = makeEnv({ workerEnabled: false, adapters: { fake: adapter } });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo } });
+    // Baseline is sampled AFTER start so the worker's own heartbeat and poll timers are already
+    // counted; the assertion is then about what the run ADDS, not about how many timers exist.
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    const baseline = activeTimers();
+
+    // Give any leaked timer a chance to be observed. It is not cleared by anything downstream, so
+    // if it leaked it is still pending here; if cleanup works it was cleared at the race.
+    await sleep(250);
+    const after = activeTimers();
+
+    // One timer of slack covers the run's own in-flight bookkeeping. Without the fix this grows by
+    // one per attempted retry (measured: baseline+3 on the default retry policy), each for the full
+    // remaining max-duration.
+    assert.ok(
+      after <= baseline + 1,
+      `pending timers grew from ${baseline} to ${after} after a throwing run: the drive loop's ` +
+        `cancellableSleep timer was not released on the rejection path. Each leak holds the event ` +
+        `loop open for the full remaining max-duration.`,
+    );
   } finally {
     env.worker.stop();
     env.close();
