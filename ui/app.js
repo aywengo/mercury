@@ -135,6 +135,40 @@ export function esc(s) {
   }[c]));
 }
 
+/**
+ * Return the URL only if it is safe to put in an href, else null.
+ *
+ * esc() is necessary but NOT sufficient for a URL context (issue #57). It neutralises the
+ * characters that would break out of the attribute, and `javascript:alert(1)` needs none of them:
+ * it is a perfectly well-formed attribute value whose scheme is the payload. So escaping the
+ * value and validating the scheme are different jobs, and only the second one stops this.
+ *
+ * prUrl is attacker-reachable: it arrives from a `git.pr` event, which the agent process emits,
+ * and the agent operates inside a repository that may itself be untrusted. A stored
+ * `javascript:` URL therefore turns the run detail page into XSS against whoever is watching the
+ * run.
+ *
+ * Absolute http(s) only. Relative URLs are rejected on purpose: a PR link is always absolute, and
+ * accepting relatives would mean resolving against the dashboard's own origin.
+ */
+export function safeUrl(s) {
+  const raw = String(s ?? '').trim();
+  if (!raw) return null;
+  let url;
+  try {
+    // No base argument: that is what makes a relative URL throw instead of silently resolving
+    // against this page.
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  // Compare the parsed protocol, never the raw string. URL parsing strips tabs and newlines, so
+  // `java\tscript:alert(1)` -- which a substring check on the raw text would wave through --
+  // arrives here as exactly 'javascript:'.
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  return url.href;
+}
+
 export function statusClass(status) {
   return 'status-' + String(status).toLowerCase();
 }
