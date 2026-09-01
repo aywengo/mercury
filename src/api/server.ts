@@ -10,10 +10,11 @@ import type { EventStream } from '../events/eventStream.ts';
 import type { RunQueue } from '../queue/runQueue.ts';
 import type { RunService } from '../runs/runService.ts';
 import { createAuthMiddleware } from './auth.ts';
-import { createRoutes } from './routes.ts';
+import { createRoutes, sendError } from './routes.ts';
 import { createAuthRoutes } from './authRoutes.ts';
 import { createRateLimiter } from './rateLimit.ts';
 import { createSessionStore, type SessionStore } from './sessions.ts';
+import type { Logger } from '../logger.ts';
 
 // Dashboard UI (Mercury.md section 23): static SPA served at /.
 // The UI authenticates with a session cookie (POST /api/auth/login);
@@ -59,6 +60,8 @@ export interface ServerDeps {
    * so a client cannot invent an address that survives the peel.
    */
   trustProxy?: number;
+  /** Optional structured logger; used to record the real cause of a 500 (issue #66). */
+  logger?: Logger;
 }
 
 // Defaults for the two protected route groups (Mercury.md section 24).
@@ -122,10 +125,15 @@ export function createApp(deps: ServerDeps): Express {
   });
   app.post('/api/runs', createRunLimiter);
 
-  app.use('/api', createRoutes({ runService: deps.runService, events: deps.events, stream: deps.stream }));
+  app.use('/api', createRoutes({ runService: deps.runService, events: deps.events, stream: deps.stream, logger: deps.logger }));
 
+  // Last-resort handler for anything that escaped a route (including middleware and body-parser
+  // failures). It used to answer `500 { error: err.message }`, which pushed raw internals --
+  // driver text, absolute paths -- to the browser (issue #66). Same mapping as the routes use, so
+  // a classified error thrown outside a try/catch still gets its proper status, and anything
+  // unclassified gets a fixed body with the real cause logged instead.
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    res.status(500).json({ error: err.message });
+    sendError(res, err, deps.logger);
   });
 
   return app;

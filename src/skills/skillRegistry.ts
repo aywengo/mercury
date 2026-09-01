@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import type { ResolvedSkill } from '../domain/types.ts';
+import { ValidationError } from '../domain/errors.ts';
 
 /**
  * A skill id must be one safe path segment (issue #58).
@@ -22,7 +23,7 @@ const SAFE_SKILL_ID = /^[a-z0-9][a-z0-9._-]*$/;
 
 export function assertSafeSkillId(id: string): string {
   if (typeof id !== 'string' || !SAFE_SKILL_ID.test(id)) {
-    throw new Error(`Unsafe skill id: ${JSON.stringify(id)}`);
+    throw new ValidationError(`Unsafe skill id: ${JSON.stringify(id)}`);
   }
   return id;
 }
@@ -78,12 +79,12 @@ export function resolveContained(root: string, rel: string): string {
   const absRoot = resolve(root);
   const abs = resolve(absRoot, rel);
   if (!isContained(absRoot, abs)) {
-    throw new Error(`Path escapes ${absRoot}: ${JSON.stringify(rel)}`);
+    throw new ValidationError(`Skill path escapes the skill root: ${JSON.stringify(rel)}`);
   }
   const realRoot = realpathNearest(absRoot);
   const realAbs = realpathNearest(abs);
   if (!isContained(realRoot, realAbs)) {
-    throw new Error(`Path escapes ${realRoot} through a symlink: ${JSON.stringify(rel)}`);
+    throw new ValidationError(`Skill path escapes the skill root through a symlink: ${JSON.stringify(rel)}`);
   }
   assertNoSymlinkBelow(absRoot, abs);
   return abs;
@@ -110,7 +111,7 @@ function assertNoSymlinkBelow(root: string, abs: string): void {
     } catch {
       continue; // does not exist yet, so it cannot be a symlink
     }
-    throw new Error(`Path component is a symlink, refusing to follow it: ${step} -> ${link}`);
+    throw new ValidationError(`Skill path component is a symlink, refusing to follow it: ${JSON.stringify(step)}`);
   }
 }
 
@@ -173,7 +174,7 @@ export class SkillRegistry {
     const dir = resolveContained(this.rootDir, assertSafeSkillId(id));
     const skillPath = join(dir, 'SKILL.md');
     if (!exists(skillPath)) {
-      throw new Error(`Skill not found: ${id} (expected ${skillPath})`);
+      throw new ValidationError(`Skill not found: ${JSON.stringify(id)}`);
     }
     const meta = this.readMeta(id);
     const files: Record<string, string> = {};

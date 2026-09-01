@@ -1,5 +1,5 @@
 import { test } from 'node:test';
-import assert from 'node:assert/strict';
+import { NotFoundError } from '../src/domain/errors.ts';import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { openDatabase } from '../src/db/database.ts';
 import { makeEnv, waitFor } from './helpers.ts';
@@ -119,7 +119,11 @@ test('cancel requires ownership', () => {
   const env = makeEnv({ workerEnabled: false });
   try {
     const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
-    assert.throws(() => env.runService.cancel(run.id, 'bob', false), /Run not found/);
+    // Asserted by error CLASS, not message text: the class is what the API maps to a status, and
+    // a foreign run must be indistinguishable from a nonexistent one (404, never 403) so that
+    // cancelling someone else's run does not confirm it exists.
+    assert.throws(() => env.runService.cancel(run.id, 'bob', false), NotFoundError);
+    assert.throws(() => env.runService.cancel('does-not-exist', 'alice', true), NotFoundError);
   } finally {
     env.close();
   }

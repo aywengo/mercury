@@ -4,6 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tx } from '../db/database.ts';
 import { isTerminal } from '../domain/stateMachine.ts';
+import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.ts';
 import type { Redactor } from '../domain/redact.ts';
 import type { RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
 import { EventStore } from '../events/eventStore.ts';
@@ -50,7 +51,7 @@ export class RunService {
 
   create(input: CreateRunInput): Run {
     if (!input.task || input.task.trim().length === 0) {
-      throw new Error('task is required');
+      throw new ValidationError('task is required');
     }
     if (input.constraints) validateConstraints(input.constraints);
     if (input.idempotencyKey) {
@@ -59,7 +60,7 @@ export class RunService {
     }
     const agent = input.agent ?? 'primeagent';
     if (!this.deps.knownAgents.includes(agent)) {
-      throw new Error(`Unknown agent: ${agent} (known: ${this.deps.knownAgents.join(', ')})`);
+      throw new ValidationError(`Unknown agent: ${agent} (known: ${this.deps.knownAgents.join(', ')})`);
     }
     const available = this.deps.skills.list();
     const skillIds = input.skills && input.skills.length > 0
@@ -172,9 +173,9 @@ export class RunService {
 
   submitInput(runId: string, ownerId: string, isAdmin: boolean, value: unknown): void {
     const run = this.get(runId, ownerId, isAdmin);
-    if (!run) throw new Error('Run not found');
+    if (!run) throw new NotFoundError('run not found');
     if (run.status !== 'NEEDS_INPUT') {
-      throw new Error(`Run is not waiting for input (status: ${run.status})`);
+      throw new ConflictError(`Run is not waiting for input (status: ${run.status})`);
     }
     const safeValue = this.deps.redactor ? this.deps.redactor.redactJson(value) : value;
     this.deps.db
@@ -184,8 +185,8 @@ export class RunService {
 
   cancel(runId: string, ownerId: string, isAdmin: boolean): Run {
     const run = this.get(runId, ownerId, isAdmin);
-    if (!run) throw new Error('Run not found');
-    if (isTerminal(run.status)) throw new Error(`Run already terminal (${run.status})`);
+    if (!run) throw new NotFoundError('run not found');
+    if (isTerminal(run.status)) throw new ConflictError(`Run already terminal (${run.status})`);
     if (run.status === 'QUEUED') {
       const updated = this.deps.runs.transition(runId, 'CANCELLED', { completedAt: new Date().toISOString() });
       this.deps.events.append(runId, 'run.cancelling', { runId });
@@ -200,11 +201,11 @@ export class RunService {
 
   retry(runId: string, ownerId: string, isAdmin: boolean, opts: { auto?: boolean } = {}): Run {
     const original = this.get(runId, ownerId, isAdmin);
-    if (!original) throw new Error('Run not found');
-    if (!isTerminal(original.status)) throw new Error(`Run not terminal (${original.status})`);
-    if (original.status === 'COMPLETED') throw new Error('Cannot retry a completed Run');
+    if (!original) throw new NotFoundError('run not found');
+    if (!isTerminal(original.status)) throw new ConflictError(`Run not terminal (${original.status})`);
+    if (original.status === 'COMPLETED') throw new ConflictError('Cannot retry a completed Run');
     if (original.attempt >= original.constraints.maxRetries + 1) {
-      throw new Error(`Max retries reached (${original.constraints.maxRetries})`);
+      throw new ConflictError(`Max retries reached (${original.constraints.maxRetries})`);
     }
     const skills = this.getSkills(runId).map((s) => s.id);
     // original.repository carries the pinned base commit (set when the original
@@ -245,40 +246,40 @@ const CONSTRAINT_KEYS = new Set(['maxDurationMs', 'maxRetries', 'maxTokens', 'ma
 function validateConstraints(c: Record<string, unknown>): void {
   for (const key of Object.keys(c)) {
     if (!CONSTRAINT_KEYS.has(key)) {
-      throw new Error(`Unknown constraint: ${key}`);
+      throw new ValidationError(`Unknown constraint: ${key}`);
     }
   }
   for (const key of NUMERIC_CONSTRAINT_KEYS) {
     const v = c[key];
     if (v === undefined) continue;
     if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) {
-      throw new Error(`constraint ${key} must be a finite integer`);
+      throw new ValidationError(`constraint ${key} must be a finite integer`);
     }
     if (v < 0) {
-      throw new Error(`constraint ${key} must be >= 0`);
+      throw new ValidationError(`constraint ${key} must be >= 0`);
     }
     if (v > Number.MAX_SAFE_INTEGER) {
-      throw new Error(`constraint ${key} must be <= ${Number.MAX_SAFE_INTEGER}`);
+      throw new ValidationError(`constraint ${key} must be <= ${Number.MAX_SAFE_INTEGER}`);
     }
   }
   const rl = c.resourceLimits;
   if (rl !== undefined) {
     if (typeof rl !== 'object' || rl === null || Array.isArray(rl)) {
-      throw new Error('constraint resourceLimits must be an object');
+      throw new ValidationError('constraint resourceLimits must be an object');
     }
     for (const [k, v] of Object.entries(rl)) {
       if (!['cpu', 'memory', 'disk'].includes(k)) {
-        throw new Error(`Unknown resourceLimits key: ${k}`);
+        throw new ValidationError(`Unknown resourceLimits key: ${k}`);
       }
       if (typeof v !== 'string') {
-        throw new Error(`resourceLimits.${k} must be a string`);
+        throw new ValidationError(`resourceLimits.${k} must be a string`);
       }
     }
   }
   const an = c.allowedNetworks;
   if (an !== undefined) {
     if (!Array.isArray(an) || an.some((x) => typeof x !== 'string')) {
-      throw new Error('constraint allowedNetworks must be an array of strings');
+      throw new ValidationError('constraint allowedNetworks must be an array of strings');
     }
   }
 }

@@ -6,11 +6,48 @@ import type { EventStream } from '../events/eventStream.ts';
 import type { RunService } from '../runs/runService.ts';
 import type { RunStatus } from '../domain/types.ts';
 import { requireAuth } from './auth.ts';
+import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.ts';
+import type { Logger } from '../logger.ts';
 
 export interface RoutesDeps {
   runService: RunService;
   events: EventStore;
   stream: EventStream;
+  /** Optional; used to record the real cause of a 500, which is never sent to the client. */
+  logger?: Logger;
+}
+
+/**
+ * Map a thrown value to a response (issue #66).
+ *
+ * Recognised domain errors carry their own status and a message that is safe to send. Everything
+ * else is an unexpected failure: report 500 with a fixed body and log the real cause. Defaulting
+ * the UNKNOWN case to "generic" is the point -- a throw nobody classified cannot leak its
+ * internals, whereas the previous `catch { 400 + err.message }` leaked by default.
+ */
+export function sendError(res: Response, err: unknown, logger?: Logger): void {
+  if (err instanceof NotFoundError) {
+    res.status(404).json({ error: err.message });
+    return;
+  }
+  if (err instanceof ConflictError) {
+    res.status(409).json({ error: err.message });
+    return;
+  }
+  if (err instanceof ValidationError) {
+    res.status(400).json({ error: err.message });
+    return;
+  }
+  // Unclassified: keep the detail server-side. The logger redacts, so a message containing a
+  // token still cannot reach the log in the clear.
+  logger?.error(
+    {
+      err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    },
+    'unhandled API error',
+  );
+  res.status(500).json({ error: 'internal error' });
 }
 
 const VALID_STATUSES = new Set<RunStatus>(['QUEUED', 'STARTING', 'RUNNING', 'NEEDS_INPUT', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT']);
@@ -40,7 +77,7 @@ export function createRoutes(deps: RoutesDeps): Router {
       });
       res.status(201).json({ runId: run.id, status: run.status });
     } catch (err) {
-      res.status(400).json({ error: String(err instanceof Error ? err.message : err) });
+      sendError(res, err, deps.logger);
     }
   });
 
@@ -77,7 +114,7 @@ export function createRoutes(deps: RoutesDeps): Router {
       deps.runService.submitInput(req.params.runId, req.auth!.ownerId, req.auth!.isAdmin, req.body?.input ?? req.body);
       res.json({ ok: true });
     } catch (err) {
-      res.status(400).json({ error: String(err instanceof Error ? err.message : err) });
+      sendError(res, err, deps.logger);
     }
   });
 
@@ -87,7 +124,7 @@ export function createRoutes(deps: RoutesDeps): Router {
       const run = deps.runService.cancel(req.params.runId, req.auth!.ownerId, req.auth!.isAdmin);
       res.json({ runId: run.id, status: run.status });
     } catch (err) {
-      res.status(400).json({ error: String(err instanceof Error ? err.message : err) });
+      sendError(res, err, deps.logger);
     }
   });
 
@@ -97,7 +134,7 @@ export function createRoutes(deps: RoutesDeps): Router {
       const run = deps.runService.retry(req.params.runId, req.auth!.ownerId, req.auth!.isAdmin);
       res.status(201).json({ runId: run.id, status: run.status, retryOf: run.retryOf });
     } catch (err) {
-      res.status(400).json({ error: String(err instanceof Error ? err.message : err) });
+      sendError(res, err, deps.logger);
     }
   });
 
