@@ -116,14 +116,17 @@ function makeWorker(
  * that ignores SIGTERM cannot wedge the suite either.
  */
 async function stopChild(proc: ChildProcess, graceMs = 5_000): Promise<void> {
-  if (!proc.connected && proc.exitCode !== null) return;
-  if (proc.exitCode !== null) return;
+  // exitCode stays NULL for a child killed by a signal -- signalCode carries the reason -- so
+  // checking exitCode alone would treat a SIGKILLed child as still running and burn the grace
+  // period sending signals to a corpse. Measured: {exitCode: null, signalCode: 'SIGKILL'}.
+  const dead = () => proc.exitCode !== null || proc.signalCode !== null;
+  if (dead()) return;
   proc.kill('SIGTERM');
   const exited = await Promise.race([
     new Promise<boolean>((r) => proc.once('exit', () => r(true))),
     sleep(graceMs).then(() => false),
   ]);
-  if (!exited && proc.exitCode === null) {
+  if (!exited && !dead()) {
     proc.kill('SIGKILL');
     await Promise.race([new Promise<void>((r) => proc.once('exit', () => r())), sleep(graceMs)]);
   }
@@ -437,8 +440,12 @@ test('CLI wiring: /healthz/workers returns 200 when started via cli.ts server (i
   const output: string[] = [];
   proc.stderr.on('data', (c: Buffer) => output.push(c.toString()));
   proc.stdout.on('data', (c: Buffer) => output.push(c.toString()));
-  let exitCode: number | null = null;
-  proc.once('exit', (code) => { exitCode = code; });
+  let childExited = false;
+  let exitInfo = 'still running';
+  proc.once('exit', (code, signal) => {
+    childExited = true;
+    exitInfo = code !== null ? `code ${code}` : `signal ${signal}`;
+  });
 
   try {
     let ok = false;
@@ -446,7 +453,7 @@ test('CLI wiring: /healthz/workers returns 200 when started via cli.ts server (i
     // anything other than 200 consumed all 40 attempts with no delay at all -- measured at 287ms
     // for the whole loop instead of 10s. The budget now means what it looks like.
     const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline && exitCode === null) {
+    while (Date.now() < deadline && !childExited) {
       try {
         const res = await fetch(`http://127.0.0.1:${port}/healthz`);
         if (res.status === 200) { ok = true; break; }
@@ -457,7 +464,7 @@ test('CLI wiring: /healthz/workers returns 200 when started via cli.ts server (i
     }
     assert.ok(
       ok,
-      `server did not start (exit=${exitCode}). Child output:\n` +
+      `server did not start (exited: ${exitInfo}). Child output:\n` +
         output.join('').slice(-4_000),
     );
     const res = await fetch(`http://127.0.0.1:${port}/healthz/workers`);
