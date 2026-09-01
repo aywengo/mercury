@@ -27,6 +27,146 @@ The single most consequential finding is **H9** — the dashboard silently loses
 history beyond 1,000 events. It is invisible, it breaks the product's core promise, and
 no test covers it.
 
+> **This verdict is the review as written, not the current state.** For what has since
+> been fixed, held, or found to be wrong in this document itself, see
+> [Resolution status](#resolution-status) directly below.
+
+---
+
+## Resolution status
+
+_Updated after remediation. Findings are listed in this document's own numbering; each links to the_
+_issue that tracked it and the PR that closed it._
+
+**39 findings: 32 resolved, 1 already fixed before it was reached, 1 held on infrastructure, 1 partial, 4 open.**
+Every High finding is resolved. The only Medium still outstanding is M11, which is blocked on
+observable CI rather than on code.
+
+| ID | Finding | Issue | PR | Status |
+| --- | --- | --- | --- | --- |
+| H1 | Every successful run leaks the agent process | [#46](https://github.com/aywengo/mercury/issues/46) | [#96](https://github.com/aywengo/mercury/pull/96) | ✅ resolved |
+| H2 | A cancelled run can keep being executed and written to | [#47](https://github.com/aywengo/mercury/issues/47) | [#96](https://github.com/aywengo/mercury/pull/96) | ✅ resolved |
+| H3 | `RunStore.transition` can lose a cancellation | [#48](https://github.com/aywengo/mercury/issues/48) | [#90](https://github.com/aywengo/mercury/pull/90) | ✅ resolved |
+| H4 | `busy_timeout` does not protect event appends | [#49](https://github.com/aywengo/mercury/issues/49) | [#89](https://github.com/aywengo/mercury/pull/89) | ✅ resolved |
+| H5 | SSE frame injection via unvalidated event type | [#50](https://github.com/aywengo/mercury/issues/50) | [#93](https://github.com/aywengo/mercury/pull/93) | ✅ resolved |
+| H6 | Every deploy fails in-flight runs and auto-retries them | [#51](https://github.com/aywengo/mercury/issues/51) | [#99](https://github.com/aywengo/mercury/pull/99) | ✅ resolved |
+| H7 | Server shutdown hangs until SIGKILL | [#52](https://github.com/aywengo/mercury/issues/52) | [#98](https://github.com/aywengo/mercury/pull/98) | ✅ resolved |
+| H8 | The lease-loss recovery path is effectively dead code | [#53](https://github.com/aywengo/mercury/issues/53) | [#94](https://github.com/aywengo/mercury/pull/94) | ✅ resolved |
+| H9 | Dashboard silently loses run history beyond 1,000 events | [#54](https://github.com/aywengo/mercury/issues/54) | [#100](https://github.com/aywengo/mercury/pull/100) | ✅ resolved |
+| H10 | Daemon adapter `terminate()` never settles the exit promise | [#55](https://github.com/aywengo/mercury/issues/55) | [#102](https://github.com/aywengo/mercury/pull/102) | ✅ resolved |
+| H11 | Sandbox does not pass environment, despite saying it does | [#56](https://github.com/aywengo/mercury/issues/56) | [#104](https://github.com/aywengo/mercury/pull/104) | ✅ resolved |
+| M1 | Stored XSS via `prUrl` | [#57](https://github.com/aywengo/mercury/issues/57) | [#114](https://github.com/aywengo/mercury/pull/114) | ✅ resolved |
+| M2 | Skill ids are caller-controlled and uncontained | [#58](https://github.com/aywengo/mercury/issues/58) | [#92](https://github.com/aywengo/mercury/pull/92) | ✅ resolved |
+| M3 | `requeueLostLease` bypasses the state machine | [#59](https://github.com/aywengo/mercury/issues/59) | [#115](https://github.com/aywengo/mercury/pull/115) | ✅ resolved |
+| M4 | The §14 event whitelist is decorative | [#60](https://github.com/aywengo/mercury/issues/60) | [#93](https://github.com/aywengo/mercury/pull/93) | ✅ resolved |
+| M5 | State and events are not atomic | [#61](https://github.com/aywengo/mercury/issues/61) | [#105](https://github.com/aywengo/mercury/pull/105) | ✅ resolved |
+| M6 | Unbounded `sessions` Map | [#62](https://github.com/aywengo/mercury/issues/62) | [#103](https://github.com/aywengo/mercury/pull/103) | ✅ resolved |
+| M7 | `maxTokens` / `maxCost` are decorative | [#63](https://github.com/aywengo/mercury/issues/63) | [#118](https://github.com/aywengo/mercury/pull/118) | ✅ resolved |
+| M8 | Session cookie has no `Secure` flag | [#64](https://github.com/aywengo/mercury/issues/64) | [#108](https://github.com/aywengo/mercury/pull/108) | ✅ resolved |
+| M9 | Rate limiting collapses behind a reverse proxy | [#65](https://github.com/aywengo/mercury/issues/65) | [#109](https://github.com/aywengo/mercury/pull/109) | ✅ resolved |
+| M10 | Wrong status codes and internal leakage | [#66](https://github.com/aywengo/mercury/issues/66) | [#110](https://github.com/aywengo/mercury/pull/110) | ✅ resolved |
+| M11 | API/auth surface untestable as checked out | [#67](https://github.com/aywengo/mercury/issues/67) | [#112](https://github.com/aywengo/mercury/pull/112) | ⏸ **held** |
+| M12 | `readFrame` silently drops pipelined frames | [#68](https://github.com/aywengo/mercury/issues/68) | [#111](https://github.com/aywengo/mercury/pull/111) | ✅ resolved |
+| M13 | Backup fallback can silently produce a torn backup | [#69](https://github.com/aywengo/mercury/issues/69) | [#120](https://github.com/aywengo/mercury/pull/120) | ✅ resolved |
+| M14 | Deploy path mismatch trap | [#70](https://github.com/aywengo/mercury/issues/70) | [#121](https://github.com/aywengo/mercury/pull/121) | ✅ resolved |
+| M15 | Lease leak on the skip path | [#71](https://github.com/aywengo/mercury/issues/71) | [#107](https://github.com/aywengo/mercury/pull/107) | ✅ resolved |
+| M16 | Races are simulated, not multi-process | [#72](https://github.com/aywengo/mercury/issues/72) | [#113](https://github.com/aywengo/mercury/pull/113) | ✅ resolved |
+| L1 | `detectRuntime()` is dead code | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
+| L2 | Backlog alerts stall during runs | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
+| L3 | Stuck-run detection caps at 200 per status | — | — | ✔ already fixed |
+| L4 | Shipped logrotate config is a no-op | [#73](https://github.com/aywengo/mercury/issues/73) | — | ⬜ open |
+| L5 | Admin token compared with `===` | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
+| L6 | SSE streams stay open for terminal runs | [#73](https://github.com/aywengo/mercury/issues/73) | — | ⬜ open |
+| L7 | Retry-of link renders as literal markup | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
+| L8 | Temp-dir leaks in tests | [#73](https://github.com/aywengo/mercury/issues/73) | — | ⬜ open |
+| L9 | Doc drift on test counts | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
+| L10 | systemd hardening blocks the docker sandbox | [#73](https://github.com/aywengo/mercury/issues/73) | — | ◐ partial |
+| L11 | No metrics endpoint | [#73](https://github.com/aywengo/mercury/issues/73) | — | ⬜ open |
+| L12 | §6 diagram has a phantom `CANCELLED --> RUNNING` edge | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
+
+### Held, not fixed: M11
+
+PR #112 adds CI that installs dependencies, which is the correct fix, but it cannot be
+verified here: `get_pull_request_status` reports `state: pending` with **zero checks** on
+every PR in this private repository, `gh` is installed but the available `GITHUB_TOKEN` is
+rejected, and the GitHub API surface in use exposes no workflow-runs tool. Merging a change
+whose whole purpose is to make tests run, without being able to see those tests run, would
+replace an unknown with a false certainty. It is left open deliberately.
+
+### Already fixed before being reached: L3
+
+The `LIMIT 200` on stuck-run detection was gone by the time the item was picked up. Recorded
+rather than silently dropped, because "we fixed this" and "this was fixed by something else"
+are different claims.
+
+### Partial: L10
+
+`TimeoutStopSec` is now present in both units (it arrived with the H6 graceful-shutdown work),
+so the shutdown half of this finding is closed. The remaining half — `ProtectSystem=strict`
+with no docker socket access makes the container sandbox unusable under the shipped units —
+is untouched and is grouped with L4 as deploy-config work.
+
+### Still open in #73: L4, L6, L8, L11
+
+- **L4** — the app logs JSON to stdout only, so the shipped `logrotate.conf` rotates files
+  nothing writes. The config now carries a "file-based logging deployments" caveat, but the
+  finding stands: shipping it by default is misleading.
+- **L6** — #98 bounded server shutdown, which was the dangerous consequence, but nothing
+  server-side closes a stream when its run reaches a terminal status. Streams still linger
+  until the client disconnects.
+- **L8** — temp-dir leaks across 11 test files (68 `mkdtempSync`, no `rmSync`). Mechanical,
+  broad, and worth doing as its own change rather than folded into others.
+- **L11** — no metrics endpoint. This is a feature gap rather than a defect: durations and
+  queue-wait exist as event payloads and worker liveness as `/healthz/workers`. It should
+  probably leave the defect backlog and become its own enhancement.
+
+### Found during remediation, not in the original review
+
+Fixing a finding repeatedly surfaced adjacent defects that were filed and fixed rather than
+folded in silently:
+
+| Issue | Found while fixing | PR |
+| --- | --- | --- |
+| [#95](https://github.com/aywengo/mercury/issues/95) | `--skill` path join in `PrimeAgentAdapter` unguarded (defence in depth found while fixing M2) | [#117](https://github.com/aywengo/mercury/pull/117) |
+| [#106](https://github.com/aywengo/mercury/issues/106) | Failure bookkeeping still non-atomic on the worker paths, not just the reaper (found while fixing M5) | [#119](https://github.com/aywengo/mercury/pull/119) |
+| [#101](https://github.com/aywengo/mercury/issues/101) | `GET /api/runs` read `limit=0` as absent (found while fixing H9) | [#116](https://github.com/aywengo/mercury/pull/116) |
+| [#86](https://github.com/aywengo/mercury/issues/86) | Skill content hash was locale-dependent | [#122](https://github.com/aywengo/mercury/pull/122) |
+| [#87](https://github.com/aywengo/mercury/issues/87) | Singular task text missed a plural capability | [#123](https://github.com/aywengo/mercury/pull/123) |
+| [#88](https://github.com/aywengo/mercury/issues/88) | Substring scoring fired wrong skills from innocent words | [#123](https://github.com/aywengo/mercury/pull/123) |
+| [#78](https://github.com/aywengo/mercury/issues/78) | 4 of 12 skills could never be auto-selected | [#84](https://github.com/aywengo/mercury/pull/84) |
+| [#79](https://github.com/aywengo/mercury/issues/79) | No test that selector KEYWORDS and the registry agree | [#85](https://github.com/aywengo/mercury/pull/85) |
+| [#80](https://github.com/aywengo/mercury/issues/80) | A skill could ship with broken frontmatter undetected | [#83](https://github.com/aywengo/mercury/pull/83) |
+| [#81](https://github.com/aywengo/mercury/issues/81) | Skill ids sorted with two different comparators | [#82](https://github.com/aywengo/mercury/pull/82) |
+| [#76](https://github.com/aywengo/mercury/issues/76) | `skills.test.ts` failed on main | [#77](https://github.com/aywengo/mercury/pull/77) |
+
+### What the process produced, stated plainly
+
+Two review conclusions in this document turned out to be wrong or incomplete on contact with
+the code, and both changed the fix:
+
+- **H8 / M3.** The review asked for the lease-loss path to be repaired. Reading it closely
+  showed it was worse than described: it matched `lease_owner != ?`, so it fired when
+  *another* worker held the lease and cleared theirs, producing two agents on one workspace.
+  The correct fix was deletion, not repair — one recovery path (the reaper) instead of two
+  racing ones. See §6.1 of `ARCHITECTURE.md`.
+- **M7.** The review framed unenforced limits as a missing enforcement. Enforcement is not
+  implementable without per-run usage reporting, which no adapter produces and no event type
+  carries. The honest fix was to rename them `budget*` and document them as recorded-only, so
+  the name stops implying a guarantee. Renaming left all 297 tests green: the fields had
+  **zero** coverage.
+
+Reviewer findings on the fix PRs caught defects in the fixes themselves, including a phishing
+vector in the M1 fix (link text showing a trusted host while the href pointed elsewhere), a
+partial backup file left behind on failure in M13, a root-owned database in the M13 restore
+runbook, and a prototype-chain lookup in M7's migration error message.
+
+Two tests were found to be passing for reasons unrelated to what they claimed. The CLI backlog
+alert test (#5) created runs with no repository, so both failed instantly and the alert only
+appeared because depth was transiently correct at the sampling instant; it never exercised a
+real backlog. A `detectRuntime` test asserted `null || docker || podman`, which is true for
+every possible outcome. Both are noted where they were fixed.
+
+
 ---
 
 ## Method and confidence
@@ -403,25 +543,40 @@ Worth stating plainly, because the finding list could otherwise misrepresent the
 
 Ordered by dependency, not severity. Each step is independently shippable.
 
-| Step | Change | Unblocks |
-| --- | --- | --- |
-| 1 | `BEGIN IMMEDIATE` in `tx()` (`database.ts:141`) | H4; makes every guard in group 2 actually hold |
-| 2 | Path containment helper, wired into `writeSkills` and skill resolution | M2; also a blocking prerequisite for Crew Phase 5 |
-| 3 | Conditional `transition` (`WHERE id = ? AND status = ?`, check `changes`) | H3 |
-| 4 | Enforce `EVENT_TYPES` in `EventStore.append`; add `lease.lost`, `sandbox.enabled` to the set | H5, M4 |
-| 5 | Clear `lease_owner` in the reap failure branch | H8 |
-| 6 | Terminate the handle on *every* worker exit path, including the throwing one; guard the drive loop on persisted status | H1, H2 |
-| 7 | Graceful shutdown: `worker.stop()` + lease release + `closeAllConnections()` + `TimeoutStopSec` | H6, H7, L10 |
-| 8 | Page events from the last *returned* sequence; add a cursor to the events endpoint | H9 |
-| 9 | Shared adapter base for spawn / stderr / exit settlement / session lifetime | H10, M6, M12 |
-| 10 | Sandbox env passthrough, disk-limit portability, image contents | H11 |
-| 11 | `Secure` cookie when TLS is on; `trust proxy`; 404 for foreign runs; stop leaking `err.message` | M8, M9, M10 |
-| 12 | CI installs dependencies so the API surface is actually tested | M11, M16 |
+The ordering was the point of this table, and it held up: doing step 1 (`BEGIN IMMEDIATE`)
+before step 3 was load-bearing, because a conditional `UPDATE ... WHERE status = ?` is only
+atomic once the write lock is taken up front. Shipping them the other way round would have
+produced guards that looked correct and were not.
+
+| Step | Change | Unblocks | Status |
+| --- | --- | --- | --- |
+| 1 | `BEGIN IMMEDIATE` in `tx()` (`database.ts:141`) | H4; makes every guard in group 2 actually hold | ✅ #89 |
+| 2 | Path containment helper, wired into `writeSkills` and skill resolution | M2; also a blocking prerequisite for Crew Phase 5 | ✅ #92, #117 |
+| 3 | Conditional `transition` (`WHERE id = ? AND status = ?`, check `changes`) | H3 | ✅ #90 |
+| 4 | Enforce `EVENT_TYPES` in `EventStore.append`; add `lease.lost`, `sandbox.enabled` to the set | H5, M4 | ✅ #93 |
+| 5 | Clear `lease_owner` in the reap failure branch | H8 | ✅ #94, #115 |
+| 6 | Terminate the handle on *every* worker exit path, including the throwing one; guard the drive loop on persisted status | H1, H2 | ✅ #96 |
+| 7 | Graceful shutdown: `worker.stop()` + lease release + `closeAllConnections()` + `TimeoutStopSec` | H6, H7, L10 | ✅ #98, #99 (L10 partial) |
+| 8 | Page events from the last *returned* sequence; add a cursor to the events endpoint | H9 | ✅ #100, #116 |
+| 9 | Shared adapter base for spawn / stderr / exit settlement / session lifetime | H10, M6, M12 | ✅ #102, #103, #111 |
+| 10 | Sandbox env passthrough, disk-limit portability, image contents | H11 | ✅ #104 |
+| 11 | `Secure` cookie when TLS is on; `trust proxy`; 404 for foreign runs; stop leaking `err.message` | M8, M9, M10 | ✅ #108, #109, #110 |
+| 12 | CI installs dependencies so the API surface is actually tested | M11, M16 | ⏸ #112 held; ✅ #113 |
 
 Steps 1-5 are each small, local, and testable. Steps 6-9 are the real work.
 
+Two deviations from this table, both deliberate:
+
+- **Step 5 became a deletion, not a repair.** The lease-loss path was worse than the review
+  described — it cleared *another* worker's lease — so `requeueLostLease` was removed and the
+  reaper made the single recovery path. See §6.1 of `ARCHITECTURE.md`.
+- **Step 12 is only half landed.** The multi-process contention tests (#113) merged; the CI
+  that installs dependencies (#112) is held because its checks cannot be observed on this
+  private repository. See [Held, not fixed: M11](#held-not-fixed-m11).
+
 **Recommendation on process:** findings in group 3 are security issues in a public
-repository. Fix them on a branch with the usual review, not by pushing to `main`.
+repository. Fix them on a branch with the usual review, not by pushing to `main`. This was
+followed: every fix in this table went through a branch and a PR.
 
 ---
 

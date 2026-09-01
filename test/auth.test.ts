@@ -511,3 +511,30 @@ test('with trustProxy=1, distinct clients get independent rate-limit buckets (is
     await srv.close(); close(); env.close();
   }
 });
+
+test('a wrong admin token of the SAME length is rejected (issue #73 L5)', async () => {
+  // The admin compare moved from === to timingSafeEqual. timingSafeEqual THROWS when the buffers
+  // differ in length, so the guard compares lengths first. That makes the equal-length path the one
+  // worth pinning: if the length check were the only comparison, every same-length token would be
+  // accepted as admin. A shorter/longer wrong token cannot catch that class of bug.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, { tokens: [], admin: 'admin-tok' });
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const sameLen = 'dmin-tok!'; // 9 chars, same as 'admin-tok', differs in bytes
+      assert.equal(sameLen.length, 'admin-tok'.length, 'fixture must be the same length');
+      const r = await login(base, sameLen);
+      assert.equal(r.status, 401, 'a same-length wrong token must not authenticate');
+      assert.ok(!sidFrom(r), 'no session may be issued for a wrong token');
+      // And the real token still works, so the length guard did not break the accept path.
+      assert.ok(sidFrom(await login(base, 'admin-tok')), 'the correct admin token must still log in');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});

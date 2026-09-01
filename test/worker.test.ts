@@ -1000,3 +1000,91 @@ test('both failure-bookkeeping sites are wrapped in a transaction (issue #106)',
       `bookkeeping transaction ${i} must not contain maybeAutoRetry`);
   }
 });
+
+// Issue #73 L2. Shared so the test and its control cannot drift apart.
+const BACKLOG_RUN_DELAY_MS = 1_500;
+const BACKLOG_CHECK_INTERVAL_MS = 40;
+const BACKLOG_THRESHOLD = 2;
+
+test('a backlog that develops DURING a run is still alerted on (issue #73 L2)', async () => {
+  // The claim loop is blocked for the whole duration of `await this.execute(run)`. Backlog
+  // sampling driven from that loop therefore goes silent for the entire run.
+  //
+  // The subtlety that makes this test need the mid-run enqueue: the old code called checkBacklog()
+  // just BEFORE execute(), so a queue that was already deep when the run started still produced
+  // one alert at t~0. Asserting merely "an alert fired during the run" therefore passes against
+  // the buggy code. The defect is about the window DURING the run, so the backlog has to appear
+  // inside that window: start with a shallow queue, let a long run begin, then push it over the
+  // threshold and require the alert to arrive before the run finishes.
+  const alerts: number[] = [];
+  const env = makeEnv({
+    workerEnabled: false,
+    fakeScript: [{ event: { type: 'agent.message', payload: { text: 'long run' } }, delayMs: BACKLOG_RUN_DELAY_MS }],
+    backlogAlertThreshold: BACKLOG_THRESHOLD,
+    backlogCheckIntervalMs: BACKLOG_CHECK_INTERVAL_MS,
+    logCapture: (_level, msg) => {
+      if (msg === 'queue backlog above threshold') alerts.push(Date.now());
+    },
+  });
+  try {
+    const repo = makeGitRepo(mkdtempSync(join(tmpdir(), 'mercury-backlog-l2-')));
+    const mk = () =>
+      env.runService.create({ ownerId: 'alice', task: 't', agent: 'fake', repository: { localPath: repo, baseBranch: 'main' } });
+
+    const blocker = mk(); // alone: depth 0, below threshold, so no alert may fire yet
+    env.worker.start();
+    await waitFor(() => env.runs.get(blocker.id)!.status === 'RUNNING', 10_000);
+
+    // Cross the threshold while the run is executing, and note when.
+    const crossedAt = Date.now();
+    mk();
+    mk();
+    const runningUntil = Date.now() + BACKLOG_RUN_DELAY_MS;
+
+    await waitFor(() => alerts.length > 0, BACKLOG_RUN_DELAY_MS + 500);
+    const alertAt = alerts[0];
+    assert.ok(
+      alertAt >= crossedAt,
+      `alert fired before the backlog existed (alertAt=+${alertAt - crossedAt}ms): the queue was ` +
+        `below threshold when this run started, so an alert at that point cannot be about this backlog`,
+    );
+    assert.ok(
+      alertAt <= runningUntil,
+      `backlog alert arrived only after the run finished (+${alertAt - crossedAt}ms after crossing; ` +
+        `run window ended at +${runningUntil - crossedAt}ms). Backlog sampling is blocked behind run ` +
+        `execution again -- it needs its own timer.`,
+    );
+    // The run must still be in flight at alert time for the assertion above to mean anything.
+    assert.equal(env.runs.get(blocker.id)!.status, 'RUNNING', 'the run must still be executing when the alert fires');
+  } finally {
+    env.worker.stop();
+    env.close();
+  }
+});
+
+test('the backlog timer and alert path work with no runs at all (issue #73 L2 control)', async () => {
+  // Positive control for the test above. Threshold 0 makes `depth >= threshold` true even with an
+  // empty queue, so this exercises ONLY the timer, the capture wiring, and the alert branch --
+  // with no dependence on runs or queue depth. If the timing test above fails while this passes,
+  // the cause is scheduling; if this fails too, the plumbing is broken. An earlier version of this
+  // control started two fast runs, and it timed out for the wrong reason: the worker drained both
+  // in well under one check interval, so depth never reached the threshold.
+  const alerts: string[] = [];
+  const env = makeEnv({
+    workerEnabled: false,
+    fakeScript: [{ event: { type: 'agent.message', payload: { text: 'x' } } }],
+    backlogAlertThreshold: 0,
+    backlogCheckIntervalMs: BACKLOG_CHECK_INTERVAL_MS,
+    logCapture: (_level, msg) => {
+      if (msg === 'queue backlog above threshold') alerts.push(msg);
+    },
+  });
+  try {
+    env.worker.start();
+    await waitFor(() => alerts.length > 0, 5_000);
+    assert.ok(alerts.length > 0, 'the backlog timer must fire and the alert must be observable');
+  } finally {
+    env.worker.stop();
+    env.close();
+  }
+});

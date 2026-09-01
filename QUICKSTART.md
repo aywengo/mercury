@@ -130,5 +130,5 @@ Full reference: `README.md` → Configuration.
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # 201 tests, no network, no LLM
+npm test            # full suite, no network, no LLM
 ```

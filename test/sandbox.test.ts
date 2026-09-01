@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { SandboxManager, detectRuntime } from '../src/sandbox/sandboxManager.ts';
+import { SandboxManager } from '../src/sandbox/sandboxManager.ts';
 import type { Run } from '../src/domain/types.ts';
 
 function makeRun(overrides: Partial<Run> = {}): Run {
@@ -87,12 +87,6 @@ test('available: false when runtime is none or binary missing', async () => {
   assert.equal(await sbMissing.available(), false);
 });
 
-test('detectRuntime: returns null when no container runtime installed', async () => {
-  // In the test environment neither docker nor podman is guaranteed; the function
-  // must not throw and returns null when both are absent.
-  const rt = await detectRuntime();
-  assert.ok(rt === null || rt.name === 'docker' || rt.name === 'podman');
-});
 
 
 

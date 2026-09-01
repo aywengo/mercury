@@ -374,7 +374,7 @@ requests `resourceLimits.disk` with an explanation instead.
 
 ## Testing
 
-`npm test` — 201 tests, no network, no LLM APIs (PrimeAgentAdapter is tested against a mock RPC server speaking the real protocol):
+`npm test` — the whole suite runs with no network and no LLM APIs (PrimeAgentAdapter is tested against a mock RPC server speaking the real protocol):
 
 - state machine (valid/invalid transitions, terminal states)
 - secret redaction

@@ -56,7 +56,13 @@ function renderRun(r, skills) {
   $('run-task').textContent = r.task;
   $('f-agent').textContent = r.agent;
   $('f-attempt').textContent = r.attempt;
-  $('f-retryof').textContent = r.retryOf ? `<a href="/run.html?run=${encodeURIComponent(r.retryOf)}">${esc(shortId(r.retryOf))}</a>` : '—';
+  // innerHTML, not textContent: this builds an anchor, and textContent renders the markup as
+  // literal text (the link showed up as "<a href=\"/run.html?run=...\">"). Both interpolated
+  // values are escaped -- the href is a relative path with the id percent-encoded, and the label
+  // goes through esc(), matching how every other markup field in this function renders.
+  $('f-retryof').innerHTML = r.retryOf
+    ? `<a href="/run.html?run=${encodeURIComponent(String(r.retryOf))}">${esc(shortId(r.retryOf))}</a>`
+    : '—';
   $('f-repo').textContent = repoLabel(r.repository);
   $('f-branch').textContent = r.workspaceBranch || r.repository.baseBranch || '—';
   $('f-created').textContent = fmtTime(r.createdAt);
