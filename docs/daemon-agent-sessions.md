@@ -48,6 +48,26 @@ flowchart TD
     style H fill:#8b0000,color:#fff
 ```
 
+That chain was not reasoned out — it was executed. Feeding a frame built exactly the way
+`private-framing.js` builds one into the adapter's own drain loop (`daemonAgentAdapter.ts:178-200`)
+gives:
+
+```text
+real frame on the wire: 331 bytes
+  u32@0 (headerLen)  = 75
+  u32@4 (payloadLen) = 248
+
+after adapter drain of the real hello:
+  frames parsed          : 0
+  frames silently dropped: 1
+  starved (waiting for more bytes): true
+  bytes still buffered   : 252
+```
+
+Zero frames parsed, one discarded without a word, and the reader then sits waiting for more bytes
+because the next 4 bytes it reads as a length are the start of a JSON object. Nothing throws, nothing
+is logged, no event ever arrives, and `handle.exit` never settles.
+
 **Recommendation.** Do not enable `MERCURY_AGENT_MODE=daemon` in any environment where a run matters
 until §7 lands. Fix it in the order given there: transport first, then envelope, then session
 identity, then the socket it connects to. Add a contract test that runs against the real binary
@@ -379,14 +399,14 @@ Stop spawning a daemon per run. Resolve the supervisor socket in this order:
 3. Otherwise **fail `start()`** with an actionable message.
 
 Never fall back to spawning. Spawning is what produced the `stale` socket in §4.1 and it silently
-defeats the purpose of the mode. If no supervisor is reachable, the correct behaviour is a clear error,
+defeats the purpose of the mode. If no supervisor is reachable, the correct behavior is a clear error,
 or — if `MERCURY_AGENT_MODE_FALLBACK=rpc` is set — an explicit, logged downgrade to RPC.
 
 ---
 
 ## 8. Failure modes
 
-| Failure | Today | Required behaviour |
+| Failure | Today | Required behavior |
 | --- | --- | --- |
 | Protocol version unsupported | Silent frame drop, run times out | Reject at `start()`, naming observed vs supported |
 | Required capability absent | Command silently unanswered | Reject at `start()`, naming the capability |
@@ -444,6 +464,11 @@ until an operator opts in.
   `create` yields an `activeSessionId`; `prompt` with that id produces events; `detach` leaves the
   session live; `kill` ends it. This is the test whose absence caused everything in §1. Skip it when the
   binary is absent, and **say so loudly** — a silently skipped test is how this happened before.
+- **A framing golden test — no daemon required.** Encode a hello the way `private-framing.js` does,
+  feed it to the adapter's reader, and assert it parses. This is the single cheapest test that catches
+  mismatch #1, and unlike the contract test it runs in CI on a machine with no `prime-agent` installed,
+  which matters because the contract test is exactly the one that gets skipped. The bytes are stable
+  enough to pin: a 75-byte header and a payload of any size, since only the two leading `u32`s matter.
 - **A fixture-fidelity guard.** The mock must be derived from the real protocol, not maintained by
   hand. Minimum viable version: assert the mock's framing constants and hello shape match a recorded
   transcript from the real daemon, so the two cannot drift apart silently.
