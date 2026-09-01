@@ -7,6 +7,7 @@ import { createSessionStore } from '../src/api/sessions.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { makeEnv, tempDir, waitFor } from './helpers.ts';
 import type { Express } from 'express';
+import { readdirSync, readFileSync } from 'node:fs';
 
 type ApiOpts = {
   tokens?: [string, string][];
@@ -536,4 +537,173 @@ test('a wrong admin token of the SAME length is rejected (issue #73 L5)', async 
   } finally {
     env.close();
   }
+});
+
+// --- issue #140: ONE credential resolver, used by both paths ------------------------------------
+//
+// Round 1 filed this as L5 and #124 fixed it -- in authRoutes.ts only. The middleware that gates
+// every /api request kept `token === adminToken`, so the constant-time comparison protected the
+// lower-traffic path for a whole release. The duplication was the finding; the `===` was its symptom.
+
+/** Every .ts file under src/, so a guard can see all of the implementation. */
+function srcFiles(dir = 'src'): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) out.push(...srcFiles(full));
+    else if (entry.name.endsWith('.ts')) out.push(full);
+  }
+  return out;
+}
+
+
+/**
+ * Remove // and /* *\/ comments while respecting string literals, so a source guard sees only live
+ * code. Without this the guard below trips on the prose that EXPLAINS the bug it guards against.
+ */
+function stripComments(code: string): string {
+  const out: string[] = [];
+  let i = 0;
+  let quote: string | null = null;
+  while (i < code.length) {
+    const c = code[i];
+    const next = code[i + 1];
+    if (quote) {
+      out.push(c);
+      if (c === '\\' && next !== undefined) {
+        out.push(next);
+        i += 2;
+        continue;
+      }
+      if (c === quote) quote = null;
+      i += 1;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      quote = c;
+      out.push(c);
+      i += 1;
+      continue;
+    }
+    if (c === '/' && next === '/') {
+      while (i < code.length && code[i] !== '\n') i += 1;
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      i += 2;
+      while (i < code.length && !(code[i] === '*' && code[i + 1] === '/')) i += 1;
+      i += 2;
+      continue;
+    }
+    out.push(c);
+    i += 1;
+  }
+  return out.join('');
+}
+
+test('a same-length wrong admin token is rejected on the MIDDLEWARE path too (issue #140)', async () => {
+  // The L5 test above pins POST /api/auth/login. This is the counterpart for the path EVERY /api
+  // request takes, which is the one that was left on `===`.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, { tokens: [], admin: 'admin-tok' });
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const sameLen = 'dmin-tok!'; // same byte length as 'admin-tok', differs in content
+      assert.equal(sameLen.length, 'admin-tok'.length, 'fixture must be the same length');
+
+      const bad = await fetch(`${base}/api/runs`, { headers: { authorization: `Bearer ${sameLen}` } });
+      assert.equal(bad.status, 401, 'a same-length wrong admin token must not authenticate via bearer');
+
+      const good = await fetch(`${base}/api/runs`, { headers: { authorization: 'Bearer admin-tok' } });
+      assert.equal(good.status, 200, 'the correct admin token must still work');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('both credential paths reach the same verdict for the same token (issue #140)', async () => {
+  // The observable contract of "one implementation": login and the middleware may not disagree.
+  // With two copies this is exactly what drifted -- one accepted the same input the other rejected
+  // in terms of HOW it compared it, which no single-path test could see.
+  const ADMIN = 'admin-tok';
+  const cases: { label: string; token: string; expectAuth: boolean }[] = [
+    { label: 'correct admin', token: ADMIN, expectAuth: true },
+    { label: 'correct owner token', token: 'tok-alice', expectAuth: true },
+    { label: 'wrong admin, same length', token: 'dmin-tok!', expectAuth: false },
+    { label: 'wrong admin, longer', token: ADMIN + 'x', expectAuth: false },
+    { label: 'wrong admin, shorter', token: 'dmin-tok', expectAuth: false },
+    { label: 'unknown token', token: 'nope-not-a-token', expectAuth: false },
+    { label: 'empty token', token: '', expectAuth: false },
+  ];
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, { admin: ADMIN });
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      for (const c of cases) {
+        const viaLogin = await login(base, c.token);
+        // The middleware path: a bearer token on a gated route. An empty bearer does not match the
+        // header regex at all, which is the same verdict (unauthenticated) by a different route.
+        const viaMiddleware = await fetch(`${base}/api/runs`, {
+          headers: c.token ? { authorization: `Bearer ${c.token}` } : {},
+        });
+        // Assert the EXACT status, not `=== 200`. Checking only for 200 let a 500 pass as
+        // "unauthenticated": with the length guard removed from secretsEqual, timingSafeEqual throws
+        // on a wrong-LENGTH token and both paths answered 500. That is an unhandled exception on
+        // ordinary attacker-supplied input, and 500-vs-401 is itself an oracle. The first version of
+        // this test scored that as a pass; the mutation was only caught once the status was pinned.
+        const want = c.expectAuth ? 200 : 401;
+        assert.equal(viaLogin.status, want, `${c.label}: login status`);
+        assert.equal(viaMiddleware.status, want, `${c.label}: middleware status`);
+      }
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('there is exactly one credential resolver and no plain-equality admin compare (issue #140)', () => {
+  // A guard, not a behaviour test, and deliberately so: `===` and timingSafeEqual are behaviourally
+  // indistinguishable apart from timing, so no request can tell them apart. What CAN be pinned is the
+  // structure that let them drift -- a second copy appearing, or the plain compare coming back.
+  const files = srcFiles();
+  assert.ok(files.length > 20, `guard must actually scan the tree, saw ${files.length} files`);
+
+  // Built from fragments so this test cannot match its own patterns.
+  const defPattern = new RegExp(['function\\s+resolveCredential\\s*\\('].join(''));
+  const plainCompare = new RegExp(['===\\s*adminToken'].join(''));
+  const safeCompare = new RegExp(['secretsEqual\\s*\\('].join(''));
+
+  const defs: string[] = [];
+  const plainSites: string[] = [];
+  for (const f of files) {
+    // Live code only. auth.ts carries the string `token === adminToken` twice in prose explaining
+    // what used to be there, and a guard that counts prose as code is a guard people switch off.
+    const text = stripComments(readFileSync(f, 'utf8'));
+    if (defPattern.test(text)) defs.push(f);
+    if (plainCompare.test(text)) plainSites.push(f);
+  }
+  assert.deepEqual(defs, ['src/api/auth.ts'],
+    'resolveCredential must be defined in exactly one module (a second copy is how #140 happened)');
+  assert.deepEqual(plainSites, [], `no source file may compare the admin token with plain equality: ${plainSites.join(', ')}`);
+
+  // Both callers must go through it, rather than re-implementing the compare.
+  const authMw = stripComments(readFileSync('src/api/auth.ts', 'utf8'));
+  const routes = stripComments(readFileSync('src/api/authRoutes.ts', 'utf8'));
+  assert.match(authMw, /resolveCredential\(tokens, adminToken, match\[1\]\)/,
+    'the middleware must call the shared resolver');
+  assert.match(routes, /import \{ resolveCredential \} from '\.\/auth\.ts'/,
+    'authRoutes must import the shared resolver rather than keep a copy');
+  assert.ok(!defPattern.test(routes), 'authRoutes must not define its own resolver');
+  assert.ok(!safeCompare.test(routes), 'authRoutes must not keep its own constant-time compare');
 });
