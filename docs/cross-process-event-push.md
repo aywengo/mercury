@@ -1,7 +1,8 @@
 # Cross-process event push — design
 
 **Status:** proposal. **Scope:** design only; no implementation is included.
-**Related:** [`architecture-review.md`](architecture-review.md) (M16), issue #133, README "Recommended next steps" item 11.
+**Related:** [`architecture-review.md`](architecture-review.md) (M16); issue #133, closed by PR #134 and
+on `main` as of `f9bb44d`; README "Recommended next steps" item 11.
 
 ---
 
@@ -182,8 +183,9 @@ Worth stating so a redesign does not quietly discard it:
 - Events are **persisted before** any notification is attempted.
 - Per-run `sequence` is monotonic and assigned by a single writer under `tx()`.
 - Clients reconnect with `?after=<sequence>`, so a dropped connection is recoverable from the DB.
-- `subscribe()` now delivers the backlog synchronously (#133), so a late subscriber is caught up
-  immediately rather than on a poll tick.
+- `subscribe()` delivers the first backlog page synchronously rather than on a poll tick. This landed
+  in #133 / PR #134 and is on `main` as of `f9bb44d`; it is listed here because it is load-bearing for
+  every stage below, and a reader checking an older checkout will not find it.
 - Streams on terminal runs are closed server-side, so idle sockets do not accumulate.
 
 ---
@@ -476,8 +478,9 @@ stateDiagram-v2
   forbids.
 - **Reconnect is unchanged:** `?after=<last sequence the client saw>`. Recovery is a database read, so
   it works whether or not any notification channel is alive.
-- **Backlog first, then live.** `subscribe()` delivers persisted rows synchronously before registering
-  (#133). Any notification arriving during that window is harmless because the cursor is already past
+- **Backlog first, then live.** `subscribe()` reads persisted rows and delivers them before
+  registering (on `main` since `f9bb44d`). Any notification arriving during that window is harmless
+  because the cursor is already past
   those rows.
 - **Terminal close stays.** A terminal event ends the stream; the grace backstop covers a reconnect
   that starts past the terminal event.
@@ -526,7 +529,7 @@ storm collapses naturally. A design that fetched exactly the notified sequence w
 | `mercury_event_wakeup_drops_total` | counter | notifications lost; must be non-zero-tolerated but alert-worthy if it climbs |
 | `mercury_sse_streams_active` | gauge | subscriber set size; catches a leak like the one #133 nearly introduced |
 
-`EventStream.subscriptionCount` covers the last of these. It was added in PR #134 alongside the leak regression test, because a stream that fails to unsubscribe is otherwise invisible from outside the process — it is a getter over the live subscriber set, not a metric, so wiring it to `/metrics` is the remaining step.
+`EventStream.subscriptionCount` covers the last of these. It is on `main` since `f9bb44d`, added with the leak regression test for #133, because a stream that fails to unsubscribe is otherwise invisible from outside the process. It is a getter over the live subscriber set rather than a metric, so wiring it through to `/metrics` is the remaining step.
 
 ---
 
