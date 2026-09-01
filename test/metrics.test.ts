@@ -114,7 +114,11 @@ test('/metrics requires authentication', async () => {
       assert.equal(bad.status, 401);
       const ok = await fetch(`http://127.0.0.1:${srv.port}/metrics`, { headers: { authorization: 'Bearer tok-alice' } });
       assert.equal(ok.status, 200);
-      assert.match(ok.headers.get('content-type') ?? '', /text\/plain/);
+      // Exact, not a substring match: Express's res.send() reorders the media parameters to
+      // `charset=utf-8; version=0.0.4`, which is equivalent per RFC 2045 but not what the exposition
+      // spec documents, and string-matching scrapers reject it.
+      assert.equal(ok.headers.get('content-type'), 'text/plain; version=0.0.4; charset=utf-8',
+        'the Content-Type must match the exposition format spec byte for byte');
     } finally {
       await srv.close();
       close();

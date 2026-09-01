@@ -142,8 +142,13 @@ export function createApp(deps: ServerDeps): Express {
       // leaving two clocks in play.
       const now = Date.now();
       const leases = deps.queue?.activeLeases(now);
-      res.type('text/plain; version=0.0.4; charset=utf-8');
-      res.send(renderPrometheus(collectMetrics(deps.db, { leases, now })));
+      // setHeader + end, not res.type() + res.send(). Express's send() re-serialises the header and
+      // reorders the media parameters to `text/plain; charset=utf-8; version=0.0.4`. That is
+      // equivalent per RFC 2045 (parameters are a set, not a sequence) and Prometheus's own parser
+      // accepts it, but the exposition format spec documents one order and scrapers that match the
+      // header as a string reject the other. end() is raw Node http and leaves the header alone.
+      res.setHeader('content-type', 'text/plain; version=0.0.4; charset=utf-8');
+      res.end(renderPrometheus(collectMetrics(deps.db, { leases, now })));
     } catch (err) {
       // A metrics scrape must not surface internals. Log name, message and stack the same way
       // sendError() does for unclassified errors (routes.ts): coercing with String(err) keeps the
