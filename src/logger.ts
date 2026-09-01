@@ -18,7 +18,16 @@ export interface Logger {
 
 const LEVEL_ORDER: Record<Level, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
-export function createLogger(redactor: Redactor, minLevel: Level = 'info'): Logger {
+/** Where a log line goes. Defaults to stdout/stderr; tests pass a collector. */
+export type LogSink = (line: string, level: Level) => void;
+
+export function createLogger(redactor: Redactor, minLevel: Level = 'info', sink?: LogSink): Logger {
+  const defaultSink: LogSink = (line, level) => {
+    const stream = level === 'error' || level === 'warn' ? process.stderr : process.stdout;
+    stream.write(line + '\n');
+  };
+  const write = sink ?? defaultSink;
+
   function emit(level: Level, fields: LogFields, msg: string): void {
     if (LEVEL_ORDER[level] < LEVEL_ORDER[minLevel]) return;
     const line = JSON.stringify({
@@ -27,8 +36,12 @@ export function createLogger(redactor: Redactor, minLevel: Level = 'info'): Logg
       msg: redactor.redact(msg),
       ...(redactor.redactJson(fields) as Record<string, unknown>),
     });
-    const stream = level === 'error' || level === 'warn' ? process.stderr : process.stdout;
-    stream.write(line + '\n');
+    // Routed through the sink rather than written to process.stdout directly. Tests previously
+    // monkey-patched process.stdout.write to observe output, which is hazardous: the node test
+    // runner patches that same function to report results, so a capture that failed to restore it
+    // cleanly swallowed the runner's own output and the file reported "1 test passed" having run
+    // none. Observing the logger should not require editing a global the test harness owns.
+    write(line, level);
   }
 
   return {
