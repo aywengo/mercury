@@ -172,3 +172,33 @@ test('run.js renders prUrl through safeUrl, not raw esc() (issue #57)', async ()
   );
   assert.match(code, /rel="noopener noreferrer"/, 'target=_blank needs rel=noopener noreferrer');
 });
+
+test('safeUrl canonicalises so the displayed URL cannot lie about its host (issue #57)', async () => {
+  // Rendering the raw input while linking to the parsed URL is a phishing vector: the two can
+  // disagree about the host. URL parsing drops backslashes and control characters, so a value that
+  // reads as good.example to a human can have evil.example as its real host.
+  const safeUrl = await loadSafeUrl();
+  // A NUL before the userinfo separator survives into the parsed authority, so the raw text reads
+  // as "x.example..." while the real host is evil.example. (A backslash does NOT do this -- the
+  // WHATWG parser browsers use turns it into a path separator. Verified against node's URL, not a
+  // general-purpose parser, because the two disagree.)
+  const tricky = 'https://x.example\u0000@evil.example/';
+  const canonical = safeUrl(tricky);
+  assert.ok(canonical, 'still a valid https URL, so it must be linkable');
+  assert.notEqual(canonical, tricky, 'must return the parsed form, not echo the input');
+  // The raw string hides this; the canonical form does not.
+  assert.equal(new URL(canonical).host, 'evil.example', 'canonical form must expose the real host');
+  // And the raw text is what a human would have misread: it does not even contain the host as a
+  // leading label.
+  assert.ok(!tricky.startsWith('https://evil.example'), 'raw text leads with the decoy host');
+});
+
+test('run.js renders the canonical URL as the link text, not the raw input (issue #57)', () => {
+  const code = readFileSync(join(UI_DIR, 'run.js'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+  // Anchor text must be esc(safe); esc(r.prUrl) as the text of a live link is the mismatch.
+  assert.match(code, />\$\{esc\(safe\)\}<\/a>/, 'link text must be the canonicalised URL');
+  assert.doesNotMatch(code, /rel="noopener noreferrer"[^>]*>\$\{esc\(r\.prUrl\)\}/,
+    'a live link must not display the raw untrusted URL');
+});

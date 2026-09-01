@@ -74,9 +74,15 @@ function renderRun(r, skills) {
   // make a PR link silently vanish and leave whoever is watching the run guessing.
   if (r.prUrl) {
     const safe = safeUrl(r.prUrl);
+    // The link TEXT is the canonicalised URL, not the raw input. Showing the raw string while
+    // linking to the parsed one is a phishing vector, because the two can disagree about the host:
+    // `https://good.example\@evil.example/` reads as good.example to a human, but URL parsing
+    // drops the backslash and treats `good.example` as userinfo, so the real host is evil.example.
+    // Rendering safe.href makes what you read the thing you click. The raw value stays reachable
+    // via the title attribute for debugging.
     $('f-pr').innerHTML = safe
-      ? `<a href="${esc(safe)}" target="_blank" rel="noopener noreferrer">${esc(r.prUrl)}</a>`
-      : `<span class="mono" title="not a http(s) URL, link disabled">${esc(r.prUrl)} (not linked)</span>`;
+      ? `<a href="${esc(safe)}" target="_blank" rel="noopener noreferrer" title="${esc(r.prUrl)}">${esc(safe)}</a>`
+      : `<span class="mono" title="not an HTTP(S) URL, link disabled">${esc(r.prUrl)} (not linked)</span>`;
   } else {
     $('f-pr').innerHTML = '—';
   }
