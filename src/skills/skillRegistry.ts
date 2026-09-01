@@ -192,8 +192,9 @@ export class SkillRegistry {
     // localeCompare depends on the host locale and the ICU build, so two hosts can order the same
     // set of paths differently. collectFiles() is recursive, so any skill with more than one file
     // can hash differently on two machines from byte-identical content -- files differing only by
-    // punctuation or case are enough (locale puts '-' below '.' while code-unit order puts '.'
-    // below '-').
+    // punctuation are enough. Measured on these very paths, the disagreement is about '_': locale
+    // sorts '_' BEFORE '-' and '.', code-unit sorts it AFTER both. '-' and '.' keep the same
+    // relative order either way, so a fixture that varied only those two would prove nothing.
     //
     // This matters because the hash is an audit artifact, not an internal detail: it is persisted
     // to run_skills.skill_hash, emitted in skill.selected events, and handed to the adapters. A

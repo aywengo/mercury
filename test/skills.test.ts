@@ -375,8 +375,14 @@ test('skill hash is independent of host locale (issue #86)', () => {
   writeFileSync(join(dir, 'references', 'a.b.md'), 'a.b\n');
   writeFileSync(join(dir, 'references', 'a_b.md'), 'a_b\n');
 
+  let hash: string;
+  try {
   const reg = new SkillRegistry(root);
-  const hash = reg.resolve(['punct'])[0].hash;
+  hash = reg.resolve(['punct'])[0].hash;
+
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 
   // Pinned, computed from the code-unit ordering of these exact paths:
   //   SKILL.md | references/a-b.md | references/a.b.md | references/a_b.md
