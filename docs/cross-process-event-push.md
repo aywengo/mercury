@@ -550,6 +550,7 @@ stateDiagram-v2
 | Worker blocks on notify | **Agent stalls — unacceptable** | Must be non-blocking with a drop counter; enforced by test |
 | Notification channel silently dead | Invisible 2 s latency | P7: lag metric + alert |
 | API restarts mid-stream | Clients reconnect with `?after=` | Recovery is a DB read |
+| API restarts and the worker's socket dies | Writes fail until it reconnects | Connection loss is a stream-socket cost, not a correctness one: failed writes are counted and dropped, and the poller covers the gap |
 | Very chatty run (thousands of events) | Notification storm | Coalesce: one wake-up per run per tick is sufficient, since the handler drains by cursor, not by payload |
 
 The last row matters: because the handler reads *by cursor* rather than *by notified sequence*, a
@@ -627,6 +628,12 @@ passed in the full suite and failed in isolation. Requirements:
   duplicate frame.
 - **Non-blocking test.** Point the worker at a socket with a full/absent reader and assert the run
   still completes within a deadline — the failure mode in §10 that would stall an agent.
+- **Peer-restart test.** Specific to the stream socket: close the connection and remove the socket
+  file mid-run, then bring the listener back. Assert the worker reconnects and later notifications
+  still arrive, and that the run completed correctly throughout even while every write in the gap
+  failed. A datagram socket has no connection to lose, so this failure mode is one this design
+  accepts in exchange for using the primitive Node actually provides — which makes it exactly the
+  thing a test has to pin rather than a thing to reason about.
 - **Real multi-process test.** Review finding M16 notes the current "cross-process" test is an
   in-process SQL insert. Spawn a real worker child process and assert an API-side subscriber sees its
   events. Without this, the cross-process path is untested by definition.
