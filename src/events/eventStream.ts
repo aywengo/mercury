@@ -56,7 +56,13 @@ export class EventStream {
   }
 
   /**
-   * Register a subscriber and deliver what it has already missed BEFORE returning.
+   * Register a subscriber and deliver the first page of what it has already missed BEFORE returning.
+   *
+   * "First page" is deliberate and must not be read as "everything". readAfter() caps a read at 500
+   * rows, so a backlog longer than that is delivered across subsequent polls; the guarantee here is
+   * that delivery STARTS synchronously, not that it finishes. Callers must not treat a fixed timer as
+   * a safe truncation point on the assumption the backlog is drained -- see the close backstop in
+   * src/api/routes.ts, which had exactly that wrong assumption.
    *
    * The backlog used to be left to poll(), which is wrong for two reasons and both were observed.
    *

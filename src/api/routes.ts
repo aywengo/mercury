@@ -268,12 +268,19 @@ export function createRoutes(deps: RoutesDeps): Router {
       res.write(': keepalive\n\n');
     }, 15_000);
 
-    // Backstop for the case send() cannot see: the client reconnects with ?after= already past the
-    // terminal event, so no further event will ever arrive to trigger the end above. Without this
+    // Backstop for the one case send() cannot see: the client reconnects with ?after= already past
+    // the terminal event, so no further event will ever arrive to trigger the end above. Without it
     // the keepalive interval keeps the socket open forever (issue #73 L6) -- which is what made
     // server shutdown need closeAllConnections() to avoid hanging until SIGKILL (issue #52).
-    // Armed only for runs already terminal at open time, so a live run is never cut short.
-    if (isTerminal(run.status)) backstop = setTimeout(end, STREAM_CLOSE_GRACE_MS);
+    //
+    // The condition is "already caught up", not merely "the run is terminal". readAfter() pages at
+    // 500 rows, so a terminal run with a long tail can still have history pending when subscribe()
+    // returns; arming a fixed timer over an undrained backlog truncates it, cutting the stream off
+    // mid-history while still reporting a clean close. Anything still pending is delivered by the
+    // poller, and the terminal row inside that backlog ends the stream through send() as usual.
+    if (isTerminal(run.status) && afterSeq >= deps.events.lastSequence(run.id)) {
+      backstop = setTimeout(end, STREAM_CLOSE_GRACE_MS);
+    }
 
     req.on('close', () => {
       clearInterval(keepalive);

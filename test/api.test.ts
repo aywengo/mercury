@@ -702,6 +702,30 @@ test('both list endpoints share one limit parser (issue #101)', () => {
 // a server full of finished runs could not shut down without closeAllConnections().
 
 /** Read an SSE response to completion, or fail loudly. Never awaits indefinitely. */
+/**
+ * Event sequences carried by an SSE body, in arrival order.
+ *
+ * Parses frames instead of regexing them: an earlier version matched `^data: \{"id":.*"sequence":`
+ * which silently encoded JSON.stringify property order. Frames that are not events -- the `hello`
+ * frame, keepalive comments -- have no numeric `sequence` and drop out.
+ */
+function sequencesOf(sse: string): number[] {
+  const out: number[] = [];
+  for (const line of sse.split('\n')) {
+    if (!line.startsWith('data: ')) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line.slice('data: '.length));
+    } catch {
+      continue;
+    }
+    if (parsed && typeof parsed === 'object' && typeof (parsed as { sequence?: unknown }).sequence === 'number') {
+      out.push((parsed as { sequence: number }).sequence);
+    }
+  }
+  return out;
+}
+
 async function readToEnd(url: string, headers: Record<string, string>, timeoutMs: number): Promise<string> {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
@@ -758,7 +782,10 @@ test('a stream opened with after=0 delivers every sequence with no gap (issue #1
       await waitFor(() => env.runs.get(runId)!.status === 'COMPLETED', 10_000);
 
       const data = await readToEnd(`${base}/api/runs/${runId}/stream`, headers, 8_000);
-      const delivered = [...data.matchAll(/^data: \{"id":.*"sequence":(\d+),/gm)].map((m) => Number(m[1]));
+      // Parse the frames rather than regexing them: the previous pattern assumed "id" was the first
+    // key and "sequence" came next, so it encoded JSON.stringify property order and would break on
+    // a harmless serialisation refactor while still asserting nothing about the payload.
+    const delivered = sequencesOf(data);
       const lastSeq = env.events.lastSequence(runId);
 
       assert.ok(delivered.length > 3, `expected a real event set, got ${delivered.length}`);
@@ -797,6 +824,58 @@ test('an SSE stream on a terminal run is closed by the server (issue #73 L6)', a
     } finally {
       await srv.close();
       closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('a terminal run with a backlog longer than one page is not truncated by the close backstop', async () => {
+  // readAfter() caps a read at 500 rows, so subscribe() returning does NOT mean the backlog is
+  // drained. The close backstop used to be armed for every already-terminal run, on the assumption
+  // that a terminal run has nothing left to send. With a long tail that assumption is false, and the
+  // timer ended the stream mid-history while still closing it cleanly -- silent truncation that
+  // looks like success to the client.
+  //
+  // Cadence is set explicitly so the drain provably outlasts STREAM_CLOSE_GRACE_MS (2s) rather than
+  // depending on ambient machine load: 1100 events is three pages, and at 1500ms per poll the final
+  // page lands at ~3s.
+  const TOTAL = 1100;
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'long tail', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING');
+    for (let i = 1; i <= TOTAL; i++) {
+      env.events.append(run.id, 'agent.message', { text: `e${i}` });
+    }
+    env.events.append(run.id, 'run.completed', { ok: true });
+    env.runs.transition(run.id, 'COMPLETED');
+    const last = env.events.lastSequence(run.id);
+    assert.ok(last > 1000, `fixture needs more than one 500-row page, got ${last}`);
+
+    const streamHub = new EventStream(env.db, env.events, 1_500, 1_500);
+    streamHub.start();
+    const app = createApp({
+      runService: env.runService, events: env.events, stream: streamHub,
+      apiTokens: new Map([['tok-alice', 'alice']]), adminToken: null,
+    });
+    const srv = await listen(app);
+    try {
+      const data = await readToEnd(
+        `http://127.0.0.1:${srv.port}/api/runs/${run.id}/stream?after=0`,
+        { authorization: 'Bearer tok-alice' },
+        20_000,
+      );
+      const delivered = sequencesOf(data);
+      assert.equal(delivered.length, last,
+        `backstop truncated the stream: got ${delivered.length} of ${last} events`);
+      assert.deepEqual(delivered, [...Array(last).keys()].map((i) => i + 1),
+        'delivered sequences must be contiguous 1..N');
+      assert.ok(data.includes('event: run.completed'), 'the terminal event must reach the client');
+    } finally {
+      await srv.close();
+      streamHub.stop();
     }
   } finally {
     env.close();
