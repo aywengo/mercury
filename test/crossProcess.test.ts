@@ -139,8 +139,12 @@ test('cross-process: exactly one process wins a claim for a single queued run (i
     // Note claim() only takes the lease -- the worker moves QUEUED -> STARTING separately -- so
     // status is deliberately still QUEUED here.
     const stored = env.runs.get(run.id);
-    assert.equal(stored?.status, 'QUEUED', 'claim() takes a lease but does not transition status');
-    assert.ok(stored?.leaseOwner, 'lease owner must be set');
+    // Narrow once, with a message that says what actually went wrong. Optional chaining on every
+    // line would instead turn a missing row into `undefined !== 'QUEUED'` and point the reader at
+    // the status assertion when the real problem is that the run is not there at all.
+    assert.ok(stored, 'run must still exist after the claim race');
+    assert.equal(stored.status, 'QUEUED', 'claim() takes a lease but does not transition status');
+    assert.ok(stored.leaseOwner, 'lease owner must be set');
     assert.equal(stored.leaseOwner, `child-${winners[0].pid}`, 'lease owner must be the winning racer');
     assert.ok(stored.leaseExpiresAt, 'lease must carry an expiry');
   } finally {

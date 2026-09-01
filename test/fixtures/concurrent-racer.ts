@@ -34,13 +34,20 @@ const db = openDatabase(dbPath);
  * A fixed sleep would make the test depend on scheduling luck. The barrier makes simultaneity the
  * thing under test: all processes block on the same file and start within the same tick window.
  */
-function waitForBarrier(expected: number): void {
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitForBarrier(expected: number): Promise<void> {
   writeFileSync(barrierFile + '/arrive.' + process.pid, String(process.pid));
   const deadline = Date.now() + 20_000;
   for (;;) {
     const arrived = readdirSync(barrierFile).filter((n) => n.startsWith('arrive.')).length;
     if (arrived >= expected) return;
     if (Date.now() > deadline) throw new Error('barrier timeout: only ' + arrived + '/' + expected + ' arrived');
+    // Yield between polls. The barrier's guarantee comes from the arrival COUNT, not from how
+    // fast each participant notices the count changed, so a 2ms pause costs nothing in
+    // determinism -- whereas a synchronous busy loop pegs a core per racer for the whole wait and
+    // adds scheduler noise to the very contention this test is trying to observe cleanly.
+    await sleep(2);
   }
 }
 
@@ -48,7 +55,7 @@ const out: Record<string, unknown> = { mode, pid: process.pid };
 try {
   // All participants are already spawned by the time the last one reaches here, so releasing on
   // a full barrier puts every writer into the same window instead of relying on spawn timing.
-  waitForBarrier(Number(process.env.BARRIER_EXPECT ?? '1'));
+  await waitForBarrier(Number(process.env.BARRIER_EXPECT ?? '1'));
 
   if (mode === 'append') {
     const events = new EventStore(db);
