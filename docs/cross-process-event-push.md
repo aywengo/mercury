@@ -250,8 +250,28 @@ sequenceDiagram
 - **It cannot be allowed to fail the run.** A slow or downed API must not stall the worker, so the
   callback must be fire-and-forget with a bounded queue — at which point it is a lossy advisory
   channel, which is fine by P2 but means all this machinery buys only latency.
-- **Latency is not obviously better than the alternative.** A loopback HTTP round trip plus a DB read
-  is not meaningfully cheaper than a DB read plus a loopback socket write.
+- **Its transport costs more than the work it triggers.** Measured on one host (node 26, sequential
+  round trips, loopback, keep-alive; absolute numbers are machine-dependent, the ratios are the
+  point):
+
+  | Operation | Per notification |
+  | --- | --- |
+  | HTTP POST over TCP loopback | ~62 µs |
+  | Unix stream socket write + echo | ~1.4 µs |
+  | The poll read it wakes (`sequence > ?`, empty page) | ~1.7 µs |
+  | The same read returning a full 500-row page | ~235 µs |
+
+  So the HTTP notification is about **43× the cost of a Unix socket notification**, and roughly
+  **36× the cost of the database read it exists to trigger**. In the common case — a wake-up that
+  finds nothing new, or a handful of rows — Option A spends most of its budget on the notification
+  rather than on delivering anything. At 2 000 notifications that is ~124 ms of worker time over HTTP
+  against ~3 ms over a socket, and that cost is paid by every API instance whether or not it has a
+  subscriber for the run.
+
+  It does not follow that browser-visible latency differs by 43×: once a full page is being delivered,
+  the 235 µs read dominates both transports. The honest claim is narrower and still fatal — Option A
+  adds a large, per-instance, always-paid overhead to buy a wake-up that the read itself is cheaper
+  than.
 - **New inbound surface** on the API that must be authenticated, rate-limited, and excluded from
   public exposure — a category of mistake this codebase has already had to fix once (`/metrics`
   auth posture, session cookie `Secure`).
@@ -397,8 +417,20 @@ telemetry the later stages need.*
 
 ### 8.2 Stage 1 — same-host wake-up over a Unix socket *(recommended push design)*
 
-The worker and API run as two systemd units on one host. A datagram Unix socket gives them a
+The worker and API run as two systemd units on one host. A Unix domain socket gives them a
 zero-config, filesystem-permissioned, loopback-only channel.
+
+**It has to be a stream socket, not a datagram one.** Node's `dgram` accepts only `udp4` and `udp6`;
+there is no `AF_UNIX` datagram support in the standard library, so the obvious "fire-and-forget
+datagram" shape is not available without adding a native dependency. That is worth stating because
+datagram is the natural first instinct for an advisory channel, and discovering the gap during
+implementation would invite a worse fallback — UDP over loopback, which reopens the TCP-surface
+argument in §11.
+
+Stream is not a downgrade here, and §10's last row is the reason: the handler drains **by cursor**, not
+by notified payload, so message boundaries carry no meaning. Newline-delimited run ids, read in
+whatever chunks arrive, coalesced freely. What a stream does add is a connection to manage, so the
+worker connects lazily, drops writes on error, and never blocks on a missing peer.
 
 That premise is not an assumption about some future deployment; it is what `deploy/` installs today.
 `mercury.service` (`node src/cli.ts server`) and `mercury-worker.service` (`node src/cli.ts worker`)
@@ -412,24 +444,28 @@ across hosts.
 sequenceDiagram
     participant Wk as Worker
     participant DB as SQLite
-    participant SK as unix dgram socket<br/>/run/mercury/events.sock
+    participant SK as unix stream socket<br/>/run/mercury/events.sock
     participant API as API process
     participant BR as Browser (SSE)
-    Wk->>DB: INSERT event (seq 15) — committed
-    Wk--)SK: "runId:15" (fire-and-forget, non-blocking)
+    Wk->>DB: INSERT event (seq 15), committed
+    Wk->>SK: write "runId:15\n", non-blocking
     Note over Wk: worker never waits, never retries,<br/>never fails the run on this write
-    SK--)API: datagram arrives
-    API->>DB: SELECT seq > cursor FOR runId
+    SK->>API: bytes arrive, coalesced with any others
+    API->>DB: SELECT seq > cursor for each distinct runId
     API-->>BR: SSE frames, then advance cursor
-    Note over API: if the datagram is lost, the next poll<br/>delivers the same rows. No loss.
+    Note over API: if the write is lost or the peer is down,<br/>the next poll delivers the same rows. No loss.
 ```
 
 Why this shape:
 
-- **Satisfies P2 trivially.** A datagram write is fire-and-forget. There is no ack path to get wrong,
-  because there is deliberately no ack path at all.
-- **Satisfies P3/P4.** The datagram carries only an identifier; the cursor advances after the `SELECT`
-  feeds the client. A lost, duplicated, or reordered datagram changes nothing except timing.
+- **Satisfies P2 trivially.** The write is fire-and-forget. There is no ack path to get wrong, because
+  there is deliberately no ack path at all. A stream socket makes this slightly less free than a
+  datagram would have been — a write can fail on a closed peer — so the rule is explicit: swallow the
+  error, count it, carry on.
+- **Satisfies P3/P4.** The line carries only an identifier; the cursor advances after the `SELECT`
+  feeds the client. A lost, duplicated, or reordered notification changes nothing except timing, and
+  because the reader drains by cursor, several ids arriving in one chunk is a feature rather than a
+  framing problem.
 - **No discovery.** The socket path is a config value both units already have (`MERCURY_*`), and
   systemd can `ListenStream`/socket-activate or simply create it at API start.
 - **Permissions are free.** File mode on the socket plus its directory is the access control; nothing
