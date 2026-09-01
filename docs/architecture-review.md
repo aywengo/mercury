@@ -38,9 +38,11 @@ no test covers it.
 _Updated after remediation. Findings are listed in this document's own numbering; each links to the_
 _issue that tracked it and the PR that closed it._
 
-**39 findings: 32 resolved, 1 already fixed before it was reached, 1 held on infrastructure, 1 partial, 4 open.**
-Every High finding is resolved. The only Medium still outstanding is M11, which is blocked on
-observable CI rather than on code.
+**39 findings: 37 resolved, 1 already fixed before it was reached, 1 split.** No finding remains open.
+
+The split is L11, which bundled two claims: the logger-redaction test gap was a real defect and is fixed; the missing metrics endpoint is a feature request and now lives in [#131](https://github.com/aywengo/mercury/issues/131) rather than in a defect checklist.
+
+Verified as a whole rather than per-PR: `main` runs **340 tests, 0 failures, 0 cancelled** in ~28 s with `npm run typecheck` clean on node v26.7.0.
 
 | ID | Finding | Issue | PR | Status |
 | --- | --- | --- | --- | --- |
@@ -65,7 +67,7 @@ observable CI rather than on code.
 | M8 | Session cookie has no `Secure` flag | [#64](https://github.com/aywengo/mercury/issues/64) | [#108](https://github.com/aywengo/mercury/pull/108) | ✅ resolved |
 | M9 | Rate limiting collapses behind a reverse proxy | [#65](https://github.com/aywengo/mercury/issues/65) | [#109](https://github.com/aywengo/mercury/pull/109) | ✅ resolved |
 | M10 | Wrong status codes and internal leakage | [#66](https://github.com/aywengo/mercury/issues/66) | [#110](https://github.com/aywengo/mercury/pull/110) | ✅ resolved |
-| M11 | API/auth surface untestable as checked out | [#67](https://github.com/aywengo/mercury/issues/67) | [#112](https://github.com/aywengo/mercury/pull/112) | ⏸ **held** |
+| M11 | CI never installs dependencies, so the whole API/auth surface is unrunnable there | [#67](https://github.com/aywengo/mercury/issues/67) | [#112](https://github.com/aywengo/mercury/pull/112) | ✅ resolved — `npm ci` added; all three checks green, incl. a job asserting the *uninstalled* failure stays legible |
 | M12 | `readFrame` silently drops pipelined frames | [#68](https://github.com/aywengo/mercury/issues/68) | [#111](https://github.com/aywengo/mercury/pull/111) | ✅ resolved |
 | M13 | Backup fallback can silently produce a torn backup | [#69](https://github.com/aywengo/mercury/issues/69) | [#120](https://github.com/aywengo/mercury/pull/120) | ✅ resolved |
 | M14 | Deploy path mismatch trap | [#70](https://github.com/aywengo/mercury/issues/70) | [#121](https://github.com/aywengo/mercury/pull/121) | ✅ resolved |
@@ -74,14 +76,14 @@ observable CI rather than on code.
 | L1 | `detectRuntime()` is dead code | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
 | L2 | Backlog alerts stall during runs | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
 | L3 | Stuck-run detection caps at 200 per status | — | — | ✔ already fixed |
-| L4 | Shipped logrotate config is a no-op | [#73](https://github.com/aywengo/mercury/issues/73) | — | ⬜ open |
+| L4 | Shipped logrotate config is a no-op | [#73](https://github.com/aywengo/mercury/issues/73) | [#129](https://github.com/aywengo/mercury/pull/129) | ✅ resolved — **deleted**, not documented; the app logs to journald, which already rotates |
 | L5 | Admin token compared with `===` | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
-| L6 | SSE streams stay open for terminal runs | [#73](https://github.com/aywengo/mercury/issues/73) | — | ⬜ open |
+| L6 | SSE streams stay open for terminal runs | [#73](https://github.com/aywengo/mercury/issues/73) | [#128](https://github.com/aywengo/mercury/pull/128) | ✅ resolved — close on terminal event + grace backstop for reconnects |
 | L7 | Retry-of link renders as literal markup | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
-| L8 | Temp-dir leaks in tests | [#73](https://github.com/aywengo/mercury/issues/73) | — | ⬜ open |
+| L8 | Temp-dir leaks in tests | [#73](https://github.com/aywengo/mercury/issues/73) | [#125](https://github.com/aywengo/mercury/pull/125) | ✅ resolved — 131 per run → 0; 26,409 accumulated dirs deleted; guard added |
 | L9 | Doc drift on test counts | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
-| L10 | systemd hardening blocks the docker sandbox | [#73](https://github.com/aywengo/mercury/issues/73) | — | ◐ partial |
-| L11 | No metrics endpoint | [#73](https://github.com/aywengo/mercury/issues/73) | — | ⬜ open |
+| L10 | systemd hardening blocks the docker sandbox | [#73](https://github.com/aywengo/mercury/issues/73) | [#129](https://github.com/aywengo/mercury/pull/129) | ✅ resolved — opt-in drop-in; baseline stays `ProtectSystem=strict` (fail-closed was already the right direction) |
+| L11 | No metrics endpoint + logger redaction untested | [#73](https://github.com/aywengo/mercury/issues/73) | [#130](https://github.com/aywengo/mercury/pull/130) | ◐ split — redaction gap fixed in [#130](https://github.com/aywengo/mercury/pull/130); metrics endpoint moved to [#131](https://github.com/aywengo/mercury/issues/131) as an enhancement |
 | L12 | §6 diagram has a phantom `CANCELLED --> RUNNING` edge | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
 
 ### Held, not fixed: M11
@@ -556,7 +558,7 @@ produced guards that looked correct and were not.
 | 4 | Enforce `EVENT_TYPES` in `EventStore.append`; add `lease.lost`, `sandbox.enabled` to the set | H5, M4 | ✅ #93 |
 | 5 | Clear `lease_owner` in the reap failure branch | H8 | ✅ #94, #115 |
 | 6 | Terminate the handle on *every* worker exit path, including the throwing one; guard the drive loop on persisted status | H1, H2 | ✅ #96 |
-| 7 | Graceful shutdown: `worker.stop()` + lease release + `closeAllConnections()` + `TimeoutStopSec` | H6, H7, L10 | ✅ #98, #99 (L10 partial) |
+| 7 | Graceful shutdown: `worker.stop()` + lease release + `closeAllConnections()` + `TimeoutStopSec` | H6, H7, L10 | ✅ #98, #99, #129 |
 | 8 | Page events from the last *returned* sequence; add a cursor to the events endpoint | H9 | ✅ #100, #116 |
 | 9 | Shared adapter base for spawn / stderr / exit settlement / session lifetime | H10, M6, M12 | ✅ #102, #103, #111 |
 | 10 | Sandbox env passthrough, disk-limit portability, image contents | H11 | ✅ #104 |
