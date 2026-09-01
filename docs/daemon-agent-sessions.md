@@ -263,6 +263,10 @@ valid across a boundary where it is not — and Mercury's per-run `sequence` has
 
 ## 5. Why twelve tests pass
 
+Ran directly, not inferred from CI: `node --test test/daemonAgentAdapter.test.ts` reports
+**12 tests, 12 pass, 0 fail** — including `daemon: happy path — prompt, events, completion`, which
+passes against a mock while the same code path cannot complete against the real daemon.
+
 The fixture and the adapter were written against the same misunderstanding, so they agree with each
 other and disagree with the daemon. Agreement between an implementation and its own mock is not
 evidence.
