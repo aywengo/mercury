@@ -10,10 +10,41 @@ sudo mkdir -p /opt/mercury /var/lib/mercury /etc/mercury
 sudo cp -r /path/to/mercury/* /opt/mercury/
 sudo cp mercury.service mercury-worker.service /etc/systemd/system/
 sudo cp logrotate.conf /etc/logrotate.d/mercury
-# create /etc/mercury/mercury.env with MERCURY_* variables (see README.md at repo root)
 sudo systemctl daemon-reload
 sudo systemctl enable --now mercury mercury-worker
 ```
+
+## Configuration file (required)
+
+Both units declare `EnvironmentFile=/etc/mercury/mercury.env` **without a leading `-`**, so systemd
+refuses to start the service if the file is missing. It is not optional.
+
+Create it before `systemctl enable --now`:
+
+```bash
+# /etc/mercury/mercury.env
+MERCURY_DB=/var/lib/mercury/mercury.db
+MERCURY_WORKSPACE_BASE=/var/lib/mercury/workspaces
+MERCURY_BIND_HOST=127.0.0.1
+# plus auth: MERCURY_API_TOKENS=... and any session settings (see the root README)
+```
+```bash
+sudo chown mercury:mercury /etc/mercury/mercury.env
+sudo chmod 600 /etc/mercury/mercury.env   # it holds API tokens
+sudo mkdir -p /var/lib/mercury/workspaces
+sudo chown -R mercury:mercury /var/lib/mercury
+```
+
+**Why these two lines are not optional extras.** The application defaults are *relative*:
+`MERCURY_DB` defaults to `./mercury.db` and `MERCURY_WORKSPACE_BASE` to `./workspaces`
+(`src/config.ts`). Both units set `WorkingDirectory=/opt/mercury`, so if you omit these settings the
+app silently writes `/opt/mercury/mercury.db` -- while the backup cron below reads
+`/var/lib/mercury/mercury.db`. The two then refer to different files, and the nightly job backs up
+a path the application never writes to. Nothing in the app or the cron line reports that they
+disagree.
+
+If you choose a different location, it must be changed in **three** places that have to agree:
+`mercury.env`, the backup cron line, and the restore commands below.
 
 ## Backup
 
