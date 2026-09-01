@@ -16,6 +16,8 @@ import {
   SESSION_TTL_MS,
   parseCookies,
   sessionClearCookie,
+  sessionCookie,
+  sessionIsSecure,
   type SessionStore,
 } from './sessions.ts';
 
@@ -23,6 +25,12 @@ export interface AuthRoutesDeps {
   tokens: Map<string, string>;
   adminToken: string | null;
   sessions: SessionStore;
+  /**
+   * Force `Secure` on the session cookie even when the request does not look encrypted
+   * (MERCURY_COOKIE_SECURE=true). For deployments behind a proxy that does not forward
+   * `X-Forwarded-Proto`. Off by default; encryption is otherwise detected per request.
+   */
+  cookieSecure?: boolean;
 }
 
 function resolveCredential(tokens: Map<string, string>, adminToken: string | null, token: string): { ownerId: string; isAdmin: boolean } | null {
@@ -52,7 +60,7 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Router {
     });
     res.setHeader(
       'Set-Cookie',
-      `${SESSION_COOKIE}=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+      sessionCookie(sid, { secure: sessionIsSecure(req, deps.cookieSecure), maxAgeMs: SESSION_TTL_MS }),
     );
     res.json({ ok: true, ownerId: auth.ownerId, isAdmin: auth.isAdmin });
   });
@@ -60,7 +68,7 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Router {
   router.post('/logout', (req: Request, res: Response) => {
     const sid = parseCookies(req.headers.cookie)[SESSION_COOKIE];
     if (sid) deps.sessions.delete(sid);
-    res.setHeader('Set-Cookie', sessionClearCookie());
+    res.setHeader('Set-Cookie', sessionClearCookie({ secure: sessionIsSecure(req, deps.cookieSecure) }));
     res.json({ ok: true });
   });
 

@@ -191,7 +191,18 @@ async function main(): Promise<void> {
   if (cmd === 'server' || cmd === 'dev') {
     stream.start();
     const server = await startServer(
-      { runService, events, stream, queue, apiTokens: config.apiTokens, adminToken: config.adminToken },
+      {
+        runService,
+        events,
+        stream,
+        queue,
+        apiTokens: config.apiTokens,
+        adminToken: config.adminToken,
+        // Issue #64: the session cookie used to omit `Secure` unconditionally, so a TLS
+        // deployment still sent the session id in cleartext over plain http. Encryption is
+        // detected per request; this only forces it for proxies that do not forward the proto.
+        cookieSecure: config.cookieSecure,
+      },
       config.port,
       { host: config.bindHost, tls: config.tls ?? undefined },
     );

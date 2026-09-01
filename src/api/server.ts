@@ -40,6 +40,12 @@ export interface ServerDeps {
     login?: RateLimitConfig;
     createRun?: RateLimitConfig;
   };
+  /**
+   * Force `Secure` on the session cookie (MERCURY_COOKIE_SECURE=true). Only needed behind a
+   * TLS-terminating proxy that does not forward `X-Forwarded-Proto`; encryption is otherwise
+   * detected per request (issue #64).
+   */
+  cookieSecure?: boolean;
 }
 
 // Defaults for the two protected route groups (Mercury.md section 24).
@@ -82,7 +88,12 @@ export function createApp(deps: ServerDeps): Express {
     max: deps.rateLimits?.login?.max ?? DEFAULT_LOGIN_LIMIT.max,
   });
   app.post('/api/auth/login', loginLimiter);
-  app.use('/api/auth', createAuthRoutes({ tokens: deps.apiTokens, adminToken: deps.adminToken, sessions }));
+  app.use('/api/auth', createAuthRoutes({
+    tokens: deps.apiTokens,
+    adminToken: deps.adminToken,
+    sessions,
+    cookieSecure: deps.cookieSecure,
+  }));
 
   // Run-creation limit (per owner+IP; req.auth is already resolved).
   const createRunLimiter = createRateLimiter({

@@ -53,6 +53,8 @@ export interface Config {
    * worker's environment: the container runs untrusted agents.
    */
   sandboxEnv: string[] | null;
+  /** Force `Secure` on the session cookie (MERCURY_COOKIE_SECURE=true). */
+  cookieSecure: boolean;
   /**
    * Whether the host storage driver honours `--storage-opt size=`
    * (MERCURY_SANDBOX_DISK_LIMITS=true). Off by default because the common
@@ -126,6 +128,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         ? null
         : env.MERCURY_SANDBOX_ENV.split(',').map((v) => v.trim()).filter(Boolean),
     sandboxDiskLimits: env.MERCURY_SANDBOX_DISK_LIMITS === 'true',
+    cookieSecure: env.MERCURY_COOKIE_SECURE === 'true',
     logLevel: (env.MERCURY_LOG_LEVEL as Config['logLevel']) ?? 'info',
   };
 }

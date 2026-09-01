@@ -12,6 +12,7 @@ type ApiOpts = {
   tokens?: [string, string][];
   admin?: string;
   rateLimits?: { login?: { windowMs: number; max: number }; createRun?: { windowMs: number; max: number } };
+  cookieSecure?: boolean;
 };
 
 function makeApi(env: ReturnType<typeof makeEnv>, opts: ApiOpts = {}) {
@@ -24,6 +25,7 @@ function makeApi(env: ReturnType<typeof makeEnv>, opts: ApiOpts = {}) {
     apiTokens: new Map(opts.tokens ?? [['tok-alice', 'alice']]),
     adminToken: opts.admin ?? null,
     rateLimits: opts.rateLimits,
+    cookieSecure: opts.cookieSecure,
   });
   return { app, close: () => stream.stop() };
 }
@@ -361,4 +363,86 @@ test('session store: lazy expiry drops expired sessions on access', () => {
 
   store.delete('live');
   assert.equal(store.get('live'), null);
+});
+
+// --- session cookie `Secure` flag (issue #64) -------------------------------
+
+function setCookie(res: globalThis.Response): string {
+  const raw = res.headers.get('set-cookie') ?? '';
+  return Array.isArray(raw) ? raw[0] : raw;
+}
+
+async function loginAndGetCookie(port: number, headers: Record<string, string> = {}): Promise<string> {
+  const res = await fetch(`http://127.0.0.1:${port}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify({ token: 'tok-alice' }),
+  });
+  assert.equal(res.status, 200);
+  return setCookie(res);
+}
+
+test('session cookie carries Secure when the request arrived over TLS (issue #64)', async () => {
+  // Before the fix the cookie was written without `Secure` unconditionally -- including on a
+  // MERCURY_TLS_* deployment -- so the session id went out in cleartext on any plain http://
+  // request to the same host.
+  const env = makeEnv({ workerEnabled: false });
+  const { app, close } = makeApi(env);
+  const srv = await listen(app);
+  try {
+    // A TLS-terminating proxy on loopback: this process speaks http, the client did not.
+    const viaProxy = await loginAndGetCookie(srv.port, { 'x-forwarded-proto': 'https' });
+    assert.ok(/; Secure/.test(viaProxy), `proxy-forwarded https must set Secure: ${viaProxy}`);
+    assert.ok(/HttpOnly/.test(viaProxy) && /SameSite=Strict/.test(viaProxy), 'existing flags preserved');
+
+    // Plain http with no forwarded proto: no Secure, or local dev over http would break.
+    const plain = await loginAndGetCookie(srv.port);
+    assert.ok(!/; Secure/.test(plain), `plain http must not set Secure: ${plain}`);
+  } finally {
+    await srv.close();
+    close();
+    env.close();
+  }
+});
+
+test('cookieSecure forces the flag for proxies that do not forward the proto (issue #64)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  const { app, close } = makeApi(env, { cookieSecure: true });
+  const srv = await listen(app);
+  try {
+    const cookie = await loginAndGetCookie(srv.port);
+    assert.ok(/; Secure/.test(cookie), `forced Secure missing: ${cookie}`);
+  } finally {
+    await srv.close();
+    close();
+    env.close();
+  }
+});
+
+test('the logout cookie carries the same Secure flag as the login cookie (issue #64)', async () => {
+  // A clear-cookie without Secure lets the browser keep a stale session cookie alive over http.
+  const env = makeEnv({ workerEnabled: false });
+  const { app, close } = makeApi(env);
+  const srv = await listen(app);
+  try {
+    const base = `http://127.0.0.1:${srv.port}`;
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-proto': 'https' },
+      body: JSON.stringify({ token: 'tok-alice' }),
+    });
+    const sid = (setCookie(login).match(/mercury_session=([^;]+)/) ?? [])[1];
+    assert.ok(sid, 'login must return a session cookie');
+
+    const out = await fetch(`${base}/api/auth/logout`, {
+      method: 'POST', headers: { cookie: `mercury_session=${sid}`, 'x-forwarded-proto': 'https' },
+    });
+    assert.equal(out.status, 200);
+    const cleared = setCookie(out);
+    assert.ok(/Max-Age=0/.test(cleared), `logout must clear the cookie: ${cleared}`);
+    assert.ok(/; Secure/.test(cleared), `cleared cookie must match the login flag: ${cleared}`);
+  } finally {
+    await srv.close();
+    close();
+    env.close();
+  }
 });
