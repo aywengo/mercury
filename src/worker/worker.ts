@@ -467,8 +467,10 @@ export class Worker {
           value: undefined as AgentEvent | undefined,
           shuttingDown: true,
         }));
-        const next = await Promise.race([iterator.next(), timeoutRace, leaseRace, cancelRace, shutdownRace]);
-        timeoutSleep.cancel();
+        const next = await settleDespite(
+          Promise.race([iterator.next(), timeoutRace, leaseRace, cancelRace, shutdownRace]),
+          () => timeoutSleep.cancel(),
+        );
         if ((next as { cancelled?: boolean }).cancelled) {
           cancelled = true;
           await adapter.cancel(run.id);
@@ -953,6 +955,22 @@ function createCancellationSignal(check: () => boolean, intervalMs: number): Can
 
 interface CancellablePromise<T> extends Promise<T> {
   cancel(): void;
+}
+
+/**
+ * Await `promise`, running `cleanup` whether it resolved or rejected.
+ *
+ * Exists because `cancellableSleep`'s timer is only released by `cancel()`. Writing the cleanup as
+ * the statement AFTER an await silently does nothing on the rejection path, and a leaked timer
+ * holds the event loop open for the full run duration. Wrapping it makes the cleanup unconditional
+ * without widening the awaited type, which an explicit `let` declaration would have done.
+ */
+async function settleDespite<T>(promise: Promise<T>, cleanup: () => void): Promise<T> {
+  try {
+    return await promise;
+  } finally {
+    cleanup();
+  }
 }
 
 function cancellableSleep<T>(ms: number, value?: T): CancellablePromise<T> {
