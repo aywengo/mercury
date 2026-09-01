@@ -95,3 +95,39 @@ test('backup.sh has no cp fallback and verifies integrity (issue #69)', () => {
   assert.match(code, /PRAGMA integrity_check/, 'the backup must be verified after writing');
   assert.match(code, /exit 1/, 'and must fail loudly when it cannot back up safely');
 });
+
+test('a failed .backup leaves no partial file behind (issue #69 review)', () => {
+  // sqlite3 exists, but the database is unreadable, so .backup itself fails partway. `set -e`
+  // would exit and leave a truncated $OUT named exactly like a good backup, which retention would
+  // then keep.
+  const dir = mkdtempSync(join(tmpdir(), 'mercury-backup-partial-'));
+  const db = join(dir, 'mercury.db');
+  // A file that is not a database: sqlite3 opens it, then fails on the backup step.
+  writeFileSync(db, 'this is definitely not an sqlite database file');
+  const backupDir = join(dir, 'backups');
+  let sqlite3: string;
+  try {
+    sqlite3 = execFileSync('bash', ['-lc', 'command -v sqlite3'], { encoding: 'utf8' }).trim();
+  } catch {
+    return; // no sqlite3 to fail with
+  }
+  const res = runBackup({
+    PATH: `${sqlite3.replace(/\/sqlite3$/, '')}:/usr/bin:/bin`,
+    MERCURY_DB: db,
+    BACKUP_DIR: backupDir,
+  });
+  assert.notEqual(res.code, 0, 'a failed backup must exit non-zero');
+  const left = existsSync(backupDir) ? readdirSync(backupDir) : [];
+  assert.deepEqual(left, [],
+    `a failed backup must leave nothing behind, found ${JSON.stringify(left)}`);
+});
+
+test('the restore chowns the database to the service user (issue #69 review)', () => {
+  // `sudo cp` leaves the file root-owned while both units run as User=mercury.
+  const readme = readFileSync(join(import.meta.dirname, '..', 'deploy', 'README.md'), 'utf8');
+  const restore = readme.slice(readme.indexOf('## Restore'));
+  const cpIdx = restore.indexOf('sudo cp ');
+  const chownIdx = restore.indexOf('chown mercury:mercury /var/lib/mercury/mercury.db');
+  assert.ok(chownIdx > cpIdx,
+    'the restore must chown the database to mercury after copying it as root');
+});

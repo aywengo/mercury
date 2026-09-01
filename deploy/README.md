@@ -28,6 +28,10 @@ sudo systemctl enable --now mercury mercury-worker
 # stop services, replace the db file, remove stale WAL sidecars, start services
 sudo systemctl stop mercury mercury-worker
 sudo cp /var/backups/mercury/mercury-YYYYMMDD-HHMMSS.db /var/lib/mercury/mercury.db
+# `cp` runs as root, so without this the restored database is root-owned while both services run as
+# User=mercury -- the API would start and then fail on its first write with SQLITE_CANTOPEN or a
+# permissions error that points at SQLite rather than at ownership.
+sudo chown mercury:mercury /var/lib/mercury/mercury.db
 # Remove the sidecars (issue #69). A -wal file belongs to the database it was written beside: it
 # contains frames keyed to that file's change counter. Replacing only the .db leaves a -wal from
 # the OLD database next to a NEW one, and SQLite will replay those foreign frames into the

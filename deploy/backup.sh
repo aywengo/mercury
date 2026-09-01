@@ -31,7 +31,15 @@ if ! command -v sqlite3 >/dev/null 2>&1; then
   exit 1
 fi
 
-sqlite3 "$DB" ".backup '$OUT'"
+# Capture the status rather than letting `set -e` abort here. A failed .backup (disk full, EACCES,
+# SQLITE_BUSY) leaves a PARTIAL $OUT on disk, and `set -e` exits without removing it -- so the
+# retention glob below would keep a truncated file that is named exactly like a good backup. That is
+# the same silent-failure class this whole script is about: you discover it only when restoring.
+if ! sqlite3 "$DB" ".backup '$OUT'"; then
+  echo "error: sqlite3 .backup failed; removing the partial file" >&2
+  rm -f "$OUT"
+  exit 1
+fi
 
 # Verify what we just wrote. Without this the script reports success for a backup that cannot be
 # opened, which is the failure mode that matters most: a bad backup is indistinguishable from a good
