@@ -208,8 +208,8 @@ async function main(): Promise<void> {
         trustProxy: config.trustProxy,
         // Records the real cause of a 500, which is deliberately not sent to the client.
         logger,
-          // Aggregate queries for /metrics (issue #131).
-          db,
+        // Aggregate queries for /metrics (issue #131).
+        db,
       },
       config.port,
       { host: config.bindHost, tls: config.tls ?? undefined },

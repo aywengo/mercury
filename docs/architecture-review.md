@@ -83,7 +83,7 @@ Verified as a whole rather than per-PR: `main` runs **340 tests, 0 failures, 0 c
 | L8 | Temp-dir leaks in tests | [#73](https://github.com/aywengo/mercury/issues/73) | [#125](https://github.com/aywengo/mercury/pull/125) | ✅ resolved — 131 per run → 0; 26,409 accumulated dirs deleted; guard added |
 | L9 | Doc drift on test counts | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
 | L10 | systemd hardening blocks the docker sandbox | [#73](https://github.com/aywengo/mercury/issues/73) | [#129](https://github.com/aywengo/mercury/pull/129) | ✅ resolved — opt-in drop-in; baseline stays `ProtectSystem=strict` (fail-closed was already the right direction) |
-| L11 | No metrics endpoint + logger redaction untested | [#73](https://github.com/aywengo/mercury/issues/73) | [#130](https://github.com/aywengo/mercury/pull/130) | ✅ resolved — redaction gap in [#130]({P}/130); metrics endpoint shipped in [#132]({P}/132) |
+| L11 | No metrics endpoint + logger redaction untested | [#73](https://github.com/aywengo/mercury/issues/73) | [#130](https://github.com/aywengo/mercury/pull/130) | ✅ resolved — redaction gap in [#130](https://github.com/aywengo/mercury/pull/130); metrics endpoint shipped in [#132](https://github.com/aywengo/mercury/pull/132) |
 | L12 | §6 diagram has a phantom `CANCELLED --> RUNNING` edge | [#73](https://github.com/aywengo/mercury/issues/73) | [#124](https://github.com/aywengo/mercury/pull/124) | ✅ resolved |
 
 ### Held, not fixed: M11

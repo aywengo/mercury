@@ -133,13 +133,28 @@ export function createApp(deps: ServerDeps): Express {
       return;
     }
     try {
-      const leases = deps.queue?.activeLeases();
+      // ONE clock reading for both calls. activeLeases(now) decides liveness with `expires_at > now`
+      // and collectMetrics then derives seconds-until-expiry from the same instant, so the value is
+      // positive by construction. Reading Date.now() twice let the second reading land after a lease
+      // expired, which reported a NEGATIVE "seconds until expiry" -- and a negative value on a gauge
+      // whose alert is `mercury_lease_expires_in_seconds < 10` reads as a lease that expired long
+      // ago rather than one that just did. Clamping to zero would have hidden the symptom while
+      // leaving two clocks in play.
+      const now = Date.now();
+      const leases = deps.queue?.activeLeases(now);
       res.type('text/plain; version=0.0.4; charset=utf-8');
-      res.send(renderPrometheus(collectMetrics(deps.db, { leases })));
+      res.send(renderPrometheus(collectMetrics(deps.db, { leases, now })));
     } catch (err) {
-      // A metrics scrape must not surface internals, and must not take down the scraper's loop
-      // with a 500 body it will re-parse as a parse error.
-      deps.logger?.error({ err: String(err) }, 'metrics collection failed');
+      // A metrics scrape must not surface internals. Log name, message and stack the same way
+      // sendError() does for unclassified errors (routes.ts): coercing with String(err) keeps the
+      // message but throws away the stack, which is the part that says where it actually failed.
+      deps.logger?.error(
+        {
+          err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
+        },
+        'metrics collection failed',
+      );
       res.status(500).json({ error: 'metrics unavailable' });
     }
   });

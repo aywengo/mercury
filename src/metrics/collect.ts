@@ -79,22 +79,23 @@ export interface MetricsSnapshot {
 }
 
 /**
- * SQL expression for a duration in seconds between two ISO-8601 TEXT columns.
+ * SQL expression for a whole-second duration between two ISO-8601 TEXT columns.
  *
- * julianday() parses the stored UTC strings and yields days; the fraction is exact enough for
- * second-granularity buckets. Done in SQL rather than in JS so the database returns a handful of
- * aggregate rows instead of one row per run.
+ * strftime('%s') yields an exact integer epoch second, so a run of exactly 60s computes to 60 and
+ * lands in le="60" -- bucket boundaries are exact and the behaviour is testable.
+ *
+ * The obvious alternative, (julianday(b) - julianday(a)) * 86400.0, was what this used first and it
+ * is float64 arithmetic on a day number near 2.46e6, so resolution is only ~100us. Measured: a
+ * clean 60-second gap came out as 59.99999642372131. That is far finer than any bucket here, but it
+ * makes every bucket boundary ambiguous -- an observation ON a boundary falls either side depending
+ * on rounding, so inclusive `le` semantics could not be tested, and two runs of identical length
+ * could land in different buckets. Whole-second precision is the right granularity for run
+ * durations anyway: they are minutes to hours long.
  */
-/// Precision caveat worth knowing before alerting on a boundary: julianday() returns a float64
-/// count of days, so near the modern Julian day number (~2.46e6) its resolution is roughly
-/// 1e-9 days, about 100 microseconds. Durations are therefore accurate to ~100us, which is far
-/// finer than any bucket here -- EXCEPT for a value sitting exactly on a bucket boundary, which
-/// can fall either side. A run that waited exactly 5s may compute as 5.0000000596s and land in the
-/// band above le="5". That is inherent to floating-point bucketing and harmless in aggregate, but
-/// it means a test must not place an observation exactly on a boundary and then assert a band.
 function secondsBetween(from: string, to: string): string {
-  return `(julianday(${to}) - julianday(${from})) * 86400.0`;
+  return `(strftime('%s', ${to}) - strftime('%s', ${from}))`;
 }
+
 
 /**
  * Build one SELECT that buckets a duration expression server-side.
@@ -104,8 +105,12 @@ function secondsBetween(from: string, to: string): string {
  * of this query would silently keep reporting stale buckets after someone edited the array.
  */
 function bucketedQuery(expr: string, buckets: readonly number[], groupBy: string | null): string {
+  // `<=`, not `<`. Prometheus defines the histogram bound label `le` as LESS THAN OR EQUAL, so an
+  // observation landing exactly on a bound belongs in that bucket. Using `<` here silently dropped
+  // those observations into the next bucket up, which under-counts the interesting bands (a run
+  // that took exactly 60s would not appear in le="60").
   const cols = buckets
-    .map((b, i) => `SUM(CASE WHEN d < ${b} THEN 1 ELSE 0 END) AS b${i}`)
+    .map((b, i) => `SUM(CASE WHEN d <= ${b} THEN 1 ELSE 0 END) AS b${i}`)
     .join(',\n           ');
   const sel = groupBy ? `${groupBy},\n           ` : '';
   // The GROUP BY is load-bearing, not decoration. Without it SQLite treats the whole result as ONE
@@ -126,7 +131,7 @@ function readHistogram(
 ): Map<string, Histogram> | Histogram {
   const rows = db.prepare(sql).all() as Record<string, unknown>[];
   const make = (): Histogram => ({
-    // Prometheus wants the cumulative count at or below each bound, plus +Inf for the total.
+    // Prometheus wants the cumulative count at or below each bound (le is inclusive), plus +Inf.
     buckets: new Map<string, number>([...buckets.map((b) => [String(b), 0] as const), ['+Inf', 0]]),
     sum: 0,
     count: 0,
@@ -150,7 +155,7 @@ function readHistogram(
 }
 
 function fill(h: Histogram, row: Record<string, unknown>, buckets: readonly number[]): void {
-  // The SQL columns are ALREADY cumulative: each is `SUM(CASE WHEN d < bound ...)`, and an
+  // The SQL columns are ALREADY cumulative: each is `SUM(CASE WHEN d <= bound ...)`, and an
   // observation below a small bound is below every larger bound too, so the columns are
   // non-decreasing by construction. Copy them straight across.
   //

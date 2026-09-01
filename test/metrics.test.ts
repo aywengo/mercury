@@ -396,3 +396,56 @@ test('metric family names do not collide after Prometheus suffix normalisation',
     env.close();
   }
 });
+
+test('a duration landing exactly on a bucket bound is counted in that bucket', () => {
+  // Prometheus `le` is LESS THAN OR EQUAL. The first implementation used `d < bound`, which pushed
+  // an on-bound observation one bucket up and under-counted every band. That was also untestable at
+  // the time: julianday() is float64 days, so a clean 60s gap computed as 59.99999642372131 and
+  // "exactly on the bound" was not expressible. strftime('%s') yields exact integer seconds, which
+  // is what makes this assertion meaningful.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    seedRun(env, { id: 'exact60', status: 'COMPLETED', created: 0, started: 0, completed: 60_000 });
+    seedRun(env, { id: 'exact300', status: 'COMPLETED', created: 0, started: 0, completed: 300_000 });
+    const h = collectMetrics(env.db).durationByStatus.get('COMPLETED');
+    assert.ok(h);
+
+    assert.equal(h.buckets.get('60'), 1, 'a 60s run must be inside le="60"');
+    assert.equal(h.buckets.get('30'), 0, 'and not in the band below');
+    assert.equal(h.buckets.get('300'), 2, 'a 300s run must be inside le="300"');
+    assert.equal(h.count, 2);
+    // Exactness, not approximation: the durations must be the integers, not 59.9999...
+    assert.equal(h.sum, 360, `expected exact whole seconds, got ${h.sum}`);
+  } finally {
+    env.close();
+  }
+});
+
+test('lease expiry is non-negative because one clock feeds both calls', () => {
+  // The server reads Date.now() ONCE and passes it to both activeLeases(now) and collectMetrics
+  // ({ now }). activeLeases keeps a lease while expires_at > now, so with a shared instant the
+  // remaining time is positive by construction. Two readings let the second land after expiry and
+  // produced a NEGATIVE "seconds until expiry".
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    seedRun(env, {
+      id: 'leased', status: 'RUNNING', created: 0, started: 0,
+      leaseOwner: 'w1', leaseExpires: 60_000,
+    });
+    const shared = T0;
+    const leases = env.queue.activeLeases(shared);
+    assert.equal(leases.length, 1, 'the lease must be considered live at the shared instant');
+    assert.ok(collectMetrics(env.db, { leases, now: shared }).leaseExpiresInSeconds! >= 0,
+      'shared clock must never yield a negative remaining time');
+
+    // And the hazard the shared clock removes, demonstrated rather than asserted away: the same
+    // lease, measured against a later instant, goes negative. If this ever stops being true the
+    // two-clock bug cannot recur and the shared clock is no longer load-bearing.
+    const later = T0 + 61_000;
+    const stale = env.queue.activeLeases(shared);
+    assert.ok(collectMetrics(env.db, { leases: stale, now: later }).leaseExpiresInSeconds! < 0,
+      'expected two clocks to produce a negative remaining time');
+  } finally {
+    env.close();
+  }
+});
