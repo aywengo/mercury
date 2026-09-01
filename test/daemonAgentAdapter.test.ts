@@ -68,6 +68,23 @@ async function collectAll(handle: Awaited<ReturnType<DaemonAgentAdapter['start']
   return { events, exit };
 }
 
+/**
+ * Fail rather than hang. A dropped `agent_end` frame never settles the exit promise, so awaiting
+ * `collectAll` outright turns a real regression into a test-runner timeout -- which still gets
+ * caught by CI, but reports as an opaque timeout instead of naming the frame that went missing.
+ */
+async function withDeadline<T>(label: string, ms: number, work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} did not finish in ${ms}ms -- a frame was dropped`)), ms);
+  });
+  try {
+    return await Promise.race([work, guard]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function spawnAdapter(env: Record<string, string>): DaemonAgentAdapter {
   return new DaemonAgentAdapter(process.execPath, { args: [MOCK], env });
 }
@@ -373,3 +390,34 @@ test('daemon: terminate() settles the exit promise instead of leaving it pending
 // is kept as defence in depth; the behaviour that actually matters -- terminate() settling
 // the exit at all -- is covered by the test above, which does fail when the settle is
 // removed.
+
+test('daemon: frames coalesced into the hello write are not dropped (issue #68)', async () => {
+  // TCP has no frame boundaries. The daemon here sends the hello plus four further frames in a
+  // single write, which is legal and what a real daemon does when it has something to say
+  // immediately. The old readFrame resolved on the first frame and threw the tail away, then the
+  // caller started a fresh reader from an empty buffer -- so every one of those four frames was
+  // lost with no error and no sign anything was missing.
+  const { context, workspacePath } = makeContext();
+  const adapter = spawnAdapter({
+    MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'),
+    MOCK_DAEMON_MODE: 'pipeline',
+  });
+  try {
+    const handle = await adapter.start(context);
+    const { events, exit } = await withDeadline('pipeline drain', 5_000, collectAll(handle));
+    // The translator merges consecutive text deltas into one message (as it does on the happy
+    // path), so the assertion is that BOTH deltas survived -- not that they arrived separately.
+    const text = events
+      .filter((e) => e.type === 'agent.message')
+      .map((e) => (e.payload as { text: string }).text)
+      .join('');
+    assert.equal(text, 'alphabeta', 'a coalesced delta was dropped');
+    // agent_end is the LAST frame in the coalesced write, so a clean completed exit proves the
+    // tail of the buffer was consumed and not merely its head. Had it been dropped, nothing would
+    // have settled the exit from agent_end and this would have failed by timeout instead.
+    assert.equal(exit.code, 0, `agent_end lost; got events=${JSON.stringify(events.map((e) => e.type))}`);
+    assert.equal(exit.reason, 'completed');
+  } finally {
+    await adapter.cancel(context.run.id);
+  }
+});

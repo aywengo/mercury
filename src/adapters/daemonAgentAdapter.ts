@@ -166,15 +166,17 @@ export class DaemonAgentAdapter implements AgentAdapter {
     await waitForSocket(socketPath, 10_000);
     const socket = await connectSocket(socketPath);
     session.socket = socket;
-    await readFrame(socket); // daemon_hello — ignored
+    // Seed the long-lived reader with anything that arrived in the hello's write (issue #68).
+    const { rest } = await readFrame(socket); // daemon_hello — payload ignored
 
     // Send the initial prompt (same as RPC mode) so the agent starts working.
     socket.write(frame({ type: 'prompt', message: `Work on the task in .mercury-context.json. Task: ${context.run.task}` }));
 
     // Wire incoming frames: responses (with id) and events (no id).
-    let buffer = Buffer.alloc(0);
-    socket.on('data', (chunk: Buffer) => {
-      buffer = Buffer.concat([buffer, chunk]);
+    // Explicit Buffer, not the inferred Buffer<ArrayBuffer>: `rest` arrives as a subarray view
+    // typed Buffer<ArrayBufferLike>, and the two are not assignable to each other.
+    let buffer: Buffer = Buffer.alloc(0);
+    const drain = (): void => {
       for (;;) {
         if (buffer.length < 4) break;
         const len = buffer.readUInt32BE(0);
@@ -183,7 +185,19 @@ export class DaemonAgentAdapter implements AgentAdapter {
         buffer = buffer.subarray(4 + len);
         this.handleFrame(session, frame);
       }
+    };
+    socket.on('data', (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      drain();
     });
+    // Seed the reader with whatever shared the hello's write, and drain it NOW. Assigning the
+    // leftover bytes to `buffer` is not enough on its own: nothing parses them until the next
+    // `data` event, and a daemon that sent everything it had in that one write never sends
+    // another. That variant of the bug hangs instead of losing frames.
+    if (rest.length > 0) {
+      buffer = rest;
+      drain();
+    }
     // These two guarded on `!session.done` alone -- never on exitSettled -- so they could
     // call exitResolve a second time after agent.end had already settled the exit. The
     // promise ignores a repeat resolve so the outcome was usually harmless, but it made the
@@ -332,21 +346,40 @@ function connectSocket(path: string): Promise<Socket> {
   });
 }
 
-function readFrame(socket: Socket): Promise<Buffer> {
+/**
+ * Read exactly one length-prefixed frame, and hand back whatever else arrived with it.
+ *
+ * The remainder is the whole point (issue #68). TCP gives no frame boundaries, so a daemon that
+ * flushes its hello plus the first event in a single write -- legal, and what a daemon with a
+ * warm socket tends to do -- delivered both frames in one `data` event. The old version resolved
+ * with the first frame and dropped `buffer.subarray(4 + len)` on the floor, then the caller
+ * attached a fresh `data` listener starting from an empty buffer. Every frame that shared the
+ * hello's write was silently gone: no error, no truncation marker, just a missing event.
+ *
+ * `rest` is handed to the caller to seed the long-lived reader, so nothing is discarded.
+ *
+ * Also removes the error listener on the success path. `socket.once('error', reject)` used to
+ * stay attached after resolution, so it accumulated one zombie listener per session and would
+ * reject an already-settled promise on a later socket failure.
+ */
+function readFrame(socket: Socket): Promise<{ payload: Buffer; rest: Buffer }> {
   return new Promise((resolve, reject) => {
     let buffer = Buffer.alloc(0);
     const onData = (chunk: Buffer): void => {
       buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length >= 4) {
-        const len = buffer.readUInt32BE(0);
-        if (buffer.length >= 4 + len) {
-          socket.off('data', onData);
-          resolve(buffer.subarray(4, 4 + len));
-        }
-      }
+      if (buffer.length < 4) return;
+      const len = buffer.readUInt32BE(0);
+      if (buffer.length < 4 + len) return;
+      socket.off('data', onData);
+      socket.off('error', onError);
+      resolve({ payload: buffer.subarray(4, 4 + len), rest: buffer.subarray(4 + len) });
+    };
+    const onError = (err: Error): void => {
+      socket.off('data', onData);
+      reject(err);
     };
     socket.on('data', onData);
-    socket.once('error', reject);
+    socket.once('error', onError);
   });
 }
 
