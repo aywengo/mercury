@@ -128,9 +128,11 @@ async function main(): Promise<void> {
     redactor,
   });
 
-  // The logger matters here: poll() is the only place that can observe an SSE delivery failure or a
-  // failed event read, and both are logged rather than swallowed (issue #139). Without it the default
-  // nullLogger would keep the silence this fixes.
+  // The logger matters here: EventStream.poll() logs the two failures it can observe -- a failed
+  // event read and a subscriber whose delivery throws -- rather than swallowing them (issue #139).
+  // subscribe() reads too, but it rethrows to its caller and src/api/routes.ts handles that (issue
+  // #143), so poll() is the only path that would otherwise stay silent. Without a logger here the
+  // default nullLogger would keep exactly the silence this removes.
   const stream = new EventStream(db, events, config.pollMs, undefined, logger.child({ c: 'events' }));
 
   if (cmd === 'gc') {

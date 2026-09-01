@@ -8,6 +8,18 @@ import type { MercuryEvent } from '../domain/types.ts';
 import type { EventStore } from './eventStore.ts';
 import { nullLogger, type Logger } from '../logger.ts';
 
+/**
+ * Error detail that survives the logger.
+ *
+ * The logger serialises fields with JSON.stringify, and `message`/`stack` are NOT enumerable on an
+ * Error -- measured, `JSON.stringify({ err })` yields `{"err":{}}`. Passing the raw error would have
+ * made every line added here say nothing but "an error happened", which is the exact blindness this
+ * issue is about.
+ */
+function describeError(err: unknown): string {
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+}
+
 interface Subscription {
   runId: string;
   afterSeq: number;
@@ -27,11 +39,14 @@ export class EventStream {
   private detachHook: (() => void) | null = null;
   private log: Logger;
   /**
-   * True while the poll loop is inside a streak of read failures. Used only to log the first
-   * failure and the recovery, instead of once per tick: a busy or closed database fails every
-   * subscriber every 250 ms, which would bury everything else the process logs.
+   * runIds whose most recent poll read failed. Read failures are logged on the edges of a streak
+   * rather than once per tick -- a busy or closed database fails every subscriber every 250 ms, which
+   * would bury everything else the process logs -- and the streak is tracked PER RUN on purpose. A
+   * single global flag cleared by the first successful read would make one healthy subscriber log a
+   * "recovery" every tick while a poisoned row kept failing another run, so the recovery line would be
+   * describing a run that never recovered.
    */
-  private readFailing = false;
+  private failingReads = new Set<string>();
 
   constructor(
     db: DatabaseSync,
@@ -68,6 +83,7 @@ export class EventStream {
     this.detachHook?.();
     this.detachHook = null;
     this.subs.clear();
+    this.failingReads.clear();
   }
 
   /**
@@ -171,15 +187,17 @@ export class EventStream {
         events = this.readAfter(sub.runId, sub.afterSeq);
       } catch (err) {
         // Transient and shared across subscribers, so keep the subscription. Logged on the leading
-        // edge of a failure streak only -- see readFailing.
-        if (!this.readFailing) {
-          this.readFailing = true;
-          this.log.error({ err, runId: sub.runId, subs: this.subs.size }, 'event poll read failed; retrying');
+        // edge of this run's failure streak only -- see failingReads.
+        if (!this.failingReads.has(sub.runId)) {
+          this.failingReads.add(sub.runId);
+          this.log.error(
+            { err: describeError(err), runId: sub.runId, subs: this.subs.size },
+            'event poll read failed; retrying',
+          );
         }
         continue;
       }
-      if (this.readFailing) {
-        this.readFailing = false;
+      if (this.failingReads.delete(sub.runId)) {
         this.log.info({ runId: sub.runId }, 'event poll read recovered');
       }
       if (events.length === 0) continue;
@@ -191,7 +209,10 @@ export class EventStream {
         // Dead client: drop this one subscriber and say so. This is the only place that can observe
         // a delivery failure at all, so a silent handler here means nobody ever learns.
         this.subs.delete(sub);
-        this.log.error({ err, runId: sub.runId }, 'event subscriber dropped after delivery failure');
+        this.log.error(
+          { err: describeError(err), runId: sub.runId },
+          'event subscriber dropped after delivery failure',
+        );
       }
     }
     // Back to fast cadence when the poll found nothing new (idle).
