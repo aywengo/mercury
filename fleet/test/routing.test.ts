@@ -157,3 +157,36 @@ test('an explicit host that cannot take the work is an error, not a fallback', a
 test('an empty fleet is refused before any filtering', async () => {
   assert.throws(() => routeRun([], {}), /no hosts are registered/);
 });
+
+test('malformed routing input is a 400 rather than a crash inside a filter', async () => {
+  // Each of these used to reach a string method on a non-string and surface as a 500, which sends the operator
+  // to the service logs for a mistake sitting in their own request body.
+  const hosts = [host('a', { localPaths: ['/repo'] })];
+  const bad: Array<[string, unknown]> = [
+    ['repository.localPath', { repository: { localPath: 123 } }],
+    ['repository.url', { repository: { url: '' } }],
+    ['repository as array', { repository: [] }],
+    ['repository as string', { repository: '/repo' }],
+    ['labels as array', { labels: ['tier=gpu'] }],
+    ['labels value non-string', { labels: { tier: 4 } }],
+    ['agent non-string', { agent: 7 }],
+    ['host non-string', { host: {} }],
+  ];
+  for (const [label, req] of bad) {
+    let err: RoutingError | null = null;
+    try { routeRun(hosts, req as never); } catch (e) { err = e as RoutingError; }
+    assert.ok(err, `${label} must be rejected`);
+    assert.equal(err!.status, 400, `${label} must be a client error, got ${err!.status}`);
+  }
+});
+
+test('the rewrite also applies when the caller names a host', async () => {
+  // Naming a host removes locality as a filter, but a localPath the child does not have still fails -- as a
+  // Run failure, which is the worse place to learn it.
+  const hosts = [host('cloud', { localPaths: [] })];
+  const d = routeRun(hosts, { host: 'cloud', repository: { localPath: '/repo' } },
+    { resolveCloneUrl: (p) => (p === '/repo' ? 'https://github.com/o/r.git' : null) });
+  assert.equal(d.rewroteLocalPath, true);
+  assert.equal(d.repository?.url, 'https://github.com/o/r.git');
+  assert.equal(d.repository?.localPath, undefined);
+});

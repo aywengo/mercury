@@ -196,8 +196,10 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
           {
             host: namedHost,
             agent: typeof b.agent === 'string' && b.agent ? b.agent : undefined,
-            labels: isRecord(b.labels) ? b.labels as Record<string, string> : undefined,
-            repository: isRecord(b.repository) ? b.repository as RouteRepository : undefined,
+            // Passed through rather than quietly dropped when the shape is wrong: an array or a string here
+            // must be a 400 about the caller's body, not a request that silently loses its filter.
+            labels: b.labels as Record<string, string> | undefined,
+            repository: b.repository as RouteRepository | undefined,
           },
             { resolveCloneUrl },
           );

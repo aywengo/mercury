@@ -364,8 +364,16 @@ Two separate credential boundaries, and conflating them is the mistake:
 - **Fleet → child.** The `credential_ref` set, resolved from the credential file (section 15.2).
 
 The per-caller host allowlist from section 9 must be real authorisation rather than a filter: a caller
-permitted only for `box-lan-2` must get `403` when naming another host, not a silently narrowed choice. Without
-that, one leaked Fleet token is every host on the LAN, which is the whole reason section 9 exists.
+permitted only for `box-lan-2` must be refused when naming another host, not silently narrowed onto a host they
+did not choose. Without that, one leaked Fleet token is every host on the LAN, which is the whole reason section
+9 exists.
+
+*Refused with `404`, not `403` — a decision taken while implementing section 6.* Routing is given only the hosts
+a caller may see, so a host outside the allowlist is simply not registered as far as that caller is concerned,
+and `403` would confirm that it exists. This matches how Mercury scopes Runs (`404`, not `403`). The
+requirement this section actually imposes is that the request fail rather than be quietly redirected, and `404`
+satisfies it while leaking less. Omitting `host` is equally constrained: the router can only choose from the
+caller's visible set.
 
 ### 15.4 Fleet's own API surface
 

@@ -99,11 +99,42 @@ function score(host: HostView): number {
   return active * 2 + queued + headroom;
 }
 
+function bad(field: string, value: unknown): never {
+  throw new RoutingError(`${field} must be ${'a non-empty string'}, got ${JSON.stringify(value) ?? typeof value}`, 400, []);
+}
+
+function validateRequest(request: RouteRequest): void {
+  if (request.host !== undefined && (typeof request.host !== 'string' || !request.host)) bad('host', request.host);
+  if (request.agent !== undefined && (typeof request.agent !== 'string' || !request.agent)) bad('agent', request.agent);
+  if (request.repository !== undefined) {
+    if (typeof request.repository !== 'object' || request.repository === null || Array.isArray(request.repository)) {
+      bad('repository', request.repository);
+    }
+    for (const key of ['url', 'localPath', 'ref'] as const) {
+      const v = request.repository[key];
+      if (v !== undefined && (typeof v !== 'string' || !v)) bad(`repository.${key}`, v);
+    }
+  }
+  if (request.labels !== undefined) {
+    if (typeof request.labels !== 'object' || request.labels === null || Array.isArray(request.labels)) {
+      bad('labels', request.labels);
+    }
+    for (const [k, v] of Object.entries(request.labels)) {
+      if (typeof v !== 'string') bad(`labels.${k}`, v);
+    }
+  }
+}
+
 export function routeRun(
   hosts: HostView[],
   request: RouteRequest,
   opts: RouterOptions = {},
 ): RouteDecision {
+  // Types are checked here rather than trusted. A body like {"repository":{"localPath":123}} would otherwise
+  // reach a .replace() on a number and surface as a 500 -- sending the operator to the service logs for what
+  // is a mistake in their own request.
+  validateRequest(request);
+
   const considered = hosts.map((h) => h.id);
   const exclusions: Exclusion[] = [];
 
@@ -123,7 +154,19 @@ export function routeRun(
     if (!chosen.enabled) {
       throw new RoutingError(`host ${chosen.id} is disabled`, 409, [{ hostId: chosen.id, reason: 'disabled' }]);
     }
-    return { hostId: chosen.id, score: 0, rewroteLocalPath: false, repository: request.repository, considered };
+    // The rewrite still applies. Naming a host removes locality as a FILTER, but a localPath handed to a child
+    // that does not have it still fails there -- and it fails as a Run failure rather than as a routing
+    // decision, which is the worse place to learn it.
+    const explicitUrl = !request.repository?.url && request.repository?.localPath
+      ? opts.resolveCloneUrl?.(normalizePath(request.repository.localPath)) ?? null
+      : null;
+    return {
+      hostId: chosen.id,
+      score: 0,
+      rewroteLocalPath: explicitUrl !== null,
+      repository: explicitUrl ? { ...request.repository, url: explicitUrl, localPath: undefined } : request.repository,
+      considered,
+    };
   }
 
   const repo = request.repository;
