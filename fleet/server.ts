@@ -12,11 +12,14 @@ import { readFileSync } from 'node:fs';
 import * as https from 'node:https';
 import type { DatabaseSync } from 'node:sqlite';
 import { HostRegistry, RegistryError, type HostView } from './registry.ts';
+import { BindingStore, UNKNOWN } from './bindings.ts';
+import { createChildClient } from './child.ts';
+import { DispatchError, recoverPending, refreshStates, submitRun, type DispatchDeps } from './dispatch.ts';
 import { createProber, type Prober } from './prober.ts';
 import { CredentialError, type CredentialStore } from './credentials.ts';
 import type { Caller } from './auth.ts';
 import { parseCallerTokens, hostAllowed } from './auth.ts';
-import { authenticate, HttpError, matchRoute, readJsonBody, sendJson, type Route } from './http.ts';
+import { authenticate, HttpError, matchRoute, readJsonBody, sendJson, type RequestContext, type Route } from './http.ts';
 import type { Logger } from './logger.ts';
 import type { FleetConfig } from './config.ts';
 
@@ -43,6 +46,17 @@ function bodyObject(body: unknown): Record<string, unknown> {
   return body as Record<string, unknown>;
 }
 
+/** The standard Idempotency-Key header, accepted alongside an in-body equivalent. */
+function headerIdempotency(ctx: RequestContext): string | null {
+  const v = ctx.headers?.['idempotency-key'];
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+function scopedHosts(caller: Caller, registry: HostRegistry): '*' | string[] {
+  if (caller.isAdmin || caller.allowedHosts === '*') return '*';
+  return caller.allowedHosts;
+}
+
 function str(body: Record<string, unknown>, key: string): string {
   const v = body[key];
   if (typeof v !== 'string' || !v) throw new HttpError(400, `${key} is required and must be a non-empty string`);
@@ -56,8 +70,14 @@ function visibleHosts(registry: HostRegistry, caller: Caller): HostView[] {
   return all.filter((h) => caller.allowedHosts.includes(h.id));
 }
 
-export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: Prober } {
+export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: Prober; dispatch: DispatchDeps } {
   const registry = new HostRegistry(deps.db);
+  const dispatch: DispatchDeps = {
+    registry,
+    bindings: new BindingStore(deps.db),
+    child: createChildClient({ timeoutMs: deps.config.probeTimeoutMs }),
+    resolveToken: (ref) => deps.credentials.secret(ref),
+  };
   const prober = createProber({
     registry,
     resolveToken: (ref) => deps.credentials.secret(ref),
@@ -106,8 +126,20 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
     {
       method: 'DELETE', pattern: ['fleet', 'hosts', ':id'], admin: true,
       handle: (ctx, res) => {
-        if (!registry.remove(ctx.params[0]!)) throw new HttpError(404, 'no such host');
-        sendJson(res, 200, { removed: ctx.params[0] });
+        // ?force=1 discards the bindings to this host's Runs. Offered because refusing outright would give
+        // no way forward, but never implied: the default protects the one table that cannot be rebuilt.
+        const force = ctx.query.get('force') === '1';
+        let removed = false;
+        try {
+          removed = registry.remove(ctx.params[0]!, { force });
+        } catch (err) {
+          if (err instanceof RegistryError && /still owns/.test(err.message)) {
+            throw new HttpError(409, err.message);
+          }
+          throw err;
+        }
+        if (!removed) throw new HttpError(404, 'no such host');
+        sendJson(res, 200, { removed: ctx.params[0], forced: force });
       },
     },
     {
@@ -127,6 +159,63 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
       },
     },
     {
+      // Dispatch. The caller names a host; the allowlist is checked against THAT host and a mismatch is 403,
+      // never a silent substitution to a host the caller may use.
+      method: 'POST', pattern: ['fleet', 'runs'],
+      handle: async (ctx, res) => {
+        const b = bodyObject(ctx.body);
+        const hostId = str(b, 'host');
+        if (!hostAllowed(ctx.caller, hostId)) {
+          throw new HttpError(403, `caller ${ctx.caller.ownerId} may not submit work to host ${hostId}`);
+        }
+        const requested = { ...b };
+        delete requested.host;
+        delete requested.idempotency;
+        const idem = typeof b.idempotency === 'string' && b.idempotency
+          ? b.idempotency
+          : headerIdempotency(ctx);
+        // ownerId comes from the authenticated caller, never the body: idempotency scoping is a security
+        // boundary, and a caller that could choose it could claim another caller's binding.
+        const outcome = await submitRun(dispatch, {
+          hostId, ownerId: ctx.caller.ownerId, requested, clientToken: idem ?? null,
+        });
+        sendJson(res, outcome.reused ? 200 : 201, {
+          fleetRunId: outcome.binding.fleetRunId,
+          hostId: outcome.binding.hostId,
+          childRunId: outcome.binding.childRunId,
+          pending: outcome.pending,
+          reused: outcome.reused,
+          status: dispatch.bindings.state(outcome.binding.fleetRunId)?.status ?? UNKNOWN,
+          ...(outcome.note ? { note: outcome.note } : {}),
+        });
+      },
+    },
+    {
+      method: 'GET', pattern: ['fleet', 'runs'],
+      handle: (ctx, res) => {
+        const runs = dispatch.bindings.list(scopedHosts(ctx.caller, registry));
+        sendJson(res, 200, { runs });
+      },
+    },
+    {
+      method: 'GET', pattern: ['fleet', 'runs', ':id'],
+      handle: async (ctx, res) => {
+        const id = ctx.params[0]!;
+        const binding = dispatch.bindings.get(id);
+        if (!binding) throw new HttpError(404, 'no such fleet run');
+        if (!hostAllowed(ctx.caller, binding.hostId)) {
+          // Same status as "does not exist" would be for a different reason; 403 is honest here because the
+          // caller demonstrably knows an id that it may not read.
+          throw new HttpError(403, `caller ${ctx.caller.ownerId} may not read runs on host ${binding.hostId}`);
+        }
+        await refreshStates(dispatch, [binding.hostId]);
+        sendJson(res, 200, {
+          ...binding,
+          state: dispatch.bindings.state(id),
+        });
+      },
+    },
+    {
       method: 'POST', pattern: ['fleet', 'probe'], admin: true,
       handle: async (_ctx, res) => {
         const results = await prober.sweepOnce();
@@ -135,11 +224,11 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
     },
   ];
 
-  return { routes, prober };
+  return { routes, prober, dispatch };
 }
 
 export function createFleetServer(deps: FleetServerDeps): FleetServer {
-  const { routes, prober } = buildRoutes(deps);
+  const { routes, prober, dispatch } = buildRoutes(deps);
   const registry = new HostRegistry(deps.db);
   // Parsed once, not per request: the token set is fixed at startup, and re-splitting it on every call
   // would let a caller's request rate scale the cost of an operation that never changes.
@@ -169,7 +258,7 @@ export function createFleetServer(deps: FleetServerDeps): FleetServer {
         }
       }
       const body = route.method === 'POST' ? await readJsonBody(req) : {};
-      await route.handle({ caller, params, query: url.searchParams, body, log: deps.logger }, res);
+      await route.handle({ caller, params, query: url.searchParams, headers: req.headers, body, log: deps.logger }, res);
     } catch (err) {
       // All three are the caller's mistake rather than a server fault, so all three are 4xx. CredentialError
       // in particular names a credential_ref that is not in the file -- returning 500 for that sends the
@@ -205,6 +294,16 @@ export function createFleetServer(deps: FleetServerDeps): FleetServer {
       // reconciliation happens here. Binding LAST means a client can never get a response from an endpoint
       // that has not finished loading the registry.
       const hosts = registry.list();
+      // Recovery BEFORE binding, per section 15.6: a client must not be able to ask about a Run while the
+      // set of Runs is still being worked out. Pending bindings are those where Fleet asked a child for a Run
+      // and never recorded the answer -- typically because Fleet died in between.
+      const pending = dispatch.bindings.pending();
+      if (pending.length > 0) {
+        const rec = await recoverPending(dispatch);
+        deps.logger.info('recovered pending bindings', {
+          found: pending.length, resolved: rec.resolved, stillPending: rec.stillPending,
+        });
+      }
       deps.logger.info('fleet starting', {
         hosts: hosts.length,
         bindHost: deps.config.bindHost,
