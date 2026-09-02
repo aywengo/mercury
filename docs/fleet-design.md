@@ -330,11 +330,16 @@ Fleet runs as a long-lived service on one host, not as a CLI on an operator's la
 question 1, and it is not cosmetic: it changes where secrets live, who authenticates to what, and what a
 crash costs.
 
+**Scope of this section: it is a specification, not a description.** Only Phase 0 exists — registry and
+probe, driven by a CLI. There is no Fleet server, no Fleet unit, no caller authentication, and no redactor.
+Everything below is written before the code so that Phase 1 does not invent it under pressure, and the
+imperative and future tenses are deliberate.
+
 ### 15.1 Why the service shape forced a decision now
 
 Phase 0 shipped registry and probe with no server, so it could dodge this. Phase 1 records a binding the
 moment it dispatches, and a binding only has value if it outlives the process that wrote it. From here on,
-Fleet is a daemon that clients talk to.
+Fleet is a daemon that clients talk to rather than a command that runs and exits.
 
 ### 15.2 Secrets move out of `$HOME`
 
@@ -344,20 +349,22 @@ Mercury's hardening would not be able to read anything under a home directory. T
 asymmetric and easy to miss — the unit starts, the registry loads, and every probe reports `auth-fail`
 because the credential store never resolved.
 
-For a service the file lives at `/etc/fleet/credentials.json`, mode `0600`, owned by the `fleet` user, and
-`ReadWritePaths` covers only `/var/lib/fleet`. The default stays laptop-shaped for development; the unit
-sets `FLEET_CREDENTIALS_FILE` explicitly rather than relying on a default.
+A service deployment should therefore put the file at `/etc/fleet/credentials.json`, mode `0600`, owned by
+the `fleet` user, and should restrict `ReadWritePaths` to `/var/lib/fleet`. None of this exists yet — there
+is no Fleet unit and no `/etc/fleet`, and the paths above are the intended layout, not the current one. The
+Phase 0 default stays laptop-shaped for development; the unit, when it is written, should set
+`FLEET_CREDENTIALS_FILE` explicitly rather than rely on that default.
 
 ### 15.3 Fleet authenticates its own callers
 
 Two separate credential boundaries, and conflating them is the mistake:
 
-- **Caller → Fleet.** Fleet has its own token set. A caller's token is never forwarded to a child, so a
+- **Caller → Fleet.** Fleet must have its own token set. A caller's token is never forwarded to a child, so a
   Fleet token and a Mercury token are different things with different blast radii.
-- **Fleet → child.** The `credential_ref` set in `/etc/fleet/credentials.json`.
+- **Fleet → child.** The `credential_ref` set, resolved from the credential file (section 15.2).
 
-The per-caller host allowlist from section 9 becomes real authorisation rather than a filter: a caller
-permitted only for `box-lan-2` gets `403` when naming another host, not a silently narrowed choice. Without
+The per-caller host allowlist from section 9 must be real authorisation rather than a filter: a caller
+permitted only for `box-lan-2` must get `403` when naming another host, not a silently narrowed choice. Without
 that, one leaked Fleet token is every host on the LAN, which is the whole reason section 9 exists.
 
 ### 15.4 Fleet's own API surface
@@ -370,7 +377,7 @@ GET  /healthz                       liveness, no auth
 GET  /fleet/hosts                   registry + cached probe state
 POST /fleet/hosts                   register a host (admin)
 POST /fleet/hosts/:id/enable        enable|disable (admin)
-DEL  /fleet/hosts/:id               forget a host (admin)
+DELETE /fleet/hosts/:id             forget a host (admin)
 POST /fleet/hosts/:id/probe         probe now (admin)
 
 POST /fleet/runs                    submit; body names a host (Phase 1), routing later
@@ -391,8 +398,8 @@ what keeps "do not proxy arbitrary paths" true as the surface grows.
 Fleet cannot import Mercury's redactor — section 11 forbids it — so Fleet carries its own. This is not
 cosmetic parity. Fleet holds a credential for every Mercury on the network, and the failure mode is
 specific: an HTTP client error can echo request headers, and a bearer token in a log line is a fleet-wide
-compromise sitting in a file with journald's retention. Fleet redacts every known child secret and the
-`Authorization` header pattern from log output, and the redactor is seeded from the credential store at
+compromise sitting in a file with journald's retention. Fleet must redact every known child secret and the
+`Authorization` header pattern from log output, and the redactor must be seeded from the credential store at
 startup so a rotated file cannot leak through a stale list.
 
 ### 15.6 Lifecycle

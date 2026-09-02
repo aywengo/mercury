@@ -65,14 +65,14 @@ time on the wrong machine.
 | --- | --- | --- |
 | `FLEET_DB` | `fleet.db` | Fleet's own SQLite database, separate from every Mercury's. |
 | `FLEET_CREDENTIALS_FILE` | `~/.fleet/credentials.json` | Must be mode `0600`; Fleet refuses otherwise. |
+| `FLEET_PROBE_INTERVAL_MS` | `15000` | Sweep interval for `probe --watch`. |
+| `FLEET_PROBE_TIMEOUT_MS` | `5000` | Per-request timeout. A hung host must not stall the sweep. |
+| `FLEET_ALLOW_INSECURE_CREDENTIALS` | unset | `1` bypasses the mode check. For filesystems that cannot do `0600`. |
 
 > The default is laptop-shaped on purpose, for development. Fleet runs as a **service**
 > ([`docs/fleet-design.md` §15](../docs/fleet-design.md#15-fleet-as-a-service)), and a hardened unit sets
 > `ProtectHome=true`, which cannot read anything under a home directory. A service deployment sets
 > `FLEET_CREDENTIALS_FILE=/etc/fleet/credentials.json` explicitly instead of relying on this default.
-| `FLEET_PROBE_INTERVAL_MS` | `15000` | Sweep interval for `probe --watch`. |
-| `FLEET_PROBE_TIMEOUT_MS` | `5000` | Per-request timeout. A hung host must not stall the sweep. |
-| `FLEET_ALLOW_INSECURE_CREDENTIALS` | unset | `1` bypasses the mode check. For filesystems that cannot do `0600`. |
 
 ## Two rules this directory is built around
 
