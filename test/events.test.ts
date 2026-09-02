@@ -1052,7 +1052,12 @@ test('POSITIVE CONTROL: two cursors on one run read separately and get their own
     const stream = new EventStream(env.db, env.events, 10, 10);
     const aSeen: number[][] = [];
     const bSeen: number[][] = [];
-    stream.subscribe(run.id, 0, (e) => aSeen.push(e.map((x) => x.sequence))); // A advances to 1
+    // Cursor 0 means "deliver everything", so subscribe() drains the backlog synchronously and A
+    // lands at the head of it -- which is NOT sequence 1. runService.create() has already written six
+    // lifecycle events (run.created, run.queued, 4x skill.selected), so A starts at 6 and the append
+    // below is sequence 7. No number is hard-coded here on purpose: the fixture's lifecycle count is
+    // free to change, and a comment asserting a specific head is how this line used to mislead.
+    stream.subscribe(run.id, 0, (e) => aSeen.push(e.map((x) => x.sequence)));
     for (let i = 2; i <= 6; i++) writer.append(run.id, 'agent.message', { i });
     // Capture B's cursor AFTER the appends, so B really is at the head and A is the only one behind.
     const caughtUp = env.events.lastSequence(run.id);
@@ -1063,12 +1068,12 @@ test('POSITIVE CONTROL: two cursors on one run read separately and get their own
     pollOnce(stream);
 
     assert.equal(counter.reads(), 2,
-      `A at cursor 1 and B at the head are different groups; got ${counter.reads()} reads`);
+      `A lagging behind the head and B at the head are different groups; got ${counter.reads()} reads`);
     // Sequences include the lifecycle events the run service appends itself, so assert against the
     // store rather than a hand-count of the fixture's own appends.
     const last = env.events.lastSequence(run.id);
-    // aSeen accumulates BOTH the synchronous backlog from subscribe() (sequence 1) and the poll
-    // delivery (everything after it).
+    // aSeen accumulates BOTH deliveries: the synchronous backlog drained by subscribe() (the lifecycle
+    // events, sequences 1..6) and the poll delivery that follows (everything after them).
     assert.deepEqual(aSeen.flat(), Array.from({ length: last }, (_, k) => k + 1),
       'the lagging subscriber gets everything after its cursor, across both deliveries');
     assert.deepEqual(bSeen, [], 'the caught-up subscriber must NOT be handed the lagging one\'s page');
