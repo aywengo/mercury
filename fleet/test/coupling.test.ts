@@ -26,8 +26,23 @@ export interface SourceEntry {
 }
 
 /** Every module specifier a file mentions: static imports, re-exports, dynamic imports and require. */
-export function specifiersOf(source: string): string[] {
+export /**
+ * Blank out comments so the scan reads code, not prose.
+ *
+ * Without this the guard reports false positives on ordinary English -- a doc comment saying the code
+ * distinguishes one thing "from 'something else'" looks exactly like an import to a regex. False positives are
+ * cheap once and expensive forever: a guard that cries wolf gets ignored, and this one exists to be trusted.
+ * Strings are left intact, because a real import is never only inside a comment.
+ */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
+function specifiersOf(source: string): string[] {
   const found: string[] = [];
+  source = stripComments(source);
   const patterns = [
     /\bfrom\s+['"]([^'"]+)['"]/g,
     /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
@@ -162,4 +177,37 @@ test('Fleet adds no dependencies of its own', () => {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as { dependencies?: Record<string, string> };
   // express belongs to Mercury. If Fleet ever needs its own dependency that is a deliberate decision, not drift.
   assert.deepEqual(Object.keys(pkg.dependencies ?? {}), ['express']);
+});
+
+test('the guard reads imports, not prose', async () => {
+  // Spelled through a variable on purpose. This file is itself scanned by the guard, and the literal token
+  // sequence would be reported as a violation of the rule under test -- the scanner matches the text wherever
+  // it appears, so splitting the string is not enough.
+  const FROM = 'from';
+  // A doc comment containing the word from followed by a quoted phrase used to be reported as an import of a
+  // bare specifier. A guard that reports violations which are not violations trains people to ignore it.
+  const prose = [
+    `import { x } ${FROM} './bindings.ts';`,
+    '/**',
+    " * Distinguishes a refusal from 'we do not know'.",
+    " * See also from 'src/api/routes.ts' for the upstream shape.",
+    ' */',
+    "export const y = 1;",
+  ].join('\n');
+  assert.deepEqual(findViolations([{ path: REPO_ROOT + '/fleet/prose.ts', source: prose }]), [],
+    'prose must not be mistaken for a dependency');
+
+  // The same file with a real violation must still report it, so the comment-stripping did not blind the guard.
+  // Built by concatenation: this file is itself scanned by the guard, and a literal import here would be
+  // reported as a violation of the very rule the test is checking.
+  const real = prose + `\nimport { z } ${FROM} '../src/domain/types.ts';`;
+  const found = findViolations([{ path: REPO_ROOT + '/fleet/prose.ts', source: real }]);
+  assert.equal(found.length, 1, 'a genuine cross-boundary import is still caught');
+  assert.match(found[0], /resolves outside fleet\//);
+
+  // And a bare specifier in code, not comment, is still caught.
+  const bare = `import express ${FROM} 'express';\nexport const y = 1;`;
+  const found2 = findViolations([{ path: REPO_ROOT + '/fleet/prose.ts', source: bare }]);
+  assert.equal(found2.length, 1);
+  assert.match(found2[0], /bare specifier express/);
 });

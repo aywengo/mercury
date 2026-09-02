@@ -354,6 +354,9 @@ test('the sweeper actually passes event deps through to the sweep', async () => 
           mirrored++;
           return { kind: 'ok' as const, value: { events: [], lastSequence: 0, nextCursor: after, hasMore: false } };
         },
+        submitInput: async () => ({ kind: 'ok' as const, value: { ok: true } }),
+        cancelRun: async () => ({ kind: 'ok' as const, value: { runId: 'run_1', status: 'CANCELLED' } }),
+        retryRun: async () => ({ kind: 'ok' as const, value: { runId: 'run_2', status: 'QUEUED', retryOf: 'run_1' } }),
       },
       resolveToken: () => 'secret-value',
     };

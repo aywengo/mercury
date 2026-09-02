@@ -19,6 +19,7 @@ import { startSweeper, type SweeperHandle, type SweepEvent } from './sweep.ts';
 import { listMirroredEvents, type EventMirrorDeps } from './events.ts';
 import { startEventStream } from './stream.ts';
 import { loadRepoUrlMap, routeRun, RoutingError, type RouteRepository } from './routing.ts';
+import { cancelRun, retryRun, sendInput, type InteractionDeps } from './interact.ts';
 import { createProber, type Prober } from './prober.ts';
 import { CredentialError, type CredentialStore } from './credentials.ts';
 import type { Caller } from './auth.ts';
@@ -99,6 +100,12 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
     bindings: new BindingStore(deps.db),
     child: createChildClient({ timeoutMs: deps.config.probeTimeoutMs }),
     resolveToken: (ref) => deps.credentials.secret(ref),
+  };
+  const interaction: InteractionDeps = {
+    registry: dispatch.registry,
+    bindings: dispatch.bindings,
+    child: dispatch.child,
+    resolveToken: dispatch.resolveToken,
   };
   const prober = createProber({
     registry,
@@ -264,6 +271,29 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
         });
       },
     },
+    // Interaction verbs. Each is scoped by the same host allowlist as reads: a caller who may not see a host
+    // must not be able to cancel or feed work to a Run on it.
+    ...(['input', 'cancel', 'retry'] as const).map((verb) => ({
+      method: 'POST' as const,
+      pattern: ['fleet', 'runs', ':id', verb],
+      handle: async (ctx: RequestContext, res: ServerResponse) => {
+        const id = ctx.params[0]!;
+        const binding = dispatch.bindings.get(id);
+        if (!binding) throw new HttpError(404, 'no such fleet run');
+        if (!hostAllowed(ctx.caller, binding.hostId)) {
+          throw new HttpError(403, `caller ${ctx.caller.ownerId} may not act on runs on host ${binding.hostId}`);
+        }
+        const outcome = verb === 'input'
+          // The child takes an arbitrary JSON value; Fleet forwards it rather than inventing a shape.
+          ? await sendInput(interaction, id, bodyObject(ctx.body).input ?? bodyObject(ctx.body))
+          : verb === 'cancel'
+            ? await cancelRun(interaction, id)
+            : await retryRun(interaction, id);
+        // 200 even when unknown: the request was accepted and understood, and the uncertainty is about the
+        // child's answer rather than about the caller's request. The body says which it was.
+        sendJson(res, 200, outcome);
+      },
+    })),
     {
       // GET /fleet/runs/:id/stream -- Fleet-side SSE, a view onto the mirror rather than a second path to the
       // child. Losing this stream costs latency only: the client reconnects with ?after=<cursor> and resumes
@@ -376,8 +406,14 @@ export function createFleetServer(deps: FleetServerDeps): FleetServer {
       // All three are the caller's mistake rather than a server fault, so all three are 4xx. CredentialError
       // in particular names a credential_ref that is not in the file -- returning 500 for that sends the
       // operator to the service logs when the answer is in their own request body.
-      if (err instanceof HttpError || err instanceof RegistryError || err instanceof CredentialError) {
-        const status = err instanceof HttpError ? err.status : 400;
+      if (err instanceof HttpError || err instanceof RegistryError || err instanceof CredentialError
+          || err instanceof DispatchError) {
+        // DispatchError carries its own status (404 for an unknown Fleet Run, 409 for a disabled host or an
+        // idempotency conflict). Treating it as a server fault would answer a caller's bad request with a 500
+        // and send them to the service logs.
+        const status = err instanceof HttpError ? err.status
+          : err instanceof DispatchError ? err.status
+            : 400;
         sendJson(res, status, {
           error: err.message,
           ...(err instanceof HttpError && err.details !== undefined ? { details: err.details } : {}),
