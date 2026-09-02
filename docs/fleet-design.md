@@ -283,7 +283,7 @@ binding recorded. No routing. Proves the idempotency and binding model, and the 
 **Phase 2 — reconciliation and merged status (medium).** *Shipped: `fleet/sweep.ts`, `FLEET_SWEEP_INTERVAL_MS`.* The sweep from section 7, `UNKNOWN` handling, and
 `GET /fleet/runs` showing one view across hosts. This is where durability gets exercised for real.
 
-**Phase 3 — event aggregation (medium).** Cursor mirroring, Fleet-side SSE, metadata-only by default.
+**Phase 3 — event aggregation (medium).** *Shipped: `fleet/events.ts`, `fleet/stream.ts`, `GET /fleet/runs/:id/events` and `/stream`.* Cursor mirroring, Fleet-side SSE, metadata-only by default.
 
 **Phase 4 — routing (medium).** Locality filter, agent filter, label selectors, capacity scoring, and the
 `localPath` → git URL rewrite. Ship the rewrite **before** the scorer, since it removes most of the
