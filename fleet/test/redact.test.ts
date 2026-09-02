@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRedactor, REDACTED } from '../redact.ts';
+import { createRedactor, createServiceRedactor, REDACTED } from '../redact.ts';
 
 const CHILD = 'child-secret-abcdef123456';
 const CALLER = 'caller-token-xyz789999';
@@ -54,4 +54,26 @@ test('the header pattern cannot swallow a whole line', () => {
   const out = r.redact('Authorization: Bearer abcdef123456789 host=studio latency=12ms');
   assert.match(out, /host=studio/);
   assert.match(out, /latency=12ms/);
+});
+
+test('the service redactor is seeded from all three secret classes', () => {
+  // The serve path used to seed child credentials only, while its comment claimed otherwise. A caller or
+  // admin token reaching a log through an exception message therefore went unredacted -- and no test noticed,
+  // because nothing asserted the seeding covered them.
+  const r = createServiceRedactor({
+    childSecrets: ['child-secret-aaaaaaaaaaaa'],
+    callerTokens: ['caller-token-bbbbbbbbbbbb'],
+    adminToken: 'admin-token-cccccccccccc',
+  });
+  assert.equal(r.seededCount, 3);
+  for (const secret of ['child-secret-aaaaaaaaaaaa', 'caller-token-bbbbbbbbbbbb', 'admin-token-cccccccccccc']) {
+    const out = r.redact(`request failed while handling ${secret}`);
+    assert.ok(!out.includes(secret), `${secret.slice(0, 8)}... leaked into the log line`);
+  }
+});
+
+test('a null admin token is not seeded as the string "null"', () => {
+  const r = createServiceRedactor({ childSecrets: [], callerTokens: [], adminToken: null });
+  assert.equal(r.seededCount, 0);
+  assert.equal(r.redact('admin token is null'), 'admin token is null');
 });

@@ -15,7 +15,7 @@ import { HostRegistry, RegistryError, type HostView } from './registry.ts';
 import { createProber, type Prober } from './prober.ts';
 import { CredentialError, type CredentialStore } from './credentials.ts';
 import type { Caller } from './auth.ts';
-import { parseCallerTokens, hostAllowed, type CallerIndex } from './auth.ts';
+import { parseCallerTokens, hostAllowed } from './auth.ts';
 import { authenticate, HttpError, matchRoute, readJsonBody, sendJson, type Route } from './http.ts';
 import type { Logger } from './logger.ts';
 import type { FleetConfig } from './config.ts';
@@ -58,7 +58,6 @@ function visibleHosts(registry: HostRegistry, caller: Caller): HostView[] {
 
 export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: Prober } {
   const registry = new HostRegistry(deps.db);
-  const callers: CallerIndex = parseCallerTokens(deps.config.apiTokens);
   const prober = createProber({
     registry,
     resolveToken: (ref) => deps.credentials.secret(ref),
@@ -142,6 +141,9 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
 export function createFleetServer(deps: FleetServerDeps): FleetServer {
   const { routes, prober } = buildRoutes(deps);
   const registry = new HostRegistry(deps.db);
+  // Parsed once, not per request: the token set is fixed at startup, and re-splitting it on every call
+  // would let a caller's request rate scale the cost of an operation that never changes.
+  const authDeps = { callers: parseCallerTokens(deps.config.apiTokens), adminToken: deps.config.adminToken };
 
   const handler = async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', 'http://internal');
@@ -155,7 +157,7 @@ export function createFleetServer(deps: FleetServerDeps): FleetServer {
     try {
       let caller: Caller = { ownerId: 'anonymous', isAdmin: false, allowedHosts: [] };
       if (!route.public) {
-        const resolved = authenticate(req, { callers: parseCallerTokens(deps.config.apiTokens), adminToken: deps.config.adminToken });
+        const resolved = authenticate(req, authDeps);
         if (!resolved) {
           sendJson(res, 401, { error: 'authentication required' });
           return;

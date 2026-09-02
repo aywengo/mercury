@@ -65,3 +65,22 @@ export function createRedactor(secrets: Iterable<string> = []): Redactor {
     },
   };
 }
+
+/**
+ * Build the redactor a running Fleet service needs.
+ *
+ * Extracted from the serve path so that "every secret class Fleet holds is seeded" is a tested invariant
+ * rather than a comment. It used to be a comment that was wrong: the code seeded child credentials only,
+ * so a bare caller or admin token reaching a log line through an exception message went unredacted.
+ */
+export function createServiceRedactor(sources: {
+  childSecrets: Iterable<string>;
+  callerTokens: Iterable<string>;
+  adminToken: string | null;
+}): Redactor {
+  return createRedactor([
+    ...sources.childSecrets,
+    ...sources.callerTokens,
+    ...(sources.adminToken ? [sources.adminToken] : []),
+  ]);
+}

@@ -24,7 +24,7 @@ import { createProber } from './prober.ts';
 import { probeAndRecord } from './probe.ts';
 import { createFleetServer } from './server.ts';
 import { assertServeable } from './config.ts';
-import { createRedactor } from './redact.ts';
+import { createServiceRedactor } from './redact.ts';
 import { createLogger } from './logger.ts';
 import { parseCallerTokens } from './auth.ts';
 
@@ -185,12 +185,17 @@ export async function main(argv: string[]): Promise<number> {
     // Startup order from design section 15.6: configuration, then credentials, then the database, then the
     // server binds. Binding last means a client never reaches an endpoint whose registry is still loading.
     assertServeable(config);
-    return await withRegistry(async (registry, db) => {
+    return await withRegistry(async (_registry, db) => {
       const store = openStore(config);
-      // The redactor is seeded from the credential store AND the caller tokens, so neither class of secret
-      // can reach a log line -- including via an exception message that echoes a request header.
+      // Seeded from all three secret classes: child credentials, caller tokens, and the admin token. A
+      // pattern pass cannot recognise a bare token it has no label for, and a caller or admin token in a
+      // log is the credential that reaches a whole fleet.
       const callers = parseCallerTokens(config.apiTokens);
-      const redactor = createRedactor(store.secrets());
+      const redactor = createServiceRedactor({
+        childSecrets: store.secrets(),
+        callerTokens: callers.secrets(),
+        adminToken: config.adminToken,
+      });
       const logger = createLogger(redactor, config.logLevel);
       const server = createFleetServer({ db, config, credentials: store, logger });
       const addr = await server.listen();
@@ -204,7 +209,6 @@ export async function main(argv: string[]): Promise<number> {
         logger.warn('caller tokens grant access to every host', { owners: unrestricted,
           hint: 'scope with token:owner:host1+host2 to limit blast radius' });
       }
-      void registry;
       await new Promise<void>((resolve) => {
         const done = () => { void server.close().then(resolve); };
         process.once('SIGINT', done);

@@ -28,6 +28,13 @@ export interface CallerIndex {
   owners(): string[];
   /** Owners whose token grants access to every host, for the startup warning. */
   unrestrictedOwners(): string[];
+  /**
+   * The token VALUES, for seeding the log redactor only -- nothing may print them.
+   *
+   * Needed for the same reason CredentialStore.secrets() is: a pattern pass cannot recognise a bare token
+   * it has no label for, and a caller token in a log is the credential that reaches a whole fleet.
+   */
+  secrets(): string[];
   readonly size: number;
 }
 
@@ -69,6 +76,9 @@ export function parseCallerTokens(raw: string | undefined): CallerIndex {
     },
     unrestrictedOwners() {
       return [...map.values()].filter((c) => c.allowedHosts === '*').map((c) => c.ownerId).sort();
+    },
+    secrets() {
+      return [...map.keys()];
     },
     get size() {
       return map.size;
