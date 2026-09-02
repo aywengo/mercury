@@ -119,3 +119,38 @@ baseline is the right default for deployments that do not sandbox.
 
 - The API server and worker are separate units; run both for production-style operation.
 - `MERCURY_BIND_HOST` defaults to 127.0.0.1 — set it explicitly if you need LAN access (and use TLS or a reverse proxy).
+
+## Fleet (optional)
+
+`fleet.service` runs the federation layer from `fleet/`, which manages several Mercury instances over their
+HTTP APIs. It is optional: Mercury works with no Fleet at all, and a child must keep working with Fleet
+deleted.
+
+```bash
+sudo useradd --system --home /var/lib/fleet --shell /usr/sbin/nologin fleet
+sudo install -d -o fleet -g fleet -m 750 /var/lib/fleet
+sudo install -d -o root -g fleet -m 750 /etc/fleet
+
+# Child credentials: a separate 0600 file, NOT part of the unit environment.
+sudo install -m 600 -o fleet -g fleet /dev/null /etc/fleet/credentials.json
+sudo $EDITOR /etc/fleet/credentials.json      # {"mac-studio": "<that host's MERCURY_API_TOKENS value>"}
+
+sudo install -m 640 -o root -g fleet deploy/fleet.env.example /etc/fleet/fleet.env
+sudo $EDITOR /etc/fleet/fleet.env             # set tokens; FLEET_CREDENTIALS_FILE must point at the file above
+
+sudo cp deploy/fleet.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now fleet
+curl -s http://127.0.0.1:3100/healthz
+```
+
+Two things about this unit are load-bearing rather than stylistic:
+
+- **`FLEET_CREDENTIALS_FILE` must be outside `$HOME`.** `ProtectHome=true` makes the home directory
+  unreadable, so the `~/.fleet/credentials.json` default fails closed under systemd: the service starts, the
+  registry loads, and every probe reports `auth-fail`. That is the intended failure, but it reads like a
+  credential problem on the children rather than a path problem here.
+- **`ReadWritePaths` covers `/var/lib/fleet` only.** The credential file is read once at startup and is not
+  writable by the process holding every child token.
+
+Fleet refuses to bind a non-loopback address without TLS, by design. Put it behind a reverse proxy if it
+must be reachable beyond the host.
