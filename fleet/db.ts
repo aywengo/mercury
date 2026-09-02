@@ -72,11 +72,17 @@ const MIGRATIONS: Migration[] = [
         -- is RESTRICT by omission, and HostRegistry.remove turns it into an explanation.
         host_id        TEXT NOT NULL REFERENCES hosts(id),
         child_run_id   TEXT,
-        client_token   TEXT UNIQUE,
+        -- The caller Fleet authenticated, never a value taken from the request body. Idempotency is scoped
+        -- to it below: a globally unique token would let one caller who guessed another's token receive
+        -- that caller's run id, host and status.
+        owner_id       TEXT NOT NULL,
+        client_token   TEXT,
         requested      TEXT NOT NULL,
         created_at     TEXT NOT NULL,
         bound_at       TEXT,
-        UNIQUE (host_id, child_run_id)
+        UNIQUE (host_id, child_run_id),
+        -- Scoped rather than global: the same token string from two callers is two distinct keys.
+        UNIQUE (owner_id, client_token)
       );
 
       -- CACHE ONLY: rebuildable by re-reading the child. status holds the child's own status string, or

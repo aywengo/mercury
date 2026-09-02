@@ -27,6 +27,8 @@ export class DispatchError extends Error {
 
 export interface SubmitInput {
   hostId: string;
+  /** The authenticated caller. Idempotency is scoped to it, so it cannot be taken from the body. */
+  ownerId: string;
   /** The child payload, sent verbatim: task, repository, agent, constraints. */
   requested: Record<string, unknown>;
   clientToken?: string | null;
@@ -65,17 +67,30 @@ function resolveHost(deps: DispatchDeps, hostId: string): { baseUrl: string; tok
 
 export async function submitRun(deps: DispatchDeps, input: SubmitInput): Promise<SubmitOutcome> {
   // Caller-level idempotency, checked before anything is written. This is what makes a retry after a
-  // transport failure cheap: the same token returns the same binding, so no second child call happens at
-  // all and no second Run is paid for.
+  // transport failure cheap: the same token returns the same binding, so no second child call happens and
+  // no second Run is paid for.
   if (input.clientToken) {
-    const existing = deps.bindings.findByClientToken(input.clientToken);
+    const existing = deps.bindings.findByClientToken(input.ownerId, input.clientToken);
     if (existing) {
+      // Reuse is only correct if the caller means the same thing it meant the first time. Silently
+      // returning a binding for a DIFFERENT host would suppress dispatch to the host the caller just named
+      // and hand back a Run running somewhere else.
+      if (existing.hostId !== input.hostId) {
+        throw new DispatchError(
+          409,
+          `idempotency token was already used for host ${existing.hostId}, not ${input.hostId}. ` +
+            `Reuse would return the existing Run rather than dispatch to the host you named; use a new token.`,
+        );
+      }
       return {
         binding: existing,
         reused: true,
         pending: existing.childRunId === null,
+        // Accurate about WHEN this resolves: Phase 1 recovers at startup or on an explicit call. The
+        // background sweep is Phase 2, and claiming otherwise here would send an operator to wait for
+        // something that does not exist yet.
         note: existing.childRunId === null
-          ? 'existing binding is still awaiting its child answer; it will be recovered on the next sweep'
+          ? 'existing binding is still awaiting its child answer; it is resolved at Fleet startup or via a manual recovery'
           : undefined,
       };
     }
@@ -86,6 +101,7 @@ export async function submitRun(deps: DispatchDeps, input: SubmitInput): Promise
   const binding = deps.bindings.createPending({
     fleetRunId,
     hostId: input.hostId,
+    ownerId: input.ownerId,
     requested: input.requested,
     clientToken: input.clientToken ?? null,
   });

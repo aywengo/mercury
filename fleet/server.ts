@@ -174,7 +174,11 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
         const idem = typeof b.idempotency === 'string' && b.idempotency
           ? b.idempotency
           : headerIdempotency(ctx);
-        const outcome = await submitRun(dispatch, { hostId, requested, clientToken: idem ?? null });
+        // ownerId comes from the authenticated caller, never the body: idempotency scoping is a security
+        // boundary, and a caller that could choose it could claim another caller's binding.
+        const outcome = await submitRun(dispatch, {
+          hostId, ownerId: ctx.caller.ownerId, requested, clientToken: idem ?? null,
+        });
         sendJson(res, outcome.reused ? 200 : 201, {
           fleetRunId: outcome.binding.fleetRunId,
           hostId: outcome.binding.hostId,

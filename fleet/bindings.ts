@@ -12,6 +12,8 @@ import type { DatabaseSync } from 'node:sqlite';
 export interface Binding {
   fleetRunId: string;
   hostId: string;
+  /** The authenticated caller that created this binding. Idempotency is scoped to it. */
+  ownerId: string;
   /** Null until the child has answered. Null is "unknown", never "failed". */
   childRunId: string | null;
   clientToken: string | null;
@@ -38,6 +40,7 @@ export const UNKNOWN = 'UNKNOWN';
 interface BindingRow {
   fleet_run_id: string;
   host_id: string;
+  owner_id: string;
   child_run_id: string | null;
   client_token: string | null;
   requested: string;
@@ -53,6 +56,14 @@ interface StateRow {
   last_error: string | null;
 }
 
+/** Shape produced by list()'s LEFT JOIN: the binding columns plus nullable run_state columns. */
+interface JoinedRow extends BindingRow {
+  state_status: string | null;
+  state_cursor: number | null;
+  state_last_seen_at: string | null;
+  state_last_error: string | null;
+}
+
 function toBinding(row: BindingRow): Binding {
   let requested: Record<string, unknown> = {};
   try {
@@ -65,6 +76,7 @@ function toBinding(row: BindingRow): Binding {
   return {
     fleetRunId: row.fleet_run_id,
     hostId: row.host_id,
+    ownerId: row.owner_id,
     childRunId: row.child_run_id,
     clientToken: row.client_token,
     requested,
@@ -99,15 +111,16 @@ export class BindingStore {
   createPending(input: {
     fleetRunId: string;
     hostId: string;
+    ownerId: string;
     requested: Record<string, unknown>;
     clientToken?: string | null;
   }): Binding {
     this.db
       .prepare(
-        `INSERT INTO fleet_runs (fleet_run_id, host_id, child_run_id, client_token, requested, created_at)
-         VALUES (?, ?, NULL, ?, ?, ?)`,
+        `INSERT INTO fleet_runs (fleet_run_id, host_id, owner_id, child_run_id, client_token, requested, created_at)
+         VALUES (?, ?, ?, NULL, ?, ?, ?)`,
       )
-      .run(input.fleetRunId, input.hostId, input.clientToken ?? null,
+      .run(input.fleetRunId, input.hostId, input.ownerId, input.clientToken ?? null,
         JSON.stringify(input.requested), new Date().toISOString());
     return this.get(input.fleetRunId)!;
   }
@@ -119,10 +132,14 @@ export class BindingStore {
     return row ? toBinding(row) : null;
   }
 
-  findByClientToken(token: string): Binding | null {
-    const row = this.db.prepare('SELECT * FROM fleet_runs WHERE client_token = ?').get(token) as
-      | BindingRow
-      | undefined;
+  /**
+   * Look up by idempotency token WITHIN one owner. Unscoped lookup was a leak: two callers reusing the same
+   * memorable token collided, and the second received the first one's run id, host and status.
+   */
+  findByClientToken(ownerId: string, token: string): Binding | null {
+    const row = this.db
+      .prepare('SELECT * FROM fleet_runs WHERE owner_id = ? AND client_token = ?')
+      .get(ownerId, token) as BindingRow | undefined;
     return row ? toBinding(row) : null;
   }
 
@@ -156,17 +173,41 @@ export class BindingStore {
    * Bindings scoped to the hosts the caller may see. An empty allowlist yields no rows rather than all of
    * them -- the same fail-closed reading the caller allowlist uses.
    */
+  /**
+   * Bindings scoped to the hosts the caller may see. An empty allowlist yields no rows rather than all of
+   * them -- the same fail-closed reading the caller allowlist uses.
+   *
+   * run_state is joined rather than fetched per row. The previous shape issued one extra SELECT per binding,
+   * so a list of N Runs cost N+1 queries on the endpoint operators hit most often.
+   */
   list(hostIds: '*' | string[]): BindingView[] {
-    if (hostIds === '*') {
-      const all = this.db.prepare('SELECT * FROM fleet_runs ORDER BY created_at DESC').all();
-      return (all as unknown as BindingRow[]).map((row) => ({ ...toBinding(row), state: this.state(row.fleet_run_id) }));
-    }
-    if (hostIds.length === 0) return [];
-    const placeholders = hostIds.map(() => '?').join(',');
+    // Fail closed on an empty allowlist. node:sqlite happens to accept `IN ()` and return no rows, so the
+    // query would also come back empty without this line -- but that is one driver's behaviour, not a
+    // guarantee worth depending on for an authorization decision. The order matters too: '*' is a string of
+    // length 1, so an emptiness test written first would never catch the wildcard.
+    if (hostIds !== '*' && hostIds.length === 0) return [];
+    const where = hostIds === '*' ? '' : `WHERE fleet_runs.host_id IN (${hostIds.map(() => '?').join(',')})`;
+    const args = hostIds === '*' ? [] : hostIds;
     const rows = this.db
-      .prepare(`SELECT * FROM fleet_runs WHERE host_id IN (${placeholders}) ORDER BY created_at DESC`)
-      .all(...hostIds) as unknown as BindingRow[];
-    return rows.map((row) => ({ ...toBinding(row), state: this.state(row.fleet_run_id) }));
+      .prepare(
+        `SELECT fleet_runs.*,
+                run_state.status AS state_status, run_state.cursor AS state_cursor,
+                run_state.last_seen_at AS state_last_seen_at, run_state.last_error AS state_last_error
+           FROM fleet_runs
+           LEFT JOIN run_state ON run_state.fleet_run_id = fleet_runs.fleet_run_id
+           ${where}
+          ORDER BY fleet_runs.created_at DESC`,
+      )
+      .all(...args) as unknown as JoinedRow[];
+    return rows.map((row) => ({
+      ...toBinding(row),
+      state: row.state_status === null || row.state_status === undefined
+        ? null
+        : {
+          fleetRunId: row.fleet_run_id, status: row.state_status, cursor: Number(row.state_cursor ?? 0),
+          lastSeenAt: row.state_last_seen_at ?? null, lastError: row.state_last_error ?? null,
+        },
+    }));
   }
 
   recordState(input: RunState): void {
