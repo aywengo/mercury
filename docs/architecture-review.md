@@ -80,14 +80,26 @@ R2-11 was originally left unfiled on the reasoning that the cross-process rewrit
 poller. That reasoning was withdrawn and the finding is now fixed under [#162](https://github.com/aywengo/mercury/issues/162):
 an unimplemented design is not a reason to leave a defect in the code that ships today.
 
-### Follow-up found while shipping
+### Follow-ups found while shipping
 
-[#165](https://github.com/aywengo/mercury/issues/165) — the test suite fails intermittently under parallel
-load, on different tests between runs (the auth same-length-token test, and the mock-RPC adapter happy
-path returning zero events). Reproduced twice in four runs under load, and zero times in four runs each
-for `origin/main` and a feature branch in clean throwaway worktrees, so it is pre-existing and
-load-sensitive rather than a regression from this round. Filed separately and deliberately NOT fixed
-inside any of these PRs.
+[#166](https://github.com/aywengo/mercury/issues/166) — **a child agent could exit successfully while every
+event it produced was silently dropped**: the Run was recorded `completed` with exit code 0 and the caller
+received an empty event stream. Both adapters settled the exit on the child's `'exit'` event while emitting
+their final output from stdout's `'end'` handler, and Node fires `'exit'` when the process is gone, not when
+its stdio has drained. Blocking the parent's event loop for 50 ms or more makes `'exit'` win that race every
+time; at 0 ms it never does. That is why it looked like flakiness — an idle machine always wins. Fixed in
+`2183542`.
+
+[#165](https://github.com/aywengo/mercury/issues/165) — the auth same-length-token test still fails
+intermittently under parallel load. It was filed as one issue covering two symptoms; the adapter symptom was
+#166 in disguise, and only the auth case remains open. Both were reproduced twice in four runs under load
+and zero times in four runs each for `origin/main` and a feature branch in clean throwaway worktrees, so
+neither was a regression from this round.
+
+The lesson worth keeping is about the diagnosis rather than the defect: the adapter failure was first
+recorded as "flaky under load, probably a deadline", and that framing was wrong in a way that would have
+kept it unfixed. It was deterministic given the right interleaving, and the test that appeared flaky had
+been catching a real event-loss bug all along.
 
 ---
 
