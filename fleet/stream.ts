@@ -35,6 +35,8 @@ export interface StreamOptions {
   /** Resume point: everything up to and including this sequence is treated as already delivered. */
   after?: number;
   onEnd?: (reason: string) => void;
+  /** Surfaced for logging. A stream failure is never a client error; the cursor still works. */
+  onError?: (err: unknown) => void;
 }
 
 function write(res: ServerResponse, event: string, data: unknown, id?: number): boolean {
@@ -59,17 +61,45 @@ export function startEventStream(res: ServerResponse, opts: StreamOptions): Stre
   let keepTimer: ReturnType<typeof setInterval> | null = null;
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const stop = (reason: string): void => {
-    if (closed) return;
-    closed = true;
+  const clearTimers = (): void => {
     if (pollTimer) clearInterval(pollTimer);
     if (keepTimer) clearInterval(keepTimer);
     if (drainTimer) clearTimeout(drainTimer);
     pollTimer = null;
     keepTimer = null;
     drainTimer = null;
+  };
+
+  const stop = (reason: string): void => {
+    if (closed) return;
+    closed = true;
+    clearTimers();
     opts.onEnd?.(reason);
-    if (!res.writableEnded) res.end();
+    // res.end() throws on a destroyed socket, which is often the very reason this path is running. Nothing
+    // can act on it, and letting it escape would surface as an uncaught exception during teardown.
+    try {
+      if (!res.writableEnded) res.end();
+    } catch {
+      /* already gone */
+    }
+  };
+
+  /**
+   * A subscriber that has stopped reading gets its socket torn down rather than a graceful end. Ending lets
+   * the kernel keep buffering a transcript nobody will read, and the event whose write returned false has not
+   * been recorded in the cursor, so a reconnect could receive it twice. Same reasoning as Mercury's own SSE
+   * backpressure handling.
+   */
+  const abortUnreadable = (reason: string): void => {
+    if (closed) return;
+    closed = true;
+    clearTimers();
+    opts.onEnd?.(reason);
+    try {
+      res.destroy();
+    } catch {
+      /* already gone */
+    }
   };
 
   const armDrainWatch = (): void => {
@@ -81,11 +111,22 @@ export function startEventStream(res: ServerResponse, opts: StreamOptions): Stre
 
   const pump = (): void => {
     if (closed) return;
+    // A throw inside a timer callback is an uncaught exception, not a failed request, and would take the whole
+    // service down over one bad read. Every other periodic task here (sweep, prober) wraps its body likewise.
+    try {
+      pumpInner();
+    } catch (err) {
+      opts.onError?.(err);
+      stop('read failed');
+    }
+  };
+
+  const pumpInner = (): void => {
     const page = listMirroredEvents(opts.db, opts.fleetRunId, cursor, 500);
     for (const ev of page.events) {
       if (!write(res, 'event', ev, ev.sequence)) {
         // The kernel buffer is full: the subscriber has stopped reading.
-        stop('backpressure');
+        abortUnreadable('backpressure');
         return;
       }
       cursor = ev.sequence;

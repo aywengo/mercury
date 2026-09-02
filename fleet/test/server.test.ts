@@ -346,7 +346,7 @@ test('a huge limit is capped rather than pulling the whole transcript', async ()
   } finally { await s.close(); }
 });
 
-/** Seed a host + binding + mirrored events, returning the run id. */
+/** Seed a host, a binding, a cached state row and a mirrored event window. The caller picks the run id. */
 function seedStreamableRun(db: DatabaseSync, opts: {
   id: string; hostId?: string; status?: string; events?: number; drained?: boolean;
 }): void {
