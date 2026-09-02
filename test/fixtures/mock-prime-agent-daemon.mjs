@@ -90,11 +90,16 @@ function encodeFramed(obj) {
   return frame;
 }
 
+let connectionCount = 0;
 const server = net.createServer((socket) => {
+  connectionCount += 1;
   const state = { attached: new Set(), buffer: '' };
 
-  if (MODE === 'framed') {
+  if (MODE === 'framed' || (MODE === 'framed_second' && connectionCount > 1)
+      || (MODE === 'slow_hello_first' && connectionCount > 1)) {
     // The internal worker transport. A correct client must refuse this loudly, not hang.
+    // framed_second frames only the SECOND connection, so a test can prove one bad handshake does not
+    // take down an unrelated handshake sharing the same adapter.
     socket.write(encodeFramed(loadHello()));
     return;
   }
@@ -105,7 +110,13 @@ const server = net.createServer((socket) => {
     hello.serverCapabilities = hello.serverCapabilities.filter((c) => c !== 'event_sequence');
   }
   if (MODE === 'silent') return; // accepts the connection, never greets
-  socket.write(JSON.stringify(hello) + '\n');
+  if (MODE === 'slow_hello_first' && connectionCount === 1) {
+    // Hold the healthy handshake open so a second, broken handshake arrives while it is still pending.
+    // Without that overlap the two never interact and a test around it proves nothing.
+    setTimeout(() => socket.write(JSON.stringify(hello) + '\n'), 600);
+  } else {
+    socket.write(JSON.stringify(hello) + '\n');
+  }
 
   const send = (obj) => { socket.write(JSON.stringify(obj) + '\n'); };
   const respond = (id, command, ok, extra = {}) => {

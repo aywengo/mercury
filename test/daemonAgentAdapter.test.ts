@@ -587,3 +587,30 @@ test('keepSessionsAlive detaches instead, for when reattach exists', async () =>
     assert.ok(!types.includes('kill'), types.join(','));
   } finally { await mock.close(); }
 });
+
+test('a bad handshake on one run does not break another run sharing the adapter', async () => {
+  // The hello waiters used to live on the adapter, so a second connection's hello resolved the first
+  // session's waiter and a second connection's framed bytes failed every handshake in flight. Harmless
+  // while the worker drives one run at a time, and a cross-run misfire the moment it does not.
+  const mock = await startMock({ MOCK_DAEMON_MODE: 'slow_hello_first' });
+  try {
+    const adapter = adapterFor(mock);
+    const first = adapter.start(makeContext(makeRun({ id: 'run_first' })));
+    // The mock holds the first hello for 600ms, so the second (framed) connection arrives while the
+    // first handshake is still pending -- that overlap is the whole point of the test.
+    await new Promise((r) => setTimeout(r, 100));
+    const second = adapter.start(makeContext(makeRun({ id: 'run_second' })));
+    const [a, b] = await Promise.allSettled([
+      withDeadline('first', 8_000, first).then(collectAll),
+      withDeadline('second', 8_000, second).then(collectAll),
+    ]);
+    // The framed sibling must be refused...
+    assert.equal(b.status, 'rejected', 'the framed handshake should still be refused');
+    assert.match(String((b as PromiseRejectedResult).reason?.message ?? ''), /INTERNAL worker transport/);
+    // ...and must not take the healthy one down with it.
+    if (a.status === 'rejected') {
+      throw new Error(`healthy run was killed by another run's bad handshake: ${a.reason?.message ?? a.reason}`);
+    }
+    assert.equal(a.value.exit.reason, 'completed');
+  } finally { await mock.close(); }
+});

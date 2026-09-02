@@ -142,6 +142,8 @@ interface DaemonSession {
   clientNonce: string;
   /** Set while we are releasing the session ourselves, so our own closure is not read as a crash. */
   releasing?: boolean;
+  /** Handshakes waiting on THIS socket. Never shared across sessions; see failHelloWaiters(). */
+  helloWaiters: Set<HelloWaiter>;
   /** First bytes seen on the socket, used to recognise the internal framed transport. */
   firstBytes?: Buffer;
   socketPath?: string;
@@ -244,6 +246,7 @@ export class DaemonAgentAdapter implements AgentAdapter {
     const session: DaemonSession = {
       runId, socket, socketPath,
       clientNonce: randomBytes(6).toString('hex'),
+      helloWaiters: new Set<HelloWaiter>(),
       detachReader: () => undefined,
       translator: new EventTranslator(),
       protocolVersion: 0, capabilities: [], generation: null, activeSessionId: null, cursor: 0,
@@ -391,25 +394,31 @@ export class DaemonAgentAdapter implements AgentAdapter {
   private awaitHello(session: DaemonSession): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        this.helloWaiters.delete(entry);
+        session.helloWaiters.delete(entry);
         reject(new DaemonProtocolError(
           'daemon did not send a daemon_hello within the handshake window; the socket may not be a '
           + 'supervisor, or it is a session worker on the internal transport'));
       }, this.opts.helloTimeoutMs ?? 5_000);
       timeout.unref?.();
       const entry: HelloWaiter = {
-        resolve: (hello) => { clearTimeout(timeout); this.helloWaiters.delete(entry); resolve(hello); },
-        reject: (err) => { clearTimeout(timeout); this.helloWaiters.delete(entry); reject(err); },
+        resolve: (hello) => { clearTimeout(timeout); session.helloWaiters.delete(entry); resolve(hello); },
+        reject: (err) => { clearTimeout(timeout); session.helloWaiters.delete(entry); reject(err); },
       };
-      this.helloWaiters.add(entry);
+      session.helloWaiters.add(entry);
     });
   }
 
-  private helloWaiters = new Set<HelloWaiter>();
-
+  /**
+   * Reject this session's pending handshakes only.
+   *
+   * The waiters used to live on the adapter, which meant a second connection's hello resolved the
+   * FIRST session's waiter (handing it another socket's hello) and a second connection's framed bytes
+   * failed every other handshake in flight. Harmless while the worker drives one Run at a time, and a
+   * cross-Run misfire the moment it does not.
+   */
   private failHelloWaiters(session: DaemonSession, err: Error): void {
-    for (const waiter of [...this.helloWaiters]) waiter.reject(err);
-    this.helloWaiters.clear();
+    for (const waiter of [...session.helloWaiters]) waiter.reject(err);
+    session.helloWaiters.clear();
   }
 
   private onLine(session: DaemonSession, line: string): void {
@@ -417,7 +426,8 @@ export class DaemonAgentAdapter implements AgentAdapter {
     const parsed = parseDaemonLine(line);
     switch (parsed.kind) {
       case 'hello':
-        for (const waiter of [...this.helloWaiters]) waiter.resolve(parsed.hello);
+        for (const waiter of [...session.helloWaiters]) waiter.resolve(parsed.hello);
+        session.helloWaiters.clear();
         return;
       case 'response': {
         const p = session.pending.get(parsed.id);
@@ -693,6 +703,7 @@ export class DaemonAgentAdapter implements AgentAdapter {
       const session: DaemonSession = {
         runId: 'probe', socket, socketPath,
         clientNonce: randomBytes(6).toString('hex'),
+        helloWaiters: new Set<HelloWaiter>(),
         detachReader: () => undefined,
         translator: new EventTranslator(),
         protocolVersion: MERCURY_DAEMON_PROTOCOL_VERSION, capabilities: [], generation: null,
