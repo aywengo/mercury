@@ -480,7 +480,7 @@ sequenceDiagram
     S-->>W: session_attached, session_event… (meta.cursor)
     Note over W: translate events, advance cursor<br/>only after the write succeeds
     W->>S: command detach {activeSessionId}
-    Note over S: session stays live — this is the point
+    Note over S: session stays live — the point, once reattach exists (see §7.3 deviation)
 ```
 
 Persist `activeSessionId` and the observed `generation` on the run **before** sending the first prompt.
@@ -489,6 +489,11 @@ prompt leaves a window in which the recovery path cannot work.
 
 `terminate()` should send `kill`, and normal completion should send `detach`. The current adapter sends
 `abort` and then destroys the socket, which conflates "stop this turn" with "destroy this session".
+
+**Deviation, added after implementing:** shipped behaviour is `kill` on normal completion, not `detach`.
+Detach is only correct when something can come back and reattach, and nothing can until reattach and
+session persistence exist (§12 item 1); leaving the session live stranded a supervisor worker after every
+successful run. `keepSessionsAlive: true` restores the behaviour described above. See §3.2 item 3.
 
 ### 7.4 Cursors across generations
 
