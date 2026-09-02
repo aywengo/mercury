@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { openFleetDb } from '../db.ts';
+import { probeAndRecord } from '../probe.ts';
 import { HostRegistry, RegistryError, normalizeBaseUrl } from '../registry.ts';
 
 function fresh() {
@@ -8,17 +15,59 @@ function fresh() {
   return { db, registry: new HostRegistry(db) };
 }
 
-test('add stores the credential NAME and never the secret', () => {
-  const { registry, db } = fresh();
-  const secret = 'super-secret-token-abc123';
-  registry.add({ id: 'box-1', baseUrl: 'http://127.0.0.1:3000', credentialRef: 'lan-token' });
-  // The secret must not appear anywhere in the database file, not merely not in the column I read back.
-  const dump = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>)
-    .flatMap((row) => (db.prepare(`SELECT * FROM ${row.name}`).all() as unknown[]))
+/** Every value in every row of every table. A leak anywhere shows up here, not just in one column. */
+function dumpAll(db: DatabaseSync): string {
+  return (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>)
+    .flatMap((row) => (db.prepare(`SELECT * FROM "${row.name}"`).all() as unknown[]))
     .map((row) => JSON.stringify(row))
     .join('\n');
-  assert.ok(!dump.includes(secret), 'secret must never be persisted');
+}
+
+test('add stores the credential NAME, not the secret', () => {
+  const { registry } = fresh();
+  registry.add({ id: 'box-1', baseUrl: 'http://127.0.0.1:3000', credentialRef: 'lan-token' });
   assert.equal(registry.get('box-1')!.credentialRef, 'lan-token');
+});
+
+/**
+ * The guarantee that actually matters, and the reason this is not asserted on `add` alone.
+ *
+ * An earlier version of this test declared a secret, added a host with only its NAME, and asserted the
+ * secret was absent from the database. Copilot correctly called that vacuous: the registry never receives
+ * the secret, so the assertion could not fail for any value of the code under test.
+ *
+ * The path where a secret really is in hand is the probe: it holds the resolved token, and it writes
+ * `detail` and `last_error` text that a future change could build out of a failing request's headers. So
+ * the test puts a token in play, drives a real probe against a host that rejects it, and then reads the
+ * whole database back.
+ */
+test('a token in play during a probe never reaches the database', async () => {
+  const TOKEN = 'tok-live-abc123-must-never-be-stored';
+  const server = createServer((req, res) => {
+    // Only /api/agents rejects. A server that 401s everything fails the liveness check first, and the probe
+    // never reaches the credential path this test is about.
+    const authed = req.url === '/api/agents';
+    res.writeHead(authed ? 401 : 200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(authed ? { error: 'authentication required' }
+      : req.url === '/healthz/workers' ? { workers: [], queueDepth: 0 } : { ok: true }));
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address() as AddressInfo;
+  const { db, registry } = fresh();
+  try {
+    registry.add({ id: 'box-1', baseUrl: `http://127.0.0.1:${port}`, credentialRef: 'lan-token' });
+    const rec = await probeAndRecord({
+      hostId: 'box-1', baseUrl: `http://127.0.0.1:${port}`, token: TOKEN, timeoutMs: 1000,
+    });
+    registry.recordProbe(rec);
+    assert.equal(rec.outcome, 'unauthorized', 'the probe must have actually run and failed on auth');
+    const dump = dumpAll(db);
+    assert.ok(dump.includes('lan-token'), 'the ref should be present, so the dump is not empty by accident');
+    assert.ok(!dump.includes(TOKEN), 'the resolved token must never be persisted');
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    db.close();
+  }
 });
 
 test('base url is normalized and validated', () => {
@@ -119,15 +168,33 @@ test('recordProbe refuses an unknown host instead of writing an orphan', () => {
     probedAt: new Date().toISOString(), lastError: null }), /unknown host/);
 });
 
-test('migrations are idempotent across reopen', () => {
-  const a = openFleetDb(':memory:');
-  assert.deepEqual(a.appliedVersions, [1]);
-  // A second open of a fresh database applies 1 again; reopening an existing one must apply nothing.
-  const { db } = openFleetDb(':memory:');
-  const reg = new HostRegistry(db);
-  reg.add({ id: 'b', baseUrl: 'http://a:1', credentialRef: 'r' });
-  const again = openFleetDb(':memory:');
-  assert.deepEqual(again.appliedVersions, [1], 'fresh db applies exactly once');
-  db.close();
-  again.db.close();
+test('migrations apply once per database file, not once per open', () => {
+  // The first version of this test called openFleetDb(':memory:') twice and compared the results. Each call
+  // makes a brand-new database, so it proved only that a fresh database applies migration 1 -- never that a
+  // REOPEN leaves an applied migration alone, which is the behaviour that matters once Phase 1 adds one.
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-db-'));
+  const path = join(dir, 'fleet.db');
+  const first = openFleetDb(path);
+  try {
+    assert.deepEqual(first.appliedVersions, [1]);
+    new HostRegistry(first.db).add({ id: 'b', baseUrl: 'http://a:1', credentialRef: 'r' });
+  } finally {
+    first.db.close();
+  }
+
+  const second = openFleetDb(path);
+  try {
+    assert.deepEqual(second.appliedVersions, [], 'a reopen must not re-apply migration 1');
+    assert.equal(new HostRegistry(second.db).get('b')?.baseUrl, 'http://a:1', 'data must survive the reopen');
+  } finally {
+    second.db.close();
+  }
+
+  // A third open stays quiet too, so the version bookkeeping is durable rather than cached.
+  const third = openFleetDb(path);
+  try {
+    assert.deepEqual(third.appliedVersions, []);
+  } finally {
+    third.db.close();
+  }
 });
