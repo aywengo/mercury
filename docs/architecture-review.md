@@ -34,19 +34,21 @@ where it can be pointed at.**
 | R2-10 one poll read per subscriber | [#146](https://github.com/aywengo/mercury/issues/146) | coded, **not shipped** | `71a4a9c` |
 | R2-11 `slowDown()` fires with no subscribers | — | coded, **not shipped** | `26fa007`, no issue filed — see below |
 | R2-12 shared adapter base never built | [#148](https://github.com/aywengo/mercury/issues/148) | coded, **not shipped** | `18a8d27` |
-| R2-13 CLI-wiring test flake | [#149](https://github.com/aywengo/mercury/issues/149) | **merged**; issue closure verified separately | `df67aa6` (PR #150) |
+| R2-13 CLI-wiring test flake | [#149](https://github.com/aywengo/mercury/issues/149) | **merged and closed** | `df67aa6` (PR #150) |
 
 Seven findings are merged. Six are coded and reviewed but cannot be pushed. None is left open.
 
-### One closure caveat worth stating
+### A correction: an earlier draft of this section was wrong about #149
 
-Six of the seven merged issues carry `Closes #N` in their squashed commit, so GitHub closed them on
-merge. **#149 does not** — PR #150's squash message references only `(#150)`, so nothing closed it. The
-fix is on `main`; the issue would have stayed open indefinitely. It is closed manually, with a comment
-naming the commit, rather than left to a keyword that was never written.
+An earlier version of this table claimed #149 had been merged but never closed, because its squashed
+commit `df67aa6` carries no `Closes #N` keyword. That was checked against the commit message and nothing
+else, and it was **wrong**: PR #150's *body* ends with `Closes #149`, GitHub closes issues from PR bodies
+as well as commit messages, and the issue has been closed since `2026-09-01T17:24:09Z`.
 
-This is the same failure mode as Round 1's phantom step 9, arriving from an unexpected direction: not a
-fix claimed but absent, but a fix present and its bookkeeping quietly incomplete.
+The lesson is about the check, not the issue. "The merged commit has no closing keyword" does not license
+"the issue is still open" — it only licenses "the commit has no closing keyword". Closure is a property of
+the issue, so it has to be read from the issue. Every state recorded in this table is now read from
+GitHub directly, or from `git merge-base --is-ancestor`, rather than inferred from how a fix was packaged.
 
 ### R2-11 — why it is still open, and what the earlier wording got wrong
 
