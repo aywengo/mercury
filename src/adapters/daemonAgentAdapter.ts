@@ -37,7 +37,7 @@ import { attachJsonlLineReader, serializeJsonLine } from './rpc/jsonl.ts';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
-import { EventTranslator, buildExtensionUiResponse, isRecord } from './eventTranslation.ts';
+import { EventTranslator, buildExtensionUiResponse, isRecord, type RpcEvent } from './eventTranslation.ts';
 import {
   buildCommandEnvelope, checkHello, checkSocketPath, helloForLogging, looksPrivateFramed,
   parseDaemonLine, MERCURY_DAEMON_PROTOCOL_VERSION, PRIVATE_TRANSPORT_HINT, type DaemonHello,
@@ -418,7 +418,16 @@ export class DaemonAgentAdapter implements AgentAdapter {
       }
       case 'event': {
         if (typeof parsed.sequence === 'number') session.cursor = Math.max(session.cursor, parsed.sequence);
-        const events = session.translator.translate(parsed.event as never);
+        // The translator switches on `type`, so an event without one is not translatable. Feeding it
+        // in anyway would mean casting away the one field the translator depends on; a daemon that
+        // sends shapeless events should be visible in the log rather than silently contributing
+        // nothing to the run's history.
+        if (typeof parsed.event.type !== 'string') {
+          this.opts.logger?.warn('daemon event carried no string type and was not translated',
+            { runId: session.runId, sequence: parsed.sequence, keys: Object.keys(parsed.event) });
+          return;
+        }
+        const events = session.translator.translate(parsed.event as unknown as RpcEvent);
         for (const ev of events) {
           this.push(session, ev);
           if (ev.type === 'agent.end') void this.finishCompleted(session);

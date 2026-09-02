@@ -163,6 +163,20 @@ const server = net.createServer((socket) => {
             { type: 'message_end' },
             { type: 'agent_end', result: 0 },
           ];
+          if (process.env.MOCK_DAEMON_SHAPELESS === '1') {
+            // An event with no `type`: not translatable, and the adapter must say so rather than
+            // quietly contribute a hole to the run's history.
+            const s = sessions.get(cmd.activeSessionId);
+            for (const client of s.subscribers) {
+              s.sequence += 1;
+              client.write(JSON.stringify({ type: 'event', activeSessionId: cmd.activeSessionId,
+                sequence: s.sequence, cursor: { generation: GENERATION, sequence: s.sequence },
+                emittedAt: new Date().toISOString(),
+                event: { delta: 'orphan', noTypeHere: true } }) + '\n');
+            }
+            setTimeout(() => { for (const e of turn.slice(2)) emit(cmd.activeSessionId, e); }, 5);
+            return;
+          }
           if (process.env.MOCK_DAEMON_COALESCE === '1') {
             // One write carrying every frame. TCP gives no record boundaries, and a reader that
             // attaches after the first line loses everything that shared the previous write (#68).

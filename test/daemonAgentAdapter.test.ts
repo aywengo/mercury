@@ -434,3 +434,24 @@ test('the REAL supervisor speaks the protocol this adapter implements', { skip: 
   const sessions = (info.sessions as { sessions?: unknown[] })?.sessions;
   assert.ok(Array.isArray(sessions), `list returned ${JSON.stringify(info.sessions).slice(0, 200)}`);
 });
+
+test('an event with no type is reported, not silently dropped', async () => {
+  // A guard nobody proved fires is a comment. This asserts the warning is actually emitted, and that
+  // the run still completes -- refusing one malformed event must not abort the run.
+  const warnings: Record<string, unknown>[] = [];
+  const logger = {
+    info: () => {}, debug: () => {}, error: () => {},
+    warn: (msg: string, fields: Record<string, unknown>) => { warnings.push({ msg, ...fields }); },
+  } as never;
+  const mock = await startMock({ MOCK_DAEMON_SHAPELESS: '1' });
+  try {
+    const adapter = adapterFor(mock, { logger });
+    const handle = await adapter.start(makeContext());
+    const { events, exit } = await withDeadline('collect', 8_000, collectAll(handle));
+    const hit = warnings.find((w) => String(w.msg).includes('no string type'));
+    assert.ok(hit, `expected a warning, saw ${JSON.stringify(warnings)}`);
+    assert.deepEqual((hit as never as { keys: string[] }).keys, ['delta', 'noTypeHere']);
+    assert.equal(exit.reason, 'completed', 'a shapeless event must not fail the run');
+    assert.ok(!events.some((e) => JSON.stringify(e.payload).includes('orphan')));
+  } finally { await mock.close(); }
+});
