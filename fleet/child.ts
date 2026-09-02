@@ -70,6 +70,12 @@ export interface ChildClient {
   getRun: (host: { baseUrl: string; token: string }, runId: string) => Promise<ChildResult<ChildRun>>;
   getEvents: (host: { baseUrl: string; token: string }, runId: string, after: number, limit: number)
     => Promise<ChildResult<ChildEventPage>>;
+  submitInput: (host: { baseUrl: string; token: string }, runId: string, input: unknown)
+    => Promise<ChildResult<{ ok: boolean }>>;
+  cancelRun: (host: { baseUrl: string; token: string }, runId: string)
+    => Promise<ChildResult<{ runId: string; status: string }>>;
+  retryRun: (host: { baseUrl: string; token: string }, runId: string)
+    => Promise<ChildResult<{ runId: string; status: string; retryOf: string | null }>>;
 }
 
 export interface ChildClientOptions {
@@ -136,6 +142,23 @@ export function createChildClient(opts: ChildClientOptions): ChildClient {
         return { kind: 'unknown', reason: 'child run response had no run object' };
       }
       return { kind: 'ok', value: res.value.run };
+    },
+    async submitInput(host, runId, input) {
+      const safe = encodeURIComponent(runId);
+      return call<{ ok: boolean }>(opts, `${host.baseUrl}/api/runs/${safe}/input`, {
+        method: 'POST', headers: { ...headers(host.token), 'content-type': 'application/json' },
+        body: JSON.stringify({ input }),
+      });
+    },
+    async cancelRun(host, runId) {
+      const safe = encodeURIComponent(runId);
+      return call<{ runId: string; status: string }>(opts, `${host.baseUrl}/api/runs/${safe}/cancel`,
+        { method: 'POST', headers: headers(host.token) });
+    },
+    async retryRun(host, runId) {
+      const safe = encodeURIComponent(runId);
+      return call<{ runId: string; status: string; retryOf: string | null }>(
+        opts, `${host.baseUrl}/api/runs/${safe}/retry`, { method: 'POST', headers: headers(host.token) });
     },
     async getEvents(host, runId, after, limit) {
       const safe = encodeURIComponent(runId);

@@ -19,6 +19,7 @@ import { startSweeper, type SweeperHandle, type SweepEvent } from './sweep.ts';
 import { listMirroredEvents, type EventMirrorDeps } from './events.ts';
 import { startEventStream } from './stream.ts';
 import { loadRepoUrlMap, routeRun, RoutingError, type RouteRepository } from './routing.ts';
+import { cancelRun, retryRun, sendInput, type InteractionDeps } from './interact.ts';
 import { createProber, type Prober } from './prober.ts';
 import { CredentialError, type CredentialStore } from './credentials.ts';
 import type { Caller } from './auth.ts';
@@ -71,6 +72,17 @@ function nonNegativeInt(raw: string | null | undefined, fallback: number): numbe
   return n;
 }
 
+/**
+ * Unwrap the optional { input: ... } wrapper without losing a genuine null, and without rejecting a body that
+ * is a bare string, number, array or null -- the child accepts any JSON value.
+ */
+function unwrapInput(body: unknown): unknown {
+  if (body !== null && typeof body === 'object' && !Array.isArray(body) && 'input' in body) {
+    return (body as Record<string, unknown>).input;
+  }
+  return body;
+}
+
 /** Narrow to a plain object without accepting arrays or null, both of which `typeof` would let through. */
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -99,6 +111,12 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
     bindings: new BindingStore(deps.db),
     child: createChildClient({ timeoutMs: deps.config.probeTimeoutMs }),
     resolveToken: (ref) => deps.credentials.secret(ref),
+  };
+  const interaction: InteractionDeps = {
+    registry: dispatch.registry,
+    bindings: dispatch.bindings,
+    child: dispatch.child,
+    resolveToken: dispatch.resolveToken,
   };
   const prober = createProber({
     registry,
@@ -264,6 +282,32 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
         });
       },
     },
+    // Interaction verbs. Each is scoped by the same host allowlist as reads: a caller who may not see a host
+    // must not be able to cancel or feed work to a Run on it.
+    ...(['input', 'cancel', 'retry'] as const).map((verb) => ({
+      method: 'POST' as const,
+      pattern: ['fleet', 'runs', ':id', verb],
+      handle: async (ctx: RequestContext, res: ServerResponse) => {
+        const id = ctx.params[0]!;
+        const binding = dispatch.bindings.get(id);
+        if (!binding) throw new HttpError(404, 'no such fleet run');
+        if (!hostAllowed(ctx.caller, binding.hostId)) {
+          throw new HttpError(403, `caller ${ctx.caller.ownerId} may not act on runs on host ${binding.hostId}`);
+        }
+        const outcome = verb === 'input'
+          // The child takes an arbitrary JSON value; Fleet forwards it rather than inventing a shape.
+          // The child takes any JSON value, so Fleet must not demand an object. A body of {"input": ...} is
+          // unwrapped -- but by key presence, not truthiness, because {input: null} is a caller genuinely
+          // sending null rather than one who omitted it.
+          ? await sendInput(interaction, id, unwrapInput(ctx.body))
+          : verb === 'cancel'
+            ? await cancelRun(interaction, id)
+            : await retryRun(interaction, id);
+        // 200 even when unknown: the request was accepted and understood, and the uncertainty is about the
+        // child's answer rather than about the caller's request. The body says which it was.
+        sendJson(res, 200, outcome);
+      },
+    })),
     {
       // GET /fleet/runs/:id/stream -- Fleet-side SSE, a view onto the mirror rather than a second path to the
       // child. Losing this stream costs latency only: the client reconnects with ?after=<cursor> and resumes
@@ -373,11 +417,19 @@ export function createFleetServer(deps: FleetServerDeps): FleetServer {
       const body = route.method === 'POST' ? await readJsonBody(req) : {};
       await route.handle({ caller, params, query: url.searchParams, headers: req.headers, body, log: deps.logger }, res);
     } catch (err) {
-      // All three are the caller's mistake rather than a server fault, so all three are 4xx. CredentialError
-      // in particular names a credential_ref that is not in the file -- returning 500 for that sends the
-      // operator to the service logs when the answer is in their own request body.
-      if (err instanceof HttpError || err instanceof RegistryError || err instanceof CredentialError) {
-        const status = err instanceof HttpError ? err.status : 400;
+      // Each of these is a caller mistake rather than a server fault, and each carries or maps to a 4xx:
+      // HttpError carries its own status, DispatchError carries 404 or 409, and RegistryError plus
+      // CredentialError are always 400. CredentialError in particular names a credential_ref that is not in the
+      // file -- answering 500 there sends the operator to the service logs when the answer is in their own
+      // request body. Anything NOT listed here falls through to the 500 below, which is the point: an
+      // unrecognised exception is a server fault and must not be dressed up as a client error.
+      if (err instanceof HttpError || err instanceof RegistryError || err instanceof CredentialError
+          || err instanceof DispatchError) {
+        // DispatchError's status is chosen where the failure is understood, so it must survive to the caller:
+        // 404 for an unknown Fleet Run, 409 for a disabled host or an idempotency conflict.
+        const status = err instanceof HttpError ? err.status
+          : err instanceof DispatchError ? err.status
+            : 400;
         sendJson(res, status, {
           error: err.message,
           ...(err instanceof HttpError && err.details !== undefined ? { details: err.details } : {}),

@@ -237,6 +237,36 @@ export class BindingStore {
   }
 
   /**
+   * Point a binding at a new child Run and drop the mirrored window with it.
+   *
+   * Retry creates a NEW child Run, and the mirror is keyed on the child's own (run, sequence) pair -- so a
+   * second child Run would collide with the first one's sequences rather than continue them. Clearing is the
+   * honest option: the old events still live on the child under the old id, and the new Run's log is rebuilt
+   * from sequence 1. Doing neither would serve an interleaving of two Runs' events as if they were one.
+   */
+  rebind(fleetRunId: string, childRunId: string): Binding {
+    const now = new Date().toISOString();
+    // One transaction. Three separate statements here could leave a binding pointing at a new child Run while
+    // the mirror still holds the OLD Run's sequences -- which is worse than either half failing, because the
+    // two windows are indistinguishable in the table: both are (run, sequence) rows starting at 1.
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('DELETE FROM fleet_events WHERE fleet_run_id = ?').run(fleetRunId);
+      this.db
+        .prepare('UPDATE fleet_runs SET child_run_id = ?, bound_at = ? WHERE fleet_run_id = ?')
+        .run(childRunId, now, fleetRunId);
+      this.db
+        .prepare('UPDATE run_state SET cursor = 0, events_drained = 0 WHERE fleet_run_id = ?')
+        .run(fleetRunId);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return this.get(fleetRunId)!;
+  }
+
+  /**
    * Record how far a Run's event log has been read, touching nothing else.
    *
    * Status and staleness are deliberately absent: mirroring and reconciliation are separate concerns with
