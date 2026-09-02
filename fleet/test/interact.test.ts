@@ -181,3 +181,21 @@ test('an unknown Fleet Run is a 404', async () => {
     assert.equal(e.status, 404);
   } finally { await h.child.close(); h.db.close(); }
 });
+
+test('a rebind that fails partway leaves nothing half-applied', async () => {
+  // Retry writes three tables. Half-applying them is worse than failing outright: the binding would point at a
+  // new child Run while the mirror still holds the OLD Run's sequences, and both windows look identical in the
+  // table -- rows keyed (run, sequence) starting at 1 -- so the corruption would be silent.
+  const h = await harness({ retryRunId: 'run_second', seen: [], bodies: [] });
+  try {
+    h.db.prepare(`CREATE TRIGGER blow_up BEFORE UPDATE ON fleet_runs
+                  BEGIN SELECT RAISE(ABORT, 'simulated failure mid-rebind'); END`).run();
+    const before = h.bindings.get(h.id)!;
+    await assert.rejects(() => retryRun(h.dispatch, h.id), /simulated failure/);
+    const after = h.bindings.get(h.id)!;
+    assert.equal(after.childRunId, before.childRunId, 'the binding did not move');
+    const n = (h.db.prepare('SELECT COUNT(*) AS n FROM fleet_events').get() as unknown as { n: number }).n;
+    assert.equal(n, 3, 'the mirrored window survived intact');
+    assert.equal(h.bindings.state(h.id)!.cursor, 3, 'the cursor survived intact');
+  } finally { await h.child.close(); h.db.close(); }
+});

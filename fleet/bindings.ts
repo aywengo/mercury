@@ -246,15 +246,23 @@ export class BindingStore {
    */
   rebind(fleetRunId: string, childRunId: string): Binding {
     const now = new Date().toISOString();
-    this.db.prepare('DELETE FROM fleet_events WHERE fleet_run_id = ?').run(fleetRunId);
-    this.db
-      .prepare(
-        `UPDATE fleet_runs SET child_run_id = ?, bound_at = ? WHERE fleet_run_id = ?`,
-      )
-      .run(childRunId, now, fleetRunId);
-    this.db
-      .prepare('UPDATE run_state SET cursor = 0, events_drained = 0 WHERE fleet_run_id = ?')
-      .run(fleetRunId);
+    // One transaction. Three separate statements here could leave a binding pointing at a new child Run while
+    // the mirror still holds the OLD Run's sequences -- which is worse than either half failing, because the
+    // two windows are indistinguishable in the table: both are (run, sequence) rows starting at 1.
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('DELETE FROM fleet_events WHERE fleet_run_id = ?').run(fleetRunId);
+      this.db
+        .prepare('UPDATE fleet_runs SET child_run_id = ?, bound_at = ? WHERE fleet_run_id = ?')
+        .run(childRunId, now, fleetRunId);
+      this.db
+        .prepare('UPDATE run_state SET cursor = 0, events_drained = 0 WHERE fleet_run_id = ?')
+        .run(fleetRunId);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
     return this.get(fleetRunId)!;
   }
 

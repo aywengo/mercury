@@ -34,14 +34,20 @@ function requireBound(deps: DispatchDeps, fleetRunId: string): { binding: Bindin
   return { binding, host: resolveHost(deps, binding.hostId) };
 }
 
-function describe(kind: 'rejected' | 'unknown', detail: string): never {
-  throw new DispatchError(kind === 'rejected' ? 400 : 502, detail);
+/**
+ * A child refusal is the caller's problem to see, so it surfaces as a 400 carrying the child's own reason.
+ *
+ * Only refusals go through here. An unreachable child is NOT an error and never was: it returns an outcome with
+ * unknown set, because throwing would invite someone to map it to a status that implies the action failed.
+ */
+function refuse(detail: string): never {
+  throw new DispatchError(400, detail);
 }
 
 export async function sendInput(deps: DispatchDeps, fleetRunId: string, input: unknown): Promise<InteractionOutcome> {
   const { binding, host } = requireBound(deps, fleetRunId);
   const res = await deps.child.submitInput(host, binding.childRunId!, input);
-  if (res.kind === 'rejected') describe('rejected', `child refused input: ${res.detail}`);
+  if (res.kind === 'rejected') refuse(`child refused input: ${res.detail}`);
   if (res.kind === 'unknown') {
     return {
       fleetRunId, hostId: binding.hostId, childRunId: binding.childRunId, status: null, unknown: true,
@@ -54,7 +60,7 @@ export async function sendInput(deps: DispatchDeps, fleetRunId: string, input: u
 export async function cancelRun(deps: DispatchDeps, fleetRunId: string): Promise<InteractionOutcome> {
   const { binding, host } = requireBound(deps, fleetRunId);
   const res = await deps.child.cancelRun(host, binding.childRunId!);
-  if (res.kind === 'rejected') describe('rejected', `child refused cancel: ${res.detail}`);
+  if (res.kind === 'rejected') refuse(`child refused cancel: ${res.detail}`);
   if (res.kind === 'unknown') {
     // Deliberately not recorded as CANCELLED. Reconciliation will read the real status on the next pass.
     return {
@@ -84,7 +90,7 @@ export async function retryRun(deps: DispatchDeps, fleetRunId: string): Promise<
   const { binding, host } = requireBound(deps, fleetRunId);
   const previousChildRunId = binding.childRunId!;
   const res = await deps.child.retryRun(host, previousChildRunId);
-  if (res.kind === 'rejected') describe('rejected', `child refused retry: ${res.detail}`);
+  if (res.kind === 'rejected') refuse(`child refused retry: ${res.detail}`);
   if (res.kind === 'unknown') {
     // A retry that we cannot confirm is the dangerous case: the child may have created a Run that Fleet does
     // not know about. Say so plainly rather than leaving the binding silently pointing at the old Run.

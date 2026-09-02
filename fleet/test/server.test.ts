@@ -550,3 +550,106 @@ test('a caller cannot route onto a host outside their allowlist by naming it', a
     assert.match(r.json.error, /not registered/);
   } finally { await s.close(); }
 });
+
+// --- Phase 5 interaction routes, driven through HTTP -----------------------------------------------
+//
+// These exist because the unit tests for dispatch called submitRun directly and never crossed the HTTP
+// boundary, which is exactly where a real defect lived: DispatchError was unmapped and answered 500.
+
+test('an unknown Fleet Run is a 404 through HTTP, not a 500', async () => {
+  const s = await startService();
+  try {
+    for (const verb of ['input', 'cancel', 'retry']) {
+      const r = await s.call('POST', `/fleet/runs/fr_missing/${verb}`, { token: CALLER_TOKEN, body: { input: 'x' } });
+      assert.equal(r.status, 404, `${verb} on an unknown run must not be a server fault`);
+    }
+  } finally { await s.close(); }
+});
+
+test('a DispatchError reaches the caller with its own status, not 500', async () => {
+  // A Run whose dispatch never got an answer has no child to act on. That is a 409 the caller can act on --
+  // resubmit, or wait -- and it is raised as a DispatchError deep in the interaction layer, so it is the path
+  // that proves the error mapping covers that type. Without the mapping it answers 500 and sends the operator
+  // to logs for something their own request can fix.
+  const s = await startService();
+  try {
+    const add = await s.call('POST', '/fleet/hosts', {
+      token: ADMIN_TOKEN,
+      body: { id: 'box-1', baseUrl: 'http://127.0.0.1:1', credentialRef: 'lan-ref' },
+    });
+    assert.equal(add.status, 201);
+    const { BindingStore } = await import('../bindings.ts');
+    new BindingStore(s.db).createPending({
+      fleetRunId: 'fr_pending', hostId: 'box-1', ownerId: 'alice', requested: {},
+    });
+    const r = await s.call('POST', '/fleet/runs/fr_pending/cancel', { token: CALLER_TOKEN });
+    assert.equal(r.status, 409, 'a pending dispatch is a conflict, not a server fault');
+    assert.match(String(r.json.error), /no child Run yet/);
+  } finally { await s.close(); }
+});
+
+test('a caller may not act on a Run bound to a host they cannot see', async () => {
+  const s = await startService();
+  try {
+    // box-1 is the only host the CALLER token may see; register a different one as admin.
+    const add = await s.call('POST', '/fleet/hosts', {
+      token: ADMIN_TOKEN,
+      body: { id: 'elsewhere', baseUrl: 'http://127.0.0.1:1', credentialRef: 'lan-ref' },
+    });
+    assert.equal(add.status, 201);
+    const { BindingStore } = await import('../bindings.ts');
+    new BindingStore(s.db).createPending({
+      fleetRunId: 'fr_hidden', hostId: 'elsewhere', ownerId: 'alice', requested: {},
+    });
+    const r = await s.call('POST', '/fleet/runs/fr_hidden/cancel', { token: CALLER_TOKEN });
+    assert.equal(r.status, 403, 'acting must be scoped as tightly as reading');
+  } finally { await s.close(); }
+});
+
+test('the input body is forwarded without inventing or swallowing a value', async () => {
+  // Records exactly what the child receives, so the wrapper rules are proven rather than asserted in a unit
+  // test that calls the unwrapper directly.
+  const received: unknown[] = [];
+  const child = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      if ((req.url ?? '').endsWith('/input')) received.push(JSON.parse(raw).input);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ runId: 'run_1', status: 'QUEUED' }));
+    });
+  });
+  await new Promise<void>((r) => child.listen(0, '127.0.0.1', r));
+  const s = await startService();
+  try {
+    const { port } = child.address() as AddressInfo;
+    const add = await s.call('POST', '/fleet/hosts', {
+      token: ADMIN_TOKEN,
+      body: { id: 'box-1', baseUrl: `http://127.0.0.1:${port}`, credentialRef: 'lan-ref' },
+    });
+    assert.equal(add.status, 201);
+    const { BindingStore } = await import('../bindings.ts');
+    new BindingStore(s.db).createPending({
+      fleetRunId: 'fr_in', hostId: 'box-1', ownerId: 'alice', requested: {},
+    });
+    // Bind it: the routes refuse to act on a Run with no child yet.
+    s.db.prepare('UPDATE fleet_runs SET child_run_id = ? WHERE fleet_run_id = ?').run('child_1', 'fr_in');
+
+    const cases: Array<[unknown, unknown, string]> = [
+      [{ input: { answer: 'go' } }, { answer: 'go' }, 'the wrapper is unwrapped'],
+      [{ input: null }, null, 'an explicit null is a real value, not a missing key'],
+      ['plain text', 'plain text', 'a bare string is valid JSON and reaches the child as-is'],
+      [42, 42, 'a bare number likewise'],
+      [{ answer: 'no wrapper' }, { answer: 'no wrapper' }, 'an unwrapped object passes through'],
+    ];
+    for (const [sent, expected, why] of cases) {
+      received.length = 0;
+      const r = await s.call('POST', '/fleet/runs/fr_in/input', { token: CALLER_TOKEN, body: sent });
+      assert.equal(r.status, 200, `${why} -- status`);
+      assert.deepEqual(received[0], expected, why);
+    }
+  } finally {
+    await s.close();
+    await new Promise<void>((r) => { child.closeAllConnections?.(); child.close(() => r()); });
+  }
+});
