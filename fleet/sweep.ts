@@ -2,6 +2,7 @@ import type { BindingView } from './bindings.ts';
 import { UNKNOWN } from './bindings.ts';
 import type { DispatchDeps } from './dispatch.ts';
 import { resolveHost } from './dispatch.ts';
+import { mirrorEvents, type EventMirrorDeps } from './events.ts';
 
 /**
  * Exactly Mercury's TERMINAL_STATUSES (src/domain/stateMachine.ts). Section 7: these are the ONLY states
@@ -44,6 +45,11 @@ export interface SweepEvent {
 }
 
 export interface SweepOptions {
+  /**
+   * Mirror event metadata for live Runs as part of the same pass. Optional so reconciliation stays useful on
+   * its own: a Run whose event log is unreadable must still have its status advanced.
+   */
+  events?: EventMirrorDeps;
   /** Called once per binding the FIRST time it becomes LOST. Repeats are suppressed. */
   onEvent?: (event: SweepEvent) => void;
   hostIds?: '*' | string[];
@@ -75,8 +81,28 @@ export async function sweepOnce(deps: DispatchDeps, opts: SweepOptions = {}): Pr
   const now = new Date().toISOString();
 
   for (const view of views) {
-    if (isTerminal(view.state?.status)) {
+    const terminal = isTerminal(view.state?.status);
+    // A terminal Run needs no further status reads, but it may still owe an event log. Skipping terminal
+    // bindings outright was wrong twice over: a Run that finished between two sweeps never had its log read,
+    // and a Run whose one log read failed was never given another. The drain flag is what makes "finished"
+    // mean finished rather than "finished and permanently unread".
+    const owesEvents = opts.events !== undefined && !(terminal && (view.state?.eventsDrained ?? false));
+    if (terminal && !owesEvents) {
       report.skippedTerminal++;
+      continue;
+    }
+    if (terminal) {
+      // Finished, but its log is still owed -- either never read or a read that failed. Events only: the
+      // status is settled and re-reading it would undo the skip above.
+      try {
+        await mirrorEvents(opts.events!, view.fleetRunId);
+      } catch (err) {
+        deps.bindings.recordState({
+          fleetRunId: view.fleetRunId, status: view.state!.status,
+          cursor: view.state?.cursor ?? 0, lastSeenAt: view.state?.lastSeenAt ?? null,
+          lastError: `events still unreadable: ${(err as Error).message}`,
+        });
+      }
       continue;
     }
     if (!view.childRunId) {
@@ -115,6 +141,20 @@ export async function sweepOnce(deps: DispatchDeps, opts: SweepOptions = {}): Pr
         lastError: result.value.error ?? null,
       });
       report.advanced++;
+      // Mirror events, including for a Run that has just finished. Skipping terminal Runs outright was a real
+      // bug found end-to-end: a Run that ended before the first sweep never had its log mirrored at all, so
+      // Fleet could not show how anything finished. Once drained, a terminal Run is left alone.
+      if (opts.events && !(isTerminal(result.value.status) && (view.state?.eventsDrained ?? false))) {
+        try {
+          await mirrorEvents(opts.events, view.fleetRunId);
+        } catch (err) {
+          deps.bindings.recordState({
+            fleetRunId: view.fleetRunId, status: result.value.status,
+            cursor: view.state?.cursor ?? 0, lastSeenAt: now,
+            lastError: `status read ok, events unreadable: ${(err as Error).message}`,
+          });
+        }
+      }
       continue;
     }
 
@@ -163,7 +203,13 @@ export interface SweeperHandle {
  */
 export function startSweeper(
   deps: DispatchDeps,
-  opts: { intervalMs: number; onEvent?: (e: SweepEvent) => void; onError?: (e: unknown) => void; hostIds?: '*' | string[] },
+  opts: {
+    intervalMs: number;
+    onEvent?: (e: SweepEvent) => void;
+    onError?: (e: unknown) => void;
+    hostIds?: '*' | string[];
+    events?: EventMirrorDeps;
+  },
 ): SweeperHandle {
   let running = false;
   let stopped = false;
@@ -173,7 +219,7 @@ export function startSweeper(
     if (running || stopped) return;
     running = true;
     try {
-      await sweepOnce(deps, { hostIds: opts.hostIds, onEvent: opts.onEvent });
+      await sweepOnce(deps, { hostIds: opts.hostIds, onEvent: opts.onEvent, events: opts.events });
     } catch (err) {
       opts.onError?.(err);
     } finally {

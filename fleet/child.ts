@@ -42,10 +42,34 @@ export type ChildResult<T> =
   | { kind: 'rejected'; status: number; detail: string }
   | { kind: 'unknown'; reason: string };
 
+/** One event as the child reports it. Mirrors Mercury's RunEvent. */
+export interface ChildEvent {
+  id: string;
+  runId: string;
+  type: string;
+  sequence: number;
+  timestamp: string;
+  payload?: unknown;
+}
+
+/**
+ * The events page. `nextCursor` is the ONLY safe resume point: it is the last sequence actually returned,
+ * whereas `lastSequence` is the run's true maximum and resuming from it skips whatever a truncated page left
+ * out. Mercury had exactly that bug (issue #54) and the response shape exists to prevent it.
+ */
+export interface ChildEventPage {
+  events: ChildEvent[];
+  lastSequence: number;
+  nextCursor: number;
+  hasMore: boolean;
+}
+
 export interface ChildClient {
   createRun: (host: { baseUrl: string; token: string }, payload: unknown, idempotencyKey: string)
     => Promise<ChildResult<ChildRunCreated>>;
   getRun: (host: { baseUrl: string; token: string }, runId: string) => Promise<ChildResult<ChildRun>>;
+  getEvents: (host: { baseUrl: string; token: string }, runId: string, after: number, limit: number)
+    => Promise<ChildResult<ChildEventPage>>;
 }
 
 export interface ChildClientOptions {
@@ -112,6 +136,12 @@ export function createChildClient(opts: ChildClientOptions): ChildClient {
         return { kind: 'unknown', reason: 'child run response had no run object' };
       }
       return { kind: 'ok', value: res.value.run };
+    },
+    async getEvents(host, runId, after, limit) {
+      const safe = encodeURIComponent(runId);
+      const url = `${host.baseUrl}/api/runs/${safe}/events?after=${encodeURIComponent(String(after))}`
+        + `&limit=${encodeURIComponent(String(limit))}`;
+      return call<ChildEventPage>(opts, url, { method: 'GET', headers: headers(host.token) });
     },
   };
 }

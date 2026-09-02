@@ -16,6 +16,7 @@ import { BindingStore, UNKNOWN } from './bindings.ts';
 import { createChildClient } from './child.ts';
 import { DispatchError, recoverPending, refreshStates, submitRun, type DispatchDeps } from './dispatch.ts';
 import { startSweeper, type SweeperHandle, type SweepEvent } from './sweep.ts';
+import { listMirroredEvents, type EventMirrorDeps } from './events.ts';
 import { createProber, type Prober } from './prober.ts';
 import { CredentialError, type CredentialStore } from './credentials.ts';
 import type { Caller } from './auth.ts';
@@ -219,6 +220,28 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
       },
     },
     {
+      // GET /fleet/runs/:id/events?after=<cursor>&limit=<n>
+      // Reads Fleet's mirror, so it answers at the freshness of the last sweep rather than this instant, and
+      // costs the child nothing. That is deliberate: section 8 makes the cursor the correctness mechanism and
+      // polling the baseline, so a client that pages from nextCursor sees every event whether or not a child
+      // connection is open.
+      method: 'GET', pattern: ['fleet', 'runs', ':id', 'events'],
+      handle: async (ctx, res) => {
+        const id = ctx.params[0]!;
+        const binding = dispatch.bindings.get(id);
+        if (!binding) throw new HttpError(404, 'no such fleet run');
+        if (!hostAllowed(ctx.caller, binding.hostId)) {
+          throw new HttpError(403, `caller ${ctx.caller.ownerId} may not read runs on host ${binding.hostId}`);
+        }
+        const after = Number(ctx.query?.get('after') ?? 0) || 0;
+        const rawLimit = Number(ctx.query?.get('limit') ?? 200);
+        // Bounded rather than trusted: an unbounded limit would let one caller pull an entire mirrored
+        // transcript into memory in one request.
+        const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 1000) : 200;
+        sendJson(res, 200, listMirroredEvents(deps.db, id, after, limit));
+      },
+    },
+    {
       method: 'POST', pattern: ['fleet', 'probe'], admin: true,
       handle: async (_ctx, res) => {
         const results = await prober.sweepOnce();
@@ -233,6 +256,15 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
 export function createFleetServer(deps: FleetServerDeps): FleetServer {
   const { routes, prober, dispatch } = buildRoutes(deps);
   const registry = new HostRegistry(deps.db);
+  // Built from the same dispatch the routes use, so mirroring resolves hosts and tokens exactly the way
+  // dispatch and reconciliation do rather than through a second, subtly different wiring.
+  const eventMirror: EventMirrorDeps = {
+    db: deps.db,
+    bindings: dispatch.bindings,
+    registry: dispatch.registry,
+    child: dispatch.child,
+    resolveToken: dispatch.resolveToken,
+  };
   // Parsed once, not per request: the token set is fixed at startup, and re-splitting it on every call
   // would let a caller's request rate scale the cost of an operation that never changes.
   const authDeps = { callers: parseCallerTokens(deps.config.apiTokens), adminToken: deps.config.adminToken };
@@ -331,6 +363,9 @@ export function createFleetServer(deps: FleetServerDeps): FleetServer {
       // dashboard is closed would stay RUNNING until somebody opens the page again.
       sweeperRef.handle = startSweeper(dispatch, {
         intervalMs: deps.config.sweepIntervalMs,
+        // Event metadata rides with reconciliation rather than on a third timer: both walk the same set of
+        // live bindings, and a Run worth a status read is worth an event page.
+        events: eventMirror,
         onEvent: (event: SweepEvent) => {
           // LOST is an operator event, not a Run outcome: the binding asserts a Run exists and the child
           // denies it. Loud in the log; a webhook belongs with the alerting work in a later phase.

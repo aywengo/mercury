@@ -98,6 +98,40 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_fleet_runs_pending ON fleet_runs(host_id) WHERE child_run_id IS NULL;
     `,
   },
+  {
+    version: 3,
+    sql: `
+      -- CACHE, like host_probe: this mirrors what the child already has, so deleting it costs a re-read and
+      -- nothing else. The child stays the source of truth (section 2). Keeping it in its own table is what
+      -- makes that claim checkable rather than aspirational.
+      --
+      -- Metadata only by default (section 8): agent output can be large, and mirroring bodies turns Fleet
+      -- into a second copy of every Run's transcript with all the retention and secret questions that raises.
+      -- payload is therefore NULL unless the host opted in.
+      CREATE TABLE IF NOT EXISTS fleet_events (
+        fleet_run_id TEXT NOT NULL REFERENCES fleet_runs(fleet_run_id) ON DELETE CASCADE,
+        -- The child's own per-Run sequence, not a Fleet-assigned one. Re-mirroring the same event must be a
+        -- no-op, and the child's sequence is the only stable identity available.
+        sequence     INTEGER NOT NULL,
+        type         TEXT NOT NULL,
+        timestamp    TEXT NOT NULL,
+        payload      TEXT,
+        PRIMARY KEY (fleet_run_id, sequence)
+      );
+
+      CREATE INDEX IF NOT EXISTS fleet_events_run_seq
+        ON fleet_events (fleet_run_id, sequence);
+
+      -- Opt-in per host, because the right default differs by machine: a laptop Fleet may mirror freely where
+      -- a shared instance should not hold transcripts at all.
+      ALTER TABLE hosts ADD COLUMN mirror_bodies INTEGER NOT NULL DEFAULT 0;
+
+      -- Set once a mirror pass finds nothing more to read. Without it there is no way to leave a finished Run
+      -- alone: skipping terminal Runs outright means a Run that ended before the first sweep never has its
+      -- log mirrored at all, and Fleet could never show how anything finished.
+      ALTER TABLE run_state ADD COLUMN events_drained INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 export interface FleetDb {
