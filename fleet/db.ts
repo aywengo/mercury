@@ -57,6 +57,41 @@ const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 2,
+    sql: `
+      -- TRUTH. Section 5 is explicit about what losing this costs: orphaned Runs on remote machines that
+      -- nobody can find. child_run_id is nullable, and the NULL is not a placeholder for "failed" -- it
+      -- means Fleet asked a child for a Run and has not yet learned the answer. Section 7's rule that
+      -- UNKNOWN is not FAILED is expressed by that column staying NULL rather than by a status string.
+      CREATE TABLE IF NOT EXISTS fleet_runs (
+        fleet_run_id   TEXT PRIMARY KEY,
+        -- Deliberately NOT ON DELETE CASCADE. A cascade here would mean that removing a host from the
+        -- registry silently deletes the record of Runs still executing on it. That is section 5's worst
+        -- failure -- orphaned Runs nobody can find -- reachable through an ordinary registry edit. The FK
+        -- is RESTRICT by omission, and HostRegistry.remove turns it into an explanation.
+        host_id        TEXT NOT NULL REFERENCES hosts(id),
+        child_run_id   TEXT,
+        client_token   TEXT UNIQUE,
+        requested      TEXT NOT NULL,
+        created_at     TEXT NOT NULL,
+        bound_at       TEXT,
+        UNIQUE (host_id, child_run_id)
+      );
+
+      -- CACHE ONLY: rebuildable by re-reading the child. status holds the child's own status string, or
+      -- UNKNOWN when Fleet could not reach the child -- which is deliberately not the same value.
+      CREATE TABLE IF NOT EXISTS run_state (
+        fleet_run_id   TEXT PRIMARY KEY REFERENCES fleet_runs(fleet_run_id) ON DELETE CASCADE,
+        status         TEXT NOT NULL,
+        cursor         INTEGER NOT NULL DEFAULT 0,
+        last_seen_at   TEXT,
+        last_error     TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_fleet_runs_pending ON fleet_runs(host_id) WHERE child_run_id IS NULL;
+    `,
+  },
 ];
 
 export interface FleetDb {

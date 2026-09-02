@@ -236,8 +236,33 @@ export class HostRegistry {
     return this.get(id)!;
   }
 
-  remove(id: string): boolean {
-    // host_probe cascades: a cache row for a host that no longer exists has nothing to describe.
+  /**
+   * Forget a host and its cached probe.
+   *
+   * Refused while the host still owns Runs. `host_probe` cascades because it is cache and a cache row for a
+   * host that no longer exists describes nothing. `fleet_runs` must NOT cascade: deleting it would orphan
+   * Runs that are executing right now, on a machine Fleet can no longer name. The caller has to deal with
+   * those Runs first, or accept the loss explicitly.
+   */
+  remove(id: string, opts: { force?: boolean } = {}): boolean {
+    if (!opts.force) {
+      const owned = this.db
+        .prepare('SELECT COUNT(*) AS n, SUM(child_run_id IS NULL) AS unresolved FROM fleet_runs WHERE host_id = ?')
+        .get(id) as { n: number; unresolved: number | null };
+      const count = Number(owned.n);
+      if (count > 0) {
+        const unresolved = Number(owned.unresolved ?? 0);
+        throw new RegistryError(
+          `host ${id} still owns ${count} Fleet Run(s)${unresolved ? `, ${unresolved} of them with no ` +
+          `recorded child answer` : ''}. Removing it would delete the only record of those Runs and leave ` +
+          `them running on a machine Fleet cannot name. Let them finish, or pass force to accept the loss.`,
+        );
+      }
+    } else {
+      // Explicit force: drop the bindings first so the FK does not reject the host row, and say nothing
+      // here -- the caller asked for this and the route records it.
+      this.db.prepare('DELETE FROM fleet_runs WHERE host_id = ?').run(id);
+    }
     const res = this.db.prepare('DELETE FROM hosts WHERE id = ?').run(id);
     return Number(res.changes) > 0;
   }

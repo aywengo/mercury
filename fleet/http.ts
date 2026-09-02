@@ -21,6 +21,8 @@ export interface RequestContext {
    */
   params: string[];
   query: URLSearchParams;
+  /** Request headers, for the few the API surface reads (Idempotency-Key). */
+  headers: Record<string, string | string[] | undefined>;
   body: unknown;
   log: Logger;
 }
