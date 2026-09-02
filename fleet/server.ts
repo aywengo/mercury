@@ -18,6 +18,7 @@ import { DispatchError, recoverPending, refreshStates, submitRun, type DispatchD
 import { startSweeper, type SweeperHandle, type SweepEvent } from './sweep.ts';
 import { listMirroredEvents, type EventMirrorDeps } from './events.ts';
 import { startEventStream } from './stream.ts';
+import { loadRepoUrlMap, routeRun, RoutingError, type RouteRepository } from './routing.ts';
 import { createProber, type Prober } from './prober.ts';
 import { CredentialError, type CredentialStore } from './credentials.ts';
 import type { Caller } from './auth.ts';
@@ -70,6 +71,11 @@ function nonNegativeInt(raw: string | null | undefined, fallback: number): numbe
   return n;
 }
 
+/** Narrow to a plain object without accepting arrays or null, both of which `typeof` would let through. */
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 function str(body: Record<string, unknown>, key: string): string {
   const v = body[key];
   if (typeof v !== 'string' || !v) throw new HttpError(400, `${key} is required and must be a non-empty string`);
@@ -85,6 +91,9 @@ function visibleHosts(registry: HostRegistry, caller: Caller): HostView[] {
 
 export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: Prober; dispatch: DispatchDeps } {
   const registry = new HostRegistry(deps.db);
+  // Loaded once at startup. A malformed map must fail the process loudly rather than degrade into "no
+  // mapping", which would present as routing refusing work it should have accepted.
+  const resolveCloneUrl = loadRepoUrlMap(deps.config.repoUrlsFile);
   const dispatch: DispatchDeps = {
     registry,
     bindings: new BindingStore(deps.db),
@@ -177,11 +186,33 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
       method: 'POST', pattern: ['fleet', 'runs'],
       handle: async (ctx, res) => {
         const b = bodyObject(ctx.body);
-        const hostId = str(b, 'host');
-        if (!hostAllowed(ctx.caller, hostId)) {
-          throw new HttpError(403, `caller ${ctx.caller.ownerId} may not submit work to host ${hostId}`);
+        const namedHost = typeof b.host === 'string' && b.host ? b.host : undefined;
+        // Routing runs over the hosts THIS caller may see, not the whole fleet. A router that could place work
+        // on a hidden host would turn an allowlist into a suggestion.
+        let decision;
+        try {
+          decision = routeRun(
+          visibleHosts(registry, ctx.caller),
+          {
+            host: namedHost,
+            agent: typeof b.agent === 'string' && b.agent ? b.agent : undefined,
+            labels: isRecord(b.labels) ? b.labels as Record<string, string> : undefined,
+            repository: isRecord(b.repository) ? b.repository as RouteRepository : undefined,
+          },
+            { resolveCloneUrl },
+          );
+        } catch (err) {
+          // A routing failure names every host considered and why each was excluded. Swallowing that into a
+          // generic 400 is exactly how a five-second mistake becomes an hour of confusion.
+          if (err instanceof RoutingError) throw new HttpError(err.status, err.message, undefined, err.exclusions);
+          throw err;
         }
-        const requested = { ...b };
+        if (!hostAllowed(ctx.caller, decision.hostId)) {
+          // Unreachable given the scoping above, kept because a router change must not silently widen access.
+          throw new HttpError(403, `caller ${ctx.caller.ownerId} may not submit work to host ${decision.hostId}`);
+        }
+        const requested: Record<string, unknown> = { ...b, ...(decision.repository ? { repository: decision.repository } : {}) };
+        if (!decision.repository) delete requested.repository;
         delete requested.host;
         delete requested.idempotency;
         const idem = typeof b.idempotency === 'string' && b.idempotency
@@ -190,11 +221,14 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
         // ownerId comes from the authenticated caller, never the body: idempotency scoping is a security
         // boundary, and a caller that could choose it could claim another caller's binding.
         const outcome = await submitRun(dispatch, {
-          hostId, ownerId: ctx.caller.ownerId, requested, clientToken: idem ?? null,
+          hostId: decision.hostId, ownerId: ctx.caller.ownerId, requested, clientToken: idem ?? null,
         });
         sendJson(res, outcome.reused ? 200 : 201, {
           fleetRunId: outcome.binding.fleetRunId,
           hostId: outcome.binding.hostId,
+          // Say so when the localPath was replaced: a caller who asked for a path and got a clone should be
+          // able to see that the constraint was lifted, not discover it from a missing working tree.
+          ...(decision.rewroteLocalPath ? { rewroteLocalPath: true } : {}),
           childRunId: outcome.binding.childRunId,
           pending: outcome.pending,
           reused: outcome.reused,
@@ -342,7 +376,10 @@ export function createFleetServer(deps: FleetServerDeps): FleetServer {
       // operator to the service logs when the answer is in their own request body.
       if (err instanceof HttpError || err instanceof RegistryError || err instanceof CredentialError) {
         const status = err instanceof HttpError ? err.status : 400;
-        sendJson(res, status, { error: err.message });
+        sendJson(res, status, {
+          error: err.message,
+          ...(err instanceof HttpError && err.details !== undefined ? { details: err.details } : {}),
+        });
         return;
       }
       // The logger redacts, so an exception message carrying a header cannot reach the log intact.

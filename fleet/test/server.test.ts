@@ -480,3 +480,73 @@ test('a finished Run that still owes its log keeps the stream open', async () =>
       'a terminal Run with an undrained log must not claim the stream is finished');
   } finally { await s.close(); }
 });
+
+/** Register a host with declared local paths and labels, bypassing the admin API to keep the test focused. */
+function seedHost(db: DatabaseSync, id: string, opts: { localPaths?: string[]; labels?: Record<string, string> } = {}): void {
+  db.prepare(
+    `INSERT INTO hosts (id, base_url, credential_ref, enabled, labels, local_paths, agents_cache, added_at, mirror_bodies)
+     VALUES (?, ?, 'lan-ref', 1, ?, ?, '["claude"]', ?, 0)`,
+  ).run(id, `http://${id}:1`, JSON.stringify(opts.labels ?? {}), JSON.stringify(opts.localPaths ?? []),
+    new Date().toISOString());
+}
+
+test('routing places work without the caller naming a host', async () => {
+  const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*` });
+  try {
+    seedHost(s.db, 'laptop', { localPaths: ['/Users/roman/devops/mercury'] });
+    seedHost(s.db, 'gpu-box', { localPaths: ['/srv/other'] });
+    const r = await s.call('POST', '/fleet/runs', {
+      token: CALLER_TOKEN,
+      body: { task: 'fix tests', repository: { localPath: '/Users/roman/devops/mercury' } },
+    });
+    assert.equal(r.status, 201);
+    assert.equal(r.json.hostId, 'laptop', 'the only host that declares the path');
+  } finally { await s.close(); }
+});
+
+test('an unroutable localPath is refused with every host accounted for', async () => {
+  const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*` });
+  try {
+    seedHost(s.db, 'laptop', { localPaths: ['/elsewhere'] });
+    seedHost(s.db, 'gpu-box', { localPaths: [] });
+    const r = await s.call('POST', '/fleet/runs', {
+      token: CALLER_TOKEN, body: { task: 'x', repository: { localPath: '/nowhere' } },
+    });
+    assert.equal(r.status, 400);
+    assert.ok(Array.isArray(r.json.details), 'the response must carry the exclusions, not just a sentence');
+    const ids = r.json.details.map((d: any) => d.hostId).sort();
+    assert.deepEqual(ids, ['gpu-box', 'laptop']);
+    assert.ok(r.json.details.every((d: any) => typeof d.reason === 'string' && d.reason.length > 0));
+    // Nothing was written: a refused submission leaves no binding behind.
+    const list = await s.call('GET', '/fleet/runs', { token: CALLER_TOKEN });
+    assert.equal(list.json.runs.length, 0);
+  } finally { await s.close(); }
+});
+
+test('routing can only place work on hosts the caller may see', async () => {
+  // The router is fed the caller-visible set, so a hidden host cannot be reached by omitting `host` even
+  // though it is the better machine.
+  const s = await startService();  // scoped to box-1
+  try {
+    seedHost(s.db, 'box-1');
+    seedHost(s.db, 'secret-box');
+    const r = await s.call('POST', '/fleet/runs', { token: CALLER_TOKEN, body: { task: 'x' } });
+    assert.equal(r.status, 201);
+    assert.equal(r.json.hostId, 'box-1');
+  } finally { await s.close(); }
+});
+
+test('a caller cannot route onto a host outside their allowlist by naming it', async () => {
+  const s = await startService();
+  try {
+    seedHost(s.db, 'box-1');
+    seedHost(s.db, 'secret-box');
+    const r = await s.call('POST', '/fleet/runs', {
+      token: CALLER_TOKEN, body: { task: 'x', host: 'secret-box' },
+    });
+    // 404 rather than 403, matching how Mercury scopes Runs: confirming that a hidden host exists is itself
+    // a leak. The caller learns "no such host", which is all they are entitled to know.
+    assert.equal(r.status, 404);
+    assert.match(r.json.error, /not registered/);
+  } finally { await s.close(); }
+});
