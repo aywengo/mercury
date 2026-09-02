@@ -292,8 +292,7 @@ constraint the scorer exists to work around.
 **Phase 5 — interaction (small).** Input, cancel, retry through Fleet, including the binding update when
 `retry` yields a new child Run id.
 
-**Phase 6 — metrics rollup (small).** Scrape each child's `/metrics`, aggregate, expose one Prometheus
-endpoint. Cheap and disproportionately useful.
+**Phase 6 — metrics rollup (small).** *Shipped: `fleet/metrics.ts`, `GET /metrics`.* Scrape each child's `/metrics` in parallel, relabel every series with `host="<hostId>"`, and serve one Prometheus endpoint. Series are relabelled rather than summed — summing across heterogeneous hosts destroys the per-host view and is wrong for gauges like lease timestamps — and a failed scrape publishes `mercury_fleet_scrape_success{host}=0` rather than omitting the host, so a vanished host cannot be mistaken for an idle one.
 
 ## 13. Upstream changes worth filing against Mercury
 
@@ -395,7 +394,7 @@ GET  /fleet/runs/:id/stream         merged SSE, cursor-backed (Phase 3)
 POST /fleet/runs/:id/input          (Phase 5)
 POST /fleet/runs/:id/cancel         (Phase 5)
 POST /fleet/runs/:id/retry          (Phase 5; updates the binding)
-GET  /metrics                       rollup of child /metrics (Phase 6)
+GET  /metrics                       rollup of child /metrics, host-labelled (Phase 6)
 ```
 
 Nothing here accepts a URL to fetch. A caller names a host by its registry id and Fleet resolves it. That is

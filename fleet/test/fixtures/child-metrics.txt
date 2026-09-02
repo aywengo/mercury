@@ -1,0 +1,44 @@
+# HELP mercury_runs_in_status Runs currently in each status.
+# TYPE mercury_runs_in_status gauge
+mercury_runs_in_status{status="CANCELLED"} 0
+mercury_runs_in_status{status="COMPLETED"} 0
+mercury_runs_in_status{status="FAILED"} 0
+mercury_runs_in_status{status="NEEDS_INPUT"} 0
+mercury_runs_in_status{status="QUEUED"} 0
+mercury_runs_in_status{status="RUNNING"} 0
+mercury_runs_in_status{status="STARTING"} 0
+mercury_runs_in_status{status="TIMED_OUT"} 0
+# HELP mercury_run_duration_seconds Wall-clock run duration, from claim to terminal status, by terminal status.
+# TYPE mercury_run_duration_seconds histogram
+# HELP mercury_run_queue_wait_seconds Time a run spent QUEUED before being claimed.
+# TYPE mercury_run_queue_wait_seconds histogram
+mercury_run_queue_wait_seconds_bucket{le="0.5"} 0
+mercury_run_queue_wait_seconds_bucket{le="1"} 0
+mercury_run_queue_wait_seconds_bucket{le="5"} 0
+mercury_run_queue_wait_seconds_bucket{le="15"} 0
+mercury_run_queue_wait_seconds_bucket{le="30"} 0
+mercury_run_queue_wait_seconds_bucket{le="60"} 0
+mercury_run_queue_wait_seconds_bucket{le="120"} 0
+mercury_run_queue_wait_seconds_bucket{le="300"} 0
+mercury_run_queue_wait_seconds_bucket{le="900"} 0
+mercury_run_queue_wait_seconds_bucket{le="+Inf"} 0
+mercury_run_queue_wait_seconds_sum 0
+mercury_run_queue_wait_seconds_count 0
+# HELP mercury_run_errors_total Failed runs by error kind.
+# TYPE mercury_run_errors_total counter
+mercury_run_errors_total{kind="agent"} 0
+mercury_run_errors_total{kind="infrastructure"} 0
+mercury_run_errors_total{kind="task"} 0
+mercury_run_errors_total{kind="unspecified"} 0
+# HELP mercury_sandbox_enabled_total Runs that had a sandbox policy applied.
+# TYPE mercury_sandbox_enabled_total counter
+mercury_sandbox_enabled_total 0
+# HELP mercury_runs_total Runs ever created.
+# TYPE mercury_runs_total counter
+mercury_runs_total 0
+# HELP mercury_workers Workers currently holding a live lease.
+# TYPE mercury_workers gauge
+mercury_workers 0
+# HELP mercury_claimed_runs Runs currently claimed by a worker.
+# TYPE mercury_claimed_runs gauge
+mercury_claimed_runs 0

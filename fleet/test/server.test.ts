@@ -653,3 +653,49 @@ test('the input body is forwarded without inventing or swallowing a value', asyn
     await new Promise<void>((r) => { child.closeAllConnections?.(); child.close(() => r()); });
   }
 });
+
+// --- Phase 6: metrics rollup -----------------------------------------------------------------------
+
+test('/metrics requires authentication', async () => {
+  const s = await startService();
+  try {
+    const r = await fetch(s.base + '/metrics');
+    assert.equal(r.status, 401);
+  } finally { await s.close(); }
+});
+
+test('/metrics exposes only the hosts a caller may see', async () => {
+  // The aggregate leaks queue depth, run counts and worker topology. A caller scoped to one host must not read
+  // another host's numbers out of a summary endpoint that never checks who is asking.
+  const s = await startService();
+  try {
+    for (const [id, port] of [['box-1', 1], ['elsewhere', 2]] as Array<[string, number]>) {
+      const add = await s.call('POST', '/fleet/hosts', {
+        token: ADMIN_TOKEN,
+        body: { id, baseUrl: `http://127.0.0.1:${port}`, credentialRef: 'lan-ref' },
+      });
+      assert.equal(add.status, 201);
+    }
+    const scoped = await fetch(s.base + '/metrics', { headers: { authorization: `Bearer ${CALLER_TOKEN}` } });
+    assert.equal(scoped.status, 200);
+    const scopedText = await scoped.text();
+    assert.match(scopedText, /host="box-1"/, 'the caller sees its own host');
+    assert.doesNotMatch(scopedText, /host="elsewhere"/, 'and not the other one');
+
+    const admin = await fetch(s.base + '/metrics', { headers: { authorization: `Bearer ${ADMIN_TOKEN}` } });
+    const adminText = await admin.text();
+    assert.match(adminText, /host="box-1"/);
+    assert.match(adminText, /host="elsewhere"/, 'an admin sees the whole fleet');
+    // Both hosts are unreachable here, which is exactly the case that must be visible rather than absent.
+    assert.match(adminText, /mercury_fleet_scrape_success\{host="box-1"\} 0/);
+  } finally { await s.close(); }
+});
+
+test('/metrics is served as Prometheus text, not JSON', async () => {
+  const s = await startService();
+  try {
+    const r = await fetch(s.base + '/metrics', { headers: { authorization: `Bearer ${CALLER_TOKEN}` } });
+    assert.match(r.headers.get('content-type') ?? '', /text\/plain/);
+    assert.match(r.headers.get('content-type') ?? '', /version=0\.0\.4/);
+  } finally { await s.close(); }
+});

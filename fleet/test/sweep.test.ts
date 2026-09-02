@@ -357,6 +357,7 @@ test('the sweeper actually passes event deps through to the sweep', async () => 
         submitInput: async () => ({ kind: 'ok' as const, value: { ok: true } }),
         cancelRun: async () => ({ kind: 'ok' as const, value: { runId: 'run_1', status: 'CANCELLED' } }),
         retryRun: async () => ({ kind: 'ok' as const, value: { runId: 'run_2', status: 'QUEUED', retryOf: 'run_1' } }),
+        getMetrics: async () => ({ kind: 'ok' as const, value: '' }),
       },
       resolveToken: () => 'secret-value',
     };
