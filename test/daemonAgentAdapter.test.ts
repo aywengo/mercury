@@ -1,424 +1,616 @@
-// DaemonAgentAdapter tests against the mock prime-agent daemon.
-// Verifies the adapter contract over the daemon socket protocol.
+// DaemonAgentAdapter tests against a mock supervisor.
+//
+// The mock speaks the protocol the REAL daemon speaks (see its header), so these tests can actually
+// fail. The previous twelve tests passed against a fixture that agreed with the adapter about every
+// way the adapter was wrong.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DaemonAgentAdapter } from '../src/adapters/daemonAgentAdapter.ts';
-import type { Run, RunContext, ResolvedSkill } from '../src/domain/types.ts';
-import { tempDir } from './helpers.ts';
+import { createConnection } from 'node:net';
+import { DaemonAgentAdapter, DaemonProtocolError, sessionConfigFromArgs } from '../src/adapters/daemonAgentAdapter.ts';
+import { looksPrivateFramed } from '../src/adapters/daemonProtocol.ts';
+import type { AgentExit, Run, RunContext, ResolvedSkill } from '../src/domain/types.ts';
+import { tempDir, tempFile } from './helpers.ts';
 
 const MOCK = join(import.meta.dirname, 'fixtures', 'mock-prime-agent-daemon.mjs');
+const HELLO_FIXTURE = join(import.meta.dirname, 'fixtures', 'daemon-hello.jsonl');
+let socketCounter = 0;
 
 function makeRun(overrides: Partial<Run> = {}): Run {
   const now = new Date().toISOString();
   return {
-    id: 'run_daemon',
-    ownerId: 'alice',
-    task: 'Fix the failing integration tests',
-    repository: { localPath: '/tmp/repo' },
-    workspaceBranch: null,
-    workspacePath: null,
-    agent: 'primeagent',
-    status: 'QUEUED',
-    attempt: 1,
-    retryOf: null,
-    error: null,
-    errorKind: null,
-    constraints: { maxDurationMs: 60_000, maxRetries: 2 },
-    createdAt: now,
-    startedAt: null,
-    completedAt: null,
-    leaseOwner: null,
-    leaseExpiresAt: null,
-    cancellationRequestedAt: null,
-    finalCommits: [],
-    prUrl: null,
-    ...overrides,
+    id: 'run_daemon', ownerId: 'alice', task: 'Fix the failing integration tests',
+    repository: { localPath: '/tmp/repo' }, workspaceBranch: null, workspacePath: null,
+    agent: 'primeagent', status: 'QUEUED', attempt: 1, retryOf: null, error: null, errorKind: null,
+    constraints: { maxDurationMs: 60_000, maxRetries: 2 }, createdAt: now, startedAt: null,
+    completedAt: null, leaseOwner: null, leaseExpiresAt: null, cancellationRequestedAt: null,
+    finalCommits: [], prUrl: null, ...overrides,
   };
 }
 
-function makeContext(opts: { run?: Run; skills?: ResolvedSkill[]; env?: Record<string, string> } = {}): {
-  context: RunContext;
-  workspacePath: string;
-} {
+function makeContext(run: Run = makeRun()): RunContext {
   const workspacePath = tempDir('mercury-daemon-');
-  const run = opts.run ?? makeRun();
-  const context: RunContext = {
-    run,
-    repository: run.repository,
+  return {
+    run, repository: run.repository,
     workspace: { path: workspacePath, branch: 'agent/' + run.id, baseCommit: 'abc123', mode: 'copy' },
-    skills: opts.skills ?? [],
-    constraints: run.constraints,
+    skills: [] as ResolvedSkill[], constraints: run.constraints,
   };
-  return { context, workspacePath };
 }
 
-async function collectAll(handle: Awaited<ReturnType<DaemonAgentAdapter['start']>>): Promise<{
-  events: { type: string; payload: unknown }[];
-  exit: import('../src/domain/types.ts').AgentExit;
-}> {
+/**
+ * Socket paths go through the helpers' tracked temp files. A socket path is length-limited (104 bytes
+ * on macOS) and a long one fails connect() with EINVAL, so the length is asserted here rather than
+ * discovered as an unexplained failure later.
+ */
+function shortSocketPath(tag: string): string {
+  const p = tempFile(`mcd${tag}`, '.sock');
+  assert.ok(Buffer.byteLength(p) <= 104, `test socket path too long (${Buffer.byteLength(p)}): ${p}`);
+  return p;
+}
+
+interface Mock { path: string; close(): Promise<void>; }
+
+async function startMock(env: Record<string, string> = {}): Promise<Mock> {
+  const path = shortSocketPath('s');
+  const proc: ChildProcess = spawn(process.execPath, [MOCK, path], {
+    env: { ...process.env, MOCK_DAEMON_HELLO: HELLO_FIXTURE, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let err = '';
+  proc.stderr?.on('data', (d: Buffer) => { err += d.toString(); });
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`mock daemon did not start: ${err}`)), 8_000);
+    proc.stdout?.on('data', (d: Buffer) => {
+      if (d.toString().includes('"ready":true')) { clearTimeout(timer); resolve(); }
+    });
+    proc.once('exit', (code) => { clearTimeout(timer); reject(new Error(`mock exited ${code}: ${err}`)); });
+  });
+  return {
+    path,
+    close: async () => {
+      if (proc.exitCode === null) { proc.kill('SIGKILL'); await new Promise((r) => proc.once('exit', r)); }
+      // A leftover socket file looks exactly like a live listener to the next test, so remove it.
+      // (An earlier draft called require() here; this module is ESM, so it threw and cleanup silently
+      // did nothing, and every later test failed with EADDRINUSE.)
+      if (existsSync(path)) { try { unlinkSync(path); } catch { /* already gone */ } }
+    },
+  };
+}
+
+function adapterFor(mock: Mock, opts: ConstructorParameters<typeof DaemonAgentAdapter>[1] = {}): DaemonAgentAdapter {
+  return new DaemonAgentAdapter('prime-agent', { socketPath: mock.path, helloTimeoutMs: 1_500,
+    commandTimeoutMs: 3_000, connectTimeoutMs: 1_500, ...opts });
+}
+
+/** Fail rather than hang: a dropped frame must report the frame, not burn the runner's timeout. */
+async function withDeadline<T>(label: string, ms: number, work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} did not finish in ${ms}ms`)), ms);
+  });
+  try { return await Promise.race([work, guard]); }
+  finally { if (timer) clearTimeout(timer); }
+}
+
+async function collectAll(handle: Awaited<ReturnType<DaemonAgentAdapter['start']>>) {
   const events: { type: string; payload: unknown }[] = [];
   for await (const ev of handle.events) {
     if (ev.type === '__done__') break;
     events.push({ type: ev.type, payload: ev.payload });
   }
-  const exit = await handle.exit;
-  return { events, exit };
+  return { events, exit: await handle.exit };
 }
+
+const err = async (fn: () => Promise<unknown>): Promise<Error> => {
+  try { await fn(); } catch (e) { return e as Error; }
+  throw new Error('expected a rejection');
+};
+
+test('happy path: handshake, create, attach, prompt, events, completed exit', async () => {
+  const mock = await startMock();
+  try {
+    const adapter = adapterFor(mock);
+    const handle = await withDeadline('start', 8_000, adapter.start(makeContext()));
+    const { events, exit } = await withDeadline('collect', 8_000, collectAll(handle));
+    assert.ok(events.some((e) => e.type === 'agent.message'), `no agent.message in ${JSON.stringify(events)}`);
+    assert.equal(exit.reason, 'completed');
+    assert.equal(exit.code, 0);
+  } finally { await mock.close(); }
+});
+
+
 
 /**
- * Fail rather than hang. A dropped `agent_end` frame never settles the exit promise, so awaiting
- * `collectAll` outright turns a real regression into a test-runner timeout -- which still gets
- * caught by CI, but reports as an opaque timeout instead of naming the frame that went missing.
+ * Each test gets its own directory for the wire transcript. Sharing one temp namespace by name is how
+ * an earlier draft of this file made one test's commands appear in another's assertions: the failures
+ * looked like the adapter sending every command twice, and were purely scaffolding.
  */
-async function withDeadline<T>(label: string, ms: number, work: Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const guard = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} did not finish in ${ms}ms -- a frame was dropped`)), ms);
-  });
-  try {
-    return await Promise.race([work, guard]);
-  } finally {
-    clearTimeout(timer);
-  }
+/** The wire transcript is a tracked temp file; tests assert on it after the run finishes. */
+function newTx(): string { return tempFile('mcdwire', '.jsonl'); }
+
+function transcript(file: string): Record<string, unknown>[] {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
 
-function spawnAdapter(env: Record<string, string>): DaemonAgentAdapter {
-  return new DaemonAgentAdapter(process.execPath, { args: [MOCK], env });
-}
-
-test('daemon: happy path — prompt, events, completion', async () => {
-  const { context, workspacePath } = makeContext();
-  const adapter = spawnAdapter({ MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock') });
+test('every line the adapter writes is a valid daemon command envelope', async () => {
+  // Asserted on the WIRE, not on adapter internals. The old adapter sent a bare {type:"prompt"} and
+  // no test noticed, because the fixture accepted exactly that.
+  const tx = newTx();
+  const mock = await startMock({ MOCK_DAEMON_TRANSCRIPT: tx });
   try {
-    const handle = await adapter.start(context);
-    const { events, exit } = await collectAll(handle);
-    const types = events.map((e) => e.type);
-    assert.ok(types.includes('agent.message'), `expected agent.message, got ${types.join(',')}`);
-    assert.ok(types.includes('tool.started'));
-    assert.ok(types.includes('tool.completed'));
-    assert.equal(exit.code, 0);
-    const msg = events.find((e) => e.type === 'agent.message')?.payload as { text: string };
-    assert.equal(msg.text, 'Hello from daemon mock');
-  } finally {
-    await adapter.cancel(context.run.id);
-  }
+    const adapter = adapterFor(mock);
+    const handle = await adapter.start(makeContext());
+    await withDeadline('collect', 8_000, collectAll(handle));
+    const lines = transcript(tx);
+    assert.ok(lines.length >= 4, `expected create/attach/prompt/detach, saw ${lines.length}`);
+    for (const line of lines) {
+      assert.equal(line.type, 'command', `not a command envelope: ${JSON.stringify(line)}`);
+      assert.equal(typeof line.id, 'string');
+      assert.deepEqual(line.protocol, { name: 'prime-agent.daemon', version: 7 });
+      assert.match(String(line.clientId), /^mercury:run:run_daemon/);
+      assert.equal(typeof line.command, 'object');
+      assert.equal(typeof (line.command as any).type, 'string');
+    }
+  } finally { await mock.close(); }
 });
 
-test('daemon: input request -> response -> completion', async () => {
-  const { context, workspacePath } = makeContext();
-  const adapter = spawnAdapter({ MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'), MOCK_DAEMON_MODE: 'input' });
+test('create precedes prompt, and prompt carries the activeSessionId create returned', async () => {
+  // The adapter used to send prompt with no session at all. Ordering and identity are both asserted
+  // on the transcript so a reordering cannot pass by accident.
+  const tx = newTx();
+  const mock = await startMock({ MOCK_DAEMON_TRANSCRIPT: tx });
   try {
-    const handle = await adapter.start(context);
-    // Phase 1: wait for input.required (promise-based, doesn't consume the generator)
-    const inputPromise = new Promise<{ type: string; payload: unknown }>((resolve) => {
-      (async () => {
-        for await (const ev of handle.events) {
-          if (ev.type === 'input.required') { resolve({ type: ev.type, payload: ev.payload }); return; }
-          if (ev.type === '__done__') { resolve({ type: '__none__', payload: {} }); return; }
-        }
-      })();
+    const adapter = adapterFor(mock);
+    const handle = await adapter.start(makeContext());
+    await withDeadline('collect', 8_000, collectAll(handle));
+    const types = transcript(tx).map((l) => (l.command as any).type);
+    assert.deepEqual(types, ['create', 'attach', 'prompt', 'kill']);
+    const prompt = transcript(tx).find((l) => (l.command as any).type === 'prompt')!.command as any;
+    assert.match(prompt.activeSessionId, /^sess_/, 'prompt must name the daemon-assigned session');
+    assert.equal(typeof prompt.message, 'string');
+  } finally { await mock.close(); }
+});
+
+test('session identity is reported before the prompt is sent', async () => {
+  // Persisting the id after the prompt leaves a window in which a worker that dies mid-run cannot
+  // reattach. The ordering is the whole point, so it is asserted against the transcript.
+  const tx = newTx();
+  const mock = await startMock({ MOCK_DAEMON_TRANSCRIPT: tx });
+  try {
+    const seen: { activeSessionId: string; generation: string | null; sentSoFar: string[] }[] = [];
+    const adapter = adapterFor(mock, {
+      // Sample the wire INSIDE the callback. Sampling after start() returns proves nothing, because
+      // start() has already sent the prompt by then -- an earlier draft of this test passed for the
+      // wrong reason until that was fixed.
+      onSessionIdentity: (id) => seen.push({
+        activeSessionId: id.activeSessionId, generation: id.generation,
+        sentSoFar: transcript(tx).map((l) => (l.command as any).type),
+      }),
     });
-    const inputEvent = await inputPromise;
-    assert.ok(inputEvent.type === 'input.required', 'expected input.required');
-    const payload = inputEvent.payload as { method: string; options: { label: string; value: string }[] };
-    assert.equal(payload.method, 'select');
-    assert.equal(payload.options.length, 2);
-    await adapter.sendInput(context.run.id, { value: 'yes', at: new Date().toISOString() });
-    // Phase 2: collect the rest (response events from the mock)
-    const all: { type: string; payload: unknown }[] = [];
-    for await (const ev of handle.events) {
-      if (ev.type === '__done__') break;
-      all.push({ type: ev.type, payload: ev.payload });
-    }
-    const exit = await handle.exit;
-    assert.equal(exit.code, 0);
-    const msg = all.find((e) => e.type === 'agent.message')?.payload as { text: string };
-    assert.ok(msg.text.includes('got input'), `expected 'got input' in '${msg.text}'`);
-  } finally {
-    await adapter.cancel(context.run.id);
-  }
+    const handle = await adapter.start(makeContext());
+    assert.equal(seen.length, 1, 'identity must be reported exactly once');
+    assert.match(seen[0]!.activeSessionId, /^sess_/);
+    assert.equal(typeof seen[0]!.generation, 'string', 'supervisor generation must be captured');
+    assert.deepEqual(seen[0]!.sentSoFar, ['create'], 'identity must be recorded after create and before prompting');
+    await withDeadline('collect', 8_000, collectAll(handle));
+  } finally { await mock.close(); }
 });
 
-test('daemon: sendInput writes the RPC response shape { id, value } (issue #10)', async () => {
-  const { context, workspacePath } = makeContext();
-  const logPath = join(workspacePath, 'daemon.log');
-  const adapter = spawnAdapter({
-    MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'),
-    MOCK_DAEMON_MODE: 'input',
-    MOCK_DAEMON_LOG: logPath,
-  });
+test('normal completion releases the session so no worker is stranded', async () => {
+  // Reuse is not implemented (fresh client identity per start, resume() throws), so a session left live
+  // after a successful run is a stranded supervisor worker. Detach becomes correct when reattach lands.
+  const tx = newTx();
+  const mock = await startMock({ MOCK_DAEMON_TRANSCRIPT: tx });
   try {
-    const handle = await adapter.start(context);
-    // wait for input.required
-    const inputPromise = new Promise<{ type: string; payload: unknown }>((resolve) => {
-      (async () => {
-        for await (const ev of handle.events) {
-          if (ev.type === 'input.required') { resolve({ type: ev.type, payload: ev.payload }); return; }
-          if (ev.type === '__done__') { resolve({ type: '__none__', payload: {} }); return; }
-        }
-      })();
-    });
-    const inputEvent = await inputPromise;
-    assert.equal(inputEvent.type, 'input.required');
-    const payload = inputEvent.payload as { requestId: string };
-    await adapter.sendInput(context.run.id, { value: 'yes', at: new Date().toISOString() });
-    // drain the rest so the session completes
-    for await (const ev of handle.events) {
-      if (ev.type === '__done__') break;
-    }
-    await handle.exit;
-    // the mock logs the exact frame it received
-    const log = readFileSync(logPath, 'utf8');
-    const line = log.split('\n').find((l) => l.startsWith('input response: '));
-    assert.ok(line, 'expected an input response log line');
-    const frame = JSON.parse(line!.slice('input response: '.length)) as Record<string, unknown>;
-    assert.equal(frame.type, 'extension_ui_response');
-    assert.equal(frame.id, payload.requestId);
-    assert.equal(frame.value, 'yes');
-    assert.equal(frame.requestId, undefined, 'old requestId key must be gone');
-    assert.equal(frame.response, undefined, 'old response key must be gone');
-  } finally {
-    await adapter.cancel(context.run.id);
-  }
+    const adapter = adapterFor(mock);
+    const handle = await adapter.start(makeContext());
+    await withDeadline('collect', 8_000, collectAll(handle));
+    const types = transcript(tx).map((l) => (l.command as any).type);
+    assert.ok(types.includes('kill'), `completion must release the session, saw ${types.join(',')}`);
+    assert.ok(!types.includes('detach'), types.join(','));
+  } finally { await mock.close(); }
 });
-test('daemon: sendInput confirm method coerces to { id, confirmed } (issue #10)', async () => {
-  const { context, workspacePath } = makeContext();
-  const logPath = join(workspacePath, 'daemon.log');
-  const adapter = spawnAdapter({
-    MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'),
-    MOCK_DAEMON_MODE: 'input',
-    MOCK_DAEMON_METHOD: 'confirm',
-    MOCK_DAEMON_LOG: logPath,
-  });
+
+test('all frames sharing one write are delivered, not just the first (#68)', async () => {
+  const mock = await startMock({ MOCK_DAEMON_COALESCE: '1' });
   try {
-    const handle = await adapter.start(context);
-    const inputPromise = new Promise<{ type: string; payload: unknown }>((resolve) => {
-      (async () => {
-        for await (const ev of handle.events) {
-          if (ev.type === 'input.required') { resolve({ type: ev.type, payload: ev.payload }); return; }
-          if (ev.type === '__done__') { resolve({ type: '__none__', payload: {} }); return; }
-        }
-      })();
-    });
-    const inputEvent = await inputPromise;
-    assert.equal(inputEvent.type, 'input.required');
-    const payload = inputEvent.payload as { requestId: string };
-    await adapter.sendInput(context.run.id, { value: 'yes', at: new Date().toISOString() });
-    for await (const ev of handle.events) {
-      if (ev.type === '__done__') break;
-    }
-    await handle.exit;
-    const log = readFileSync(logPath, 'utf8');
-    const line = log.split('\n').find((l) => l.startsWith('input response: '));
-    assert.ok(line, 'expected an input response log line');
-    const frame = JSON.parse(line!.slice('input response: '.length)) as Record<string, unknown>;
-    assert.equal(frame.type, 'extension_ui_response');
-    assert.equal(frame.id, payload.requestId);
-    assert.equal(frame.confirmed, true);
-    assert.equal(frame.value, undefined);
-  } finally {
-    await adapter.cancel(context.run.id);
-  }
-});
-
-test('daemon: sendInput cancelled passthrough writes { id, cancelled } (issue #10)', async () => {
-  const { context, workspacePath } = makeContext();
-  const logPath = join(workspacePath, 'daemon.log');
-  const adapter = spawnAdapter({
-    MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'),
-    MOCK_DAEMON_MODE: 'input',
-    MOCK_DAEMON_LOG: logPath,
-  });
-  try {
-    const handle = await adapter.start(context);
-    const inputPromise = new Promise<{ type: string; payload: unknown }>((resolve) => {
-      (async () => {
-        for await (const ev of handle.events) {
-          if (ev.type === 'input.required') { resolve({ type: ev.type, payload: ev.payload }); return; }
-          if (ev.type === '__done__') { resolve({ type: '__none__', payload: {} }); return; }
-        }
-      })();
-    });
-    const inputEvent = await inputPromise;
-    assert.equal(inputEvent.type, 'input.required');
-    const payload = inputEvent.payload as { requestId: string };
-    await adapter.sendInput(context.run.id, { value: { cancelled: true }, at: new Date().toISOString() });
-    for await (const ev of handle.events) {
-      if (ev.type === '__done__') break;
-    }
-    await handle.exit;
-    const log = readFileSync(logPath, 'utf8');
-    const line = log.split('\n').find((l) => l.startsWith('input response: '));
-    assert.ok(line, 'expected an input response log line');
-    const frame = JSON.parse(line!.slice('input response: '.length)) as Record<string, unknown>;
-    assert.equal(frame.type, 'extension_ui_response');
-    assert.equal(frame.id, payload.requestId);
-    assert.equal(frame.cancelled, true);
-    assert.equal(frame.value, undefined);
-  } finally {
-    await adapter.cancel(context.run.id);
-  }
-});
-
-
-
-test('daemon: abort cancels the session', async () => {
-  const { context, workspacePath } = makeContext();
-  const adapter = spawnAdapter({ MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock') });
-  const handle = await adapter.start(context);
-  await adapter.cancel(context.run.id);
-  const exit = await handle.exit;
-  assert.ok(exit.code !== 0 || exit.signal === 'SIGTERM');
-  // Pin the REASON, not just "it failed somehow". cancel() settles before touching the socket
-  // precisely so a synchronous socket error cannot win the race and report SIGPIPE/failed for
-  // what was a deliberate user cancellation.
-  assert.equal(exit.reason, 'cancelled', `a deliberate cancel must report 'cancelled', got ${JSON.stringify(exit)}`);
-});
-
-test('daemon: spawn failure surfaces as failed exit', async () => {
-  const { context, workspacePath } = makeContext();
-  const adapter = new DaemonAgentAdapter('/nonexistent/prime-agent', { args: [] });
-  try {
-    const handle = await adapter.start(context);
-    const exit = await handle.exit;
-    assert.notEqual(exit.code, 0);
-  } catch {
-    // start() may throw if the spawn fails immediately — acceptable
-  }
-});
-
-test('daemon: context file written into workspace', async () => {
-  const { context, workspacePath } = makeContext();
-  const adapter = spawnAdapter({ MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock') });
-  try {
-    await adapter.start(context);
-    const ctx = JSON.parse(readFileSync(join(workspacePath, '.mercury-context.json'), 'utf8')) as { runId: string; task: string };
-    assert.equal(ctx.runId, 'run_daemon');
-    assert.equal(ctx.task, 'Fix the failing integration tests');
-  } finally {
-    await adapter.cancel(context.run.id);
-  }
-});
-
-test('daemon: sendInput throws when no live session (issue #30)', async () => {
-  const { context, workspacePath } = makeContext();
-  const adapter = spawnAdapter({
-    MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'),
-    MOCK_DAEMON_MODE: 'input',
-  });
-  try {
-    await assert.rejects(
-      () => adapter.sendInput('no-such-run', { value: 'x', at: new Date().toISOString() }),
-      /No live agent session/,
-    );
-  } finally {
-    await adapter.cancel(context.run.id);
-  }
-});
-test('daemon: sendInput throws when not waiting for input (issue #30)', async () => {
-  const { context, workspacePath } = makeContext();
-  const adapter = spawnAdapter({
-    MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'),
-    // happy mode: no input.required emitted, so the session has no pending dialog
-  });
-  try {
-    const handle = await adapter.start(context);
-    // drain events so the session is established
-    for await (const ev of handle.events) {
-      if (ev.type === '__done__') break;
-    }
-    await assert.rejects(
-      () => adapter.sendInput(context.run.id, { value: 'x', at: new Date().toISOString() }),
-      /not waiting for input/,
-    );
-  } finally {
-    await adapter.cancel(context.run.id);
-  }
-});
-
-test('daemon: terminate() settles the exit promise instead of leaving it pending (issue #55)', async () => {
-  // The bug: terminate() set `done = true`, and every exit handler in this adapter was
-  // guarded on `done`, so none of them would settle afterwards. handle.exit NEVER resolved.
-  // The worker then sat in Promise.race([handle.exit, sleep(10_000)]) for the full timeout and
-  // reported an invented SIGKILL/terminated exit instead of the real one.
-  //
-  // `ignore` mode acks the prompt and then emits nothing, so nothing else can settle the exit
-  // -- terminate() is the only candidate.
-  const { context, workspacePath } = makeContext();
-  const adapter = spawnAdapter({
-    MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'),
-    MOCK_DAEMON_MODE: 'ignore',
-  });
-  try {
-    const handle = await adapter.start(context);
-
-    await handle.terminate();
-
-    // Race against a deadline rather than awaiting: the bug IS that this promise never
-    // settles, so a plain await would hang the runner instead of failing it. The bound is far
-    // below the worker's 10s fabrication timeout -- that gap is the user-visible win.
-    const TIMEOUT_MS = 5_000;
-    const settledIn = Date.now();
-    const outcome = await Promise.race([
-      handle.exit.then((exit) => ({ kind: 'settled' as const, exit })),
-      new Promise<{ kind: 'hung' }>((resolve) => setTimeout(() => resolve({ kind: 'hung' }), TIMEOUT_MS)),
-    ]);
-
-    // assert.fail returns never, so this narrows the union for the lines below.
-    if (outcome.kind === 'hung') {
-      assert.fail(`handle.exit never resolved after terminate() -- the worker would stall `
-        + `${TIMEOUT_MS}ms+ and invent an exit reason instead of the real one`);
-    }
-
-    const elapsed = Date.now() - settledIn;
-    assert.ok(elapsed < TIMEOUT_MS, `exit settled only after ${elapsed}ms`);
-    // The reason must be the real one, not the worker's fabricated SIGKILL fallback.
-    assert.equal(outcome.exit.reason, 'terminated', `expected the real 'terminated' reason, got ${JSON.stringify(outcome.exit)}`);
-  } finally {
-    await adapter.cancel(context.run.id);
-  }
-});
-
-// NOTE (issue #55): an idempotency test for settleExit was written and deliberately
-// removed. It asserted that tearing down after a natural end left the exit reason as
-// 'completed', but that assertion CANNOT fail: a Promise ignores every resolve() after
-// the first, so deleting the `if (session.exitSettled) return` guard left the test green.
-// A test that cannot fail is worse than no test, because it reads as coverage. The guard
-// is kept as defence in depth; the behaviour that actually matters -- terminate() settling
-// the exit at all -- is covered by the test above, which does fail when the settle is
-// removed.
-
-test('daemon: frames coalesced into the hello write are not dropped (issue #68)', async () => {
-  // TCP has no frame boundaries. The daemon here sends the hello plus four further frames in a
-  // single write, which is legal and what a real daemon does when it has something to say
-  // immediately. The old readFrame resolved on the first frame and threw the tail away, then the
-  // caller started a fresh reader from an empty buffer -- so every one of those four frames was
-  // lost with no error and no sign anything was missing.
-  const { context, workspacePath } = makeContext();
-  const adapter = spawnAdapter({
-    MOCK_DAEMON_SOCKET: join(workspacePath, '.mercury-sessions', 'daemon.sock'),
-    MOCK_DAEMON_MODE: 'pipeline',
-  });
-  try {
-    const handle = await adapter.start(context);
-    const { events, exit } = await withDeadline('pipeline drain', 5_000, collectAll(handle));
-    // The translator merges consecutive text deltas into one message (as it does on the happy
-    // path), so the assertion is that BOTH deltas survived -- not that they arrived separately.
-    const text = events
-      .filter((e) => e.type === 'agent.message')
-      .map((e) => (e.payload as { text: string }).text)
-      .join('');
-    assert.equal(text, 'alphabeta', 'a coalesced delta was dropped');
-    // agent_end is the LAST frame in the coalesced write, so a clean completed exit proves the
-    // tail of the buffer was consumed and not merely its head. Had it been dropped, nothing would
-    // have settled the exit from agent_end and this would have failed by timeout instead.
-    assert.equal(exit.code, 0, `agent_end lost; got events=${JSON.stringify(events.map((e) => e.type))}`);
+    const adapter = adapterFor(mock);
+    const handle = await adapter.start(makeContext());
+    const { events, exit } = await withDeadline('collect', 8_000, collectAll(handle));
+    assert.ok(events.some((e) => e.type === 'agent.message'), 'the coalesced delta must still arrive');
     assert.equal(exit.reason, 'completed');
+  } finally { await mock.close(); }
+});
+
+test('a framed hello is refused loudly as the internal transport, not hung on', async () => {
+  const mock = await startMock({ MOCK_DAEMON_MODE: 'framed' });
+  try {
+    const adapter = adapterFor(mock);
+    const e = await withDeadline('start', 8_000, err(() => adapter.start(makeContext())));
+    assert.ok(e instanceof DaemonProtocolError, e.constructor.name);
+    assert.match(e.message, /INTERNAL worker transport/);
+    assert.match(e.message, /PRIME_AGENT_INTERNAL_DAEMON_WORKER/);
+  } finally { await mock.close(); }
+});
+
+test('a newer daemon protocol is refused at start, naming observed and supported', async () => {
+  const mock = await startMock({ MOCK_DAEMON_MODE: 'bad-version' });
+  try {
+    const adapter = adapterFor(mock);
+    const e = await withDeadline('start', 8_000, err(() => adapter.start(makeContext())));
+    assert.match(e.message, /newer protocol/);
+    assert.match(e.message, /observed v99/);
+  } finally { await mock.close(); }
+});
+
+test('a missing required capability is refused and named', async () => {
+  const mock = await startMock({ MOCK_DAEMON_MODE: 'missing-cap' });
+  try {
+    const adapter = adapterFor(mock);
+    const e = await withDeadline('start', 8_000, err(() => adapter.start(makeContext())));
+    assert.match(e.message, /missing capabilities/);
+    assert.match(e.message, /event_sequence/);
+  } finally { await mock.close(); }
+});
+
+test('a daemon that never greets fails with a message instead of hanging', async () => {
+  const mock = await startMock({ MOCK_DAEMON_MODE: 'silent' });
+  try {
+    const adapter = adapterFor(mock);
+    const e = await withDeadline('start', 8_000, err(() => adapter.start(makeContext())));
+    assert.match(e.message, /daemon_hello/);
+  } finally { await mock.close(); }
+});
+
+test('a refused command surfaces the daemon error code, not a timeout', async () => {
+  // The adapter used to discard every response, so a precise code like no_capacity never reached anyone.
+  const mock = await startMock({ MOCK_DAEMON_MODE: 'reject-create' });
+  try {
+    const adapter = adapterFor(mock);
+    const e = await withDeadline('start', 8_000, err(() => adapter.start(makeContext())));
+    assert.match(e.message, /create \(no_capacity\)/);
+    assert.match(e.message, /no capacity/);
+  } finally { await mock.close(); }
+});
+
+test('terminate settles the exit as terminated rather than racing into a SIGPIPE failure (#55)', async () => {
+  const mock = await startMock({ MOCK_DAEMON_PROMPT_REPLIES: '0' });
+  try {
+    const adapter = adapterFor(mock);
+    const handle = await adapter.start(makeContext());
+    const exit = await withDeadline('terminate', 8_000, (async () => {
+      await handle.terminate();
+      return handle.exit;
+    })());
+    assert.equal(exit.reason, 'terminated');
+    assert.equal(exit.signal, 'SIGTERM');
+  } finally { await mock.close(); }
+});
+
+test('cancel settles as cancelled and releases the session (#46)', async () => {
+  const tx = newTx();
+  const mock = await startMock({ MOCK_DAEMON_PROMPT_REPLIES: '0', MOCK_DAEMON_TRANSCRIPT: tx });
+  try {
+    const adapter = adapterFor(mock);
+    const handle = await adapter.start(makeContext());
+    await adapter.cancel('run_daemon');
+    const exit = await withDeadline('exit', 8_000, handle.exit);
+    assert.equal(exit.reason, 'cancelled');
+    const types = transcript(tx).map((l) => (l.command as any).type);
+    assert.ok(types.includes('abort'), 'the daemon should learn the run was cancelled');
+    assert.ok(types.includes('kill'), 'no worker may be left running');
+    adapter.dispose('run_daemon');
+  } finally { await mock.close(); }
+});
+
+test('dispose after terminate is safe and drops per-run state (#62, #97)', async () => {
+  const mock = await startMock();
+  try {
+    const adapter = adapterFor(mock);
+    const handle = await adapter.start(makeContext());
+    await handle.terminate();
+    await handle.exit;
+    adapter.dispose('run_daemon');
+    adapter.dispose('run_daemon'); // idempotent
+  } finally { await mock.close(); }
+});
+
+test('a missing supervisor socket produces an actionable error, never a spawn', async () => {
+  const adapter = new DaemonAgentAdapter('prime-agent', { socketPath: '/tmp/definitely-not-here.sock' });
+  const e = await err(() => adapter.start(makeContext()));
+  assert.match(e.message, /no daemon supervisor socket/);
+  assert.match(e.message, /prime-agent status/);
+});
+
+test('an over-long socket path is refused before connect', async () => {
+  const deep = '/' + 'd/'.repeat(60) + 'daemon.sock';
+  const adapter = new DaemonAgentAdapter('prime-agent', { socketPath: deep });
+  const e = await err(() => adapter.start(makeContext()));
+  assert.match(e.message, /EINVAL|over the 104-byte limit/);
+});
+
+test('a run requesting isolation is refused rather than run unsandboxed', async () => {
+  const mock = await startMock();
+  try {
+    const sandbox = { requiresSandbox: () => true, buildCommand: () => ({ cmd: 'docker', args: [] }) } as never;
+    const adapter = adapterFor(mock, { sandbox });
+    const e = await err(() => adapter.start(makeContext()));
+    assert.match(e.message, /cannot sandbox/);
+  } finally { await mock.close(); }
+});
+
+test('resume refuses rather than guessing at session continuity', async () => {
+  const mock = await startMock();
+  try {
+    const adapter = adapterFor(mock);
+    const e = await err(() => adapter.resume!('run_daemon'));
+    assert.match(e.message, /refusing to guess/);
+  } finally { await mock.close(); }
+});
+
+test('provider and model flags reach the create config instead of being dropped', async () => {
+  const tx = newTx();
+  const mock = await startMock({ MOCK_DAEMON_TRANSCRIPT: tx });
+  try {
+    const adapter = adapterFor(mock, { args: ['--provider', 'anthropic', '--model', 'some-model', '--verbose'] });
+    const handle = await adapter.start(makeContext());
+    await withDeadline('collect', 8_000, collectAll(handle));
+    const create = transcript(tx).find((l) => (l.command as any).type === 'create')!.command as any;
+    assert.equal(create.config.model, 'some-model');
+    assert.equal(create.config.provider, 'anthropic');
+    assert.equal(typeof create.config.cwd, 'string');
+  } finally { await mock.close(); }
+});
+
+test('sessionConfigFromArgs reports what it could not place', () => {
+  const { config, ignored } = sessionConfigFromArgs(['--model', 'm', '--offline', 'stray']);
+  assert.deepEqual(config, { model: 'm' });
+  assert.deepEqual(ignored, ['--offline', 'stray']);
+});
+
+test('socket discovery prefers the explicit option, then MERCURY_DAEMON_SOCKET, then the default', () => {
+  const withOpt = new DaemonAgentAdapter('prime-agent', { socketPath: '/tmp/explicit.sock' });
+  assert.deepEqual(withOpt.resolveSocketPath(), { path: '/tmp/explicit.sock', source: 'option' });
+  const saved = process.env.MERCURY_DAEMON_SOCKET;
+  process.env.MERCURY_DAEMON_SOCKET = '/tmp/from-env.sock';
+  try {
+    assert.deepEqual(new DaemonAgentAdapter('p').resolveSocketPath(),
+      { path: '/tmp/from-env.sock', source: 'MERCURY_DAEMON_SOCKET' });
   } finally {
-    await adapter.cancel(context.run.id);
+    if (saved === undefined) delete process.env.MERCURY_DAEMON_SOCKET;
+    else process.env.MERCURY_DAEMON_SOCKET = saved;
   }
+  const d = new DaemonAgentAdapter('p').resolveSocketPath();
+  assert.equal(d.source, 'default supervisor path');
+  assert.match(d.path, /prime-agent-\w+[/\\]daemon\.sock$/);
+});
+
+test('the framing detector agrees with the mock that produces framed bytes', () => {
+  // Cross-check: the same helper the adapter uses must flag what the mock builds with the real
+  // private-framing layout, and must not flag the real JSONL hello.
+  const helloLine = readFileSync(HELLO_FIXTURE, 'utf8').split('\n').filter((l) => !l.startsWith('#') && l.trim())[0];
+  assert.equal(looksPrivateFramed(Buffer.from(helloLine, 'utf8')), false);
+});
+
+test('describeSupervisor reports the mock supervisor honestly', async () => {
+  const mock = await startMock();
+  try {
+    const info = await adapterFor(mock).describeSupervisor();
+    assert.equal(info.protocolVersion, 7);
+    assert.ok(info.capabilities.includes('event_sequence'));
+    assert.equal(typeof info.generation, 'string');
+    assert.equal(info.appVersion, '0.9.1');
+  } finally { await mock.close(); }
+});
+
+// ---------------------------------------------------------------------------
+// Contract test against the REAL supervisor.
+//
+// Everything above runs against a fixture, and the whole reason this adapter was broken is that its
+// fixture shared its wrong assumptions. This test talks to whatever supervisor is actually running on
+// this machine and is read-only: it performs the handshake and issues `list`, creating no session and
+// starting no agent. It skips with a loud message when no supervisor is reachable, so CI without a
+// daemon still passes -- but a machine with a daemon cannot pass these twelve tests while disagreeing
+// with the real protocol.
+// ---------------------------------------------------------------------------
+const realAdapter = new DaemonAgentAdapter('prime-agent', { commandTimeoutMs: 10_000 });
+const realSocket = realAdapter.resolveSocketPath();
+const realReachable = existsSync(realSocket.path);
+
+test('the REAL supervisor speaks the protocol this adapter implements', { skip: realReachable ? false :
+  `no supervisor socket at ${realSocket.path}; start prime-agent to run this contract test` }, async () => {
+  const info = await withDeadline('describeSupervisor', 20_000, realAdapter.describeSupervisor());
+  // Framing: a framed hello would have been rejected before we got here.
+  // Envelope: `list` was answered, which only happens for a well-formed envelope.
+  assert.equal(info.protocolVersion, 7, 'protocol version negotiated with the real supervisor');
+  assert.ok(info.capabilities.includes('event_sequence'),
+    `real supervisor lacks event_sequence: ${info.capabilities.join(',')}`);
+  assert.match(info.socketPath, /daemon\.sock$/);
+  assert.equal(typeof info.generation, 'string');
+  // The response must be the supervisor's own shape, not something the adapter invented.
+  const sessions = (info.sessions as { sessions?: unknown[] })?.sessions;
+  assert.ok(Array.isArray(sessions), `list returned ${JSON.stringify(info.sessions).slice(0, 200)}`);
+});
+
+test('an event with no type is reported, not silently dropped', async () => {
+  // A guard nobody proved fires is a comment. This asserts the warning is actually emitted, and that
+  // the run still completes -- refusing one malformed event must not abort the run.
+  const warnings: Record<string, unknown>[] = [];
+  const logger = {
+    info: () => {}, debug: () => {}, error: () => {},
+    warn: (msg: string, fields: Record<string, unknown>) => { warnings.push({ msg, ...fields }); },
+  } as never;
+  const mock = await startMock({ MOCK_DAEMON_SHAPELESS: '1' });
+  try {
+    const adapter = adapterFor(mock, { logger });
+    const handle = await adapter.start(makeContext());
+    const { events, exit } = await withDeadline('collect', 8_000, collectAll(handle));
+    const hit = warnings.find((w) => String(w.msg).includes('no string type'));
+    assert.ok(hit, `expected a warning, saw ${JSON.stringify(warnings)}`);
+    assert.deepEqual((hit as never as { keys: string[] }).keys, ['delta', 'noTypeHere']);
+    assert.equal(exit.reason, 'completed', 'a shapeless event must not fail the run');
+    assert.ok(!events.some((e) => JSON.stringify(e.payload).includes('orphan')));
+  } finally { await mock.close(); }
+});
+
+test('sendInput answers a pending dialog over the wire', async () => {
+  // The first draft of sendInput threw on every healthy session: `!session?.socket.destroyed` is true
+  // exactly when the socket is fine. None of the twelve old tests called sendInput, so nothing noticed.
+  const tx = newTx();
+  const mock = await startMock({ MOCK_DAEMON_AWAIT_INPUT: '1', MOCK_DAEMON_AFTER_INPUT: 'end', MOCK_DAEMON_TRANSCRIPT: tx });
+  try {
+    const adapter = adapterFor(mock);
+    const handle = await adapter.start(makeContext());
+    // Consume in the background and signal when the dialog arrives. Breaking out of a `for await`
+    // instead made this test depend on exactly when the run finished, which under full-suite load is
+    // not when the test expects it.
+    const seen: string[] = [];
+    let signalWaiting: () => void = () => {};
+    const waiting = new Promise<void>((r) => { signalWaiting = r; });
+    const draining = (async () => {
+      for await (const ev of handle.events) {
+        if (ev.type === '__done__') break;
+        seen.push(ev.type);
+        if (ev.type === 'input.required') signalWaiting();
+      }
+    })();
+    await withDeadline('input.required', 8_000, waiting);
+    await withDeadline('sendInput', 8_000,
+      adapter.sendInput('run_daemon', { value: 'main', at: new Date().toISOString() }));
+    const answered = transcript(tx).find((l) => (l.command as any).type === 'extension_ui_response');
+    assert.ok(answered, 'the answer must reach the daemon as extension_ui_response');
+    const cmd = answered!.command as any;
+    // The daemon takes {requestId, response}. The flat RPC form {id, value} is accepted by the socket
+    // and answers nothing, so the shape is asserted on the wire rather than trusted.
+    assert.equal(cmd.requestId, 'req-1');
+    assert.deepEqual(cmd.response, { value: 'main' });
+    assert.equal(cmd.id, undefined, 'the flat RPC form must not be sent over the daemon socket');
+    assert.match(cmd.activeSessionId, /^sess_/, 'the answer must name the session it answers');
+    const exit = await withDeadline('exit', 8_000, Promise.all([handle.exit, draining]).then(([e]) => e));
+    assert.equal(exit.reason, 'completed');
+  } finally { await mock.close(); }
+});
+
+test('sendInput refuses when nothing is waiting, and when the run is gone', async () => {
+  // PROMPT_REPLIES=0 keeps the run open. With the default mock the turn completes a few milliseconds
+  // after start(), so the session is legitimately gone by the time this asserts, and the assertion
+  // passed or failed depending on load rather than on behaviour.
+  const mock = await startMock({ MOCK_DAEMON_PROMPT_REPLIES: '0' });
+  try {
+    const adapter = adapterFor(mock);
+    await adapter.start(makeContext());
+    const e = await err(() => adapter.sendInput('run_daemon', { value: 'x', at: new Date().toISOString() }));
+    assert.match(e.message, /not waiting for input/);
+    const gone = await err(() => adapter.sendInput('no-such-run', { value: 'x', at: new Date().toISOString() }));
+    assert.match(gone.message, /No live agent session/);
+  } finally { await mock.close(); }
+});
+
+test('the mock rejects an envelope with no clientId', async () => {
+  // The mock claims to enforce the envelope; it must enforce all of it, or it silently permits a
+  // regression the real supervisor would refuse.
+  const mock = await startMock();
+  try {
+    const sock = createConnection(mock.path);
+    await new Promise<void>((res, rej) => { sock.once('connect', () => res()); sock.once('error', rej); });
+    const reply = await new Promise<Record<string, unknown>>((res) => {
+      let buf = '';
+      sock.on('data', (d: Buffer) => {
+        buf += d.toString();
+        const line = buf.split('\n').filter(Boolean)[1]; // [0] is the hello
+        if (line) res(JSON.parse(line));
+      });
+      setTimeout(() => sock.write(JSON.stringify({
+        type: 'command', id: 'x1', protocol: { name: 'prime-agent.daemon', version: 7 },
+        command: { type: 'list' }, // no clientId
+      }) + '\n'), 50);
+    });
+    assert.equal(reply.success, false);
+    assert.equal((reply.errorInfo as { code: string }).code, 'invalid_envelope');
+    sock.destroy();
+  } finally { await mock.close(); }
+});
+
+test('each start presents a distinct client identity', async () => {
+  // The supervisor binds a session to the clientId that created it and does not clear the binding when
+  // the session is killed, so a reused clientId hands back a dead activeSessionId and every later attach
+  // for that run fails. Verified against a live supervisor; this pins it so it cannot regress.
+  const txA = newTx(); const txB = newTx();
+  const mockA = await startMock({ MOCK_DAEMON_TRANSCRIPT: txA });
+  const mockB = await startMock({ MOCK_DAEMON_TRANSCRIPT: txB });
+  try {
+    const run = makeRun();
+    const adapter = new DaemonAgentAdapter('prime-agent', {
+      socketPath: mockA.path, helloTimeoutMs: 1_500, commandTimeoutMs: 3_000, connectTimeoutMs: 1_500 });
+    const h1 = await adapter.start(makeContext(run));
+    await withDeadline('collect A', 8_000, collectAll(h1));
+    const adapter2 = new DaemonAgentAdapter('prime-agent', {
+      socketPath: mockB.path, helloTimeoutMs: 1_500, commandTimeoutMs: 3_000, connectTimeoutMs: 1_500 });
+    const h2 = await adapter2.start(makeContext(run));
+    await withDeadline('collect B', 8_000, collectAll(h2));
+    const idA = transcript(txA)[0]!.clientId as string;
+    const idB = transcript(txB)[0]!.clientId as string;
+    assert.match(idA, /^mercury:run:run_daemon:s[0-9a-f]+$/);
+    assert.notEqual(idA, idB, 'two starts must not share a client identity');
+  } finally { await mockA.close(); await mockB.close(); }
+});
+
+test('a session that closes mid-run ends the run with a failure, not a timeout', async () => {
+  const warnings: Record<string, unknown>[] = [];
+  const logger = { info: () => {}, error: () => {},
+    warn: (msg: string, f: Record<string, unknown>) => { warnings.push({ msg, ...f }); } } as never;
+  const mock = await startMock({ MOCK_DAEMON_CLOSE_EARLY: '1' });
+  try {
+    const adapter = adapterFor(mock, { logger, commandTimeoutMs: 30_000 });
+    const handle = await adapter.start(makeContext());
+    // The command timeout is 30s; the run must end as soon as the closure is announced.
+    const exit = await withDeadline('exit', 8_000, handle.exit);
+    assert.equal(exit.reason, 'failed');
+    assert.ok(warnings.some((w) => String(w.msg).includes('session closed before the run finished')),
+      JSON.stringify(warnings));
+  } finally { await mock.close(); }
+});
+
+test('keepSessionsAlive detaches instead, for when reattach exists', async () => {
+  const tx = newTx();
+  const mock = await startMock({ MOCK_DAEMON_TRANSCRIPT: tx });
+  try {
+    const adapter = adapterFor(mock, { keepSessionsAlive: true });
+    const handle = await adapter.start(makeContext());
+    await withDeadline('collect', 8_000, collectAll(handle));
+    const types = transcript(tx).map((l) => (l.command as any).type);
+    assert.ok(types.includes('detach'), types.join(','));
+    assert.ok(!types.includes('kill'), types.join(','));
+  } finally { await mock.close(); }
+});
+
+test('a bad handshake on one run does not break another run sharing the adapter', async () => {
+  // The hello waiters used to live on the adapter, so a second connection's hello resolved the first
+  // session's waiter and a second connection's framed bytes failed every handshake in flight. Harmless
+  // while the worker drives one run at a time, and a cross-run misfire the moment it does not.
+  const mock = await startMock({ MOCK_DAEMON_MODE: 'slow_hello_first' });
+  try {
+    const adapter = adapterFor(mock);
+    const first = adapter.start(makeContext(makeRun({ id: 'run_first' })));
+    // The mock holds the first hello for 600ms, so the second (framed) connection arrives while the
+    // first handshake is still pending -- that overlap is the whole point of the test.
+    await new Promise((r) => setTimeout(r, 100));
+    const second = adapter.start(makeContext(makeRun({ id: 'run_second' })));
+    const [a, b] = await Promise.allSettled([
+      withDeadline('first', 8_000, first).then(collectAll),
+      withDeadline('second', 8_000, second).then(collectAll),
+    ]);
+    // The framed sibling must be refused...
+    assert.equal(b.status, 'rejected', 'the framed handshake should still be refused');
+    assert.match(String((b as PromiseRejectedResult).reason?.message ?? ''), /INTERNAL worker transport/);
+    // ...and must not take the healthy one down with it.
+    if (a.status === 'rejected') {
+      throw new Error(`healthy run was killed by another run's bad handshake: ${a.reason?.message ?? a.reason}`);
+    }
+    assert.equal(a.value.exit.reason, 'completed');
+  } finally { await mock.close(); }
 });

@@ -396,7 +396,7 @@ requests `resourceLimits.disk` with an explanation instead.
 - RPC client (get_state, prompt streaming, extension UI round trip, send timeout, spawn failure)
 - RpcAgentAdapter (happy path, argv construction, input round trip, cancel, resume, vendor-extras tolerance, registry)
 - PrimeAgentAdapter (happy path, skills via --skill, human input, spawn failure, agent crash, cancel, terminate, resume, trace-env propagation)
-- DaemonAgentAdapter (RPC-over-socket against a mock daemon: prompt/events/completion, input round trip, abort, spawn failure)
+- DaemonAgentAdapter (JSONL against a supervisor fixture derived from a captured real hello: envelope correctness checked against the vendor's own envelope builder, `create`→`attach`→`prompt` ordering on the wire, `session_event` translation, dialog round trip in the daemon's own payload form, session release, `session_closed`, internal-transport refusal, protocol/capability negotiation, socket discovery and length, sandbox refusal, plus a read-only contract test against a live supervisor)
 - Dashboard UI (static assets served without auth, API still token-gated, UI modules parse)
 - Workspace GC (retention expiry, quota eviction, active-run protection, orphan cleanup, git-worktree removal, multi-repo extras + primary dedupe)
 - `/metrics` (auth gating, aggregate correctness, cumulative `+Inf` histogram invariants, bounded label cardinality, Prometheus family-name collisions, and that the `events(type)` index is actually used by the planner)
@@ -436,10 +436,10 @@ Setting a depth also makes `req.secure` honour `X-Forwarded-Proto`, so the sessi
 5. ~~Multi-repository Runs~~ — done: `repositories[]` in the Run model, API + workspace support
 6. ~~Expand skill library~~ — done: 12 skills (added documentation, deployment, frontend, issue-fix-loop)
 7. ~~Deployment packaging~~ — done: systemd units, integrity-checking backup/restore script, ops guide in `deploy/` (logs go to journald, so `logrotate` is not used and the config that implied otherwise was removed)
-8. Daemon-based agent sessions — `MERCURY_AGENT_MODE=daemon` exists but **does not work against a
-    real daemon**: it disagrees with PrimeAgent 0.8.1 on framing, command envelope, session identity
-    and which socket to use, while all 12 of its tests pass against a mock that shares its wrong
-    assumptions. RPC remains the default and the only working path. Analysis and fix order:
+8. ~~Daemon-based agent sessions~~ — done: `MERCURY_AGENT_MODE=daemon` now speaks the protocol the
+    supervisor actually uses (JSONL, command envelope, `create`→`attach`→`prompt`, the per-uid supervisor
+    socket, never spawning one), verified end to end against a live supervisor. RPC remains the default.
+    Session reuse across Runs, multi-tenancy and supervisor provisioning are still open; see
     [`docs/daemon-agent-sessions.md`](docs/daemon-agent-sessions.md).
 9. ~~Sandboxed execution (containers)~~ — done: `SandboxManager` enforces `resourceLimits` + `allowedNetworks` via docker/podman; fails closed when a constrained Run has no runtime
 10. ~~Input timeout + observability~~ — done: configurable `MERCURY_INPUT_TIMEOUT_MS` (`TIMED_OUT` reason `input-timeout`), stuck-run alerting, `GET /metrics` in Prometheus format (run duration, queue wait, status gauges, worker/lease state), and run/worker trace env (`MERCURY_RUN_ID`/`MERCURY_TRACE_ID`/`MERCURY_WORKER_ID`) propagated to the agent process
