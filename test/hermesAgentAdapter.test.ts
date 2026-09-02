@@ -224,3 +224,80 @@ test('sendInput is not supported (deferred per design)', async () => {
   await collectAll(handle);
   await assert.rejects(() => a.sendInput(handle.runId, { value: 'x', at: new Date().toISOString() }), /does not support sendInput/);
 });
+
+// --- issue #166: exit must not settle before stdout has drained -------------
+
+/**
+ * Consume the handle through its iterator so a waiter is genuinely parked, then block the event loop
+ * while the child writes and exits.
+ *
+ * This is not an arbitrary delay: Node fires 'exit' when the process is gone, not when its stdio has
+ * drained, and a blocked loop makes 'exit' win that race every time (measured: exit precedes stdout
+ * 'end' at any block >= 50ms, and never at 0ms). Before the fix the consumer was released by 'exit' and
+ * observed zero events, while the run still reported `completed` with code 0.
+ */
+async function collectWithBlockedLoop(
+  handle: Awaited<ReturnType<HermesAgentAdapter['start']>>,
+  blockMs = 200,
+): Promise<{ events: { type: string; payload: unknown }[]; exit: AgentExit }> {
+  const it = (handle.events as AsyncIterable<{ type: string; payload: unknown }>)[Symbol.asyncIterator]();
+  const first = it.next(); // parks: the child has not produced anything yet
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setTimeout(r, 5));
+  const t0 = Date.now();
+  while (Date.now() - t0 < blockMs) { /* spin: emulate a busy worker, not a slow agent */ }
+  const events: { type: string; payload: unknown }[] = [];
+  let step = await first;
+  while (!step.done) {
+    if (step.value.type !== '__done__') events.push(step.value);
+    step = await it.next();
+  }
+  const exit = await handle.exit;
+  return { events, exit };
+}
+
+test('the final message survives a blocked event loop (issue #166)', async () => {
+  const { context } = makeContext();
+  const a = adapter();
+  const handle = await a.start(context);
+  const { events, exit } = await collectWithBlockedLoop(handle);
+  // The run reporting success is what makes the old bug silent, so assert both halves together.
+  assert.equal(exit.code, 0);
+  assert.equal(exit.reason, 'completed');
+  const msgs = events.filter((e) => e.type === 'agent.message');
+  assert.equal(msgs.length, 1, `stdout drained after 'exit' must still be delivered; got ${events.length} events total`);
+  assert.equal((msgs[0]!.payload as { text: string }).text, 'Hello from mock hermes');
+});
+
+test('the run settles on the drain grace when stdout never ends (issue #166)', async () => {
+  // 'leak' mode writes a response, spawns a grandchild that inherits stdout, and exits. stdout therefore
+  // never reaches 'end' -- verified against the fixture directly -- so only the bounded grace timer can
+  // settle this run. Without it the Run would hang forever, which is worse than a possibly truncated
+  // response, and that trade is the reason the grace exists at all.
+  const { context } = makeContext();
+  // The grandchild holds stdout for 4s, far past the 150ms grace, so the grace timer is the ONLY thing
+  // that can settle this run in time. With it removed the run settles at ~4s and the bound below fails --
+  // an earlier version held for 1.5s against a 5s bound and passed with the grace deleted entirely.
+  const a = adapter({ drainGraceMs: 150, env: { MOCK_HERMES_MODE: 'leak', MOCK_HERMES_LEAK_MS: '4000' } });
+  const handle = await a.start(context);
+  const t0 = Date.now();
+  // Race a deadline so a missing grace timer reports what is missing instead of hanging the suite:
+  // without the fallback this run never settles at all, and a hang is a far worse failure signal than
+  // an assertion.
+  const withDeadline = <T>(p: Promise<T>, ms: number): Promise<T> =>
+    Promise.race([
+      p,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`run did not settle within ${ms}ms; the drain grace timer is what ends it`)), ms),
+      ),
+    ]);
+  const { events, exit } = await withDeadline(collectAll(handle), 5_000);
+  const waited = Date.now() - t0;
+  assert.equal(exit.reason, 'completed');
+  const msgs = events.filter((e) => e.type === 'agent.message');
+  assert.equal(msgs.length, 1, 'whatever stdout accumulated must still be delivered on the grace path');
+  assert.equal((msgs[0]!.payload as { text: string }).text, 'leaked response');
+  // Bounded by the grace, not by the grandchild letting go of the pipe.
+  assert.ok(waited < 1_500,
+    `settling took ${waited}ms; the 150ms drain grace should end this run, not the 4000ms pipe hold`);
+});

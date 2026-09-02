@@ -460,3 +460,158 @@ test('session id from stdout regex (resume.sessionIdSource=stdout)', async () =>
   // text mode prints "line one"/"line two" — no session id; resume should throw
   await assert.rejects(() => adapter.resume(handle.runId), /No session id/);
 });
+
+// --- issue #166: exit must not settle before stdout has drained -------------
+
+/**
+ * Park a waiter on the event iterator, then block the event loop while the child writes and exits.
+ *
+ * Node fires 'exit' when the process is gone, not when its stdio has drained; a blocked loop makes
+ * 'exit' win that race reliably. For `format: 'json'` the entire document is parsed on stdout 'end', so
+ * settling on 'exit' loses EVERY event while the run still reports `completed`.
+ */
+async function collectWithBlockedLoop(
+  handle: Awaited<ReturnType<LocalAgentAdapter['start']>>,
+  blockMs = 200,
+): Promise<{ events: { type: string; payload: unknown }[]; exit: AgentExit }> {
+  const it = (handle.events as AsyncIterable<{ type: string; payload: unknown }>)[Symbol.asyncIterator]();
+  const first = it.next();
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setTimeout(r, 5));
+  const t0 = Date.now();
+  while (Date.now() - t0 < blockMs) { /* spin: emulate a busy worker, not a slow agent */ }
+  const events: { type: string; payload: unknown }[] = [];
+  let step = await first;
+  while (!step.done) {
+    if (step.value.type !== '__done__') events.push(step.value);
+    step = await it.next();
+  }
+  const exit = await handle.exit;
+  return { events, exit };
+}
+
+test('json output survives a blocked event loop (issue #166)', async () => {
+  const { context } = makeContext();
+  const adapter = new LocalAgentAdapter(jsonlConfig({
+    args: [MOCK],
+    env: { MOCK_LOCAL_MODE: 'json' },
+    output: { format: 'json', stream: false },
+    eventMap: { message: 'agent.message', completed: 'result' },
+  }));
+  const handle = await adapter.start(context);
+  const { events, exit } = await collectWithBlockedLoop(handle);
+  assert.equal(exit.reason, 'completed');
+  const msg = events.find((e) => e.type === 'agent.message');
+  assert.ok(msg, `json output is produced entirely on stdout 'end'; got ${events.length} events`);
+  assert.equal((msg!.payload as { text: string }).text, 'hi from json');
+});
+
+test('text output keeps its trailing unterminated line after a blocked loop (issue #166)', async () => {
+  const { context } = makeContext();
+  const adapter = new LocalAgentAdapter(jsonlConfig({
+    args: [MOCK],
+    env: { MOCK_LOCAL_MODE: 'text' },
+    output: { format: 'text' },
+    eventMap: {},
+  }));
+  const handle = await adapter.start(context);
+  const { events, exit } = await collectWithBlockedLoop(handle);
+  assert.equal(exit.reason, 'completed');
+  // The trailing line has no newline, so only the stdout 'end' flush can emit it.
+  assert.ok(events.some((e) => e.type === 'agent.message'),
+    `trailing unterminated line must survive; got ${events.length} events`);
+});
+
+test('the run settles on the drain grace when stdout never ends (issue #166)', async () => {
+  // 'leak' mode writes an unterminated jsonl line, spawns a grandchild that inherits stdout, and exits.
+  // stdout therefore never reaches 'end' (verified against the fixture), so the bounded grace timer is the
+  // only thing that can settle this run -- and the unterminated line can only be delivered by the
+  // grace-path flush. The grandchild holds the pipe for 4s against a 150ms grace and a 1.5s bound, so the
+  // assertion isolates the grace rather than merely tolerating its absence.
+  const { context } = makeContext();
+  // drainGraceMs is an ADAPTER option, not a LocalAgentConfig field -- the compiler rejects it inside
+  // jsonlConfig (TS2353), which is what caught this being wired to the wrong object.
+  const adapter = new LocalAgentAdapter(
+    jsonlConfig({ args: [MOCK], env: { MOCK_LOCAL_MODE: 'leak', MOCK_LOCAL_LEAK_MS: '4000' } }),
+    { drainGraceMs: 150 },
+  );
+  const handle = await adapter.start(context);
+  const t0 = Date.now();
+  // Race a deadline so a missing grace reports what is missing instead of hanging the suite for the full
+  // test timeout: without the fallback this run never settles at all.
+  const withDeadline = <T>(p: Promise<T>, ms: number): Promise<T> =>
+    Promise.race([
+      p,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`run did not settle within ${ms}ms; the drain grace timer is what ends it`)), ms),
+      ),
+    ]);
+  const { events, exit } = await withDeadline(collectAll(handle), 5_000);
+  const waited = Date.now() - t0;
+  assert.equal(exit.reason, 'completed');
+  const msgs = events.filter((e) => e.type === 'agent.message');
+  assert.equal(msgs.length, 1, 'the unterminated trailing line must be delivered by the grace flush');
+  assert.equal((msgs[0]!.payload as { text: string }).text, 'leaked tail');
+  assert.ok(waited < 1_500,
+    `settling took ${waited}ms; the 150ms drain grace should end this run, not the 4000ms pipe hold`);
+});
+
+// --- guard: the grace path must release the pipes it truncated (issue #166) --
+
+/** Quote-aware comment stripper: the source legitimately names these patterns in prose. */
+function stripComments(src: string): string {
+  let out = '';
+  let i = 0;
+  let str: string | null = null;
+  while (i < src.length) {
+    const c = src[i];
+    const two = src.slice(i, i + 2);
+    if (str) {
+      out += c;
+      if (c === '\\') { out += src[i + 1] ?? ''; i += 2; continue; }
+      if (c === str) str = null;
+      i += 1;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') { str = c; out += c; i += 1; continue; }
+    if (two === '//') { while (i < src.length && src[i] !== '\n') i += 1; continue; }
+    if (two === '/*') { i = src.indexOf('*/', i); i = i < 0 ? src.length : i + 2; continue; }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
+/** Body of a method, delimited by brace balance from its declaration. */
+function methodBody(code: string, name: string): string {
+  const at = code.indexOf(`private ${name}(`);
+  assert.notEqual(at, -1, `${name} is missing`);
+  const open = code.indexOf('{', at);
+  let depth = 0;
+  for (let i = open; i < code.length; i++) {
+    if (code[i] === '{') depth += 1;
+    else if (code[i] === '}') { depth -= 1; if (depth === 0) return code.slice(open, i + 1); }
+  }
+  assert.fail(`${name} has unbalanced braces`);
+}
+
+test('the drain grace releases the pipes it truncated (issue #166)', () => {
+  // Copilot's review of #167: after the grace truncates output, the read end of the pipe stays open for
+  // as long as whatever inherited it holds it -- measured as `readable=true, destroyed=false`
+  // indefinitely -- and the stream listeners keep the session closure reachable after the run settled.
+  // That is the #46/#62/#97 leak class, and it is invisible to the suite unless asserted, because the run
+  // itself settles correctly either way.
+  for (const rel of ['../src/adapters/hermesAgentAdapter.ts', '../src/adapters/localAgentAdapter.ts']) {
+    const code = stripComments(readFileSync(new URL(rel, import.meta.url), 'utf8'));
+    const grace = methodBody(code, 'armDrainGrace');
+    assert.match(grace, /this\.releasePipes\(session\)/,
+      `${rel}: the grace path truncates output, so it must also stop holding the pipe open`);
+    const release = methodBody(code, 'releasePipes');
+    assert.match(release, /stdout\.destroy\(\)/, `${rel}: stdout must be destroyed`);
+    assert.match(release, /stderr\.destroy\(\)/, `${rel}: stderr must be destroyed`);
+    // Destroying a stream with no 'error' listener turns a late error into an uncaught exception, which
+    // would take the worker down over a run that had already settled.
+    assert.match(release, /stdout\.on\('error'/, `${rel}: stdout needs an error listener before destroy`);
+    assert.match(release, /stderr\.on\('error'/, `${rel}: stderr needs an error listener before destroy`);
+  }
+});

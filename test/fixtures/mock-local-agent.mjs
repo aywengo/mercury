@@ -2,7 +2,7 @@
 // Generic mock local CLI agent for LocalAgentAdapter tests.
 // Driven entirely by env vars (mirrors mock-prime-agent-rpc.mjs):
 //
-//   MOCK_LOCAL_MODE      happy | input | input-flag | fail | hang | json | text | resume
+//   MOCK_LOCAL_MODE      happy | input | input-flag | fail | hang | json | text | resume | leak
 //   MOCK_LOCAL_ARGV_FILE write process.argv.slice(2) as JSON
 //   MOCK_LOCAL_ENV_FILE  write MERCURY_* env vars as JSON
 //   MOCK_LOCAL_SESSION_FILE write the session id as plain text
@@ -87,6 +87,24 @@ async function main() {
       emit({ type: 'started' });
       process.exitCode = 1;
       break;
+
+    case 'leak': {
+      // Write a trailing line with NO newline, then exit while a grandchild keeps stdout open.
+      // stdout therefore never reaches 'end', so only the adapter's bounded drain grace can settle the
+      // run -- and the unterminated line can only be delivered by the grace-path flush.
+      // Deliberately not process.exit(): that discards pending pipe writes.
+      process.stdout.write(JSON.stringify({ type: 'message', text: 'leaked tail' }));
+      {
+        const holdMs = Number(process.env.MOCK_LOCAL_LEAK_MS ?? '4000');
+        const { spawn } = await import('node:child_process');
+        const kid = spawn(process.execPath, ['-e', `setTimeout(() => process.exit(0), ${holdMs});`], {
+          stdio: 'inherit',
+          detached: false,
+        });
+        kid.unref();
+      }
+      break;
+    }
 
     case 'hang':
       emit({ type: 'started' });
