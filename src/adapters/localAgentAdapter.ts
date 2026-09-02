@@ -104,6 +104,11 @@ export interface LocalAgentConfig {
 export interface LocalAgentAdapterOptions {
   sandbox?: SandboxManager;
   workerId?: string;
+  /**
+   * How long to wait after the child exits for stdout to finish draining (default 5000ms). Only
+   * reachable when something other than the child keeps the pipe open; see issue #166.
+   */
+  drainGraceMs?: number;
 }
 
 // --- validation -------------------------------------------------------------
@@ -146,9 +151,26 @@ interface Session {
   stdoutBuf: string;
   /** true after the agent emitted promptEvent (used by flag-mode input) */
   waitingForInput: boolean;
+  /**
+   * Exit info from the child's 'exit' event, held until stdout has drained. 'exit' does not mean stdio
+   * is finished -- only 'close' does -- so settling on it can release consumers before the final output
+   * has been parsed. See issue #166.
+   */
+  exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null;
+  /** stdout reached 'end' (or the process closed), so the format-specific flush has run. */
+  stdoutEnded: boolean;
+  /**
+   * Emits whatever the configured output format still owes: the trailing jsonl/text line, or the whole
+   * json document. Assigned per format in spawnProcess and invoked exactly once, before any waiter is
+   * released.
+   */
+  flush: (() => void) | null;
+  /** bounded fallback so a grandchild holding stdout open cannot wedge the run forever. */
+  drainTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const DONE: AgentEvent = { type: '__done__', payload: {} };
+const DEFAULT_DRAIN_GRACE_MS = 5000;
 
 // --- adapter ----------------------------------------------------------------
 
@@ -165,6 +187,11 @@ export class LocalAgentAdapter implements AgentAdapter {
 
   get config(): LocalAgentConfig {
     return this.cfg;
+  }
+
+  /** How long to wait after exit for stdout to drain; bounds the issue #166 fallback path. */
+  private get drainGraceMs(): number {
+    return this.opts.drainGraceMs ?? DEFAULT_DRAIN_GRACE_MS;
   }
 
   /** Wrap the spawn command in a container when the run requests isolation. */
@@ -238,6 +265,10 @@ export class LocalAgentAdapter implements AgentAdapter {
       sessionId: null,
       stdoutBuf: '',
       waitingForInput: false,
+      exitInfo: null,
+      stdoutEnded: false,
+      flush: null,
+      drainTimer: null,
     };
     this.sessions.set(runId, session);
 
@@ -289,13 +320,18 @@ export class LocalAgentAdapter implements AgentAdapter {
     proc.on('error', (err) => {
       // spawn failure (ENOENT etc.)
       if (session.exitSettled) return;
+      this.clearDrainGrace(session);
       session.done = true;
       for (const waiter of session.waiters.splice(0)) waiter(DONE);
       settleExit(session, { code: 127, signal: null, reason: 'failed' });
     });
 
     proc.on('exit', (code, signal) => {
-      this.handleExit(session, code, signal);
+      // Record the exit but do NOT settle yet -- stdout may still hold output to parse. Under a busy
+      // event loop 'exit' reliably beats stdout's 'end', which is how issue #166 lost events.
+      session.exitInfo = { code, signal };
+      this.armDrainGrace(session);
+      this.settleWhenDrained(session);
     });
 
     proc.stderr.on('data', () => {
@@ -315,16 +351,18 @@ export class LocalAgentAdapter implements AgentAdapter {
           this.handleJsonlLine(session, line);
         }
       });
-      proc.stdout.on('end', () => {
+      // Only the trailing unterminated line is owed here; complete lines were already emitted.
+      session.flush = () => {
         if (buf.trim()) this.handleJsonlLine(session, buf.trim());
-      });
+      };
     } else if (fmt === 'json') {
       proc.stdout.on('data', (chunk: Buffer) => {
         session.stdoutBuf += chunk.toString();
       });
-      proc.stdout.on('end', () => {
+      // The whole document is produced here, so losing this flush loses every event the run emitted.
+      session.flush = () => {
         this.handleJsonDoc(session);
-      });
+      };
     } else {
       // text
       let buf = '';
@@ -337,9 +375,60 @@ export class LocalAgentAdapter implements AgentAdapter {
           if (line.trim()) push(session, { type: 'agent.message', payload: { text: line } });
         }
       });
-      proc.stdout.on('end', () => {
+      session.flush = () => {
         if (buf.trim()) push(session, { type: 'agent.message', payload: { text: buf.trim() } });
-      });
+      };
+    }
+
+    const drained = () => {
+      session.stdoutEnded = true;
+      this.settleWhenDrained(session);
+    };
+    proc.stdout.on('end', drained);
+    // 'close' is Node's guarantee that stdio is finished; if stdout was destroyed rather than ending
+    // cleanly, 'end' never fires and this is the only signal that lets the run settle.
+    proc.on('close', drained);
+  }
+
+  /**
+   * Settle only once the process has exited AND stdout has been drained and flushed.
+   *
+   * Both halves are required: waiting on stdout alone would hang on a child that never closes stdout,
+   * and settling on exit alone is the issue #166 bug. The grace timer bounds the former.
+   */
+  private settleWhenDrained(session: Session): void {
+    if (session.exitSettled || !session.exitInfo || !session.stdoutEnded) return;
+    this.clearDrainGrace(session);
+    const flush = session.flush;
+    session.flush = null; // run at most once, even if 'end' and 'close' both arrive
+    if (flush) flush();
+    const { code, signal } = session.exitInfo;
+    this.handleExit(session, code, signal);
+  }
+
+  /**
+   * Fallback for a child that exits but leaves stdout open -- typically a grandchild that inherited the
+   * pipe. Without this the run never settles, which is worse than a possibly truncated result.
+   */
+  private armDrainGrace(session: Session): void {
+    if (session.drainTimer) return;
+    const ms = this.drainGraceMs;
+    session.drainTimer = setTimeout(() => {
+      session.drainTimer = null;
+      if (session.exitSettled || !session.exitInfo) return;
+      const flush = session.flush;
+      session.flush = null;
+      if (flush) flush();
+      const { code, signal } = session.exitInfo;
+      this.handleExit(session, code, signal);
+    }, ms);
+    session.drainTimer.unref?.();
+  }
+
+  private clearDrainGrace(session: Session): void {
+    if (session.drainTimer) {
+      clearTimeout(session.drainTimer);
+      session.drainTimer = null;
     }
   }
 
@@ -414,6 +503,7 @@ export class LocalAgentAdapter implements AgentAdapter {
 
   private handleExit(session: Session, code: number | null, signal: NodeJS.Signals | null): void {
     if (session.exitSettled) return;
+    this.clearDrainGrace(session);
     if (session.cancelled) {
       session.done = true;
       for (const waiter of session.waiters.splice(0)) waiter(DONE);
@@ -496,6 +586,7 @@ export class LocalAgentAdapter implements AgentAdapter {
     const session = this.sessions.get(runId);
     if (!session || session.cancelled || session.exitSettled) return;
     session.cancelled = true;
+    this.clearDrainGrace(session);
     session.done = true;
     const proc = session.proc;
     if (proc && proc.exitCode === null) {
@@ -519,6 +610,7 @@ export class LocalAgentAdapter implements AgentAdapter {
     const session = this.sessions.get(runId);
     if (!session || session.terminated || session.exitSettled) return;
     session.terminated = true;
+    this.clearDrainGrace(session);
     session.done = true;
     const proc = session.proc;
     if (proc && proc.exitCode === null) {
@@ -548,6 +640,10 @@ export class LocalAgentAdapter implements AgentAdapter {
         sessionId: null,
         stdoutBuf: '',
         waitingForInput: false,
+        exitInfo: null,
+        stdoutEnded: false,
+        flush: null,
+        drainTimer: null,
       };
       this.sessions.set(runId, session);
     }

@@ -45,6 +45,11 @@ export interface HermesAgentAdapterOptions {
   source?: string;
   /** cancel grace period before SIGKILL (default 5000ms). */
   cancelGraceMs?: number;
+  /**
+   * How long to wait after the child exits for stdout to finish draining (default 5000ms). Only
+   * reachable when something other than the child keeps the pipe open; see issue #166.
+   */
+  drainGraceMs?: number;
   /** extra env vars for the spawned process (e.g. test knobs). */
   env?: Record<string, string>;
 }
@@ -63,11 +68,25 @@ interface Session {
   sessionId: string | null;
   /** accumulated stdout (final response) */
   stdoutBuf: string;
+  /**
+   * Exit info as reported by the child's 'exit' event, kept until stdout has drained.
+   * Node does not promise that stdio has finished when 'exit' fires -- that guarantee belongs to
+   * 'close' -- so settling on 'exit' alone can release consumers before the final message exists.
+   * See issue #166.
+   */
+  exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null;
+  /** stdout reached 'end' (or was force-drained), so the final response has been pushed. */
+  stdoutEnded: boolean;
+  /** true once the final response has been pushed, so the flush cannot run twice. */
+  stdoutFlushed: boolean;
+  /** bounded fallback so a grandchild holding stdout open cannot wedge the run forever. */
+  drainTimer: ReturnType<typeof setTimeout> | null;
   /** original RunContext (needed to rebuild argv on resume) */
   context: RunContext;
 }
 
 const DONE: AgentEvent = { type: '__done__', payload: {} };
+const DEFAULT_DRAIN_GRACE_MS = 5000;
 const SESSION_ID_RE = /session_id:\s*(\S+)/;
 
 export class HermesAgentAdapter implements AgentAdapter {
@@ -113,6 +132,10 @@ export class HermesAgentAdapter implements AgentAdapter {
         ...createExitGate(),
       sessionId: null,
       stdoutBuf: '',
+      exitInfo: null,
+      stdoutEnded: false,
+      stdoutFlushed: false,
+      drainTimer: null,
       context,
     };
     this.sessions.set(runId, session);
@@ -146,13 +169,20 @@ export class HermesAgentAdapter implements AgentAdapter {
 
     proc.on('error', (err) => {
       if (session.exitSettled) return;
+      this.clearDrainGrace(session);
       session.done = true;
       for (const waiter of session.waiters.splice(0)) waiter(DONE);
       settleExit(session, { code: 127, signal: null, reason: 'failed' });
     });
 
     proc.on('exit', (code, signal) => {
-      this.handleExit(session, code, signal);
+      // Record the exit, but do NOT settle yet: stdout can still be holding the final response.
+      // Node fires 'exit' when the process is gone, not when its stdio has drained, and under a busy
+      // event loop 'exit' reliably wins that race (issue #166). Settling here released consumers before
+      // the message existed, so a run could report `completed` with zero events delivered.
+      session.exitInfo = { code, signal };
+      this.armDrainGrace(session);
+      this.settleWhenDrained(session);
     });
 
     // stdout: the final response (quiet mode guarantees only this)
@@ -160,8 +190,14 @@ export class HermesAgentAdapter implements AgentAdapter {
       session.stdoutBuf += chunk.toString();
     });
     proc.stdout.on('end', () => {
-      const text = session.stdoutBuf.trim();
-      if (text) push(session, { type: 'agent.message', payload: { text } });
+      session.stdoutEnded = true;
+      this.settleWhenDrained(session);
+    });
+    // 'close' is Node's guarantee that stdio is finished. If stdout was destroyed rather than ending
+    // cleanly, 'end' never fires and this is the only signal that lets the run settle.
+    proc.on('close', () => {
+      session.stdoutEnded = true;
+      this.settleWhenDrained(session);
     });
 
     // stderr: capture "session_id: <id>" for resume; ignore the rest
@@ -177,8 +213,60 @@ export class HermesAgentAdapter implements AgentAdapter {
     proc.stdin.end();
   }
 
+  /**
+   * Push the accumulated stdout as the final response, at most once.
+   *
+   * Called from every path that can finish the session, because the flush has to happen BEFORE any
+   * waiter is released -- pushing afterwards is what lost the message in issue #166.
+   */
+  private flushStdout(session: Session): void {
+    if (session.stdoutFlushed) return;
+    session.stdoutFlushed = true;
+    const text = session.stdoutBuf.trim();
+    if (text) push(session, { type: 'agent.message', payload: { text } });
+  }
+
+  /**
+   * Settle only once the process has exited AND stdout has been drained.
+   *
+   * Both halves are required. Waiting on stdout alone would hang on a child that never closes stdout;
+   * settling on exit alone is the #166 bug. The grace timer bounds the second case.
+   */
+  private settleWhenDrained(session: Session): void {
+    if (session.exitSettled || !session.exitInfo || !session.stdoutEnded) return;
+    this.clearDrainGrace(session);
+    this.flushStdout(session);
+    const { code, signal } = session.exitInfo;
+    this.handleExit(session, code, signal);
+  }
+
+  /**
+   * Fallback for a child that exits but leaves stdout open -- typically a grandchild that inherited the
+   * pipe. Without this the run would never settle, which is worse than a possibly truncated response.
+   */
+  private armDrainGrace(session: Session): void {
+    if (session.drainTimer) return;
+    const ms = this.opts.drainGraceMs ?? DEFAULT_DRAIN_GRACE_MS;
+    session.drainTimer = setTimeout(() => {
+      session.drainTimer = null;
+      if (session.exitSettled || !session.exitInfo) return;
+      const { code, signal } = session.exitInfo;
+      this.flushStdout(session);
+      this.handleExit(session, code, signal);
+    }, ms);
+    session.drainTimer.unref?.();
+  }
+
+  private clearDrainGrace(session: Session): void {
+    if (session.drainTimer) {
+      clearTimeout(session.drainTimer);
+      session.drainTimer = null;
+    }
+  }
+
   private handleExit(session: Session, code: number | null, signal: NodeJS.Signals | null): void {
     if (session.exitSettled) return;
+    this.clearDrainGrace(session);
     if (session.cancelled) {
       session.done = true;
       for (const waiter of session.waiters.splice(0)) waiter(DONE);
@@ -214,6 +302,7 @@ export class HermesAgentAdapter implements AgentAdapter {
     const session = this.sessions.get(runId);
     if (!session || session.cancelled || session.exitSettled) return;
     session.cancelled = true;
+    this.clearDrainGrace(session);
     session.done = true;
     const proc = session.proc;
     if (proc && proc.exitCode === null) {
@@ -233,6 +322,7 @@ export class HermesAgentAdapter implements AgentAdapter {
     const session = this.sessions.get(runId);
     if (!session || session.terminated || session.exitSettled) return;
     session.terminated = true;
+    this.clearDrainGrace(session);
     session.done = true;
     const proc = session.proc;
     if (proc && proc.exitCode === null) {
@@ -258,6 +348,10 @@ export class HermesAgentAdapter implements AgentAdapter {
         ...createExitGate(),
         sessionId: null,
         stdoutBuf: '',
+        exitInfo: null,
+        stdoutEnded: false,
+        stdoutFlushed: false,
+        drainTimer: null,
         context,
       };
       this.sessions.set(runId, session);

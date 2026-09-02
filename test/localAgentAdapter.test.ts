@@ -460,3 +460,64 @@ test('session id from stdout regex (resume.sessionIdSource=stdout)', async () =>
   // text mode prints "line one"/"line two" — no session id; resume should throw
   await assert.rejects(() => adapter.resume(handle.runId), /No session id/);
 });
+
+// --- issue #166: exit must not settle before stdout has drained -------------
+
+/**
+ * Park a waiter on the event iterator, then block the event loop while the child writes and exits.
+ *
+ * Node fires 'exit' when the process is gone, not when its stdio has drained; a blocked loop makes
+ * 'exit' win that race reliably. For `format: 'json'` the entire document is parsed on stdout 'end', so
+ * settling on 'exit' loses EVERY event while the run still reports `completed`.
+ */
+async function collectWithBlockedLoop(
+  handle: Awaited<ReturnType<LocalAgentAdapter['start']>>,
+  blockMs = 200,
+): Promise<{ events: { type: string; payload: unknown }[]; exit: AgentExit }> {
+  const it = (handle.events as AsyncIterable<{ type: string; payload: unknown }>)[Symbol.asyncIterator]();
+  const first = it.next();
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setTimeout(r, 5));
+  const t0 = Date.now();
+  while (Date.now() - t0 < blockMs) { /* spin: emulate a busy worker, not a slow agent */ }
+  const events: { type: string; payload: unknown }[] = [];
+  let step = await first;
+  while (!step.done) {
+    if (step.value.type !== '__done__') events.push(step.value);
+    step = await it.next();
+  }
+  const exit = await handle.exit;
+  return { events, exit };
+}
+
+test('json output survives a blocked event loop (issue #166)', async () => {
+  const { context } = makeContext();
+  const adapter = new LocalAgentAdapter(jsonlConfig({
+    args: [MOCK],
+    env: { MOCK_LOCAL_MODE: 'json' },
+    output: { format: 'json', stream: false },
+    eventMap: { message: 'agent.message', completed: 'result' },
+  }));
+  const handle = await adapter.start(context);
+  const { events, exit } = await collectWithBlockedLoop(handle);
+  assert.equal(exit.reason, 'completed');
+  const msg = events.find((e) => e.type === 'agent.message');
+  assert.ok(msg, `json output is produced entirely on stdout 'end'; got ${events.length} events`);
+  assert.equal((msg!.payload as { text: string }).text, 'hi from json');
+});
+
+test('text output keeps its trailing unterminated line after a blocked loop (issue #166)', async () => {
+  const { context } = makeContext();
+  const adapter = new LocalAgentAdapter(jsonlConfig({
+    args: [MOCK],
+    env: { MOCK_LOCAL_MODE: 'text' },
+    output: { format: 'text' },
+    eventMap: {},
+  }));
+  const handle = await adapter.start(context);
+  const { events, exit } = await collectWithBlockedLoop(handle);
+  assert.equal(exit.reason, 'completed');
+  // The trailing line has no newline, so only the stdout 'end' flush can emit it.
+  assert.ok(events.some((e) => e.type === 'agent.message'),
+    `trailing unterminated line must survive; got ${events.length} events`);
+});

@@ -6,7 +6,7 @@
 //   exit 0 = success, non-zero = failure
 //
 // Env knobs:
-//   MOCK_HERMES_MODE       happy | fail | hang | resume
+//   MOCK_HERMES_MODE       happy | fail | hang | resume | leak
 //   MOCK_HERMES_ARGV_FILE  write process.argv.slice(2) as JSON
 //   MOCK_HERMES_ENV_FILE   write MERCURY_* env vars as JSON
 //   MOCK_HERMES_SESSION    fixed session id (default random)
@@ -16,6 +16,7 @@
 // resumed session id.
 
 import { writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 
 const mode = process.env.MOCK_HERMES_MODE ?? 'happy';
 const argv = process.argv.slice(2);
@@ -51,6 +52,21 @@ process.stdin.on('end', () => {
     case 'fail':
       process.stderr.write('\nsession_id: ' + sessionId + '\n');
       process.exitCode = 1;
+      break;
+    case 'leak':
+      // Exit while a grandchild keeps stdout open, as a real agent that forks a worker can do.
+      // stdout never reaches 'end', so the adapter must fall back to its bounded drain grace.
+      process.stdout.write('leaked response\n');
+      {
+        const holdMs = Number(process.env.MOCK_HERMES_LEAK_MS ?? '1500');
+        const kid = spawn(process.execPath, ['-e', `setTimeout(() => process.exit(0), ${holdMs});`], {
+          stdio: 'inherit',
+          detached: false,
+        });
+        kid.unref();
+      }
+      process.stderr.write('\nsession_id: ' + sessionId + '\n');
+      process.exit(0);
       break;
     case 'hang':
       process.stderr.write('\nsession_id: ' + sessionId + '\n');
