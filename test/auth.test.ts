@@ -551,11 +551,16 @@ test('a wrong admin token of the SAME length is rejected (issue #73 L5)', async 
       const sameLen = 'dmin-tok!'; // 9 chars, same as 'admin-tok', differs in bytes
       assert.equal(sameLen.length, 'admin-tok'.length, 'fixture must be the same length');
       const r = await login(base, sameLen);
-      // Carry the body in the failure: a 500 here would otherwise report only "500 !== 401", which says
-      // the server threw but not what or why. Issue #165 was open because exactly that happened once with
-      // nothing left behind to diagnose.
-      assert.equal(r.status, 401,
-        `a same-length wrong token must not authenticate (body: ${(await r.clone().text()).slice(0, 300)})`);
+      // Read the body ONLY on mismatch. An earlier version interpolated `(await r.clone().text())` into
+      // assert.equal's message, and since arguments evaluate before the call, that cloned and drained the
+      // body on every passing run -- wasted work on the happy path, and a second reader of a body later
+      // assertions still expect untouched.
+      if (r.status !== 401) {
+        // A 500 here would otherwise report only "500 !== 401": the server threw, but not what or why.
+        // Issue #165 stayed open because exactly that happened once with nothing readable left behind.
+        const body = (await r.text()).slice(0, 300);
+        assert.fail(`a same-length wrong token must not authenticate: got ${r.status} (body: ${body})`);
+      }
       assert.ok(!sidFrom(r), 'no session may be issued for a wrong token');
       // And the real token still works, so the length guard did not break the accept path.
       assert.ok(sidFrom(await login(base, 'admin-tok')), 'the correct admin token must still log in');
