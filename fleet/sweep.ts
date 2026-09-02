@@ -49,6 +49,14 @@ export interface SweepOptions {
   hostIds?: '*' | string[];
 }
 
+/**
+ * Compose an operator-facing reason with the child's own detail when it gave one. Appending unconditionally
+ * left a trailing colon on every response with an empty body, which is most 502s from a proxy.
+ */
+function withDetail(base: string, detail: string): string {
+  return detail ? `${base}: ${detail}` : base;
+}
+
 function empty(): SweepReport {
   return { examined: 0, advanced: 0, stale: 0, lost: 0, pending: 0, skippedTerminal: 0 };
 }
@@ -115,7 +123,7 @@ export async function sweepOnce(deps: DispatchDeps, opts: SweepOptions = {}): Pr
       deps.bindings.recordState({
         fleetRunId: view.fleetRunId, status: LOST, cursor: view.state?.cursor ?? 0,
         lastSeenAt: now,
-        lastError: `child reports no such Run (HTTP 404): ${result.detail}`,
+        lastError: withDetail('child reports no such Run (HTTP 404)', result.detail),
       });
       if (!wasLost) {
         report.lost++;
@@ -131,7 +139,9 @@ export async function sweepOnce(deps: DispatchDeps, opts: SweepOptions = {}): Pr
       status: view.state?.status ?? UNKNOWN,
       cursor: view.state?.cursor ?? 0,
       lastSeenAt: view.state?.lastSeenAt ?? null,
-      lastError: result.kind === 'unknown' ? result.reason : `child said HTTP ${result.status}`,
+      lastError: result.kind === 'unknown'
+        ? result.reason
+        : withDetail(`child said HTTP ${result.status}`, result.detail),
     });
   }
 

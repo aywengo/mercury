@@ -10,8 +10,8 @@ import { submitRun, type DispatchDeps } from '../dispatch.ts';
 import { isTerminal, LOST, startSweeper, sweepOnce, type SweepEvent, type SweeperHandle } from '../sweep.ts';
 
 /**
- * A child whose answers an individual test can change between sweeps, because every row of section 7's table
- * is a different answer to the same question. `mode` is mutated in place so a test can watch a binding move
+ * A stand-in child whose answers a test can change between sweeps. Every row of section 7's table is a
+ * different answer to the same question, so the answers have to be mutable while the binding stays put. `mode` is mutated in place so a test can watch a binding move
  * across states -- which is the only way to show LOST is recoverable rather than a dead end.
  */
 interface ChildMode {
@@ -23,6 +23,8 @@ interface ChildMode {
   seen: string[];
   /** How many Runs the child has handed out, so ids stay unique. */
   created: number;
+  /** Answer an error status with no body at all, which is what a proxy in front of the child does. */
+  emptyBody?: boolean;
 }
 
 async function fakeChild(mode: ChildMode): Promise<{ url: string; close: () => Promise<void> }> {
@@ -49,7 +51,7 @@ async function fakeChild(mode: ChildMode): Promise<{ url: string; close: () => P
     }
     if (mode.answer !== 'ok') {
       res.writeHead(mode.answer, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: 'child said no' }));
+      res.end(mode.emptyBody ? '' : JSON.stringify({ error: 'child said no' }));
       return;
     }
     // The real envelope: GET /api/runs/:runId answers { run, skills }.
@@ -60,7 +62,12 @@ async function fakeChild(mode: ChildMode): Promise<{ url: string; close: () => P
   const port = (server.address() as AddressInfo).port;
   return {
     url: `http://127.0.0.1:${port}`,
-    close: () => new Promise<void>((r) => server.close(() => r())),
+    // Shut idle sockets first. fetch/undici pools connections, and server.close() only resolves once every
+    // connection is gone, so closing without this leaves teardown waiting on a socket nobody is holding.
+    close: () => new Promise<void>((r) => {
+      server.closeAllConnections?.();
+      server.close(() => r());
+    }),
   };
 }
 
@@ -151,6 +158,9 @@ test('a 404 for a bound Run becomes LOST and is reported once', async () => {
     assert.equal(events[0].kind, 'lost');
     assert.equal(events[0].childRunId, binding.childRunId);
     assert.match(h.bindings.state(binding.fleetRunId)!.lastError!, /HTTP 404/);
+    // The child's own words matter here: "run not found" and "no such workspace" point at different fixes,
+    // and an operator reading only "HTTP 404" has to go and reproduce it themselves.
+    assert.match(h.bindings.state(binding.fleetRunId)!.lastError!, /child said no/);
 
     // Repeated sweeps must not turn one incident into an alert per interval.
     await sweepOnce(h.dispatch, { onEvent: (e) => events.push(e) });
@@ -274,8 +284,11 @@ test('the sweeper runs on a timer and cannot overlap itself', async () => {
     await new Promise((r) => setTimeout(r, 120));
     assert.ok(seen.requests >= 2, 'it must keep going after a pass completes');
     sweeper.stop();
+    // Let any pass already in flight land before sampling. Snapshotting immediately after stop() raced with a
+    // tick that fired microseconds earlier and whose request had not arrived yet.
+    await new Promise((r) => setTimeout(r, 120));
     const settled = seen.requests;
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 200));
     assert.equal(seen.requests, settled, 'stop() ends the timer');
     db.close();
   } finally {
@@ -288,4 +301,37 @@ test('the sweeper runs on a timer and cannot overlap itself', async () => {
     await new Promise<void>((r) => server.close(() => r()));
     if (db.isOpen) db.close();
   }
+});
+
+test('the child detail reaches the operator, and an empty one adds no punctuation', async () => {
+  const h = await harness();
+  try {
+    const { binding } = await h.submit();
+    h.mode.answer = 403;
+    await sweepOnce(h.dispatch);
+    // Auth and validation failures are invisible unless the child's own words survive the trip.
+    assert.match(h.bindings.state(binding.fleetRunId)!.lastError!, /HTTP 403/);
+    assert.match(h.bindings.state(binding.fleetRunId)!.lastError!, /child said no/);
+
+    // A proxy answering 403 with no body must not leave "child said HTTP 403: " in an operator's log.
+    // (A 5xx takes a different path on purpose: the client classifies it as unknown, so §7 keeps the last
+    // known status rather than treating a transient 5xx as an answer about the Run.)
+    h.mode.answer = 403;
+    h.mode.emptyBody = true;
+    await sweepOnce(h.dispatch);
+    const err = h.bindings.state(binding.fleetRunId)!.lastError!;
+    assert.equal(err, 'child said HTTP 403', `dangling punctuation: ${JSON.stringify(err)}`);
+  } finally { await h.child.close(); h.db.close(); }
+});
+
+test('a 404 with no body still reads as LOST without dangling punctuation', async () => {
+  const h = await harness();
+  try {
+    const { binding } = await h.submit();
+    h.mode.answer = 404;
+    h.mode.emptyBody = true;
+    await sweepOnce(h.dispatch);
+    assert.equal(h.bindings.state(binding.fleetRunId)!.status, LOST);
+    assert.equal(h.bindings.state(binding.fleetRunId)!.lastError!, 'child reports no such Run (HTTP 404)');
+  } finally { await h.child.close(); h.db.close(); }
 });
