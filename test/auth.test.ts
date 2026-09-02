@@ -8,6 +8,8 @@ import { EventStream } from '../src/events/eventStream.ts';
 import { makeEnv, tempDir, waitFor } from './helpers.ts';
 import type { Express } from 'express';
 import { readdirSync, readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 type ApiOpts = {
   tokens?: [string, string][];
@@ -45,8 +47,31 @@ async function listen(app: Express): Promise<{ port: number; close: () => Promis
   });
 }
 
+/**
+ * POST with the transport failure called out separately from a wrong status.
+ *
+ * Issue #165: this file's same-length-token test failed intermittently under heavy machine load, and the
+ * failure was unreadable because `fetch` REJECTS on a transport error (ECONNREFUSED on a full accept
+ * backlog, ECONNRESET under socket pressure) while the assertion below compares a status code. A rejected
+ * fetch surfaces as an unhandled TypeError with no hint that the server never answered, which reads like
+ * an authentication bug. Naming the syscall makes the next occurrence self-diagnosing.
+ */
+async function postLogin(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException & { cause?: unknown };
+    const cause = (e.cause as NodeJS.ErrnoException | undefined)?.code ?? e.code ?? e.cause ?? e.message;
+    throw new Error(
+      `transport failure talking to ${url}: ${cause}. The server never produced an HTTP response, so this ` +
+      `is not an auth verdict -- it is the request failing to complete.`,
+      { cause: err },
+    );
+  }
+}
+
 async function login(base: string, token: string): Promise<Response> {
-  return fetch(`${base}/api/auth/login`, {
+  return postLogin(`${base}/api/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ token }),
@@ -464,7 +489,7 @@ test('the logout cookie carries the same Secure flag as the login cookie (issue 
 // lock each other out, while an attacker sharing that bucket is barely throttled.
 
 async function loginFrom(port: number, clientIp: string): Promise<number> {
-  const res = await fetch(`http://127.0.0.1:${port}/api/auth/login`, {
+  const res = await postLogin(`http://127.0.0.1:${port}/api/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-forwarded-for': clientIp },
     body: JSON.stringify({ token: 'tok-alice' }),
@@ -526,7 +551,16 @@ test('a wrong admin token of the SAME length is rejected (issue #73 L5)', async 
       const sameLen = 'dmin-tok!'; // 9 chars, same as 'admin-tok', differs in bytes
       assert.equal(sameLen.length, 'admin-tok'.length, 'fixture must be the same length');
       const r = await login(base, sameLen);
-      assert.equal(r.status, 401, 'a same-length wrong token must not authenticate');
+      // Read the body ONLY on mismatch. An earlier version interpolated `(await r.clone().text())` into
+      // assert.equal's message, and since arguments evaluate before the call, that cloned and drained the
+      // body on every passing run -- wasted work on the happy path, and a second reader of a body later
+      // assertions still expect untouched.
+      if (r.status !== 401) {
+        // A 500 here would otherwise report only "500 !== 401": the server threw, but not what or why.
+        // Issue #165 stayed open because exactly that happened once with nothing readable left behind.
+        const body = (await r.text()).slice(0, 300);
+        assert.fail(`a same-length wrong token must not authenticate: got ${r.status} (body: ${body})`);
+      }
       assert.ok(!sidFrom(r), 'no session may be issued for a wrong token');
       // And the real token still works, so the length guard did not break the accept path.
       assert.ok(sidFrom(await login(base, 'admin-tok')), 'the correct admin token must still log in');
@@ -706,4 +740,19 @@ test('there is exactly one credential resolver and no plain-equality admin compa
     'authRoutes must import the shared resolver rather than keep a copy');
   assert.ok(!defPattern.test(routes), 'authRoutes must not define its own resolver');
   assert.ok(!safeCompare.test(routes), 'authRoutes must not keep its own constant-time compare');
+});
+
+test('a transport failure is reported as one, not as an auth verdict (issue #165)', async () => {
+  // The helper above exists only to make an unreadable failure readable, so pin that it works: a port
+  // with no listener rejects the fetch, and the message must say the server never answered rather than
+  // surfacing a bare TypeError that looks like a 401 mismatch.
+  const srv = createServer();
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as AddressInfo).port;
+  await new Promise<void>((r) => srv.close(() => r()));
+  let msg = '';
+  await login(`http://127.0.0.1:${port}`, 'admin-tok').catch((e: Error) => { msg = e.message; });
+  assert.ok(msg, 'a closed port must reject the request');
+  assert.match(msg, /transport failure/, `expected a transport-labelled error, got: ${msg}`);
+  assert.match(msg, /never produced an HTTP response/, msg);
 });
