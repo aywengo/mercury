@@ -1,56 +1,153 @@
-// DaemonAgentAdapter: optional PrimeAgent integration via the daemon socket.
-// (Mercury.md sections 8, 31; roadmap item 9.)
-//
-// The prime-agent daemon (`prime-agent --mode daemon --daemon-socket <path>`) is a
-// resident supervisor that owns long-lived sessions. Its public contract (daemon.md)
-// keeps the RPC JSONL framing for commands/events; the daemon adds a 4-byte
-// big-endian length prefix per frame and a `daemon_hello` handshake frame on connect.
-//
-// This adapter:
-//   - spawns the daemon (or attaches to an existing socket),
-//   - performs the hello handshake (reads the first frame, ignores it),
-//   - then speaks the SAME RPC commands as rpcClient.ts over the socket,
-//   - translates events into Mercury domain events (shared logic with PrimeAgentAdapter).
-//
-// RPC mode remains the default; enable this with MERCURY_AGENT_MODE=daemon.
+/**
+ * DaemonAgentAdapter: run a Mercury Run against a resident PrimeAgent daemon supervisor.
+ *
+ * Enable with MERCURY_AGENT_MODE=daemon. RPC remains the default and the only mode that does not
+ * require a supervisor to already be running.
+ *
+ * Transport, verified against prime-agent 0.9.1 rather than inferred (see
+ * docs/daemon-agent-sessions.md section 3):
+ *
+ *   - The PUBLIC supervisor transport is newline-delimited JSON in BOTH directions, on the socket
+ *     `prime-agent status` reports -- `$TMPDIR/prime-agent-<uid>/daemon.sock` by default.
+ *   - The first line on connect is a `daemon_hello` carrying protocol version, schema revision and
+ *     the server capability list. It is validated, not ignored.
+ *   - Commands must be wrapped in an envelope. A bare `{type:"prompt",...}` is not answered at all,
+ *     which is indistinguishable from an agent that is merely thinking.
+ *   - `prompt` requires an `activeSessionId` obtained from a prior `create`, and events reach a
+ *     client that has `attach`ed to that session.
+ *
+ * What this file deliberately does NOT do:
+ *
+ *   - **It never spawns a daemon.** The supervisor is a per-uid background service that owns live
+ *     agent sessions; a Mercury worker starting one would be starting a service it does not own,
+ *     and a spawned process inherits `PRIME_AGENT_INTERNAL_DAEMON_WORKER` whenever Mercury itself
+ *     runs inside an agent session, which yields the internal worker transport instead of the public
+ *     one. If no supervisor is reachable, this fails with an actionable message.
+ *   - **It never uses the internal worker transport.** That path is gated by
+ *     `PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN` and is free to change without notice.
+ *   - **It never logs `supervisorOwnerToken`.** It is a fencing token for supervisor update handoff,
+ *     not a credential for Mercury.
+ */
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createConnection, type Socket } from 'node:net';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { attachJsonlLineReader, serializeJsonLine } from './rpc/jsonl.ts';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
-import type {
-  AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext,
-} from '../domain/types.ts';
+import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
-import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
+import { EventTranslator, buildExtensionUiResponse, isRecord } from './eventTranslation.ts';
+import {
+  buildCommandEnvelope, checkHello, checkSocketPath, helloForLogging, looksPrivateFramed,
+  parseDaemonLine, MERCURY_DAEMON_PROTOCOL_VERSION, PRIVATE_TRANSPORT_HINT, type DaemonHello,
+} from './daemonProtocol.ts';
+
+/**
+ * Translate the CLI-style provider/model flags into the subset of `create` config Mercury knows how
+ * to set. Returns the config plus any flags it could not place, so the caller can report them.
+ */
+export function sessionConfigFromArgs(args: string[]): { config: Record<string, unknown>; ignored: string[] } {
+  const config: Record<string, unknown> = {};
+  const ignored: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const flag = args[i]!;
+    const value = args[i + 1];
+    if (flag === '--model' && value) { config.model = value; i++; continue; }
+    if (flag === '--provider' && value) { config.provider = value; i++; continue; }
+    if (flag === '--thinking' && value) { config.thinking = value; i++; continue; }
+    if (flag.startsWith('--')) {
+      // Consume a value only for flags we know take one; a bare boolean flag must not swallow the
+      // next token and report the wrong thing as ignored.
+      ignored.push(flag);
+      continue;
+    }
+    ignored.push(flag);
+  }
+  return { config, ignored };
+}
 
 const CONTEXT_FILE = '.mercury-context.json';
 const SESSION_DIR_NAME = '.mercury-sessions';
 
+/** Raised when the daemon is reachable but speaks something Mercury must not pretend to understand. */
+export class DaemonProtocolError extends Error {
+  readonly details: Record<string, unknown>;
+  constructor(message: string, details: Record<string, unknown> = {}) {
+    super(message);
+    this.name = 'DaemonProtocolError';
+    this.details = details;
+  }
+}
+
+export interface DaemonSessionIdentity {
+  runId: string;
+  activeSessionId: string;
+  /** Supervisor generation the session was created under; a change means replay is unavailable. */
+  generation: string | null;
+}
+
 export interface DaemonAgentAdapterOptions {
-  /** Extra CLI args passed to prime-agent (e.g. --provider, --model). */
-  args?: string[];
+  /** Explicit supervisor socket. Wins over MERCURY_DAEMON_SOCKET and the default path. */
+  socketPath?: string;
   /** Session directory name inside the workspace. */
   sessionDirName?: string;
-  /** Optional sandbox manager; when set and the run requests isolation, the daemon
-   *  process runs inside a container with the run's resource/network limits. */
+  /** Optional sandbox manager; a run requesting isolation cannot be served by daemon mode (see below). */
   sandbox?: SandboxManager;
-  /** Owning worker id; propagated to the agent process for log correlation (section 25). */
+  /** Owning worker id; propagated for log correlation (section 25). */
   workerId?: string;
-  /** Extra env vars for the spawned process (tests use this to point at the mock). */
+  /**
+   * Provider/model flags from MERCURY_PRIMEAGENT_ARGS. The adapter spawns no process, so these are
+   * forwarded into the `create` config instead of a command line. Anything unrecognised is reported
+   * rather than dropped: a run that silently used the supervisor's default model because a flag went
+   * missing is the kind of surprise this adapter's history is full of.
+   */
+  args?: string[];
+  /** Unused; kept so callers do not break. The adapter spawns no process. */
   env?: Record<string, string>;
+  /** Bound on the completion detach, so a wedged supervisor cannot stall a finished run. */
+  detachTimeoutMs?: number;
+  /** Called once the daemon has assigned a session, before the first prompt is sent. */
+  onSessionIdentity?: (identity: DaemonSessionIdentity) => void;
+  /** Timeouts, overridable for tests. */
+  connectTimeoutMs?: number;
+  helloTimeoutMs?: number;
+  commandTimeoutMs?: number;
+  logger?: { info(msg: string, fields?: Record<string, unknown>): void; warn(msg: string, fields?: Record<string, unknown>): void };
+}
+
+interface HelloWaiter {
+  resolve: (hello: unknown) => void;
+  reject: (err: Error) => void;
+}
+
+interface Pending {
+  resolve: (value: unknown) => void;
+  reject: (err: Error) => void;
+  timer: NodeJS.Timeout;
+  command: string;
 }
 
 interface DaemonSession {
   runId: string;
-  socket: Socket | null;
-  proc: ChildProcess | null;
-  sessionFile: string | null;
+  socket: Socket;
+  detachReader: () => void;
+  /** First bytes seen on the socket, used to recognise the internal framed transport. */
+  firstBytes?: Buffer;
+  socketPath?: string;
   translator: EventTranslator;
+  protocolVersion: number;
+  capabilities: string[];
+  generation: string | null;
+  activeSessionId: string | null;
+  /** Highest daemon sequence applied; recovery metadata, kept separate from Mercury's own sequence. */
+  cursor: number;
+  pending: Map<string, Pending>;
+  nextCommandId: number;
   done: boolean;
-  cancelled: boolean;
   terminated: boolean;
+  cancelled: boolean;
+  /** Provided by createExitGate(); declared because settleExit() requires it. */
   exitSettled: boolean;
   queue: AgentEvent[];
   waiters: ((ev: AgentEvent) => void)[];
@@ -63,35 +160,49 @@ const DONE: AgentEvent = { type: '__done__', payload: {} };
 /**
  * Resolve the run's exit promise exactly once.
  *
- * Guards on `exitSettled` ALONE, never on `done`. `done` is set by terminate() and cancel()
- * while the exit is still unresolved, so a guard that consults it refuses to settle on
- * precisely the paths that need it most (issue #55). Same shape as settleExit() in
- * primeAgentAdapter.ts, which already gets this right.
+ * Guards on `exitSettled` ALONE, never on `done`. `done` is set by terminate() and cancel() while the
+ * exit is still unresolved, so a guard that consults it refuses to settle on precisely the paths that
+ * need it most (issue #55). Same rule as primeAgentAdapter.ts.
  */
 export class DaemonAgentAdapter implements AgentAdapter {
-  private cmd: string;
   private opts: DaemonAgentAdapterOptions;
   private sessions = new Map<string, DaemonSession>();
+  private cmd: string;
 
   constructor(cmd: string, opts: DaemonAgentAdapterOptions = {}) {
     this.cmd = cmd;
     this.opts = opts;
   }
 
-  /** Wrap the spawn command in a container when the run requests isolation. */
-  private wrapForSandbox(run: RunContext, args: string[]): { cmd: string; args: string[] } {
-    const sandbox = this.opts.sandbox;
-    if (!sandbox || !sandbox.requiresSandbox(run.run)) return { cmd: this.cmd, args };
-    // The run row may not have workspacePath persisted yet; the workspace object
-    // always carries the real path.
-    const runWithWs = { ...run.run, workspacePath: run.run.workspacePath ?? run.workspace.path };
-    const wrapped = sandbox.buildCommand(runWithWs, this.cmd, args);
-    return { cmd: wrapped.cmd, args: wrapped.args };
+  /**
+   * Resolve which socket to talk to, in this order:
+   *   1. an explicit option (tests, and the only way to point at a non-default supervisor)
+   *   2. MERCURY_DAEMON_SOCKET, because the operator knows best
+   *   3. the default per-uid supervisor path
+   * There is deliberately no "start one ourselves" step.
+   */
+  resolveSocketPath(): { path: string; source: string } {
+    if (this.opts.socketPath) return { path: this.opts.socketPath, source: 'option' };
+    const fromEnv = process.env.MERCURY_DAEMON_SOCKET;
+    if (fromEnv && fromEnv.trim() !== '') return { path: fromEnv.trim(), source: 'MERCURY_DAEMON_SOCKET' };
+    const uid = typeof process.getuid === 'function' ? String(process.getuid()) : 'user';
+    return { path: join(tmpdir(), `prime-agent-${uid}`, 'daemon.sock'), source: 'default supervisor path' };
   }
 
   async start(context: RunContext): Promise<AgentHandle> {
     const runId = context.run.id;
     const workspacePath = context.workspace.path;
+
+    // A supervisor runs in the user's own context and cannot be placed inside this run's container.
+    // Running an isolation-requesting run UNSANDBOXED because the transport happens to be different
+    // would be a silent security downgrade, so refuse and let the operator choose RPC mode instead.
+    const sandbox = this.opts.sandbox;
+    if (sandbox?.requiresSandbox(context.run)) {
+      throw new DaemonProtocolError(
+        'daemon mode cannot sandbox a run: the supervisor is a per-uid service outside this worker. '
+        + 'Run this task with MERCURY_AGENT_MODE=rpc, or mount the supervisor socket into the sandbox '
+        + 'and set MERCURY_DAEMON_SOCKET (docs/daemon-agent-sessions.md section 12 item 6).');
+    }
 
     writeFileSync(join(workspacePath, CONTEXT_FILE), JSON.stringify({
       runId,
@@ -108,119 +219,258 @@ export class DaemonAgentAdapter implements AgentAdapter {
     const sessionDir = join(workspacePath, this.opts.sessionDirName ?? SESSION_DIR_NAME);
     mkdirSync(sessionDir, { recursive: true });
 
+    const { path: socketPath, source } = this.resolveSocketPath();
+    const pathErr = checkSocketPath(socketPath);
+    if (pathErr) throw new DaemonProtocolError(pathErr, { socketPath });
+    if (!existsSync(socketPath)) {
+      throw new DaemonProtocolError(
+        `no daemon supervisor socket at ${socketPath} (from ${source}). Start one with `
+        + '`prime-agent` background service or `prime-agent status` to see what is running, or run `this host in RPC mode.',
+        { socketPath, source });
+    }
+
+    const socket = await this.connect(socketPath);
     const session: DaemonSession = {
-      runId,
-      socket: null,
-      proc: null,
-      sessionFile: null,
+      runId, socket, socketPath,
+      detachReader: () => undefined,
       translator: new EventTranslator(),
-      done: false,
-      cancelled: false,
-      terminated: false,
-      queue: [],
-      waiters: [],
-        ...createExitGate(),
+      protocolVersion: 0, capabilities: [], generation: null, activeSessionId: null, cursor: 0,
+      pending: new Map(), nextCommandId: 0,
+      done: false, terminated: false, cancelled: false,
+      queue: [], waiters: [],
+      ...createExitGate(),
     };
     this.sessions.set(runId, session);
 
-    const socketPath = join(sessionDir, 'daemon.sock');
-    const extra = this.opts.args ?? [];
-    // If the first extra arg is a script path (mock fixture), it must come BEFORE the
-    // flags so node treats it as the script. Production usage passes provider/model
-    // flags only, so the binary stays first.
-    const scriptFirst = extra.length > 0 && /\.(mjs|js|cjs)$/.test(extra[0]) && existsSync(extra[0]);
-    const argv = scriptFirst ? [extra[0], '--mode', 'daemon', '--daemon-socket', socketPath, '--no-session', ...extra.slice(1)]
-      : ['--mode', 'daemon', '--daemon-socket', socketPath, '--no-session', ...extra];
-    const spawnCmd = this.wrapForSandbox(context, argv);
-    const traceEnv: Record<string, string> = { MERCURY_RUN_ID: runId, MERCURY_TRACE_ID: runId };
-    if (this.opts.workerId) traceEnv.MERCURY_WORKER_ID = this.opts.workerId;
-    const proc = spawn(spawnCmd.cmd, spawnCmd.args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ...traceEnv, ...this.opts.env },
-    });
-    session.proc = proc;
-    proc.stderr?.on('data', (d: Buffer) => {
-      // daemon logs to stderr; surface as debug only
-      process.stderr.write(`[daemon] ${d.toString()}`);
-    });
-    proc.on('error', (err) => {
-      session.done = true;
-      settleExit(session, { code: 127, signal: null, reason: 'failed' });
-    });
-    proc.on('exit', (code, signal) => {
-      session.done = true;
-      settleExit(session, { code: code ?? 1, signal, reason: code === 0 ? 'completed' : 'failed' });
-    });
+    this.attachTransport(session);
 
-    // Wait for the socket to appear, connect, and consume the hello frame.
-    await waitForSocket(socketPath, 10_000);
-    const socket = await connectSocket(socketPath);
-    session.socket = socket;
-    // Seed the long-lived reader with anything that arrived in the hello's write (issue #68).
-    const { rest } = await readFrame(socket); // daemon_hello — payload ignored
-
-    // Send the initial prompt (same as RPC mode) so the agent starts working.
-    socket.write(frame({ type: 'prompt', message: `Work on the task in .mercury-context.json. Task: ${context.run.task}` }));
-
-    // Wire incoming frames: responses (with id) and events (no id).
-    // Explicit Buffer, not the inferred Buffer<ArrayBuffer>: `rest` arrives as a subarray view
-    // typed Buffer<ArrayBufferLike>, and the two are not assignable to each other.
-    let buffer: Buffer = Buffer.alloc(0);
-    const drain = (): void => {
-      for (;;) {
-        if (buffer.length < 4) break;
-        const len = buffer.readUInt32BE(0);
-        if (buffer.length < 4 + len) break;
-        const frame = buffer.subarray(4, 4 + len).toString('utf8');
-        buffer = buffer.subarray(4 + len);
-        this.handleFrame(session, frame);
+    try {
+      const hello = await this.awaitHello(session);
+      if (this.sawFramedBytes(session)) {
+        throw new DaemonProtocolError(`daemon handshake was not JSONL. ${PRIVATE_TRANSPORT_HINT}`, { socketPath });
       }
-    };
-    socket.on('data', (chunk: Buffer) => {
-      buffer = Buffer.concat([buffer, chunk]);
-      drain();
-    });
-    // Seed the reader with whatever shared the hello's write, and drain it NOW. Assigning the
-    // leftover bytes to `buffer` is not enough on its own: nothing parses them until the next
-    // `data` event, and a daemon that sent everything it had in that one write never sends
-    // another. That variant of the bug hangs instead of losing frames.
-    if (rest.length > 0) {
-      buffer = rest;
-      drain();
+      const check = checkHello(hello);
+      if (!check.ok) {
+        throw new DaemonProtocolError(
+          `refusing to run against this daemon: ${check.reason} (observed ${check.observed}, expected ${check.expected})`,
+          { socketPath, hello: helloForLogging(hello ?? {}) });
+      }
+      session.protocolVersion = check.protocolVersion;
+      session.capabilities = check.capabilities;
+      session.generation = check.generation;
+      this.opts.logger?.info('daemon handshake accepted', {
+        runId, protocolVersion: check.protocolVersion,
+        appVersion: (hello as Partial<DaemonHello>)?.appVersion,
+        schemaRevision: (hello as Partial<DaemonHello>)?.schemaRevision,
+      });
+
+      // Create the session, then record its identity BEFORE prompting: if the worker dies mid-run,
+      // reattach is only possible if the id survived, and storing it after the prompt leaves a window
+      // in which the recovery path cannot work.
+      const { config: argConfig, ignored } = sessionConfigFromArgs(this.opts.args ?? []);
+      if (ignored.length > 0) {
+        this.opts.logger?.warn('daemon mode ignored agent flags it cannot express as session config',
+          { runId, ignored });
+      }
+      const created = await this.command<{ activeSessionId?: string }>(session, {
+        type: 'create', noSession: true,
+        config: { cwd: workspacePath, sessionDir: sessionDir, ...argConfig },
+      });
+      const activeSessionId = created?.activeSessionId;
+      if (typeof activeSessionId !== 'string' || activeSessionId === '') {
+        throw new DaemonProtocolError('daemon create returned no activeSessionId', { created });
+      }
+      session.activeSessionId = activeSessionId;
+      this.opts.onSessionIdentity?.({ runId, activeSessionId, generation: session.generation });
+
+      // attach is what subscribes this connection to the session's events; prompt alone does not.
+      await this.command(session, {
+        type: 'attach', activeSessionId, clientId: this.clientId(runId),
+        capabilities: ['event_sequence', 'slim_attach', 'chunked_snapshot', 'attach_snapshot'],
+      });
+
+      await this.command(session, {
+        type: 'prompt', activeSessionId,
+        message: `Work on the task in ${CONTEXT_FILE}. Task: ${context.run.task}`,
+      });
+    } catch (err) {
+      // Fail fast and loudly (G3): a protocol mismatch must not become a run that times out minutes later.
+      session.done = true;
+      settleExit(session, { code: 1, signal: null, reason: 'failed' });
+      this.destroy(session);
+      throw err;
     }
-    // These two guarded on `!session.done` alone -- never on exitSettled -- so they could
-    // call exitResolve a second time after agent.end had already settled the exit. The
-    // promise ignores a repeat resolve so the outcome was usually harmless, but it made the
-    // settlement rule differ per site, which is how terminate() ended up settling nothing.
-    socket.on('close', () => {
-      session.done = true;
-      settleExit(session, { code: null, signal: 'SIGPIPE', reason: 'failed' });
-    });
-    socket.on('error', () => {
-      session.done = true;
-      settleExit(session, { code: null, signal: 'SIGPIPE', reason: 'failed' });
-    });
 
     return this.makeHandle(session);
   }
 
-  private handleFrame(session: DaemonSession, frame: string): void {
-    let msg: Record<string, unknown>;
-    try {
-      msg = JSON.parse(frame) as Record<string, unknown>;
-    } catch {
-      return;
-    }
-    if (msg.type === 'response') return; // command ack — correlation handled by caller
-    const events = session.translator.translate(msg as never);
-    for (const ev of events) {
-      this.push(session, ev);
-      if (ev.type === 'agent.end') {
-        // Agent finished; resolve the exit promise (the daemon keeps the socket open).
-        session.done = true;
-        settleExit(session, { code: Number((msg.result ?? 0)), signal: null, reason: 'completed' });
+  private clientId(runId: string): string {
+    return `mercury:run:${runId}${this.opts.workerId ? `:worker:${this.opts.workerId}` : ''}`;
+  }
+
+  private connect(path: string): Promise<Socket> {
+    return new Promise((resolve, reject) => {
+      const socket = createConnection(path);
+      const timer = setTimeout(() => {
+        socket.destroy();
+        reject(new DaemonProtocolError(`timed out connecting to daemon socket ${path}`));
+      }, this.opts.connectTimeoutMs ?? 5_000);
+      timer.unref?.();
+      socket.once('connect', () => { clearTimeout(timer); resolve(socket); });
+      socket.once('error', (err) => { clearTimeout(timer); reject(err); });
+    });
+  }
+
+  /**
+   * Wire a connected socket to the line reader and the session.
+   *
+   * The reader is attached BEFORE the hello is consumed on purpose. A single data event can carry the
+   * hello plus the first events; parsing the hello separately and then attaching a fresh reader is what
+   * discarded every frame that shared the hello's write (issue #68). Both start() and describeSupervisor()
+   * go through here, because a second hand-rolled copy is how the two paths would drift apart.
+   */
+  private attachTransport(session: DaemonSession): void {
+    const socket = session.socket;
+    const onFirst = (chunk: Buffer): void => {
+      const bytes = Buffer.concat([session.firstBytes ?? Buffer.alloc(0), chunk]).subarray(0, 64);
+      session.firstBytes = bytes;
+      // Detect the internal transport the moment its bytes arrive. Framed bytes contain no newline, so
+      // waiting for a hello line before classifying them means the connection simply times out -- the
+      // same silent hang this adapter exists to eliminate, only slower.
+      if (looksPrivateFramed(bytes)) {
+        socket.off('data', onFirst);
+        this.failHelloWaiters(session, new DaemonProtocolError(
+          `daemon handshake was not JSONL. ${PRIVATE_TRANSPORT_HINT}`, { socketPath: session.socketPath ?? '' }));
       }
+    };
+    socket.on('data', onFirst);
+    socket.on('close', () => this.onSocketClosed(session, 'close'));
+    socket.on('error', (err) => this.onSocketClosed(session, `error: ${(err as Error).message}`));
+
+    session.detachReader = attachJsonlLineReader(socket, (line) => this.onLine(session, line), {
+      maxLineLength: 32 * 1024 * 1024,
+      onLineOverflow: (line) => {
+        // A dropped record is a hole in the run's event history. Say so rather than continuing quietly.
+        this.opts.logger?.warn('daemon event line exceeded the reader cap and was dropped',
+          { runId: session.runId, bytes: line.length });
+      },
+    });
+  }
+
+  private sawFramedBytes(session: DaemonSession): boolean {
+    return !!session.firstBytes && looksPrivateFramed(session.firstBytes);
+  }
+
+  private awaitHello(session: DaemonSession): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.helloWaiters.delete(entry);
+        reject(new DaemonProtocolError(
+          'daemon did not send a daemon_hello within the handshake window; the socket may not be a '
+          + 'supervisor, or it is a session worker on the internal transport'));
+      }, this.opts.helloTimeoutMs ?? 5_000);
+      timeout.unref?.();
+      const entry: HelloWaiter = {
+        resolve: (hello) => { clearTimeout(timeout); this.helloWaiters.delete(entry); resolve(hello); },
+        reject: (err) => { clearTimeout(timeout); this.helloWaiters.delete(entry); reject(err); },
+      };
+      this.helloWaiters.add(entry);
+    });
+  }
+
+  private helloWaiters = new Set<HelloWaiter>();
+
+  private failHelloWaiters(session: DaemonSession, err: Error): void {
+    for (const waiter of [...this.helloWaiters]) waiter.reject(err);
+    this.helloWaiters.clear();
+  }
+
+  private onLine(session: DaemonSession, line: string): void {
+    if (line.trim() === '') return;
+    const parsed = parseDaemonLine(line);
+    switch (parsed.kind) {
+      case 'hello':
+        for (const waiter of [...this.helloWaiters]) waiter.resolve(parsed.hello);
+        return;
+      case 'response': {
+        const p = session.pending.get(parsed.id);
+        if (!p) {
+          // An unsolicited response is worth a log: it usually means a command timed out and the
+          // answer arrived afterwards, which is information about daemon latency, not noise to eat.
+          this.opts.logger?.warn('daemon response for an unknown or expired command id',
+            { runId: session.runId, id: parsed.id, command: parsed.command });
+          return;
+        }
+        session.pending.delete(parsed.id);
+        clearTimeout(p.timer);
+        if (!parsed.success) {
+          const info = isRecord(parsed.errorInfo) ? parsed.errorInfo : undefined;
+          const code = info && typeof info.code === 'string' ? info.code : undefined;
+          // The daemon often answers a refusal with a precise code. Surfacing it is the difference
+          // between an operator knowing what happened and reading a timeout.
+          p.reject(new DaemonProtocolError(
+            `daemon refused ${p.command}${code ? ` (${code})` : ''}: ${parsed.error ?? 'no reason given'}`,
+            { command: p.command, code, errorInfo: parsed.errorInfo }));
+          return;
+        }
+        p.resolve(parsed.data);
+        return;
+      }
+      case 'event': {
+        if (typeof parsed.sequence === 'number') session.cursor = Math.max(session.cursor, parsed.sequence);
+        const events = session.translator.translate(parsed.event as never);
+        for (const ev of events) {
+          this.push(session, ev);
+          if (ev.type === 'agent.end') void this.finishCompleted(session);
+        }
+        return;
+      }
+      case 'closing': {
+        // Graceful shutdown signal: stop, and let the run be requeued rather than marked failed by a
+        // socket error that would look like an agent crash.
+        this.opts.logger?.warn('daemon is closing', { runId: session.runId, reason: parsed.reason });
+        session.done = true;
+        settleExit(session, { code: null, signal: 'SIGTERM', reason: 'failed' });
+        this.push(session, DONE);
+        this.destroy(session);
+        return;
+      }
+      case 'unparsed':
+        // Reported, never swallowed. Every silent drop in the previous adapter's history became a hang.
+        this.opts.logger?.warn('unrecognised daemon line', { runId: session.runId, detail: parsed.detail });
+        return;
     }
+  }
+
+  private onSocketClosed(session: DaemonSession, cause: string): void {
+    if (session.exitSettled) return;
+    session.done = true;
+    for (const [, p] of session.pending) {
+      clearTimeout(p.timer);
+      p.reject(new DaemonProtocolError(`daemon socket closed while awaiting ${p.command} (${cause})`));
+    }
+    session.pending.clear();
+    settleExit(session, { code: null, signal: 'SIGPIPE', reason: 'failed' });
+    this.push(session, DONE);
+  }
+
+  private command<T = unknown>(session: DaemonSession, command: Record<string, unknown> & { type: string },
+    timeoutMs?: number): Promise<T> {
+    const id = `c${++session.nextCommandId}`;
+    const envelope = buildCommandEnvelope({
+      command, id, clientId: this.clientId(session.runId), protocolVersion: session.protocolVersion,
+    });
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        session.pending.delete(id);
+        reject(new DaemonProtocolError(
+          `daemon did not answer ${command.type} within the command window; the supervisor is `
+          + 'unreachable or wedged (a bare command with no envelope is never answered at all)'));
+      }, timeoutMs ?? this.opts.commandTimeoutMs ?? 60_000);
+      timer.unref?.();
+      session.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer, command: command.type });
+      session.socket.write(serializeJsonLine(envelope));
+    });
   }
 
   private push(session: DaemonSession, ev: AgentEvent): void {
@@ -233,144 +483,174 @@ export class DaemonAgentAdapter implements AgentAdapter {
     const gen = (): AsyncGenerator<AgentEvent> => {
       async function* events(): AsyncGenerator<AgentEvent> {
         while (true) {
-          if (session.queue.length > 0) yield session.queue.shift()!;
-          else if (session.done) return;
-          else yield await new Promise<AgentEvent>((r) => session.waiters.push(r));
+          if (session.queue.length > 0) {
+            const ev = session.queue.shift()!;
+            if (ev.type === '__done__') return;
+            yield ev;
+            continue;
+          }
+          if (session.done) return;
+          const ev = await new Promise<AgentEvent>((r) => session.waiters.push(r));
+          if (ev.type === '__done__') return;
+          yield ev;
         }
       }
       return events();
     };
     return {
       runId: session.runId,
-      get events() {
-        return gen();
-      },
+      get events() { return gen(); },
       exit: session.exitPromise,
       terminate: async () => {
         session.terminated = true;
         session.cancelled = true;
         session.done = true;
-        // Settle BEFORE tearing the socket down. terminate() sets `done`, and every exit
-        // handler here was guarded on `done`, so none of them would settle afterwards:
-        // handle.exit never resolved and the worker sat in
-        // Promise.race([handle.exit, sleep(10_000)]) for the full timeout, then reported an
-        // invented SIGKILL/terminated exit instead of this one (issue #55).
-        //
-        // Settling first also fixes the reported reason. socket.destroy() fires 'close',
-        // which would otherwise race to settle the exit as SIGPIPE/failed.
+        // Settle BEFORE tearing the socket down (issue #55). terminate() sets `done`, every exit
+        // handler is guarded on it, and socket.destroy() fires 'close' -- which would otherwise win
+        // the race and record SIGPIPE/failed for what was a deliberate stop.
         settleExit(session, { code: null, signal: 'SIGTERM', reason: 'terminated' });
-        session.socket?.destroy();
-        session.proc?.kill('SIGTERM');
+        // kill destroys the session; abort alone would only stop the turn and leave a worker behind.
+        if (session.activeSessionId) {
+          await this.command(session, { type: 'kill', activeSessionId: session.activeSessionId })
+            .catch(() => { /* already gone */ });
+        }
+        this.destroy(session);
       },
     };
   }
 
-  async sendInput(runId: string, input: AgentInput): Promise<void> {
-    const session = this.sessions.get(runId);
-    if (!session?.socket) throw new Error(`No live agent session for run ${runId}`);
-    const pending = session.translator.pending;
-    if (!pending) throw new Error(`Run ${runId} is not waiting for input`);
-    const { requestId, method } = pending;
-    session.socket.write(frame({ type: 'extension_ui_response', ...buildExtensionUiResponse(requestId, method, input.value) }));
-    session.translator.clearPending();
+  /**
+   * Normal completion: release the subscription but keep the session alive. Reuse across runs is the
+   * whole point of daemon mode, so this detaches rather than kills.
+   *
+   * The detach has to reach the supervisor BEFORE the socket goes away. An earlier draft fired it off
+   * and destroyed the socket on the next line, so the write usually never left the process: the
+   * supervisor kept a subscriber attached to a closed connection, and the session could not be reattached
+   * cleanly. `done` is set first so the socket's close handler cannot overwrite the exit reason (#55),
+   * which is what makes it safe to await here instead of settling first.
+   */
+  private async finishCompleted(session: DaemonSession): Promise<void> {
+    if (session.exitSettled) return;
+    session.done = true;
+    await this.command(session, { type: 'detach', activeSessionId: session.activeSessionId ?? '' },
+      this.opts.detachTimeoutMs ?? 2_000)
+      .catch(() => { /* the run already succeeded; a failed detach is not a run failure */ });
+    settleExit(session, { code: 0, signal: null, reason: 'completed' });
+    this.destroy(session);
+  }
+
+  private destroy(session: DaemonSession): void {
+    session.detachReader();
+    session.socket.destroy();
+    this.sessions.delete(session.runId);
   }
 
   /**
-   * Release per-run state once the worker is finished with the run (issues #62, #97).
-   * The worker calls this after handle.terminate() has resolved; see AgentAdapter.dispose
-   * for why pruning any earlier reintroduces the #46 process leak.
+   * Answer a pending dialog. The daemon takes an extension_ui_response command, not a prompt:
+   * sending the answer as a prompt would queue it as new work instead of unblocking the turn.
+   */
+  async sendInput(runId: string, input: AgentInput): Promise<void> {
+    const session = this.sessions.get(runId);
+    if (!session?.socket.destroyed) throw new Error(`No live agent session for run ${runId}`);
+    const pending = session.translator.pending;
+    if (!pending) throw new Error(`Run ${runId} is not waiting for input`);
+    session.translator.clearPending();
+    await this.command(session, {
+      type: 'extension_ui_response', activeSessionId: session.activeSessionId ?? '',
+      ...buildExtensionUiResponse(pending.requestId, pending.method, input.value),
+    });
+  }
+
+  /**
+   * Cancel a run.
+   *
+   * Settle BEFORE touching the socket, for the reason issue #55 established: the 'close' and 'error'
+   * handlers settle the exit as SIGPIPE/failed, and a write to a broken socket can fire 'error'
+   * synchronously. Settling afterwards loses that race and records a deliberate cancellation as a
+   * crash. The commands are still sent -- settleExit only resolves a promise.
+   */
+  async cancel(runId: string): Promise<void> {
+    const session = this.sessions.get(runId);
+    if (!session || session.cancelled) return;
+    session.cancelled = true;
+    session.done = true;
+    settleExit(session, { code: 130, signal: 'SIGTERM', reason: 'cancelled' });
+    // abort stops the current turn; kill releases the session so no worker is left running (#46).
+    if (session.activeSessionId) {
+      await this.command(session, { type: 'abort', activeSessionId: session.activeSessionId }).catch(() => undefined);
+      await this.command(session, { type: 'kill', activeSessionId: session.activeSessionId }).catch(() => undefined);
+    }
+    for (const waiter of session.waiters.splice(0)) waiter(DONE);
+    this.destroy(session);
+  }
+
+  /**
+   * Release per-run state once the worker is finished with the run (issues #62, #97). The worker
+   * calls this AFTER handle.terminate() resolves; pruning any earlier reintroduces the #46 leak,
+   * because terminate() looks the session up by runId.
    */
   dispose(runId: string): void {
     this.sessions.delete(runId);
   }
 
-  async cancel(runId: string): Promise<void> {
-    const session = this.sessions.get(runId);
-    if (!session?.socket) return;
-    session.cancelled = true;
-    session.done = true;
-    // Settle BEFORE touching the socket, for the same reason terminate() does (see issue #55):
-    // the 'close' and 'error' handlers settle the exit as SIGPIPE/failed, and `write` on a
-    // socket that is already broken can fire 'error' synchronously. Settling afterwards then
-    // loses the race and reports 'failed' for what was a deliberate cancellation.
-    //
-    // The abort frame is still sent -- settleExit only resolves a promise, it does not close
-    // anything -- so the daemon still learns the run was cancelled rather than dropped.
-    settleExit(session, { code: 130, signal: 'SIGTERM', reason: 'cancelled' });
-    session.socket.write(frame({ type: 'abort' }));
-    session.socket.destroy();
-    session.proc?.kill('SIGTERM');
+  /**
+   * Resume is not supported yet. Reattach needs the persisted activeSessionId and a generation
+   * comparison -- if the generation changed, replay is unavailable and the snapshot path must be taken
+   * instead of assuming continuity (docs/daemon-agent-sessions.md section 7.4). Assuming continuity
+   * is the #133 failure mode in a new costume, so this refuses rather than guesses.
+   */
+  /**
+   * Read-only supervisor check: connect, validate the handshake, and ask what is there.
+   *
+   * Creates nothing. It exists because "is daemon mode even usable here" is the first question an
+   * operator has after setting MERCURY_AGENT_MODE=daemon, and because it lets the real supervisor be
+   * exercised in tests without starting an agent session.
+   */
+  async describeSupervisor(): Promise<{
+    socketPath: string; protocolVersion: number; capabilities: string[];
+    generation: string | null; appVersion: string | null; sessions: unknown;
+  }> {
+    const { path: socketPath } = this.resolveSocketPath();
+    const lengthProblem = checkSocketPath(socketPath);
+    if (lengthProblem) throw new DaemonProtocolError(lengthProblem, { socketPath });
+    const socket = await this.connect(socketPath);
+    try {
+      const session: DaemonSession = {
+        runId: 'probe', socket, socketPath,
+        detachReader: () => undefined,
+        translator: new EventTranslator(),
+        protocolVersion: MERCURY_DAEMON_PROTOCOL_VERSION, capabilities: [], generation: null,
+        activeSessionId: null, cursor: 0,
+        pending: new Map(), nextCommandId: 0,
+        done: false, terminated: false, cancelled: false,
+        queue: [], waiters: [],
+        ...createExitGate(),
+      };
+      this.attachTransport(session);
+      const hello = await this.awaitHello(session);
+      if (this.sawFramedBytes(session)) {
+        throw new DaemonProtocolError(`daemon handshake was not JSONL. ${PRIVATE_TRANSPORT_HINT}`, { socketPath });
+      }
+      const checked = checkHello(hello);
+      if (!checked.ok) {
+        throw new DaemonProtocolError(`daemon handshake rejected: ${checked.reason}`, {
+          socketPath, observed: checked.observed, expected: checked.expected,
+        });
+      }
+      const sessions = await this.command(session, { type: 'list' }, this.opts.commandTimeoutMs ?? 10_000);
+      return {
+        socketPath, protocolVersion: checked.protocolVersion, capabilities: checked.capabilities,
+        generation: checked.generation,
+        appVersion: typeof (hello as Record<string, unknown>).appVersion === 'string'
+          ? String((hello as Record<string, unknown>).appVersion) : null,
+        sessions,
+      };
+    } finally {
+      socket.destroy();
+    }
   }
 
   async resume(runId: string, _context?: RunContext): Promise<AgentHandle> {
-    // Daemon sessions are resident; a new start() with the same runId re-attaches.
-    // Resume is not supported: the worker falls back to start().
-    throw new Error('DaemonAgentAdapter does not support resume; use start()');
+    throw new DaemonProtocolError('daemon resume is not implemented; refusing to guess at session continuity');
   }
 }
-
-function frame(obj: unknown): Buffer {
-  const payload = Buffer.from(JSON.stringify(obj), 'utf8');
-  const header = Buffer.alloc(4);
-  header.writeUInt32BE(payload.length, 0);
-  return Buffer.concat([header, payload]);
-}
-
-function waitForSocket(path: string, timeoutMs: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    const tick = (): void => {
-      if (existsSync(path)) return resolve();
-      if (Date.now() - start > timeoutMs) return reject(new Error(`daemon socket not ready: ${path}`));
-      setTimeout(tick, 50);
-    };
-    tick();
-  });
-}
-
-function connectSocket(path: string): Promise<Socket> {
-  return new Promise((resolve, reject) => {
-    const socket = createConnection(path);
-    socket.once('connect', () => resolve(socket));
-    socket.once('error', reject);
-  });
-}
-
-/**
- * Read exactly one length-prefixed frame, and hand back whatever else arrived with it.
- *
- * The remainder is the whole point (issue #68). TCP gives no frame boundaries, so a daemon that
- * flushes its hello plus the first event in a single write -- legal, and what a daemon with a
- * warm socket tends to do -- delivered both frames in one `data` event. The old version resolved
- * with the first frame and dropped `buffer.subarray(4 + len)` on the floor, then the caller
- * attached a fresh `data` listener starting from an empty buffer. Every frame that shared the
- * hello's write was silently gone: no error, no truncation marker, just a missing event.
- *
- * `rest` is handed to the caller to seed the long-lived reader, so nothing is discarded.
- *
- * Also removes the error listener on the success path. `socket.once('error', reject)` used to
- * stay attached after resolution, so it accumulated one zombie listener per session and would
- * reject an already-settled promise on a later socket failure.
- */
-function readFrame(socket: Socket): Promise<{ payload: Buffer; rest: Buffer }> {
-  return new Promise((resolve, reject) => {
-    let buffer = Buffer.alloc(0);
-    const onData = (chunk: Buffer): void => {
-      buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length < 4) return;
-      const len = buffer.readUInt32BE(0);
-      if (buffer.length < 4 + len) return;
-      socket.off('data', onData);
-      socket.off('error', onError);
-      resolve({ payload: buffer.subarray(4, 4 + len), rest: buffer.subarray(4 + len) });
-    };
-    const onError = (err: Error): void => {
-      socket.off('data', onData);
-      reject(err);
-    };
-    socket.on('data', onData);
-    socket.once('error', onError);
-  });
-}
-
-

@@ -1,118 +1,226 @@
 #!/usr/bin/env node
-// Mock prime-agent daemon for tests. Speaks the daemon framing:
-//   4-byte big-endian length prefix + JSON payload per frame.
-// First frame on connect is a daemon_hello (ignored by the client).
-// Then it accepts RPC commands (prompt/abort/get_state) and emits events.
-// Modes via MOCK_DAEMON_MODE: happy (default) | input | fail | hang | ignore | pipeline
-// Env: MOCK_DAEMON_SOCKET (required), MOCK_DAEMON_LOG (optional debug log path)
+/**
+ * A stand-in for the PrimeAgent daemon SUPERVISOR, for adapter tests.
+ *
+ * Derived from the real protocol, not from the adapter's expectations:
+ *   - the hello is the captured fixture in test/fixtures/daemon-hello.jsonl (a real 0.9.1 supervisor),
+ *   - the command envelope is validated with the daemon's own rules (type/id/protocol/clientId/command),
+ *   - responses use the two shapes the real supervisor sends, including errorInfo.code,
+ *   - events are delivered only to a client that has `attach`ed, with a server-assigned sequence and
+ *     a cursor carrying the supervisor generation.
+ *
+ * The previous fixture spoke 4-byte framing and a bare {type:"prompt"} command, i.e. it agreed with
+ * the adapter about every way the adapter was wrong, so all twelve tests passed against a daemon that
+ * does not exist. This one disagrees where the real daemon disagrees.
+ *
+ * Knobs (env):
+ *   MOCK_DAEMON_MODE           happy | framed | bad-version | missing-cap | reject-create | silent
+ *   MOCK_DAEMON_HELLO          path to a hello fixture to replay verbatim
+ *   MOCK_DAEMON_PROMPT_REPLIES "1" to emit a scripted assistant turn after a prompt
+ */
+import net from 'node:net';
+import { appendFileSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 
-import { createServer } from 'node:net';
-import { writeFileSync, appendFileSync } from 'node:fs';
+const MODE = process.env.MOCK_DAEMON_MODE ?? 'happy';
+const HELLO_FILE = process.env.MOCK_DAEMON_HELLO;
+const SOCKET_PATH = process.argv[2];
+if (!SOCKET_PATH) { console.error('usage: mock-prime-agent-daemon.mjs <socket-path>'); process.exit(2); }
 
-const socketPath = process.env.MOCK_DAEMON_SOCKET;
-if (!socketPath) {
-  console.error('MOCK_DAEMON_SOCKET required');
-  process.exit(1);
+function loadHello() {
+  if (HELLO_FILE) {
+    const line = readFileSync(HELLO_FILE, 'utf8').split('\n').filter((l) => !l.startsWith('#') && l.trim())[0];
+    return JSON.parse(line);
+  }
+  return {
+    type: 'daemon_hello',
+    socketPath: SOCKET_PATH,
+    protocol: { name: 'prime-agent.daemon', version: 7 },
+    schemaId: 'protocol-7-schema-25-585ef1102921',
+    schemaRevision: 25,
+    appVersion: '0.9.1',
+    supervisorGeneration: randomUUID(),
+    supervisorOwnerToken: 'mock-fencing-token',
+    supervisorPid: process.pid,
+    clientId: 'mock00000001',
+    serverCapabilities: ['attach_snapshot', 'event_sequence', 'slim_attach', 'chunked_snapshot',
+      'client_owned_sessions', 'model_catalog'],
+  };
 }
-const mode = process.env.MOCK_DAEMON_MODE ?? 'happy';
-const method = process.env.MOCK_DAEMON_METHOD ?? 'select';
-const logPath = process.env.MOCK_DAEMON_LOG;
-const log = (msg) => { if (logPath) appendFileSync(logPath, msg + '\n'); };
 
-function frame(obj) {
+const GENERATION = randomUUID();
+/** Every raw line the client sent, so tests can assert on what was actually put on the wire. */
+const received = [];
+const sessions = new Map();
+
+function encodeFramed(obj) {
+  // Exactly the daemon's private-framing.js layout: two u32 lengths, header JSON, payload JSON.
+  const header = Buffer.from(JSON.stringify({ kind: 'outbound', outboundType: 'daemon_hello', payloadEncoding: 'jsonl' }), 'utf8');
   const payload = Buffer.from(JSON.stringify(obj), 'utf8');
-  const header = Buffer.alloc(4);
-  header.writeUInt32BE(payload.length, 0);
-  return Buffer.concat([header, payload]);
+  const frame = Buffer.allocUnsafe(8 + header.length + payload.length);
+  frame.writeUInt32BE(header.length, 0);
+  frame.writeUInt32BE(payload.length, 4);
+  header.copy(frame, 8);
+  payload.copy(frame, 8 + header.length);
+  return frame;
 }
 
-const HELLO = { kind: 'outbound', outboundType: 'daemon_hello', payloadEncoding: 'jsonl', protocol: { name: 'prime-agent.daemon', version: 7 } };
+const server = net.createServer((socket) => {
+  const state = { attached: new Set(), buffer: '' };
 
-const server = createServer((socket) => {
-  log('client connected');
-  if (mode === 'pipeline') {
-    // Issue #68: TCP has no frame boundaries, so a daemon may legally coalesce the hello with
-    // whatever it sends next into a single write. Emit hello + 4 further frames as ONE write so
-    // the test is deterministic rather than relying on Node happening to batch separate writes.
-    // A client that reads one frame per `data` event and discards the tail loses all 4 silently.
-    socket.write(Buffer.concat([
-      frame(HELLO),
-      frame({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'alpha' } }),
-      frame({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'beta' } }),
-      frame({ type: 'message_end' }),
-      frame({ type: 'agent_end', result: 0 }),
-    ]));
-    // Half-close so the adapter sees EOF once it has consumed everything. The agent_end above
-    // already settled the exit as completed, so the close handler must not overwrite that.
-    socket.on('error', () => {});
-    socket.end();
+  if (MODE === 'framed') {
+    // The internal worker transport. A correct client must refuse this loudly, not hang.
+    socket.write(encodeFramed(loadHello()));
     return;
   }
-  socket.write(frame(HELLO));
-  let buffer = Buffer.alloc(0);
+  const hello = loadHello();
+  if (MODE === 'bad-version') hello.protocol = { name: 'prime-agent.daemon', version: 99 };
+  if (MODE === 'wrong-name') hello.protocol = { name: 'other.daemon', version: 7 };
+  if (MODE === 'missing-cap') {
+    hello.serverCapabilities = hello.serverCapabilities.filter((c) => c !== 'event_sequence');
+  }
+  if (MODE === 'silent') return; // accepts the connection, never greets
+  socket.write(JSON.stringify(hello) + '\n');
+
+  const send = (obj) => { socket.write(JSON.stringify(obj) + '\n'); };
+  const respond = (id, command, ok, extra = {}) => {
+    send({ id, type: 'response', command, success: ok, ...extra });
+  };
+  const emit = (activeSessionId, event) => {
+    const s = sessions.get(activeSessionId);
+    if (!s) return;
+    for (const client of s.subscribers) {
+      client.write(JSON.stringify({
+        type: 'event', activeSessionId, sequence: ++s.sequence,
+        cursor: { generation: GENERATION, sequence: s.sequence },
+        emittedAt: new Date().toISOString(),
+        event,
+      }) + '\n');
+    }
+  };
+
   socket.on('data', (chunk) => {
-    buffer = Buffer.concat([buffer, chunk]);
-    for (;;) {
-      if (buffer.length < 4) break;
-      const len = buffer.readUInt32BE(0);
-      if (buffer.length < 4 + len) break;
-      const raw = buffer.subarray(4, 4 + len).toString('utf8');
-      buffer = buffer.subarray(4 + len);
-      let cmd;
-      try { cmd = JSON.parse(raw); } catch { continue; }
-      log('cmd: ' + raw);
-      handleCommand(socket, cmd);
+    state.buffer += chunk.toString('utf8');
+    let i;
+    while ((i = state.buffer.indexOf('\n')) >= 0) {
+      const line = state.buffer.slice(0, i);
+      state.buffer = state.buffer.slice(i + 1);
+      if (!line.trim()) continue;
+      // Recorded so a test can assert on what was actually put on the wire and in what order,
+      // rather than on adapter internals that a wrong implementation could still set correctly.
+      if (process.env.MOCK_DAEMON_TRANSCRIPT) appendFileSync(process.env.MOCK_DAEMON_TRANSCRIPT, line + '\n');
+      handle(line);
     }
   });
-  socket.on('error', () => {});
-});
 
-function handleCommand(socket, cmd) {
-  if (cmd.type === 'get_state') {
-    socket.write(frame({ type: 'response', id: cmd.id, command: 'get_state', success: true, sessionFile: process.env.MOCK_DAEMON_SESSION_FILE ?? null, sessionId: 'mock-session', model: 'mock-model', messageCount: 1 }));
-    return;
-  }
-  if (cmd.type === 'prompt') {
-    socket.write(frame({ type: 'response', id: cmd.id, command: 'prompt', success: true }));
-    if (mode === 'ignore') return;
-    if (mode === 'fail') {
-      socket.write(frame({ type: 'agent_end', result: 1 }));
-      socket.end();
+  function handle(line) {
+    received.push(line);
+    let msg;
+    try { msg = JSON.parse(line); } catch { return; }
+
+    // Envelope rules, mirroring isDaemonCommandEnvelope. A message that is not an envelope is a client
+    // bug; answer it with an explicit refusal so a test fails with a message instead of hanging.
+    if (msg.type !== 'command' || typeof msg.id !== 'string'
+        || msg.protocol?.name !== 'prime-agent.daemon' || typeof msg.protocol?.version !== 'number'
+        || typeof msg.command !== 'object' || msg.command === null) {
+      send({ id: typeof msg.id === 'string' ? msg.id : '', type: 'response',
+        command: String(msg.type ?? ''), success: false,
+        error: 'message is not a daemon command envelope',
+        errorInfo: { code: 'invalid_envelope' } });
       return;
     }
-    if (mode === 'input') {
-      socket.write(frame({ type: 'extension_ui_request', id: 'req-1', method, title: 'Question', message: 'Continue?', options: [{ label: 'yes', value: 'yes' }, { label: 'no', value: 'no' }] }));
-      socket.write(frame({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'waiting for input' } }));
-      return;
-    }
-    // happy: emit a couple of events then finish
-    socket.write(frame({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Hello from ' } }));
-    socket.write(frame({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'daemon mock' } }));
-    socket.write(frame({ type: 'message_end' }));
-    socket.write(frame({ type: 'tool_execution_start', toolName: 'ipython', args: { code: '1+1' } }));
-    socket.write(frame({ type: 'tool_execution_end', toolName: 'ipython', result: '2' }));
-    socket.write(frame({ type: 'agent_end', result: 0 }));
-    socket.end();
-    return;
-  }
-  if (cmd.type === 'abort') {
-    socket.write(frame({ type: 'response', id: cmd.id, command: 'abort', success: true }));
-    socket.end();
-    return;
-  }
-  if (cmd.type === 'extension_ui_response') {
-    log('input response: ' + JSON.stringify(cmd));
-    // fire-and-forget: no response frame
-    socket.write(frame({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'got input' } }));
-    socket.write(frame({ type: 'message_end' }));
-    socket.write(frame({ type: 'agent_end', result: 0 }));
-    socket.end();
-    return;
-  }
-  socket.write(frame({ type: 'response', id: cmd.id, command: cmd.type, success: false, error: 'unknown command' }));
-}
+    const cmd = msg.command;
+    const id = msg.id;
 
-server.listen(socketPath, () => {
-  log('mock daemon listening on ' + socketPath);
+    switch (cmd.type) {
+      case 'create': {
+        if (MODE === 'reject-create') {
+          respond(id, 'create', false, { error: 'no capacity', errorInfo: { code: 'no_capacity' } });
+          return;
+        }
+        const activeSessionId = 'sess_' + Math.random().toString(16).slice(2, 10);
+        sessions.set(activeSessionId, { subscribers: new Set(), sequence: 0, config: cmd.config ?? {} });
+        respond(id, 'create', true, { data: { activeSessionId, sessionId: randomUUID(), lifecycle: 'draft' } });
+        return;
+      }
+      case 'attach': {
+        const s = sessions.get(cmd.activeSessionId);
+        if (!s) { respond(id, 'attach', false, { error: 'no such session', errorInfo: { code: 'session_not_found' } }); return; }
+        s.subscribers.add(socket);
+        state.attached.add(cmd.activeSessionId);
+        respond(id, 'attach', true, { data: { snapshot: [], cursor: { generation: GENERATION, sequence: s.sequence } } });
+        return;
+      }
+      case 'prompt': {
+        const s = sessions.get(cmd.activeSessionId);
+        if (!s) { respond(id, 'prompt', false, { error: 'no such session', errorInfo: { code: 'session_not_found' } }); return; }
+        respond(id, 'prompt', true, { data: { accepted: true } });
+        if (!s.subscribers.size) return; // the real daemon does not invent a subscriber
+        if (process.env.MOCK_DAEMON_PROMPT_REPLIES === '0') return;
+        setTimeout(() => {
+          const turn = [
+            { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'working' } },
+            { type: 'message_end' },
+            { type: 'agent_end', result: 0 },
+          ];
+          if (process.env.MOCK_DAEMON_COALESCE === '1') {
+            // One write carrying every frame. TCP gives no record boundaries, and a reader that
+            // attaches after the first line loses everything that shared the previous write (#68).
+            const s = sessions.get(cmd.activeSessionId);
+            for (const client of s.subscribers) {
+              const blob = turn.map((event) => {
+                s.sequence += 1;
+                return JSON.stringify({ type: 'event', activeSessionId: cmd.activeSessionId,
+                  sequence: s.sequence, cursor: { generation: GENERATION, sequence: s.sequence },
+                  emittedAt: new Date().toISOString(), event });
+              }).join('\n') + '\n';
+              client.write(blob);
+            }
+            return;
+          }
+          for (const event of turn) emit(cmd.activeSessionId, event);
+        }, 10);
+        return;
+      }
+      case 'extension_ui_response': {
+        respond(id, 'extension_ui_response', true, { data: { ok: true } });
+        if (process.env.MOCK_DAEMON_AFTER_INPUT === 'end') {
+          emit(cmd.activeSessionId, { type: 'agent_end', result: 0 });
+        }
+        return;
+      }
+      case 'detach': {
+        const s = sessions.get(cmd.activeSessionId);
+        if (s) s.subscribers.delete(socket);
+        respond(id, 'detach', true, { data: { ok: true } });
+        return;
+      }
+      case 'abort':
+        respond(id, 'abort', true, { data: { ok: true } });
+        return;
+      case 'kill': {
+        const s = sessions.get(cmd.activeSessionId);
+        if (s) { for (const c of s.subscribers) c.destroy(); sessions.delete(cmd.activeSessionId); }
+        respond(id, 'kill', true, { data: { ok: true } });
+        return;
+      }
+      case 'list':
+        respond(id, 'list', true, { data: { sessions: [...sessions.keys()].map((k) => ({ id: k })) } });
+        return;
+      default:
+        respond(id, cmd.type, false, { error: `unknown command ${cmd.type}`, errorInfo: { code: 'unknown_command' } });
+    }
+  }
 });
-process.on('SIGTERM', () => { server.close(); process.exit(0); });
+
+// A socket file left by a crashed run is not a live listener; bind would fail with EADDRINUSE and the
+// failure would look like a port conflict rather than stale state.
+if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH);
+
+server.listen(SOCKET_PATH, () => {
+  process.stdout.write(JSON.stringify({ ready: true, socketPath: SOCKET_PATH, generation: GENERATION }) + '\n');
+});
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+
+/** Exposed for in-process tests that want to assert on the wire, not on adapter internals. */
+export const __test = { received, sessions };
