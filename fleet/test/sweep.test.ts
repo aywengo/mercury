@@ -335,3 +335,35 @@ test('a 404 with no body still reads as LOST without dangling punctuation', asyn
     assert.equal(h.bindings.state(binding.fleetRunId)!.lastError!, 'child reports no such Run (HTTP 404)');
   } finally { await h.child.close(); h.db.close(); }
 });
+
+test('the sweeper actually passes event deps through to the sweep', async () => {
+  // Wiring bug this catches: startSweeper accepted an `events` option and never forwarded it, so mirroring
+  // silently never ran in production while every direct sweepOnce test stayed green. A type that accepts a
+  // field the call site drops is invisible to the compiler, so the forwarding itself needs a test.
+  const mode: ChildMode = { answer: 'ok', status: 'RUNNING', requests: 0, seen: [], created: 0 };
+  const h = await harness(mode);
+  try {
+    await h.submit();
+    let mirrored = 0;
+    const eventsDeps = {
+      db: h.db, bindings: h.bindings, registry: h.registry,
+      child: {
+        createRun: h.dispatch.child.createRun,
+        getRun: h.dispatch.child.getRun,
+        getEvents: async (host: any, runId: string, after: number, limit: number) => {
+          mirrored++;
+          return { kind: 'ok' as const, value: { events: [], lastSequence: 0, nextCursor: after, hasMore: false } };
+        },
+      },
+      resolveToken: () => 'secret-value',
+    };
+    let sweeper: SweeperHandle | null = null;
+    try {
+      sweeper = startSweeper(h.dispatch, { intervalMs: 10_000, events: eventsDeps });
+      await new Promise((r) => setTimeout(r, 120));
+      assert.ok(mirrored > 0, 'the timer pass must carry the event deps into sweepOnce');
+    } finally {
+      sweeper?.stop();
+    }
+  } finally { await h.child.close(); h.db.close(); }
+});

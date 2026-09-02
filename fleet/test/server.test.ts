@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
+import type { DatabaseSync } from 'node:sqlite';
 import { openFleetDb } from '../db.ts';
 import { createFleetServer, type FleetServer } from '../server.ts';
 import { loadCredentials } from '../credentials.ts';
@@ -31,7 +32,7 @@ async function fakeMercury(healthy = true): Promise<{ url: string; close: () => 
 }
 
 async function startService(opts: { apiTokens?: string } = {}): Promise<{
-  base: string; svc: FleetServer; call: (m: string, p: string, o?: { token?: string; body?: unknown }) => Promise<{ status: number; json: any }>;
+  base: string; svc: FleetServer; db: DatabaseSync; call: (m: string, p: string, o?: { token?: string; body?: unknown }) => Promise<{ status: number; json: any }>;
   close: () => Promise<void>;
 }> {
   const dir = mkdtempSync(join(tmpdir(), 'fleet-svc-'));
@@ -61,7 +62,7 @@ async function startService(opts: { apiTokens?: string } = {}): Promise<{
     try { json = await res.json(); } catch { /* no body */ }
     return { status: res.status, json: json as any };
   };
-  return { base, svc, call, close: async () => { await svc.close(); db.close(); } };
+  return { base, svc, db, call, close: async () => { await svc.close(); db.close(); } };
 }
 
 test('/healthz is public, everything else is not', async () => {
@@ -245,4 +246,102 @@ test('close() stops the reconciliation sweeper too', async () => {
     assert.equal(typeof s.svc.sweeper!.running, 'boolean');
   } finally { await s.close(); }
   assert.equal(s.svc.sweeper, null, 'close() releases the handle so nothing can fire after shutdown');
+});
+
+test('the mirrored event window is readable through Fleet, scoped to the caller', async () => {
+  // Seeded directly: this test is about Fleet's own read path and authorization, and driving a real child
+  // through a full Run would test Phase 2 again rather than this route.
+  const s = await startService();
+  try {
+    const { db } = s;
+    db.prepare(
+      `INSERT INTO hosts (id, base_url, credential_ref, enabled, labels, local_paths, agents_cache, added_at)
+       VALUES ('box-1', 'http://127.0.0.1:1', 'lan-ref', 1, '{}', '[]', '[]', ?)`,
+    ).run(new Date().toISOString());
+    db.prepare(
+      `INSERT INTO fleet_runs (fleet_run_id, host_id, owner_id, child_run_id, requested, created_at)
+       VALUES ('fr_evt_1', 'box-1', 'alice', 'run_1', '{}', ?)`,
+    ).run(new Date().toISOString());
+    const ins = db.prepare('INSERT INTO fleet_events (fleet_run_id, sequence, type, timestamp, payload) VALUES (?,?,?,?,?)');
+    for (let i = 1; i <= 5; i++) ins.run('fr_evt_1', i, 'run.log', '2026-01-01T00:00:00.000Z', null);
+
+    const ok = await s.call('GET', '/fleet/runs/fr_evt_1/events?after=2', { token: CALLER_TOKEN });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.json.events.map((e: any) => e.sequence), [3, 4, 5], 'resumes from the cursor');
+    assert.equal(ok.json.nextCursor, 5);
+    assert.equal(ok.json.hasMore, false);
+    assert.equal(ok.json.events[0].payload, undefined, 'metadata only unless the host opted into bodies');
+
+    const capped = await s.call('GET', '/fleet/runs/fr_evt_1/events?limit=2', { token: CALLER_TOKEN });
+    assert.equal(capped.json.events.length, 2);
+    assert.equal(capped.json.hasMore, true, 'a partial page must say more exists');
+
+    // A caller scoped to box-1 may not read a run on another host, and must not learn it exists on a host
+    // it can see either way.
+    db.prepare(
+      `INSERT INTO hosts (id, base_url, credential_ref, enabled, labels, local_paths, agents_cache, added_at)
+       VALUES ('other', 'http://127.0.0.1:1', 'lan-ref', 1, '{}', '[]', '[]', ?)`,
+    ).run(new Date().toISOString());
+    db.prepare(
+      `INSERT INTO fleet_runs (fleet_run_id, host_id, owner_id, child_run_id, requested, created_at)
+       VALUES ('fr_evt_2', 'other', 'bob', 'run_2', '{}', ?)`,
+    ).run(new Date().toISOString());
+    assert.equal((await s.call('GET', '/fleet/runs/fr_evt_2/events', { token: CALLER_TOKEN })).status, 403);
+    assert.equal((await s.call('GET', '/fleet/runs/fr_nope/events', { token: CALLER_TOKEN })).status, 404);
+    assert.equal((await s.call('GET', '/fleet/runs/fr_evt_1/events')).status, 401);
+  } finally { await s.close(); }
+});
+
+test('nonsense pagination parameters fall back instead of reaching the database', async () => {
+  const s = await startService();
+  try {
+    const { db } = s;
+    db.prepare(
+      `INSERT INTO hosts (id, base_url, credential_ref, enabled, labels, local_paths, agents_cache, added_at)
+       VALUES ('box-1', 'http://127.0.0.1:1', 'lan-ref', 1, '{}', '[]', '[]', ?)`,
+    ).run(new Date().toISOString());
+    db.prepare(
+      `INSERT INTO fleet_runs (fleet_run_id, host_id, owner_id, child_run_id, requested, created_at)
+       VALUES ('fr_q_1', 'box-1', 'alice', 'run_1', '{}', ?)`,
+    ).run(new Date().toISOString());
+    const ins = db.prepare('INSERT INTO fleet_events (fleet_run_id, sequence, type, timestamp, payload) VALUES (?,?,?,?,?)');
+    for (let i = 1; i <= 6; i++) ins.run('fr_q_1', i, 'run.log', '2026-01-01T00:00:00.000Z', null);
+
+    // Infinity is truthy, so the usual `|| 0` fallback would have let it through to a SQLite bind.
+    for (const q of ['after=Infinity', 'limit=2.5', 'limit=-5', 'after=abc', 'after=-1', 'limit=0', 'after=', 'limit=1e309']) {
+      const r = await s.call('GET', `/fleet/runs/fr_q_1/events?${q}`, { token: CALLER_TOKEN });
+      assert.equal(r.status, 200, `${q} must fall back rather than error`);
+      assert.ok(Array.isArray(r.json.events), `${q} returned no event array`);
+      for (const e of r.json.events) {
+        assert.ok(Number.isInteger(e.sequence), `${q} produced a non-integer sequence`);
+      }
+    }
+    // A valid cursor still works alongside the guards.
+    const ok = await s.call('GET', '/fleet/runs/fr_q_1/events?after=4&limit=1', { token: CALLER_TOKEN });
+    assert.deepEqual(ok.json.events.map((e: any) => e.sequence), [5]);
+    assert.equal(ok.json.hasMore, true);
+  } finally { await s.close(); }
+});
+
+test('a huge limit is capped rather than pulling the whole transcript', async () => {
+  // The cap only exists to bound one caller's memory, and a cap no test exercises is a comment.
+  const s = await startService();
+  try {
+    const { db } = s;
+    db.prepare(
+      `INSERT INTO hosts (id, base_url, credential_ref, enabled, labels, local_paths, agents_cache, added_at)
+       VALUES ('box-1', 'http://127.0.0.1:1', 'lan-ref', 1, '{}', '[]', '[]', ?)`,
+    ).run(new Date().toISOString());
+    db.prepare(
+      `INSERT INTO fleet_runs (fleet_run_id, host_id, owner_id, child_run_id, requested, created_at)
+       VALUES ('fr_cap_1', 'box-1', 'alice', 'run_1', '{}', ?)`,
+    ).run(new Date().toISOString());
+    const ins = db.prepare('INSERT INTO fleet_events (fleet_run_id, sequence, type, timestamp, payload) VALUES (?,?,?,?,?)');
+    for (let i = 1; i <= 1001; i++) ins.run('fr_cap_1', i, 'run.log', '2026-01-01T00:00:00.000Z', null);
+
+    const r = await s.call('GET', '/fleet/runs/fr_cap_1/events?limit=99999', { token: CALLER_TOKEN });
+    assert.equal(r.json.events.length, 1000, 'the request must be bounded regardless of what was asked for');
+    assert.equal(r.json.hasMore, true, 'and must say the rest is still there');
+    assert.equal(r.json.nextCursor, 1000);
+  } finally { await s.close(); }
 });

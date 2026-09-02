@@ -28,7 +28,16 @@ export interface RunState {
   cursor: number;
   lastSeenAt: string | null;
   lastError: string | null;
+  /** True once the event log has been read to the end; one-way, see setCursor. */
+  eventsDrained: boolean;
 }
+
+/**
+ * What a status write supplies. eventsDrained is deliberately absent: reconciliation owns status and
+ * staleness, mirroring owns the drain flag, and neither should be able to reset the other by writing a
+ * complete row.
+ */
+export type RunStateWrite = Omit<RunState, 'eventsDrained'>;
 
 export interface BindingView extends Binding {
   state: RunState | null;
@@ -49,6 +58,7 @@ interface BindingRow {
 }
 
 interface StateRow {
+  events_drained?: number | null;
   fleet_run_id: string;
   status: string;
   cursor: number;
@@ -62,6 +72,7 @@ interface JoinedRow extends BindingRow {
   state_cursor: number | null;
   state_last_seen_at: string | null;
   state_last_error: string | null;
+  state_events_drained: number | null;
 }
 
 function toBinding(row: BindingRow): Binding {
@@ -92,6 +103,7 @@ function toState(row: StateRow): RunState {
     cursor: Number(row.cursor),
     lastSeenAt: row.last_seen_at,
     lastError: row.last_error,
+    eventsDrained: Number(row.events_drained ?? 0) === 1,
   };
 }
 
@@ -192,7 +204,8 @@ export class BindingStore {
       .prepare(
         `SELECT fleet_runs.*,
                 run_state.status AS state_status, run_state.cursor AS state_cursor,
-                run_state.last_seen_at AS state_last_seen_at, run_state.last_error AS state_last_error
+                run_state.last_seen_at AS state_last_seen_at, run_state.last_error AS state_last_error,
+                run_state.events_drained AS state_events_drained
            FROM fleet_runs
            LEFT JOIN run_state ON run_state.fleet_run_id = fleet_runs.fleet_run_id
            ${where}
@@ -206,11 +219,12 @@ export class BindingStore {
         : {
           fleetRunId: row.fleet_run_id, status: row.state_status, cursor: Number(row.state_cursor ?? 0),
           lastSeenAt: row.state_last_seen_at ?? null, lastError: row.state_last_error ?? null,
+          eventsDrained: Number(row.state_events_drained ?? 0) === 1,
         },
     }));
   }
 
-  recordState(input: RunState): void {
+  recordState(input: RunStateWrite): void {
     this.db
       .prepare(
         `INSERT INTO run_state (fleet_run_id, status, cursor, last_seen_at, last_error)
@@ -220,6 +234,29 @@ export class BindingStore {
            last_seen_at = excluded.last_seen_at, last_error = excluded.last_error`,
       )
       .run(input.fleetRunId, input.status, input.cursor, input.lastSeenAt, input.lastError);
+  }
+
+  /**
+   * Record how far a Run's event log has been read, touching nothing else.
+   *
+   * Status and staleness are deliberately absent: mirroring and reconciliation are separate concerns with
+   * separate failure modes, and a successful event read implies nothing about the Run's state. Going through
+   * recordState() would overwrite a status reconciliation had just decided.
+   *
+   * `drained` reports what the last pass saw rather than being one-way. A terminal Run that still owes a log
+   * is re-read regardless of this value, so an occasional false costs one extra read while a false `true`
+   * would abandon a log forever -- which is why mirrorEvents distinguishes the two.
+   */
+  setCursor(fleetRunId: string, cursor: number, drained?: boolean): void {
+    this.db
+      .prepare(
+        `INSERT INTO run_state (fleet_run_id, status, cursor, last_seen_at, last_error, events_drained)
+         VALUES (?, ?, ?, NULL, NULL, ?)
+         ON CONFLICT(fleet_run_id) DO UPDATE SET
+           cursor = excluded.cursor,
+           events_drained = excluded.events_drained`,
+      )
+      .run(fleetRunId, UNKNOWN, cursor, drained ? 1 : 0);
   }
 
   state(fleetRunId: string): RunState | null {
