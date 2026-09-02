@@ -455,3 +455,80 @@ test('an event with no type is reported, not silently dropped', async () => {
     assert.ok(!events.some((e) => JSON.stringify(e.payload).includes('orphan')));
   } finally { await mock.close(); }
 });
+
+test('sendInput answers a pending dialog over the wire', async () => {
+  // The first draft of sendInput threw on every healthy session: `!session?.socket.destroyed` is true
+  // exactly when the socket is fine. None of the twelve old tests called sendInput, so nothing noticed.
+  const tx = newTx();
+  const mock = await startMock({ MOCK_DAEMON_AWAIT_INPUT: '1', MOCK_DAEMON_AFTER_INPUT: 'end', MOCK_DAEMON_TRANSCRIPT: tx });
+  try {
+    const adapter = adapterFor(mock);
+    const handle = await adapter.start(makeContext());
+    // Consume in the background and signal when the dialog arrives. Breaking out of a `for await`
+    // instead made this test depend on exactly when the run finished, which under full-suite load is
+    // not when the test expects it.
+    const seen: string[] = [];
+    let signalWaiting: () => void = () => {};
+    const waiting = new Promise<void>((r) => { signalWaiting = r; });
+    const draining = (async () => {
+      for await (const ev of handle.events) {
+        if (ev.type === '__done__') break;
+        seen.push(ev.type);
+        if (ev.type === 'input.required') signalWaiting();
+      }
+    })();
+    await withDeadline('input.required', 8_000, waiting);
+    await withDeadline('sendInput', 8_000,
+      adapter.sendInput('run_daemon', { value: 'main', at: new Date().toISOString() }));
+    const answered = transcript(tx).find((l) => (l.command as any).type === 'extension_ui_response');
+    assert.ok(answered, 'the answer must reach the daemon as extension_ui_response');
+    const cmd = answered!.command as any;
+    // The answer is addressed by the dialog's id and carries the value; buildExtensionUiResponse uses
+    // `id`, and asserting a field that does not exist would have made this test fail for the wrong reason.
+    assert.equal(cmd.id, 'req-1');
+    assert.equal(cmd.value, 'main');
+    assert.match(cmd.activeSessionId, /^sess_/, 'the answer must name the session it answers');
+    const exit = await withDeadline('exit', 8_000, Promise.all([handle.exit, draining]).then(([e]) => e));
+    assert.equal(exit.reason, 'completed');
+  } finally { await mock.close(); }
+});
+
+test('sendInput refuses when nothing is waiting, and when the run is gone', async () => {
+  // PROMPT_REPLIES=0 keeps the run open. With the default mock the turn completes a few milliseconds
+  // after start(), so the session is legitimately gone by the time this asserts, and the assertion
+  // passed or failed depending on load rather than on behaviour.
+  const mock = await startMock({ MOCK_DAEMON_PROMPT_REPLIES: '0' });
+  try {
+    const adapter = adapterFor(mock);
+    await adapter.start(makeContext());
+    const e = await err(() => adapter.sendInput('run_daemon', { value: 'x', at: new Date().toISOString() }));
+    assert.match(e.message, /not waiting for input/);
+    const gone = await err(() => adapter.sendInput('no-such-run', { value: 'x', at: new Date().toISOString() }));
+    assert.match(gone.message, /No live agent session/);
+  } finally { await mock.close(); }
+});
+
+test('the mock rejects an envelope with no clientId', async () => {
+  // The mock claims to enforce the envelope; it must enforce all of it, or it silently permits a
+  // regression the real supervisor would refuse.
+  const mock = await startMock();
+  try {
+    const sock = createConnection(mock.path);
+    await new Promise<void>((res, rej) => { sock.once('connect', () => res()); sock.once('error', rej); });
+    const reply = await new Promise<Record<string, unknown>>((res) => {
+      let buf = '';
+      sock.on('data', (d: Buffer) => {
+        buf += d.toString();
+        const line = buf.split('\n').filter(Boolean)[1]; // [0] is the hello
+        if (line) res(JSON.parse(line));
+      });
+      setTimeout(() => sock.write(JSON.stringify({
+        type: 'command', id: 'x1', protocol: { name: 'prime-agent.daemon', version: 7 },
+        command: { type: 'list' }, // no clientId
+      }) + '\n'), 50);
+    });
+    assert.equal(reply.success, false);
+    assert.equal((reply.errorInfo as { code: string }).code, 'invalid_envelope');
+    sock.destroy();
+  } finally { await mock.close(); }
+});

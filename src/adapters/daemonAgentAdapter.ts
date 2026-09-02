@@ -224,8 +224,9 @@ export class DaemonAgentAdapter implements AgentAdapter {
     if (pathErr) throw new DaemonProtocolError(pathErr, { socketPath });
     if (!existsSync(socketPath)) {
       throw new DaemonProtocolError(
-        `no daemon supervisor socket at ${socketPath} (from ${source}). Start one with `
-        + '`prime-agent` background service or `prime-agent status` to see what is running, or run `this host in RPC mode.',
+        `no daemon supervisor socket at ${socketPath} (from ${source}). Start the PrimeAgent `
+        + 'background service, or run `prime-agent status` to see what is running. To use RPC mode '
+        + 'instead, set MERCURY_AGENT_MODE=rpc.',
         { socketPath, source });
     }
 
@@ -560,7 +561,10 @@ export class DaemonAgentAdapter implements AgentAdapter {
    */
   async sendInput(runId: string, input: AgentInput): Promise<void> {
     const session = this.sessions.get(runId);
-    if (!session?.socket.destroyed) throw new Error(`No live agent session for run ${runId}`);
+    // A live session is one whose socket is still open. The first draft read `!session?.socket.destroyed`,
+    // which is true exactly when the session IS healthy -- so sendInput threw on every run that was
+    // actually waiting for input, and the twelve old tests never called it.
+    if (!session || session.socket.destroyed) throw new Error(`No live agent session for run ${runId}`);
     const pending = session.translator.pending;
     if (!pending) throw new Error(`Run ${runId} is not waiting for input`);
     session.translator.clearPending();

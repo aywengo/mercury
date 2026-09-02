@@ -122,6 +122,7 @@ const server = net.createServer((socket) => {
     // bug; answer it with an explicit refusal so a test fails with a message instead of hanging.
     if (msg.type !== 'command' || typeof msg.id !== 'string'
         || msg.protocol?.name !== 'prime-agent.daemon' || typeof msg.protocol?.version !== 'number'
+        || typeof msg.clientId !== 'string' || !msg.clientId
         || typeof msg.command !== 'object' || msg.command === null) {
       send({ id: typeof msg.id === 'string' ? msg.id : '', type: 'response',
         command: String(msg.type ?? ''), success: false,
@@ -157,6 +158,13 @@ const server = net.createServer((socket) => {
         respond(id, 'prompt', true, { data: { accepted: true } });
         if (!s.subscribers.size) return; // the real daemon does not invent a subscriber
         if (process.env.MOCK_DAEMON_PROMPT_REPLIES === '0') return;
+        if (process.env.MOCK_DAEMON_AWAIT_INPUT === '1') {
+          // A dialog request: the run now waits for an answer, and the adapter must reply with
+          // extension_ui_response rather than another prompt.
+          emit(cmd.activeSessionId, { type: 'extension_ui_request', id: 'req-1', method: 'select',
+            title: 'Which branch?', message: 'Pick a base branch', options: ['main', 'dev'] });
+          return;
+        }
         setTimeout(() => {
           const turn = [
             { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'working' } },

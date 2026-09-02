@@ -147,7 +147,8 @@ export function looksPrivateFramed(bytes: Buffer): boolean {
 
 export const PRIVATE_TRANSPORT_HINT =
   'the socket answered with length-prefixed frames, which is the daemon\'s INTERNAL worker transport '
-  + '(gated by PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN), not the public supervisor protocol. '
+  + '(selected by PRIME_AGENT_INTERNAL_DAEMON_WORKER and authenticated by '
+  + 'PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN), not the public supervisor protocol. '
   + 'Point MERCURY_DAEMON_SOCKET at the supervisor socket reported by `prime-agent status`, '
   + 'or unset PRIME_AGENT_INTERNAL_DAEMON_WORKER if a daemon was spawned from inside another agent session.';
 
