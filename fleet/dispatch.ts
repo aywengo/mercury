@@ -56,7 +56,7 @@ function newFleetRunId(): string {
 }
 
 /** Resolve a host the caller may use, or explain why not. */
-function resolveHost(deps: DispatchDeps, hostId: string): { baseUrl: string; token: string } {
+export function resolveHost(deps: DispatchDeps, hostId: string): { baseUrl: string; token: string } {
   const host = deps.registry.get(hostId);
   if (!host) throw new DispatchError(404, `no such host: ${hostId}`);
   if (!host.enabled) {

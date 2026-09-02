@@ -234,3 +234,15 @@ test('close() stops the prober so the process can exit', async () => {
   } finally { await s.close(); }
   assert.equal(s.svc.prober.running, false);
 });
+
+test('close() stops the reconciliation sweeper too', async () => {
+  // The sweeper is a second long-lived timer, and a timer left running after close() is the difference between
+  // a clean `systemctl stop` and a SIGKILL at the timeout. The prober assertion above does not cover it:
+  // they are independent handles with independent lifecycles.
+  const s = await startService();
+  try {
+    assert.notEqual(s.svc.sweeper, null, 'listen() starts reconciliation');
+    assert.equal(typeof s.svc.sweeper!.running, 'boolean');
+  } finally { await s.close(); }
+  assert.equal(s.svc.sweeper, null, 'close() releases the handle so nothing can fire after shutdown');
+});

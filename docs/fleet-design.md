@@ -280,7 +280,7 @@ section 3 against real hosts.
 binding recorded. No routing. Proves the idempotency and binding model, and the crash-recovery path
 (restart Fleet, still find every Run).
 
-**Phase 2 — reconciliation and merged status (medium).** The sweep from section 7, `UNKNOWN` handling, and
+**Phase 2 — reconciliation and merged status (medium).** *Shipped: `fleet/sweep.ts`, `FLEET_SWEEP_INTERVAL_MS`.* The sweep from section 7, `UNKNOWN` handling, and
 `GET /fleet/runs` showing one view across hosts. This is where durability gets exercised for real.
 
 **Phase 3 — event aggregation (medium).** Cursor mirroring, Fleet-side SSE, metadata-only by default.
