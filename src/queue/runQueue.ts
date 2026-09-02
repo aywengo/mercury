@@ -121,8 +121,9 @@ export class RunQueue {
    * busy_timeout), and the ON CONFLICT ... WHERE means the loser's UPDATE is skipped rather than
    * queued: `changes === 0` is the "someone else already alerted" answer.
    *
-   * The claim is deliberately NOT released. An alert has no lease to hand back; the interval is what
-   * bounds repeats.
+   * A claim is released by {@link releaseAlert} when the condition clears, so the claim models an
+   * EPISODE rather than a window. `intervalMs` is only the floor for a worker that JOINS an episode
+   * already in progress, and the fallback bound if the holder never releases (see releaseAlert).
    */
   claimAlert(key: string, workerId: string, intervalMs: number, now = Date.now()): boolean {
     const nowIso = new Date(now).toISOString();

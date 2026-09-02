@@ -831,6 +831,14 @@ export class Worker {
       // Episode over. Release the cluster-wide claim so the NEXT crossing alerts, otherwise the
       // repeat floor would swallow a genuinely new backlog that arrives inside the interval.
       // Only the worker that won the claim has a row to delete; for the others this is a no-op.
+      //
+      // Known bound (review finding, waived with reason): if the winning worker dies before it
+      // observes this falling edge, nobody releases the row, and a NEW backlog episode is muted until
+      // the claim goes stale at backlogRepeatIntervalMs. The exposure is therefore bounded by that
+      // interval and equals the floor a healthy cluster already applies -- it is not an indefinite
+      // mute. Letting any worker release the key would close it, and is safe because the claim itself
+      // is atomic, but it trades away the invariant that a worker never deletes a claim it does not
+      // hold. A muted alert for at most one interval after a crash is the better trade.
       this.backlogAlerted = false;
       if (this.alertWebhookUrl) this.deps.queue.releaseAlert('backlog', this.deps.workerId);
     }
@@ -878,10 +886,13 @@ export class Worker {
       const lastActivity = this.deps.events.lastActivity(run.id);
       const refMs = Date.parse(lastActivity ?? run.startedAt ?? run.createdAt);
       stillStuck.add(run.id);
-      // One alert per stuck run, cluster-wide. Scoping alone was not enough: this loop runs every
-      // stuckCheckIntervalMs and had NO dedupe whatsoever, so a single worker re-alerted about the
-      // same run on every tick -- measured at 9 webhook posts in 480 ms. The claim is released once
-      // the run stops being stuck (below), so a run that goes stuck twice alerts twice.
+      // At most one alert per stuck run per stuckAlertRepeatMs, cluster-wide. Scoping alone was not
+      // enough: this loop runs every stuckCheckIntervalMs and had NO dedupe whatsoever, so a single
+      // worker re-alerted about the same run on every tick -- measured at 9 webhook posts in 480 ms.
+      // A run that STAYS stuck re-alerts every stuckAlertRepeatMs, which is intended: a run wedged for
+      // three hours should keep nagging. The claim is released as soon as the run stops being stuck
+      // (below), so the repeat floor only ever applies to an episode still in progress, and a run that
+      // goes stuck twice alerts twice without waiting for the floor.
       if (!this.deps.queue.claimAlert(`stuck:${run.id}`, this.deps.workerId, this.stuckAlertRepeatMs, now)) continue;
       this.stuckAlerted.add(run.id);
       stuck.push({ runId: run.id, status: run.status, idleMs: now - refMs });
