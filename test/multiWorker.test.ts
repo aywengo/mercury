@@ -966,19 +966,26 @@ test('control: the abort assertion in the lease-loss test can actually fail (iss
 
 const OVER_CAP = 260; // > the old limit of 200, so truncation is observable
 
-/** Insert `n` RUNNING runs directly, oldest first, and return their ids oldest-first. */
-function seedRunningRuns(env: ReturnType<typeof makeEnv>, n: number, ageMs: number): string[] {
+/**
+ * Insert `n` RUNNING runs directly, oldest first, and return their ids oldest-first.
+ *
+ * `leaseOwner` is set because a RUNNING run always has one in reality -- RunQueue.claim sets it before
+ * the run starts -- and since issue #142 the stuck check is scoped to it. Leaving it NULL would model
+ * a state the worker never produces and the scoped scan would correctly ignore.
+ */
+function seedRunningRuns(env: ReturnType<typeof makeEnv>, n: number, ageMs: number, leaseOwner?: string): string[] {
   const now = Date.now();
   const ids: string[] = [];
   const ins = env.db.prepare(
-    `INSERT INTO runs (id, owner_id, task, repository_json, agent, status, attempt, constraints_json, created_at, started_at)
-     VALUES (?, 'alice', ?, '{}', 'fake', 'RUNNING', 1, '{}', ?, ?)`,
+    `INSERT INTO runs (id, owner_id, task, repository_json, agent, status, attempt, constraints_json, created_at, started_at, lease_owner, lease_expires_at)
+     VALUES (?, 'alice', ?, '{}', 'fake', 'RUNNING', 1, '{}', ?, ?, ?, ?)`,
   );
   for (let i = 0; i < n; i++) {
     // i = 0 is the OLDEST by ageMs; each later one is 1s newer.
     const at = new Date(now - ageMs + i * 1000).toISOString();
     const id = `run_seed_${String(i).padStart(4, '0')}`;
-    ins.run(id, `seed ${i}`, at, at);
+    ins.run(id, `seed ${i}`, at, at,
+      leaseOwner ?? null, leaseOwner ? new Date(now + 60_000).toISOString() : null);
     ids.push(id);
   }
   return ids;
@@ -1079,7 +1086,8 @@ test('the stuck check alerts on the OLDEST run when more than 200 are running (i
   });
   try {
     const ageMs = 10 * 60 * 60 * 1000; // 10 hours old
-    const ids = seedRunningRuns(env, OVER_CAP, ageMs);
+    // Leased to this worker: since issue #142 the stuck scan is scoped to the worker's own leases.
+    const ids = seedRunningRuns(env, OVER_CAP, ageMs, 'mw-worker');
     const oldest = ids[0];
     for (const id of ids.slice(1)) touchRun(env, id);
 
@@ -1143,4 +1151,111 @@ test('listIdle with no limit reports idle runs past the old default of 500 (issu
   } finally {
     env.close();
   }
+});
+
+// --- issue #142: one alert per incident, however many workers are running -----------------------
+//
+// Both alert paths measure a CLUSTER-GLOBAL quantity and used to dedupe with a per-process boolean,
+// so an N-worker deployment sent N copies of one incident. That is how alerting gets muted and then
+// ignored. These tests run more than one worker against one webhook; with a single worker none of
+// them can fail.
+
+test('two workers produce ONE stuck-run alert, from the worker that owns the run (issue #142)', async () => {
+  const webhook = await startWebhookServer();
+  const env = makeEnv({ workerEnabled: false });
+  const opts = {
+    pollMs: 10,
+    stuckRunThresholdMs: 60 * 60 * 1000,
+    stuckCheckIntervalMs: 50,
+    alertWebhookUrl: webhook.url,
+  };
+  const owner = makeWorker(env, { ...opts, workerId: 'owner-w' });
+  const bystander = makeWorker(env, { ...opts, workerId: 'bystander-w' });
+  try {
+    // One stuck run, leased to owner-w. Both workers scan; only the owner may report it.
+    const [runId] = seedRunningRuns(env, 1, 10 * 60 * 60 * 1000, 'owner-w');
+    owner.start();
+    bystander.start();
+
+    await waitFor(() => webhook.hits.length >= 1, 15_000);
+    await sleep(400); // give the bystander several more check intervals a chance to speak up
+    const hits = webhook.hits.filter((h) => h.body.type === 'stuck_runs');
+    assert.equal(hits.length, 1, `exactly one alert for one stuck run, got ${hits.length}`);
+    assert.equal(hits[0].body.workerId, 'owner-w', 'the owning worker reports the run it can act on');
+    const runs = hits[0].body.runs as { runId: string }[];
+    assert.deepEqual(runs.map((r) => r.runId), [runId]);
+  } finally {
+    owner.stop();
+    bystander.stop();
+    await webhook.close();
+    env.close();
+  }
+});
+
+test('a run leased to NOBODY is not alerted by every worker (issue #142)', async () => {
+  // The scoping also removes the "worker A alerts about a run it cannot act on" confusion. A run with
+  // no owner is anomalous for RUNNING, and the reaper (not the stuck check) is what recovers a run
+  // whose worker died: its lease expires and it goes to FAILED(infrastructure).
+  const webhook = await startWebhookServer();
+  const env = makeEnv({ workerEnabled: false });
+  const worker = makeWorker(env, {
+    pollMs: 10,
+    stuckRunThresholdMs: 60 * 60 * 1000,
+    stuckCheckIntervalMs: 50,
+    alertWebhookUrl: webhook.url,
+  });
+  try {
+    seedRunningRuns(env, 3, 10 * 60 * 60 * 1000); // no lease owner
+    worker.start();
+    await sleep(600);
+    assert.equal(webhook.hits.filter((h) => h.body.type === 'stuck_runs').length, 0,
+      'an unowned run is the reaper\'s business, not the stuck check\'s');
+  } finally {
+    worker.stop();
+    await webhook.close();
+    env.close();
+  }
+});
+
+test('two workers produce ONE backlog alert for one backlog (issue #142)', async () => {
+  // Queue depth has no owner, so this one cannot be scoped -- it needs the shared claim.
+  const webhook = await startWebhookServer();
+  const env = makeEnv({
+    workerEnabled: false,
+    fakeScript: [{ event: { type: 'agent.message', payload: { text: 'slow' } }, delayMs: 250 }],
+  });
+  const opts = { pollMs: 20, backlogCheckIntervalMs: 50, backlogAlertThreshold: 2, alertWebhookUrl: webhook.url };
+  const a = makeWorker(env, { ...opts, workerId: 'a-w' });
+  const b = makeWorker(env, { ...opts, workerId: 'b-w' });
+  try {
+    const repoDir = makeGitRepo(join(envDir(), 'repo-dedup'));
+    a.start();
+    b.start();
+    for (let i = 0; i < 5; i++) {
+      env.runService.create({ ownerId: 'alice', task: `d${i}`, agent: 'fake', repository: { localPath: repoDir } });
+    }
+    await waitFor(() => webhook.hits.length >= 1, 15_000);
+    await sleep(600); // several more sampler ticks on both workers
+    assert.equal(webhook.hits.length, 1,
+      `one backlog is one alert, got ${webhook.hits.length} from ${webhook.hits.map((h) => h.body.workerId).join(',')}`);
+  } finally {
+    a.stop();
+    b.stop();
+    await webhook.close();
+    env.close();
+  }
+});
+
+test('the backlog claim releases, so a SECOND episode alerts again (issue #142)', async () => {
+  // The failure mode a time-window claim would have introduced: the backlog drains and refills inside
+  // the repeat interval and the second alert is silently swallowed. An existing test caught this
+  // during development; this pins it deliberately.
+  const env = makeEnv({ workerEnabled: false });
+  const w = 'w1';
+  assert.equal(env.queue.claimAlert('backlog', w, 15 * 60 * 1000), true, 'first episode claims');
+  assert.equal(env.queue.claimAlert('backlog', 'w2', 15 * 60 * 1000), false, 'second worker is muted');
+  assert.equal(env.queue.releaseAlert('backlog', 'w2'), false, 'a worker that never won cannot release');
+  assert.equal(env.queue.releaseAlert('backlog', w), true, 'the winner releases');
+  assert.equal(env.queue.claimAlert('backlog', 'w2', 15 * 60 * 1000), true,
+    'the next episode alerts, well inside the interval');
 });

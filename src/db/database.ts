@@ -104,6 +104,20 @@ export const MIGRATIONS: string[] = [
   `
   CREATE INDEX IF NOT EXISTS idx_events_type ON events(type, run_id);
   `,
+  // v5: cluster-wide alert dedupe (issue #142).
+  //
+  // Both alert paths measure a CLUSTER-GLOBAL quantity and deduped with a per-process variable, so
+  // an N-worker deployment sent N copies of one alert. That is how alerting gets muted and then
+  // ignored. The dedupe has to live where the workers share it, which is this database.
+  //
+  // One row per alert key, holding who last claimed the right to send and when.
+  `
+  CREATE TABLE IF NOT EXISTS alert_claims (
+    key TEXT PRIMARY KEY,
+    claimed_at TEXT NOT NULL,
+    worker_id TEXT NOT NULL
+  );
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;
