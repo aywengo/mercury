@@ -151,7 +151,7 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
         if (dropped.length > 0) {
           // Reported rather than swallowed: a rollup that quietly loses a family under-reports, and the whole
           // point of the endpoint is to be trusted.
-          deps.logger.warn('metrics rollup dropped data', { dropped: dropped.length, hosts: dropped.slice(0, 20) });
+          deps.logger.warn('metrics rollup dropped data', { dropped: dropped.length, examples: dropped.slice(0, 20) });
         }
         res.writeHead(200, {
           'content-type': 'text/plain; version=0.0.4; charset=utf-8',

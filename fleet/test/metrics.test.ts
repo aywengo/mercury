@@ -207,3 +207,48 @@ test('a 404 from the metrics path is a rejection, not an empty success', async (
     await new Promise<void>((r) => { child.closeAllConnections?.(); child.close(() => r()); });
   }
 });
+
+test('a series with duplicate label keys is dropped, not re-emitted', async () => {
+  // Prometheus rejects the ENTIRE scrape for one malformed line, so re-emitting a child's mistake would let a
+  // single bad host blank the fleet-wide endpoint.
+  const bad = '# TYPE t counter\nt{a="1",a="2"} 5\n';
+  const out = mergeRollup([
+    { hostId: 'box-1', text: REAL, reason: null },
+    { hostId: 'weird', text: bad, reason: null },
+  ]);
+  assert.ok(out.dropped.some((d) => d.includes('duplicate label keys')), out.dropped.join('\n'));
+  assert.doesNotMatch(out.text, /a="1",a="2"/);
+  // The healthy host still contributes everything.
+  assert.match(out.text, /mercury_runs_total\{host="box-1"\} 0/);
+});
+
+test('metric names containing a colon parse instead of being dropped', () => {
+  // Recording rules produce names like this. Restricting the pattern to \w reports them as unparsed and quietly
+  // removes a valid family from the rollup.
+  const rec = '# TYPE job:mercury_runs:rate5m gauge\njob:mercury_runs:rate5m{status="RUNNING"} 0.5\n';
+  const { families, unparsed } = parseExposition(rec);
+  assert.deepEqual(unparsed, [], JSON.stringify(unparsed));
+  assert.equal(families[0]!.name, 'job:mercury_runs:rate5m');
+  const out = mergeRollup([{ hostId: 'h1', text: rec, reason: null }]);
+  assert.deepEqual(out.dropped, []);
+  assert.match(out.text, /job:mercury_runs:rate5m\{host="h1",status="RUNNING"\} 0\.5/);
+});
+
+test('the scrape asks the child for text, not JSON', async () => {
+  const { createServer } = await import('node:http');
+  const accepts: string[] = [];
+  const child = createServer((req, res) => {
+    accepts.push(String(req.headers.accept ?? ''));
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('');
+  });
+  await new Promise<void>((r) => child.listen(0, '127.0.0.1', r));
+  const { port } = child.address() as import('node:net').AddressInfo;
+  try {
+    const { createChildClient } = await import('../child.ts');
+    await createChildClient({ timeoutMs: 1000 }).getMetrics({ baseUrl: `http://127.0.0.1:${port}`, token: 't' });
+    assert.deepEqual(accepts, ['text/plain']);
+  } finally {
+    await new Promise<void>((r) => { child.closeAllConnections?.(); child.close(() => r()); });
+  }
+});

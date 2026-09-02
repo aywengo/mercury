@@ -73,7 +73,10 @@ export function parseExposition(text: string): { families: ParsedFamily[]; unpar
       continue;
     }
     // Sample line: name{labels} value [timestamp]
-    const m = /^(\w+)(?:\{([^}]*)\})?\s+(-?[0-9eE+._infNaNinf]+)(?:\s+\S+)?\s*$/.exec(line);
+    // Metric names allow ':' as well as word characters -- recording rules produce names like
+    // `job:mercury_runs:rate5m`, and a regex restricted to \w would report those as unparsed and drop a valid
+    // family out of the rollup.
+    const m = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+(-?[0-9eE+._infNaNinf]+)(?:\s+\S+)?\s*$/.exec(line);
     if (!m) {
       unparsed.push(line);
       continue;
@@ -179,6 +182,14 @@ export function mergeRollup(results: ScrapeResult[]): { text: string; dropped: s
         dropped.push(`${scrape.hostId}: TYPE mismatch for ${f.name} (${s.type} kept, ${f.type} ignored)`);
       }
       for (const sample of f.samples) {
+        const keys = new Set(sample.labels.map(([k]) => k));
+        if (keys.size !== sample.labels.length) {
+          // A child emitting `t{a="1",a="2"}` produces text Prometheus rejects outright, and it rejects the
+          // whole scrape rather than the one line. Same reasoning as the host-label guard below: one malformed
+          // series must not take the fleet endpoint down.
+          dropped.push(`${scrape.hostId}: series ${sample.name} has duplicate label keys; skipped`);
+          continue;
+        }
         if (sample.labels.some(([k]) => k === HOST_LABEL)) {
           // Defensive: Mercury never labels a series `host` today. If a child ever does, emitting two labels
           // with the same name produces text Prometheus rejects outright, so dropping one with a report beats

@@ -209,7 +209,12 @@ export function createChildClient(opts: ChildClientOptions): ChildClient {
     async getMetrics(host) {
       // Text, not JSON: the value is returned verbatim rather than parsed here, so an unexpected metric family
       // reaches the merge layer intact and can be reported as dropped instead of vanishing.
-      return callText(opts, `${host.baseUrl}/metrics`, { method: 'GET', headers: headers(host.token) });
+      return callText(opts, `${host.baseUrl}/metrics`, {
+        method: 'GET',
+        // The shared helper asks for JSON because every other endpoint returns it. Asking a metrics endpoint
+        // for JSON is a latent trap: harmless while the child ignores Accept, wrong the day it honours it.
+        headers: { ...headers(host.token), accept: 'text/plain' },
+      });
     },
     async getEvents(host, runId, after, limit) {
       const safe = encodeURIComponent(runId);
