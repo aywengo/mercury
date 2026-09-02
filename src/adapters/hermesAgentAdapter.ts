@@ -253,8 +253,33 @@ export class HermesAgentAdapter implements AgentAdapter {
       const { code, signal } = session.exitInfo;
       this.flushStdout(session);
       this.handleExit(session, code, signal);
+      // Output is truncated by decision here, so stop holding the pipe open for it.
+      this.releasePipes(session);
     }, ms);
     session.drainTimer.unref?.();
+  }
+
+  /**
+   * Stop reading the child's stdio once the drain grace has decided to truncate it.
+   *
+   * Measured: at grace time stdout is still `readable=true, destroyed=false`, and it stays that way for as
+   * long as whatever inherited the pipe keeps it open -- possibly forever. The listeners also keep the
+   * whole session closure reachable after the run has settled. State that outlives the run it belongs to
+   * is the same leak class as #46/#62/#97, so release it deliberately rather than waiting for the
+   * grandchild to finish.
+   */
+  private releasePipes(session: Session): void {
+    const proc = session.proc;
+    if (!proc) return;
+    proc.stdout.removeAllListeners('data');
+    proc.stdout.removeAllListeners('end');
+    proc.stderr.removeAllListeners('data');
+    // A destroyed stream can still emit 'error'; with no listener attached that becomes an uncaught
+    // exception on the process, which would take the worker down over a run that already settled.
+    proc.stdout.on('error', () => {});
+    proc.stderr.on('error', () => {});
+    proc.stdout.destroy();
+    proc.stderr.destroy();
   }
 
   private clearDrainGrace(session: Session): void {
