@@ -15,6 +15,7 @@ import { HostRegistry, RegistryError, type HostView } from './registry.ts';
 import { BindingStore, UNKNOWN } from './bindings.ts';
 import { createChildClient } from './child.ts';
 import { DispatchError, recoverPending, refreshStates, submitRun, type DispatchDeps } from './dispatch.ts';
+import { startSweeper, type SweeperHandle, type SweepEvent } from './sweep.ts';
 import { createProber, type Prober } from './prober.ts';
 import { CredentialError, type CredentialStore } from './credentials.ts';
 import type { Caller } from './auth.ts';
@@ -34,6 +35,8 @@ export interface FleetServer {
   server: Server;
   prober: Prober;
   routes: Route[];
+  /** Reconciliation timer, running from listen() until close(). */
+  sweeper: SweeperHandle | null;
   /** Bind, then start the sweep. Resolves once listening. */
   listen: () => Promise<{ host: string; port: number; tls: boolean }>;
   close: () => Promise<void>;
@@ -285,10 +288,14 @@ export function createFleetServer(deps: FleetServerDeps): FleetServer {
   server.keepAliveTimeout = 5000;
   server.headersTimeout = 10000;
 
+  const sweeperRef: { handle: SweeperHandle | null } = { handle: null };
   return {
     server,
     prober,
     routes,
+    get sweeper() {
+      return sweeperRef.handle;
+    },
     async listen() {
       // Startup order from section 15.6: credentials were loaded by the caller, the database is open, and
       // reconciliation happens here. Binding LAST means a client can never get a response from an endpoint
@@ -318,6 +325,24 @@ export function createFleetServer(deps: FleetServerDeps): FleetServer {
       prober.start();
       // Sweep once immediately so the first GET /fleet/hosts is not all "never-probed".
       void prober.sweepOnce().catch((err: Error) => deps.logger.error('initial sweep failed', { err }));
+
+      // Reconciliation on its own timer, from startup, whether or not anyone is asking (section 7). A sweep
+      // driven by reads would report exactly the staleness it exists to prevent: a Run that finishes while the
+      // dashboard is closed would stay RUNNING until somebody opens the page again.
+      sweeperRef.handle = startSweeper(dispatch, {
+        intervalMs: deps.config.sweepIntervalMs,
+        onEvent: (event: SweepEvent) => {
+          // LOST is an operator event, not a Run outcome: the binding asserts a Run exists and the child
+          // denies it. Loud in the log; a webhook belongs with the alerting work in a later phase.
+          deps.logger.error('binding lost: child has no such Run', {
+            fleetRunId: event.fleetRunId, hostId: event.hostId, childRunId: event.childRunId,
+            detail: event.detail,
+          });
+        },
+        onError: (err: unknown) => deps.logger.error('reconciliation sweep failed', {
+          err: err instanceof Error ? err : new Error(String(err)),
+        }),
+      });
       return {
         host: deps.config.bindHost,
         port: typeof addr === 'object' && addr ? addr.port : deps.config.port,
@@ -327,6 +352,10 @@ export function createFleetServer(deps: FleetServerDeps): FleetServer {
     async close() {
       // In-flight probes are abandoned, not awaited: the sweep writes cache rows and cache is cheap to lose.
       prober.stop();
+      // Stopped before the socket closes so a pass cannot start against a half-torn-down process and write a
+      // cache row after the database is on its way out.
+      sweeperRef.handle?.stop();
+      sweeperRef.handle = null;
       await new Promise<void>((resolve) => {
         server.closeAllConnections?.();
         server.close(() => resolve());

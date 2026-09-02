@@ -30,6 +30,12 @@ export interface FleetConfig {
   /** Per-request timeout for a single probe call. A hung host must not stall the sweep. */
   probeTimeoutMs: number;
   /**
+   * How often reconciliation re-reads every non-terminal Run (design section 7). Independent of the probe
+   * interval on purpose: probing asks "is this machine up" for every host, reconciling asks "what is this Run
+   * doing" for every Run, and a fleet with three hosts and two hundred Runs wants those on different clocks.
+   */
+  sweepIntervalMs: number;
+  /**
    * Escape hatch for filesystems where 0600 cannot be set. Off by default: a credential file readable by
    * the whole machine is the exact failure mode section 9 of the design exists to prevent.
    */
@@ -68,6 +74,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     credentialsFile: env['FLEET_CREDENTIALS_FILE'] ?? defaultCredentialsFile(),
     probeIntervalMs: num(env['FLEET_PROBE_INTERVAL_MS'], 15_000),
     probeTimeoutMs: num(env['FLEET_PROBE_TIMEOUT_MS'], 5_000),
+    sweepIntervalMs: num(env['FLEET_SWEEP_INTERVAL_MS'], 10_000),
     allowInsecureCredentials: env['FLEET_ALLOW_INSECURE_CREDENTIALS'] === '1',
     bindHost: env['FLEET_BIND_HOST'] ?? '127.0.0.1',
     port: port(env['FLEET_PORT'], 3100),
