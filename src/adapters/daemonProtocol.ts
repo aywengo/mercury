@@ -208,6 +208,16 @@ export type DaemonLine =
   | { kind: 'hello'; hello: unknown }
   | { kind: 'response'; id: string; command: string; success: boolean; data?: unknown; error?: string; errorInfo?: unknown }
   | { kind: 'event'; activeSessionId?: string; sequence?: number; cursor?: unknown; event: Record<string, unknown> }
+  /** `session_status`: a recap/idle marker for a session. Informational, never run-ending. */
+  | { kind: 'status'; activeSessionId?: string; recap?: string }
+  /**
+   * `session_closed`: THIS session ended (reason `killed`, `crashed`, ...). Distinct from `closing`,
+   * which is the whole daemon shutting down. A run whose session vanished cannot continue, so the
+   * adapter must end it rather than wait for a command timeout.
+   */
+  | { kind: 'session_closed'; activeSessionId?: string; reason: string }
+  /** Routine chatter with no run-relevant payload (e.g. `heartbeats_changed`). */
+  | { kind: 'ignore'; detail: string }
   | { kind: 'closing'; reason: string }
   | { kind: 'unparsed'; detail: string };
 
@@ -240,14 +250,41 @@ export function parseDaemonLine(line: string): DaemonLine {
         ...(value.error !== undefined ? { error: String(value.error) } : {}),
         ...(value.errorInfo !== undefined ? { errorInfo: value.errorInfo } : {}),
       };
-    case 'event':
+    case 'session_event': {
+      // The real supervisor puts the ordering information in `meta`, not at the top level:
+      // meta = { id: "<session>:<seq>", protocol, activeSessionId, sequence, cursor, emittedAt }.
+      // Reading only top-level fields yields a cursor that never advances.
+      const meta = (typeof value.meta === 'object' && value.meta !== null ? value.meta : {}) as Record<string, unknown>;
+      const sequence = typeof value.sequence === 'number' ? value.sequence
+        : typeof meta.sequence === 'number' ? meta.sequence : undefined;
+      const cursor = value.cursor ?? meta.cursor;
+      const activeSessionId = typeof value.activeSessionId === 'string' ? value.activeSessionId
+        : typeof meta.activeSessionId === 'string' ? meta.activeSessionId : undefined;
       return {
         kind: 'event',
-        ...(typeof value.activeSessionId === 'string' ? { activeSessionId: value.activeSessionId } : {}),
-        ...(typeof value.sequence === 'number' ? { sequence: value.sequence } : {}),
-        ...(value.cursor !== undefined ? { cursor: value.cursor } : {}),
+        ...(activeSessionId !== undefined ? { activeSessionId } : {}),
+        ...(sequence !== undefined ? { sequence } : {}),
+        ...(cursor !== undefined ? { cursor } : {}),
         event: (typeof value.event === 'object' && value.event !== null ? value.event : {}) as Record<string, unknown>,
       };
+    }
+    case 'session_status': {
+      const meta = (typeof value.meta === 'object' && value.meta !== null ? value.meta : {}) as Record<string, unknown>;
+      return {
+        kind: 'status',
+        ...(typeof value.activeSessionId === 'string' ? { activeSessionId: value.activeSessionId } : {}),
+        ...(typeof value.recap === 'string' ? { recap: value.recap } : {}),
+        ...(typeof meta.recap === 'string' ? { recap: meta.recap } : {}),
+      };
+    }
+    case 'session_closed':
+      return {
+        kind: 'session_closed',
+        ...(typeof value.activeSessionId === 'string' ? { activeSessionId: value.activeSessionId } : {}),
+        reason: String(value.reason ?? 'closed'),
+      };
+    case 'heartbeats_changed':
+      return { kind: 'ignore', detail: 'heartbeats_changed' };
     case 'daemon_closing':
       return { kind: 'closing', reason: String(value.reason ?? 'daemon is shutting down') };
     default:

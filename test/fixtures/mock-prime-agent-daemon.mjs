@@ -49,6 +49,31 @@ function loadHello() {
 }
 
 const GENERATION = randomUUID();
+const PROTOCOL_INFO = { name: 'prime-agent.daemon', version: 7 };
+
+/**
+ * The wire shape the real supervisor uses: the line type is `session_event`, and the ordering
+ * information lives in `meta` rather than at the top level. An earlier version of this fixture
+ * invented `{type:"event"}` with top-level sequence/cursor, the adapter agreed with it, and against a
+ * live supervisor every single event was classified unrecognised and dropped -- the run completed and
+ * Mercury saw nothing.
+ */
+function sessionEvent(activeSessionId, event, sequence) {
+  return {
+    type: 'session_event',
+    activeSessionId,
+    event,
+    meta: {
+      id: `${activeSessionId}:${sequence}`,
+      protocol: { name: 'prime-agent.daemon', version: 7 },
+      activeSessionId,
+      sequence,
+      cursor: { generation: GENERATION, sequence },
+      emittedAt: new Date().toISOString(),
+    },
+  };
+}
+
 /** Every raw line the client sent, so tests can assert on what was actually put on the wire. */
 const received = [];
 const sessions = new Map();
@@ -96,12 +121,7 @@ const server = net.createServer((socket) => {
         // Mirrors hasExtensionUiClientForMethod: a dialog has no recipient unless the client asked for it.
         continue;
       }
-      client.write(JSON.stringify({
-        type: 'event', activeSessionId, sequence: ++s.sequence,
-        cursor: { generation: GENERATION, sequence: s.sequence },
-        emittedAt: new Date().toISOString(),
-        event,
-      }) + '\n');
+      client.write(JSON.stringify(sessionEvent(activeSessionId, event, ++s.sequence)) + '\n');
     }
   };
 
@@ -169,6 +189,19 @@ const server = net.createServer((socket) => {
         respond(id, 'prompt', true, { data: { accepted: true } });
         if (!s.subscribers.size) return; // the real daemon does not invent a subscriber
         if (process.env.MOCK_DAEMON_PROMPT_REPLIES === '0') return;
+        if (process.env.MOCK_DAEMON_CLOSE_EARLY === '1') {
+          // The session dies mid-run (crash, or killed by another client). The run cannot continue, and
+          // without handling this line the adapter waits for its command timeout and reports a timeout.
+          const s = sessions.get(cmd.activeSessionId);
+          respond(id, 'prompt', true, { data: { accepted: true } });
+          setTimeout(() => {
+            for (const client of s.subscribers) {
+              client.write(JSON.stringify({ type: 'session_closed', activeSessionId: cmd.activeSessionId,
+                reason: 'crashed', meta: { id: `${cmd.activeSessionId}:1`, protocol: PROTOCOL_INFO } }) + '\n');
+            }
+          }, 10);
+          return;
+        }
         if (process.env.MOCK_DAEMON_AWAIT_INPUT === '1') {
           // A dialog request: the run now waits for an answer, and the adapter must reply with
           // extension_ui_response rather than another prompt.
@@ -188,10 +221,8 @@ const server = net.createServer((socket) => {
             const s = sessions.get(cmd.activeSessionId);
             for (const client of s.subscribers) {
               s.sequence += 1;
-              client.write(JSON.stringify({ type: 'event', activeSessionId: cmd.activeSessionId,
-                sequence: s.sequence, cursor: { generation: GENERATION, sequence: s.sequence },
-                emittedAt: new Date().toISOString(),
-                event: { delta: 'orphan', noTypeHere: true } }) + '\n');
+              client.write(JSON.stringify(sessionEvent(cmd.activeSessionId,
+                { delta: 'orphan', noTypeHere: true }, s.sequence)) + '\n');
             }
             setTimeout(() => { for (const e of turn.slice(2)) emit(cmd.activeSessionId, e); }, 5);
             return;
@@ -203,9 +234,7 @@ const server = net.createServer((socket) => {
             for (const client of s.subscribers) {
               const blob = turn.map((event) => {
                 s.sequence += 1;
-                return JSON.stringify({ type: 'event', activeSessionId: cmd.activeSessionId,
-                  sequence: s.sequence, cursor: { generation: GENERATION, sequence: s.sequence },
-                  emittedAt: new Date().toISOString(), event });
+                return JSON.stringify(sessionEvent(cmd.activeSessionId, event, s.sequence));
               }).join('\n') + '\n';
               client.write(blob);
             }
@@ -242,7 +271,17 @@ const server = net.createServer((socket) => {
         return;
       case 'kill': {
         const s = sessions.get(cmd.activeSessionId);
-        if (s) { for (const c of s.subscribers) c.destroy(); sessions.delete(cmd.activeSessionId); }
+        if (s) {
+          // The supervisor announces the closure before the connection goes away.
+          for (const c of s.subscribers) {
+            c.write(JSON.stringify({ type: 'session_closed', activeSessionId: cmd.activeSessionId,
+              reason: 'killed', meta: { id: `${cmd.activeSessionId}:${++s.sequence}`, protocol: PROTOCOL_INFO } }) + '\n');
+          }
+          respond(id, 'kill', true, { data: { ok: true } });
+          for (const c of s.subscribers) c.destroy();
+          sessions.delete(cmd.activeSessionId);
+          return;
+        }
         respond(id, 'kill', true, { data: { ok: true } });
         return;
       }

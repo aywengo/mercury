@@ -202,7 +202,9 @@ test('responses, events and closing are all classified -- none discarded', () =>
     assert.deepEqual((bad.errorInfo as any).code, 'session_not_found');
   }
 
-  const ev = parseDaemonLine('{"type":"event","activeSessionId":"s1","sequence":7,"cursor":{"generation":"g1","sequence":7},"event":{"type":"agent_message_delta"}}');
+  // session_event with meta, as the real supervisor sends it.
+  const ev = parseDaemonLine('{"type":"session_event","activeSessionId":"s1","event":{"type":"message_update"},'
+    + '"meta":{"id":"s1:7","sequence":7,"cursor":{"generation":"g1","sequence":7}}}');
   assert.equal(ev.kind, 'event');
   if (ev.kind === 'event') {
     assert.equal(ev.sequence, 7);
@@ -237,4 +239,43 @@ test('a dialog answer is converted into the daemon form, not the flat RPC form',
     { requestId: 'r1', response: { cancelled: true } });
   // A value of null is still a value; it must not fall through to the confirm branch.
   assert.deepEqual(toDaemonUiResponse({ id: 'r1', value: null }), { requestId: 'r1', response: { value: null } });
+});
+
+test('a real session_event line is recognised, with its ordering taken from meta', () => {
+  // Captured verbatim from a live supervisor turn. The line type is session_event and the sequence and
+  // cursor live in meta; a parser that only reads top-level fields sees a cursor that never advances,
+  // and a parser keyed on `event` drops every event the real daemon sends.
+  const line = JSON.stringify({
+    type: 'session_event',
+    activeSessionId: 'b2171e30b7e2',
+    event: { type: 'message_update', message: { role: 'assistant', content: 'PONG' } },
+    meta: {
+      id: 'b2171e30b7e2:12',
+      protocol: { name: 'prime-agent.daemon', version: 7 },
+      activeSessionId: 'b2171e30b7e2',
+      sequence: 12,
+      cursor: { generation: 'gen-abc', sequence: 12 },
+      emittedAt: '2026-09-02T22:41:19.889Z',
+    },
+  });
+  const parsed = parseDaemonLine(line);
+  assert.equal(parsed.kind, 'event');
+  if (parsed.kind === 'event') {
+    assert.equal(parsed.sequence, 12);
+    assert.deepEqual(parsed.cursor, { generation: 'gen-abc', sequence: 12 });
+    assert.equal((parsed.event as { type: string }).type, 'message_update');
+  }
+});
+
+test('session lifecycle lines are classified, not reported as unknown', () => {
+  // These arrive on every real run. Leaving them `unparsed` would flood the log and hide the lines that
+  // actually matter, and treating session_closed as informational would leave the run hanging.
+  assert.equal(parseDaemonLine('{"type":"heartbeats_changed"}').kind, 'ignore');
+  const status = parseDaemonLine(JSON.stringify({ type: 'session_status', activeSessionId: 's', recap: 'done', meta: {} }));
+  assert.equal(status.kind, 'status');
+  const closed = parseDaemonLine(JSON.stringify({ type: 'session_closed', activeSessionId: 's', reason: 'killed', meta: {} }));
+  assert.equal(closed.kind, 'session_closed');
+  if (closed.kind === 'session_closed') assert.equal(closed.reason, 'killed');
+  // Something genuinely unknown is still reported.
+  assert.equal(parseDaemonLine('{"type":"brand_new_thing"}').kind, 'unparsed');
 });

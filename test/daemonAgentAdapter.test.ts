@@ -168,7 +168,7 @@ test('create precedes prompt, and prompt carries the activeSessionId create retu
     const handle = await adapter.start(makeContext());
     await withDeadline('collect', 8_000, collectAll(handle));
     const types = transcript(tx).map((l) => (l.command as any).type);
-    assert.deepEqual(types, ['create', 'attach', 'prompt', 'detach']);
+    assert.deepEqual(types, ['create', 'attach', 'prompt', 'kill']);
     const prompt = transcript(tx).find((l) => (l.command as any).type === 'prompt')!.command as any;
     assert.match(prompt.activeSessionId, /^sess_/, 'prompt must name the daemon-assigned session');
     assert.equal(typeof prompt.message, 'string');
@@ -200,8 +200,9 @@ test('session identity is reported before the prompt is sent', async () => {
   } finally { await mock.close(); }
 });
 
-test('normal completion detaches and leaves the session live; it does not kill it', async () => {
-  // Killing on success would destroy the reuse the daemon mode exists to provide.
+test('normal completion releases the session so no worker is stranded', async () => {
+  // Reuse is not implemented (fresh client identity per start, resume() throws), so a session left live
+  // after a successful run is a stranded supervisor worker. Detach becomes correct when reattach lands.
   const tx = newTx();
   const mock = await startMock({ MOCK_DAEMON_TRANSCRIPT: tx });
   try {
@@ -209,8 +210,8 @@ test('normal completion detaches and leaves the session live; it does not kill i
     const handle = await adapter.start(makeContext());
     await withDeadline('collect', 8_000, collectAll(handle));
     const types = transcript(tx).map((l) => (l.command as any).type);
-    assert.ok(types.includes('detach'), types.join(','));
-    assert.ok(!types.includes('kill'), 'a successful run must not kill its session');
+    assert.ok(types.includes('kill'), `completion must release the session, saw ${types.join(',')}`);
+    assert.ok(!types.includes('detach'), types.join(','));
   } finally { await mock.close(); }
 });
 
@@ -531,5 +532,58 @@ test('the mock rejects an envelope with no clientId', async () => {
     assert.equal(reply.success, false);
     assert.equal((reply.errorInfo as { code: string }).code, 'invalid_envelope');
     sock.destroy();
+  } finally { await mock.close(); }
+});
+
+test('each start presents a distinct client identity', async () => {
+  // The supervisor binds a session to the clientId that created it and does not clear the binding when
+  // the session is killed, so a reused clientId hands back a dead activeSessionId and every later attach
+  // for that run fails. Verified against a live supervisor; this pins it so it cannot regress.
+  const txA = newTx(); const txB = newTx();
+  const mockA = await startMock({ MOCK_DAEMON_TRANSCRIPT: txA });
+  const mockB = await startMock({ MOCK_DAEMON_TRANSCRIPT: txB });
+  try {
+    const run = makeRun();
+    const adapter = new DaemonAgentAdapter('prime-agent', {
+      socketPath: mockA.path, helloTimeoutMs: 1_500, commandTimeoutMs: 3_000, connectTimeoutMs: 1_500 });
+    const h1 = await adapter.start(makeContext(run));
+    await withDeadline('collect A', 8_000, collectAll(h1));
+    const adapter2 = new DaemonAgentAdapter('prime-agent', {
+      socketPath: mockB.path, helloTimeoutMs: 1_500, commandTimeoutMs: 3_000, connectTimeoutMs: 1_500 });
+    const h2 = await adapter2.start(makeContext(run));
+    await withDeadline('collect B', 8_000, collectAll(h2));
+    const idA = transcript(txA)[0]!.clientId as string;
+    const idB = transcript(txB)[0]!.clientId as string;
+    assert.match(idA, /^mercury:run:run_daemon:s[0-9a-f]+$/);
+    assert.notEqual(idA, idB, 'two starts must not share a client identity');
+  } finally { await mockA.close(); await mockB.close(); }
+});
+
+test('a session that closes mid-run ends the run with a failure, not a timeout', async () => {
+  const warnings: Record<string, unknown>[] = [];
+  const logger = { info: () => {}, error: () => {},
+    warn: (msg: string, f: Record<string, unknown>) => { warnings.push({ msg, ...f }); } } as never;
+  const mock = await startMock({ MOCK_DAEMON_CLOSE_EARLY: '1' });
+  try {
+    const adapter = adapterFor(mock, { logger, commandTimeoutMs: 30_000 });
+    const handle = await adapter.start(makeContext());
+    // The command timeout is 30s; the run must end as soon as the closure is announced.
+    const exit = await withDeadline('exit', 8_000, handle.exit);
+    assert.equal(exit.reason, 'failed');
+    assert.ok(warnings.some((w) => String(w.msg).includes('session closed before the run finished')),
+      JSON.stringify(warnings));
+  } finally { await mock.close(); }
+});
+
+test('keepSessionsAlive detaches instead, for when reattach exists', async () => {
+  const tx = newTx();
+  const mock = await startMock({ MOCK_DAEMON_TRANSCRIPT: tx });
+  try {
+    const adapter = adapterFor(mock, { keepSessionsAlive: true });
+    const handle = await adapter.start(makeContext());
+    await withDeadline('collect', 8_000, collectAll(handle));
+    const types = transcript(tx).map((l) => (l.command as any).type);
+    assert.ok(types.includes('detach'), types.join(','));
+    assert.ok(!types.includes('kill'), types.join(','));
   } finally { await mock.close(); }
 });

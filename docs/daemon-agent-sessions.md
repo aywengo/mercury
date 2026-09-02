@@ -213,6 +213,38 @@ Three further facts came out of the re-verification, none of which §4 recorded:
 Verification stayed read-only against the live supervisor: the handshake plus `list`. No session was
 created, prompted, or killed. The contract test in §11 repeats exactly that.
 
+### 3.2 What only a real run could show
+
+Read-only verification is not enough, and §11's contract test as written is not enough either. Running
+the adapter end to end against a live supervisor — `create`, `attach`, `prompt`, a real model turn —
+turned up three things that no fixture, and no read-only probe, could have:
+
+1. **Events arrive as `session_event`, not `event`.** The line is
+   `{type:"session_event", activeSessionId, event, meta:{id, protocol, sequence, cursor, emittedAt}}`,
+   and the ordering information lives in `meta`. The adapter classified `type:"event"` and read
+   `sequence` from the top level, so against a real supervisor **every event was unrecognised and
+   dropped**: the run completed, the exit was clean, and Mercury received an empty timeline. The fixture
+   had been sending `{type:"event"}` with top-level fields, because that is what the adapter expected.
+   Other real line types: `session_status`, `session_closed` (with a `reason`), `heartbeats_changed`.
+2. **The supervisor binds a session to the `clientId` that created it, and does not clear that binding
+   when the session is killed.** A second `create` under the same clientId returns the *dead* session's
+   `activeSessionId`, and the `attach` that follows fails `Unknown active session` — permanently, for
+   that run. A stable `mercury:run:<runId>` id is therefore a bug, not a feature: it breaks every retry
+   and every run that was ever cancelled.
+3. **Detaching on success strands a worker.** Detach is the protocol-correct way to leave a session for
+   reuse, but reuse needs reattach, which does not exist yet. Leaving the session live therefore leaks
+   a supervisor worker after every successful run.
+
+All three are fixed. The end-to-end check is now: create → attach → prompt → the model's reply arrives
+as `agent.message` → `agent.end` → exit `completed` → **no session left on the supervisor and no process
+left behind**. That last part matters: the first version passed the first five steps and failed the last
+two.
+
+The lesson generalises beyond this adapter. A fixture written from the adapter's own behaviour can only
+confirm the adapter's own beliefs, and a read-only contract test can confirm the handshake while every
+payload is wrong. The checks that found these three bugs were: running the real thing once, and reading
+the supervisor's own handlers for the commands being sent.
+
 ---
 
 ## 4. What the real daemon actually is
@@ -567,6 +599,7 @@ until an operator opts in.
 
 | Item | Status |
 | --- | --- |
+| End-to-end run against a real supervisor | **Done manually, deliberately not a test.** It costs a model turn and creates a real session, so it does not belong in CI. It is how §3.2's three bugs were found, and the procedure is: create → attach → prompt → expect `agent.message` → `agent.end` → exit `completed` → assert no session and no worker remain. |
 | Real-daemon contract test | **Shipped.** `describeSupervisor()` performs the handshake and `list` against whatever supervisor is running, read-only. Skips with the socket path in the message when none is reachable, so a skip is visible rather than silent. |
 | Framing golden test | **Shipped**, in two halves: the mock builds a frame with the real `private-framing.js` layout and the adapter refuses it, and `looksPrivateFramed` is asserted **not** to fire on the recorded real hello. A detector that only ever returns `true` fails the second half. |
 | Fixture-fidelity guard | **Shipped, and stronger than proposed.** `test/daemonProtocol.test.ts` imports `createDaemonCommandEnvelope` and `isDaemonCommandEnvelope` from the installed package and asserts Mercury's envelope matches byte for byte; it skips with a loud message if the package is absent. It caught a field the adapter had invented. The hello fixture is a real captured hello with host-specific values scrubbed, and the mock replays it verbatim. |
@@ -614,6 +647,10 @@ what a fresh deployment does.
 | 7.1 JSONL transport | `src/adapters/rpc/jsonl.ts` — the same reader/writer the RPC adapter uses, and the same module the daemon's own client imports. Attached **before** the hello is consumed, so frames sharing the hello's write survive (#68). |
 | 7.2 Envelope | `buildCommandEnvelope` in `src/adapters/daemonProtocol.ts`, checked against the daemon's own `createDaemonCommandEnvelope` by a fidelity test that imports it from the installed package. |
 | 7.3 Session identity | `create` → `activeSessionId` → `onSessionIdentity` callback → `attach` → `prompt`, in that order, asserted on the wire transcript rather than on adapter internals. |
+
+Two things about identity that only showed up against a live supervisor: the `clientId` must be unique
+per `start()` (§3.2 item 2), and the identity callback fires after `create` and **before** `prompt`, so a
+worker that dies mid-run has something to persist. Both are asserted on the wire transcript.
 | 7.4 Cursors | Cursor (max observed sequence) and `supervisorGeneration` are tracked and reported with the identity. `resume()` **throws** rather than guessing: replay needs a persisted id plus a generation comparison, and assuming continuity is the #133 failure mode in a new costume. |
 | 7.5 Discovery, not creation | `resolveSocketPath()`: explicit option → `MERCURY_DAEMON_SOCKET` → `$TMPDIR/prime-agent-<uid>/daemon.sock`. The adapter never spawns a supervisor; a missing socket is an error naming `prime-agent status`. |
 
@@ -646,8 +683,9 @@ the mock: `create` (its `config.agentDir` falls back to the supervisor's default
   This was found by reading §4.2 against `dist/modes/rpc/rpc-mode.js` after review, not by a test: the
   first version of the mock accepted whatever the adapter sent, which is the same mistake §5 describes,
   made again in a place that had not been checked.
-- **Completion detaches and waits**, so the supervisor stops streaming to a socket that is about to
-  close; termination kills, and normal completion never kills.
+- **Completion releases the session and waits for the release to land**, so the supervisor stops
+  streaming to a socket that is about to close and no worker is stranded. `keepSessionsAlive` switches
+  back to detach for whoever implements reattach; see §3.2 item 3.
 - **Provider and model flags are forwarded** into the `create` config, and anything that cannot be
   expressed is logged rather than dropped.
 - **`supervisorOwnerToken` is never logged.** It is a fencing token, not a Mercury credential.

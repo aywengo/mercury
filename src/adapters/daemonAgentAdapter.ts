@@ -33,6 +33,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createConnection, type Socket } from 'node:net';
+import { randomBytes } from 'node:crypto';
 import { attachJsonlLineReader, serializeJsonLine } from './rpc/jsonl.ts';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext } from '../domain/types.ts';
@@ -105,8 +106,13 @@ export interface DaemonAgentAdapterOptions {
   args?: string[];
   /** Unused; kept so callers do not break. The adapter spawns no process. */
   env?: Record<string, string>;
-  /** Bound on the completion detach, so a wedged supervisor cannot stall a finished run. */
+  /** Bound on the completion release, so a wedged supervisor cannot stall a finished run. */
   detachTimeoutMs?: number;
+  /**
+   * Leave sessions running after a successful run. Only meaningful together with reattach, which is not
+   * implemented; see finishCompleted(). Off by default so a run does not strand a supervisor worker.
+   */
+  keepSessionsAlive?: boolean;
   /** Called once the daemon has assigned a session, before the first prompt is sent. */
   onSessionIdentity?: (identity: DaemonSessionIdentity) => void;
   /** Timeouts, overridable for tests. */
@@ -132,6 +138,10 @@ interface DaemonSession {
   runId: string;
   socket: Socket;
   detachReader: () => void;
+  /** Per-start client nonce; see clientId(). */
+  clientNonce: string;
+  /** Set while we are releasing the session ourselves, so our own closure is not read as a crash. */
+  releasing?: boolean;
   /** First bytes seen on the socket, used to recognise the internal framed transport. */
   firstBytes?: Buffer;
   socketPath?: string;
@@ -233,6 +243,7 @@ export class DaemonAgentAdapter implements AgentAdapter {
     const socket = await this.connect(socketPath);
     const session: DaemonSession = {
       runId, socket, socketPath,
+      clientNonce: randomBytes(6).toString('hex'),
       detachReader: () => undefined,
       translator: new EventTranslator(),
       protocolVersion: 0, capabilities: [], generation: null, activeSessionId: null, cursor: 0,
@@ -286,7 +297,7 @@ export class DaemonAgentAdapter implements AgentAdapter {
 
       // attach is what subscribes this connection to the session's events; prompt alone does not.
       await this.command(session, {
-        type: 'attach', activeSessionId, clientId: this.clientId(runId),
+        type: 'attach', activeSessionId, clientId: this.clientId(runId, session.clientNonce),
         // extension_ui is not cosmetic. The supervisor only delivers DIALOG requests (select/confirm/
         // input) when some attached client advertises it, so attaching without it means an agent that
         // asks the user a question is never forwarded to Mercury and the run waits on a dialog nobody
@@ -309,8 +320,19 @@ export class DaemonAgentAdapter implements AgentAdapter {
     return this.makeHandle(session);
   }
 
-  private clientId(runId: string): string {
-    return `mercury:run:${runId}${this.opts.workerId ? `:worker:${this.opts.workerId}` : ''}`;
+  /**
+   * The supervisor binds a session to the clientId that created it, and does NOT clear that binding
+   * when the session is killed: a later `create` under the same clientId returns the dead session's
+   * `activeSessionId`, and the `attach` that follows fails with `Unknown active session` -- for that
+   * run, forever. A stable id is therefore only safe while the session is alive.
+   *
+   * Each start() gets its own nonce so a retry, a cancelled run, or a worker that restarts after a
+   * kill always creates a live session. Reuse across runs would want the opposite (a stable id plus
+   * reattach), which is open question 1 and is not implemented; `resume()` throws rather than
+   * pretending to support it.
+   */
+  private clientId(runId: string, nonce: string): string {
+    return `mercury:run:${runId}${this.opts.workerId ? `:worker:${this.opts.workerId}` : ''}:s${nonce}`;
   }
 
   private connect(path: string): Promise<Socket> {
@@ -449,6 +471,29 @@ export class DaemonAgentAdapter implements AgentAdapter {
         this.destroy(session);
         return;
       }
+      case 'session_closed': {
+        // The session is gone, so nothing more can arrive for this run. Without this the run would sit
+        // until its command timeout and then report a timeout instead of the real reason.
+        // Normal completion detaches rather than kills, so this only fires for a session that ended
+        // underneath us -- and cancel/terminate have already settled the exit, which settleExit
+        // preserves.
+        if (session.exitSettled || session.releasing) return;
+        this.opts.logger?.warn('daemon session closed before the run finished',
+          { runId: session.runId, reason: parsed.reason });
+        session.done = true;
+        settleExit(session, { code: null, signal: null, reason: 'failed' });
+        this.push(session, DONE);
+        this.destroy(session);
+        return;
+      }
+      case 'status':
+        // A recap/idle marker. It carries no run state, and treating it as unknown would flood the log
+        // on every turn.
+        this.opts.logger?.info('daemon session status', { runId: session.runId, recap: parsed.recap });
+        return;
+      case 'ignore':
+        return;
+
       case 'unparsed':
         // Reported, never swallowed. Every silent drop in the previous adapter's history became a hang.
         this.opts.logger?.warn('unrecognised daemon line', { runId: session.runId, detail: parsed.detail });
@@ -472,7 +517,7 @@ export class DaemonAgentAdapter implements AgentAdapter {
     timeoutMs?: number): Promise<T> {
     const id = `c${++session.nextCommandId}`;
     const envelope = buildCommandEnvelope({
-      command, id, clientId: this.clientId(session.runId), protocolVersion: session.protocolVersion,
+      command, id, clientId: this.clientId(session.runId, session.clientNonce), protocolVersion: session.protocolVersion,
     });
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -546,9 +591,19 @@ export class DaemonAgentAdapter implements AgentAdapter {
   private async finishCompleted(session: DaemonSession): Promise<void> {
     if (session.exitSettled) return;
     session.done = true;
-    await this.command(session, { type: 'detach', activeSessionId: session.activeSessionId ?? '' },
+    // Detach stops the event stream; it deliberately leaves the session running. That is the right
+    // protocol move ONLY once something can come back and reattach -- and nothing can: each start()
+    // uses a fresh client identity, and resume() throws until persistence and reattach exist. Leaving
+    // the session live therefore strands a supervisor worker after every successful run, which is the
+    // #46 process leak arriving through a different door. So release it, and keep the detach path one
+    // option away from the person who implements reuse (open question 1).
+    const release = this.opts.keepSessionsAlive ? 'detach' : 'kill';
+    // Killing makes the supervisor announce session_closed for us. That closure is ours, not a crash,
+    // and it arrives while the kill is still in flight -- so mark it before sending.
+    session.releasing = release === 'kill';
+    await this.command(session, { type: release, activeSessionId: session.activeSessionId ?? '' },
       this.opts.detachTimeoutMs ?? 2_000)
-      .catch(() => { /* the run already succeeded; a failed detach is not a run failure */ });
+      .catch(() => { /* the run already succeeded; a failed release is not a run failure */ });
     settleExit(session, { code: 0, signal: null, reason: 'completed' });
     this.destroy(session);
   }
@@ -637,6 +692,7 @@ export class DaemonAgentAdapter implements AgentAdapter {
     try {
       const session: DaemonSession = {
         runId: 'probe', socket, socketPath,
+        clientNonce: randomBytes(6).toString('hex'),
         detachReader: () => undefined,
         translator: new EventTranslator(),
         protocolVersion: MERCURY_DAEMON_PROTOCOL_VERSION, capabilities: [], generation: null,
