@@ -1110,3 +1110,131 @@ test('POSITIVE CONTROL: one throwing subscriber does not starve the others in it
     env.close();
   }
 });
+
+// --- issue #162 (finding R2-11): the poll cadence must follow whether PUSH served the event ------
+//
+// Push is the primary delivery path; poll() is the backstop that carries events appended by ANOTHER
+// process, which push cannot see. slowDown() exists because a pushed event needs no backstop soon
+// after it, so the poller can relax. It was called on EVERY append, including appends with no
+// subscriber at all -- so a busy run with nobody watching left the sole delivery path for
+// cross-process events running at its SLOWEST cadence, exactly when the system is busiest.
+// These two tests point in opposite directions on purpose: one alone would be satisfied by a
+// slowDown() that never fires, and the other by one that always fires.
+
+function slowDownCalls(stream: EventStream): () => number {
+  const target = stream as unknown as { slowDown: () => void };
+  let n = 0;
+  const original = target.slowDown.bind(stream);
+  target.slowDown = () => { n += 1; original(); };
+  return () => n;
+}
+
+test('an append nobody is watching does not slow the poller (issue #162)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    const stream = new EventStream(env.db, env.events, 5, 5_000);
+    const calls = slowDownCalls(stream);
+    stream.start();
+    try {
+      // Must append through the SAME EventStore the stream was built with: a separate instance
+      // writing to the same database does not fire the in-process push hook, which would make this
+      // test pass without the hook ever running.
+      for (let i = 0; i < 5; i++) env.events.append(run.id, 'agent.message', { i });
+      assert.equal(calls(), 0,
+        'with no subscribers, push delivered nothing, so the poller must stay at its fast cadence');
+    } finally {
+      stream.stop();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('an append for a run nobody watches does not slow the poller (issue #162)', () => {
+  // A subscriber on ANOTHER run is not "served" by this append, so the backstop must stay sharp:
+  // cross-process events for the watched run still arrive only via poll().
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const watched = env.runService.create({ ownerId: 'alice', task: 'watched', agent: 'fake' });
+    const noisy = env.runService.create({ ownerId: 'alice', task: 'noisy', agent: 'fake' });
+    const stream = new EventStream(env.db, env.events, 5, 5_000);
+    const calls = slowDownCalls(stream);
+    stream.start();
+    try {
+      stream.subscribe(watched.id, 0, () => {});
+      const before = calls();
+      for (let i = 0; i < 5; i++) env.events.append(noisy.id, 'agent.message', { i });
+      assert.equal(calls(), before,
+        'appends to an unwatched run must not relax the poller that serves the watched one');
+    } finally {
+      stream.stop();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('a subscriber that throws was not served, so the poller does not relax (issue #162)', () => {
+  // "Served" must mean DELIVERED, not attempted. The throwing subscriber is dropped as dead, so after
+  // this append there is nobody to push to and poll() is again the only path -- relaxing it would be the
+  // same mistake as relaxing on an append nobody subscribed to.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    const { log, lines } = capturingLogger();
+    const stream = new EventStream(env.db, env.events, 5, 5_000, log);
+    const calls = slowDownCalls(stream);
+    stream.start();
+    try {
+      // Subscribe AT THE HEAD: subscribe() delivers the backlog synchronously, and the run already has
+      // lifecycle events, so subscribing from 0 would throw here rather than on the append under test.
+      stream.subscribe(run.id, cursor(env, run.id), () => { throw new Error('client socket gone'); });
+      const before = calls();
+      env.events.append(run.id, 'agent.message', { boom: true });
+      assert.ok(lines.some((l) => l.msg.includes('subscriber dropped after delivery failure')),
+        'precondition: the throwing subscriber was dropped and logged');
+      assert.equal(calls(), before,
+        'a failed delivery is not a served event; the backstop must stay sharp');
+    } finally {
+      stream.stop();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('POSITIVE CONTROL: an append that push DID deliver does slow the poller (issue #162)', () => {
+  // Points the other way on purpose. Without it, "never slows down" would pass by deleting slowDown()
+  // entirely, and the poller would then spin at its fast cadence forever -- the cost the call exists to
+  // avoid.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    const stream = new EventStream(env.db, env.events, 5, 5_000);
+    const calls = slowDownCalls(stream);
+    stream.start();
+    try {
+      const seen: number[] = [];
+      stream.subscribe(run.id, 0, (evts) => { for (const e of evts) seen.push(e.sequence); });
+      const before = calls();
+      // subscribe(run.id, 0, ...) already drained the backlog synchronously, so seen is NOT empty
+      // before the append -- it holds the six lifecycle events create() wrote. Asserting
+      // "seen.length >= 1" therefore proves nothing about the event under test: it passed even when
+      // push delivered only the backlog. Pin the precondition to the appended sequence.
+      const backlogLen = seen.length;
+      assert.ok(backlogLen > 0, 'precondition: subscribe() should have drained the backlog');
+      const appended = env.events.append(run.id, 'agent.message', { hello: true });
+      assert.ok(seen.length > backlogLen,
+        'precondition: push must deliver the NEW event, not merely the backlog');
+      assert.ok(seen.includes(appended.sequence),
+        `precondition: push must deliver sequence ${appended.sequence}; saw ${JSON.stringify(seen)}`);
+      assert.ok(calls() > before,
+        'an event that push actually delivered should let the backstop relax');
+    } finally {
+      stream.stop();
+    }
+  } finally {
+    env.close();
+  }
+});

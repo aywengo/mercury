@@ -75,6 +75,11 @@ export class EventStream {
     if (this.timer) return;
     // In-process push: wake matching subscribers immediately on append.
     this.detachHook = this.store.onAppend((runId, event) => {
+      // Whether push actually SERVED this event. poll() is the backstop that carries events appended by
+      // another process, which push can never see, and slowDown() is the only thing that moves it off
+      // the fast cadence. Relaxing the backstop after an append nobody subscribed to is pure downside:
+      // the cadence was slowest exactly when the system was busiest (issue R2-11).
+      let served = false;
       for (const sub of [...this.subs]) {
         if (sub.runId !== runId) continue;
         if (event.sequence <= sub.afterSeq) continue;
@@ -82,6 +87,7 @@ export class EventStream {
           // Deliver first, then advance (cursor rule at the top of this file).
           sub.onEvents([event]);
           sub.afterSeq = event.sequence;
+          served = true;
         } catch (err) {
           // Advancing after delivery is NOT enough on this path. The cursor is a single scalar, so
           // the NEXT successful push moves it past the refused sequence and poll() -- which reads
@@ -98,7 +104,7 @@ export class EventStream {
           );
         }
       }
-      this.slowDown();
+      if (served) this.slowDown();
     });
     this.timer = setInterval(() => this.poll(), this.fastMs);
   }
