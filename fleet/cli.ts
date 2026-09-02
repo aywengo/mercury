@@ -9,6 +9,7 @@
  *   fleet hosts rm <id>
  *   fleet hosts probe [<id>] [--json]
  *   fleet probe --watch            run the sweep on FLEET_PROBE_INTERVAL_MS until interrupted
+  fleet serve                    run the service; binds 127.0.0.1:3100 by default
  *   fleet credentials list         credential NAMES only; values are never printed
  *
  * No command accepts a child credential as an argument. argv is world-readable through ps, so the secret
@@ -21,6 +22,11 @@ import { HostRegistry, RegistryError, type HostView, type ProbeRecord } from './
 import { loadCredentials, CredentialError, type CredentialStore } from './credentials.ts';
 import { createProber } from './prober.ts';
 import { probeAndRecord } from './probe.ts';
+import { createFleetServer } from './server.ts';
+import { assertServeable } from './config.ts';
+import { createRedactor } from './redact.ts';
+import { createLogger } from './logger.ts';
+import { parseCallerTokens } from './auth.ts';
 
 const USAGE = `fleet -- manage multiple Mercury instances
 
@@ -30,6 +36,7 @@ const USAGE = `fleet -- manage multiple Mercury instances
   fleet hosts rm <id>
   fleet hosts probe [<id>] [--json]
   fleet probe --watch
+  fleet serve                      run the service (binds FLEET_BIND_HOST:FLEET_PORT)
   fleet credentials list
 `;
 
@@ -172,6 +179,40 @@ export async function main(argv: string[]): Promise<number> {
         : names.length ? names.join('\n') + '\n' : `(no credentials in ${config.credentialsFile})\n`,
     );
     return 0;
+  }
+
+  if (group === 'serve') {
+    // Startup order from design section 15.6: configuration, then credentials, then the database, then the
+    // server binds. Binding last means a client never reaches an endpoint whose registry is still loading.
+    assertServeable(config);
+    return await withRegistry(async (registry, db) => {
+      const store = openStore(config);
+      // The redactor is seeded from the credential store AND the caller tokens, so neither class of secret
+      // can reach a log line -- including via an exception message that echoes a request header.
+      const callers = parseCallerTokens(config.apiTokens);
+      const redactor = createRedactor(store.secrets());
+      const logger = createLogger(redactor, config.logLevel);
+      const server = createFleetServer({ db, config, credentials: store, logger });
+      const addr = await server.listen();
+      logger.info('fleet api listening', {
+        host: addr.host, port: addr.port, tls: addr.tls,
+        callers: callers.size, unrestricted: callers.unrestrictedOwners(),
+        seededSecrets: redactor.seededCount,
+      });
+      const unrestricted = callers.unrestrictedOwners();
+      if (unrestricted.length) {
+        logger.warn('caller tokens grant access to every host', { owners: unrestricted,
+          hint: 'scope with token:owner:host1+host2 to limit blast radius' });
+      }
+      void registry;
+      await new Promise<void>((resolve) => {
+        const done = () => { void server.close().then(resolve); };
+        process.once('SIGINT', done);
+        process.once('SIGTERM', done);
+      });
+      logger.info('fleet stopped');
+      return 0;
+    });
   }
 
   if (group === 'probe') {

@@ -1,0 +1,32 @@
+[Unit]
+Description=Fleet (federation layer over multiple Mercury instances)
+Documentation=file:///opt/fleet/docs/fleet-design.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fleet
+Group=fleet
+WorkingDirectory=/opt/fleet
+EnvironmentFile=/etc/fleet/fleet.env
+ExecStart=/usr/bin/env node fleet/cli.ts serve
+Restart=on-failure
+RestartSec=5
+
+# Shutdown is bounded in-process: the prober is stopped and open connections are closed without waiting for
+# in-flight probes, because the sweep only writes cache rows and cache is cheap to lose (design 15.6).
+# This is the outer bound, matching mercury.service.
+TimeoutStopSec=15
+
+# Hardening, matching deploy/mercury.service.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Fleet's own SQLite database and WAL sidecar. Deliberately NOT the credential file: that is read once at
+# startup and must never be writable by the process that holds every child token.
+ReadWritePaths=/var/lib/fleet
+
+[Install]
+WantedBy=multi-user.target

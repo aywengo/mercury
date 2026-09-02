@@ -16,6 +16,14 @@ export interface CredentialStore {
   secret(ref: string): string;
   /** Names only. Safe to print; the values never are. */
   names(): string[];
+  /**
+   * The secret VALUES, for seeding the log redactor only.
+   *
+   * This exists because a pattern pass cannot recognise a bearer token it has no label for, and section
+   * 15.5 requires the redactor to be seeded from the store. Nothing else may call it: no command prints
+   * these, and `fleet credentials list` deliberately reports names only.
+   */
+  secrets(): string[];
 }
 
 /**
@@ -102,6 +110,9 @@ export function loadCredentials(path: string, allowInsecure = false): Credential
     },
     names(): string[] {
       return [...map.keys()].sort();
+    },
+    secrets(): string[] {
+      return [...map.values()];
     },
   };
 }
