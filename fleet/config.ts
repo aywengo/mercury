@@ -35,6 +35,8 @@ export interface FleetConfig {
    * doing" for every Run, and a fleet with three hosts and two hundred Runs wants those on different clocks.
    */
   sweepIntervalMs: number;
+  /** How often an open SSE stream looks for newly mirrored events. */
+  streamPollMs: number;
   /**
    * Escape hatch for filesystems where 0600 cannot be set. Off by default: a credential file readable by
    * the whole machine is the exact failure mode section 9 of the design exists to prevent.
@@ -75,6 +77,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     probeIntervalMs: num(env['FLEET_PROBE_INTERVAL_MS'], 15_000),
     probeTimeoutMs: num(env['FLEET_PROBE_TIMEOUT_MS'], 5_000),
     sweepIntervalMs: num(env['FLEET_SWEEP_INTERVAL_MS'], 10_000),
+    streamPollMs: num(env['FLEET_STREAM_POLL_MS'], 1000),
     allowInsecureCredentials: env['FLEET_ALLOW_INSECURE_CREDENTIALS'] === '1',
     bindHost: env['FLEET_BIND_HOST'] ?? '127.0.0.1',
     port: port(env['FLEET_PORT'], 3100),

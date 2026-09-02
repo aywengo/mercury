@@ -345,3 +345,138 @@ test('a huge limit is capped rather than pulling the whole transcript', async ()
     assert.equal(r.json.nextCursor, 1000);
   } finally { await s.close(); }
 });
+
+/** Seed a host + binding + mirrored events, returning the run id. */
+function seedStreamableRun(db: DatabaseSync, opts: {
+  id: string; hostId?: string; status?: string; events?: number; drained?: boolean;
+}): void {
+  const hostId = opts.hostId ?? 'box-1';
+  db.prepare(
+    `INSERT OR IGNORE INTO hosts (id, base_url, credential_ref, enabled, labels, local_paths, agents_cache, added_at)
+     VALUES (?, 'http://127.0.0.1:1', 'lan-ref', 1, '{}', '[]', '[]', ?)`,
+  ).run(hostId, new Date().toISOString());
+  db.prepare(
+    `INSERT INTO fleet_runs (fleet_run_id, host_id, owner_id, child_run_id, requested, created_at)
+     VALUES (?, ?, 'alice', 'run_1', '{}', ?)`,
+  ).run(opts.id, hostId, new Date().toISOString());
+  db.prepare(
+    `INSERT INTO run_state (fleet_run_id, status, cursor, last_seen_at, last_error, events_drained)
+     VALUES (?, ?, ?, ?, NULL, ?)`,
+  ).run(opts.id, opts.status ?? 'RUNNING', opts.events ?? 0, new Date().toISOString(), opts.drained ? 1 : 0);
+  const ins = db.prepare('INSERT INTO fleet_events (fleet_run_id, sequence, type, timestamp, payload) VALUES (?,?,?,?,?)');
+  for (let i = 1; i <= (opts.events ?? 0); i++) {
+    ins.run(opts.id, i, 'run.log', '2026-01-01T00:00:00.000Z', null);
+  }
+}
+
+/** Read SSE frames until `until` matches or the deadline passes. */
+async function readSse(url: string, token: string, until: (frames: any[]) => boolean, ms = 6000) {
+  const res = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+  const frames: any[] = [];
+  const reader = (res.body as any).getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    const race = await Promise.race([
+      reader.read(),
+      new Promise((r) => setTimeout(() => r('timeout'), Math.max(50, deadline - Date.now()))),
+    ]);
+    if (race === 'timeout') break;
+    const { done, value } = race as { done: boolean; value?: Uint8Array };
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const raw = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const ev = /^event: (.+)$/m.exec(raw)?.[1];
+      const data = /^data: (.+)$/m.exec(raw)?.[1];
+      if (ev) frames.push({ event: ev, data: data ? JSON.parse(data) : null });
+    }
+    if (until(frames)) break;
+  }
+  reader.cancel().catch(() => {});
+  return { status: res.status, frames };
+}
+
+test('the SSE stream delivers mirrored events and ends on a drained terminal Run', async () => {
+  const s = await startService();
+  try {
+    seedStreamableRun(s.db, { id: 'fr_sse_1', status: 'COMPLETED', events: 4, drained: true });
+    const { status, frames } = await readSse(
+      `${s.base}/fleet/runs/fr_sse_1/stream`, CALLER_TOKEN,
+      (f) => f.some((x) => x.event === 'done'),
+    );
+    assert.equal(status, 200);
+    const ids = frames.filter((f) => f.event === 'event').map((f) => f.data.sequence);
+    assert.deepEqual(ids, [1, 2, 3, 4], 'the backlog arrives in order');
+    assert.ok(frames.some((f) => f.event === 'snapshot'), 'the client is told where it stands');
+    const done = frames.find((f) => f.event === 'done');
+    assert.ok(done, 'a finished, drained Run ends the stream rather than holding it open');
+    assert.equal(done.data.status, 'COMPLETED');
+  } finally { await s.close(); }
+});
+
+test('?after resumes without replaying what the client already has', async () => {
+  const s = await startService();
+  try {
+    seedStreamableRun(s.db, { id: 'fr_sse_2', status: 'COMPLETED', events: 6, drained: true });
+    const { frames } = await readSse(
+      `${s.base}/fleet/runs/fr_sse_2/stream?after=4`, CALLER_TOKEN,
+      (f) => f.some((x) => x.event === 'done'),
+    );
+    const ids = frames.filter((f) => f.event === 'event').map((f) => f.data.sequence);
+    assert.deepEqual(ids, [5, 6], 'the cursor is the resume point, exactly as on the poll path');
+  } finally { await s.close(); }
+});
+
+test('a live Run keeps the stream open and receives events as they are mirrored', async () => {
+  const s = await startService();
+  try {
+    seedStreamableRun(s.db, { id: 'fr_sse_3', status: 'RUNNING', events: 1 });
+    const got = readSse(`${s.base}/fleet/runs/fr_sse_3/stream`, CALLER_TOKEN,
+      (f) => f.filter((x) => x.event === 'event').length >= 3);
+    // Let the stream attach before appending, so this proves live delivery rather than backlog replay.
+    await new Promise((r) => setTimeout(r, 300));
+    const ins = s.db.prepare('INSERT INTO fleet_events (fleet_run_id, sequence, type, timestamp, payload) VALUES (?,?,?,?,?)');
+    ins.run('fr_sse_3', 2, 'run.output', new Date().toISOString(), null);
+    ins.run('fr_sse_3', 3, 'run.output', new Date().toISOString(), null);
+    const { frames } = await got;
+    const ids = frames.filter((f) => f.event === 'event').map((f) => f.data.sequence);
+    assert.deepEqual(ids, [1, 2, 3], 'events mirrored after connect arrive on the open stream');
+    assert.ok(!frames.some((f) => f.event === 'done'), 'a live Run must not end the stream');
+  } finally { await s.close(); }
+});
+
+test('the stream is scoped and authenticated like every other read', async () => {
+  const s = await startService();
+  try {
+    seedStreamableRun(s.db, { id: 'fr_sse_4', status: 'COMPLETED', events: 1, drained: true });
+    seedStreamableRun(s.db, { id: 'fr_sse_5', hostId: 'other', status: 'COMPLETED', events: 1, drained: true });
+    const noAuth = await fetch(`${s.base}/fleet/runs/fr_sse_4/stream`);
+    assert.equal(noAuth.status, 401);
+    assert.equal((await fetch(`${s.base}/fleet/runs/fr_nope/stream`,
+      { headers: { authorization: `Bearer ${CALLER_TOKEN}` } })).status, 404);
+    assert.equal((await fetch(`${s.base}/fleet/runs/fr_sse_5/stream`,
+      { headers: { authorization: `Bearer ${CALLER_TOKEN}` } })).status, 403);
+  } finally { await s.close(); }
+});
+
+test('a finished Run that still owes its log keeps the stream open', async () => {
+  // Terminal and drained are different questions. A Run can be COMPLETED with its event log unread -- the
+  // exact state the drain flag exists to notice. Ending the stream here would tell the client it had seen
+  // everything when it had seen nothing.
+  const s = await startService();
+  try {
+    seedStreamableRun(s.db, { id: 'fr_sse_6', status: 'COMPLETED', events: 2, drained: false });
+    const { frames } = await readSse(
+      `${s.base}/fleet/runs/fr_sse_6/stream`, CALLER_TOKEN,
+      (f) => f.some((x) => x.event === 'done'),
+      2500,
+    );
+    assert.deepEqual(frames.filter((f) => f.event === 'event').map((f) => f.data.sequence), [1, 2]);
+    assert.ok(!frames.some((f) => f.event === 'done'),
+      'a terminal Run with an undrained log must not claim the stream is finished');
+  } finally { await s.close(); }
+});

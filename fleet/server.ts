@@ -17,6 +17,7 @@ import { createChildClient } from './child.ts';
 import { DispatchError, recoverPending, refreshStates, submitRun, type DispatchDeps } from './dispatch.ts';
 import { startSweeper, type SweeperHandle, type SweepEvent } from './sweep.ts';
 import { listMirroredEvents, type EventMirrorDeps } from './events.ts';
+import { startEventStream } from './stream.ts';
 import { createProber, type Prober } from './prober.ts';
 import { CredentialError, type CredentialStore } from './credentials.ts';
 import type { Caller } from './auth.ts';
@@ -224,6 +225,37 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
         sendJson(res, 200, {
           ...binding,
           state: dispatch.bindings.state(id),
+        });
+      },
+    },
+    {
+      // GET /fleet/runs/:id/stream -- Fleet-side SSE, a view onto the mirror rather than a second path to the
+      // child. Losing this stream costs latency only: the client reconnects with ?after=<cursor> and resumes
+      // exactly where it was, because the cursor is the correctness mechanism and SSE is the optimisation.
+      method: 'GET', pattern: ['fleet', 'runs', ':id', 'stream'],
+      handle: async (ctx, res) => {
+        const id = ctx.params[0]!;
+        const binding = dispatch.bindings.get(id);
+        if (!binding) throw new HttpError(404, 'no such fleet run');
+        if (!hostAllowed(ctx.caller, binding.hostId)) {
+          throw new HttpError(403, `caller ${ctx.caller.ownerId} may not read runs on host ${binding.hostId}`);
+        }
+        res.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+          // Without this a buffering proxy turns a live stream into one long download.
+          'x-accel-buffering': 'no',
+        });
+        // Flush the headers now. Otherwise a client that connected but receives nothing waits on the socket
+        // and cannot tell a working stream from a hung request.
+        res.flushHeaders?.();
+        startEventStream(res, {
+          db: deps.db, bindings: dispatch.bindings, fleetRunId: id,
+          pollIntervalMs: deps.config.streamPollMs,
+          // Passed in rather than applied afterwards: the backlog is written synchronously, so a handle method
+          // would run after the client had already been sent events it asked to skip.
+          after: nonNegativeInt(ctx.query?.get('after'), 0),
         });
       },
     },
