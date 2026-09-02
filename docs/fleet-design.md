@@ -59,7 +59,7 @@ Verified against `src/api/routes.ts` and `src/api/server.ts` at the time of writ
 | `POST /api/runs/:id/{input,cancel,retry}` | Interaction. Retry creates a **new** Run with `retryOf`. |
 | `GET /api/agents` | `{ agents: string[] }` — which agents this host can run. |
 | `GET /healthz` | `{ ok, ts }`. Public. Liveness. |
-| `GET /healthz/workers` | `{ workers: [{ lease_owner, active_runs, oldest_expires }], queueDepth }`. Public. **Live capacity and backlog — the scheduler input.** |
+| `GET /healthz/workers` | `{ workers: [{ workerId, activeRuns, oldestLeaseExpiresAt }], queueDepth }`. Public. **Live capacity and backlog — the scheduler input.** Fields are camelCase: `activeLeases()` maps the SQL's snake_case row aliases into `ActiveLease` (`runQueue.ts`), so the wire shape is not the column shape. Returns `503 { error: "queue not configured" }` when no queue is wired — a probe must treat 503 as "reachable but not serving", not as down. |
 | `GET /metrics` | Prometheus text, behind `requireAuth`. Note: mounted at the root, **not** under `/api`. Fleet scrapes and aggregates across hosts. |
 
 Two properties matter more than the endpoints themselves:
@@ -151,7 +151,7 @@ flowchart TD
   H2 --> A
   A --> L[Filter: label selectors match]
   L --> C{More than<br/>one host?}
-  C -->|yes| S[Score: queueDepth, active_runs,<br/>oldest_expires headroom]
+  C -->|yes| S[Score: queueDepth, activeRuns,<br/>lease-expiry headroom]
   C -->|one| B[Bind]
   S --> B
   B --> P[POST /api/runs with Idempotency-Key]

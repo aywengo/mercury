@@ -9,10 +9,15 @@ Mercury has **no client binary**. The remote surface is the HTTP API and the das
 this doc drives: a machine that authenticates with a token, creates a Run, and tails its events.
 
 It is worth being explicit about the thing this is *not*, because the shape of the question usually assumes
-it: **the worker is not a network client.** `src/cli.ts` opens the database directly with
-`openDatabase(config.dbPath)`, and the worker's only outbound HTTP request in the entire codebase is the
-optional alert webhook. There is no `MERCURY_API_URL` or equivalent — grep the config and you will not find
-a server address for the worker to use.
+it: **the worker never calls back into Mercury over HTTP.** `src/cli.ts` opens the database directly with
+`openDatabase(config.dbPath)`, and the worker's only outbound request of its own is the optional alert
+webhook. There is no `MERCURY_API_URL` or equivalent — grep the config and you will not find a server
+address for the worker to use.
+
+(One qualification, so the claim is not overstated: `RemoteAgentAdapter` does make outbound HTTP calls, when
+a Run is configured to drive a third-party SaaS agent over HTTP. That is traffic to *someone else's agent
+API*, never to Mercury, so it does not change the conclusion — but "the worker makes no HTTP requests" would
+be wrong.)
 
 So "run the client on a remote host" means *submit and observe*, which works fine. Running the **worker** on
 a second host against the same database does not: `MERCURY_DB` is a plain file path, there is no networked
@@ -30,6 +35,7 @@ On the client machine:
 | Node >= 23.6 | Mercury runs TypeScript directly via Node's type stripping (no build step) and stores state in `node:sqlite`. Both are load-bearing. Node 20 or 22 will not start. |
 | git | To check out the repository. |
 | Network reach to the server | Default server bind is `127.0.0.1:3000`, so a remote client needs the server operator to have set `MERCURY_BIND_HOST`. |
+| `bash`, `curl`, `python3` | The client script below is bash, drives every request with `curl`, and uses `python3 -c 'import json'` to build JSON and read `runId` out of the response. Node cannot substitute here without rewriting the script. All three are present on a typical Linux box and macOS; check them before blaming the server. |
 
 `prime-agent` is **not** needed on a client machine. It is only required where the worker runs, because the
 worker spawns it as a child process.
@@ -111,27 +117,66 @@ set -euo pipefail
 
 : "${MERCURY_URL:?set MERCURY_URL, e.g. https://mercury.internal:3000}"
 : "${MERCURY_TOKEN:?set MERCURY_TOKEN (never pass it as a command-line argument)}"
-task="${1:?usage: submit.sh \"the task for the agent to do\" [localPathOfRepository]}"
-repo="${2:-.}"
+task="${1:?usage: submit.sh \"the task for the agent to do\" <git-url | path-on-the-worker>}"
+repo="${2:?usage: submit.sh \"task\" <git-url | path-on-the-worker>}"
+
+# The repository argument is resolved on the WORKER's filesystem, never on this machine. A git URL is the
+# normal remote case -- the worker clones it. A bare path only names a directory the worker already has,
+# so it is accepted but never guessed: defaulting it to "." would silently submit this client's current
+# directory and fail with "localPath not found" on a host that has never seen it.
+case "$repo" in
+  *://*|git@*|*.git) repo_json="$(MERCURY_REPO="$repo" python3 -c \
+      'import json,os; print(json.dumps({"url": os.environ["MERCURY_REPO"]}))')" ;;
+  /*) repo_json="$(MERCURY_REPO="$repo" python3 -c \
+      'import json,os; print(json.dumps({"localPath": os.environ["MERCURY_REPO"]}))')" ;;
+  *) echo "repository must be a git URL or an ABSOLUTE path on the worker (got: $repo)" >&2; exit 2 ;;
+esac
 
 auth=(-H "Authorization: Bearer ${MERCURY_TOKEN}")
+body_file="$(mktemp)"; trap 'rm -f "$body_file"' EXIT
 
-# Read-only probe: fails loudly and distinctly before any Run is created.
-curl -fsS "${auth[@]}" "${MERCURY_URL}/api/agents" >/dev/null \
-  || { echo "cannot reach ${MERCURY_URL} with this token; see troubleshooting" >&2; exit 1; }
+# Read-only probe, before any Run is created. The status code is captured rather than swallowed by
+# `curl -f`, because the three failure modes need different fixes and a generic "cannot reach" message
+# sends you debugging the wrong one.
+# On a failed connection curl still writes "000" via -w and exits non-zero, so the fallback must
+# assign rather than append -- `|| echo 000` produced "000000" and fell through to the default branch.
+status="$(curl -sS -o "$body_file" -w '%{http_code}' "${auth[@]}" "${MERCURY_URL}/api/agents" 2>/dev/null)" \
+  || status=000
+case "$status" in
+  200) ;;
+  000) echo "cannot reach ${MERCURY_URL}: refused, timed out, or the server is bound to 127.0.0.1" \
+         "(the operator must set MERCURY_BIND_HOST)" >&2; exit 1 ;;
+  401|403) echo "reachable, but this token was rejected (HTTP ${status}). The address is right and the" \
+             "credential is not -- do not try the admin token or another path." >&2; exit 1 ;;
+  404) echo "something answered, but it is not the Mercury API (HTTP 404 from /api/agents)" >&2; exit 1 ;;
+  *) echo "unexpected HTTP ${status} from /api/agents: $(head -c 200 "$body_file")" >&2; exit 1 ;;
+esac
 
 # Build the payload in one place. Values travel through the environment rather than through shell
 # quoting, so a task containing quotes, $, backticks or newlines cannot break the JSON or the command.
-payload="$(MERCURY_TASK="$task" MERCURY_REPO="$repo" python3 -c \
-  'import json, os; print(json.dumps({"task": os.environ["MERCURY_TASK"], "repository": {"localPath": os.environ["MERCURY_REPO"]}}))')"
+payload="$(MERCURY_TASK="$task" MERCURY_REPO_JSON="$repo_json" python3 -c \
+  'import json, os; print(json.dumps({"task": os.environ["MERCURY_TASK"], "repository": json.loads(os.environ["MERCURY_REPO_JSON"])}))')"
 
-# Idempotency-Key makes a retried submit reuse the Run instead of starting a second one.
-key="$(date +%s)-$$"
-created="$(curl -fsS "${auth[@]}" -H 'content-type: application/json' -H "Idempotency-Key: ${key}" \
-  --data-binary "$payload" "${MERCURY_URL}/api/runs")"
+# Idempotency. The key is the payload's content hash and NOTHING ELSE -- deliberately no PID or
+# timestamp. An earlier version appended "-$$", which changes every invocation, so re-running after a
+# transport failure produced a different key and paid for a second agent execution: the exact double-spend
+# this header exists to prevent, while the comment claimed the opposite.
+#
+# Consequence: the same task+repository maps to one Run. Re-running prints the existing runId rather than
+# starting a second one. To force a genuinely new Run of an identical task, set MERCURY_IDEMPOTENCY_KEY to
+# anything new. Choosing reuse-by-default is deliberate: a surprising reuse is cheap and visible, a silent
+# double-spend is neither.
+key="${MERCURY_IDEMPOTENCY_KEY:-$(printf '%s' "$payload" | cksum | cut -d' ' -f1)}"
 
-run_id="$(printf '%s' "$created" | python3 -c 'import json, sys; print(json.load(sys.stdin)["runId"])')"
-echo "run ${run_id}"
+created="$(curl -sS -o "$body_file" -w '%{http_code}' "${auth[@]}" -H 'content-type: application/json' \
+  -H "Idempotency-Key: ${key}" --data-binary "$payload" "${MERCURY_URL}/api/runs" 2>/dev/null)" || created=000
+if [ "$created" != 201 ] && [ "$created" != 200 ]; then
+  echo "submit failed: HTTP ${created} $(head -c 300 "$body_file")" >&2
+  exit 1
+fi
+
+run_id="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["runId"])' "$body_file")"
+echo "run ${run_id} (idempotency key ${key}; set MERCURY_IDEMPOTENCY_KEY to start a separate Run)"
 
 # Follow the event stream: structured, sequenced events rather than a pipe of agent stdout.
 curl -sS -N "${auth[@]}" "${MERCURY_URL}/api/runs/${run_id}/stream"
