@@ -248,6 +248,27 @@ export function createRoutes(deps: RoutesDeps): Router {
     };
 
     /**
+     * Tear the stream down WITHOUT flushing, for a client that has proven it will not read.
+     *
+     * destroy(), not end(): end() queues its closing bytes behind a buffer this client is not
+     * draining, so the client never observes the close AND the bytes we are trying to reclaim stay
+     * pinned -- which is the entire problem issue #145 describes. destroy() drops the buffer and
+     * tears the socket down immediately.
+     */
+    const abortUnreadable = (): void => {
+      if (closed) return;
+      closed = true;
+      if (keepalive) clearInterval(keepalive);
+      if (backstop) clearTimeout(backstop);
+      unsubscribe();
+      try {
+        res.destroy();
+      } catch {
+        /* already gone */
+      }
+    };
+
+    /**
      * Close the stream and record why. NOT sendError(): that ends in res.status(500).json(), and
      * headers are already on the wire by the time any of these paths can be reached, so calling it
      * here would raise a second failure while trying to report the first. Once headers are out the
@@ -281,15 +302,85 @@ export function createRoutes(deps: RoutesDeps): Router {
     try {
       res.write(`event: hello\ndata: {"runId":"${run.id}","after":${afterSeq}}\n\n`);
 
+      /**
+       * Backpressure (issue #145). res.write() returns false once the socket buffer passes its
+       * highWaterMark; the old code discarded that, so a client that stopped reading left Node
+       * buffering the entire backlog in memory -- one browser tab on a run with a long history was
+       * enough. Now: stop writing at the first false, hold at most MAX_PENDING events, resume on
+       * 'drain', and close the stream if the client still will not read.
+       *
+       * The close is driven by ARRIVALS, not by a timer: a client wedged at the cap that receives no
+       * further events is left open, holding at most MAX_PENDING events. That is bounded by
+       * construction and is the intended steady state for a slow client that may resume; nothing
+       * unbounded accumulates while it waits.
+       *
+       * Closing rather than blocking is deliberate. The producer here is the shared EventStream
+       * dispatch loop, and a handler that blocks or grows without bound turns one wedged tab into a
+       * server-wide problem. A dropped client reconnects with its own ?after= cursor and resumes;
+       * nothing is lost, because an event that was never written was never acknowledged.
+       */
+      const MAX_PENDING = 1_000;
+      const pending: { type: string; sequence: number; payload: unknown }[] = [];
+      let paused = false;
+      let sawTerminal = false;
+
+      const writeEvent = (ev: { type: string; sequence: number; payload: unknown }): boolean =>
+        res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
+
+      /** Push as much of the queue as the socket will take. Returns after pausing or emptying. */
+      const flushPending = (): void => {
+        while (pending.length > 0 && !paused && !closed) {
+          const ok = writeEvent(pending[0]);
+          // Always dropped: a false return still means the event was accepted into the socket
+          // buffer, so keeping it here would send it twice.
+          pending.shift();
+          if (!ok) {
+            paused = true;
+            return;
+          }
+        }
+        if (pending.length === 0 && sawTerminal) end();
+      };
+
       const send = (events: { type: string; sequence: number; payload: unknown }[]): void => {
+        if (closed) return;
+        let overLimit = false;
         for (const ev of events) {
-          res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
+          if (paused) {
+            // Checked BEFORE the push so MAX_PENDING is a real ceiling. Checking after the loop let a
+            // single 500-row backlog page push the queue well past the cap before anything noticed,
+            // which made "at most MAX_PENDING" untrue by up to a page.
+            if (pending.length >= MAX_PENDING) {
+              overLimit = true;
+              break;
+            }
+            pending.push(ev);
+            continue;
+          }
+          // A false return means "accepted, but please stop" -- the bytes ARE queued. Re-queueing
+          // this event duplicates it, which is how the first version of this fix emitted two events
+          // twice on a 1,107-event backlog and an existing test caught it.
+          if (!writeEvent(ev)) paused = true;
         }
         // A terminal event is the last thing a run ever appends, so the stream has said everything
-        // it has to say. End after the batch is written rather than inside the loop, so a terminal
-        // event sharing a batch with earlier events still delivers all of them first.
-        if (events.some((ev) => TERMINAL_EVENT_TYPES.has(ev.type))) end();
+        // it has to say. But only end once the queue is empty: ending with events still buffered
+        // would truncate the history it was mid-way through delivering.
+        if (events.some((ev) => TERMINAL_EVENT_TYPES.has(ev.type))) sawTerminal = true;
+        if (overLimit) {
+          deps.logger?.warn(
+            { runId: run.id, pending: pending.length, limit: MAX_PENDING },
+            'SSE client is not reading; closing the stream so the backlog is not buffered in memory',
+          );
+          abortUnreadable();
+          return;
+        }
+        flushPending();
       };
+
+      res.on('drain', () => {
+        paused = false;
+        flushPending();
+      });
 
       const unsubscribeFn = deps.stream.subscribe(run.id, afterSeq, send);
       unsubscribe = unsubscribeFn;
@@ -306,6 +397,11 @@ export function createRoutes(deps: RoutesDeps): Router {
         // No try/catch here on purpose. res.write() does not throw on a destroyed socket or after
         // end(); it reports through the 'error' event, which fail() already handles. A guard that
         // cannot fire is worse than none: it implies a hazard that was measured not to exist.
+        //
+        // Skipped while paused: a keepalive on a socket that is already over its highWaterMark adds
+        // to the very backlog the pause exists to stop growing. The queued events themselves keep the
+        // connection interesting, and a client that stays wedged hits MAX_PENDING and is closed.
+        if (paused) return;
         res.write(': keepalive\n\n');
       }, 15_000);
 
