@@ -23,22 +23,17 @@ function makeApi(env: ReturnType<typeof makeEnv>, tokens: [string, string][] = [
   return { app, stream, close: () => stream.stop() };
 }
 
-async function listen(
-  app: Express, opts: { socketBufferSize?: number } = {},
-): Promise<{ port: number; close: () => Promise<void> }> {
+async function listen(app: Express): Promise<{ port: number; close: () => Promise<void> }> {
   return new Promise((resolve) => {
     const server = app.listen(0, () => {
-      // Shrink the SERVER-side kernel send buffer so res.write() reliably returns false against a
-      // stalled client. Without this, loopback buffers absorb a whole test's worth of events, the
-      // backpressure path is never taken, and a backpressure test is silently vacuous -- which is
-      // exactly how one passed while the bug it targets was still in the code.
-      if (opts.socketBufferSize) {
-        server.on('connection', (s) => {
-          try {
-            (s as unknown as { setBufferSize(n: number): void }).setBufferSize(opts.socketBufferSize!);
-          } catch { /* best effort: the test then depends on host buffer sizes */ }
-        });
-      }
+      // No buffer tuning here on purpose. An earlier version called socket.setBufferSize() behind a
+      // try/catch to shrink the server-side send buffer. That method does not exist on net.Socket or
+      // http.ServerResponse in this Node (checked: 'setBufferSize' in net.Socket.prototype === false),
+      // so it threw, the catch swallowed it, and the option silently did nothing while its comment
+      // claimed it was forcing the pause. The pause is forced by VOLUME instead -- the tests write
+      // megabytes of padded payloads, which exceeds the real highWaterMark -- and the tests then
+      // ASSERT the pause was entered rather than assuming it. Asserting the effect is what makes the
+      // setup honest; a knob you cannot verify is how a vacuous test looks green.
       const addr = server.address() as { port: number };
       resolve({
         port: addr.port,
@@ -1343,7 +1338,7 @@ test('a client that pauses and then resumes receives every event exactly once (i
       runService: env.runService, events: env.events, stream: hub,
       apiTokens: new Map([['tok-alice', 'alice']]), adminToken: null,
     });
-    const srv = await listen(app, { socketBufferSize: 2_048 });
+    const srv = await listen(app);
     try {
       const data = await openSsePauseThenResume(
         srv.port, `/api/runs/${run.id}/stream?after=0`, 'tok-alice', 40,
@@ -1393,6 +1388,16 @@ test('an SSE client that stops reading is dropped instead of buffered (issue #14
       );
       assert.equal(hub.subscriptionCount, 0,
         'the wedged subscriber must be released, not left holding the backlog');
+
+      // The ceiling is exact. The bound used to be checked AFTER the delivery loop, so a single
+      // 500-row backlog page could push the queue past the documented cap before anything noticed --
+      // "at most MAX_PENDING" was untrue by up to a page. The warn line carries the queue length at
+      // the moment of the abort, so the overshoot is observable rather than a matter of reading the
+      // loop. Checking before each push makes the logged value exactly MAX_PENDING.
+      const abort = lines.find((l) => l.msg === 'SSE client is not reading; closing the stream so the backlog is not buffered in memory')!;
+      assert.equal(abort.fields.pending, 1_000,
+        `the queue must stop AT the cap, not past it; logged pending=${abort.fields.pending}`);
+      assert.equal(abort.fields.limit, 1_000);
 
       // And it stopped early: a client that reads receives the whole ~8 MB backlog (see the control).
       const totalBytes = TOTAL * PAD.length;

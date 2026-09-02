@@ -309,6 +309,11 @@ export function createRoutes(deps: RoutesDeps): Router {
        * enough. Now: stop writing at the first false, hold at most MAX_PENDING events, resume on
        * 'drain', and close the stream if the client still will not read.
        *
+       * The close is driven by ARRIVALS, not by a timer: a client wedged at the cap that receives no
+       * further events is left open, holding at most MAX_PENDING events. That is bounded by
+       * construction and is the intended steady state for a slow client that may resume; nothing
+       * unbounded accumulates while it waits.
+       *
        * Closing rather than blocking is deliberate. The producer here is the shared EventStream
        * dispatch loop, and a handler that blocks or grows without bound turns one wedged tab into a
        * server-wide problem. A dropped client reconnects with its own ?after= cursor and resumes;
@@ -339,8 +344,16 @@ export function createRoutes(deps: RoutesDeps): Router {
 
       const send = (events: { type: string; sequence: number; payload: unknown }[]): void => {
         if (closed) return;
+        let overLimit = false;
         for (const ev of events) {
           if (paused) {
+            // Checked BEFORE the push so MAX_PENDING is a real ceiling. Checking after the loop let a
+            // single 500-row backlog page push the queue well past the cap before anything noticed,
+            // which made "at most MAX_PENDING" untrue by up to a page.
+            if (pending.length >= MAX_PENDING) {
+              overLimit = true;
+              break;
+            }
             pending.push(ev);
             continue;
           }
@@ -353,7 +366,7 @@ export function createRoutes(deps: RoutesDeps): Router {
         // it has to say. But only end once the queue is empty: ending with events still buffered
         // would truncate the history it was mid-way through delivering.
         if (events.some((ev) => TERMINAL_EVENT_TYPES.has(ev.type))) sawTerminal = true;
-        if (pending.length > MAX_PENDING) {
+        if (overLimit) {
           deps.logger?.warn(
             { runId: run.id, pending: pending.length, limit: MAX_PENDING },
             'SSE client is not reading; closing the stream so the backlog is not buffered in memory',
