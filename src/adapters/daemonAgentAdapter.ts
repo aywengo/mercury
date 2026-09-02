@@ -287,7 +287,11 @@ export class DaemonAgentAdapter implements AgentAdapter {
       // attach is what subscribes this connection to the session's events; prompt alone does not.
       await this.command(session, {
         type: 'attach', activeSessionId, clientId: this.clientId(runId),
-        capabilities: ['event_sequence', 'slim_attach', 'chunked_snapshot', 'attach_snapshot'],
+        // extension_ui is not cosmetic. The supervisor only delivers DIALOG requests (select/confirm/
+        // input) when some attached client advertises it, so attaching without it means an agent that
+        // asks the user a question is never forwarded to Mercury and the run waits on a dialog nobody
+        // was told about. The capability folds into the same set the older supportsExtensionUi flag did.
+        capabilities: ['event_sequence', 'extension_ui', 'slim_attach', 'chunked_snapshot', 'attach_snapshot'],
       });
 
       await this.command(session, {

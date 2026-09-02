@@ -625,6 +625,17 @@ Also enforced, none of it in the original design:
 - **Refusals carry their code.** The daemon answers a rejected command with `errorInfo.code`; surfacing
   it is the difference between an operator knowing `no_capacity` and reading a timeout.
 - **Isolation-requesting runs are refused**, as in §12 item 6.
+- **`attach` must advertise `extension_ui`.** The supervisor delivers a DIALOG request
+  (`select`/`confirm`/`input`) only when some attached client advertises that capability
+  (`hasExtensionUiClientForMethod`); attaching without it means an agent that asks the user a question
+  is never forwarded to Mercury, and the run waits on a dialog nobody was told about. The older
+  `supportsExtensionUi` flag folds into the same capability set, so the capability is the thing to send.
+
+Every command Mercury sends was then checked against the supervisor's own handlers rather than against
+the mock: `create` (its `config.agentDir` falls back to the supervisor's default, and `model`,
+`provider` and `thinking` are real config fields, so forwarding them is meaningful), `prompt`, `detach`,
+`kill`, `abort` and `list` all match. Two of the eight did not, and both were invisible to the fixture.
+
 - **A dialog answer is re-shaped, not forwarded.** §4.2 lists `extension_ui_response` as taking
   `requestId` and `response`; the RPC transport answers with a flat `{id, value}`. The two forms are
   not interchangeable, and the daemon socket does not complain about the wrong one — it accepts the

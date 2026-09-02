@@ -86,10 +86,16 @@ const server = net.createServer((socket) => {
   const respond = (id, command, ok, extra = {}) => {
     send({ id, type: 'response', command, success: ok, ...extra });
   };
+  const DIALOG_METHODS = new Set(['select', 'confirm', 'input']);
   const emit = (activeSessionId, event) => {
     const s = sessions.get(activeSessionId);
     if (!s) return;
     for (const client of s.subscribers) {
+      if (event.type === 'extension_ui_request' && DIALOG_METHODS.has(event.method)
+          && !(client.__caps && client.__caps.has('extension_ui'))) {
+        // Mirrors hasExtensionUiClientForMethod: a dialog has no recipient unless the client asked for it.
+        continue;
+      }
       client.write(JSON.stringify({
         type: 'event', activeSessionId, sequence: ++s.sequence,
         cursor: { generation: GENERATION, sequence: s.sequence },
@@ -147,6 +153,11 @@ const server = net.createServer((socket) => {
       case 'attach': {
         const s = sessions.get(cmd.activeSessionId);
         if (!s) { respond(id, 'attach', false, { error: 'no such session', errorInfo: { code: 'session_not_found' } }); return; }
+        // Remember what this client can actually receive. The supervisor gates dialog delivery on the
+        // extension_ui capability; a fixture that ignores it will happily deliver dialogs to a client the
+        // real daemon would never send them to.
+        state.caps = new Set(Array.isArray(cmd.capabilities) ? cmd.capabilities : []);
+        socket.__caps = state.caps;
         s.subscribers.add(socket);
         state.attached.add(cmd.activeSessionId);
         respond(id, 'attach', true, { data: { snapshot: [], cursor: { generation: GENERATION, sequence: s.sequence } } });
