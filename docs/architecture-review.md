@@ -9,6 +9,88 @@ and dispositioned there; nothing below repeats them. This file is the current ba
 
 ---
 
+## Status of this round
+
+All thirteen findings are merged and their issues closed. The state below was re-derived rather than
+recalled: every SHA was read back from GitHub as the PR's merge commit, and every issue state from the
+issue itself. An earlier version of this table recorded state from local branches and inferred closure
+from commit messages, and that inference was wrong once (see the #149 correction below).
+
+Round 1's archive carries a row that claimed a shared adapter base had been delivered when it had not
+(see [R2-12](#r2-12-the-shared-adapter-base-was-reported-delivered-and-never-built-six-copies-of-the-same-fix-remain)).
+This table exists so the same failure cannot be repeated against this round: **state is only recorded
+where it can be pointed at.**
+
+| Finding | Issue | State | Evidence |
+| --- | --- | --- | --- |
+| R2-1 stuck-run scan reached the newest 200 | [#137](https://github.com/aywengo/mercury/issues/137) | **merged and closed** | `82f489e` |
+| R2-2 cursor advanced before delivery | [#138](https://github.com/aywengo/mercury/issues/138) | **merged and closed** | `3db8484` |
+| R2-3 `poll()` swallowed every error | [#139](https://github.com/aywengo/mercury/issues/139) | **merged and closed** | `751a2ea` |
+| R2-4 two credential resolvers | [#140](https://github.com/aywengo/mercury/issues/140) | **merged and closed** | `6ae37bc` |
+| R2-5 `activeLeases()` ignored `NEEDS_INPUT` | [#141](https://github.com/aywengo/mercury/issues/141) | **merged and closed** | `ea9670e` |
+| R2-6 every worker sent its own alert | [#142](https://github.com/aywengo/mercury/issues/142) | **merged and closed** | `c8a2249` |
+| R2-7 SSE route had no error handling | [#143](https://github.com/aywengo/mercury/issues/143) | **merged and closed** | `a4a73ac` |
+| R2-8 rate-limiter map unbounded | [#144](https://github.com/aywengo/mercury/issues/144) | **merged and closed** | `d9248e8` |
+| R2-9 SSE ignored backpressure | [#145](https://github.com/aywengo/mercury/issues/145) | **merged and closed** | `778fe7b` |
+| R2-10 one poll read per subscriber | [#146](https://github.com/aywengo/mercury/issues/146) | **merged and closed** | `278d46a` |
+| R2-11 `slowDown()` fires with no subscribers | [#162](https://github.com/aywengo/mercury/issues/162) | **merged and closed** | `6b564d2` |
+| R2-12 shared adapter base never built | [#148](https://github.com/aywengo/mercury/issues/148) | **merged and closed** | `f7856d7` |
+| R2-13 CLI-wiring test flake | [#149](https://github.com/aywengo/mercury/issues/149) | **merged and closed** | `df67aa6` |
+
+Thirteen findings, thirteen merged pull requests, thirteen closed issues. None is left open, and none is
+left as a branch someone has to trust.
+
+### A correction: an earlier draft of this section was wrong about #149
+
+An earlier version of this table claimed #149 had been merged but never closed, because its squashed
+commit `df67aa6` carries no `Closes #N` keyword. That was checked against the commit message and nothing
+else, and it was **wrong**: PR #150's *body* ends with `Closes #149`, GitHub closes issues from PR bodies
+as well as commit messages, and the issue has been closed since `2026-09-01T17:24:09Z`.
+
+The lesson is about the check, not the issue. "The merged commit has no closing keyword" does not license
+"the issue is still open" — it only licenses "the commit has no closing keyword". Closure is a property of
+the issue, so it has to be read from the issue. Every state recorded in this table is now read from
+GitHub directly, or from `git merge-base --is-ancestor`, rather than inferred from how a fix was packaged.
+
+### R2-11 — why it was nearly left out, and what the earlier wording got wrong
+
+The original text said this finding was *"Already analyzed and given a Stage 0 fix in
+`docs/cross-process-event-push.md`; listed here so the backlog is complete, not as new work."* That
+phrasing invited the reader to conclude a fix existed. **It does not.** Re-checked at `ea9670e`:
+`src/events/eventStream.ts:101` still calls `this.slowDown()` immediately after the subscriber loop
+closes and inside the append hook, so any event on any run still drops the poller to the slow cadence
+whether or not anyone is listening.
+
+What `docs/cross-process-event-push.md` contains is a **design** for the fix, not the fix, and at
+`ea9670e` the behaviour is unchanged: `eventStream.ts:101` still calls `this.slowDown()` unconditionally.
+
+It is fixed in `6b564d2` under [#162](https://github.com/aywengo/mercury/issues/162). The condition is now whether
+push actually **served** the event — delivered it to at least one subscriber — so an append nobody
+subscribed to, an append to a run nobody watches, and an append whose only subscriber threw all leave the
+backstop at its fast cadence.
+
+The original reason for leaving it unfiled was that the effect is cadence only (no event is lost, no state
+is wrong) and that the cross-process work would replace this poller entirely. The second half of that
+reasoning does not hold: it argues for leaving any defect that some hypothetical future change might
+remove, and that change is an unimplemented design. The fix is four lines, so it was made.
+
+### One finding was fixed after the round closed
+
+R2-11 was originally left unfiled on the reasoning that the cross-process rewrite would replace the
+poller. That reasoning was withdrawn and the finding is now fixed under [#162](https://github.com/aywengo/mercury/issues/162):
+an unimplemented design is not a reason to leave a defect in the code that ships today.
+
+### Follow-up found while shipping
+
+[#165](https://github.com/aywengo/mercury/issues/165) — the test suite fails intermittently under parallel
+load, on different tests between runs (the auth same-length-token test, and the mock-RPC adapter happy
+path returning zero events). Reproduced twice in four runs under load, and zero times in four runs each
+for `origin/main` and a feature branch in clean throwaway worktrees, so it is pre-existing and
+load-sensitive rather than a regression from this round. Filed separately and deliberately NOT fixed
+inside any of these PRs.
+
+---
+
 ## Verdict
 
 Round 1 found that the specification was sound and the implementation failed to enforce it. That
@@ -68,7 +150,7 @@ Every finding below is filed. None is fixed at the time of writing.
 | R2-10 | One poll query per subscriber | Low | [#146](https://github.com/aywengo/mercury/issues/146) |
 | R2-12 | Shared adapter base never built; 6 copies of one fix | Medium | [#148](https://github.com/aywengo/mercury/issues/148) |
 | R2-13 | CLI-wiring test budget is fake, cause unread, cleanup can hang | Low | [#149](https://github.com/aywengo/mercury/issues/149) |
-| R2-11 | `slowDown()` fires with no subscribers | Low | not filed — already Stage 0 in [cross-process-event-push.md](cross-process-event-push.md) |
+| R2-11 | `slowDown()` fires with no subscribers | Low | [#162](https://github.com/aywengo/mercury/issues/162) |
 
 **Suggested order.** R2-3 and R2-7 first: they are small, and they are what would make R2-2 visible
 instead of silent. Then R2-2. R2-1 is independent and the highest severity. R2-4, R2-5 and R2-6 are
@@ -80,7 +162,7 @@ each a single-file change plus a test.
 
 Every finding below was read in source at `6e7a035` and, where a claim is numerical or behavioral,
 **executed**. Each reproduction is inlined in
-[Appendix — reproduction](#appendix--reproduction) and was run on this commit.
+[Appendix — reproduction](#appendix-reproduction) and was run on this commit.
 
 Two things did not go as planned, and both changed what this document is allowed to claim:
 
