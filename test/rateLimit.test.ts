@@ -27,15 +27,31 @@ test('the bucket map stays bounded past the cap, even when nothing has expired (
   // bound while paying an O(size) scan per new key.
   const limiter = createRateLimiter({ windowMs: 60_000, max: 1_000, group: 'bound' });
   const N = CAP * 3;
-  const t0 = performance.now();
-  for (let i = 0; i < N; i++) limiter(req(ip(i)), res, pass);
-  const elapsed = performance.now() - t0;
+  const CHUNK = 2_000;
+  // Cost is asserted as a RATIO, not an absolute wall-clock bound. An earlier version said
+  // "elapsed < 500 ms", which is a flake waiting to happen: this suite is known to fail spuriously
+  // under parallel load (issue #165), and a threshold that only a slow machine can cross fails on the
+  // machine that is already having a bad day. A ratio is self-calibrating -- both halves pay the same
+  // load, so a loaded machine scales them together.
+  //
+  // The old sweep made cost per insert proportional to map size, so inserts late in the run were far
+  // more expensive than inserts early on. Linear behaviour keeps the two comparable; quadratic blows
+  // the ratio up by roughly the growth in size.
+  const per: number[] = [];
+  for (let i = 0; i < N; i++) {
+    const t0 = performance.now();
+    limiter(req(ip(i)), res, pass);
+    per.push(performance.now() - t0);
+  }
 
   assert.ok(limiter.bucketCount() <= CAP,
     `map must stay at or under the cap of ${CAP}, grew to ${limiter.bucketCount()}`);
-  // Positive control on the cost, not just the size: the old implementation took ~2500 ms for 40k
-  // keys because total cost was quadratic. A generous bound still separates linear from quadratic.
-  assert.ok(elapsed < 500, `30k inserts must stay linear; took ${elapsed.toFixed(0)} ms`);
+  const mean = (a: number[]) => a.reduce((x, y) => x + y, 0) / a.length;
+  const early = mean(per.slice(0, CHUNK));
+  const late = mean(per.slice(-CHUNK));
+  assert.ok(late < early * 20,
+    `per-insert cost must not track map size: early ${early.toFixed(5)} ms vs late ${late.toFixed(5)} ms ` +
+    `(ratio ${(late / early).toFixed(1)}x) -- the old O(size) sweep made this grow with the map`);
 });
 
 test('eviction drops LIVE buckets, and survivors keep their counters (issue #144)', () => {
