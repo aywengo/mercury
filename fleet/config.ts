@@ -38,6 +38,12 @@ export interface FleetConfig {
   /** How often an open SSE stream looks for newly mirrored events. */
   streamPollMs: number;
   /**
+   * Optional JSON map of local path -> host-independent clone URL (design section 6's escape hatch). When a
+   * submitted localPath is a key here, routing drops the locality constraint and sends the URL instead, which
+   * turns the hardest routing rule into a non-issue for most work.
+   */
+  repoUrlsFile: string | null;
+  /**
    * Escape hatch for filesystems where 0600 cannot be set. Off by default: a credential file readable by
    * the whole machine is the exact failure mode section 9 of the design exists to prevent.
    */
@@ -78,6 +84,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     probeTimeoutMs: num(env['FLEET_PROBE_TIMEOUT_MS'], 5_000),
     sweepIntervalMs: num(env['FLEET_SWEEP_INTERVAL_MS'], 10_000),
     streamPollMs: num(env['FLEET_STREAM_POLL_MS'], 1000),
+    repoUrlsFile: env.FLEET_REPO_URLS_FILE ?? null,
     allowInsecureCredentials: env['FLEET_ALLOW_INSECURE_CREDENTIALS'] === '1',
     bindHost: env['FLEET_BIND_HOST'] ?? '127.0.0.1',
     port: port(env['FLEET_PORT'], 3100),

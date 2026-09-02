@@ -43,11 +43,17 @@ export interface Route {
 export class HttpError extends Error {
   readonly status: number;
   readonly code: string | undefined;
+  /**
+   * Structured detail for callers that can act on it -- routing returns which hosts were considered and why
+   * each was ruled out, which is the difference between a five-second fix and an hour of guessing.
+   */
+  readonly details: unknown;
 
-  constructor(status: number, message: string, code?: string) {
+  constructor(status: number, message: string, code?: string, details?: unknown) {
     super(message);
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
