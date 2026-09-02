@@ -86,21 +86,36 @@ an unimplemented design is not a reason to leave a defect in the code that ships
 event it produced was silently dropped**: the Run was recorded `completed` with exit code 0 and the caller
 received an empty event stream. Both adapters settled the exit on the child's `'exit'` event while emitting
 their final output from stdout's `'end'` handler, and Node fires `'exit'` when the process is gone, not when
-its stdio has drained. Blocking the parent's event loop for 50 ms or more makes `'exit'` win that race every
-time; at 0 ms it never does. That is why it looked like flakiness — an idle machine always wins. Fixed in
-`2183542`.
+its stdio has drained. In the probe, blocking the parent's event loop for 50 ms or more made `'exit'` win
+that race in every repetition, and an unblocked loop lost it in every repetition; that contrast is the
+measurement, not a claim about all machines under all load. It is why the defect looked like flakiness: a
+machine with nothing else to do wins the race. Fixed in commit `2183542`.
 
-[#165](https://github.com/aywengo/mercury/issues/165) — the auth same-length-token test still fails
-intermittently under parallel load. It was filed as one issue covering two symptoms; the adapter symptom was
-#166 in disguise, and only the auth case remains open. Both were reproduced twice in four runs under load
-and zero times in four runs each for `origin/main` and a feature branch in clean throwaway worktrees, so
-neither was a regression from this round.
+[#165](https://github.com/aywengo/mercury/issues/165) — closed in commit `413f0f6`, and its history is the
+more useful part. It was filed as one issue covering two symptoms, and **neither was what it appeared to
+be**:
 
-The lesson worth keeping is about the diagnosis rather than the defect: the adapter failure was first
-recorded as "flaky under load, probably a deadline", and that framing was wrong in a way that would have
-kept it unfixed. It was deterministic given the right interleaving, and the test that appeared flaky had
-been catching a real event-loss bug all along.
+- The adapter symptom was #166 — a deterministic event-loss race, not flakiness.
+- The auth symptom traced back to two events that memory had merged into "fails ~2/4 under load". One was a
+  real failure, but in the test's own assertion, written 17 seconds earlier and fixed on sight. The other
+  was a single full-suite failure whose assertion detail my script had discarded by printing only the
+  `failing tests` lines. That one uncaptured observation was the entire basis for the "~2/4" figure.
 
+After #166 landed, 52+ runs came back clean: 12 full suites (9 three-wide in parallel) and 40 concurrent
+instances of the file under CPU load. Both mechanisms I had guessed at were ruled out by reading the code —
+the reject path touches no database, and the login limiter is per-app-instance at 10/min while the test
+makes two requests. So the resolution is honest about what it is: the failure is not reproduced and no root
+cause is claimed. What shipped instead is the thing that was missing — a failure that names its own cause,
+separating a transport error from an HTTP verdict and carrying the response body when the status is wrong.
+
+Two lessons, both about diagnosis rather than defects:
+
+1. **"Flaky, probably timing" can be a correctness bug with a deterministic trigger.** That framing is what
+   nearly kept #166 unfixed.
+2. **Check the evidence before trusting a remembered number.** The "~2/4" rate was wrong, and the log said
+   so in one query. Relatedly, the first verification of the #165 diagnostics used `--test-name-pattern` and
+   reported `tests=1 pass=1` — it had matched the file wrapper and run nothing. A green result from a filter
+   that selects no test is not evidence at all.
 ---
 
 ## Verdict
