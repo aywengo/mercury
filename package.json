@@ -14,7 +14,10 @@
     "gc": "node src/cli.ts gc",
     "migrate": "node src/cli.ts migrate",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --test-timeout=180000 'test/*.test.ts'"
+    "test": "npm run test:core && npm run test:fleet",
+    "fleet": "node fleet/cli.ts",
+    "test:fleet": "node --test --test-timeout=180000 'fleet/test/*.test.ts'",
+    "test:core": "node --test --test-timeout=180000 'test/*.test.ts'"
   },
   "dependencies": {
     "express": "^4.21.2"

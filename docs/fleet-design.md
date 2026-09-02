@@ -271,7 +271,7 @@ The practical benefit arrives the first time Mercury changes an internal type an
 
 Each phase is independently useful and ships behind its own PR, per `issue-fix-loop`.
 
-**Phase 0 — registry and probe (small).** `hosts` table, add/list/enable, and a prober that hits
+**Phase 0 — registry and probe (small).** *Shipped: `fleet/`, `npm run fleet`.* `hosts` table, add/list/enable, and a prober that hits
 `/healthz`, `/healthz/workers`, `/api/agents` on a timer. Output: a table of hosts with live capacity and
 agent lists. No dispatch. This alone answers "what is my fleet doing?" and validates every assumption in
 section 3 against real hosts.
