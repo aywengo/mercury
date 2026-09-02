@@ -276,7 +276,7 @@ Each phase is independently useful and ships behind its own PR, per `issue-fix-l
 agent lists. No dispatch. This alone answers "what is my fleet doing?" and validates every assumption in
 section 3 against real hosts.
 
-**Phase 1 — dispatch with explicit host (small).** Submit a task, name the host, get a `fleet_run_id`,
+**Phase 1 — dispatch with explicit host (small).** *Shipped: `fleet/dispatch.ts`, `POST /fleet/runs`.* Submit a task, name the host, get a `fleet_run_id`,
 binding recorded. No routing. Proves the idempotency and binding model, and the crash-recovery path
 (restart Fleet, still find every Run).
 
