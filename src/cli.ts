@@ -31,7 +31,7 @@ import { LocalAgentRegistry } from './adapters/localAgentRegistry.ts';
 import { RemoteAgentRegistry } from './adapters/remoteAgentRegistry.ts';
 import { RpcAgentRegistry } from './adapters/rpcAgentRegistry.ts';
 import { HermesAgentAdapter } from './adapters/hermesAgentAdapter.ts';
-import { DaemonAgentAdapter } from './adapters/daemonAgentAdapter.ts';
+import { selectPrimeAgentAdapter } from './adapters/selectAgentAdapter.ts';
 import { SandboxManager } from './sandbox/sandboxManager.ts';
 import { Worker } from './worker/worker.ts';
 import { startServer } from './api/server.ts';
@@ -83,9 +83,8 @@ async function main(): Promise<void> {
     diskLimitsSupported: config.sandboxDiskLimits,
   });
   const adapters: Record<string, import('./adapters/agentAdapter.ts').AgentAdapter> = {
-    primeagent: config.agentMode === 'daemon'
-      ? new DaemonAgentAdapter(config.primeAgentCmd, { args: config.primeAgentArgs, sandbox, workerId })
-      : new PrimeAgentAdapter(config.primeAgentCmd, { args: config.primeAgentArgs, sandbox, workerId }),
+    primeagent: selectPrimeAgentAdapter(config.agentMode, config.primeAgentCmd,
+      { args: config.primeAgentArgs, sandbox, workerId }),
     fake: new FakeAgentAdapter({ script: [] }),
     hermes: new HermesAgentAdapter({
       cmd: process.env.MERCURY_HERMES_CMD ?? 'hermes',
