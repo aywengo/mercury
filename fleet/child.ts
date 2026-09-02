@@ -76,11 +76,29 @@ export interface ChildClient {
     => Promise<ChildResult<{ runId: string; status: string }>>;
   retryRun: (host: { baseUrl: string; token: string }, runId: string)
     => Promise<ChildResult<{ runId: string; status: string; retryOf: string | null }>>;
+  /**
+   * Raw Prometheus exposition text. Mounted at the ROOT of a Mercury, not under /api -- a detail easy to get
+   * wrong and silent when you do, since the child answers 404 and the rollup just reports nothing.
+   */
+  getMetrics: (host: { baseUrl: string; token: string }) => Promise<ChildResult<string>>;
 }
 
 export interface ChildClientOptions {
   timeoutMs: number;
   fetchImpl?: typeof fetch;
+}
+
+/**
+ * Describe a transport failure usefully.
+ *
+ * undici wraps everything as `fetch failed` and puts the actual reason in `cause`, so reporting only the
+ * message tells an operator nothing about why a host is unreachable. The distinction they need -- refused,
+ * timed out, name not resolving, TLS -- lives in the cause.
+ */
+function describeTransportError(err: unknown): string {
+  const e = err as Error & { cause?: { code?: string; message?: string } };
+  const detail = e.cause?.code ?? e.cause?.message;
+  return `${e.message}${detail ? `: ${detail}` : ''}`.slice(0, 200);
 }
 
 async function call<T>(
@@ -95,7 +113,7 @@ async function call<T>(
   } catch (err) {
     // Transport failure after a POST means the request may have been fully processed. The caller must not
     // conclude anything from this except "ask again later".
-    return { kind: 'unknown', reason: (err as Error).message.slice(0, 200) };
+    return { kind: 'unknown', reason: describeTransportError(err) };
   }
   if (res.status >= 500) {
     return { kind: 'unknown', reason: `HTTP ${res.status} from child` };
@@ -113,6 +131,34 @@ async function call<T>(
   } catch (err) {
     // A 2xx with an unreadable body is genuinely ambiguous for a create: the Run may exist.
     return { kind: 'unknown', reason: `child response was not JSON: ${(err as Error).message}`.slice(0, 200) };
+  }
+}
+
+/**
+ * Same classification as `call`, but the success body is text.
+ *
+ * Kept separate rather than parameterised because the failure meanings differ: a 2xx with an unreadable JSON
+ * body after a POST is ambiguous about whether a Run was created, whereas a body that cannot be read here is
+ * simply a scrape that produced nothing usable.
+ */
+async function callText(
+  opts: ChildClientOptions,
+  url: string,
+  init: RequestInit,
+): Promise<ChildResult<string>> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  let res: Response;
+  try {
+    res = await doFetch(url, { ...init, signal: AbortSignal.timeout(opts.timeoutMs) });
+  } catch (err) {
+    return { kind: 'unknown', reason: describeTransportError(err) };
+  }
+  if (res.status >= 500) return { kind: 'unknown', reason: `HTTP ${res.status} from child` };
+  if (res.status >= 400) return { kind: 'rejected', status: res.status, detail: `HTTP ${res.status}` };
+  try {
+    return { kind: 'ok', value: await res.text() };
+  } catch (err) {
+    return { kind: 'unknown', reason: `child metrics body unreadable: ${(err as Error).message}`.slice(0, 200) };
   }
 }
 
@@ -159,6 +205,11 @@ export function createChildClient(opts: ChildClientOptions): ChildClient {
       const safe = encodeURIComponent(runId);
       return call<{ runId: string; status: string; retryOf: string | null }>(
         opts, `${host.baseUrl}/api/runs/${safe}/retry`, { method: 'POST', headers: headers(host.token) });
+    },
+    async getMetrics(host) {
+      // Text, not JSON: the value is returned verbatim rather than parsed here, so an unexpected metric family
+      // reaches the merge layer intact and can be reported as dropped instead of vanishing.
+      return callText(opts, `${host.baseUrl}/metrics`, { method: 'GET', headers: headers(host.token) });
     },
     async getEvents(host, runId, after, limit) {
       const safe = encodeURIComponent(runId);

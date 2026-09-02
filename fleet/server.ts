@@ -20,6 +20,7 @@ import { listMirroredEvents, type EventMirrorDeps } from './events.ts';
 import { startEventStream } from './stream.ts';
 import { loadRepoUrlMap, routeRun, RoutingError, type RouteRepository } from './routing.ts';
 import { cancelRun, retryRun, sendInput, type InteractionDeps } from './interact.ts';
+import { mergeRollup, scrapeAll, type MetricsDeps } from './metrics.ts';
 import { createProber, type Prober } from './prober.ts';
 import { CredentialError, type CredentialStore } from './credentials.ts';
 import type { Caller } from './auth.ts';
@@ -118,6 +119,12 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
     child: dispatch.child,
     resolveToken: dispatch.resolveToken,
   };
+  const metricsDeps: MetricsDeps = {
+    registry: dispatch.registry,
+    child: dispatch.child,
+    resolveToken: dispatch.resolveToken,
+    timeoutMs: deps.config.probeTimeoutMs,
+  };
   const prober = createProber({
     registry,
     resolveToken: (ref) => deps.credentials.secret(ref),
@@ -129,6 +136,29 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
     {
       method: 'GET', pattern: ['healthz'], public: true,
       handle: (_ctx, res) => sendJson(res, 200, { ok: true, ts: new Date().toISOString() }),
+    },
+    {
+      // GET /metrics -- the fleet rollup. Mounted at the root like a Mercury's own, so a Prometheus job can
+      // point at either with the same path.
+      //
+      // Scoped to the caller's visible hosts for the same reason reads are: a caller limited to one host must
+      // not learn another host's queue depth, run counts and worker topology from one aggregate endpoint.
+      method: 'GET', pattern: ['metrics'],
+      handle: async (ctx, res) => {
+        const hosts = visibleHosts(registry, ctx.caller);
+        const scrapes = await scrapeAll(metricsDeps, hosts.map((h) => h.id));
+        const { text, dropped } = mergeRollup(scrapes);
+        if (dropped.length > 0) {
+          // Reported rather than swallowed: a rollup that quietly loses a family under-reports, and the whole
+          // point of the endpoint is to be trusted.
+          deps.logger.warn('metrics rollup dropped data', { dropped: dropped.length, hosts: dropped.slice(0, 20) });
+        }
+        res.writeHead(200, {
+          'content-type': 'text/plain; version=0.0.4; charset=utf-8',
+          'cache-control': 'no-cache',
+        });
+        res.end(text);
+      },
     },
     {
       // Registry reads. A caller sees only the hosts it may act on; naming a host it may not touch is a
