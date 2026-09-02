@@ -573,6 +573,16 @@ silent no-op. That is the direct consequence of discarding responses and swallow
 Each step is behind the existing `MERCURY_AGENT_MODE=daemon` gate, so the default path is byte-identical
 until an operator opts in.
 
+### 10.1 Status
+
+Steps 1–4 landed in one PR rather than four, which is acceptable here only because the gate means no
+existing deployment changes behaviour. Step 5 was **not** done as written: there is no staging deployment
+in this environment. What was done instead is disposable runs against a live local supervisor — a trivial
+prompt in a throwaway workspace, then asserting the reply arrived, the exit was clean, and no session or
+worker remained. That exercises the protocol end to end; it does not exercise a real deployment under
+load, a supervisor restart mid-run, or concurrent Runs sharing one supervisor. Treat those as untested
+before pointing anything important at daemon mode.
+
 ---
 
 ## 11. Testing strategy
