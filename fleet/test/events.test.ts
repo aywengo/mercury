@@ -202,6 +202,10 @@ test('a child that will not advance the cursor cannot spin the mirror', async ()
     const r = await mirrorEvents({ db, bindings, registry, child, resolveToken: () => 's' }, id);
     assert.equal(r.pages, 1, 'it stopped after the first page instead of looping');
     assert.equal(r.hasMore, false);
+    // The distinction that matters: giving up is not the same as finishing. Recording this as drained would
+    // tell a later sweep the Run owes nothing, making a missing log permanent.
+    assert.equal(r.drained, false, 'a stuck cursor is not a drained log');
+    assert.equal(bindings.state(id)!.eventsDrained, false);
   } finally {
     await new Promise<void>((r) => { server.closeAllConnections?.(); server.close(() => r()); });
     db.close();

@@ -61,6 +61,14 @@ function scopedHosts(caller: Caller, registry: HostRegistry): '*' | string[] {
   return caller.allowedHosts;
 }
 
+/** Parse a query parameter as a non-negative integer, falling back when it is anything else. */
+function nonNegativeInt(raw: string | null | undefined, fallback: number): number {
+  if (raw === null || raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return fallback;
+  return n;
+}
+
 function str(body: Record<string, unknown>, key: string): string {
   const v = body[key];
   if (typeof v !== 'string' || !v) throw new HttpError(400, `${key} is required and must be a non-empty string`);
@@ -233,11 +241,13 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
         if (!hostAllowed(ctx.caller, binding.hostId)) {
           throw new HttpError(403, `caller ${ctx.caller.ownerId} may not read runs on host ${binding.hostId}`);
         }
-        const after = Number(ctx.query?.get('after') ?? 0) || 0;
-        const rawLimit = Number(ctx.query?.get('limit') ?? 200);
+        // Parsed as integers before anything reaches SQLite. `after=Infinity` and `limit=2.5` are both
+        // accepted by Number() and both produce pagination nobody can reason about -- and Infinity is a
+        // perfectly truthy value, so the usual `|| 0` fallback would not have caught it.
+        const after = nonNegativeInt(ctx.query?.get('after'), 0);
         // Bounded rather than trusted: an unbounded limit would let one caller pull an entire mirrored
         // transcript into memory in one request.
-        const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 1000) : 200;
+        const limit = Math.min(nonNegativeInt(ctx.query?.get('limit'), 200) || 200, 1000);
         sendJson(res, 200, listMirroredEvents(deps.db, id, after, limit));
       },
     },

@@ -291,3 +291,57 @@ test('the mirrored event window is readable through Fleet, scoped to the caller'
     assert.equal((await s.call('GET', '/fleet/runs/fr_evt_1/events')).status, 401);
   } finally { await s.close(); }
 });
+
+test('nonsense pagination parameters fall back instead of reaching the database', async () => {
+  const s = await startService();
+  try {
+    const { db } = s;
+    db.prepare(
+      `INSERT INTO hosts (id, base_url, credential_ref, enabled, labels, local_paths, agents_cache, added_at)
+       VALUES ('box-1', 'http://127.0.0.1:1', 'lan-ref', 1, '{}', '[]', '[]', ?)`,
+    ).run(new Date().toISOString());
+    db.prepare(
+      `INSERT INTO fleet_runs (fleet_run_id, host_id, owner_id, child_run_id, requested, created_at)
+       VALUES ('fr_q_1', 'box-1', 'alice', 'run_1', '{}', ?)`,
+    ).run(new Date().toISOString());
+    const ins = db.prepare('INSERT INTO fleet_events (fleet_run_id, sequence, type, timestamp, payload) VALUES (?,?,?,?,?)');
+    for (let i = 1; i <= 6; i++) ins.run('fr_q_1', i, 'run.log', '2026-01-01T00:00:00.000Z', null);
+
+    // Infinity is truthy, so the usual `|| 0` fallback would have let it through to a SQLite bind.
+    for (const q of ['after=Infinity', 'limit=2.5', 'limit=-5', 'after=abc', 'after=-1', 'limit=0', 'after=', 'limit=1e309']) {
+      const r = await s.call('GET', `/fleet/runs/fr_q_1/events?${q}`, { token: CALLER_TOKEN });
+      assert.equal(r.status, 200, `${q} must fall back rather than error`);
+      assert.ok(Array.isArray(r.json.events), `${q} returned no event array`);
+      for (const e of r.json.events) {
+        assert.ok(Number.isInteger(e.sequence), `${q} produced a non-integer sequence`);
+      }
+    }
+    // A valid cursor still works alongside the guards.
+    const ok = await s.call('GET', '/fleet/runs/fr_q_1/events?after=4&limit=1', { token: CALLER_TOKEN });
+    assert.deepEqual(ok.json.events.map((e: any) => e.sequence), [5]);
+    assert.equal(ok.json.hasMore, true);
+  } finally { await s.close(); }
+});
+
+test('a huge limit is capped rather than pulling the whole transcript', async () => {
+  // The cap only exists to bound one caller's memory, and a cap no test exercises is a comment.
+  const s = await startService();
+  try {
+    const { db } = s;
+    db.prepare(
+      `INSERT INTO hosts (id, base_url, credential_ref, enabled, labels, local_paths, agents_cache, added_at)
+       VALUES ('box-1', 'http://127.0.0.1:1', 'lan-ref', 1, '{}', '[]', '[]', ?)`,
+    ).run(new Date().toISOString());
+    db.prepare(
+      `INSERT INTO fleet_runs (fleet_run_id, host_id, owner_id, child_run_id, requested, created_at)
+       VALUES ('fr_cap_1', 'box-1', 'alice', 'run_1', '{}', ?)`,
+    ).run(new Date().toISOString());
+    const ins = db.prepare('INSERT INTO fleet_events (fleet_run_id, sequence, type, timestamp, payload) VALUES (?,?,?,?,?)');
+    for (let i = 1; i <= 1001; i++) ins.run('fr_cap_1', i, 'run.log', '2026-01-01T00:00:00.000Z', null);
+
+    const r = await s.call('GET', '/fleet/runs/fr_cap_1/events?limit=99999', { token: CALLER_TOKEN });
+    assert.equal(r.json.events.length, 1000, 'the request must be bounded regardless of what was asked for');
+    assert.equal(r.json.hasMore, true, 'and must say the rest is still there');
+    assert.equal(r.json.nextCursor, 1000);
+  } finally { await s.close(); }
+});

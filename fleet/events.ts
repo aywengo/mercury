@@ -31,6 +31,13 @@ export interface MirrorResult {
   cursor: number;
   /** True when the child had more than one page, so the next sweep should continue promptly. */
   hasMore: boolean;
+  /**
+   * True only when the log was genuinely read to its end. Distinct from `!hasMore`: a child that refuses to
+   * advance its cursor, a read that failed part way, or a page cap that stopped early all leave hasMore false
+   * without the log having been drained. Persisting that as drained would tell a later sweep a terminal Run
+   * owes nothing, and its log would go unread forever.
+   */
+  drained: boolean;
   /** Pages read in this call, capped so one chatty Run cannot monopolise a sweep. */
   pages: number;
 }
@@ -79,7 +86,8 @@ export async function mirrorEvents(
   const binding = deps.bindings.get(fleetRunId);
   if (!binding) throw new DispatchError(404, `no Fleet Run ${fleetRunId}`);
   if (!binding.childRunId) {
-    return { fleetRunId, inserted: 0, cursor: 0, hasMore: false, pages: 0 };
+    // Not drained: there is no child Run to read yet, so nothing has been learned about any log.
+    return { fleetRunId, inserted: 0, cursor: 0, hasMore: false, drained: false, pages: 0 };
   }
   const host = resolveHost(deps, binding.hostId);
   const withBodies = mirrorBodiesEnabled(deps.db, binding.hostId);
@@ -93,6 +101,7 @@ export async function mirrorEvents(
 
   let inserted = 0;
   let hasMore = false;
+  let drained = false;
   let pages = 0;
 
   for (let page = 0; page < MAX_PAGES_PER_RUN; page++) {
@@ -109,7 +118,9 @@ export async function mirrorEvents(
     pages++;
     const events = res.value.events ?? [];
     if (events.length === 0) {
+      // Nothing beyond the cursor and the child says so: the log is drained.
       hasMore = false;
+      drained = !res.value.hasMore;
       break;
     }
     for (const ev of events) {
@@ -121,17 +132,24 @@ export async function mirrorEvents(
     // content of Mercury issue #54 and the reason a truncated page is still safe to page from.
     const next = res.value.nextCursor;
     if (typeof next !== 'number' || next <= cursor) {
-      // A child that will not advance the cursor would spin this loop forever. Stop rather than repeat.
+      // A child that will not advance the cursor would spin this loop forever. Stop rather than repeat -- but
+      // do NOT call this drained. The log may hold plenty more; we simply cannot make progress right now, and
+      // recording drained here is what would make a terminal Run's missing log permanent.
       hasMore = false;
+      drained = false;
       break;
     }
     cursor = next;
     hasMore = Boolean(res.value.hasMore);
-    if (!hasMore) break;
+    if (!hasMore) {
+      drained = true;
+      break;
+    }
   }
 
-  deps.bindings.setCursor(fleetRunId, cursor, !hasMore);
-  return { fleetRunId, inserted, cursor, hasMore, pages };
+  // Reaching the per-call page cap with more still pending is explicitly not drained; the next pass continues.
+  deps.bindings.setCursor(fleetRunId, cursor, drained);
+  return { fleetRunId, inserted, cursor, hasMore, drained, pages };
 }
 
 /**

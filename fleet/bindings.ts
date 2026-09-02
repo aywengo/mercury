@@ -237,18 +237,15 @@ export class BindingStore {
   }
 
   /**
-   * Advance only the event cursor, leaving status and staleness alone.
+   * Record how far a Run's event log has been read, touching nothing else.
    *
-   * Mirroring events and reconciling status are separate concerns with separate failure modes: a successful
-   * event read must not imply anything about the Run's state, and going through recordState() would overwrite
-   * a status the reconciliation sweep had just decided.
-   */
-  /**
-   * Record how far the event log has been read, and whether it is finished.
+   * Status and staleness are deliberately absent: mirroring and reconciliation are separate concerns with
+   * separate failure modes, and a successful event read implies nothing about the Run's state. Going through
+   * recordState() would overwrite a status reconciliation had just decided.
    *
-   * The flag reports what the last pass saw rather than being one-way: a Run's log can only stop growing once
-   * the Run is terminal, and a terminal Run that still owes a log is re-read by the sweep regardless of this
-   * value, so an occasional false here costs one extra read rather than missing events.
+   * `drained` reports what the last pass saw rather than being one-way. A terminal Run that still owes a log
+   * is re-read regardless of this value, so an occasional false costs one extra read while a false `true`
+   * would abandon a log forever -- which is why mirrorEvents distinguishes the two.
    */
   setCursor(fleetRunId: string, cursor: number, drained?: boolean): void {
     this.db
