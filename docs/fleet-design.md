@@ -313,11 +313,112 @@ Fleet does not need these, but each removes a workaround. They belong in Mercury
 
 ## 14. Open questions
 
-1. **Where does Fleet run?** On one host as a service, or on the operator's laptop as a CLI? The schema
-   supports both, but the credential file and TLS story differ a lot.
+1. **Where does Fleet run?** *Decided: one host, as a service. See section 15.* The schema supports both,
+   but the credential file, TLS and logging story differ enough that the choice had to be made before any
+   dispatch code existed. It was deferred long enough that Phase 0 shipped a laptop-shaped default
+   credential path, which section 15 corrects.
 2. **Multi-user?** Fleet inherits per-caller host allowlists but no tenancy model. If two people with
    different access levels share it, the allowlist needs to be real authorisation.
 3. **How much history?** Metadata-only mirroring keeps Fleet small and is the default here, but it means
    Fleet cannot show a historical timeline for a host that has since garbage-collected its events.
 4. **Does a Run ever move?** Deliberately assumed no: one Run, one host, for life. Moving a Run would mean
    moving a workspace and an agent session, which is a different and much harder design.
+
+## 15. Fleet as a service
+
+Fleet runs as a long-lived service on one host, not as a CLI on an operator's laptop. That was open
+question 1, and it is not cosmetic: it changes where secrets live, who authenticates to what, and what a
+crash costs.
+
+**Scope of this section: it is a specification, not a description.** Only Phase 0 exists — registry and
+probe, driven by a CLI. There is no Fleet server, no Fleet unit, no caller authentication, and no redactor.
+Everything below is written before the code so that Phase 1 does not invent it under pressure, and the
+imperative and future tenses are deliberate.
+
+### 15.1 Why the service shape forced a decision now
+
+Phase 0 shipped registry and probe with no server, so it could dodge this. Phase 1 records a binding the
+moment it dispatches, and a binding only has value if it outlives the process that wrote it. From here on,
+Fleet is a daemon that clients talk to rather than a command that runs and exits.
+
+### 15.2 Secrets move out of `$HOME`
+
+Phase 0 defaults `FLEET_CREDENTIALS_FILE` to `~/.fleet/credentials.json`. That is right for a laptop and
+**wrong for a service**: `deploy/mercury.service` sets `ProtectHome=true`, and a Fleet unit that matches
+Mercury's hardening would not be able to read anything under a home directory. The failure is also
+asymmetric and easy to miss — the unit starts, the registry loads, and every probe reports `auth-fail`
+because the credential store never resolved.
+
+A service deployment should therefore put the file at `/etc/fleet/credentials.json`, mode `0600`, owned by
+the `fleet` user, and should restrict `ReadWritePaths` to `/var/lib/fleet`. None of this exists yet — there
+is no Fleet unit and no `/etc/fleet`, and the paths above are the intended layout, not the current one. The
+Phase 0 default stays laptop-shaped for development; the unit, when it is written, should set
+`FLEET_CREDENTIALS_FILE` explicitly rather than rely on that default.
+
+### 15.3 Fleet authenticates its own callers
+
+Two separate credential boundaries, and conflating them is the mistake:
+
+- **Caller → Fleet.** Fleet must have its own token set. A caller's token is never forwarded to a child, so a
+  Fleet token and a Mercury token are different things with different blast radii.
+- **Fleet → child.** The `credential_ref` set, resolved from the credential file (section 15.2).
+
+The per-caller host allowlist from section 9 must be real authorisation rather than a filter: a caller
+permitted only for `box-lan-2` must get `403` when naming another host, not a silently narrowed choice. Without
+that, one leaked Fleet token is every host on the LAN, which is the whole reason section 9 exists.
+
+### 15.4 Fleet's own API surface
+
+Enumerated rather than left open, because section 9 forbids a general pass-through to children and the only
+alternative to a list is drift toward one.
+
+```
+GET  /healthz                       liveness, no auth
+GET  /fleet/hosts                   registry + cached probe state
+POST /fleet/hosts                   register a host (admin)
+POST /fleet/hosts/:id/enable        enable|disable (admin)
+DELETE /fleet/hosts/:id             forget a host (admin)
+POST /fleet/hosts/:id/probe         probe now (admin)
+
+POST /fleet/runs                    submit; body names a host (Phase 1), routing later
+GET  /fleet/runs                    one merged view across hosts (Phase 2)
+GET  /fleet/runs/:id                status, with UNKNOWN honoured
+GET  /fleet/runs/:id/stream         merged SSE, cursor-backed (Phase 3)
+POST /fleet/runs/:id/input          (Phase 5)
+POST /fleet/runs/:id/cancel         (Phase 5)
+POST /fleet/runs/:id/retry          (Phase 5; updates the binding)
+GET  /metrics                       rollup of child /metrics (Phase 6)
+```
+
+Nothing here accepts a URL to fetch. A caller names a host by its registry id and Fleet resolves it. That is
+what keeps "do not proxy arbitrary paths" true as the surface grows.
+
+### 15.5 Logging and redaction
+
+Fleet cannot import Mercury's redactor — section 11 forbids it — so Fleet carries its own. This is not
+cosmetic parity. Fleet holds a credential for every Mercury on the network, and the failure mode is
+specific: an HTTP client error can echo request headers, and a bearer token in a log line is a fleet-wide
+compromise sitting in a file with journald's retention. Fleet must redact every known child secret and the
+`Authorization` header pattern from log output, and the redactor must be seeded from the credential store at
+startup so a rotated file cannot leak through a stale list.
+
+### 15.6 Lifecycle
+
+- **Bind `127.0.0.1` by default.** Reaching Fleet across the LAN is opt-in, and then TLS is required for the
+  same reason Mercury requires it: the caller's bearer token would otherwise cross the network in plaintext.
+- **Startup order matters.** Load credentials, open the database, reconcile, then bind. Binding last means a
+  client never gets a `200` from an endpoint that has not loaded the registry.
+- **The prober is a separate timer**, not work inside the request path, and it is the same `createProber`
+  Phase 0 shipped. Section 12's Phase 0 sweep and the service sweep are one implementation.
+- **Shutdown is bounded.** In-flight probes are abandoned rather than awaited; the sweep writes cache rows,
+  and cache is cheap to lose. `TimeoutStopSec` is the outer bound, matching Mercury's unit.
+- **A crash must cost only cache.** Section 5's split is what makes this true: `hosts` and `fleet_runs`
+  survive, `host_probe` and `run_state` are rebuilt by one sweep and one reconcile.
+
+### 15.7 What the service shape does *not* buy
+
+It is still not a dashboard (section 10), still not multi-tenant, and still one host: Fleet's own
+availability is a single process on a single machine. That is deliberate. Making Fleet itself highly
+available would mean replicating `fleet_runs`, and `fleet_runs` is the one table that cannot be rebuilt —
+so HA for Fleet is a genuinely harder problem than HA for any child, and it is out of scope rather than
+merely unbuilt.
