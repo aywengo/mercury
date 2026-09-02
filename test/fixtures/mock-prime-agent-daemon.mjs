@@ -205,6 +205,15 @@ const server = net.createServer((socket) => {
         return;
       }
       case 'extension_ui_response': {
+        // The daemon form is {requestId, response}; the flat RPC form {id, value} answers nothing.
+        // Enforcing it here is what stops this fixture agreeing with the adapter about a wrong shape,
+        // which is the failure mode the previous fixture was built out of.
+        if (typeof cmd.requestId !== 'string' || !cmd.requestId || typeof cmd.response !== 'object' || cmd.response === null) {
+          respond(id, 'extension_ui_response', false, {
+            error: 'extension_ui_response requires requestId and response',
+            errorInfo: { code: 'invalid_extension_ui_response' } });
+          return;
+        }
         respond(id, 'extension_ui_response', true, { data: { ok: true } });
         if (process.env.MOCK_DAEMON_AFTER_INPUT === 'end') {
           emit(cmd.activeSessionId, { type: 'agent_end', result: 0 });

@@ -483,10 +483,11 @@ test('sendInput answers a pending dialog over the wire', async () => {
     const answered = transcript(tx).find((l) => (l.command as any).type === 'extension_ui_response');
     assert.ok(answered, 'the answer must reach the daemon as extension_ui_response');
     const cmd = answered!.command as any;
-    // The answer is addressed by the dialog's id and carries the value; buildExtensionUiResponse uses
-    // `id`, and asserting a field that does not exist would have made this test fail for the wrong reason.
-    assert.equal(cmd.id, 'req-1');
-    assert.equal(cmd.value, 'main');
+    // The daemon takes {requestId, response}. The flat RPC form {id, value} is accepted by the socket
+    // and answers nothing, so the shape is asserted on the wire rather than trusted.
+    assert.equal(cmd.requestId, 'req-1');
+    assert.deepEqual(cmd.response, { value: 'main' });
+    assert.equal(cmd.id, undefined, 'the flat RPC form must not be sent over the daemon socket');
     assert.match(cmd.activeSessionId, /^sess_/, 'the answer must name the session it answers');
     const exit = await withDeadline('exit', 8_000, Promise.all([handle.exit, draining]).then(([e]) => e));
     assert.equal(exit.reason, 'completed');

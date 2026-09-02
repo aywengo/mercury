@@ -40,7 +40,7 @@ import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 import { EventTranslator, buildExtensionUiResponse, isRecord, type RpcEvent } from './eventTranslation.ts';
 import {
   buildCommandEnvelope, checkHello, checkSocketPath, helloForLogging, looksPrivateFramed,
-  parseDaemonLine, MERCURY_DAEMON_PROTOCOL_VERSION, PRIVATE_TRANSPORT_HINT, type DaemonHello,
+  parseDaemonLine, toDaemonUiResponse, MERCURY_DAEMON_PROTOCOL_VERSION, PRIVATE_TRANSPORT_HINT, type DaemonHello,
 } from './daemonProtocol.ts';
 
 /**
@@ -568,9 +568,12 @@ export class DaemonAgentAdapter implements AgentAdapter {
     const pending = session.translator.pending;
     if (!pending) throw new Error(`Run ${runId} is not waiting for input`);
     session.translator.clearPending();
+    // The daemon does not take the flat RPC answer. Sending `{id, value}` here answers nothing and
+    // produces no error, so the run would simply sit waiting for a dialog that was already answered.
+    const { requestId, response } = toDaemonUiResponse(
+      buildExtensionUiResponse(pending.requestId, pending.method, input.value));
     await this.command(session, {
-      type: 'extension_ui_response', activeSessionId: session.activeSessionId ?? '',
-      ...buildExtensionUiResponse(pending.requestId, pending.method, input.value),
+      type: 'extension_ui_response', activeSessionId: session.activeSessionId ?? '', requestId, response,
     });
   }
 

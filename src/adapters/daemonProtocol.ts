@@ -266,3 +266,28 @@ export function helloForLogging(hello: Partial<DaemonHello>): Record<string, unk
   const { supervisorOwnerToken: _omit, ...rest } = hello as Record<string, unknown>;
   return rest;
 }
+
+/**
+ * Convert the RPC-shaped dialog answer into the daemon's `extension_ui_response` command payload.
+ *
+ * The two transports disagree here and the disagreement is silent: the RPC form is flat
+ * (`{id, value}`), the daemon form is `{requestId, response}`. Sending the flat form over the daemon
+ * socket answers nothing, and nothing complains.
+ *
+ * The three-way split below is transcribed from the vendor's own RPC-to-daemon bridge
+ * (`dist/modes/rpc/rpc-mode.js`, the `extension_ui_response` branch), including its ordering: a
+ * cancelled answer wins over a value, and a value wins over a confirmation. Reordering those changes
+ * which answer a run gets.
+ */
+export function toDaemonUiResponse(rpc: Record<string, unknown>): {
+  requestId: string;
+  response: Record<string, unknown>;
+} {
+  const requestId = typeof rpc.id === 'string' ? rpc.id : '';
+  const response = 'cancelled' in rpc && rpc.cancelled
+    ? { cancelled: true }
+    : 'value' in rpc
+      ? { value: rpc.value }
+      : { confirmed: 'confirmed' in rpc && Boolean(rpc.confirmed) };
+  return { requestId, response };
+}

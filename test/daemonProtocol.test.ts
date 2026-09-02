@@ -7,8 +7,8 @@ import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   buildCommandEnvelope, checkHello, checkSocketPath, helloForLogging, looksPrivateFramed,
-  parseDaemonLine, DAEMON_PROTOCOL_NAME, MERCURY_DAEMON_PROTOCOL_VERSION, MAX_SOCKET_PATH_BYTES,
-  PRIVATE_TRANSPORT_HINT,
+  parseDaemonLine, toDaemonUiResponse, DAEMON_PROTOCOL_NAME, MERCURY_DAEMON_PROTOCOL_VERSION,
+  MAX_SOCKET_PATH_BYTES, PRIVATE_TRANSPORT_HINT,
 } from '../src/adapters/daemonProtocol.ts';
 
 /**
@@ -224,4 +224,17 @@ test('the fencing token never survives into a loggable hello', () => {
   assert.equal(safe.appVersion, '0.9.1');
   assert.equal(safe.schemaRevision, 25);
   assert.ok(Array.isArray(safe.serverCapabilities));
+});
+test('a dialog answer is converted into the daemon form, not the flat RPC form', () => {
+  // Transcribed from the vendor's own RPC->daemon bridge. The ordering is load-bearing: cancelled wins
+  // over a value, and a value wins over a confirmation.
+  assert.deepEqual(toDaemonUiResponse({ id: 'r1', value: 'main' }), { requestId: 'r1', response: { value: 'main' } });
+  assert.deepEqual(toDaemonUiResponse({ id: 'r1', confirmed: true }), { requestId: 'r1', response: { confirmed: true } });
+  assert.deepEqual(toDaemonUiResponse({ id: 'r1', confirmed: false }), { requestId: 'r1', response: { confirmed: false } });
+  assert.deepEqual(toDaemonUiResponse({ id: 'r1', cancelled: true }), { requestId: 'r1', response: { cancelled: true } });
+  // A cancel that also carries a value is a cancellation, not an answer.
+  assert.deepEqual(toDaemonUiResponse({ id: 'r1', cancelled: true, value: 'x' }),
+    { requestId: 'r1', response: { cancelled: true } });
+  // A value of null is still a value; it must not fall through to the confirm branch.
+  assert.deepEqual(toDaemonUiResponse({ id: 'r1', value: null }), { requestId: 'r1', response: { value: null } });
 });

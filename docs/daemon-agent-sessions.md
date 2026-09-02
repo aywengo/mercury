@@ -625,6 +625,16 @@ Also enforced, none of it in the original design:
 - **Refusals carry their code.** The daemon answers a rejected command with `errorInfo.code`; surfacing
   it is the difference between an operator knowing `no_capacity` and reading a timeout.
 - **Isolation-requesting runs are refused**, as in §12 item 6.
+- **A dialog answer is re-shaped, not forwarded.** §4.2 lists `extension_ui_response` as taking
+  `requestId` and `response`; the RPC transport answers with a flat `{id, value}`. The two forms are
+  not interchangeable, and the daemon socket does not complain about the wrong one — it accepts the
+  command and the run keeps waiting for a dialog that was already answered. `toDaemonUiResponse`
+  performs the conversion, transcribed from the vendor's own RPC-to-daemon bridge including the
+  ordering of its three branches (a cancellation beats a value, a value beats a confirmation). The mock
+  now rejects the flat form, so a fixture cannot agree with the adapter about this particular mistake.
+  This was found by reading §4.2 against `dist/modes/rpc/rpc-mode.js` after review, not by a test: the
+  first version of the mock accepted whatever the adapter sent, which is the same mistake §5 describes,
+  made again in a place that had not been checked.
 - **Completion detaches and waits**, so the supervisor stops streaming to a socket that is about to
   close; termination kills, and normal completion never kills.
 - **Provider and model flags are forwarded** into the `create` config, and anything that cannot be
