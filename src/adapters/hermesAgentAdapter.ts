@@ -20,6 +20,7 @@
 // is deferred per the design.
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type {
   AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext,
 } from '../domain/types.ts';
@@ -107,18 +108,13 @@ export class HermesAgentAdapter implements AgentAdapter {
       done: false,
       cancelled: false,
       terminated: false,
-      exitSettled: false,
       queue: [],
       waiters: [],
-      exitPromise: undefined as unknown as Promise<AgentExit>,
-      exitResolve: undefined as unknown as (exit: AgentExit) => void,
+        ...createExitGate(),
       sessionId: null,
       stdoutBuf: '',
       context,
     };
-    session.exitPromise = new Promise<AgentExit>((resolve) => {
-      session.exitResolve = resolve;
-    });
     this.sessions.set(runId, session);
 
     const argv = this.buildArgv(context, null);
@@ -257,28 +253,20 @@ export class HermesAgentAdapter implements AgentAdapter {
         done: false,
         cancelled: false,
         terminated: false,
-        exitSettled: false,
         queue: [],
         waiters: [],
-        exitPromise: undefined as unknown as Promise<AgentExit>,
-        exitResolve: undefined as unknown as (exit: AgentExit) => void,
+        ...createExitGate(),
         sessionId: null,
         stdoutBuf: '',
         context,
       };
-      session.exitPromise = new Promise<AgentExit>((resolve) => {
-        session!.exitResolve = resolve;
-      });
       this.sessions.set(runId, session);
     }
     if (!session.sessionId) throw new Error(`No session id for run ${runId}; use retry-from-scratch`);
     session.done = false;
     session.cancelled = false;
     session.terminated = false;
-    session.exitSettled = false;
-    session.exitPromise = new Promise<AgentExit>((resolve) => {
-      session.exitResolve = resolve;
-    });
+    rearmExitGate(session);
     session.stdoutBuf = '';
     const argv = this.buildArgv(session.context, session.sessionId);
     this.spawnProcess(session, session.context, argv);
@@ -293,12 +281,6 @@ export class HermesAgentAdapter implements AgentAdapter {
 }
 
 // --- helpers ----------------------------------------------------------------
-
-function settleExit(session: Session, exit: AgentExit): void {
-  if (session.exitSettled) return;
-  session.exitSettled = true;
-  session.exitResolve(exit);
-}
 
 function push(session: Session, ev: AgentEvent): void {
   const waiter = session.waiters.shift();

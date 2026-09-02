@@ -901,6 +901,52 @@ rather than removing them:
 
 ---
 
+## 8b. Shared plumbing an adapter MUST reuse
+
+`src/adapters/exitSettlement.ts` owns exit settlement for every adapter. Import it; do not
+re-implement it.
+
+```ts
+import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
+
+// Constructing a session: spread the gate in. There is no way to build a session without one --
+// omitting the spread fails to typecheck (TS2739), which is the point.
+const session = { ...fields, ...createExitGate() };
+
+// ... later, from whichever transport path observes completion first:
+settleExit(session, { code, signal, reason: 'completed' });
+
+// Re-arming is for an EXISTING session whose gate has already fired, e.g. on resume().
+// It mutates and returns the same object; it is not a constructor.
+rearmExitGate(session);
+```
+
+Do not write `exitPromise: null as any` / `exitResolve: null as any` placeholders to satisfy the type.
+That was the old shape, and it is what let a session exist with a gate that could never settle. Spreading
+`createExitGate()` makes the guarantee compile-time instead of a convention someone has to remember.
+
+This exists because the same bug was hand-copied six times. Round 1 of the architecture review
+diagnosed it ("exit settlement is hand-rolled in five adapters with three different answers, one of
+them wrong ... the same bug is reproduced five times") and its remediation table promised a shared base
+as step 9, marked delivered. It was never built; the three linked PRs patched the three bugs per
+adapter instead. By Round 2 there were six `settleExit()` functions, five of them byte-identical, plus
+thirteen hand-rolled copies of the same four lines that allocate the exit promise and capture its
+resolver. Issue #148 removed all of them.
+
+`rearmExitGate()` matters for `resume()`: a resumed run reuses its session object, and re-arming
+without clearing the settled flag would leave the retried run's exit promise unresolvable.
+
+Two rules, both enforced by `test/adapterExitSettlement.test.ts`:
+
+1. **An adapter must not declare `settleExit`, write `exitSettled`, or call `exitResolve`.** The test
+   scans every file in `src/adapters/` except the shared module and fails on any of the three. It
+   strips comments first, because the comments explaining this history quote the code the guard
+   forbids.
+2. **`settleExit()` has exactly one definition in `src/`.**
+
+Rows 1-2, 4 and 6 of the table below are all still to be written. Each is a new adapter, which is
+exactly the situation that produced this issue six times over; reuse is the whole point.
+
 ## 9. Suggested implementation order
 
 | # | Adapter | Pattern | Effort | Depends on |
