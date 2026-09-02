@@ -63,9 +63,13 @@ function violations(code: string): string[] {
 
 test('settleExit settles exactly once and keeps the FIRST reason', async () => {
   // The guard is the whole point of the module. A transport reports completion through several racing
-  // paths -- child exit, stream end, socket close, cancel, timeout -- and resolving the promise twice
-  // is silently ignored, so the visible damage is that a later observation overwrites the REASON: a
-  // user cancel reported as a crash, or a timeout reported as a clean completion.
+  // paths -- child exit, stream end, socket close, cancel, timeout. Resolving an already-resolved
+  // promise is a LANGUAGE NO-OP, so a second settle does not overwrite anything today: the first
+  // reason wins because the promise already settled, not because the guard did anything. The guard is
+  // still the contract, and it is what keeps it that way -- the moment exitResolve does anything beyond
+  // resolving (logging, emitting, clearing a timer), a second call stops being harmless and
+  // first-writer-wins becomes a property the module has to enforce rather than inherit.
+  // The next test asserts that contract directly, with a counting resolver.
   const gate = createExitGate();
   const session = { ...gate };
 

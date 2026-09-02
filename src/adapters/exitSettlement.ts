@@ -17,7 +17,7 @@
 // about. It deliberately does NOT own spawn or stderr buffering: those genuinely differ per backend --
 // the daemon talks to a unix socket, the remote adapter speaks HTTP, and local/rpc spawn a child
 // process -- and unifying them would be a rewrite with no evidence base, not the mechanical change
-// this one is. The guard test in test/adaptersShared.test.ts pins the part that is shared.
+// this one is. The guard test in test/adapterExitSettlement.test.ts pins the part that is shared.
 
 import type { AgentExit } from '../domain/types.ts';
 

@@ -907,12 +907,23 @@ rather than removing them:
 re-implement it.
 
 ```ts
-import { rearmExitGate, settleExit } from './exitSettlement.ts';
+import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 
-const session = rearmExitGate({ ...fields, exitPromise: null as any, exitResolve: null as any });
+// Constructing a session: spread the gate in. There is no way to build a session without one --
+// omitting the spread fails to typecheck (TS2739), which is the point.
+const session = { ...fields, ...createExitGate() };
+
 // ... later, from whichever transport path observes completion first:
 settleExit(session, { code, signal, reason: 'completed' });
+
+// Re-arming is for an EXISTING session whose gate has already fired, e.g. on resume().
+// It mutates and returns the same object; it is not a constructor.
+rearmExitGate(session);
 ```
+
+Do not write `exitPromise: null as any` / `exitResolve: null as any` placeholders to satisfy the type.
+That was the old shape, and it is what let a session exist with a gate that could never settle. Spreading
+`createExitGate()` makes the guarantee compile-time instead of a convention someone has to remember.
 
 This exists because the same bug was hand-copied six times. Round 1 of the architecture review
 diagnosed it ("exit settlement is hand-rolled in five adapters with three different answers, one of
