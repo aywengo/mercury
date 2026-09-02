@@ -271,28 +271,40 @@ The practical benefit arrives the first time Mercury changes an internal type an
 
 Each phase is independently useful and ships behind its own PR, per `issue-fix-loop`.
 
-**Phase 0 — registry and probe (small).** *Shipped: `fleet/`, `npm run fleet`.* `hosts` table, add/list/enable, and a prober that hits
-`/healthz`, `/healthz/workers`, `/api/agents` on a timer. Output: a table of hosts with live capacity and
-agent lists. No dispatch. This alone answers "what is my fleet doing?" and validates every assumption in
-section 3 against real hosts.
+**Phase 0 — registry and probe (small).** *Shipped: `fleet/`, `npm run fleet`.* `hosts` table,
+add/list/enable, and a prober that hits `/healthz`, `/healthz/workers`, `/api/agents` on a timer.
+Output: a table of hosts with live capacity and agent lists. No dispatch. This alone answers "what
+is my fleet doing?" and validates every assumption in section 3 against real hosts.
 
-**Phase 1 — dispatch with explicit host (small).** *Shipped: `fleet/dispatch.ts`, `POST /fleet/runs`.* Submit a task, name the host, get a `fleet_run_id`,
-binding recorded. No routing. Proves the idempotency and binding model, and the crash-recovery path
-(restart Fleet, still find every Run).
+**Phase 1 — dispatch with explicit host (small).** *Shipped: `fleet/dispatch.ts`, `POST
+/fleet/runs`.* Submit a task, name the host, get a `fleet_run_id`, binding recorded. No routing.
+Proves the idempotency and binding model, and the crash-recovery path (restart Fleet, still find
+every Run).
 
-**Phase 2 — reconciliation and merged status (medium).** *Shipped: `fleet/sweep.ts`, `FLEET_SWEEP_INTERVAL_MS`.* The sweep from section 7, `UNKNOWN` handling, and
-`GET /fleet/runs` showing one view across hosts. This is where durability gets exercised for real.
+**Phase 2 — reconciliation and merged status (medium).** *Shipped: `fleet/sweep.ts`,
+`FLEET_SWEEP_INTERVAL_MS`.* The sweep from section 7, `UNKNOWN` handling, and `GET /fleet/runs`
+showing one view across hosts. This is where durability gets exercised for real.
 
-**Phase 3 — event aggregation (medium).** *Shipped: `fleet/events.ts`, `fleet/stream.ts`, `GET /fleet/runs/:id/events` and `/stream`.* Cursor mirroring, Fleet-side SSE, metadata-only by default.
+**Phase 3 — event aggregation (medium).** *Shipped: `fleet/events.ts`, `fleet/stream.ts`, `GET
+/fleet/runs/:id/events` and `/stream`.* Cursor mirroring, Fleet-side SSE, metadata-only by default.
 
-**Phase 4 — routing (medium).** Locality filter, agent filter, label selectors, capacity scoring, and the
-`localPath` → git URL rewrite. Ship the rewrite **before** the scorer, since it removes most of the
-constraint the scorer exists to work around.
+**Phase 4 — routing (medium).** *Shipped: `fleet/routing.ts`.* Locality filter, agent filter, label
+selectors, capacity scoring, and the `localPath` → git URL rewrite. Ship the rewrite **before** the
+scorer, since it removes most of the constraint the scorer exists to work around. The router is a
+pure function returning its exclusions as data, so an inert filter is a test failure rather than a
+Run that happened to land somewhere.
 
-**Phase 5 — interaction (small).** Input, cancel, retry through Fleet, including the binding update when
-`retry` yields a new child Run id.
+**Phase 5 — interaction (small).** *Shipped: `fleet/interact.ts`, `POST
+/fleet/runs/:id/{input,cancel,retry}`.* Input, cancel, retry through Fleet, including the binding
+update when `retry` yields a new child Run id. An unconfirmed cancel is never recorded as cancelled,
+and an unconfirmed retry does not rebind — section 7 applies to verbs as much as to status.
 
-**Phase 6 — metrics rollup (small).** *Shipped: `fleet/metrics.ts`, `GET /metrics`.* Scrape each child's `/metrics` in parallel, relabel every series with `host="<hostId>"`, and serve one Prometheus endpoint. Series are relabelled rather than summed — summing across heterogeneous hosts destroys the per-host view and is wrong for gauges like lease timestamps — and a failed scrape publishes `mercury_fleet_scrape_success{host}=0` rather than omitting the host, so a vanished host cannot be mistaken for an idle one.
+**Phase 6 — metrics rollup (small).** *Shipped: `fleet/metrics.ts`, `GET /metrics`.* Scrape each
+child's `/metrics` in parallel, relabel every series with `host="<hostId>"`, and serve one
+Prometheus endpoint. Series are relabelled rather than summed — summing across heterogeneous hosts
+destroys the per-host view and is wrong for gauges like lease timestamps — and a failed scrape
+publishes `mercury_fleet_scrape_success{host}=0` rather than omitting the host, so a vanished host
+cannot be mistaken for an idle one.
 
 ## 13. Upstream changes worth filing against Mercury
 
