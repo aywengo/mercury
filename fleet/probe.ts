@@ -37,6 +37,26 @@ interface FetchLike {
   (url: string, init?: RequestInit): Promise<Response>;
 }
 
+/**
+ * Strip terminal control sequences from text a CHILD produced.
+ *
+ * Fleet's trust boundary is HTTP: it may be pointed at a Mercury it did not build, and any child it can
+ * reach can answer with arbitrary JSON. Without this, a hostile or compromised child returns
+ * `{"error": "\u001b]0;pwned\u0007..."}` from /healthz/workers and writes raw escapes into the operator's
+ * terminal -- enough to set the window title, clear the screen, or print a line that looks like Fleet's own
+ * output. Verified against a live fake before this function existed.
+ *
+ * Applied where child text enters the system rather than at each print site, so a future command cannot
+ * forget to sanitize. Control characters are removed rather than escaped: `detail` is a single-line
+ * diagnostic, and a newline is exactly how a child would forge a second one.
+ */
+export function stripTerminalControls(raw: string): string {
+  return raw
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '') // OSC ... BEL or ST
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '') // CSI ... final byte
+    .replace(/[\u0000-\u001f\u007f]/g, ''); // remaining C0 (incl. CR/LF/TAB) and DEL
+}
+
 /** Shape of Mercury's /healthz/workers. camelCase: activeLeases() maps its SQL aliases before responding. */
 interface WorkersResponse {
   workers?: Array<{ workerId?: string; activeRuns?: number }>;
@@ -151,7 +171,8 @@ export async function probeHost(target: ProbeTarget, fetchImpl: FetchLike = fetc
   if (workers.status === 503) {
     // Reachable and serving HTTP, but no queue wired up: this Mercury cannot execute anything. Distinct
     // from unreachable because the fix is operator-side configuration, not a network or host problem.
-    notServingDetail = (workers.json as { error?: string } | null)?.error ?? 'queue not configured';
+    notServingDetail = stripTerminalControls(
+      (workers.json as { error?: string } | null)?.error ?? 'queue not configured');
   } else if (workers.status === 404) {
     // An older Mercury that predates the endpoint. It is still perfectly dispatchable, so this is NOT
     // not_serving: that outcome means "cannot execute anything", and claiming it here would take a healthy
@@ -195,7 +216,9 @@ export async function probeHost(target: ProbeTarget, fetchImpl: FetchLike = fetc
       `rejected. Check credential_ref; do not assume the host is down.`;
   } else if (agents.status >= 200 && agents.status < 300) {
     const raw = (agents.json as AgentsResponse | null)?.agents;
-    agentList = Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : [];
+    agentList = Array.isArray(raw)
+      ? raw.filter((x): x is string => typeof x === 'string').map(stripTerminalControls)
+      : [];
   } else {
     agentsDetail = `HTTP ${agents.status} from /api/agents`;
   }

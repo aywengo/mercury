@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { probeHost } from '../probe.ts';
+import { probeHost, stripTerminalControls } from '../probe.ts';
 
 interface Behavior {
   health?: { status?: number; body?: unknown; delayMs?: number };
@@ -170,4 +170,40 @@ test('a malformed agents payload degrades to no agents instead of failing the pr
     assert.equal(r.outcome, 'ok');
     assert.deepEqual(r.agents, []);
   } finally { await fake.close(); }
+});
+
+test('child-controlled text cannot write escape sequences into the operator terminal', async () => {
+  // Fleet may be pointed at a Mercury it did not build. Anything that answers can put bytes on the screen.
+  const fake = await startFakeMercury({
+    health: { body: { ok: true } },
+    workers: { status: 503, body: { error: 'queue not configured \u001b]0;pwned\u0007\u001b[2J FORGED' } },
+    agents: { body: { agents: ['prime-agent', 'ok\u001b[31mred\u0007'] } },
+  });
+  try {
+    const r = await probeHost({ hostId: 'h', baseUrl: fake.url, token: 'tok', timeoutMs: 2000 });
+    assert.equal(r.outcome, 'not_serving');
+    for (const s of [r.detail ?? '', ...(r.agents ?? [])]) {
+      // eslint-disable-next-line no-control-regex
+      assert.ok(!/[\u0000-\u001f\u007f]/.test(s), `control characters survived sanitisation: ${JSON.stringify(s)}`);
+      assert.ok(!s.includes('pwned') || !s.includes('\u001b'), 'escape byte must be gone');
+    }
+    // The substance survives; only the control bytes are removed.
+    assert.match(r.detail ?? '', /queue not configured/);
+    assert.match(r.detail ?? '', /FORGED/, 'the text is diagnostic content, not something to hide');
+    assert.deepEqual(r.agents, ['prime-agent', 'okred']);
+  } finally { await fake.close(); }
+});
+
+test('stripTerminalControls removes sequences but keeps ordinary text', () => {
+  assert.equal(stripTerminalControls('plain text'), 'plain text');
+  assert.equal(stripTerminalControls('a\u001b[2Jb'), 'ab');
+  assert.equal(stripTerminalControls('a\u001b]0;title\u0007b'), 'ab');
+  assert.equal(stripTerminalControls('line1\nline2\r\ntab\there'), 'line1line2tabhere');
+  assert.equal(stripTerminalControls('del\u007f'), 'del');
+  // An unterminated OSC sequence has no terminator to match, so its argument survives as ordinary text
+  // (the `]` is part of that argument, not a control byte). Honest behaviour, and safe: the escape byte is
+  // gone, so the terminal interprets nothing.
+  assert.equal(stripTerminalControls('a\u001b]0;stuck'), 'a]0;stuck');
+  // eslint-disable-next-line no-control-regex
+  assert.ok(!/[\u0000-\u001f\u007f]/.test(stripTerminalControls('a\u001b]0;stuck')));
 });
