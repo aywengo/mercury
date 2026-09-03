@@ -161,6 +161,41 @@ export const PRIVATE_TRANSPORT_HINT =
  * no longer puts its socket inside the workspace: a deep workspace path can exceed the limit on its
  * own, and did during verification of this design.
  */
+/**
+ * Turn a bare connect errno into something an operator can act on.
+ *
+ * A Unix socket file that exists proves nothing about its listener. A supervisor that was SIGKILLed
+ * leaves its inode behind, and connecting to that stale file fails with ECONNREFUSED -- while the
+ * missing-file case already gets a helpful message, the stale-file case (the one an operator actually
+ * meets after a crash) reported `connect ECONNREFUSED /path` and nothing else.
+ *
+ * Pure so the wording is testable without arranging a dead supervisor.
+ */
+export function describeConnectError(
+  code: string, message: string, socketPath: string, source: string,
+): string {
+  const guidance = 'Run `prime-agent status` to see what is running, or start the PrimeAgent background '
+    + 'service. To use RPC mode instead, set MERCURY_AGENT_MODE=rpc.';
+  if (code === 'ECONNREFUSED') {
+    return `nothing is listening on daemon socket ${socketPath} (from ${source}). The socket file exists, `
+      + 'but its supervisor is gone: a crashed or killed supervisor leaves the file behind, and a stale '
+      + 'socket is indistinguishable from a live one until something connects. ' + guidance;
+  }
+  if (code === 'ENOENT') {
+    return `daemon socket ${socketPath} (from ${source}) disappeared between discovery and connect; the `
+      + 'supervisor is restarting or has just stopped. ' + guidance;
+  }
+  if (code === 'EACCES' || code === 'EPERM') {
+    return `permission denied connecting to daemon socket ${socketPath} (from ${source}). The socket is `
+      + 'owned by another user, or the worker runs as a different uid than the supervisor.';
+  }
+  if (code === 'EADDRINUSE') {
+    return `daemon socket ${socketPath} (from ${source}) is already in use by something that is not a `
+      + 'supervisor we can talk to. ' + guidance;
+  }
+  return `cannot connect to daemon socket ${socketPath} (from ${source}): ${code || 'error'}: ${message}`;
+}
+
 export function checkSocketPath(path: string): string | null {
   const bytes = Buffer.byteLength(path, 'utf8');
   if (bytes > MAX_SOCKET_PATH_BYTES) {
