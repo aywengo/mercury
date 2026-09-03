@@ -588,7 +588,15 @@ That was wrong, and it was wrong in the way that matters most here. PrimeAgent s
 that both bind a `daemon.sock` and both send a `daemon_hello`: `AgentDaemon` (`daemon-mode.js`) and
 `DaemonSupervisor` (`daemon-supervisor.js`). The one that owns the public socket — provable by the
 `worker-*.sock` files beside it, which only the supervisor creates — is the supervisor, and the
-supervisor has no transport concept in its attach path at all:
+supervisor has no transport concept in its attach path at all.
+
+`AgentDaemon` is not dead code to be waved away, which is why the gate exists at all: the supervisor
+launches each session worker as `--mode daemon` (`daemon-supervisor.js:2366`), so every worker runs
+`AgentDaemon`, and the supervisor connects to it as a worker client. Inside `AgentDaemon`,
+`transport: this.options.worker ? "private-framed" : "jsonl"` (`daemon-mode.js:2571`) separates those
+supervisor-to-worker connections from public ones. The gate therefore guards the **worker** socket, one
+hop away from Mercury — reading it as though it guarded Mercury's connection is what produced the wrong
+conclusion.
 
 ```js
 // daemon-supervisor.js:1396 — the handler that actually serves Mercury
