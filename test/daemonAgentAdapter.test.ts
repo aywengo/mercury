@@ -95,13 +95,33 @@ async function withDeadline<T>(label: string, ms: number, work: Promise<T>): Pro
   finally { if (timer) clearTimeout(timer); }
 }
 
-async function collectAll(handle: Awaited<ReturnType<DaemonAgentAdapter['start']>>) {
+async function collectAll(
+  handle: Awaited<ReturnType<DaemonAgentAdapter['start']>>, ms = 20_000,
+): Promise<{ events: { type: string; payload: unknown }[]; exit: AgentExit }> {
+  // Bounded per step rather than around the whole call. A `for await` over an adapter that never
+  // pushes DONE hangs, and wrapping the *start* promise in a deadline does not cover the iteration
+  // that follows it -- which is how a test written to prevent anonymous 180s timeouts (issue #174)
+  // could still produce one. Failing here names the run instead of the runner.
   const events: { type: string; payload: unknown }[] = [];
-  for await (const ev of handle.events) {
-    if (ev.type === '__done__') break;
-    events.push({ type: ev.type, payload: ev.payload });
+  const it = handle.events[Symbol.asyncIterator]();
+  const until = Date.now() + ms;
+  for (;;) {
+    const left = until - Date.now();
+    if (left <= 0) throw new Error('collectAll: event stream did not finish in time');
+    const step = await withDeadline('collectAll next', left, it.next());
+    if (step.done) break;
+    if (step.value.type === '__done__') break;
+    events.push({ type: step.value.type, payload: step.value.payload });
   }
-  return { events, exit: await handle.exit };
+  const leftForExit = until - Date.now();
+  if (leftForExit <= 0) {
+    // Say which phase ran out and over what budget. Racing a 1ms timer here would report
+    // "collectAll exit did not finish in 1ms", which reads like a broken timer rather than the truth:
+    // the event stream consumed the whole allowance.
+    throw new Error(`collectAll: event stream consumed the whole ${ms}ms budget; no time left to await exit`);
+  }
+  const exit = await withDeadline('collectAll exit', leftForExit, handle.exit);
+  return { events, exit };
 }
 
 const err = async (fn: () => Promise<unknown>): Promise<Error> => {
@@ -678,4 +698,35 @@ test('the stale-socket helper fails fast when its listener never becomes ready',
     /exited before it became ready|never became ready/,
   ));
   assert.ok(Date.now() - started < 20_000, 'helper took too long on its failure path');
+});
+
+test('a supervisor shutdown settles the run instead of hanging it', async () => {
+  // daemon_closing arrives on its own line type, not as a command response, so an adapter that only
+  // understands responses and events would sit until its command timeout and report a timeout.
+  // Settling promptly is the property worth pinning.
+  //
+  // What it settles AS is wrong and deliberately not asserted here: the run becomes an agent failure
+  // with no automatic retry, when a supervisor shutting down is infrastructure and design section 8
+  // asks for a requeue. Pinning the current classification would make the wrong behaviour load-bearing.
+  // The misclassification is issue #188.
+  const mock = await startMock({ MOCK_DAEMON_CLOSING: '1' });
+  const logged: { msg: string; fields?: Record<string, unknown> }[] = [];
+  try {
+    const adapter = adapterFor(mock, {
+      logger: { info: () => {}, warn: (msg, fields) => logged.push({ msg, fields }) },
+    });
+    const handle = await adapter.start(makeContext());
+    const { exit } = await collectAll(handle, 12_000);
+    assert.notEqual(exit.reason, 'completed', 'a supervisor shutdown must not look like a finished run');
+    assert.equal(exit.code, null);
+    // The discriminator. A socket that dies on its own settles as SIGPIPE; only the daemon_closing
+    // branch settles as SIGTERM. Asserting merely "not completed" also passes when the socket blows up,
+    // which is how an early version of this test stayed green while the fixture was sending the
+    // supervisor's line to a destroyed socket.
+    assert.equal(exit.signal, 'SIGTERM',
+      `expected the graceful supervisor-shutdown path, not a socket failure (${JSON.stringify(exit)})`);
+    const closing = logged.find((l) => l.msg === 'daemon is closing');
+    assert.ok(closing, `the closing branch never ran; logged: ${JSON.stringify(logged.map((l) => l.msg))}`);
+    assert.match(String(closing.fields?.reason ?? ''), /supervisor shutting down/);
+  } finally { await mock.close(); }
 });
