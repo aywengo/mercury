@@ -7,7 +7,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
-import { makeEnv } from './helpers.ts';
+import { expectStatus, makeEnv } from './helpers.ts';
 import type { Express } from 'express';
 
 const UI_DIR = join(import.meta.dirname, '..', 'ui');
@@ -45,15 +45,15 @@ test('UI files exist and are served without auth', async () => {
       // static assets: public
       for (const f of ['', 'run.html', 'app.js', 'style.css']) {
         const res = await fetch(`${base}/${f}`);
-        assert.equal(res.status, 200, `GET /${f} should be 200`);
+        await expectStatus(res, 200, `GET /${f} (public static asset)`);
       }
       // API: still auth-gated (no token AND no cookie, or a bogus cookie)
       const noAuth = await fetch(`${base}/api/runs`);
-      assert.equal(noAuth.status, 401);
+      await expectStatus(noAuth, 401, 'no credential on a gated /api route');
       const bogusCookie = await fetch(`${base}/api/runs`, { headers: { cookie: 'mercury_session=not-a-real-session' } });
-      assert.equal(bogusCookie.status, 401);
+      await expectStatus(bogusCookie, 401, 'a bogus session cookie');
       const withAuth = await fetch(`${base}/api/runs`, { headers: { authorization: 'Bearer tok-alice' } });
-      assert.equal(withAuth.status, 200);
+      await expectStatus(withAuth, 200, 'valid bearer on a gated /api route');
     } finally {
       await srv.close();
       stream.stop();

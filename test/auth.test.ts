@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { createApp } from '../src/api/server.ts';
 import { createSessionStore } from '../src/api/sessions.ts';
 import { EventStream } from '../src/events/eventStream.ts';
-import { makeEnv, tempDir, waitFor } from './helpers.ts';
+import { expectStatus, makeEnv, tempDir, waitFor } from './helpers.ts';
 import type { Express } from 'express';
 import { readdirSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -138,7 +138,7 @@ test('login with invalid or missing token -> 401, no cookie, generic error', asy
     try {
       const base = `http://127.0.0.1:${srv.port}`;
       const bad = await login(base, 'wrong-token');
-      assert.equal(bad.status, 401);
+      await expectStatus(bad, 401, 'login with a wrong token');
       assert.equal(bad.headers.get('set-cookie'), null);
       const badBody = (await bad.json()) as { error: string };
 
@@ -147,7 +147,7 @@ test('login with invalid or missing token -> 401, no cookie, generic error', asy
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({}),
       });
-      assert.equal(empty.status, 401);
+      await expectStatus(empty, 401, 'login with a missing token');
       assert.equal(empty.headers.get('set-cookie'), null);
       const emptyBody = (await empty.json()) as { error: string };
 

@@ -7,7 +7,7 @@ import { EventStream } from '../src/events/eventStream.ts';
 import { collectMetrics } from '../src/metrics/collect.ts';
 import { escapeLabelValue, renderPrometheus } from '../src/metrics/prometheus.ts';
 import { EventStore } from '../src/events/eventStore.ts';
-import { makeEnv, waitFor } from './helpers.ts';
+import { expectStatus, makeEnv, waitFor } from './helpers.ts';
 import type { ErrorKind, RunStatus } from '../src/domain/types.ts';
 import type { Express } from 'express';
 import { ACTIVE_WORK_STATUSES, isTerminal, LEASE_HOLDING_STATUSES, STUCK_CANDIDATE_STATUSES, TERMINAL_STATUSES } from '../src/domain/stateMachine.ts';
@@ -115,9 +115,9 @@ test('/metrics requires authentication', async () => {
     const srv = await listen(app);
     try {
       const anon = await fetch(`http://127.0.0.1:${srv.port}/metrics`);
-      assert.equal(anon.status, 401, 'an unauthenticated scrape must not read operational metrics');
+      await expectStatus(anon, 401, 'an unauthenticated scrape must not read operational metrics');
       const bad = await fetch(`http://127.0.0.1:${srv.port}/metrics`, { headers: { authorization: 'Bearer nope' } });
-      assert.equal(bad.status, 401);
+      await expectStatus(bad, 401, 'a bad token on /metrics');
       const ok = await fetch(`http://127.0.0.1:${srv.port}/metrics`, { headers: { authorization: 'Bearer tok-alice' } });
       assert.equal(ok.status, 200);
       // Exact, not a substring match: Express's res.send() reorders the media parameters to

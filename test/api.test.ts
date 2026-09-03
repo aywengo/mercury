@@ -5,7 +5,7 @@ import net from 'node:net';
 import { join } from 'node:path';
 import { closeServer, createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
-import { makeEnv, sleep, tempDir, waitFor } from './helpers.ts';
+import { expectStatus, makeEnv, sleep, tempDir, waitFor } from './helpers.ts';
 import { createLogger } from '../src/logger.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import type { Express } from 'express';
@@ -50,11 +50,11 @@ test('auth: missing/invalid token rejected', async () => {
     const srv = await listen(app);
     try {
       const noAuth = await fetch(`http://127.0.0.1:${srv.port}/api/runs`);
-      assert.equal(noAuth.status, 401);
+      await expectStatus(noAuth, 401, 'no credential on /api/runs');
       const badAuth = await fetch(`http://127.0.0.1:${srv.port}/api/runs`, {
         headers: { authorization: 'Bearer wrong' },
       });
-      assert.equal(badAuth.status, 401);
+      await expectStatus(badAuth, 401, 'wrong bearer on /api/runs');
     } finally {
       await srv.close();
       closeStream();
