@@ -622,18 +622,30 @@ test('a bad handshake on one run does not break another run sharing the adapter'
  * then SIGKILL it so it cannot unlink its own inode. This is the state a crashed supervisor leaves
  * behind, and it is indistinguishable from a live one until something connects.
  */
-async function makeStaleSocket(): Promise<string> {
-  const path = shortSocketPath('stale');
+async function makeStaleSocket(path: string = shortSocketPath('stale')): Promise<string> {
   const child = spawn(process.execPath, ['-e',
     'const n=require("node:net");const s=n.createServer();s.listen(process.argv[1],()=>console.log("READY"));setInterval(()=>{},1000);',
     path], { stdio: ['ignore', 'pipe', 'pipe'] });
+  // Registered synchronously, while the child is certainly still alive. A listener attached in the
+  // finally-block can miss the event entirely: if the child dies before becoming ready, the failure
+  // path runs `once('exit')` on a process that already emitted it, and the await never settles. That is
+  // the anonymous 180s runner timeout issue #174 exists to eliminate, reintroduced by the test written
+  // to fix it -- caught in review, not by running the suite, because the happy path never takes that
+  // branch.
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
   try {
-    await new Promise<void>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('stale listener never became ready')), 8_000);
-      child.stdout!.on('data', (d: Buffer) => { if (d.toString().includes('READY')) { clearTimeout(t); resolve(); } });
-      child.once('exit', (c) => { clearTimeout(t); reject(new Error(`listener exited ${c}`)); });
-    });
-  } finally { child.kill('SIGKILL'); await new Promise((r) => child.once('exit', r)); }
+    await Promise.race([
+      new Promise<void>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('stale listener never became ready')), 8_000);
+        child.stdout!.on('data', (d: Buffer) => { if (d.toString().includes('READY')) { clearTimeout(t); resolve(); } });
+      }),
+      exited.then(() => { throw new Error('stale listener exited before it became ready'); }),
+    ]);
+  } finally {
+    child.kill('SIGKILL');
+    // Bounded even though `exited` should always settle: a helper that can hang is the bug.
+    await Promise.race([exited, new Promise<void>((r) => { const t = setTimeout(() => { clearTimeout(t); r(); }, 5_000); })]);
+  }
   // Give the OS a beat; the inode must survive the kill for this test to mean anything.
   for (let i = 0; i < 50 && !existsSync(path); i++) await new Promise((r) => setTimeout(r, 20));
   assert.ok(existsSync(path), 'stale socket file did not survive SIGKILL; this test would prove nothing');
@@ -652,4 +664,18 @@ test('a stale socket file is reported as a dead supervisor, not a bare ECONNREFU
   // A raw errno with no diagnosis is the regression being guarded against.
   assert.doesNotMatch(e.message, /^connect ECONNREFUSED/);
   assert.ok(e instanceof DaemonProtocolError);
+});
+
+test('the stale-socket helper fails fast when its listener never becomes ready', async () => {
+  // The helper's failure branch is the one the happy path never walks, and it is where an
+  // `once('exit')` registered too late hangs forever. Point it at a path that cannot bind so the child
+  // dies before announcing READY, and require a rejection -- bounded, so a regression reports a failure
+  // instead of the 180s runner timeout this whole issue is about.
+  const doomed = '/nonexistent-dir-for-mercury-test/daemon.sock';
+  const started = Date.now();
+  await withDeadline('makeStaleSocket failure path', 20_000, assert.rejects(
+    () => makeStaleSocket(doomed),
+    /exited before it became ready|never became ready/,
+  ));
+  assert.ok(Date.now() - started < 20_000, 'helper took too long on its failure path');
 });
