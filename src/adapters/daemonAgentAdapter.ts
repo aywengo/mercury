@@ -484,8 +484,12 @@ export class DaemonAgentAdapter implements AgentAdapter {
         return;
       }
       case 'closing': {
-        // Graceful shutdown signal: stop, and let the run be requeued rather than marked failed by a
-        // socket error that would look like an agent crash.
+        // The supervisor is shutting down. We stop cleanly -- no hang, no half-read socket -- but the
+        // run is recorded as an AGENT failure and is not auto-retried, because AgentExitReason has no
+        // way to report an infrastructure failure from inside the drive loop. The message the operator
+        // sees ("Agent exited with code null") blames the agent for the supervisor's shutdown.
+        // Design section 8 asks for a requeue instead. Tracked in issue #188; do not describe this as
+        // graceful requeueing here again -- an earlier version of this comment did, and it was wrong.
         this.opts.logger?.warn('daemon is closing', { runId: session.runId, reason: parsed.reason });
         session.done = true;
         settleExit(session, { code: null, signal: 'SIGTERM', reason: 'failed' });

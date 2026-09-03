@@ -200,6 +200,17 @@ const server = net.createServer((socket) => {
         respond(id, 'prompt', true, { data: { accepted: true } });
         if (!s.subscribers.size) return; // the real daemon does not invent a subscriber
         if (process.env.MOCK_DAEMON_PROMPT_REPLIES === '0') return;
+        if (process.env.MOCK_DAEMON_CLOSING === '1') {
+          // The SUPERVISOR is shutting down -- an infrastructure event, nothing wrong with the agent or
+          // the task. It arrives on its own line type, not as a session or command response.
+          respond(id, 'prompt', true, { data: { accepted: true } });
+          setTimeout(() => {
+            for (const client of s.subscribers) {
+              client.write(JSON.stringify({ type: 'daemon_closing', reason: 'supervisor shutting down' }) + '\n');
+            }
+          }, 10);
+          return;
+        }
         if (process.env.MOCK_DAEMON_CLOSE_EARLY === '1') {
           // The session dies mid-run (crash, or killed by another client). The run cannot continue, and
           // without handling this line the adapter waits for its command timeout and reports a timeout.
