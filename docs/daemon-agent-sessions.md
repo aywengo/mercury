@@ -612,9 +612,21 @@ Steps 1–4 landed in one PR rather than four, which is acceptable here only bec
 existing deployment changes behaviour. Step 5 was **not** done as written: there is no staging deployment
 in this environment. What was done instead is disposable runs against a live local supervisor — a trivial
 prompt in a throwaway workspace, then asserting the reply arrived, the exit was clean, and no session or
-worker remained. That exercises the protocol end to end; it does not exercise a real deployment under
-load, a supervisor restart mid-run, or concurrent Runs sharing one supervisor. Treat those as untested
-before pointing anything important at daemon mode.
+worker remained. That exercises the protocol end to end.
+
+**Concurrent Runs sharing one supervisor are now verified**, because the per-session handshake waiters
+were originally proven only against a mock, and a mock cannot start two handshakes at the same instant.
+Two Runs were driven through one adapter instance against the live supervisor at once: each got its own
+reply, each got a distinct `activeSessionId` under a shared generation, both exited `completed`, and no
+session or worker was left behind. Distinct session ids matter more than distinct replies — two Runs
+sharing one `activeSessionId` would mean one Run reading the other's transcript, which the replies alone
+would not reveal.
+
+Still untested, and the reason is deliberate:
+
+- **A supervisor restart mid-run.** Testing it means restarting the supervisor, and the supervisor here
+  hosts the session making the change. A test that can take down the thing running it is not a test.
+- **A real deployment under load.**
 
 ---
 
@@ -647,7 +659,7 @@ before pointing anything important at daemon mode.
 
 | Item | Status |
 | --- | --- |
-| End-to-end run against a real supervisor | **Done manually, deliberately not a test.** It costs a model turn and creates a real session, so it does not belong in CI. It is how §3.2's three bugs were found, and the procedure is: create → attach → prompt → expect `agent.message` → `agent.end` → exit `completed` → assert no session and no worker remain. |
+| End-to-end run against a real supervisor | **Done manually, deliberately not a test.** It costs a model turn and creates a real session, so it does not belong in CI. It is how §3.2's three bugs were found, and the procedure is: create → attach → prompt → expect `agent.message` → `agent.end` → exit `completed` → assert no session and no worker remain. Run twice concurrently through one adapter to check session isolation (§10.1). |
 | Real-daemon contract test | **Shipped.** `describeSupervisor()` performs the handshake and `list` against whatever supervisor is running, read-only. Skips with the socket path in the message when none is reachable, so a skip is visible rather than silent. |
 | Framing golden test | **Shipped**, in two halves: the mock builds a frame with the real `private-framing.js` layout and the adapter refuses it, and `looksPrivateFramed` is asserted **not** to fire on the recorded real hello. A detector that only ever returns `true` fails the second half. |
 | Fixture-fidelity guard | **Shipped, and stronger than proposed.** `test/daemonProtocol.test.ts` imports `createDaemonCommandEnvelope` and `isDaemonCommandEnvelope` from the installed package and asserts Mercury's envelope matches byte for byte; it skips with a loud message if the package is absent. It caught a field the adapter had invented. The hello fixture is a real captured hello with host-specific values scrubbed, and the mock replays it verbatim. |
