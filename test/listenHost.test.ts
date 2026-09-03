@@ -14,6 +14,9 @@ import { join } from 'node:path';
 import { createServer } from 'node:http';
 
 const TEST_DIR = import.meta.dirname;
+const REPO = join(TEST_DIR, '..');
+/** Every directory that starts a server in a test, so the rule covers both suites. */
+const SUITES = ['test', join('fleet', 'test')];
 
 /**
  * Strip // and /* *\/ comments and string literals, so a guard that scans source sees only code.
@@ -64,15 +67,17 @@ function listenCalls(src: string): { args: string[] }[] {
 
 test('every port-binding listen() in test/ names an explicit host (issue #185)', () => {
   const offenders: string[] = [];
-  for (const f of readdirSync(TEST_DIR).filter((n) => /\.test\.ts$/.test(n))) {
-    const src = readFileSync(join(TEST_DIR, f), 'utf8');
+  for (const dir of SUITES) {
+   for (const f of readdirSync(join(REPO, dir)).filter((n) => /\.test\.ts$/.test(n))) {
+    const src = readFileSync(join(REPO, dir, f), 'utf8');
     for (const { args } of listenCalls(src)) {
       // Only port-binding calls matter: listen(0) or listen(<number>, ...). Socket-path and no-arg
       // forms (the wakeup listener) are a different API and are skipped.
       if (!/^\d+$/.test(args[0] ?? '')) continue;
       const hasHost = args.slice(1).some((a) => /^['"]/.test(a));
-      if (!hasHost) offenders.push(`${f}: .listen(${args.join(', ')})`);
+      if (!hasHost) offenders.push(`${dir}/${f}: .listen(${args.join(', ')})`);
     }
+   }
   }
   assert.deepEqual(offenders, [], `these bind the wildcard and can be silently shadowed by another\n` +
     `process holding the same port on 127.0.0.1 (see issue #185):\n  ${offenders.join('\n  ')}`);
