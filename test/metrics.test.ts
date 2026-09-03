@@ -6,7 +6,8 @@ import { closeServer, createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { collectMetrics } from '../src/metrics/collect.ts';
 import { escapeLabelValue, renderPrometheus } from '../src/metrics/prometheus.ts';
-import { makeEnv } from './helpers.ts';
+import { EventStore } from '../src/events/eventStore.ts';
+import { makeEnv, waitFor } from './helpers.ts';
 import type { ErrorKind, RunStatus } from '../src/domain/types.ts';
 import type { Express } from 'express';
 import { ACTIVE_WORK_STATUSES, isTerminal, LEASE_HOLDING_STATUSES, STUCK_CANDIDATE_STATUSES, TERMINAL_STATUSES } from '../src/domain/stateMachine.ts';
@@ -91,7 +92,11 @@ function makeMetricsApp(env: ReturnType<typeof makeEnv>, tokens: [string, string
     apiTokens: new Map(tokens),
     adminToken: null,
   });
-  return { app, close: () => stream.stop() };
+  // Returns the stream so a test can drive real subscriptions and then scrape what the endpoint
+  // reports about them. Without this the /metrics wiring is untested: the unit tests call
+  // collectMetrics directly, so deleting `eventStream: deps.stream.metrics()` from the route would
+  // leave every one of them green while the endpoint silently stopped exporting the series.
+  return { app, stream, close: () => stream.stop() };
 }
 
 async function listen(app: Express): Promise<{ port: number; close: () => Promise<void> }> {
@@ -631,5 +636,52 @@ test('the cross-process poll read uses idx_events_run_seq and does not sort', ()
     // constraint is ever dropped, this assertion becomes live -- which is the only reason it is worth
     // carrying rather than deleting.
     assert.doesNotMatch(detail, /TEMP B-TREE/, `the index must supply the order, got: ${detail}`);
+  } finally { env.close(); }
+});
+
+test('the /metrics endpoint exports live event-delivery state end to end (issue #198)', async () => {
+  // The wiring test. Every other metrics test hands collectMetrics an eventStream object, so none of
+  // them can see whether the ROUTE supplies one -- and the entire point of these metrics is that a
+  // silent regression here is invisible from outside the process. Deleting the wiring from the route
+  // fails this test and leaves all the others green.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'scraped', agent: 'fake' });
+    const { app, stream, close } = makeMetricsApp(env);
+    const srv = await listen(app);
+    try {
+      // Subscribe AT THE HEAD so the backlog is empty: then the only way `delivered` can move is a
+      // poll. Subscribing from 0 let subscribe() deliver the backlog synchronously, which satisfied
+      // the wait before the poller had necessarily ticked once -- the assertion below then raced the
+      // first tick and read 0 iterations.
+      const backlog = env.events.list(run.id);
+      const head = backlog.length ? backlog[backlog.length - 1].sequence : 0;
+      let delivered = 0;
+      const unsubscribe = stream.subscribe(run.id, head, () => { delivered += 1; });
+      // A cross-process append, so the poller -- not the in-process push hook -- has to do the work.
+      new EventStore(env.db).append(run.id, 'agent.message', { n: 1 });
+      await waitFor(() => delivered > 0);
+
+      const scrape = () => fetch(`http://127.0.0.1:${srv.port}/metrics`,
+        { headers: { authorization: 'Bearer tok-alice' } }).then((r) => r.text());
+
+      const m = parse(await scrape());
+      assert.equal(get(m, 'mercury_sse_streams_active'), 1,
+        'the live subscription must be visible on the endpoint');
+      const iters = get(m, 'mercury_event_poll_iterations_total');
+      assert.ok(iters !== undefined && iters >= 1,
+        `a poll that delivered must be counted on the endpoint, got ${iters}`);
+      const lag = get(m, 'mercury_event_poll_lag_seconds');
+      assert.ok(lag !== undefined && lag >= 0 && Number.isFinite(lag),
+        `lag must be exported as a finite non-negative number, got ${lag}`);
+
+      unsubscribe();
+      const after = parse(await scrape());
+      assert.equal(get(after, 'mercury_sse_streams_active'), 0,
+        'the gauge must follow unsubscribes, or it cannot detect the leak it exists for');
+    } finally {
+      await srv.close();
+      close();
+    }
   } finally { env.close(); }
 });
