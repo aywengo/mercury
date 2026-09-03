@@ -639,8 +639,24 @@ from outside the process.
   an issue #196 regression legible: it reports how many subscriptions are on the relaxed cadence, which
   is the exact thing that was invisible while #196 was open.
 
-Not shipped (they belong to Stage 1 and have nothing to count yet): `mercury_event_wakeups_total`,
-`mercury_event_wakeup_drops_total`.
+Shipped later, in issue #204: `mercury_event_wakeups_total{source="socket"}`, counted where the
+notifications actually land — the API listener. It is **absent, not zero**, when
+`MERCURY_EVENT_WAKEUP_SOCKET` is unset, for the same reason the delivery counters are absent without a
+poller: a zero would read as "push is working and nothing is being lost" in a process where push does not
+exist at all.
+
+**`mercury_event_wakeup_drops_total` is deliberately NOT a metric, and this is a deviation from this
+table.** The drops counter lives in the worker, and the worker has no HTTP server at all — there is no
+`/metrics` to add it to. Building one just for this number would be a larger change than Stage 1 itself,
+and exporting a constant zero from the API would be worse than exporting nothing: it would look healthy.
+Drops are therefore surfaced where they can genuinely be seen — a throttled `warn` from the worker
+(`event wake-up notifications dropped`), fired on the first drop and every 1000 after, so a slow leak
+still shows up without spamming the log. Alert on that log line if you enable the socket.
+
+One behavioural consequence of Stage 1 worth knowing before you read a lag spike into it: the writer
+**drops rather than queues** anything it cannot put on the wire yet, so the first notifications after a
+worker start or an API restart fall back to the poll path. That is the design working, not failing —
+bounded memory over a hint the poller acts on within one tick anyway.
 
 Two properties worth knowing before you alert on these:
 

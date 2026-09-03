@@ -86,6 +86,16 @@ export interface MetricsSnapshot {
    * snapshot without it; collectMetrics always sets it, to null when no stream is wired.
    */
   eventStream?: EventStreamMetrics | null;
+  /**
+   * Wake-up notifications this process's listener actually received (Stage 1, §12). Null when no
+   * `MERCURY_EVENT_WAKEUP_SOCKET` is configured, which is the default.
+   *
+   * Only the API side is exportable. The DROPS counter lives in the worker, and the worker has no HTTP
+   * server at all -- see `WakeupWriter.dropped()` -- so there is no honest place to put a
+   * `mercury_event_wakeup_drops_total` without building a metrics endpoint that does not exist. A zero
+   * exported from the API would claim "no drops" when the truth is "not measured here".
+   */
+  wakeupsReceived?: number | null;
 }
 
 /**
@@ -219,6 +229,8 @@ export interface CollectOptions {
   now?: number;
   /** Live EventStream counters from this process; omitted (-> null) when no stream is wired. */
   eventStream?: EventStreamMetrics;
+  /** Wake-ups received by this process's Stage 1 listener; null/omitted when the socket is not configured. */
+  wakeupsReceived?: number | null;
 }
 
 /** Compute the current metrics snapshot. Read-only; safe to call on every scrape. */
@@ -287,5 +299,6 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
     // Always set, explicitly: null means "this process has no poller", which the renderer must be able
     // to tell apart from "the poller is here and has done nothing yet".
     eventStream: opts.eventStream ?? null,
+    wakeupsReceived: opts.wakeupsReceived ?? null,
   };
 }

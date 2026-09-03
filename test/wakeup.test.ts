@@ -20,6 +20,10 @@ const db = new DatabaseSync(dbPath);
 const store = new EventStore(db);
 const w = new WakeupWriter(sock);
 const n = Number(countRaw);
+// The writer drops rather than queues while the connection is still being set up, so give it one tick
+// to connect before the measured burst. The poller would cover these; the test wants to measure push.
+w.notify(runId, 0);
+await new Promise((r) => setTimeout(r, 200));
 for (let i = 0; i < n; i++) {
   const e = store.append(runId, 'agent.message', { i, from: 'child' });
   w.notify(runId, e.sequence);
@@ -41,6 +45,11 @@ test('a wake-up travels writer -> listener and coalesces per run per tick', asyn
   await listener.listen();
   const writer = new WakeupWriter(path);
   try {
+    // Warm up the connection first. The writer drops anything it cannot put on the wire yet rather
+    // than queueing it (see WakeupWriter.ready), so the very first notifications after a connect are
+    // dropped by design and the poller covers them. A real worker is long-lived and already connected.
+    writer.notify('warmup', 0);
+    await new Promise((r) => setTimeout(r, 150));
     for (let i = 1; i <= 50; i++) writer.notify('run_a', i);
     writer.notify('run_b', 1);
     await new Promise((r) => setTimeout(r, 150));
@@ -234,4 +243,22 @@ test('REAL two-process delivery: a separate node process wakes the API over the 
     if (existsSync(path)) unlinkSync(path);
     env.close();
   }
+});
+
+test('drops are reported through the callback, throttled, because the worker has no metrics endpoint', () => {
+  // §12 asks for mercury_event_wakeup_drops_total. The worker serves no HTTP at all, so a Prometheus
+  // counter cannot live there; the callback is what makes drops observable instead of silently zero.
+  const path = socketPath('drops');
+  if (existsSync(path)) unlinkSync(path);
+  const seen: number[] = [];
+  const writer = new WakeupWriter(path, (total) => seen.push(total));
+  try {
+    for (let i = 0; i < 2500; i++) writer.notify('run_x', i);
+    const s = writer.stats_();
+    assert.ok(s.drops > 0, 'with no peer anywhere, every notify must count as a drop');
+    assert.equal(seen[0], 1, 'the FIRST drop must be reported immediately, not after a threshold');
+    assert.ok(seen.length < s.drops,
+      `reporting must be throttled, not per-drop: ${seen.length} reports for ${s.drops} drops`);
+    assert.ok(seen.every((v, i) => i === 0 || v > seen[i - 1]), 'reported totals must increase');
+  } finally { writer.close(); }
 });

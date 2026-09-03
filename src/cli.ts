@@ -196,7 +196,12 @@ async function main(): Promise<void> {
     if (config.eventWakeupSocket) {
       // Registered on the existing append hook rather than at the ~20 append call sites: one seam, and
       // the writer is contractually unable to throw, so an append can never fail because a hint failed.
-      wakeupWriter = new WakeupWriter(config.eventWakeupSocket);
+      wakeupWriter = new WakeupWriter(config.eventWakeupSocket, (total) => {
+        // The worker has no metrics endpoint, so this log line IS the drops signal (§12). Throttled by
+        // the writer to the first drop and then every 1000, so a slow leak still surfaces.
+        logger.warn({ drops: total, path: config.eventWakeupSocket },
+          'event wake-up notifications dropped; polling still delivers every event');
+      });
       events.onAppend((runId, event) => wakeupWriter!.notify(runId, event.sequence));
       logger.info({ path: config.eventWakeupSocket }, 'event wake-up writer enabled for this worker');
     }
@@ -241,6 +246,9 @@ async function main(): Promise<void> {
         logger,
         // Aggregate queries for /metrics (issue #131).
         db,
+        // Stage 1 wake-up counter (issue #204). Only present when the socket is configured, so the
+        // series stays absent -- rather than reading zero -- in the default deployment.
+        wakeupStats: wakeupListener ? () => wakeupListener!.wakeupsReceived : undefined,
       },
       config.port,
       { host: config.bindHost, tls: config.tls ?? undefined },

@@ -39,6 +39,11 @@ export interface ServerDeps {
   sessions?: SessionStore;
   /** Optional run queue for the /healthz/workers endpoint (worker health, Mercury.md section 25). */
   queue?: RunQueue;
+  /**
+   * Wake-ups received by this process's Stage 1 listener. Omitted when `MERCURY_EVENT_WAKEUP_SOCKET` is
+   * unset, which keeps `mercury_event_wakeups_total` absent rather than zero in the default deployment.
+   */
+  wakeupStats?: () => number;
   /** Optional rate-limit overrides (defaults: login 10/min, run creation 30/min). */
   rateLimits?: {
     login?: RateLimitConfig;
@@ -150,7 +155,7 @@ export function createApp(deps: ServerDeps): Express {
       res.setHeader('content-type', 'text/plain; version=0.0.4; charset=utf-8');
       res.end(
         renderPrometheus(
-          collectMetrics(deps.db, { leases, now, eventStream: deps.stream.metrics() }),
+          collectMetrics(deps.db, { leases, now, eventStream: deps.stream.metrics(), wakeupsReceived: deps.wakeupStats?.() ?? null }),
         ),
       );
     } catch (err) {
