@@ -1203,3 +1203,33 @@ test('an ordinary agent failure is still not auto-retried', async () => {
     env.close();
   }
 });
+
+test('a non-infrastructure attribution survives instead of being flattened to agent', async () => {
+  // AgentExit.errorKind is the full ErrorKind union. Honouring only 'infrastructure' would make the
+  // type a lie: an adapter reporting 'task' would be recorded as 'agent' and its message discarded.
+  // 'task' must still not retry -- only infrastructure does -- so this pins classification without
+  // changing spend.
+  const repo = makeGitRepo(tempDir('mercury-task-exit-'));
+  const env = makeEnv({
+    workerEnabled: false,
+    maxRetries: 2,
+    retryBackoffMs: 30,
+    fakeScript: [{ exit: { errorKind: 'task', message: 'the task cannot be completed: repository is empty' } }],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo },
+    });
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    const r = env.runs.get(run.id)!;
+    assert.equal(r.errorKind, 'task', `attribution was flattened: got ${r.errorKind}`);
+    assert.match(r.error ?? '', /repository is empty/, 'the adapter message should be kept for any kind');
+    assert.doesNotMatch(r.error ?? '', /Agent exited with code/);
+    await sleep(250);
+    const all = env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 10 });
+    assert.ok(!all.runs.some((x) => x.retryOf === run.id), 'a task failure must not auto-retry');
+  } finally {
+    env.close();
+  }
+});

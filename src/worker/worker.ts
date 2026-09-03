@@ -571,16 +571,15 @@ export class Worker {
       if (timedOut) return { status: 'TIMED_OUT', exit, reason: 'max-duration' };
       if (inputTimedOut) return { status: 'TIMED_OUT', exit, reason: 'input-timeout' };
       if (exit.code === 0) return { status: 'COMPLETED', exit };
-      // An adapter can attribute its own failure. Without this the supervisor shutting down mid-run was
-      // recorded as the agent's fault: no auto-retry, and an operator told the agent exited badly.
-      // (issue #188)
-      if (exit.errorKind === 'infrastructure') {
-        return {
-          status: 'FAILED', exit, errorKind: 'infrastructure',
-          error: exit.message ?? `Agent exited with code ${exit.code ?? 'null'} (signal ${exit.signal ?? 'none'})`,
-        };
-      }
-      return { status: 'FAILED', exit, error: `Agent exited with code ${exit.code ?? 'null'} (signal ${exit.signal ?? 'none'})` };
+      // Honor the adapter's own attribution, whatever it is. Special-casing 'infrastructure' here would
+      // make AgentExit.errorKind a lie: an adapter reporting 'task' would silently be recorded as
+      // 'agent', and its message dropped. Only 'infrastructure' retries (maybeAutoRetry), so accepting
+      // the others changes classification, not spend. (issue #188)
+      return {
+        status: 'FAILED', exit,
+        errorKind: exit.errorKind ?? 'agent',
+        error: exit.message ?? `Agent exited with code ${exit.code ?? 'null'} (signal ${exit.signal ?? 'none'})`,
+      };
     } finally {
       clearInterval(heartbeat);
       cancelSignal.cancel();
