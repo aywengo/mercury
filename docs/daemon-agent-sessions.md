@@ -380,9 +380,10 @@ binary. §11 makes that test exist.
 ### 5.1 What happened to those tests
 
 The fixture was rewritten from the captured real protocol rather than patched, and the adapter's tests
-were rewritten against it. They now number 24 rather than 12, and — the part the old suite could not do
-— **they fail when the adapter is wrong**. Ten independent mutations of the adapter and its protocol
-module were applied one at a time; each was caught by at least one test:
+were rewritten against it. They now number 57 rather than 12 (`test/daemonProtocol.test.ts` 18,
+`test/daemonAgentAdapter.test.ts` 35, `test/agentSelection.test.ts` 4), and — the part the old suite
+could not do — **they fail when the adapter is wrong**. Ten independent mutations of the adapter and its protocol module were applied one at a time;
+each was caught by at least one test:
 
 | Mutation | Caught by |
 | --- | --- |
@@ -396,6 +397,13 @@ module were applied one at a time; each was caught by at least one test:
 | remove the session-identity callback | ordering test |
 | accept any protocol version | version test |
 | skip the capability check | missing-capability test |
+
+These are the ten from the original rewrite. Mutation proof continued after it, and each later fix
+carries its own mutation proof: the per-session handshake waiters, the stale-socket diagnosis, the
+mock's duplicate-response refusal, the `daemon_closing` handler, and both directions of the
+`errorKind` routing. Two of those mutations exposed a bad test rather than bad code — a test that
+passed against the bug it was written for — which is the same failure this section is about, recurring
+while it was being fixed.
 
 One test in the first draft of the new suite was itself wrong and was caught by its own assertion: it
 checked that the session identity was recorded before `prompt` by reading the transcript *after*
