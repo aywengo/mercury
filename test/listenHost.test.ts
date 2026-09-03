@@ -79,22 +79,38 @@ test('every port-binding listen() in test/ names an explicit host (issue #185)',
 });
 
 test('an explicit loopback bind makes a port collision loud instead of silent (issue #185)', async () => {
-  // The mechanism itself, pinned. First show the wildcard hole is real on this platform, then show
-  // the explicit bind closes it. If the platform ever stops allowing the coexistence, the first half
-  // fails and this test tells us the premise changed rather than passing vacuously.
+  // The hole is PLATFORM-SPECIFIC, and that is part of the finding: macOS/BSD lets a wildcard bind
+  // take a port another process holds on 127.0.0.1, Linux refuses it. That asymmetry is exactly why
+  // issue #185 flaked on a macOS laptop and never once appeared in CI -- so this test must not assert
+  // the BSD behaviour as universal (an earlier version did, and failed on Linux CI).
+  //
+  // What IS asserted everywhere: the explicit-host bind is refused on collision. That is the rule the
+  // suite relies on, and it holds on both platforms. Which branch the platform took is reported, so
+  // the test can never pass by silently skipping the interesting half.
   const holder = createServer((_q, r) => { r.writeHead(200); r.end('holder'); });
   await new Promise<void>((res) => holder.listen(0, '127.0.0.1', () => res()));
   const port = (holder.address() as { port: number }).port;
   try {
     const wild = createServer((_q, r) => { r.writeHead(200); r.end('wildcard'); });
-    const coexisted = await new Promise<boolean>((res) => {
-      wild.once('error', () => res(false));
-      wild.listen(port, () => res(true));
+    const wildResult = await new Promise<string>((res) => {
+      wild.once('error', (e: NodeJS.ErrnoException) => res(`refused:${e.code ?? 'ERR'}`));
+      wild.listen(port, () => res('bound'));
     });
-    assert.ok(coexisted, 'premise: a wildcard bind on a port already held on 127.0.0.1 must still succeed on this platform');
-    const viaLoopback = await (await fetch(`http://127.0.0.1:${port}/`)).text();
-    assert.equal(viaLoopback, 'holder', 'loopback traffic went to the specific bind, NOT the wildcard one -- this is the shadowing');
-    wild.close();
+    if (wildResult === 'bound') {
+      // BSD/macOS: the hole is live here. Prove the misrouting actually happens.
+      const viaLoopback = await (await fetch(`http://127.0.0.1:${port}/`)).text();
+      assert.equal(
+        viaLoopback, 'holder',
+        'wildcard and specific binds coexist on this platform, so loopback traffic must go to the ' +
+        'SPECIFIC bind -- that preference is the whole of issue #185',
+      );
+      console.log(`  platform ${process.platform}: wildcard bind coexists -> shadowing demonstrated`);
+      wild.close();
+    } else {
+      // Linux: the kernel already refuses it. Say so rather than pretending we proved something.
+      console.log(`  platform ${process.platform}: wildcard bind ${wildResult} -> ` +
+        'shadowing is impossible here, which is why CI never reproduced #185');
+    }
 
     const explicit = createServer((_q, r) => { r.writeHead(200); r.end('explicit'); });
     const code = await new Promise<string>((res) => {
