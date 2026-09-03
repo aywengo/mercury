@@ -416,7 +416,8 @@ Use a depth, not blanket trust. `trust proxy = true` makes Express accept the wh
 
 Setting a depth also makes `req.secure` honour `X-Forwarded-Proto`, so the session cookie picks up `Secure` automatically (see `MERCURY_COOKIE_SECURE`).
 - `PrimeAgentAdapter` uses `prime-agent --mode rpc` (subprocess). The daemon API (`prime-agent send` / `send_message` to resident sessions) is a possible future path for sharing long-lived agent sessions across Runs.
-- SSE fan-out is in-process push (EventStore append hook) plus an adaptive DB poller (250 ms idle / 2 s after a push) as the cross-process fallback. Push between separate server and worker processes (worker → server callback) is the remaining scale path.
+- SSE fan-out is in-process push (EventStore append hook) plus a DB poller as the cross-process fallback. Poll cadence is **per subscription**, not process-wide: a stream is polled fast while it is delivering and relaxes to 2 s only after it goes quiet, and a poll that finds new rows sharpens it again (#197). Worst-case cross-process latency is one fast interval, measured at 250 ms.
+- Same-host worker → API wake-up exists over a Unix stream socket (`MERCURY_EVENT_WAKEUP_SOCKET`, #203) and cuts measured p50 from 141 ms to 0.6 ms. It is **off by default** because poll-only already meets an "under 1 s" budget. A worker → server HTTP callback was analysed and **rejected** — most coupling, least correctness benefit.
 - Resource limits (`cpu`/`memory`/`disk`) and egress policy (`allowedNetworks`) are enforced via a container runtime when `MERCURY_SANDBOX_RUNTIME` is set (see Sandboxed execution); without a runtime, constrained Runs fail closed instead of running unsandboxed.
 - Dashboard is a static vanilla-JS SPA (no framework, no build step); a richer UI (React/Vite) would need a build pipeline.
 - Workspace GC runs in the worker (startup + hourly); a standalone scheduler/daemon is not needed for the single-PC deployment.
@@ -431,7 +432,7 @@ Setting a depth also makes `req.secure` honour `X-Forwarded-Proto`, so the sessi
 
 1. ~~Real auth (offline)~~ — done: HttpOnly session cookies, rate limiting, `127.0.0.1` bind default, optional TLS. Next: OIDC/SSO to replace the token→owner map
 2. ~~Workspace retention/GC job~~ — done: retention + quota + orphan cleanup, `mercury gc`, hourly worker pass
-3. ~~Push-based event fan-out~~ — done: in-process push via EventStore append hook + adaptive poller (cross-process push remains the scale path)
+3. ~~Push-based event fan-out~~ — done: in-process push via EventStore append hook + per-subscription poller; same-host cross-process wake-up over a Unix socket also exists, shipped off by default
 4. ~~Multi-worker deployment~~ — done: backlog alerting (+ optional webhook), `/healthz/workers`, expired-lease reaping (one owner: `reapExpiredLeases`; an active run goes FAILED/infrastructure and recovers by retry-as-new-run, never by requeue)
 5. ~~Multi-repository Runs~~ — done: `repositories[]` in the Run model, API + workspace support
 6. ~~Expand skill library~~ — done: 12 skills (added documentation, deployment, frontend, issue-fix-loop)
@@ -443,7 +444,10 @@ Setting a depth also makes `req.secure` honour `X-Forwarded-Proto`, so the sessi
     [`docs/daemon-agent-sessions.md`](docs/daemon-agent-sessions.md).
 9. ~~Sandboxed execution (containers)~~ — done: `SandboxManager` enforces `resourceLimits` + `allowedNetworks` via docker/podman; fails closed when a constrained Run has no runtime
 10. ~~Input timeout + observability~~ — done: configurable `MERCURY_INPUT_TIMEOUT_MS` (`TIMED_OUT` reason `input-timeout`), stuck-run alerting, `GET /metrics` in Prometheus format (run duration, queue wait, status gauges, worker/lease state), and run/worker trace env (`MERCURY_RUN_ID`/`MERCURY_TRACE_ID`/`MERCURY_WORKER_ID`) propagated to the agent process
-11. Cross-process event push (worker → server) for multi-host scale — remaining. Designed in
-    [`docs/cross-process-event-push.md`](docs/cross-process-event-push.md): polling stays the correctness
-    mechanism and push is advisory; the multi-host blocker is storage, not transport.
+11. ~~Cross-process event push (worker → server)~~ — done for same-host, **multi-host still blocked on
+    storage**. Stage 0 (per-subscription cadence + delivery metrics) and Stage 1 (Unix-socket wake-up,
+    off by default) are merged; poll-only already meets an "under 1 s" budget at 250 ms worst case.
+    Stage 2 (Postgres `LISTEN/NOTIFY`) is deliberately unbuilt: the multi-host blocker is the single-file
+    SQLite database, not the transport, and replacing it is out of scope. See
+    [`docs/cross-process-event-push.md`](docs/cross-process-event-push.md) §7 and §14.
 12. OIDC/SSO identity to replace the token→owner map — remaining

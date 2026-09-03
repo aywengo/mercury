@@ -1,6 +1,12 @@
 # Cross-process event push — design
 
-**Status:** proposal. **Scope:** design only; no implementation is included.
+**Status:** Stages 0 and 1 are **implemented and merged**; Stage 2 is not built. Poll-only already
+meets an "under 1 s" latency budget (14.1), so Stage 1 ships behind `MERCURY_EVENT_WAKEUP_SOCKET` and is
+**left off** -- it is a mechanism under test, not a default to flip. Multi-host scale remains blocked on
+storage (7), exactly as this document predicted, and Stage 2 waits on that decision.
+**What landed:** 8.1 and 12.1 (Stage 0: per-subscription poll cadence, delivery metrics, PRs #197 #199),
+14.1 (the measurement that met the stop condition, PR #201), 8.2.1 and 14 step 3 (Stage 1: Unix-socket
+wake-up plus its counters, PRs #203 #205 #208).
 **Related:** [`architecture-review-round-1.md`](architecture-review-round-1.md) (finding M16, and the
 standing requirement it leaves on any cross-process design);
 [`architecture-review.md`](architecture-review.md) (round 2 — R2-2 and R2-3 are in this same file's
