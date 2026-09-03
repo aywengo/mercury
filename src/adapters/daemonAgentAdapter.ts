@@ -492,7 +492,13 @@ export class DaemonAgentAdapter implements AgentAdapter {
         // graceful requeueing here again -- an earlier version of this comment did, and it was wrong.
         this.opts.logger?.warn('daemon is closing', { runId: session.runId, reason: parsed.reason });
         session.done = true;
-        settleExit(session, { code: null, signal: 'SIGTERM', reason: 'failed' });
+        // Infrastructure, not the agent: the supervisor went away and the task was never given a
+        // chance to fail. Attributing it here is what gets the run auto-retried against the next
+        // supervisor instead of leaving a human to notice (issue #188).
+        settleExit(session, {
+          code: null, signal: 'SIGTERM', reason: 'failed', errorKind: 'infrastructure',
+          message: `the daemon supervisor shut down mid-run: ${parsed.reason}`,
+        });
         this.push(session, DONE);
         this.destroy(session);
         return;

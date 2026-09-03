@@ -8,6 +8,12 @@ export interface FakeStep {
   delayMs?: number;
   input?: { question: string; choices?: string[] };
   fail?: boolean;
+  /**
+   * Exit to report instead of the scripted default, merged over
+   * `{ code: 1, signal: null, reason: 'failed' }`. Lets a test exercise how the worker treats an
+   * adapter's own attribution (`errorKind`) without inventing a whole adapter for it.
+   */
+  exit?: Partial<AgentExit>;
 }
 
 export interface FakeAgentConfig {
@@ -63,6 +69,8 @@ export class FakeAgentAdapter implements AgentAdapter {
         exit = { code: 130, signal: 'SIGTERM', reason: 'cancelled' };
       } else if (script.some((s) => s.fail)) {
         exit = { code: 1, signal: null, reason: 'failed' };
+      } else if (script.some((s) => s.exit)) {
+        exit = { code: 1, signal: null, reason: 'failed', ...script.find((s) => s.exit)!.exit };
       } else {
         exit = { code: 0, signal: null, reason: 'completed' };
       }

@@ -705,10 +705,9 @@ test('a supervisor shutdown settles the run instead of hanging it', async () => 
   // understands responses and events would sit until its command timeout and report a timeout.
   // Settling promptly is the property worth pinning.
   //
-  // What it settles AS is wrong and deliberately not asserted here: the run becomes an agent failure
-  // with no automatic retry, when a supervisor shutting down is infrastructure and design section 8
-  // asks for a requeue. Pinning the current classification would make the wrong behaviour load-bearing.
-  // The misclassification is issue #188.
+  // It also asserts the attribution below, which it deliberately did not when the classification was
+  // wrong (issue #188): pinning wrong behaviour makes it load-bearing. Now that the run is attributed
+  // to infrastructure and retried, the assertion is worth having.
   const mock = await startMock({ MOCK_DAEMON_CLOSING: '1' });
   const logged: { msg: string; fields?: Record<string, unknown> }[] = [];
   try {
@@ -728,5 +727,10 @@ test('a supervisor shutdown settles the run instead of hanging it', async () => 
     const closing = logged.find((l) => l.msg === 'daemon is closing');
     assert.ok(closing, `the closing branch never ran; logged: ${JSON.stringify(logged.map((l) => l.msg))}`);
     assert.match(String(closing.fields?.reason ?? ''), /supervisor shutting down/);
+    // Attribution (issue #188). The supervisor going away is infrastructure; recorded as an agent
+    // failure it is never auto-retried and the operator is told the agent exited badly.
+    assert.equal(exit.errorKind, 'infrastructure', JSON.stringify(exit));
+    assert.match(exit.message ?? '', /supervisor shut down mid-run/);
+    assert.doesNotMatch(exit.message ?? '', /Agent exited with code/);
   } finally { await mock.close(); }
 });
