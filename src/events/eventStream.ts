@@ -33,6 +33,22 @@ interface Subscription {
   runId: string;
   afterSeq: number;
   onEvents: (events: MercuryEvent[]) => void;
+  /**
+   * Whether THIS subscription's backstop poll may run at the slow cadence.
+   *
+   * Per-subscription and deliberately not process-wide. One timer for the whole process meant that any
+   * run served by the in-process push hook relaxed the cadence for every other subscriber, so a browser
+   * tab open on run A added ~1.75 s of latency to run B's cross-process stream (issue #196, measured:
+   * 29 poll reads in 300 ms down to 1).
+   *
+   * Set when a push actually delivers to this subscription. Cleared when a poll finds NEW rows for it,
+   * because that is the moment the poller is doing real work and must stay sharp -- the inverse of the
+   * old global `if (!anyNew)` rule, which restored the fast cadence only while nothing was arriving and
+   * so pinned the slow cadence exactly while cross-process events were flowing.
+   */
+  slow: boolean;
+  /** When this subscription was last actually read; drives the slow-cadence due check. */
+  lastPollAt: number;
 }
 
 const FAST_MS = 250;
@@ -73,13 +89,11 @@ export class EventStream {
 
   start(): void {
     if (this.timer) return;
-    // In-process push: wake matching subscribers immediately on append.
+    // One driving timer, always at the fast cadence. Per-subscription due-checking in poll() is what
+    // relaxes a backstop now, so the interval itself never changes: re-creating it globally is how one
+    // run's traffic set another run's latency (issue #196).
     this.detachHook = this.store.onAppend((runId, event) => {
-      // Whether push actually SERVED this event. poll() is the backstop that carries events appended by
-      // another process, which push can never see, and slowDown() is the only thing that moves it off
-      // the fast cadence. Relaxing the backstop after an append nobody subscribed to is pure downside:
-      // the cadence was slowest exactly when the system was busiest (issue R2-11).
-      let served = false;
+      // In-process push: wake matching subscribers immediately on append.
       for (const sub of [...this.subs]) {
         if (sub.runId !== runId) continue;
         if (event.sequence <= sub.afterSeq) continue;
@@ -87,7 +101,10 @@ export class EventStream {
           // Deliver first, then advance (cursor rule at the top of this file).
           sub.onEvents([event]);
           sub.afterSeq = event.sequence;
-          served = true;
+          // Only THIS subscription relaxes. An append nobody subscribed to reaches this line for
+          // nobody, so the backstop stays sharp (issue R2-11), and an append served here no longer
+          // relaxes the subscribers of unrelated runs (issue #196).
+          this.relax(sub);
         } catch (err) {
           // Advancing after delivery is NOT enough on this path. The cursor is a single scalar, so
           // the NEXT successful push moves it past the refused sequence and poll() -- which reads
@@ -104,7 +121,6 @@ export class EventStream {
           );
         }
       }
-      if (served) this.slowDown();
     });
     this.timer = setInterval(() => this.poll(), this.fastMs);
   }
@@ -147,7 +163,9 @@ export class EventStream {
    * which is the right way round.
    */
   subscribe(runId: string, afterSeq: number, onEvents: (events: MercuryEvent[]) => void): () => void {
-    const sub: Subscription = { runId, afterSeq, onEvents };
+    // Starts sharp: a subscription whose events can only arrive by poll() must be polled at the fast
+    // cadence until something proves otherwise (issue #196).
+    const sub: Subscription = { runId, afterSeq, onEvents, slow: false, lastPollAt: 0 };
     const backlog = this.readAfter(runId, afterSeq);
     if (backlog.length > 0) {
       // Deliver first, then advance. A throw here propagates to the caller (src/api/routes.ts
@@ -193,11 +211,28 @@ export class EventStream {
     return this.subs.size;
   }
 
-  /** Switch to the slow cadence after a push; the next empty poll restores fast. */
-  private slowDown(): void {
-    if (!this.timer) return;
-    clearInterval(this.timer);
-    this.timer = setInterval(() => this.poll(), this.slowMs);
+  /**
+   * Relax ONE subscription's backstop to the slow cadence.
+   *
+   * Replaces the old process-wide `slowDown()`, which cleared and re-created the single shared interval
+   * and so applied one run's push traffic to every other subscriber (issue #196).
+   */
+  private relax(sub: Subscription): void {
+    sub.slow = true;
+    sub.lastPollAt = Date.now();
+  }
+
+  /**
+   * Subscriptions currently sitting on the slow backstop cadence.
+   *
+   * Read-only, and the observable form of the property issue #196 is about: it answers "how many streams
+   * are currently being polled slowly, and why" instead of the old unanswerable "what is the process
+   * cadence". Also the natural source for the Stage 0 metrics in docs/cross-process-event-push.md §12.
+   */
+  get relaxedCount(): number {
+    let n = 0;
+    for (const sub of this.subs) if (sub.slow) n += 1;
+    return n;
   }
 
   /**
@@ -215,7 +250,7 @@ export class EventStream {
    *     So exactly that subscription is dropped.
    */
   private poll(): void {
-    let anyNew = false;
+    const now = Date.now();
 
     // Group subscriptions that would issue the IDENTICAL read, so N tabs on one run cost one query
     // instead of N (issue #146). Ten subscribers on one run were ten `SELECT ... LIMIT 500` four
@@ -229,11 +264,17 @@ export class EventStream {
     // subscribers on the same run are always at the same cursor -- and changes nothing else.
     const groups = new Map<string, { runId: string; afterSeq: number; subs: Subscription[] }>();
     for (const sub of this.subs) {
+      // Due check, per subscription. A relaxed subscription is only read once its slow interval has
+      // elapsed; a sharp one is read every tick. This is the whole of issue #196 -- the cadence decision
+      // moved from "what is this process's interval" to "what has THIS stream been doing".
+      if (sub.slow && now - sub.lastPollAt < this.slowMs) continue;
+      sub.lastPollAt = now;
       const key = `${sub.runId}\u0000${sub.afterSeq}`;
       const g = groups.get(key);
       if (g) g.subs.push(sub);
       else groups.set(key, { runId: sub.runId, afterSeq: sub.afterSeq, subs: [sub] });
     }
+    if (groups.size === 0) return;
 
     // A run can appear in SEVERAL groups in one tick, one per distinct cursor, so the failure streak
     // cannot be cleared by whichever group succeeds first. Doing that logged "recovered" while another
@@ -262,11 +303,14 @@ export class EventStream {
         continue;
       }
       if (events.length === 0) continue;
-      anyNew = true;
+      // The poll found real rows, so for these subscriptions the poller is the delivery path and must
+      // stay at the fast cadence. This is the inverse of the old global `if (!anyNew)` rule, which
+      // relaxed precisely while a cross-process run was streaming (issue #196).
       // One read, many deliveries -- but each delivery stays isolated. A subscriber that throws owns a
       // client response, so it is dropped on its own; failing to isolate here let one bad subscriber
       // starve every later subscriber (issue #138).
       for (const sub of group.subs) {
+        sub.slow = false;
         try {
           // Advance only once the batch is accepted. Advancing first meant a throw partway through a
           // page silently forfeited the rest of it for the life of the subscription (issue #138).
@@ -291,10 +335,7 @@ export class EventStream {
       }
     }
 
-    // Back to fast cadence when the poll found nothing new (idle).
-    if (!anyNew && this.timer) {
-      clearInterval(this.timer);
-      this.timer = setInterval(() => this.poll(), this.fastMs);
-    }
+    // No cadence switch here any more. The driving timer always runs at fastMs and each subscription
+    // decides for itself whether it is due (issue #196).
   }
 }

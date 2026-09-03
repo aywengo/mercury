@@ -4,7 +4,7 @@ import { makeEnv, tempDir, waitFor } from './helpers.ts';
 import { createLogger } from '../src/logger.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { EventStore } from '../src/events/eventStore.ts';
-import { EVENT_TYPES } from '../src/domain/types.ts';
+import { EVENT_TYPES, type MercuryEvent } from '../src/domain/types.ts';
 import { readdirSync, readFileSync } from 'node:fs';
 import { createRedactor } from '../src/domain/redact.ts';
 
@@ -1121,12 +1121,16 @@ test('POSITIVE CONTROL: one throwing subscriber does not starve the others in it
 // These two tests point in opposite directions on purpose: one alone would be satisfied by a
 // slowDown() that never fires, and the other by one that always fires.
 
-function slowDownCalls(stream: EventStream): () => number {
-  const target = stream as unknown as { slowDown: () => void };
-  let n = 0;
-  const original = target.slowDown.bind(stream);
-  target.slowDown = () => { n += 1; original(); };
-  return () => n;
+/**
+ * How many subscriptions are currently sitting on the slow backstop cadence.
+ *
+ * This replaced wrapping the private `slowDown()`, which stopped existing when the cadence became
+ * per-subscription (issue #196). It is also the better question: the old helper could only report that
+ * SOME timer in the process had been re-created, which said nothing about WHICH stream got slower --
+ * precisely the blind spot that let one run's push traffic silently cost another run 1.75 s.
+ */
+function relaxedSubs(stream: EventStream): () => number {
+  return () => stream.relaxedCount;
 }
 
 test('an append nobody is watching does not slow the poller (issue #162)', () => {
@@ -1134,14 +1138,14 @@ test('an append nobody is watching does not slow the poller (issue #162)', () =>
   try {
     const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
     const stream = new EventStream(env.db, env.events, 5, 5_000);
-    const calls = slowDownCalls(stream);
+    const relaxed = relaxedSubs(stream);
     stream.start();
     try {
       // Must append through the SAME EventStore the stream was built with: a separate instance
       // writing to the same database does not fire the in-process push hook, which would make this
       // test pass without the hook ever running.
       for (let i = 0; i < 5; i++) env.events.append(run.id, 'agent.message', { i });
-      assert.equal(calls(), 0,
+      assert.equal(relaxed(), 0,
         'with no subscribers, push delivered nothing, so the poller must stay at its fast cadence');
     } finally {
       stream.stop();
@@ -1159,13 +1163,13 @@ test('an append for a run nobody watches does not slow the poller (issue #162)',
     const watched = env.runService.create({ ownerId: 'alice', task: 'watched', agent: 'fake' });
     const noisy = env.runService.create({ ownerId: 'alice', task: 'noisy', agent: 'fake' });
     const stream = new EventStream(env.db, env.events, 5, 5_000);
-    const calls = slowDownCalls(stream);
+    const relaxed = relaxedSubs(stream);
     stream.start();
     try {
       stream.subscribe(watched.id, 0, () => {});
-      const before = calls();
+      const before = relaxed();
       for (let i = 0; i < 5; i++) env.events.append(noisy.id, 'agent.message', { i });
-      assert.equal(calls(), before,
+      assert.equal(relaxed(), before,
         'appends to an unwatched run must not relax the poller that serves the watched one');
     } finally {
       stream.stop();
@@ -1184,17 +1188,17 @@ test('a subscriber that throws was not served, so the poller does not relax (iss
     const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
     const { log, lines } = capturingLogger();
     const stream = new EventStream(env.db, env.events, 5, 5_000, log);
-    const calls = slowDownCalls(stream);
+    const relaxed = relaxedSubs(stream);
     stream.start();
     try {
       // Subscribe AT THE HEAD: subscribe() delivers the backlog synchronously, and the run already has
       // lifecycle events, so subscribing from 0 would throw here rather than on the append under test.
       stream.subscribe(run.id, cursor(env, run.id), () => { throw new Error('client socket gone'); });
-      const before = calls();
+      const before = relaxed();
       env.events.append(run.id, 'agent.message', { boom: true });
       assert.ok(lines.some((l) => l.msg.includes('subscriber dropped after delivery failure')),
         'precondition: the throwing subscriber was dropped and logged');
-      assert.equal(calls(), before,
+      assert.equal(relaxed(), before,
         'a failed delivery is not a served event; the backstop must stay sharp');
     } finally {
       stream.stop();
@@ -1212,12 +1216,12 @@ test('POSITIVE CONTROL: an append that push DID deliver does slow the poller (is
   try {
     const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
     const stream = new EventStream(env.db, env.events, 5, 5_000);
-    const calls = slowDownCalls(stream);
+    const relaxed = relaxedSubs(stream);
     stream.start();
     try {
       const seen: number[] = [];
       stream.subscribe(run.id, 0, (evts) => { for (const e of evts) seen.push(e.sequence); });
-      const before = calls();
+      const before = relaxed();
       // subscribe(run.id, 0, ...) already drained the backlog synchronously, so seen is NOT empty
       // before the append -- it holds the six lifecycle events create() wrote. Asserting
       // "seen.length >= 1" therefore proves nothing about the event under test: it passed even when
@@ -1229,7 +1233,7 @@ test('POSITIVE CONTROL: an append that push DID deliver does slow the poller (is
         'precondition: push must deliver the NEW event, not merely the backlog');
       assert.ok(seen.includes(appended.sequence),
         `precondition: push must deliver sequence ${appended.sequence}; saw ${JSON.stringify(seen)}`);
-      assert.ok(calls() > before,
+      assert.ok(relaxed() > before,
         'an event that push actually delivered should let the backstop relax');
     } finally {
       stream.stop();
@@ -1237,4 +1241,60 @@ test('POSITIVE CONTROL: an append that push DID deliver does slow the poller (is
   } finally {
     env.close();
   }
+});
+
+
+// ------ cadence is PER SUBSCRIPTION, not process-wide (issue #196) ------
+//
+// The old EventStream had ONE timer for the whole process and re-created it whenever any push served any
+// subscriber. Measured on main with fastMs=10 / slowMs=1000 over a 300 ms window, counting the poll reads
+// issued for a run whose events can ONLY arrive by poll():
+//
+//   that run alone                                    29 reads
+//   the same run, plus another run with a subscriber   1 read
+//
+// A browser tab on run A cost run B a 29x latency penalty -- 250 ms to 2 s with the shipped constants.
+// The margin below is deliberately enormous (>=10 vs the observed 1) so this cannot pass by winning a
+// race, which is the failure mode docs/cross-process-event-push.md §15 warns about.
+
+test('a locally-pushed run does not slow the cross-process backstop of another run (issue #196)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const pushed = env.runService.create({ ownerId: 'alice', task: 'pushed locally', agent: 'fake' });
+    const cross = env.runService.create({ ownerId: 'alice', task: 'cross process', agent: 'fake' });
+
+    const stream = new EventStream(env.db, env.events, 10, 1_000);
+    const reads: Record<string, number> = {};
+    const target = stream as unknown as { readAfter: (r: string, a: number) => MercuryEvent[] };
+    const originalRead = target.readAfter.bind(stream);
+    target.readAfter = (runId: string, afterSeq: number) => {
+      reads[runId] = (reads[runId] ?? 0) + 1;
+      return originalRead(runId, afterSeq);
+    };
+
+    // A SEPARATE EventStore over the same database stands in for another process: writes land, but the
+    // in-process append hook the stream registered does NOT fire, so only poll() can deliver them.
+    const otherProcess = new EventStore(env.db);
+
+    stream.start();
+    try {
+      stream.subscribe(pushed.id, 0, () => {});
+      stream.subscribe(cross.id, 0, () => {});
+
+      const deadline = Date.now() + 300;
+      while (Date.now() < deadline) {
+        env.events.append(pushed.id, 'agent.message', { n: 1 });
+        otherProcess.append(cross.id, 'agent.message', { n: 1 });
+        await new Promise((r) => setTimeout(r, 5));
+      }
+
+      assert.ok((reads[cross.id] ?? 0) >= 10,
+        `the cross-process run must keep the fast cadence regardless of other runs' push traffic; ` +
+        `got ${reads[cross.id] ?? 0} poll reads in ~300 ms (regressed value was 1)`);
+      // The fix must not be "never relax": the run that push genuinely serves still backs its own
+      // poller off, which is the property issue #162 established.
+      assert.ok(stream.relaxedCount >= 1,
+        'the locally-pushed subscription must still relax its OWN backstop');
+    } finally { stream.stop(); }
+  } finally { env.close(); }
 });
