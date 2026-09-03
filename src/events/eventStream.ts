@@ -268,7 +268,9 @@ export class EventStream {
     return {
       pollIterations: this.pollIterations,
       pollLagSeconds: this.pollLagSeconds,
-      streamsActive: this.subs.size,
+      // Via the named accessor, not this.subs.size: §12 names subscriptionCount as the seam that
+      // feeds this gauge, and going through it keeps one definition of "live subscription".
+      streamsActive: this.subscriptionCount,
       relaxedStreams: this.relaxedCount,
     };
   }
