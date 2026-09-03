@@ -685,3 +685,20 @@ test('the /metrics endpoint exports live event-delivery state end to end (issue 
     }
   } finally { env.close(); }
 });
+
+test('mercury_event_wakeups_total appears only when the wake-up socket is wired (issue #204)', async () => {
+  // Two halves, both needed. Present with a listener, and ABSENT without one: exporting 0 in the
+  // default deployment (socket unset) would read as "push is working and nothing is being lost" in a
+  // process where push does not exist at all.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const withListener = renderPrometheus(
+      collectMetrics(env.db, { wakeupsReceived: 7 }),
+    );
+    assert.match(withListener, /mercury_event_wakeups_total\{source="socket"\} 7$/m);
+
+    const without = renderPrometheus(collectMetrics(env.db));
+    assert.ok(!without.includes('mercury_event_wakeups_total'),
+      'the series must be absent, not zero, when MERCURY_EVENT_WAKEUP_SOCKET is unset');
+  } finally { env.close(); }
+});

@@ -38,13 +38,26 @@ export interface WakeupWriterStats {
 export class WakeupWriter {
   private socket: Socket | null = null;
   private connecting = false;
+  /**
+   * True only between 'connect' and 'close'/'error'.
+   *
+   * This exists because Node BUFFERS writes issued to a still-connecting socket. Without this gate the
+   * writer quietly queued every notification in process memory whenever the API was down -- the exact
+   * opposite of the "drop, never queue" rule in section 8.2, and invisible until a test counted drops
+   * with no peer present and found zero. A hint that cannot reach the wire yet is a dropped hint; the
+   * poller delivers the rows anyway.
+   */
+  private ready = false;
   private closed = false;
   private stats: WakeupWriterStats = { writes: 0, drops: 0 };
 
   private readonly path: string;
 
-  constructor(path: string) {
+  private readonly onDrops: ((total: number) => void) | null;
+
+  constructor(path: string, onDrops?: (total: number) => void) {
     this.path = path;
+    this.onDrops = onDrops ?? null;
   }
 
   /**
@@ -60,29 +73,41 @@ export class WakeupWriter {
     try {
       const sock = this.ensureSocket();
       if (!sock) {
-        this.stats.drops += 1;
+        this.dropped();
         return;
       }
-      if (sock.writableEnded || sock.destroyed) {
-        this.stats.drops += 1;
+      if (!this.ready || sock.writableEnded || sock.destroyed) {
+        this.dropped();
         return;
       }
       const ok = sock.write(encodeWakeup(runId, sequence));
       if (ok) this.stats.writes += 1;
       else {
         // Buffer full: drop the hint, and stop holding a socket we cannot drain into.
-        this.stats.drops += 1;
+        this.dropped();
         this.destroySocket();
       }
     } catch {
       // Any unexpected failure is still just a lost hint. Swallowing here is the design, not sloppiness;
       // the counter is what makes it observable (section 12).
-      this.stats.drops += 1;
+      this.dropped();
     }
   }
 
   stats_(): WakeupWriterStats {
     return { ...this.stats };
+  }
+
+  /**
+   * The worker serves NO metrics endpoint -- it has no HTTP server at all -- so a drop cannot become a
+   * Prometheus counter without building one, and exporting a constant zero from the API would be worse
+   * than nothing: it would look healthy. This surfaces the count where it can actually be seen, logged
+   * on the leading edge and then every 1000 so a slow leak still shows up without spamming.
+   */
+  private dropped(): void {
+    this.stats.drops += 1;
+    if (!this.onDrops) return;
+    if (this.stats.drops === 1 || this.stats.drops % 1000 === 0) this.onDrops(this.stats.drops);
   }
 
   close(): void {
@@ -111,7 +136,8 @@ export class WakeupWriter {
       // An 'error' event with no listener is an UNCAUGHT exception in Node, which would take the worker
       // and its in-flight run down over a hint to a browser. This listener is load-bearing.
       s.on('error', () => {
-        this.stats.drops += 1;
+        this.ready = false;
+        this.dropped();
         this.connecting = false;
         if (this.socket === s) this.socket = null;
         try {
@@ -122,10 +148,12 @@ export class WakeupWriter {
       });
       s.on('close', () => {
         this.connecting = false;
+        this.ready = false;
         if (this.socket === s) this.socket = null;
       });
       s.on('connect', () => {
         this.connecting = false;
+        this.ready = true;
       });
       this.socket = s;
       return s;

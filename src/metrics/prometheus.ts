@@ -142,5 +142,14 @@ export function renderPrometheus(m: MetricsSnapshot): string {
     ]);
   }
 
+  // Stage 1 wake-ups. Omitted when the socket is not configured (the default), for the same reason the
+  // delivery counters are omitted without a poller: a zero here would read as "push is working and
+  // nothing is being lost" in a deployment where push does not exist.
+  if (m.wakeupsReceived !== null && m.wakeupsReceived !== undefined) {
+    writeCounter(out, 'mercury_event_wakeups_total', 'Wake-up notifications received by this process.', [
+      [{ source: 'socket' }, m.wakeupsReceived],
+    ]);
+  }
+
   return out.join('\n') + '\n';
 }
