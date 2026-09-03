@@ -8,6 +8,26 @@ import { EventStream } from '../src/events/eventStream.ts';
 import { EventStore } from '../src/events/eventStore.ts';
 import { makeEnv, waitFor } from './helpers.ts';
 
+// Source for the second process in the multi-process test. `SRC` is replaced with the repo root so the
+// child imports the SAME modules the API process uses -- which is the point: it must be a different
+// process, not a different implementation.
+const CHILD_SOURCE = `
+import { DatabaseSync } from 'node:sqlite';
+import { EventStore } from 'SRC/src/events/eventStore.ts';
+import { WakeupWriter } from 'SRC/src/events/wakeup.ts';
+const [dbPath, sock, runId, countRaw] = process.argv.slice(2);
+const db = new DatabaseSync(dbPath);
+const store = new EventStore(db);
+const w = new WakeupWriter(sock);
+const n = Number(countRaw);
+for (let i = 0; i < n; i++) {
+  const e = store.append(runId, 'agent.message', { i, from: 'child' });
+  w.notify(runId, e.sequence);
+}
+// Let the socket flush before tearing down, or the test measures a race instead of the channel.
+setTimeout(() => { w.close(); db.close(); process.exit(0); }, 250);
+`;
+
 function socketPath(name: string): string {
   // Sockets live outside the repo temp dirs: macOS caps sun_path at 104 bytes and mkdtemp paths
   // routinely exceed it, which fails bind() with a message that looks like a permissions bug.
@@ -178,7 +198,10 @@ test('REAL two-process delivery: a separate node process wakes the API over the 
   const path = socketPath('multiproc');
   const child = join(tmpdir(), `mercury-wakeup-child-${process.pid}.ts`);
   const srcRoot = join(import.meta.dirname, '..');
-  writeFileSync(child, readFileSync('/tmp/wakeup_child.ts.tpl', 'utf8').replaceAll('SRC', srcRoot));
+  // The child source lives HERE, not in a scratch file. An earlier version read it from
+  // /tmp/wakeup_child.ts.tpl: that passed locally because the file happened to exist on the author's
+  // machine and failed CI with ENOENT. A test may not depend on state it did not create itself.
+  writeFileSync(child, CHILD_SOURCE.replaceAll('SRC', srcRoot));
   try {
     const run = env.runService.create({ ownerId: 'alice', task: 'multiproc', agent: 'fake' });
     const stream = new EventStream(env.db, env.events, 60_000, 60_000);
