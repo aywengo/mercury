@@ -7,14 +7,19 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
-import { makeEnv } from './helpers.ts';
+import { expectStatus, makeEnv } from './helpers.ts';
 import type { Express } from 'express';
 
 const UI_DIR = join(import.meta.dirname, '..', 'ui');
 
 async function listen(app: Express): Promise<{ port: number; close: () => Promise<void> }> {
   return new Promise((resolve) => {
-    const server = app.listen(0, () => {
+    // Bind loopback EXPLICITLY. `app.listen(0)` with no host binds the wildcard, and on macOS/BSD a
+    // wildcard bind succeeds on a port another process already holds on 127.0.0.1 -- the two coexist.
+    // Loopback traffic then goes to the OTHER socket, so a request meant for this app is answered by
+    // some unrelated server that happens to hold the port (issue #185: 200 and 403 where the app can
+    // only return 401). An explicit host makes the collision EADDRINUSE: loud, not silently wrong.
+    const server = app.listen(0, '127.0.0.1', () => {
       const addr = server.address() as { port: number };
       resolve({
         port: addr.port,
@@ -45,15 +50,15 @@ test('UI files exist and are served without auth', async () => {
       // static assets: public
       for (const f of ['', 'run.html', 'app.js', 'style.css']) {
         const res = await fetch(`${base}/${f}`);
-        assert.equal(res.status, 200, `GET /${f} should be 200`);
+        await expectStatus(res, 200, `GET /${f} (public static asset)`);
       }
       // API: still auth-gated (no token AND no cookie, or a bogus cookie)
       const noAuth = await fetch(`${base}/api/runs`);
-      assert.equal(noAuth.status, 401);
+      await expectStatus(noAuth, 401, 'no credential on a gated /api route');
       const bogusCookie = await fetch(`${base}/api/runs`, { headers: { cookie: 'mercury_session=not-a-real-session' } });
-      assert.equal(bogusCookie.status, 401);
+      await expectStatus(bogusCookie, 401, 'a bogus session cookie');
       const withAuth = await fetch(`${base}/api/runs`, { headers: { authorization: 'Bearer tok-alice' } });
-      assert.equal(withAuth.status, 200);
+      await expectStatus(withAuth, 200, 'valid bearer on a gated /api route');
     } finally {
       await srv.close();
       stream.stop();

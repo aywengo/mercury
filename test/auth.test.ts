@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { createApp } from '../src/api/server.ts';
 import { createSessionStore } from '../src/api/sessions.ts';
 import { EventStream } from '../src/events/eventStream.ts';
-import { makeEnv, tempDir, waitFor } from './helpers.ts';
+import { expectStatus, makeEnv, tempDir, waitFor } from './helpers.ts';
 import type { Express } from 'express';
 import { readdirSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -37,7 +37,12 @@ function makeApi(env: ReturnType<typeof makeEnv>, opts: ApiOpts = {}) {
 
 async function listen(app: Express): Promise<{ port: number; close: () => Promise<void> }> {
   return new Promise((resolve) => {
-    const server = app.listen(0, () => {
+    // Bind loopback EXPLICITLY. `app.listen(0)` with no host binds the wildcard, and on macOS/BSD a
+    // wildcard bind succeeds on a port another process already holds on 127.0.0.1 -- the two coexist.
+    // Loopback traffic then goes to the OTHER socket, so a request meant for this app is answered by
+    // some unrelated server that happens to hold the port (issue #185: 200 and 403 where the app can
+    // only return 401). An explicit host makes the collision EADDRINUSE: loud, not silently wrong.
+    const server = app.listen(0, '127.0.0.1', () => {
       const addr = server.address() as { port: number };
       resolve({
         port: addr.port,
@@ -138,7 +143,7 @@ test('login with invalid or missing token -> 401, no cookie, generic error', asy
     try {
       const base = `http://127.0.0.1:${srv.port}`;
       const bad = await login(base, 'wrong-token');
-      assert.equal(bad.status, 401);
+      await expectStatus(bad, 401, 'login with a wrong token');
       assert.equal(bad.headers.get('set-cookie'), null);
       const badBody = (await bad.json()) as { error: string };
 
@@ -147,7 +152,7 @@ test('login with invalid or missing token -> 401, no cookie, generic error', asy
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({}),
       });
-      assert.equal(empty.status, 401);
+      await expectStatus(empty, 401, 'login with a missing token');
       assert.equal(empty.headers.get('set-cookie'), null);
       const emptyBody = (await empty.json()) as { error: string };
 

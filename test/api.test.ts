@@ -5,7 +5,7 @@ import net from 'node:net';
 import { join } from 'node:path';
 import { closeServer, createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
-import { makeEnv, sleep, tempDir, waitFor } from './helpers.ts';
+import { expectStatus, makeEnv, sleep, tempDir, waitFor } from './helpers.ts';
 import { createLogger } from '../src/logger.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import type { Express } from 'express';
@@ -25,7 +25,12 @@ function makeApi(env: ReturnType<typeof makeEnv>, tokens: [string, string][] = [
 
 async function listen(app: Express): Promise<{ port: number; close: () => Promise<void> }> {
   return new Promise((resolve) => {
-    const server = app.listen(0, () => {
+    // Bind loopback EXPLICITLY. `app.listen(0)` with no host binds the wildcard, and on macOS/BSD a
+    // wildcard bind succeeds on a port another process already holds on 127.0.0.1 -- the two coexist.
+    // Loopback traffic then goes to the OTHER socket, so a request meant for this app is answered by
+    // some unrelated server that happens to hold the port (issue #185: 200 and 403 where the app can
+    // only return 401). An explicit host makes the collision EADDRINUSE: loud, not silently wrong.
+    const server = app.listen(0, '127.0.0.1', () => {
       // No buffer tuning here on purpose. An earlier version called socket.setBufferSize() behind a
       // try/catch to shrink the server-side send buffer. That method does not exist on net.Socket or
       // http.ServerResponse in this Node (checked: 'setBufferSize' in net.Socket.prototype === false),
@@ -50,11 +55,11 @@ test('auth: missing/invalid token rejected', async () => {
     const srv = await listen(app);
     try {
       const noAuth = await fetch(`http://127.0.0.1:${srv.port}/api/runs`);
-      assert.equal(noAuth.status, 401);
+      await expectStatus(noAuth, 401, 'no credential on /api/runs');
       const badAuth = await fetch(`http://127.0.0.1:${srv.port}/api/runs`, {
         headers: { authorization: 'Bearer wrong' },
       });
-      assert.equal(badAuth.status, 401);
+      await expectStatus(badAuth, 401, 'wrong bearer on /api/runs');
     } finally {
       await srv.close();
       closeStream();

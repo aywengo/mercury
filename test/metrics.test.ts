@@ -7,7 +7,7 @@ import { EventStream } from '../src/events/eventStream.ts';
 import { collectMetrics } from '../src/metrics/collect.ts';
 import { escapeLabelValue, renderPrometheus } from '../src/metrics/prometheus.ts';
 import { EventStore } from '../src/events/eventStore.ts';
-import { makeEnv, waitFor } from './helpers.ts';
+import { expectStatus, makeEnv, waitFor } from './helpers.ts';
 import type { ErrorKind, RunStatus } from '../src/domain/types.ts';
 import type { Express } from 'express';
 import { ACTIVE_WORK_STATUSES, isTerminal, LEASE_HOLDING_STATUSES, STUCK_CANDIDATE_STATUSES, TERMINAL_STATUSES } from '../src/domain/stateMachine.ts';
@@ -101,7 +101,12 @@ function makeMetricsApp(env: ReturnType<typeof makeEnv>, tokens: [string, string
 
 async function listen(app: Express): Promise<{ port: number; close: () => Promise<void> }> {
   return new Promise((resolve) => {
-    const server = app.listen(0, () => {
+    // Bind loopback EXPLICITLY. `app.listen(0)` with no host binds the wildcard, and on macOS/BSD a
+    // wildcard bind succeeds on a port another process already holds on 127.0.0.1 -- the two coexist.
+    // Loopback traffic then goes to the OTHER socket, so a request meant for this app is answered by
+    // some unrelated server that happens to hold the port (issue #185: 200 and 403 where the app can
+    // only return 401). An explicit host makes the collision EADDRINUSE: loud, not silently wrong.
+    const server = app.listen(0, '127.0.0.1', () => {
       const addr = server.address() as { port: number };
       resolve({ port: addr.port, close: () => new Promise<void>((r) => server.close(() => r())) });
     });
@@ -115,9 +120,9 @@ test('/metrics requires authentication', async () => {
     const srv = await listen(app);
     try {
       const anon = await fetch(`http://127.0.0.1:${srv.port}/metrics`);
-      assert.equal(anon.status, 401, 'an unauthenticated scrape must not read operational metrics');
+      await expectStatus(anon, 401, 'an unauthenticated scrape must not read operational metrics');
       const bad = await fetch(`http://127.0.0.1:${srv.port}/metrics`, { headers: { authorization: 'Bearer nope' } });
-      assert.equal(bad.status, 401);
+      await expectStatus(bad, 401, 'a bad token on /metrics');
       const ok = await fetch(`http://127.0.0.1:${srv.port}/metrics`, { headers: { authorization: 'Bearer tok-alice' } });
       assert.equal(ok.status, 200);
       // Exact, not a substring match: Express's res.send() reorders the media parameters to

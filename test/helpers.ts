@@ -1,5 +1,6 @@
 // Shared test environment: temp dir, in-memory DB, stores, worker, fake agent.
 
+import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { after } from 'node:test';
 import { execFileSync } from 'node:child_process';
@@ -222,3 +223,35 @@ after(() => {
   }
   leakedDirs.clear();
 });
+
+/**
+ * Assert an HTTP status and, on mismatch, report WHO ANSWERED -- not just the number.
+ *
+ * Issue #185: a `test:core` run reported `actual: 403, expected: 401`, and nothing in `src/` can
+ * return 403. The failing test name scrolled past and no response body was captured, so the run
+ * could not be attributed to the application or to something else on the port. Every such report is
+ * unactionable, and an unactionable flake is eventually re-run into silence.
+ *
+ * The discriminator is `x-powered-by`. Express marks EVERY response it produces with
+ * `x-powered-by: Express` (verified against a live app, including 401s), so:
+ *   - 403 WITH that header  -> Mercury produced it. A real auth bug. Go find it in src/.
+ *   - 403 WITHOUT it        -> some other process answered. The app is not implicated.
+ * That turns "the suite produced a status it cannot produce" into a fact either way.
+ *
+ * The body is read ONLY on the failure path. Reading it eagerly would drain a body that later
+ * assertions still expect untouched -- the same trap recorded in auth.test.ts (issue #73 L5), where
+ * an `assert.equal` message interpolated `await r.clone().text()` and drained it on every PASS.
+ */
+export async function expectStatus(res: Response, want: number, label: string): Promise<void> {
+  if (res.status === want) return;
+  const body = (await res.text().catch(() => '<unreadable>')).slice(0, 300);
+  const powered = res.headers.get('x-powered-by');
+  const server = res.headers.get('server');
+  const verdict = powered === 'Express'
+    ? 'FROM THE APP: Express marked this response, so the status came from Mercury\'s own code.'
+    : powered || server
+      ? `UNMARKED BY EXPRESS (x-powered-by=${powered ?? 'none'}, server=${server ?? 'none'}): ` +
+        'not a Mercury response. Another process answered on this port.'
+      : 'NO FRAMEWORK MARKER at all: not a Mercury response. Another process answered on this port.';
+  assert.fail(`${label}: expected ${want}, got ${res.status}. url=${res.url}. ${verdict}. body=${body}`);
+}
