@@ -275,6 +275,31 @@ export class EventStream {
     };
   }
 
+  /**
+   * Drain one run NOW, because another process said it may have new rows (Stage 1, issue #202).
+   *
+   * Deliberately tiny. It sharpens the affected subscriptions and re-enters the SAME poll path the
+   * timer uses, rather than growing a second delivery route: a second route is a second place for the
+   * cursor rule to be wrong, and getting it wrong is exactly how #133 lost events. The notification
+   * carries a run id and nothing else, and no cursor is advanced here -- `afterSeq` still moves only
+   * after rows have been handed to a client inside poll().
+   *
+   * A wake-up for a run nobody watches is a no-op by construction, which is the fan-out property of
+   * section 8.2: the worker never needs to know who is listening.
+   */
+  wakeRun(runId: string): void {
+    let touched = false;
+    for (const sub of this.subs) {
+      if (sub.runId !== runId) continue;
+      sub.slow = false;
+      sub.lastPollAt = 0;
+      touched = true;
+    }
+    // Nothing watching this run: do not walk the whole subscription set to discover that.
+    if (!touched) return;
+    this.poll();
+  }
+
   get relaxedCount(): number {
     let n = 0;
     for (const sub of this.subs) if (sub.slow) n += 1;

@@ -24,6 +24,15 @@ export interface Config {
   shutdownGraceMs: number;
   leaseHeartbeatMs: number;
   pollMs: number;
+  /**
+   * Path to the same-host worker->API wake-up socket (MERCURY_EVENT_WAKEUP_SOCKET).
+   *
+   * UNSET BY DEFAULT, and unset means the feature does not exist: no socket is created, no listener is
+   * started, and event delivery is byte-identical to Stage 0 polling. That is deliberate (section 14
+   * step 2) -- the measurement in section 14.1 bounds poll lag at one fast interval already, so this is
+   * an opt-in latency improvement and not a correctness dependency. Polling never stops running.
+   */
+  eventWakeupSocket: string | null;
   maxRetries: number;
   retryBackoffMs: number;
   inputPollMs: number;
@@ -128,6 +137,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     shutdownGraceMs: num(env.MERCURY_SHUTDOWN_GRACE_MS, 30_000),
     leaseHeartbeatMs: num(env.MERCURY_LEASE_HEARTBEAT_MS, 15_000),
     pollMs: num(env.MERCURY_POLL_MS, 250),
+    eventWakeupSocket: env.MERCURY_EVENT_WAKEUP_SOCKET ?? null,
     maxRetries: num(env.MERCURY_MAX_RETRIES, 2),
     retryBackoffMs: num(env.MERCURY_RETRY_BACKOFF_MS, 5_000),
     inputPollMs: num(env.MERCURY_INPUT_POLL_MS, 200),
