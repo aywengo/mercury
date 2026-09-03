@@ -315,11 +315,18 @@ export class DaemonAgentAdapter implements AgentAdapter {
         //   serialising the full history twice more per attach.
         //
         // chunked_snapshot and attach_snapshot are deliberately absent: no snapshot-vs-replay branch
-        // exists here (see the generation TODO below and design §8.1). chunked_snapshot was especially
-        // unsafe to claim -- the supervisor gates the chunked stream on
-        // `transport === 'private-framed' && has('chunked_snapshot')`, so advertising it over JSONL was
-        // inert only by luck of a condition we do not own. Re-add either one only together with the code
-        // that consumes it.
+        // exists here (see the generation TODO below and design §8.1).
+        //
+        // Claiming chunked_snapshot is NOT inert. The process that owns the public socket is
+        // DaemonSupervisor, and its attach handler (daemon-supervisor.js:1396) branches on the
+        // capability with no transport gate at all: it demands a snapshot transcript (throwing
+        // "Session worker did not provide a snapshot transcript" when there is none) and then streams
+        // `session_snapshot_*` chunk lines at us. parseDaemonLine has no case for those, so they arrive
+        // as `unparsed` and are discarded -- protocol traffic we asked for and then threw away.
+        //
+        // Do not copy the `transport === 'private-framed'` gate from daemon-mode.js:3183 as a reason
+        // this is safe. That check belongs to AgentDaemon, a different server that does not serve
+        // Mercury's connection. Re-add either capability only together with the code that consumes it.
         capabilities: ['event_sequence', 'extension_ui', 'slim_attach'],
       });
 

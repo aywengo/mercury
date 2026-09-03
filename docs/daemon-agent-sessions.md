@@ -573,17 +573,49 @@ over-claimed capability produces no error at all — it just makes the superviso
 cannot consume. Branching in the supervisor is limited to three client capabilities
 (`grep -rho 'has("...")' dist/modes/daemon/*.js`): `chunked_snapshot`, `extension_ui`, `slim_attach`.
 
-`chunked_snapshot` was the one that could actually bite:
+`chunked_snapshot` was the one that actually bit, and finding out why is a story worth keeping.
+
+The first version of this note said claiming it was inert, because the supervisor gates the chunked
+stream on the transport:
 
 ```js
+// daemon-mode.js:3183 — AgentDaemon, which is NOT the server Mercury talks to
 const streamsSnapshot = client.transport === "private-framed" &&
     daemonClientCapabilitiesForSession(client, state.activeSessionId).has("chunked_snapshot");
 ```
 
-Claiming it over a JSONL connection was inert **only** because the transport check short-circuits first —
-a condition Mercury does not control. `attach_snapshot` was inert by being unread: nothing branches on it.
-Both are now gone, and the rule recorded in the adapter is that a capability is added only together with
-the code that honours it.
+That was wrong, and it was wrong in the way that matters most here. PrimeAgent ships **two** servers
+that both bind a `daemon.sock` and both send a `daemon_hello`: `AgentDaemon` (`daemon-mode.js`) and
+`DaemonSupervisor` (`daemon-supervisor.js`). The one that owns the public socket — provable by the
+`worker-*.sock` files beside it, which only the supervisor creates — is the supervisor, and the
+supervisor has no transport concept in its attach path at all:
+
+```js
+// daemon-supervisor.js:1396 — the handler that actually serves Mercury
+case "attach": {
+    const attached = await this.attachClient(client, command);
+    if (client.capabilities.has("chunked_snapshot")) {
+        const transcript = attached.transcript;
+        if (!transcript) {
+            throw new Error("Session worker did not provide a snapshot transcript");
+        }
+        ...
+        void this.streamSnapshot(client, attached.worker, streamedResult, transcript, ...);
+```
+
+So advertising the capability was live behaviour, not inert: the supervisor demanded a transcript, threw
+if there was none, and otherwise streamed `session_snapshot_*` chunk lines at Mercury. Those are
+well-formed JSONL, so nothing broke — `parseDaemonLine` has no case for the type, they fell through to
+`kind: 'unparsed'`, and were discarded. Mercury was asking for a protocol it then threw away, and was
+one empty-transcript attach away from an error it could not explain.
+
+`attach_snapshot` really was inert — nothing branches on it anywhere. Both are now gone, and the rule
+recorded in the adapter is that a capability is added only together with the code that honours it.
+
+The methodological lesson is the sharper one: `grep -rho 'has("chunked_snapshot")' dist/modes/daemon/*.js`
+returns **11** sites across two files. Reading the three in the file that confirmed the hypothesis, and
+not the eight in the file that refuted it, produced a confident and incorrect justification. A count is
+not a reading.
 
 `slim_attach` stays, deliberately. The supervisor omits the top-level `state`/`messages` duplicate from the
 attach result for slim clients, and Mercury discards that result entirely, so the claim is both true and
