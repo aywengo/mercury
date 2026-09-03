@@ -662,12 +662,12 @@ what a fresh deployment does.
 | 7.1 JSONL transport | `src/adapters/rpc/jsonl.ts` — the same reader/writer the RPC adapter uses, and the same module the daemon's own client imports. Attached **before** the hello is consumed, so frames sharing the hello's write survive (#68). |
 | 7.2 Envelope | `buildCommandEnvelope` in `src/adapters/daemonProtocol.ts`, checked against the daemon's own `createDaemonCommandEnvelope` by a fidelity test that imports it from the installed package. |
 | 7.3 Session identity | `create` → `activeSessionId` → `onSessionIdentity` callback → `attach` → `prompt`, in that order, asserted on the wire transcript rather than on adapter internals. |
+| 7.4 Cursors | Cursor (max observed sequence) and `supervisorGeneration` are tracked and reported with the identity. `resume()` **throws** rather than guessing: replay needs a persisted id plus a generation comparison, and assuming continuity is the #133 failure mode in a new costume. |
+| 7.5 Discovery, not creation | `resolveSocketPath()`: explicit option → `MERCURY_DAEMON_SOCKET` → `$TMPDIR/prime-agent-<uid>/daemon.sock`. The adapter never spawns a supervisor; a missing socket is an error naming `prime-agent status`. |
 
 Two things about identity that only showed up against a live supervisor: the `clientId` must be unique
 per `start()` (§3.2 item 2), and the identity callback fires after `create` and **before** `prompt`, so a
 worker that dies mid-run has something to persist. Both are asserted on the wire transcript.
-| 7.4 Cursors | Cursor (max observed sequence) and `supervisorGeneration` are tracked and reported with the identity. `resume()` **throws** rather than guessing: replay needs a persisted id plus a generation comparison, and assuming continuity is the #133 failure mode in a new costume. |
-| 7.5 Discovery, not creation | `resolveSocketPath()`: explicit option → `MERCURY_DAEMON_SOCKET` → `$TMPDIR/prime-agent-<uid>/daemon.sock`. The adapter never spawns a supervisor; a missing socket is an error naming `prime-agent status`. |
 
 Also enforced, none of it in the original design:
 
