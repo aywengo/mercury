@@ -703,11 +703,23 @@ test('a supervisor shutdown settles the run instead of hanging it', async () => 
   // asks for a requeue. Pinning the current classification would make the wrong behaviour load-bearing.
   // The misclassification is issue #188.
   const mock = await startMock({ MOCK_DAEMON_CLOSING: '1' });
+  const logged: { msg: string; fields?: Record<string, unknown> }[] = [];
   try {
-    const adapter = adapterFor(mock);
+    const adapter = adapterFor(mock, {
+      logger: { info: () => {}, warn: (msg, fields) => logged.push({ msg, fields }) },
+    });
     const handle = await adapter.start(makeContext());
     const { exit } = await collectAll(handle, 12_000);
     assert.notEqual(exit.reason, 'completed', 'a supervisor shutdown must not look like a finished run');
     assert.equal(exit.code, null);
+    // The discriminator. A socket that dies on its own settles as SIGPIPE; only the daemon_closing
+    // branch settles as SIGTERM. Asserting merely "not completed" also passes when the socket blows up,
+    // which is how an early version of this test stayed green while the fixture was sending the
+    // supervisor's line to a destroyed socket.
+    assert.equal(exit.signal, 'SIGTERM',
+      `expected the graceful supervisor-shutdown path, not a socket failure (${JSON.stringify(exit)})`);
+    const closing = logged.find((l) => l.msg === 'daemon is closing');
+    assert.ok(closing, `the closing branch never ran; logged: ${JSON.stringify(logged.map((l) => l.msg))}`);
+    assert.match(String(closing.fields?.reason ?? ''), /supervisor shutting down/);
   } finally { await mock.close(); }
 });

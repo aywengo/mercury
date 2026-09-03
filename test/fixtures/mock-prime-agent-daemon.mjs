@@ -119,7 +119,19 @@ const server = net.createServer((socket) => {
   }
 
   const send = (obj) => { socket.write(JSON.stringify(obj) + '\n'); };
+  const respondedIds = new Set();
   const respond = (id, command, ok, extra = {}) => {
+    // The real supervisor answers a requestId exactly once. A second answer is invisible to the
+    // adapter -- its pending entry was resolved by the first -- so the mock would drift from the real
+    // protocol while every test stayed green. That is the exact failure mode this fixture exists to
+    // prevent, so it is fatal here rather than silent.
+    if (respondedIds.has(id)) {
+      const msg = `mock bug: duplicate response for requestId ${id} (command ${command})`;
+      process.stderr.write(msg + '\n');
+      socket.destroy(new Error(msg));
+      return;
+    }
+    respondedIds.add(id);
     send({ id, type: 'response', command, success: ok, ...extra });
   };
   const DIALOG_METHODS = new Set(['select', 'confirm', 'input']);
@@ -202,8 +214,8 @@ const server = net.createServer((socket) => {
         if (process.env.MOCK_DAEMON_PROMPT_REPLIES === '0') return;
         if (process.env.MOCK_DAEMON_CLOSING === '1') {
           // The SUPERVISOR is shutting down -- an infrastructure event, nothing wrong with the agent or
-          // the task. It arrives on its own line type, not as a session or command response.
-          respond(id, 'prompt', true, { data: { accepted: true } });
+          // the task. It arrives on its own line type, not as a session or command response. The prompt
+          // was already answered above; answering twice is a mock bug (see respond).
           setTimeout(() => {
             for (const client of s.subscribers) {
               client.write(JSON.stringify({ type: 'daemon_closing', reason: 'supervisor shutting down' }) + '\n');
@@ -215,7 +227,7 @@ const server = net.createServer((socket) => {
           // The session dies mid-run (crash, or killed by another client). The run cannot continue, and
           // without handling this line the adapter waits for its command timeout and reports a timeout.
           const s = sessions.get(cmd.activeSessionId);
-          respond(id, 'prompt', true, { data: { accepted: true } });
+          // The prompt was already answered above; a second answer for the same requestId is a mock bug.
           setTimeout(() => {
             for (const client of s.subscribers) {
               client.write(JSON.stringify({ type: 'session_closed', activeSessionId: cmd.activeSessionId,
