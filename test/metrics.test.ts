@@ -566,3 +566,70 @@ test('the live-status sets agree and are derived from the machine (issue #141)',
     }
   }
 });
+
+
+// ------ event-delivery observability (docs/cross-process-event-push.md §12) ------
+
+test('event-delivery metrics are exported when a poller is wired', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const body = renderPrometheus(
+      collectMetrics(env.db, {
+        eventStream: { pollIterations: 42, pollLagSeconds: 0.25, streamsActive: 3, relaxedStreams: 1 },
+      }),
+    );
+    assert.match(body, /mercury_event_poll_iterations_total 42$/m);
+    assert.match(body, /mercury_event_poll_lag_seconds 0\.25$/m);
+    assert.match(body, /mercury_sse_streams_active 3$/m);
+    assert.match(body, /mercury_sse_streams_relaxed 1$/m);
+  } finally { env.close(); }
+});
+
+test('event-delivery metrics are ABSENT, not zero, when no poller is wired', () => {
+  // Exporting zeros here would assert "a poller exists and has found nothing". The truth in a process
+  // with no EventStream is that there is no poller, and an all-zero series is how a dead fallback gets
+  // read as a healthy one -- the exact blindness P7 exists to prevent.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const snap = collectMetrics(env.db);
+    assert.equal(snap.eventStream, null, 'collectMetrics must set it explicitly, not leave it undefined');
+    const body = renderPrometheus(snap);
+    for (const name of [
+      'mercury_event_poll_iterations_total',
+      'mercury_event_poll_lag_seconds',
+      'mercury_sse_streams_active',
+      'mercury_sse_streams_relaxed',
+    ]) {
+      assert.ok(!body.includes(name), `${name} must not be exported without a poller`);
+    }
+  } finally { env.close(); }
+});
+
+test('the cross-process poll read uses idx_events_run_seq and does not sort', () => {
+  // Stage 0 guard, matching how the /metrics index plan is pinned above. The poll runs this query for
+  // every due subscription every fast tick, so a planner regression here is not a slow endpoint -- it is
+  // a load generator on the same database the workers are contending for. The ORDER BY half matters as
+  // much as the index half: "USE TEMP B-TREE FOR ORDER BY" would mean the 500-row page is being sorted
+  // on every tick even though the index already yields sequence order.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const detail = (env.db
+      .prepare('EXPLAIN QUERY PLAN SELECT * FROM events WHERE run_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT 500')
+      .all('run_x', 0) as { detail: string }[])
+      .map((r) => r.detail)
+      .join(' ');
+    assert.match(detail, /idx_events_run_seq/, `planner must use the explicit index, got: ${detail}`);
+
+    // Honest scope on this second assertion: it CANNOT fail on today's schema, and it is kept anyway
+    // with that stated rather than implied. Measured -- drop idx_events_run_seq and the plan becomes
+    // `SEARCH events USING INDEX sqlite_autoindex_events_2 (run_id=? AND sequence>?)`, still with no
+    // TEMP B-TREE, because the UNIQUE (run_id, sequence) autoindex supplies the order just as well. So
+    // this line does not prove the first line's point and must not be read as doing so.
+    //
+    // What it does guard is a future schema change that removes the UNIQUE constraint and leaves only a
+    // non-covering index; at that point the 500-row page really would be sorted per tick. If the UNIQUE
+    // constraint is ever dropped, this assertion becomes live -- which is the only reason it is worth
+    // carrying rather than deleting.
+    assert.doesNotMatch(detail, /TEMP B-TREE/, `the index must supply the order, got: ${detail}`);
+  } finally { env.close(); }
+});

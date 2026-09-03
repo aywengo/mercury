@@ -76,6 +76,33 @@ export interface MetricsSnapshot {
    * a lease close to expiry means the holder has stopped renewing.
    */
   leaseExpiresInSeconds: number | null;
+  /**
+   * Delivery-pipeline counters from THIS process's EventStream, or null when no stream is wired.
+   *
+   * Null rather than zeroed on a fresh install, unlike the run histograms: these describe a live
+   * in-process poller, and a zero would assert "the poller ran and found nothing" when the truth is
+   * "there is no poller here". Prometheus renders an absent series as no data, which is the honest
+   * answer for a process that does not fan events out at all. Optional so a renderer test can build a
+   * snapshot without it; collectMetrics always sets it, to null when no stream is wired.
+   */
+  eventStream?: EventStreamMetrics | null;
+}
+
+/**
+ * Process-local event-delivery counters (docs/cross-process-event-push.md §12).
+ *
+ * Not SQL aggregates. They answer "is the cross-process fallback alive in the process serving this
+ * scrape, and how late was its last delivery", which no table can answer.
+ */
+export interface EventStreamMetrics {
+  /** Poll ticks that issued at least one read. Proves the fallback is alive (P7). */
+  pollIterations: number;
+  /** Age in seconds of the newest row the last delivering poll handed to a client. Holds its value when idle. */
+  pollLagSeconds: number;
+  /** Live SSE subscriptions. Catches a leaked subscriber set, which is otherwise invisible (issue #133). */
+  streamsActive: number;
+  /** Subscriptions currently on the relaxed backstop cadence (issue #196). */
+  relaxedStreams: number;
 }
 
 /**
@@ -190,6 +217,8 @@ export interface CollectOptions {
   leases?: ActiveLease[];
   /** Clock injection for deterministic lease-age maths. */
   now?: number;
+  /** Live EventStream counters from this process; omitted (-> null) when no stream is wired. */
+  eventStream?: EventStreamMetrics;
 }
 
 /** Compute the current metrics snapshot. Read-only; safe to call on every scrape. */
@@ -255,5 +284,8 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
     workers: leases.length,
     claimedRuns: leases.reduce((acc, l) => acc + l.activeRuns, 0),
     leaseExpiresInSeconds,
+    // Always set, explicitly: null means "this process has no poller", which the renderer must be able
+    // to tell apart from "the poller is here and has done nothing yet".
+    eventStream: opts.eventStream ?? null,
   };
 }

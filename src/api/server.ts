@@ -148,7 +148,11 @@ export function createApp(deps: ServerDeps): Express {
       // accepts it, but the exposition format spec documents one order and scrapers that match the
       // header as a string reject the other. end() is raw Node http and leaves the header alone.
       res.setHeader('content-type', 'text/plain; version=0.0.4; charset=utf-8');
-      res.end(renderPrometheus(collectMetrics(deps.db, { leases, now })));
+      res.end(
+        renderPrometheus(
+          collectMetrics(deps.db, { leases, now, eventStream: deps.stream.metrics() }),
+        ),
+      );
     } catch (err) {
       // A metrics scrape must not surface internals. Log name, message and stack the same way
       // sendError() does for unclassified errors (routes.ts): coercing with String(err) keeps the
