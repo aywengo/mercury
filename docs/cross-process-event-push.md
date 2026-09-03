@@ -589,8 +589,7 @@ storm collapses naturally. A design that fetched exactly the notified sequence w
 
 `EventStream.subscriptionCount` covers the last of these. It is on `main` since `f9bb44d`, added with
 the leak regression test for #133, because a stream that fails to unsubscribe is otherwise invisible
-from outside the process. It is a getter over the live subscriber set rather than a metric, so wiring
-it through to `/metrics` is the remaining step.
+from outside the process.
 
 ### 12.1 What this PR (#198) landed
 
@@ -641,6 +640,35 @@ Stage 2 (Postgres) brings its own migration and is out of scope here.
 4. Keep the poller running unconditionally. There is no configuration in which polling is disabled —
    that is the point of P1, and it is what makes rollout reversible.
 
+### 14.1 Stage 0 measurement — the stop condition was met (issue #200)
+
+Step 1 is now executable, because #198 exported the metric it asks for. Measured on the same scenario in
+both builds: one run whose events can only arrive by poll (a second `EventStore` over the same database, so
+the in-process push hook never fires), plus a second run being pushed locally at 5 events / 20 ms — the
+exact interference pattern #196 measured. Production cadence (`fastMs=250`, `slowMs=2000`), 40 events, 3
+runs, within-run spread under 4 ms.
+
+| build | p50 | p95 | max | lost |
+| --- | --- | --- | --- | --- |
+| `cc696d9` (before #197) | 2511 ms | 2940 ms | 2963 ms | 0 |
+| `main` + #197 + #198 | 141 ms | 247 ms | **250 ms** | 0 |
+
+**The post-fix worst case is 250 ms, which is exactly `fastMs`, and that is structural rather than lucky.**
+A cross-process subscription has new rows on every poll, and #197 made a poll that finds new rows SHARPEN
+that subscription, so it never relaxes no matter what another run's push traffic does. `mercury_sse_streams_relaxed`
+confirms it: it reads 1 (the locally-pushed run relaxing its own backstop) while the cross-process stream
+stays sharp.
+
+Under the "under 1 s" reading of §16 Q1, **Stage 0 already meets the budget and Stages 1–2 are
+unnecessary.** Step 1 above calls stopping "a genuine expected outcome and the cheapest one"; this is that
+outcome, so steps 2–3 are NOT executed. Stage 1 stays designed and unbuilt, and becomes the right next step
+only if a real deployment shows lag above budget.
+
+What this measurement does NOT establish, stated so it can be falsified rather than trusted: it is synthetic,
+not a real deployment — no worker process, no agent, no concurrent SSE clients, no SQLite write contention
+from other runs, one warm machine. The cadence *bound* should hold under load because it is structural; the
+poll's *work* time may not. That is exactly what `mercury_event_poll_lag_seconds` is now exported to catch.
+
 ---
 
 ## 15. Testing strategy
@@ -677,6 +705,9 @@ passed in the full suite and failed in isolation. Requirements:
 
 1. **What is the actual latency budget?** If "under 1 s" is acceptable, Stage 0 finishes the problem
    and Stages 1–2 are unnecessary. This should be answered with measurement before code.
+   **Measured (§14.1): worst case 250 ms, p95 247 ms, zero loss.** Under a "under 1 s" budget the answer is
+   that Stage 0 finishes it and Stage 1 should not be built. The budget itself is a product decision and
+   still needs an explicit yes; the measurement is no longer the missing part.
 2. **Per-run channels or one channel plus run id?** Matters only for Stage 2; the `NOTIFY` payload
    must stay under 8000 bytes in the default configuration, and per-run channels consume a channel
    slot per listener.
