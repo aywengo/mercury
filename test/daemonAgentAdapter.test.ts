@@ -113,7 +113,14 @@ async function collectAll(
     if (step.value.type === '__done__') break;
     events.push({ type: step.value.type, payload: step.value.payload });
   }
-  const exit = await withDeadline('collectAll exit', Math.max(1, until - Date.now()), handle.exit);
+  const leftForExit = until - Date.now();
+  if (leftForExit <= 0) {
+    // Say which phase ran out and over what budget. Racing a 1ms timer here would report
+    // "collectAll exit did not finish in 1ms", which reads like a broken timer rather than the truth:
+    // the event stream consumed the whole allowance.
+    throw new Error(`collectAll: event stream consumed the whole ${ms}ms budget; no time left to await exit`);
+  }
+  const exit = await withDeadline('collectAll exit', leftForExit, handle.exit);
   return { events, exit };
 }
 
