@@ -1140,3 +1140,66 @@ test('a run whose agent stream throws leaves no pending timer (issue #67)', asyn
     env.close();
   }
 });
+
+test('an adapter attributing its failure to infrastructure is retried, and says why', async () => {
+  // The case that prompted issue #188: the PrimeAgent supervisor shuts down mid-run. Nothing is wrong
+  // with the agent or the task, so the run must go back through the infrastructure path -- auto-retry
+  // and an error text that does not blame the agent.
+  const repo = makeGitRepo(tempDir('mercury-infra-exit-'));
+  const env = makeEnv({
+    workerEnabled: false,
+    maxRetries: 1,
+    retryBackoffMs: 30,
+    fakeScript: [{
+      exit: { errorKind: 'infrastructure', message: 'the daemon supervisor shut down mid-run: shutting down' },
+    }],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo },
+    });
+    env.worker.start();
+    await waitFor(() => {
+      const r = env.runs.get(run.id)!;
+      return r.status === 'FAILED' && r.errorKind === 'infrastructure';
+    }, 10_000);
+    // The operator-facing text must not blame the agent for the supervisor's shutdown.
+    assert.match(env.runs.get(run.id)!.error ?? '', /supervisor shut down/,
+      'the adapter-supplied message should be recorded');
+    assert.doesNotMatch(env.runs.get(run.id)!.error ?? '', /Agent exited with code/);
+    const failed = env.events.list(run.id).find((e) => e.type === 'run.failed');
+    assert.equal((failed?.payload as { kind?: string })?.kind, 'infrastructure');
+    await waitFor(() => {
+      const all = env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 10 });
+      return all.runs.some((r) => r.retryOf === run.id);
+    }, 10_000);
+  } finally {
+    env.close();
+  }
+});
+
+test('an ordinary agent failure is still not auto-retried', async () => {
+  // The other half of the distinction. Routing every failure through the infrastructure path would
+  // make this test pass, so it is asserted here: an unattributed failure stays the agent's, and a
+  // failing task must not be re-executed on Mercury's own dime.
+  const repo = makeGitRepo(tempDir('mercury-agent-exit-'));
+  const env = makeEnv({
+    workerEnabled: false,
+    maxRetries: 2,
+    retryBackoffMs: 30,
+    fakeScript: [{ fail: true }],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo },
+    });
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    assert.equal(env.runs.get(run.id)!.errorKind, 'agent');
+    await sleep(250); // give a wrong auto-retry a chance to fire
+    const all = env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 10 });
+    assert.ok(!all.runs.some((r) => r.retryOf === run.id), 'an agent failure must not auto-retry');
+  } finally {
+    env.close();
+  }
+});

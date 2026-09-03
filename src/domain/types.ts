@@ -103,6 +103,21 @@ export interface AgentExit {
   code: number | null;
   signal: string | null;
   reason: AgentExitReason;
+  /**
+   * Who to blame when `reason` is a failure. Defaults to `agent`.
+   *
+   * Without this, an adapter can only report an infrastructure failure by throwing from `start()`,
+   * which the worker's catch path classifies correctly. A failure discovered *while driving* -- the
+   * PrimeAgent supervisor shutting down mid-run is the case that prompted this -- had nowhere to go, so
+   * it landed as an agent failure: no automatic retry, and an operator told the agent exited badly.
+   */
+  errorKind?: ErrorKind;
+  /**
+   * Adapter-supplied explanation, used instead of the generic "Agent exited with code N" when the
+   * worker records the failure. Only meaningful alongside `errorKind`; an infrastructure failure that
+   * reports "Agent exited with code null (signal SIGTERM)" blames the wrong party twice over.
+   */
+  message?: string;
 }
 
 export interface AgentEvent {

@@ -10,7 +10,7 @@ import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts'
 import type { Redactor } from '../domain/redact.ts';
 import { isEventType } from '../domain/types.ts';
 import type {
-  AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run, RunContext, ResolvedSkill,
+  AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, ErrorKind, Run, RunContext, ResolvedSkill,
 } from '../domain/types.ts';
 import type { EventStore } from '../events/eventStore.ts';
 import type { Logger } from '../logger.ts';
@@ -421,7 +421,14 @@ export class Worker {
     handle: Awaited<ReturnType<AgentAdapter['start']>>,
     skills: ResolvedSkill[],
     startedAt: string,
-  ): Promise<{ status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | 'LEASE_LOST' | 'SHUTDOWN'; exit: AgentExit; error?: string; reason?: string }> {
+  ): Promise<{
+    status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | 'LEASE_LOST' | 'SHUTDOWN';
+    exit: AgentExit;
+    error?: string;
+    reason?: string;
+    /** Whom to blame for a FAILED outcome; defaults to the agent. See AgentExit.errorKind. */
+    errorKind?: ErrorKind;
+  }> {
     const log = this.logger(run.id);
     const startedMs = Date.parse(startedAt);
     const maxDurationMs = run.constraints.maxDurationMs;
@@ -555,15 +562,24 @@ export class Worker {
       }
 
       // Final exit status (cancelled/timeout paths wait for the agent to actually exit).
-      const exit = await Promise.race([
+      const exit = await Promise.race<AgentExit>([
         handle.exit,
-        sleep(10_000).then(() => ({ code: null, signal: 'SIGKILL', reason: 'terminated' as const })),
+        sleep(10_000).then<AgentExit>(() => ({ code: null, signal: 'SIGKILL', reason: 'terminated' })),
       ]);
 
       if (cancelled) return { status: 'CANCELLED', exit };
       if (timedOut) return { status: 'TIMED_OUT', exit, reason: 'max-duration' };
       if (inputTimedOut) return { status: 'TIMED_OUT', exit, reason: 'input-timeout' };
       if (exit.code === 0) return { status: 'COMPLETED', exit };
+      // An adapter can attribute its own failure. Without this the supervisor shutting down mid-run was
+      // recorded as the agent's fault: no auto-retry, and an operator told the agent exited badly.
+      // (issue #188)
+      if (exit.errorKind === 'infrastructure') {
+        return {
+          status: 'FAILED', exit, errorKind: 'infrastructure',
+          error: exit.message ?? `Agent exited with code ${exit.code ?? 'null'} (signal ${exit.signal ?? 'none'})`,
+        };
+      }
       return { status: 'FAILED', exit, error: `Agent exited with code ${exit.code ?? 'null'} (signal ${exit.signal ?? 'none'})` };
     } finally {
       clearInterval(heartbeat);
@@ -673,7 +689,14 @@ export class Worker {
 
   private async finalize(
     run: Run,
-    outcome: { status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | 'LEASE_LOST' | 'SHUTDOWN'; exit: AgentExit; error?: string; reason?: string },
+    outcome: {
+    status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | 'LEASE_LOST' | 'SHUTDOWN';
+    exit: AgentExit;
+    error?: string;
+    reason?: string;
+    /** Whom to blame for a FAILED outcome; defaults to the agent. See AgentExit.errorKind. */
+    errorKind?: ErrorKind;
+  },
     skills: ResolvedSkill[],
   ): Promise<void> {
     const log = this.logger(run.id);
@@ -773,19 +796,22 @@ export class Worker {
     // FAILED
     const error = this.deps.redactor ? this.deps.redactor.redact(outcome.error ?? 'Agent failed') : (outcome.error ?? 'Agent failed');
     // One transaction, for the same reason as the infrastructure path above (issue #106).
+    // The adapter's attribution decides the kind, and therefore whether the run is retried. Hardcoding
+    // 'agent' here is what made a supervisor shutdown permanent (issue #188).
+    const errorKind: ErrorKind = outcome.errorKind ?? 'agent';
     tx(this.deps.db, () => {
-      this.deps.runs.setError(run.id, error, 'agent');
+      this.deps.runs.setError(run.id, error, errorKind);
       this.deps.events.append(run.id, 'error', { message: error });
       this.deps.events.append(run.id, 'run.failed', {
         runId: run.id,
         error,
-        kind: 'agent',
+        kind: errorKind,
         durationMs: durations.agentDurationMs,
       });
       this.deps.runs.transition(run.id, 'FAILED', { completedAt: now });
     });
-    log.error({ error, ...durations }, 'run failed');
-    await this.maybeAutoRetry(run, 'agent');
+    log.error({ error, errorKind, ...durations }, 'run failed');
+    await this.maybeAutoRetry(run, errorKind === 'infrastructure' ? 'infrastructure' : 'agent');
   }
 
   private async maybeAutoRetry(run: Run, kind: 'infrastructure' | 'agent'): Promise<void> {

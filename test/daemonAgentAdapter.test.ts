@@ -728,5 +728,10 @@ test('a supervisor shutdown settles the run instead of hanging it', async () => 
     const closing = logged.find((l) => l.msg === 'daemon is closing');
     assert.ok(closing, `the closing branch never ran; logged: ${JSON.stringify(logged.map((l) => l.msg))}`);
     assert.match(String(closing.fields?.reason ?? ''), /supervisor shutting down/);
+    // Attribution (issue #188). The supervisor going away is infrastructure; recorded as an agent
+    // failure it is never auto-retried and the operator is told the agent exited badly.
+    assert.equal(exit.errorKind, 'infrastructure', JSON.stringify(exit));
+    assert.match(exit.message ?? '', /supervisor shut down mid-run/);
+    assert.doesNotMatch(exit.message ?? '', /Agent exited with code/);
   } finally { await mock.close(); }
 });
