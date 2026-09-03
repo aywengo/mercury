@@ -41,7 +41,7 @@ import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 import { EventTranslator, buildExtensionUiResponse, isRecord, type RpcEvent } from './eventTranslation.ts';
 import {
   buildCommandEnvelope, checkHello, checkSocketPath, helloForLogging, looksPrivateFramed,
-  parseDaemonLine, toDaemonUiResponse, MERCURY_DAEMON_PROTOCOL_VERSION, PRIVATE_TRANSPORT_HINT, type DaemonHello,
+  parseDaemonLine, toDaemonUiResponse, describeConnectError, MERCURY_DAEMON_PROTOCOL_VERSION, PRIVATE_TRANSPORT_HINT, type DaemonHello,
 } from './daemonProtocol.ts';
 
 /**
@@ -242,7 +242,7 @@ export class DaemonAgentAdapter implements AgentAdapter {
         { socketPath, source });
     }
 
-    const socket = await this.connect(socketPath);
+    const socket = await this.connect(socketPath, source);
     const session: DaemonSession = {
       runId, socket, socketPath,
       clientNonce: randomBytes(6).toString('hex'),
@@ -338,16 +338,28 @@ export class DaemonAgentAdapter implements AgentAdapter {
     return `mercury:run:${runId}${this.opts.workerId ? `:worker:${this.opts.workerId}` : ''}:s${nonce}`;
   }
 
-  private connect(path: string): Promise<Socket> {
+  /**
+   * Connect, translating a bare errno into an actionable message.
+   *
+   * Retrying is deliberately absent. Mercury never starts the supervisor (design §7.5), so waiting on a
+   * socket it does not own means guessing about someone else's lifecycle; a fast, specific failure that
+   * names `prime-agent status` serves an operator better than a silent backoff that eventually gives up.
+   */
+  private connect(path: string, source: string): Promise<Socket> {
     return new Promise((resolve, reject) => {
       const socket = createConnection(path);
       const timer = setTimeout(() => {
         socket.destroy();
-        reject(new DaemonProtocolError(`timed out connecting to daemon socket ${path}`));
+        reject(new DaemonProtocolError(`timed out connecting to daemon socket ${path}`, { socketPath: path }));
       }, this.opts.connectTimeoutMs ?? 5_000);
       timer.unref?.();
       socket.once('connect', () => { clearTimeout(timer); resolve(socket); });
-      socket.once('error', (err) => { clearTimeout(timer); reject(err); });
+      socket.once('error', (err) => {
+        clearTimeout(timer);
+        const e = err as NodeJS.ErrnoException;
+        reject(new DaemonProtocolError(describeConnectError(e.code ?? '', e.message, path, source),
+          { socketPath: path, source, code: e.code }));
+      });
     });
   }
 
@@ -695,10 +707,10 @@ export class DaemonAgentAdapter implements AgentAdapter {
     socketPath: string; protocolVersion: number; capabilities: string[];
     generation: string | null; appVersion: string | null; sessions: unknown;
   }> {
-    const { path: socketPath } = this.resolveSocketPath();
+    const { path: socketPath, source } = this.resolveSocketPath();
     const lengthProblem = checkSocketPath(socketPath);
     if (lengthProblem) throw new DaemonProtocolError(lengthProblem, { socketPath });
-    const socket = await this.connect(socketPath);
+    const socket = await this.connect(socketPath, source);
     try {
       const session: DaemonSession = {
         runId: 'probe', socket, socketPath,

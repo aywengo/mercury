@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import {
   buildCommandEnvelope, checkHello, checkSocketPath, helloForLogging, looksPrivateFramed,
   parseDaemonLine, toDaemonUiResponse, DAEMON_PROTOCOL_NAME, MERCURY_DAEMON_PROTOCOL_VERSION,
-  MAX_SOCKET_PATH_BYTES, PRIVATE_TRANSPORT_HINT,
+  MAX_SOCKET_PATH_BYTES, PRIVATE_TRANSPORT_HINT, describeConnectError,
 } from '../src/adapters/daemonProtocol.ts';
 
 /**
@@ -278,4 +278,41 @@ test('session lifecycle lines are classified, not reported as unknown', () => {
   if (closed.kind === 'session_closed') assert.equal(closed.reason, 'killed');
   // Something genuinely unknown is still reported.
   assert.equal(parseDaemonLine('{"type":"brand_new_thing"}').kind, 'unparsed');
+});
+
+// --- describeConnectError: a stale socket must not report a bare errno ---------------------------
+
+test('a stale socket (ECONNREFUSED) explains that the file exists but its supervisor is gone', () => {
+  const msg = describeConnectError('ECONNREFUSED', 'connect ECONNREFUSED /run/daemon.sock',
+    '/run/daemon.sock', 'MERCURY_DAEMON_SOCKET');
+  // The operator needs the diagnosis, not the errno.
+  assert.match(msg, /nothing is listening/);
+  assert.match(msg, /socket file exists/);
+  assert.match(msg, /crashed or killed/);
+  // ...and the next action.
+  assert.match(msg, /prime-agent status/);
+  assert.match(msg, /MERCURY_AGENT_MODE=rpc/);
+  assert.match(msg, /MERCURY_DAEMON_SOCKET/, 'names where the path came from');
+});
+
+test('a socket that vanished mid-connect is described as a restart, not a missing config', () => {
+  const msg = describeConnectError('ENOENT', 'connect ENOENT /run/daemon.sock', '/run/daemon.sock', 'default');
+  assert.match(msg, /disappeared between discovery and connect/);
+  assert.match(msg, /prime-agent status/);
+});
+
+test('a permission problem names uid, because that is the actual fix', () => {
+  for (const code of ['EACCES', 'EPERM']) {
+    const msg = describeConnectError(code, 'connect EACCES', '/run/daemon.sock', 'default');
+    assert.match(msg, /permission denied/i, code);
+    assert.match(msg, /uid|another user/, code);
+  }
+});
+
+test('an unrecognised errno keeps its code and message instead of inventing a diagnosis', () => {
+  const msg = describeConnectError('EHOSTUNREACH', 'no route to socket', '/run/daemon.sock', 'default');
+  assert.match(msg, /EHOSTUNREACH/);
+  assert.match(msg, /no route to socket/);
+  // Must not claim the supervisor crashed when we do not know that.
+  assert.doesNotMatch(msg, /crashed or killed/);
 });
