@@ -705,10 +705,9 @@ test('a supervisor shutdown settles the run instead of hanging it', async () => 
   // understands responses and events would sit until its command timeout and report a timeout.
   // Settling promptly is the property worth pinning.
   //
-  // What it settles AS is wrong and deliberately not asserted here: the run becomes an agent failure
-  // with no automatic retry, when a supervisor shutting down is infrastructure and design section 8
-  // asks for a requeue. Pinning the current classification would make the wrong behaviour load-bearing.
-  // The misclassification is issue #188.
+  // It also asserts the attribution below, which it deliberately did not when the classification was
+  // wrong (issue #188): pinning wrong behaviour makes it load-bearing. Now that the run is attributed
+  // to infrastructure and retried, the assertion is worth having.
   const mock = await startMock({ MOCK_DAEMON_CLOSING: '1' });
   const logged: { msg: string; fields?: Record<string, unknown> }[] = [];
   try {

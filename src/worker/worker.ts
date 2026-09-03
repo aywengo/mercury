@@ -689,13 +689,13 @@ export class Worker {
   private async finalize(
     run: Run,
     outcome: {
-    status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | 'LEASE_LOST' | 'SHUTDOWN';
-    exit: AgentExit;
-    error?: string;
-    reason?: string;
-    /** Whom to blame for a FAILED outcome; defaults to the agent. See AgentExit.errorKind. */
-    errorKind?: ErrorKind;
-  },
+      status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | 'LEASE_LOST' | 'SHUTDOWN';
+      exit: AgentExit;
+      error?: string;
+      reason?: string;
+      /** Whom to blame for a FAILED outcome; defaults to the agent. See AgentExit.errorKind. */
+      errorKind?: ErrorKind;
+    },
     skills: ResolvedSkill[],
   ): Promise<void> {
     const log = this.logger(run.id);
