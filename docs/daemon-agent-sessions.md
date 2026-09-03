@@ -567,11 +567,26 @@ unedited because the analysis is what drove the fix. What each row does now:
 One row deserves emphasis, because the code used to *advertise* a capability it did not implement.
 
 `attach` used to send `['event_sequence', 'extension_ui', 'slim_attach', 'chunked_snapshot',
-'attach_snapshot']`. Two of those five described behaviour that does not exist. The supervisor accepts
-any name it recognises without checking whether the client can keep its side of the contract, so an
-over-claimed capability produces no error at all — it just makes the supervisor do something the adapter
-cannot consume. Branching in the supervisor is limited to three client capabilities
-(`grep -rho 'has("...")' dist/modes/daemon/*.js`): `chunked_snapshot`, `extension_ui`, `slim_attach`.
+'attach_snapshot']`. Two of those five described behaviour that does not exist. The supervisor does not
+even validate the names it is given — `normalizeCapabilities` (`daemon-supervisor.js:390`) builds a set
+from the array and filters nothing — so an over-claimed capability produces no error at all. It just
+makes the supervisor do something the adapter cannot consume.
+
+Which names have any effect depends on **which server** is asked, so count per file rather than across
+`dist/modes/daemon/*.js`:
+
+| capability | `has()` sites in `daemon-supervisor.js` (serves Mercury) | sites in `daemon-mode.js` (per-session worker) |
+| --- | --- | --- |
+| `chunked_snapshot` | 8 | 3 |
+| `extension_ui` | 1 | 3 |
+| `slim_attach` | **0** | 1 |
+| `attach_snapshot` | 0 | 0 |
+| `event_sequence` | 0 | 0 |
+
+Of the three capabilities Mercury advertises today, the supervisor acts on exactly one: `extension_ui`.
+`event_sequence` and `slim_attach` are stored and never branched on. That is not a reason to remove them
+— they are true statements about the adapter, and unlike `chunked_snapshot` they commit it to nothing it
+cannot honour — but a capability that does nothing should not be described as doing something.
 
 `chunked_snapshot` was the one that actually bit, and finding out why is a story worth keeping.
 
@@ -625,11 +640,21 @@ returns **11** sites across two files. Reading the three in the file that confir
 not the eight in the file that refuted it, produced a confident and incorrect justification. A count is
 not a reading.
 
-`slim_attach` stays, deliberately. The supervisor omits the top-level `state`/`messages` duplicate from the
-attach result for slim clients, and Mercury discards that result entirely, so the claim is both true and
-worth ~two full-history serialisations per attach. The mock now echoes `client: { id, capabilities }` the
-way `createAttachResult` does, which is what makes the advertised set assertable instead of merely
-readable.
+`slim_attach` stays, and the reason is narrower than the first version of this note claimed. It said
+advertising it saves the supervisor "two full-history serialisations per attach". That saving is real but
+**not attributable to Mercury**: the supervisor always requests `slim_attach` from its own worker, in both
+branches of the capability choice (`daemon-supervisor.js:4087` and `:4088`, and again at `:2653`–`:2654`),
+regardless of what the public client advertised. The top-level `state`/`messages` duplicate is therefore
+never sent to any public client, and the supervisor itself never branches on the capability.
+
+So `slim_attach` is inert against the supervisor today. It stays because it is true — the adapter discards
+the attach result entirely and genuinely cannot consume the duplicate — and because it would start
+mattering if Mercury ever attached to a worker-side `AgentDaemon` directly, where the capability *is*
+honoured (`daemon-mode.js:4227`). Inert-but-true is acceptable; inert-but-false is what `chunked_snapshot`
+was.
+
+The mock now echoes `client: { id, capabilities }` the way `createAttachResult` does, which is what makes
+the advertised set assertable instead of merely readable.
 
 The `daemon_closing` row was, until #188, the only failure recorded against the wrong party: the
 supervisor went away and the agent was blamed for it, which also meant no automatic retry. The fix

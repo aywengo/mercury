@@ -301,18 +301,22 @@ export class DaemonAgentAdapter implements AgentAdapter {
       // attach is what subscribes this connection to the session's events; prompt alone does not.
       await this.command(session, {
         type: 'attach', activeSessionId, clientId: this.clientId(runId, session.clientNonce),
-        // Advertise only capabilities this adapter actually honours. The supervisor accepts any name it
-        // recognises without checking whether the client can keep its side of the contract, so an extra
-        // entry here is an unenforced promise: nothing fails until a real code path depends on it.
+        // Advertise only capabilities this adapter actually honours. The supervisor does not even
+        // validate the names it is sent -- normalizeCapabilities (daemon-supervisor.js:390) builds a set
+        // from the array and filters nothing -- so an extra entry here is an unenforced promise: nothing
+        // fails until a real code path depends on it.
         //
         // - event_sequence: declarative, and true -- the reader consumes meta.cursor / meta.sequence.
         // - extension_ui: not cosmetic. The supervisor only delivers DIALOG requests (select/confirm/
         //   input) when some attached client advertises it, so attaching without it means an agent that
         //   asks the user a question is never forwarded to Mercury and the run waits on a dialog nobody
         //   was told about. The capability folds into the same set the older supportsExtensionUi flag did.
-        // - slim_attach: the supervisor omits the top-level `state`/`messages` duplicate from the attach
-        //   result for slim clients. We discard that result entirely, so this only saves the supervisor
-        //   serialising the full history twice more per attach.
+        // - slim_attach: true but currently inert. The supervisor never branches on it, and it always
+        //   requests slim_attach from its own worker anyway (daemon-supervisor.js:4087-4088), so the
+        //   top-level `state`/`messages` duplicate is never sent to any public client regardless of what
+        //   we advertise. Kept because we genuinely cannot consume that duplicate, and because the
+        //   capability IS honoured on the worker-side AgentDaemon (daemon-mode.js:4227) should this
+        //   adapter ever attach there directly.
         //
         // chunked_snapshot and attach_snapshot are deliberately absent: no snapshot-vs-replay branch
         // exists here (see the generation TODO below and design §8.1).
