@@ -591,28 +591,6 @@ storm collapses naturally. A design that fetched exactly the notified sequence w
 the leak regression test for #133, because a stream that fails to unsubscribe is otherwise invisible
 from outside the process.
 
-**Status after #198:** the first, second, and fifth rows are shipped, plus `mercury_sse_streams_relaxed`
-(subscriptions currently on the relaxed backstop cadence — not in the original list, but it is the number
-that makes a #196-class regression legible rather than merely slow). They come from `EventStream.metrics()`
-and are deliberately NOT SQL aggregates like every other series in `/metrics`: they describe what this
-process's poller did, and the poller exists only in the API process. `eventStream` is null when no poller is
-wired and the series are then omitted rather than zeroed — zeros would assert "a poller exists and found
-nothing", which is how a dead fallback reads as a healthy one. The two `wakeup` rows belong to Stage 1 and
-are not shipped.
-
-**Alert on the pair, never on lag alone.** `mercury_event_poll_lag_seconds` HOLDS its last value when a poll
-delivers nothing, because it measures the latency of the last real delivery rather than a per-tick average.
-The consequence is that a poller whose timer has died reports a stale, plausible, low lag forever. The only
-series that distinguishes "idle, nothing to deliver" from "dead poller" is the iteration counter, so the
-alert that actually works is:
-
-```promql
-rate(mercury_event_poll_iterations_total[1m]) == 0 and mercury_sse_streams_active > 0
-```
-
-A `mercury_event_poll_lag_seconds > 1` alert is still worth having, but on its own it clears during exactly
-the outage it exists to catch.
-
 ### 12.1 What this PR (#198) landed
 
 `EventStream.metrics()` now feeds `/metrics`. Shipped here:
