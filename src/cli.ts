@@ -18,6 +18,7 @@ import { createRedactor } from './domain/redact.ts';
 import { createLogger } from './logger.ts';
 import { EventStore } from './events/eventStore.ts';
 import { EventStream } from './events/eventStream.ts';
+import { WakeupListener, WakeupWriter } from './events/wakeup.ts';
 import { RunQueue } from './queue/runQueue.ts';
 import { RunStore } from './runs/runStore.ts';
 import { RunService } from './runs/runService.ts';
@@ -134,6 +135,25 @@ async function main(): Promise<void> {
   // default nullLogger would keep exactly the silence this removes.
   const stream = new EventStream(db, events, config.pollMs, undefined, logger.child({ c: 'events' }));
 
+  // Stage 1 same-host wake-up channel (issue #202, design section 8.2). MERCURY_EVENT_WAKEUP_SOCKET is
+  // unset by default and unset means none of this exists: no socket, no listener, no writer, and
+  // delivery is byte-identical to polling. The channel is advisory -- it only says "look now" -- so the
+  // poller keeps running unconditionally and a missing socket cannot lose an event.
+  let wakeupListener: WakeupListener | null = null;
+  let wakeupWriter: WakeupWriter | null = null;
+  if (config.eventWakeupSocket && (cmd === 'server' || cmd === 'dev')) {
+    wakeupListener = new WakeupListener(config.eventWakeupSocket, (runId) => stream.wakeRun(runId));
+    try {
+      await wakeupListener.listen();
+      logger.info({ path: config.eventWakeupSocket }, 'event wake-up listener started');
+    } catch (err) {
+      // Failing to bind the hint channel must not stop the API: polling still delivers everything.
+      logger.error({ err, path: config.eventWakeupSocket },
+        'event wake-up listener failed to start; continuing on polling alone');
+      wakeupListener = null;
+    }
+  }
+
   if (cmd === 'gc') {
     const report = await gc.run();
     logger.info({ ...report }, 'workspace gc pass complete');
@@ -173,6 +193,13 @@ async function main(): Promise<void> {
       alertWebhookUrl: config.alertWebhookUrl,
       sandbox,
     });
+    if (config.eventWakeupSocket) {
+      // Registered on the existing append hook rather than at the ~20 append call sites: one seam, and
+      // the writer is contractually unable to throw, so an append can never fail because a hint failed.
+      wakeupWriter = new WakeupWriter(config.eventWakeupSocket);
+      events.onAppend((runId, event) => wakeupWriter!.notify(runId, event.sequence));
+      logger.info({ path: config.eventWakeupSocket }, 'event wake-up writer enabled for this worker');
+    }
     workerRef = worker;
     worker.start();
     logger.info({}, 'worker started');
@@ -220,6 +247,9 @@ async function main(): Promise<void> {
     );
     logger.info({ port: config.port, host: config.bindHost, tls: config.tls !== null, db: config.dbPath }, 'mercury api listening');
     const shutdown = (): void => {
+      // Remove our socket file on the way out; a stale path makes the next start unlink and rebind,
+      // but leaving it behind is the kind of debris that turns a restart into a confusing failure.
+      wakeupListener?.close();
       server.close().then(() => {
         db.close();
         process.exit(0);
@@ -256,6 +286,8 @@ async function main(): Promise<void> {
       if (workerRef && workerRef.activeCount() > 0) {
         logger.warn({ active: workerRef.activeCount() }, 'shutdown grace expired with runs still active; leaving them to the reaper');
       }
+      wakeupWriter?.close();
+      wakeupListener?.close();
       db.close();
       process.exit(0);
     };

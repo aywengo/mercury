@@ -484,6 +484,43 @@ rule applies here and is enforced by test.
 subscriber. The worker does not need to know who is watching, which is exactly the coupling that made
 Option A expensive.
 
+#### 8.2.1 As built (issue #202)
+
+Implemented in `src/events/wakeup.ts` as `WakeupWriter` (worker) and `WakeupListener` (API), wired in
+`src/cli.ts` behind `MERCURY_EVENT_WAKEUP_SOCKET`. **Unset by default**, and unset means the feature does
+not exist at all: no socket is created, no listener is started, no writer is registered, and delivery is
+byte-identical to Stage 0. Polling is never disabled.
+
+Three places the implementation is deliberately smaller than it could be, each because a larger version
+had already caused an incident here:
+
+- **`EventStream.wakeRun()` does not deliver anything.** It sharpens the affected subscriptions and calls
+  the existing `poll()`. A second delivery route would be a second place for the cursor rule to be wrong,
+  and that is precisely how #133 lost events. A notification therefore advances no cursor and delivers no
+  frame; it only makes the next read happen now.
+- **The writer is registered on the existing `EventStore.onAppend` hook** rather than at the ~20 append
+  call sites. One seam, and `notify()` is contractually unable to throw, so an append can never fail
+  because a hint failed.
+- **Writes are dropped, never queued.** A full buffer means the hint is discarded and counted. A queue
+  would grow without bound whenever the API is slower than the worker, and what it protects is a hint the
+  poller acts on within one tick anyway.
+
+`WakeupWriter`'s socket `error` listener is load-bearing rather than defensive polish: in Node an `error`
+event with no listener is an uncaught exception, which would take the worker and its in-flight run down
+over a hint to a browser.
+
+Tests (`test/wakeup.test.ts`) cover the §15 list: notification loss mid-run (the permanent P2 proof — the
+channel is killed AFTER events have flowed through it, so the test cannot pass by never using push),
+duplicate/reordered/malformed notifications, a writer with no peer anywhere, and a **real second node
+process** appending to the same database. The multi-process test is deterministic rather than timing-based:
+the poll interval is 60 s, so the poller cannot have delivered anything inside the window and every
+delivered event must have come through the socket. Verified non-vacuous — neutering `wakeRun()` to a
+no-op fails that test along with the two cursor tests, and nothing else.
+
+One deviation from the wire format worth stating: a line without the `:` separator is rejected rather
+than treated as a bare run id. It is harmless either way today, since an unknown id matches no
+subscriber, but the format is specified and the reader should hold it.
+
 ### 8.3 Stage 2 — Postgres `LISTEN / NOTIFY`
 
 Adopted when Postgres is adopted, for the storage reason. `NOTIFY` on a channel per run (or one
@@ -635,7 +672,10 @@ Stage 2 (Postgres) brings its own migration and is out of scope here.
 1. Land Stage 0. Measure `mercury_event_poll_lag_seconds` in a real deployment. **If the latency
    budget is already met, stop.** This is a genuine expected outcome and the cheapest one.
 2. Land Stage 1 behind `MERCURY_EVENT_WAKEUP_SOCKET` (unset = disabled). With it unset, behaviour is
-   byte-identical to Stage 0, so it is safe to ship dark.
+   byte-identical to Stage 0, so it is safe to ship dark. **Done (issue #202, see 8.2.1) — shipped dark
+   and left off**, because the measurement in 14.1 bounds poll lag at one fast interval already. Enable it
+   only if a real deployment shows `mercury_event_poll_lag_seconds` above budget; until then it is a
+   mechanism under test, not a tuning knob.
 3. Enable on one host; confirm `mercury_event_wakeups_total` climbs and lag falls.
 4. Keep the poller running unconditionally. There is no configuration in which polling is disabled —
    that is the point of P1, and it is what makes rollout reversible.
