@@ -692,7 +692,19 @@ Stage 2 (Postgres) brings its own migration and is out of scope here.
    and left off**, because the measurement in 14.1 bounds poll lag at one fast interval already. Enable it
    only if a real deployment shows `mercury_event_poll_lag_seconds` above budget; until then it is a
    mechanism under test, not a tuning knob.
-3. Enable on one host; confirm `mercury_event_wakeups_total` climbs and lag falls.
+3. Enable on one host; confirm `mercury_event_wakeups_total` climbs and lag falls. **Measured locally
+   (issue #207), same scenario as 14.1 — a cross-process writer, production cadence, 40 events, 3 runs:**
+
+   | mode | p50 | p95 | max | lost | wakeups received |
+   | --- | --- | --- | --- | --- | --- |
+   | poll only (Stage 0) | 141 ms | 243 ms | 251 ms | 0 | — |
+   | push enabled (Stage 1) | **0.6 ms** | 0.9 ms | 1.8 ms | 0 | 40 / 40 |
+
+   Roughly a 250x reduction in median latency, with no loss and every notification accounted for, so the
+   mechanism is proven rather than merely shipped. It still stays off by default: 14.1 shows the poll-only
+   path already meets an "under 1 s" budget, so this is headroom held in reserve, not a default to flip.
+   The measurement is single-host and synthetic — no worker process, no concurrent SSE clients, no SQLite
+   contention — so it bounds the mechanism, not a production deployment.
 4. Keep the poller running unconditionally. There is no configuration in which polling is disabled —
    that is the point of P1, and it is what makes rollout reversible.
 
