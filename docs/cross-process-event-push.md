@@ -592,6 +592,34 @@ the leak regression test for #133, because a stream that fails to unsubscribe is
 from outside the process. It is a getter over the live subscriber set rather than a metric, so wiring
 it through to `/metrics` is the remaining step.
 
+### 12.1 What this PR (#198) landed
+
+`EventStream.metrics()` now feeds `/metrics`. Shipped here:
+
+- `mercury_event_poll_iterations_total` — counts ticks that issued at least one read.
+- `mercury_event_poll_lag_seconds` — age of the newest row the last delivering poll handed over.
+- `mercury_sse_streams_active` — now wired through `subscriptionCount`, the getter named above.
+- `mercury_sse_streams_relaxed` — **not in the table above.** Added because it is the number that makes
+  an issue #196 regression legible: it reports how many subscriptions are on the relaxed cadence, which
+  is the exact thing that was invisible while #196 was open.
+
+Not shipped (they belong to Stage 1 and have nothing to count yet): `mercury_event_wakeups_total`,
+`mercury_event_wakeup_drops_total`.
+
+Two properties worth knowing before you alert on these:
+
+- **Absent, not zero, when there is no poller.** `MetricsSnapshot.eventStream` is null in a process that
+  does not fan events out, and the series are omitted — following `mercury_lease_expires_in_seconds`.
+  Exporting zeros would claim "a poller exists and found nothing", which is how a dead fallback reads as
+  a healthy one.
+- **Lag holds its value on idle ticks, and that is deliberate.** It measures the latency of the last real
+  delivery, not a per-tick average; zeroing it when nothing was delivered would report "zero lag" exactly
+  when there is nothing to be fast about. The consequence is that a poller whose timer has died reports a
+  stale, plausible lag forever — so **alert on the pair**, never on lag alone:
+  `rate(mercury_event_poll_iterations_total[1m]) == 0 and mercury_sse_streams_active > 0`.
+  Resetting the gauge to 0 would not fix this either: the reset would live inside `poll()`, which is
+  exactly the code that stopped running.
+
 ---
 
 ## 13. Database changes
