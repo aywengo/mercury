@@ -101,7 +101,12 @@ function makeMetricsApp(env: ReturnType<typeof makeEnv>, tokens: [string, string
 
 async function listen(app: Express): Promise<{ port: number; close: () => Promise<void> }> {
   return new Promise((resolve) => {
-    const server = app.listen(0, () => {
+    // Bind loopback EXPLICITLY. `app.listen(0)` with no host binds the wildcard, and on macOS/BSD a
+    // wildcard bind succeeds on a port another process already holds on 127.0.0.1 -- the two coexist.
+    // Loopback traffic then goes to the OTHER socket, so a request meant for this app is answered by
+    // some unrelated server that happens to hold the port (issue #185: 200 and 403 where the app can
+    // only return 401). An explicit host makes the collision EADDRINUSE: loud, not silently wrong.
+    const server = app.listen(0, '127.0.0.1', () => {
       const addr = server.address() as { port: number };
       resolve({ port: addr.port, close: () => new Promise<void>((r) => server.close(() => r())) });
     });
