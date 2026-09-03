@@ -578,10 +578,17 @@ Which names have any effect depends on **which server** is asked, so count per f
 | capability | `has()` sites in `daemon-supervisor.js` (serves Mercury) | sites in `daemon-mode.js` (per-session worker) |
 | --- | --- | --- |
 | `chunked_snapshot` | 8 | 3 |
-| `extension_ui` | 1 | 3 |
+| `extension_ui` | 1 <sup>(a)</sup> | 3 <sup>(a)</sup> |
 | `slim_attach` | **0** | 1 |
 | `attach_snapshot` | 0 | 0 |
 | `event_sequence` | 0 | 0 |
+
+<sup>(a)</sup> These columns count only the literal `has("<name>")` form. `extension_ui` is additionally
+read through a derived boolean, `client.supportsExtensionUi`, which `normalizeCapabilities` folds in from
+the legacy flag — so the real number of `extension_ui` decision points is higher: `daemon-supervisor.js:2648`
+and `:4785`, plus `daemon-extension-binding.js:193` in a third file. Counting one syntactic form in two
+files is itself a narrowing; the conclusion below is unaffected because `extension_ui` is the capability
+the narrowing *under*-counts, not the one it over-counts.
 
 Of the three capabilities Mercury advertises today, the supervisor acts on exactly one: `extension_ui`.
 `event_sequence` and `slim_attach` are stored and never branched on. That is not a reason to remove them
