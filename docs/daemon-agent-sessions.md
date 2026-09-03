@@ -622,11 +622,12 @@ session or worker was left behind. Distinct session ids matter more than distinc
 sharing one `activeSessionId` would mean one Run reading the other's transcript, which the replies alone
 would not reveal.
 
-Still untested, and the reason is deliberate:
+Still untested, and in the first case deliberately so:
 
 - **A supervisor restart mid-run.** Testing it means restarting the supervisor, and the supervisor here
   hosts the session making the change. A test that can take down the thing running it is not a test.
-- **A real deployment under load.**
+- **A real deployment under load.** There is no staging deployment in this environment, so nothing here
+  has been exercised by more than two simultaneous Runs.
 
 ---
 
