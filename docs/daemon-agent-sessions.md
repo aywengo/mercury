@@ -640,18 +640,25 @@ returns **11** sites across two files. Reading the three in the file that confir
 not the eight in the file that refuted it, produced a confident and incorrect justification. A count is
 not a reading.
 
-`slim_attach` stays, and the reason is narrower than the first version of this note claimed. It said
-advertising it saves the supervisor "two full-history serialisations per attach". That saving is real but
-**not attributable to Mercury**: the supervisor always requests `slim_attach` from its own worker, in both
-branches of the capability choice (`daemon-supervisor.js:4087` and `:4088`, and again at `:2653`–`:2654`),
-regardless of what the public client advertised. The top-level `state`/`messages` duplicate is therefore
-never sent to any public client, and the supervisor itself never branches on the capability.
+`slim_attach` stays, and it is **not** inert — though it took a third pass over this section to get that
+right. An earlier version claimed the supervisor always asks its worker for `slim_attach` regardless of
+what the client advertised, making the capability decorative. That is true of two of the three paths:
 
-So `slim_attach` is inert against the supervisor today. It stays because it is true — the adapter discards
-the attach result entirely and genuinely cannot consume the duplicate — and because it would start
-mattering if Mercury ever attached to a worker-side `AgentDaemon` directly, where the capability *is*
-honoured (`daemon-mode.js:4227`). Inert-but-true is acceptable; inert-but-false is what `chunked_snapshot`
-was.
+| supervisor → worker request | capabilities sent |
+| --- | --- |
+| initial attach (`:4086`–`:4088`) | fixed list, always includes `slim_attach`; only `chunked_snapshot` is chosen from the client's set |
+| `worker_subscribe` (`:2652`–`:2654`) | fixed list, always includes `slim_attach`; `extension_ui` added if any attached client supports it |
+| `drainClientCatchups` (`:4889`–`:4893`) | **`[...client.capabilities]` — forwarded verbatim** |
+
+The third path is the one that matters. `queueCatchup` is reached from five places on session replacement
+and resync, and when it re-attaches it forwards whatever the client advertised, so on that path
+`slim_attach` genuinely controls whether the worker includes the top-level `state`/`messages` duplicate —
+and `chunked_snapshot` is branched on again at `:4896`. Dropping `slim_attach` would therefore change
+behaviour on resync, not nothing.
+
+The supervisor itself still never branches on `slim_attach` (zero `has()` sites); it is honoured one hop
+away, by the worker (`daemon-mode.js:4227`). So the accurate statement is: `slim_attach` is honoured, but
+not by the process Mercury talks to, and not on the first attach.
 
 The mock now echoes `client: { id, capabilities }` the way `createAttachResult` does, which is what makes
 the advertised set assertable instead of merely readable.

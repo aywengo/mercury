@@ -311,12 +311,14 @@ export class DaemonAgentAdapter implements AgentAdapter {
         //   input) when some attached client advertises it, so attaching without it means an agent that
         //   asks the user a question is never forwarded to Mercury and the run waits on a dialog nobody
         //   was told about. The capability folds into the same set the older supportsExtensionUi flag did.
-        // - slim_attach: true but currently inert. The supervisor never branches on it, and it always
-        //   requests slim_attach from its own worker anyway (daemon-supervisor.js:4087-4088), so the
-        //   top-level `state`/`messages` duplicate is never sent to any public client regardless of what
-        //   we advertise. Kept because we genuinely cannot consume that duplicate, and because the
-        //   capability IS honoured on the worker-side AgentDaemon (daemon-mode.js:4227) should this
-        //   adapter ever attach there directly.
+        // - slim_attach: honoured, but not by the process we talk to. The supervisor never branches on it
+        //   itself; on the initial attach and worker_subscribe it sends its worker a fixed list that
+        //   already includes slim_attach (daemon-supervisor.js:4087-4088, 2653-2654), so advertising it
+        //   changes nothing there. It does matter on the catch-up/resync path: drainClientCatchups
+        //   re-attaches with `[...client.capabilities]` forwarded verbatim (daemon-supervisor.js:4889-4893),
+        //   so on resync this capability is what stops the worker including the top-level
+        //   `state`/`messages` duplicate -- which we discard anyway (daemon-mode.js:4227 honours it).
+        //   Dropping it would change resync behaviour, so it stays.
         //
         // chunked_snapshot and attach_snapshot are deliberately absent: no snapshot-vs-replay branch
         // exists here (see the generation TODO below and design §8.1).
