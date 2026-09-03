@@ -1133,27 +1133,23 @@ function relaxedSubs(stream: EventStream): () => number {
   return () => stream.relaxedCount;
 }
 
-test('an append nobody is watching does not slow the poller (issue #162)', () => {
-  const env = makeEnv({ workerEnabled: false });
-  try {
-    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
-    const stream = new EventStream(env.db, env.events, 5, 5_000);
-    const relaxed = relaxedSubs(stream);
-    stream.start();
-    try {
-      // Must append through the SAME EventStore the stream was built with: a separate instance
-      // writing to the same database does not fire the in-process push hook, which would make this
-      // test pass without the hook ever running.
-      for (let i = 0; i < 5; i++) env.events.append(run.id, 'agent.message', { i });
-      assert.equal(relaxed(), 0,
-        'with no subscribers, push delivered nothing, so the poller must stay at its fast cadence');
-    } finally {
-      stream.stop();
-    }
-  } finally {
-    env.close();
-  }
-});
+/*
+ * REMOVED (independent review of PR #197): "an append nobody is watching does not slow the poller".
+ *
+ * It asserted relaxed() === 0 with ZERO subscriptions, and relaxedCount iterates this.subs -- which is
+ * empty -- so the assertion held BY CONSTRUCTION and could not fail under any cadence bug. The original
+ * version of this test counted calls to the old process-wide slowDown(), which WAS observable; when the
+ * cadence became per-subscription the test was updated to the new observable and quietly stopped testing
+ * anything while still reporting green.
+ *
+ * The property it was written to protect -- an unserved append must not relax a backstop -- is now
+ * STRUCTURAL: relax() lives inside the per-subscription loop in the push hook, so with no subscribers
+ * there is no state left to corrupt. The observable half of that property is covered by the next test,
+ * which keeps a live subscription on a different run and therefore can actually fail.
+ *
+ * Deleting rather than restating: a test that cannot fail is worse than no test, because it reads as
+ * coverage.
+ */
 
 test('an append for a run nobody watches does not slow the poller (issue #162)', () => {
   // A subscriber on ANOTHER run is not "served" by this append, so the backstop must stay sharp:
@@ -1193,13 +1189,29 @@ test('a subscriber that throws was not served, so the poller does not relax (iss
     try {
       // Subscribe AT THE HEAD: subscribe() delivers the backlog synchronously, and the run already has
       // lifecycle events, so subscribing from 0 would throw here rather than on the append under test.
+      // Subscribe AT THE HEAD, and add a HEALTHY co-subscriber on the SAME run.
+      //
+      // The healthy one exists to make the cadence assertion observable. The original version of this
+      // test asserted relaxed() === before with the thrower as the ONLY subscriber -- but the thrower is
+      // dropped on throw, so this.subs ends up empty and relaxed() is 0 === 0 BY CONSTRUCTION. That
+      // assertion could not fail under any bug. It is not enough to assert the thrower stays sharp,
+      // because a dropped subscription has no cadence left to observe.
       stream.subscribe(run.id, cursor(env, run.id), () => { throw new Error('client socket gone'); });
+      const served: number[] = [];
+      stream.subscribe(run.id, cursor(env, run.id), (evts) => { for (const e of evts) served.push(e.sequence); });
       const before = relaxed();
-      env.events.append(run.id, 'agent.message', { boom: true });
+      const appended = env.events.append(run.id, 'agent.message', { boom: true });
       assert.ok(lines.some((l) => l.msg.includes('subscriber dropped after delivery failure')),
         'precondition: the throwing subscriber was dropped and logged');
-      assert.equal(relaxed(), before,
-        'a failed delivery is not a served event; the backstop must stay sharp');
+
+      // "Served" means DELIVERED. Exactly one subscription was served here -- the healthy one -- so
+      // exactly one backstop may relax. If the catch aborted the loop instead of continuing to the next
+      // subscriber, this is `before` and the healthy client silently lost its low-latency path; if a
+      // future change relaxed per-run rather than per-subscription it would be `before + 2`.
+      assert.equal(relaxed(), before + 1,
+        'the healthy co-subscriber was served and must relax; the thrower must contribute nothing');
+      assert.deepEqual(served, [appended.sequence],
+        'a co-subscriber must still be served when another subscriber throws');
     } finally {
       stream.stop();
     }
@@ -1265,11 +1277,25 @@ test('a locally-pushed run does not slow the cross-process backstop of another r
 
     const stream = new EventStream(env.db, env.events, 10, 1_000);
     const reads: Record<string, number> = {};
-    const target = stream as unknown as { readAfter: (r: string, a: number) => MercuryEvent[] };
+    let ticks = 0;
+    const target = stream as unknown as {
+      readAfter: (runId: string, afterSeq: number) => MercuryEvent[];
+      poll: () => void;
+    };
     const originalRead = target.readAfter.bind(stream);
     target.readAfter = (runId: string, afterSeq: number) => {
       reads[runId] = (reads[runId] ?? 0) + 1;
       return originalRead(runId, afterSeq);
+    };
+    // Counting TICKS alongside reads is what makes this independent of machine speed. The first version
+    // asserted ">= 10 reads in ~300 ms" against an expected ~30 -- 3x headroom on a wall-clock window,
+    // which a loaded CI runner can eat, and a test that flakes is a defect even when the code is right.
+    // A ratio against the ticks the timer ACTUALLY achieved degrades with the machine instead of
+    // failing on it. poll() is called only by the driving timer (see start()), so ticks is exact.
+    const originalPoll = target.poll.bind(stream);
+    target.poll = () => {
+      ticks += 1;
+      originalPoll();
     };
 
     // A SEPARATE EventStore over the same database stands in for another process: writes land, but the
@@ -1288,13 +1314,20 @@ test('a locally-pushed run does not slow the cross-process backstop of another r
         await new Promise((r) => setTimeout(r, 5));
       }
 
-      assert.ok((reads[cross.id] ?? 0) >= 10,
-        `the cross-process run must keep the fast cadence regardless of other runs' push traffic; ` +
-        `got ${reads[cross.id] ?? 0} poll reads in ~300 ms (regressed value was 1)`);
-      // The fix must not be "never relax": the run that push genuinely serves still backs its own
-      // poller off, which is the property issue #162 established.
-      assert.ok(stream.relaxedCount >= 1,
-        'the locally-pushed subscription must still relax its OWN backstop');
+      // Precondition, not verdict: if the timer barely ran, every ratio below is vacuous.
+      assert.ok(ticks >= 3, `precondition: the driving timer must tick several times; got ${ticks}`);
+
+      const crossRatio = (reads[cross.id] ?? 0) / ticks;
+      assert.ok(crossRatio >= 0.8,
+        `the cross-process subscription must be read on nearly every tick regardless of other runs' push ` +
+        `traffic; got ${reads[cross.id] ?? 0} reads over ${ticks} ticks (ratio ${crossRatio.toFixed(2)}; ` +
+        `the process-wide cadence this replaced measured ~0.03)`);
+
+      // The fix must not be "never relax": the run that push genuinely serves still backs its OWN
+      // backstop off, which is the property issue #162 established.
+      const pushedRatio = (reads[pushed.id] ?? 0) / ticks;
+      assert.ok(pushedRatio <= 0.5,
+        `the locally-pushed subscription must relax its own backstop; got ratio ${pushedRatio.toFixed(2)}`);
     } finally { stream.stop(); }
   } finally { env.close(); }
 });
