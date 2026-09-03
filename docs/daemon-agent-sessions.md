@@ -512,8 +512,10 @@ replay from the stored cursor and treat `replayed: true` as a signal to dedupe b
 not by Mercury sequence.
 
 If `cursor.generation` differs from the stored generation, replay is not available — the counter's
-identity changed. Then fall back to a snapshot (`attach_snapshot` capability) rather than assuming
-continuity. Assuming it is precisely the #133 failure mode in a new costume.
+identity changed. Then fall back to a snapshot rather than assuming continuity. Assuming it is precisely
+the #133 failure mode in a new costume. This path is not built: the adapter does not advertise
+`attach_snapshot` today, because nothing consumes a snapshot yet (#194). Advertising it before the
+consumer exists is what this section warns about.
 
 ### 7.5 Discovery, not creation
 
@@ -557,13 +559,116 @@ unedited because the analysis is what drove the fix. What each row does now:
 | Required capability absent | **Shipped.** Rejected at `start()`, naming the capability. A hello with no capability list at all is refused rather than treated as capability-free. |
 | No supervisor reachable | **Shipped.** Fails with a message naming the path, where it came from, and `prime-agent status`; never spawns. A socket file left behind by a crashed supervisor is diagnosed as such rather than reported as a bare `ECONNREFUSED` (#187). |
 | Supervisor restarts mid-run | **Partial.** `supervisorGeneration` is captured and reported with the session identity, and the run ends failed with a cause instead of a timeout. There is no reattach, so nothing resumes; see §12 item 1. |
-| Generation changes | **Not shipped.** There is no snapshot-vs-replay branch. `attach_snapshot` and `chunked_snapshot` are advertised in the capability list, and that is the trap worth recording: the names make it look implemented. `resume()` throws instead of guessing. |
+| Generation changes | **Not shipped.** There is no snapshot-vs-replay branch, and `resume()` throws instead of guessing. The adapter no longer advertises `attach_snapshot` or `chunked_snapshot` for it (#194) — see the note below. |
 | `daemon_closing` received | **Shipped.** The run settles cleanly instead of hanging, and is attributed to infrastructure via `AgentExit.errorKind`, so it is auto-retried against the next supervisor and the operator reads the supervisor's own reason instead of "Agent exited with code null" (#188). |
 | Command rejected | **Shipped.** The daemon's `errorInfo.code` is surfaced, so `no_capacity` does not arrive as a timeout. |
 | Session dies while worker is idle | **Shipped.** `session_closed` ends the run as failed, and a closure the adapter caused itself is excluded so a normal completion is not read as a crash. |
 
-One row deserves emphasis. The generation row is the only place where the code *advertises* a
-capability it does not implement.
+One row deserves emphasis, because the code used to *advertise* a capability it did not implement.
+
+`attach` used to send `['event_sequence', 'extension_ui', 'slim_attach', 'chunked_snapshot',
+'attach_snapshot']`. Two of those five described behaviour that does not exist. The supervisor does not
+even validate the names it is given — `normalizeCapabilities` (`daemon-supervisor.js:390`) builds a set
+from the array and filters nothing — so an over-claimed capability produces no error at all. It just
+makes the supervisor do something the adapter cannot consume.
+
+Which names have any effect depends on **which server** is asked, so count per file rather than across
+`dist/modes/daemon/*.js`:
+
+| capability | `has()` sites in `daemon-supervisor.js` (serves Mercury) | sites in `daemon-mode.js` (per-session worker) |
+| --- | --- | --- |
+| `chunked_snapshot` | 8 | 3 |
+| `extension_ui` | 1 <sup>(a)</sup> | 3 <sup>(a)</sup> |
+| `slim_attach` | **0** | 1 |
+| `attach_snapshot` | 0 | 0 |
+| `event_sequence` | 0 | 0 |
+
+<sup>(a)</sup> These columns count only the literal `has("<name>")` form. `extension_ui` is additionally
+read through a derived boolean, `client.supportsExtensionUi`, which `normalizeCapabilities` folds in from
+the legacy flag — so the real number of `extension_ui` decision points is higher: `daemon-supervisor.js:2648`
+and `:4785`, plus `daemon-extension-binding.js:193` in a third file. Counting one syntactic form in two
+files is itself a narrowing; the conclusion below is unaffected because `extension_ui` is the capability
+the narrowing *under*-counts, not the one it over-counts.
+
+Of the three capabilities Mercury advertises today, the supervisor acts on exactly one: `extension_ui`.
+`event_sequence` and `slim_attach` are stored and never branched on. That is not a reason to remove them
+— they are true statements about the adapter, and unlike `chunked_snapshot` they commit it to nothing it
+cannot honour — but a capability that does nothing should not be described as doing something.
+
+`chunked_snapshot` was the one that actually bit, and finding out why is a story worth keeping.
+
+The first version of this note said claiming it was inert, because the supervisor gates the chunked
+stream on the transport:
+
+```js
+// daemon-mode.js:3183 — AgentDaemon, which is NOT the server Mercury talks to
+const streamsSnapshot = client.transport === "private-framed" &&
+    daemonClientCapabilitiesForSession(client, state.activeSessionId).has("chunked_snapshot");
+```
+
+That was wrong, and it was wrong in the way that matters most here. PrimeAgent ships **two** servers
+that both bind a `daemon.sock` and both send a `daemon_hello`: `AgentDaemon` (`daemon-mode.js`) and
+`DaemonSupervisor` (`daemon-supervisor.js`). The one that owns the public socket — provable by the
+`worker-*.sock` files beside it, which only the supervisor creates — is the supervisor, and the
+supervisor has no transport concept in its attach path at all.
+
+`AgentDaemon` is not dead code to be waved away, which is why the gate exists at all: the supervisor
+launches each session worker as `--mode daemon` (`daemon-supervisor.js:2366`), so every worker runs
+`AgentDaemon`, and the supervisor connects to it as a worker client. Inside `AgentDaemon`,
+`transport: this.options.worker ? "private-framed" : "jsonl"` (`daemon-mode.js:2571`) separates those
+supervisor-to-worker connections from public ones. The gate therefore guards the **worker** socket, one
+hop away from Mercury — reading it as though it guarded Mercury's connection is what produced the wrong
+conclusion.
+
+```js
+// daemon-supervisor.js:1396 — the handler that actually serves Mercury
+case "attach": {
+    const attached = await this.attachClient(client, command);
+    if (client.capabilities.has("chunked_snapshot")) {
+        const transcript = attached.transcript;
+        if (!transcript) {
+            throw new Error("Session worker did not provide a snapshot transcript");
+        }
+        ...
+        void this.streamSnapshot(client, attached.worker, streamedResult, transcript, ...);
+```
+
+So advertising the capability was live behaviour, not inert: the supervisor demanded a transcript, threw
+if there was none, and otherwise streamed `session_snapshot_*` chunk lines at Mercury. Those are
+well-formed JSONL, so nothing broke — `parseDaemonLine` has no case for the type, they fell through to
+`kind: 'unparsed'`, and were discarded. Mercury was asking for a protocol it then threw away, and was
+one empty-transcript attach away from an error it could not explain.
+
+`attach_snapshot` really was inert — nothing branches on it anywhere. Both are now gone, and the rule
+recorded in the adapter is that a capability is added only together with the code that honours it.
+
+The methodological lesson is the sharper one: `grep -rho 'has("chunked_snapshot")' dist/modes/daemon/*.js`
+returns **11** sites across two files. Reading the three in the file that confirmed the hypothesis, and
+not the eight in the file that refuted it, produced a confident and incorrect justification. A count is
+not a reading.
+
+`slim_attach` stays, and it is **not** inert — though it took a third pass over this section to get that
+right. An earlier version claimed the supervisor always asks its worker for `slim_attach` regardless of
+what the client advertised, making the capability decorative. That is true of two of the three paths:
+
+| supervisor → worker request | capabilities sent |
+| --- | --- |
+| initial attach (`:4086`–`:4088`) | fixed list, always includes `slim_attach`; only `chunked_snapshot` is chosen from the client's set |
+| `worker_subscribe` (`:2652`–`:2654`) | fixed list, always includes `slim_attach`; `extension_ui` added if any attached client supports it |
+| `drainClientCatchups` (`:4889`–`:4893`) | **`[...client.capabilities]` — forwarded verbatim** |
+
+The third path is the one that matters. `queueCatchup` is reached from five places on session replacement
+and resync, and when it re-attaches it forwards whatever the client advertised, so on that path
+`slim_attach` genuinely controls whether the worker includes the top-level `state`/`messages` duplicate —
+and `chunked_snapshot` is branched on again at `:4896`. Dropping `slim_attach` would therefore change
+behaviour on resync, not nothing.
+
+The supervisor itself still never branches on `slim_attach` (zero `has()` sites); it is honoured one hop
+away, by the worker (`daemon-mode.js:4227`). So the accurate statement is: `slim_attach` is honoured, but
+not by the process Mercury talks to, and not on the first attach.
+
+The mock now echoes `client: { id, capabilities }` the way `createAttachResult` does, which is what makes
+the advertised set assertable instead of merely readable.
 
 The `daemon_closing` row was, until #188, the only failure recorded against the wrong party: the
 supervisor went away and the agent was blamed for it, which also meant no automatic retry. The fix

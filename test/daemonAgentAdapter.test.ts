@@ -178,6 +178,35 @@ test('every line the adapter writes is a valid daemon command envelope', async (
   } finally { await mock.close(); }
 });
 
+test('attach advertises only capabilities the adapter actually honours', async () => {
+  // The supervisor accepts any recognised capability name without checking that the client can keep its
+  // side of the contract, so an over-claimed entry raises no error -- it just makes the supervisor do
+  // something the adapter cannot consume. chunked_snapshot was the dangerous one: the chunked stream is
+  // gated on `transport === 'private-framed' && has('chunked_snapshot')`, so claiming it over JSONL was
+  // inert only thanks to a condition Mercury does not control. See issue #194.
+  const tx = newTx();
+  const mock = await startMock({ MOCK_DAEMON_TRANSCRIPT: tx });
+  try {
+    const adapter = adapterFor(mock);
+    const handle = await adapter.start(makeContext());
+    await withDeadline('collect', 8_000, collectAll(handle));
+    const attach = transcript(tx).find((l: any) => l.command?.type === 'attach');
+    assert.ok(attach, 'no attach command reached the wire');
+    const caps: string[] = (attach as any).command.capabilities;
+    assert.deepEqual(
+      [...caps].sort(),
+      ['event_sequence', 'extension_ui', 'slim_attach'],
+      `advertised set drifted; every entry must name the code that honours it. got: ${caps.join(',')}`,
+    );
+    for (const over of ['chunked_snapshot', 'attach_snapshot']) {
+      assert.ok(!caps.includes(over),
+        `${over} is advertised but no snapshot-vs-replay branch exists in the adapter (design §8.1: not shipped)`);
+    }
+    // extension_ui is load-bearing, not decoration: drop it and the supervisor stops forwarding dialogs.
+    assert.ok(caps.includes('extension_ui'), 'extension_ui must stay advertised or dialogs go undelivered');
+  } finally { await mock.close(); }
+});
+
 test('create precedes prompt, and prompt carries the activeSessionId create returned', async () => {
   // The adapter used to send prompt with no session at all. Ordering and identity are both asserted
   // on the transcript so a reordering cannot pass by accident.

@@ -301,11 +301,39 @@ export class DaemonAgentAdapter implements AgentAdapter {
       // attach is what subscribes this connection to the session's events; prompt alone does not.
       await this.command(session, {
         type: 'attach', activeSessionId, clientId: this.clientId(runId, session.clientNonce),
-        // extension_ui is not cosmetic. The supervisor only delivers DIALOG requests (select/confirm/
-        // input) when some attached client advertises it, so attaching without it means an agent that
-        // asks the user a question is never forwarded to Mercury and the run waits on a dialog nobody
-        // was told about. The capability folds into the same set the older supportsExtensionUi flag did.
-        capabilities: ['event_sequence', 'extension_ui', 'slim_attach', 'chunked_snapshot', 'attach_snapshot'],
+        // Advertise only capabilities this adapter actually honours. The supervisor does not even
+        // validate the names it is sent -- normalizeCapabilities (daemon-supervisor.js:390) builds a set
+        // from the array and filters nothing -- so an extra entry here is an unenforced promise: nothing
+        // fails until a real code path depends on it.
+        //
+        // - event_sequence: declarative, and true -- the reader consumes meta.cursor / meta.sequence.
+        // - extension_ui: not cosmetic. The supervisor only delivers DIALOG requests (select/confirm/
+        //   input) when some attached client advertises it, so attaching without it means an agent that
+        //   asks the user a question is never forwarded to Mercury and the run waits on a dialog nobody
+        //   was told about. The capability folds into the same set the older supportsExtensionUi flag did.
+        // - slim_attach: honoured, but not by the process we talk to. The supervisor never branches on it
+        //   itself; on the initial attach and worker_subscribe it sends its worker a fixed list that
+        //   already includes slim_attach (daemon-supervisor.js:4087-4088, 2653-2654), so advertising it
+        //   changes nothing there. It does matter on the catch-up/resync path: drainClientCatchups
+        //   re-attaches with `[...client.capabilities]` forwarded verbatim (daemon-supervisor.js:4889-4893),
+        //   so on resync this capability is what stops the worker including the top-level
+        //   `state`/`messages` duplicate -- which we discard anyway (daemon-mode.js:4227 honours it).
+        //   Dropping it would change resync behaviour, so it stays.
+        //
+        // chunked_snapshot and attach_snapshot are deliberately absent: no snapshot-vs-replay branch
+        // exists here (see the generation TODO below and design §8.1).
+        //
+        // Claiming chunked_snapshot is NOT inert. The process that owns the public socket is
+        // DaemonSupervisor, and its attach handler (daemon-supervisor.js:1396) branches on the
+        // capability with no transport gate at all: it demands a snapshot transcript (throwing
+        // "Session worker did not provide a snapshot transcript" when there is none) and then streams
+        // `session_snapshot_*` chunk lines at us. parseDaemonLine has no case for those, so they arrive
+        // as `unparsed` and are discarded -- protocol traffic we asked for and then threw away.
+        //
+        // Do not copy the `transport === 'private-framed'` gate from daemon-mode.js:3183 as a reason
+        // this is safe. That check belongs to AgentDaemon, a different server that does not serve
+        // Mercury's connection. Re-add either capability only together with the code that consumes it.
+        capabilities: ['event_sequence', 'extension_ui', 'slim_attach'],
       });
 
       await this.command(session, {
