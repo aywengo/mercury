@@ -1331,3 +1331,38 @@ test('a locally-pushed run does not slow the cross-process backstop of another r
     } finally { stream.stop(); }
   } finally { env.close(); }
 });
+
+// ------ delivery counters exposed for /metrics (design §12) ------
+
+test('metrics() reports real iteration, lag and stream counts (issue #196 observability)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'counted', agent: 'fake' });
+    const stream = new EventStream(env.db, env.events, 5, 5_000);
+    const otherProcess = new EventStore(env.db);
+
+    const zero = stream.metrics();
+    assert.equal(zero.pollIterations, 0, 'no poll has run yet');
+    assert.equal(zero.streamsActive, 0);
+
+    stream.start();
+    let delivered = 0;
+    try {
+      const unsubscribe = stream.subscribe(run.id, cursor(env, run.id), () => { delivered += 1; });
+      otherProcess.append(run.id, 'agent.message', { n: 1 });
+
+      await waitFor(() => delivered > 0);
+
+      const m = stream.metrics();
+      assert.ok(m.pollIterations >= 1, `a poll that delivered must count itself, got ${m.pollIterations}`);
+      assert.equal(m.streamsActive, 1);
+      // The row was appended moments ago, so lag must be small but non-negative. A NaN here would mean
+      // the timestamp was never parsed, and Prometheus would reject the whole scrape over it.
+      assert.ok(Number.isFinite(m.pollLagSeconds) && m.pollLagSeconds >= 0 && m.pollLagSeconds < 5,
+        `lag must be a finite small number of seconds, got ${m.pollLagSeconds}`);
+
+      unsubscribe();
+      assert.equal(stream.metrics().streamsActive, 0, 'unsubscribing must reduce the gauge (issue #133 leak)');
+    } finally { stream.stop(); }
+  } finally { env.close(); }
+});

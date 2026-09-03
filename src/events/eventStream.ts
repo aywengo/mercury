@@ -72,6 +72,29 @@ export class EventStream {
    * describing a run that never recovered.
    */
   private failingReads = new Set<string>();
+  /**
+   * Ticks on which the poller actually issued at least one read.
+   *
+   * Counted per tick-with-work rather than per timer firing: a tick with no subscribers, or with every
+   * subscriber relaxed and not yet due, does nothing, and counting it would make this counter measure
+   * "the process is up" instead of the thing §12 asks it to prove -- that the cross-process FALLBACK is
+   * still running. If this counter stops climbing while runs are active, push is the only path left and
+   * nobody can tell from outside.
+   */
+  private pollIterations = 0;
+  /**
+   * Age in seconds of the newest row the last delivering poll handed to a client.
+   *
+   * The direct measure of G1 (bounded cross-process latency) and the only way P7 holds: without it a
+   * silent regression to the slow cadence looks identical to a healthy system from the outside, which is
+   * exactly how issue #196 stayed invisible.
+   *
+   * HOLDS its last value when a poll delivers nothing, rather than falling to 0. This is a gauge of the
+   * latency of the last real delivery, not a per-tick average; zeroing it on an idle tick would report
+   * "zero lag" at the moment there is nothing to be fast about, and an alert on `> 1` would clear
+   * precisely when it should not.
+   */
+  private pollLagSeconds = 0;
 
   constructor(
     db: DatabaseSync,
@@ -229,6 +252,29 @@ export class EventStream {
    * are currently being polled slowly, and why" instead of the old unanswerable "what is the process
    * cadence". Also the natural source for the Stage 0 metrics in docs/cross-process-event-push.md §12.
    */
+  /**
+   * Process-local delivery counters for `/metrics` (design §12).
+   *
+   * Deliberately NOT SQL aggregates like the rest of `/metrics`: these describe what THIS process's
+   * poller did, and the poller exists only in the API process. Deriving them from the database would
+   * report another process's inactivity as this one's health.
+   */
+  metrics(): {
+    pollIterations: number;
+    pollLagSeconds: number;
+    streamsActive: number;
+    relaxedStreams: number;
+  } {
+    return {
+      pollIterations: this.pollIterations,
+      pollLagSeconds: this.pollLagSeconds,
+      // Via the named accessor, not this.subs.size: §12 names subscriptionCount as the seam that
+      // feeds this gauge, and going through it keeps one definition of "live subscription".
+      streamsActive: this.subscriptionCount,
+      relaxedStreams: this.relaxedCount,
+    };
+  }
+
   get relaxedCount(): number {
     let n = 0;
     for (const sub of this.subs) if (sub.slow) n += 1;
@@ -275,6 +321,7 @@ export class EventStream {
       else groups.set(key, { runId: sub.runId, afterSeq: sub.afterSeq, subs: [sub] });
     }
     if (groups.size === 0) return;
+    this.pollIterations += 1;
 
     // A run can appear in SEVERAL groups in one tick, one per distinct cursor, so the failure streak
     // cannot be cleared by whichever group succeeds first. Doing that logged "recovered" while another
@@ -309,6 +356,12 @@ export class EventStream {
       // One read, many deliveries -- but each delivery stays isolated. A subscriber that throws owns a
       // client response, so it is dropped on its own; failing to isolate here let one bad subscriber
       // starve every later subscriber (issue #138).
+      // Lag is measured against the newest row in the batch about to be handed over, read from the row
+      // itself rather than from a counter, so it reflects what a client is actually waiting on.
+      const newest = events[events.length - 1];
+      const newestAt = Date.parse(newest.timestamp);
+      if (Number.isFinite(newestAt)) this.pollLagSeconds = Math.max(0, (now - newestAt) / 1000);
+
       for (const sub of group.subs) {
         sub.slow = false;
         try {

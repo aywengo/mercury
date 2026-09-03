@@ -119,5 +119,28 @@ export function renderPrometheus(m: MetricsSnapshot): string {
     ]);
   }
 
+  // Event-delivery counters (docs/cross-process-event-push.md §12). Omitted when this process has no
+  // EventStream, following mercury_lease_expires_in_seconds: exporting zeros would assert that a
+  // poller exists and has found nothing, which is a different fact from there being no poller here.
+  //
+  // These are the observability half of P7. Issue #196 was invisible for exactly as long as it existed
+  // because nothing exposed WHICH streams were being polled slowly; lag and iteration count are what
+  // make a silent revert to the slow cadence visible from outside the process.
+  if (m.eventStream) {
+    const es = m.eventStream;
+    writeCounter(out, 'mercury_event_poll_iterations_total', 'Poll ticks that issued at least one read; proves the cross-process fallback is alive.', [
+      [{}, es.pollIterations],
+    ]);
+    writeGauge(out, 'mercury_event_poll_lag_seconds', 'Age in seconds of the newest row the last delivering poll handed to a client; holds its value when idle.', [
+      [{}, es.pollLagSeconds],
+    ]);
+    writeGauge(out, 'mercury_sse_streams_active', 'Live SSE subscriptions; a set that only grows is a leak (issue #133).', [
+      [{}, es.streamsActive],
+    ]);
+    writeGauge(out, 'mercury_sse_streams_relaxed', 'Subscriptions currently on the relaxed backstop cadence (issue #196).', [
+      [{}, es.relaxedStreams],
+    ]);
+  }
+
   return out.join('\n') + '\n';
 }

@@ -6,7 +6,8 @@ import { closeServer, createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { collectMetrics } from '../src/metrics/collect.ts';
 import { escapeLabelValue, renderPrometheus } from '../src/metrics/prometheus.ts';
-import { makeEnv } from './helpers.ts';
+import { EventStore } from '../src/events/eventStore.ts';
+import { makeEnv, waitFor } from './helpers.ts';
 import type { ErrorKind, RunStatus } from '../src/domain/types.ts';
 import type { Express } from 'express';
 import { ACTIVE_WORK_STATUSES, isTerminal, LEASE_HOLDING_STATUSES, STUCK_CANDIDATE_STATUSES, TERMINAL_STATUSES } from '../src/domain/stateMachine.ts';
@@ -91,7 +92,11 @@ function makeMetricsApp(env: ReturnType<typeof makeEnv>, tokens: [string, string
     apiTokens: new Map(tokens),
     adminToken: null,
   });
-  return { app, close: () => stream.stop() };
+  // Returns the stream so a test can drive real subscriptions and then scrape what the endpoint
+  // reports about them. Without this the /metrics wiring is untested: the unit tests call
+  // collectMetrics directly, so deleting `eventStream: deps.stream.metrics()` from the route would
+  // leave every one of them green while the endpoint silently stopped exporting the series.
+  return { app, stream, close: () => stream.stop() };
 }
 
 async function listen(app: Express): Promise<{ port: number; close: () => Promise<void> }> {
@@ -565,4 +570,118 @@ test('the live-status sets agree and are derived from the machine (issue #141)',
       assert.ok(LEASE_HOLDING_STATUSES.includes(s), `${s} must be lease-holding`);
     }
   }
+});
+
+
+// ------ event-delivery observability (docs/cross-process-event-push.md §12) ------
+
+test('event-delivery metrics are exported when a poller is wired', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const body = renderPrometheus(
+      collectMetrics(env.db, {
+        eventStream: { pollIterations: 42, pollLagSeconds: 0.25, streamsActive: 3, relaxedStreams: 1 },
+      }),
+    );
+    assert.match(body, /mercury_event_poll_iterations_total 42$/m);
+    assert.match(body, /mercury_event_poll_lag_seconds 0\.25$/m);
+    assert.match(body, /mercury_sse_streams_active 3$/m);
+    assert.match(body, /mercury_sse_streams_relaxed 1$/m);
+  } finally { env.close(); }
+});
+
+test('event-delivery metrics are ABSENT, not zero, when no poller is wired', () => {
+  // Exporting zeros here would assert "a poller exists and has found nothing". The truth in a process
+  // with no EventStream is that there is no poller, and an all-zero series is how a dead fallback gets
+  // read as a healthy one -- the exact blindness P7 exists to prevent.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const snap = collectMetrics(env.db);
+    assert.equal(snap.eventStream, null, 'collectMetrics must set it explicitly, not leave it undefined');
+    const body = renderPrometheus(snap);
+    for (const name of [
+      'mercury_event_poll_iterations_total',
+      'mercury_event_poll_lag_seconds',
+      'mercury_sse_streams_active',
+      'mercury_sse_streams_relaxed',
+    ]) {
+      assert.ok(!body.includes(name), `${name} must not be exported without a poller`);
+    }
+  } finally { env.close(); }
+});
+
+test('the cross-process poll read uses idx_events_run_seq and does not sort', () => {
+  // Stage 0 guard, matching how the /metrics index plan is pinned above. The poll runs this query for
+  // every due subscription every fast tick, so a planner regression here is not a slow endpoint -- it is
+  // a load generator on the same database the workers are contending for. The ORDER BY half matters as
+  // much as the index half: "USE TEMP B-TREE FOR ORDER BY" would mean the 500-row page is being sorted
+  // on every tick even though the index already yields sequence order.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const detail = (env.db
+      .prepare('EXPLAIN QUERY PLAN SELECT * FROM events WHERE run_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT 500')
+      .all('run_x', 0) as { detail: string }[])
+      .map((r) => r.detail)
+      .join(' ');
+    assert.match(detail, /idx_events_run_seq/, `planner must use the explicit index, got: ${detail}`);
+
+    // Honest scope on this second assertion: it CANNOT fail on today's schema, and it is kept anyway
+    // with that stated rather than implied. Measured -- drop idx_events_run_seq and the plan becomes
+    // `SEARCH events USING INDEX sqlite_autoindex_events_2 (run_id=? AND sequence>?)`, still with no
+    // TEMP B-TREE, because the UNIQUE (run_id, sequence) autoindex supplies the order just as well. So
+    // this line does not prove the first line's point and must not be read as doing so.
+    //
+    // What it does guard is a future schema change that removes the UNIQUE constraint and leaves only a
+    // non-covering index; at that point the 500-row page really would be sorted per tick. If the UNIQUE
+    // constraint is ever dropped, this assertion becomes live -- which is the only reason it is worth
+    // carrying rather than deleting.
+    assert.doesNotMatch(detail, /TEMP B-TREE/, `the index must supply the order, got: ${detail}`);
+  } finally { env.close(); }
+});
+
+test('the /metrics endpoint exports live event-delivery state end to end (issue #198)', async () => {
+  // The wiring test. Every other metrics test hands collectMetrics an eventStream object, so none of
+  // them can see whether the ROUTE supplies one -- and the entire point of these metrics is that a
+  // silent regression here is invisible from outside the process. Deleting the wiring from the route
+  // fails this test and leaves all the others green.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'scraped', agent: 'fake' });
+    const { app, stream, close } = makeMetricsApp(env);
+    const srv = await listen(app);
+    try {
+      // Subscribe AT THE HEAD so the backlog is empty: then the only way `delivered` can move is a
+      // poll. Subscribing from 0 let subscribe() deliver the backlog synchronously, which satisfied
+      // the wait before the poller had necessarily ticked once -- the assertion below then raced the
+      // first tick and read 0 iterations.
+      const backlog = env.events.list(run.id);
+      const head = backlog.length ? backlog[backlog.length - 1].sequence : 0;
+      let delivered = 0;
+      const unsubscribe = stream.subscribe(run.id, head, () => { delivered += 1; });
+      // A cross-process append, so the poller -- not the in-process push hook -- has to do the work.
+      new EventStore(env.db).append(run.id, 'agent.message', { n: 1 });
+      await waitFor(() => delivered > 0);
+
+      const scrape = () => fetch(`http://127.0.0.1:${srv.port}/metrics`,
+        { headers: { authorization: 'Bearer tok-alice' } }).then((r) => r.text());
+
+      const m = parse(await scrape());
+      assert.equal(get(m, 'mercury_sse_streams_active'), 1,
+        'the live subscription must be visible on the endpoint');
+      const iters = get(m, 'mercury_event_poll_iterations_total');
+      assert.ok(iters !== undefined && iters >= 1,
+        `a poll that delivered must be counted on the endpoint, got ${iters}`);
+      const lag = get(m, 'mercury_event_poll_lag_seconds');
+      assert.ok(lag !== undefined && lag >= 0 && Number.isFinite(lag),
+        `lag must be exported as a finite non-negative number, got ${lag}`);
+
+      unsubscribe();
+      const after = parse(await scrape());
+      assert.equal(get(after, 'mercury_sse_streams_active'), 0,
+        'the gauge must follow unsubscribes, or it cannot detect the leak it exists for');
+    } finally {
+      await srv.close();
+      close();
+    }
+  } finally { env.close(); }
 });
