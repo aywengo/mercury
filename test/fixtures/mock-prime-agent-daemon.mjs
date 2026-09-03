@@ -203,7 +203,25 @@ const server = net.createServer((socket) => {
         socket.__caps = state.caps;
         s.subscribers.add(socket);
         state.attached.add(cmd.activeSessionId);
-        respond(id, 'attach', true, { data: { snapshot: [], cursor: { generation: GENERATION, sequence: s.sequence } } });
+        // Echo the negotiated set back, as the real daemon does (daemon-mode.js returns
+        // `client: { id, capabilities }` from createAttachResult). Without this the set the adapter
+        // advertised is invisible to a test, and an over-claimed capability can only be caught by
+        // reading source. Note the real daemon accepts ANY recognised name without checking that the
+        // client can honour it -- so this fixture must not validate the set either, or it would be
+        // inventing a guard the supervisor does not have.
+        //
+        // slim_attach is modelled for the same reason: a slim client gets no top-level state/messages
+        // duplicate, so a fixture that always sends them would hide a client that reads them.
+        const slim = state.caps.has('slim_attach');
+        respond(id, 'attach', true, {
+          data: {
+            activeSessionId: cmd.activeSessionId,
+            ...(slim ? {} : { state: { messageCount: 0 }, messages: [] }),
+            snapshot: [],
+            cursor: { generation: GENERATION, sequence: s.sequence },
+            client: { id: cmd.clientId, capabilities: [...state.caps] },
+          },
+        });
         return;
       }
       case 'prompt': {

@@ -512,8 +512,10 @@ replay from the stored cursor and treat `replayed: true` as a signal to dedupe b
 not by Mercury sequence.
 
 If `cursor.generation` differs from the stored generation, replay is not available — the counter's
-identity changed. Then fall back to a snapshot (`attach_snapshot` capability) rather than assuming
-continuity. Assuming it is precisely the #133 failure mode in a new costume.
+identity changed. Then fall back to a snapshot rather than assuming continuity. Assuming it is precisely
+the #133 failure mode in a new costume. This path is not built: the adapter does not advertise
+`attach_snapshot` today, because nothing consumes a snapshot yet (#194). Advertising it before the
+consumer exists is what this section warns about.
 
 ### 7.5 Discovery, not creation
 
@@ -557,13 +559,37 @@ unedited because the analysis is what drove the fix. What each row does now:
 | Required capability absent | **Shipped.** Rejected at `start()`, naming the capability. A hello with no capability list at all is refused rather than treated as capability-free. |
 | No supervisor reachable | **Shipped.** Fails with a message naming the path, where it came from, and `prime-agent status`; never spawns. A socket file left behind by a crashed supervisor is diagnosed as such rather than reported as a bare `ECONNREFUSED` (#187). |
 | Supervisor restarts mid-run | **Partial.** `supervisorGeneration` is captured and reported with the session identity, and the run ends failed with a cause instead of a timeout. There is no reattach, so nothing resumes; see §12 item 1. |
-| Generation changes | **Not shipped.** There is no snapshot-vs-replay branch. `attach_snapshot` and `chunked_snapshot` are advertised in the capability list, and that is the trap worth recording: the names make it look implemented. `resume()` throws instead of guessing. |
+| Generation changes | **Not shipped.** There is no snapshot-vs-replay branch, and `resume()` throws instead of guessing. The adapter no longer advertises `attach_snapshot` or `chunked_snapshot` for it (#194) — see the note below. |
 | `daemon_closing` received | **Shipped.** The run settles cleanly instead of hanging, and is attributed to infrastructure via `AgentExit.errorKind`, so it is auto-retried against the next supervisor and the operator reads the supervisor's own reason instead of "Agent exited with code null" (#188). |
 | Command rejected | **Shipped.** The daemon's `errorInfo.code` is surfaced, so `no_capacity` does not arrive as a timeout. |
 | Session dies while worker is idle | **Shipped.** `session_closed` ends the run as failed, and a closure the adapter caused itself is excluded so a normal completion is not read as a crash. |
 
-One row deserves emphasis. The generation row is the only place where the code *advertises* a
-capability it does not implement.
+One row deserves emphasis, because the code used to *advertise* a capability it did not implement.
+
+`attach` used to send `['event_sequence', 'extension_ui', 'slim_attach', 'chunked_snapshot',
+'attach_snapshot']`. Two of those five described behaviour that does not exist. The supervisor accepts
+any name it recognises without checking whether the client can keep its side of the contract, so an
+over-claimed capability produces no error at all — it just makes the supervisor do something the adapter
+cannot consume. Branching in the supervisor is limited to three client capabilities
+(`grep -rho 'has("...")' dist/modes/daemon/*.js`): `chunked_snapshot`, `extension_ui`, `slim_attach`.
+
+`chunked_snapshot` was the one that could actually bite:
+
+```js
+const streamsSnapshot = client.transport === "private-framed" &&
+    daemonClientCapabilitiesForSession(client, state.activeSessionId).has("chunked_snapshot");
+```
+
+Claiming it over a JSONL connection was inert **only** because the transport check short-circuits first —
+a condition Mercury does not control. `attach_snapshot` was inert by being unread: nothing branches on it.
+Both are now gone, and the rule recorded in the adapter is that a capability is added only together with
+the code that honours it.
+
+`slim_attach` stays, deliberately. The supervisor omits the top-level `state`/`messages` duplicate from the
+attach result for slim clients, and Mercury discards that result entirely, so the claim is both true and
+worth ~two full-history serialisations per attach. The mock now echoes `client: { id, capabilities }` the
+way `createAttachResult` does, which is what makes the advertised set assertable instead of merely
+readable.
 
 The `daemon_closing` row was, until #188, the only failure recorded against the wrong party: the
 supervisor went away and the agent was blamed for it, which also meant no automatic retry. The fix

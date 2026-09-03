@@ -301,11 +301,26 @@ export class DaemonAgentAdapter implements AgentAdapter {
       // attach is what subscribes this connection to the session's events; prompt alone does not.
       await this.command(session, {
         type: 'attach', activeSessionId, clientId: this.clientId(runId, session.clientNonce),
-        // extension_ui is not cosmetic. The supervisor only delivers DIALOG requests (select/confirm/
-        // input) when some attached client advertises it, so attaching without it means an agent that
-        // asks the user a question is never forwarded to Mercury and the run waits on a dialog nobody
-        // was told about. The capability folds into the same set the older supportsExtensionUi flag did.
-        capabilities: ['event_sequence', 'extension_ui', 'slim_attach', 'chunked_snapshot', 'attach_snapshot'],
+        // Advertise only capabilities this adapter actually honours. The supervisor accepts any name it
+        // recognises without checking whether the client can keep its side of the contract, so an extra
+        // entry here is an unenforced promise: nothing fails until a real code path depends on it.
+        //
+        // - event_sequence: declarative, and true -- the reader consumes meta.cursor / meta.sequence.
+        // - extension_ui: not cosmetic. The supervisor only delivers DIALOG requests (select/confirm/
+        //   input) when some attached client advertises it, so attaching without it means an agent that
+        //   asks the user a question is never forwarded to Mercury and the run waits on a dialog nobody
+        //   was told about. The capability folds into the same set the older supportsExtensionUi flag did.
+        // - slim_attach: the supervisor omits the top-level `state`/`messages` duplicate from the attach
+        //   result for slim clients. We discard that result entirely, so this only saves the supervisor
+        //   serialising the full history twice more per attach.
+        //
+        // chunked_snapshot and attach_snapshot are deliberately absent: no snapshot-vs-replay branch
+        // exists here (see the generation TODO below and design §8.1). chunked_snapshot was especially
+        // unsafe to claim -- the supervisor gates the chunked stream on
+        // `transport === 'private-framed' && has('chunked_snapshot')`, so advertising it over JSONL was
+        // inert only by luck of a condition we do not own. Re-add either one only together with the code
+        // that consumes it.
+        capabilities: ['event_sequence', 'extension_ui', 'slim_attach'],
       });
 
       await this.command(session, {
