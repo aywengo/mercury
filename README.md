@@ -18,10 +18,6 @@ generic `LocalAgentAdapter`, `RemoteAgentAdapter`, and `RpcAgentAdapter` (pi / o
 JSONL CLI). The two worker-level leftovers (resume wiring into retry, cancel race for hanging
 agents) are implemented — see §7 "Known gaps".
 
-**CI and GitHub Actions cost?** See [`docs/ci-cost.md`](docs/ci-cost.md) — what a CI run actually bills,
-why a red check can mean "the runner never started" rather than "the code is wrong", and how to keep the
-pipeline free.
-
 The short version:
 
 ```bash

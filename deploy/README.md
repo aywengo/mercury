@@ -154,3 +154,34 @@ Two things about this unit are load-bearing rather than stylistic:
 
 Fleet refuses to bind a non-loopback address without TLS, by design. Put it behind a reverse proxy if it
 must be reachable beyond the host.
+
+## CI (GitHub Actions)
+
+`.github/workflows/ci.yml` runs on `ubuntu-latest` only, and the repository is public, so Linux runner
+minutes are free. Keep it that way: **macOS and Windows legs still bill, as do artifact uploads and
+larger runner sizes** -- none are used today, and adding one reintroduces a bill.
+
+Measured cost, so this can be reasoned about without re-measuring: **~11.2 job-minutes per run**
+(node 24.x ~4.9, node 23.6.0 ~5.1, the uninstalled-checkout guard ~1.1). Billed minutes are the sum
+across jobs, so the run page's wall-clock understates it roughly threefold.
+
+**Before debugging a red run, check that it ran.** When the account's Actions allowance was exhausted,
+every job failed with "recent account payments have failed or your spending limit needs to be increased"
+while executing ZERO steps and dying in about two seconds. A red check that ran nothing says nothing
+about the code. No steps in `gh run view <id> --log`, or a job whose `started_at` and `completed_at` are
+nearly equal, is that signature.
+
+If the repository ever goes private again, minutes become metered and the reductions to make -- in order
+of saving, each with its trade-off -- are recorded in issue #218, together with a pending patch that adds
+`timeout-minutes` to every job and stops draft PRs from triggering CI. That patch cannot be applied with
+the dev box's current OAuth token: GitHub refuses any write to `.github/workflows/` without the
+`workflow` scope (`gh auth refresh -s workflow`).
+
+Two things deliberately left alone: the `23.6.0` matrix leg, because `package.json` `engines` declares
+`>=23.6` as the supported floor and dropping the leg is a support-policy change that should follow
+`engines` rather than precede it; and the `push: [main]` trigger, because the merge commit rather than
+the PR head is the real state of `main`.
+
+Do not add `paths-ignore: ['**/*.md']` to skip CI on documentation changes. `test/deployDocs.test.ts`
+and `test/backup.test.ts` assert on the CONTENT of this file, so ignoring markdown would let a
+documentation change that breaks a doc test merge unverified.
