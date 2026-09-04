@@ -1090,7 +1090,7 @@ test('the backlog timer and alert path work with no runs at all (issue #73 L2 co
 // keeps the event loop alive past `TimeoutStopSec=45`, converting a graceful shutdown into a
 // SIGKILL -- the exact failure mode issue #51 was raised to remove.
 test('a run whose agent stream throws leaves no pending timer (issue #67)', async () => {
-  // getActiveResourcesInfo exists on the runtimes this project declares (engines: node >=23.6) but
+  // getActiveResourcesInfo exists on the runtimes this project declares (engines: node >=22.18) but
   // is not part of the documented public API, so a cast plus a presence check rather than a bare
   // cast: if it is ever absent the test must skip with a reason, not throw a TypeError and be read
   // as a product failure.

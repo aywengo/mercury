@@ -424,7 +424,7 @@ Setting a depth also makes `req.secure` honour `X-Forwarded-Proto`, so the sessi
 
 ## Infrastructure requirements
 
-- Node.js ≥ 23.6 (uses built-in `node:sqlite` and native TypeScript type-stripping — no build step, no native deps)
+- Node.js ≥ 22.18 (uses built-in `node:sqlite` and native TypeScript type-stripping — no build step, no native deps)
 - `git` (for worktree isolation)
 - SQLite (embedded via `node:sqlite`)
 

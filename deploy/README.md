@@ -161,8 +161,8 @@ must be reachable beyond the host.
 minutes are free. Keep it that way: **macOS and Windows legs still bill, as do artifact uploads and
 larger runner sizes** -- none are used today, and adding one reintroduces a bill.
 
-Measured cost, so this can be reasoned about without re-measuring: **~11.2 job-minutes per run**
-(node 24.x ~4.9, node 23.6.0 ~5.1, the uninstalled-checkout guard ~1.1). Billed minutes are the sum
+Measured cost, so this can be reasoned about without re-measuring: **~11.2 job-minutes per run** on the
+two-Node matrix (each test leg ~5, the uninstalled-checkout guard ~1.1). Billed minutes are the sum
 across jobs, so the run page's wall-clock understates it roughly threefold.
 
 **Before debugging a red run, check that it ran.** When the account's Actions allowance was exhausted,
@@ -171,16 +171,21 @@ while executing ZERO steps and dying in about two seconds. A red check that ran 
 about the code. No steps in `gh run view <id> --log`, or a job whose `started_at` and `completed_at` are
 nearly equal, is that signature.
 
-If the repository ever goes private again, minutes become metered and the reductions to make -- in order
-of saving, each with its trade-off -- are recorded in issue #218, together with a pending patch that adds
-`timeout-minutes` to every job and stops draft PRs from triggering CI. That patch cannot be applied with
-the dev box's current OAuth token: GitHub refuses any write to `.github/workflows/` without the
-`workflow` scope (`gh auth refresh -s workflow`).
+If the repository ever goes private again, minutes become metered and the remaining reductions to make --
+in order of saving, each with its trade-off -- are recorded in issue #218. The two that were pending
+there have since landed: `timeout-minutes` on every job, and draft PRs no longer triggering CI.
 
-Two things deliberately left alone: the `23.6.0` matrix leg, because `package.json` `engines` declares
-`>=23.6` as the supported floor and dropping the leg is a support-policy change that should follow
-`engines` rather than precede it; and the `push: [main]` trigger, because the merge commit rather than
-the PR head is the real state of `main`.
+**Editing workflows from a machine whose token lacks the `workflow` scope.** GitHub refuses any write to
+`.github/workflows/` from an OAuth token without that scope (`gh auth refresh -s workflow`), and it does
+so for `git push` and API commits alike -- no transport workaround, and it blocks the whole branch ref
+because the commit contains a workflow file. The scope governs writes made *by OAuth tokens*, not a
+signed-in browser session, so **editing the file in the github.com web editor needs no token change at
+all** and is the fastest path when the scope is missing.
+
+The Node matrix follows `package.json` `engines` rather than leading it. It was `23.6.0` plus `24.x`
+while `engines` declared `>=23.6`, which tested an end-of-life runtime (Node 23 lost support in June 2025)
+and excluded Node 22 LTS, which passes the whole suite from 22.18. Both moved together in #222. The
+`push: [main]` trigger stays because the merge commit, not the PR head, is the real state of `main`.
 
 Do not add `paths-ignore: ['**/*.md']` to skip CI on documentation changes. `test/deployDocs.test.ts`
 and `test/backup.test.ts` assert on the CONTENT of this file, so ignoring markdown would let a
