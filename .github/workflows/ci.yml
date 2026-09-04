@@ -33,7 +33,7 @@ jobs:
         # 23.6.0 is the exact floor declared in package.json `engines`. Testing it explicitly is
         # the point: `node:sqlite` only became usable around that release, so an LTS-only job
         # would happily pass while the floor was broken.
-        node-version: ['23.6.0', '24.x']
+        node-version: ['22.x', '24.x']
     name: test (node ${{ matrix.node-version }})
     steps:
       - uses: actions/checkout@v4
