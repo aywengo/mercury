@@ -181,6 +181,8 @@ import {
   DEFAULT_ENV_ALLOWLIST,
   forwardedCredentialValues,
   resolveEnvAllowlist,
+  subThresholdForwardedCredentials,
+  MIN_CREDENTIAL_LEN,
 } from '../src/sandbox/sandboxManager.ts';
 
 test('forwardedCredentialValues picks up forwarded provider keys by value', () => {
@@ -260,4 +262,46 @@ test('the CLI wires forwarded credentials into the redactor (issue #214)', () =>
     /createRedactor\(\s*\[[^)]*forwardedCredentialValues/s,
     'cli.ts must pass forwardedCredentialValues() into createRedactor()',
   );
+});
+
+test('a forwarded credential too short to redact is REPORTED, not silently skipped (issue #214)', () => {
+  // Declining to redact a 12-char key is the right call, but a silent gap here is indistinguishable
+  // from a working redactor. The gap has to be loud.
+  const env = { OPENAI_API_KEY: 'shorty-key-12', ANTHROPIC_API_KEY: 'sk-ant-' + 'A'.repeat(60) };
+  assert.deepEqual(subThresholdForwardedCredentials(env, null), ['OPENAI_API_KEY']);
+  // and it is still not added to the redaction set
+  assert.deepEqual(forwardedCredentialValues(env, null), [env.ANTHROPIC_API_KEY]);
+});
+
+test('the startup warning names the variable without leaking its value (issue #214)', () => {
+  // A warning ABOUT a secret that prints the secret would be a worse bug than the one being fixed.
+  const KEY = 'tiny-key-42';
+  const vars = subThresholdForwardedCredentials({ HF_TOKEN: KEY }, null);
+  const line = JSON.stringify({ vars, minLength: MIN_CREDENTIAL_LEN });
+  assert.ok(vars.includes('HF_TOKEN'), 'the variable is named');
+  assert.ok(!line.includes(KEY), `the warning would print the secret value: ${line}`);
+});
+
+test('a forwarded value with stray whitespace is still redacted (issue #214)', () => {
+  // Keys pasted from a dashboard often carry a trailing newline. The threshold decides on the
+  // trimmed form, but the UNTRIMMED value is what must match, or the key leaks via its own padding.
+  const KEY = 'sk-ant-' + 'A'.repeat(50) + '\n';
+  const values = forwardedCredentialValues({ ANTHROPIC_API_KEY: KEY }, null);
+  assert.deepEqual(values, [KEY], 'the untrimmed value is the redaction target');
+  const out = createRedactor(values).redact(`dump: ${KEY}`);
+  assert.ok(!out.includes('sk-ant-'), `padded key survived redaction: ${JSON.stringify(out)}`);
+});
+
+test('the CLI warns about credentials it will forward but cannot redact (issue #214)', () => {
+  // The length floor is a deliberate gap, so it has to be visible. Without this guard a refactor
+  // can delete the warning and every unit test stays green while operators run with an unscrubbed
+  // key in scope and no idea.
+  const cli = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  assert.match(cli, /subThresholdForwardedCredentials\(process\.env, config\.sandboxEnv\)/,
+    'cli.ts must compute the sub-threshold forwarded credentials');
+  assert.match(cli, /logger\.warn\(\s*\{\s*vars: tooShort/,
+    'cli.ts must warn, naming the variables');
+  // and must not print the values
+  assert.doesNotMatch(cli, /vars:\s*\[[^\]]*tooShort[^\]]*values/s,
+    'the warning must carry names only, never the secret values');
 });

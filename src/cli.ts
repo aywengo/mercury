@@ -33,7 +33,11 @@ import { RemoteAgentRegistry } from './adapters/remoteAgentRegistry.ts';
 import { RpcAgentRegistry } from './adapters/rpcAgentRegistry.ts';
 import { HermesAgentAdapter } from './adapters/hermesAgentAdapter.ts';
 import { ClaudeCodeAdapter } from './adapters/claudeCodeAdapter.ts';
-import { forwardedCredentialValues } from './sandbox/sandboxManager.ts';
+import {
+  forwardedCredentialValues,
+  MIN_CREDENTIAL_LEN,
+  subThresholdForwardedCredentials,
+} from './sandbox/sandboxManager.ts';
 import { selectPrimeAgentAdapter } from './adapters/selectAgentAdapter.ts';
 import { SandboxManager } from './sandbox/sandboxManager.ts';
 import { Worker } from './worker/worker.ts';
@@ -54,6 +58,16 @@ async function main(): Promise<void> {
   ]);
   const logger = createLogger(redactor, config.logLevel);
 
+  // A forwarded credential below the length floor is handed to an untrusted agent and NOT scrubbed.
+  // Say so at startup: a silent gap here looks exactly like a working redactor. Names only -- a
+  // warning about a secret must not leak the secret into its own log line.
+  const tooShort = subThresholdForwardedCredentials(process.env, config.sandboxEnv);
+  if (tooShort.length > 0) {
+    logger.warn(
+      { vars: tooShort, minLength: MIN_CREDENTIAL_LEN },
+      'forwarded credentials too short to redact; their values may appear in events and logs',
+    );
+  }
   if (cmd === 'migrate') {
     const db = openDatabase(config.dbPath);
     logger.info({ db: config.dbPath }, 'migrations applied');

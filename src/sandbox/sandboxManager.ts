@@ -129,15 +129,39 @@ export function forwardedCredentialValues(
   env: NodeJS.ProcessEnv = process.env,
   sandboxEnv: string[] | null = null,
 ): string[] {
-  const names = resolveEnvAllowlist(
-    sandboxEnv === null ? undefined : sandboxEnv.join(','),
-  );
+  return forwardedCredentials(env, sandboxEnv).values;
+}
+
+/**
+ * The forwarded variables whose values are TOO SHORT to redact safely (issue #214).
+ *
+ * These are names the sandbox will hand to an untrusted agent that the redactor then declines to
+ * scrub -- a real gap, and one that would otherwise be invisible. Reported by NAME, never by value,
+ * so the warning about a secret cannot itself leak the secret into the log line.
+ */
+export function subThresholdForwardedCredentials(
+  env: NodeJS.ProcessEnv = process.env,
+  sandboxEnv: string[] | null = null,
+): string[] {
+  return forwardedCredentials(env, sandboxEnv).tooShort;
+}
+
+function forwardedCredentials(
+  env: NodeJS.ProcessEnv,
+  sandboxEnv: string[] | null,
+): { values: string[]; tooShort: string[] } {
+  const names = resolveEnvAllowlist(sandboxEnv === null ? undefined : sandboxEnv.join(','));
   const values = new Set<string>();
+  const tooShort: string[] = [];
   for (const name of names) {
     const value = env[name];
-    if (typeof value === 'string' && value.trim().length >= MIN_CREDENTIAL_LEN) values.add(value);
+    if (typeof value !== 'string' || value.trim().length === 0) continue;
+    // Trimmed length decides, but the UNTRIMMED value is what gets matched, so a key with stray
+    // whitespace is still scrubbed rather than silently kept because of how it was pasted.
+    if (value.trim().length < MIN_CREDENTIAL_LEN) tooShort.push(name);
+    else values.add(value);
   }
-  return [...values];
+  return { values: [...values], tooShort };
 }
 
 /** Never forwarded regardless of configuration: these compromise Mercury itself. */

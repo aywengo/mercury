@@ -12,6 +12,11 @@ import { tempDir, tempFile } from './helpers.ts';
 
 const MOCK = join(import.meta.dirname, 'fixtures', 'mock-claude-code.mjs');
 
+/** Every spawn the mock recorded, in order. One JSON array per line. */
+function readSpawns(file: string): string[][] {
+  return readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as string[]);
+}
+
 function makeRun(overrides: Partial<Run> = {}): Run {
   const now = new Date().toISOString();
   return {
@@ -114,7 +119,9 @@ test('--verbose is ALWAYS passed: stream-json hard-fails without it', async () =
   const ctx = makeContext();
   await drain(await a.start(ctx));
   a.dispose(ctx.run.id);
-  const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+  const spawns = readSpawns(argvFile);
+  assert.equal(spawns.length, 1, 'expected exactly one spawn');
+  const argv = spawns[0];
   assert.ok(argv.includes('-p'), 'must be non-interactive');
   assert.ok(argv.includes('stream-json'), 'must request the JSONL stream');
   assert.ok(argv.includes('--verbose'), '--verbose is mandatory for stream-json');
@@ -133,7 +140,9 @@ test('configured flags reach argv', async () => {
   const ctx = makeContext();
   await drain(await a.start(ctx));
   a.dispose(ctx.run.id);
-  const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+  const spawns = readSpawns(argvFile);
+  assert.equal(spawns.length, 1, 'expected exactly one spawn');
+  const argv = spawns[0];
   const after = (flag: string) => argv[argv.indexOf(flag) + 1];
   assert.equal(after('--model'), 'claude-sonnet-4-5');
   assert.equal(after('--allowedTools'), 'Bash(git:*) Edit');
@@ -148,7 +157,9 @@ test('skipPermissions is OFF by default: the sandbox-only knob is never implicit
   const ctx = makeContext();
   await drain(await a.start(ctx));
   a.dispose(ctx.run.id);
-  const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+  const spawns = readSpawns(argvFile);
+  assert.equal(spawns.length, 1, 'expected exactly one spawn');
+  const argv = spawns[0];
   assert.ok(!argv.includes('--dangerously-skip-permissions'));
 });
 
@@ -161,7 +172,9 @@ test('the task goes to stdin and never into argv', async () => {
   const ctx = makeContext(task);
   await drain(await a.start(ctx));
   a.dispose(ctx.run.id);
-  const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+  const spawns = readSpawns(argvFile);
+  assert.equal(spawns.length, 1, 'expected exactly one spawn');
+  const argv = spawns[0];
   const seen = JSON.parse(readFileSync(envFile, 'utf8')) as { task: string };
   assert.ok(!argv.some((x) => x.includes('RECONCILABLE-TASK-TEXT')), 'task must not be in argv');
   assert.equal(seen.task, task, 'task must arrive complete on stdin');
@@ -213,8 +226,11 @@ test('a JSONL object split across two stdout chunks is still parsed', async () =
 });
 
 test('resume passes -r with the session id captured from the stream', async () => {
-  // The adapter records argv on EVERY spawn, so: start (records argv #1, captures the id from the
-  // init event), then resume (overwrites with argv #2, which must carry -r <that id>).
+  // The mock APPENDS argv per spawn, so this asserts the spawn COUNT as well as its flags. That
+  // matters: when the file was overwritten in place, a resume whose spawn never happened (EMFILE
+  // under full-suite parallelism) left the FIRST spawn's argv on disk and the test reported
+  // "resume must pass -r" -- the wrong diagnosis for a spawn that did not occur. Counting spawns
+  // separates "did not spawn" from "spawned without the flag".
   const argvFile = tempFile('claude-argv-', '.json');
   const a = adapter({ env: { MOCK_CLAUDE_ARGV_FILE: argvFile } });
   const ctx = makeContext();
@@ -223,10 +239,28 @@ test('resume passes -r with the session id captured from the stream', async () =
   assert.match(firstId, /^[0-9a-f-]{36}$/);
 
   const resumed = await a.resume(ctx.run.id, ctx);
-  await drain(resumed);
+  const { events: resumedEvents, exit: resumedExit } = await drain(resumed);
   a.dispose(ctx.run.id);
 
-  const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+  // Assert the resume actually RAN before asserting what it was launched with. Under full-suite
+  // parallelism a spawn can fail outright; without this the test blames the -r flag for a process
+  // that never started, which is what it did for two days.
+  assert.equal(
+    resumedExit.reason, 'completed',
+    `resume did not run (exit ${JSON.stringify(resumedExit)}, ${resumedEvents.length} events) -- `
+    + 'the spawn failed, most likely resource pressure from the parallel suite',
+  );
+
+  // The child appends argv before it emits anything, so by now the line exists; the short poll only
+  // absorbs filesystem latency on a loaded machine rather than papering over a missing spawn.
+  let spawns = readSpawns(argvFile);
+  for (let i = 0; spawns.length < 2 && i < 40; i++) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    spawns = readSpawns(argvFile);
+  }
+  assert.equal(spawns.length, 2, `expected a start spawn and a resume spawn, got ${spawns.length}`);
+  assert.ok(!spawns[0].includes('-r'), 'the FIRST spawn is a fresh run and must not resume');
+  const argv = spawns[1];
   assert.ok(argv.includes('-r'), 'resume must pass -r');
   assert.equal(argv[argv.indexOf('-r') + 1], firstId, 'and it must be the id from the stream');
   assert.ok(argv.includes('--verbose'), 'resume must still satisfy the stream-json requirement');
