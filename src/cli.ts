@@ -33,6 +33,11 @@ import { RemoteAgentRegistry } from './adapters/remoteAgentRegistry.ts';
 import { RpcAgentRegistry } from './adapters/rpcAgentRegistry.ts';
 import { HermesAgentAdapter } from './adapters/hermesAgentAdapter.ts';
 import { ClaudeCodeAdapter } from './adapters/claudeCodeAdapter.ts';
+import {
+  forwardedCredentialValues,
+  MIN_CREDENTIAL_LEN,
+  subThresholdForwardedCredentials,
+} from './sandbox/sandboxManager.ts';
 import { selectPrimeAgentAdapter } from './adapters/selectAgentAdapter.ts';
 import { SandboxManager } from './sandbox/sandboxManager.ts';
 import { Worker } from './worker/worker.ts';
@@ -43,9 +48,26 @@ const SKILLS_DIR = resolve(import.meta.dirname, '..', '.agents', 'skills');
 async function main(): Promise<void> {
   const [cmd, ...args] = process.argv.slice(2);
   const config = loadConfig();
-  const redactor = createRedactor(config.secrets);
+  // Two layers (issue #214): the operator's declared MERCURY_SECRETS, plus the exact VALUES of
+  // the provider credentials this process may hand to a Run. The second layer is what makes
+  // redaction track forwarding instead of guessing at key shapes -- if the sandbox can pass a key
+  // to an agent, that key cannot come back out through an event.
+  const redactor = createRedactor([
+    ...config.secrets,
+    ...forwardedCredentialValues(process.env, config.sandboxEnv),
+  ]);
   const logger = createLogger(redactor, config.logLevel);
 
+  // A forwarded credential below the length floor is handed to an untrusted agent and NOT scrubbed.
+  // Say so at startup: a silent gap here looks exactly like a working redactor. Names only -- a
+  // warning about a secret must not leak the secret into its own log line.
+  const tooShort = subThresholdForwardedCredentials(process.env, config.sandboxEnv);
+  if (tooShort.length > 0) {
+    logger.warn(
+      { vars: tooShort, minLength: MIN_CREDENTIAL_LEN },
+      'forwarded credentials too short to redact; their values may appear in events and logs',
+    );
+  }
   if (cmd === 'migrate') {
     const db = openDatabase(config.dbPath);
     logger.info({ db: config.dbPath }, 'migrations applied');

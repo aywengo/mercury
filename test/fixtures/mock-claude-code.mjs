@@ -15,14 +15,17 @@
 //   resume       emit a DIFFERENT session id, as the real CLI does on -r
 //   hang         emit init then never finish (cancel/terminate tests)
 //   noresult     emit assistant text but no result event, exit 0
-import { readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 
 const MODE = process.env.MOCK_CLAUDE_MODE ?? 'success';
 const ARGV_FILE = process.env.MOCK_CLAUDE_ARGV_FILE;
 const ENV_FILE = process.env.MOCK_CLAUDE_ENV_FILE;
 
 if (ARGV_FILE) {
-  writeFileSync(ARGV_FILE, JSON.stringify(process.argv.slice(2)));
+  // APPEND one JSON array per spawn. Overwriting meant a test could not tell "this spawn never
+  // happened" (EMFILE under full-suite parallelism) from "this spawn lacked the flag", and it
+  // reported the wrong one. JSONL lets each test assert the spawn COUNT as well as its argv.
+  appendFileSync(ARGV_FILE, JSON.stringify(process.argv.slice(2)) + '\n');
 }
 if (ENV_FILE) {
   writeFileSync(ENV_FILE, JSON.stringify({
