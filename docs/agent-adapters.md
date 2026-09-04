@@ -140,7 +140,7 @@ codex exec --model <model>                 # model override
 
 **Effort:** M (adapter + translator + mock fixture + ~8 tests).
 
-### Phase 2 — ClaudeCodeAdapter (Anthropic Claude Code) — *high priority*
+### Phase 2 — ClaudeCodeAdapter (Anthropic Claude Code) — ✅ **implemented** (see 8.2.1 for where this section is wrong)
 
 **Interface (verified locally):**
 
@@ -180,6 +180,71 @@ claude --model <model>                           # model override
 - `--include-partial-messages` gives streaming text deltas → richer `agent.message`.
 
 **Effort:** M (same template as Codex).
+
+#### 8.2.1 As built (implemented)
+
+Implemented in `src/adapters/claudeCodeAdapter.ts`, wired as the `claude` adapter in `src/cli.ts`
+(`MERCURY_CLAUDE_*` env vars), tested by `test/claudeCodeAdapter.test.ts` against
+`test/fixtures/mock-claude-code.mjs`.
+
+**The table above does not describe claude 1.0.3, which is the version installed here.** Everything
+below was checked against the running binary (`claude --help`, plus real `stream-json` output
+captured from live runs), not inferred. A fixture written from this table would have reproduced the
+table's errors instead of catching them, so the mock replays the captured stdout byte-for-byte.
+
+Flags the table lists that **do not exist** in 1.0.3:
+
+| table says | reality |
+| --- | --- |
+| `--input-format stream-json` | absent — so `sendInput()` is impossible and **throws** rather than dropping input |
+| `--session-id <uuid>` | absent — the id is read from the `system`/init event instead |
+| `--permission-mode <mode>` | absent — `--dangerously-skip-permissions` is the only knob, and it is opt-in |
+| `--include-partial-messages` | absent — there is no `stream_event`, so no partial `agent.message` deltas |
+| `--max-turns <n>` | absent — no turn budget from here |
+| `--allowedTools "Bash(git *)"` | syntax is `Bash(git:*)` (colon, not space) |
+
+Two behaviours the table omits, both load-bearing:
+
+1. **`-p --output-format stream-json` fails outright without `--verbose`:**
+   `Error: When using --print, --output-format=stream-json requires --verbose`. `--verbose` is
+   therefore unconditional, not a debug nicety.
+2. **A failed run reports `"subtype":"success"` together with `"is_error":true` and exits 1.**
+   Mapping `result` → `run.completed` on `subtype` — which is what the table's `result (final)` row
+   invites — marks failures as completed. `is_error` is authoritative and the exit code is checked
+   too, either alone being sufficient to fail.
+
+Verified event shapes (captured, not assumed):
+
+```
+{"type":"system","subtype":"init","session_id":"<uuid>","tools":[...],"mcp_servers":[...]}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_…","name":"Bash","input":{…}}]},"session_id":"…"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_…","is_error":false,"content":"…"}]},"session_id":"…"}
+{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"…","session_id":"…"}
+```
+
+Three consequences of those shapes that the table does not mention:
+
+- **`tool_result` carries no tool name**, only `tool_use_id`. The adapter keeps a `tool_use.id → name`
+  map, or `tool.completed`/`tool.failed` would report `unknown` and the UI could not say what finished.
+- **`result.result` repeats the final assistant text verbatim.** It is emitted only when no assistant
+  text arrived, so the timeline shows the message once instead of twice.
+- **Resuming session X mints a NEW session id Y** (confirmed: `num_turns` carried over, id did not).
+  The adapter refreshes its stored id from every init event; keeping X would resume a stale id on the
+  second retry.
+
+Task text goes to **stdin**, never argv: `-p` with no positional prompt reads stdin (verified). That
+sidesteps `ARG_MAX` for long tasks and keeps run tasks out of every `ps` on the host.
+
+`--dangerously-skip-permissions` is **off by default** and opt-in: the CLI's own help says it "only
+works in Docker containers with no internet access", so it is a sandbox-only knob.
+
+**What is NOT implemented, stated plainly:** `sendInput()` and therefore the
+`input.required`/`input.received` round-trip (acceptance criterion 3). The table's line "Claude's
+permission prompts surface as `user` events with `is_error`/permission payloads → translate to
+`input.required`" is not reachable in 1.0.3: with no `--input-format` there is no channel to answer a
+prompt even if one were detected, so detecting it would produce a run waiting forever on input nobody
+can deliver. `sendInput()` throws with that explanation instead — the same documented-throw shape
+`HermesAgentAdapter` uses. Acceptance criteria 1, 2, 4, 5, 6, 7, 8 and 9 are met.
 
 ### Phase 3 — HermesAgentAdapter (Nous Research Hermes Agent) — ✅ **implemented**
 
@@ -944,15 +1009,17 @@ Two rules, both enforced by `test/adapterExitSettlement.test.ts`:
    forbids.
 2. **`settleExit()` has exactly one definition in `src/`.**
 
-Rows 1-2, 4 and 6 of the table below are all still to be written. Each is a new adapter, which is
-exactly the situation that produced this issue six times over; reuse is the whole point.
+Rows 1, 4 and 6 of the table below are still to be written (row 2, ClaudeCodeAdapter, is done and reused
+`createExitGate()`/`settleExit()` rather than growing a seventh copy). Each remaining row is a new
+adapter, which is exactly the situation that produced this issue six times over; reuse is the whole
+point.
 
 ## 9. Suggested implementation order
 
 | # | Adapter | Pattern | Effort | Depends on |
 | --- | --- | --- | --- | --- |
 | 1 | CodexAdapter | A (CLI JSONL) | M | — |
-| 2 | ClaudeCodeAdapter | A (CLI JSONL) | M | — |
+| 2 | ClaudeCodeAdapter | A (CLI JSONL) | M | ✅ done (see 8.2.1 — the Phase 2 flag list does not match claude 1.0.3) |
 | 3 | HermesAgentAdapter | A (CLI text) | S–M | ✅ done |
 | 4 | GeminiAdapter | A (CLI JSONL) | M | — |
 | 5 | LocalAgentAdapter | A (generic) | M | ✅ done |
