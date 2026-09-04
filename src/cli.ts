@@ -32,6 +32,7 @@ import { LocalAgentRegistry } from './adapters/localAgentRegistry.ts';
 import { RemoteAgentRegistry } from './adapters/remoteAgentRegistry.ts';
 import { RpcAgentRegistry } from './adapters/rpcAgentRegistry.ts';
 import { HermesAgentAdapter } from './adapters/hermesAgentAdapter.ts';
+import { ClaudeCodeAdapter } from './adapters/claudeCodeAdapter.ts';
 import { selectPrimeAgentAdapter } from './adapters/selectAgentAdapter.ts';
 import { SandboxManager } from './sandbox/sandboxManager.ts';
 import { Worker } from './worker/worker.ts';
@@ -96,6 +97,17 @@ async function main(): Promise<void> {
       runBudgetSeconds: envInt(process.env.MERCURY_HERMES_RUN_BUDGET_SECONDS),
       yolo: process.env.MERCURY_HERMES_YOLO === 'true',
       acceptHooks: process.env.MERCURY_HERMES_ACCEPT_HOOKS === 'true',
+    }),
+    claude: new ClaudeCodeAdapter({
+      cmd: process.env.MERCURY_CLAUDE_CMD ?? 'claude',
+      args: (process.env.MERCURY_CLAUDE_ARGS ?? '').split(/\s+/).filter(Boolean),
+      sandbox,
+      workerId,
+      model: process.env.MERCURY_CLAUDE_MODEL || undefined,
+      allowedTools: process.env.MERCURY_CLAUDE_ALLOWED_TOOLS || undefined,
+      disallowedTools: process.env.MERCURY_CLAUDE_DISALLOWED_TOOLS || undefined,
+      mcpConfig: process.env.MERCURY_CLAUDE_MCP_CONFIG || undefined,
+      skipPermissions: process.env.MERCURY_CLAUDE_SKIP_PERMISSIONS === 'true',
     }),
     // declarative local CLI agents (docs/agent-adapters.md section 4):
     // JSON configs in MERCURY_LOCAL_AGENTS_DIR (default ./local-agents)
