@@ -182,10 +182,12 @@ because the commit contains a workflow file. The scope governs writes made *by O
 signed-in browser session, so **editing the file in the github.com web editor needs no token change at
 all** and is the fastest path when the scope is missing.
 
-The Node matrix follows `package.json` `engines` rather than leading it. It was `23.6.0` plus `24.x`
-while `engines` declared `>=23.6`, which tested an end-of-life runtime (Node 23 lost support in June 2025)
-and excluded Node 22 LTS, which passes the whole suite from 22.18. Both moved together in #222. The
-`push: [main]` trigger stays because the merge commit, not the PR head, is the real state of `main`.
+The Node matrix follows `package.json` `engines` rather than leading it. `engines` once declared
+`>=23.6` while the matrix tested `23.6.0` plus `24.x`: that spent CI on an end-of-life runtime (Node 23
+lost support in June 2025) and excluded Node 22 LTS, which passes the whole suite from 22.18. Issue #222
+corrected the floor to `>=22.18.0`; the matrix is expected to track it (`['22.x', '24.x']`), and
+`test/nodeFloor.test.ts` fails if a leg ever falls below the declared floor. The `push: [main]` trigger
+stays because the merge commit, not the PR head, is the real state of `main`.
 
 Do not add `paths-ignore: ['**/*.md']` to skip CI on documentation changes. `test/deployDocs.test.ts`
 and `test/backup.test.ts` assert on the CONTENT of this file, so ignoring markdown would let a
