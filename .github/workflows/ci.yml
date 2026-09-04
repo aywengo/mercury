@@ -30,10 +30,14 @@ jobs:
       # at the first failure: a floor-only break and an LTS-only break are different problems.
       fail-fast: false
       matrix:
-        # 23.6.0 is the exact floor declared in package.json `engines`. Testing it explicitly is
-        # the point: `node:sqlite` only became usable around that release, so an LTS-only job
-        # would happily pass while the floor was broken.
-        node-version: ['23.6.0', '24.x']
+        # 22.18.0 is the exact floor declared in package.json `engines`, and it is tested by exact
+        # version rather than as `22.x` on purpose: `22.x` resolves to the LATEST 22, so a change that
+        # broke only on the floor would pass CI while every supported user kept working. The floor is
+        # the later of two measured boundaries -- flag-free `node:sqlite` (22.13) and flag-free
+        # TypeScript type stripping (22.18), which production needs because it runs `node src/cli.ts`
+        # with no build step. Both were measured against real Node binaries, not release notes.
+        # If `engines` moves, change it here and in the same commit, or test/nodeFloor.test.ts fails.
+        node-version: ['22.18.0', '24.x']
     name: test (node ${{ matrix.node-version }})
     steps:
       - uses: actions/checkout@v4
