@@ -79,7 +79,13 @@ const DEFAULT_IMAGE = 'node:22-bookworm-slim';
  * Copying process.env wholesale would hand an untrusted agent the keys to the whole service.
  * Operators who need more set MERCURY_SANDBOX_ENV explicitly.
  */
-const DEFAULT_ENV_ALLOWLIST = [
+/**
+ * Provider credential variables forwarded into the sandbox by default. Exported because the
+ * redactor needs the same list: whatever we hand to an untrusted agent must be the exact set we
+ * scrub from events, and a second copy of this list would drift (issue #214). The drift failure
+ * mode is silent -- events would look redacted while carrying a live key.
+ */
+export const DEFAULT_ENV_ALLOWLIST = [
   'ANTHROPIC_API_KEY',
   'OPENAI_API_KEY',
   'GEMINI_API_KEY',
@@ -91,6 +97,48 @@ const DEFAULT_ENV_ALLOWLIST = [
   'OPENROUTER_API_KEY',
   'HF_TOKEN',
 ];
+
+/**
+ * Resolve the effective forwarded-credential NAMES from MERCURY_SANDBOX_ENV.
+ *
+ * `undefined` means "use the built-in provider list"; a set-but-empty string means "forward nothing
+ * but PATH". `??` alone cannot express that, and operators narrowing the list to nothing is the
+ * security-relevant case, so the distinction is preserved here rather than at the call site.
+ */
+export function resolveEnvAllowlist(raw: string | undefined): string[] {
+  return raw !== undefined
+    ? raw.split(',').map((v) => v.trim()).filter(Boolean)
+    : [...DEFAULT_ENV_ALLOWLIST];
+}
+
+/**
+ * The VALUES of the credentials a Run may receive, for exact redaction (issue #214).
+ *
+ * Prefix patterns are a floor; this is the layer that actually closes the gap, because it does not
+ * care what the key looks like. It redacts precisely the secrets Mercury itself puts in reach of an
+ * untrusted agent, which is the set that can plausibly come back out in a tool result.
+ *
+ * Values shorter than MIN_CREDENTIAL_LEN are skipped. We are GUESSING these are secrets, unlike an
+ * operator's explicit MERCURY_SECRETS list: a dev `OPENAI_API_KEY=test` is not a secret, and
+ * matching it as a plain substring would blank every occurrence of "test" in every event, log line
+ * and diff the system ever produced. Real provider keys are far longer.
+ */
+export const MIN_CREDENTIAL_LEN = 16;
+
+export function forwardedCredentialValues(
+  env: NodeJS.ProcessEnv = process.env,
+  sandboxEnv: string[] | null = null,
+): string[] {
+  const names = resolveEnvAllowlist(
+    sandboxEnv === null ? undefined : sandboxEnv.join(','),
+  );
+  const values = new Set<string>();
+  for (const name of names) {
+    const value = env[name];
+    if (typeof value === 'string' && value.trim().length >= MIN_CREDENTIAL_LEN) values.add(value);
+  }
+  return [...values];
+}
 
 /** Never forwarded regardless of configuration: these compromise Mercury itself. */
 const NEVER_FORWARD = [
@@ -133,11 +181,7 @@ export class SandboxManager {
     // An explicitly empty string means "forward nothing"; only an UNSET variable falls back to
     // the default list. `?? ` alone cannot express that, and operators narrowing the list to
     // nothing is the security-relevant case.
-    this.envAllowlist =
-      opts.envAllowlist ??
-      (process.env.MERCURY_SANDBOX_ENV !== undefined
-        ? process.env.MERCURY_SANDBOX_ENV.split(',').map((v) => v.trim()).filter(Boolean)
-        : [...DEFAULT_ENV_ALLOWLIST]);
+    this.envAllowlist = opts.envAllowlist ?? resolveEnvAllowlist(process.env.MERCURY_SANDBOX_ENV);
     this.diskLimitsSupported =
       opts.diskLimitsSupported ?? process.env.MERCURY_SANDBOX_DISK_LIMITS === 'true';
     const explicit = opts.runtime ?? process.env.MERCURY_SANDBOX_RUNTIME;

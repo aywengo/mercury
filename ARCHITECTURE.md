@@ -1272,6 +1272,39 @@ Third-party skills must receive the same review, sandboxing and security treatme
 
 **Hardening (implemented in the Mercury slice):** every Run API request is authenticated (bearer token or `HttpOnly` session cookie) and authorized per-Run (owner scoping + admin); login and run creation are brute-force rate-limited; the API binds `127.0.0.1` by default and can serve TLS; secrets are redacted from events and logs; execution time is enforced per Run (`maxDurationMs` → `TIMED_OUT`), human-input waits time out (§19); `resourceLimits`/`allowedNetworks` are enforced by running the agent in a container (docker/podman) and the worker fails closed when a constrained Run has no runtime. Remaining: OIDC/SSO identity (token map is the identity source) and per-repository credential scoping.
 
+### 24.1 Secret redaction (issue #214)
+
+`src/domain/redact.ts` runs at the write choke point: `EventStore.append` redacts every payload
+before it is persisted, and the logger redacts before a line reaches journald. Redaction therefore
+happens once, on the way in, rather than being re-applied by every reader.
+
+It works in two layers, and the difference matters:
+
+1. **Exact values.** `forwardedCredentialValues()` reads the VALUES of the variables the sandbox is
+   configured to forward (`DEFAULT_ENV_ALLOWLIST`, or `MERCURY_SANDBOX_ENV` when set) and registers
+   them as literals. This layer does not care what a key looks like, so it covers a provider Mercury
+   has never heard of. It is derived from the same list the sandbox uses, never a second copy of it:
+   a duplicated list would drift, and the drift would be silent -- events would look redacted while
+   carrying a live key.
+2. **Known shapes.** Patterns for the key formats of the forwarded providers, plus GitHub. This is a
+   FLOOR for keys the process never saw (one an agent read from a file inside the container), not a
+   catalogue.
+
+Both layers exist because neither covers the other's gap. Shapes alone missed anything unlabelled
+until #214 -- every original pattern required a `name: value` label, while the realistic leak is an
+agent running `printenv` and putting a bare key in a tool result. Values alone miss a secret the
+worker process never had in its own environment.
+
+**The limit, stated rather than implied:** redaction is a mitigation, not a boundary. A secret of an
+unrecognised shape that the worker never saw and that an agent reconstructs can still reach an event.
+The boundary is the sandbox network policy and the `NEVER_FORWARD` list; this layer reduces what a
+prompt-injected Run can exfiltrate into persisted, browser-visible history.
+
+Values derived from the environment are skipped below 16 characters. We are guessing those are
+secrets, unlike an operator's explicit `MERCURY_SECRETS` list, which is honoured at any length: a
+dev `OPENAI_API_KEY=test` matched as a plain substring would otherwise blank the word "test" out of
+every event, log line and diff the system ever produced.
+
 ---
 
 

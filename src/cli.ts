@@ -33,6 +33,7 @@ import { RemoteAgentRegistry } from './adapters/remoteAgentRegistry.ts';
 import { RpcAgentRegistry } from './adapters/rpcAgentRegistry.ts';
 import { HermesAgentAdapter } from './adapters/hermesAgentAdapter.ts';
 import { ClaudeCodeAdapter } from './adapters/claudeCodeAdapter.ts';
+import { forwardedCredentialValues } from './sandbox/sandboxManager.ts';
 import { selectPrimeAgentAdapter } from './adapters/selectAgentAdapter.ts';
 import { SandboxManager } from './sandbox/sandboxManager.ts';
 import { Worker } from './worker/worker.ts';
@@ -43,7 +44,14 @@ const SKILLS_DIR = resolve(import.meta.dirname, '..', '.agents', 'skills');
 async function main(): Promise<void> {
   const [cmd, ...args] = process.argv.slice(2);
   const config = loadConfig();
-  const redactor = createRedactor(config.secrets);
+  // Two layers (issue #214): the operator's declared MERCURY_SECRETS, plus the exact VALUES of
+  // the provider credentials this process may hand to a Run. The second layer is what makes
+  // redaction track forwarding instead of guessing at key shapes -- if the sandbox can pass a key
+  // to an agent, that key cannot come back out through an event.
+  const redactor = createRedactor([
+    ...config.secrets,
+    ...forwardedCredentialValues(process.env, config.sandboxEnv),
+  ]);
   const logger = createLogger(redactor, config.logLevel);
 
   if (cmd === 'migrate') {
