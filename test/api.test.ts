@@ -402,7 +402,7 @@ test('closeServer() does not stall on a long-lived SSE connection (issue #52)', 
 test('closeServer() is safe when the server closes before the grace period (issue #52)', async () => {
   // No long-lived connections, so `server.close()` wins the race and there is nothing to
   // force. Copilot predicted ERR_SERVER_NOT_RUNNING here; it does not reproduce on the
-  // supported range (engines node >=23.6; verified a no-op on v26.7.0). This test pins the
+  // supported range (engines node >=22.18; verified a no-op on v26.7.0). This test pins the
   // behaviour that matters -- shutdown resolves rather than rejects -- and is deliberately
   // NOT described as catching that throw, because it does not: forcing unconditionally
   // passes it too. Called twice to pin idempotence as well.

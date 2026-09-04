@@ -5,7 +5,7 @@
   "description": "Mercury - durable long-running coding orchestration for PrimeAgent (see Mercury.md)",
   "type": "module",
   "engines": {
-    "node": ">=23.6"
+    "node": ">=22.18.0"
   },
   "scripts": {
     "dev": "node src/cli.ts dev",

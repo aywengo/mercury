@@ -32,7 +32,7 @@ On the client machine:
 
 | Need | Why |
 | --- | --- |
-| Node >= 23.6 | Mercury runs TypeScript directly via Node's type stripping (no build step) and stores state in `node:sqlite`. Both are load-bearing. Node 20 or 22 will not start. |
+| Node >= 22.18 | Mercury runs TypeScript directly via Node's type stripping (no build step) and stores state in `node:sqlite`. Both are load-bearing, and each sets part of the floor: `node:sqlite` is flag-free from Node 22.13 and type stripping without a flag from Node 22.18, so the requirement is the later of the two. Node 20 will not start; neither will 22.x below 22.18. |
 | git | To check out the repository. |
 | Network reach to the server | Default server bind is `127.0.0.1:3000`, so a remote client needs the server operator to have set `MERCURY_BIND_HOST`. |
 | `bash`, `curl`, `python3` | The client script below is bash, drives every request with `curl`, and uses `python3 -c 'import json'` to build JSON and read `runId` out of the response. Node cannot substitute here without rewriting the script. All three are present on a typical Linux box and macOS; check them before blaming the server. |
@@ -60,7 +60,7 @@ server address and token before it touches the network.
 Set up a Mercury client on this machine. Work in this order, and stop at the checkpoint before contacting
 any server.
 
-1. Check the toolchain. Run `node --version` and `git --version`. Node must be 23.6 or newer, because
+1. Check the toolchain. Run `node --version` and `git --version`. Node must be 22.18 or newer, because
    Mercury executes TypeScript directly through Node's built-in type stripping and uses the built-in
    node:sqlite module. If Node is missing or older, install a current LTS-or-newer Node using this
    machine's normal package manager, and show me the command before running it. Do not install anything

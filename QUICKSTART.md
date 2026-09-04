@@ -11,7 +11,7 @@ close the browser, and the Run keeps executing in the background.
 
 | Requirement | Version | Check |
 | --- | --- | --- |
-| Node.js | ≥ 23.6 (built-in `node:sqlite`, no build step) | `node --version` |
+| Node.js | ≥ 22.18 (built-in `node:sqlite`, no build step) | `node --version` |
 | `prime-agent` | on `PATH` (for real agent Runs) | `which prime-agent` |
 | `git` | any modern version (worktree isolation) | `git --version` |
 
