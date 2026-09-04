@@ -159,6 +159,16 @@ test('provider shapes do not redact ordinary Run data (issue #214)', () => {
     'https://example.com:8443/path?q=1',
     'ssh://git@github.com/org/repo.git',
     'MERCURY_SANDBOX_ENV=ANTHROPIC_API_KEY,OPENAI_API_KEY',
+    // Added after an independent sweep over real captured event data (Claude stream-json lines,
+    // /metrics exposition text) plus the shapes most likely to appear in a Run's tool output.
+    'ghcr.io/aywengo/mercury@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08',
+    'Authorization header eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U',
+    '-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJALmOhFHbXJHhMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV\n-----END CERTIFICATE-----',
+    'const SKU_PREFIX = "sk-"; // stock-keeping-unit prefix, not a key',
+    '.token-bucket__sk--large { padding: 0 1rem }',
+    "SELECT count(*) FROM events WHERE type = 'tool.completed' AND payload LIKE '%token%'",
+    'level=info ts=2026-09-04T08:03:30Z caller=worker.go:212 runId=dd0c721174f4 durationMs=141',
+    'mercury_event_wakeups_total{source="socket"} 41',
   ];
   for (const line of ordinary) assert.equal(r.redact(line), line, `false positive on: ${line}`);
 });
