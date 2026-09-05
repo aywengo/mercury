@@ -99,8 +99,15 @@ test('start schedules sweeps and stop cancels them', async () => {
     assert.ok(row, 'the timer must have swept at least once');
     prober.stop();
     assert.equal(prober.running, false);
-    const at = row!.probedAt;
-    await new Promise((r) => setTimeout(r, 150));
+    // Baseline AFTER stop(), and after any sweep already in flight has landed. The old version read the
+    // row before calling stop() and compared the database against that captured object, so a sweep
+    // completing in between changed probedAt and the assertion failed while the timer had in fact
+    // stopped. stop() cancels the timer; it does not await work that has already started.
+    // Reproduced deterministically by giving the fake host a 15ms response delay, which puts a sweep in
+    // flight across stop(); the old assertion fails there with "stop() must actually stop the timer".
+    await new Promise((r) => setTimeout(r, 50));
+    const at = registry.probeFor('tick')!.probedAt;
+    await new Promise((r) => setTimeout(r, 200));
     assert.equal(registry.probeFor('tick')!.probedAt, at, 'stop() must actually stop the timer');
   } finally {
     prober.stop();
