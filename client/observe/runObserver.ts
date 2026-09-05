@@ -17,7 +17,7 @@
 import { isTerminalStatus } from '../exitCodes.ts';
 import { MercuryClientError, StreamUnrecoverableError, TransportError } from '../api/errors.ts';
 import { AbortError } from '../api/client.ts';
-import { ProtocolError, parseEvent } from '../api/protocol.ts';
+import { NON_EVENT_FRAME_TYPES, ProtocolError, parseEvent } from '../api/protocol.ts';
 import type { MercuryEvent } from '../api/protocol.ts';
 import type { MercuryClient } from '../api/client.ts';
 
@@ -133,6 +133,9 @@ export async function observeRun(deps: ObserverDeps): Promise<ObservationResult>
         // frame. An empty data payload is still possible from a different server, and there is no
         // event to deliver, so it is skipped rather than parsed.
         if (frame.data === '') continue;
+        // Control frames carry no event. Skipping is by exact name, from a set the protocol owns, so an
+        // unrecognised frame name still reaches parseEvent and fails loudly rather than being ignored.
+        if (frame.event !== undefined && NON_EVENT_FRAME_TYPES.has(frame.event)) continue;
         let event: MercuryEvent;
         try {
           event = parseEvent(JSON.parse(frame.data));

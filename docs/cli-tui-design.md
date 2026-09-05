@@ -992,6 +992,40 @@ intended. They now derive a stub command from the same `IMPLEMENTED` set the
 dispatcher consults, and a guard test fails if that set ever becomes fully
 implemented so the derivation cannot become vacuous.
 
+**The live stream had never been used, and nothing noticed.** `streamEvents` built its
+request and never called `req.end()`. A GET with no body still has to be closed: until it is, the
+client has written a half-request, the server never answers, and the iterator waits for a response
+that cannot arrive. Every watch test passed because each one used an already-terminal Run, which the
+observer finishes from the history drain plus a status read without ever entering the streaming loop.
+The follow path -- the reason the milestone exists -- was entirely untested. The test that found it
+watches a QUEUED Run, cancels it, and requires the cancellation events to arrive live.
+
+**The server's opening frame is not an event.** `GET /runs/:id/stream` begins with
+`event: hello` carrying `{runId, after}` and no `sequence`. Feeding it to the event validator raised
+a protocol error, so a watch died on contact with a healthy server. Control frames are now skipped by
+exact name from a set the protocol owns; an unrecognised frame name still fails loudly, because
+silently skipping anything unknown is how a future server-side event becomes invisible.
+
+**An armed idle timer outlived the stream, and `process.exit` hid it.** The iterator's `return()`
+disarmed the timer, but a stream the server ends normally never calls `return()`, so the timer stayed
+armed for the whole idle window. `bin.ts` calls `process.exit()`, which also hides this from every
+subprocess test in the suite. The client is a library and the TUI is meant to embed it, so the
+cleanup now happens on every terminal path and the test asserts on live handles rather than on a
+claim that a timer was cleared.
+
+**A test that passes alone and fails in the suite was reading a race, not a defect.** The live test
+first waited for the event and only then attached an `exit` listener; by then the child had already
+exited and the event had gone to nobody, so the test reported a hang that did not exist. Measuring
+the elapsed time showed the live event arriving in about 100ms. The exit promise is now created at
+spawn time, and a fixed sleep before cancelling was replaced by waiting for the history the watch must
+print before it can follow anything.
+
+**An independent review's data-loss claim was checked, not argued.** It reported that a page whose
+`nextCursor` trails the highest sequence inside that page would skip an event. Reproduced against a
+server built that way: no event was lost and none was duplicated, because the delivered cursor
+deduplicates the overlap. The claim had counted an already-delivered event as skipped. It is recorded
+here because the check, not the report, is the evidence.
+
 **Two cursors are not one cursor, and a vacuous test hid the bug.** The observer's
 history loop advanced a single `cursor` both as the value it requested next and as the
 value it had delivered. `emit()` moves the delivered cursor to the last event shown,

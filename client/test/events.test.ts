@@ -13,7 +13,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { BIN, apiCall, createRunViaApi, forceStatus, runCli, runCliAsync, seedEvents, startMercuryServer, type LiveServer } from './helpers/server.ts';
+import { BIN, apiCall, createRunViaApi, forceNeedsInput, forceStatus, runCli, runCliAsync, seedEvents, startMercuryServer, type LiveServer } from './helpers/server.ts';
 import { observeRun } from '../observe/runObserver.ts';
 import { StreamUnrecoverableError, TransportError } from '../api/errors.ts';
 import { watchExitCode } from '../commands/events.ts';
@@ -351,4 +351,85 @@ test('Ctrl-C stops the watch, exits 130, and leaves the Run untouched', async ()
   assert.equal(code, 130, `expected 130 for SIGINT, got ${code}; stderr: ${stderr}`);
   const after = await apiCall(server, `/api/runs/${runId}`);
   assert.equal(after.body.run.status, 'QUEUED', 'Ctrl-C must not cancel the Run');
+});// ---------------------------------------------------------------------------
+// Live following (the path every earlier watch test skipped)
+// ---------------------------------------------------------------------------
+
+test('runs watch follows events appended AFTER the watch started and exits cancelled', async () => {
+  // The acceptance behaviour of the milestone, and the one thing the rest of this file could not see.
+  // streamEvents built its request but never ended it, so the server never answered and the iterator
+  // waited for a response that could not arrive -- yet every test here passed, because each one used an
+  // already-terminal Run, which the observer finishes from the history drain plus a status read without
+  // ever entering the streaming loop. A suite that only exercises the terminal case cannot see the live
+  // case at all.
+  //
+  // Cancelling a QUEUED Run is used to produce the live events because it is the only API that appends
+  // through the normal path without a worker: submitInput stores the answer and appends nothing, so it
+  // looks like a live event and is not one.
+  const runId = await createRunViaApi(server, 'm3: follow me live');
+
+  const child = spawn(process.execPath, ['--no-warnings', BIN, 'runs', 'watch', runId, '--json', '--timeout', '60s'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, MERCURY_CLIENT_URL: server.url, MERCURY_CLIENT_TOKEN: 'tok-contract-alice' },
+  });
+  let out = '';
+  let err = '';
+  child.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+  child.stderr.on('data', (d: Buffer) => { err += d.toString(); });
+  // Started at spawn time, not when the test gets round to asking. An earlier version attached the
+  // listener after waiting for the live event, and by then the child had already exited and the 'exit'
+  // event had been delivered to nobody -- the test then reported a hang that did not exist.
+  const exited = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
+
+  try {
+    // Wait until the watch has actually printed the Run's history. A fixed sleep here was the second
+    // version of this test: it passed alone and failed inside the full suite, because several servers
+    // and CLI processes start at once and the watch had not attached yet. Reading for the history the
+    // watch must print before it can follow anything makes the ordering explicit instead of probable.
+    const attached = await waitFor(() => out.includes('run.queued'), 30_000);
+    assert.ok(attached, `the watch never printed the Run's history.\nstderr: ${err.slice(0, 400)}`);
+    const tCancel = Date.now();
+    const cancel = await apiCall(server, `/api/runs/${runId}/cancel`, { method: 'POST' });
+    assert.equal(cancel.status, 200, `cancel should succeed: ${cancel.status} ${JSON.stringify(cancel.body)}`);
+
+    const seen = await waitFor(() => out.includes('run.cancelled'), 30_000);
+    assert.ok(seen, `live events never reached the watch after ${Date.now() - tCancel}ms.` +
+      `\nstdout: ${out.slice(0, 400)}\nstderr: ${err.slice(0, 400)}`);
+    const tLive = Date.now() - tCancel;
+
+    // The watch must finish on its own once the server ends the stream, not wait for its timeout.
+    const code = await withTimeout(exited, 30_000, `the watch did not exit on its own (live event took ${tLive}ms)`);
+    assert.equal(code, 11, `a cancelled Run must exit 11, got ${code} (live event took ${tLive}ms)`);
+    // Every line stands alone, or the NDJSON contract is broken on the live path.
+    for (const line of out.trim().split('\n')) JSON.parse(line);
+    const lines = out.trim().split('\n').map((l: string) => JSON.parse(l));
+    const types = lines.map((l: { type: string }) => l.type);
+    assert.ok(types.includes('run.cancelling'), `the earlier live event was skipped: ${types}`);
+    assert.ok(types.includes('run.cancelled'), `the terminal live event was skipped: ${types}`);
+  } finally {
+    child.kill('SIGKILL');
+  }
 });
+
+/** Poll a predicate on the event loop. Bounded, so a missing event fails rather than hanging. */
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (predicate()) return true;
+    if (Date.now() > deadline) return false;
+    await delay(100);
+  }
+}
+
+/** Race a promise against a hard cap, so a missing result fails with a message instead of hanging. */
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, guard]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}

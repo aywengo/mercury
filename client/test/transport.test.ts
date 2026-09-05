@@ -16,6 +16,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { MercuryClient } from '../api/client.ts';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 import { TransportError } from '../api/errors.ts';
 
 /** Start a server on a free port and hand back its base URL plus a closer. */
@@ -181,6 +184,68 @@ test('the deadline timer does not keep the process alive after a fast response',
     // The request itself is local and instant; anything approaching the 30s timeout means the timer
     // was left armed. The bound is deliberately far from both so a loaded runner cannot trip it.
     assert.ok(elapsed < 8_000, `process lingered ${elapsed}ms; the deadline timer was not cleared`);
+  } finally {
+    await close();
+  }
+});// ---------------------------------------------------------------------------
+// Handle lifetime
+// ---------------------------------------------------------------------------
+
+test('a stream the server ends leaves no timer behind', async () => {
+  // A stream the server ends normally never calls the iterator's return(), so the idle timer has to be
+  // disarmed on the completion path as well. Measured as a live handle rather than as a claim that
+  // clearTimeout ran: the CLI calls process.exit(), which would hide an armed timer from every
+  // subprocess test in this suite. The idle window is set far longer than the assertion below so a
+  // regression shows up as a lingering handle rather than as a slow pass.
+  const { url, close } = await serve(async (_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('event: agent.message\ndata: {"sequence":1,"type":"agent.message","payload":{}}\n\n');
+    res.end();          // what a healthy server does once it has delivered a terminal event
+  });
+  try {
+    const client = new MercuryClient({ baseUrl: url, token: 't', timeoutMs: 5000 });
+    const before = process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+    let frames = 0;
+    for await (const frame of client.streamEvents('run_x', { idleTimeoutMs: 60_000 })) {
+      frames += 1;
+      assert.equal(frame.event, 'agent.message');
+    }
+    assert.equal(frames, 1, 'the frame was never delivered');
+    const after = process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+    assert.ok(after <= before, `a timer outlived the stream: ${before} -> ${after} Timeout handles`);
+  } finally {
+    await close();
+  }
+});
+
+test('an aborted stream leaves no timer behind either', async () => {
+  // The other path that must disarm the timer. A server that sends headers and then nothing at all is
+  // also the shape of a hung upstream, so this is not only about Ctrl-C.
+  const { url, close } = await serve(async (_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    // A real frame, not a keepalive comment: the parser drops comments rather than emitting an empty
+    // frame, so a comment here would deliver nothing, the loop body would never run, and the abort
+    // would never be reached -- the test would then sit out the whole idle window and pass for the
+    // wrong reason or fail as a timeout.
+    res.write('event: agent.message\ndata: {"sequence":1,"type":"agent.message","payload":{}}\n\n');
+    // deliberately never ended
+  });
+  try {
+    const client = new MercuryClient({ baseUrl: url, token: 't', timeoutMs: 5000 });
+    const controller = new AbortController();
+    const before = process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+    let sawFrame = false;
+    try {
+      for await (const frame of client.streamEvents('run_x', { signal: controller.signal, idleTimeoutMs: 60_000 })) {
+        sawFrame = true;
+        controller.abort();
+      }
+    } catch {
+      /* an abort surfaces as AbortError; this test is about the handles, not the error */
+    }
+    assert.ok(sawFrame, 'the keepalive frame was never delivered');
+    const after = process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+    assert.ok(after <= before, `a timer outlived the aborted stream: ${before} -> ${after} Timeout handles`);
   } finally {
     await close();
   }

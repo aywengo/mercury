@@ -318,6 +318,12 @@ export class MercuryClient {
         const fail = (err: unknown): void => {
           if (done) return;
           done = true;
+          // Clear the idle timer on every terminal path, not only on break. A stream the server ends
+          // after a terminal transition never calls return(), so without this the timer stays armed for
+          // the whole idle window. The CLI hides the symptom because bin.ts calls process.exit(), which
+          // also hides it from the subprocess tests -- but the client is a library, and a consumer that
+          // embeds it (the TUI, per §12) would keep a live handle after the watch was over.
+          stopIdle();
           failure = err;
           wake();
         };
@@ -361,7 +367,7 @@ export class MercuryClient {
           });
           res.on('end', () => {
             for (const frame of parser.end()) { queue.push(frame); wake(); }
-            if (!done) { done = true; wake(); }
+            if (!done) { stopIdle(); done = true; wake(); }
           });
           res.on('error', fail);
         });
@@ -370,6 +376,14 @@ export class MercuryClient {
         // Idle-only bound: a stream that stops carrying bytes at all is dead, but one that trickles
         // keepalives for hours is healthy.
         let idleTimer: ReturnType<typeof setTimeout> | undefined;
+        // One place that disarms the idle timer, called from every path that ends the stream. The timer
+        // is armed before the response arrives, so it must be cleared on normal completion too: a stream
+        // the server ends after a terminal transition never calls return(), and the armed timer would
+        // otherwise hold the event loop open for the whole idle window. The CLI hides that behind
+        // process.exit(); a library consumer such as the TUI would not.
+        const stopIdle = (): void => {
+          if (idleTimer !== undefined) { clearTimeout(idleTimer); idleTimer = undefined; }
+        };
         const resetIdle = (): void => {
           if (idleTimer !== undefined) clearTimeout(idleTimer);
           idleTimer = setTimeout(() => {
@@ -388,6 +402,14 @@ export class MercuryClient {
           else options.signal.addEventListener('abort', onAbort, { once: true });
         }
 
+        // The request must be ended or it is never sent. A GET with no body still has to be closed:
+        // until then the client has written only a half-request, the server never answers, and the
+        // iterator sits waiting for a response that will not arrive until the idle bound fires. This
+        // was invisible for a while because every watch test used an already-terminal Run, which the
+        // observer finishes from the history drain and the status read without ever entering the
+        // streaming loop -- so the follow path had never been exercised end to end.
+        req.end();
+
         return {
           next(): Promise<IteratorResult<SseFrame>> {
             if (queue.length > 0) return Promise.resolve({ value: queue.shift()!, done: false });
@@ -401,7 +423,7 @@ export class MercuryClient {
             // Breaking out of for-await lands here. Release everything, including the abort listener,
             // so a watch that ends does not keep the process or the socket alive.
             done = true;
-            if (idleTimer !== undefined) clearTimeout(idleTimer);
+            stopIdle();
             options.signal?.removeEventListener('abort', onAbort);
             req.destroy();
             return Promise.resolve({ value: undefined as never, done: true });
