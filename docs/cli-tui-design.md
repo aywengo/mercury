@@ -5,12 +5,12 @@ contracts, transport, configuration and credential layers; the read-only command
 `mercuryctl agents list`, `runs list` and `runs show`; the mutation commands
 `runs create`, `runs input`, `runs cancel` and `runs retry` with idempotency keys
 and confirmation; and the observation commands `runs events` and `runs watch` with
-paging, gap recovery, bounded reconnect and terminal outcome exit codes. Milestone 4
-is in progress under issue #233: `config profiles` and `config current` are built,
-and every command in the design is now implemented. Shell completion, version
-output, operator documentation and the clean-install packaging checks remain. The
-TUI in Milestone 5 remains gated on demonstrated need. See §16 for per-milestone
-status.
+paging, gap recovery, bounded reconnect and terminal outcome exit codes. Milestones 0 to 4
+are implemented. Milestone 4 (#233) added `config profiles` and `config current`,
+shell completion, `--version`, operator documentation, and the packaging checks --
+which found that the published artifact could not run at all, and that the client
+had two unsanitised display paths. The TUI in Milestone 5 remains gated on
+demonstrated need. See §16 for per-milestone status.
 
 Mercury already runs as long-lived services: an API server owns the HTTP and
 dashboard surface, while one or more workers execute durable Runs. The existing
@@ -1085,7 +1085,7 @@ Deferred:
 - package-registry publication unless there is an operational need;
 - multi-host routing.
 
-### Milestone 4: packaging and operational hardening -- **in progress** (issue #233)
+### Milestone 4: packaging and operational hardening -- **done** (issue #233)
 
 Deliverables landed so far:
 
@@ -1232,6 +1232,44 @@ Two follow-on defects surfaced while doing it:
 The smoke test packs the real tarball, extracts it under a path containing `node_modules` -- the path is
 the point, since anywhere else the restriction does not apply -- and runs the binary there. Reverting
 `bin` to `client/bin.ts` makes it fail with the original error verbatim.
+
+#### 16.5 Bounded retry, timeout and terminal sanitisation review
+
+This was the last Milestone 4 deliverable, and it was a review rather than a feature. The bounds held:
+
+| Bound | Value |
+| --- | --- |
+| Stream reconnects | 5, exponential backoff capped at 15s (~30s worst case) |
+| Create retries | 1, wait capped at 10s |
+| Request deadline | total per request, not idle |
+| Stream silence | idle timeout, since a healthy watch is quiet by design |
+| Response body | 16 MiB |
+
+The display layer did not. Three defects, all mutation-proven:
+
+**`agents list` printed server-supplied agent ids unsanitised.** Every other command sanitises what it
+prints; this one relied on "the server would never send that", which is the exact premise a sanitiser
+exists to remove.
+
+**`runs list` sanitised the task but not the agent cell.** `agent` is whatever `runs create --agent` was
+given, stored verbatim and echoed back. On a shared instance that is one operator writing a control
+sequence into another operator's terminal, from data that never looked like markup.
+
+**`renderTable` hard-coded `ANSI.dim` on its header row**, ignoring the caller's colour settings. So
+`--no-color` did not remove it, and `runs list > runs.txt` wrote escape codes into the file -- a file that
+then does not diff or grep cleanly. The header style now comes from the caller's colourizer and defaults
+to *no* decoration, so a caller that forgets to pass one gets plain output rather than colour it never
+asked for.
+
+The review also found a bound that existed but was untested: the cap on `Retry-After`. Honouring that
+header literally lets a misconfigured reverse proxy park `mercuryctl runs create` for days on
+`Retry-After: 999999`. A bound nobody tests is a bound that regresses.
+
+One inconsistency was resolved in favour of the code. The sanitiser's header comment states it replaces
+rather than deletes, because deleting silently joins the surrounding text -- yet the bidi rule deletes.
+That is correct here and the rule does not apply: an escape sequence *consumes* a payload the attacker
+chose, so replacing it leaves evidence that something was removed, whereas a bidi override is invisible
+and carries no payload, so deleting it cannot splice anything that was not already adjacent.
 
 ### Milestone 5: optional TUI
 
