@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 
 // The coupling rule (docs/cli-tui-design.md §11.1, §15.4).
 //
@@ -15,6 +15,7 @@ import { join, relative } from 'node:path';
 // would make drift invisible while quietly destroying independent deployment.
 
 const CLIENT_DIR = new URL('..', import.meta.url).pathname;
+const ROOT = new URL('../..', import.meta.url).pathname;
 const FORBIDDEN = [/(?:^|[./])src\//, /(?:^|[./])fleet\//];
 
 function sourceFiles(dir: string): string[] {
@@ -110,4 +111,35 @@ test('the client does not read Mercury state directly', () => {
     if (text.includes(['node:', 'sqlite'].join(''))) offenders.push(relative(CLIENT_DIR, file));
   }
   assert.deepEqual(offenders, [], `client must not touch the database: ${offenders.join(', ')}`);
+});
+test('the client needs no agent backend and no server runtime to install', () => {
+  // Definition of done, item 10: "install the client without installing an agent backend."
+  //
+  // The mechanism by which that silently stops being true is not an import of an agent SDK -- that would
+  // be obvious -- it is the client spawning a local process. Once `mercuryctl` shells out to an agent
+  // CLI, "watch my Run" quietly requires that agent on the operator's laptop. So the guard is on process
+  // creation, not on a blocklist of package names.
+  //
+  // Test files are excluded: they spawn the CLI under test, which is the opposite of the claim.
+  const sources = sourceFiles(CLIENT_DIR).filter((f) => !f.includes(`${sep}test${sep}`));
+  assert.ok(sources.length >= 10, `only ${sources.length} non-test client sources; the scan is broken`);
+
+  const offenders: string[] = [];
+  for (const file of sources) {
+    const text = readFileSync(file, 'utf8');
+    if (/from 'node:child_process'|require\('node:child_process'\)|\bexecFileSync\b|\bspawnSync?\s*\(/.test(text)) {
+      offenders.push(`${relative(ROOT, file)} (creates a process)`);
+    }
+    if (/from 'express'|require\('express'\)/.test(text)) {
+      offenders.push(`${relative(ROOT, file)} (imports express)`);
+    }
+  }
+  assert.deepEqual(offenders, [], `the client would need more than HTTP to run:\n${offenders.join('\n')}`);
+
+  // Production dependencies are what an operator installs. Naming the one that is legitimately here
+  // means adding an agent SDK to `dependencies` fails this test rather than shipping into every install.
+  const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as { dependencies?: Record<string, string> };
+  const deps = Object.keys(manifest.dependencies ?? {}).sort();
+  assert.deepEqual(deps, ['express'],
+    `unexpected production dependency; the client must not drag a backend into every install: ${deps.join(', ')}`);
 });

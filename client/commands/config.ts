@@ -123,8 +123,11 @@ export function renderProfiles(listing: ProfilesListing, ctx: RenderOptions): st
   const { color } = makeColorizer({ noColor: ctx.noColor, isTty: ctx.isTty, json: false });
   if (listing.rows.length === 0) {
     return listing.configFilePresent
-      ? color('dim', `no profiles defined in ${listing.configFilePath}`)
-      : `${color('dim', `no config file at ${listing.configFilePath}`)}\n` +
+      // The path comes from $XDG_CONFIG_HOME -- the operator's own variable, not server data. But
+      // renderCurrent already sanitises this same value, and two renderers of one field disagreeing about
+      // whether it needs sanitising is how one of them ends up wrong later.
+      ? color('dim', `no profiles defined in ${sanitizeForTerminal(listing.configFilePath)}`)
+      : `${color('dim', `no config file at ${sanitizeForTerminal(listing.configFilePath)}`)}\n` +
         'configuration is coming from flags or the environment; run `config current` to see it.';
   }
   const rows = listing.rows;

@@ -30,6 +30,7 @@ import { describeConfig } from './config.ts';
 
 import { CLIENT_VERSION, PROGRAM } from './version.ts';
 import { completionScript } from './commands/completion.ts';
+import { sanitizeForTerminal } from './output/human.ts';
 
 export { PROGRAM };
 
@@ -659,9 +660,26 @@ function flagNumber(flags: Record<string, string | boolean>, name: string): numb
  * server's own message is surfaced verbatim (already credential-free, since the server redacts)
  * rather than replaced with a generic one that would hide why the call failed.
  */
-export function reportError(err: unknown, io: Stdio): number {
+export /**
+ * Make an error message safe to write to a terminal.
+ *
+ * Errors are the last untrusted path, and the one that was missed: a `ProtocolError` quotes fragments of
+ * the server's payload, and `MercuryClientError` carries the server's own `error` string, so a message
+ * reaching here can contain text chosen by whatever answered on the other end -- or text the server
+ * echoed back from a Run's task, which on a shared instance another operator wrote. stderr is a terminal
+ * like any other.
+ *
+ * Redaction runs BEFORE sanitisation, not after. Sanitising first can break the byte pattern that
+ * `redactAuthorization` looks for, which would leak a credential while appearing to defend against a
+ * far smaller problem.
+ */
+function safeMessage(message: string): string {
+  return sanitizeForTerminal(redactAuthorization(message));
+}
+
+function reportError(err: unknown, io: Stdio): number {
   if (err instanceof MercuryClientError) {
-    io.stderr(`${PROGRAM}: ${redactAuthorization(err.message)}\n`);
+    io.stderr(`${PROGRAM}: ${safeMessage(err.message)}\n`);
     return err.exitCode;
   }
   if (err instanceof AbortedError) {
@@ -670,18 +688,18 @@ export function reportError(err: unknown, io: Stdio): number {
   }
   if (err instanceof DeclinedError) {
     // Stated plainly so exit 2 is never read as "you typed the command wrong".
-    io.stderr(`${PROGRAM}: ${err.message}\n`);
+    io.stderr(`${PROGRAM}: ${safeMessage(err.message)}\n`);
     return err.exitCode;
   }
   if (err instanceof CreateUncertainError) {
     // The key is the whole point of this path: without it the operator cannot retry safely.
-    io.stderr(`${PROGRAM}: ${err.message}\n`);
+    io.stderr(`${PROGRAM}: ${safeMessage(err.message)}\n`);
     return err.exitCode;
   }
   if (err instanceof ProtocolError) {
-    io.stderr(`${PROGRAM}: incompatible server response: ${err.message}\n`);
+    io.stderr(`${PROGRAM}: incompatible server response: ${safeMessage(err.message)}\n`);
     return EXIT.TRANSPORT;
   }
-  io.stderr(`${PROGRAM}: ${redactAuthorization(String((err as Error).message ?? err))}\n`);
+  io.stderr(`${PROGRAM}: ${safeMessage(String((err as Error).message ?? err))}\n`);
   return EXIT.TRANSPORT;
 }
