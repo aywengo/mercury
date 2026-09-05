@@ -40,6 +40,25 @@ function certs(): Promise<Certs> {
   return certBundle;
 }
 
+/**
+ * Locate the openssl binary.
+ *
+ * Hard-coding /usr/bin/openssl happens to work on both macOS and the Linux CI runners, but it is a
+ * coincidence rather than a contract -- Homebrew installs it under a different prefix, and a test that
+ * fails because of where a binary lives teaches the reader nothing about the code under test.
+ */
+function openssl(): string {
+  for (const candidate of ['openssl', '/usr/bin/openssl', '/opt/homebrew/bin/openssl', '/usr/local/bin/openssl']) {
+    try {
+      execFileSync(candidate, ['version'], { stdio: 'ignore', timeout: 30_000 });
+      return candidate;
+    } catch {
+      // try the next one
+    }
+  }
+  throw new Error('openssl not found; the TLS tests cannot generate certificates');
+}
+
 function generateCerts(): Promise<Certs> {
   const dir = mkdtempSync(join(tmpdir(), 'mercuryctl-tls-'));
   const make = (name: string) => {
@@ -52,7 +71,7 @@ function generateCerts(): Promise<Certs> {
       'keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign',
       '',
     ].join('\n'));
-    execFileSync('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+    execFileSync(openssl(), ['req', '-x509', '-newkey', 'rsa:2048', '-nodes',
       '-keyout', join(dir, `${name}-key.pem`), '-out', join(dir, `${name}-cert.pem`),
       '-days', '2', '-config', cnf, '-extensions', 'v3'], { stdio: 'ignore', timeout: 60_000 });
     return { cert: join(dir, `${name}-cert.pem`), key: join(dir, `${name}-key.pem`) };

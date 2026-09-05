@@ -147,7 +147,12 @@ test('bash and zsh both accept the script they are given', () => {
   // catches quoting damage that the functional test would not notice because bash is forgiving.
   for (const [shell, exe] of [['bash', '/bin/bash'], ['zsh', '/bin/zsh']] as const) {
     const script = cli(['completion', shell], emptyXdg()).out;
-    const r = spawnSync(exe, ['-n', '/dev/stdin'], { encoding: 'utf8', timeout: 60_000, input: script });
+    // A real file, not /dev/stdin. Feeding a pipe to `bash -n /dev/stdin` works on macOS and fails on
+    // Linux with "No such device or address", so the test was green here and red in CI -- the script
+    // was never the problem, the way it was handed over was.
+    const file = join(mkdtempSync(join(tmpdir(), 'mercuryctl-syntax-')), `.${shell}rc`);
+    writeFileSync(file, script);
+    const r = spawnSync(exe, ['-n', file], { encoding: 'utf8', timeout: 60_000 });
     if (r.error) continue;   // interpreter absent on this host; the functional test above still covers bash
     assert.equal(r.status, 0, `${shell} -n failed: ${r.stderr}`);
   }
