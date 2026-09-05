@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync, readdirSync, statSync, mkdtempSync, mkdirSync, chmodSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdtempSync, mkdirSync, chmodSync, rmSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -220,6 +220,44 @@ test('clean-install smoke test: the published artifact runs from inside node_mod
     const direct = spawnSync(binPath, ['--version'], { encoding: 'utf8', timeout: 120_000, env });
     assert.equal(direct.status, 0, `shebang execution failed: ${direct.stderr}`);
     assert.equal(direct.stdout.trim(), `mercuryctl ${pkg.version}`);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+test('a real npm install puts a working mercuryctl on the PATH', () => {
+  // The smoke test above extracts the tarball and runs the file with `node`, and then chmods it before
+  // testing the shebang. Both of those are gaps a reviewer pointed out: running the file directly never
+  // touches the shim npm creates, and chmodding the artifact ourselves means the test cannot notice an
+  // artifact that shipped without the executable bit. This installs for real and runs the command an
+  // operator types.
+  //
+  // It needs the registry, unlike everything else in this file. That is deliberate: "installs without
+  // server or worker runtime configuration" is a claim about installing, and a test that avoids
+  // installing does not test it.
+  const tmp = mkdtempSync(join(tmpdir(), 'mercuryctl-npmi-'));
+  try {
+    const packed = spawnSync('npm', ['pack', '--pack-destination', tmp], { cwd: ROOT, encoding: 'utf8', timeout: 300_000 });
+    assert.equal(packed.status, 0, `npm pack failed: ${packed.stdout}${packed.stderr}`);
+    const tarball = readdirSync(tmp).find((f) => f.endsWith('.tgz'))!;
+    writeFileSync(join(tmp, 'package.json'), '{"name":"consumer","version":"1.0.0","private":true}');
+
+    const installed = spawnSync('npm', ['install', '--no-audit', '--no-fund', '--omit=dev', '--ignore-scripts',
+      join(tmp, tarball)], { cwd: tmp, encoding: 'utf8', timeout: 600_000 });
+    assert.equal(installed.status, 0, `npm install failed: ${installed.stdout}\n${installed.stderr}`);
+
+    const shim = join(tmp, 'node_modules', '.bin', 'mercuryctl');
+    assert.ok(existsSync(shim), 'npm did not link a mercuryctl command; check package.json "bin"');
+
+    const env = { ...process.env, XDG_CONFIG_HOME: join(tmp, 'no-home'), MERCURY_CLIENT_URL: '', MERCURY_CLIENT_TOKEN: '' };
+    const r = spawnSync(shim, ['--version'], { encoding: 'utf8', timeout: 120_000, env });
+    assert.equal(r.status, 0, `installed mercuryctl failed: ${r.stdout}\n${r.stderr}`);
+    assert.equal(r.stdout.trim(), `mercuryctl ${pkg.version}`);
+
+    // The whole point of the shim is that the operator types a name, not a path. A shebang that node
+    // cannot follow, or a bin target that is still TypeScript, both surface here and nowhere else.
+    const help = spawnSync(shim, ['--help'], { encoding: 'utf8', timeout: 120_000, env });
+    assert.equal(help.status, 0, help.stderr);
+    assert.match(help.stdout, /remote operator client/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
