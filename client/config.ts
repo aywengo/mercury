@@ -74,10 +74,66 @@ export function readConfigFile(path = configPath()): ConfigFile | undefined {
   if (profiles !== undefined && (typeof profiles !== 'object' || profiles === null || Array.isArray(profiles))) {
     throw new UsageError(`config ${path}: profiles must be an object`);
   }
+  const out: Record<string, ProfileConfig> = {};
+  for (const [name, raw] of Object.entries((profiles ?? {}) as Record<string, unknown>)) {
+    if (raw === undefined || raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new UsageError(`config ${path}: profile ${JSON.stringify(name)} must be an object`);
+    }
+    const entry = { ...(raw as Record<string, unknown>) };
+    entry.credential = assertCredentialReference(entry.credential, name, path);
+    if (entry.credential === undefined) delete entry.credential;
+    out[name] = entry as unknown as ProfileConfig;
+  }
   return {
     currentProfile: typeof obj.currentProfile === 'string' ? obj.currentProfile : undefined,
-    profiles: (profiles ?? {}) as Record<string, ProfileConfig>,
+    profiles: out,
   };
+}
+
+/**
+ * A credential field names an entry in the credentials file. It is never the secret itself.
+ *
+ * The type says so and the comment says so, but neither stops someone pasting a token into the profile
+ * because that is what every other tool they use asks for. When they do, `config current` -- whose whole
+ * job is echoing configuration back -- prints the token to stdout, into a terminal scrollback, and very
+ * often into a bug report or a CI log.
+ *
+ * So the shape is enforced where the file is read, which covers the request path and both config
+ * commands at once rather than teaching each printer to be careful. The error deliberately does NOT
+ * quote the offending value: refusing to leak a secret while printing a message that contains it would
+ * be a very expensive joke.
+ */
+const CREDENTIAL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:@+/-]{0,63}$/;
+// Three long base64url segments. The length floor keeps an ordinary dotted name such as "svc.prod"
+// from being mistaken for a signed token.
+const JWT_SHAPED = /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/;
+const SECRET_PREFIXES = [
+  'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_',
+  'AKIA', 'xox', 'glpat-', 'dckr_pat_', 'nt_', 'ya29.',
+];
+
+function assertCredentialReference(value: unknown, profile: string, path: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new UsageError(
+      `config ${path}: profile ${JSON.stringify(profile)} credential must be a non-empty string ` +
+      'naming an entry in the credentials file',
+    );
+  }
+  const ref = value.trim();
+  const looksLikeSecret =
+    JWT_SHAPED.test(ref)
+    || SECRET_PREFIXES.some((prefix) => ref.toLowerCase().startsWith(prefix.toLowerCase()))
+    || ref.length > 64
+    || !CREDENTIAL_NAME.test(ref);
+  if (looksLikeSecret) {
+    throw new UsageError(
+      `config ${path}: profile ${JSON.stringify(profile)} credential does not look like a name. ` +
+      'It must be a short key into the credentials file, never the token itself -- move the secret ' +
+      'into the credentials file and put its key here. (The value is not shown, because it may be a live token.)',
+    );
+  }
+  return ref;
 }
 
 /**
