@@ -71,6 +71,7 @@ producing results.
 
 ## Quick start
 
+Requires Node.js ≥ 22.18 (built-in `node:sqlite` and TypeScript type stripping).
 For prerequisites and a complete first-run walkthrough, see
 [`QUICKSTART.md`](QUICKSTART.md).
 
