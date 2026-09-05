@@ -108,8 +108,9 @@ non-Git local inputs but does not preserve Git branch metadata.
 | `MERCURY_SANDBOX_ENV` | model-provider allowlist | Comma-separated environment names forwarded to the container |
 | `MERCURY_SANDBOX_DISK_LIMITS` | `false` | Enable `--storage-opt size=` on a verified storage driver |
 
-An unset runtime means constrained Runs fail closed. Runs without sandbox
-constraints continue directly on the host.
+An unset runtime (or `MERCURY_SANDBOX_RUNTIME=none`) means constrained Runs fail closed. Runs without sandbox
+constraints continue directly on the host. To run unsandboxed, omit `resourceLimits` and `allowedNetworks`
+from the Run constraints.
 
 The default image does not contain PrimeAgent or Git and is not sufficient for
 a real sandboxed coding Run. Build an image containing:
