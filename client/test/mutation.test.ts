@@ -249,6 +249,29 @@ test('a 429 honours Retry-After and keeps the key', async () => {
   assert.equal(spy.keys[0], spy.keys[1], 'backoff retry changed the key');
 });
 
+test('an absurd Retry-After is capped rather than obeyed', async () => {
+  // The wait between create attempts is the one place a server can dictate how long the client blocks.
+  // Honouring `Retry-After` literally would let a misconfigured proxy -- or a hostile endpoint -- park a
+  // `mercuryctl runs create` for days on a value like 999999 seconds. The client caps the wait, so the
+  // server can influence the backoff but cannot own the clock.
+  const waits: number[] = [];
+  let calls = 0;
+  const client = {
+    async createRun(_r: unknown, _key: string) {
+      calls += 1;
+      if (calls === 1) throw new RateLimitError('slow down', 999_999);
+      return { runId: 'run_capped', status: 'QUEUED' as const };
+    },
+  };
+  const outcome = await createRunIdempotent(client as never, { task: 'x' }, {
+    sleep: async (ms: number) => { waits.push(ms); },
+  });
+  assert.equal(outcome.response.runId, 'run_capped');
+  assert.equal(waits.length, 1);
+  assert.ok(waits[0]! <= 10_000, `waited ${waits[0]}ms; the Retry-After cap is not applied`);
+  assert.ok(waits[0]! > 0, 'the wait was skipped entirely, which is a different bug');
+});
+
 // ---------------------------------------------------------------------------
 // runs retry / cancel / input
 // ---------------------------------------------------------------------------

@@ -8,6 +8,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { sanitizeForTerminal, renderTable, ellipsis, age, makeColorizer } from '../output/human.ts';
+import { renderAgents } from '../commands/agents.ts';
+import { renderRunList } from '../commands/list.ts';
 import { writeJson, eventLine } from '../output/json.ts';
 
 test('CSI sequences cannot survive sanitisation', () => {
@@ -137,4 +139,57 @@ test('JSON output is exactly one value and event lines are self-contained', () =
   assert.deepEqual(JSON.parse(buf), { a: 1, b: [2, 3] });
   assert.ok(eventLine({ sequence: 1 }).endsWith('\n'));
   assert.equal(eventLine({ sequence: 1 }).split('\n').length, 2, 'an event line must contain no inner newline');
+});
+test('a hostile agent id cannot inject terminal sequences into `agents list`', () => {
+  // Every other command sanitises what it prints. `agents list` printed server-supplied ids straight
+  // through, so this is the one place where "the server would never send that" was load-bearing. The
+  // display layer must not depend on the source being benign -- that is the entire premise of having a
+  // sanitiser. Comparison still happens on the raw id, so the `default` marker is unaffected.
+  const hostile = 'prime\u001b]0;pwned\u0007-agent';
+  const out = renderAgents(
+    { agents: [hostile, 'claude-code'], defaultAgent: hostile },
+    { json: false, noColor: true, isTty: false } as never,
+    false,
+  );
+  // The hostile sequence must be dead; the marker must be visible. Note the assertion is about the
+  // payload, not about the absence of ESC anywhere -- a colourised header legitimately contains ESC.
+  assert.ok(!out.includes('prime\u001b'), `escape survived: ${JSON.stringify(out)}`);
+  assert.ok(out.includes('prime\u241b-agent'), 'the escape was not replaced with a visible marker');
+  assert.ok(!out.includes('pwned\u0007'), 'the OSC payload reached the terminal intact');
+  // The rest of the row is still readable -- sanitising must not destroy the data the operator came for.
+  assert.match(out, /claude-code/);
+  assert.match(out, /default/);
+});
+test('`runs list` sanitises every cell, not only the task', () => {
+  // `agent` is whatever `runs create --agent` was given, stored verbatim and echoed back. On a shared
+  // instance that is one operator writing into another operator's terminal.
+  const hostile = 'evil\u001b[2A\u0007agent';
+  const run = {
+    id: 'run-1', status: 'RUNNING', task: 'ordinary task', agent: hostile,
+    repository: { url: 'https://example.com/x.git' },
+    createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+  const out = renderRunList(
+    { runs: [run as never], nextCursor: null },
+    { json: false, noColor: true, isTty: false } as never,
+    false,
+  );
+  assert.ok(!out.includes('evil\u001b'), `agent cell survived unsanitised: ${JSON.stringify(out)}`);
+  assert.ok(out.includes('evil\u241b'), 'agent escape was not replaced with a visible marker');
+  assert.match(out, /ordinary task/);
+});
+
+test('--no-color and a non-terminal produce no escape codes anywhere, headers included', () => {
+  // renderTable used to hard-code ANSI.dim on the header row, ignoring the caller's colour settings.
+  // `runs list > runs.txt` therefore wrote escape codes into the file and --no-color did not stop it.
+  // The header style now comes from the caller's colourizer, and the default is no decoration.
+  const rows = [['run-1', 'RUNNING', 'prime-agent', '3m12s', 'do the thing']];
+  const plain = renderTable(['ID', 'STATUS', 'AGENT', 'AGE', 'TASK'], rows);
+  assert.ok(!plain.includes('\u001b'), `undecorated table emitted ANSI: ${JSON.stringify(plain)}`);
+  const { color, dim } = makeColorizer({ noColor: true, isTty: false, json: false });
+  const off = renderTable(['ID', 'STATUS'], rows, (t) => color('cyan', t), (t) => dim(t));
+  assert.ok(!off.includes('\u001b'), `--no-color still emitted ANSI: ${JSON.stringify(off)}`);
+  const { color: c2, dim: d2 } = makeColorizer({ noColor: false, isTty: true, json: false });
+  const on = renderTable(['ID', 'STATUS'], rows, (t) => c2('cyan', t), (t) => d2(t));
+  assert.ok(on.includes('\u001b'), 'colour on a real terminal produced no ANSI; the switch is broken');
 });

@@ -90,6 +90,7 @@ export function renderTable(
   headers: string[],
   rows: string[][],
   decorate: (text: string, column: number) => string = (t) => t,
+  decorateHeader: (text: string) => string = (t) => t,
 ): string {
   const widths = headers.map((h, i) =>
     Math.max(h.length, ...rows.map((r) => (r[i] ?? '').length)),
@@ -100,7 +101,12 @@ export function renderTable(
       .join('  ')
       .trimEnd();
 
-  const header = line(headers, (t) => ANSI.dim + t + ANSI.reset);
+  // The header style comes from the caller's colourizer, not from a hard-coded ANSI constant. It used to
+  // be hard-coded, so `--no-color` left the header coloured and any redirect wrote escape codes into the
+  // file -- `runs list > runs.txt` produced a file that did not diff or grep cleanly. Defaulting to no
+  // decoration is deliberate: a new caller that forgets to pass one gets plain output rather than
+  // colour it never asked for.
+  const header = line(headers, (t) => decorateHeader(t));
   const body = rows.map((r) => line(r, (t, i) => decorate(t, i)));
   return [header, ...body].join('\n');
 }
