@@ -6,9 +6,11 @@ contracts, transport, configuration and credential layers; the read-only command
 `runs create`, `runs input`, `runs cancel` and `runs retry` with idempotency keys
 and confirmation; and the observation commands `runs events` and `runs watch` with
 paging, gap recovery, bounded reconnect and terminal outcome exit codes. Milestone 4
-(packaging) remains as issue #233, `config profiles` and `config current` are
-advertised but not yet built, and the TUI in Milestone 5 remains gated on
-demonstrated need. See §16 for per-milestone status.
+is in progress under issue #233: `config profiles` and `config current` are built,
+and every command in the design is now implemented. Shell completion, version
+output, operator documentation and the clean-install packaging checks remain. The
+TUI in Milestone 5 remains gated on demonstrated need. See §16 for per-milestone
+status.
 
 Mercury already runs as long-lived services: an API server owns the HTTP and
 dashboard surface, while one or more workers execute durable Runs. The existing
@@ -1082,6 +1084,154 @@ Deferred:
 
 - package-registry publication unless there is an operational need;
 - multi-host routing.
+
+### Milestone 4: packaging and operational hardening -- **in progress** (issue #233)
+
+Deliverables landed so far:
+
+- `config profiles` and `config current`;
+- every command in the design is now implemented, so help no longer marks anything unavailable;
+- commands that take no positional argument now refuse one;
+- `--version` / `-V`, with the version single-sourced from the installed manifest (§16.1);
+- `completion bash|zsh|fish`, generated from the command table and executed by the real shell in test (§16.3);
+- a compiled publish artifact and a clean-install smoke test, which found that the published CLI could not run at all (§16.4);
+- the custom-CA acceptance criterion, tested over both the JSON and the SSE path (§16.2).
+
+**A blank environment variable now means unset.** `??` skips `null` and `undefined` but not `''`, so a
+declared-but-empty `MERCURY_CLIENT_URL` -- which is what `${MERCURY_CLIENT_URL:-}` produces in a shell
+script, and what an unset CI variable often becomes -- beat a perfectly good profile and then failed
+with "no endpoint configured". The message pointed at the wrong knob, because the knob that was broken
+was the empty one. The credential layer already treated blank as absent; the config layer now agrees
+with it.
+
+**`config profiles` no longer resolves a configuration.** Routing it through the full resolver made the
+command that answers "what is in my file?" fail with "no endpoint configured" on a machine whose file was
+perfectly readable -- the command you reach for when the endpoint is missing was itself refusing to run
+without one. It reads the file and resolves each profile independently, reporting a broken profile
+inline instead of hiding the four good ones behind it.
+
+**A stray positional is now refused rather than ignored.** `mercuryctl runs list run-123` listed every
+Run. The operator asked about one and received a normal-looking listing, which is the worst shape a
+failure can take.
+
+**`config current` reports which layer won**, per field, from `describeConfig` -- the same function the
+request path uses. A diagnostic that re-derives precedence is a diagnostic that eventually lies. It also
+runs before the client is built, because the operator whose credential is broken is the one who needs it,
+and it never resolves a token into the printed object: the value is read only to decide whether one
+exists, then dropped.
+
+**Finishing the design invalidated its own scaffolding.** Seven tests used "a command that is not built
+yet" as a convenient way to exercise the parser without a server, derived from `IMPLEMENTED`. Once every
+command existed the derivation was empty and all seven failed at once -- which is the loud outcome the
+derivation was built to produce. Two properties had been tangled together. The parser tests now use a
+command that will never exist, and the "not available in this build" branch is covered by removing a
+command from `IMPLEMENTED` in-process and restoring it, so it stays covered whether or not anything
+happens to be unimplemented. The help test now asserts that help and the command table agree in both
+directions, against the CLI's own lists rather than a third hand-written list inside the test.
+
+#### 16.1 Version output and the compatibility policy
+
+`--version` prints `mercuryctl <version>`, and `--version --json` prints one JSON value with
+`name`, `version` and `node`. Both work with no config file, no endpoint and no credential.
+
+The version is read from the installed `package.json` rather than repeated in source. It had been
+written twice: the manifest said `0.1.0` and `USER_AGENT` said `0.1`. Nothing failed, because the two
+strings are never compared -- a server log would simply record a version no artifact ever had.
+`USER_AGENT` is now derived from `CLIENT_VERSION`, and a test asserts both against the manifest.
+
+The compatibility surface is what the design names as stable: **JSON field names and exit semantics**.
+Human output may change freely and is not pinned. One test walks the exit-code table in `--help` and
+asserts it matches the constants the CLI actually returns, in both directions, with `130` declared
+explicitly as the one code that comes from the shell rather than from a code path.
+
+**`--version` alone printed the help page.** The bare-invocation branch (`no command path -> show help`)
+ran before the version check, so the most likely way the flag is ever typed dumped a help page, and the
+flag only worked when a command followed it. Explicit `--help` still wins over `--version`, so asking
+for both gives the more informative answer.
+
+#### 16.2 A custom CA, proven rather than threaded
+
+The `caFile` option was already threaded from the profile through to both request paths, and reading
+the threading proved nothing. The JSON request and the SSE stream build their request options
+separately, so either could drop `ca` while the other kept it. Each path is now exercised on its own.
+
+Every case runs three ways: with the **right** CA, with **no** CA, and with a **different valid** CA.
+The third is the one that matters. Without it, a green test cannot distinguish "the profile's CA is
+consulted" from "certificate verification is switched off" -- and disabling verification is the failure
+that ships, because everything still works. Mutating the client to add `rejectUnauthorized: false`
+fails three of the five tests; dropping `ca` from the SSE options alone fails exactly one, which is the
+proof that the stream path has its own coverage rather than borrowing the JSON path's.
+
+**The tests hung for 30 seconds each, in both directions, including the case that should have failed
+instantly.** The HTTPS server runs inside the test process, and `spawnSync` blocks that process's event
+loop for the whole call -- so the server could never complete the very handshake the CLI subprocess was
+waiting on. Every request timed out, and the failure looked like a broken TLS transport. The symptom
+that gives it away is the negative case hanging too: a certificate rejection is immediate, so a hang
+means the handshake never started. Async `spawn` fixed all five. This is the same trap as a blocked
+in-process log drain, and it is worth repeating because the in-process server is exactly what makes the
+test fast and hermetic.
+
+#### 16.3 Shell completion
+
+`mercuryctl completion bash|zsh|fish` writes a completion script to stdout. It resolves no
+configuration and touches no network, so it works offline and with no credential -- which is both the
+acceptance criterion and the only sane behaviour for something the shell calls on every keystroke.
+
+The scripts are **generated from `COMMAND_SUMMARIES`**, the same table `--help` renders and the
+dispatcher consults. A hand-written completion file is a third copy of the command list, and it drifts
+the way the help text would have drifted: a command that works but does not complete makes the tool
+look smaller than it is, and one that completes but does not work is worse.
+
+Making `completion` a one-word command needed a parser change. The parser took the first two non-flag
+tokens as the command path unconditionally, so `completion bash` became a command named
+`"completion bash"`. That is the same class of bug as swallowing a run id into the command path, which
+review caught in Milestone 0; the parser now knows a one-word command consumes exactly one token and
+everything after it is an argument.
+
+**A syntax check is not a test.** `/bin/bash -n` accepted a version of the generated script whose
+subcommand branch omitted the `-- "$cur"` filter, so `runs w` offered all eight subcommands instead of
+`watch`, and a completed command re-offered its siblings. The test therefore drives the generated
+function with synthetic `COMP_WORDS` and asserts the answers, and a mutation that removes the filter
+again is caught. The zsh and fish scripts are syntax-checked but not executed: `fish` is not installed
+on this machine, so its behaviour beyond parsing is unverified here.
+
+#### 16.4 The published artifact could not run
+
+The acceptance criterion "the client installs without server or worker runtime configuration" is the
+first one in this design that cannot be checked from a source checkout, and writing its test found that
+**the installed `mercuryctl` did not work at all**.
+
+`bin.mercuryctl` pointed at `client/bin.ts`. Node refuses to strip types from any file under
+`node_modules`:
+
+```text
+Error [ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING]: Stripping types is currently unsupported
+for files under node_modules
+```
+
+The same file, on the same Node binary, runs fine from a checkout. The failure exists only after
+installation, which is precisely the moment no test in the suite had ever reached.
+
+The fix is a compile step: `npm run build:client` emits `dist/client/` with
+`rewriteRelativeImportExtensions`, `prepack` runs it, and `bin` points at the JavaScript. The repository
+already set `erasableSyntaxOnly`, which is what makes this safe to automate -- the source is guaranteed
+free of constructs that need more than erasure, so the emitted JavaScript is the same program.
+
+Two follow-on defects surfaced while doing it:
+
+- `--version` reported `0.0.0-dev` from the compiled output. It resolved `../package.json` relative to
+  its own file, which is the manifest in `client/` and nothing in `dist/client/`; the `catch` swallowed
+  it and produced a plausible-looking wrong version. It now walks upward and matches on the package
+  name, so a dependency's manifest cannot be mistaken for this one.
+- `bin.mercury` has the same TypeScript problem and is **not** fixed here. The server resolves
+  migrations, `ui/` and skill directories relative to its own location, so relocating it is a separate
+  change. It is tracked in #243, and the packaging test keeps a list of exactly that kind of exception
+  and asserts the list is accurate in both directions -- so fixing it breaks the test until the entry is
+  removed.
+
+The smoke test packs the real tarball, extracts it under a path containing `node_modules` -- the path is
+the point, since anywhere else the restriction does not apply -- and runs the binary there. Reverting
+`bin` to `client/bin.ts` makes it fail with the original error verbatim.
 
 ### Milestone 5: optional TUI
 

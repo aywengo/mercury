@@ -25,8 +25,13 @@ import type { MercuryEvent } from './api/protocol.ts';
 import { renderEventLine, renderWatchSummary, watchExitCode } from './commands/events.ts';
 import { AbortedError, observeRun } from './observe/runObserver.ts';
 import { reduceRun } from './observe/reducer.ts';
+import { buildCurrentView, listProfiles, renderCurrent, renderProfiles } from './commands/config.ts';
+import { describeConfig } from './config.ts';
 
-export const PROGRAM = 'mercuryctl';
+import { CLIENT_VERSION, PROGRAM } from './version.ts';
+import { completionScript } from './commands/completion.ts';
+
+export { PROGRAM };
 
 export interface GlobalOptions {
   profile?: string;
@@ -35,6 +40,7 @@ export interface GlobalOptions {
   noColor: boolean;
   timeoutMs?: number;
   help: boolean;
+  version: boolean;
   yes: boolean;
 }
 
@@ -59,6 +65,8 @@ const GLOBAL_BOOL_FLAGS: Record<string, keyof GlobalOptions> = {
   '--no-color': 'noColor',
   '--help': 'help',
   '-h': 'help',
+  '--version': 'version',
+  '-V': 'version',
   '--yes': 'yes',
 };
 
@@ -84,11 +92,15 @@ function looksLikeFlag(token: string): boolean {
   return token.startsWith('-') && token !== '-';
 }
 
+/** Commands whose name is a single token; everything after them is an argument. */
+const ONE_WORD_COMMANDS = new Set(['completion']);
+
 export function parseArgs(argv: string[]): ParsedInvocation {
-  const globals: GlobalOptions = { json: false, noColor: false, help: false, yes: false };
+  const globals: GlobalOptions = { json: false, noColor: false, help: false, version: false, yes: false };
   const path: string[] = [];
   const positional: string[] = [];
   const flags: Record<string, string | boolean> = {};
+  let singleWordCommand = false;
 
   /**
    * Apply one flag, returning true if this parser consumed it.
@@ -172,8 +184,17 @@ export function parseArgs(argv: string[]): ParsedInvocation {
       if (applied) i += applied.consumed;
       continue;
     }
-    if (path.length < 2) path.push(tok);
-    else positional.push(tok);
+    if (path.length === 0 && ONE_WORD_COMMANDS.has(tok)) {
+      // A one-word command consumes exactly one token and everything after it is an argument. Without
+      // this the parser takes `bash` as the second half of a command named "completion bash" -- the
+      // same class of bug as swallowing a run id into the command path.
+      path.push(tok);
+      singleWordCommand = true;
+    } else if (!singleWordCommand && path.length < 2) {
+      path.push(tok);
+    } else {
+      positional.push(tok);
+    }
     i += 1;
   }
 
@@ -216,6 +237,9 @@ export const IMPLEMENTED = new Set<string>([
   'runs retry',
   'runs events',
   'runs watch',
+  'config profiles',
+  'config current',
+  'completion',
 ]);
 
 /**
@@ -225,7 +249,7 @@ export const IMPLEMENTED = new Set<string>([
  * wires up a command updates one set and help follows automatically. Storing it twice is how a
  * command ends up advertised as unavailable after it works.
  */
-const COMMAND_SUMMARIES: [string, string][] = [
+export const COMMAND_SUMMARIES: [string, string][] = [
   ['agents list', 'list registered agents and the server default'],
   ['runs list', 'list Runs (newest first)'],
   ['runs show', 'show one Run and its recorded skills'],
@@ -235,12 +259,14 @@ const COMMAND_SUMMARIES: [string, string][] = [
   ['runs input', 'answer a Run waiting for input'],
   ['runs cancel', 'request cancellation'],
   ['runs retry', 'create a new Run from a terminal one'],
+  ['completion', 'print a shell completion script'],
   ['config profiles', 'list configured profiles'],
   ['config current', 'show the resolved profile'],
 ];
 
 /** Usage suffix per command, so the argument a caller must supply is visible in help. */
 const COMMAND_ARGS: Record<string, string> = {
+  completion: ' <bash|zsh|fish>',
   'runs show': ' <run-id>',
   'runs events': ' <run-id>',
   'runs watch': ' <run-id>',
@@ -281,6 +307,7 @@ const HELP_LINES: string[] = [
   '  --timeout <duration>       per-request deadline, e.g. 30s, 2m, 1500ms',
   '  --yes                      skip confirmation prompts',
   '  -h, --help                 show this help',
+  '  -V, --version                print the client version and exit',
   '',
   'ENVIRONMENT',
   '  MERCURY_CLIENT_PROFILE     profile to select',
@@ -336,7 +363,28 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
     return EXIT.USAGE;
   }
 
-  if (parsed.globals.help || parsed.path.length === 0) {
+  // Order matters and was wrong the first time: with the bare-invocation branch first, `mercuryctl
+  // --version` printed the help text, because no command path was given. Explicit --help still wins
+  // over --version so that asking for both gives the more informative answer.
+  if (parsed.globals.help) {
+    io.stdout(`${helpText()}\n`);
+    return EXIT.OK;
+  }
+
+  // Answered before anything is resolved. --version is the first thing an operator runs on a machine
+  // where nothing is configured yet, and it is the thing a support request asks for; failing it with
+  // "no endpoint configured" would make the tool unable to describe itself. It also prints no
+  // credential, so it stays safe to paste.
+  if (parsed.globals.version) {
+    if (parsed.globals.json) {
+      io.stdout(`${JSON.stringify({ name: PROGRAM, version: CLIENT_VERSION, node: process.versions.node })}\n`);
+    } else {
+      io.stdout(`${PROGRAM} ${CLIENT_VERSION}\n`);
+    }
+    return EXIT.OK;
+  }
+
+  if (parsed.path.length === 0) {
     io.stdout(`${helpText()}\n`);
     return EXIT.OK;
   }
@@ -351,6 +399,46 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
   }
 
   try {
+    if (ZERO_POSITIONAL_COMMANDS.has(command)) rejectStrayPositional(parsed, command);
+
+    // Completion is answered before the client is built and before any configuration is resolved.
+    // The shell invokes it on every keystroke, so a completion function that needed a credential would
+    // make the tool unusable on a machine that has not been configured yet -- and that is exactly when
+    // an operator is typing the first command (§16 Milestone 4).
+    if (command === 'completion') {
+      const shell = parsed.positional[0];
+      if (shell === undefined) {
+        throw new UsageError('completion needs a shell name: bash, zsh or fish');
+      }
+      if (parsed.positional.length > 1) {
+        throw new UsageError(
+          `completion takes one shell name, got ${JSON.stringify(parsed.positional.join(' '))}`,
+        );
+      }
+      io.stdout(completionScript(shell));
+      return EXIT.OK;
+    }
+
+    // Config commands are answered before the client is built. buildContext resolves a credential and
+    // throws without one, and the operator who needs this command most is the one whose credential is
+    // broken. They also never touch the network, so they work offline (§16 Milestone 4).
+    if (command === 'config profiles' || command === 'config current') {
+      const render = { json: parsed.globals.json, noColor: parsed.globals.noColor, isTty: io.isTty };
+      if (command === 'config profiles') {
+        // No resolver here on purpose: listing the file must work with no endpoint and no credential.
+        io.stdout(`${renderProfiles(listProfiles({ profileFlag: parsed.globals.profile }), render)}\n`);
+      } else {
+        const detail = describeConfig({
+          profileFlag: parsed.globals.profile,
+          urlFlag: parsed.globals.url,
+          timeoutFlagMs: parsed.globals.timeoutMs,
+          noColorFlag: parsed.globals.noColor,
+        });
+        io.stdout(`${renderCurrent(buildCurrentView(detail), render)}\n`);
+      }
+      return EXIT.OK;
+    }
+
     const ctx = buildContext(parsed.globals);
     if (command === 'agents list') {
       io.stdout(`${renderAgents(await ctx.client.listAgents(), ctx, io.isTty)}\n`);
@@ -502,6 +590,33 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
 }
 
 /** Every <run-id> command takes exactly one; a second argument is almost always a mistake. */
+/**
+ * Commands that take no positional argument at all.
+ *
+ * Listed rather than inferred because the check has to happen before the command runs: by the time a
+ * command body could notice, it has already decided to ignore the extra word.
+ *
+ * `runs create` belongs here even though it takes no id: it is configured entirely by flags, so a bare
+ * word after it has nowhere to go. It was missing from the first version of this set, which a reviewer
+ * caught by walking every command in the dispatcher rather than only the ones the change touched.
+ */
+const ZERO_POSITIONAL_COMMANDS = new Set(['agents list', 'runs list', 'runs create', 'config profiles', 'config current']);
+
+/**
+ * Reject a stray positional on a command that has nowhere to put it.
+ *
+ * `mercuryctl runs list run-123` used to list every Run. The operator asked about one Run and got an
+ * answer that looked like a normal listing -- the worst kind of failure, because it is indistinguishable
+ * from success. An unambiguous usage error is the only acceptable outcome.
+ */
+function rejectStrayPositional(parsed: ParsedInvocation, command: string): void {
+  if (parsed.positional.length === 0) return;
+  throw new UsageError(
+    `${command} takes no arguments, got ${JSON.stringify(parsed.positional.join(' '))}. ` +
+    `Run \`${PROGRAM} --help\` for what ${command} accepts.`,
+  );
+}
+
 function requireRunId(parsed: ParsedInvocation, command: string): string {
   const runId = parsed.positional[0];
   if (!runId) throw new UsageError(`${command} needs a run id: ${PROGRAM} ${command} <run-id>`);
