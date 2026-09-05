@@ -177,3 +177,16 @@ test('help no longer advertises these as unavailable', () => {
   assert.equal(r.code, 0, r.err);
   assert.ok(!/\[not in this build\]/.test(r.out), `help still marks something unimplemented:\n${r.out}`);
 });
+test('a token pasted into the credential field cannot be printed by either config command', () => {
+  // The realistic mistake: a tool that asks for the token itself, so the operator pastes one here.
+  // Before this was refused, `config current` printed it -- its entire job is echoing configuration.
+  const token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk';
+  const root = makeConfig({ prod: { url: 'https://prod.example.com:3000', credential: token } });
+  for (const args of [['config', 'profiles'], ['config', 'current'], ['config', 'current', '--json']]) {
+    const r = cli(root, args);
+    assert.equal(r.code, 2, `${args.join(' ')} accepted a token as a credential name`);
+    assert.ok(!r.all.includes(token), `${args.join(' ')} printed the token`);
+    assert.ok(!r.all.includes(token.slice(0, 20)), `${args.join(' ')} printed part of the token`);
+    assert.match(r.err, /does not look like a name/);
+  }
+});

@@ -70,7 +70,12 @@ test('the "not available in this build" path still works when nothing is left un
 test('a stray positional on a command that takes none is refused, not ignored', async () => {
   // `runs list <id>` used to list every Run: the operator asked about one and received an answer that
   // looked normal. Same for the config commands.
-  for (const args of [['runs', 'list', 'run-123'], ['agents', 'list', 'x'], ['config', 'current', 'x']]) {
+  for (const args of [
+    ['runs', 'list', 'run-123'], ['agents', 'list', 'x'], ['config', 'current', 'x'],
+    // create is configured entirely by flags, so a bare word after it has nowhere to go. It was
+    // missing from the first version of the set.
+    ['runs', 'create', 'stray-word'],
+  ]) {
     const r = run(args, { MERCURY_CLIENT_URL: 'http://127.0.0.1:1', MERCURY_CLIENT_TOKEN: 'tok' });
     assert.equal(r.code, 2, `${args.join(' ')} accepted a stray argument`);
     assert.match(r.stderr, /takes no arguments/);
