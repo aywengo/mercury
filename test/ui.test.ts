@@ -73,9 +73,11 @@ test('UI pages reference the correct assets', () => {
   const run = readFileSync(join(UI_DIR, 'run.html'), 'utf8');
   assert.match(index, /<script type="module" src="\/index\.js">/);
   assert.match(index, /<link rel="stylesheet" href="\/style\.css">/);
+  assert.match(index, /<option value="fake">fake<\/option>/);
   assert.match(run, /<script type="module" src="\/run\.js">/);
   // both pages use the shared helpers
   assert.match(readFileSync(join(UI_DIR, 'index.js'), 'utf8'), /from '\.\/app\.js'/);
+  assert.match(readFileSync(join(UI_DIR, 'index.js'), 'utf8'), /defaultAgent/);
   assert.match(readFileSync(join(UI_DIR, 'run.js'), 'utf8'), /from '\.\/app\.js'/);
 });
 

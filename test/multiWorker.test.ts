@@ -545,6 +545,7 @@ test('CLI wiring: backlog alert webhook fires when configured via env (issue #5)
       db, runs, events, skills,
       selector: createSkillSelector(),
       knownAgents: ['fake'],
+      defaultAgent: 'fake',
       defaultMaxDurationMs: 60_000,
       defaultMaxRetries: 0,
     });

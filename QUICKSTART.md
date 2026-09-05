@@ -1,78 +1,86 @@
 # Mercury QuickStart
 
-Get Mercury running in under five minutes and submit your first coding Run.
+Get Mercury running and complete a first Run without installing a coding-agent CLI.
 
-Mercury is the durable orchestration layer for PrimeAgent: you submit a task, get a `runId`,
-close the browser, and the Run keeps executing in the background.
+Mercury is a durable control plane for coding agents: you submit a task, get a `runId`,
+close the browser, and the Run keeps executing in the background. Omitting `agent` (or
+selecting `fake`) exercises that path with no LLM and no extra binaries.
 
 ---
 
 ## 1. Prerequisites
 
+Required to run Mercury:
+
 | Requirement | Version | Check |
 | --- | --- | --- |
 | Node.js | ≥ 22.18 (built-in `node:sqlite`, no build step) | `node --version` |
-| `prime-agent` | on `PATH` (for real agent Runs) | `which prime-agent` |
 | `git` | any modern version (worktree isolation) | `git --version` |
 
-No database server, no Docker, no external services required for a basic run.
+No database server, no Docker, and no coding-agent CLI are required for this walkthrough.
 Docker/podman is only needed for sandboxed (resource-limited) execution.
+
+PrimeAgent, Hermes, and Claude are optional. Install one of them only when you want a real
+coding Run — see [section 6](#6-real-coding-agents-optional).
+
+Work from the repository root (the directory that contains `package.json`). Migrations
+apply automatically when the process opens the database; you do not need `npm run migrate`
+first.
 
 ## 2. Install
 
 ```bash
-cd mercury
 npm install
 ```
 
-`npm install` is required before **either** `npm test` or `npm run typecheck`, not just before
-running the server. Without `node_modules`, `npm run typecheck` exits 127 with `tsc: command not
-found`, and `npm test` runs but fails 4 files (`api`, `auth`, `multiWorker`, `ui`) with
-`ERR_MODULE_NOT_FOUND: express` -- so the whole authentication and authorization surface looks
-broken when only the install is missing. CI installs dependencies first; see
-`.github/workflows/ci.yml`.
+Install dependencies before starting the server, running tests, or typechecking.
 
-## 3. Start the server (dev mode: API + worker in one process)
+Optional checkout check:
+
+```bash
+npm run typecheck
+npm test
+```
+
+## 3. Start the server
 
 ```bash
 MERCURY_EMBEDDED_WORKER=true MERCURY_API_TOKENS="tok-alice:alice" npm run dev
 ```
 
-- `MERCURY_API_TOKENS` maps a bearer token to an owner (`token:owner,...`). This is your login.
-- Server listens on `http://127.0.0.1:3000` by default (loopback only — secure default).
-- The dashboard is served at `http://127.0.0.1:3000/`.
+`MERCURY_API_TOKENS` is `token:owner` pairs, comma-separated:
 
-Production-style split (separate processes, same DB):
+- left of the colon is the **bearer token** (`tok-alice`) — use this in `Authorization`
+  headers and in the dashboard login box;
+- right of the colon is the **owner id** (`alice`) — this is not a password.
+
+The API listens on `http://127.0.0.1:3000` (loopback only). Confirm it is up:
 
 ```bash
-MERCURY_API_TOKENS="tok-alice:alice" npm run server   # terminal 1: API only
-MERCURY_API_TOKENS="tok-alice:alice" npm run worker   # terminal 2: worker only
+curl -s http://127.0.0.1:3000/healthz
 ```
 
-## 4. Submit a Run
+The dashboard is `http://127.0.0.1:3000/`. Sign in with `tok-alice`, not `alice` and not
+the whole `tok-alice:alice` string.
 
-### Plumbing check (fake agent — no LLM, completes instantly)
+Production-style split (separate processes, same DB) is documented in
+[`docs/operations.md`](docs/operations.md). For a first run, keep the embedded worker.
+
+## 4. Submit a plumbing Run
+
+Default workspace mode is `git-worktree`, so `repository.localPath` must be a git repo.
+Use this checkout (replace the path if you cloned elsewhere):
 
 ```bash
 curl -X POST http://127.0.0.1:3000/api/runs \
   -H "Authorization: Bearer tok-alice" -H "Content-Type: application/json" \
-  -d '{"task":"smoke test","agent":"fake","repository":{"localPath":"/tmp"}}'
+  -d '{"task":"smoke test","repository":{"localPath":"'"$PWD"'","baseBranch":"main"}}'
 ```
 
-### Real PrimeAgent Run
+Omitting `agent` selects `fake` (in-process, no LLM). You can also send `"agent":"fake"`.
 
-```bash
-curl -X POST http://127.0.0.1:3000/api/runs \
-  -H "Authorization: Bearer tok-alice" -H "Content-Type: application/json" \
-  -d '{"task":"Fix the failing integration tests and prepare a PR","repository":{"localPath":"/path/to/repo","baseBranch":"main"}}'
-```
-
-- `agent` defaults to `primeagent` (runs via `prime-agent --mode rpc` with your local model config).
-- Need explicit provider/model flags? Start the server with
-  `MERCURY_PRIMEAGENT_ARGS="--provider omlx --model <name>"`.
-- `repository.localPath` = local git repo; `repository.url` = remote git URL.
-- Default workspace mode is `git-worktree` (needs a git repo). For a non-git folder:
-  `MERCURY_WORKSPACE_MODE=copy`.
+Do not use `/tmp` as `localPath` unless you started with `MERCURY_WORKSPACE_MODE=copy`.
+`/tmp` is not a git repo, so git-worktree setup fails.
 
 Response (the API returns immediately — the Run keeps going in the background):
 
@@ -91,34 +99,90 @@ curl http://127.0.0.1:3000/api/runs/<runId> -H "Authorization: Bearer tok-alice"
 curl http://127.0.0.1:3000/api/runs/<runId>/events -H "Authorization: Bearer tok-alice"
 ```
 
-Or open the dashboard: **http://127.0.0.1:3000/** — log in with your token, create/observe Runs,
-answer human-input questions, cancel, retry.
-
-## 6. What you should see
+Or open the dashboard, create/observe Runs, answer human-input questions, cancel, retry.
 
 A Run goes through `QUEUED → STARTING → RUNNING → COMPLETED` (or `FAILED / CANCELLED / TIMED_OUT`).
-Structured events are persisted per Run: `run.started`, `skill.started/completed`,
-`agent.message`, `tool.started/completed`, `test.completed`, `run.completed`, ...
+The Run survives browser/terminal closure. That is the point of Mercury.
 
-The Run survives browser/terminal closure. Close everything, come back hours later, and the
-Run is still there — that is the whole point of Mercury.
+## 6. Real coding agents (optional)
+
+Pick one CLI, put it on `PATH`, then create a Run with that `agent` id. Capability details:
+[`docs/agents.md`](docs/agents.md).
+
+Each of these needs its own model/provider credentials. Mercury does not bundle them.
+
+### PrimeAgent (`agent`: `primeagent`)
+
+Binary: `prime-agent`. Highest-fidelity builtin: RPC events, tools, human input.
+
+```bash
+curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+which prime-agent
+```
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/runs \
+  -H "Authorization: Bearer tok-alice" -H "Content-Type: application/json" \
+  -d '{"task":"Fix the failing integration tests and prepare a PR","agent":"primeagent","repository":{"localPath":"'"$PWD"'","baseBranch":"main"}}'
+```
+
+Need explicit provider/model flags? Start Mercury with
+`MERCURY_PRIMEAGENT_ARGS="--provider omlx --model <name>"`. Command override:
+`MERCURY_PRIMEAGENT_CMD`.
+
+To make omitted `agent` select PrimeAgent again: `MERCURY_DEFAULT_AGENT=primeagent`.
+
+### Hermes (`agent`: `hermes`)
+
+Binary: `hermes`. Quiet CLI: final text plus a session id; no tool events and no
+interactive input bridge.
+
+```bash
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+which hermes
+```
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/runs \
+  -H "Authorization: Bearer tok-alice" -H "Content-Type: application/json" \
+  -d '{"task":"Summarize the repository layout","agent":"hermes","repository":{"localPath":"'"$PWD"'","baseBranch":"main"}}'
+```
+
+Knobs: `MERCURY_HERMES_CMD`, `MERCURY_HERMES_ARGS`. Approval-bypass flags
+(`MERCURY_HERMES_YOLO`, `MERCURY_HERMES_ACCEPT_HOOKS`) change execution safety —
+see [`docs/configuration.md`](docs/configuration.md#hermes).
+
+### Claude (`agent`: `claude`)
+
+Binary: `claude` (Claude Code CLI). Stream-JSON tool events; no interactive
+`sendInput` in the verified CLI version.
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+which claude
+```
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/runs \
+  -H "Authorization: Bearer tok-alice" -H "Content-Type: application/json" \
+  -d '{"task":"Fix the failing integration tests and prepare a PR","agent":"claude","repository":{"localPath":"'"$PWD"'","baseBranch":"main"}}'
+```
+
+Knobs: `MERCURY_CLAUDE_CMD`, `MERCURY_CLAUDE_ARGS`, `MERCURY_CLAUDE_MODEL`.
+`MERCURY_CLAUDE_SKIP_PERMISSIONS` is a dangerous permission bypass.
+
+Declarative local, RPC, and remote agents: [`docs/agents.md`](docs/agents.md).
 
 ## 7. Useful environment variables
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `MERCURY_API_TOKENS` | — | `token:owner,...` map (required for auth) |
-| `MERCURY_ADMIN_TOKEN` | — | Admin token (sees all Runs) |
 | `MERCURY_PORT` | `3000` | API port |
-| `MERCURY_BIND_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` to expose — use TLS/reverse proxy) |
-| `MERCURY_DB` | `./mercury.db` | SQLite database file |
-| `MERCURY_WORKSPACE_BASE` | `./workspaces` | Workspace root |
-| `MERCURY_WORKSPACE_MODE` | `git-worktree` | `git-worktree` or `copy` |
-| `MERCURY_PRIMEAGENT_CMD` | `prime-agent` | Agent command |
-| `MERCURY_PRIMEAGENT_ARGS` | — | Extra agent args (e.g. `--provider omlx --model <name>`) |
 | `MERCURY_EMBEDDED_WORKER` | `false` | Run worker inside the API process (dev) |
-| `MERCURY_INPUT_TIMEOUT_MS` | `1800000` | Human-input wait timeout (`0` = no limit) |
-| `MERCURY_SANDBOX_RUNTIME` | — | `docker`/`podman` for resource/network-limited Runs |
+| `MERCURY_DEFAULT_AGENT` | `fake` | Agent id when create omits `agent` |
+| `MERCURY_PRIMEAGENT_CMD` | `prime-agent` | PrimeAgent executable |
+| `MERCURY_PRIMEAGENT_ARGS` | — | Extra PrimeAgent args |
 
 Full reference: [`docs/configuration.md`](docs/configuration.md).
 
@@ -126,16 +190,11 @@ Full reference: [`docs/configuration.md`](docs/configuration.md).
 
 | Symptom | Fix |
 | --- | --- |
-| `401` on `/api/runs` | Wrong/missing `Authorization: Bearer <token>`; token must be in `MERCURY_API_TOKENS` |
+| `401` on `/api/runs` | Wrong/missing `Authorization: Bearer <token>`; token is the left side of `MERCURY_API_TOKENS` |
+| Dashboard login fails | Enter `tok-alice`, not `alice` and not `tok-alice:alice` |
 | Run stuck `QUEUED` | Worker not running — start it (`MERCURY_EMBEDDED_WORKER=true` or `npm run worker`) |
-| Run `FAILED` at setup, "Workspace requires repository..." | `repository.localPath` missing/not a git repo (or use `MERCURY_WORKSPACE_MODE=copy`) |
-| Agent exits immediately | `prime-agent` not on PATH or bad `MERCURY_PRIMEAGENT_ARGS`; check `agent-output.log` in the workspace |
+| Run `FAILED` at setup, "Workspace requires repository..." | `repository.localPath` missing |
+| Run `FAILED` at setup on a non-git folder | Default mode is git-worktree; use a git repo or `MERCURY_WORKSPACE_MODE=copy` |
+| Agent exits immediately | Coding-agent CLI not on PATH or bad `MERCURY_*_ARGS`; check `agent-output.log` in the workspace |
 | `429 Too Many Requests` | Rate limit (login 10/min/IP, run creation 30/min/owner+IP); wait for `Retry-After` |
 | Sandbox error at setup | Run requested `resourceLimits`/`allowedNetworks` but no container runtime — configure docker/podman or remove the constraints |
-
-## 9. Verify the install (optional)
-
-```bash
-npm run typecheck   # tsc --noEmit
-npm test            # full suite, no network, no LLM
-```

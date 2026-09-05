@@ -5,6 +5,7 @@ Mercury configuration is environment-based. Application settings use the
 access.
 
 For a production systemd example, see [`deploy/README.md`](../deploy/README.md).
+First-run walkthrough: [`QUICKSTART.md`](../QUICKSTART.md).
 
 ## Minimal development configuration
 
@@ -14,10 +15,50 @@ MERCURY_API_TOKENS="tok-alice:alice"
 npm run dev
 ```
 
-The API listens on `127.0.0.1:3000` and stores `mercury.db` plus workspaces
-relative to the current directory.
+The API listens on `127.0.0.1:3000`. Confirm with `curl -s http://127.0.0.1:3000/healthz`.
+It stores `mercury.db` plus workspaces relative to the current directory.
+
+`MERCURY_API_TOKENS` is comma-separated `token:owner` mappings:
+
+- left of the colon is the bearer token (`tok-alice`) — curl `Authorization: Bearer`
+  and the dashboard login box;
+- right of the colon is the owner id (`alice`).
+
+Do not type the owner id or the whole `tok-alice:alice` string into the dashboard.
+
+Creating a Run without `agent` uses `fake` (no coding-agent CLI). Migrations apply
+when the process opens the database; `npm run migrate` is a verify/apply CLI, not a
+required first-run step.
+
+The QuickStart inline environment is for loopback only. Tokens and secret values
+must come from a protected environment file or secret manager in any shared or
+networked install. Do not place them in command-line arguments, repository files
+or Git remote URLs.
+
+## Choosing an agent
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MERCURY_DEFAULT_AGENT` | `fake` | Agent id used when create omits `agent` |
+
+Startup fails if the configured id is not registered. Restore the previous
+create-Run default with `MERCURY_DEFAULT_AGENT=primeagent`.
+
+Builtin ids (the CLI must be on `PATH` except for `fake`):
+
+| Id | Binary | Notes |
+| --- | --- | --- |
+| `fake` | — | In-process plumbing adapter; always registered |
+| `primeagent` | `prime-agent` | Supported coding transport (RPC) |
+| `hermes` | `hermes` | Quiet CLI; reduced fidelity |
+| `claude` | `claude` | Stream-JSON CLI; no interactive input |
+
+Install and capability notes: [`agents.md`](agents.md). Extra ids load from the
+registry directories below. `npm install` does not ship those CLIs.
 
 ## Core
+
+A new local install can keep every default in this section.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -42,10 +83,6 @@ are resolved from the service working directory.
 | `MERCURY_COOKIE_SECURE` | `false` | Force the browser session cookie's `Secure` attribute |
 | `MERCURY_TRUST_PROXY` | `0` | Number of trusted reverse-proxy hops |
 
-Tokens and secret values must come from a protected environment file or secret
-manager. Do not place them in command-line arguments, repository files or Git
-remote URLs.
-
 ### Reverse proxy
 
 Set `MERCURY_TRUST_PROXY` to the exact number of proxies between the client and
@@ -69,6 +106,8 @@ reverse proxy.
 
 ## Queue and lifecycle
 
+Leave these at defaults unless you are tuning leases or timeouts.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `MERCURY_LEASE_MS` | `60000` | Queue lease duration |
@@ -88,6 +127,9 @@ by `MERCURY_SHUTDOWN_GRACE_MS`.
 
 ## Workspace and retention
 
+Default `git-worktree` needs a git repository. Use `copy` only for non-git
+local inputs (tests, throwaway folders). `/tmp` is not a git repo.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `MERCURY_WORKSPACE_BASE` | `./workspaces` | Repository cache and Run workspace root |
@@ -101,6 +143,8 @@ non-Git local inputs but does not preserve Git branch metadata.
 
 ## Sandbox
 
+Unset unless a Run requests `resourceLimits` or `allowedNetworks`.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `MERCURY_SANDBOX_RUNTIME` | unset | `docker`, `podman` or `none` |
@@ -112,8 +156,8 @@ An unset runtime (or `MERCURY_SANDBOX_RUNTIME=none`) means constrained Runs fail
 constraints continue directly on the host. To run unsandboxed, omit `resourceLimits` and `allowedNetworks`
 from the Run constraints.
 
-The default image does not contain PrimeAgent or Git and is not sufficient for
-a real sandboxed coding Run. Build an image containing:
+The default image does not contain a coding-agent binary or Git and is not
+sufficient for a real sandboxed coding Run. Build an image containing:
 
 1. the selected agent binary;
 2. its compatible runtime;
@@ -136,7 +180,7 @@ credential families even when they are named in the custom list. See
 | `MERCURY_PRIMEAGENT_ARGS` | unset | Static arguments appended to the RPC command |
 | `MERCURY_DAEMON_SOCKET` | platform default | Explicit experimental PrimeAgent daemon socket |
 
-RPC is the supported default. Daemon mode is not production-ready; see
+RPC is the supported coding transport. Daemon mode is not production-ready; see
 [`daemon-agent-sessions.md`](daemon-agent-sessions.md).
 
 ## Hermes
@@ -215,13 +259,15 @@ variable that contains that backend's credential.
 
 ## Production-style example
 
-Use one environment file for both API and worker:
+Use one environment file for both API and worker. Set `MERCURY_DEFAULT_AGENT` to
+the coding backend this host should run when callers omit `agent`:
 
 ```bash
 MERCURY_DB=/var/lib/mercury/mercury.db
 MERCURY_WORKSPACE_BASE=/var/lib/mercury/workspaces
 MERCURY_BIND_HOST=127.0.0.1
 MERCURY_API_TOKENS=replace-me:operator
+MERCURY_DEFAULT_AGENT=primeagent
 MERCURY_SANDBOX_RUNTIME=docker
 MERCURY_SANDBOX_IMAGE=registry.example/mercury-agent:stable
 ```

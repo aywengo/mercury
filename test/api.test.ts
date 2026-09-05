@@ -180,9 +180,10 @@ test('GET /api/agents returns the registered agent ids (issue #13)', async () =>
         headers: { authorization: 'Bearer tok-alice' },
       });
       assert.equal(res.status, 200);
-      const body = (await res.json()) as { agents: string[] };
+      const body = (await res.json()) as { agents: string[]; defaultAgent: string };
       assert.ok(Array.isArray(body.agents));
       assert.ok(body.agents.includes('fake'), `expected 'fake' in ${body.agents.join(',')}`);
+      assert.equal(body.defaultAgent, 'fake');
       // matches what RunService accepts
       const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: body.agents[0] });
       assert.ok(run.id);

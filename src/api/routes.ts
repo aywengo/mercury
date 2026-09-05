@@ -99,7 +99,7 @@ export function createRoutes(deps: RoutesDeps): Router {
 
   // GET /api/agents — registered agent ids for the UI dropdown
   router.get('/agents', (_req: Request, res: Response) => {
-    res.json({ agents: deps.runService.listAgents() });
+    res.json({ agents: deps.runService.listAgents(), defaultAgent: deps.runService.defaultAgent() });
   });
 
   // POST /api/runs

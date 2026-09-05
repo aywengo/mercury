@@ -50,6 +50,11 @@ export interface Config {
   backlogCheckIntervalMs: number;
   /** Optional webhook URL for backlog alerts (MERCURY_ALERT_WEBHOOK_URL); null disables. */
   alertWebhookUrl: string | null;
+  /**
+   * Agent id used when a create request omits `agent` (MERCURY_DEFAULT_AGENT).
+   * Default `fake` so a first Run does not spawn a coding-agent CLI.
+   */
+  defaultAgent: string;
   /** Agent execution mode: 'rpc' (default, subprocess per Run) or 'daemon' (resident sessions). */
   agentMode: 'rpc' | 'daemon';
   /** Container runtime for sandboxed execution (MERCURY_SANDBOX_RUNTIME: docker|podman|none). */
@@ -150,6 +155,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     backlogAlertThreshold: num(env.MERCURY_BACKLOG_ALERT_THRESHOLD, 10),
     backlogCheckIntervalMs: num(env.MERCURY_BACKLOG_CHECK_INTERVAL_MS, 60_000),
     alertWebhookUrl: env.MERCURY_ALERT_WEBHOOK_URL ?? null,
+    defaultAgent: env.MERCURY_DEFAULT_AGENT?.trim() || 'fake',
     agentMode: env.MERCURY_AGENT_MODE === 'daemon' ? 'daemon' : 'rpc',
     sandboxRuntime: env.MERCURY_SANDBOX_RUNTIME ?? null,
     sandboxImage: env.MERCURY_SANDBOX_IMAGE ?? null,
