@@ -5,6 +5,11 @@ name: CI
 # (api, auth, multiWorker, ui). That meant the entire authentication and authorization surface was
 # unverifiable from a fresh clone, and nothing caught it because nothing ran on a fresh clone.
 # The fix is a job that installs dependencies before running anything.
+#
+# Path policy: narrative markdown alone does not burn the dual-Node matrix. Contract markdown
+# (README / QUICKSTART / remote-client-setup / deploy README) still runs the cheap docs-contract
+# job — those files are pinned by test/nodeFloor.test.ts and test/deployDocs.test.ts. Anything
+# else (or any push to main) runs the full suite.
 
 on:
   push:
@@ -19,12 +24,59 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    outputs:
+      code: ${{ steps.gate.outputs.code }}
+      contract_docs: ${{ steps.gate.outputs.contract_docs }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # On push to main always run the full suite. On PRs, classify the file set.
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!docs/**/*.md'
+              - '!ARCHITECTURE.md'
+              - '!AGENTS.md'
+              - '!README.md'
+              - '!QUICKSTART.md'
+              - '!deploy/README.md'
+            contract_docs:
+              - 'README.md'
+              - 'QUICKSTART.md'
+              - 'docs/remote-client-setup.md'
+              - 'deploy/README.md'
+
+      - name: Set path-filter outputs
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FILTER_CODE: ${{ steps.filter.outputs.code }}
+          FILTER_CONTRACT: ${{ steps.filter.outputs.contract_docs }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "contract_docs=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=${FILTER_CODE}" >> "$GITHUB_OUTPUT"
+            echo "contract_docs=${FILTER_CONTRACT}" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: needs.changes.outputs.code == 'true'
     strategy:
       # Do not let one Node version masking a failure in the other go unnoticed, and do not stop
       # at the first failure: a floor-only break and an LTS-only break are different problems.
@@ -70,9 +122,10 @@ jobs:
   # proving nothing while still reporting green. Delete or rewrite it in that case; do NOT "fix" it
   # by inverting the check, which would turn a vacuous guard into a wrong one.
   uninstalled-checkout-fails-clearly:
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -94,3 +147,63 @@ jobs:
             exit 1
           fi
           echo "OK: uninstalled checkout fails with ERR_MODULE_NOT_FOUND as expected"
+
+  # Contract markdown only: pin Node floor and deploy guide paths without the full matrix.
+  docs-contract:
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: needs.changes.outputs.code != 'true' && needs.changes.outputs.contract_docs == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Docs contract tests
+        run: node --test --test-timeout=180000 test/nodeFloor.test.ts test/deployDocs.test.ts
+
+  # Always reports a single status so narrative-only PRs are not stuck waiting on skipped required jobs.
+  ci:
+    name: ci
+    needs: [changes, test, uninstalled-checkout-fails-clearly, docs-contract]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    steps:
+      - name: Evaluate path-filtered results
+        env:
+          CODE: ${{ needs.changes.outputs.code }}
+          CONTRACT: ${{ needs.changes.outputs.contract_docs }}
+          CHANGES: ${{ needs.changes.result }}
+          TEST: ${{ needs.test.result }}
+          UNINSTALL: ${{ needs.uninstalled-checkout-fails-clearly.result }}
+          DOCS: ${{ needs.docs-contract.result }}
+        run: |
+          set -e
+          if [ "$CHANGES" != "success" ]; then
+            echo "changes job did not succeed: $CHANGES" >&2
+            exit 1
+          fi
+
+          if [ "$CODE" = "true" ]; then
+            if [ "$TEST" != "success" ] || [ "$UNINSTALL" != "success" ]; then
+              echo "full CI failed (test=$TEST uninstall=$UNINSTALL)" >&2
+              exit 1
+            fi
+            echo "full CI passed"
+            exit 0
+          fi
+
+          if [ "$CONTRACT" = "true" ]; then
+            if [ "$DOCS" != "success" ]; then
+              echo "docs-contract failed: $DOCS" >&2
+              exit 1
+            fi
+            echo "docs-contract passed (full matrix skipped)"
+            exit 0
+          fi
+
+          echo "narrative docs only — full CI and docs-contract skipped"
