@@ -1,10 +1,19 @@
 # Crew — Agent Preset Store
 
+> **Historical proposal — superseded.**
+>
+> This document is retained to preserve the original all-in-one design. It is
+> not the active implementation guide. The current design separates
+> [Role Presets, per-run MCP, the Preset Store and Workflow Templates](crew/README.md),
+> with the dependency-ordered plan in [`crew/roadmap.md`](crew/roadmap.md).
+
 Design and implementation roadmap for **Crew**: a versioned store of agent role
 presets (skills, MCP servers, instructions, loops/graphs) that users upload from
 the dashboard and keep in a Git repository.
 
-Status: **design only.** No source changes are in scope for this document.
+Status: **historical design only.** Source citations, completed prerequisites
+and estimates below describe an earlier repository revision and must not be used
+as current implementation facts.
 
 Related: [ARCHITECTURE.md](../ARCHITECTURE.md) (§8 adapters, §10–13 skills, §14 events,
 §24 security), [docs/agent-adapters.md](agent-adapters.md).
