@@ -5,6 +5,14 @@ runs, state, workspaces, events, retries, and human input independently of
 browser sessions. Agents execute the coding work, while Mercury safely
 orchestrates when, where, and with which tools and instructions they run.
 
+It is a harness for harnesses. Mercury never inspects a repository, edits a
+file, or runs a test; every one of those decisions belongs to the agent backend.
+What Mercury owns is everything that has to survive the agent process: the Run's
+identity and state, its workspace, its event history, the queue and lease that
+decide when it runs, and the human-input loop that resumes it. That separation is
+why one control plane can drive PrimeAgent, Claude, Hermes, a local CLI, a remote
+API, or a fake adapter in tests without any of them knowing about the others.
+
 Mercury is a working Node.js and SQLite implementation. Creating a Run without
 an `agent` field uses the built-in `fake` adapter (no extra CLI). PrimeAgent,
 Hermes, Claude, and declarative local/RPC/remote adapters are optional backends
@@ -100,6 +108,47 @@ The dashboard is available at `http://127.0.0.1:3000/`. Sign in with `tok-alice`
 | `npm run typecheck` | Run TypeScript checks |
 | `npm test` | Run the core and Fleet test suites |
 | `npm run fleet` | Manage federated Mercury hosts |
+
+## Operating Runs from a terminal
+
+`mercuryctl` is the remote operator client: it talks to a running Mercury over its
+HTTP API and never starts a server or a worker.
+
+```bash
+export MERCURY_CLIENT_URL=https://mercury.example.com:3000
+export MERCURY_CLIENT_TOKEN="$MY_TOKEN"     # never a flag: argv is readable with ps
+
+npx mercuryctl agents list
+npx mercuryctl runs create --task "fix the flaky test" --repo https://github.com/acme/api.git
+npx mercuryctl runs list --status running --json | jq -r '.runs[].id'
+npx mercuryctl runs watch "$RUN_ID"
+```
+
+`--json` emits exactly one machine-readable value on stdout, exit codes are stable
+and documented, and `mercuryctl --help` lists the commands this build implements.
+The design is in [`docs/cli-tui-design.md`](docs/cli-tui-design.md).
+
+## Fleet
+
+[`fleet/`](fleet/) is a separate product in this repository: a federation layer
+that runs several independent Mercury instances as one fleet. It talks to each
+Mercury over its public HTTP API, never touches a Mercury database, and imports
+no Mercury code — a coupling test enforces the boundary.
+
+The `fleet` CLI manages the host registry and probes it. `fleet serve` is the
+part that has to outlive the operator who started it: submitting and routing Runs
+across hosts, reconciling their state after a crash, aggregating events, and
+serving one Prometheus rollup.
+
+```bash
+npm run fleet -- hosts add mac-studio --url https://studio.lan:3000 --credential mac-studio
+npm run fleet -- hosts list --live
+FLEET_API_TOKENS="tok-admin:admin" npm run fleet -- serve
+```
+
+Fleet has its own tests (`npm run test:fleet`), configuration, changelog, and
+[operator documentation](fleet/README.md). Its design is in
+[`docs/fleet-design.md`](docs/fleet-design.md).
 
 ## Documentation
 

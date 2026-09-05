@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 /**
- * Fleet CLI. Phase 0: registry and probe only, no dispatch (docs/fleet-design.md section 12).
+ * Fleet CLI: host registry, probe and credential inspection.
+ *
+ * Dispatch, routing, event aggregation, interaction and the metrics rollup are NOT here. They live on the
+ * service (docs/fleet-design.md section 12, phases 1-6), because a Run binding has to survive the process
+ * that created it: a CLI that submitted work would have to stay alive to reconcile it, which is the
+ * durability property Fleet exists to provide.
  *
  * Usage:
  *   fleet hosts add <id> --url <base> --credential <ref> [--label k=v] [--path <abs>] [--disabled]
