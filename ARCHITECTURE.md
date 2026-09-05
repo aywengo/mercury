@@ -1541,11 +1541,13 @@ flowchart TD
 7. ~~Expand skill library~~ — **done**: 12 skills (added documentation, deployment, frontend, issue-fix-loop).
 8. ~~Deployment packaging~~ — **done**: `deploy/` with systemd units (server + worker), SQLite backup script with retention, logrotate config, ops guide.
 9. **Daemon-based agent sessions** — an adapter exists behind `MERCURY_AGENT_MODE=daemon` but is **not functional against a real daemon**: verified against PrimeAgent 0.8.1 (daemon protocol v7), it disagrees on frame layout, command envelope, session identity and socket choice, while its 12 tests pass against a mock that shares those assumptions. RPC remains the default and the only working path. See [`docs/daemon-agent-sessions.md`](docs/daemon-agent-sessions.md).
-10. **Crew — agent preset store** — **design only, not implemented**: versioned role
-   presets (instruction, skills, MCP servers, constraints, bounded loops/graphs) for roles
-   like `reviewer`, `system-architect`, `kubernetes`, `kafka`, `gcp-sre`, `aws-sre`;
-   uploaded from the dashboard and kept in a GitHub repository. Design + phased roadmap:
-   [`docs/crew-design.md`](docs/crew-design.md).
+10. **Crew — reusable execution configuration** — **design only, not implemented**:
+   ship builtin **Role Presets** first (instruction, skills, agent preference and
+   constraints), then treat per-run MCP, Git-backed preset distribution and bounded
+   multi-Run workflows as separate milestones with their own security and lifecycle
+   gates. Current design: [`docs/crew/README.md`](docs/crew/README.md). Dependency-ordered
+   implementation plan: [`docs/crew/roadmap.md`](docs/crew/roadmap.md). The original
+   all-in-one proposal is retained as a historical document.
 
 
 ## Phase 1 — Durable Runs ✅
