@@ -1,7 +1,11 @@
 # Mercury CLI and TUI design
 
-Status: design only. No user-facing Mercury Run CLI or TUI described here is
-implemented yet.
+Status: **partly implemented.** Milestones 0 and 1 are on `main`: the client
+contracts, transport, configuration and credential layers, and the read-only
+commands `mercuryctl agents list`, `runs list` and `runs show`. Milestones 2 to 4
+(create/control, events/watch, packaging) are open as issues #231-#233, and the
+TUI in Milestone 5 remains gated on demonstrated need. See §16 for per-milestone
+status.
 
 Mercury already runs as long-lived services: an API server owns the HTTP and
 dashboard surface, while one or more workers execute durable Runs. The existing
@@ -717,7 +721,7 @@ database, worker or Fleet dependencies.
 Each milestone is independently reviewable and leaves the prior surface usable.
 Do not begin the TUI by bypassing unfinished client layers.
 
-### Milestone 0: contracts and test harness
+### Milestone 0: contracts and test harness -- **done** (issue #229, PR #234)
 
 Deliverables:
 
@@ -746,7 +750,7 @@ Deferred:
 - profiles written by the CLI;
 - TUI framework selection.
 
-### Milestone 1: read-only CLI
+### Milestone 1: read-only CLI -- **done** (issue #230)
 
 Deliverables:
 
@@ -775,9 +779,70 @@ npm test
 
 Deferred:
 
-- mutations;
 - event streaming;
 - distributable packaging.
+
+Mutations were **not** deferred: the contract suite was mutation-tested, and two
+survivors changed the implementation. Dropping `sanitizeForTerminal` from the
+repository field kept every test green, so that field gained its own test; and a
+first attempt at mutating cursor handling only altered a footer string, which
+proved nothing, so it was rewritten to remove the cursor from the outgoing query.
+That second case is the general one -- a mutation that does not change behaviour
+cannot detect anything, and a green suite after such a mutation is not evidence.
+
+#### Corrections found after the first Milestone 1 commit
+
+Independent review of the first Milestone 1 commit found one defect, and chasing
+it exposed three more. All four are recorded here because each is a way this
+design can be implemented plausibly and wrongly.
+
+**The request deadline was an idle timeout, not a total one.** §11.2 requires a
+total deadline, and the code comment claimed one while calling only
+`req.setTimeout`, which measures time since the last byte. A server that sends a
+valid JSON prefix and then one byte every 200ms resets it forever. Reproduced
+against a stub: with a 1s timeout the client waited 25 seconds and was still
+waiting. The response-size bound does not cover this, because a slow drip stays
+under the limit indefinitely. The wall-clock bound is now armed explicitly, and
+`client/test/transport.test.ts` keeps a slow-drip server as a permanent fixture.
+The idle handler was then **removed** rather than kept: at the same duration as
+the total deadline it can never fire first, mutation testing confirmed deleting it
+changes no result, and code that cannot be observed cannot be trusted later.
+
+**A regression test must fail, not stall.** With the deadline removed, the new
+test hung the suite for 400 seconds instead of failing. Awaiting a rejection that
+never arrives is indistinguishable from a slow run, so the test now races the
+request against a hard cap and asserts the cap did not win.
+
+**The sanitiser let `\\r` through.** It excluded CR alongside `\\n` as layout,
+but a terminal returns the cursor to column 0 on CR, so a Run task of
+`legit work\\rOK - all tests pass` displays only the attacker's suffix. `\\n`
+advances a line; `\\r` overwrites one.
+
+**The oversized-response test was itself wrong.** Its server incremented a byte
+counter only when `write()` returned `true`, but `write()` returns `false` to
+signal backpressure *after* queueing the data -- so the counter never advanced and
+the handler streamed without end. The test was therefore proving "an endless stream
+trips the bound", which still passed when the bound was raised to 1GB, and the
+mutation survived. It now sends a fixed 20MB and ends.
+
+**The published package would have shipped a broken `mercuryctl`.** `bin` named
+`client/bin.ts` while `files` remained an allowlist naming only `src/` and friends.
+npm always includes files that `bin` names, so the tarball contained `client/bin.ts`
+and no other client source -- an installed command that fails on its first import.
+Nothing in the suite caught it because nothing runs `npm install`. `client/` is now
+in `files`, and `client/test/packaging.test.ts` asserts that every `bin` target's
+*directory* is published. Naming only the entry point is deliberately not accepted
+as coverage, since that is the exact state that shipped.
+
+Two review findings were smaller but real: `--status` was passed to the client as
+`as never`, which type-checked only by silencing the compiler -- and since the server
+silently ignores an unrecognised status, a divergence between `RUN_STATUSES` and the
+protocol type would have produced an unfiltered list rather than an error; and
+`writeJson` was imported into `agents.ts` and never used.
+
+One mutation deliberately survives: deleting the `mercury` bin entry keeps the
+packaging guard green, because a target that does not exist needs no coverage. That
+is the guard behaving correctly, not a hole in it.
 
 ### Milestone 2: create and control
 

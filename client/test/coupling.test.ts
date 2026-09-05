@@ -48,6 +48,19 @@ test('the client tree is non-empty and actually being scanned', () => {
     files.some((f) => f.endsWith('protocol.ts')),
     'the scan is not reaching client/api/protocol.ts',
   );
+  // The command and output layers are where a convenient relative import of a server type is most
+  // likely to appear, since that is exactly where the deliberate DTO duplication starts to chafe.
+  // Pin that the recursive walk still reaches them after any restructure. (Deliberately not
+  // spelled out as a specifier: this file is itself scanned, and a guard that reports its own
+  // fixtures is a guard that gets switched off.)
+  assert.ok(
+    files.some((f) => f.endsWith(join('commands', 'context.ts'))),
+    'the scan is not reaching client/commands/',
+  );
+  assert.ok(
+    files.some((f) => f.endsWith(join('output', 'human.ts'))),
+    'the scan is not reaching client/output/',
+  );
 });
 
 test('no client module imports from src/ or fleet/', () => {
