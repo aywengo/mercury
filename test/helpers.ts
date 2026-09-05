@@ -61,6 +61,8 @@ export function makeEnv(opts: {
   primeagent?: { cmd: string; args?: string[] };
   /** Extra adapters to register (merged over the built-in fake). */
   adapters?: Record<string, AgentAdapter>;
+  /** Agent id used when create omits `agent` (default `fake`). */
+  defaultAgent?: string;
 } = {}): TestEnv {
   const dir = mkdtempSync(join(tmpdir(), 'mercury-test-'));
   const db = openDatabase(join(dir, 'test.db'));
@@ -84,6 +86,7 @@ export function makeEnv(opts: {
     skills,
     selector: createSkillSelector(),
     knownAgents: Object.keys(adapters),
+    defaultAgent: opts.defaultAgent ?? 'fake',
     defaultMaxDurationMs: 60_000,
     defaultMaxRetries: opts.maxRetries ?? 2,
     redactor: opts.redactor,

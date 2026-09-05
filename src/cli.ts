@@ -157,6 +157,7 @@ async function main(): Promise<void> {
     skills,
     selector,
     knownAgents: Object.keys(adapters),
+    defaultAgent: config.defaultAgent,
     defaultMaxDurationMs: 60 * 60 * 1000,
     defaultMaxRetries: config.maxRetries,
     redactor,

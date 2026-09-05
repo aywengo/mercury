@@ -44,7 +44,7 @@ restarts. They are not shared between multiple API processes.
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/api/agents` | List registered agent ids |
+| `GET` | `/api/agents` | List registered agent ids and the create-Run default |
 | `POST` | `/api/runs` | Create and durably queue a Run |
 | `GET` | `/api/runs` | List visible Runs |
 | `GET` | `/api/runs/:runId` | Return Run details and recorded skills |
@@ -89,6 +89,10 @@ Response:
 
 The response means the Run is persisted and scheduled. It does not wait for the
 agent to start or finish.
+
+Omitting `agent` selects `MERCURY_DEFAULT_AGENT` (default `fake`). Send an
+explicit id such as `"agent": "primeagent"` for a real coding Run. `GET
+/api/agents` returns `{ "agents": ["fake", "primeagent", ...], "defaultAgent": "fake" }`.
 
 ### Repository fields
 

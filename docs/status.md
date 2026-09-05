@@ -14,7 +14,8 @@ The production baseline is:
 - one host;
 - one local SQLite database shared by API and workers;
 - separate `server` and `worker` processes;
-- PrimeAgent RPC as the default agent transport;
+- `fake` as the create-Run default when `agent` is omitted (`MERCURY_DEFAULT_AGENT`);
+- PrimeAgent RPC as the supported coding-agent transport;
 - Git-worktree isolation;
 - optional Docker or Podman sandboxing;
 - bearer-token or browser-session authentication;

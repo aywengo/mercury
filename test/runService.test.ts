@@ -7,6 +7,38 @@ import { openDatabase } from '../src/db/database.ts';
 import { makeEnv, waitFor } from './helpers.ts';
 import type { RunConstraints } from '../src/domain/types.ts';
 import { createRedactor } from '../src/domain/redact.ts';
+import { FakeAgentAdapter } from '../src/adapters/fakeAgentAdapter.ts';
+
+test('omitting agent selects fake', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'smoke' });
+    assert.equal(run.agent, 'fake');
+  } finally {
+    env.close();
+  }
+});
+
+test('omitting agent uses defaultAgent override', () => {
+  const env = makeEnv({
+    workerEnabled: false,
+    defaultAgent: 'primeagent',
+    adapters: { primeagent: new FakeAgentAdapter({ script: [] }) },
+  });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'smoke' });
+    assert.equal(run.agent, 'primeagent');
+  } finally {
+    env.close();
+  }
+});
+
+test('unknown defaultAgent fails at construction', () => {
+  assert.throws(
+    () => makeEnv({ workerEnabled: false, defaultAgent: 'nope' }),
+    /MERCURY_DEFAULT_AGENT=nope is not a registered agent/,
+  );
+});
 
 test('create run: QUEUED, stable id, events persisted', () => {
   const env = makeEnv({ workerEnabled: false });

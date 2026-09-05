@@ -31,6 +31,8 @@ export interface RunServiceDeps {
   skills: SkillRegistry;
   selector: SkillSelector;
   knownAgents: string[];
+  /** Agent id used when create input omits `agent` (MERCURY_DEFAULT_AGENT; default `fake`). */
+  defaultAgent: string;
   defaultMaxDurationMs: number;
   defaultMaxRetries: number;
   /** Optional secret redactor; input values are redacted at write time (issue #36). */
@@ -41,12 +43,24 @@ export class RunService {
   private deps: RunServiceDeps;
 
   constructor(deps: RunServiceDeps) {
+    // Fail at construction, not on the first POST: an unknown default is an operator
+    // misconfiguration and must not wait for a Run to surface it.
+    if (!deps.knownAgents.includes(deps.defaultAgent)) {
+      throw new Error(
+        `MERCURY_DEFAULT_AGENT=${deps.defaultAgent} is not a registered agent (known: ${deps.knownAgents.join(', ')})`,
+      );
+    }
     this.deps = deps;
   }
 
   /** Registered agent ids (the adapters wired at startup). */
   listAgents(): string[] {
     return [...this.deps.knownAgents];
+  }
+
+  /** Agent id used when create input omits `agent`. */
+  defaultAgent(): string {
+    return this.deps.defaultAgent;
   }
 
   create(input: CreateRunInput): Run {
@@ -58,7 +72,7 @@ export class RunService {
       const existing = this.findByIdempotencyKey(input.ownerId, input.idempotencyKey);
       if (existing) return existing;
     }
-    const agent = input.agent ?? 'primeagent';
+    const agent = input.agent ?? this.deps.defaultAgent;
     if (!this.deps.knownAgents.includes(agent)) {
       throw new ValidationError(`Unknown agent: ${agent} (known: ${this.deps.knownAgents.join(', ')})`);
     }
