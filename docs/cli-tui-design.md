@@ -1093,6 +1093,7 @@ Deliverables landed so far:
 - every command in the design is now implemented, so help no longer marks anything unavailable;
 - commands that take no positional argument now refuse one;
 - `--version` / `-V`, with the version single-sourced from the installed manifest (§16.1);
+- `completion bash|zsh|fish`, generated from the command table and executed by the real shell in test (§16.3);
 - the custom-CA acceptance criterion, tested over both the JSON and the SSE path (§16.2).
 
 **A blank environment variable now means unset.** `??` skips `null` and `undefined` but not `''`, so a
@@ -1168,6 +1169,30 @@ that gives it away is the negative case hanging too: a certificate rejection is 
 means the handshake never started. Async `spawn` fixed all five. This is the same trap as a blocked
 in-process log drain, and it is worth repeating because the in-process server is exactly what makes the
 test fast and hermetic.
+
+#### 16.3 Shell completion
+
+`mercuryctl completion bash|zsh|fish` writes a completion script to stdout. It resolves no
+configuration and touches no network, so it works offline and with no credential -- which is both the
+acceptance criterion and the only sane behaviour for something the shell calls on every keystroke.
+
+The scripts are **generated from `COMMAND_SUMMARIES`**, the same table `--help` renders and the
+dispatcher consults. A hand-written completion file is a third copy of the command list, and it drifts
+the way the help text would have drifted: a command that works but does not complete makes the tool
+look smaller than it is, and one that completes but does not work is worse.
+
+Making `completion` a one-word command needed a parser change. The parser took the first two non-flag
+tokens as the command path unconditionally, so `completion bash` became a command named
+`"completion bash"`. That is the same class of bug as swallowing a run id into the command path, which
+review caught in Milestone 0; the parser now knows a one-word command consumes exactly one token and
+everything after it is an argument.
+
+**A syntax check is not a test.** `/bin/bash -n` accepted a version of the generated script whose
+subcommand branch omitted the `-- "$cur"` filter, so `runs w` offered all eight subcommands instead of
+`watch`, and a completed command re-offered its siblings. The test therefore drives the generated
+function with synthetic `COMP_WORDS` and asserts the answers, and a mutation that removes the filter
+again is caught. The zsh and fish scripts are syntax-checked but not executed: `fish` is not installed
+on this machine, so its behaviour beyond parsing is unverified here.
 
 ### Milestone 5: optional TUI
 

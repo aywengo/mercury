@@ -29,6 +29,7 @@ import { buildCurrentView, listProfiles, renderCurrent, renderProfiles } from '.
 import { describeConfig } from './config.ts';
 
 import { CLIENT_VERSION, PROGRAM } from './version.ts';
+import { completionScript } from './commands/completion.ts';
 
 export { PROGRAM };
 
@@ -91,11 +92,15 @@ function looksLikeFlag(token: string): boolean {
   return token.startsWith('-') && token !== '-';
 }
 
+/** Commands whose name is a single token; everything after them is an argument. */
+const ONE_WORD_COMMANDS = new Set(['completion']);
+
 export function parseArgs(argv: string[]): ParsedInvocation {
   const globals: GlobalOptions = { json: false, noColor: false, help: false, version: false, yes: false };
   const path: string[] = [];
   const positional: string[] = [];
   const flags: Record<string, string | boolean> = {};
+  let singleWordCommand = false;
 
   /**
    * Apply one flag, returning true if this parser consumed it.
@@ -179,8 +184,17 @@ export function parseArgs(argv: string[]): ParsedInvocation {
       if (applied) i += applied.consumed;
       continue;
     }
-    if (path.length < 2) path.push(tok);
-    else positional.push(tok);
+    if (path.length === 0 && ONE_WORD_COMMANDS.has(tok)) {
+      // A one-word command consumes exactly one token and everything after it is an argument. Without
+      // this the parser takes `bash` as the second half of a command named "completion bash" -- the
+      // same class of bug as swallowing a run id into the command path.
+      path.push(tok);
+      singleWordCommand = true;
+    } else if (!singleWordCommand && path.length < 2) {
+      path.push(tok);
+    } else {
+      positional.push(tok);
+    }
     i += 1;
   }
 
@@ -225,6 +239,7 @@ export const IMPLEMENTED = new Set<string>([
   'runs watch',
   'config profiles',
   'config current',
+  'completion',
 ]);
 
 /**
@@ -244,12 +259,14 @@ export const COMMAND_SUMMARIES: [string, string][] = [
   ['runs input', 'answer a Run waiting for input'],
   ['runs cancel', 'request cancellation'],
   ['runs retry', 'create a new Run from a terminal one'],
+  ['completion', 'print a shell completion script'],
   ['config profiles', 'list configured profiles'],
   ['config current', 'show the resolved profile'],
 ];
 
 /** Usage suffix per command, so the argument a caller must supply is visible in help. */
 const COMMAND_ARGS: Record<string, string> = {
+  completion: ' <bash|zsh|fish>',
   'runs show': ' <run-id>',
   'runs events': ' <run-id>',
   'runs watch': ' <run-id>',
@@ -383,6 +400,24 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
 
   try {
     if (ZERO_POSITIONAL_COMMANDS.has(command)) rejectStrayPositional(parsed, command);
+
+    // Completion is answered before the client is built and before any configuration is resolved.
+    // The shell invokes it on every keystroke, so a completion function that needed a credential would
+    // make the tool unusable on a machine that has not been configured yet -- and that is exactly when
+    // an operator is typing the first command (§16 Milestone 4).
+    if (command === 'completion') {
+      const shell = parsed.positional[0];
+      if (shell === undefined) {
+        throw new UsageError('completion needs a shell name: bash, zsh or fish');
+      }
+      if (parsed.positional.length > 1) {
+        throw new UsageError(
+          `completion takes one shell name, got ${JSON.stringify(parsed.positional.join(' '))}`,
+        );
+      }
+      io.stdout(completionScript(shell));
+      return EXIT.OK;
+    }
 
     // Config commands are answered before the client is built. buildContext resolves a credential and
     // throws without one, and the operator who needs this command most is the one whose credential is
