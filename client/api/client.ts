@@ -112,11 +112,32 @@ export class MercuryClient {
 
     return new Promise<RawResponse>((resolve, reject) => {
       let settled = false;
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
       const settleReject = (err: unknown): void => {
         if (settled) return;
         settled = true;
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
         reject(err instanceof MercuryClientError ? err : new TransportError(String((err as Error).message ?? err)));
       };
+      const settleResolve = (value: RawResponse): void => {
+        if (settled) return;
+        settled = true;
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+        resolve(value);
+      };
+
+      // A TOTAL deadline, armed here rather than by req.setTimeout below.
+      //
+      // req.setTimeout is an IDLE timeout: it measures time since the last byte, so a server that
+      // trickles one byte every 200ms resets it forever and the request never completes. That is not
+      // a theoretical case -- it was reproduced against a stub that drips a valid JSON prefix and
+      // then spaces out single spaces, and the client hung past a 1s timeout for as long as the
+      // probe was willing to wait. The size bound does not cover it either, since a slow drip stays
+      // under 16MB indefinitely. For a CLI run inside shell scripts and CI, "hangs forever despite
+      // --timeout 1s" is the worst available failure mode, so the wall-clock bound is enforced here.
+      deadlineTimer = setTimeout(() => {
+        req.destroy(new TransportError(`request exceeded its ${this.options.timeoutMs}ms deadline`));
+      }, this.options.timeoutMs);
 
       const req = transport(
         {
@@ -146,20 +167,19 @@ export class MercuryClient {
             }
             chunks.push(chunk);
           });
-          res.on('end', () => {
-            if (settled) return;
-            settled = true;
-            resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') });
-          });
+          res.on('end', () => settleResolve({
+            status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString('utf8'),
+          }));
           res.on('error', settleReject);
         },
       );
 
-      // A total deadline, not an idle timeout: a server that accepts the socket and then stalls
-      // forever must not hang the client indefinitely.
-      req.setTimeout(this.options.timeoutMs, () => {
-        req.destroy(new TransportError(`request timed out after ${this.options.timeoutMs}ms`));
-      });
+      // No req.setTimeout here, deliberately. It measures idle time, and at the same duration as the
+      // deadline above it can never fire first: the wall-clock bound always wins, so the idle handler
+      // is unreachable in practice. Mutation testing confirmed this -- deleting it changes no test
+      // result -- and code that cannot be observed is code that cannot be trusted to still work in six
+      // months. If a separate idle bound is ever wanted, it needs its own shorter duration and its own
+      // test, not a duplicate of this one.
       req.on('error', settleReject);
       if (payload !== undefined) req.write(payload);
       req.end();

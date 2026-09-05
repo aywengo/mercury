@@ -790,6 +790,45 @@ proved nothing, so it was rewritten to remove the cursor from the outgoing query
 That second case is the general one -- a mutation that does not change behaviour
 cannot detect anything, and a green suite after such a mutation is not evidence.
 
+#### Corrections found after the first Milestone 1 commit
+
+Independent review of the first Milestone 1 commit found one defect, and chasing
+it exposed three more. All four are recorded here because each is a way this
+design can be implemented plausibly and wrongly.
+
+**The request deadline was an idle timeout, not a total one.** §11.2 requires a
+total deadline, and the code comment claimed one while calling only
+`req.setTimeout`, which measures time since the last byte. A server that sends a
+valid JSON prefix and then one byte every 200ms resets it forever. Reproduced
+against a stub: with a 1s timeout the client waited 25 seconds and was still
+waiting. The response-size bound does not cover this, because a slow drip stays
+under the limit indefinitely. The wall-clock bound is now armed explicitly, and
+`client/test/transport.test.ts` keeps a slow-drip server as a permanent fixture.
+The idle handler was then **removed** rather than kept: at the same duration as
+the total deadline it can never fire first, mutation testing confirmed deleting it
+changes no result, and code that cannot be observed cannot be trusted later.
+
+**A regression test must fail, not stall.** With the deadline removed, the new
+test hung the suite for 400 seconds instead of failing. Awaiting a rejection that
+never arrives is indistinguishable from a slow run, so the test now races the
+request against a hard cap and asserts the cap did not win.
+
+**The sanitiser let `\\r` through.** It excluded CR alongside `\\n` as layout,
+but a terminal returns the cursor to column 0 on CR, so a Run task of
+`legit work\\rOK - all tests pass` displays only the attacker's suffix. `\\n`
+advances a line; `\\r` overwrites one.
+
+**The oversized-response test was itself wrong.** Its server incremented a byte
+counter only when `write()` returned `true`, but `write()` returns `false` to
+signal backpressure *after* queueing the data -- so the counter never advanced and
+the handler streamed without end. The test was therefore proving "an endless stream
+trips the bound", which still passed when the bound was raised to 1GB, and the
+mutation survived. It now sends a fixed 20MB and ends.
+
+**`--help` advertised commands this build cannot run**, and the `mercuryctl` npm
+entry point did not exist despite being a deliverable; both are fixed, with help
+rendered from the dispatcher's own command set so they cannot drift again.
+
 ### Milestone 2: create and control
 
 Deliverables:
