@@ -77,10 +77,28 @@ test('HOST_VERSION equals package.json and the host changelog', () => {
     `docs/releases/host/${pkg.version}.md must exist`);
 });
 
-test('there is no CLI release stream yet', () => {
+test('the CLI release stream exists and agrees with package.json', () => {
+  // This was "there is no CLI release stream yet", asserting docs/releases/cli/ stayed empty until
+  // mercuryctl existed. mercuryctl exists, so the guard had become a lock on a door that should open --
+  // and a `cli-v*` tag would still have failed the release workflow. Replaced rather than deleted, so
+  // the directory is now checked for the thing that actually matters: a `cli-vX.Y.Z` tag resolves to
+  // docs/releases/cli/X.Y.Z.md, so a version with no notes file must not be able to drift into being
+  // taggable.
   const cliDir = join(ROOT, 'docs', 'releases', 'cli');
-  if (!existsSync(cliDir)) return;
-  assert.equal(readdirSync(cliDir).length, 0, 'docs/releases/cli/ must stay empty until mercuryctl exists');
+  assert.ok(existsSync(cliDir), 'docs/releases/cli/ must exist now that mercuryctl is published');
+  const notes = join(cliDir, `${pkg.version}.md`);
+  assert.ok(existsSync(notes), `docs/releases/cli/${pkg.version}.md must exist for a cli-v${pkg.version} tag`);
+
+  const text = read(`docs/releases/cli/${pkg.version}.md`);
+  assert.match(text, new RegExp(`mercuryctl ${pkg.version.replace(/\./g, '\\.')}`),
+    'the CLI notes must name the version they describe');
+  // The release workflow creates the GitHub release from this file alone, so an empty or stub file would
+  // produce a published release with nothing in it.
+  assert.ok(text.length > 500, `docs/releases/cli/${pkg.version}.md looks like a stub (${text.length} bytes)`);
+  // The client ships in the host package, so its version is the package version -- there is no independent
+  // CLI version to keep in sync, and the notes must not imply one.
+  assert.ok(!/cli-v\d+\.\d+\.\d+/.test(text),
+    'the CLI notes name a specific cli-v tag; the version is owned by package.json');
 });
 
 test('mercury --version prints mercury-host <version> and does not start a server', async () => {
