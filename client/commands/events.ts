@@ -29,7 +29,12 @@ export function renderEventLine(event: MercuryEvent, ctx: EventRenderContext): s
   if (ctx.json) return eventLine(event).replace(/\n$/, '');
   const { color } = makeColorizer({ noColor: ctx.noColor, isTty: ctx.isTty, json: false });
   const summary = summarizePayload(event.payload);
-  return `${color('dim', String(event.sequence).padStart(6))}  ${color('cyan', event.type.padEnd(22))} ${sanitizeForTerminal(summary)}`.trimEnd();
+  // The event TYPE is sanitised too, and before padding. It is not a hard-coded vocabulary: §14 says an
+  // unknown type must stay visible rather than break the client, so the field is data the server chose,
+  // and a type name carrying a control sequence would land in the operator's terminal on every line.
+  // Sanitising before padEnd keeps the column aligned on the text the operator actually sees.
+  return `${color('dim', String(event.sequence).padStart(6))}  ` +
+    `${color('cyan', sanitizeForTerminal(event.type).padEnd(22))} ${sanitizeForTerminal(summary)}`.trimEnd();
 }
 
 /** Short, single-line rendering of an event payload. Never more than one line, by construction. */

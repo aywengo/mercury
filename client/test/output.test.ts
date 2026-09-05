@@ -10,6 +10,8 @@ import assert from 'node:assert/strict';
 import { sanitizeForTerminal, renderTable, ellipsis, age, makeColorizer } from '../output/human.ts';
 import { renderAgents } from '../commands/agents.ts';
 import { renderRunList } from '../commands/list.ts';
+import { renderRunDetail } from '../commands/show.ts';
+import { renderEventLine } from '../commands/events.ts';
 import { writeJson, eventLine } from '../output/json.ts';
 
 test('CSI sequences cannot survive sanitisation', () => {
@@ -192,4 +194,59 @@ test('--no-color and a non-terminal produce no escape codes anywhere, headers in
   const { color: c2, dim: d2 } = makeColorizer({ noColor: false, isTty: true, json: false });
   const on = renderTable(['ID', 'STATUS'], rows, (t) => c2('cyan', t), (t) => d2(t));
   assert.ok(on.includes('\u001b'), 'colour on a real terminal produced no ANSI; the switch is broken');
+});
+// ---------------------------------------------------------------------------
+// The invariant, rather than a list of fields.
+//
+// A reviewer found that `runs show` printed run.id, run.agent, run.ownerId, run.retryOf, the commit list
+// and skill.version unsanitised -- after the author had sanitised `agent` in `runs list` and believed the
+// field was handled. Field-by-field audits fail that way: the same field reaches several render paths.
+// So this asserts the property instead -- with colour switched off, human output must contain no escape
+// byte anywhere -- and applies it to every renderer.
+// ---------------------------------------------------------------------------
+
+const HOSTILE = 'a\u001b]0;pwned\u0007b\u001b[31mc\u0007d';
+const OFF = { json: false, noColor: true, isTty: false } as never;
+
+function assertNoEscape(label: string, out: string): void {
+  assert.ok(!out.includes('\u001b'),
+    `${label}: human output with colour off still contains an escape byte: ${JSON.stringify(out)}`);
+  assert.ok(!out.includes('\u0007'), `${label}: a BEL survived in ${label}`);
+}
+
+test('runs show: no escape byte survives with colour off', () => {
+  const run = {
+    id: HOSTILE, status: 'RUNNING', agent: HOSTILE, ownerId: HOSTILE, attempt: 1,
+    task: HOSTILE, createdAt: HOSTILE, startedAt: HOSTILE, completedAt: null,
+    retryOf: HOSTILE, workspaceBranch: HOSTILE, prUrl: HOSTILE,
+    error: HOSTILE, errorKind: HOSTILE, finalCommits: [HOSTILE, HOSTILE],
+    repository: { url: HOSTILE, localPath: HOSTILE },
+  };
+  const out = renderRunDetail(
+    { run: run as never, skills: [{ id: HOSTILE, version: HOSTILE } as never] },
+    OFF, false,
+  );
+  assertNoEscape('runs show', out);
+  // The data is still legible: the control bytes became visible markers rather than vanishing, so the
+  // operator can see something was there. The OSC payload is consumed with its introducer, which is the
+  // point -- leaving "0;pwned" behind would still be attacker-shaped text.
+  assert.match(out, /run\s+a\u241bb\u241bc\u2400d/);
+});
+
+test('runs list and agents list: no escape byte survives with colour off', () => {
+  const run = {
+    id: HOSTILE, status: 'FAILED', agent: HOSTILE, task: HOSTILE,
+    repository: { url: 'https://example.com/x.git' },
+    createdAt: '2026-01-01T00:00:00.000Z',
+  };
+  assertNoEscape('runs list', renderRunList({ runs: [run as never], nextCursor: HOSTILE }, OFF, false));
+  assertNoEscape('agents list', renderAgents({ agents: [HOSTILE], defaultAgent: HOSTILE }, OFF, false));
+});
+
+test('event lines: no escape byte survives with colour off', () => {
+  const event = {
+    id: HOSTILE, runId: HOSTILE, type: HOSTILE, sequence: 1,
+    timestamp: HOSTILE, payload: { text: HOSTILE, message: HOSTILE, command: HOSTILE },
+  };
+  assertNoEscape('event line', renderEventLine(event as never, OFF));
 });

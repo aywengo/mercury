@@ -15,22 +15,30 @@ export function renderRunDetail(response: RunDetailResponse, ctx: CommandContext
   const field = (label: string, value: string): string =>
     `${color('dim', `${label.padEnd(12)}`)}${value}`;
 
+  // Every value below is sanitised at the point it enters the line, BEFORE colouring -- sanitising after
+  // colouring would strip the colour codes along with any injected sequence. A reviewer caught that
+  // `agent` was sanitised in `runs list` and left raw here: the same field, two render paths, and fixing
+  // one of them is exactly the mistake a field-by-field audit makes. The invariant test in
+  // client/test/output.test.ts now asserts that human output with colour off contains no escape bytes at
+  // all, so the next path that forgets fails a test rather than waiting for an audit.
   const lines: string[] = [
-    field('run', color('cyan', run.id)),
-    field('status', color(statusColor(run.status), run.status)),
-    field('agent', run.agent),
-    field('owner', run.ownerId),
+    field('run', color('cyan', sanitizeForTerminal(run.id))),
+    field('status', color(statusColor(run.status), sanitizeForTerminal(run.status))),
+    field('agent', sanitizeForTerminal(run.agent)),
+    field('owner', sanitizeForTerminal(run.ownerId)),
     field('attempt', String(run.attempt)),
-    field('created', run.createdAt),
-    field('started', run.startedAt ?? '-'),
-    field('completed', run.completedAt ?? '-'),
+    field('created', sanitizeForTerminal(run.createdAt)),
+    field('started', sanitizeForTerminal(run.startedAt ?? '-')),
+    field('completed', sanitizeForTerminal(run.completedAt ?? '-')),
   ];
-  if (run.retryOf) lines.push(field('retry of', color('cyan', run.retryOf)));
+  if (run.retryOf) lines.push(field('retry of', color('cyan', sanitizeForTerminal(run.retryOf))));
   const repo = run.repository.url ?? run.repository.localPath ?? '-';
   lines.push(field('repository', sanitizeForTerminal(repo)));
   if (run.workspaceBranch) lines.push(field('branch', sanitizeForTerminal(run.workspaceBranch)));
   if (run.prUrl) lines.push(field('pr', sanitizeForTerminal(run.prUrl)));
-  if (run.finalCommits.length > 0) lines.push(field('commits', run.finalCommits.join(', ')));
+  if (run.finalCommits.length > 0) {
+    lines.push(field('commits', run.finalCommits.map(sanitizeForTerminal).join(', ')));
+  }
   if (run.error) lines.push(field('error', color('red', sanitizeForTerminal(run.error))));
   if (run.errorKind) lines.push(field('caused by', sanitizeForTerminal(run.errorKind)));
 
@@ -39,7 +47,7 @@ export function renderRunDetail(response: RunDetailResponse, ctx: CommandContext
   if (response.skills.length > 0) {
     lines.push('', color('dim', `skills (${response.skills.length})`));
     for (const skill of response.skills) {
-      lines.push(`  ${sanitizeForTerminal(skill.id)} ${color('dim', skill.version)}`);
+      lines.push(`  ${sanitizeForTerminal(skill.id)} ${color('dim', sanitizeForTerminal(skill.version))}`);
     }
   }
   return lines.join('\n');
