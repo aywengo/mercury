@@ -3,8 +3,16 @@
 Fleet manages several independent Mercury instances from one place. It is a federation layer: it talks to
 each Mercury over its public HTTP API and never touches a Mercury database or imports Mercury code.
 
-Design: [`docs/fleet-design.md`](../docs/fleet-design.md). This directory is **Phase 0** — host registry and
-probe. There is no dispatch yet; Fleet cannot start a Run.
+Design: [`docs/fleet-design.md`](../docs/fleet-design.md). All six build phases are shipped: registry and
+probe, dispatch, reconciliation, event aggregation, routing, interaction, and the metrics rollup.
+
+Two surfaces, deliberately different:
+
+- **`fleet` (this CLI)** — the host registry, probing, and credential inspection. Local, interactive, no
+  network service of its own.
+- **`fleet serve` (the service)** — everything that has to outlive the person who started it: submitting
+  Runs, routing them, reconciling their state, aggregating events, and the Prometheus rollup. See
+  [Service](#service) below.
 
 Version `FLEET_VERSION` lives in [`version.ts`](version.ts) and must match
 [`package.json`](package.json). Changelog: [`CHANGELOG.md`](CHANGELOG.md).
@@ -79,6 +87,46 @@ time on the wrong machine.
 > `ProtectHome=true`, which cannot read anything under a home directory. A service deployment sets
 > `FLEET_CREDENTIALS_FILE=/etc/fleet/credentials.json` explicitly instead of relying on this default.
 
+## Service
+
+`fleet serve` runs the HTTP API. It binds `127.0.0.1:3100` by default.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `FLEET_BIND_HOST` | `127.0.0.1` | Bind address. |
+| `FLEET_PORT` | `3100` | Listen port. |
+| `FLEET_API_TOKENS` | unset | `token:owner[:hosts]`, comma-separated. `hosts` scopes a caller to a subset. |
+| `FLEET_ADMIN_TOKEN` | unset | A caller that may see and change every host. |
+| `FLEET_TLS_CERT` / `FLEET_TLS_KEY` | unset | Both or neither. Required to bind beyond loopback. |
+| `FLEET_SWEEP_INTERVAL_MS` | `10000` | How often bindings are reconciled against every host. |
+| `FLEET_STREAM_POLL_MS` | `1000` | Poll interval behind the aggregated Run stream. |
+| `FLEET_REPO_URLS_FILE` | unset | `localPath` → git URL map used by the router. |
+
+**It refuses to start in an unsafe configuration**, rather than serving and leaving discovery to an audit:
+binding beyond loopback without TLS, half a TLS pair, or no caller tokens at all each fail at startup with
+the reason. A Fleet token reaches every Mercury in the fleet, so plaintext on a shared network is not a
+deployment someone should arrive at by omission.
+
+| Endpoint | Does |
+| --- | --- |
+| `GET /healthz` | Liveness, with `product: "fleet"` and the version. Unauthenticated. |
+| `GET /metrics` | Prometheus rollup across hosts, every series relabelled `host="<hostId>"`. |
+| `GET\|POST /fleet/hosts` | List and register hosts. |
+| `POST /fleet/hosts/:id/enable`, `.../disable`, `DELETE /fleet/hosts/:id` | Include or exclude a host from sweeps. |
+| `POST /fleet/hosts/:id/probe` | Probe one host now. |
+| `POST /fleet/runs` | Submit a Run. Name a `host`, or omit it and let the router choose. |
+| `GET /fleet/runs` | Every Run across the fleet, one merged view. |
+| `GET /fleet/runs/:id` | One Run, with its binding and current child state. |
+| `GET /fleet/runs/:id/events`, `.../stream` | Aggregated history and SSE for a fleet Run. |
+| `POST /fleet/runs/:id/input`, `.../cancel`, `.../retry` | Answer, cancel, or retry through Fleet. |
+| `POST /fleet/probe` | Sweep every enabled host. |
+
+Changing the registry — adding, removing, enabling or disabling a host, and sweeping — requires the admin
+token. Reads and Run submission do not, but are scoped: a caller limited to a subset of hosts cannot route
+work onto a hidden host, read another host's Run, or learn another host's queue depth from `/metrics`.
+Routing failures name every host considered and why each was excluded, because "no host matched" without
+reasons is an hour of guessing.
+
 ## Two rules this directory is built around
 
 **Nothing here imports from `src/`.** Fleet speaks HTTP so that it can drive a Mercury it did not build.
@@ -91,6 +139,6 @@ holds can orphan a Run on a machine nobody is watching.
 ## Development
 
 ```bash
-npm run test:fleet    # 48 tests, no network beyond localhost
+npm run test:fleet    # 187 tests, no network beyond localhost
 npm run typecheck     # covers fleet/ as well as src/
 ```
