@@ -144,6 +144,14 @@ boundaries.
 
 ## Designed but not implemented
 
+### Operator CLI and TUI
+
+A remote Run client is designed as a scriptable `mercuryctl` CLI first, with an
+optional TUI only after the shared HTTP/SSE client and observation model are
+stable. Neither surface is implemented. See
+[`cli-tui-design.md`](cli-tui-design.md) for the architecture, protocol
+contracts and milestone roadmap.
+
 ### Crew
 
 Crew is being designed as four staged products:

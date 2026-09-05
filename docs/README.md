@@ -27,6 +27,12 @@ historical reviews.
 - [`Testing`](testing.md) — focused and full verification, fixtures and bounded
   command guidance.
 
+## Operator client
+
+- [`CLI and TUI design`](cli-tui-design.md) — CLI-first remote Run control,
+  shared HTTP/SSE client architecture and implementation milestones. This is a
+  design; the proposed `mercuryctl` executable is not implemented yet.
+
 ## Agent backends
 
 - [`Agent overview`](agents.md) — supported adapters and their capability
