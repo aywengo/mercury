@@ -1,12 +1,14 @@
 # Mercury CLI and TUI design
 
-Status: **partly implemented.** Milestones 0 to 2 are implemented: the client
+Status: **partly implemented.** Milestones 0 to 3 are implemented: the client
 contracts, transport, configuration and credential layers; the read-only commands
-`mercuryctl agents list`, `runs list` and `runs show`; and the mutation commands
+`mercuryctl agents list`, `runs list` and `runs show`; the mutation commands
 `runs create`, `runs input`, `runs cancel` and `runs retry` with idempotency keys
-and confirmation. Milestones 3 and 4 (events/watch, packaging) remain as issues
-#232 and #233, and the TUI in Milestone 5 remains gated on demonstrated need.
-See §16 for per-milestone status.
+and confirmation; and the observation commands `runs events` and `runs watch` with
+paging, gap recovery, bounded reconnect and terminal outcome exit codes. Milestone 4
+(packaging) remains as issue #233, `config profiles` and `config current` are
+advertised but not yet built, and the TUI in Milestone 5 remains gated on
+demonstrated need. See §16 for per-milestone status.
 
 Mercury already runs as long-lived services: an API server owns the HTTP and
 dashboard surface, while one or more workers execute durable Runs. The existing
@@ -916,7 +918,7 @@ database, because no adapter except the real PrimeAgent one produces it -- that
 proves the client handles the status, and does not prove the worker ever reaches
 it.
 
-### Milestone 3: events and watch
+### Milestone 3: events and watch -- **done** (issue #232)
 
 Deliverables:
 
@@ -948,6 +950,70 @@ Deferred:
 
 - global Run-list streaming;
 - local event persistence.
+
+**Paging must resume from `nextCursor`, never `lastSequence`.** `GET
+/api/runs/:id/events` returns both, and the server comments that `lastSequence` is
+not a safe resume point when a page is truncated. Resuming from the maximum sequence
+on a truncated page silently skips the events between the last returned event and
+that maximum -- data that was persisted and never shown. The observer takes its next
+`after` from `nextCursor` only, and a test pins the difference.
+
+**A fake that lies about paging makes correct code look broken.** The first scripted
+store indexed a list of pages by call count, so it could answer `hasMore: false`
+while events remained; the observer then paged once and looked like it was dropping
+events. The fixture was rewritten to model an actual store -- one flat list, paged by
+`after`/`limit`, with `hasMore` computed exactly as the server computes it. Three
+tests that "failed" were fixture bugs, not product bugs.
+
+**Gap recovery is unreachable unless the fixture can change state mid-observation.**
+With a terminal status the observer finishes right after the initial history drain and
+never enters the streaming loop; with a permanently running status it exhausts the
+reconnect budget. Both are correct behaviour, and neither exercises the gap path. The
+store now publishes the missing sequences when the stream is opened, so the stream can
+run ahead of history the way the real in-memory fan-out does.
+
+**Ctrl-C hung, and the cause was a comment.** The SSE iterator's wake-up path handled
+a queued frame and a completed stream, and for the failure case it carried the comment
+"rejections surface below" while resolving nothing. A consumer parked in `next()` when
+the socket died was never woken, so an interrupt closed the socket and left the process
+running. The iterator now holds both settle functions and rejects on failure. A bare
+`req.destroy()` also had to become `req.destroy(error)`: destroy-without-error emits
+`close` but neither `end` nor `error`, so nothing wakes the reader.
+
+**An interrupt is not a transport failure.** The abort now surfaces as a distinct
+`AbortError` that the observer maps to exit 130. Routing it through `TransportError`
+would have reported a network fault that never happened, and the exit code would have
+been wrong for scripts that distinguish "I stopped watching" from "Mercury is down".
+
+**Five tests were written against a milestone that had not happened yet.** They used
+`runs watch` as the example of an unimplemented command, and implementing it turned
+each into an assertion about endpoint configuration -- green, and testing nothing
+intended. They now derive a stub command from the same `IMPLEMENTED` set the
+dispatcher consults, and a guard test fails if that set ever becomes fully
+implemented so the derivation cannot become vacuous.
+
+**Two cursors are not one cursor, and a vacuous test hid the bug.** The observer's
+history loop advanced a single `cursor` both as the value it requested next and as the
+value it had delivered. `emit()` moves the delivered cursor to the last event shown,
+which on a full page equals `page.nextCursor`, so the loop's anti-loop guard
+`page.nextCursor <= cursor` was true after every page and paging stopped after one page
+regardless of `hasMore`. A Run with more history than one page showed only its first
+page before following the stream. The loop now keeps a separate `requested` cursor and
+applies the anti-loop guard to it.
+
+**The test that should have caught it was not testing paging.** It was named "a capped
+page advances from `nextCursor`", but the scripted store sized pages from the caller's
+`limit`, and the observer asks for 200 -- so all five events came back in one page and
+nothing was ever capped. Mutating `nextCursor` to `lastSequence` survived, which is how
+this was found: the fixture now caps at `min(caller limit, store page size)` the way a
+real server caps at its own maximum, and the same mutation fails. A test whose name
+asserts a property its fixture does not produce is worse than no test, because it reads
+as coverage.
+
+**A fresh Run already has six events.** Creating one writes `run.created`,
+`run.queued` and one `skill.selected` per candidate skill, so a test that seeded two
+events and asserted a page length of two was wrong about the server. The assertion now
+names the seeded event types instead of a total the server owns.
 
 ### Milestone 4: packaging and operational hardening
 

@@ -13,6 +13,8 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { readFileSync } from 'node:fs';
+import { SseParser } from './sse.ts';
+import type { SseFrame } from './sse.ts';
 import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 import {
   AuthError, MercuryClientError, TransportError, errorFromStatus,
@@ -261,7 +263,155 @@ export class MercuryClient {
   retryRun(runId: string): Promise<RetryRunResponse> {
     return this.call('POST', `/api/runs/${encodeURIComponent(runId)}/retry`, parseRetryRunResponse, { body: {} });
   }
+
+  /**
+   * Open the SSE event stream for a Run and yield raw frames.
+   *
+   * Returns an async iterable rather than a callback soup so that cancellation composes: the consumer
+   * breaks out of a for-await loop, the generator's finally block destroys the request, and the socket
+   * is released. That matters for `runs watch`, where Ctrl-C must stop the CLIENT and leave the Run
+   * untouched (§11.3) -- a callback design makes it easy to leave the socket half-alive.
+   *
+   * `after` is the resume point and is sent as `?after=`. The caller supplies it from the last
+   * sequence it actually processed, never from the server's `lastSequence`, which is not a safe resume
+   * point on a truncated page.
+   *
+   * No total deadline is armed here, unlike request(). A watch is legitimately long-lived -- the
+   * design says so explicitly -- so the bound that matters is "no bytes for N ms", which is what the
+   * idle timeout gives us. Applying the JSON request deadline would kill a healthy watch.
+   */
+  streamEvents(
+    runId: string,
+    options: { after?: number; signal?: AbortSignal; idleTimeoutMs?: number } = {},
+  ): AsyncIterable<SseFrame> {
+    const url = new URL(`/api/runs/${encodeURIComponent(runId)}/stream`, this.url);
+    if (options.after !== undefined) url.searchParams.set('after', String(options.after));
+    const idleMs = options.idleTimeoutMs ?? this.options.timeoutMs;
+
+    return {
+      [Symbol.asyncIterator]: (): AsyncIterator<SseFrame> => {
+        const transport = url.protocol === 'https:' ? httpsRequest : httpRequest;
+        const req = transport(
+          {
+            protocol: url.protocol,
+            hostname: url.hostname,
+            port: url.port || (url.protocol === 'https:' ? 443 : 80),
+            path: `${url.pathname}${url.search}`,
+            method: 'GET',
+            headers: this.buildHeaders({ accept: 'text/event-stream' }),
+            ...(this.ca ? { ca: this.ca } : {}),
+          },
+          () => { /* handled below */ },
+        );
+
+        const parser = new SseParser();
+        const queue: SseFrame[] = [];
+        let pending: { resolve: (r: IteratorResult<SseFrame>) => void; reject: (e: unknown) => void } | null = null;
+        let failure: unknown = null;
+        let done = false;
+
+        const asClientError = (err: unknown): unknown =>
+          err instanceof MercuryClientError || err instanceof AbortError
+            ? err
+            : new TransportError(String((err as Error).message ?? err));
+
+        const fail = (err: unknown): void => {
+          if (done) return;
+          done = true;
+          failure = err;
+          wake();
+        };
+        // Wakes a parked next(). The failure branch MUST settle the promise: an earlier version left a
+        // comment saying "rejections surface below" and did nothing, so a consumer blocked in next()
+        // when the socket died or the caller aborted stayed blocked forever. That is why Ctrl-C on a
+        // watch hung instead of exiting 130 -- the abort closed the socket and nothing told the reader.
+        const wake = (): void => {
+          if (!pending) return;
+          const settle = pending;
+          pending = null;
+          if (queue.length > 0) { settle.resolve({ value: queue.shift()!, done: false }); return; }
+          if (failure) { settle.reject(asClientError(failure)); return; }
+          if (done) settle.resolve({ value: undefined as never, done: true });
+        };
+
+        req.on('response', (res: IncomingMessage) => {
+          const status = res.statusCode ?? 0;
+          if (status < 200 || status >= 300) {
+            // The stream endpoint answers non-2xx with a JSON error body, so read a little and map it
+            // like any other response. A 404 here must be NOT_FOUND, not a stream failure.
+            const bits: Buffer[] = [];
+            res.on('data', (c: Buffer) => { if (bits.join('').length < 4096) bits.push(c); });
+            res.on('end', () => {
+              fail(errorFromStatus(status, parseJsonLenient(Buffer.concat(bits).toString('utf8')), res.headers['retry-after']));
+            });
+            res.on('error', () => {
+              fail(errorFromStatus(status, undefined, res.headers['retry-after']));
+            });
+            return;
+          }
+          res.on('data', (chunk) => {
+            resetIdle();
+            // Decoded explicitly rather than via setEncoding: the parser is fed strings, and leaving
+            // the stream in Buffer mode keeps that contract visible at the call site.
+            const text = typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8');
+            for (const frame of parser.push(text)) {
+              queue.push(frame);
+              wake();
+            }
+          });
+          res.on('end', () => {
+            for (const frame of parser.end()) { queue.push(frame); wake(); }
+            if (!done) { done = true; wake(); }
+          });
+          res.on('error', fail);
+        });
+        req.on('error', fail);
+
+        // Idle-only bound: a stream that stops carrying bytes at all is dead, but one that trickles
+        // keepalives for hours is healthy.
+        let idleTimer: ReturnType<typeof setTimeout> | undefined;
+        const resetIdle = (): void => {
+          if (idleTimer !== undefined) clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => {
+            req.destroy(new TransportError(`event stream was silent for ${idleMs}ms`));
+          }, idleMs);
+        };
+        resetIdle();
+
+        // Destroying with an error, not bare destroy(). A bare destroy() emits 'close' but neither
+        // 'end' nor 'error', so a consumer parked in next() would never be woken: Ctrl-C on a watch
+        // would leave the process hanging with the socket closed and nothing reported. Passing an
+        // error routes through fail(), which resolves the pending promise and lets the abort surface.
+        const onAbort = (): void => { req.destroy(new AbortError()); };
+        if (options.signal) {
+          if (options.signal.aborted) onAbort();
+          else options.signal.addEventListener('abort', onAbort, { once: true });
+        }
+
+        return {
+          next(): Promise<IteratorResult<SseFrame>> {
+            if (queue.length > 0) return Promise.resolve({ value: queue.shift()!, done: false });
+            if (failure) return Promise.reject(asClientError(failure));
+            if (done) return Promise.resolve({ value: undefined as never, done: true });
+            return new Promise<IteratorResult<SseFrame>>((resolve, reject) => {
+              pending = { resolve, reject };
+            });
+          },
+          return(): Promise<IteratorResult<SseFrame>> {
+            // Breaking out of for-await lands here. Release everything, including the abort listener,
+            // so a watch that ends does not keep the process or the socket alive.
+            done = true;
+            if (idleTimer !== undefined) clearTimeout(idleTimer);
+            options.signal?.removeEventListener('abort', onAbort);
+            req.destroy();
+            return Promise.resolve({ value: undefined as never, done: true });
+          },
+        };
+      },
+    };
+  }
 }
+
 
 /**
  * Parse a body that may be JSON or may be plain text.
@@ -280,3 +430,17 @@ function parseJsonLenient(body: string): unknown {
 }
 
 export { AuthError };
+
+/**
+ * Raised locally when the caller aborts, so a pending read resolves instead of hanging.
+ *
+ * Deliberately not a TransportError: an interrupt is not a network fault, and the observer must be able
+ * to report exit 130 rather than "transport failure" after the operator pressed Ctrl-C.
+ */
+export class AbortError extends Error {
+  readonly aborted = true;
+  constructor(message = 'aborted by caller') {
+    super(message);
+    this.name = 'AbortError';
+  }
+}

@@ -218,3 +218,47 @@ export async function runCliAsync(
   clearTimeout(timer);
   return { code, stdout, stderr };
 }
+
+/**
+ * Insert persisted events directly, with sequential sequences.
+ *
+ * The worker is what normally appends events, and running it would make the client suite depend on an
+ * agent backend. Writing rows directly produces the same persisted state the endpoints read. What this
+ * does NOT prove is that the worker emits the right events in the right order -- that is the worker's
+ * own test surface.
+ */
+export function seedEvents(
+  server: LiveServer,
+  runId: string,
+  events: Array<{ type: string; payload?: unknown }>,
+): void {
+  const db = join(server.dir, 'contract.db');
+  const now = new Date().toISOString();
+  // Continue from the Run's existing maximum rather than starting at 1. Creating a Run already writes
+  // run.created and run.queued, so seeding from 1 collides with the (run_id, sequence) unique index --
+  // and a helper that only works on a Run with no events would be useless for testing paging.
+  const maxOut = spawnSync('sqlite3', [db, `SELECT COALESCE(MAX(sequence), 0) FROM events WHERE run_id = '${runId}';`],
+    { encoding: 'utf8', timeout: 15_000 });
+  if (maxOut.status !== 0) throw new Error(`could not read max sequence: ${maxOut.stderr}`);
+  const startSequence = Number(maxOut.stdout.trim()) + 1;
+  const statements = events.map((event, index) => {
+    const payload = JSON.stringify(event.payload ?? { note: `event ${index + 1}` });
+    const escaped = payload.replace(/'/g, "''");
+    const seq = startSequence + index;
+    return `INSERT INTO events (id, run_id, type, sequence, timestamp, payload_json) VALUES ` +
+      `('evt_seed_${runId}_${seq}', '${runId}', '${event.type}', ${seq}, '${now}', '${escaped}');`;
+  });
+  const r = spawnSync('sqlite3', [db, statements.join(' ')], { encoding: 'utf8', timeout: 20_000 });
+  if (r.status !== 0) throw new Error(`could not seed events: ${r.stderr}`);
+}
+
+/** Set a Run's status directly, for terminal-state tests that no CLI command can reach on its own. */
+export function forceStatus(server: LiveServer, runId: string, status: string): void {
+  const db = join(server.dir, 'contract.db');
+  const r = spawnSync(
+    'sqlite3',
+    [db, `UPDATE runs SET status = '${status}', completed_at = '${new Date().toISOString()}' WHERE id = '${runId}';`],
+    { encoding: 'utf8', timeout: 15_000 },
+  );
+  if (r.status !== 0) throw new Error(`could not set status: ${r.stderr}`);
+}

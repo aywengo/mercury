@@ -60,10 +60,11 @@ test('no arguments prints help rather than an error', () => {
 });
 
 test('a command not built yet fails with exit 2 and says so on stderr', () => {
-  // `runs watch` lands in M3. Deliberately a command that is NOT implemented, so this keeps testing
+  // Derived from IMPLEMENTED, so implementing a command cannot quietly turn this into a test about
+  // endpoint configuration. The guard test above fails if the stub list ever becomes empty.
   // the stub path after each milestone adds commands; using an implemented one would silently test
   // the network path instead.
-  const r = run(['runs', 'watch']);
+  const r = run(STUB_COMMANDS[0]);
   assert.equal(r.code, 2);
   assert.match(r.stderr, /not available in this build/);
   // Data goes to stdout only; a half-written stdout would corrupt `--json | jq`.
@@ -134,7 +135,7 @@ test('unknown flags BEFORE the command are rejected, after it they are the comma
   assert.equal(before.code, 2);
   assert.match(before.stderr, /unknown option/);
 
-  const after = run(['runs', 'watch', '--definitely-not-a-command-flag']);
+  const after = run([...STUB_COMMANDS[0], '--definitely-not-a-command-flag']);
   assert.equal(after.code, 2);
   assert.match(after.stderr, /not available in this build/);
 });
@@ -147,11 +148,12 @@ test('unknown flags BEFORE the command are rejected, after it they are the comma
 // ---------------------------------------------------------------------------
 
 test('a run id after a two-word command is a positional, not part of the command', () => {
-  // `runs watch` is unimplemented, so the stub message reveals the parsed command path without
-  // needing a server. `runs show <id>` is covered against a live server in the contract suite.
-  const r = run(['runs', 'watch', 'run-123']);
+  // A stub command reveals the parsed command path without needing a server, so this tests positional
+  // parsing rather than any endpoint. `runs show <id>` is covered against a live server in the contract
+  // suite.
+  const r = run([...STUB_COMMANDS[0], 'run-123']);
   // The message must name the COMMAND, not swallow the id into it.
-  assert.match(r.stderr, /"runs watch" is not available/);
+  assert.match(r.stderr, new RegExp(`"${STUB_COMMANDS[0].join(' ')}" is not available`));
   assert.ok(!r.stderr.includes('run-123'), 'the run id was folded into the command path');
 });
 
@@ -166,14 +168,14 @@ test('command-specific flags reach the command instead of being rejected', () =>
 });
 
 test('global options still work before the command', () => {
-  const r = run(['--json', 'runs', 'watch']);
+  const r = run(['--json', ...STUB_COMMANDS[0]]);
   assert.equal(r.code, 2);
-  assert.match(r.stderr, /"runs watch" is not available/);
+  assert.match(r.stderr, new RegExp(`"${STUB_COMMANDS[0].join(' ')}" is not available`));
 });
 
 test('global options also work after the command, the way people type them', () => {
-  const r = run(['runs', 'watch', '--json']);
-  assert.match(r.stderr, /"runs watch" is not available/);
+  const r = run([...STUB_COMMANDS[0], '--json']);
+  assert.match(r.stderr, new RegExp(`"${STUB_COMMANDS[0].join(' ')}" is not available`));
 });
 
 test('help never advertises a command that this build cannot run', () => {
