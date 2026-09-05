@@ -25,6 +25,8 @@ import type { MercuryEvent } from './api/protocol.ts';
 import { renderEventLine, renderWatchSummary, watchExitCode } from './commands/events.ts';
 import { AbortedError, observeRun } from './observe/runObserver.ts';
 import { reduceRun } from './observe/reducer.ts';
+import { buildCurrentView, listProfiles, renderCurrent, renderProfiles } from './commands/config.ts';
+import { describeConfig } from './config.ts';
 
 export const PROGRAM = 'mercuryctl';
 
@@ -216,6 +218,8 @@ export const IMPLEMENTED = new Set<string>([
   'runs retry',
   'runs events',
   'runs watch',
+  'config profiles',
+  'config current',
 ]);
 
 /**
@@ -225,7 +229,7 @@ export const IMPLEMENTED = new Set<string>([
  * wires up a command updates one set and help follows automatically. Storing it twice is how a
  * command ends up advertised as unavailable after it works.
  */
-const COMMAND_SUMMARIES: [string, string][] = [
+export const COMMAND_SUMMARIES: [string, string][] = [
   ['agents list', 'list registered agents and the server default'],
   ['runs list', 'list Runs (newest first)'],
   ['runs show', 'show one Run and its recorded skills'],
@@ -351,6 +355,28 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
   }
 
   try {
+    if (ZERO_POSITIONAL_COMMANDS.has(command)) rejectStrayPositional(parsed, command);
+
+    // Config commands are answered before the client is built. buildContext resolves a credential and
+    // throws without one, and the operator who needs this command most is the one whose credential is
+    // broken. They also never touch the network, so they work offline (§16 Milestone 4).
+    if (command === 'config profiles' || command === 'config current') {
+      const render = { json: parsed.globals.json, noColor: parsed.globals.noColor, isTty: io.isTty };
+      if (command === 'config profiles') {
+        // No resolver here on purpose: listing the file must work with no endpoint and no credential.
+        io.stdout(`${renderProfiles(listProfiles({ profileFlag: parsed.globals.profile }), render)}\n`);
+      } else {
+        const detail = describeConfig({
+          profileFlag: parsed.globals.profile,
+          urlFlag: parsed.globals.url,
+          timeoutFlagMs: parsed.globals.timeoutMs,
+          noColorFlag: parsed.globals.noColor,
+        });
+        io.stdout(`${renderCurrent(buildCurrentView(detail), render)}\n`);
+      }
+      return EXIT.OK;
+    }
+
     const ctx = buildContext(parsed.globals);
     if (command === 'agents list') {
       io.stdout(`${renderAgents(await ctx.client.listAgents(), ctx, io.isTty)}\n`);
@@ -502,6 +528,29 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
 }
 
 /** Every <run-id> command takes exactly one; a second argument is almost always a mistake. */
+/**
+ * Commands that take no positional argument at all.
+ *
+ * Listed rather than inferred because the check has to happen before the command runs: by the time a
+ * command body could notice, it has already decided to ignore the extra word.
+ */
+const ZERO_POSITIONAL_COMMANDS = new Set(['agents list', 'runs list', 'config profiles', 'config current']);
+
+/**
+ * Reject a stray positional on a command that has nowhere to put it.
+ *
+ * `mercuryctl runs list run-123` used to list every Run. The operator asked about one Run and got an
+ * answer that looked like a normal listing -- the worst kind of failure, because it is indistinguishable
+ * from success. An unambiguous usage error is the only acceptable outcome.
+ */
+function rejectStrayPositional(parsed: ParsedInvocation, command: string): void {
+  if (parsed.positional.length === 0) return;
+  throw new UsageError(
+    `${command} takes no arguments, got ${JSON.stringify(parsed.positional.join(' '))}. ` +
+    `Run \`${PROGRAM} --help\` for what ${command} accepts.`,
+  );
+}
+
 function requireRunId(parsed: ParsedInvocation, command: string): string {
   const runId = parsed.positional[0];
   if (!runId) throw new UsageError(`${command} needs a run id: ${PROGRAM} ${command} <run-id>`);

@@ -6,9 +6,11 @@ contracts, transport, configuration and credential layers; the read-only command
 `runs create`, `runs input`, `runs cancel` and `runs retry` with idempotency keys
 and confirmation; and the observation commands `runs events` and `runs watch` with
 paging, gap recovery, bounded reconnect and terminal outcome exit codes. Milestone 4
-(packaging) remains as issue #233, `config profiles` and `config current` are
-advertised but not yet built, and the TUI in Milestone 5 remains gated on
-demonstrated need. See §16 for per-milestone status.
+is in progress under issue #233: `config profiles` and `config current` are built,
+and every command in the design is now implemented. Shell completion, version
+output, operator documentation and the clean-install packaging checks remain. The
+TUI in Milestone 5 remains gated on demonstrated need. See §16 for per-milestone
+status.
 
 Mercury already runs as long-lived services: an API server owns the HTTP and
 dashboard surface, while one or more workers execute durable Runs. The existing
@@ -1082,6 +1084,46 @@ Deferred:
 
 - package-registry publication unless there is an operational need;
 - multi-host routing.
+
+### Milestone 4: packaging and operational hardening -- **in progress** (issue #233)
+
+Deliverables landed so far:
+
+- `config profiles` and `config current`;
+- every command in the design is now implemented, so help no longer marks anything unavailable;
+- commands that take no positional argument now refuse one.
+
+**A blank environment variable now means unset.** `??` skips `null` and `undefined` but not `''`, so a
+declared-but-empty `MERCURY_CLIENT_URL` -- which is what `${MERCURY_CLIENT_URL:-}` produces in a shell
+script, and what an unset CI variable often becomes -- beat a perfectly good profile and then failed
+with "no endpoint configured". The message pointed at the wrong knob, because the knob that was broken
+was the empty one. The credential layer already treated blank as absent; the config layer now agrees
+with it.
+
+**`config profiles` no longer resolves a configuration.** Routing it through the full resolver made the
+command that answers "what is in my file?" fail with "no endpoint configured" on a machine whose file was
+perfectly readable -- the command you reach for when the endpoint is missing was itself refusing to run
+without one. It reads the file and resolves each profile independently, reporting a broken profile
+inline instead of hiding the four good ones behind it.
+
+**A stray positional is now refused rather than ignored.** `mercuryctl runs list run-123` listed every
+Run. The operator asked about one and received a normal-looking listing, which is the worst shape a
+failure can take.
+
+**`config current` reports which layer won**, per field, from `describeConfig` -- the same function the
+request path uses. A diagnostic that re-derives precedence is a diagnostic that eventually lies. It also
+runs before the client is built, because the operator whose credential is broken is the one who needs it,
+and it never resolves a token into the printed object: the value is read only to decide whether one
+exists, then dropped.
+
+**Finishing the design invalidated its own scaffolding.** Seven tests used "a command that is not built
+yet" as a convenient way to exercise the parser without a server, derived from `IMPLEMENTED`. Once every
+command existed the derivation was empty and all seven failed at once -- which is the loud outcome the
+derivation was built to produce. Two properties had been tangled together. The parser tests now use a
+command that will never exist, and the "not available in this build" branch is covered by removing a
+command from `IMPLEMENTED` in-process and restoring it, so it stays covered whether or not anything
+happens to be unimplemented. The help test now asserts that help and the command table agree in both
+directions, against the CLI's own lists rather than a third hand-written list inside the test.
 
 ### Milestone 5: optional TUI
 
