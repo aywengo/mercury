@@ -120,7 +120,7 @@ Run is still there — that is the whole point of Mercury.
 | `MERCURY_INPUT_TIMEOUT_MS` | `1800000` | Human-input wait timeout (`0` = no limit) |
 | `MERCURY_SANDBOX_RUNTIME` | — | `docker`/`podman` for resource/network-limited Runs |
 
-Full reference: `README.md` → Configuration.
+Full reference: [`docs/configuration.md`](docs/configuration.md).
 
 ## 8. Troubleshooting
 
@@ -131,12 +131,11 @@ Full reference: `README.md` → Configuration.
 | Run `FAILED` at setup, "Workspace requires repository..." | `repository.localPath` missing/not a git repo (or use `MERCURY_WORKSPACE_MODE=copy`) |
 | Agent exits immediately | `prime-agent` not on PATH or bad `MERCURY_PRIMEAGENT_ARGS`; check `agent-output.log` in the workspace |
 | `429 Too Many Requests` | Rate limit (login 10/min/IP, run creation 30/min/owner+IP); wait for `Retry-After` |
-| Sandbox error at setup | Run requested `resourceLimits`/`allowedNetworks` but no container runtime — install docker/podman or set `MERCURY_SANDBOX_RUNTIME=none` |
+| Sandbox error at setup | Run requested `resourceLimits`/`allowedNetworks` but no container runtime — configure docker/podman or remove the constraints |
 
 ## 9. Verify the install (optional)
 
 ```bash
 npm run typecheck   # tsc --noEmit
 npm test            # full suite, no network, no LLM
->>>>>>> 2beb563 (ci: install dependencies before typecheck and test (issue #67))
 ```
