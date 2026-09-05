@@ -1,12 +1,14 @@
 # Mercury CLI and TUI design
 
-Status: **partly implemented.** Milestones 0 to 2 are implemented: the client
+Status: **partly implemented.** Milestones 0 to 3 are implemented: the client
 contracts, transport, configuration and credential layers; the read-only commands
-`mercuryctl agents list`, `runs list` and `runs show`; and the mutation commands
+`mercuryctl agents list`, `runs list` and `runs show`; the mutation commands
 `runs create`, `runs input`, `runs cancel` and `runs retry` with idempotency keys
-and confirmation. Milestones 3 and 4 (events/watch, packaging) remain as issues
-#232 and #233, and the TUI in Milestone 5 remains gated on demonstrated need.
-See §16 for per-milestone status.
+and confirmation; and the observation commands `runs events` and `runs watch` with
+paging, gap recovery, bounded reconnect and terminal outcome exit codes. Milestone 4
+(packaging) remains as issue #233, `config profiles` and `config current` are
+advertised but not yet built, and the TUI in Milestone 5 remains gated on
+demonstrated need. See §16 for per-milestone status.
 
 Mercury already runs as long-lived services: an API server owns the HTTP and
 dashboard surface, while one or more workers execute durable Runs. The existing
@@ -916,7 +918,7 @@ database, because no adapter except the real PrimeAgent one produces it -- that
 proves the client handles the status, and does not prove the worker ever reaches
 it.
 
-### Milestone 3: events and watch
+### Milestone 3: events and watch -- **done** (issue #232)
 
 Deliverables:
 
@@ -948,6 +950,104 @@ Deferred:
 
 - global Run-list streaming;
 - local event persistence.
+
+**Paging must resume from `nextCursor`, never `lastSequence`.** `GET
+/api/runs/:id/events` returns both, and the server comments that `lastSequence` is
+not a safe resume point when a page is truncated. Resuming from the maximum sequence
+on a truncated page silently skips the events between the last returned event and
+that maximum -- data that was persisted and never shown. The observer takes its next
+`after` from `nextCursor` only, and a test pins the difference.
+
+**A fake that lies about paging makes correct code look broken.** The first scripted
+store indexed a list of pages by call count, so it could answer `hasMore: false`
+while events remained; the observer then paged once and looked like it was dropping
+events. The fixture was rewritten to model an actual store -- one flat list, paged by
+`after`/`limit`, with `hasMore` computed exactly as the server computes it. Three
+tests that "failed" were fixture bugs, not product bugs.
+
+**Gap recovery is unreachable unless the fixture can change state mid-observation.**
+With a terminal status the observer finishes right after the initial history drain and
+never enters the streaming loop; with a permanently running status it exhausts the
+reconnect budget. Both are correct behaviour, and neither exercises the gap path. The
+store now publishes the missing sequences when the stream is opened, so the stream can
+run ahead of history the way the real in-memory fan-out does.
+
+**Ctrl-C hung, and the cause was a comment.** The SSE iterator's wake-up path handled
+a queued frame and a completed stream, and for the failure case it carried the comment
+"rejections surface below" while resolving nothing. A consumer parked in `next()` when
+the socket died was never woken, so an interrupt closed the socket and left the process
+running. The iterator now holds both settle functions and rejects on failure. A bare
+`req.destroy()` also had to become `req.destroy(error)`: destroy-without-error emits
+`close` but neither `end` nor `error`, so nothing wakes the reader.
+
+**An interrupt is not a transport failure.** The abort now surfaces as a distinct
+`AbortError` that the observer maps to exit 130. Routing it through `TransportError`
+would have reported a network fault that never happened, and the exit code would have
+been wrong for scripts that distinguish "I stopped watching" from "Mercury is down".
+
+**Five tests were written against a milestone that had not happened yet.** They used
+`runs watch` as the example of an unimplemented command, and implementing it turned
+each into an assertion about endpoint configuration -- green, and testing nothing
+intended. They now derive a stub command from the same `IMPLEMENTED` set the
+dispatcher consults, and a guard test fails if that set ever becomes fully
+implemented so the derivation cannot become vacuous.
+
+**The live stream had never been used, and nothing noticed.** `streamEvents` built its
+request and never called `req.end()`. A GET with no body still has to be closed: until it is, the
+client has written a half-request, the server never answers, and the iterator waits for a response
+that cannot arrive. Every watch test passed because each one used an already-terminal Run, which the
+observer finishes from the history drain plus a status read without ever entering the streaming loop.
+The follow path -- the reason the milestone exists -- was entirely untested. The test that found it
+watches a QUEUED Run, cancels it, and requires the cancellation events to arrive live.
+
+**The server's opening frame is not an event.** `GET /runs/:id/stream` begins with
+`event: hello` carrying `{runId, after}` and no `sequence`. Feeding it to the event validator raised
+a protocol error, so a watch died on contact with a healthy server. Control frames are now skipped by
+exact name from a set the protocol owns; an unrecognised frame name still fails loudly, because
+silently skipping anything unknown is how a future server-side event becomes invisible.
+
+**An armed idle timer outlived the stream, and `process.exit` hid it.** The iterator's `return()`
+disarmed the timer, but a stream the server ends normally never calls `return()`, so the timer stayed
+armed for the whole idle window. `bin.ts` calls `process.exit()`, which also hides this from every
+subprocess test in the suite. The client is a library and the TUI is meant to embed it, so the
+cleanup now happens on every terminal path and the test asserts on live handles rather than on a
+claim that a timer was cleared.
+
+**A test that passes alone and fails in the suite was reading a race, not a defect.** The live test
+first waited for the event and only then attached an `exit` listener; by then the child had already
+exited and the event had gone to nobody, so the test reported a hang that did not exist. Measuring
+the elapsed time showed the live event arriving in about 100ms. The exit promise is now created at
+spawn time, and a fixed sleep before cancelling was replaced by waiting for the history the watch must
+print before it can follow anything.
+
+**An independent review's data-loss claim was checked, not argued.** It reported that a page whose
+`nextCursor` trails the highest sequence inside that page would skip an event. Reproduced against a
+server built that way: no event was lost and none was duplicated, because the delivered cursor
+deduplicates the overlap. The claim had counted an already-delivered event as skipped. It is recorded
+here because the check, not the report, is the evidence.
+
+**Two cursors are not one cursor, and a vacuous test hid the bug.** The observer's
+history loop advanced a single `cursor` both as the value it requested next and as the
+value it had delivered. `emit()` moves the delivered cursor to the last event shown,
+which on a full page equals `page.nextCursor`, so the loop's anti-loop guard
+`page.nextCursor <= cursor` was true after every page and paging stopped after one page
+regardless of `hasMore`. A Run with more history than one page showed only its first
+page before following the stream. The loop now keeps a separate `requested` cursor and
+applies the anti-loop guard to it.
+
+**The test that should have caught it was not testing paging.** It was named "a capped
+page advances from `nextCursor`", but the scripted store sized pages from the caller's
+`limit`, and the observer asks for 200 -- so all five events came back in one page and
+nothing was ever capped. Mutating `nextCursor` to `lastSequence` survived, which is how
+this was found: the fixture now caps at `min(caller limit, store page size)` the way a
+real server caps at its own maximum, and the same mutation fails. A test whose name
+asserts a property its fixture does not produce is worse than no test, because it reads
+as coverage.
+
+**A fresh Run already has six events.** Creating one writes `run.created`,
+`run.queued` and one `skill.selected` per candidate skill, so a test that seeded two
+events and asserted a page length of two was wrong about the server. The assertion now
+names the seeded event types instead of a total the server owns.
 
 ### Milestone 4: packaging and operational hardening
 

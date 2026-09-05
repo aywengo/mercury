@@ -21,6 +21,10 @@ import { renderInputAck, renderRetry, renderRunAction } from './commands/control
 import { buildCreateRequest, buildInputValue } from './commands/request.ts';
 import { createKeyDiagnostic, createRunIdempotent, CreateUncertainError, renderCreate } from './commands/create.ts';
 import { confirm, DeclinedError } from './confirm.ts';
+import type { MercuryEvent } from './api/protocol.ts';
+import { renderEventLine, renderWatchSummary, watchExitCode } from './commands/events.ts';
+import { AbortedError, observeRun } from './observe/runObserver.ts';
+import { reduceRun } from './observe/reducer.ts';
 
 export const PROGRAM = 'mercuryctl';
 
@@ -210,6 +214,8 @@ export const IMPLEMENTED = new Set<string>([
   'runs input',
   'runs cancel',
   'runs retry',
+  'runs events',
+  'runs watch',
 ]);
 
 /**
@@ -430,6 +436,65 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
       return EXIT.OK;
     }
 
+    if (command === 'runs events' || command === 'runs watch') {
+      const runId = requireRunId(parsed, command);
+      const follow = command === 'runs watch' || parsed.flags['--follow'] === true;
+      const after = flagNumber(parsed.flags, '--after');
+      const limit = flagNumber(parsed.flags, '--limit');
+
+      if (command === 'runs events' && !follow) {
+        // A single page, and in JSON mode exactly ONE value on stdout -- the same contract every other
+        // non-streaming command has. Streaming mode switches to NDJSON, which is why --follow is
+        // handled below rather than sharing this branch.
+        const page = await ctx.client.listEvents(runId, { after, limit });
+        if (ctx.json) { io.stdout(`${JSON.stringify(page)}\n`); return EXIT.OK; }
+        if (page.events.length === 0) { io.stdout('no events\n'); return EXIT.OK; }
+        for (const event of page.events) io.stdout(`${renderEventLine(event, { ...ctx, isTty: io.isTty })}\n`);
+        return EXIT.OK;
+      }
+
+      const controller = new AbortController();
+      // Ctrl-C aborts the WATCH and leaves the Run untouched (§11.3). The distinction is the whole
+      // point: an ordinary terminal interrupt must never become a cancellation request.
+      const onSigint = (): void => { controller.abort(); };
+      process.on('SIGINT', onSigint);
+      try {
+        // Retained for the final projection only. The watch prints each event as it arrives and does not
+        // need the list to do so; keeping it lets the summary report step, tool and skill counts without
+        // the output layer re-scanning anything.
+        const seen: MercuryEvent[] = [];
+        const outcome = await observeRun({
+          client: ctx.client,
+          runId,
+          signal: controller.signal,
+          onEvent: (event) => {
+            seen.push(event);
+            io.stdout(`${renderEventLine(event, { ...ctx, isTty: io.isTty })}\n`);
+          },
+          onReconnect: (info) => io.stderr(
+            `${PROGRAM}: stream dropped (${info.reason}); reconnecting in ${info.waitMs}ms from sequence ${info.after}\n`,
+          ),
+        });
+        // The reducer needs the Run row, and the watch outcome deliberately carries only a status. One
+        // extra read at the end is cheaper than widening the observer's contract, and the status here is
+        // the authoritative row rather than an inferred event.
+        let presentation = null;
+        try {
+          const detail = await ctx.client.getRun(runId);
+          presentation = reduceRun({ run: detail.run as never, events: seen });
+        } catch {
+          // A summary read must not turn a successful watch into a failure. The outcome and exit code are
+          // already known; the counts are decoration.
+        }
+        io.stdout(`${renderWatchSummary(outcome, presentation, { ...ctx, isTty: io.isTty })}\n`);
+        // `runs events --follow` is a read: it exits 0 whatever the Run did. Only `watch` encodes the
+        // outcome, so that `events $id || alert` does not fire on every failed Run.
+        return command === 'runs watch' ? watchExitCode(outcome) : EXIT.OK;
+      } finally {
+        process.removeListener('SIGINT', onSigint);
+      }
+    }
+
     return EXIT.USAGE;
   } catch (err) {
     return reportError(err, io);
@@ -483,6 +548,10 @@ export function reportError(err: unknown, io: Stdio): number {
   if (err instanceof MercuryClientError) {
     io.stderr(`${PROGRAM}: ${redactAuthorization(err.message)}\n`);
     return err.exitCode;
+  }
+  if (err instanceof AbortedError) {
+    // Shell convention: 128 + SIGINT. No message -- the operator pressed Ctrl-C and knows.
+    return 130;
   }
   if (err instanceof DeclinedError) {
     // Stated plainly so exit 2 is never read as "you typed the command wrong".

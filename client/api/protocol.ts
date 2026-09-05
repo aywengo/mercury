@@ -378,3 +378,15 @@ function validateConstraints(value: unknown): Partial<RunConstraints> {
   }
   return out as Partial<RunConstraints>;
 }
+
+/**
+ * SSE frame names the server sends that are NOT Mercury events.
+ *
+ * `hello` is the stream's opening frame: it echoes the run id and the `after` cursor the server
+ * honoured, which is what lets a client confirm it resumed where it meant to. Its payload has no
+ * `sequence`, so feeding it to parseEvent raises a protocol error and a watch dies on contact with a
+ * healthy server. Names are matched exactly and the set is small on purpose: an unknown frame name is
+ * still a protocol error, because silently skipping an unrecognised frame is how a new server-side
+ * event type becomes invisible.
+ */
+export const NON_EVENT_FRAME_TYPES: ReadonlySet<string> = new Set(['hello']);
