@@ -14,7 +14,7 @@ the `systemctl enable --now` above.
 MERCURY_DB=/var/lib/mercury/mercury.db
 MERCURY_WORKSPACE_BASE=/var/lib/mercury/workspaces
 MERCURY_BIND_HOST=127.0.0.1
-# plus auth: MERCURY_API_TOKENS=... and any session settings (see the root README)
+# plus auth: MERCURY_API_TOKENS=... and any session settings (see docs/configuration.md)
 ```
 ```bash
 sudo chown mercury:mercury /etc/mercury/mercury.env

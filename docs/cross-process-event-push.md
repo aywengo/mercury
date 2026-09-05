@@ -11,7 +11,8 @@ wake-up plus its counters, PRs #203 #205 #208).
 standing requirement it leaves on any cross-process design);
 [`architecture-review.md`](architecture-review.md) (round 2 — R2-2 and R2-3 are in this same file's
 delivery path and should be fixed before any push mechanism is layered on it); issue #133, closed by
-PR #134 and on `main` as of `f9bb44d`; README "Recommended next steps" item 11.
+PR #134 and on `main` as of `f9bb44d`; current operational summary:
+[`operations.md`](operations.md#event-delivery).
 
 ---
 

@@ -5,15 +5,15 @@ daemon**. **Scope:** design plus verification; no implementation is included.
 **Verified against:** PrimeAgent 0.8.1, daemon protocol `prime-agent.daemon` version 7, schema
 `protocol-7-schema-22-4d515169dc6b`.
 **Related:** [`agent-adapters.md`](agent-adapters.md) (Pattern B), issues #55 and #68,
-README "Recommended next steps" item 8.
+and [`status.md`](status.md#primeagent-daemon-mode).
 
 ---
 
 ## 1. Summary
 
 Mercury already ships `DaemonAgentAdapter` behind `MERCURY_AGENT_MODE=daemon`, with RPC remaining the
-default. README item 8 and `ARCHITECTURE.md` §9 both close with the same caveat: *"verify against the
-real daemon before relying on it."*
+default. `ARCHITECTURE.md` §9 keeps the same caveat: verify against the real daemon before relying
+on it.
 
 **This document is that verification. It fails.**
 
