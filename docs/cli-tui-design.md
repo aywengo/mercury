@@ -825,9 +825,24 @@ the handler streamed without end. The test was therefore proving "an endless str
 trips the bound", which still passed when the bound was raised to 1GB, and the
 mutation survived. It now sends a fixed 20MB and ends.
 
-**`--help` advertised commands this build cannot run**, and the `mercuryctl` npm
-entry point did not exist despite being a deliverable; both are fixed, with help
-rendered from the dispatcher's own command set so they cannot drift again.
+**The published package would have shipped a broken `mercuryctl`.** `bin` named
+`client/bin.ts` while `files` remained an allowlist naming only `src/` and friends.
+npm always includes files that `bin` names, so the tarball contained `client/bin.ts`
+and no other client source -- an installed command that fails on its first import.
+Nothing in the suite caught it because nothing runs `npm install`. `client/` is now
+in `files`, and `client/test/packaging.test.ts` asserts that every `bin` target's
+*directory* is published. Naming only the entry point is deliberately not accepted
+as coverage, since that is the exact state that shipped.
+
+Two review findings were smaller but real: `--status` was passed to the client as
+`as never`, which type-checked only by silencing the compiler -- and since the server
+silently ignores an unrecognised status, a divergence between `RUN_STATUSES` and the
+protocol type would have produced an unfiltered list rather than an error; and
+`writeJson` was imported into `agents.ts` and never used.
+
+One mutation deliberately survives: deleting the `mercury` bin entry keeps the
+packaging guard green, because a target that does not exist needs no coverage. That
+is the guard behaving correctly, not a hole in it.
 
 ### Milestone 2: create and control
 

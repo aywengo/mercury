@@ -5,7 +5,6 @@
 
 import type { AgentsResponse } from '../api/protocol.ts';
 import { renderTable, makeColorizer } from '../output/human.ts';
-import { writeJson } from '../output/json.ts';
 import type { CommandContext } from './context.ts';
 
 export function renderAgents(response: AgentsResponse, ctx: CommandContext, isTty: boolean): string {

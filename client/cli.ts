@@ -11,6 +11,7 @@
 import { EXIT } from './exitCodes.ts';
 import { MercuryClientError, UsageError } from './api/errors.ts';
 import { ProtocolError, RUN_STATUSES } from './api/protocol.ts';
+import type { RunStatus } from './api/protocol.ts';
 import { redactAuthorization } from './credentials.ts';
 import { buildContext } from './commands/context.ts';
 import { renderAgents } from './commands/agents.ts';
@@ -328,7 +329,12 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
       }
       const limit = flagNumber(parsed.flags, '--limit');
       const cursor = flagString(parsed.flags, '--cursor');
-      io.stdout(`${renderRunList(await ctx.client.listRuns({ status: status as never, limit, cursor }), ctx, io.isTty)}\n`);
+      // Narrowed by the guard above rather than asserted away. `as never` type-checked only because it
+      // silences the compiler entirely: if RUN_STATUSES and the protocol's RunStatus ever diverged, the
+      // cast would keep this compiling while sending a status the server does not recognise -- and the
+      // server silently ignores an unknown status, so the operator would get an unfiltered list.
+      const statusFilter: RunStatus | undefined = status === undefined ? undefined : (status as RunStatus);
+      io.stdout(`${renderRunList(await ctx.client.listRuns({ status: statusFilter, limit, cursor }), ctx, io.isTty)}\n`);
       return EXIT.OK;
     }
     if (command === 'runs show') {
