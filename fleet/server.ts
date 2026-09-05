@@ -28,6 +28,7 @@ import { parseCallerTokens, hostAllowed } from './auth.ts';
 import { authenticate, HttpError, matchRoute, readJsonBody, sendJson, type RequestContext, type Route } from './http.ts';
 import type { Logger } from './logger.ts';
 import type { FleetConfig } from './config.ts';
+import { FLEET_PRODUCT, FLEET_VERSION } from './version.ts';
 
 export interface FleetServerDeps {
   db: DatabaseSync;
@@ -135,7 +136,12 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
   const routes: Route[] = [
     {
       method: 'GET', pattern: ['healthz'], public: true,
-      handle: (_ctx, res) => sendJson(res, 200, { ok: true, ts: new Date().toISOString() }),
+      handle: (_ctx, res) => sendJson(res, 200, {
+        ok: true,
+        ts: new Date().toISOString(),
+        product: FLEET_PRODUCT,
+        version: FLEET_VERSION,
+      }),
     },
     {
       // GET /metrics -- the fleet rollup. Mounted at the root like a Mercury's own, so a Prometheus job can

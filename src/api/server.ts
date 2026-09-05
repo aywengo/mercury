@@ -18,6 +18,7 @@ import type { Logger } from '../logger.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { collectMetrics } from '../metrics/collect.ts';
 import { renderPrometheus } from '../metrics/prometheus.ts';
+import { HOST_PRODUCT, HOST_VERSION } from '../version.ts';
 
 // Dashboard UI (Mercury.md section 23): static SPA served at /.
 // The UI authenticates with a session cookie (POST /api/auth/login);
@@ -102,7 +103,12 @@ export function createApp(deps: ServerDeps): Express {
   app.use(createAuthMiddleware(deps.apiTokens, deps.adminToken, sessions));
 
   app.get('/healthz', (_req, res) => {
-    res.json({ ok: true, ts: new Date().toISOString() });
+    res.json({
+      ok: true,
+      ts: new Date().toISOString(),
+      product: HOST_PRODUCT,
+      version: HOST_VERSION,
+    });
   });
 
   // Worker health (public like /healthz, Mercury.md section 25): active workers

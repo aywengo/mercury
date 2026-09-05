@@ -7,6 +7,7 @@ import { createServer, type Server as HttpServer } from 'node:http';
 import type { ChildProcess } from 'node:child_process';
 import type { Express } from 'express';
 import { createApp } from '../src/api/server.ts';
+import { HOST_PRODUCT, HOST_VERSION } from '../src/version.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { Worker } from '../src/worker/worker.ts';
 import { nullLogger, type Logger, type LogFields } from '../src/logger.ts';
@@ -467,6 +468,11 @@ test('CLI wiring: /healthz/workers returns 200 when started via cli.ts server (i
       `server did not start (exited: ${exitInfo}). Child output:\n` +
         output.join('').slice(-4_000),
     );
+    const health = await fetch(`http://127.0.0.1:${port}/healthz`);
+    assert.equal(health.status, 200);
+    const healthBody = (await health.json()) as { product: string; version: string };
+    assert.equal(healthBody.product, HOST_PRODUCT);
+    assert.equal(healthBody.version, HOST_VERSION);
     const res = await fetch(`http://127.0.0.1:${port}/healthz/workers`);
     assert.equal(res.status, 200);
     const body = (await res.json()) as { workers: unknown[]; queueDepth: number };

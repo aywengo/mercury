@@ -27,6 +27,7 @@ import { assertServeable } from './config.ts';
 import { createServiceRedactor } from './redact.ts';
 import { createLogger } from './logger.ts';
 import { parseCallerTokens } from './auth.ts';
+import { FLEET_VERSION } from './version.ts';
 
 const USAGE = `fleet -- manage multiple Mercury instances
 
@@ -38,6 +39,7 @@ const USAGE = `fleet -- manage multiple Mercury instances
   fleet probe --watch
   fleet serve                      run the service (binds FLEET_BIND_HOST:FLEET_PORT)
   fleet credentials list
+  fleet --version                  print mercury-fleet <version>
 `;
 
 /** Human label per outcome. Kept distinct because each one sends the operator somewhere different. */
@@ -147,6 +149,10 @@ function openStore(config: ReturnType<typeof loadConfig>): CredentialStore {
 }
 
 export async function main(argv: string[]): Promise<number> {
+  if (argv[0] === '--version' || argv[0] === '-V') {
+    process.stdout.write(`mercury-fleet ${FLEET_VERSION}\n`);
+    return 0;
+  }
   if (argv.length === 0 || argv[0] === 'help' || argv[0] === '--help') {
     process.stdout.write(USAGE);
     return 0;

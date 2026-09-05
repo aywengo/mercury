@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // Mercury CLI: dev (API + embedded worker), server (API only), worker, migrate, redact-events
 // (retroactive secret redaction: events.payload_json, run_inputs.input_json, runs.error,
 // runs.task, runs.repository_json, runs.repositories_json).
@@ -42,11 +43,16 @@ import { selectPrimeAgentAdapter } from './adapters/selectAgentAdapter.ts';
 import { SandboxManager } from './sandbox/sandboxManager.ts';
 import { Worker } from './worker/worker.ts';
 import { startServer } from './api/server.ts';
+import { HOST_VERSION } from './version.ts';
 
 const SKILLS_DIR = resolve(import.meta.dirname, '..', '.agents', 'skills');
 
 async function main(): Promise<void> {
   const [cmd, ...args] = process.argv.slice(2);
+  if (cmd === '--version' || cmd === '-V') {
+    process.stdout.write(`mercury-host ${HOST_VERSION}\n`);
+    return;
+  }
   const config = loadConfig();
   // Two layers (issue #214): the operator's declared MERCURY_SECRETS, plus the exact VALUES of
   // the provider credentials this process may hand to a Run. The second layer is what makes
@@ -361,7 +367,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  console.error('usage: mercury <dev|server|worker|gc|migrate|redact-events>');
+  console.error('usage: mercury [--version|-V] | <dev|server|worker|gc|migrate|redact-events>');
 console.error('redact-events: retroactive secret redaction of events.payload_json, run_inputs.input_json, runs.error, runs.task, runs.repository_json, runs.repositories_json');
   process.exit(1);
 }

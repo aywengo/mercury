@@ -1,11 +1,30 @@
 {
-  "name": "mercury",
+  "name": "@aywengo/mercury",
   "version": "0.1.0",
-  "private": true,
-  "description": "Mercury - durable long-running coding orchestration for PrimeAgent (see Mercury.md)",
+  "private": false,
+  "license": "MIT",
+  "description": "Durable long-running coding orchestration for PrimeAgent and other agent backends",
   "type": "module",
   "engines": {
     "node": ">=22.18.0"
+  },
+  "bin": {
+    "mercury": "src/cli.ts"
+  },
+  "files": [
+    "src/",
+    "ui/",
+    ".agents/skills/",
+    "local-agents/",
+    "remote-agents/",
+    "rpc-agents/",
+    "deploy/",
+    "LICENSE",
+    "README.md",
+    "QUICKSTART.md"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "dev": "node src/cli.ts dev",

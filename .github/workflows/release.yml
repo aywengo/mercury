@@ -1,0 +1,69 @@
+name: Release
+
+# Tag-only. A host or Fleet bump on main does not publish until the matching
+# prefixed tag is pushed. Bare vX.Y.Z tags are not in this filter and are not
+# handled here.
+
+on:
+  push:
+    tags:
+      - 'host-v*.*.*'
+      - 'fleet-v*.*.*'
+      - 'cli-v*.*.*'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Parse tag and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^(host|fleet|cli)-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "refusing tag ${tag}; expected host-vX.Y.Z, fleet-vX.Y.Z, or cli-vX.Y.Z" >&2
+            exit 1
+          fi
+          product="${BASH_REMATCH[1]}"
+          version="${BASH_REMATCH[2]}"
+          notes="docs/releases/${product}/${version}.md"
+          if [ ! -f "$notes" ]; then
+            echo "missing ${notes}" >&2
+            exit 1
+          fi
+
+          if [ "$product" = "host" ]; then
+            pkg=$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).version)")
+            [ "$pkg" = "$version" ] || { echo "package.json version ${pkg} != tag ${version}" >&2; exit 1; }
+            title="Mercury host v${version}"
+          elif [ "$product" = "fleet" ]; then
+            pkg=$(node -e "console.log(JSON.parse(require('fs').readFileSync('fleet/package.json','utf8')).version)")
+            [ "$pkg" = "$version" ] || { echo "fleet/package.json version ${pkg} != tag ${version}" >&2; exit 1; }
+            title="Mercury Fleet v${version}"
+          else
+            echo "cli tags are reserved until mercuryctl exists and ${notes} is present" >&2
+            title="Mercury CLI v${version}"
+          fi
+
+          gh release create "$tag" --title "$title" --notes-file "$notes"
+
+          if [ "$product" = "host" ]; then
+            npm publish --access public --provenance
+          elif [ "$product" = "fleet" ]; then
+            cp LICENSE fleet/LICENSE
+            (cd fleet && npm publish --access public --provenance)
+          fi

@@ -235,12 +235,22 @@ retried.
 
 | Method | Path | Authentication | Description |
 | --- | --- | --- | --- |
-| `GET` | `/healthz` | public | Process liveness and timestamp |
+| `GET` | `/healthz` | public | Process liveness, product id and version |
 | `GET` | `/healthz/workers` | public | Active leases and queue depth |
 | `GET` | `/metrics` | required | Prometheus metrics |
 
+`GET /healthz` is unauthenticated and returns:
+
+```json
+{ "ok": true, "ts": "2026-09-05T12:00:00.000Z", "product": "host", "version": "0.1.0" }
+```
+
+`product` is always `host` on this process. `version` matches
+`package.json` / `HOST_VERSION`. This is not a capabilities API.
+
 `/healthz/workers` returns `503` when the API was started without queue
 dependencies. That means “reachable but not serving Runs,” not “host down.”
+It does not include a version field.
 
 Metrics are protected because they reveal accumulated Run volume, duration,
 failure and sandbox information.

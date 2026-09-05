@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import net from 'node:net';
 import { join } from 'node:path';
 import { closeServer, createApp } from '../src/api/server.ts';
+import { HOST_PRODUCT, HOST_VERSION } from '../src/version.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { expectStatus, makeEnv, sleep, tempDir, waitFor } from './helpers.ts';
 import { createLogger } from '../src/logger.ts';
@@ -47,6 +48,29 @@ async function listen(app: Express): Promise<{ port: number; close: () => Promis
     });
   });
 }
+
+test('GET /healthz is public and reports host product and version', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/healthz`);
+      await expectStatus(res, 200, 'GET /healthz');
+      const body = await res.json() as { ok: boolean; ts: string; product: string; version: string };
+      assert.equal(body.ok, true);
+      assert.equal(body.product, HOST_PRODUCT);
+      assert.equal(body.version, HOST_VERSION);
+      assert.equal(typeof body.ts, 'string');
+      assert.ok(body.ts.length > 0);
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
 
 test('auth: missing/invalid token rejected', async () => {
   const env = makeEnv({ workerEnabled: false });

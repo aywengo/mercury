@@ -6,6 +6,11 @@ each Mercury over its public HTTP API and never touches a Mercury database or im
 Design: [`docs/fleet-design.md`](../docs/fleet-design.md). This directory is **Phase 0** — host registry and
 probe. There is no dispatch yet; Fleet cannot start a Run.
 
+Version `FLEET_VERSION` lives in [`version.ts`](version.ts) and must match
+[`package.json`](package.json). Changelog: [`CHANGELOG.md`](CHANGELOG.md).
+`fleet --version` prints `mercury-fleet <version>`. `GET /healthz` includes
+`product: "fleet"` and that same version.
+
 ## Quick start
 
 ```bash

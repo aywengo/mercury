@@ -16,6 +16,15 @@ historical reviews.
 - [`Current status and limitations`](status.md) — supported baseline, active
   gaps and recommended priorities.
 
+## Releases
+
+Host and Fleet have independent versions. See [`releasing.md`](releasing.md).
+
+- [`Host 0.1.0`](releases/host/0.1.0.md)
+- [`Fleet 0.1.0`](releases/fleet/0.1.0.md)
+- [`Host changelog`](../CHANGELOG.md)
+- [`Fleet changelog`](../fleet/CHANGELOG.md)
+
 ## Operating Mercury
 
 - [`Operations`](operations.md) — topology, shutdown, workspaces, sandbox,
@@ -99,7 +108,10 @@ Use the narrowest document for a change:
 - deployment commands → `deploy/README.md`;
 - architectural invariant → `ARCHITECTURE.md`;
 - active limitation → `docs/status.md`;
-- Crew design → `docs/crew/`.
+- Crew design → `docs/crew/`;
+- host release notes → `docs/releases/host/`;
+- Fleet release notes → `docs/releases/fleet/`;
+- how to cut a release → `docs/releasing.md`.
 
 Avoid copying the same detailed table into several files. Link to the owning
 document and keep summaries short.

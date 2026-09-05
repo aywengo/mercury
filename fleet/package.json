@@ -1,0 +1,21 @@
+{
+  "name": "@aywengo/mercury-fleet",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Federation layer for independent Mercury hosts: registry and probe (Phase 0, no dispatch)",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "bin": {
+    "fleet": "cli.ts"
+  },
+  "files": [
+    "*.ts",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

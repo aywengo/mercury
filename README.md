@@ -126,3 +126,13 @@ not production-ready. Named network destinations are not currently enforced, and
 stored skill snapshots are not yet the bytes materialized by the worker.
 
 See [`docs/status.md`](docs/status.md) for the complete and current limitations.
+
+## License and contributing
+
+Mercury is [MIT](LICENSE) licensed. Host changes are recorded in
+[`CHANGELOG.md`](CHANGELOG.md); Fleet has [`fleet/CHANGELOG.md`](fleet/CHANGELOG.md).
+How to cut a release: [`docs/releasing.md`](docs/releasing.md).
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- [`SECURITY.md`](SECURITY.md)
+- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)

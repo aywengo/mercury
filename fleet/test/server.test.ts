@@ -13,6 +13,7 @@ import { createRedactor } from '../redact.ts';
 import { createLogger } from '../logger.ts';
 import { assertServeable, loadConfig } from '../config.ts';
 import { HostRegistry } from '../registry.ts';
+import { FLEET_PRODUCT, FLEET_VERSION } from '../version.ts';
 
 const CHILD_SECRET = 'child-secret-abcdef123456';
 const CALLER_TOKEN = 'caller-token-xyz789999';
@@ -64,6 +65,18 @@ async function startService(opts: { apiTokens?: string } = {}): Promise<{
   };
   return { base, svc, db, call, close: async () => { await svc.close(); db.close(); } };
 }
+
+test('/healthz reports fleet product and version', async () => {
+  const s = await startService();
+  try {
+    const r = await s.call('GET', '/healthz');
+    assert.equal(r.status, 200);
+    assert.equal(r.json.ok, true);
+    assert.equal(r.json.product, FLEET_PRODUCT);
+    assert.equal(r.json.version, FLEET_VERSION);
+    assert.equal(typeof r.json.ts, 'string');
+  } finally { await s.close(); }
+});
 
 test('/healthz is public, everything else is not', async () => {
   const s = await startService();
