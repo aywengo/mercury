@@ -1091,7 +1091,9 @@ Deliverables landed so far:
 
 - `config profiles` and `config current`;
 - every command in the design is now implemented, so help no longer marks anything unavailable;
-- commands that take no positional argument now refuse one.
+- commands that take no positional argument now refuse one;
+- `--version` / `-V`, with the version single-sourced from the installed manifest (§16.1);
+- the custom-CA acceptance criterion, tested over both the JSON and the SSE path (§16.2).
 
 **A blank environment variable now means unset.** `??` skips `null` and `undefined` but not `''`, so a
 declared-but-empty `MERCURY_CLIENT_URL` -- which is what `${MERCURY_CLIENT_URL:-}` produces in a shell
@@ -1124,6 +1126,48 @@ command that will never exist, and the "not available in this build" branch is c
 command from `IMPLEMENTED` in-process and restoring it, so it stays covered whether or not anything
 happens to be unimplemented. The help test now asserts that help and the command table agree in both
 directions, against the CLI's own lists rather than a third hand-written list inside the test.
+
+#### 16.1 Version output and the compatibility policy
+
+`--version` prints `mercuryctl <version>`, and `--version --json` prints one JSON value with
+`name`, `version` and `node`. Both work with no config file, no endpoint and no credential.
+
+The version is read from the installed `package.json` rather than repeated in source. It had been
+written twice: the manifest said `0.1.0` and `USER_AGENT` said `0.1`. Nothing failed, because the two
+strings are never compared -- a server log would simply record a version no artifact ever had.
+`USER_AGENT` is now derived from `CLIENT_VERSION`, and a test asserts both against the manifest.
+
+The compatibility surface is what the design names as stable: **JSON field names and exit semantics**.
+Human output may change freely and is not pinned. One test walks the exit-code table in `--help` and
+asserts it matches the constants the CLI actually returns, in both directions, with `130` declared
+explicitly as the one code that comes from the shell rather than from a code path.
+
+**`--version` alone printed the help page.** The bare-invocation branch (`no command path -> show help`)
+ran before the version check, so the most likely way the flag is ever typed dumped a help page, and the
+flag only worked when a command followed it. Explicit `--help` still wins over `--version`, so asking
+for both gives the more informative answer.
+
+#### 16.2 A custom CA, proven rather than threaded
+
+The `caFile` option was already threaded from the profile through to both request paths, and reading
+the threading proved nothing. The JSON request and the SSE stream build their request options
+separately, so either could drop `ca` while the other kept it. Each path is now exercised on its own.
+
+Every case runs three ways: with the **right** CA, with **no** CA, and with a **different valid** CA.
+The third is the one that matters. Without it, a green test cannot distinguish "the profile's CA is
+consulted" from "certificate verification is switched off" -- and disabling verification is the failure
+that ships, because everything still works. Mutating the client to add `rejectUnauthorized: false`
+fails three of the five tests; dropping `ca` from the SSE options alone fails exactly one, which is the
+proof that the stream path has its own coverage rather than borrowing the JSON path's.
+
+**The tests hung for 30 seconds each, in both directions, including the case that should have failed
+instantly.** The HTTPS server runs inside the test process, and `spawnSync` blocks that process's event
+loop for the whole call -- so the server could never complete the very handshake the CLI subprocess was
+waiting on. Every request timed out, and the failure looked like a broken TLS transport. The symptom
+that gives it away is the negative case hanging too: a certificate rejection is immediate, so a hang
+means the handshake never started. Async `spawn` fixed all five. This is the same trap as a blocked
+in-process log drain, and it is worth repeating because the in-process server is exactly what makes the
+test fast and hermetic.
 
 ### Milestone 5: optional TUI
 

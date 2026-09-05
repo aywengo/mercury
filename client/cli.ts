@@ -28,7 +28,9 @@ import { reduceRun } from './observe/reducer.ts';
 import { buildCurrentView, listProfiles, renderCurrent, renderProfiles } from './commands/config.ts';
 import { describeConfig } from './config.ts';
 
-export const PROGRAM = 'mercuryctl';
+import { CLIENT_VERSION, PROGRAM } from './version.ts';
+
+export { PROGRAM };
 
 export interface GlobalOptions {
   profile?: string;
@@ -37,6 +39,7 @@ export interface GlobalOptions {
   noColor: boolean;
   timeoutMs?: number;
   help: boolean;
+  version: boolean;
   yes: boolean;
 }
 
@@ -61,6 +64,8 @@ const GLOBAL_BOOL_FLAGS: Record<string, keyof GlobalOptions> = {
   '--no-color': 'noColor',
   '--help': 'help',
   '-h': 'help',
+  '--version': 'version',
+  '-V': 'version',
   '--yes': 'yes',
 };
 
@@ -87,7 +92,7 @@ function looksLikeFlag(token: string): boolean {
 }
 
 export function parseArgs(argv: string[]): ParsedInvocation {
-  const globals: GlobalOptions = { json: false, noColor: false, help: false, yes: false };
+  const globals: GlobalOptions = { json: false, noColor: false, help: false, version: false, yes: false };
   const path: string[] = [];
   const positional: string[] = [];
   const flags: Record<string, string | boolean> = {};
@@ -285,6 +290,7 @@ const HELP_LINES: string[] = [
   '  --timeout <duration>       per-request deadline, e.g. 30s, 2m, 1500ms',
   '  --yes                      skip confirmation prompts',
   '  -h, --help                 show this help',
+  '  -V, --version                print the client version and exit',
   '',
   'ENVIRONMENT',
   '  MERCURY_CLIENT_PROFILE     profile to select',
@@ -340,7 +346,28 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
     return EXIT.USAGE;
   }
 
-  if (parsed.globals.help || parsed.path.length === 0) {
+  // Order matters and was wrong the first time: with the bare-invocation branch first, `mercuryctl
+  // --version` printed the help text, because no command path was given. Explicit --help still wins
+  // over --version so that asking for both gives the more informative answer.
+  if (parsed.globals.help) {
+    io.stdout(`${helpText()}\n`);
+    return EXIT.OK;
+  }
+
+  // Answered before anything is resolved. --version is the first thing an operator runs on a machine
+  // where nothing is configured yet, and it is the thing a support request asks for; failing it with
+  // "no endpoint configured" would make the tool unable to describe itself. It also prints no
+  // credential, so it stays safe to paste.
+  if (parsed.globals.version) {
+    if (parsed.globals.json) {
+      io.stdout(`${JSON.stringify({ name: PROGRAM, version: CLIENT_VERSION, node: process.versions.node })}\n`);
+    } else {
+      io.stdout(`${PROGRAM} ${CLIENT_VERSION}\n`);
+    }
+    return EXIT.OK;
+  }
+
+  if (parsed.path.length === 0) {
     io.stdout(`${helpText()}\n`);
     return EXIT.OK;
   }
@@ -533,8 +560,12 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
  *
  * Listed rather than inferred because the check has to happen before the command runs: by the time a
  * command body could notice, it has already decided to ignore the extra word.
+ *
+ * `runs create` belongs here even though it takes no id: it is configured entirely by flags, so a bare
+ * word after it has nowhere to go. It was missing from the first version of this set, which a reviewer
+ * caught by walking every command in the dispatcher rather than only the ones the change touched.
  */
-const ZERO_POSITIONAL_COMMANDS = new Set(['agents list', 'runs list', 'config profiles', 'config current']);
+const ZERO_POSITIONAL_COMMANDS = new Set(['agents list', 'runs list', 'runs create', 'config profiles', 'config current']);
 
 /**
  * Reject a stray positional on a command that has nowhere to put it.
