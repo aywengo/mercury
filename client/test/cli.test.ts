@@ -93,11 +93,71 @@ for (const argv of [
   });
 }
 
-test('an arbitrary unknown flag never echoes its value', () => {
+test('an arbitrary unknown command flag never echoes its value', () => {
   // Generalises the credential rule to flags this parser has never heard of: --password, --auth,
   // or anything added later that happens to carry a secret.
   const r = run(['runs', 'list', `--password=${SECRET}`]);
   assert.equal(r.code, 2);
   assert.ok(!(r.stdout + r.stderr).includes(SECRET), 'value leaked from an unknown flag');
-  assert.match(r.stderr, /--password/);
+});
+
+test('unknown flags BEFORE the command are rejected, after it they are the command\u0027s problem', () => {
+  // The scope split has a consequence worth pinning: a flag after the command name is stored raw,
+  // so the top-level parser does NOT reject a typo like `--stat` for `--status`. That is deliberate
+  // -- the command owns its grammar -- but it means every command MUST validate its own flags, or a
+  // mistyped option is silently ignored and the operator believes they set something. Each command
+  // milestone carries that obligation; this test records where the boundary sits.
+  const before = run(['--definitely-not-global', 'runs', 'list']);
+  assert.equal(before.code, 2);
+  assert.match(before.stderr, /unknown option/);
+
+  const after = run(['runs', 'list', '--definitely-not-a-command-flag']);
+  assert.equal(after.code, 2);
+  assert.match(after.stderr, /not available in this build/);
+});
+
+// ---------------------------------------------------------------------------
+// Command-scope parsing. Found in review: the first implementation folded every
+// non-flag token into the command path and rejected every unrecognised flag, so
+// `runs show <id>` lost the id and `runs create --task` could not be expressed
+// at all. Both are structural, not cosmetic -- M1 and M2 cannot be built on top.
+// ---------------------------------------------------------------------------
+
+test('a run id after a two-word command is a positional, not part of the command', () => {
+  const r = run(['runs', 'show', 'run-123']);
+  // The message must name the COMMAND, not swallow the id into it.
+  assert.match(r.stderr, /"runs show" is not available/);
+  assert.ok(!r.stderr.includes('run-123'), 'the run id was folded into the command path');
+});
+
+test('command-specific flags reach the command instead of being rejected', () => {
+  const r = run(['runs', 'create', '--task', 'fix the bug', '--repo', 'https://example/r.git']);
+  assert.match(r.stderr, /"runs create" is not available/);
+  assert.ok(!r.stderr.includes('unknown option'), 'command flags must not be rejected by the global parser');
+});
+
+test('global options still work before the command', () => {
+  const r = run(['--json', 'runs', 'list']);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /"runs list" is not available/);
+});
+
+test('global options also work after the command, the way people type them', () => {
+  const r = run(['runs', 'list', '--json']);
+  assert.match(r.stderr, /"runs list" is not available/);
+});
+
+test('a typo in a GLOBAL option is still caught before the command', () => {
+  // The scope split must not turn pre-command typos into silently-ignored command flags.
+  const r = run(['--porfile', 'lab', 'runs', 'list']);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /unknown option "--porfile"/);
+});
+
+test('a credential flag is refused in command scope too', () => {
+  // The most likely placement by far: `mercuryctl runs list --token=...`.
+  const r = run(['runs', 'list', `--token=${SECRET}`]);
+  assert.equal(r.code, 2);
+  assert.ok(!(r.stdout + r.stderr).includes(SECRET));
+  assert.match(r.stderr, /MERCURY_CLIENT_TOKEN|credentials file/);
 });

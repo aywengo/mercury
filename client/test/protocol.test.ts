@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseAgentsResponse, parseCreateRunResponse, parseRunActionResponse, parseRetryRunResponse,
-  parseRunListResponse, parseRunDetailResponse, parseEventPage, parseRun, parseEvent, ProtocolError,
+  parseRunListResponse, parseRunDetailResponse, parseEventPage, parseRun, parseEvent, parseOkResponse, ProtocolError,
 } from '../api/protocol.ts';
 
 // Fixtures for every endpoint the client consumes (docs/cli-tui-design.md §16 M0 acceptance).
@@ -138,4 +138,13 @@ test('non-object responses are rejected rather than read as empty', () => {
 
 test('a non-array runs field is rejected', () => {
   assert.throws(() => parseRunListResponse({ runs: { '0': RUN }, nextCursor: null }), ProtocolError);
+});
+
+test('an ok acknowledgement must actually say ok', () => {
+  assert.deepEqual(parseOkResponse({ ok: true }), { ok: true });
+  // A 200 with an unexpected or error-shaped body must not be reported as accepted, or a failed
+  // `runs input` tells the operator the Run was answered while it stays NEEDS_INPUT.
+  assert.throws(() => parseOkResponse({}), ProtocolError);
+  assert.throws(() => parseOkResponse({ ok: false }), ProtocolError);
+  assert.throws(() => parseOkResponse({ error: 'boom' }), ProtocolError);
 });

@@ -171,3 +171,10 @@ test('assertCredentialFileSafe skips the check on win32 rather than faking it', 
   const dir = dirWith(undefined, { file: JSON.stringify({ lab: 'x' }), mode: 0o666 });
   assert.doesNotThrow(() => assertCredentialFileSafe(join(dir, 'credentials.json'), 'win32'));
 });
+
+test('a fragment on the endpoint is refused rather than silently dropped', () => {
+  // url.origin drops the fragment, so without this check a pasted URL would quietly point at a
+  // different Mercury than the operator typed.
+  assert.throws(() => normalizeEndpoint('https://example.test#frag'), /fragment/);
+  assert.throws(() => normalizeEndpoint('https://example.test/a#frag'), /fragment/);
+});

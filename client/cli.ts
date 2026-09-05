@@ -60,74 +60,94 @@ export const FORBIDDEN_FLAGS = ['--token', '--api-token', '--bearer'];
 export function parseArgs(argv: string[]): ParsedInvocation {
   const globals: GlobalOptions = { json: false, noColor: false, help: false, yes: false };
   const path: string[] = [];
+  const positional: string[] = [];
   const flags: Record<string, string | boolean> = {};
 
-  let i = 0;
-  // Global options may appear before the command path. Once a non-flag token is seen, everything
-  // after it belongs to the command, so `runs create --json` and `--json runs create` both work,
-  // but a command flag is never mistaken for a global one.
-  while (i < argv.length) {
-    const tok = argv[i]!;
-    if (!tok.startsWith('-')) {
-      path.push(tok);
-      i += 1;
-      continue;
-    }
-    // Match on the flag NAME, before any `=`. Without this split, `--token=abc` falls through to the
-    // generic unknown-option branch, which quoted the whole token back into stderr -- putting the
-    // credential in terminal scrollback and CI logs, which is the exact thing §13 forbids.
+  /**
+   * Apply one flag, returning true if this parser consumed it.
+   *
+   * `commandScope` distinguishes the two halves of the grammar. Before the command name every flag
+   * must be a known global, so a typo like `--porfile` is caught. AFTER the command name an
+   * unrecognised flag belongs to that command -- `runs create --task` must reach the create command,
+   * which owns its own grammar -- so it is stored raw instead of rejected.
+   *
+   * Forbidden credential flags are refused in BOTH scopes. Checking only the global scope would let
+   * `runs list --token=abc` through, which is the one placement an operator is most likely to type.
+   */
+  const applyFlag = (tok: string, next: string | undefined, commandScope: boolean): { consumed: number } | null => {
     const flagName = tok.split('=')[0]!;
+    const inline = tok.includes('=') ? tok.slice(flagName.length + 1) : undefined;
+
     if (FORBIDDEN_FLAGS.includes(flagName)) {
       throw new UsageError(
         `${flagName} is not supported: credentials in argv are visible to other local processes and are ` +
           'kept in shell history. Use MERCURY_CLIENT_TOKEN or a named credential in the credentials file.',
       );
     }
-    const valueKey = GLOBAL_VALUE_FLAGS[tok];
+
+    const valueKey = GLOBAL_VALUE_FLAGS[flagName];
     if (valueKey) {
-      const value = argv[i + 1];
-      if (value === undefined || value.startsWith('-')) {
-        throw new UsageError(`${tok} requires a value`);
+      const value = inline ?? next;
+      if (value === undefined || (next !== undefined && inline === undefined && value.startsWith('-'))) {
+        throw new UsageError(`${flagName} requires a value`);
       }
       (globals as unknown as Record<string, unknown>)[valueKey] =
-        valueKey === 'timeoutMs' ? parseTimeoutFlag(tok, value) : value;
-      i += 2;
-      continue;
+        valueKey === 'timeoutMs' ? parseTimeoutFlag(flagName, value) : value;
+      return { consumed: inline === undefined ? 2 : 1 };
     }
-    const boolKey = GLOBAL_BOOL_FLAGS[tok];
+
+    const boolKey = GLOBAL_BOOL_FLAGS[flagName];
     if (boolKey) {
       (globals as unknown as Record<string, unknown>)[boolKey] = true;
-      i += 1;
-      continue;
+      return { consumed: 1 };
     }
+
+    if (commandScope) {
+      // The command's own flag. Stored raw, with the value attached when one follows, so the command
+      // can decide whether it takes a value.
+      if (inline !== undefined) {
+        flags[flagName] = inline;
+        return { consumed: 1 };
+      }
+      if (next !== undefined && !next.startsWith('-')) {
+        flags[flagName] = next;
+        return { consumed: 2 };
+      }
+      flags[flagName] = true;
+      return { consumed: 1 };
+    }
+
     // Report the flag NAME only. An unknown option may itself be a credential in disguise
-    // (`--password=hunter2`), and the value after `=` must never reach stderr. This is a
-    // belt-and-braces rule: it holds even for flags this parser has never heard of.
+    // (`--password=hunter2`), and the value after `=` must never reach stderr.
     throw new UsageError(
       `unknown option ${JSON.stringify(flagName)}` + (tok.length > flagName.length ? ' (value omitted)' : ''),
     );
+  };
+
+  let i = 0;
+  // Global scope: flags until the first non-flag token, which starts the command.
+  while (i < argv.length) {
+    const tok = argv[i]!;
+    if (!tok.startsWith('-')) break;
+    const applied = applyFlag(tok, argv[i + 1], false);
+    if (applied) i += applied.consumed;
+    else break;
   }
 
-  // Everything after the command path is the command's own: positionals then flags.
-  const positional: string[] = [];
-  let j = i;
-  while (j < argv.length) {
-    const tok = argv[j]!;
+  // Command scope: the command words, then its positionals and flags. Only the first two
+  // non-flag tokens form the command path (`runs list`); anything after that is an argument, so
+  // `runs show run-123` yields path ['runs','show'] and positional ['run-123'] rather than folding
+  // the run id into the command name.
+  while (i < argv.length) {
+    const tok = argv[i]!;
     if (tok.startsWith('-') && tok !== '-') {
-      // Command flags are stored raw; validating a command's own grammar is that command's job, so
-      // `runs create --task` never requires the top-level parser to know about tasks.
-      const next = argv[j + 1];
-      if (next !== undefined && !next.startsWith('-')) {
-        flags[tok] = next;
-        j += 2;
-      } else {
-        flags[tok] = true;
-        j += 1;
-      }
+      const applied = applyFlag(tok, argv[i + 1], true);
+      if (applied) i += applied.consumed;
       continue;
     }
-    positional.push(tok);
-    j += 1;
+    if (path.length < 2) path.push(tok);
+    else positional.push(tok);
+    i += 1;
   }
 
   return { globals, path, positional, flags };

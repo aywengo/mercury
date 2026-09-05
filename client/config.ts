@@ -110,9 +110,11 @@ export function normalizeEndpoint(rawUrl: string): string {
       'would cross the network in clear text. Use https://.',
     );
   }
-  // Reject a query or fragment on the BASE url: it would be silently dropped when a path is
-  // appended, so a mistyped endpoint would look like it worked.
+  // Reject a query OR a fragment on the base url. Both are silently dropped by url.origin below,
+  // so a mistyped or copy-pasted endpoint would look like it worked while pointing somewhere else --
+  // and "somewhere else" can be a different Mercury, which is how a create lands on the wrong host.
   if (url.search) throw new UsageError('endpoint URL must not include a query string');
+  if (url.hash) throw new UsageError('endpoint URL must not include a fragment');
   const base = url.origin.replace(/\/$/, '');
   return base;
 }

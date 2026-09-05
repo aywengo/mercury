@@ -215,8 +215,19 @@ export function parseRetryRunResponse(value: unknown): RetryRunResponse {
   return { ...base, retryOf };
 }
 
+/**
+ * Validate the `{ ok: true }` acknowledgement.
+ *
+ * The body must actually SAY ok. Returning success for any object would report a failed `runs input`
+ * as accepted whenever the server answered 200 with an unexpected or error-shaped body -- the client
+ * would tell the operator the Run was answered, the Run would stay NEEDS_INPUT, and nothing would
+ * explain the difference.
+ */
 export function parseOkResponse(value: unknown): OkResponse {
-  asObject(value, 'ok response');
+  const o = asObject(value, 'ok response');
+  if (o.ok !== true) {
+    throw new ProtocolError(`expected { ok: true }, got ${JSON.stringify(value).slice(0, 200)}`);
+  }
   return { ok: true };
 }
 
