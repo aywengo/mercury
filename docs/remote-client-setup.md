@@ -5,8 +5,16 @@ the install, the checkout, and the configuration.
 
 ## What this sets up, and what it does not
 
-Mercury has **no client binary**. The remote surface is the HTTP API and the dashboard, and that is what
-this doc drives: a machine that authenticates with a token, creates a Run, and tails its events.
+Mercury ships a remote operator client, [`mercuryctl`](client.md). If you just want to drive Runs from a
+terminal, read that instead of this document.
+
+This doc is for the case where a binary is the wrong answer: a machine you cannot install packages on, a
+language the client does not cover, or a script that must depend on nothing but `curl`. It drives the same
+HTTP API directly: a machine that authenticates with a token, creates a Run, and tails its events.
+
+Everything below about **how** to talk to the API safely still applies, and `mercuryctl` implements the
+same rules rather than replacing them — no credential in `argv`, an idempotency key on every create, and
+sequenced events rather than a pipe of agent stdout.
 
 It is worth being explicit about the thing this is *not*, because the shape of the question usually assumes
 it: **the worker never calls back into Mercury over HTTP.** `src/cli.ts` opens the database directly with

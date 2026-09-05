@@ -38,9 +38,13 @@ Host and Fleet have independent versions. See [`releasing.md`](releasing.md).
 
 ## Operator client
 
-- [`CLI and TUI design`](cli-tui-design.md) — CLI-first remote Run control,
-  shared HTTP/SSE client architecture and implementation milestones. This is a
-  design; the proposed `mercuryctl` executable is not implemented yet.
+- [`mercuryctl operator guide`](client.md) — install, configure, and drive
+  Runs from a terminal: create, list, watch, answer, cancel, retry, JSON
+  output, exit codes, shell completion and private certificate authorities.
+- [`CLI and TUI design`](cli-tui-design.md) — the design behind it: CLI-first
+  remote Run control over a shared HTTP/SSE client, with per-milestone status.
+  Milestones 0-4 are implemented; the optional TUI (Milestone 5) remains gated
+  on demonstrated need.
 
 ## Agent backends
 
