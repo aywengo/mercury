@@ -40,7 +40,10 @@ test('no arguments prints help rather than an error', () => {
 });
 
 test('a command not built yet fails with exit 2 and says so on stderr', () => {
-  const r = run(['runs', 'list']);
+  // `runs watch` lands in M3. Deliberately a command that is NOT implemented, so this keeps testing
+  // the stub path after each milestone adds commands; using an implemented one would silently test
+  // the network path instead.
+  const r = run(['runs', 'watch']);
   assert.equal(r.code, 2);
   assert.match(r.stderr, /not available in this build/);
   // Data goes to stdout only; a half-written stdout would corrupt `--json | jq`.
@@ -111,7 +114,7 @@ test('unknown flags BEFORE the command are rejected, after it they are the comma
   assert.equal(before.code, 2);
   assert.match(before.stderr, /unknown option/);
 
-  const after = run(['runs', 'list', '--definitely-not-a-command-flag']);
+  const after = run(['runs', 'watch', '--definitely-not-a-command-flag']);
   assert.equal(after.code, 2);
   assert.match(after.stderr, /not available in this build/);
 });
@@ -124,9 +127,11 @@ test('unknown flags BEFORE the command are rejected, after it they are the comma
 // ---------------------------------------------------------------------------
 
 test('a run id after a two-word command is a positional, not part of the command', () => {
-  const r = run(['runs', 'show', 'run-123']);
+  // `runs watch` is unimplemented, so the stub message reveals the parsed command path without
+  // needing a server. `runs show <id>` is covered against a live server in the contract suite.
+  const r = run(['runs', 'watch', 'run-123']);
   // The message must name the COMMAND, not swallow the id into it.
-  assert.match(r.stderr, /"runs show" is not available/);
+  assert.match(r.stderr, /"runs watch" is not available/);
   assert.ok(!r.stderr.includes('run-123'), 'the run id was folded into the command path');
 });
 
@@ -137,14 +142,37 @@ test('command-specific flags reach the command instead of being rejected', () =>
 });
 
 test('global options still work before the command', () => {
-  const r = run(['--json', 'runs', 'list']);
+  const r = run(['--json', 'runs', 'watch']);
   assert.equal(r.code, 2);
-  assert.match(r.stderr, /"runs list" is not available/);
+  assert.match(r.stderr, /"runs watch" is not available/);
 });
 
 test('global options also work after the command, the way people type them', () => {
-  const r = run(['runs', 'list', '--json']);
-  assert.match(r.stderr, /"runs list" is not available/);
+  const r = run(['runs', 'watch', '--json']);
+  assert.match(r.stderr, /"runs watch" is not available/);
+});
+
+test('help never advertises a command that this build cannot run', () => {
+  // --help is the discovery surface. If it lists a command that then answers "not available in this
+  // build", the operator's first encounter with the tool is a dead end; if it omits a command that
+  // works, that command is invisible. Both come from help and the dispatcher drifting apart, so the
+  // assertion is written against the dispatcher's own set rather than a second hand-written list.
+  const help = run(['--help']);
+  assert.equal(help.code, 0);
+  const implemented = ['agents list', 'runs list', 'runs show'];
+  for (const command of implemented) {
+    const line = help.stdout.split('\n').find((l) => l.trim().startsWith(command));
+    assert.ok(line, `implemented command ${JSON.stringify(command)} is missing from help`);
+    assert.ok(!line.includes('not in this build'), `${command} is marked unavailable but it works`);
+  }
+  const stubbed = help.stdout.split('\n').filter((l) => l.includes('not in this build'));
+  assert.ok(stubbed.length > 0, 'no command is marked unavailable; is the marker still wired up?');
+  for (const line of stubbed) {
+    const name = line.trim().split(/\s+/).slice(0, 2).join(' ');
+    const r = run(name.split(' '));
+    assert.equal(r.code, 2, `${name} is marked unavailable but exits ${r.code}`);
+    assert.match(r.stderr, /not available in this build/);
+  }
 });
 
 test('a typo in a GLOBAL option is still caught before the command', () => {

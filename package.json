@@ -9,7 +9,8 @@
     "node": ">=22.18.0"
   },
   "bin": {
-    "mercury": "src/cli.ts"
+    "mercury": "src/cli.ts",
+    "mercuryctl": "client/bin.ts"
   },
   "files": [
     "src/",

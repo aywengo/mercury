@@ -9,7 +9,13 @@
 // with no route to the server both need --help and a correct exit 2 to behave identically.
 
 import { EXIT } from './exitCodes.ts';
-import { UsageError } from './api/errors.ts';
+import { MercuryClientError, UsageError } from './api/errors.ts';
+import { ProtocolError, RUN_STATUSES } from './api/protocol.ts';
+import { redactAuthorization } from './credentials.ts';
+import { buildContext } from './commands/context.ts';
+import { renderAgents } from './commands/agents.ts';
+import { renderRunList } from './commands/list.ts';
+import { renderRunDetail } from './commands/show.ts';
 
 export const PROGRAM = 'mercuryctl';
 
@@ -172,6 +178,57 @@ export function helpText(): string {
 }
 
 // A flat list so the help text reads as text in review and cannot be broken by nested quoting.
+/**
+ * Commands wired up so far. Kept as data so the help text, the dispatch table and the "not yet
+ * available" message cannot disagree about what this build does.
+ */
+// Declared before HELP_LINES on purpose: HELP_LINES is a module-level const that calls
+// renderCommandHelp(), which reads this Set. Declaring it later is a temporal dead zone error at
+// runtime that typecheck does not report, so the ordering is load-bearing rather than stylistic.
+export const IMPLEMENTED = new Set<string>(['agents list', 'runs list', 'runs show']);
+
+/**
+ * Every command this CLI knows about, with the summary shown in help.
+ *
+ * `implemented` is NOT stored here: it is read from IMPLEMENTED at render time, so a milestone that
+ * wires up a command updates one set and help follows automatically. Storing it twice is how a
+ * command ends up advertised as unavailable after it works.
+ */
+const COMMAND_SUMMARIES: [string, string][] = [
+  ['agents list', 'list registered agents and the server default'],
+  ['runs list', 'list Runs (newest first)'],
+  ['runs show', 'show one Run and its recorded skills'],
+  ['runs create', 'create a Run from --file or --task/--repo'],
+  ['runs events', 'print persisted event history'],
+  ['runs watch', 'follow a Run to a terminal status'],
+  ['runs input', 'answer a Run waiting for input'],
+  ['runs cancel', 'request cancellation'],
+  ['runs retry', 'create a new Run from a terminal one'],
+  ['config profiles', 'list configured profiles'],
+  ['config current', 'show the resolved profile'],
+];
+
+/** Usage suffix per command, so the argument a caller must supply is visible in help. */
+const COMMAND_ARGS: Record<string, string> = {
+  'runs show': ' <run-id>',
+  'runs events': ' <run-id>',
+  'runs watch': ' <run-id>',
+  'runs input': ' <run-id>',
+  'runs cancel': ' <run-id>',
+  'runs retry': ' <run-id>',
+};
+
+function renderCommandHelp(): string[] {
+  return COMMAND_SUMMARIES.map(([command, summary]) => {
+    const label = `${command}${COMMAND_ARGS[command] ?? ''}`;
+    const available = IMPLEMENTED.has(command);
+    const text = available ? summary : `${summary} [not in this build]`;
+    // Unavailable commands are dimmed only when colour is on; the bracketed marker is what carries
+    // the meaning, because help is read through pipes and captured in CI logs with no colour.
+    return `  ${label.padEnd(29)}${text}`;
+  });
+}
+
 const HELP_LINES: string[] = [
   `${PROGRAM} - remote operator client for Mercury Runs`,
   '',
@@ -179,17 +236,11 @@ const HELP_LINES: string[] = [
   `  ${PROGRAM} [global options] <command> [<args>]`,
   '',
   'COMMANDS',
-  '  agents list                list registered agents and the server default',
-  '  runs list                  list Runs (newest first)',
-  '  runs show <run-id>         show one Run and its recorded skills',
-  '  runs create                create a Run from --file or --task/--repo',
-  '  runs events <run-id>       print persisted event history',
-  '  runs watch <run-id>        follow a Run to a terminal status',
-  '  runs input <run-id>        answer a Run waiting for input',
-  '  runs cancel <run-id>       request cancellation',
-  '  runs retry <run-id>        create a new Run from a terminal one',
-  '  config profiles            list configured profiles',
-  '  config current             show the resolved profile',
+  // Rendered from the same table the dispatcher consults. A hand-maintained list here would drift
+  // the moment a milestone landed, and the failure mode is bad in both directions: a command that
+  // works but is not listed is invisible, and a command that is listed but does not work sends the
+  // operator to a stub.
+  ...renderCommandHelp(),
   '',
   'GLOBAL OPTIONS',
   '  --profile <name>           select a profile from the config file',
@@ -226,15 +277,11 @@ const HELP_LINES: string[] = [
   '  tokens     $XDG_CONFIG_HOME/mercury/credentials.json, mode 0600 required',
 ];
 
-/**
- * Commands wired up so far. Kept as data so the help text, the dispatch table and the "not yet
- * available" message cannot disagree about what this build does.
- */
-export const IMPLEMENTED = new Set<string>([]);
-
 export interface Stdio {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
+  /** Injected so confirmation prompts and TTY-dependent layout are testable. */
+  isTty: boolean;
 }
 
 /**
@@ -242,13 +289,8 @@ export interface Stdio {
  *
  * Returns a code rather than calling process.exit so the whole surface is testable in-process; the
  * bin wrapper is the only place that terminates.
- *
- * Milestone 0 ships parsing, help and the credential-flag refusal only. Commands that are parsed but
- * not yet implemented exit 2 with an explicit reason: they are a local condition with no request
- * sent, which is exactly what exit 2 means. Reporting them as a transport failure (7) would imply a
- * server was involved, and reporting success (0) would be a lie that automation would trust.
  */
-export function run(argv: string[], io: Stdio): number {
+export async function run(argv: string[], io: Stdio): Promise<number> {
   let parsed: ParsedInvocation;
   try {
     parsed = parseArgs(argv);
@@ -258,7 +300,7 @@ export function run(argv: string[], io: Stdio): number {
   }
 
   if (parsed.globals.help || parsed.path.length === 0) {
-    io.stdout(helpText() + '\n');
+    io.stdout(`${helpText()}\n`);
     return EXIT.OK;
   }
 
@@ -270,7 +312,82 @@ export function run(argv: string[], io: Stdio): number {
     );
     return EXIT.USAGE;
   }
-  // Dispatch for implemented commands is added by the milestone that adds them.
-  io.stderr(`${PROGRAM}: ${JSON.stringify(command)} has no handler wired.\n`);
-  return EXIT.USAGE;
+
+  try {
+    const ctx = buildContext(parsed.globals);
+    if (command === 'agents list') {
+      io.stdout(`${renderAgents(await ctx.client.listAgents(), ctx, io.isTty)}\n`);
+      return EXIT.OK;
+    }
+    if (command === 'runs list') {
+      const status = flagString(parsed.flags, '--status');
+      if (status !== undefined && !RUN_STATUSES.includes(status)) {
+        throw new UsageError(
+          `unknown status ${JSON.stringify(status)}. Valid: ${RUN_STATUSES.join(', ')}`,
+        );
+      }
+      const limit = flagNumber(parsed.flags, '--limit');
+      const cursor = flagString(parsed.flags, '--cursor');
+      io.stdout(`${renderRunList(await ctx.client.listRuns({ status: status as never, limit, cursor }), ctx, io.isTty)}\n`);
+      return EXIT.OK;
+    }
+    if (command === 'runs show') {
+      const runId = parsed.positional[0];
+      if (!runId) throw new UsageError(`runs show needs a run id: ${PROGRAM} runs show <run-id>`);
+      if (parsed.positional.length > 1) {
+        throw new UsageError(`runs show takes one run id, got ${parsed.positional.length} arguments`);
+      }
+      io.stdout(`${renderRunDetail(await ctx.client.getRun(runId), ctx, io.isTty)}\n`);
+      return EXIT.OK;
+    }
+    return EXIT.USAGE;
+  } catch (err) {
+    return reportError(err, io);
+  }
+}
+
+/**
+ * Read a string-valued command flag.
+ *
+ * A flag given WITHOUT a value is reported rather than silently treated as absent: `--status` with
+ * nothing after it currently stores `true`, and quietly listing every Run when the operator asked to
+ * filter would be a wrong answer that looks right.
+ */
+function flagString(flags: Record<string, string | boolean>, name: string): string | undefined {
+  const value = flags[name];
+  if (value === undefined) return undefined;
+  // Covers both `--status` with nothing after it (stored as true) and a repeated flag whose last
+  // occurrence was a bare boolean. Either way the operator asked for a filter and did not supply
+  // one; listing everything anyway would be a wrong answer that looks right.
+  if (typeof value !== 'string') throw new UsageError(`${name} requires a value`);
+  return value;
+}
+
+function flagNumber(flags: Record<string, string | boolean>, name: string): number | undefined {
+  const raw = flagString(flags, name);
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) throw new UsageError(`${name} expects a positive number, got ${JSON.stringify(raw)}`);
+  return n;
+}
+
+/**
+ * Map a failure to an exit code and a one-line message.
+ *
+ * Every typed error already carries its code, so this is mostly a passthrough; the interesting part
+ * is what it must NOT do. A lifecycle conflict must not be reported as a transport failure, and a
+ * server's own message is surfaced verbatim (already credential-free, since the server redacts)
+ * rather than replaced with a generic one that would hide why the call failed.
+ */
+export function reportError(err: unknown, io: Stdio): number {
+  if (err instanceof MercuryClientError) {
+    io.stderr(`${PROGRAM}: ${redactAuthorization(err.message)}\n`);
+    return err.exitCode;
+  }
+  if (err instanceof ProtocolError) {
+    io.stderr(`${PROGRAM}: incompatible server response: ${err.message}\n`);
+    return EXIT.TRANSPORT;
+  }
+  io.stderr(`${PROGRAM}: ${redactAuthorization(String((err as Error).message ?? err))}\n`);
+  return EXIT.TRANSPORT;
 }

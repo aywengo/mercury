@@ -1,7 +1,11 @@
 # Mercury CLI and TUI design
 
-Status: design only. No user-facing Mercury Run CLI or TUI described here is
-implemented yet.
+Status: **partly implemented.** Milestones 0 and 1 are on `main`: the client
+contracts, transport, configuration and credential layers, and the read-only
+commands `mercuryctl agents list`, `runs list` and `runs show`. Milestones 2 to 4
+(create/control, events/watch, packaging) are open as issues #231-#233, and the
+TUI in Milestone 5 remains gated on demonstrated need. See §16 for per-milestone
+status.
 
 Mercury already runs as long-lived services: an API server owns the HTTP and
 dashboard surface, while one or more workers execute durable Runs. The existing
@@ -717,7 +721,7 @@ database, worker or Fleet dependencies.
 Each milestone is independently reviewable and leaves the prior surface usable.
 Do not begin the TUI by bypassing unfinished client layers.
 
-### Milestone 0: contracts and test harness
+### Milestone 0: contracts and test harness -- **done** (issue #229, PR #234)
 
 Deliverables:
 
@@ -746,7 +750,7 @@ Deferred:
 - profiles written by the CLI;
 - TUI framework selection.
 
-### Milestone 1: read-only CLI
+### Milestone 1: read-only CLI -- **done** (issue #230)
 
 Deliverables:
 
@@ -775,9 +779,16 @@ npm test
 
 Deferred:
 
-- mutations;
 - event streaming;
 - distributable packaging.
+
+Mutations were **not** deferred: the contract suite was mutation-tested, and two
+survivors changed the implementation. Dropping `sanitizeForTerminal` from the
+repository field kept every test green, so that field gained its own test; and a
+first attempt at mutating cursor handling only altered a footer string, which
+proved nothing, so it was rewritten to remove the cursor from the outgoing query.
+That second case is the general one -- a mutation that does not change behaviour
+cannot detect anything, and a green suite after such a mutation is not evidence.
 
 ### Milestone 2: create and control
 
