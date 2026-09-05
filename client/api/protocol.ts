@@ -99,7 +99,13 @@ export interface RetryRunResponse { runId: string; status: RunStatus; retryOf: s
 
 export interface CreateRunRequest {
   task: string;
-  repository?: string;
+  // An OBJECT, not a URL string. The server does not validate this shape: POST /api/runs stores
+  // whatever it is given, so sending the convenient `"repository": "https://..."` returns 201 and
+  // stores a string where Run.repository is typed as an object. The Run then has no `repository.url`,
+  // so the workspace has nothing to check out and `runs show` renders `-` -- created successfully and
+  // unusable, with no error anywhere. Verified against a live server. Hence validateCreateRunRequest
+  // below, which rejects the string form rather than forwarding it.
+  repository?: RepositoryContext;
   repositories?: RepositoryContext[];
   agent?: string;
   skills?: string[];
@@ -110,6 +116,13 @@ export interface RunListQuery { status?: RunStatus; limit?: number; cursor?: str
 export interface EventQuery { after?: number; limit?: number }
 
 /** Raised when a response is missing something the client cannot operate without. */
+// A malformed request the OPERATOR supplied is a usage error, not a protocol error: the client never
+// spoke to anyone. Reporting it as a protocol error mapped it to exit 7 (transport), which tells the
+// operator the endpoint is unhealthy when the real answer is "your file is wrong". protocol.ts depends
+// on nothing today; this import is protocol -> errors -> exitCodes, and errors.ts does not import
+// protocol, so there is no cycle.
+import { UsageError } from './errors.ts';
+
 export class ProtocolError extends Error {
   constructor(message: string) {
     super(message);
@@ -287,4 +300,81 @@ export function parseEventPage(value: unknown): EventPage {
     throw new ProtocolError(`event page.nextCursor must be a finite number, got ${JSON.stringify(o.nextCursor)}`);
   }
   return { events, lastSequence, nextCursor: o.nextCursor, hasMore: Boolean(o.hasMore) };
+}
+
+/**
+ * Validate a create request the operator supplied, before it is sent.
+ *
+ * This exists because the server accepts almost anything here. `POST /api/runs` requires only a
+ * non-empty `task` and then stores `repository` verbatim, so the two realistic operator mistakes --
+ * passing a URL string instead of an object, and misspelling a field name -- both produce a 201 and a
+ * Run that cannot be worked on. A rejected request is a much better outcome than a silently useless
+ * Run, and rejecting it here means the message can name the field.
+ *
+ * Unknown TOP-LEVEL keys are rejected (they would be ignored by the server), but keys INSIDE
+ * `constraints` and `repository` pass through, since those are forward-compatible extension points
+ * where an older client legitimately does not know the newer names.
+ */
+export function validateCreateRunRequest(value: unknown): CreateRunRequest {
+  const o = asObject(value, 'create request');
+  const task = reqString(o.task, 'task', 'create request');
+  if (task.trim() === '') throw new UsageError('create request: task must not be blank');
+
+  const known = new Set(['task', 'repository', 'repositories', 'agent', 'skills', 'constraints']);
+  const unknown = Object.keys(o).filter((k) => !known.has(k));
+  if (unknown.length > 0) {
+    throw new UsageError(
+      `create request has unrecognised field(s): ${unknown.join(', ')}. ` +
+        `Accepted: ${[...known].join(', ')}. A misspelled field would be ignored by the server and ` +
+        'the Run would be created without it.',
+    );
+  }
+
+  const request: CreateRunRequest = { task };
+  if (o.repository !== undefined) request.repository = validateRepository(o.repository, 'repository');
+  if (o.repositories !== undefined) {
+    request.repositories = reqArray(o.repositories, 'repositories', 'create request')
+      .map((r, i) => validateRepository(r, `repositories[${i}]`));
+  }
+  if (o.agent !== undefined) request.agent = reqString(o.agent, 'agent', 'create request');
+  if (o.skills !== undefined) {
+    request.skills = reqArray(o.skills, 'skills', 'create request')
+      .map((s, i) => reqString(s, `skills[${i}]`, 'create request'));
+  }
+  if (o.constraints !== undefined) request.constraints = validateConstraints(o.constraints);
+  return request;
+}
+
+function validateRepository(value: unknown, where: string): RepositoryContext {
+  if (typeof value === 'string') {
+    throw new UsageError(
+      `${where} must be an object, not the string ${JSON.stringify(value.slice(0, 60))}. ` +
+        'Use {"url": "..."} -- the server stores this field verbatim, so a string is accepted and then ' +
+        'produces a Run with no repository to check out.',
+    );
+  }
+  const o = asObject(value, where);
+  const repo: RepositoryContext = {};
+  for (const key of ['url', 'localPath', 'baseBranch', 'baseCommit'] as const) {
+    const v = o[key];
+    if (v !== undefined) repo[key] = reqString(v, `${where}.${key}`, where);
+  }
+  if (repo.url === undefined && repo.localPath === undefined) {
+    throw new UsageError(`${where} needs at least one of "url" or "localPath"`);
+  }
+  return { ...repo, ...(o as Record<string, unknown>) } as RepositoryContext;
+}
+
+function validateConstraints(value: unknown): Partial<RunConstraints> {
+  const o = asObject(value, 'constraints');
+  const out: Record<string, unknown> = { ...o };
+  for (const key of ['maxDurationMs', 'maxRetries', 'budgetTokens', 'budgetCost'] as const) {
+    const v = o[key];
+    if (v === undefined) continue;
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+      throw new UsageError(`constraints.${key} must be a non-negative number, got ${JSON.stringify(v)}`);
+    }
+    out[key] = v;
+  }
+  return out as Partial<RunConstraints>;
 }
