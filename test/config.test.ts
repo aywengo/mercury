@@ -56,3 +56,10 @@ test('MERCURY_TRUST_PROXY defaults to 0 and rejects unsafe values (issue #65)', 
   assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '1' }).trustProxy, 1);
   assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '2' }).trustProxy, 2);
 });
+
+test('MERCURY_DEFAULT_AGENT defaults to fake', () => {
+  assert.equal(loadConfig({}).defaultAgent, 'fake');
+  assert.equal(loadConfig({ MERCURY_DEFAULT_AGENT: '' }).defaultAgent, 'fake');
+  assert.equal(loadConfig({ MERCURY_DEFAULT_AGENT: '   ' }).defaultAgent, 'fake');
+  assert.equal(loadConfig({ MERCURY_DEFAULT_AGENT: 'primeagent' }).defaultAgent, 'primeagent');
+});

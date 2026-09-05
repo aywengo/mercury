@@ -25,7 +25,8 @@ node src/cli.ts gc  # one workspace retention/quota GC pass
 ```
 
 Environment: everything is `MERCURY_*` in `src/config.ts`. Defaults are safe (bind `127.0.0.1`,
-git-worktree workspaces, `prime-agent --mode rpc`).
+git-worktree workspaces). Omitting `agent` on create selects `fake` (`MERCURY_DEFAULT_AGENT`).
+Real coding Runs use `prime-agent --mode rpc` (or hermes/claude) when that id is requested.
 
 ## Bounded command execution
 

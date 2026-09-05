@@ -31,38 +31,61 @@ the Run domain model.
 
 ## Registered agents
 
-`GET /api/agents` returns the ids registered in the current process. Builtin ids
+`GET /api/agents` returns `{ agents, defaultAgent }` for the current process.
+`defaultAgent` is `MERCURY_DEFAULT_AGENT` (default `fake`). Builtin ids
 normally include:
 
+- `fake` (create-Run default when `agent` is omitted);
 - `primeagent`;
 - `hermes`;
 - `claude`;
-- `fake`;
 - any ids loaded from local, remote and RPC registry directories.
 
 The exact list depends on startup configuration. Run creation rejects an
-unknown id before queueing.
+unknown id before queueing. Startup fails if `MERCURY_DEFAULT_AGENT` is not in
+the registered list.
 
 ## Capability summary
 
 | Backend | Transport | Structured tool events | Human input | Resume | Status |
 | --- | --- | --- | --- | --- | --- |
-| PrimeAgent | RPC JSONL subprocess | yes | yes | session file | supported default |
+| Fake | in-process deterministic script | scripted | scripted | test-specific | create-Run default; plumbing and tests |
+| PrimeAgent | RPC JSONL subprocess | yes | yes | session file | supported coding transport |
 | Hermes | quiet CLI text | no | no interactive bridge | session id | supported with reduced fidelity |
 | Claude | stream JSON CLI | yes | no interactive bridge | session id | supported with version-specific limits |
 | Local | configurable CLI | depends on config | configurable | configurable | supported |
 | RPC | configurable RPC JSONL CLI | yes | configurable | configurable | supported |
 | Remote | configurable HTTP API | depends on API | configurable | reattach | supported |
-| Fake | in-process deterministic script | scripted | scripted | test-specific | tests only |
 | PrimeAgent daemon | daemon socket | intended | intended | resident session | experimental, not production-ready |
 
 “Supported” means the adapter contract is implemented and tested against its
 fixture or verified interface. It does not mean every third-party agent version
-is compatible.
+is compatible. `npm install` does not ship coding-agent CLIs.
+
+## Fake agent
+
+`FakeAgentAdapter` supplies scripted messages, delays, input requests, failures
+and completions. The `fake` id is registered in every mode. Omitting `agent` on
+create selects it unless `MERCURY_DEFAULT_AGENT` is set.
+
+It needs no binary. Use it to prove the control plane (queue, workspace, events,
+dashboard) without an LLM. Normal tests use it so they need no network, model
+API or real coding-agent process. It is not a production coding backend.
 
 ## PrimeAgent RPC
 
-`PrimeAgentAdapter` is the default:
+### Install
+
+Binary: `prime-agent`. Mercury `agent` id: `primeagent`.
+
+```bash
+curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+which prime-agent
+```
+
+Docs: [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
+
+`PrimeAgentAdapter` is the supported coding transport:
 
 ```text
 prime-agent --mode rpc
@@ -90,6 +113,17 @@ domain events.
 
 ## Hermes
 
+### Install
+
+Binary: `hermes`. Mercury `agent` id: `hermes`.
+
+```bash
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+which hermes
+```
+
+Docs: [Hermes Agent installation](https://hermes-agent.nousresearch.com/docs/getting-started/installation).
+
 `HermesAgentAdapter` runs Hermes in quiet programmatic mode:
 
 ```text
@@ -107,6 +141,17 @@ operator policy.
 Configuration: [`configuration.md`](configuration.md#hermes).
 
 ## Claude
+
+### Install
+
+Binary: `claude` (Claude Code CLI). Mercury `agent` id: `claude`.
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+which claude
+```
+
+Docs: [Claude Code setup](https://code.claude.com/docs/en/setup).
 
 `ClaudeCodeAdapter` drives the installed Claude CLI with stream JSON output.
 The implementation follows behavior verified against the local supported CLI
@@ -214,15 +259,6 @@ vendor semantics from arbitrary responses; status and event mappings are part
 of the reviewed config.
 
 Full contract: [`remote-agents/README.md`](../remote-agents/README.md).
-
-## Fake agent
-
-`FakeAgentAdapter` supplies scripted messages, delays, input requests, failures
-and completions. Normal tests use it so they need no network, model API or real
-PrimeAgent process.
-
-The `fake` id is registered by the current CLI in every mode. It is intended for
-tests and plumbing checks, not production coding.
 
 ## Daemon mode
 

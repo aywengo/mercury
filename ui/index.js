@@ -15,7 +15,7 @@ function showLogin() {
 
 async function loadAgents() {
   try {
-    const { agents } = await api('/api/agents');
+    const { agents, defaultAgent } = await api('/api/agents');
     if (!Array.isArray(agents)) return; // defensive: keep the static options
     const select = $('agent');
     select.innerHTML = '';
@@ -25,6 +25,10 @@ async function loadAgents() {
       opt.textContent = a;
       select.appendChild(opt);
     }
+    const preferred = typeof defaultAgent === 'string' && agents.includes(defaultAgent)
+      ? defaultAgent
+      : (agents.includes('fake') ? 'fake' : agents[0]);
+    if (preferred) select.value = preferred;
   } catch {
     // keep the static options as a fallback
   }

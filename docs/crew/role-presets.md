@@ -136,7 +136,7 @@ The selected agent follows these rules:
    not silently override either side.
 3. Otherwise an explicit caller agent wins.
 4. Otherwise the preset agent is used.
-5. Otherwise Mercury uses its existing `primeagent` default.
+5. Otherwise Mercury uses its create-Run default (`fake`, or `MERCURY_DEFAULT_AGENT`).
 
 An unknown selected agent is rejected through the same known-agent check used
 for runs without presets.
