@@ -10,11 +10,13 @@
   },
   "bin": {
     "mercury": "src/cli.ts",
-    "mercuryctl": "client/bin.ts"
+    "mercuryctl": "dist/client/bin.js"
   },
   "files": [
     "src/",
     "client/",
+    "dist/",
+    "!client/test/",
     "ui/",
     ".agents/skills/",
     "local-agents/",
@@ -39,7 +41,9 @@
     "fleet": "node fleet/cli.ts",
     "test:fleet": "node --test --test-timeout=180000 'fleet/test/*.test.ts'",
     "test:core": "node --test --test-timeout=180000 'test/*.test.ts'",
-    "test:client": "node --test --test-timeout=180000 'client/test/*.test.ts'"
+    "test:client": "node --test --test-timeout=180000 'client/test/*.test.ts'",
+    "build:client": "tsc -p tsconfig.client.json",
+    "prepack": "npm run build:client"
   },
   "dependencies": {
     "express": "^4.21.2"

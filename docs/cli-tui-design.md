@@ -1094,6 +1094,7 @@ Deliverables landed so far:
 - commands that take no positional argument now refuse one;
 - `--version` / `-V`, with the version single-sourced from the installed manifest (§16.1);
 - `completion bash|zsh|fish`, generated from the command table and executed by the real shell in test (§16.3);
+- a compiled publish artifact and a clean-install smoke test, which found that the published CLI could not run at all (§16.4);
 - the custom-CA acceptance criterion, tested over both the JSON and the SSE path (§16.2).
 
 **A blank environment variable now means unset.** `??` skips `null` and `undefined` but not `''`, so a
@@ -1193,6 +1194,44 @@ subcommand branch omitted the `-- "$cur"` filter, so `runs w` offered all eight 
 function with synthetic `COMP_WORDS` and asserts the answers, and a mutation that removes the filter
 again is caught. The zsh and fish scripts are syntax-checked but not executed: `fish` is not installed
 on this machine, so its behaviour beyond parsing is unverified here.
+
+#### 16.4 The published artifact could not run
+
+The acceptance criterion "the client installs without server or worker runtime configuration" is the
+first one in this design that cannot be checked from a source checkout, and writing its test found that
+**the installed `mercuryctl` did not work at all**.
+
+`bin.mercuryctl` pointed at `client/bin.ts`. Node refuses to strip types from any file under
+`node_modules`:
+
+```text
+Error [ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING]: Stripping types is currently unsupported
+for files under node_modules
+```
+
+The same file, on the same Node binary, runs fine from a checkout. The failure exists only after
+installation, which is precisely the moment no test in the suite had ever reached.
+
+The fix is a compile step: `npm run build:client` emits `dist/client/` with
+`rewriteRelativeImportExtensions`, `prepack` runs it, and `bin` points at the JavaScript. The repository
+already set `erasableSyntaxOnly`, which is what makes this safe to automate -- the source is guaranteed
+free of constructs that need more than erasure, so the emitted JavaScript is the same program.
+
+Two follow-on defects surfaced while doing it:
+
+- `--version` reported `0.0.0-dev` from the compiled output. It resolved `../package.json` relative to
+  its own file, which is the manifest in `client/` and nothing in `dist/client/`; the `catch` swallowed
+  it and produced a plausible-looking wrong version. It now walks upward and matches on the package
+  name, so a dependency's manifest cannot be mistaken for this one.
+- `bin.mercury` has the same TypeScript problem and is **not** fixed here. The server resolves
+  migrations, `ui/` and skill directories relative to its own location, so relocating it is a separate
+  change. It is tracked in #243, and the packaging test keeps a list of exactly that kind of exception
+  and asserts the list is accurate in both directions -- so fixing it breaks the test until the entry is
+  removed.
+
+The smoke test packs the real tarball, extracts it under a path containing `node_modules` -- the path is
+the point, since anywhere else the restriction does not apply -- and runs the binary there. Reverting
+`bin` to `client/bin.ts` makes it fail with the original error verbatim.
 
 ### Milestone 5: optional TUI
 
