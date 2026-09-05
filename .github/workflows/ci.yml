@@ -159,9 +159,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24.x'
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
       - name: Docs contract tests
         run: node --test --test-timeout=180000 test/nodeFloor.test.ts test/deployDocs.test.ts
 
