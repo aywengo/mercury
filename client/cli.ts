@@ -17,6 +17,10 @@ import { buildContext } from './commands/context.ts';
 import { renderAgents } from './commands/agents.ts';
 import { renderRunList } from './commands/list.ts';
 import { renderRunDetail } from './commands/show.ts';
+import { renderInputAck, renderRetry, renderRunAction } from './commands/control.ts';
+import { buildCreateRequest, buildInputValue } from './commands/request.ts';
+import { createKeyDiagnostic, createRunIdempotent, CreateUncertainError, renderCreate } from './commands/create.ts';
+import { confirm, DeclinedError } from './confirm.ts';
 
 export const PROGRAM = 'mercuryctl';
 
@@ -64,6 +68,18 @@ const GLOBAL_BOOL_FLAGS: Record<string, keyof GlobalOptions> = {
  */
 export const FORBIDDEN_FLAGS = ['--token', '--api-token', '--bearer'];
 
+/**
+ * Whether a token should be read as another flag rather than as a value.
+ *
+ * A lone `-` is NOT a flag. It is the long-standing convention for "read stdin", and treating it as
+ * an option name made `--file -` fail with "--file requires a value" -- the documented stdin form was
+ * simply broken. Everything else beginning with `-` is still treated as a flag, so a missing value is
+ * still caught instead of swallowing the next option.
+ */
+function looksLikeFlag(token: string): boolean {
+  return token.startsWith('-') && token !== '-';
+}
+
 export function parseArgs(argv: string[]): ParsedInvocation {
   const globals: GlobalOptions = { json: false, noColor: false, help: false, yes: false };
   const path: string[] = [];
@@ -95,7 +111,7 @@ export function parseArgs(argv: string[]): ParsedInvocation {
     const valueKey = GLOBAL_VALUE_FLAGS[flagName];
     if (valueKey) {
       const value = inline ?? next;
-      if (value === undefined || (next !== undefined && inline === undefined && value.startsWith('-'))) {
+      if (value === undefined || (next !== undefined && inline === undefined && looksLikeFlag(value))) {
         throw new UsageError(`${flagName} requires a value`);
       }
       (globals as unknown as Record<string, unknown>)[valueKey] =
@@ -116,7 +132,7 @@ export function parseArgs(argv: string[]): ParsedInvocation {
         flags[flagName] = inline;
         return { consumed: 1 };
       }
-      if (next !== undefined && !next.startsWith('-')) {
+      if (next !== undefined && !looksLikeFlag(next)) {
         flags[flagName] = next;
         return { consumed: 2 };
       }
@@ -186,7 +202,15 @@ export function helpText(): string {
 // Declared before HELP_LINES on purpose: HELP_LINES is a module-level const that calls
 // renderCommandHelp(), which reads this Set. Declaring it later is a temporal dead zone error at
 // runtime that typecheck does not report, so the ordering is load-bearing rather than stylistic.
-export const IMPLEMENTED = new Set<string>(['agents list', 'runs list', 'runs show']);
+export const IMPLEMENTED = new Set<string>([
+  'agents list',
+  'runs list',
+  'runs show',
+  'runs create',
+  'runs input',
+  'runs cancel',
+  'runs retry',
+]);
 
 /**
  * Every command this CLI knows about, with the summary shown in help.
@@ -281,8 +305,14 @@ const HELP_LINES: string[] = [
 export interface Stdio {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
-  /** Injected so confirmation prompts and TTY-dependent layout are testable. */
+  /** Whether STDOUT is a terminal; controls colour only. */
   isTty: boolean;
+  /** Whether STDIN is a terminal; controls whether a prompt or a stdin read is allowed at all. */
+  stdinIsTty: boolean;
+  /** Read one line from stdin. Only reached when stdinIsTty is true. */
+  readLine: () => Promise<string>;
+  /** Read all of stdin. Only reached when stdinIsTty is false. */
+  readStdin: () => string;
 }
 
 /**
@@ -338,18 +368,82 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
       return EXIT.OK;
     }
     if (command === 'runs show') {
-      const runId = parsed.positional[0];
-      if (!runId) throw new UsageError(`runs show needs a run id: ${PROGRAM} runs show <run-id>`);
-      if (parsed.positional.length > 1) {
-        throw new UsageError(`runs show takes one run id, got ${parsed.positional.length} arguments`);
-      }
+      const runId = requireRunId(parsed, command);
       io.stdout(`${renderRunDetail(await ctx.client.getRun(runId), ctx, io.isTty)}\n`);
       return EXIT.OK;
     }
+
+    if (command === 'runs create') {
+      const request = buildCreateRequest(
+        {
+          file: flagString(parsed.flags, '--file'),
+          task: flagString(parsed.flags, '--task'),
+          repo: flagString(parsed.flags, '--repo'),
+          agent: flagString(parsed.flags, '--agent'),
+          skills: flagString(parsed.flags, '--skills'),
+        },
+        { stdinIsTty: io.stdinIsTty, readStdin: io.readStdin },
+      );
+      const outcome = await createRunIdempotent(ctx.client, request, {
+        idempotencyKey: flagString(parsed.flags, '--idempotency-key'),
+        // Prompts and retries are diagnostics, so they belong on stderr: `--json | jq` must still
+        // parse when the create needed a retry to succeed.
+        onRetry: (info) => io.stderr(
+          `${PROGRAM}: create attempt ${info.attempt} failed (${info.reason}); ` +
+            `retrying in ${info.waitMs}ms with the same idempotency key\n`,
+        ),
+      });
+      io.stdout(`${renderCreate(outcome, ctx, io.isTty)}\n`);
+      if (!ctx.json) io.stderr(`${PROGRAM}: ${createKeyDiagnostic(outcome)}\n`);
+      return EXIT.OK;
+    }
+
+    if (command === 'runs input') {
+      const runId = requireRunId(parsed, command);
+      const value = buildInputValue(
+        { file: flagString(parsed.flags, '--file'), value: flagString(parsed.flags, '--value') },
+        { stdinIsTty: io.stdinIsTty, readStdin: io.readStdin },
+      );
+      io.stdout(`${renderInputAck(runId, await ctx.client.submitInput(runId, value), ctx, io.isTty)}\n`);
+      return EXIT.OK;
+    }
+
+    if (command === 'runs cancel' || command === 'runs retry') {
+      const runId = requireRunId(parsed, command);
+      // Confirmation happens BEFORE the request, so a declined or refused command sends nothing.
+      await confirm(
+        {
+          yes: parsed.globals.yes,
+          json: parsed.globals.json,
+          stdinIsTty: io.stdinIsTty,
+          write: io.stderr,      // prompts are diagnostics, not data
+          readLine: io.readLine,
+        },
+        command,
+        runId,
+      );
+      if (command === 'runs cancel') {
+        io.stdout(`${renderRunAction('cancelled', await ctx.client.cancelRun(runId), ctx, io.isTty)}\n`);
+      } else {
+        io.stdout(`${renderRetry(await ctx.client.retryRun(runId), ctx, io.isTty)}\n`);
+      }
+      return EXIT.OK;
+    }
+
     return EXIT.USAGE;
   } catch (err) {
     return reportError(err, io);
   }
+}
+
+/** Every <run-id> command takes exactly one; a second argument is almost always a mistake. */
+function requireRunId(parsed: ParsedInvocation, command: string): string {
+  const runId = parsed.positional[0];
+  if (!runId) throw new UsageError(`${command} needs a run id: ${PROGRAM} ${command} <run-id>`);
+  if (parsed.positional.length > 1) {
+    throw new UsageError(`${command} takes one run id, got ${parsed.positional.length} arguments`);
+  }
+  return runId;
 }
 
 /**
@@ -388,6 +482,16 @@ function flagNumber(flags: Record<string, string | boolean>, name: string): numb
 export function reportError(err: unknown, io: Stdio): number {
   if (err instanceof MercuryClientError) {
     io.stderr(`${PROGRAM}: ${redactAuthorization(err.message)}\n`);
+    return err.exitCode;
+  }
+  if (err instanceof DeclinedError) {
+    // Stated plainly so exit 2 is never read as "you typed the command wrong".
+    io.stderr(`${PROGRAM}: ${err.message}\n`);
+    return err.exitCode;
+  }
+  if (err instanceof CreateUncertainError) {
+    // The key is the whole point of this path: without it the operator cannot retry safely.
+    io.stderr(`${PROGRAM}: ${err.message}\n`);
     return err.exitCode;
   }
   if (err instanceof ProtocolError) {

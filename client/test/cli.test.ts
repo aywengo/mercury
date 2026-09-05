@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
+import { IMPLEMENTED } from '../cli.ts';
 
 // Subprocess tests (docs/cli-tui-design.md §15.3).
 //
@@ -21,6 +22,25 @@ function run(args: string[], env: Record<string, string> = {}) {
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
+
+/**
+ * Commands the parser knows about that this build does not implement.
+ *
+ * Derived from the same source the dispatcher consults. Tests that need "a command that does nothing
+ * yet" previously hardcoded one, and each milestone that implemented it turned the test into an
+ * assertion about endpoint configuration instead -- green, but testing something else entirely.
+ */
+const STUB_COMMANDS: string[][] = (() => {
+  const all = [
+    'agents list', 'runs list', 'runs show', 'runs create', 'runs input', 'runs cancel', 'runs retry',
+    'runs events', 'runs watch', 'config profiles', 'config current',
+  ];
+  return all.filter((c) => !IMPLEMENTED.has(c)).map((c) => c.split(' '));
+})();
+
+test('at least one command is still a stub, so stub-derived tests are not vacuous', () => {
+  assert.ok(STUB_COMMANDS.length > 0, 'every command is implemented; stub tests would be asserting nothing');
+});
 
 test('--help works with no endpoint configured and no network', () => {
   // §16 M0: help must not require a reachable server. Strip every endpoint source so a stray
@@ -136,8 +156,12 @@ test('a run id after a two-word command is a positional, not part of the command
 });
 
 test('command-specific flags reach the command instead of being rejected', () => {
-  const r = run(['runs', 'create', '--task', 'fix the bug', '--repo', 'https://example/r.git']);
-  assert.match(r.stderr, /"runs create" is not available/);
+  // Uses a command that is still a stub, derived from the dispatcher rather than hardcoded. This test
+  // has gone stale three times now by naming a command that a later milestone implemented; deriving it
+  // means the next milestone cannot silently turn a parser test into an endpoint-configuration test.
+  const stub = STUB_COMMANDS[0];
+  const r = run([...stub, '--task', 'fix the bug', '--repo', 'https://example/r.git']);
+  assert.match(r.stderr, new RegExp(`"${stub.join(' ')}" is not available`));
   assert.ok(!r.stderr.includes('unknown option'), 'command flags must not be rejected by the global parser');
 });
 

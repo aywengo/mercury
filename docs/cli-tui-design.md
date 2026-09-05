@@ -1,11 +1,12 @@
 # Mercury CLI and TUI design
 
-Status: **partly implemented.** Milestones 0 and 1 are on `main`: the client
-contracts, transport, configuration and credential layers, and the read-only
-commands `mercuryctl agents list`, `runs list` and `runs show`. Milestones 2 to 4
-(create/control, events/watch, packaging) are open as issues #231-#233, and the
-TUI in Milestone 5 remains gated on demonstrated need. See §16 for per-milestone
-status.
+Status: **partly implemented.** Milestones 0 to 2 are implemented: the client
+contracts, transport, configuration and credential layers; the read-only commands
+`mercuryctl agents list`, `runs list` and `runs show`; and the mutation commands
+`runs create`, `runs input`, `runs cancel` and `runs retry` with idempotency keys
+and confirmation. Milestones 3 and 4 (events/watch, packaging) remain as issues
+#232 and #233, and the TUI in Milestone 5 remains gated on demonstrated need.
+See §16 for per-milestone status.
 
 Mercury already runs as long-lived services: an API server owns the HTTP and
 dashboard surface, while one or more workers execute durable Runs. The existing
@@ -844,7 +845,7 @@ One mutation deliberately survives: deleting the `mercury` bin entry keeps the
 packaging guard green, because a target that does not exist needs no coverage. That
 is the guard behaving correctly, not a hole in it.
 
-### Milestone 2: create and control
+### Milestone 2: create and control -- **done** (issue #231)
 
 Deliverables:
 
@@ -875,6 +876,45 @@ Deferred:
 
 - cross-invocation pending-create journal;
 - automatic retries for control operations.
+
+#### Notes from implementing Milestone 2
+
+**A definite rejection must not be reported as an uncertain one.** The first
+implementation wrapped every exhausted create in `CreateUncertainError`, which
+told the operator "the Run may or may not have been created, rerun with this key"
+even when the server had answered 400 and said it was not created. Only an
+indeterminate outcome earns the key advice; validation, auth and conflict errors
+now propagate unchanged.
+
+**The idempotency criterion was initially tested against a hostile socket, and
+that was the wrong instrument.** Proving "an automatic retry reuses the same key"
+is a statement about a decision in `createRunIdempotent`, so it is now tested
+against a scripted client that fails on demand: deterministic, and it fails in
+milliseconds. Whether a socket reset counts as indeterminate at all is a separate
+question, covered by the transport suite.
+
+**`spawnSync` in a test blocks the test process's own event loop.** Three
+symptoms, one cause: in-process stub servers could never answer the CLI (tests
+timed out at 30s as though the client were broken), and the drain that keeps the
+real server's stdout pipe from filling could not run, so the server wedged and a
+later unrelated test died with `fetch failed`. Tests that host a server in-process
+must spawn asynchronously.
+
+**Weak mutations produce false confidence twice in one session.** Adding
+`runs create` to the confirmation table appeared to survive testing, and adding a
+`confirm()` call to the dispatcher also appeared to survive -- each alone is inert,
+because the table gates the call and the call consults the table. Only the
+combination breaks the property, and it fails 18 tests. A mutation that cannot
+change behaviour cannot detect anything; concluding "this property is untested"
+from an inert mutation is its own error.
+
+**Two tests were wrong and the code was right.** Both asserted that `runs input`
+succeeds on a `QUEUED` Run; the server requires `NEEDS_INPUT` and answers 409. The
+tests now assert the conflict, which is one of this milestone's acceptance
+criteria. Reaching `NEEDS_INPUT` in a test sets the status directly in the
+database, because no adapter except the real PrimeAgent one produces it -- that
+proves the client handles the status, and does not prove the worker ever reaches
+it.
 
 ### Milestone 3: events and watch
 
