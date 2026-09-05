@@ -95,6 +95,10 @@ test('the CLI release stream exists and agrees with package.json', () => {
   // The release workflow creates the GitHub release from this file alone, so an empty or stub file would
   // produce a published release with nothing in it.
   assert.ok(text.length > 500, `docs/releases/cli/${pkg.version}.md looks like a stub (${text.length} bytes)`);
+  // A test count in a file that is never re-checked starts rotting the moment a test is added, and the
+  // release body is generated from this file alone. The CI run for the tag is the record of what passed.
+  assert.ok(!/\b\d{3,}\s+tests\b/i.test(text),
+    'the CLI notes quote a test count; that number goes stale silently, so state the checks instead');
   // The client ships in the host package, so its version is the package version -- there is no independent
   // CLI version to keep in sync, and the notes must not imply one.
   assert.ok(!/cli-v\d+\.\d+\.\d+/.test(text),
