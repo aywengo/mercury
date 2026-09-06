@@ -9,7 +9,6 @@ on:
     tags:
       - 'host-v*.*.*'
       - 'fleet-v*.*.*'
-      - 'cli-v*.*.*'
 
 permissions:
   contents: write
@@ -34,8 +33,8 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          if [[ ! "$tag" =~ ^(host|fleet|cli)-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "refusing tag ${tag}; expected host-vX.Y.Z, fleet-vX.Y.Z, or cli-vX.Y.Z" >&2
+          if [[ ! "$tag" =~ ^(host|fleet)-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "refusing tag ${tag}; expected host-vX.Y.Z or fleet-vX.Y.Z" >&2
             exit 1
           fi
           product="${BASH_REMATCH[1]}"
@@ -55,15 +54,13 @@ jobs:
             [ "$pkg" = "$version" ] || { echo "fleet/package.json version ${pkg} != tag ${version}" >&2; exit 1; }
             title="Mercury Fleet v${version}"
           else
-            # The CLI has no manifest of its own -- it ships inside @aywengo/mercury -- so its version IS
-            # the host package version. Without this comparison the cli branch was the only one that
-            # accepted a tag unchecked: host and fleet both compare the tag against their manifest, so
-            # cli-v9.9.9 was published as a GitHub Release whose notes described a version nobody could
-            # install. The notes file is not a substitute; it only proves someone wrote notes.
-            pkg=$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).version)")
-            [ "$pkg" = "$version" ] || { echo "cli-v${version} but package.json is ${pkg}: the CLI ships in the host package, so it has no version of its own" >&2; exit 1; }
-            echo "cli tags create a GitHub Release only: the CLI ships inside @aywengo/mercury, so there is no separate npm package to publish" >&2
-            title="Mercury CLI v${version}"
+            # Unreachable: the tag regex above admits host and fleet only. Kept fail-closed so that a
+            # future product added to the regex without adding a branch here cannot publish with an
+            # unset title or skip the manifest comparison. The cli branch that used to live here was
+            # removed: a cli-vX.Y.Z tag published a GitHub Release and no artifact, because the CLI
+            # ships inside @aywengo/mercury and has no version of its own.
+            echo "refusing tag ${tag}: product ${product} has no release branch" >&2
+            exit 1
           fi
 
           gh release create "$tag" --title "$title" --notes-file "$notes"
