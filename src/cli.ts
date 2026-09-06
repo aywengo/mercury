@@ -48,10 +48,37 @@ import { HOST_VERSION } from './version.ts';
 
 const SKILLS_DIR = dataPath('.agents', 'skills');
 
+// One source for the usage text. The help path and the error path differ in stream and exit code, and
+// nothing else -- two copies would drift, and the copy an operator actually reads is whichever one they
+// happen to hit.
+function usageText(): string {
+  return [
+    'usage: mercury [--version|-V] [--help|-h] | <dev|server|worker|gc|migrate|redact-events>',
+    '',
+    '  dev             run the API and the worker in one process (development)',
+    '  server          run the API only',
+    '  worker          claim and drive Runs only',
+    '  gc              one workspace retention/quota pass',
+    '  migrate         apply pending database migrations',
+    '  redact-events   retroactive secret redaction of events.payload_json,',
+    '                  run_inputs.input_json, runs.error, runs.task,',
+    '                  runs.repository_json, runs.repositories_json',
+    '',
+  ].join('\n');
+}
+
 async function main(): Promise<void> {
   const [cmd, ...args] = process.argv.slice(2);
   if (cmd === '--version' || cmd === '-V') {
     process.stdout.write(`mercury-host ${HOST_VERSION}\n`);
+    return;
+  }
+  if (cmd === '--help' || cmd === '-h') {
+    // Asking for help is not an error. It goes to stdout and exits 0, so `mercury --help > usage.txt`
+    // captures something and `mercury --help && ...` proceeds -- and it is handled before loadConfig(),
+    // because help has to work for someone whose config is exactly what they are trying to fix.
+    // mercuryctl already behaves this way; the two commands in one package must not disagree.
+    process.stdout.write(usageText());
     return;
   }
   const config = loadConfig();
@@ -368,8 +395,9 @@ async function main(): Promise<void> {
     return;
   }
 
-  console.error('usage: mercury [--version|-V] | <dev|server|worker|gc|migrate|redact-events>');
-console.error('redact-events: retroactive secret redaction of events.payload_json, run_inputs.input_json, runs.error, runs.task, runs.repository_json, runs.repositories_json');
+  // Unknown input: usage on stderr, exit 1. This is the path that must stay an error -- it is how help
+  // and nonsense are told apart.
+  process.stderr.write(usageText());
   process.exit(1);
 }
 
