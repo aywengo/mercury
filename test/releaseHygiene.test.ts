@@ -447,3 +447,25 @@ test('README states the install channels without over-claiming them', () => {
   assert.match(readme, /\[`docs\/distribution\.md`\]\(docs\/distribution\.md\)/,
     'README must link the distribution doc that owns the detail');
 });
+
+test('every document that lists install channels lists all of them', () => {
+  // Three separate documents tell an operator how to install Mercury, and they drifted apart
+  // independently: the README had no install section at all, the host release notes listed git and
+  // npm but not Homebrew, and status.md named npm only. A reader who consults the wrong one gets a
+  // shorter list, which reads as "this channel does not exist" rather than "this doc is stale".
+  // Asserting the SET, rather than one document's wording, is what makes the three stay in step.
+  const channels = [
+    { name: 'git checkout', re: /git clone\s+https:\/\/github\.com\/aywengo\/mercury/ },
+    { name: 'npm', re: /npm install -g @aywengo\/mercury/ },
+    { name: 'Homebrew', re: /brew install mercury-ai/ },
+  ];
+  const docs = ['README.md', join('docs', 'status.md'), join('docs', 'releases', 'host', `${HOST_VERSION}.md`)];
+  for (const doc of docs) {
+    const text = readFileSync(join(ROOT, doc), 'utf8');
+    // Only documents that actually carry an install section are held to the set; a doc that never
+    // claims to tell anyone how to install is not this guard's business.
+    if (!/npm install -g @aywengo\/mercury/.test(text)) continue;
+    const missing = channels.filter((c) => !c.re.test(text)).map((c) => c.name);
+    assert.deepEqual(missing, [], `${doc} lists install channels but omits: ${missing.join(', ')}`);
+  }
+});

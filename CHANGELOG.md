@@ -11,7 +11,10 @@ and this project uses [Semantic Versioning](https://semver.org/).
 ## [0.1.0-rc1] - 2026-09-06
 
 First public host release, as a release candidate. Published to the npm dist-tag **`rc`**
-(`npm install -g @aywengo/mercury@rc`), not `latest`. Install from git also works.
+(`npm install -g @aywengo/mercury@rc`), not `latest`. Install from a git checkout also
+works, as does Homebrew: `brew tap aywengo/mercury https://github.com/aywengo/mercury`
+then `brew install mercury-ai` (the formula is `mercury-ai` because homebrew-core already
+owns `mercury`, which is a different project).
 
 ### Added
 
