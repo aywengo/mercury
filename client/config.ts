@@ -313,3 +313,111 @@ function parseTimeoutEnv(value: string | undefined): number | undefined {
   if (!Number.isFinite(n)) throw new UsageError(`MERCURY_CLIENT_TIMEOUT_MS must be a number, got ${JSON.stringify(value)}`);
   return n;
 }
+
+// ---------------------------------------------------------------------------
+// Unknown keys (issue #250)
+//
+// A misspelled key is accepted and ignored today. The failure is loud -- exit 2 "no endpoint
+// configured", exit 3 "no credential configured", or a TLS error much later -- so nothing silently
+// succeeds with the wrong configuration. What is missing is the diagnosis: the operator has to spot a
+// two-character transposition in a file they believe is correct.
+//
+// So this is REPORTING, not validation. Making unknown keys fatal would break forward compatibility
+// (a newer client's key read by an older one) and would turn a warning into the very kind of hard
+// failure the surrounding code is careful to avoid.
+//
+// Only the KEY is ever named. A person who writes `"token": "ghp_..."` has put a secret in a value,
+// and a diagnostic that quotes it would leak the thing it exists to help them find.
+// ---------------------------------------------------------------------------
+
+/** Keys the reader understands at the top level of config.json. */
+export const KNOWN_TOP_LEVEL_KEYS: readonly string[] = ['currentProfile', 'profiles'];
+
+/** Keys the reader understands inside a profile object. */
+export const KNOWN_PROFILE_KEYS: readonly string[] = ['url', 'credential', 'timeoutMs', 'caFile'];
+
+export interface UnknownKey {
+  /** Where it was found, for the message. */
+  scope: 'top-level' | string;
+  key: string;
+  /** Closest known key within edit distance 2, or undefined when nothing is close enough to claim. */
+  suggestion?: string;
+}
+
+/** Levenshtein distance. Small inputs, so the full matrix is fine and clearer than a rolling row. */
+function editDistance(a: string, b: string): number {
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  let prev = Array.from({ length: cols }, (_, i) => i);
+  for (let i = 1; i < rows; i++) {
+    const cur = [i];
+    for (let j = 1; j < cols; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+    }
+    prev = cur;
+  }
+  return prev[cols - 1]!;
+}
+
+/**
+ * The nearest known key, but only when it is plausibly a typo rather than a different word.
+ *
+ * Two edits covers the transposition and single-character cases that dominate real typos
+ * (`crednetial` -> `credential`, `caCertPathx` -> `caFile` does NOT qualify and should not be
+ * suggested). A suggestion that is wrong is worse than no suggestion: the operator edits the file to
+ * match advice that was never about their key.
+ */
+function nearest(key: string, known: readonly string[]): string | undefined {
+  let best: string | undefined;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (const candidate of known) {
+    const d = editDistance(key.toLowerCase(), candidate.toLowerCase());
+    if (d < bestScore) { bestScore = d; best = candidate; }
+  }
+  if (best === undefined || bestScore > 2) return undefined;
+  // A one-edit suggestion against a very short key is usually coincidence ("id" vs "url").
+  if (bestScore === 2 && key.length < 6) return undefined;
+  return best;
+}
+
+/**
+ * Read the file again, untyped, and report the keys the reader will ignore.
+ *
+ * readConfigFile deliberately projects onto the known shape, so it cannot answer "what else is in
+ * there". Re-reading is cheap and keeps the two concerns separate rather than widening the typed
+ * ConfigFile with an escape hatch that every caller would then have to reason about. Anything that
+ * fails to read yields no findings: readConfigFile has already raised the real error by the time this
+ * runs, and a diagnostic pass must not become a second place where configuration can fail.
+ */
+export function findUnknownKeysAt(path = configPath()): UnknownKey[] {
+  try {
+    return findUnknownKeys(JSON.parse(readFileSync(path, 'utf8')));
+  } catch {
+    return [];
+  }
+}
+
+/** Every key in the parsed file that the reader will ignore, with a suggestion where one is safe. */
+export function findUnknownKeys(parsed: unknown): UnknownKey[] {
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return [];
+  const obj = parsed as Record<string, unknown>;
+  const found: UnknownKey[] = [];
+  for (const key of Object.keys(obj)) {
+    if (!KNOWN_TOP_LEVEL_KEYS.includes(key)) {
+      found.push({ scope: 'top-level', key, suggestion: nearest(key, KNOWN_TOP_LEVEL_KEYS) });
+    }
+  }
+  const profiles = obj.profiles;
+  if (typeof profiles === 'object' && profiles !== null && !Array.isArray(profiles)) {
+    for (const [name, raw] of Object.entries(profiles as Record<string, unknown>)) {
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue;
+      for (const key of Object.keys(raw)) {
+        if (!KNOWN_PROFILE_KEYS.includes(key)) {
+          found.push({ scope: `profile ${JSON.stringify(name)}`, key, suggestion: nearest(key, KNOWN_PROFILE_KEYS) });
+        }
+      }
+    }
+  }
+  return found;
+}

@@ -9,7 +9,8 @@
 // the client is built for exactly that reason: an operator whose token is wrong still has to be able to
 // ask what the client thinks its configuration is.
 
-import { configPath, describeConfig, readConfigFile, type ConfigSource, type ResolvedConfigDetail } from '../config.ts';
+import { configPath, describeConfig, findUnknownKeysAt, readConfigFile,
+  type ConfigSource, type ResolvedConfigDetail, type UnknownKey } from '../config.ts';
 import { configDir } from '../credentials.ts';
 import { resolveCredential } from '../credentials.ts';
 import { makeColorizer, sanitizeForTerminal } from '../output/human.ts';
@@ -50,6 +51,8 @@ export interface ProfilesListing {
   configFilePresent: boolean;
   currentProfile: string;
   rows: Array<ProfileRow & { error: string | null }>;
+  /** Keys the reader ignores, so the listing can name them instead of leaving the operator to guess. */
+  unknownKeys: UnknownKey[];
 }
 
 export function listProfiles(options: {
@@ -83,7 +86,8 @@ export function listProfiles(options: {
       return { ...base, error: (err as Error).message };
     }
   });
-  return { configFilePath: path, configFilePresent: file !== undefined, currentProfile, rows };
+  return { configFilePath: path, configFilePresent: file !== undefined, currentProfile, rows,
+    unknownKeys: findUnknownKeysAt(path) };
 }
 
 export function collectProfiles(
@@ -119,6 +123,7 @@ export function renderProfiles(listing: ProfilesListing, ctx: RenderOptions): st
     configFilePresent: listing.configFilePresent,
     currentProfile: listing.currentProfile,
     profiles: listing.rows,
+    unknownKeys: listing.unknownKeys,
   }).replace(/\n$/, '');
   const { color } = makeColorizer({ noColor: ctx.noColor, isTty: ctx.isTty, json: false });
   if (listing.rows.length === 0) {
@@ -131,7 +136,7 @@ export function renderProfiles(listing: ProfilesListing, ctx: RenderOptions): st
         'configuration is coming from flags or the environment; run `config current` to see it.';
   }
   const rows = listing.rows;
-  return rows.map((row) => {
+  const body = rows.map((row) => {
     const marker = row.current ? color('cyan', '*') : ' ';
     const name = sanitizeForTerminal(row.name).padEnd(18);
     if (row.error) return `${marker} ${name} ${color('red', sanitizeForTerminal(row.error))}`;
@@ -142,6 +147,16 @@ export function renderProfiles(listing: ProfilesListing, ctx: RenderOptions): st
     ].filter(Boolean).join('  ');
     return `${marker} ${name} ${color('dim', bits)}`.trimEnd();
   }).join('\n');
+
+  if (listing.unknownKeys.length === 0) return body;
+  // Appended, never replacing the listing: an operator with one typo out of five profiles still needs
+  // the rows. Only key names are printed -- a value could be a secret someone put in the wrong place.
+  const notes = listing.unknownKeys.map((u) => {
+    const where = u.scope === 'top-level' ? 'top level' : sanitizeForTerminal(u.scope);
+    const hint = u.suggestion ? color('yellow', `did you mean ${u.suggestion}?`) : color('dim', 'ignored');
+    return `  ${where}: ${color('yellow', sanitizeForTerminal(u.key))} is not a known key (${hint})`;
+  });
+  return body + '\n' + [color('dim', 'configuration keys that will be ignored:'), ...notes].join('\n');
 }
 
 export interface CurrentView {
