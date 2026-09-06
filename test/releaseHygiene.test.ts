@@ -170,3 +170,17 @@ test('release.yml states the real CLI policy instead of denying the CLI exists',
     'release.yml still prints that the CLI does not exist');
   assert.match(wf, /no separate npm package/i, 'the cli branch must state the actual policy');
 });
+
+test('releasing.md does not claim the cli tag check is missing', () => {
+  // #251 documented this as a known gap and #252 closed it. A doc that still says the check is absent
+  // is worse than no doc: an operator would skip the check they actually have to satisfy, or distrust
+  // a refusal the workflow correctly raises. Asserted in both directions, so re-opening the gap would
+  // have to re-introduce the stale sentence deliberately.
+  const doc = read('docs/releasing.md');
+  for (const stale of [/but not\nfor `cli`/i, /not for `cli`/i, /known gap/i,
+                       /the notes file, not a version comparison/i]) {
+    assert.ok(!stale.test(doc), `releasing.md still describes the cli version check as missing: ${stale}`);
+  }
+  assert.match(doc, /for `cli`\s*\n?that manifest is the root `package\.json`|root `package\.json`, because the CLI ships/,
+    'releasing.md must say which manifest a cli tag is checked against');
+});

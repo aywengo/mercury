@@ -3,8 +3,9 @@
 Host, Fleet, and the `mercuryctl` CLI are released as **independent SemVer
 streams**. Bump only the product that changed. Do not use a bare `v0.1.0` tag.
 The CLI has no version of its own: it ships inside the host package, so its
-released version is the host package version. See "The CLI" below for what a
-`cli-*` tag does and does not check.
+released version is the host package version, and the workflow enforces that: a
+`cli-*` tag whose version differs from `package.json` is refused. See "The CLI"
+below.
 
 | Product | Version file | Tag | npm | Notes |
 | --- | --- | --- | --- | --- |
@@ -52,11 +53,11 @@ and a stub file publishes a stub release.
 `test/releaseHygiene.test.ts` enforces that the notes file for the current
 package version exists, names that version, and is not a stub.
 
-The workflow checks the tag against the manifest for `host` and `fleet`, but not
-for `cli`: a `cli-vX.Y.Z` tag is accepted as long as `docs/releases/cli/X.Y.Z.md`
-exists. So the notes file, not a version comparison, is what limits which CLI
-versions are taggable. Track this as a known gap rather than implying the tag is
-verified.
+The workflow checks the tag against a manifest for all three products. For `cli`
+that manifest is the root `package.json`, because the CLI ships inside
+`@aywengo/mercury` and has no version of its own -- so `cli-v9.9.9` is refused
+while `package.json` says otherwise. The notes file is checked too, but it is not
+a substitute: it only proves someone wrote notes, not that the version is real.
 
 Verify before tagging, beyond `npm test`:
 

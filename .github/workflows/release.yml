@@ -55,6 +55,13 @@ jobs:
             [ "$pkg" = "$version" ] || { echo "fleet/package.json version ${pkg} != tag ${version}" >&2; exit 1; }
             title="Mercury Fleet v${version}"
           else
+            # The CLI has no manifest of its own -- it ships inside @aywengo/mercury -- so its version IS
+            # the host package version. Without this comparison the cli branch was the only one that
+            # accepted a tag unchecked: host and fleet both compare the tag against their manifest, so
+            # cli-v9.9.9 was published as a GitHub Release whose notes described a version nobody could
+            # install. The notes file is not a substitute; it only proves someone wrote notes.
+            pkg=$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).version)")
+            [ "$pkg" = "$version" ] || { echo "cli-v${version} but package.json is ${pkg}: the CLI ships in the host package, so it has no version of its own" >&2; exit 1; }
             echo "cli tags create a GitHub Release only: the CLI ships inside @aywengo/mercury, so there is no separate npm package to publish" >&2
             title="Mercury CLI v${version}"
           fi
