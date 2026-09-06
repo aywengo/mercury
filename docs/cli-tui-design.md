@@ -201,6 +201,27 @@ Global options include:
 There is deliberately no `--token` option. Command-line arguments are visible
 to other local processes and are commonly retained in shell history.
 
+Each command validates its own flags and refuses one it does not implement.
+This is stated because the first implementation did not: the parser stored
+command-scope flags raw so that `runs create --task` could reach the create
+command, and nothing then checked them, so an unrecognised flag was discarded
+and the command ran as though it had not been typed. Every outcome of that was a
+wrong answer that looked correct:
+
+```text
+runs list --stat QUEUED      listed every Run instead of the filtered set
+runs events <id> --folw      printed history and exited 0, so the operator
+                             believed they were watching a live Run
+runs create --agnet hermes   started the Run on the default agent
+```
+
+That last pair is why this is not cosmetic: one reports a snapshot as live
+observation, the other starts paid work on the wrong backend. It is the same
+defect already fixed for `--status`, where the server silently ignores an
+unrecognised value and the client would have returned an unfiltered list rather
+than an error -- a shape this design treats as a bug precisely because it is
+indistinguishable from success.
+
 Two entries were added during delivery rather than designed up front, and are
 recorded here so this section stays the surface an operator can read as
 complete. `completion` came from Milestone 4 (§16.3): the command list already
