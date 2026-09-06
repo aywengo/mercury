@@ -1,11 +1,12 @@
 # Local pre-PR end-to-end testing
 
-Status: **Phase 1 implemented** (container and Compose foundation). Phases 0 and 1 are shipped;
-Phases 2-8 below are still design. See section 17 for the per-phase state.
+Status: **Phases 1-2 implemented** (foundation + fake-agent system journey). Phases 0-2 are
+shipped; Phases 3-8 below are still design. See section 17 for the per-phase state.
 
-Implemented so far: `e2e/Dockerfile`, `e2e/compose.yml`, `e2e/preflight.ts`, `e2e/system.test.ts`,
-`e2e/README.md`, `.dockerignore`, and the `test:e2e` / `test:e2e:config` scripts. `npm run prepr`
-does not exist yet -- that is Phase 3.
+Implemented so far: `e2e/Dockerfile`, `e2e/compose.yml`, `e2e/preflight.ts`, `e2e/helpers.ts`,
+`e2e/system.test.ts`, `e2e/README.md`, `.dockerignore`, and the `test:e2e` / `test:e2e:config`
+scripts. `npm run prepr` does not exist yet -- that is Phase 3. The mock-RPC human-input journey is
+Phase 4 and is not implemented.
 
 This document designs a local end-to-end test gate for Mercury. The gate runs on a
 developer workstation before a pull request is opened. It is deliberately separate
@@ -576,7 +577,12 @@ Assertions:
 - events contain `run.created`, `run.started` and `run.completed`;
 - event sequences are strictly increasing and have no duplicate sequence;
 - the SSE terminal event agrees with the final REST state;
-- `workspacePath` is under `/state/workspaces/worktrees/`;
+- `workspacePath` is under `/state/workspaces/worktrees/`; NOTE: this assertion alone does **not**
+  prove worktree mode, because Mercury puts copied workspaces under `worktrees/` too. The
+  implementation additionally requires the workspace `.git` to be a **file** whose `gitdir:` resolves
+  under `/state`; a copy leaves a `.git` directory. Verified by switching the stack to
+  `MERCURY_WORKSPACE_MODE=copy`, which the path assertion alone passes and the `.git`-file assertion
+  catches.
 - `workspaceBranch` is the expected `agent/<runId>` branch;
 - no event reports an error;
 - the Run remains retrievable after SSE disconnect.
@@ -1026,7 +1032,7 @@ unwaited-for. The harness asserts the names it uses resolve, so a naming change 
 instead of silently weakening it. A completed one-shot container is likewise not retrievable after
 `up()`, so the fixture's logs are collected through the compose CLI.
 
-### Phase 2 — fake-agent system journey
+### Phase 2 — fake-agent system journey — **DONE**
 
 Deliverables:
 
@@ -1045,6 +1051,26 @@ Acceptance gate:
 - success and failure leave no Compose resources by default.
 
 Recommended PR boundary: the first useful E2E command.
+
+Two acceptance items needed notes against the wording above:
+
+- "the test fails clearly if the worker is absent" is implemented as a scenario that stops the worker
+  container and asserts the *shape* of the failure: the error must name the Run id, report the last
+  observed non-terminal status, and point at `worker.log`. It asserts the property rather than a
+  specific status, because stopping the worker after submission lets the claim loop pick the Run up
+  first and the Run reaches `STARTING` instead of `QUEUED` -- which is a different interleaving than
+  the one under test.
+- `pollRun()` distinguished its own "wrong terminal state" control-flow signal from transient request
+  failures by testing whether the error message starts with `"run "`. That is a silent-coupling: a
+  cosmetic rewording turns "give up at once and say why" into "spin until the deadline and say less".
+  It is now a typed `TerminalStateError` matched with `instanceof`. Proven by applying the old
+  matching *and* a reworded message together -- the fast exit degrades into a full-deadline spin, and
+  `e2e/helpers.test.ts` catches it. That file covers the helper control flow against a stub server
+  and needs no Docker daemon.
+- The SSE stream opens with an `event: hello` acknowledgement frame carrying `runId` and `after` but
+  no `sequence`. A parser that coerces every data frame into an event invents a phantom row at
+  sequence 0, which then looks like a sequence violation. Frames without a numeric `sequence` are
+  skipped.
 
 ### Phase 3 — full pre-PR gate
 
