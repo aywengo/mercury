@@ -18,6 +18,18 @@ import { tempDir } from './helpers.ts';
 const ROOT = join(import.meta.dirname, '..');
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
 
+// The bundler refuses to run without dist/, and it is right to: shipping a bundle without the
+// compiled entry points is the failure that made #243 unrunnable once installed. That makes this
+// file depend on a build it does not itself produce, so on a checkout where `npm ci` has not run
+// the four tests below fail while CI -- which always installs -- stays green. Build it here rather
+// than assume the caller did.
+function ensureBuilt(): void {
+  if (existsSync(join(ROOT, 'dist', 'src', 'cli.js')) && existsSync(join(ROOT, 'dist', 'client', 'bin.js'))) return;
+  const build = spawnSync('npm', ['run', 'prepare'], { cwd: ROOT, encoding: 'utf8', timeout: 900_000 });
+  assert.equal(build.status, 0, `preparing dist/ for the bundle tests failed: ${build.stdout}\n${build.stderr}`);
+}
+ensureBuilt();
+
 function buildBundle(): { reportedSha: string; actualSha: string; tarballExists: boolean; names: string[] } {
   const out = tempDir('mercury-bundle-');
   try {
