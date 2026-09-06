@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { openDatabase, MIGRATIONS, BUSY_TIMEOUT_MS } from '../src/db/database.ts';
@@ -206,4 +207,74 @@ test('read-then-write transaction waits for the lock instead of failing instantl
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/**
+ * Concurrent first-open of a fresh database (issue #284).
+ *
+ * `openDatabase()` is called by the API process and by every worker process. The migration runner
+ * read the applied-version set OUTSIDE any transaction and then applied the missing migrations
+ * inside one, so two processes starting against a fresh file both computed "nothing applied yet".
+ * The second one did not fail fast: `PRAGMA busy_timeout` made it WAIT for the first to commit,
+ * and it then replayed migrations that had already been applied.
+ *
+ * Replaying them is not a benign no-op. v2 is `ALTER TABLE runs ADD COLUMN` and v3 recreates the
+ * idempotency-key table, so the duplicate application surfaces as `UNIQUE constraint failed:
+ * schema_migrations.version` (or a duplicate-column error) and the process dies at startup.
+ *
+ * This is the exact shape the local E2E stack produces -- API and worker containers start together
+ * against one empty volume -- and it was found there rather than here.
+ */
+test('concurrent first-open of a fresh database migrates exactly once (issue #284)', async () => {
+  const dir = tempDir('mercury-migrate-race-');
+  const dbPath = join(dir, 'race.db');
+  const barrier = join(dir, 'barrier');
+  mkdirSync(barrier, { recursive: true });
+
+  // 8 contenders, not 4. The window is the few hundred microseconds between reading the applied
+  // set and taking the write lock, so the odds of crossing it are a function of how many processes
+  // start together. Measured against the pre-fix code: 4 racers caught the bug in 4 of 6 runs,
+  // 6 racers in 6 of 6. A regression test that only sometimes catches its regression is not a
+  // regression test, so this runs with margin.
+  const N = 8;
+  const MIGRATOR = join(import.meta.dirname, 'fixtures', 'concurrent-migrator.ts');
+
+  // Spawn first, then let them release each other: a barrier only works if every participant can
+  // reach it (see the note in crossProcess.test.ts about spawnSync).
+  const children = [];
+  for (let i = 0; i < N; i++) {
+    children.push(spawn(process.execPath, [MIGRATOR, dbPath, barrier], {
+      env: { ...process.env, BARRIER_EXPECT: String(N) },
+    }));
+  }
+
+  const results = await Promise.all(children.map(async (child, i) => {
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (d: string) => { stdout += d; });
+    child.stderr.on('data', (d: string) => { stderr += d; });
+    const status = await new Promise<number | null>((resolve) => child.once('close', resolve));
+    const line = stdout.trim().split('\n').filter(Boolean).pop();
+    if (!line) {
+      throw new Error(`migrator ${i} produced no output (status ${status}): ${stderr.slice(0, 500)}`);
+    }
+    return JSON.parse(line) as { ok: boolean; pid: number; error?: string; applied?: number[] };
+  }));
+
+  const failed = results.filter((r) => !r.ok);
+  assert.deepEqual(
+    failed.map((r) => r.error),
+    [],
+    `every process must open a fresh database successfully; ${failed.length}/${N} died`,
+  );
+
+  // One row per migration, not one per process: the loser must observe the winner's work rather
+  // than repeat it.
+  const db = openDatabase(dbPath);
+  const rows = db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as { version: number }[];
+  db.close();
+  assert.equal(rows.length, MIGRATIONS.length, 'schema_migrations must hold exactly one row per migration');
+  assert.deepEqual(rows.map((r) => r.version), MIGRATIONS.map((_, i) => i + 1));
 });
