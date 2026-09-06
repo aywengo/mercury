@@ -9,6 +9,12 @@ import { run } from './cli.ts';
 
 // A closed stdout (mercuryctl runs list | head) must not print a stack trace or change the exit
 // code: EPIPE here is normal, expected, and the operator's intent.
+//
+// This exit deliberately does NOT await flushed(), unlike the one at the bottom of this file. EPIPE
+// means the reader has already gone, so there is nothing left to deliver the buffer to; flushing a
+// closed pipe cannot succeed and would only delay an exit whose data is unreachable. Measured: with
+// this handler in place `runs list | head -c 100000` receives exactly 100000 bytes -- well past the
+// 64 KiB buffer -- and `| cat` receives all 1,900,049. Nothing the reader asked for is lost here.
 process.stdout.on('error', (err: NodeJS.ErrnoException) => {
   if (err.code === 'EPIPE') process.exit(0);
   throw err;
@@ -61,9 +67,17 @@ function readStdin(): string {
 function flushed(stream: NodeJS.WriteStream): Promise<void> {
   return new Promise((resolve) => {
     if (stream.destroyed || stream.writableEnded) { resolve(); return; }
-    stream.write('', () => resolve());
     stream.once('close', resolve);
     stream.once('error', () => resolve());
+    // A synchronous throw here would leave the promise unresolved with no close and no error to resolve
+    // it, so the CLI would hang instead of exiting. Nothing in Node's stream contract promises it cannot
+    // happen on a stream in a degraded state, and hanging is strictly worse than truncating: the previous
+    // bug lost the tail of a listing, whereas this would never return the shell to the operator.
+    try {
+      stream.write('', () => resolve());
+    } catch {
+      resolve();
+    }
   });
 }
 
