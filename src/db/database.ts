@@ -122,15 +122,57 @@ export const MIGRATIONS: string[] = [
 
 export const BUSY_TIMEOUT_MS = 5_000;
 
+/** Synchronous pause, used only for startup contention before any connection is serving traffic. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** True for the two "someone else holds the lock" results, primary code is the low byte. */
+function isBusy(err: unknown): boolean {
+  const code = (err as { errcode?: number })?.errcode;
+  if (typeof code !== 'number') return false;
+  const primary = code & 0xff;
+  return primary === 5 /* SQLITE_BUSY */ || primary === 6 /* SQLITE_LOCKED */;
+}
+
+/**
+ * Put the database in WAL mode, retrying the one case SQLite refuses to wait for.
+ *
+ * `PRAGMA busy_timeout` does NOT cover the journal-mode conversion. Upgrading a database that is
+ * still in rollback-journal mode requires an exclusive lock, and SQLite answers SQLITE_BUSY
+ * immediately rather than consulting the busy handler for it. So on a brand-new file, N processes
+ * that start together all attempt the same conversion and all but one die at startup with
+ * 'database is locked' -- which is exactly the API-plus-workers startup shape (issue #284).
+ *
+ * Retrying converges: once the winner has committed the file is WAL, and the pragma is then a
+ * no-op that takes no lock at all.
+ */
+function enableWal(db: DatabaseSync): void {
+  const deadline = Date.now() + BUSY_TIMEOUT_MS;
+  for (;;) {
+    try {
+      db.exec('PRAGMA journal_mode = WAL;');
+      return;
+    } catch (err) {
+      if (!isBusy(err) || Date.now() >= deadline) throw err;
+      sleepSync(10);
+    }
+  }
+}
+
 export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
-  db.exec('PRAGMA journal_mode = WAL;');
-  db.exec('PRAGMA foreign_keys = ON;');
   // Concurrent API + worker processes share the DB file (WAL). Without a busy
   // timeout (default 0), a writer that hits an in-flight tx from the other
   // process fails immediately with SQLITE_BUSY ('database is locked') instead
   // of waiting for the lock (issue #38).
+  //
+  // Set before anything that can contend for the write lock. It does NOT cover the WAL conversion
+  // on the next line -- SQLite answers that one without consulting the busy handler at all, which
+  // is why enableWal() exists.
   db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
+  enableWal(db);
+  db.exec('PRAGMA foreign_keys = ON;');
   migrate(db);
   return db;
 }
@@ -140,17 +182,39 @@ export function migrate(db: DatabaseSync): void {
     version INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL
   );`);
+  // Fast path: an up-to-date database takes no write lock at all. This matters. The API and every
+  // worker call openDatabase() on a schema that is already current, and wrapping the whole check in
+  // BEGIN IMMEDIATE made each of those startup paths contend for the exclusive lock -- which then
+  // blocked behind any in-flight write transaction. Only the rare first-open case needs the lock.
+  if (pendingMigrations(db).length === 0) return;
+  // The slow path re-reads under the write lock rather than trusting the scan above.
+  //
+  // That scan is the whole bug. It used to be the only read: two processes opening a fresh
+  // database together both saw an empty `schema_migrations`, both decided to apply everything, and
+  // busy_timeout made the loser WAIT for the winner to commit and then replay migrations that had
+  // already run. Replay is not a no-op -- v2 is `ALTER TABLE runs ADD COLUMN` and v3 recreates the
+  // idempotency table -- so the loser died with `UNIQUE constraint failed: schema_migrations.version`
+  // and never started. Making the INSERT idempotent would not help either, because the DDL is what
+  // collides. Re-checking inside BEGIN IMMEDIATE is what makes the loser observe the winner's work
+  // instead of repeating it (issue #284).
+  tx(db, () => {
+    for (const version of pendingMigrations(db)) {
+      db.exec(MIGRATIONS[version - 1]);
+      db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(version, new Date().toISOString());
+    }
+  });
+}
+
+/** Migration versions not yet recorded as applied, in ascending order. */
+function pendingMigrations(db: DatabaseSync): number[] {
   const applied = new Set(
     (db.prepare('SELECT version FROM schema_migrations').all() as { version: number }[]).map((r) => r.version),
   );
-  for (let i = 0; i < MIGRATIONS.length; i++) {
-    const version = i + 1;
-    if (applied.has(version)) continue;
-    tx(db, () => {
-      db.exec(MIGRATIONS[i]);
-      db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(version, new Date().toISOString());
-    });
+  const pending: number[] = [];
+  for (let version = 1; version <= MIGRATIONS.length; version++) {
+    if (!applied.has(version)) pending.push(version);
   }
+  return pending;
 }
 
 const txDepths = new WeakMap<DatabaseSync, number>();
