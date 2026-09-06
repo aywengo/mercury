@@ -83,6 +83,12 @@ function runTag(
       'console.log(JSON.stringify({ tarball: process.argv[process.argv.indexOf("--out") + 1] '
       + '+ "/mercury-fake-bundle.tar.gz", version: "0.0.0", sha256: "f".repeat(64) }));\n');
 
+    // Same reasoning as the bundle stub above: the real generator would run against this throwaway
+    // tree. It is exercised for real by test/formula.test.ts.
+    writeFileSync(join(tmp, 'scripts', 'update-formula.mjs'),
+      'console.log(JSON.stringify({ formula: "Formula/mercury-ai.rb", version: "0.0.0", '
+      + 'sha256: "f".repeat(64), rubySyntax: "skipped (no ruby)" }));\n');
+
     // Stub the only two external commands the step uses, and record what it asked for.
     const bin = join(tmp, 'bin');
     mkdirSync(bin);
@@ -91,6 +97,16 @@ function runTag(
       writeFileSync(stub, `#!/bin/sh\necho "${cmd} $*" >> "${tmp}/calls.log"\nexit 0\n`);
       chmodSync(stub, 0o755);
     }
+    // The formula step drives git directly, and the step runs in a throwaway directory that is not a
+    // repository, so the real git would fail for reasons unrelated to what these tests check. The
+    // `diff --cached --quiet` case exits 1 on purpose: that is git's "there ARE staged changes"
+    // answer, which is the branch that commits and pushes. Without it the stub would always report a
+    // clean tree and the push path would never be exercised.
+    const gitStub = join(bin, 'git');
+    writeFileSync(gitStub,
+      '#!/bin/sh\necho "git $*" >> "' + tmp + '/calls.log"\n'
+      + 'case "$1 $2" in "diff --cached") exit 1 ;; esac\nexit 0\n');
+    chmodSync(gitStub, 0o755);
 
     const script = join(tmp, 'step.sh');
     writeFileSync(script, extractReleaseScript());
@@ -111,6 +127,9 @@ function runTag(
         // The step writes the bundle under $RUNNER_TEMP. With `set -u` an unset value aborts the
         // step, so it is provided here exactly as the runner would provide it.
         RUNNER_TEMP: tmp,
+        // Always present on a real runner; the formula push builds its remote from it. With `set -u`
+        // an unset value aborts the step, so the harness has to provide it the way the runner does.
+        GITHUB_REPOSITORY: 'aywengo/mercury',
       },
     });
     const calls = existsSync(join(tmp, 'calls.log')) ? readFileSync(join(tmp, 'calls.log'), 'utf8') : '';
@@ -313,4 +332,34 @@ test('a fleet release attaches no bundle, because Fleet has no formula', () => {
   // made every fleet tag build a bundle it has no use for.
   assert.ok(!/bundle sha256=/.test(r.stdout),
     `a fleet tag must not build the Homebrew bundle; step output was: ${r.stdout}`);
+});
+
+test('the Homebrew formula is written only after the release exists', () => {
+  // A formula committed before the release would 404 for anyone who ran `brew install` in the window
+  // between the two, so ordering is the whole correctness property here.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  assert.equal(r.status, 0, `release should succeed: ${r.stderr}`);
+  const calls = r.stdout.split('\n').filter((l) => /^(npm|gh|node|git) /.test(l));
+  const created = calls.findIndex((l) => /^gh release create\b/.test(l));
+  // `node` is not stubbed, so the generator itself leaves no line in the call log -- asserting on it
+  // would be vacuous. Staging the formula is the observable proof that the step ran, and it is the
+  // last thing before the push that would make the formula live.
+  const formula = calls.findIndex((l) => /^git add Formula\/mercury-ai\.rb$/.test(l));
+  assert.ok(created >= 0 && formula >= 0, `expected both calls, got: ${calls.join(' | ')}`);
+  assert.ok(created < formula,
+    `the formula must be written after the release that hosts its asset, got: ${calls.join(' | ')}`);
+});
+
+test('the formula update is pushed to main', () => {
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  assert.equal(r.status, 0, `release should succeed: ${r.stderr}`);
+  assert.match(r.stdout, /^git push .*HEAD:main$/m,
+    `expected a push of HEAD:main so the tap picks up the new formula:\n${r.stdout}`);
+});
+
+test('a fleet tag never touches the formula', () => {
+  const r = runTag(`fleet-v${V}`, { notes: [`fleet/${V}.md`] });
+  assert.equal(r.status, 0, `fleet release should succeed: ${r.stderr}`);
+  assert.ok(!/Formula\/mercury-ai\.rb/.test(r.stdout), `fleet must not write the host formula:\n${r.stdout}`);
+  assert.ok(!/git push/.test(r.stdout), 'fleet must not push to main');
 });

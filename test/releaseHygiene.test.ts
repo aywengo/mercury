@@ -393,11 +393,20 @@ test('docs/distribution.md agrees with what the release workflow actually produc
   // downloads ~1 GB before saying so. Only fenced blocks are checked: the doc legitimately *warns*
   // about this command in prose, and an earlier version of this assertion matched that warning and
   // failed the baseline. A reader copies fenced blocks, so that is where the command must be right.
-  const fenced = doc.split('\n').reduce((acc: string[], l) => {
-    if (l.startsWith('```')) acc.push('');
-    else if (acc.length) acc[acc.length - 1] += l + '\n';
-    return acc;
-  }, []);
+  // Toggle on every fence line and collect ONLY what is inside one. The first version pushed a new
+  // accumulator on each fence, so the prose BETWEEN two blocks was collected as if it were code and
+  // the guard failed on a paragraph that merely discussed the bad command.
+  const fenced: string[] = [];
+  let inFence = false;
+  let current = '';
+  for (const line of doc.split('\n')) {
+    if (line.startsWith('```')) {
+      if (inFence) { fenced.push(current); current = ''; }
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) current += line + '\n';
+  }
   const badInstall = fenced.filter((b) => /brew install\s+mercury\b(?!-)/.test(b));
   assert.equal(badInstall.length, 0,
     'docs/distribution.md instructs `brew install mercury`, which installs homebrew-core\'s Mercury '

@@ -2,7 +2,7 @@
 
 How Mercury reaches an operator. Three channels, one release train.
 
-Status header: npm and GitHub Release implemented; the Homebrew bundle is built and attached by `release.yml`, and the `mercury-ai` formula is validated but **not yet published to the tap**. See the guard in `test/releaseHygiene.test.ts` — this line must agree with what `release.yml` actually builds.
+Status header: npm, GitHub Release and Homebrew are all implemented in `release.yml`; the `mercury-ai` formula is generated and pushed to `main` by the release job. See the guard in `test/releaseHygiene.test.ts` — this line must agree with what `release.yml` actually builds.
 
 ## Channels
 
@@ -11,7 +11,7 @@ Status header: npm and GitHub Release implemented; the Homebrew bundle is built 
 | npm | `npm install -g @aywengo/mercury@<tag>` | host + `mercuryctl` | implemented, blocked on `NPM_TOKEN` |
 | GitHub Release | download asset, or `git clone` | host + `mercuryctl` | implemented |
 | Git checkout | `git clone` + `npm ci` | host + `mercuryctl` | implemented (see #266) |
-| Homebrew | `brew tap aywengo/tap && brew install mercury-ai` | host + `mercuryctl` | bundle built by CI; formula pending in the tap |
+| Homebrew | `brew tap aywengo/mercury https://github.com/aywengo/mercury` then `brew install mercury-ai` | host + `mercuryctl` | wired into the release job |
 
 Host and CLI are **one artifact**. There is no CLI-only channel and no separate CLI
 version: `package.json` `bin` carries both `mercury` and `mercuryctl`, so any install
@@ -55,8 +55,27 @@ what it happened to find.
 
 ### Tap
 
-Use the existing **`aywengo/homebrew-tap`**, which already carries `ksr.rb` and
-`ksr-cli.rb`. No new repository is needed.
+The formula lives in **this repository** under `Formula/mercury-ai.rb`, and the repository is
+tapped directly by URL:
+
+```
+brew tap aywengo/mercury https://github.com/aywengo/mercury
+brew install mercury-ai
+```
+
+Verified against real Homebrew: `brew tap <name> <URL>` accepts an arbitrary repository and
+Homebrew discovers `Formula/` at its root, and `brew info` then resolves the formula. The tap
+clone costs 20 MB.
+
+The alternative was the existing `aywengo/homebrew-tap` (which carries `ksr.rb` and
+`ksr-cli.rb`) for the shorter `brew tap aywengo/tap`. It was rejected because the release job
+would need a credential for a second repository, and because the formula would then be
+maintained somewhere other than the thing it describes. Hosting it here means the release job
+updates it with the `contents:write` token it already has -- `main` is not branch-protected --
+so no new secret is required and the version cannot drift from the artifact.
+
+The trade-off is that the tap command needs the explicit URL. That is documented above and
+guarded by `test/releaseHygiene.test.ts`.
 
 ### Name collision — `mercury` is taken
 
@@ -136,7 +155,15 @@ reported no findings. The audit drove three earlier corrections (drop the redund
 `release.yml` builds the bundle, prints `bundle sha256=<digest>`, and attaches the
 artifact; the digest printed is the digest the formula must pin, and
 `test/bundle.test.ts` asserts the script reports the sha256 of the bytes it actually wrote.
-The remaining step is publishing `Formula/mercury-ai.rb` to `aywengo/homebrew-tap`.
+The formula is **generated**, not hand-maintained: `scripts/update-formula.mjs` writes it from
+the version and the digest of the artifact that was just built. Two reasons:
+
+- A committed formula would 404 for anyone who ran `brew install` before the release existed, so
+  the release job creates it only after `gh release create` has uploaded the asset.
+- A `tar.gz` is not byte-reproducible across implementations -- CI runs GNU tar, macOS ships
+  bsdtar, and bsdtar rejects `--sort` outright -- so a digest computed on one host is not the
+  digest the other produces. Deriving it at release time makes the pin correct by construction
+  rather than a value someone must remember to refresh.
 
 The formula must never be updated by hand to a version whose bundle is not already attached
 to a published release. Ordering in the workflow enforces the related hazard: the bundle is
@@ -151,7 +178,7 @@ failed publish cannot leave a public release advertising an uninstallable versio
    - builds, packs the npm tarball, builds the Homebrew bundle;
    - creates the GitHub Release with the npm tarball **and** the bundle attached;
    - publishes to npm under a dist-tag derived from the version (`rc`, `beta`, `latest`).
-3. Update `aywengo/homebrew-tap` with the new version and bundle `sha256`.
+3. Generate `Formula/mercury-ai.rb` from the bundle digest and push it to `main`.
 4. Verify: npm dist-tag, GitHub Release assets, `brew install` from the tap.
 
 `fleet-v<version>` publishes Fleet to npm only; Fleet has no Homebrew formula.
