@@ -174,7 +174,8 @@ failed publish cannot leave a public release advertising an uninstallable versio
 
 1. Prepare the release (versions, notes, changelog) — `docs/releasing.md`.
 2. Tag `host-v<version>`. `release.yml`:
-   - refuses if `NODE_AUTH_TOKEN` is absent, **before** creating the GitHub Release (#265);
+   - refuses if neither an npm credential nor a runner OIDC id-token is available, **before**
+     creating the GitHub Release (#265);
    - builds, packs the npm tarball, builds the Homebrew bundle;
    - creates the GitHub Release with the npm tarball **and** the bundle attached;
    - publishes to npm under a dist-tag derived from the version (`rc`, `beta`, `latest`).
@@ -201,10 +202,27 @@ Verified end to end, in order, on a fresh clone of `main`:
    `mercuryctl 0.1.0-rc1`, and `mercury --help` listed the command groups.
 6. `brew audit --strict` on the generated formula reported no findings.
 
-Not yet exercised, and the only parts still taken on trust:
+Exercised for real by pushing `host-v0.1.0-rc1`. This was the first time the release job had
+ever run, and it got as far as the publish before npm refused it:
 
-- **`npm publish`.** No `NPM_TOKEN` exists on the repository, so no publish has ever run. The
-  workflow asserts ordering and the dist-tag derivation, but the publish itself is unproven.
+- `npm ci` installed and compiled on `ubuntu-latest`; the tag regex, the notes lookup and the
+  manifest comparison all accepted a real tag.
+- The provenance statement was signed and recorded in the sigstore transparency log.
+- `npm publish` ran with the correct dist-tag (`rc`) and was rejected with
+  `E404 PUT /@aywengo%2fmercury`. Two different tokens were tried; `npm whoami` succeeded on
+  both, so both were valid and simply not permitted to publish. npm is removing direct publish
+  from 2FA-bypassing granular tokens (github.blog changelog, 2026-07-31).
+- **The ordering guard held.** With the publish failing, no GitHub Release was created and no
+  formula was pushed. The half-release that #265 and #271 were written to prevent did not
+  occur, observed rather than asserted.
+
+Still not observed, and the reason the channels are not yet installable:
+
+- **A successful `npm publish`.** Blocked on npm authorization, not on this repository. The
+  durable answer is OIDC trusted publishing, which `release.yml` now falls back to
+  automatically; enabling it needs a one-time interactive configuration on npmjs.com, and npm
+  will not accept that change from a token -- it is exactly the class of action the 2026-07-31
+  change reserves for an interactive 2FA challenge.
 - **The GitHub Releases download URL.** The verification above served the artifact over local
   HTTP because nothing is published. The URL shape is asserted by `test/formula.test.ts` against
   the asset name `scripts/build-bundle.mjs` produces, which catches a rename but not, say, an
@@ -213,10 +231,18 @@ Not yet exercised, and the only parts still taken on trust:
   runs after `gh release create`, and pushes `HEAD:main`, using a stubbed `git`. `main` is not
   branch-protected, so the push should succeed; it has not been observed to.
 
-These three all resolve on the first real tag push and can be confirmed in one pass.
+One consequence of OIDC worth stating before it surprises anyone: npm stages trusted publishes
+by default and makes direct publishing opt-in per configuration. A tag push may therefore leave
+the version sitting in the npm staging queue until a maintainer approves it on npmjs.com. That
+is a safety property rather than a defect -- a compromised workflow cannot push straight to the
+registry -- but it does mean "tag pushed" is not yet "installable" until direct publishing is
+turned on for the configuration.
+
+
 
 ## Decisions
 
+- **npm authentication prefers OIDC over a long-lived token.** Decided after two valid tokens were refused direct publish. The token path is kept because it still works for accounts whose tokens retain publish, but it is no longer a requirement, and the OIDC path logs verbosely because npm's OIDC helper reports every failure at `verbose` and never throws.
 - **The bundle vendors its production `node_modules`.** Decided by implementation and
   measured: the whole production tree is `express` plus 67 transitive packages, 3.9 MB,
   1.2 MB compressed. Vendoring makes `brew install` need no network and no build, which is

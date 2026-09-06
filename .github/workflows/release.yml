@@ -63,16 +63,54 @@ jobs:
             exit 1
           fi
 
-          # Check the publish credential BEFORE creating the release. `gh release create` needs only
-          # contents:write and will succeed with no NPM_TOKEN; the `npm publish` below then fails
-          # closed, leaving a public GitHub Release advertising a version that was never published --
-          # the same half-state that made the cli-* tag worth deleting. NODE_AUTH_TOKEN is already
-          # mapped from secrets.NPM_TOKEN on this step, so an empty value is exactly that condition.
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "refusing ${tag}: NPM_TOKEN is not configured; npm publish would fail after the release is created" >&2
+                    # Choose how to authenticate to npm BEFORE creating the release. `gh release create` needs
+          # only contents:write and succeeds with no npm credential at all; the `npm publish` below
+          # then fails closed, leaving a public GitHub Release advertising a version that was never
+          # published -- the same half-state that made the cli-* tag worth deleting. So the step has to
+          # know it can authenticate before it reaches anything irreversible.
+          #
+          # Two modes, in preference order:
+          #
+          #   1. NPM_TOKEN, a long-lived automation token, surfaced as NODE_AUTH_TOKEN on this step.
+          #   2. OIDC trusted publishing: no secret at all. npm/cli (lib/utils/oidc.js) requests an ID
+          #      token from the runner -- those two env vars exist if and only if the job has
+          #      id-token:write, which this workflow already grants -- and exchanges it at
+          #      /-/npm/v1/oidc/token/exchange/package/<name> for a short-lived publish token.
+          #
+          # Mode 2 is the durable one, not a convenience. npm is stripping 2FA-bypassing granular
+          # tokens of direct publish (github.blog changelog, 2026-07-31). The first real tag push here
+          # was rejected with `E404 PUT /@aywengo%2fmercury` by two such tokens in a row, while
+          # `npm whoami` succeeded on both: the credential was valid and simply not permitted to
+          # publish. Long-lived npm secrets are a sinking platform, so the token path stays supported
+          # but is no longer required.
+          #
+          # OIDC is attempted before npm reads credentials and NEVER throws. Every failure path in
+          # oidc.js is log.verbose, including "this package has no trusted-publishing configuration",
+          # so a missing configuration surfaces as an opaque registry 404 rather than a reason -- which
+          # is exactly how the failure above presented itself. OIDC mode therefore raises the log level
+          # so the actual cause lands in the log instead of having to be inferred.
+          if [ -n "$NODE_AUTH_TOKEN" ]; then
+            echo "publish auth: NPM_TOKEN"
+            npm_loglevel=normal
+          elif [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo "publish auth: OIDC trusted publishing (no repository secret)"
+            npm_loglevel=verbose
+            # actions/setup-node writes `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into a
+            # PROJECT .npmrc because registry-url is set. With no secret that is an empty credential at
+            # project scope, which outranks the user-scope token npm's OIDC exchange installs via
+            # config.set(..., 'user'). Drop only the EMPTY token line and keep the registry line.
+            #
+            # node rather than sed -i: GNU sed takes `sed -i /pat/d f` while BSD sed reads /pat/d as the
+            # backup suffix and dies with "invalid command code". The job runs on ubuntu-latest but its
+            # tests run on macOS, so sed would make this red locally and green in CI. node is already a
+            # hard dependency of this step.
+            if [ -f .npmrc ]; then
+              node -e 'const fs=require("fs");const p=".npmrc";fs.writeFileSync(p,fs.readFileSync(p,"utf8").split("\n").filter((l)=>!/:_authToken=\s*$/.test(l)).join("\n"))'
+            fi
+          else
+            echo "refusing ${tag}: no NPM_TOKEN and no OIDC id-token available; npm publish would fail after the release is created" >&2
             exit 1
           fi
-
           # Install BEFORE anything that compiles. `npm publish` runs `prepare`, which runs tsc, and
           # setup-node does not install dependencies. Without this line the publish fails with
           # "tsc: not found" -- and did so AFTER the `gh release create` further down, which needs only
@@ -112,10 +150,10 @@ jobs:
           # public release pointing at an uninstallable version; in this order the worst case is a
           # published package with no release page, an inconvenience rather than a trap.
           if [ "$product" = "host" ]; then
-            npm publish --access public --provenance --tag "$dist_tag"
+            npm publish --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel"
           elif [ "$product" = "fleet" ]; then
             cp LICENSE fleet/LICENSE
-            (cd fleet && npm publish --access public --provenance --tag "$dist_tag")
+            (cd fleet && npm publish --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel")
           fi
 
           if [ "$product" = "host" ]; then
