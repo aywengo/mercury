@@ -195,8 +195,11 @@ Everything after the first release is the procedure below.
    - **stages** the package on npm under a dist-tag derived from the version (`rc`, `beta`,
      `latest`), rather than publishing it directly;
    - creates the GitHub Release with the npm tarball **and** the bundle attached, and appends a
-     notice to the release body while the npm package still awaits approval;
-   - generates `Formula/mercury-ai.rb` from the bundle digest and pushes it to `main`.
+     notice to the release body describing the npm state accurately -- staged-and-awaiting-approval,
+     or not-available-at-all;
+   - generates `Formula/mercury-ai.rb` from the bundle digest and pushes it to `main`;
+   - fails the job **last** if the npm submission failed, so the gap is visible without taking the
+     Homebrew channel down with it (#277).
 3. Approve the staged package on npmjs.com (**Published packages -> Staged packages**). This is
    the one step a machine cannot do: staged publishing exists precisely to defer
    proof-of-presence to a human. Nothing else waits on it -- the release assets and the
@@ -287,6 +290,7 @@ turned on for the configuration.
 
 ## Decisions
 
+- **An npm failure does not block the Homebrew release.** Decided in response to #277, after the coupling stopped being hypothetical: a registry policy change made both npm write paths fail, and because the job aborted at that call the bundle and the formula were never built, so a channel that needs nothing from npm went down with it. The invariant the job protects is that the release body accurately describes what is installable, not that a release requires npm to have succeeded; the body now states the npm state explicitly and the job still goes red, at the end. Red means "npm needs attention", not "Mercury cannot be installed".
 - **CI stages the npm package instead of publishing it directly.** Decided from the live registry rather than from preference: direct publish is refused for the credential class npm leaves standing, staging is accepted, and npm recommends staging for CI anyway. The cost is one human approval per release, which the release body discloses so the notes cannot overstate availability.
 - **npm authentication prefers OIDC over a long-lived token.** Decided after two valid tokens were refused direct publish. The token path is kept because it still works for accounts whose tokens retain publish, but it is no longer a requirement, and the OIDC path logs verbosely because npm's OIDC helper reports every failure at `verbose` and never throws.
 - **The bundle vendors its production `node_modules`.** Decided by implementation and
