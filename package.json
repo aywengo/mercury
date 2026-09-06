@@ -44,7 +44,9 @@
     "test:core": "node --test --test-timeout=180000 'test/*.test.ts'",
     "test:fleet": "node --test --test-timeout=180000 'fleet/test/*.test.ts'",
     "test:client": "node --test --test-timeout=180000 'client/test/*.test.ts'",
-    "fleet": "node fleet/cli.ts"
+    "fleet": "node fleet/cli.ts",
+    "test:e2e": "node --test --test-timeout=900000 'e2e/*.test.ts'",
+    "test:e2e:config": "docker compose -f e2e/compose.yml config --quiet"
   },
   "dependencies": {
     "express": "^4.21.2"
@@ -52,6 +54,7 @@
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^24.0.0",
+    "testcontainers": "^12.1.0",
     "typescript": "^5.8.3"
   }
 }

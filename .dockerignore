@@ -1,0 +1,29 @@
+# The image installs its own dependencies with `npm ci`; a host tree would leak
+# macOS-built optional natives into a Linux image.
+node_modules/
+npm-debug.log*
+
+# Source control and build output: the image builds `dist/` itself.
+.git/
+.gitignore
+dist/
+client/dist/
+
+# Runtime state must never enter a layer.
+*.db
+*.db-wal
+*.db-shm
+workspaces/
+/state/
+
+# Local secrets and local-only E2E material.
+.env
+.env.*
+e2e/.env*
+e2e/results/
+
+# Editor / OS metadata.
+.DS_Store
+*.swp
+.idea/
+.vscode/
