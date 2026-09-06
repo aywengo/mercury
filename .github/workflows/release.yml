@@ -73,7 +73,13 @@ jobs:
             exit 1
           fi
 
-          gh release create "$tag" --title "$title" --notes-file "$notes"
+          # Install BEFORE anything that compiles. `npm publish` runs `prepare`, which runs tsc, and
+          # setup-node does not install dependencies. Without this line the publish fails with
+          # "tsc: not found" -- and did so AFTER the `gh release create` further down, which needs only
+          # contents:write and therefore succeeded, leaving a public GitHub Release for a version that
+          # was never published. That is the same half-release state #265 was written for, reached by a
+          # different route. No tag had ever been pushed, so nothing had ever exercised this path.
+          npm ci --no-audit --no-fund
 
           # npm's default dist-tag is "latest" for ANY version, prerelease included -- `npm config get
           # tag` prints "latest". Publishing 0.1.0-rc1 without --tag would therefore make
@@ -93,8 +99,27 @@ jobs:
           echo "publishing ${product} ${version} under dist-tag ${dist_tag}"
 
           if [ "$product" = "host" ]; then
+            # The Homebrew bundle is built before the release exists so a bundle failure cannot leave a
+            # release advertising an artifact that was never produced.
+            bundle_json=$(node scripts/build-bundle.mjs --out "$RUNNER_TEMP/bundle")
+            bundle=$(node -e "console.log(JSON.parse(process.argv[1]).tarball)" "$bundle_json")
+            bundle_sha=$(node -e "console.log(JSON.parse(process.argv[1]).sha256)" "$bundle_json")
+            echo "bundle=${bundle}"
+            echo "bundle sha256=${bundle_sha}  -> paste into Formula/mercury-ai.rb in aywengo/homebrew-tap"
+          fi
+
+          # Publish first, create the release second. Reversed, every failure between the two leaves a
+          # public release pointing at an uninstallable version; in this order the worst case is a
+          # published package with no release page, an inconvenience rather than a trap.
+          if [ "$product" = "host" ]; then
             npm publish --access public --provenance --tag "$dist_tag"
           elif [ "$product" = "fleet" ]; then
             cp LICENSE fleet/LICENSE
             (cd fleet && npm publish --access public --provenance --tag "$dist_tag")
+          fi
+
+          if [ "$product" = "host" ]; then
+            gh release create "$tag" --title "$title" --notes-file "$notes" "$bundle"
+          else
+            gh release create "$tag" --title "$title" --notes-file "$notes"
           fi
