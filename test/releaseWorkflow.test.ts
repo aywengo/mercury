@@ -1,8 +1,9 @@
 // The release workflow's tag validation, executed rather than pattern-matched.
 //
-// Issue #252: the `cli` branch was the only one that accepted a tag without comparing it to a manifest.
-// host and fleet both do `[ "$pkg" = "$version" ] || exit 1`; `cli` did neither, so `cli-v9.9.9` produced
-// a published GitHub Release whose notes described a version nobody could install.
+// Issue #252 added a manifest comparison to the `cli` branch, which was the only one accepting a tag
+// unchecked. That branch has since been removed entirely: a cli tag published a GitHub Release and no
+// artifact, so the whole pattern was dropped rather than kept and guarded. What remains here is the
+// proof that host and fleet still compare tags to their manifests, and that cli is refused outright.
 //
 // A test that asserts the workflow text "contains a version check" would pass on a check that never
 // fires, and would fail on a harmless reformat. So this extracts the real shell step from the YAML and
@@ -91,24 +92,37 @@ function runTag(tag: string, opts: { notes?: string[]; pkgVersion?: string } = {
 }
 
 const V = pkg.version;
-const cliNotes = [`cli/${V}.md`];
 
-test('a cli tag matching package.json is released, and publishes no npm package', () => {
-  const r = runTag(`cli-v${V}`, { notes: cliNotes });
-  assert.equal(r.status, 0, `expected acceptance, got exit ${r.status}:\n${r.stderr}`);
-  assert.match(r.stdout, /gh release create cli-v/, 'the release was not created');
-  assert.ok(!/npm publish/.test(r.stdout),
-    'a cli tag must not publish; the CLI ships inside the host package');
+test('a cli tag is refused outright, even one matching package.json', () => {
+  // The cli release stream was removed. A cli-vX.Y.Z tag created a GitHub Release and published no
+  // artifact, because the CLI ships inside @aywengo/mercury and has no version of its own -- so the tag
+  // announced a version nobody could install. Nothing was ever tagged (no tags, no releases, nothing on
+  // npm at the time of removal), so dropping the pattern strands nothing.
+  //
+  // The version-matching tag is the case that matters: it is the one the old code ACCEPTED. Notes are
+  // supplied so the refusal can only come from the tag pattern, not from a missing notes file.
+  const r = runTag(`cli-v${V}`, { notes: [`cli/${V}.md`] });
+  assert.equal(r.status, 1, `cli-v${V} should be refused now, got exit ${r.status}`);
+  assert.match(r.stderr, /refusing tag cli-v/, `expected a tag-pattern refusal: ${r.stderr}`);
+  assert.ok(!/gh release create/.test(r.stdout), 'a refused tag must not create a release');
+  assert.ok(!/npm publish/.test(r.stdout), 'a refused tag must not publish');
 });
 
-test('a cli tag that does NOT match package.json is refused (issue #252)', () => {
-  // The regression. Before the fix this exited 0 and published a release describing a version that no
-  // published artifact carries. The notes file exists here on purpose: it proves the guard is the
-  // version comparison and not the notes check doing the work by accident.
-  const r = runTag('cli-v9.9.9', { notes: ['cli/9.9.9.md'] });
-  assert.equal(r.status, 1, `cli-v9.9.9 against package.json ${V} should be refused, got exit ${r.status}`);
-  assert.match(r.stderr, /cli-v9\.9\.9 but package.json is/, `refusal should name both versions: ${r.stderr}`);
-  assert.ok(!/gh release create/.test(r.stdout), 'a refused tag must not create a release');
+test('the workflow tag filter no longer admits cli', () => {
+  // The regex above is what rejects an already-triggered run, but the `on.push.tags` filter decides
+  // whether the workflow runs at all. Both must drop cli, or a cli tag still starts a job that fails
+  // instead of never starting. Asserted on the filter block, not the whole file, so a comment that
+  // mentions cli cannot satisfy it.
+  const lines = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8').split('\n');
+  const start = lines.findIndex((l) => l.trim() === 'tags:');
+  assert.ok(start >= 0, 'no `tags:` filter found in release.yml; the extractor is stale');
+  const filter = lines.slice(start + 1).filter((l) => /^\s*-\s+'/.test(l));
+  assert.ok(filter.length >= 2, `tag filter looks truncated: ${JSON.stringify(filter)}`);
+  assert.ok(!filter.some((l) => l.includes('cli')),
+    `the tag filter still admits a cli pattern: ${JSON.stringify(filter)}`);
+  // Both directions: dropping cli must not have dropped a product that still releases.
+  assert.ok(filter.some((l) => l.includes('host-v')), 'host tag pattern missing from the filter');
+  assert.ok(filter.some((l) => l.includes('fleet-v')), 'fleet tag pattern missing from the filter');
 });
 
 test('host and fleet keep their existing manifest comparison', () => {
@@ -131,11 +145,14 @@ test('a matching host tag still publishes, so the guards did not over-tighten', 
   assert.match(r.stdout, /npm publish --access public --provenance/, 'host must publish');
 });
 
-test('a cli tag with no notes file is still refused', () => {
-  // Guards stack: the notes check must not have been weakened while adding the version check.
-  const r = runTag(`cli-v${V}`, { notes: [] });
+test('a host tag with no notes file is still refused', () => {
+  // The notes check must stay live for the products that do release. It used to be asserted through a
+  // cli tag; cli is now refused at the tag pattern, before the notes check is ever reached, so that
+  // path would prove nothing. host is a product that actually publishes, so assert on it.
+  const r = runTag(`host-v${V}`, { notes: [] });
   assert.equal(r.status, 1, `missing notes should refuse, got exit ${r.status}`);
-  assert.match(r.stderr, new RegExp(`missing docs/releases/cli/${V.replace(/\./g, '\\.')}\\.md`));
+  assert.match(r.stderr, /missing docs\/releases\/host\//);
+  assert.ok(!/gh release create/.test(r.stdout), 'a tag with no notes must not create a release');
 });
 
 test('a malformed tag is refused before any product logic runs', () => {

@@ -87,32 +87,36 @@ test('HOST_VERSION equals package.json and the host changelog', () => {
     `docs/releases/host/${pkg.version}.md must exist`);
 });
 
-test('the CLI release stream exists and agrees with package.json', () => {
-  // This was "there is no CLI release stream yet", asserting docs/releases/cli/ stayed empty until
-  // mercuryctl existed. mercuryctl exists, so the guard had become a lock on a door that should open --
-  // and a `cli-v*` tag would still have failed the release workflow. Replaced rather than deleted, so
-  // the directory is now checked for the thing that actually matters: a `cli-vX.Y.Z` tag resolves to
-  // docs/releases/cli/X.Y.Z.md, so a version with no notes file must not be able to drift into being
-  // taggable.
-  const cliDir = join(ROOT, 'docs', 'releases', 'cli');
-  assert.ok(existsSync(cliDir), 'docs/releases/cli/ must exist now that mercuryctl is published');
-  const notes = join(cliDir, `${pkg.version}.md`);
-  assert.ok(existsSync(notes), `docs/releases/cli/${pkg.version}.md must exist for a cli-v${pkg.version} tag`);
+test('the CLI has no release stream of its own', () => {
+  // The cli-* tag was removed: it created a GitHub Release and published no artifact, because the CLI
+  // ships inside @aywengo/mercury. This test used to assert the opposite -- that docs/releases/cli/
+  // existed and carried notes for the current version -- because a cli tag needed them. Inverting it is
+  // the point: if the directory comes back, someone has re-introduced a taggable CLI stream, and the
+  // host notes are no longer the single place a CLI change is described.
+  assert.ok(!existsSync(join(ROOT, 'docs', 'releases', 'cli')),
+    'docs/releases/cli/ must not exist; the CLI ships in the host release and is described there');
+  const doc = read('docs/releasing.md');
+  assert.match(doc, /no tag,\n?and no notes file of its own|no version of its own, no tag/,
+    'releasing.md must say the CLI has no tag and no notes file of its own');
+  assert.match(doc, /described in the host release notes/,
+    'releasing.md must say where a CLI change is described');
+});
 
-  const text = read(`docs/releases/cli/${pkg.version}.md`);
-  assert.match(text, new RegExp(`mercuryctl ${pkg.version.replace(/\./g, '\\.')}`),
-    'the CLI notes must name the version they describe');
-  // The release workflow creates the GitHub release from this file alone, so an empty or stub file would
-  // produce a published release with nothing in it.
-  assert.ok(text.length > 500, `docs/releases/cli/${pkg.version}.md looks like a stub (${text.length} bytes)`);
-  // A test count in a file that is never re-checked starts rotting the moment a test is added, and the
-  // release body is generated from this file alone. The CI run for the tag is the record of what passed.
-  assert.ok(!/\b\d{3,}\s+tests\b/i.test(text),
-    'the CLI notes quote a test count; that number goes stale silently, so state the checks instead');
-  // The client ships in the host package, so its version is the package version -- there is no independent
-  // CLI version to keep in sync, and the notes must not imply one.
-  assert.ok(!/cli-v\d+\.\d+\.\d+/.test(text),
-    'the CLI notes name a specific cli-v tag; the version is owned by package.json');
+test('host release notes do not deny that the CLI ships in them', () => {
+  // docs/releases/host/0.1.0.md listed `mercuryctl` under "Not in this release" while package.json
+  // `bin` carried it and `dist/` is published. The two notes files contradicted each other: the CLI one
+  // announced a first release of the client, the host one said the client was absent. Nothing had been
+  // tagged, so the false one is corrected rather than left as published history.
+  const notes = read(`docs/releases/host/${pkg.version}.md`);
+  const notIn = notes.slice(notes.indexOf('## Not in this release'));
+  assert.ok(!/`mercuryctl`/.test(notIn.split('\n').find((l) => l.trim() !== '' && !l.startsWith('#')) || ''),
+    'host notes still list mercuryctl as not in this release, but package.json bin ships it');
+  assert.match(notes, /## The CLI/, 'host notes must describe the CLI, since it ships in this package');
+  assert.match(notes, /mercuryctl --version/, 'host notes must show how to run the client that ships here');
+  // The stale gap note from the old CLI notes file must not have been carried over by the merge: #243
+  // fixed bin.mercury, so a doc that still says it cannot run is now false.
+  assert.ok(!/bin\.mercury`? still points at a TypeScript file/i.test(notes),
+    'host notes repeat a gap that #243 closed');
 });
 
 test('mercury --version prints mercury-host <version> and does not start a server', async () => {
@@ -138,75 +142,56 @@ test('releasing.md does not describe the CLI as future or reserved', () => {
   }
 });
 
-test('the CLI product row states the facts a releaser needs', () => {
+test('the product table has no CLI row, because there is no CLI tag', () => {
+  // The table is the thing an operator reads while cutting a release. A CLI row naming a `cli-vX.Y.Z`
+  // tag would tell them to push a tag the workflow now refuses.
   const doc = read('docs/releasing.md');
   const row = doc.split('\n').find((l) => /^\|\s*CLI\s*\|/.test(l));
-  assert.ok(row, 'the product table must keep a CLI row');
-  const cells = row.split('|').map((s) => s.trim()).filter((s) => s.length > 0);
-  assert.equal(cells.length, 5, `CLI row must keep all five columns, got ${cells.length}: ${row}`);
-  // The client ships inside @aywengo/mercury, so there is no separate manifest to bump. The row used to
-  // leave this blank as "none yet", which hid the one fact a CLI release depends on.
-  assert.match(cells[1], /package\.json/, 'the CLI version comes from the root package.json');
-  assert.match(cells[2], /cli-vX\.Y\.Z/);
-  assert.ok(!/reserved/i.test(cells[2]), 'the cli tag is live, not reserved');
-  assert.match(cells[3], /host package|@aywengo\/mercury/, 'the CLI ships in the host package, not its own');
-  assert.match(cells[4], /docs\/releases\/cli/, 'the notes column must name the notes path');
+  assert.ok(row === undefined, `the product table still has a CLI row: ${row}`);
+  assert.ok(!/\|\s*`cli-vX\.Y\.Z`\s*\|/.test(doc), 'a table cell still offers a cli tag pattern');
+  // Both directions: dropping the CLI row must not have dropped a product that still releases.
+  for (const product of ['Host', 'Fleet']) {
+    assert.ok(doc.split('\n').some((l) => new RegExp(`^\\|\\s*${product}\\s*\\|`).test(l)),
+      `the product table lost its ${product} row`);
+  }
 });
 
-test('step 6 says which products publish, so a CLI tag does not promise a package', () => {
+test('releasing.md never instructs an operator to push a cli tag', () => {
+  // Historical mentions are fine and wanted -- the doc explains why the tag was removed. An INSTRUCTION
+  // is not. So: every line that both mentions a cli tag and reads as an instruction is a failure, and
+  // the procedure steps are checked as a block because that is the part an operator follows in order.
+  const doc = read('docs/releasing.md');
+  const procedure = doc.slice(doc.indexOf('## Cut a release'), doc.indexOf('## The CLI'));
+  assert.ok(procedure.length > 200, 'could not locate the release procedure block');
+  assert.ok(!/cli-v|cli-\*/.test(procedure),
+    'the release procedure still mentions a cli tag; it must describe host and Fleet tags only');
+  assert.match(procedure, /nothing to bump and no tag to push/,
+    'step 1 must tell a CLI-change author there is nothing to bump and no tag to push');
+  assert.match(procedure, /goes out with the next host release/,
+    'step 1 must say when a CLI change actually reaches users');
+});
+
+test('step 6 names the two products that publish and promises no third', () => {
   const doc = read('docs/releasing.md');
   const start = doc.indexOf('6. [');
   assert.ok(start >= 0, 'the release procedure must keep its numbered step 6');
-  const step6 = doc.slice(start, doc.indexOf('The `NPM_TOKEN`', start) > start ? doc.indexOf('The `NPM_TOKEN`', start) : start + 900);
-  // The workflow publishes for host and fleet only. Saying it publishes "for that product" reads as all
-  // three, so someone cutting a cli tag waits for a package that is never coming.
+  const step6 = doc.slice(start, doc.indexOf('The `NPM_TOKEN`', start) > start
+    ? doc.indexOf('The `NPM_TOKEN`', start) : start + 900);
   assert.match(step6, /host/, 'step 6 must name the products that publish');
   assert.match(step6, /fleet/);
-  assert.match(step6, /cli/i);
-  assert.match(step6, /no npm publish|does not publish|publish(es|ing)? nothing|no separate/i,
-    'step 6 must state that a cli tag publishes nothing');
+  assert.ok(!/cli/i.test(step6),
+    'step 6 still describes a cli tag; there is no cli tag, so this promises a release that cannot happen');
 });
 
-test('release.yml states the real CLI policy instead of denying the CLI exists', () => {
+test('release.yml admits exactly host and fleet, and fails closed on anything else', () => {
   const wf = read('.github/workflows/release.yml');
-  // The branch echoed this to stderr on every cli tag while continuing, so it told the person cutting the
-  // release that the thing they were releasing did not exist. Same shape as the guard #242 replaced.
+  assert.ok(!/\(host\|fleet\|cli\)/.test(wf), 'the tag regex still admits cli');
+  assert.match(wf, /\^\(host\|fleet\)-v/, 'the tag regex must admit host and fleet');
+  // Fail-closed matters: with the cli branch deleted, an unmatched product must not reach
+  // `gh release create` with an unset title.
+  assert.match(wf, /has no release branch/, 'the else branch must refuse rather than fall through');
   assert.ok(!/reserved until [`']?mercuryctl exists/i.test(wf),
     'release.yml still prints that the CLI does not exist');
-  assert.match(wf, /no separate npm package/i, 'the cli branch must state the actual policy');
-});
-
-test('releasing.md does not claim the cli tag check is missing', () => {
-  // #251 documented this as a known gap and #252 closed it. A doc that still says the check is absent
-  // is worse than no doc: an operator would skip the check they actually have to satisfy, or distrust
-  // a refusal the workflow correctly raises. Asserted in both directions, so re-opening the gap would
-  // have to re-introduce the stale sentence deliberately.
-  const doc = read('docs/releasing.md');
-  for (const stale of [/but not\nfor `cli`/i, /not for `cli`/i, /known gap/i,
-                       /the notes file, not a version comparison/i]) {
-    assert.ok(!stale.test(doc), `releasing.md still describes the cli version check as missing: ${stale}`);
-  }
-  assert.match(doc, /for `cli`\s*\n?that manifest is the root `package\.json`|root `package\.json`, because the CLI ships/,
-    'releasing.md must say which manifest a cli tag is checked against');
-});
-
-test('releasing.md tells an operator how to cut a CLI release and what it publishes', () => {
-  // The version check added for #252 refuses a cli tag whose version differs from package.json. That is
-  // only actionable if the procedure says what to do instead: the CLI has no version of its own, so
-  // step 1 has to say there is nothing to bump. And because `npm publish` runs for host and fleet only,
-  // a cli tag publishes notes without shipping the artifact -- an operator who does not know that
-  // announces a version that nobody can install yet.
-  const doc = read('docs/releasing.md');
-  const step1 = doc.slice(doc.indexOf('1. On a branch'), doc.indexOf('2. Move'));
-  assert.ok(step1.length > 0, 'the release procedure step 1 must still exist');
-  assert.match(step1, /CLI[^\n]*nothing to bump|nothing to bump/i,
-    'step 1 lists a bump target per product; the CLI must be listed or an operator has no instruction');
-  assert.match(step1, /root `package\.json`/,
-    'the CLI step must name the manifest its version comes from');
-  assert.match(doc, /A `cli-\*` tag publishes \*\*notes only\*\*/,
-    'the doc must state that a cli tag publishes notes and not the artifact');
-  assert.match(doc, /arrives with the next `host-vX\.Y\.Z` tag/,
-    'the doc must say when the CLI artifact actually reaches users');
 });
 
 // ---------------------------------------------------------------------------
@@ -280,27 +265,25 @@ test('both commands in this package answer --help the same way', async () => {
 });
 
 test('releasing.md does not call the CLI an independent release stream', () => {
-  // It used to. The claim was false when made and is now enforced: a cli-vX.Y.Z tag is refused unless
-  // package.json says X.Y.Z, and bumping package.json requires HOST_VERSION, a CHANGELOG heading and
-  // docs/releases/host/X.Y.Z.md to agree -- all four asserted by the tests above. So a CLI release
-  // cannot be prepared without host release artifacts for the same version. An operator who believed
-  // "independent stream" would bump nothing, tag cli-vX.Y.Z, and get a refusal with no hint why.
+  // The invariant outlives the reason it was written. It was added when the doc called Host, Fleet and
+  // the CLI independent streams while the CLI shared the host version; the tag has since been deleted
+  // entirely, so the CLI is not a stream at all. Either way the doc must never group it with the
+  // products that have tags of their own.
   const doc = read('docs/releasing.md');
   // Assert on the SENTENCE, not on a spelling. An earlier version of this guard matched
   // "CLI are **independent SemVer streams" and SURVIVED the exact regression it was written against,
-  // because the real sentence reads "CLI are released as **independent SemVer streams". So: take the
-  // sentence that makes the independence claim and require that it does not include the CLI. Any
-  // rewording of the false claim still trips it.
+  // because the real sentence reads "CLI are released as **independent SemVer streams". Taking the
+  // sentence that makes the claim survives any rewording of the predicate.
   const independence = doc.split(/(?<=[.!?])\s+/).filter((s) => /independent\s+SemVer\s+streams/i.test(s));
   assert.ok(independence.length > 0, 'releasing.md no longer mentions independent SemVer streams at all');
   for (const sentence of independence) {
     assert.ok(!/\bCLI\b|mercuryctl/i.test(sentence),
-      `the independence claim includes the CLI, which is not one: ${sentence.trim()}`);
+      `the independence claim includes the CLI, which has no tag of its own: ${sentence.trim()}`);
   }
-  assert.match(doc, /CLI is \*\*not\*\* an independent stream/,
-    'releasing.md must state plainly that the CLI is not an independent stream');
-  // \s+ not a space: markdown wraps this file at ~78 columns, so a literal space in the pattern
-  // matches only on the one line length the sentence happened to have when it was written.
-  assert.match(doc, /cannot be prepared without host\s+release\s+artifacts/,
-    'releasing.md must state the coupling, not just deny independence');
+  // \s+ not a space: markdown wraps this file at ~78 columns, so a literal space in the pattern matches
+  // only the one line length the sentence happened to have when it was written.
+  assert.match(doc, /has \*\*no tag and no version of its\s+own\*\*/,
+    'releasing.md must state plainly that the CLI has no tag and no version of its own');
+  assert.match(doc, /ships inside\s+`@aywengo\/mercury`/,
+    'releasing.md must say the CLI ships inside the host package');
 });
