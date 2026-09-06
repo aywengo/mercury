@@ -42,6 +42,31 @@ function readStdin(): string {
   }
 }
 
+/**
+ * Exit only after both streams have handed their buffered bytes to the OS.
+ *
+ * `process.exit()` discards data still queued on a pipe. Writes to a regular file and to a terminal are
+ * synchronous, so testing from a checkout cannot see the difference; a pipe is asynchronous, and the
+ * buffer is simply dropped. The result was that `mercuryctl runs list | jq` returned the first 64 KiB of
+ * a 1.9 MB listing with exit code 0 and no warning -- a silently truncated answer that looks like
+ * success to every consumer downstream.
+ *
+ * Exiting explicitly is still required rather than letting Node settle on its own: the HTTP keep-alive
+ * agent holds a socket, so the event loop would otherwise stay alive after the command has finished.
+ *
+ * `close` and `error` also resolve, because a stream that has already failed -- `| head` closing the pipe
+ * mid-write -- will never invoke a write callback, and waiting for one would hang the process instead of
+ * truncating it.
+ */
+function flushed(stream: NodeJS.WriteStream): Promise<void> {
+  return new Promise((resolve) => {
+    if (stream.destroyed || stream.writableEnded) { resolve(); return; }
+    stream.write('', () => resolve());
+    stream.once('close', resolve);
+    stream.once('error', () => resolve());
+  });
+}
+
 const code = await run(process.argv.slice(2), {
   stdout: (text) => { process.stdout.write(text); },
   stderr: (text) => { process.stderr.write(text); },
@@ -50,4 +75,6 @@ const code = await run(process.argv.slice(2), {
   readLine,
   readStdin,
 });
+
+await Promise.all([flushed(process.stdout), flushed(process.stderr)]);
 process.exit(code);
