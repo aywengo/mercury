@@ -173,15 +173,37 @@ failed publish cannot leave a public release advertising an uninstallable versio
 ## Release procedure
 ## First release only
 
-The package does not exist on npm yet, and no token can create it: `npm publish` answers `E404`
-and `npm stage publish` answers `E401` for a package that has never existed, while reads with the
-same token succeed. Creating the first version is an interactive action.
+The package does not exist on npm yet, and creating the first version is an interactive action.
 
-1. `npm login` in an account with 2FA, then `npm publish --access public` from a clean checkout
-   of the tag -- or stage it and approve on npmjs.com.
-2. Once the package exists, configure trusted publishing on its npmjs.com settings page
-   (repository `aywengo/mercury`, workflow `release.yml`, event `push`).
-3. From then on a tag push needs no credential at all: `release.yml` uses the runner's OIDC
+**The precondition, stated up front because the error messages do not:** npm requires **one of**
+
+- two-factor authentication enabled on the account, or
+- a granular access token with **bypass 2FA** enabled.
+
+Without either, publishing a scoped package fails. Interactively the message is explicit:
+
+```
+npm error 403 Forbidden - PUT https://registry.npmjs.org/@aywengo%2fmercury - Two-factor
+authentication or granular access token with bypass 2fa enabled is required to publish packages.
+```
+
+From CI the same root cause surfaces with far less useful codes: `E404` on `npm publish` and
+`E401` on `npm stage publish`, while read calls with the same token succeed. That asymmetry --
+reads fine, both writes refused -- is the signature of this missing precondition rather than a
+bad token or a wrong scope.
+
+Prefer account 2FA. A bypass-2FA token may work today, but npm is removing direct publish from
+those tokens (github.blog changelog, 2026-07-31, targeting January 2027), so it is a dead end.
+
+1. Enable 2FA on npmjs.com under **Account Settings -> Two-Factor Authentication**.
+2. From a clean checkout of the tag: `npm publish --access public --tag rc`. The `--tag` matters:
+   npm's default dist-tag is `latest` for *any* version, prerelease included, so publishing an
+   `-rc` without it makes `npm install @aywengo/mercury` resolve to the release candidate.
+3. Configure trusted publishing on the package's npmjs.com settings page -- repository
+   `aywengo/mercury`, workflow `release.yml`, event `push` -- for both `@aywengo/mercury` and
+   `@aywengo/mercury-fleet`. Note that npm stages trusted publishes by default and makes direct
+   publishing opt-in per configuration.
+4. From then on a tag push needs no credential at all: `release.yml` uses the runner's OIDC
    id-token, and `NPM_TOKEN` can be deleted.
 
 Everything after the first release is the procedure below.
