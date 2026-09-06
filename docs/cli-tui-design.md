@@ -1364,11 +1364,26 @@ meet this design.
 ## 19. Open decisions at implementation time
 
 The architecture does not depend on these choices, so they are intentionally
-deferred to the milestone that has evidence to decide them:
+deferred to the milestone that has evidence to decide them. Two of the five have
+since been decided; they stay listed with their outcome, because a deferred
+decision that was silently made is indistinguishable from one still open.
 
-- whether the packaged executable is an npm `bin`, a bundled JavaScript
-  artifact or both;
-- whether a small command parser dependency is justified after Milestone 1;
+**Decided -- the packaged executable is an npm `bin` targeting compiled
+JavaScript**, not a bundle and not the TypeScript source. `client/test/packaging.test.ts`
+shows why the source option is not available: Node refuses to strip types under
+`node_modules`, so a `bin` pointing at `.ts` installs cleanly and fails on first
+run, while the identical file works from a checkout. A bundler would add a build
+dependency to solve a problem the compiler already solves. See §16.4.
+
+**Decided -- no command parser dependency.** The hand-written parser survived
+Milestones 0 to 4, including the cases that usually motivate a framework:
+scope-aware flags, options before and after the command, one-word commands such as
+`completion`, and refusing stray positionals. Adding a framework would have replaced
+~200 tested lines with an API to learn and a supply-chain surface, and the design's
+own rule was to add one only if hand-written parsing failed. It did not fail.
+
+Still open:
+
 - which TUI framework best satisfies the Milestone 5 gate;
 - whether real usage warrants crash-safe pending-create journaling;
 - whether Mercury should later expose an explicit API capabilities endpoint.
