@@ -405,3 +405,36 @@ test('docs/distribution.md agrees with what the release workflow actually produc
   assert.match(doc, /brew install mercury-ai/,
     'docs/distribution.md must give the actual install command for the Homebrew channel');
 });
+
+test('README states the install channels without over-claiming them', () => {
+  // The README is the first thing an operator reads, and this repo has a history of docs that
+  // outlived the fact they described. Two specific traps are asserted here.
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+
+  // `brew install mercury` is a real homebrew-core formula: the Mercury language compiler. It
+  // downloads roughly a gigabyte of the wrong thing before saying anything.
+  const fenced: string[] = [];
+  let inFence = false;
+  let current = '';
+  for (const line of readme.split('\n')) {
+    if (line.startsWith('```')) {
+      if (inFence) { fenced.push(current); current = ''; }
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) current += line + '\n';
+  }
+  assert.ok(!fenced.some((b) => /brew install\s+mercury\b(?!-)/.test(b)),
+    'README instructs `brew install mercury`, which installs homebrew-core\'s Mercury language compiler');
+  assert.ok(fenced.some((b) => /brew install mercury-ai/.test(b)),
+    'README must give the actual Homebrew command for this product');
+
+  // #256: the CLI has no independent release. A README that reintroduces one re-opens it.
+  assert.match(readme, /no CLI-only channel/i);
+  assert.ok(!/brew install[^\n]*mercury-cli/.test(readme), 'README must not invent a CLI-only artifact');
+
+  // Both binaries come from one install; saying otherwise is what made #245 and #262 wrong.
+  assert.match(readme, /mercuryctl/, 'README must name the operator client');
+  assert.match(readme, /\[`docs\/distribution\.md`\]\(docs\/distribution\.md\)/,
+    'README must link the distribution doc that owns the detail');
+});

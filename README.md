@@ -83,11 +83,45 @@ responsibility for inspecting repositories, editing code, running tools and
 producing results. Backends other than `fake` need their CLI (or remote API)
 installed separately; `npm install` does not ship them.
 
-## Quick start
+## Install
 
 Requires Node.js ≥ 22.18 (built-in `node:sqlite` and TypeScript type stripping).
+What each channel ships and how it is built:
+[`docs/distribution.md`](docs/distribution.md).
+
+**From a checkout — works today.** This also installs both commands, `mercury` (the
+host) and `mercuryctl` (the operator client), because they ship in one package:
+
+```bash
+git clone https://github.com/aywengo/mercury.git
+cd mercury
+npm ci
+npm install -g .
+mercury --version
+```
+
+`npm ci` compiles `dist/` as part of installing, so the binaries work immediately.
+Installing with `npm install <git-url>` instead of a clone also works.
+
+**From npm and Homebrew.** These serve the published artifacts; see
+[Releases](https://github.com/aywengo/mercury/releases) for what is currently
+available. Prereleases are published under a matching dist-tag, so pin one with
+`@aywengo/mercury@rc` rather than expecting an RC to appear under `latest`:
+
+```bash
+npm install -g @aywengo/mercury          # stable
+brew tap aywengo/mercury https://github.com/aywengo/mercury
+brew install mercury-ai                  # not `mercury`: that is a different project
+```
+
+There is no CLI-only channel. `mercuryctl` is inside the host package, so any install
+that provides one provides the other.
+
+## Quick start
+
 For prerequisites and a complete first-run walkthrough, see
-[`QUICKSTART.md`](QUICKSTART.md).
+[`QUICKSTART.md`](QUICKSTART.md). The commands below run Mercury from a source
+checkout without installing it.
 
 ```bash
 npm install
