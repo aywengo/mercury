@@ -216,77 +216,40 @@ configuration with direct publishing is in place.
 What has actually been executed, and what has not. The distinction matters because the
 release path had already been shown to contain a step that had never run.
 
-Verified end to end, in order, on a fresh clone of `main`:
+Verified end to end against real infrastructure, not a local stand-in. Pushing `host-v0.1.0-rc1`
+ran `release.yml` for real, and the release job produced:
 
-1. `npm ci` built `dist/` via `prepare`.
-2. `scripts/build-bundle.mjs` produced `mercury-0.1.0-rc1-bundle.tar.gz` and reported its sha256.
-3. `scripts/update-formula.mjs` generated `Formula/mercury-ai.rb` pinning that digest; `ruby -c` accepted it.
-4. The artifact was served over real HTTP and `brew install mercury-ai` fetched it. Homebrew
-   verifies the pinned digest on download, so a successful install is evidence the digest the
-   generator wrote matches the bytes the bundler produced -- the two ends of the chain were
-   never compared by hand.
-5. Installed `mercury --version` -> `mercury-host 0.1.0-rc1`, `mercuryctl --version` ->
-   `mercuryctl 0.1.0-rc1`, and `mercury --help` listed the command groups.
-6. `brew audit --strict` on the generated formula reported no findings.
+1. A GitHub Release `Mercury host v0.1.0-rc1` with `mercury-0.1.0-rc1-bundle.tar.gz` attached
+   (1.16 MB).
+2. A commit by `github-actions[bot]` adding `Formula/mercury-ai.rb` to `main`.
+3. A release body that states the npm package is unavailable, because the npm step did fail.
 
-Exercised for real by pushing `host-v0.1.0-rc1`. This was the first time the release job had
-ever run, and it got as far as the publish before npm refused it:
+Then, from a real machine with a real Homebrew:
 
-- `npm ci` installed and compiled on `ubuntu-latest`; the tag regex, the notes lookup and the
-  manifest comparison all accepted a real tag.
-- The provenance statement was signed and recorded in the sigstore transparency log.
-- `npm publish` ran with the correct dist-tag (`rc`) and was rejected with
-  `E404 PUT /@aywengo%2fmercury`. Two different tokens were tried; `npm whoami` succeeded on
-  both, so both were valid and simply not permitted to publish. npm is removing direct publish
-  from 2FA-bypassing granular tokens (github.blog changelog, 2026-07-31).
-- **The ordering guard held.** With the publish failing, no GitHub Release was created and no
-  formula was pushed. The half-release that #265 and #271 were written to prevent did not
-  occur, observed rather than asserted.
+4. `brew tap aywengo/mercury https://github.com/aywengo/mercury` cloned the tap and found the
+   formula. Newer Homebrew refuses an untrusted tap, so `brew trust aywengo/mercury` is required
+   before install; the error message names the command.
+5. `brew install mercury-ai` downloaded the asset from the real Releases URL. Homebrew verifies
+   the pinned digest on download, so a successful install proves the formula's sha256 matches the
+   bytes the bundler produced and GitHub served. Independently confirmed: the downloaded artifact
+   hashes to `0d2c888161d3b17f087414e20ece64e9bc989ee296c1c2e3e774a56ba8b3739f`, identical to the
+   value in the generated formula.
+6. `mercury --version` -> `mercury-host 0.1.0-rc1`; `mercuryctl --version` -> `mercuryctl
+   0.1.0-rc1`; `mercury --help` listed the command groups. 793 files installed.
+7. `brew audit --strict` on the generated formula reported no findings.
 
-What the credential can and cannot do, measured against the live registry. Two granular
-tokens were tried; both behaved identically, so this is the credential class, not a typo.
+One consequence of the formula worth knowing before it surprises a user: it depends on `node`, so
+`brew install mercury-ai` installs or upgrades Homebrew's `node`. On the machine used for the test
+above that silently moved the active `node` from 24.1.0 to 26.8.1. This is ordinary Homebrew
+behaviour for a `depends_on "node"` formula, not a defect in this one, but it is not obvious from
+the install command and a user who pins a Node major version should expect it.
 
-- `npm whoami` succeeds, so the token is valid and belongs to the account.
-- `npm stage list @aywengo/mercury` succeeds.
-- `npm publish` is refused with `E404 PUT /@aywengo%2fmercury`.
-- `npm stage publish` is refused with `E401 Unable to authenticate`.
+Still not observed:
 
-Reads succeed and both write paths fail, by two different codes, for a package that does not
-exist yet. The reading that holds is that **no token route can create the first version of a
-new package here**: npm is removing direct publish from 2FA-bypassing granular tokens
-(github.blog changelog, 2026-07-31), and its docs list only account 2FA or such a token as ways
-to publish a scoped package directly.
-
-An earlier revision of this page cited the successful `npm stage list` as proof that "the
-staging API accepts this credential". That was wrong, and it is worth keeping the wrongness on
-record: `stage list` is a GET, and a successful read says nothing about whether the POST is
-authorised. The very next release run answered that with `E401`. The failure mode is the same
-one this repository has hit repeatedly -- treating a signal adjacent to the thing being claimed
-as evidence for it.
-
-Still not observed, and the reason the channels are not yet installable:
-
-- **A successful `npm publish`.** Blocked on npm authorization, not on this repository. The
-  durable answer is OIDC trusted publishing, which `release.yml` now falls back to
-  automatically; enabling it needs a one-time interactive configuration on npmjs.com, and npm
-  will not accept that change from a token -- it is exactly the class of action the 2026-07-31
-  change reserves for an interactive 2FA challenge.
-- **The GitHub Releases download URL.** The verification above served the artifact over local
-  HTTP because nothing is published. The URL shape is asserted by `test/formula.test.ts` against
-  the asset name `scripts/build-bundle.mjs` produces, which catches a rename but not, say, an
-  asset that failed to upload.
-- **The formula commit back to `main`.** `test/releaseWorkflow.test.ts` asserts the step exists,
-  runs after `gh release create`, and pushes `HEAD:main`, using a stubbed `git`. `main` is not
-  branch-protected, so the push should succeed; it has not been observed to.
-
-One consequence of OIDC worth stating before it surprises anyone: npm stages trusted publishes
-by default and makes direct publishing opt-in per configuration. A tag push may therefore leave
-the version sitting in the npm staging queue until a maintainer approves it on npmjs.com. That
-is a safety property rather than a defect -- a compromised workflow cannot push straight to the
-registry -- but it does mean "tag pushed" is not yet "installable" until direct publishing is
-turned on for the configuration.
-
-
+- **A successful npm submission.** Both write paths are refused for the credential class npm
+  leaves standing, and creating the first version of a package is an interactive action. See
+  "First release only" above. This is the only channel that does not work, and since #281 it no
+  longer blocks the others.
 
 ## Decisions
 
