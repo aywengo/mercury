@@ -177,10 +177,19 @@ failed publish cannot leave a public release advertising an uninstallable versio
    - refuses if neither an npm credential nor a runner OIDC id-token is available, **before**
      creating the GitHub Release (#265);
    - builds, packs the npm tarball, builds the Homebrew bundle;
-   - creates the GitHub Release with the npm tarball **and** the bundle attached;
-   - publishes to npm under a dist-tag derived from the version (`rc`, `beta`, `latest`).
-3. Generate `Formula/mercury-ai.rb` from the bundle digest and push it to `main`.
+   - **stages** the package on npm under a dist-tag derived from the version (`rc`, `beta`,
+     `latest`), rather than publishing it directly;
+   - creates the GitHub Release with the npm tarball **and** the bundle attached, and appends a
+     notice to the release body while the npm package still awaits approval;
+   - generates `Formula/mercury-ai.rb` from the bundle digest and pushes it to `main`.
+3. Approve the staged package on npmjs.com (**Published packages -> Staged packages**). This is
+   the one step a machine cannot do: staged publishing exists precisely to defer
+   proof-of-presence to a human. Nothing else waits on it -- the release assets and the
+   Homebrew formula are already live.
 4. Verify: npm dist-tag, GitHub Release assets, `brew install` from the tap.
+
+Set the repository variable `NPM_DIRECT_PUBLISH` to `true` to skip staging once an OIDC
+configuration with direct publishing is in place.
 
 `fleet-v<version>` publishes Fleet to npm only; Fleet has no Homebrew formula.
 
@@ -216,6 +225,17 @@ ever run, and it got as far as the publish before npm refused it:
   formula was pushed. The half-release that #265 and #271 were written to prevent did not
   occur, observed rather than asserted.
 
+What the credential can and cannot do, measured against the live registry:
+
+- `npm whoami` succeeds, so the token is valid.
+- Direct publish is refused (`E404 PUT`). npm is removing direct publish from 2FA-bypassing
+  granular tokens, and its own docs list only two ways to publish a scoped package directly:
+  account 2FA, or such a token.
+- **`npm stage list` succeeds**, so the staging API accepts this credential. Staged publishing
+  deliberately needs no 2FA to submit, which is what makes CI able to reach the registry at all
+  under the current policy -- and it is the difference between the job producing Homebrew
+  artifacts and aborting before it gets there.
+
 Still not observed, and the reason the channels are not yet installable:
 
 - **A successful `npm publish`.** Blocked on npm authorization, not on this repository. The
@@ -242,6 +262,7 @@ turned on for the configuration.
 
 ## Decisions
 
+- **CI stages the npm package instead of publishing it directly.** Decided from the live registry rather than from preference: direct publish is refused for the credential class npm leaves standing, staging is accepted, and npm recommends staging for CI anyway. The cost is one human approval per release, which the release body discloses so the notes cannot overstate availability.
 - **npm authentication prefers OIDC over a long-lived token.** Decided after two valid tokens were refused direct publish. The token path is kept because it still works for accounts whose tokens retain publish, but it is no longer a requirement, and the OIDC path logs verbosely because npm's OIDC helper reports every failure at `verbose` and never throws.
 - **The bundle vendors its production `node_modules`.** Decided by implementation and
   measured: the whole production tree is `express` plus 67 transitive packages, 3.9 MB,

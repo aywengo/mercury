@@ -30,6 +30,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_DIRECT_PUBLISH: ${{ vars.NPM_DIRECT_PUBLISH }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
@@ -149,11 +150,55 @@ jobs:
           # Publish first, create the release second. Reversed, every failure between the two leaves a
           # public release pointing at an uninstallable version; in this order the worst case is a
           # published package with no release page, an inconvenience rather than a trap.
+          # Stage rather than publish, by default. `npm stage publish` submits the package and defers
+          # proof-of-presence to a maintainer approving it on npmjs.com; npm's guidance is that CI
+          # configurations should stage, and direct publish is being taken away from 2FA-bypassing
+          # tokens (github.blog changelog, 2026-07-31) -- which is exactly how the first two real tag
+          # pushes here failed. Staging is the path that works with the credential that survives that
+          # change, and it is what lets the job reach the Homebrew artifacts at all: the bundle and the
+          # formula need nothing from npm, but they are built after this step and an abort here means
+          # no Homebrew install either.
+          #
+          # The command is a drop-in: npm/cli's lib/commands/stage/publish.js is `class StagePublish
+          # extends Publish` with `static stage = true` and `static params = Publish.params`, so
+          # --access, --tag, --provenance and --loglevel all carry over unchanged.
+          #
+          # Staging needs npm >= 11.15. Verified against the published tarballs rather than inferred from
+          # merge dates: lib/commands/stage/index.js is absent from npm@11.14.0 and present in
+          # npm@11.15.0. The runner's npm comes from the node version, so detect instead of assuming.
+          # Set the repository variable NPM_DIRECT_PUBLISH to "true" to publish straight to the
+          # registry, which is what an OIDC configuration with direct publishing enabled will want.
+          if [ "${NPM_DIRECT_PUBLISH:-}" = "true" ]; then
+            npm_verb="publish"
+          elif npm stage --help >/dev/null 2>&1; then
+            npm_verb="stage publish"
+          else
+            npm_verb="publish"
+          fi
+          echo "npm submission mode: ${npm_verb}"
+
           if [ "$product" = "host" ]; then
-            npm publish --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel"
+            npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel"
           elif [ "$product" = "fleet" ]; then
             cp LICENSE fleet/LICENSE
-            (cd fleet && npm publish --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel")
+            (cd fleet && npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel")
+          fi
+
+          # A staged package is not installable yet, and the release notes are committed before the run
+          # and cannot know. So say it HERE, on the page a user actually reads, rather than letting the
+          # notes imply an npm install that would fail. The Homebrew path is unaffected.
+          if [ "$npm_verb" = "stage publish" ]; then
+            {
+              echo ""
+              echo "## npm package awaiting maintainer approval"
+              echo ""
+              echo "This run **staged** the package on the npm registry. Staged publishing defers"
+              echo "proof-of-presence to a maintainer, so \`npm install\` will not resolve this version"
+              echo "until it is approved on npmjs.com under **Published packages -> Staged packages**."
+              echo ""
+              echo "The assets attached to this release and the Homebrew formula are already live and"
+              echo "need no npm approval."
+            } >> "$notes"
           fi
 
           if [ "$product" = "host" ]; then

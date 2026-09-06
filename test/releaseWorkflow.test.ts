@@ -53,12 +53,14 @@ interface Run {
   stdout: string;
   stderr: string;
   npmrc: string;
+  notesOut: string;
 }
 
 /** Run the workflow step for one tag, in a throwaway tree with stubbed `gh` and `npm`. */
 function runTag(
   tag: string,
-  opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string } = {},
+  opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
+    directPublish?: string; npmHasStage?: boolean } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -99,7 +101,14 @@ function runTag(
     mkdirSync(bin);
     for (const cmd of ['gh', 'npm']) {
       const stub = join(bin, cmd);
-      writeFileSync(stub, `#!/bin/sh\necho "${cmd} $*" >> "${tmp}/calls.log"\nexit 0\n`);
+      // The step probes `npm stage --help` to decide between staging and direct publishing. Logging
+      // that probe would put a bogus "npm stage" line in the call log and confuse every ordering
+      // assertion below, and STUB_NPM_STAGE_RC lets a test simulate an npm too old to stage.
+      const body = cmd === 'npm'
+        ? '#!/bin/sh\ncase "$*" in\n  "stage --help") exit "${STUB_NPM_STAGE_RC:-0}" ;;\nesac\n'
+          + `echo "npm $*" >> "${tmp}/calls.log"\nexit 0\n`
+        : `#!/bin/sh\necho "${cmd} $*" >> "${tmp}/calls.log"\nexit 0\n`;
+      writeFileSync(stub, body);
       chmodSync(stub, 0o755);
     }
     // The formula step drives git directly, and the step runs in a throwaway directory that is not a
@@ -141,6 +150,11 @@ function runTag(
         // inside GitHub Actions -- locally-green, CI-red, or the reverse.
         ACTIONS_ID_TOKEN_REQUEST_URL: opts.oidc ? 'https://token.actions.githubusercontent.com/idToken' : undefined,
         ACTIONS_ID_TOKEN_REQUEST_TOKEN: opts.oidc ? 'oidc-request-token' : undefined,
+        // Explicit for the same reason as the two above: the submission verb now depends on this
+        // variable, so inheriting it would let a stray shell variable flip the mode under test.
+        NPM_DIRECT_PUBLISH: opts.directPublish ?? '',
+        // 1 makes `npm stage --help` fail, i.e. an npm older than 11.15 with no staging support.
+        STUB_NPM_STAGE_RC: opts.npmHasStage === false ? '1' : '0',
         // The step writes the bundle under $RUNNER_TEMP. With `set -u` an unset value aborts the
         // step, so it is provided here exactly as the runner would provide it.
         RUNNER_TEMP: tmp,
@@ -153,13 +167,26 @@ function runTag(
     // Read before the finally block deletes the tree: OIDC mode edits .npmrc in place, and the edit
     // is only observable here.
     const npmrc = existsSync(join(tmp, '.npmrc')) ? readFileSync(join(tmp, '.npmrc'), 'utf8') : '';
-    return { status: r.status, stdout: r.stdout + calls, stderr: r.stderr, npmrc };
+    // The step appends the pending-approval notice to the notes file it is about to upload, so the
+    // notes are read back here rather than trusted from the command line.
+    const notesOut = opts.notes?.length
+      ? (existsSync(join(tmp, 'docs', 'releases', opts.notes[0]))
+        ? readFileSync(join(tmp, 'docs', 'releases', opts.notes[0]), 'utf8') : '')
+      : '';
+    return { status: r.status, stdout: r.stdout + calls, stderr: r.stderr, npmrc, notesOut };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 }
 
 const V = pkg.version;
+
+/**
+ * The submission call, whichever verb the step chose. Dist-tag and ordering assertions are about the
+ * submission, not about whether it was staged, so they match both: pinning them to one verb would make
+ * a change of default look like a change of behaviour.
+ */
+const SUBMIT = 'npm (?:stage )?publish';
 
 test('a cli tag is refused outright, even one matching package.json', () => {
   // The cli release stream was removed. A cli-vX.Y.Z tag created a GitHub Release and published no
@@ -173,7 +200,7 @@ test('a cli tag is refused outright, even one matching package.json', () => {
   assert.equal(r.status, 1, `cli-v${V} should be refused now, got exit ${r.status}`);
   assert.match(r.stderr, /refusing tag cli-v/, `expected a tag-pattern refusal: ${r.stderr}`);
   assert.ok(!/gh release create/.test(r.stdout), 'a refused tag must not create a release');
-  assert.ok(!/npm publish/.test(r.stdout), 'a refused tag must not publish');
+  assert.ok(!new RegExp(SUBMIT).test(r.stdout), 'a refused tag must not submit anything');
 });
 
 test('the workflow tag filter no longer admits cli', () => {
@@ -210,7 +237,7 @@ test('host and fleet keep their existing manifest comparison', () => {
 test('a matching host tag still publishes, so the guards did not over-tighten', () => {
   const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
   assert.equal(r.status, 0, `expected acceptance, got exit ${r.status}:\n${r.stderr}`);
-  assert.match(r.stdout, /npm publish --access public --provenance/, 'host must publish');
+  assert.match(r.stdout, new RegExp(SUBMIT + ' --access public --provenance'), 'host must submit to npm');
 });
 
 test('a host tag with no notes file is still refused', () => {
@@ -231,7 +258,7 @@ test('a prerelease host tag is accepted and published under dist-tag rc, not lat
   const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
   assert.equal(r.status, 0, `a prerelease tag matching package.json must be accepted: ${r.stderr}`);
   assert.match(r.stdout, new RegExp(`gh release create host-v${V.replace(/\./g, '\\.')}`));
-  assert.match(r.stdout, /npm publish [^\n]*--tag rc\b/,
+  assert.match(r.stdout, new RegExp(SUBMIT + ' [^\\n]*--tag rc\\b'),
     `prerelease must publish under dist-tag rc, got:\n${r.stdout}`);
   assert.ok(!/--tag latest/.test(r.stdout), 'a prerelease must NOT be published under latest');
 });
@@ -240,14 +267,14 @@ test('a stable version still publishes under latest', () => {
   // Both directions: routing prereleases to rc must not have moved stable releases off latest.
   const r = runTag('host-v1.2.3', { notes: ['host/1.2.3.md'], pkgVersion: '1.2.3' });
   assert.equal(r.status, 0, `stable tag should be accepted: ${r.stderr}`);
-  assert.match(r.stdout, /npm publish [^\n]*--tag latest\b/,
+  assert.match(r.stdout, new RegExp(SUBMIT + ' [^\\n]*--tag latest\\b'),
     `stable must publish under latest, got:\n${r.stdout}`);
 });
 
 test('a prerelease fleet tag publishes fleet under rc too', () => {
   const r = runTag('fleet-v2.0.0-beta.3', { notes: ['fleet/2.0.0-beta.3.md'], pkgVersion: '2.0.0-beta.3' });
   assert.equal(r.status, 0, `fleet prerelease should be accepted: ${r.stderr}`);
-  assert.match(r.stdout, /npm publish [^\n]*--tag beta\b/,
+  assert.match(r.stdout, new RegExp(SUBMIT + ' [^\\n]*--tag beta\\b'),
     `fleet beta must publish under beta, got:\n${r.stdout}`);
 });
 
@@ -257,7 +284,7 @@ test('a prerelease with no alphabetic identifier publishes under next, never lat
   // empty tag would either error or, worse, be dropped and leave npm on its `latest` default.
   const r = runTag('host-v1.0.0-1', { notes: ['host/1.0.0-1.md'], pkgVersion: '1.0.0-1' });
   assert.equal(r.status, 0, `should be accepted: ${r.stderr}`);
-  assert.match(r.stdout, /npm publish [^\n]*--tag next\b/,
+  assert.match(r.stdout, new RegExp(SUBMIT + ' [^\\n]*--tag next\\b'),
     `numeric-only prerelease must use next, got:\n${r.stdout}`);
   assert.ok(!/--tag latest/.test(r.stdout), 'a prerelease must never reach latest');
 });
@@ -291,7 +318,7 @@ test('a missing NPM_TOKEN refuses the tag BEFORE the release is created (issue #
     `expected a refusal naming both auth modes: ${r.stderr}`);
   assert.ok(!/gh release create/.test(r.stdout),
     'the release must NOT be created when the credential is missing -- that is the whole point');
-  assert.ok(!/npm publish/.test(r.stdout), 'nothing should be published either');
+  assert.ok(!new RegExp(SUBMIT).test(r.stdout), 'nothing should be submitted either');
 });
 
 test('a present credential still creates the release and publishes', () => {
@@ -299,7 +326,62 @@ test('a present credential still creates the release and publishes', () => {
   const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
   assert.equal(r.status, 0, `valid credential should publish: ${r.stderr}`);
   assert.match(r.stdout, /gh release create/);
-  assert.match(r.stdout, /npm publish/);
+  assert.match(r.stdout, new RegExp(SUBMIT));
+});
+
+test('the package is staged rather than published directly, by default', () => {
+  // npm is removing direct publish from 2FA-bypassing tokens and recommends that CI configurations
+  // stage; staging is also the only mode the surviving credential can actually reach, and without
+  // it the job aborts before the Homebrew bundle and formula are ever built. `npm stage publish`
+  // is `npm publish` with stage=true (npm/cli lib/commands/stage/publish.js), so the flags carry
+  // over unchanged.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /npm submission mode: stage publish/, `expected staging by default: ${r.stdout}`);
+  assert.match(r.stdout, /npm stage publish --access public --provenance/);
+});
+
+test('a staged release says the npm package is awaiting approval', () => {
+  // The release notes are committed before the run and cannot know the submission was only staged.
+  // Without this notice the page tells a user to `npm install` a version that does not resolve --
+  // the same class of overstatement as the deleted cli-* tag, reached from the other direction.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.notesOut, /awaiting maintainer approval/, 'release notes must disclose the staged state');
+  assert.match(r.notesOut, /already live/, 'and must say the Homebrew path is unaffected');
+});
+
+test('NPM_DIRECT_PUBLISH publishes straight to the registry and adds no approval notice', () => {
+  // An OIDC configuration with direct publishing enabled does not want a human in the loop, and a
+  // "pending approval" notice on a version that IS live would be its own falsehood.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], directPublish: 'true' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /npm submission mode: publish$/m, `expected direct mode: ${r.stdout}`);
+  assert.ok(!/npm stage publish/.test(r.stdout), 'must not stage in direct mode');
+  assert.ok(!/awaiting maintainer approval/.test(r.notesOut), `notes must stay clean:\n${r.notesOut}`);
+});
+
+test('an npm without staging support falls back to direct publishing', () => {
+  // Staging needs npm >= 11.15, verified against the published tarballs (absent from 11.14.0,
+  // present in 11.15.0). The runner's npm comes from the node version, so the step probes for it;
+  // assuming it would break the release on any runner whose node ships an older npm.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmHasStage: false });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /npm submission mode: publish$/m, `expected the fallback: ${r.stdout}`);
+  assert.match(r.stdout, /\bnpm publish --access public/);
+  assert.ok(!/awaiting maintainer approval/.test(r.notesOut), 'a direct publish is not pending');
+});
+
+test('staging still happens before the release is created', () => {
+  // The ordering property is about the submission whatever it is called. If staging moved after
+  // `gh release create`, a staging failure would leave a public release with no package at all.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  assert.equal(r.status, 0, r.stderr);
+  const calls = r.stdout.split('\n').filter((l) => /^(npm|gh|git) /.test(l));
+  const submit = calls.findIndex((l) => new RegExp('^' + SUBMIT + '\\b').test(l));
+  const release = calls.findIndex((l) => l.startsWith('gh release create'));
+  assert.ok(submit >= 0 && release >= 0, `expected both calls, got: ${calls.join(' | ')}`);
+  assert.ok(submit < release, `staging must precede the release, got: ${calls.join(' | ')}`);
 });
 
 test('no credential at all still publishes when the runner offers an OIDC id-token', () => {
@@ -310,7 +392,7 @@ test('no credential at all still publishes when the runner offers an OIDC id-tok
   const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmToken: '', oidc: true });
   assert.equal(r.status, 0, `OIDC mode should publish, got exit ${r.status}: ${r.stderr}`);
   assert.match(r.stdout, /publish auth: OIDC/, 'expected the log to name the auth mode');
-  assert.match(r.stdout, /npm publish/, 'expected a publish attempt');
+  assert.match(r.stdout, new RegExp(SUBMIT), 'expected an npm submission attempt');
   assert.match(r.stdout, /gh release create/, 'expected the release to be created');
 });
 
@@ -322,7 +404,7 @@ test('OIDC mode publishes verbosely so npm states why a trusted-publishing confi
   // in the run log instead of in the reader's head.
   const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmToken: '', oidc: true });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /npm publish[^\n]*--loglevel verbose/, `expected a verbose publish: ${r.stdout}`);
+  assert.match(r.stdout, new RegExp(SUBMIT + '[^\\n]*--loglevel verbose'), `expected a verbose submission: ${r.stdout}`);
 });
 
 test('a token is preferred over OIDC and publishes at normal log level', () => {
@@ -332,7 +414,7 @@ test('a token is preferred over OIDC and publishes at normal log level', () => {
   const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmToken: 'npm-placeholder-token', oidc: true });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /publish auth: NPM_TOKEN/, 'the token must win when both are present');
-  assert.match(r.stdout, /npm publish[^\n]*--loglevel normal/);
+  assert.match(r.stdout, new RegExp(SUBMIT + '[^\\n]*--loglevel normal'));
 });
 
 test('OIDC mode removes the empty project-scope token that setup-node writes', () => {
@@ -377,7 +459,7 @@ test('dependencies are installed before anything compiles', () => {
   assert.equal(r.status, 0, `release should succeed: ${r.stderr}`);
   const calls = r.stdout.split('\n').filter((l) => /^(npm|gh|node) /.test(l));
   const ci = calls.findIndex((l) => /^npm ci\b/.test(l));
-  const publish = calls.findIndex((l) => /^npm publish\b/.test(l));
+  const publish = calls.findIndex((l) => new RegExp('^' + SUBMIT + '\\b').test(l));
   assert.ok(ci >= 0, `expected an "npm ci" call, got: ${calls.join(' | ')}`);
   assert.ok(publish >= 0, `expected an "npm publish" call, got: ${calls.join(' | ')}`);
   assert.ok(ci < publish, 'npm ci must run before npm publish, otherwise the build has no compiler');
@@ -390,11 +472,11 @@ test('the GitHub Release is created only after a successful publish', () => {
   const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
   assert.equal(r.status, 0, `release should succeed: ${r.stderr}`);
   const calls = r.stdout.split('\n').filter((l) => /^(npm|gh) /.test(l));
-  const publish = calls.findIndex((l) => /^npm publish\b/.test(l));
+  const publish = calls.findIndex((l) => new RegExp('^' + SUBMIT + '\\b').test(l));
   const created = calls.findIndex((l) => /^gh release create\b/.test(l));
   assert.ok(publish >= 0 && created >= 0, `expected both calls, got: ${calls.join(' | ')}`);
   assert.ok(publish < created,
-    `npm publish must precede gh release create, got order: ${calls.join(' | ')}`);
+    `the npm submission must precede gh release create, got order: ${calls.join(' | ')}`);
 });
 
 test('a host release attaches the Homebrew bundle', () => {
