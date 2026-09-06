@@ -74,6 +74,15 @@ function runTag(
       writeFileSync(join(tmp, 'docs', 'releases', note), `# ${note}\n\nbody long enough to not be a stub.\n`);
     }
 
+    // The step builds the Homebrew bundle with the real repo script. In this throwaway tree there is
+    // no dist/ and no dependency tree, so the real script would correctly refuse and every test here
+    // would fail for a reason unrelated to what it is checking. Substitute one that reports a bundle
+    // the way the real script does; the bundle's own behaviour is covered by test/bundle.test.ts.
+    mkdirSync(join(tmp, 'scripts'), { recursive: true });
+    writeFileSync(join(tmp, 'scripts', 'build-bundle.mjs'),
+      'console.log(JSON.stringify({ tarball: process.argv[process.argv.indexOf("--out") + 1] '
+      + '+ "/mercury-fake-bundle.tar.gz", version: "0.0.0", sha256: "f".repeat(64) }));\n');
+
     // Stub the only two external commands the step uses, and record what it asked for.
     const bin = join(tmp, 'bin');
     mkdirSync(bin);
@@ -99,6 +108,9 @@ function runTag(
         // developer's shell happens to export NODE_AUTH_TOKEN -- locally-green, CI-red, or the reverse.
         // The default is a non-empty placeholder: present-but-fake, which is all the guard checks.
         NODE_AUTH_TOKEN: opts.npmToken ?? 'npm-token-placeholder',
+        // The step writes the bundle under $RUNNER_TEMP. With `set -u` an unset value aborts the
+        // step, so it is provided here exactly as the runner would provide it.
+        RUNNER_TEMP: tmp,
       },
     });
     const calls = existsSync(join(tmp, 'calls.log')) ? readFileSync(join(tmp, 'calls.log'), 'utf8') : '';
@@ -248,4 +260,57 @@ test('a present credential still creates the release and publishes', () => {
   assert.equal(r.status, 0, `valid credential should publish: ${r.stderr}`);
   assert.match(r.stdout, /gh release create/);
   assert.match(r.stdout, /npm publish/);
+});
+
+test('dependencies are installed before anything compiles', () => {
+  // setup-node does not install dependencies, and `npm publish` runs `prepare`, which runs tsc. With
+  // no install step the publish dies with "tsc: not found" -- and did so after the release had
+  // already been created. No tag had ever been pushed, so this path had never run.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  assert.equal(r.status, 0, `release should succeed: ${r.stderr}`);
+  const calls = r.stdout.split('\n').filter((l) => /^(npm|gh|node) /.test(l));
+  const ci = calls.findIndex((l) => /^npm ci\b/.test(l));
+  const publish = calls.findIndex((l) => /^npm publish\b/.test(l));
+  assert.ok(ci >= 0, `expected an "npm ci" call, got: ${calls.join(' | ')}`);
+  assert.ok(publish >= 0, `expected an "npm publish" call, got: ${calls.join(' | ')}`);
+  assert.ok(ci < publish, 'npm ci must run before npm publish, otherwise the build has no compiler');
+});
+
+test('the GitHub Release is created only after a successful publish', () => {
+  // Ordering, not mere presence: `gh release create` needs only contents:write, so it succeeds even
+  // when the publish afterwards fails. A release created first therefore advertises a version nobody
+  // can install. #265 guarded the missing-credential case; this guards every other publish failure.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  assert.equal(r.status, 0, `release should succeed: ${r.stderr}`);
+  const calls = r.stdout.split('\n').filter((l) => /^(npm|gh) /.test(l));
+  const publish = calls.findIndex((l) => /^npm publish\b/.test(l));
+  const created = calls.findIndex((l) => /^gh release create\b/.test(l));
+  assert.ok(publish >= 0 && created >= 0, `expected both calls, got: ${calls.join(' | ')}`);
+  assert.ok(publish < created,
+    `npm publish must precede gh release create, got order: ${calls.join(' | ')}`);
+});
+
+test('a host release attaches the Homebrew bundle', () => {
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  assert.equal(r.status, 0, `release should succeed: ${r.stderr}`);
+  const created = r.stdout.split('\n').find((l) => l.startsWith('gh release create'));
+  assert.ok(created, 'no gh release create call');
+  assert.match(created, /mercury-fake-bundle\.tar\.gz/,
+    `the host release must attach the bundle so the formula has something to point at: ${created}`);
+  assert.match(r.stdout, /bundle sha256=[0-9a-f]{64}/,
+    'the host step must report the bundle sha256; that value is what the formula pins');
+});
+
+test('a fleet release attaches no bundle, because Fleet has no formula', () => {
+  const r = runTag(`fleet-v${V}`, { notes: [`fleet/${V}.md`] });
+  assert.equal(r.status, 0, `fleet release should succeed: ${r.stderr}`);
+  const created = r.stdout.split('\n').find((l) => l.startsWith('gh release create'));
+  assert.ok(created, 'no gh release create call');
+  assert.ok(!/bundle/.test(created), `fleet release should carry no bundle: ${created}`);
+  // The build itself runs under `node`, which is not stubbed, so it leaves no line in the call log.
+  // What the step does emit is the bundle report, so that is the observable signal that the bundle
+  // branch ran at all. Asserting on the script name instead was vacuous and survived a mutation that
+  // made every fleet tag build a bundle it has no use for.
+  assert.ok(!/bundle sha256=/.test(r.stdout),
+    `a fleet tag must not build the Homebrew bundle; step output was: ${r.stdout}`);
 });

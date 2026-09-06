@@ -2,7 +2,7 @@
 
 How Mercury reaches an operator. Three channels, one release train.
 
-Status header: npm and GitHub Release implemented; Homebrew designed and prototype-validated but **not yet wired into CI**. See the guard in `test/releaseHygiene.test.ts` — this line must agree with what `release.yml` actually builds.
+Status header: npm and GitHub Release implemented; the Homebrew bundle is built and attached by `release.yml`, and the `mercury-ai` formula is validated but **not yet published to the tap**. See the guard in `test/releaseHygiene.test.ts` — this line must agree with what `release.yml` actually builds.
 
 ## Channels
 
@@ -11,7 +11,7 @@ Status header: npm and GitHub Release implemented; Homebrew designed and prototy
 | npm | `npm install -g @aywengo/mercury@<tag>` | host + `mercuryctl` | implemented, blocked on `NPM_TOKEN` |
 | GitHub Release | download asset, or `git clone` | host + `mercuryctl` | implemented |
 | Git checkout | `git clone` + `npm ci` | host + `mercuryctl` | implemented (see #266) |
-| Homebrew | `brew tap aywengo/tap && brew install mercury-ai` | host + `mercuryctl` | validated locally, not wired |
+| Homebrew | `brew tap aywengo/tap && brew install mercury-ai` | host + `mercuryctl` | bundle built by CI; formula pending in the tap |
 
 Host and CLI are **one artifact**. There is no CLI-only channel and no separate CLI
 version: `package.json` `bin` carries both `mercury` and `mercuryctl`, so any install
@@ -45,6 +45,11 @@ The footprint is small because the production dependency tree is a single packag
 (`express`, 68 packages transitively, 3.9 MB).
 
 Name: `mercury-<version>-bundle.tar.gz`, attached to the `host-v<version>` GitHub Release.
+Built by `scripts/build-bundle.mjs`, whose staged file list is **derived from
+`package.json` `files`** rather than repeated: two hand-maintained lists is how the npm
+tarball and the bundle would drift, and the drift would only appear after install. The
+script refuses outright if `files` names a path that does not exist, rather than staging
+what it happened to find.
 
 ## Homebrew
 
@@ -128,9 +133,15 @@ reported no findings. The audit drove three earlier corrections (drop the redund
 
 ### Version and sha256 updates
 
-The bundle is reproducible from a release tag, so CI can compute `sha256` and open a bump
-PR against `aywengo/homebrew-tap` as a release step. The formula must never be updated by
-hand to a version whose bundle is not already attached to a published release.
+`release.yml` builds the bundle, prints `bundle sha256=<digest>`, and attaches the
+artifact; the digest printed is the digest the formula must pin, and
+`test/bundle.test.ts` asserts the script reports the sha256 of the bytes it actually wrote.
+The remaining step is publishing `Formula/mercury-ai.rb` to `aywengo/homebrew-tap`.
+
+The formula must never be updated by hand to a version whose bundle is not already attached
+to a published release. Ordering in the workflow enforces the related hazard: the bundle is
+built before the release exists, and `npm publish` runs before `gh release create`, so a
+failed publish cannot leave a public release advertising an uninstallable version.
 
 ## Release procedure
 

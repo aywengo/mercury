@@ -375,7 +375,11 @@ test('docs/distribution.md agrees with what the release workflow actually produc
     `docs/distribution.md status header must state exactly one Homebrew wiring status, got: ${header}`);
 
   const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
-  const buildsBundle = /bundle\.tar\.gz/.test(wf);
+  // Detect the wiring itself, not the artifact filename. The first version looked for the literal
+  // "bundle.tar.gz" in the workflow, but the workflow only invokes scripts/build-bundle.mjs and the
+  // script chooses the filename -- so the guard reported "consistent" while the doc was already
+  // stale. A proxy that the implementation never produces is indistinguishable from a passing test.
+  const buildsBundle = /build-bundle\.mjs/.test(wf);
   assert.equal(saysWired, buildsBundle,
     buildsBundle
       ? 'release.yml builds the Homebrew bundle but docs/distribution.md still describes Homebrew as unwired'
