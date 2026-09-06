@@ -1,5 +1,9 @@
 # Mercury
 
+<p align="center">
+  <img src="docs/assets/mercury-hero.png" width="800" alt="Mercury: a harness for harnesses. Mercury orchestrates; agents like PrimeAgent, Claude Code, Hermes and Codex write the code.">
+</p>
+
 Mercury is a durable control plane for long-running coding agents, managing
 runs, state, workspaces, events, retries, and human input independently of
 browser sessions. Agents execute the coding work, while Mercury safely
