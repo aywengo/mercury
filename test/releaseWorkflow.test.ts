@@ -60,7 +60,7 @@ interface Run {
 function runTag(
   tag: string,
   opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
-    directPublish?: string; npmHasStage?: boolean } = {},
+    directPublish?: string; npmHasStage?: boolean; npmFails?: boolean } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -106,7 +106,11 @@ function runTag(
       // assertion below, and STUB_NPM_STAGE_RC lets a test simulate an npm too old to stage.
       const body = cmd === 'npm'
         ? '#!/bin/sh\ncase "$*" in\n  "stage --help") exit "${STUB_NPM_STAGE_RC:-0}" ;;\nesac\n'
-          + `echo "npm $*" >> "${tmp}/calls.log"\nexit 0\n`
+          + 'echo "npm $*" >> "' + tmp + '/calls.log"\n'
+          // Scoped to the submission: --provenance appears only on the publish/stage call. Failing
+          // on every npm call instead also killed `npm ci`, which made three tests fail for a reason
+          // that had nothing to do with what they were checking.
+          + 'case "$*" in\n  *--provenance*) exit "${STUB_NPM_SUBMIT_RC:-0}" ;;\nesac\nexit 0\n'
         : `#!/bin/sh\necho "${cmd} $*" >> "${tmp}/calls.log"\nexit 0\n`;
       writeFileSync(stub, body);
       chmodSync(stub, 0o755);
@@ -155,6 +159,9 @@ function runTag(
         NPM_DIRECT_PUBLISH: opts.directPublish ?? '',
         // 1 makes `npm stage --help` fail, i.e. an npm older than 11.15 with no staging support.
         STUB_NPM_STAGE_RC: opts.npmHasStage === false ? '1' : '0',
+        // Makes the submission itself fail while leaving the `stage --help` capability probe alone,
+        // so a test can model "npm is unreachable" without modelling "npm is too old".
+        STUB_NPM_SUBMIT_RC: opts.npmFails ? '1' : '0',
         // The step writes the bundle under $RUNNER_TEMP. With `set -u` an unset value aborts the
         // step, so it is provided here exactly as the runner would provide it.
         RUNNER_TEMP: tmp,
@@ -327,6 +334,45 @@ test('a present credential still creates the release and publishes', () => {
   assert.equal(r.status, 0, `valid credential should publish: ${r.stderr}`);
   assert.match(r.stdout, /gh release create/);
   assert.match(r.stdout, new RegExp(SUBMIT));
+});
+
+test('an npm failure still produces the release, the bundle and the formula', () => {
+  // The coupling this removes was costing the whole Homebrew channel: the bundle and the formula
+  // need nothing from npm, yet an abort at the npm call meant neither was ever built (issue #277).
+  // The invariant is that the release body accurately describes what is installable -- not that a
+  // release requires npm to have worked.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmFails: true });
+  const calls = r.stdout.split('\n').filter((l) => /^(npm|gh|git) /.test(l));
+  assert.match(r.stderr, /npm submission FAILED/, 'the failure must be reported');
+  assert.ok(calls.some((l) => l.startsWith('gh release create')), `release must still be created: ${calls.join(' | ')}`);
+  assert.ok(calls.some((l) => l.startsWith('gh release create') && l.includes('bundle')),
+    'the Homebrew bundle must still be attached');
+  assert.ok(calls.some((l) => l.startsWith('git push')), `the formula must still be pushed: ${calls.join(' | ')}`);
+});
+
+test('an npm failure is disclosed on the release body, not hidden', () => {
+  // A body that stayed silent would advertise an `npm install` that does not resolve -- the same
+  // overstatement class as the deleted cli-* tag.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmFails: true });
+  assert.match(r.notesOut, /npm package not available for this release/, `body must disclose it:\n${r.notesOut}`);
+  assert.match(r.notesOut, /brew install/, 'and point at the channel that does work');
+});
+
+test('an npm failure still fails the job, after everything installable exists', () => {
+  // Red must survive the decoupling, or a missing npm package becomes invisible. What changed is
+  // only WHEN it fails: after the release and formula, so red means "npm needs attention" rather
+  // than "nobody can install Mercury".
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmFails: true });
+  assert.equal(r.status, 1, 'the job must still go red when npm failed');
+  assert.match(r.stderr, /Homebrew and the release asset are live/);
+});
+
+test('a successful submission does not claim the npm package is unavailable', () => {
+  // Both directions, or the disclosure becomes a permanent warning label that nobody reads.
+  const ok = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.ok(!/npm package not available/.test(ok.notesOut), `clean run must stay clean:\n${ok.notesOut}`);
+  assert.match(ok.notesOut, /awaiting maintainer approval/, 'staged state is still disclosed');
 });
 
 test('the package is staged rather than published directly, by default', () => {

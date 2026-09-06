@@ -177,17 +177,53 @@ jobs:
           fi
           echo "npm submission mode: ${npm_verb}"
 
+          # Submit to npm, but do not let npm decide whether Mercury is installable at all.
+          #
+          # The invariant this job protects is NOT "never create a release unless npm succeeded". It is
+          # "the release body must accurately describe what is installable". #265 and #271 enforced the
+          # first by refusing to create a release at all, which was right while the only way for the body
+          # to be accurate was for npm to have worked. It stopped being right the moment npm became
+          # unreachable for reasons this repository cannot fix: the bundle, the GitHub Release and the
+          # formula are a complete installable path that needs nothing from npm, and aborting here let a
+          # registry policy change take the Homebrew channel down with it (issue #277).
+          #
+          # So npm failure is now recorded, disclosed on the release page, and reported as a failed job at
+          # the very END. The job still goes red -- a silently green release with no npm package is exactly
+          # the half-release this repo has repeatedly refused -- but red now means "npm needs attention",
+          # not "nobody can install Mercury".
+          npm_ok=1
           if [ "$product" = "host" ]; then
-            npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel"
+            npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel" || npm_ok=0
           elif [ "$product" = "fleet" ]; then
             cp LICENSE fleet/LICENSE
-            (cd fleet && npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel")
+            (cd fleet && npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel") || npm_ok=0
+          fi
+          if [ "$npm_ok" = "1" ]; then
+            echo "npm submission succeeded (${npm_verb})"
+          else
+            echo "npm submission FAILED (${npm_verb}); continuing so the Homebrew artifacts are still produced" >&2
           fi
 
-          # A staged package is not installable yet, and the release notes are committed before the run
-          # and cannot know. So say it HERE, on the page a user actually reads, rather than letting the
-          # notes imply an npm install that would fail. The Homebrew path is unaffected.
-          if [ "$npm_verb" = "stage publish" ]; then
+          # The release notes are committed before the run and cannot know how the submission went, so the
+          # body is completed here. Every npm state gets its own wording; a body that stayed silent would
+          # advertise an `npm install` that does not resolve, which is the overstatement class of the
+          # deleted cli-* tag.
+          if [ "$npm_ok" = "0" ]; then
+            {
+              echo ""
+              echo "## npm package not available for this release"
+              echo ""
+              echo "The \`npm ${npm_verb}\` step failed, so this version is **not** on the npm registry."
+              echo "Do not follow any \`npm install\` instruction below for this version."
+              echo ""
+              echo "Install this release without npm:"
+              echo ""
+              echo "- Homebrew: \`brew install aywengo/mercury/mercury-ai\`"
+              echo "- The asset attached to this release: download and unpack the bundle."
+              echo ""
+              echo "The job that produced this release is marked failed so the npm gap stays visible."
+            } >> "$notes"
+          elif [ "$npm_verb" = "stage publish" ]; then
             {
               echo ""
               echo "## npm package awaiting maintainer approval"
@@ -224,4 +260,15 @@ jobs:
               git commit -m "release: Homebrew formula ${version}"
               git push "https://github.com/${GITHUB_REPOSITORY}.git" HEAD:main
             fi
+          fi
+
+          # Fail LAST. Everything a user can install has been produced by now: the release, its bundle,
+          # the formula. Failing here rather than at the npm call is what keeps the Homebrew channel alive
+          # through an npm outage while still refusing to pretend the npm channel worked. Red means "npm
+          # needs attention", not "Mercury cannot be installed".
+          if [ "$npm_ok" = "0" ]; then
+            echo "::warning::npm ${npm_verb} failed for ${tag}; the GitHub Release and Homebrew formula were still produced"
+            echo "npm submission failed for ${tag}." >&2
+            echo "Homebrew and the release asset are live; see the release body for what is and is not installable." >&2
+            exit 1
           fi
