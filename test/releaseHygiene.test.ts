@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { HOST_PRODUCT, HOST_VERSION } from '../src/version.ts';
 
@@ -21,11 +21,16 @@ function latestChangelogVersion(text: string): string | undefined {
   return [...text.matchAll(/^## \[(\d+\.\d+\.\d+)\]/gm)].map((m) => m[1])[0];
 }
 
-function spawnCli(args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function spawnCli(
+  args: string[],
+  extraEnv: Record<string, string> = {},
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [join(ROOT, 'src', 'cli.ts'), ...args], {
       cwd: ROOT,
-      env: { ...process.env },
+      // Default is exactly the previous behaviour; the override exists so one test can prove --help
+      // does not depend on a usable configuration.
+      env: { ...process.env, ...extraEnv },
     });
     let stdout = '';
     let stderr = '';
@@ -202,4 +207,70 @@ test('releasing.md tells an operator how to cut a CLI release and what it publis
     'the doc must state that a cli tag publishes notes and not the artifact');
   assert.match(doc, /arrives with the next `host-vX\.Y\.Z` tag/,
     'the doc must say when the CLI artifact actually reaches users');
+});
+
+// ---------------------------------------------------------------------------
+// `mercury --help` (issue #254)
+//
+// Asking for help is not an error, but the server CLI had no --help branch at all: it fell through to
+// the shared unknown-command path, so `mercury --help` printed usage to stderr and exited 1. That makes
+// `mercury --help > usage.txt` capture nothing and `mercury --help && ...` stop, and it makes the two
+// commands in this package disagree, because mercuryctl --help exits 0 on stdout.
+// ---------------------------------------------------------------------------
+
+const stripWarnings = (s: string): string =>
+  s.split('\n').filter((l) => l !== '' && !/ExperimentalWarning|trace-warnings/.test(l)).join('\n');
+
+test('mercury --help exits 0 and writes the command list to stdout', async () => {
+  const r = await spawnCli(['--help']);
+  assert.equal(r.code, 0, `--help must not be an error: ${r.stderr}`);
+  assert.equal(stripWarnings(r.stderr), '', `--help must not write to stderr: ${r.stderr}`);
+  assert.ok(r.stdout.length > 100, `--help produced almost nothing: ${JSON.stringify(r.stdout)}`);
+  // Every command the CLI actually accepts has to appear, or the help text is a subset that an operator
+  // will treat as the whole surface.
+  for (const c of ['dev', 'server', 'worker', 'gc', 'migrate', 'redact-events']) {
+    assert.match(r.stdout, new RegExp(`^\\s+${c}\\b`, 'm'), `--help omits the ${c} command`);
+  }
+  assert.match(r.stdout, /--help/, 'usage must document --help itself');
+});
+
+test('mercury -h matches --help byte for byte', async () => {
+  const long = await spawnCli(['--help']);
+  const short = await spawnCli(['-h']);
+  assert.equal(short.code, 0, short.stderr);
+  assert.equal(short.stdout, long.stdout, '-h and --help must not diverge');
+});
+
+test('an unknown command is still an error, so help and nonsense stay distinguishable', async () => {
+  const r = await spawnCli(['definitely-not-a-command']);
+  assert.equal(r.code, 1, 'an unknown command must still fail');
+  assert.equal(r.stdout, '', `usage for an error must not pollute stdout: ${JSON.stringify(r.stdout)}`);
+  assert.match(r.stderr, /usage: mercury/);
+  // Same text, different stream and exit code -- the two paths share one source and must not drift.
+  const help = await spawnCli(['--help']);
+  assert.equal(stripWarnings(r.stderr), stripWarnings(help.stdout));
+});
+
+test('mercury --help works with an unusable database, unlike a real subcommand', async () => {
+  // Help is handled before loadConfig(), because the person reading help may be reading it precisely
+  // because their configuration is wrong. A help path that needs config is a help path that fails on
+  // the only machine that called it.
+  const r = await spawnCli(['--help'], { MERCURY_DB: '/dev/null/not-a-real-path/mercury.db' });
+  assert.equal(r.code, 0, `help must not depend on config: ${r.stderr}`);
+  assert.ok(r.stdout.length > 100);
+});
+
+test('both commands in this package answer --help the same way', async () => {
+  // The parity claim. Without it the two CLIs can drift back apart silently, since each file's own
+  // tests would still pass.
+  const server = await spawnCli(['--help']);
+  assert.equal(server.code, 0, `mercury --help: ${server.stderr}`);
+  const client = spawnSync(process.execPath, [join(ROOT, 'dist', 'client', 'bin.js'), '--help'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    timeout: 120_000,
+    env: { ...process.env, XDG_CONFIG_HOME: join(ROOT, 'no-such-config-dir') },
+  });
+  assert.equal(client.status, 0, `mercuryctl --help: ${client.stderr}`);
+  assert.equal(server.code, client.status, 'mercury and mercuryctl must agree on the --help exit code');
 });
