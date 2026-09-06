@@ -63,6 +63,16 @@ jobs:
             exit 1
           fi
 
+          # Check the publish credential BEFORE creating the release. `gh release create` needs only
+          # contents:write and will succeed with no NPM_TOKEN; the `npm publish` below then fails
+          # closed, leaving a public GitHub Release advertising a version that was never published --
+          # the same half-state that made the cli-* tag worth deleting. NODE_AUTH_TOKEN is already
+          # mapped from secrets.NPM_TOKEN on this step, so an empty value is exactly that condition.
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "refusing ${tag}: NPM_TOKEN is not configured; npm publish would fail after the release is created" >&2
+            exit 1
+          fi
+
           gh release create "$tag" --title "$title" --notes-file "$notes"
 
           # npm's default dist-tag is "latest" for ANY version, prerelease included -- `npm config get

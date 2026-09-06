@@ -51,7 +51,10 @@ function extractReleaseScript(): string {
 interface Run { status: number | null; stdout: string; stderr: string }
 
 /** Run the workflow step for one tag, in a throwaway tree with stubbed `gh` and `npm`. */
-function runTag(tag: string, opts: { notes?: string[]; pkgVersion?: string } = {}): Run {
+function runTag(
+  tag: string,
+  opts: { notes?: string[]; pkgVersion?: string; npmToken?: string } = {},
+): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
   const tmp = tempDir('release-step-');
@@ -86,7 +89,17 @@ function runTag(tag: string, opts: { notes?: string[]; pkgVersion?: string } = {
       cwd: tmp,
       encoding: 'utf8',
       timeout: 120_000,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GITHUB_REF: `refs/tags/${tag}`, GITHUB_REF_NAME: tag },
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        GITHUB_REF: `refs/tags/${tag}`,
+        GITHUB_REF_NAME: tag,
+        // Set explicitly rather than inherited. The step now refuses when the publish credential is
+        // absent, so inheriting process.env would make every test below depend on whether the
+        // developer's shell happens to export NODE_AUTH_TOKEN -- locally-green, CI-red, or the reverse.
+        // The default is a non-empty placeholder: present-but-fake, which is all the guard checks.
+        NODE_AUTH_TOKEN: opts.npmToken ?? 'npm-token-placeholder',
+      },
     });
     const calls = existsSync(join(tmp, 'calls.log')) ? readFileSync(join(tmp, 'calls.log'), 'utf8') : '';
     return { status: r.status, stdout: r.stdout + calls, stderr: r.stderr };
@@ -211,4 +224,28 @@ test('a malformed tag is refused before any product logic runs', () => {
   const r = runTag('v9.9.9', { notes: [] });
   assert.equal(r.status, 1, `bare v9.9.9 should be refused, got exit ${r.status}`);
   assert.match(r.stderr, /refusing tag v9\.9\.9/);
+});
+
+test('a missing NPM_TOKEN refuses the tag BEFORE the release is created (issue #264)', () => {
+  // gh release create needs only contents:write, so it succeeds with no credential; the npm publish
+  // afterwards then fails closed. The result was a public GitHub Release advertising a version that
+  // was never published -- the same half-state that made the cli-* tag worth deleting.
+  //
+  // The assertion that matters is not the exit code, it is that `gh release create` never ran. A guard
+  // placed after the release would also exit 1 and would leave the half-release behind, which is the
+  // exact bug being prevented.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmToken: '' });
+  assert.equal(r.status, 1, `missing credential should refuse, got exit ${r.status}`);
+  assert.match(r.stderr, /NPM_TOKEN is not configured/, `expected a named credential refusal: ${r.stderr}`);
+  assert.ok(!/gh release create/.test(r.stdout),
+    'the release must NOT be created when the credential is missing -- that is the whole point');
+  assert.ok(!/npm publish/.test(r.stdout), 'nothing should be published either');
+});
+
+test('a present credential still creates the release and publishes', () => {
+  // Both directions: the guard must not refuse a correctly configured release.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  assert.equal(r.status, 0, `valid credential should publish: ${r.stderr}`);
+  assert.match(r.stdout, /gh release create/);
+  assert.match(r.stdout, /npm publish/);
 });
