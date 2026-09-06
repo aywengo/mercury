@@ -171,6 +171,21 @@ built before the release exists, and `npm publish` runs before `gh release creat
 failed publish cannot leave a public release advertising an uninstallable version.
 
 ## Release procedure
+## First release only
+
+The package does not exist on npm yet, and no token can create it: `npm publish` answers `E404`
+and `npm stage publish` answers `E401` for a package that has never existed, while reads with the
+same token succeed. Creating the first version is an interactive action.
+
+1. `npm login` in an account with 2FA, then `npm publish --access public` from a clean checkout
+   of the tag -- or stage it and approve on npmjs.com.
+2. Once the package exists, configure trusted publishing on its npmjs.com settings page
+   (repository `aywengo/mercury`, workflow `release.yml`, event `push`).
+3. From then on a tag push needs no credential at all: `release.yml` uses the runner's OIDC
+   id-token, and `NPM_TOKEN` can be deleted.
+
+Everything after the first release is the procedure below.
+
 
 1. Prepare the release (versions, notes, changelog) — `docs/releasing.md`.
 2. Tag `host-v<version>`. `release.yml`:
@@ -225,16 +240,26 @@ ever run, and it got as far as the publish before npm refused it:
   formula was pushed. The half-release that #265 and #271 were written to prevent did not
   occur, observed rather than asserted.
 
-What the credential can and cannot do, measured against the live registry:
+What the credential can and cannot do, measured against the live registry. Two granular
+tokens were tried; both behaved identically, so this is the credential class, not a typo.
 
-- `npm whoami` succeeds, so the token is valid.
-- Direct publish is refused (`E404 PUT`). npm is removing direct publish from 2FA-bypassing
-  granular tokens, and its own docs list only two ways to publish a scoped package directly:
-  account 2FA, or such a token.
-- **`npm stage list` succeeds**, so the staging API accepts this credential. Staged publishing
-  deliberately needs no 2FA to submit, which is what makes CI able to reach the registry at all
-  under the current policy -- and it is the difference between the job producing Homebrew
-  artifacts and aborting before it gets there.
+- `npm whoami` succeeds, so the token is valid and belongs to the account.
+- `npm stage list @aywengo/mercury` succeeds.
+- `npm publish` is refused with `E404 PUT /@aywengo%2fmercury`.
+- `npm stage publish` is refused with `E401 Unable to authenticate`.
+
+Reads succeed and both write paths fail, by two different codes, for a package that does not
+exist yet. The reading that holds is that **no token route can create the first version of a
+new package here**: npm is removing direct publish from 2FA-bypassing granular tokens
+(github.blog changelog, 2026-07-31), and its docs list only account 2FA or such a token as ways
+to publish a scoped package directly.
+
+An earlier revision of this page cited the successful `npm stage list` as proof that "the
+staging API accepts this credential". That was wrong, and it is worth keeping the wrongness on
+record: `stage list` is a GET, and a successful read says nothing about whether the POST is
+authorised. The very next release run answered that with `E401`. The failure mode is the same
+one this repository has hit repeatedly -- treating a signal adjacent to the thing being claimed
+as evidence for it.
 
 Still not observed, and the reason the channels are not yet installable:
 
