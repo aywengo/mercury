@@ -15,6 +15,12 @@ import { dirname, resolve } from 'node:path';
  * manifest is matched by name on purpose: reaching a `package.json` that belongs to a *consumer* would
  * mean the walk escaped the package, and returning that directory would resolve every data path to a
  * plausible-looking place full of nothing. Running off the filesystem root therefore throws.
+ *
+ * The boundary, measured rather than assumed: the first match wins, so a parent workspace manifest
+ * that reuses this name is never reached -- an install whose own manifest is intact always resolves
+ * to itself. The one layout that does return a wrong root is a package whose own manifest has been
+ * deleted while an identically named ancestor survives, which is not a state npm produces. It is
+ * recorded here because that failure is the silent kind this function exists to prevent.
  */
 export function packageRoot(): string {
   let dir = import.meta.dirname;
