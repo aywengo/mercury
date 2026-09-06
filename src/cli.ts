@@ -43,9 +43,10 @@ import { selectPrimeAgentAdapter } from './adapters/selectAgentAdapter.ts';
 import { SandboxManager } from './sandbox/sandboxManager.ts';
 import { Worker } from './worker/worker.ts';
 import { startServer } from './api/server.ts';
+import { dataPath } from './paths.ts';
 import { HOST_VERSION } from './version.ts';
 
-const SKILLS_DIR = resolve(import.meta.dirname, '..', '.agents', 'skills');
+const SKILLS_DIR = dataPath('.agents', 'skills');
 
 async function main(): Promise<void> {
   const [cmd, ...args] = process.argv.slice(2);
@@ -140,18 +141,18 @@ async function main(): Promise<void> {
     // declarative local CLI agents (docs/agent-adapters.md section 4):
     // JSON configs in MERCURY_LOCAL_AGENTS_DIR (default ./local-agents)
     ...new LocalAgentRegistry(
-      process.env.MERCURY_LOCAL_AGENTS_DIR ?? resolve(import.meta.dirname, '..', 'local-agents'),
+      process.env.MERCURY_LOCAL_AGENTS_DIR ?? dataPath('local-agents'),
       { sandbox, workerId },
     ).load(),
     // declarative remote API agents (docs/agent-adapters.md section 5):
     // JSON configs in MERCURY_REMOTE_AGENTS_DIR (default ./remote-agents)
     ...new RemoteAgentRegistry(
-      process.env.MERCURY_REMOTE_AGENTS_DIR ?? resolve(import.meta.dirname, '..', 'remote-agents'),
+      process.env.MERCURY_REMOTE_AGENTS_DIR ?? dataPath('remote-agents'),
     ).load(),
     // declarative RPC agents (docs/agent-adapters.md section 6):
     // JSON configs in MERCURY_RPC_AGENTS_DIR (default ./rpc-agents)
     ...new RpcAgentRegistry(
-      process.env.MERCURY_RPC_AGENTS_DIR ?? resolve(import.meta.dirname, '..', 'rpc-agents'),
+      process.env.MERCURY_RPC_AGENTS_DIR ?? dataPath('rpc-agents'),
       { sandbox, workerId },
     ).load(),
   };
