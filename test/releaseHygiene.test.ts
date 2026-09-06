@@ -111,3 +111,57 @@ test('mercury --version prints mercury-host <version> and does not start a serve
   assert.equal(r.stdout, `mercury-host ${HOST_VERSION}\n`);
   assert.doesNotMatch(r.stdout, /fleet/);
 });
+
+test('releasing.md does not describe the CLI as future or reserved', () => {
+  // #245: docs/releasing.md gained a correct "## The CLI" section in #242 but kept the opening line and
+  // product table written before mercuryctl existed, so the same page said the CLI both exists and does
+  // not. These are steps an operator follows while cutting a release, so a stale one causes a wrong action.
+  const doc = read('docs/releasing.md');
+  const stale: RegExp[] = [
+    /future\s+`?mercuryctl`?/i,
+    /`cli-vX\.Y\.Z`\s+reserved/,
+    /reserved until [`']?mercuryctl/i,
+    /\|\s*none yet\s*\|/,
+  ];
+  for (const pattern of stale) {
+    assert.ok(!pattern.test(doc), `releasing.md still claims the CLI does not exist: ${pattern}`);
+  }
+});
+
+test('the CLI product row states the facts a releaser needs', () => {
+  const doc = read('docs/releasing.md');
+  const row = doc.split('\n').find((l) => /^\|\s*CLI\s*\|/.test(l));
+  assert.ok(row, 'the product table must keep a CLI row');
+  const cells = row.split('|').map((s) => s.trim()).filter((s) => s.length > 0);
+  assert.equal(cells.length, 5, `CLI row must keep all five columns, got ${cells.length}: ${row}`);
+  // The client ships inside @aywengo/mercury, so there is no separate manifest to bump. The row used to
+  // leave this blank as "none yet", which hid the one fact a CLI release depends on.
+  assert.match(cells[1], /package\.json/, 'the CLI version comes from the root package.json');
+  assert.match(cells[2], /cli-vX\.Y\.Z/);
+  assert.ok(!/reserved/i.test(cells[2]), 'the cli tag is live, not reserved');
+  assert.match(cells[3], /host package|@aywengo\/mercury/, 'the CLI ships in the host package, not its own');
+  assert.match(cells[4], /docs\/releases\/cli/, 'the notes column must name the notes path');
+});
+
+test('step 6 says which products publish, so a CLI tag does not promise a package', () => {
+  const doc = read('docs/releasing.md');
+  const start = doc.indexOf('6. [');
+  assert.ok(start >= 0, 'the release procedure must keep its numbered step 6');
+  const step6 = doc.slice(start, doc.indexOf('The `NPM_TOKEN`', start) > start ? doc.indexOf('The `NPM_TOKEN`', start) : start + 900);
+  // The workflow publishes for host and fleet only. Saying it publishes "for that product" reads as all
+  // three, so someone cutting a cli tag waits for a package that is never coming.
+  assert.match(step6, /host/, 'step 6 must name the products that publish');
+  assert.match(step6, /fleet/);
+  assert.match(step6, /cli/i);
+  assert.match(step6, /no npm publish|does not publish|publish(es|ing)? nothing|no separate/i,
+    'step 6 must state that a cli tag publishes nothing');
+});
+
+test('release.yml states the real CLI policy instead of denying the CLI exists', () => {
+  const wf = read('.github/workflows/release.yml');
+  // The branch echoed this to stderr on every cli tag while continuing, so it told the person cutting the
+  // release that the thing they were releasing did not exist. Same shape as the guard #242 replaced.
+  assert.ok(!/reserved until [`']?mercuryctl exists/i.test(wf),
+    'release.yml still prints that the CLI does not exist');
+  assert.match(wf, /no separate npm package/i, 'the cli branch must state the actual policy');
+});
