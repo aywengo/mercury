@@ -8,8 +8,10 @@ from CI.
 
 The recommended design uses:
 
-- Docker Compose for process, network and filesystem isolation;
-- Node and TypeScript for orchestration and assertions;
+- [Testcontainers for Node](https://node.testcontainers.org/) for container lifecycle,
+  readiness, logs and cleanup;
+- Docker Compose for declarative process, network and filesystem topology;
+- Node's built-in test runner for scenarios and assertions;
 - Mercury's existing fake agent for the default system journey;
 - the existing mock PrimeAgent RPC fixture for deterministic adapter coverage;
 - explicit opt-in tiers for real agents and Mercury's own container sandbox.
@@ -73,7 +75,8 @@ The framework should:
 1. Provide one memorable local command before opening a PR.
 2. Test the current checkout, including uncommitted changes.
 3. Run dependency installation, typechecking, existing tests and system E2E in a
-   clean Linux environment.
+   clean Linux application environment. The host test process acts only as the
+   Testcontainers controller and public API client.
 4. Start the API and worker as separate processes.
 5. Drive Mercury only through public HTTP and SSE interfaces.
 6. Avoid real LLM calls, provider credentials and external network dependencies in
@@ -96,7 +99,8 @@ The first implementation should not:
 - require PrimeAgent, Hermes, Claude, provider credentials or an LLM;
 - mount the Docker socket in the default stack;
 - prove Docker or Podman behavior inside Mercury's `SandboxManager`;
-- test the dashboard in a browser;
+- test the dashboard in a browser in the initial API/worker phase; Playwright belongs
+  in a later dashboard-specific phase;
 - include Fleet in the host system journey;
 - test deployment units, reverse proxies, TLS or backup restoration;
 - provide load, soak, chaos or performance testing;
@@ -109,37 +113,55 @@ The framework is a final confidence layer, not a second copy of the full test su
 
 ## 4. Design decisions
 
-### 4.1 Use Node and TypeScript for control and assertions
+### 4.1 Use Testcontainers Node for lifecycle
 
 The repository already uses Node's built-in test runner and requires Node 22.18 or
-newer. A Node orchestrator can:
+newer. The harness should use the MIT-licensed `testcontainers` package rather than
+implementing Docker lifecycle with direct `docker compose` subprocess calls.
 
-- spawn commands with argument arrays instead of shell interpolation;
-- apply an `AbortSignal` deadline to each child process;
-- consume stdout and stderr without deadlocking on full pipes;
-- make HTTP requests and parse SSE without adding curl or jq;
-- share assertion conventions with the existing tests;
-- handle macOS without depending on GNU `timeout`.
+Testcontainers owns:
+
+- unique Compose project allocation;
+- image build and service startup;
+- health, port and one-shot wait strategies;
+- random host-port discovery;
+- bounded startup;
+- container status and log access;
+- explicit teardown;
+- Ryuk resource-reaper registration as a crash-cleanup backstop.
+
+The harness still uses `node:test` for scenario structure and assertions, built-in
+`fetch` for REST, and a small Mercury-specific SSE parser. `node:test` deadlines and
+request-level abort signals remain necessary because container readiness is not the
+same as scenario completion.
 
 A small shell wrapper would be acceptable as a convenience entry point, but it
 should not own lifecycle, timeout or assertion logic.
 
-### 4.2 Use Docker Compose for topology
+### 4.2 Retain Docker Compose for topology
 
 Compose describes the production-shaped process graph clearly and is available with
-Docker Desktop on macOS. The default runtime stack needs three long-lived or
-one-shot services:
+Docker Desktop on macOS. Testcontainers should load the Compose file through
+`DockerComposeEnvironment`; it should not duplicate service definitions in
+`GenericContainer` calls.
 
+The default Compose topology needs four services:
+
+- `verify`: a one-shot typecheck and existing-test service;
+- `fixture`: a one-shot Git repository initializer;
 - `api`: `node src/cli.ts server`;
-- `worker`: `node src/cli.ts worker`;
-- `e2e-runner`: a one-shot Node test process.
+- `worker`: `node src/cli.ts worker`.
 
-A separate `verify` service runs typechecking and the existing core and Fleet tests
-before the system stack starts.
+The full pre-PR entry point first starts `verify` alone in a short-lived Compose
+environment and tears it down. It then starts the system environment. Within that
+environment, Compose completion dependencies ensure `fixture` exits successfully
+before API and worker start. The focused E2E command skips the verification
+environment.
 
-Compose is preferred over adding Testcontainers because the topology is small,
-declarative and does not justify another runtime dependency. The Node orchestrator
-still owns sequencing and failure reporting.
+The host `node:test` process is the E2E client and Testcontainers controller. It is
+not a Compose service. Keeping Compose declarative makes the process graph easy to
+inspect and permits direct `docker compose config` validation, while Testcontainers
+removes custom lifecycle and cleanup code.
 
 ### 4.3 Build an image from the current checkout
 
@@ -173,7 +195,8 @@ version.
 
 ### 4.4 Isolate runtime state in a named volume
 
-API, worker and runner share one named volume mounted at the same absolute path:
+API, worker and the one-shot fixture service share one named volume mounted at the
+same absolute path:
 
 ```text
 /state/
@@ -189,7 +212,8 @@ API, worker and runner share one named volume mounted at the same absolute path:
 The same path in every container avoids ambiguity in persisted workspace paths and
 Git worktree metadata.
 
-The runner creates `fixture-repo` before submitting a Run:
+The `fixture` service creates `fixture-repo` and exits successfully before the
+worker accepts Runs:
 
 1. `git init --initial-branch=main`;
 2. configure a fixture-only author name and email;
@@ -212,20 +236,22 @@ The Run request uses:
 This exercises Mercury's normal `git-worktree` path rather than weakening the test
 with copy mode.
 
-### 4.5 Keep runtime networking internal
+### 4.5 Publish only a random loopback API port
 
-The Compose runtime network should be internal. The API does not need a host port:
-the E2E runner calls `http://api:3000` over the Compose network.
+The host `node:test` process needs to call the API. Compose should publish container
+port 3000 to a random host port bound only to `127.0.0.1`. Testcontainers discovers
+the mapped port from the started `api` container; no test should assume host port
+3000.
 
 Benefits:
 
 - no collision with a developer's local port 3000;
-- no accidental exposure on the workstation;
-- no external network access during deterministic scenarios;
+- no exposure beyond host loopback;
 - parallel runs can use independent Compose project names.
 
-The API must bind `0.0.0.0` inside its container. This is safe because it is attached
-only to the private test network and no port is published.
+The API must bind `0.0.0.0` inside its container so Docker can forward the mapped
+port. API and worker otherwise use a private Compose network. Runtime services do not
+need external network access for deterministic scenarios.
 
 Image pulls and `npm ci` need network access during image build. Runtime scenarios
 do not.
@@ -248,19 +274,21 @@ The default gate passes no model-provider credentials. It performs no LLM calls.
 
 ```mermaid
 flowchart LR
-  Host["Developer workstation"] --> Orchestrator["Bounded Node orchestrator"]
-  Orchestrator --> Verify["verify container"]
-  Orchestrator --> Api["API container"]
-  Orchestrator --> Worker["worker container"]
-  Orchestrator --> Runner["E2E runner container"]
+  HostTest["Host node:test process"] --> Testcontainers["Testcontainers Node"]
+  Testcontainers --> VerifyCompose["Short-lived verify Compose environment"]
+  Testcontainers --> SystemCompose["System Compose environment"]
+  VerifyCompose --> Verify["verify one-shot container"]
+  SystemCompose --> FixtureInit["fixture one-shot container"]
+  SystemCompose --> Api["API container"]
+  SystemCompose --> Worker["worker container"]
 
   Api --> Db["SQLite WAL in named volume"]
   Worker --> Db
   Worker --> Workspaces["Git workspaces in named volume"]
-  Runner --> Fixture["Fixture Git repo in named volume"]
+  FixtureInit --> Fixture["Fixture Git repo in named volume"]
   Worker --> Fixture
 
-  Runner -->|"HTTP and SSE"| Api
+  HostTest -->|"Random loopback port: HTTP and SSE"| Api
   Worker --> Fake["Fake agent"]
   Worker --> MockRpc["Mock PrimeAgent RPC process"]
 ```
@@ -278,6 +306,18 @@ existing local quality gate:
 3. run `npm test`.
 
 It does not start Mercury and does not share the runtime state volume.
+
+#### `fixture`
+
+One-shot service that:
+
+- initializes `/state/fixture-repo` on the shared named volume;
+- configures a fixture-only Git identity;
+- creates a `main` branch and initial commit;
+- exits zero only when the repository is ready.
+
+Testcontainers treats this as a one-shot startup dependency. API and worker start
+only after it completes successfully.
 
 #### `api`
 
@@ -299,17 +339,19 @@ Long-lived service that:
 - executes fake or mock-RPC adapters;
 - shuts down gracefully when Compose sends `SIGTERM`.
 
-#### `e2e-runner`
+#### Host `node:test` harness
 
-One-shot service that:
+The host test process:
 
-- initializes the fixture Git repository;
-- waits for API startup with a bounded deadline;
+- creates `DockerComposeEnvironment`;
+- applies health and one-shot wait strategies;
+- discovers the API's random loopback port;
 - proves worker availability by completing a probe Run;
 - executes sequential public-API scenarios;
-- exits zero only when every assertion passes.
+- retrieves bounded service logs on failure;
+- explicitly tears down the environment in test cleanup.
 
-The runner must not import Mercury stores, database modules or worker internals.
+The harness must not import Mercury stores, database modules or worker internals.
 Importing domain types for compile-time response typing is acceptable, but runtime
 behavior must be observed through HTTP and SSE.
 
@@ -333,16 +375,18 @@ MERCURY_PRIMEAGENT_CMD=/usr/local/bin/node
 MERCURY_PRIMEAGENT_ARGS=/app/test/fixtures/mock-prime-agent-rpc.mjs
 ```
 
-The values are test-only and contain no real secret. The runner receives only:
+The values are test-only and contain no real secret. The host harness owns only:
 
 ```text
-MERCURY_E2E_BASE_URL=http://api:3000
 MERCURY_E2E_TOKEN=tok-alice
 MERCURY_E2E_OTHER_TOKEN=tok-bob
-MERCURY_E2E_REPOSITORY=/state/fixture-repo
 ```
 
-The E2E-specific prefix prevents confusion with product configuration.
+The base URL is constructed from the mapped API host and port returned by
+Testcontainers. The submitted repository path remains
+`/state/fixture-repo`, which is a path interpreted by the worker container rather
+than the host. The E2E-specific prefix prevents confusion with product
+configuration.
 
 `/healthz/workers` is not sufficient worker readiness when the queue is idle:
 the endpoint reports active Run leases, so a healthy idle worker can produce an
@@ -370,52 +414,59 @@ npm run test:e2e:config
 The full gate should not be added to `npm test`. `npm test` must remain fast and
 usable without Docker.
 
-The implementation should also expose the underlying direct command:
+The implementation should also expose the focused underlying test command:
 
 ```bash
-node e2e/run.ts
+node --test --test-timeout=900000 e2e/system.test.ts
 ```
 
-Useful proposed flags:
+Useful proposed debugging variables:
 
 ```text
---e2e-only       skip the verify service
---keep-on-fail   retain the failed Compose project for inspection
---verbose        stream service logs while scenarios run
+MERCURY_E2E_KEEP_ON_FAIL=1
+MERCURY_E2E_VERBOSE=1
 ```
 
-The default remains cleanup-on-failure. `--keep-on-fail` is an explicit debugging
-escape hatch, and the orchestrator must print the exact cleanup command when it is
-used.
+The default remains cleanup-on-failure. Keep-on-fail disables Testcontainers auto
+cleanup for that run and skips explicit teardown only after a failure. It is an
+explicit debugging escape hatch, and the harness must print the Compose project
+name and exact cleanup command when it is used.
 
 ---
 
 ## 8. Orchestration lifecycle
 
-The host orchestrator owns the whole lifecycle.
+The host `node:test` harness owns the high-level sequence. Testcontainers owns
+container and Compose lifecycle operations.
 
 ```mermaid
 flowchart TD
-  Preflight[Preflight] --> Build[Build immutable image]
-  Build --> Verify[Run typecheck and existing tests]
-  Verify --> Start[Start API and worker]
-  Start --> Health[Wait for API health]
-  Health --> Scenarios[Run E2E scenarios]
+  Preflight[Preflight Docker runtime] --> Build[Build immutable image]
+  Build --> VerifyEnv["Create verify Compose environment"]
+  VerifyEnv --> Verify["Run verify with one-shot wait"]
+  Verify --> VerifyDown["Tear down verify environment"]
+  VerifyDown --> SystemEnv["Create system Compose environment"]
+  SystemEnv --> Fixture["Run fixture with one-shot wait"]
+  Fixture --> Start[Start API and worker]
+  Start --> Health["Wait for API health and mapped port"]
+  Health --> Scenarios["Run node:test scenarios"]
   Scenarios --> Success{All passed}
-  Success -->|yes| Cleanup[Remove stack and volume]
-  Success -->|no| Diagnose[Capture status and logs]
-  Diagnose --> Cleanup
+  Success -->|yes| Cleanup["Explicit down with volumes"]
+  Success -->|no| Diagnose["Capture Testcontainers status and logs"]
+  Diagnose --> Keep{Keep on fail}
+  Keep -->|no| Cleanup
+  Keep -->|yes| Retain["Retain project and print cleanup command"]
   Cleanup --> Result[Return original exit status]
+  Retain --> Result
 ```
 
 ### 8.1 Preflight
 
-Before building, verify:
+Before creating the environment, verify:
 
 - Node satisfies the repository floor;
-- `docker version` succeeds;
-- `docker compose version` succeeds;
-- the Docker daemon is reachable;
+- Testcontainers can discover a supported container runtime;
+- Docker Compose v2 is available to `DockerComposeEnvironment`;
 - the required Compose file exists;
 - no unsupported opt-in tier was requested.
 
@@ -423,28 +474,35 @@ Preflight failure should be short and actionable. It should not leave resources.
 
 ### 8.2 Unique project identity
 
-Generate a Compose project name from:
-
-- a fixed `mercury-e2e` prefix;
-- the orchestrator process ID;
-- a short random suffix.
+Use Testcontainers' unique Compose project name by default. If a human-readable
+name is needed for diagnostics, set an explicit name containing a fixed
+`mercury-e2e` prefix and a generated unique suffix. Never use one global project
+name.
 
 This allows two worktrees or terminals to run E2E concurrently without sharing
 containers, networks or volumes.
 
-### 8.3 Stage execution
+### 8.3 Wait strategies and deadlines
 
-Every spawned command uses:
+Use framework-native waits for container lifecycle:
 
-- an argument array;
-- inherited interactive output or captured output that is drained continuously;
-- an external deadline;
-- a clear stage label;
-- termination escalation from `SIGTERM` to `SIGKILL` when necessary.
+- one-shot wait strategies for `verify` and `fixture`;
+- the API health check for `api`;
+- normal running-state startup for `worker`;
+- a completed fake Run for API-to-worker readiness.
 
-Suggested initial outer deadlines:
+Testcontainers readiness does not bound HTTP scenarios. The test harness must also
+use:
 
-- preflight command: 30 seconds each;
+- the Node test timeout as an outer suite deadline;
+- explicit Testcontainers startup timeouts;
+- `AbortSignal.timeout()` or an equivalent signal for every HTTP request;
+- absolute deadlines for Run polling and SSE consumption;
+- a bounded timeout for explicit environment teardown.
+
+Suggested initial ceilings:
+
+- runtime discovery: 30 seconds;
 - image build, including first pull and `npm ci`: 10 minutes;
 - typecheck plus current tests: 3 minutes;
 - service startup: 30 seconds;
@@ -456,16 +514,19 @@ Suggested initial outer deadlines:
 These are safety ceilings, not expected durations. The current typecheck and full
 suite normally complete much faster.
 
-### 8.4 Signal handling
+### 8.4 Cleanup and process exit
 
-On `SIGINT`, `SIGTERM`, normal completion or an exception:
+Use two cleanup layers:
 
-1. stop accepting new work;
-2. preserve the first failure or signal as the final result;
-3. request Compose shutdown;
-4. collect logs first if the result is a failure;
-5. remove the project and named volume unless `--keep-on-fail` was selected;
-6. exit with a non-zero status for interruption or failure.
+1. an explicit test cleanup hook calls `down` with volume removal and a bounded
+   timeout;
+2. Testcontainers registers the Compose project with Ryuk, which removes resources
+   if the Node process exits before explicit cleanup.
+
+On assertion failure, collect logs before explicit teardown. On `SIGINT`, `SIGTERM`
+or an unexpected process exit, Ryuk is the backstop. Keep-on-fail must disable auto
+cleanup deliberately; otherwise a debugging stack would disappear when the test
+process exits.
 
 Cleanup errors must be reported but must not replace the original test failure.
 
@@ -595,10 +656,11 @@ On failure, report:
 - scenario name and Run id, if available;
 - last HTTP status and bounded response body;
 - last observed Run status and event sequence;
-- `docker compose ps` output;
-- bounded API and worker logs;
+- Testcontainers container state for each Compose service;
+- bounded API, worker, fixture and verify logs;
 - whether cleanup succeeded;
-- retained project name and cleanup command when `--keep-on-fail` is active.
+- retained project name and cleanup command when
+  `MERCURY_E2E_KEEP_ON_FAIL=1` is active.
 
 Large output should be written to a temporary host directory such as:
 
@@ -607,7 +669,9 @@ Large output should be written to a temporary host directory such as:
   compose-ps.txt
   api.log
   worker.log
-  runner.log
+  fixture.log
+  verify.log
+  harness.log
   summary.json
 ```
 
@@ -625,16 +689,19 @@ must add redaction before logs are persisted.
 
 The proposed default gate isolates:
 
-- Node dependencies from host `node_modules`;
-- Linux runtime behavior from macOS host behavior;
+- application dependencies from the host through `npm ci` in the test image;
+- Mercury's Linux runtime behavior from macOS host behavior;
 - API and worker into separate processes and containers;
 - database, repositories and workspaces in a unique disposable volume;
-- service traffic on a private Compose network;
-- concurrent runs through unique Compose project names;
+- API/worker traffic on a private Compose network, with only a random loopback API
+  port published for the host harness;
+- concurrent runs through Testcontainers-managed unique Compose project names;
 - process users from container root after image setup.
 
 It does not provide a hostile-code security boundary. Docker itself and the image
-build remain trusted developer tooling.
+build remain trusted developer tooling. The Testcontainers library and `node:test`
+harness run on the host and therefore use the host checkout and development
+dependencies; they do not execute Mercury agents or mutate the source tree.
 
 ### 12.2 No host source mount
 
@@ -644,13 +711,15 @@ macOS and Linux.
 
 The only current-checkout exposure is Docker's read-only build context transfer.
 
-### 12.3 No Docker socket by default
+### 12.3 No Docker socket in Mercury containers by default
 
 Never mount `/var/run/docker.sock` in the default pre-PR gate.
 
 A container with access to that socket can create privileged containers and mount
 host paths. It is effectively able to control the host Docker daemon. Calling that
-configuration "isolated" would be misleading.
+configuration "isolated" would be misleading. Testcontainers necessarily connects
+to the developer's Docker daemon from the trusted host test process; that does not
+require exposing the socket inside the API or worker container.
 
 ### 12.4 Secrets
 
@@ -725,7 +794,8 @@ Example proposed acknowledgement:
 MERCURY_E2E_ALLOW_DOCKER_SOCKET=1
 ```
 
-Without that exact value, the orchestrator should refuse the sandbox tier.
+Without that exact value, the Testcontainers harness should refuse the sandbox
+tier.
 
 ### 14.2 Why not Docker-in-Docker first
 
@@ -750,7 +820,7 @@ The opt-in sandbox scenario should prove:
 - CPU and memory options appear on the real container;
 - allowed-network behavior matches the requested policy;
 - the child container is removed on success, failure and cancellation;
-- no child container remains after orchestrator cleanup.
+- no child container remains after Testcontainers cleanup.
 
 Disk limits should remain separately opt-in because Docker storage drivers do not
 support them uniformly.
@@ -767,8 +837,8 @@ e2e/
   Dockerfile
   compose.yml
   compose.sandbox.yml
-  run.ts
   helpers.ts
+  prepr.test.ts
   system.test.ts
   README.md
 docs/
@@ -777,7 +847,8 @@ docs/
 
 Prospective modifications:
 
-- `package.json`: add local `prepr` and E2E scripts;
+- `package.json`: add `testcontainers` as a development dependency plus local
+  `prepr` and E2E scripts;
 - `tsconfig.json`: include `e2e/` in typechecking;
 - `docs/testing.md`: link to the implemented local workflow;
 - `.gitignore`: ignore only local E2E credential or artifact paths if needed.
@@ -810,9 +881,9 @@ Rejected as the primary design because:
 - child output can deadlock if pipes are not drained;
 - structured diagnostics and reusable polling are harder.
 
-A thin shell launcher may still call the Node orchestrator.
+A thin shell launcher may still call the `node:test` entry point.
 
-### 16.2 Host-only split-process tests
+### 16.2 Host-native Mercury processes
 
 Advantages:
 
@@ -823,6 +894,9 @@ Advantages:
 Not selected as the final gate because it does not isolate dependencies, Linux
 runtime behavior, ports or filesystem state. A host-only test can be a focused
 developer loop later, but it should exercise the same scenario module as Docker.
+This is distinct from the selected design's trusted host test process: in the
+selected design, only the controller and HTTP client are host-side; Mercury itself
+still runs in containers.
 
 ### 16.3 One container with embedded worker
 
@@ -840,17 +914,44 @@ in-process behavior well.
 Advantages:
 
 - container lifecycle in TypeScript;
-- dynamic ports and logs;
-- programmatic composition.
+- `DockerComposeEnvironment` preserves the declarative Compose topology;
+- dynamic loopback ports and framework-native readiness waits;
+- direct container state and log access;
+- explicit teardown plus Ryuk crash cleanup;
+- one-shot startup support for verification and fixture services;
+- maintained, MIT-licensed Node package.
 
-Deferred because Compose already describes the required topology without a new npm
-dependency. Reconsider only if Compose orchestration becomes difficult to maintain.
+Selected as the lifecycle framework. Its host-side development dependency and
+Docker daemon requirement are acceptable because the product processes and mutable
+state remain containerized. Mercury-specific Run readiness, polling, SSE parsing and
+diagnostics still belong in the test harness.
 
-### 16.5 Browser E2E
+### 16.5 Dagger
+
+Dagger can model the complete pre-PR flow as a container-native pipeline with
+service bindings. It is a reasonable alternative if Mercury later wants one
+portable pipeline abstraction shared across local development and CI.
+
+It is not selected because this workflow is intentionally local-only, Compose
+already expresses the production topology, and adopting the Dagger engine and SDK
+would add a larger operational model than this test layer needs.
+
+### 16.6 Hurl
+
+Hurl is useful for concise HTTP assertions and can exercise finite SSE responses,
+but it does not remove the need for Docker lifecycle, dynamic Run ids, terminal
+state polling, human-input sequencing or detailed event-order diagnostics.
+
+It may be useful for a tiny smoke file later, but it should not split the primary
+scenario language between Hurl and Node without a demonstrated benefit.
+
+### 16.7 Playwright dashboard E2E
 
 Playwright would validate the dashboard but would not close the primary API/worker
-gap. Browser testing should be a separate later proposal with its own maintenance
-budget.
+gap. Add it later as a separate dashboard phase after the deterministic backend
+journey is stable. One or two browser journeys should reuse the same Testcontainers
+Compose environment and assert visible UI behavior; they should not duplicate every
+REST and SSE framing assertion.
 
 ---
 
@@ -868,7 +969,8 @@ Deliverable:
 Acceptance gate:
 
 - goals and non-goals are agreed;
-- Docker Compose plus Node is accepted;
+- Testcontainers Node plus `node:test` is accepted, with Compose retained for
+  topology;
 - deterministic and opt-in tiers are clearly separated;
 - no implementation or CI behavior changes.
 
@@ -879,7 +981,9 @@ Deliverables:
 - `.dockerignore`;
 - `e2e/Dockerfile`;
 - `e2e/compose.yml`;
-- a minimal bounded orchestrator with preflight, build, start and teardown;
+- `testcontainers` development dependency;
+- a minimal `DockerComposeEnvironment` test fixture with startup and teardown;
+- one-shot fixture repository initialization;
 - Compose configuration validation.
 
 Acceptance gate:
@@ -887,8 +991,10 @@ Acceptance gate:
 - image builds from a clean checkout and from a dirty working tree;
 - API and worker start as non-root separate containers;
 - both use one named SQLite/workspace volume;
-- no host port, source bind mount, credential or Docker socket is present;
-- interrupting startup removes the project and volume;
+- only a random loopback API port is published;
+- no source bind mount, credential or Docker socket is present in Mercury
+  containers;
+- explicit teardown and Ryuk both remove the project and volume;
 - existing `npm test` behavior is unchanged.
 
 Recommended PR boundary: foundation only, with a basic health probe but no broad
@@ -901,7 +1007,7 @@ Deliverables:
 - disposable Git fixture creation;
 - public HTTP and SSE helpers;
 - API/auth, fake lifecycle and owner-scoping scenarios;
-- failure log collection;
+- Testcontainers state and failure-log collection;
 - `npm run test:e2e`.
 
 Acceptance gate:
@@ -919,6 +1025,7 @@ Recommended PR boundary: the first useful E2E command.
 Deliverables:
 
 - `verify` service;
+- one-shot wait strategy for `verify`;
 - `npm run prepr`;
 - stage summaries and independent deadlines;
 - local usage and troubleshooting documentation.
@@ -958,14 +1065,14 @@ Deliverables:
 - parallel-project collision test;
 - signal and timeout fault-injection tests;
 - log size caps;
-- `--keep-on-fail` and `--verbose`;
+- `MERCURY_E2E_KEEP_ON_FAIL` and `MERCURY_E2E_VERBOSE`;
 - disk-space and stale-project troubleshooting.
 
 Acceptance gate:
 
 - two E2E projects can run concurrently;
-- a hung child cannot hang the orchestrator;
-- `SIGINT` and `SIGTERM` clean up;
+- a hung service or request cannot hang the test process;
+- explicit teardown and Ryuk cover normal failure and abrupt process exit;
 - cleanup failure does not hide the original failure;
 - retained projects print exact inspection and cleanup commands.
 
@@ -1010,6 +1117,26 @@ Acceptance gate:
 
 This phase is optional and security-sensitive.
 
+### Phase 8 — Playwright dashboard journey
+
+Deliverables:
+
+- Playwright development dependency and browser provisioning;
+- one dashboard login/create/observe journey;
+- one live SSE-driven UI update assertion;
+- reuse of the existing Testcontainers Compose fixture.
+
+Acceptance gate:
+
+- the backend E2E suite remains browser-free and independently runnable;
+- browser scenarios assert user-visible behavior rather than duplicating REST
+  assertions;
+- browser startup and downloads have separate bounded deadlines;
+- Playwright remains an optional later local tier until its maintenance cost is
+  understood.
+
+This phase is optional and begins only after the API/worker E2E suite is stable.
+
 ---
 
 ## 18. Suggested pull-request sequence
@@ -1017,12 +1144,13 @@ This phase is optional and security-sensitive.
 Keep implementation changes reviewable:
 
 1. **Design PR** — this document only.
-2. **Foundation PR** — image, Compose model, bounded lifecycle and health.
+2. **Foundation PR** — image, Compose model, Testcontainers lifecycle and health.
 3. **System journey PR** — fixture repository, fake Run, SSE and diagnostics.
 4. **Pre-PR command PR** — verifier, package scripts and user documentation.
 5. **Mock RPC PR** — human-input adapter journey.
 6. **Hardening PRs** — only for failure modes observed or deliberately injected.
 7. **Optional compatibility PRs** — real agent and sandbox, separately.
+8. **Optional dashboard PR** — Playwright only after backend E2E is stable.
 
 Do not combine the Docker-socket tier with the deterministic foundation. The
 security review and operational trade-offs are materially different.
@@ -1035,8 +1163,9 @@ security review and operational trade-offs are materially different.
 
 Risk: Docker is not installed, the daemon is stopped or Compose v2 is missing.
 
-Mitigation: fail during preflight with the exact failed prerequisite. Keep
-`npm test` Docker-free.
+Mitigation: let Testcontainers runtime discovery fail during preflight and add a
+short Mercury-specific explanation of the missing prerequisite. Keep `npm test`
+Docker-free.
 
 ### Slow first build
 
@@ -1049,8 +1178,35 @@ stage timer.
 
 Risk: process crashes or workstation shutdown bypasses cleanup.
 
-Mitigation: unique project prefix and labels, plus a documented command to list and
-remove stale `mercury-e2e-*` projects and volumes.
+Mitigation: use Testcontainers auto cleanup and Ryuk in addition to explicit
+teardown, unique project names and labels. Document how to list and remove stale
+`mercury-e2e-*` projects and volumes.
+
+### Resource reaper restrictions
+
+Risk: a local Docker policy prevents Ryuk from starting or accessing the Docker
+daemon.
+
+Mitigation: report the Testcontainers failure directly, retain explicit teardown as
+the normal path, and document any supported Testcontainers reaper configuration.
+Do not silently disable cleanup.
+
+### Host harness dependency
+
+Risk: the host `node:test` process needs the `testcontainers` development dependency
+even though Mercury itself runs in an isolated image.
+
+Mitigation: require the repository's normal `npm ci` or `npm install` bootstrap,
+pin Testcontainers in the lockfile, and keep product verification inside the
+`verify` container.
+
+### Loopback port publication
+
+Risk: a fixed or broadly bound host port collides with another process or exposes
+the test API.
+
+Mitigation: let Docker allocate the port dynamically, bind it to `127.0.0.1`, and
+obtain the actual mapping from Testcontainers.
 
 ### SQLite filesystem behavior
 
@@ -1099,13 +1255,17 @@ warning and unique resource labels.
 The framework is complete for its initial scope when:
 
 - `npm run prepr` is the only command a developer needs to remember;
-- it tests an immutable copy of the current checkout in Linux containers;
+- Testcontainers manages a Compose environment with explicit teardown and Ryuk
+  cleanup;
+- it tests an immutable application copy of the current checkout in Linux
+  containers;
 - dependency installation, typechecking and existing tests run before system E2E;
 - API and worker run separately against one SQLite WAL database;
-- an external runner completes a fake Run through public API and SSE interfaces;
+- a host `node:test` client reaches the API through a random loopback port and
+  completes a fake Run through public API and SSE interfaces;
 - a mock PrimeAgent Run completes a human-input round trip;
 - no real LLM, provider credential, external runtime service or Docker socket is
-  required;
+  required inside Mercury containers;
 - failures identify the stage, process and last system observation;
 - all operations have external deadlines;
 - resources are removed on pass, failure and interruption;
@@ -1121,9 +1281,11 @@ definition.
 The recommended path is:
 
 1. keep the existing focused suites as the primary correctness layer;
-2. add a Docker Compose system layer for the missing process boundary;
-3. write orchestration and scenarios in Node/TypeScript;
-4. use fake and mock-RPC agents for deterministic coverage;
-5. run the full local gate explicitly before opening a PR;
-6. keep CI, real agents and nested Docker outside the default design;
-7. implement in small PRs, with the Docker-socket tier last and separately reviewed.
+2. use Testcontainers Node as the lifecycle framework;
+3. retain Docker Compose as the declarative system topology;
+4. write scenarios and assertions with `node:test`;
+5. use fake and mock-RPC agents for deterministic coverage;
+6. run the full local gate explicitly before opening a PR;
+7. keep CI, real agents and nested Docker outside the default design;
+8. add Playwright later as a separate dashboard phase;
+9. implement in small PRs, with the Docker-socket tier last and separately reviewed.
