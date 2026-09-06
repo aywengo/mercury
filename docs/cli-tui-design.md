@@ -10,10 +10,14 @@ credential layers; the read-only commands `mercuryctl agents list`, `runs list` 
 terminal outcome exit codes; and `config profiles`, `config current`, shell
 completion, `--version`, operator documentation and installable packaging.
 
-All ten Definition-of-done items in §18 are met, each by a named test. Milestone 5,
-the TUI, remains gated on demonstrated need and is deliberately unbuilt: §18 requires
-a TUI to meet those same guarantees through the shared client core, and no operator
-has yet asked for one.
+All ten Definition-of-done items in §18 are met, each by a named test -- though item
+5, "recover complete event history and follow live events", was only true after #247.
+The client had been truncating its own output to 64 KiB whenever stdout was a pipe, so
+`runs events --follow | jq` lost events while every test stayed green. See §15.3.1.
+
+Milestone 5, the TUI, remains gated on demonstrated need and is deliberately unbuilt:
+§18 requires a TUI to meet those same guarantees through the shared client core, and no
+operator has yet asked for one.
 
 Building milestones 0 to 4 found defects in the surface they touched rather than in
 this design. The published artifact could not run at all once installed. The client
@@ -731,6 +735,40 @@ Spawn the actual CLI and a fake or test Mercury server. Assert:
 
 Use asynchronous subprocesses for tests that communicate with an in-process
 HTTP server. A synchronous child would block the server's event loop.
+
+#### 15.3.1 The requirement this list forgot, which made it untestable
+
+The list above says "broken pipes exit quietly". It does not say that a pipe
+must receive the **whole** answer, and the omission cost more than the line
+cost: `mercuryctl` shipped truncating its own output to 64 KiB whenever stdout
+was a pipe.
+
+```
+mercuryctl runs list --no-color > file   # 1,900,049 bytes, ends at run-019999
+mercuryctl runs list --no-color | cat    #    65,536 bytes, ends mid-word
+```
+
+Exit 0, empty stderr. `bin.ts` ended with `process.exit(code)`; writes to a file
+and to a terminal are synchronous, so they land first, while writes to a pipe are
+asynchronous and the buffer is discarded. 65,536 is Node's stdout high-water mark,
+which is why the cutoff looks deliberate.
+
+`runs list | grep FAILED` reported nothing past roughly 690 Runs, and
+`runs events --follow | jq` lost events mid-stream -- the durable-recovery
+guarantee is the reason the client exists. Item 5 of §18 was therefore not met
+through a pipe, even though every test in this section was green.
+
+Two things made this survivable review. Every existing test captures stdout into
+a variable, which keeps the read side draining so the writes land; and a source
+checkout writes to a terminal or a file, so the bug cannot be reproduced from the
+place tests are written. The first test written for "broken pipes exit quietly"
+passed with the EPIPE handler deleted, because truncation meant the process
+stopped writing before `head` closed -- the bug above was hiding the missing
+coverage for a different one.
+
+So the assertion is a comparison rather than an absence: the same command through
+a pipe must produce byte-identical output to the same command redirected to a
+file, for both human and `--json` output. Fixed in #247.
 
 ### 15.4 Coupling test
 
