@@ -1,6 +1,6 @@
 {
   "name": "@aywengo/mercury",
-  "version": "0.1.0",
+  "version": "0.1.0-rc1",
   "private": false,
   "license": "MIT",
   "description": "Durable long-running coding orchestration for PrimeAgent and other agent backends",

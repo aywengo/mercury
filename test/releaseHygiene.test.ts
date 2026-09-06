@@ -18,7 +18,10 @@ const pkg = JSON.parse(read('package.json')) as {
 };
 
 function latestChangelogVersion(text: string): string | undefined {
-  return [...text.matchAll(/^## \[(\d+\.\d+\.\d+)\]/gm)].map((m) => m[1])[0];
+  // The optional prerelease group matters: with only \d+.\d+.\d+ the parser returns undefined for
+  // `## [0.1.0-rc1]`, so the guard comparing CHANGELOG to package.json silently loses its counterpart
+  // and fails with "latest version undefined" rather than a useful diff.
+  return [...text.matchAll(/^## \[(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\]/gm)].map((m) => m[1])[0];
 }
 
 function spawnCli(

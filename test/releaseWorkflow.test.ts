@@ -62,6 +62,10 @@ function runTag(tag: string, opts: { notes?: string[]; pkgVersion?: string } = {
     mkdirSync(join(tmp, 'fleet'), { recursive: true });
     writeFileSync(join(tmp, 'fleet', 'package.json'),
       JSON.stringify({ name: '@aywengo/mercury-fleet', version: opts.pkgVersion ?? pkg.version }));
+    // The fleet branch copies LICENSE into fleet/ before publishing. Without it the fleet PUBLISH path
+    // could not be exercised at all -- the only pre-existing fleet test asserted a version mismatch,
+    // which exits before the cp, so the gap stayed invisible.
+    writeFileSync(join(tmp, 'LICENSE'), 'MIT\n');
     for (const note of opts.notes ?? []) {
       mkdirSync(join(tmp, 'docs', 'releases', note.split('/')[0]), { recursive: true });
       writeFileSync(join(tmp, 'docs', 'releases', note), `# ${note}\n\nbody long enough to not be a stub.\n`);
@@ -153,6 +157,54 @@ test('a host tag with no notes file is still refused', () => {
   assert.equal(r.status, 1, `missing notes should refuse, got exit ${r.status}`);
   assert.match(r.stderr, /missing docs\/releases\/host\//);
   assert.ok(!/gh release create/.test(r.stdout), 'a tag with no notes must not create a release');
+});
+
+test('a prerelease host tag is accepted and published under dist-tag rc, not latest', () => {
+  // The whole point of the RC work. npm applies `latest` to ANY version published without --tag
+  // (`npm config get tag` prints "latest"), so publishing 0.1.0-rc1 the old way would have made
+  // `npm install @aywengo/mercury` resolve to the release candidate for everyone. The stubbed npm on
+  // PATH records the exact argv, so this asserts the flag the real publish would carry.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  assert.equal(r.status, 0, `a prerelease tag matching package.json must be accepted: ${r.stderr}`);
+  assert.match(r.stdout, new RegExp(`gh release create host-v${V.replace(/\./g, '\\.')}`));
+  assert.match(r.stdout, /npm publish [^\n]*--tag rc\b/,
+    `prerelease must publish under dist-tag rc, got:\n${r.stdout}`);
+  assert.ok(!/--tag latest/.test(r.stdout), 'a prerelease must NOT be published under latest');
+});
+
+test('a stable version still publishes under latest', () => {
+  // Both directions: routing prereleases to rc must not have moved stable releases off latest.
+  const r = runTag('host-v1.2.3', { notes: ['host/1.2.3.md'], pkgVersion: '1.2.3' });
+  assert.equal(r.status, 0, `stable tag should be accepted: ${r.stderr}`);
+  assert.match(r.stdout, /npm publish [^\n]*--tag latest\b/,
+    `stable must publish under latest, got:\n${r.stdout}`);
+});
+
+test('a prerelease fleet tag publishes fleet under rc too', () => {
+  const r = runTag('fleet-v2.0.0-beta.3', { notes: ['fleet/2.0.0-beta.3.md'], pkgVersion: '2.0.0-beta.3' });
+  assert.equal(r.status, 0, `fleet prerelease should be accepted: ${r.stderr}`);
+  assert.match(r.stdout, /npm publish [^\n]*--tag beta\b/,
+    `fleet beta must publish under beta, got:\n${r.stdout}`);
+});
+
+test('a prerelease with no alphabetic identifier publishes under next, never latest', () => {
+  // 1.0.0-1 has a numeric identifier, so stripping digits yields an empty string. Publishing that
+  // would mean `npm publish --tag ""`. The workflow falls back to `next`; without the fallback the
+  // empty tag would either error or, worse, be dropped and leave npm on its `latest` default.
+  const r = runTag('host-v1.0.0-1', { notes: ['host/1.0.0-1.md'], pkgVersion: '1.0.0-1' });
+  assert.equal(r.status, 0, `should be accepted: ${r.stderr}`);
+  assert.match(r.stdout, /npm publish [^\n]*--tag next\b/,
+    `numeric-only prerelease must use next, got:\n${r.stdout}`);
+  assert.ok(!/--tag latest/.test(r.stdout), 'a prerelease must never reach latest');
+});
+
+test('a prerelease tag that disagrees with package.json is still refused', () => {
+  // The #252 invariant must survive prerelease support: loosening the tag pattern must not loosen the
+  // manifest comparison, or 0.1.0-rc9 would publish against a package that says 0.1.0-rc1.
+  const r = runTag('host-v0.9.9-rc1', { notes: ['host/0.9.9-rc1.md'] });
+  assert.equal(r.status, 1, `mismatched prerelease should be refused, got exit ${r.status}`);
+  assert.match(r.stderr, /package\.json version/);
+  assert.ok(!/gh release create/.test(r.stdout), 'a refused tag must not create a release');
 });
 
 test('a malformed tag is refused before any product logic runs', () => {
