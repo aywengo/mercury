@@ -1,16 +1,31 @@
 # Mercury CLI and TUI design
 
-Status: **partly implemented.** Milestones 0 to 3 are implemented: the client
-contracts, transport, configuration and credential layers; the read-only commands
-`mercuryctl agents list`, `runs list` and `runs show`; the mutation commands
-`runs create`, `runs input`, `runs cancel` and `runs retry` with idempotency keys
-and confirmation; and the observation commands `runs events` and `runs watch` with
-paging, gap recovery, bounded reconnect and terminal outcome exit codes. Milestones 0 to 4
-are implemented. Milestone 4 (#233) added `config profiles` and `config current`,
-shell completion, `--version`, operator documentation, and the packaging checks --
-which found that the published artifact could not run at all, and that the client
-had two unsanitised display paths. The TUI in Milestone 5 remains gated on
-demonstrated need. See §16 for per-milestone status.
+Status: **the CLI design is implemented; the TUI is not.** Milestones 0 to 4 are
+done (issues #229, #230, #231, #232, #233), which is every milestone this design
+committed to building. That is: the client contracts, transport, configuration and
+credential layers; the read-only commands `mercuryctl agents list`, `runs list` and
+`runs show`; the mutation commands `runs create`, `runs input`, `runs cancel` and
+`runs retry` with idempotency keys and confirmation; the observation commands
+`runs events` and `runs watch` with paging, gap recovery, bounded reconnect and
+terminal outcome exit codes; and `config profiles`, `config current`, shell
+completion, `--version`, operator documentation and installable packaging.
+
+All ten Definition-of-done items in §18 are met, each by a named test -- though item
+5, "recover complete event history and follow live events", was only true after #247.
+The client had been truncating its own output to 64 KiB whenever stdout was a pipe, so
+`runs events --follow | jq` lost events while every test stayed green. See §15.3.1.
+
+Milestone 5, the TUI, remains gated on demonstrated need and is deliberately unbuilt:
+§18 requires a TUI to meet those same guarantees through the shared client core, and no
+operator has yet asked for one.
+
+Building milestones 0 to 4 found defects in the surface they touched rather than in
+this design. The published artifact could not run at all once installed. The client
+displayed twelve untrusted fields without terminal sanitisation, across `runs show`
+and the event line, and a table header applied styling to text it had not cleaned.
+It then wrote server-chosen text to stderr unsanitised -- a path no per-function
+renderer test could catch, because the error path is not a renderer. See §16
+for per-milestone status.
 
 Mercury already runs as long-lived services: an API server owns the HTTP and
 dashboard surface, while one or more workers execute durable Runs. The existing
@@ -167,6 +182,7 @@ mercuryctl runs retry <run-id>
 
 mercuryctl config profiles
 mercuryctl config current
+mercuryctl completion <bash|zsh|fish>
 ```
 
 Global options include:
@@ -177,10 +193,21 @@ Global options include:
 --json
 --no-color
 --timeout <duration>
+--yes
+-h, --help
+-V, --version
 ```
 
 There is deliberately no `--token` option. Command-line arguments are visible
 to other local processes and are commonly retained in shell history.
+
+Two entries were added during delivery rather than designed up front, and are
+recorded here so this section stays the surface an operator can read as
+complete. `completion` came from Milestone 4 (§16.3): the command list already
+existed in one place, so the scripts are generated from it and a hand-written
+file would have been a third copy that drifts. `--version` came from §16.1,
+where the reason for it turned out to be that the version had already been
+written twice and silently disagreed with itself. `-V` is the short form.
 
 ### 6.1 Read commands
 
@@ -709,6 +736,40 @@ Spawn the actual CLI and a fake or test Mercury server. Assert:
 Use asynchronous subprocesses for tests that communicate with an in-process
 HTTP server. A synchronous child would block the server's event loop.
 
+#### 15.3.1 The requirement this list forgot, which made it untestable
+
+The list above says "broken pipes exit quietly". It does not say that a pipe
+must receive the **whole** answer, and the omission cost more than the line
+cost: `mercuryctl` shipped truncating its own output to 64 KiB whenever stdout
+was a pipe.
+
+```
+mercuryctl runs list --no-color > file   # 1,900,049 bytes, ends at run-019999
+mercuryctl runs list --no-color | cat    #    65,536 bytes, ends mid-word
+```
+
+Exit 0, empty stderr. `bin.ts` ended with `process.exit(code)`; writes to a file
+and to a terminal are synchronous, so they land first, while writes to a pipe are
+asynchronous and the buffer is discarded. 65,536 is Node's stdout high-water mark,
+which is why the cutoff looks deliberate.
+
+`runs list | grep FAILED` reported nothing past roughly 690 Runs, and
+`runs events --follow | jq` lost events mid-stream -- the durable-recovery
+guarantee is the reason the client exists. Item 5 of §18 was therefore not met
+through a pipe, even though every test in this section was green.
+
+Two things made this survivable review. Every existing test captures stdout into
+a variable, which keeps the read side draining so the writes land; and a source
+checkout writes to a terminal or a file, so the bug cannot be reproduced from the
+place tests are written. The first test written for "broken pipes exit quietly"
+passed with the EPIPE handler deleted, because truncation meant the process
+stopped writing before `head` closed -- the bug above was hiding the missing
+coverage for a different one.
+
+So the assertion is a comparison rather than an absence: the same command through
+a pipe must produce byte-identical output to the same command redirected to a
+file, for both human and `--json` output. Fixed in #247.
+
 ### 15.4 Coupling test
 
 Add a source-level guard that rejects imports from:
@@ -1051,7 +1112,7 @@ as coverage.
 events and asserted a page length of two was wrong about the server. The assertion now
 names the seeded event types instead of a total the server owns.
 
-### Milestone 4: packaging and operational hardening
+### Milestone 4: packaging and operational hardening -- **done** (issue #233, PR #242)
 
 Deliverables:
 
@@ -1085,7 +1146,7 @@ Deferred:
 - package-registry publication unless there is an operational need;
 - multi-host routing.
 
-### Milestone 4: packaging and operational hardening -- **done** (issue #233)
+#### What landed, and what it exposed
 
 Deliverables landed so far:
 
@@ -1353,11 +1414,26 @@ meet this design.
 ## 19. Open decisions at implementation time
 
 The architecture does not depend on these choices, so they are intentionally
-deferred to the milestone that has evidence to decide them:
+deferred to the milestone that has evidence to decide them. Two of the five have
+since been decided; they stay listed with their outcome, because a deferred
+decision that was silently made is indistinguishable from one still open.
 
-- whether the packaged executable is an npm `bin`, a bundled JavaScript
-  artifact or both;
-- whether a small command parser dependency is justified after Milestone 1;
+**Decided -- the packaged executable is an npm `bin` targeting compiled
+JavaScript**, not a bundle and not the TypeScript source. `client/test/packaging.test.ts`
+shows why the source option is not available: Node refuses to strip types under
+`node_modules`, so a `bin` pointing at `.ts` installs cleanly and fails on first
+run, while the identical file works from a checkout. A bundler would add a build
+dependency to solve a problem the compiler already solves. See §16.4.
+
+**Decided -- no command parser dependency.** The hand-written parser survived
+Milestones 0 to 4, including the cases that usually motivate a framework:
+scope-aware flags, options before and after the command, one-word commands such as
+`completion`, and refusing stray positionals. Adding a framework would have replaced
+~200 tested lines with an API to learn and a supply-chain surface, and the design's
+own rule was to add one only if hand-written parsing failed. It did not fail.
+
+Still open:
+
 - which TUI framework best satisfies the Milestone 5 gate;
 - whether real usage warrants crash-safe pending-create journaling;
 - whether Mercury should later expose an explicit API capabilities endpoint.
