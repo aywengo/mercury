@@ -13,6 +13,7 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { readFileSync } from 'node:fs';
+import { USER_AGENT } from '../version.ts';
 import { SseParser } from './sse.ts';
 import type { SseFrame } from './sse.ts';
 import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
@@ -36,7 +37,6 @@ export interface ClientOptions {
 }
 
 /** Non-secret client identity (§14). Must never contain a credential. */
-export const USER_AGENT = 'mercuryctl/0.1';
 
 /**
  * Cap on a single response body.

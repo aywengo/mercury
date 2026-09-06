@@ -178,3 +178,47 @@ test('a fragment on the endpoint is refused rather than silently dropped', () =>
   assert.throws(() => normalizeEndpoint('https://example.test#frag'), /fragment/);
   assert.throws(() => normalizeEndpoint('https://example.test/a#frag'), /fragment/);
 });
+const JWT_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk';
+
+test('a credential that is a token rather than a name is refused at read time', () => {
+  // The type and the comment both say "a name, never a token", and neither stops someone pasting a
+  // token because that is what every other tool they use asks for. Refusing here covers the request
+  // path and both config commands at once, instead of teaching every printer to be careful.
+  for (const bad of [
+    JWT_TOKEN,
+    'ghp_16C7e42F292c6912E7710c838347Ae178B4a',
+    'sk-proj-abcdefghijklmnopqrstuvwxyz1234567890',
+    'a'.repeat(65),
+    'has spaces in it',
+  ]) {
+    const dir = dirWith({ profiles: { prod: { url: 'http://127.0.0.1:3000', credential: bad } } });
+    assert.throws(
+      () => readConfigFile(join(dir, 'config.json')),
+      /does not look like a name/,
+      `accepted a credential that looks like a secret: ${bad.slice(0, 12)}`,
+    );
+  }
+});
+
+test('the refusal never repeats the value it is refusing', () => {
+  // An error that quotes the secret would leak it while reporting the leak.
+  const dir = dirWith({ profiles: { prod: { url: 'http://127.0.0.1:3000', credential: JWT_TOKEN } } });
+  try {
+    readConfigFile(join(dir, 'config.json'));
+    assert.fail('expected a UsageError');
+  } catch (err) {
+    const message = (err as Error).message;
+    assert.ok(!message.includes(JWT_TOKEN), 'the error echoed the token');
+    assert.ok(!message.includes(JWT_TOKEN.slice(0, 20)), 'the error echoed a prefix of the token');
+    assert.match(message, /credentials file/);
+  }
+});
+
+test('ordinary credential names still work', () => {
+  // The rule must not be so broad that it rejects the names people actually use.
+  for (const good of ['prod', 'prod-token', 'svc.prod', 'team:prod', 'aws_eu_west_1', 'ci+bot']) {
+    const dir = dirWith({ profiles: { prod: { url: 'http://127.0.0.1:3000', credential: good } } });
+    const file = readConfigFile(join(dir, 'config.json'));
+    assert.equal(file?.profiles.prod.credential, good);
+  }
+});

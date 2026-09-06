@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "client",
+    "outDir": "dist/client",
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": [
+    "client"
+  ],
+  "exclude": [
+    "client/test"
+  ]
+}

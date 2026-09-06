@@ -74,10 +74,66 @@ export function readConfigFile(path = configPath()): ConfigFile | undefined {
   if (profiles !== undefined && (typeof profiles !== 'object' || profiles === null || Array.isArray(profiles))) {
     throw new UsageError(`config ${path}: profiles must be an object`);
   }
+  const out: Record<string, ProfileConfig> = {};
+  for (const [name, raw] of Object.entries((profiles ?? {}) as Record<string, unknown>)) {
+    if (raw === undefined || raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new UsageError(`config ${path}: profile ${JSON.stringify(name)} must be an object`);
+    }
+    const entry = { ...(raw as Record<string, unknown>) };
+    entry.credential = assertCredentialReference(entry.credential, name, path);
+    if (entry.credential === undefined) delete entry.credential;
+    out[name] = entry as unknown as ProfileConfig;
+  }
   return {
     currentProfile: typeof obj.currentProfile === 'string' ? obj.currentProfile : undefined,
-    profiles: (profiles ?? {}) as Record<string, ProfileConfig>,
+    profiles: out,
   };
+}
+
+/**
+ * A credential field names an entry in the credentials file. It is never the secret itself.
+ *
+ * The type says so and the comment says so, but neither stops someone pasting a token into the profile
+ * because that is what every other tool they use asks for. When they do, `config current` -- whose whole
+ * job is echoing configuration back -- prints the token to stdout, into a terminal scrollback, and very
+ * often into a bug report or a CI log.
+ *
+ * So the shape is enforced where the file is read, which covers the request path and both config
+ * commands at once rather than teaching each printer to be careful. The error deliberately does NOT
+ * quote the offending value: refusing to leak a secret while printing a message that contains it would
+ * be a very expensive joke.
+ */
+const CREDENTIAL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:@+/-]{0,63}$/;
+// Three long base64url segments. The length floor keeps an ordinary dotted name such as "svc.prod"
+// from being mistaken for a signed token.
+const JWT_SHAPED = /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/;
+const SECRET_PREFIXES = [
+  'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_',
+  'AKIA', 'xox', 'glpat-', 'dckr_pat_', 'nt_', 'ya29.',
+];
+
+function assertCredentialReference(value: unknown, profile: string, path: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new UsageError(
+      `config ${path}: profile ${JSON.stringify(profile)} credential must be a non-empty string ` +
+      'naming an entry in the credentials file',
+    );
+  }
+  const ref = value.trim();
+  const looksLikeSecret =
+    JWT_SHAPED.test(ref)
+    || SECRET_PREFIXES.some((prefix) => ref.toLowerCase().startsWith(prefix.toLowerCase()))
+    || ref.length > 64
+    || !CREDENTIAL_NAME.test(ref);
+  if (looksLikeSecret) {
+    throw new UsageError(
+      `config ${path}: profile ${JSON.stringify(profile)} credential does not look like a name. ` +
+      'It must be a short key into the credentials file, never the token itself -- move the secret ' +
+      'into the credentials file and put its key here. (The value is not shown, because it may be a live token.)',
+    );
+  }
+  return ref;
 }
 
 /**
@@ -137,17 +193,58 @@ function truthyEnv(value: string | undefined): boolean | undefined {
  * a create at the wrong Mercury is a costly mistake, and "it looked like it worked" is the failure
  * mode this whole file is written to avoid.
  */
-export function resolveConfig(options: ResolveOptions = {}): ResolvedConfig {
+/** Where a resolved value came from. Reported by `config current` so an operator can see which of the
+> three layers is winning, without reading the precedence rules out of the source. */
+export type ConfigSource = 'flag' | 'env' | 'profile' | 'default';
+
+export interface ResolvedConfigDetail {
+  config: ResolvedConfig;
+  /** Keyed by config field; only fields that were actually set appear. */
+  sources: Partial<Record<keyof ResolvedConfig, ConfigSource>>;
+  /** Profiles defined in the file, in file order. Empty when there is no config file. */
+  profiles: string[];
+  /** True when no config file exists at the resolved path. */
+  noConfigFile: boolean;
+  configFilePath: string;
+}
+
+/**
+ * Resolve configuration and report how each value was chosen.
+ *
+ * `resolveConfig` is a projection of this, not a second implementation. Two copies of a precedence chain
+ * is how a diagnostic command starts telling a different story from the code that actually makes the
+ * request -- and `config current` is worth nothing if an operator cannot trust it to match behaviour.
+ */
+export function describeConfig(options: ResolveOptions = {}): ResolvedConfigDetail {
   const env = options.env ?? process.env;
   // configPath() appends config.json; passing options.dir straight through would hand a
   // directory to readFileSync and surface as EISDIR.
   const file = readConfigFile(options.dir ? configPath(options.dir) : undefined);
 
+  const dir = options.dir ?? configDir();
+  const detail: ResolvedConfigDetail = {
+    config: undefined as never,
+    sources: {},
+    profiles: Object.keys(file?.profiles ?? {}),
+    noConfigFile: file === undefined,
+    configFilePath: configPath(dir),
+  };
+
+  // Blank means absent. `??` only skips null and undefined, so a declared-but-empty variable -- which
+  // is what `${MERCURY_CLIENT_URL:-}` produces in a shell script, and what an unset CI variable often
+  // becomes -- would win over a perfectly good profile and then fail with "no endpoint configured".
+  // The message points at the wrong knob, because the knob that is broken is the one that is empty.
+  const envUrl = nonEmpty(env.MERCURY_CLIENT_URL);
+  const envProfile = nonEmpty(env.MERCURY_CLIENT_PROFILE);
   const profileName =
-    options.profileFlag ?? env.MERCURY_CLIENT_PROFILE ?? file?.currentProfile ?? 'default';
+    options.profileFlag ?? envProfile ?? file?.currentProfile ?? 'default';
+  if (options.profileFlag) detail.sources.profileName = 'flag';
+  else if (envProfile) detail.sources.profileName = 'env';
+  else if (file?.currentProfile) detail.sources.profileName = 'profile';
+  else detail.sources.profileName = 'default';
 
   let profile: ProfileConfig | undefined;
-  if (options.profileFlag || env.MERCURY_CLIENT_PROFILE || file?.currentProfile) {
+  if (options.profileFlag || envProfile || file?.currentProfile) {
     profile = file?.profiles?.[profileName];
     if (!profile) {
       const known = Object.keys(file?.profiles ?? {});
@@ -158,14 +255,22 @@ export function resolveConfig(options: ResolveOptions = {}): ResolvedConfig {
     }
   }
 
-  const rawUrl = options.urlFlag ?? env.MERCURY_CLIENT_URL ?? profile?.url;
+  const rawUrl = options.urlFlag ?? envUrl ?? profile?.url;
+  if (options.urlFlag) detail.sources.url = 'flag';
+  else if (envUrl) detail.sources.url = 'env';
+  else if (profile?.url) detail.sources.url = 'profile';
   if (!rawUrl) {
     throw new UsageError(
       'no endpoint configured. Pass --url, set MERCURY_CLIENT_URL, or define a profile.',
     );
   }
 
-  const rawTimeout = options.timeoutFlagMs ?? parseTimeoutEnv(env.MERCURY_CLIENT_TIMEOUT_MS) ?? profile?.timeoutMs;
+  const timeoutEnvMs = parseTimeoutEnv(env.MERCURY_CLIENT_TIMEOUT_MS);
+  const rawTimeout = options.timeoutFlagMs ?? timeoutEnvMs ?? profile?.timeoutMs;
+  if (options.timeoutFlagMs !== undefined) detail.sources.timeoutMs = 'flag';
+  else if (timeoutEnvMs !== undefined) detail.sources.timeoutMs = 'env';
+  else if (profile?.timeoutMs !== undefined) detail.sources.timeoutMs = 'profile';
+  else detail.sources.timeoutMs = 'default';
   if (rawTimeout !== undefined && (!Number.isFinite(rawTimeout) || rawTimeout <= 0)) {
     throw new UsageError(`timeout must be a positive number of milliseconds, got ${JSON.stringify(rawTimeout)}`);
   }
@@ -176,7 +281,7 @@ export function resolveConfig(options: ResolveOptions = {}): ResolvedConfig {
   const caFile = profile?.caFile ?? undefined;
   if (caFile === null) throw new UsageError('profile caFile must be a path or absent, not null');
 
-  return {
+  const config: ResolvedConfig = {
     profileName,
     url: normalizeEndpoint(rawUrl),
     credentialName: profile?.credential,
@@ -184,6 +289,22 @@ export function resolveConfig(options: ResolveOptions = {}): ResolvedConfig {
     caFile,
     noColor,
   };
+  if (config.credentialName) detail.sources.credentialName = 'profile';
+  detail.sources.noColor = options.noColorFlag ? 'flag'
+    : truthyEnv(env.MERCURY_CLIENT_NO_COLOR) ? 'env' : 'default';
+  if (caFile) detail.sources.caFile = 'profile';
+  detail.config = config;
+  return detail;
+}
+
+/** Resolve configuration for a request. See `describeConfig` for the version that also reports sources. */
+export function resolveConfig(options: ResolveOptions = {}): ResolvedConfig {
+  return describeConfig(options).config;
+}
+
+/** A value that is present AND has content. Empty and whitespace-only are treated as unset. */
+function nonEmpty(value: string | undefined): string | undefined {
+  return value !== undefined && value.trim() !== '' ? value : undefined;
 }
 
 function parseTimeoutEnv(value: string | undefined): number | undefined {

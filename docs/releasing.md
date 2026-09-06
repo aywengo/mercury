@@ -37,10 +37,28 @@ streams**. Bump only the product that changed. Do not use a bare `v0.1.0` tag.
 The `NPM_TOKEN` repository secret must exist on `aywengo/mercury` before the
 first tag. npm publish fails closed without it. This is intended.
 
-## Reserved: CLI
+## The CLI
 
-Do not add `docs/releases/cli/` or a CLI version file until `mercuryctl`
-exists. A `cli-v*` tag fails the workflow until that notes file is present.
+`mercuryctl` exists and ships in the host package, so its version is the package
+version — there is no independent CLI version to keep in sync. Tag
+`cli-vX.Y.Z` only when `docs/releases/cli/X.Y.Z.md` exists; the workflow
+creates the release from that file alone, so the notes are the release body
+and a stub file publishes a stub release.
+
+`test/releaseHygiene.test.ts` enforces that the notes file for the current
+package version exists, names that version, and is not a stub.
+
+Verify before tagging, beyond `npm test`:
+
+```bash
+npm pack && rm -rf /tmp/cli-verify && mkdir -p /tmp/cli-verify/consumer/node_modules/@aywengo
+tar -xzf aywengo-mercury-*.tgz -C /tmp/cli-verify/consumer/node_modules/@aywengo/mercury --strip-components=1
+node /tmp/cli-verify/consumer/node_modules/@aywengo/package/dist/client/bin.js --version
+```
+
+That path contains `node_modules` deliberately: Node refuses to strip types
+under `node_modules`, which is how the first published artifact shipped
+unrunnable and every source-tree test green.
 
 ## What this document is not
 
