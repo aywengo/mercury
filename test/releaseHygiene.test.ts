@@ -170,3 +170,36 @@ test('release.yml states the real CLI policy instead of denying the CLI exists',
     'release.yml still prints that the CLI does not exist');
   assert.match(wf, /no separate npm package/i, 'the cli branch must state the actual policy');
 });
+
+test('releasing.md does not claim the cli tag check is missing', () => {
+  // #251 documented this as a known gap and #252 closed it. A doc that still says the check is absent
+  // is worse than no doc: an operator would skip the check they actually have to satisfy, or distrust
+  // a refusal the workflow correctly raises. Asserted in both directions, so re-opening the gap would
+  // have to re-introduce the stale sentence deliberately.
+  const doc = read('docs/releasing.md');
+  for (const stale of [/but not\nfor `cli`/i, /not for `cli`/i, /known gap/i,
+                       /the notes file, not a version comparison/i]) {
+    assert.ok(!stale.test(doc), `releasing.md still describes the cli version check as missing: ${stale}`);
+  }
+  assert.match(doc, /for `cli`\s*\n?that manifest is the root `package\.json`|root `package\.json`, because the CLI ships/,
+    'releasing.md must say which manifest a cli tag is checked against');
+});
+
+test('releasing.md tells an operator how to cut a CLI release and what it publishes', () => {
+  // The version check added for #252 refuses a cli tag whose version differs from package.json. That is
+  // only actionable if the procedure says what to do instead: the CLI has no version of its own, so
+  // step 1 has to say there is nothing to bump. And because `npm publish` runs for host and fleet only,
+  // a cli tag publishes notes without shipping the artifact -- an operator who does not know that
+  // announces a version that nobody can install yet.
+  const doc = read('docs/releasing.md');
+  const step1 = doc.slice(doc.indexOf('1. On a branch'), doc.indexOf('2. Move'));
+  assert.ok(step1.length > 0, 'the release procedure step 1 must still exist');
+  assert.match(step1, /CLI[^\n]*nothing to bump|nothing to bump/i,
+    'step 1 lists a bump target per product; the CLI must be listed or an operator has no instruction');
+  assert.match(step1, /root `package\.json`/,
+    'the CLI step must name the manifest its version comes from');
+  assert.match(doc, /A `cli-\*` tag publishes \*\*notes only\*\*/,
+    'the doc must state that a cli tag publishes notes and not the artifact');
+  assert.match(doc, /arrives with the next `host-vX\.Y\.Z` tag/,
+    'the doc must say when the CLI artifact actually reaches users');
+});

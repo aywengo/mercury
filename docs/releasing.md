@@ -3,8 +3,9 @@
 Host, Fleet, and the `mercuryctl` CLI are released as **independent SemVer
 streams**. Bump only the product that changed. Do not use a bare `v0.1.0` tag.
 The CLI has no version of its own: it ships inside the host package, so its
-released version is the host package version. See "The CLI" below for what a
-`cli-*` tag does and does not check.
+released version is the host package version, and the workflow enforces that: a
+`cli-*` tag whose version differs from `package.json` is refused. See "The CLI"
+below.
 
 | Product | Version file | Tag | npm | Notes |
 | --- | --- | --- | --- | --- |
@@ -19,7 +20,9 @@ released version is the host package version. See "The CLI" below for what a
 
 1. On a branch from `main`, bump **only** the changed product:
    - host: root `package.json` and `HOST_VERSION` in `src/version.ts`;
-   - Fleet: `fleet/package.json` and `FLEET_VERSION` in `fleet/version.ts`.
+   - Fleet: `fleet/package.json` and `FLEET_VERSION` in `fleet/version.ts`;
+   - CLI: there is nothing to bump. The CLI ships inside `@aywengo/mercury`, so its version is the
+     root `package.json` version and a `cli-vX.Y.Z` tag must name that version exactly.
 2. Move that product's `## [Unreleased]` changelog entries under
    `## [X.Y.Z] - YYYY-MM-DD`.
 3. Add `docs/releases/<product>/X.Y.Z.md` (GitHub Release body).
@@ -52,11 +55,18 @@ and a stub file publishes a stub release.
 `test/releaseHygiene.test.ts` enforces that the notes file for the current
 package version exists, names that version, and is not a stub.
 
-The workflow checks the tag against the manifest for `host` and `fleet`, but not
-for `cli`: a `cli-vX.Y.Z` tag is accepted as long as `docs/releases/cli/X.Y.Z.md`
-exists. So the notes file, not a version comparison, is what limits which CLI
-versions are taggable. Track this as a known gap rather than implying the tag is
-verified.
+The workflow checks the tag against a manifest for all three products. For `cli`
+that manifest is the root `package.json`, because the CLI ships inside
+`@aywengo/mercury` and has no version of its own -- so `cli-v9.9.9` is refused
+while `package.json` says otherwise. The notes file is checked too, but it is not
+a substitute: it only proves someone wrote notes, not that the version is real.
+
+A `cli-*` tag publishes **notes only**. The workflow runs `npm publish` for `host`
+and `fleet`; for `cli` it creates the GitHub Release and publishes nothing, so the
+CLI artifact users actually install arrives with the next `host-vX.Y.Z` tag, not
+with the CLI tag. Cutting a CLI tag therefore announces a version to readers of the
+releases page before that version is installable, unless the host tag goes out with
+it. Tag them together when the CLI change is meant to reach users.
 
 Verify before tagging, beyond `npm test`:
 
