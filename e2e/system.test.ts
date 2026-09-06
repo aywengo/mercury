@@ -16,7 +16,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { DockerComposeEnvironment, StartedDockerComposeEnvironment, Wait } from 'testcontainers';
-import { COMPOSE_FILE, E2E_DIR, LIMITS, keepOnFail, preflight, verbose } from './preflight.ts';
+import { COMPOSE_FILE, E2E_DIR, LIMITS, composeModel, keepOnFail, preflight, verbose } from './preflight.ts';
 
 /**
  * A unique project name per run, so two worktrees or two terminals can run this file at the same
@@ -226,12 +226,38 @@ guarded('preflight reports a usable runtime', () => {
   assert.match(preflightInfo.compose, /Compose version v\d+/);
 });
 
-guarded('compose model publishes only a loopback API port and mounts nothing dangerous', async () => {
-  const model = await readFile(COMPOSE_FILE, 'utf8');
-  assert.match(model, /"127\.0\.0\.1::3000"/, 'the API port must be random and loopback-bound');
-  assert.doesNotMatch(model, /docker\.sock/, 'the default stack must not mount the Docker socket');
-  assert.doesNotMatch(model, /\n\s+type:\s+bind/, 'runtime services must not bind-mount host paths');
-  assert.doesNotMatch(model, /:\s*\.\/(?!env)/, 'no host-relative mount');
+guarded('the compose model mounts no host paths and publishes only a loopback port', async () => {
+  const model = await composeModel();
+  const services = Object.keys(model.services).sort();
+  assert.deepEqual(services, ['api', 'fixture', 'worker'], 'unexpected services in the resolved model');
+
+  for (const [name, svc] of Object.entries(model.services)) {
+    for (const mount of svc.volumes ?? []) {
+      // Compose normalises every bind syntax -- short form, long form, ${'${}'}HOME interpolation,
+      // absolute host path -- to type "bind", so this single check covers all of them.
+      assert.equal(mount.type, 'volume',
+        `${name}: mount ${mount.source} -> ${mount.target} is a ${mount.type} mount; the stack must`
+        + ' reach the checkout only through the image, never the host filesystem');
+      assert.ok(mount.source && model.volumes && mount.source in model.volumes,
+        `${name}: mount source "${mount.source}" is not a named volume declared in this file`);
+      assert.ok(!String(mount.source).includes('docker.sock'),
+        `${name}: must not reach the host Docker daemon`);
+    }
+    assert.notEqual(svc.user, '0', `${name} must not be pinned to container root`);
+  }
+
+  const publishing = Object.entries(model.services).filter(([, svc]) => (svc.ports ?? []).length > 0);
+  assert.deepEqual(publishing.map(([name]) => name), ['api'],
+    'only the API may publish a port; a published worker port would need no test at all');
+  for (const [name, svc] of publishing) {
+    for (const port of svc.ports ?? []) {
+      assert.equal(port.host_ip, '127.0.0.1',
+        `${name}: published port ${port.target} binds to "${port.host_ip ?? 'all interfaces'}"`);
+      assert.equal(port.published, undefined,
+        `${name}: port ${port.target} pins host port ${port.published}; it must be random so two`
+        + ' runs and a developer running Mercury locally cannot collide');
+    }
+  }
 });
 
 guarded('the API answers on its mapped loopback port', async () => {

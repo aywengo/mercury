@@ -111,3 +111,61 @@ export function verbose(): boolean {
 export async function composeText(): Promise<string> {
   return readFile(COMPOSE_FILE, 'utf8');
 }
+
+/** The subset of the resolved Compose model the isolation assertions need. */
+export interface ComposeMount {
+  type: string;
+  source?: string;
+  target?: string;
+}
+
+export interface ComposePort {
+  host_ip?: string;
+  published?: string | number;
+  target?: number;
+}
+
+export interface ComposeService {
+  volumes?: ComposeMount[];
+  ports?: ComposePort[] | null;
+  user?: string | null;
+}
+
+export interface ComposeModel {
+  services: Record<string, ComposeService>;
+  volumes?: Record<string, unknown>;
+}
+
+/**
+ * The RESOLVED Compose model, not the file text.
+ *
+ * Asserting on the file means writing regexes over YAML, and YAML has too many ways to spell the
+ * same mount for that to be safe: `- ./src:/app`, `- type: bind` with the source on its own line,
+ * `- ${HOME}/x:/y` and `- /Users/me/repo:/app` are four different shapes that all mean "the
+ * container can reach host files". Compose normalises every one of them to `{type: "bind",
+ * source: ...}`, so checking the resolved model catches all of them and a future syntax cannot
+ * slip past. It also resolves the port to a concrete `host_ip`, which the file leaves implicit.
+ */
+export async function composeModel(): Promise<ComposeModel> {
+  const { spawn } = await import('node:child_process');
+  return new Promise((resolve, reject) => {
+    const child = spawn('docker', ['compose', '-f', 'compose.yml', 'config', '--format', 'json'],
+      { cwd: E2E_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new PreflightError('`docker compose config` did not finish in ' + LIMITS.runtimeProbeMs + 'ms'));
+    }, LIMITS.runtimeProbeMs);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => { out += chunk; });
+    child.stderr.on('data', (chunk: string) => { err += chunk; });
+    child.once('error', (e) => { clearTimeout(timer); reject(new PreflightError(`docker compose config unavailable: ${e.message}`)); });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) reject(new PreflightError(`compose model is invalid: ${err.slice(0, 500)}`));
+      else resolve(JSON.parse(out) as ComposeModel);
+    });
+  });
+}
