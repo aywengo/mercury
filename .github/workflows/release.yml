@@ -123,3 +123,22 @@ jobs:
           else
             gh release create "$tag" --title "$title" --notes-file "$notes"
           fi
+
+          # Publish the Homebrew formula LAST, and only once the asset it points at exists. A formula
+          # committed before the release would 404 for anyone who ran brew install in the window, and a
+          # formula pointing at an asset that was never uploaded fails checksum resolution with nothing
+          # to correlate it to. main is not branch-protected, so the contents:write token this job
+          # already has is sufficient -- no cross-repository credential is needed because the formula
+          # lives here rather than in a separate tap repo.
+          if [ "$product" = "host" ]; then
+            node scripts/update-formula.mjs --version "$version" --sha256 "$bundle_sha"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Formula/mercury-ai.rb
+            if git diff --cached --quiet; then
+              echo "Formula/mercury-ai.rb already at ${version}"
+            else
+              git commit -m "release: Homebrew formula ${version}"
+              git push "https://github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+            fi
+          fi
