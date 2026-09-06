@@ -48,12 +48,17 @@ function extractReleaseScript(): string {
   return script;
 }
 
-interface Run { status: number | null; stdout: string; stderr: string }
+interface Run {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  npmrc: string;
+}
 
 /** Run the workflow step for one tag, in a throwaway tree with stubbed `gh` and `npm`. */
 function runTag(
   tag: string,
-  opts: { notes?: string[]; pkgVersion?: string; npmToken?: string } = {},
+  opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -108,6 +113,12 @@ function runTag(
       + 'case "$1 $2" in "diff --cached") exit 1 ;; esac\nexit 0\n');
     chmodSync(gitStub, 0o755);
 
+    // actions/setup-node writes this PROJECT .npmrc because registry-url is set. OIDC mode has to drop
+    // the empty token line from it, so the tests must be able to present the file the runner presents.
+    if (opts.npmrc !== undefined) {
+      writeFileSync(join(tmp, '.npmrc'), opts.npmrc);
+    }
+
     const script = join(tmp, 'step.sh');
     writeFileSync(script, extractReleaseScript());
     const r = spawnSync('/bin/bash', [script], {
@@ -124,6 +135,12 @@ function runTag(
         // developer's shell happens to export NODE_AUTH_TOKEN -- locally-green, CI-red, or the reverse.
         // The default is a non-empty placeholder: present-but-fake, which is all the guard checks.
         NODE_AUTH_TOKEN: opts.npmToken ?? 'npm-token-placeholder',
+        // Set explicitly for the same reason as NODE_AUTH_TOKEN: the step falls back to OIDC trusted
+        // publishing when no token is present, and that fallback is keyed on exactly these two runner
+        // variables. Inheriting them would make the result depend on whether the tests happen to run
+        // inside GitHub Actions -- locally-green, CI-red, or the reverse.
+        ACTIONS_ID_TOKEN_REQUEST_URL: opts.oidc ? 'https://token.actions.githubusercontent.com/idToken' : undefined,
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: opts.oidc ? 'oidc-request-token' : undefined,
         // The step writes the bundle under $RUNNER_TEMP. With `set -u` an unset value aborts the
         // step, so it is provided here exactly as the runner would provide it.
         RUNNER_TEMP: tmp,
@@ -133,7 +150,10 @@ function runTag(
       },
     });
     const calls = existsSync(join(tmp, 'calls.log')) ? readFileSync(join(tmp, 'calls.log'), 'utf8') : '';
-    return { status: r.status, stdout: r.stdout + calls, stderr: r.stderr };
+    // Read before the finally block deletes the tree: OIDC mode edits .npmrc in place, and the edit
+    // is only observable here.
+    const npmrc = existsSync(join(tmp, '.npmrc')) ? readFileSync(join(tmp, '.npmrc'), 'utf8') : '';
+    return { status: r.status, stdout: r.stdout + calls, stderr: r.stderr, npmrc };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -267,7 +287,8 @@ test('a missing NPM_TOKEN refuses the tag BEFORE the release is created (issue #
   // exact bug being prevented.
   const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmToken: '' });
   assert.equal(r.status, 1, `missing credential should refuse, got exit ${r.status}`);
-  assert.match(r.stderr, /NPM_TOKEN is not configured/, `expected a named credential refusal: ${r.stderr}`);
+  assert.match(r.stderr, /no NPM_TOKEN and no OIDC id-token/,
+    `expected a refusal naming both auth modes: ${r.stderr}`);
   assert.ok(!/gh release create/.test(r.stdout),
     'the release must NOT be created when the credential is missing -- that is the whole point');
   assert.ok(!/npm publish/.test(r.stdout), 'nothing should be published either');
@@ -279,6 +300,73 @@ test('a present credential still creates the release and publishes', () => {
   assert.equal(r.status, 0, `valid credential should publish: ${r.stderr}`);
   assert.match(r.stdout, /gh release create/);
   assert.match(r.stdout, /npm publish/);
+});
+
+test('no credential at all still publishes when the runner offers an OIDC id-token', () => {
+  // npm is removing direct publish from 2FA-bypassing granular tokens, so a long-lived NPM_TOKEN
+  // is a deprecation waiting to happen rather than a requirement. The runner hands out an OIDC
+  // id-token whenever the job has id-token:write, which this workflow already grants, so the
+  // release must be able to proceed on that alone.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmToken: '', oidc: true });
+  assert.equal(r.status, 0, `OIDC mode should publish, got exit ${r.status}: ${r.stderr}`);
+  assert.match(r.stdout, /publish auth: OIDC/, 'expected the log to name the auth mode');
+  assert.match(r.stdout, /npm publish/, 'expected a publish attempt');
+  assert.match(r.stdout, /gh release create/, 'expected the release to be created');
+});
+
+test('OIDC mode publishes verbosely so npm states why a trusted-publishing config failed', () => {
+  // npm/cli's lib/utils/oidc.js never throws. Every failure -- including "this package has no
+  // trusted-publishing configuration" -- is log.verbose and returns undefined, after which npm
+  // publishes with no credential and the registry answers an opaque E404. Two real releases here
+  // were diagnosed by reading npm source for exactly that reason. Verbose logging puts the cause
+  // in the run log instead of in the reader's head.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmToken: '', oidc: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /npm publish[^\n]*--loglevel verbose/, `expected a verbose publish: ${r.stdout}`);
+});
+
+test('a token is preferred over OIDC and publishes at normal log level', () => {
+  // With both available the step must not silently take the newer path: the token is the explicit
+  // operator choice, and verbose npm output on every routine token publish buries the lines that
+  // matter.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmToken: 'npm-placeholder-token', oidc: true });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /publish auth: NPM_TOKEN/, 'the token must win when both are present');
+  assert.match(r.stdout, /npm publish[^\n]*--loglevel normal/);
+});
+
+test('OIDC mode removes the empty project-scope token that setup-node writes', () => {
+  // registry-url makes setup-node emit `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into a
+  // PROJECT .npmrc. With no secret that is an empty credential, and project scope outranks the
+  // user-scope token npm's OIDC exchange installs, so leaving it would send an empty bearer token
+  // instead of the exchanged one. The registry line must survive: it is what points npm at
+  // registry.npmjs.org at all.
+  const npmrc = '//registry.npmjs.org/:_authToken=\nregistry=https://registry.npmjs.org/\n';
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmToken: '', oidc: true, npmrc });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!/_authToken/.test(r.npmrc), `empty token line should be gone, got:\n${r.npmrc}`);
+  assert.match(r.npmrc, /registry=https:\/\/registry\.npmjs\.org\//, 'the registry line must survive');
+});
+
+test('OIDC mode keeps a populated .npmrc credential rather than clearing it', () => {
+  // The empty-token cleanup exists because setup-node writes an EMPTY value when the secret is
+  // absent. A POPULATED value came from somewhere deliberate, and wiping it would replace a
+  // working credential with an anonymous request. This runs the OIDC branch specifically: in
+  // token mode the filter never executes, so the token-mode test above cannot see a filter that
+  // was broadened from "empty" to "any".
+  const npmrc = '//registry.npmjs.org/:_authToken=deliberately-populated\nregistry=https://registry.npmjs.org/\n';
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmToken: '', oidc: true, npmrc });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.npmrc, /_authToken=deliberately-populated/, 'OIDC mode must not clear a populated credential');
+});
+
+test('a populated credential in .npmrc is never edited', () => {
+  // The filter is scoped to an EMPTY token on purpose. Broadening it would turn a working token
+  // publish into a 401 with nothing to explain it.
+  const npmrc = '//registry.npmjs.org/:_authToken=abc123\nregistry=https://registry.npmjs.org/\n';
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmToken: 'npm-placeholder-token', npmrc });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.npmrc, /_authToken=abc123/, 'a populated credential must not be touched');
 });
 
 test('dependencies are installed before anything compiles', () => {
