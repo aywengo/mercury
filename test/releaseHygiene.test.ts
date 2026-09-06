@@ -68,7 +68,7 @@ test('root package.json is the public host package', () => {
   assert.equal(pkg.license, 'MIT');
   // Was 'src/cli.ts', which is unrunnable once installed: Node refuses to strip types under
   // node_modules, so the published `mercury` command exited 1 before printing anything (issue #243).
-  // The server is compiled to dist/ by prepack like the client. Existence is not asserted here because
+  // The server is compiled to dist/ by `prepare` like the client. Existence is not asserted here because
   // the core suite runs without a build; client/test/packaging.test.ts builds and runs the artifact.
   assert.equal(pkg.bin?.mercury, 'dist/src/cli.js');
   assert.ok(!pkg.bin!.mercury.endsWith('.ts'), 'a bin target in TypeScript cannot run once installed');

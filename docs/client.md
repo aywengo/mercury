@@ -24,7 +24,7 @@ node client/bin.ts --version
 ```
 
 There is no build step to remember. `npm run build:client` produces the JavaScript that the published
-package points at, and `prepack` runs it automatically.
+package points at, and the `prepare` script runs it automatically.
 
 ## Configure
 
