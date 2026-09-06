@@ -401,6 +401,9 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
 
   try {
     if (ZERO_POSITIONAL_COMMANDS.has(command)) rejectStrayPositional(parsed, command);
+    // Before any network or credential work: a mistyped flag is a usage error, and answering it would
+    // mean running a command the operator did not ask for.
+    rejectUnknownFlags(parsed, command);
 
     // Completion is answered before the client is built and before any configuration is resolved.
     // The shell invokes it on every keystroke, so a completion function that needed a credential would
@@ -615,6 +618,69 @@ function rejectStrayPositional(parsed: ParsedInvocation, command: string): void 
   throw new UsageError(
     `${command} takes no arguments, got ${JSON.stringify(parsed.positional.join(' '))}. ` +
     `Run \`${PROGRAM} --help\` for what ${command} accepts.`,
+  );
+}
+
+/**
+ * The flags each command accepts. Globals are NOT listed: the parser consumes them in both scopes, so
+ * `--json`, `--no-color`, `--timeout`, `--yes`, `--profile` and `--url` never reach this check.
+ *
+ * Every command must appear here. A test asserts that the set of keys equals the set of commands in
+ * COMMAND_SUMMARIES, so a new command cannot be added without declaring its grammar -- the same reason
+ * help is generated rather than written twice.
+ */
+export const COMMAND_FLAGS: Record<string, string[]> = {
+  'agents list': [],
+  'runs list': ['--limit', '--status', '--cursor'],
+  'runs show': [],
+  'runs create': ['--file', '--task', '--repo', '--agent', '--skills', '--idempotency-key'],
+  'runs input': ['--file', '--value'],
+  'runs cancel': [],
+  'runs retry': [],
+  'runs events': ['--after', '--limit', '--follow'],
+  // `runs watch` always follows, so --follow is accepted as a no-op rather than rejected: refusing it
+  // would tell an operator that a flag which describes exactly what the command does is invalid.
+  'runs watch': ['--after', '--follow'],
+  'config profiles': [],
+  'config current': [],
+  completion: [],
+};
+
+/**
+ * Reject a flag the command does not implement.
+ *
+ * The parser stores command-scope flags raw, because `runs create --task` must reach the create command
+ * which owns that grammar. Nothing then checked them, so an unrecognised flag was silently DISCARDED and
+ * the command ran as if it had not been typed. Every one of those outcomes is a wrong answer that looks
+ * correct:
+ *
+ *   runs list --stat QUEUED     listed every Run, not the filtered set
+ *   runs list --limt 5          listed every Run, ignoring the limit
+ *   runs events <id> --folw     printed history and exited 0 -- the operator believed they were watching
+ *   runs create --agnet hermes  created the Run on the DEFAULT agent, not the one asked for
+ *
+ * The last two are the reason this is not cosmetic: one reports a snapshot as live observation, the other
+ * starts paid work on the wrong backend. This is the same defect already fixed once for `--status`, where
+ * the server silently ignores an unrecognised value and the client would have returned an unfiltered list
+ * rather than an error; the design treats that shape as a bug precisely because it is indistinguishable
+ * from success.
+ */
+function rejectUnknownFlags(parsed: ParsedInvocation, command: string): void {
+  const allowed = COMMAND_FLAGS[command];
+  if (allowed === undefined) {
+    // Unreachable while the completeness test holds, but failing loudly here means a future command
+    // cannot silently inherit the old permissive behaviour.
+    throw new UsageError(`${command} has no declared flag set; refusing to guess which flags it accepts`);
+  }
+  const unknown = Object.keys(parsed.flags).filter((f) => !allowed.includes(f)).sort();
+  if (unknown.length === 0) return;
+  // Names only. An unknown flag may itself be a credential in disguise (`--password=hunter2`), and the
+  // value must never be echoed back.
+  const named = unknown.map((f) => JSON.stringify(f)).join(', ');
+  const accepts = allowed.length > 0 ? ` accepts ${allowed.join(', ')}` : ' takes no flags';
+  throw new UsageError(
+    `unknown option${unknown.length > 1 ? 's' : ''} ${named} for ${command}; ${command}${accepts}. ` +
+      `Run \`${PROGRAM} --help\` for what this version does.`,
   );
 }
 

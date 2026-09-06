@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { COMMAND_SUMMARIES, IMPLEMENTED } from '../cli.ts';
+import { tmpdir } from 'node:os';
+import { COMMAND_FLAGS, COMMAND_SUMMARIES, IMPLEMENTED } from '../cli.ts';
+import { EXIT } from '../exitCodes.ts';
 
 // Subprocess tests (docs/cli-tui-design.md §15.3).
 //
@@ -296,4 +298,87 @@ test('the design document lists exactly the commands the CLI implements', () => 
   }
   // The absence is the point of §6, so assert it rather than trust it.
   assert.ok(!/^--token/m.test(optBlock[0]), '§6 lists a --token option, which the design forbids');
+});
+// Command-scope flags: unknown ones must be refused, and every declared one must still work.
+//
+// The parser stores command-scope flags raw so each command owns its grammar, and nothing then checked
+// them -- so `runs events <id> --folw` printed history, exited 0, and left the operator believing they
+// were watching live. A test in only one direction is not enough: too strict a table breaks working
+// commands, too permissive one keeps the silent-accept bug. Both directions are asserted.
+
+const FLAG_CASES: Record<string, string[]> = {
+  'runs list': ['--limit', '2', '--status', 'QUEUED', '--cursor', 'abc'],
+  'runs create': ['--task', 't', '--repo', 'https://example.com/x.git', '--agent', 'fake',
+                  '--skills', 'a,b', '--idempotency-key', 'k-1'],
+  'runs events': ['run_abc', '--after', '1', '--limit', '5', '--follow'],
+  'runs watch': ['run_abc', '--after', '1'],
+  'runs input': ['run_abc', '--value', 'hello'],
+  'agents list': [],
+  'runs show': ['run_abc'],
+  'runs cancel': ['run_abc', '--yes'],
+  'runs retry': ['run_abc', '--yes'],
+  'config profiles': [],
+  'config current': [],
+};
+
+test('every flag a command declares is accepted, not just known to the table', () => {
+  // Pointed at a closed port on purpose. Exit 7 means the flag was accepted and the command went on to
+  // try the network; exit 2 would mean the table is too strict and a working invocation now fails.
+  for (const [command, args] of Object.entries(FLAG_CASES)) {
+    // A credential is supplied so the run reaches the network. Without one the CLI exits 2 at
+    // credential resolution, which is indistinguishable from a flag rejection by exit code alone.
+    // The command is split into argv tokens: 'runs events' is a two-token path, not one argument.
+    const r = run([...command.split(' '), ...args], { MERCURY_CLIENT_URL: 'http://127.0.0.1:1', MERCURY_CLIENT_TOKEN: 'tok' });
+    assert.notEqual(r.code, EXIT.USAGE,
+      `${command} ${args.join(' ')} was rejected as a usage error; COMMAND_FLAGS is too strict: ${r.stderr}`);
+  }
+});
+
+test('a mistyped flag is refused with exit 2, names the flag, and lists what is accepted', () => {
+  const cases: Array<[string[], string]> = [
+    [['runs', 'list', '--stat', 'QUEUED'], '--stat'],
+    [['runs', 'list', '--limt', '5'], '--limt'],
+    [['runs', 'events', 'run_abc', '--folw'], '--folw'],
+    [['runs', 'create', '--task', 'x', '--repo', 'https://e/x.git', '--agnet', 'hermes'], '--agnet'],
+    [['runs', 'show', 'run_abc', '--jsonn'], '--jsonn'],
+    [['agents', 'list', '--limit', '5'], '--limit'],
+    [['runs', 'cancel', 'run_abc', '--yes', '--forc'], '--forc'],
+  ];
+  for (const [args, flag] of cases) {
+    const r = run([...args], { MERCURY_CLIENT_URL: 'http://127.0.0.1:1', MERCURY_CLIENT_TOKEN: 'tok' });
+    assert.equal(r.code, EXIT.USAGE, `${args.join(' ')} exited ${r.code}, expected 2: ${r.stderr}`);
+    assert.match(r.stderr, new RegExp(flag.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')),
+      `${args.join(' ')} did not name the offending flag: ${r.stderr}`);
+    // Silent acceptance is the bug; an error that does not say what to type instead is only half a fix.
+    assert.match(r.stderr, /accepts|takes no flags/, `${args.join(' ')} gave no guidance: ${r.stderr}`);
+    assert.ok(!/hermes|QUEUED/.test(r.stderr),
+      `${args.join(' ')} echoed a flag VALUE back to stderr: ${r.stderr}`);
+  }
+});
+
+test('every command declares its flags, so a new one cannot inherit the permissive default', () => {
+  const declared = Object.keys(COMMAND_FLAGS).sort();
+  const commands = COMMAND_SUMMARIES.map(([c]) => c).sort();
+  assert.deepEqual(declared, commands,
+    'COMMAND_FLAGS and COMMAND_SUMMARIES disagree; every command must declare its grammar');
+});
+
+test('globals still work after the command, and are not caught by the unknown-flag guard', () => {
+  // A real profile on disk, so --profile is proven to pass the guard AND resolve. Pointing it at a
+  // name that does not exist would exit 2 for the right reason and prove nothing about the guard.
+  const home = mkdtempSync(join(tmpdir(), 'mercuryctl-globals-'));
+  mkdirSync(join(home, 'mercury'), { recursive: true });
+  writeFileSync(join(home, 'mercury', 'config.json'),
+    JSON.stringify({ currentProfile: 'ci', profiles: { ci: { url: 'http://127.0.0.1:1', credential: 'ci-cred' } } }));
+  writeFileSync(join(home, 'mercury', 'ci-cred'), 'tok\n');
+  chmodSync(join(home, 'mercury', 'ci-cred'), 0o600);
+
+  for (const args of [['runs', 'list', '--json'], ['runs', 'list', '--no-color'],
+                      ['runs', 'list', '--timeout', '5s'], ['runs', 'list', '--profile', 'ci'],
+                      ['runs', 'cancel', 'run_abc', '--yes'], ['runs', 'list', '--url', 'http://127.0.0.1:1']]) {
+    const r = run([...args], {
+      MERCURY_CLIENT_URL: 'http://127.0.0.1:1', MERCURY_CLIENT_TOKEN: 'tok', XDG_CONFIG_HOME: home,
+    });
+    assert.notEqual(r.code, EXIT.USAGE, `${args.join(' ')} rejected a global: ${r.stderr}`);
+  }
 });
