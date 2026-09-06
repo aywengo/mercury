@@ -331,6 +331,18 @@ guarded('the worker is actually consuming the queue the API writes to', async ()
  * This is the shape nothing else in the repository covers: an external client submitting a Run over
  * public HTTP, watching it through SSE, and seeing a *separate* process claim it, build a real git
  * worktree, run an agent and write the result back through the same SQLite file.
+ *
+ * ORDERING MATTERS. These scenarios run sequentially against one stack, by design: the design
+ * rejects parallel scenarios because they would share a queue, a worker and a fixture repository
+ * and make failures impossible to attribute. Two couplings depend on declaration order:
+ *
+ *   - owner scoping inspects the Run the lifecycle scenario created, via `sharedRunId`. If the
+ *     lifecycle scenario fails first, owner scoping fails with its own explicit message rather than
+ *     a confusing one.
+ *   - the worker-absent scenario STOPS a container, so it must stay last.
+ *
+ * node:test runs tests in declaration order within a file; moving a scenario is a behavioural
+ * change, not a cosmetic one.
  */
 guarded('a fake Run completes across separate API and worker containers', async () => {
   const created = await alice.post<{ runId: string; status: string }>(

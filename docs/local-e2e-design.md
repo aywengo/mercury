@@ -1060,6 +1060,13 @@ Two acceptance items needed notes against the wording above:
   specific status, because stopping the worker after submission lets the claim loop pick the Run up
   first and the Run reaches `STARTING` instead of `QUEUED` -- which is a different interleaving than
   the one under test.
+- `pollRun()` distinguished its own "wrong terminal state" control-flow signal from transient request
+  failures by testing whether the error message starts with `"run "`. That is a silent-coupling: a
+  cosmetic rewording turns "give up at once and say why" into "spin until the deadline and say less".
+  It is now a typed `TerminalStateError` matched with `instanceof`. Proven by applying the old
+  matching *and* a reworded message together -- the fast exit degrades into a full-deadline spin, and
+  `e2e/helpers.test.ts` catches it. That file covers the helper control flow against a stub server
+  and needs no Docker daemon.
 - The SSE stream opens with an `event: hello` acknowledgement frame carrying `runId` and `after` but
   no `sequence`. A parser that coerces every data frame into an event invents a phantom row at
   sequence 0, which then looks like a sequence violation. Frames without a numeric `sequence` are

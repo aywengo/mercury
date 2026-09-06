@@ -78,6 +78,16 @@ export function client(base: string, token: string): Client {
 export const TERMINAL = new Set(['COMPLETED', 'FAILED', 'CANCELLED']);
 
 /**
+ * The Run reached a terminal state other than the one the caller was waiting for.
+ *
+ * This is a distinct type rather than an Error whose message happens to start with "run ", because
+ * pollRun() has to tell its own control-flow signal apart from transient request failures. Matching
+ * on a message prefix means that rewording the message -- a change that looks cosmetic -- silently
+ * turns "give up at once and say why" into "spin until the deadline and say less".
+ */
+export class TerminalStateError extends Error {}
+
+/**
  * Poll until a predicate holds or an absolute deadline passes.
  *
  * Polling is by deadline, never by a guessed sleep, and the timeout error carries the run id and
@@ -101,12 +111,12 @@ export async function pollRun(
       if (until(run)) return run;
       // Stop early once the Run is terminal but not the state we wanted: waiting longer cannot help.
       if (TERMINAL.has(run.status)) {
-        throw new Error(`run ${runId} reached terminal ${run.status} while waiting for ${what}`
+        throw new TerminalStateError(`run ${runId} reached terminal ${run.status} while waiting for ${what}`
           + (run.error ? ` (error: ${run.error})` : ''));
       }
     } catch (err) {
       if (err instanceof HttpError && err.status === 404) throw err;
-      if (err instanceof Error && err.message.startsWith('run ')) throw err;
+      if (err instanceof TerminalStateError) throw err;
       lastError = (err as Error).message;
     }
     if (Date.now() >= deadline) {

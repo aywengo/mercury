@@ -12,12 +12,14 @@ implementation; the design document stays authoritative for intent and trade-off
 | `preflight.ts` | Checks that fail fast and readably before any container exists, plus the shared deadlines. |
 | `system.test.ts` | The gate itself: lifecycle, isolation assertions, diagnostics, teardown. |
 | `helpers.ts` | Public-interface client, deadline-based Run polling and the SSE parser. Nothing here imports Mercury internals. |
+| `helpers.test.ts` | Control-flow tests for the above against a stub HTTP server. Needs no Docker daemon. |
 
 ## Commands
 
 ```bash
 npm run test:e2e         # build the image, start the stack, assert, tear down
 npm run test:e2e:config  # validate the compose model without starting anything
+node --test e2e/helpers.test.ts   # helper control-flow only, no Docker needed
 ```
 
 `npm test` deliberately does **not** run these. It stays Docker-free and fast; CI never runs this
