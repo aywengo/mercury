@@ -242,7 +242,7 @@ retried.
 `GET /healthz` is unauthenticated and returns:
 
 ```json
-{ "ok": true, "ts": "2026-09-05T12:00:00.000Z", "product": "host", "version": "0.1.0" }
+{ "ok": true, "ts": "2026-09-05T12:00:00.000Z", "product": "host", "version": "0.1.0-rc1" }
 ```
 
 `product` is always `host` on this process. `version` matches
