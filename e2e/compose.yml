@@ -1,0 +1,94 @@
+# Production-shaped Mercury topology for the local pre-PR E2E gate.
+# See docs/local-e2e-design.md. This stack is never started by CI or by `npm test`.
+#
+# Testcontainers owns the project name, so the `name:` below is only a default for
+# people who run `docker compose` by hand.
+name: mercury-e2e
+
+x-mercury-env: &mercury-env
+  # Identical persistence and agent configuration in both long-lived processes: the
+  # point of the gate is that they agree on one database and one workspace root.
+  MERCURY_DB: /state/mercury.db
+  MERCURY_WORKSPACE_BASE: /state/workspaces
+  MERCURY_WORKSPACE_MODE: git-worktree
+  MERCURY_DEFAULT_AGENT: fake
+  # 0.0.0.0 inside the container, or Docker cannot forward the published port. The
+  # compose healthcheck runs inside the container too, so it reports healthy even when
+  # the host cannot reach the API at all -- which is how this omission first showed up.
+  MERCURY_BIND_HOST: 0.0.0.0
+  MERCURY_PORT: "3000"
+  MERCURY_API_TOKENS: tok-alice:alice,tok-bob:bob
+  MERCURY_POLL_MS: "50"
+  MERCURY_LOG_LEVEL: info
+  # The default gate performs no LLM call. The PrimeAgent adapter is wired to the
+  # repository's own mock RPC fixture, which speaks the real JSONL protocol.
+  MERCURY_PRIMEAGENT_CMD: /usr/local/bin/node
+  MERCURY_PRIMEAGENT_ARGS: /app/test/fixtures/mock-prime-agent-rpc.mjs
+
+x-state-volume: &state-volume
+  - mercury-e2e-state:/state
+
+services:
+  # One-shot: creates the disposable Git repository the worker checks out. API and
+  # worker start only after it exits zero.
+  fixture:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+    image: mercury-e2e:local
+    restart: "no"
+    volumes: *state-volume
+    command:
+      - sh
+      - -ec
+      - |
+        set -eu
+        repo=/state/fixture-repo
+        test ! -e "$$repo/.git" || { echo "fixture: already initialized"; exit 0; }
+        git init --initial-branch=main "$$repo"
+        cd "$$repo"
+        git config user.name "Mercury E2E Fixture"
+        git config user.email "e2e-fixture@example.invalid"
+        printf 'Mercury E2E fixture repository.\n' > README.md
+        git add README.md
+        git commit -q -m "fixture: initial commit"
+        echo "fixture: ready at $$repo commit $$(git rev-parse HEAD)"
+
+  api:
+    image: mercury-e2e:local
+    restart: "no"
+    command: ["node", "src/cli.ts", "server"]
+    environment: *mercury-env
+    volumes: *state-volume
+    # Random host port, loopback only. The harness reads the real mapping from
+    # Testcontainers and never assumes 3000 on the host.
+    ports:
+      - "127.0.0.1::3000"
+    depends_on:
+      fixture:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - 'fetch("http://127.0.0.1:3000/healthz").then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'
+
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  worker:
+    image: mercury-e2e:local
+    restart: "no"
+    command: ["node", "src/cli.ts", "worker"]
+    environment: *mercury-env
+    volumes: *state-volume
+    depends_on:
+      fixture:
+        condition: service_completed_successfully
+    stop_grace_period: 15s
+
+volumes:
+  mercury-e2e-state:

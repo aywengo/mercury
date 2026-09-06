@@ -1,6 +1,11 @@
 # Local pre-PR end-to-end testing
 
-Status: **proposed design; not implemented**
+Status: **Phase 1 implemented** (container and Compose foundation). Phases 0 and 1 are shipped;
+Phases 2-8 below are still design. See section 17 for the per-phase state.
+
+Implemented so far: `e2e/Dockerfile`, `e2e/compose.yml`, `e2e/preflight.ts`, `e2e/system.test.ts`,
+`e2e/README.md`, `.dockerignore`, and the `test:e2e` / `test:e2e:config` scripts. `npm run prepr`
+does not exist yet -- that is Phase 3.
 
 This document designs a local end-to-end test gate for Mercury. The gate runs on a
 developer workstation before a pull request is opened. It is deliberately separate
@@ -17,7 +22,8 @@ The recommended design uses:
 - explicit opt-in tiers for real agents and Mercury's own container sandbox.
 
 No command or file described as "proposed" exists until the corresponding roadmap
-phase is implemented.
+phase is implemented. Section 17 records which phases have landed, so a reader can tell what is
+runnable today from what is still intent.
 
 Related documents:
 
@@ -402,13 +408,13 @@ These names are design targets, not current commands:
 ```bash
 # Complete isolated pre-PR gate:
 # image build/npm ci -> typecheck -> existing tests -> deterministic E2E
-npm run prepr
+npm run prepr          # NOT IMPLEMENTED -- Phase 3
 
 # Deterministic Docker system E2E only, for iteration
-npm run test:e2e
+npm run test:e2e       # implemented (Phase 1: foundation assertions, not yet Run journeys)
 
 # Validate the Compose model without starting services
-npm run test:e2e:config
+npm run test:e2e:config  # implemented
 ```
 
 The full gate should not be added to `npm test`. `npm test` must remain fast and
@@ -964,7 +970,7 @@ REST and SSE framing assertion.
 Each phase should be independently reviewable. A later phase starts only after the
 previous phase's acceptance gate is met.
 
-### Phase 0 — design
+### Phase 0 — design — **DONE**
 
 Deliverable:
 
@@ -978,7 +984,7 @@ Acceptance gate:
 - deterministic and opt-in tiers are clearly separated;
 - no implementation or CI behavior changes.
 
-### Phase 1 — container and Compose foundation
+### Phase 1 — container and Compose foundation — **DONE**
 
 Deliverables:
 
@@ -1003,6 +1009,22 @@ Acceptance gate:
 
 Recommended PR boundary: foundation only, with a basic health probe but no broad
 scenario set.
+
+Two acceptance items needed a note against the wording above:
+
+- "no source bind mount, credential or Docker socket is present in Mercury containers" is asserted
+  from inside the running containers (`/proc/self/mountinfo`, `test -e /var/run/docker.sock`), not
+  only from the compose model, because the model can be edited later without the assertion noticing.
+- Building the image surfaced two defects that no in-process test could reach, both fixed in
+  issue #284: the API and worker raced on first-open of a fresh database, and `PRAGMA busy_timeout`
+  does not cover the WAL conversion, so every process but the winner died at startup.
+
+One implementation detail the design does not mention: Testcontainers matches wait strategies and
+`getContainer()` against Compose **container** names (`api-1`), not service names (`api`). A wrong
+name does not fail loudly -- the strategy is dropped with a log warning and the stack starts
+unwaited-for. The harness asserts the names it uses resolve, so a naming change breaks the gate
+instead of silently weakening it. A completed one-shot container is likewise not retrievable after
+`up()`, so the fixture's logs are collected through the compose CLI.
 
 ### Phase 2 — fake-agent system journey
 
