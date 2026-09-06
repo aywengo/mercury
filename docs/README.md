@@ -20,6 +20,9 @@ historical reviews.
 
 Host and Fleet have independent versions. See [`releasing.md`](releasing.md).
 
+For how operators actually get Mercury (npm, GitHub Release, git checkout, Homebrew) and
+what each artifact contains, see [`distribution.md`](distribution.md).
+
 - [`Host 0.1.0-rc1`](releases/host/0.1.0-rc1.md)
 - [`Fleet 0.1.0-rc1`](releases/fleet/0.1.0-rc1.md)
 - [`Host changelog`](../CHANGELOG.md)
@@ -115,7 +118,8 @@ Use the narrowest document for a change:
 - Crew design → `docs/crew/`;
 - host release notes → `docs/releases/host/`;
 - Fleet release notes → `docs/releases/fleet/`;
-- how to cut a release → `docs/releasing.md`.
+- how to cut a release → `docs/releasing.md`;
+- how an operator installs Mercury → `docs/distribution.md`.
 
 Avoid copying the same detailed table into several files. Link to the owning
 document and keep summaries short.

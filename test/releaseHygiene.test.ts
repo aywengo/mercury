@@ -348,3 +348,56 @@ test('docs/status.md does not deny that the operator CLI is implemented', () => 
   assert.match(doc, /### Operator TUI/,
     'docs/status.md must keep the TUI listed as designed-but-unbuilt; that part is still true');
 });
+
+test('docs/distribution.md agrees with what the release workflow actually produces', () => {
+  // Distribution has four channels and they land at different times, so the doc is the kind that goes
+  // stale by accident: it either advertises a channel CI does not build, or keeps disclaiming one that
+  // shipped. Both directions are asserted, so wiring Homebrew up has to update the doc to stay green.
+  const docPath = join(ROOT, 'docs', 'distribution.md');
+  assert.ok(existsSync(docPath), 'docs/distribution.md is missing');
+  const doc = readFileSync(docPath, 'utf8');
+
+  const index = readFileSync(join(ROOT, 'docs', 'README.md'), 'utf8');
+  assert.ok(/\[`distribution\.md`\]\(distribution\.md\)/.test(index),
+    'docs/distribution.md must be linked from docs/README.md, or nobody finds it');
+
+  // The status must be read from the status header, not from any sentence that happens to mention
+  // Homebrew. An earlier version of this guard scanned every Homebrew sentence and was unbreakable:
+  // the unrelated true statement "Fleet has no Homebrew formula" matched the unwired pattern on every
+  // run, so the guard reported "unwired" even after the doc was edited to claim Homebrew had shipped.
+  const headerLines = doc.split('\n');
+  const from = headerLines.findIndex((l) => l.startsWith('Status header:'));
+  assert.ok(from >= 0, 'docs/distribution.md must carry a "Status header:" line stating what is wired');
+  const header = headerLines.slice(from, from + 5).join(' ').split('\n\n')[0];
+  const saysUnwired = /not yet wired|unwired|not wired/i.test(header);
+  const saysWired = /\bwired\b|shipping|implemented/i.test(header) && !saysUnwired;
+  assert.ok(saysWired !== saysUnwired,
+    `docs/distribution.md status header must state exactly one Homebrew wiring status, got: ${header}`);
+
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  const buildsBundle = /bundle\.tar\.gz/.test(wf);
+  assert.equal(saysWired, buildsBundle,
+    buildsBundle
+      ? 'release.yml builds the Homebrew bundle but docs/distribution.md still describes Homebrew as unwired'
+      : 'docs/distribution.md advertises a wired Homebrew channel but release.yml builds no bundle');
+
+  // Host and CLI are one artifact; a doc that reintroduces a CLI-only channel re-opens #256.
+  assert.ok(!/brew install[^\n]*\bmercury-cli\b/.test(doc),
+    'docs/distribution.md must not describe a CLI-only Homebrew artifact');
+
+  // `brew install mercury` installs the Mercury language compiler, not this product, and it
+  // downloads ~1 GB before saying so. Only fenced blocks are checked: the doc legitimately *warns*
+  // about this command in prose, and an earlier version of this assertion matched that warning and
+  // failed the baseline. A reader copies fenced blocks, so that is where the command must be right.
+  const fenced = doc.split('\n').reduce((acc: string[], l) => {
+    if (l.startsWith('```')) acc.push('');
+    else if (acc.length) acc[acc.length - 1] += l + '\n';
+    return acc;
+  }, []);
+  const badInstall = fenced.filter((b) => /brew install\s+mercury\b(?!-)/.test(b));
+  assert.equal(badInstall.length, 0,
+    'docs/distribution.md instructs `brew install mercury`, which installs homebrew-core\'s Mercury '
+    + 'language compiler; the formula is mercury-ai');
+  assert.match(doc, /brew install mercury-ai/,
+    'docs/distribution.md must give the actual install command for the Homebrew channel');
+});
