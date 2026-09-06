@@ -427,10 +427,12 @@ MERCURY_E2E_KEEP_ON_FAIL=1
 MERCURY_E2E_VERBOSE=1
 ```
 
-The default remains cleanup-on-failure. Keep-on-fail disables Testcontainers auto
-cleanup for that run and skips explicit teardown only after a failure. It is an
-explicit debugging escape hatch, and the harness must print the Compose project
-name and exact cleanup command when it is used.
+The default remains cleanup-on-failure. When keep-on-fail is enabled, the harness
+must create the Compose environment with Testcontainers automatic cleanup disabled,
+which also prevents Ryuk from registering that project. A successful run still
+calls explicit teardown; a failed run skips it and therefore requires manual
+cleanup. This is an explicit debugging escape hatch, and the harness must print the
+retained Compose project name and exact cleanup command.
 
 ---
 
@@ -524,9 +526,11 @@ Use two cleanup layers:
    if the Node process exits before explicit cleanup.
 
 On assertion failure, collect logs before explicit teardown. On `SIGINT`, `SIGTERM`
-or an unexpected process exit, Ryuk is the backstop. Keep-on-fail must disable auto
-cleanup deliberately; otherwise a debugging stack would disappear when the test
-process exits.
+or an unexpected process exit, Ryuk is the backstop during normal runs. With
+`MERCURY_E2E_KEEP_ON_FAIL=1`, automatic cleanup and Ryuk registration are disabled
+before startup; successful runs still tear down explicitly, but failed or
+interrupted runs leave resources behind and require the printed manual cleanup
+command.
 
 Cleanup errors must be reported but must not replace the original test failure.
 
@@ -666,7 +670,7 @@ Large output should be written to a temporary host directory such as:
 
 ```text
 /tmp/mercury-e2e-<project>/
-  compose-ps.txt
+  container-state.json
   api.log
   worker.log
   fixture.log
