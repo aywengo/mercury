@@ -1305,11 +1305,14 @@ Two follow-on defects surfaced while doing it:
   its own file, which is the manifest in `client/` and nothing in `dist/client/`; the `catch` swallowed
   it and produced a plausible-looking wrong version. It now walks upward and matches on the package
   name, so a dependency's manifest cannot be mistaken for this one.
-- `bin.mercury` has the same TypeScript problem and is **not** fixed here. The server resolves
-  migrations, `ui/` and skill directories relative to its own location, so relocating it is a separate
-  change. It is tracked in #243, and the packaging test keeps a list of exactly that kind of exception
-  and asserts the list is accurate in both directions -- so fixing it breaks the test until the entry is
-  removed.
+- `bin.mercury` had the same TypeScript problem and was **not** fixed here. The server resolves `ui/`
+  and skill directories relative to its own location, so relocating it is a separate change. It was
+  tracked in #243, and the packaging test kept a list of exactly that kind of exception and asserted the
+  list was accurate in both directions, so fixing it had to break the test until the entry was removed.
+  That is what happened: `src/` is now compiled to `dist/src/` by `prepack`, and the data lookups go
+  through `src/paths.ts`, which walks up to the package manifest by name instead of counting directory
+  levels, so the same code is correct at the `src/` depth and the `dist/src/` depth. The exception list
+  is empty and still asserted in both directions.
 
 The smoke test packs the real tarball, extracts it under a path containing `node_modules` -- the path is
 the point, since anywhere else the restriction does not apply -- and runs the binary there. Reverting

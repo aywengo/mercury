@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdtempSync, mkdirSync, chmodSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdtempSync, mkdirSync, chmodSync, rmSync, realpathSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -98,12 +98,28 @@ function buildClient(): void {
   assert.equal(r.status, 0, `npm run build:client failed:\n${r.stdout}\n${r.stderr}`);
 }
 
-buildClient();
+/**
+ * The server bin is compiled for the same reason the client one is. Without this the tree under test
+ * has no dist/src/, and "every bin is plain JavaScript" would be checking a path that does not exist.
+ */
+function buildServer(): void {
+  const r = spawnSync('npm', ['run', 'build:server'], { cwd: ROOT, encoding: 'utf8', timeout: 300_000 });
+  assert.equal(r.status, 0, `npm run build:server failed:\n${r.stdout}\n${r.stderr}`);
+}
 
-/** Bins that are still TypeScript. Each entry is a known defect, not an exemption. */
-const KNOWN_TYPESCRIPT_BINS = new Map<string, string>([
-  ['mercury', 'https://github.com/aywengo/mercury/issues/243'],
-]);
+buildClient();
+buildServer();
+
+/**
+ * Bins that are still TypeScript. Each entry is a known defect, not an exemption, and the test below
+ * requires this to be accurate in both directions: adding a .ts bin without an entry fails, and fixing
+ * one without deleting its entry fails too.
+ *
+ * `mercury` pointed at src/cli.ts and was tracked as https://github.com/aywengo/mercury/issues/243.
+ * It now points at dist/src/cli.js, compiled by `prepack` like the client, so the list is empty. It is
+ * kept rather than deleted so the next TypeScript bin has to be declared here deliberately.
+ */
+const KNOWN_TYPESCRIPT_BINS = new Map<string, string>([]);
 
 test('every bin that is not a tracked defect is plain JavaScript', () => {
   // Node will not strip types under node_modules, so a .ts bin target is an executable that cannot
@@ -258,6 +274,70 @@ test('a real npm install puts a working mercuryctl on the PATH', () => {
     const help = spawnSync(shim, ['--help'], { encoding: 'utf8', timeout: 120_000, env });
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, /remote operator client/);
+
+    // ---------------------------------------------------------------------
+    // The server bin, from the same install (issue #243).
+    //
+    // `bin.mercury` pointed at src/cli.ts, which runs from a checkout and dies once installed. The
+    // client's own smoke test above extracts the tarball with `tar`, which is enough for mercuryctl
+    // because the client has no runtime dependencies -- but the server imports express, so checking it
+    // needs the install this test already performed. Reusing it also means the two bins are proven
+    // against the same artifact rather than two builds.
+    // ---------------------------------------------------------------------
+    const serverShim = join(tmp, 'node_modules', '.bin', 'mercury');
+    assert.ok(existsSync(serverShim), 'npm did not link a mercury command; check package.json "bin"');
+
+    const serverEnv = { ...env, MERCURY_DB: join(tmp, 'smoke.db') };
+    const sv = spawnSync(serverShim, ['--version'], { encoding: 'utf8', timeout: 120_000, env: serverEnv });
+    assert.equal(sv.status, 0, `installed mercury --version failed:\n${sv.stdout}\n${sv.stderr}`);
+    assert.ok(!/ERR_UNSUPPORTED|ERR_MODULE_NOT_FOUND|SyntaxError|Cannot find (module|package)/.test(sv.stderr),
+      `installed mercury errored: ${sv.stderr}`);
+    assert.equal(sv.stdout.trim(), `mercury-host ${pkg.version}`,
+      'the installed server reports a version other than the manifest it shipped with');
+
+    // --version only proves the entry point loads. `migrate` is the lightest command that opens the
+    // database and exits, so it proves the compiled server also resolves its runtime surface -- and it
+    // is the behaviour a first-time operator triggers.
+    const mig = spawnSync(serverShim, ['migrate'], { encoding: 'utf8', timeout: 180_000, env: serverEnv });
+    assert.equal(mig.status, 0, `installed mercury migrate failed:\n${mig.stdout}\n${mig.stderr}`);
+    assert.match(mig.stdout, /migrations applied/);
+    assert.ok(existsSync(join(tmp, 'smoke.db')), 'migrate did not create the database at MERCURY_DB');
+
+    // Guard for the fix itself. Moving the server from src/ to dist/src/ changed the depth of every
+    // module that locates a published data directory, and a wrong depth does not throw -- it resolves
+    // to a directory that simply has no skills, no dashboard and no agent registries, which reads as a
+    // misconfigured deployment rather than a packaging bug. So assert the resolved root IS the installed
+    // package, and that each published data directory is actually reachable from it.
+    const installedPkg = join(tmp, 'node_modules', '@aywengo', 'mercury');
+    const probe = spawnSync(
+      process.execPath,
+      ['--input-type=module', '-e', [
+        `import { packageRoot, dataPath } from ${JSON.stringify(join(installedPkg, 'dist', 'src', 'paths.js'))};`,
+        'const { existsSync } = await import("node:fs");',
+        'console.log(JSON.stringify({',
+        '  root: packageRoot(),',
+        '  dirs: {',
+        '    skills: [dataPath(".agents", "skills"), existsSync(dataPath(".agents", "skills"))],',
+        '    ui: [dataPath("ui"), existsSync(dataPath("ui"))],',
+        '    local: [dataPath("local-agents"), existsSync(dataPath("local-agents"))],',
+        '    remote: [dataPath("remote-agents"), existsSync(dataPath("remote-agents"))],',
+        '    rpc: [dataPath("rpc-agents"), existsSync(dataPath("rpc-agents"))],',
+        '  },',
+        '}));',
+      ].join(' ')],
+      { encoding: 'utf8', timeout: 120_000, env: serverEnv },
+    );
+    assert.equal(probe.status, 0, `resolving data paths from the installed server failed: ${probe.stderr}`);
+    const resolved = JSON.parse(probe.stdout.trim()) as { root: string; dirs: Record<string, [string, boolean]> };
+    // Compare through realpath. On macOS the temp dir is reached both as /var/folders/... (what
+    // mkdtempSync returns) and as /private/var/folders/... (what the module loader reports, because
+    // /var is a symlink), and those are the same directory. Asserting the raw strings would encode a
+    // platform-specific path shape into a packaging test: green on Linux CI, red on every macOS box.
+    assert.equal(realpathSync(resolved.root), realpathSync(installedPkg),
+      `the installed server resolved its package root to ${resolved.root}, not the installed package`);
+    for (const [name, [path, present]] of Object.entries(resolved.dirs)) {
+      assert.ok(present, `installed server resolves ${name} to ${path}, which does not exist`);
+    }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

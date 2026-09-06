@@ -6,6 +6,7 @@ import { createServer as createHttpsServer } from 'node:https';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { EventStore } from '../events/eventStore.ts';
+import { dataPath } from '../paths.ts';
 import type { EventStream } from '../events/eventStream.ts';
 import type { RunQueue } from '../queue/runQueue.ts';
 import type { RunService } from '../runs/runService.ts';
@@ -23,7 +24,7 @@ import { HOST_PRODUCT, HOST_VERSION } from '../version.ts';
 // Dashboard UI (Mercury.md section 23): static SPA served at /.
 // The UI authenticates with a session cookie (POST /api/auth/login);
 // the /api routes remain the only data surface.
-const UI_DIR = resolve(import.meta.dirname, '..', '..', 'ui');
+const UI_DIR = dataPath('ui');
 
 export interface RateLimitConfig {
   windowMs: number;
