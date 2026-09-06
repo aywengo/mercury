@@ -183,8 +183,45 @@ failed publish cannot leave a public release advertising an uninstallable versio
 
 `fleet-v<version>` publishes Fleet to npm only; Fleet has no Homebrew formula.
 
-## Decisions still open
+## Verification status
 
-- **Whether the bundle should vendor `node_modules`** or let the formula run
-  `npm install --omit=dev`. Vendoring makes installs offline-capable and faster, at the
-  cost of a larger artifact; the artifact is 1.2 MB, so the cost is currently trivial.
+What has actually been executed, and what has not. The distinction matters because the
+release path had already been shown to contain a step that had never run.
+
+Verified end to end, in order, on a fresh clone of `main`:
+
+1. `npm ci` built `dist/` via `prepare`.
+2. `scripts/build-bundle.mjs` produced `mercury-0.1.0-rc1-bundle.tar.gz` and reported its sha256.
+3. `scripts/update-formula.mjs` generated `Formula/mercury-ai.rb` pinning that digest; `ruby -c` accepted it.
+4. The artifact was served over real HTTP and `brew install mercury-ai` fetched it. Homebrew
+   verifies the pinned digest on download, so a successful install is evidence the digest the
+   generator wrote matches the bytes the bundler produced -- the two ends of the chain were
+   never compared by hand.
+5. Installed `mercury --version` -> `mercury-host 0.1.0-rc1`, `mercuryctl --version` ->
+   `mercuryctl 0.1.0-rc1`, and `mercury --help` listed the command groups.
+6. `brew audit --strict` on the generated formula reported no findings.
+
+Not yet exercised, and the only parts still taken on trust:
+
+- **`npm publish`.** No `NPM_TOKEN` exists on the repository, so no publish has ever run. The
+  workflow asserts ordering and the dist-tag derivation, but the publish itself is unproven.
+- **The GitHub Releases download URL.** The verification above served the artifact over local
+  HTTP because nothing is published. The URL shape is asserted by `test/formula.test.ts` against
+  the asset name `scripts/build-bundle.mjs` produces, which catches a rename but not, say, an
+  asset that failed to upload.
+- **The formula commit back to `main`.** `test/releaseWorkflow.test.ts` asserts the step exists,
+  runs after `gh release create`, and pushes `HEAD:main`, using a stubbed `git`. `main` is not
+  branch-protected, so the push should succeed; it has not been observed to.
+
+These three all resolve on the first real tag push and can be confirmed in one pass.
+
+## Decisions
+
+- **The bundle vendors its production `node_modules`.** Decided by implementation and
+  measured: the whole production tree is `express` plus 67 transitive packages, 3.9 MB,
+  1.2 MB compressed. Vendoring makes `brew install` need no network and no build, which is
+  what makes the offline verification above possible. The alternative -- the formula running
+  `npm install --omit=dev` -- would make every install depend on the registry and on
+  Homebrew's sandbox network policy, to save about one megabyte.
+- **The formula lives in this repository, not a separate tap.** See *Tap* above.
+- **The formula is generated, not committed.** See *Version and sha256 updates* above.
