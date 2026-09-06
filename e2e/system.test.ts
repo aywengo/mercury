@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { DockerComposeEnvironment, StartedDockerComposeEnvironment, Wait } from 'testcontainers';
 import { COMPOSE_FILE, E2E_DIR, LIMITS, composeModel, keepOnFail, preflight, verbose } from './preflight.ts';
+import { client, pollRun, readSse, TERMINAL, type RunEvent, type RunView } from './helpers.ts';
 
 /**
  * A unique project name per run, so two worktrees or two terminals can run this file at the same
@@ -48,6 +49,11 @@ let env: StartedDockerComposeEnvironment | undefined;
 let apiBase = '';
 let preflightInfo = { node: '', docker: '', compose: '' };
 let scenarioFailed = false;
+let alice = { base: '', token: '' } as unknown as ReturnType<typeof client>;
+let bob = { base: '', token: '' } as unknown as ReturnType<typeof client>;
+/** Shared across the sequential journeys: the Run created by the lifecycle test is the one the
+ *  owner-scoping test inspects, which is what makes the second test cheap and meaningful. */
+let sharedRunId = '';
 
 /** Bound a promise; a teardown that hangs must not hang the suite. */
 async function withDeadline<T>(label: string, ms: number, work: Promise<T>): Promise<T> {
@@ -201,6 +207,9 @@ before(async () => {
   }
   const api = started.getContainer(SVC.api);
   apiBase = `http://${api.getHost()}:${api.getMappedPort(3000)}`;
+  // The tokens are the fixed test identities declared in compose.yml, not secrets.
+  alice = client(apiBase, 'tok-alice');
+  bob = client(apiBase, 'tok-bob');
 });
 
 after(async () => {
@@ -314,4 +323,141 @@ guarded('the worker is actually consuming the queue the API writes to', async ()
   assert.equal(db, 'PRESENT', 'the worker must open the database the API created');
   const journal = await inService('worker', 'test -f /state/mercury.db-wal && echo PRESENT || echo ABSENT');
   assert.equal(journal, 'PRESENT', 'the shared database must be in WAL mode');
+});
+
+/**
+ * Phase 2 -- the fake-agent system journey.
+ *
+ * This is the shape nothing else in the repository covers: an external client submitting a Run over
+ * public HTTP, watching it through SSE, and seeing a *separate* process claim it, build a real git
+ * worktree, run an agent and write the result back through the same SQLite file.
+ */
+guarded('a fake Run completes across separate API and worker containers', async () => {
+  const created = await alice.post<{ runId: string; status: string }>(
+    '/api/runs',
+    {
+      task: 'E2E plumbing run',
+      agent: 'fake',
+      // A path the *worker container* resolves, not the host. Sharing /state at the same absolute
+      // path in both processes is what makes this legal from the API and real from the worker.
+      repository: { localPath: '/state/fixture-repo', baseBranch: 'main' },
+    },
+    'create run',
+  );
+  assert.equal(created.status, 201);
+  sharedRunId = created.body.runId;
+  assert.ok(sharedRunId, 'a runId must be returned');
+  assert.equal(created.body.status, 'QUEUED');
+
+  // SSE first: the fake agent can finish before a REST poller ever looks, so the durable event
+  // stream -- not a sequence of status snapshots -- is what proves the intermediate lifecycle.
+  const stream = await readSse(apiBase, 'tok-alice', sharedRunId, 60_000);
+  const types = stream.events.map((e) => e.type);
+  for (const required of ['run.created', 'run.started', 'run.completed']) {
+    assert.ok(types.includes(required), `stream is missing ${required}; saw ${types.join(', ')}`);
+  }
+
+  const seqs = stream.events.map((e) => e.sequence);
+  assert.ok(seqs.length > 0, 'the stream delivered no events');
+  assert.equal(seqs[0], 1, `the first event must be sequence 1, not ${seqs[0]}`);
+  assert.equal(new Set(seqs).size, seqs.length, 'event sequences must be unique');
+  assert.ok(seqs.every((s, i) => i === 0 || s > seqs[i - 1]), 'event sequences must strictly increase');
+
+  const final = await pollRun(alice, sharedRunId, (r) => TERMINAL.has(r.status), 'a terminal state', 60_000);
+  assert.equal(final.status, 'COMPLETED', `run ended ${final.status}: ${final.error ?? ''}`);
+
+  // The SSE terminal event and the authoritative REST state have to agree.
+  const lastStreamed = stream.events[stream.events.length - 1];
+  assert.equal(lastStreamed.type, 'run.completed');
+
+  const page = await alice.get<{ events: RunEvent[] }>(`/api/runs/${sharedRunId}/events`, 'run events');
+  const restTypes = page.events.map((e) => e.type);
+  assert.ok(restTypes.includes('run.completed'), 'the terminal event must be persisted, not only streamed');
+  assert.ok(!restTypes.some((t) => t.includes('failed') || t.includes('error')),
+    `no failure event expected: ${restTypes.join(', ')}`);
+
+  // Real git-worktree isolation, asserted from the paths the worker actually produced.
+  assert.ok(final.workspacePath?.startsWith('/state/workspaces/worktrees/'),
+    `workspace must be a worktree under /state: ${final.workspacePath}`);
+  assert.equal(final.workspaceBranch, `agent/${sharedRunId}`);
+
+  // The path alone does not prove worktree mode: Mercury puts *copies* under worktrees/ too, so the
+  // assertion above passes in either mode. What distinguishes them is on disk -- `git worktree add`
+  // leaves a .git FILE pointing into the shared clone, while a copy leaves a .git DIRECTORY. Without
+  // this the gate would keep claiming it exercises the git-worktree path after someone switched it
+  // to copy mode.
+  const gitKind = await inService('worker', `test -f ${final.workspacePath}/.git && echo FILE || (test -d ${final.workspacePath}/.git && echo DIR || echo MISSING)`);
+  assert.equal(gitKind, 'FILE',
+    'the workspace must be a real git worktree (.git file), not a copied repository');
+
+  // The gitdir has to resolve on the shared volume. This is the concrete form of the design's
+  // "same absolute path in every container" rule: a worktree whose admin directory lives outside
+  // /state would be unreadable from the other process, and a macOS-side path would be nonsense
+  // here. Mercury worktrees straight off the primary repository, so this points into the fixture.
+  const gitdir = await inService('worker', `cat ${final.workspacePath}/.git`);
+  assert.match(gitdir, /^gitdir: \/state\//,
+    `the worktree admin dir must live on the shared volume: ${gitdir}`);
+
+  // The Run stays retrievable after the stream is gone.
+  const again = await alice.get<{ run: RunView }>(`/api/runs/${sharedRunId}`, 're-fetch run');
+  assert.equal(again.run.status, 'COMPLETED');
+});
+
+guarded('owner scoping survives the production-shaped configuration', async () => {
+  assert.ok(sharedRunId, 'the owner-scoping journey needs the Run from the previous scenario');
+
+  await alice.get<{ run: RunView }>(`/api/runs/${sharedRunId}`, 'alice reads her run');
+
+  // 404, not 403: another owner's Run must not be distinguishable from one that does not exist.
+  await assert.rejects(() => bob.get(`/api/runs/${sharedRunId}`, 'bob reads alice run'),
+    (err: unknown) => (err as { status?: number }).status === 404);
+  await assert.rejects(() => bob.get(`/api/runs/${sharedRunId}/events`, 'bob reads alice events'),
+    (err: unknown) => (err as { status?: number }).status === 404);
+});
+
+guarded('unauthenticated requests are refused on the API surface', async () => {
+  const anon = client(apiBase, '');
+  await assert.rejects(() => anon.get('/api/agents', 'anonymous agents'),
+    (err: unknown) => (err as { status?: number }).status === 401);
+});
+
+/**
+ * The gate has to be *loud* when the worker is missing.
+ *
+ * A Run that never leaves QUEUED is the most likely way this stack breaks in practice -- a bad
+ * adapter config, a worker that cannot reach the volume -- and a bare "timed out" sends the
+ * developer to read four log files. So this stops the worker on purpose and asserts the failure
+ * names the last observed status and points at the logs.
+ *
+ * It runs last: stopping a container is destructive to the shared stack, and teardown follows.
+ */
+guarded('the gate fails clearly when no worker is consuming the queue', async () => {
+  // Stop the worker BEFORE submitting. Stopping after submission let the claim loop pick the Run up
+  // first, so it reached STARTING and the scenario tested a different interleaving than it claimed.
+  await env!.getContainer(SVC.worker).stop({ timeout: 5 });
+
+  const created = await alice.post<{ runId: string; status: string }>(
+    '/api/runs',
+    { task: 'orphaned run', agent: 'fake', repository: { localPath: '/state/fixture-repo', baseBranch: 'main' } },
+    'create orphan run',
+  );
+  const orphanId = created.body.runId;
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    () => pollRun(alice, orphanId, (r) => TERMINAL.has(r.status), 'a terminal state', 8_000),
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.match(message, new RegExp(orphanId), 'the failure must name the Run');
+      // Assert the property, not one specific status: the message has to say what was last seen.
+      const seen = /last observed status=([A-Z_]+)/.exec(message);
+      assert.ok(seen, `the failure must report the last observed status: ${message}`);
+      assert.ok(!TERMINAL.has(seen![1]), `reported status ${seen![1]} should not have timed out`);
+      assert.match(message, /worker\.log/, `the failure must point at the logs: ${message}`);
+      return true;
+    },
+  );
+  // And it must give up on its deadline rather than hang.
+  const elapsed = Date.now() - startedAt;
+  assert.ok(elapsed >= 8_000 && elapsed < 30_000, `the poll must honour its 8s deadline, took ${elapsed}ms`);
 });
