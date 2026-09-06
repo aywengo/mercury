@@ -1307,15 +1307,29 @@ test('a locally-pushed run does not slow the cross-process backstop of another r
       stream.subscribe(pushed.id, 0, () => {});
       stream.subscribe(cross.id, 0, () => {});
 
-      const deadline = Date.now() + 300;
-      while (Date.now() < deadline) {
+      // Drive by TICKS, not by elapsed time.
+      //
+      // This loop used to run for a fixed 300ms and then assert `ticks >= 3` as a precondition. The
+      // ratio assertions below are correctly machine-independent, but that precondition was an
+      // absolute tick count over a wall-clock window -- the exact coupling the comment above this
+      // test says it removed. On a contended CI runner the synchronous appends starve the timer and
+      // 300ms yields 2 ticks, so the test failed on its own setup while the behaviour under test was
+      // fine (observed on node 22.18.0 in CI; not reproducible on a 24-core workstation).
+      //
+      // Waiting for the ticks to accumulate makes the window self-sizing: a slow machine runs the
+      // loop longer instead of failing, and the precondition now only trips when the timer is
+      // genuinely not running -- which is what a precondition is for.
+      const MIN_TICKS = 10;
+      const deadline = Date.now() + 5_000;
+      while (ticks < MIN_TICKS && Date.now() < deadline) {
         env.events.append(pushed.id, 'agent.message', { n: 1 });
         otherProcess.append(cross.id, 'agent.message', { n: 1 });
         await new Promise((r) => setTimeout(r, 5));
       }
 
       // Precondition, not verdict: if the timer barely ran, every ratio below is vacuous.
-      assert.ok(ticks >= 3, `precondition: the driving timer must tick several times; got ${ticks}`);
+      assert.ok(ticks >= MIN_TICKS,
+        `precondition: the driving timer must reach ${MIN_TICKS} ticks; got ${ticks} in 5000ms`);
 
       const crossRatio = (reads[cross.id] ?? 0) / ticks;
       assert.ok(crossRatio >= 0.8,
