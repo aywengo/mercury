@@ -1295,7 +1295,7 @@ The same file, on the same Node binary, runs fine from a checkout. The failure e
 installation, which is precisely the moment no test in the suite had ever reached.
 
 The fix is a compile step: `npm run build:client` emits `dist/client/` with
-`rewriteRelativeImportExtensions`, `prepack` runs it, and `bin` points at the JavaScript. The repository
+`rewriteRelativeImportExtensions`, `prepare` runs it, and `bin` points at the JavaScript. The repository
 already set `erasableSyntaxOnly`, which is what makes this safe to automate -- the source is guaranteed
 free of constructs that need more than erasure, so the emitted JavaScript is the same program.
 
@@ -1309,7 +1309,7 @@ Two follow-on defects surfaced while doing it:
   and skill directories relative to its own location, so relocating it is a separate change. It was
   tracked in #243, and the packaging test kept a list of exactly that kind of exception and asserted the
   list was accurate in both directions, so fixing it had to break the test until the entry was removed.
-  That is what happened: `src/` is now compiled to `dist/src/` by `prepack`, and the data lookups go
+  That is what happened: `src/` is now compiled to `dist/src/` by `prepare`, and the data lookups go
   through `src/paths.ts`, which walks up to the package manifest by name instead of counting directory
   levels, so the same code is correct at the `src/` depth and the `dist/src/` depth. The exception list
   is empty and still asserted in both directions.

@@ -116,7 +116,7 @@ buildServer();
  * one without deleting its entry fails too.
  *
  * `mercury` pointed at src/cli.ts and was tracked as https://github.com/aywengo/mercury/issues/243.
- * It now points at dist/src/cli.js, compiled by `prepack` like the client, so the list is empty. It is
+ * It now points at dist/src/cli.js, compiled by `prepare` like the client, so the list is empty. It is
  * kept rather than deleted so the next TypeScript bin has to be declared here deliberately.
  */
 const KNOWN_TYPESCRIPT_BINS = new Map<string, string>([]);
@@ -337,6 +337,49 @@ test('a real npm install puts a working mercuryctl on the PATH', () => {
       `the installed server resolved its package root to ${resolved.root}, not the installed package`);
     for (const [name, [path, present]] of Object.entries(resolved.dirs)) {
       assert.ok(present, `installed server resolves ${name} to ${path}, which does not exist`);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('installing from a git source builds dist/, so both binaries run (issue #266)', () => {
+  // The tarball tests above cannot see this defect: `npm pack` runs the build, and the install that
+  // follows passes --ignore-scripts, so no lifecycle runs at install time either. A git dependency is
+  // the opposite -- npm runs `prepare` in the checkout and nothing else. With only `prepack` defined,
+  // nothing built, dist/ was absent, and BOTH bin targets died with MODULE_NOT_FOUND while
+  // `npm install` exited 0 and reported success.
+  //
+  // Uses a local bare clone, so no network is required for the source itself.
+  const tmp = mkdtempSync(join(tmpdir(), 'mercury-gitinstall-'));
+  try {
+    const bare = join(tmp, 'origin.git');
+    const cloned = spawnSync('git', ['clone', '--quiet', '--bare', ROOT, bare], { encoding: 'utf8', timeout: 300_000 });
+    assert.equal(cloned.status, 0, `bare clone failed: ${cloned.stdout}${cloned.stderr}`);
+
+    const consumer = join(tmp, 'consumer');
+    mkdirSync(consumer);
+    writeFileSync(join(consumer, 'package.json'), '{"name":"consumer","version":"1.0.0","private":true}');
+
+    const installed = spawnSync('npm', ['install', '--no-audit', '--no-fund', `git+file://${bare}`],
+      { cwd: consumer, encoding: 'utf8', timeout: 1_800_000 });
+    assert.equal(installed.status, 0, `git install failed: ${installed.stdout}\n${installed.stderr}`);
+
+    const root = join(consumer, 'node_modules', '@aywengo', 'mercury');
+    assert.ok(existsSync(join(root, 'package.json')), 'package did not install from the git source');
+
+    // The failure was silent, so assert the build output directly rather than inferring it.
+    for (const [name, target] of Object.entries<string>(pkg.bin ?? {})) {
+      const built = join(root, target);
+      assert.ok(existsSync(built),
+        `bin ${JSON.stringify(name)} -> ${target} is absent after a git install: the checkout was never ` +
+        'built. A git dependency runs `prepare`, not `prepack`.');
+      const r = spawnSync(process.execPath, [built, '--version'], {
+        encoding: 'utf8', timeout: 120_000,
+        env: { ...process.env, XDG_CONFIG_HOME: join(tmp, 'no-home'), MERCURY_CLIENT_URL: '', MERCURY_CLIENT_TOKEN: '' },
+      });
+      assert.equal(r.status, 0, `installed ${name} failed: ${r.stdout}\n${r.stderr}`);
+      assert.match(r.stdout.trim(), /^\S+ \d+\.\d+\.\d+/, `${name} --version printed ${JSON.stringify(r.stdout)}`);
     }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
