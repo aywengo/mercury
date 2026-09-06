@@ -265,7 +265,11 @@ test('both commands in this package answer --help the same way', async () => {
   // tests would still pass.
   const server = await spawnCli(['--help']);
   assert.equal(server.code, 0, `mercury --help: ${server.stderr}`);
-  const client = spawnSync(process.execPath, [join(ROOT, 'dist', 'client', 'bin.js'), '--help'], {
+  // From SOURCE, not from dist/. This file is in the core suite, which runs with no build step; the
+  // first version of this test spawned dist/client/bin.js, passed locally because a build had happened
+  // to run in that checkout, and failed on CI where it had not. Same rule as spawnCli() above: the
+  // core suite may only depend on state it creates itself.
+  const client = spawnSync(process.execPath, [join(ROOT, 'client', 'bin.ts'), '--help'], {
     cwd: ROOT,
     encoding: 'utf8',
     timeout: 120_000,
