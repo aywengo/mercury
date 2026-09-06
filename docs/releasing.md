@@ -1,11 +1,15 @@
 # Releasing Mercury
 
-Host, Fleet, and the `mercuryctl` CLI are released as **independent SemVer
-streams**. Bump only the product that changed. Do not use a bare `v0.1.0` tag.
-The CLI has no version of its own: it ships inside the host package, so its
-released version is the host package version, and the workflow enforces that: a
-`cli-*` tag whose version differs from `package.json` is refused. See "The CLI"
-below.
+Host and Fleet are released as **independent SemVer streams**. Bump only the
+product that changed. Do not use a bare `v0.1.0` tag.
+
+The CLI is **not** an independent stream, and this used to claim it was. It ships
+inside `@aywengo/mercury`, so it has no version of its own: a `cli-vX.Y.Z` tag is
+refused unless `package.json` says `X.Y.Z`, and bumping `package.json` to `X.Y.Z`
+in turn requires `HOST_VERSION`, a `CHANGELOG.md` heading, and
+`docs/releases/host/X.Y.Z.md` to say the same -- all four enforced by
+`test/releaseHygiene.test.ts`. So a CLI release cannot be prepared without host
+release artifacts existing for the same version. See "The CLI" below.
 
 | Product | Version file | Tag | npm | Notes |
 | --- | --- | --- | --- | --- |

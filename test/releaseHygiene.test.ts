@@ -278,3 +278,29 @@ test('both commands in this package answer --help the same way', async () => {
   assert.equal(client.status, 0, `mercuryctl --help: ${client.stderr}`);
   assert.equal(server.code, client.status, 'mercury and mercuryctl must agree on the --help exit code');
 });
+
+test('releasing.md does not call the CLI an independent release stream', () => {
+  // It used to. The claim was false when made and is now enforced: a cli-vX.Y.Z tag is refused unless
+  // package.json says X.Y.Z, and bumping package.json requires HOST_VERSION, a CHANGELOG heading and
+  // docs/releases/host/X.Y.Z.md to agree -- all four asserted by the tests above. So a CLI release
+  // cannot be prepared without host release artifacts for the same version. An operator who believed
+  // "independent stream" would bump nothing, tag cli-vX.Y.Z, and get a refusal with no hint why.
+  const doc = read('docs/releasing.md');
+  // Assert on the SENTENCE, not on a spelling. An earlier version of this guard matched
+  // "CLI are **independent SemVer streams" and SURVIVED the exact regression it was written against,
+  // because the real sentence reads "CLI are released as **independent SemVer streams". So: take the
+  // sentence that makes the independence claim and require that it does not include the CLI. Any
+  // rewording of the false claim still trips it.
+  const independence = doc.split(/(?<=[.!?])\s+/).filter((s) => /independent\s+SemVer\s+streams/i.test(s));
+  assert.ok(independence.length > 0, 'releasing.md no longer mentions independent SemVer streams at all');
+  for (const sentence of independence) {
+    assert.ok(!/\bCLI\b|mercuryctl/i.test(sentence),
+      `the independence claim includes the CLI, which is not one: ${sentence.trim()}`);
+  }
+  assert.match(doc, /CLI is \*\*not\*\* an independent stream/,
+    'releasing.md must state plainly that the CLI is not an independent stream');
+  // \s+ not a space: markdown wraps this file at ~78 columns, so a literal space in the pattern
+  // matches only on the one line length the sentence happened to have when it was written.
+  assert.match(doc, /cannot be prepared without host\s+release\s+artifacts/,
+    'releasing.md must state the coupling, not just deny independence');
+});
