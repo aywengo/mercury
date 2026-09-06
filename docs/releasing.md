@@ -20,7 +20,9 @@ below.
 
 1. On a branch from `main`, bump **only** the changed product:
    - host: root `package.json` and `HOST_VERSION` in `src/version.ts`;
-   - Fleet: `fleet/package.json` and `FLEET_VERSION` in `fleet/version.ts`.
+   - Fleet: `fleet/package.json` and `FLEET_VERSION` in `fleet/version.ts`;
+   - CLI: there is nothing to bump. The CLI ships inside `@aywengo/mercury`, so its version is the
+     root `package.json` version and a `cli-vX.Y.Z` tag must name that version exactly.
 2. Move that product's `## [Unreleased]` changelog entries under
    `## [X.Y.Z] - YYYY-MM-DD`.
 3. Add `docs/releases/<product>/X.Y.Z.md` (GitHub Release body).
@@ -58,6 +60,13 @@ that manifest is the root `package.json`, because the CLI ships inside
 `@aywengo/mercury` and has no version of its own -- so `cli-v9.9.9` is refused
 while `package.json` says otherwise. The notes file is checked too, but it is not
 a substitute: it only proves someone wrote notes, not that the version is real.
+
+A `cli-*` tag publishes **notes only**. The workflow runs `npm publish` for `host`
+and `fleet`; for `cli` it creates the GitHub Release and publishes nothing, so the
+CLI artifact users actually install arrives with the next `host-vX.Y.Z` tag, not
+with the CLI tag. Cutting a CLI tag therefore announces a version to readers of the
+releases page before that version is installable, unless the host tag goes out with
+it. Tag them together when the CLI change is meant to reach users.
 
 Verify before tagging, beyond `npm test`:
 
