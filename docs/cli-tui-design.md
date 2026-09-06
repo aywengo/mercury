@@ -178,6 +178,7 @@ mercuryctl runs retry <run-id>
 
 mercuryctl config profiles
 mercuryctl config current
+mercuryctl completion <bash|zsh|fish>
 ```
 
 Global options include:
@@ -188,10 +189,21 @@ Global options include:
 --json
 --no-color
 --timeout <duration>
+--yes
+-h, --help
+-V, --version
 ```
 
 There is deliberately no `--token` option. Command-line arguments are visible
 to other local processes and are commonly retained in shell history.
+
+Two entries were added during delivery rather than designed up front, and are
+recorded here so this section stays the surface an operator can read as
+complete. `completion` came from Milestone 4 (§16.3): the command list already
+existed in one place, so the scripts are generated from it and a hand-written
+file would have been a third copy that drifts. `--version` came from §16.1,
+where the reason for it turned out to be that the version had already been
+written twice and silently disagreed with itself. `-V` is the short form.
 
 ### 6.1 Read commands
 

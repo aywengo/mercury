@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { COMMAND_SUMMARIES, IMPLEMENTED } from '../cli.ts';
 
@@ -262,4 +263,37 @@ test('a credential flag is refused in command scope too', () => {
   assert.equal(r.code, 2);
   assert.ok(!(r.stdout + r.stderr).includes(SECRET));
   assert.match(r.stderr, /MERCURY_CLIENT_TOKEN|credentials file/);
+});
+test('the design document lists exactly the commands the CLI implements', () => {
+  // §6 is the command surface an operator reads as complete. It drifted twice in one
+  // session -- `completion` shipped without appearing there, and the global-options block
+  // omitted --yes/--help/--version -- so the comparison is made mechanically rather than
+  // left to whoever notices. A design doc that quietly falls behind its implementation is
+  // worse than no doc, because it is read with the confidence of a spec.
+  const doc = readFileSync(join(import.meta.dirname, '..', '..', 'docs', 'cli-tui-design.md'), 'utf8');
+  const section = doc.slice(doc.indexOf('## 6. User-facing command model'), doc.indexOf('## 7. '));
+  assert.ok(section.length > 500 && section.startsWith('## 6.'), 'could not locate §6; the guard is not reading anything');
+
+  const block = section.match(/```text\n([\s\S]*?)```/);
+  assert.ok(block, '§6 has no grammar block; the guard is vacuous');
+  const documented = new Set(
+    block[1].split('\n').map((l) => l.trim()).filter((l) => l.startsWith('mercuryctl '))
+      .map((l) => l.replace(/^mercuryctl\s+/, '').replace(/\s+<.*$/, '')),
+  );
+  assert.ok(documented.size >= 10, `only ${documented.size} commands parsed from §6; the extraction is broken`);
+
+  const implemented = new Set(COMMAND_SUMMARIES.map(([c]) => c));
+  const missing = [...implemented].filter((c) => !documented.has(c));
+  const phantom = [...documented].filter((c) => !implemented.has(c));
+  assert.deepEqual(missing, [], `implemented but absent from §6: ${missing.join(', ')}`);
+  assert.deepEqual(phantom, [], `§6 advertises commands that do not exist: ${phantom.join(', ')}`);
+
+  // Global options, same reasoning: the block is what an operator copies from.
+  const optBlock = section.match(/--profile[\s\S]*?```/);
+  assert.ok(optBlock, '§6 has no global-options block; the guard is vacuous');
+  for (const flag of ['--json', '--no-color', '--timeout', '--yes', '--help', '--version', '--profile', '--url']) {
+    assert.ok(optBlock[0].includes(flag), `§6 omits global option ${flag}`);
+  }
+  // The absence is the point of §6, so assert it rather than trust it.
+  assert.ok(!/^--token/m.test(optBlock[0]), '§6 lists a --token option, which the design forbids');
 });
