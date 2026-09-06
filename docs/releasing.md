@@ -44,6 +44,31 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
 The `NPM_TOKEN` repository secret must exist on `aywengo/mercury` before the
 first tag. npm publish fails closed without it. This is intended.
 
+## Prereleases
+
+A tag may carry a SemVer prerelease: `host-v0.1.0-rc1`, `fleet-v0.1.0-rc1`. The version in the tag
+must still equal the matching `package.json` exactly, so a prerelease is cut by bumping the manifest
+to `0.1.0-rc1` first, exactly as for a stable release.
+
+**A prerelease is published under its own npm dist-tag, never `latest`.** npm applies `latest` to any
+version published without `--tag` -- `npm config get tag` prints `latest` -- so publishing an RC the
+naive way makes `npm install @aywengo/mercury` resolve to the release candidate for everyone. The
+workflow derives the tag from the version: `0.1.0-rc1` and `0.1.0-rc.2` go to **`rc`**,
+`1.2.0-beta.3` goes to **`beta`**, and a stable version still goes to **`latest`**.
+
+```bash
+npm install -g @aywengo/mercury@rc     # the newest RC
+npm install -g @aywengo/mercury        # stable; untouched by an RC publish
+```
+
+The first identifier is what becomes the dist-tag, with trailing digits and any sub-parts removed. A
+prerelease with no alphabetic identifier (`1.0.0-1`) falls back to `next` rather than publishing an
+empty tag.
+
+To promote an RC, cut a new release at the plain version: bump the manifest to `0.1.0`, move the
+changelog entry, add `docs/releases/host/0.1.0.md`, tag `host-v0.1.0`. The RC stays on the `rc`
+dist-tag and ages out on its own.
+
 ## The CLI
 
 `mercuryctl` ships inside `@aywengo/mercury`. It has no version of its own, no tag,

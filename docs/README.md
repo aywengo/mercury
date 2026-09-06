@@ -20,8 +20,8 @@ historical reviews.
 
 Host and Fleet have independent versions. See [`releasing.md`](releasing.md).
 
-- [`Host 0.1.0`](releases/host/0.1.0.md)
-- [`Fleet 0.1.0`](releases/fleet/0.1.0.md)
+- [`Host 0.1.0-rc1`](releases/host/0.1.0-rc1.md)
+- [`Fleet 0.1.0-rc1`](releases/fleet/0.1.0-rc1.md)
 - [`Host changelog`](../CHANGELOG.md)
 - [`Fleet changelog`](../fleet/CHANGELOG.md)
 

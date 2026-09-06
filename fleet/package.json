@@ -1,6 +1,6 @@
 {
   "name": "@aywengo/mercury-fleet",
-  "version": "0.1.0",
+  "version": "0.1.0-rc1",
   "license": "MIT",
   "description": "Federation layer for independent Mercury hosts: registry and probe (Phase 0, no dispatch)",
   "type": "module",

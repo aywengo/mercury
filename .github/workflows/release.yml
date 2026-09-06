@@ -33,8 +33,8 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          if [[ ! "$tag" =~ ^(host|fleet)-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "refusing tag ${tag}; expected host-vX.Y.Z or fleet-vX.Y.Z" >&2
+          if [[ ! "$tag" =~ ^(host|fleet)-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "refusing tag ${tag}; expected host-vX.Y.Z[-prerelease] or fleet-vX.Y.Z[-prerelease]" >&2
             exit 1
           fi
           product="${BASH_REMATCH[1]}"
@@ -65,9 +65,26 @@ jobs:
 
           gh release create "$tag" --title "$title" --notes-file "$notes"
 
+          # npm's default dist-tag is "latest" for ANY version, prerelease included -- `npm config get
+          # tag` prints "latest". Publishing 0.1.0-rc1 without --tag would therefore make
+          # `npm install @aywengo/mercury` resolve to the release candidate for everyone. So a
+          # prerelease is published under its own identifier: 0.1.0-rc1 -> rc, 1.2.0-beta.3 -> beta.
+          # A stable version still goes to latest. This is the convention npm itself documents and
+          # what packages like react do (rc -> 19.0.0-rc.1 while latest stays on a stable release).
+          case "$version" in
+            *-*)
+              pre="${version#*-}"        # 0.1.0-rc1      -> rc1
+              pre="${pre%%.*}"           # rc.1           -> rc
+              dist_tag="${pre%%[0-9]*}"  # rc1            -> rc
+              [ -n "$dist_tag" ] || dist_tag=next   # e.g. 1.0.0-1 has no alphabetic identifier
+              ;;
+            *) dist_tag=latest ;;
+          esac
+          echo "publishing ${product} ${version} under dist-tag ${dist_tag}"
+
           if [ "$product" = "host" ]; then
-            npm publish --access public --provenance
+            npm publish --access public --provenance --tag "$dist_tag"
           elif [ "$product" = "fleet" ]; then
             cp LICENSE fleet/LICENSE
-            (cd fleet && npm publish --access public --provenance)
+            (cd fleet && npm publish --access public --provenance --tag "$dist_tag")
           fi

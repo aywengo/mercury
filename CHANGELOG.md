@@ -8,10 +8,10 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-09-05
+## [0.1.0-rc1] - 2026-09-06
 
-First public host release. Install from git or
-`npm install -g @aywengo/mercury`.
+First public host release, as a release candidate. Published to the npm dist-tag **`rc`**
+(`npm install -g @aywengo/mercury@rc`), not `latest`. Install from git also works.
 
 ### Added
 
@@ -21,6 +21,10 @@ First public host release. Install from git or
 - Static operations dashboard.
 - Adapters: `fake` (create-Run default), PrimeAgent RPC, Hermes, Claude Code,
   plus declarative local, RPC, and remote registries.
+- `mercuryctl`, the remote operator client, shipped in the same package as the host
+  (`bin.mercuryctl`). Runs over the public HTTP API: `agents`, `runs list/show/create/events/
+  watch/input/cancel/retry`, `config`, shell completion. No separate install and no version of
+  its own -- it is versioned with the host.
 - systemd units, backup script, and Prometheus `/metrics`.
 - `GET /healthz` reports `{ ok, ts, product: "host", version }`.
 - `mercury --version` prints `mercury-host <version>`.
@@ -36,6 +40,6 @@ in-memory.
 ### Not included
 
 - Crew APIs
-- `mercuryctl` (operator CLI / TUI)
 - OIDC / SSO
 - Fleet (separate product, `@aywengo/mercury-fleet`)
+- The `mercuryctl` terminal UI (Milestone 5); the `mercuryctl` CLI itself is included, see Added above

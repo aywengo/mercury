@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { HOST_PRODUCT, HOST_VERSION } from '../src/version.ts';
 
 const ROOT = join(import.meta.dirname, '..');
@@ -18,7 +18,10 @@ const pkg = JSON.parse(read('package.json')) as {
 };
 
 function latestChangelogVersion(text: string): string | undefined {
-  return [...text.matchAll(/^## \[(\d+\.\d+\.\d+)\]/gm)].map((m) => m[1])[0];
+  // The optional prerelease group matters: with only \d+.\d+.\d+ the parser returns undefined for
+  // `## [0.1.0-rc1]`, so the guard comparing CHANGELOG to package.json silently loses its counterpart
+  // and fails with "latest version undefined" rather than a useful diff.
+  return [...text.matchAll(/^## \[(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\]/gm)].map((m) => m[1])[0];
 }
 
 function spawnCli(
@@ -103,7 +106,8 @@ test('the CLI has no release stream of its own', () => {
 });
 
 test('host release notes do not deny that the CLI ships in them', () => {
-  // docs/releases/host/0.1.0.md listed `mercuryctl` under "Not in this release" while package.json
+  // the host release notes (docs/releases/host/0.1.0.md, since renamed to 0.1.0-rc1.md) listed
+  // `mercuryctl` under "Not in this release" while package.json
   // `bin` carried it and `dist/` is published. The two notes files contradicted each other: the CLI one
   // announced a first release of the client, the host one said the client was absent. Nothing had been
   // tagged, so the false one is corrected rather than left as published history.
@@ -286,4 +290,31 @@ test('releasing.md does not call the CLI an independent release stream', () => {
     'releasing.md must state plainly that the CLI has no tag and no version of its own');
   assert.match(doc, /ships inside\s+`@aywengo\/mercury`/,
     'releasing.md must say the CLI ships inside the host package');
+});
+
+test('every relative markdown link in the repo resolves to a real file', () => {
+  // Renaming docs/releases/{host,fleet}/0.1.0.md to 0.1.0-rc1.md silently broke two links in
+  // docs/README.md. Nothing failed: no test had ever opened a markdown link and checked that its
+  // target exists, so a rename could strand links across the whole doc set unnoticed. This is the
+  // general guard, not a rule about release notes -- any rename that strands a link fails here.
+  const skip = new Set(['node_modules', '.git', 'dist', 'coverage']);
+  const broken: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (skip.has(entry.name)) continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) { walk(full); continue; }
+      if (!entry.name.endsWith('.md')) continue;
+      const text = readFileSync(full, 'utf8');
+      for (const m of text.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/g)) {
+        const target = m[1];
+        if (/^(https?:|mailto:|#|\/)/.test(target)) continue;
+        const path = target.split('#')[0];
+        if (path === '') continue;
+        if (!existsSync(join(dir, path))) broken.push(`${relative(full, ROOT)} -> ${target}`);
+      }
+    }
+  };
+  walk(ROOT);
+  assert.deepEqual(broken, [], `markdown links point at files that do not exist:\n  ${broken.join('\n  ')}`);
 });

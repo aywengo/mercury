@@ -8,7 +8,7 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-09-05
+## [0.1.0-rc1] - 2026-09-06
 
 First public Fleet release (Phase 0). Install from git or
 `npm install -g @aywengo/mercury-fleet`.

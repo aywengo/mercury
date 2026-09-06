@@ -16,7 +16,9 @@ const pkg = JSON.parse(readFileSync(join(FLEET_DIR, 'package.json'), 'utf8')) as
 };
 
 function latestChangelogVersion(text: string): string | undefined {
-  return [...text.matchAll(/^## \[(\d+\.\d+\.\d+)\]/gm)].map((m) => m[1])[0];
+  // Prerelease-aware: `## [0.1.0-rc1]` must parse, or the guard compares FLEET_VERSION against
+  // undefined and fails with no actionable diff.
+  return [...text.matchAll(/^## \[(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\]/gm)].map((m) => m[1])[0];
 }
 
 function fleet(args: string[]): Promise<{ code: number | null; stdout: string; out: string }> {
