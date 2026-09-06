@@ -142,13 +142,24 @@ transformed by a malicious agent.
 Minimal credential forwarding and network isolation remain the primary
 boundaries.
 
+## Implemented
+
+### Operator CLI
+
+`mercuryctl` is implemented and ships in the host package, so
+`npm install -g @aywengo/mercury` puts it on `PATH`; it has no version of its own
+and no tag of its own. It drives Runs over the public HTTP API: `agents list`;
+`runs list`, `show`, `create`, `events`, `watch`, `input`, `cancel`, `retry`;
+`config profiles`, `config current`; shell completion. Operator guide:
+[`client.md`](client.md).
+
 ## Designed but not implemented
 
-### Operator CLI and TUI
+### Operator TUI
 
-A remote Run client is designed as a scriptable `mercuryctl` CLI first, with an
-optional TUI only after the shared HTTP/SSE client and observation model are
-stable. Neither surface is implemented. See
+The terminal UI is Milestone 5 of the client design. It is deliberately not
+built: the design gates it on demonstrated need for a TUI over the CLI and
+dashboard, and that need has not been demonstrated. See
 [`cli-tui-design.md`](cli-tui-design.md) for the architecture, protocol
 contracts and milestone roadmap.
 

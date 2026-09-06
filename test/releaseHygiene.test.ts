@@ -318,3 +318,33 @@ test('every relative markdown link in the repo resolves to a real file', () => {
   walk(ROOT);
   assert.deepEqual(broken, [], `markdown links point at files that do not exist:\n  ${broken.join('\n  ')}`);
 });
+
+test('docs/status.md does not deny that the operator CLI is implemented', () => {
+  // Fourth instance of one claim. "mercuryctl does not exist" was removed from releasing.md (#251),
+  // from releasing.md again (#259) and from CHANGELOG.md (#261); docs/status.md still carried it under
+  // "Designed but not implemented" -- "Neither surface is implemented" -- while package.json `bin` ships
+  // the client. It matters more than the others because docs/README.md presents status.md as "Current
+  // status and limitations" and instructs readers to prefer it over older references, and both the
+  // changelog and the release notes point here for limitations.
+  //
+  // Asserted structurally rather than on one spelling: the unimplemented section must not name the
+  // client at all. Rewording "Neither surface is implemented" to anything else still fails, because the
+  // claim's location is what makes it false. The TUI stays in that section -- it genuinely is unbuilt --
+  // and its prose says "terminal UI" and "a TUI over the CLI", neither of which names the client.
+  const doc = read('docs/status.md');
+  const start = doc.indexOf('## Designed but not implemented');
+  assert.ok(start >= 0, 'docs/status.md lost its "Designed but not implemented" section');
+  const next = doc.indexOf('\n## ', start + 10);
+  const section = doc.slice(start, next > start ? next : undefined);
+  assert.ok(section.length > 100, 'could not bound the unimplemented section');
+  for (const forbidden of [/mercuryctl/i, /Operator\s+CLI/i]) {
+    assert.ok(!forbidden.test(section),
+      `docs/status.md still lists the operator client as unimplemented (matched ${forbidden} in that section)`);
+  }
+  // And the affirmative half: the doc must actually say the client ships, or removing the denial would
+  // leave a reader no better informed than before.
+  assert.match(doc, /`mercuryctl` is implemented and ships in the host package/,
+    'docs/status.md must state that mercuryctl is implemented and ships');
+  assert.match(doc, /### Operator TUI/,
+    'docs/status.md must keep the TUI listed as designed-but-unbuilt; that part is still true');
+});
