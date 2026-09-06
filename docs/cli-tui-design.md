@@ -1,16 +1,27 @@
 # Mercury CLI and TUI design
 
-Status: **partly implemented.** Milestones 0 to 3 are implemented: the client
-contracts, transport, configuration and credential layers; the read-only commands
-`mercuryctl agents list`, `runs list` and `runs show`; the mutation commands
-`runs create`, `runs input`, `runs cancel` and `runs retry` with idempotency keys
-and confirmation; and the observation commands `runs events` and `runs watch` with
-paging, gap recovery, bounded reconnect and terminal outcome exit codes. Milestones 0 to 4
-are implemented. Milestone 4 (#233) added `config profiles` and `config current`,
-shell completion, `--version`, operator documentation, and the packaging checks --
-which found that the published artifact could not run at all, and that the client
-had two unsanitised display paths. The TUI in Milestone 5 remains gated on
-demonstrated need. See §16 for per-milestone status.
+Status: **the CLI design is implemented; the TUI is not.** Milestones 0 to 4 are
+done (issues #229, #230, #231, #232, #233), which is every milestone this design
+committed to building. That is: the client contracts, transport, configuration and
+credential layers; the read-only commands `mercuryctl agents list`, `runs list` and
+`runs show`; the mutation commands `runs create`, `runs input`, `runs cancel` and
+`runs retry` with idempotency keys and confirmation; the observation commands
+`runs events` and `runs watch` with paging, gap recovery, bounded reconnect and
+terminal outcome exit codes; and `config profiles`, `config current`, shell
+completion, `--version`, operator documentation and installable packaging.
+
+All ten Definition-of-done items in §18 are met, each by a named test. Milestone 5,
+the TUI, remains gated on demonstrated need and is deliberately unbuilt: §18 requires
+a TUI to meet those same guarantees through the shared client core, and no operator
+has yet asked for one.
+
+Building milestones 0 to 4 found defects in the surface they touched rather than in
+this design. The published artifact could not run at all once installed. The client
+displayed twelve untrusted fields without terminal sanitisation, across `runs show`
+and the event line, and a table header applied styling to text it had not cleaned.
+It then wrote server-chosen text to stderr unsanitised -- a path no per-function
+renderer test could catch, because the error path is not a renderer. See §16
+for per-milestone status.
 
 Mercury already runs as long-lived services: an API server owns the HTTP and
 dashboard surface, while one or more workers execute durable Runs. The existing
@@ -1051,7 +1062,7 @@ as coverage.
 events and asserted a page length of two was wrong about the server. The assertion now
 names the seeded event types instead of a total the server owns.
 
-### Milestone 4: packaging and operational hardening
+### Milestone 4: packaging and operational hardening -- **done** (issue #233, PR #242)
 
 Deliverables:
 
@@ -1085,7 +1096,7 @@ Deferred:
 - package-registry publication unless there is an operational need;
 - multi-host routing.
 
-### Milestone 4: packaging and operational hardening -- **done** (issue #233)
+#### What landed, and what it exposed
 
 Deliverables landed so far:
 
