@@ -55,7 +55,7 @@ jobs:
             [ "$pkg" = "$version" ] || { echo "fleet/package.json version ${pkg} != tag ${version}" >&2; exit 1; }
             title="Mercury Fleet v${version}"
           else
-            echo "cli tags are reserved until mercuryctl exists and ${notes} is present" >&2
+            echo "cli tags create a GitHub Release only: the CLI ships inside @aywengo/mercury, so there is no separate npm package to publish" >&2
             title="Mercury CLI v${version}"
           fi
 

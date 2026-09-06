@@ -1,13 +1,16 @@
 # Releasing Mercury
 
-Host, Fleet, and the future `mercuryctl` CLI are **independent SemVer
+Host, Fleet, and the `mercuryctl` CLI are released as **independent SemVer
 streams**. Bump only the product that changed. Do not use a bare `v0.1.0` tag.
+The CLI has no version of its own: it ships inside the host package, so its
+released version is the host package version. See "The CLI" below for what a
+`cli-*` tag does and does not check.
 
 | Product | Version file | Tag | npm | Notes |
 | --- | --- | --- | --- | --- |
 | Host | root `package.json` + `src/version.ts` (`HOST_VERSION`) | `host-vX.Y.Z` | `@aywengo/mercury` | `docs/releases/host/X.Y.Z.md` |
 | Fleet | `fleet/package.json` + `fleet/version.ts` (`FLEET_VERSION`) | `fleet-vX.Y.Z` | `@aywengo/mercury-fleet` | `docs/releases/fleet/X.Y.Z.md` |
-| CLI | none yet | `cli-vX.Y.Z` reserved | none | reserved until `mercuryctl` exists |
+| CLI | root `package.json` (no separate manifest) | `cli-vX.Y.Z` | none — ships in `@aywengo/mercury` | `docs/releases/cli/X.Y.Z.md` |
 
 `HOST_VERSION` / `FLEET_VERSION` must equal the matching `package.json`
 `"version"`. Contract tests fail if they drift.
@@ -30,9 +33,10 @@ streams**. Bump only the product that changed. Do not use a bare `v0.1.0` tag.
 
    Same commit may also carry `fleet-vX.Y.Z` if both products ship together.
 
-6. [`.github/workflows/release.yml`](../.github/workflows/release.yml) creates
-   the GitHub Release and runs `npm publish --access public --provenance` for
-   that product.
+6. [`.github/workflows/release.yml`](../.github/workflows/release.yml) creates the GitHub Release from
+   the notes file for that tag. It runs `npm publish --access public --provenance` for `host` and
+   `fleet` only. A `cli-*` tag publishes nothing: the CLI ships inside `@aywengo/mercury`, so there is no
+   separate package to publish and nothing appears on the registry.
 
 The `NPM_TOKEN` repository secret must exist on `aywengo/mercury` before the
 first tag. npm publish fails closed without it. This is intended.
@@ -47,6 +51,12 @@ and a stub file publishes a stub release.
 
 `test/releaseHygiene.test.ts` enforces that the notes file for the current
 package version exists, names that version, and is not a stub.
+
+The workflow checks the tag against the manifest for `host` and `fleet`, but not
+for `cli`: a `cli-vX.Y.Z` tag is accepted as long as `docs/releases/cli/X.Y.Z.md`
+exists. So the notes file, not a version comparison, is what limits which CLI
+versions are taggable. Track this as a known gap rather than implying the tag is
+verified.
 
 Verify before tagging, beyond `npm test`:
 
