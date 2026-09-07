@@ -165,7 +165,7 @@ function runTag(
       + '    printf "%s" "$body"; exit "$code" ;;\n'
       // The tap is public too, and the release body now checks it before naming Homebrew as an
       // install path. Default 404, because that is what the tap actually returns today.
-      + '  *raw.githubusercontent.com*) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_FORMULA_HTTP:-404}"; exit 0; fi; exit 22 ;;\n'
+      + '  *raw.githubusercontent.com*) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_FORMULA_HTTP:-200}"; exit 0; fi; exit 22 ;;\n'
       // Package metadata is public, and the failure classifier now reads it to tell a rejected
       // publisher apart from a package that has never existed. STUB_PKG_HTTP is that answer.
       + '  *) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_PKG_HTTP:-200}"; exit 0; fi; exit 22 ;;\n'
@@ -216,7 +216,7 @@ function runTag(
         STUB_EXCHANGE: opts.exchange ?? '',
         STUB_EXCHANGE_EXIT: String(opts.exchangeExit ?? 0),
         STUB_PKG_HTTP: opts.pkgHttp ?? '200',
-        STUB_FORMULA_HTTP: opts.formulaHttp ?? '404',
+        STUB_FORMULA_HTTP: opts.formulaHttp ?? '200',
         STUB_EXCHANGE_OURS1: opts.exchange ?? '',
         STUB_EXCHANGE_OURS1_EXIT: String(opts.exchangeExit ?? 0),
         STUB_EXCHANGE_OURS2: opts.exchange2 ?? opts.exchange ?? '',
@@ -1095,10 +1095,11 @@ test('the release body does not offer a Homebrew install the tap cannot serve', 
   // sent users to a 404 while telling them the npm gap was the only problem.
   const r = runTag(`host-v${V}`, {
     notes: [`host/${V}.md`], oidc: true, npmToken: '', npmFails: true, npmSubmitErr: 'npm error code E401',
+    formulaHttp: '404',
   });
   assert.equal(r.status, 1);
-  assert.match(r.notesOut, /not available yet/, 'must say the formula is missing');
-  assert.match(r.notesOut, /fails with a 404/, 'and say what the command actually does');
+  assert.match(r.notesOut, /not confirmed/, 'must say the formula could not be confirmed');
+  assert.match(r.notesOut, /returned 404/, 'and name the status actually observed');
   assert.ok(!/^- Homebrew: `brew install/m.test(r.notesOut),
     'must not list the brew command as an available install path');
   assert.match(r.notesOut, /download and unpack the bundle/, 'the asset really is attached, so it stays');
@@ -1112,12 +1113,40 @@ test('the body offers Homebrew once the formula exists', () => {
     npmSubmitErr: 'npm error code E401', formulaHttp: '200',
   });
   assert.match(r.notesOut, /^- Homebrew: `brew install aywengo\/mercury\/mercury-ai`/m);
-  assert.ok(!/not available yet/.test(r.notesOut));
+  assert.ok(!/not confirmed/.test(r.notesOut));
 });
 
-test('a staged host release does not claim a formula that is not in the tap', () => {
-  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], oidc: true, npmToken: '' });
+test('a staged host release does not claim a formula the probe could not confirm', () => {
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], oidc: true, npmToken: '', formulaHttp: '404' });
   assert.equal(r.status, 0);
   assert.ok(!/Homebrew formula are already live/.test(r.notesOut));
-  assert.match(r.notesOut, /not in the tap yet/);
+  assert.match(r.notesOut, /could not be confirmed/);
+});
+
+test('a probe that never answered does not get reported as a 404', () => {
+  // The whole point of probing is that the body only says what it observed. curl failing yields 000,
+  // and a rate limit yields 403; both say nothing about whether the formula is installable, so the
+  // body must refuse to name a status it did not see rather than reuse the 404 sentence.
+  for (const code of ['000', '403', '503']) {
+    const r = runTag(`host-v${V}`, {
+      notes: [`host/${V}.md`], oidc: true, npmToken: '', npmFails: true,
+      npmSubmitErr: 'npm error code E401', formulaHttp: code,
+    });
+    assert.ok(!/returned 404/.test(r.notesOut), `${code} must not be reported as a 404`);
+    assert.match(r.notesOut, new RegExp(`HTTP \`${code}\``), `${code} must be named`);
+    assert.ok(!/^- Homebrew: `brew install/m.test(r.notesOut), `${code} must not offer brew`);
+  }
+});
+
+test('the formula probe targets the repository that is the tap', () => {
+  // The curl stub above answers any raw.githubusercontent.com URL, so every behavioural test in this
+  // file would pass against a probe pointed at a repository that has nothing to do with this product.
+  // That is not hypothetical: the first version of this probe asked aywengo/homebrew-tap, which serves
+  // a different product's formulae and 404s for this one, and it would have told every future release
+  // that a working install channel did not exist. The URL is the thing under test, so assert it.
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  assert.ok(!wf.includes('homebrew-tap/main/Formula'),
+    'must not probe the unrelated homebrew-tap repository');
+  assert.match(wf, /raw\.githubusercontent\.com\/\$\{GITHUB_REPOSITORY\}\/main\/Formula\/mercury-ai\.rb/,
+    'must probe this repository, which is the tap the formula step pushes to');
 });

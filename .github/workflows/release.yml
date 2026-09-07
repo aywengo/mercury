@@ -462,8 +462,13 @@ jobs:
           # LAST step of a successful release, and no release has ever completed, so the tap has no
           # mercury-ai.rb at all -- the raw URL 404s today. Asking costs one unauthenticated request
           # against a public repository, and it is the only way the sentence below can be true.
+          # The repository IS the tap: the formula step below commits Formula/mercury-ai.rb to this
+          # repository and pushes it here, and the workflow comment says so in as many words ("the
+          # formula lives here rather than in a separate tap repo"). Probing aywengo/homebrew-tap --
+          # which holds an unrelated product's formulae -- reported 404 for a channel that works, and
+          # would have suppressed a true install path from every future release body.
           formula_live=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
-            "https://raw.githubusercontent.com/aywengo/homebrew-tap/main/Formula/mercury-ai.rb" \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/Formula/mercury-ai.rb" \
             || echo 000)
           if [ "$npm_ok" = "0" ]; then
             {
@@ -483,10 +488,18 @@ jobs:
                 if [ "$formula_live" = "200" ]; then
                   echo "- Homebrew: \`brew install aywengo/mercury/mercury-ai\`"
                 else
-                  echo "- Homebrew: **not available yet.** The tap has no \`mercury-ai.rb\`, so"
-                  echo "  \`brew install aywengo/mercury/mercury-ai\` fails with a 404. The formula is"
-                  echo "  written by the last step of a release whose npm submission succeeded, and no"
-                  echo "  release has completed that far."
+                  # Only a 404 licenses the definitive sentence. A 000 from curl, a 403 or a 5xx from
+                  # rate limit says nothing about whether the formula is there, and asserting a 404 that
+                  # was never observed is the exact error this block exists to prevent.
+                  if [ "$formula_live" = "404" ]; then
+                    echo "- Homebrew: **not confirmed.** \`Formula/mercury-ai.rb\` returned 404 on"
+                    echo "  \`${GITHUB_REPOSITORY}\`, so \`brew install aywengo/mercury/mercury-ai\`"
+                    echo "  is expected to fail. Verify before offering it."
+                  else
+                    echo "- Homebrew: **unconfirmed.** The probe for \`Formula/mercury-ai.rb\` returned"
+                    echo "  HTTP \`${formula_live}\`, which says nothing about whether the formula is"
+                    echo "  installable. Verify before offering \`brew install\`."
+                  fi
                 fi
                 echo "- The asset attached to this release: download and unpack the bundle."
               else
@@ -510,8 +523,8 @@ jobs:
                 echo "need no npm approval."
               elif [ "$product" = "host" ]; then
                 echo "The asset attached to this release is live and needs no npm approval. The Homebrew"
-                echo "formula is not in the tap yet, so \`brew install\` does not work for this"
-                echo "product until a release completes its final step."
+                echo "formula could not be confirmed (HTTP ${formula_live}); check it before offering"
+                echo "\`brew install\` to users."
               else
                 echo "Nothing else is attached to this release and there is no Homebrew formula for"
                 echo "Fleet, so approval on npmjs.com is the only way this version becomes installable."
