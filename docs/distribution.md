@@ -312,7 +312,18 @@ Still not observed:
 ## Decisions
 
 - **An npm failure does not block the Homebrew release.** Decided in response to #277, after the coupling stopped being hypothetical: a registry policy change made both npm write paths fail, and because the job aborted at that call the bundle and the formula were never built, so a channel that needs nothing from npm went down with it. The invariant the job protects is that the release body accurately describes what is installable, not that a release requires npm to have succeeded; the body now states the npm state explicitly and the job still goes red, at the end. Red means "npm needs attention", not "Mercury cannot be installed".
-- **CI stages by default and publishes directly only when told to.** Staging was the original default because it was the only write path the credential class of the moment allowed, and npm recommends it for CI. It is now opt-out rather than forced: with trusted publishing in place the identity behind a tag push is a specific workflow, so `NPM_DIRECT_PUBLISH=true` publishes straight to the registry and skips the human approval on npmjs.com. Unset the variable to go back to staging, which costs one approval per release and is disclosed in the release body either way so the notes cannot overstate availability.
+- **CI stages. Direct publishing is available by opt-in and is not used here.** Staging is the default
+  because it is the only write path that is always permitted: npm's trusted-publishing settings make
+  `npm stage publish` allowed unconditionally, while direct `npm publish` is a per-configuration choice.
+  The date matters. npm's own documentation says a trusted publisher **created after 2026-09-03 is
+  automatically set to allow `npm stage publish` only**, and that permitting direct publishing is a
+  separate selection. This repository's publisher was created in that window, so `NPM_DIRECT_PUBLISH`
+  was set on an assumption that npm would accept direct publishes, and it is removed again: with that
+  configuration the variable does not skip an approval, it fails the release. Setting it to `true` is
+  correct only once the package's Trusted Publisher settings explicitly permit direct publishing, and
+  that setting cannot be read without publish rights.
+- **A release body states its npm state explicitly.** Staging costs one maintainer approval per release
+  and the body says so, so the notes cannot overstate availability whichever verb was used.
 - **npm authentication prefers OIDC over a long-lived token.** Decided after two valid tokens were refused direct publish. The token path is kept because it still works for accounts whose tokens retain publish, but it is no longer a requirement, and the OIDC path logs verbosely because npm's OIDC helper reports every failure at `verbose` and never throws.
 - **The bundle vendors its production `node_modules`.** Decided by implementation and
   measured: the whole production tree is `express` plus 67 transitive packages, 3.9 MB,
