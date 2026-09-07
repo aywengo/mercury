@@ -174,3 +174,60 @@ export async function composeModel(): Promise<ComposeModel> {
     });
   });
 }
+
+/**
+ * Hard ceiling on any single diagnostics file.
+ *
+ * A chatty service can emit far more than a developer can read, and the point of writing logs to
+ * disk is to read them AFTER a failure -- so an uncapped dump trades a fast failure for a directory
+ * the next run has to clean up. One source, so the collector and the guard on it cannot disagree.
+ */
+export const DIAGNOSTIC_CAP_BYTES = 1_000_000;
+
+/** Cap a buffer without copying it when it is already small enough. */
+export function capBuffer(buf: Buffer, maxBytes: number = DIAGNOSTIC_CAP_BYTES): Buffer {
+  return buf.byteLength <= maxBytes ? buf : buf.subarray(0, maxBytes);
+}
+
+/**
+ * The exact commands to inspect and remove a retained project.
+ *
+ * Printed only when the gate deliberately leaves containers running, and printed verbatim-runnable:
+ * a developer staring at a failed run should paste, not reconstruct. Kept as a pure function so a
+ * test can hold the format -- a silently wrong project name here means `down -v` deletes nothing, or
+ * the wrong thing.
+ */
+export function inspectionCommands(project: string, composeFile: string = COMPOSE_FILE): string[] {
+  return [
+    `docker compose -p ${project} -f ${composeFile} ps`,
+    `docker compose -p ${project} -f ${composeFile} logs --no-color`,
+    `docker compose -p ${project} -f ${composeFile} down -v --remove-orphans`,
+  ];
+}
+
+/**
+ * Compose project names this repository's E2E files generate.
+ *
+ * Used by the stale-project sweep so it can recognise its own leftovers without matching unrelated
+ * containers a developer may be running on purpose.
+ */
+export const PROJECT_PREFIX = 'mercury-e2e';
+
+/**
+ * What to do when teardown fails, given whether a scenario already failed.
+ *
+ * The rule: a teardown problem must never replace the scenario failure that caused it. A developer
+ * debugging a broken journey who is shown "volume is busy" instead of "the run never left QUEUED" is
+ * sent to the wrong file. But with no scenario failure, teardown IS the only failure, so it has to
+ * propagate or the gate would report green over a leaked stack.
+ *
+ * Extracted because that asymmetry is exactly the kind of thing an inline `if` loses on a later
+ * edit, and it is invisible until someone is misled by it.
+ */
+export function teardownOutcome(scenarioFailed: boolean, teardownError: Error): { propagate: boolean; log: string } {
+  return {
+    propagate: !scenarioFailed,
+    log: `e2e: teardown reported a problem: ${teardownError.message}`
+      + (scenarioFailed ? ' (not raised: a scenario already failed, and that is the failure to read)' : ''),
+  };
+}

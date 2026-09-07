@@ -1,12 +1,12 @@
 # Local pre-PR end-to-end testing
 
-Status: **Phases 1-4 implemented** (foundation, fake-agent system journey, the full pre-PR gate, and
-the mock-RPC human-input journey). Phases 0-4 are shipped; Phases 5-8 below are still design. See
-section 17 for the per-phase state.
+Status: **Phases 1-5 implemented** (foundation, fake-agent system journey, the full pre-PR gate, the
+mock-RPC human-input journey, and robustness hardening). Phases 0-5 are shipped; Phases 6-8 below are
+the opt-in tiers and are still design. See section 17 for the per-phase state.
 
 Implemented so far: `e2e/Dockerfile`, `e2e/compose.yml`, `e2e/preflight.ts`, `e2e/helpers.ts`,
 `e2e/helpers.test.ts`, `e2e/prepr.ts`, `e2e/prepr.test.ts`, `e2e/system.test.ts`,
-`e2e/mock-rpc.test.ts`, `e2e/README.md`, `.dockerignore`, and the `prepr` / `test:e2e` /
+`e2e/mock-rpc.test.ts`, `e2e/robustness.test.ts`, `e2e/README.md`, `.dockerignore`, and the `prepr` / `test:e2e` /
 `test:e2e:config` scripts. `npm run prepr` runs the whole local gate -- image build, then typecheck
 and the existing suites inside that image, then the system journey and the mock-RPC journey.
 
@@ -1173,7 +1173,7 @@ Notes against the wording above:
 - **"no provider credential is used" reads the worker's own environment** and asserts a non-empty key
   list first, so the check cannot pass vacuously on a container it failed to inspect.
 
-### Phase 5 — robustness hardening
+### Phase 5 — robustness hardening — **DONE**
 
 Deliverables:
 
@@ -1193,6 +1193,32 @@ Acceptance gate:
 
 Recommended PR boundary: reliability after real developer usage identifies the
 highest-value hardening cases.
+
+Notes against the wording above:
+
+- `MERCURY_E2E_KEEP_ON_FAIL` and `MERCURY_E2E_VERBOSE` landed with Phase 1 and are unchanged here.
+- **Concurrency is asserted, not assumed.** Two stacks come up under distinct project names, each
+  completes its own Run, and a Run from one is `404` in the other. Forcing both onto one project name
+  fails loudly rather than silently sharing state. What the mutation does *not* prove is the `404`
+  assertion itself -- it failed on image pull during the contended `up`, not on the cross-project read;
+  the `404` mechanism is proven separately by the owner-scoping scenario in `system.test.ts`.
+- **Abrupt exit is tested rather than trusted.** A killed harness runs no `after()` hook, so reaping
+  depends entirely on Ryuk. A probe process starts a container, is SIGKILLed with no cleanup of any
+  kind, and the test requires the container to disappear. It cannot pass vacuously: the container is
+  inspected and required to be running *before* the kill. Disabling Ryuk proves it bites:
+
+    mutation: TESTCONTAINERS_RYUK_DISABLED=true
+    -> fail=1  "container a7774a732ef9 survived the death of its client; the harness would leak
+                stacks on every Ctrl-C"
+
+- **Teardown-vs-scenario precedence is a pure function** (`teardownOutcome`) rather than an inline
+  `if`, because the asymmetry -- report a teardown failure always, raise it only when nothing else
+  failed -- is precisely what a later edit loses, and it is invisible until it sends someone to the
+  wrong file.
+- **Caps and the retained-project commands are shared constants and pure functions** in
+  `preflight.ts`, used by `system.test.ts` rather than duplicated, so the collector and the guard on
+  it cannot drift. A wrong project name in the printed cleanup would make `down -v` delete nothing,
+  or the wrong thing.
 
 ### Phase 6 — one real-agent compatibility check
 

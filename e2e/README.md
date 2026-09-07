@@ -83,6 +83,46 @@ With keep-on-fail, automatic cleanup is disabled **before** startup, so a failed
 containers, a network and a volume behind. The harness prints the exact project name and the
 cleanup command; a successful run still tears down.
 
+### Disk space, and projects left behind by an interrupted run
+
+Every run builds one image (`mercury-e2e:local`, shared by tag so it is built once) and one named
+volume per project holding a SQLite database, a fixture repository and the Run worktrees. A volume
+that outlives its project is invisible in `docker ps` but still on disk.
+
+```bash
+docker system df                       # what Docker is holding
+docker volume ls --filter name=mercury # leftover E2E volumes
+docker ps -aq --filter name=mercury    # leftover E2E containers
+```
+
+Normal teardown removes both. So does an abrupt exit: Testcontainers runs Ryuk, which reaps its
+session's containers the moment the test process dies, and `e2e/robustness.test.ts` asserts that by
+SIGKILLing a probe process and requiring its container to disappear. If Ryuk is disabled
+(`TESTCONTAINERS_RYUK_DISABLED=true`), that guarantee is gone and cleanup is manual:
+
+```bash
+docker compose -p <project> -f e2e/compose.yml down -v --remove-orphans
+```
+
+The project name is printed when a failure retains resources, together with the `ps` and `logs`
+commands to inspect it -- paste them, do not reconstruct them.
+
+To clear everything this directory can create, and nothing else:
+
+```bash
+docker ps -aq --filter name=mercury | xargs -r docker rm -f
+docker volume ls -q --filter name=mercury | xargs -r docker volume rm
+```
+
+Do not prune broadly (`docker system prune -a`) from a workstation that runs other projects.
+
+### A stage or suite hangs
+
+Nothing in this directory waits without a bound: requests, startup, teardown, diagnostics and each
+`prepr` stage all carry their own deadline, and a stage that blows one is killed and reported by name
+with exit 124. If something appears to hang past its deadline, the deadline is the thing to
+investigate, not the service.
+
 ### The image will not build: keychain / buildx
 
 On macOS under a non-interactive session, `docker compose build` can fail while booting BuildKit:

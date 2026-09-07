@@ -16,7 +16,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { DockerComposeEnvironment, StartedDockerComposeEnvironment, Wait } from 'testcontainers';
-import { COMPOSE_FILE, E2E_DIR, LIMITS, composeModel, keepOnFail, preflight, verbose } from './preflight.ts';
+import { COMPOSE_FILE, DIAGNOSTIC_CAP_BYTES, teardownOutcome, E2E_DIR, LIMITS, capBuffer, composeModel, inspectionCommands, keepOnFail, preflight, verbose } from './preflight.ts';
 import { client, pollRun, readSse, TERMINAL, type RunEvent, type RunView } from './helpers.ts';
 
 /**
@@ -161,7 +161,7 @@ async function collectDiagnostics(reason: string): Promise<void> {
       try {
         const container = env!.getContainer(SVC[key]);
         const stream = await container.logs({ tail: 400 });
-        writeFileSync(join(DIAG_DIR, `${service}.log`), await readBounded(stream, 1_000_000, 5_000));
+        writeFileSync(join(DIAG_DIR, `${service}.log`), await readBounded(stream, DIAGNOSTIC_CAP_BYTES, 5_000));
         summary[service] = { id: container.getId(), name: container.getName() };
       } catch (err) {
         summary[service] = { error: (err as Error).message };
@@ -171,7 +171,7 @@ async function collectDiagnostics(reason: string): Promise<void> {
     // The one-shot has exited and is no longer tracked, so its output comes from compose itself.
     try {
       const logs = await composeLogs(FIXTURE_SERVICE);
-      writeFileSync(join(DIAG_DIR, `${FIXTURE_SERVICE}.log`), logs.subarray(0, 1_000_000));
+      writeFileSync(join(DIAG_DIR, `${FIXTURE_SERVICE}.log`), capBuffer(logs));
       summary[FIXTURE_SERVICE] = { collectedVia: 'docker compose logs', bytes: logs.length };
     } catch (err) {
       summary[FIXTURE_SERVICE] = { error: (err as Error).message };
@@ -221,7 +221,7 @@ after(async () => {
   if (!env) return;
   if (scenarioFailed && keepOnFail()) {
     console.error(`e2e: FAILED and keeping resources for inspection.\n  diagnostics: ${DIAG_DIR}`
-      + `\n  cleanup:     docker compose -p ${PROJECT} -f ${COMPOSE_FILE} down -v`);
+      + `\n  ${inspectionCommands(PROJECT, COMPOSE_FILE).join('\n  ')}`);
     return;
   }
   try {
@@ -229,8 +229,9 @@ after(async () => {
     rmSync(DIAG_DIR, { recursive: true, force: true });
   } catch (err) {
     // A cleanup problem is reported, but it must not replace the scenario failure that caused it.
-    console.error(`e2e: teardown reported a problem: ${(err as Error).message}`);
-    if (!scenarioFailed) throw err;
+    const outcome = teardownOutcome(scenarioFailed, err as Error);
+    console.error(outcome.log);
+    if (outcome.propagate) throw err;
   }
 });
 
