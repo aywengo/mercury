@@ -60,7 +60,8 @@ interface Run {
 function runTag(
   tag: string,
   opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
-    directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean } = {},
+    directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean;
+    npmSubmitErr?: string } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -110,7 +111,7 @@ function runTag(
           // Scoped to the submission: --provenance appears only on the publish/stage call. Failing
           // on every npm call instead also killed `npm ci`, which made three tests fail for a reason
           // that had nothing to do with what they were checking.
-          + 'case "$*" in\n  *--provenance*) exit "${STUB_NPM_SUBMIT_RC:-0}" ;;\nesac\nexit 0\n'
+          + 'case "$*" in\n  *--provenance*) if [ -n "${STUB_NPM_SUBMIT_ERR:-}" ]; then printf "%s\\n" "${STUB_NPM_SUBMIT_ERR}" >&2; fi; exit "${STUB_NPM_SUBMIT_RC:-0}" ;;\nesac\nexit 0\n'
         : `#!/bin/sh\necho "${cmd} $*" >> "${tmp}/calls.log"\nexit 0\n`;
       writeFileSync(stub, body);
       chmodSync(stub, 0o755);
@@ -162,6 +163,9 @@ function runTag(
         // Makes the submission itself fail while leaving the `stage --help` capability probe alone,
         // so a test can model "npm is unreachable" without modelling "npm is too old".
         STUB_NPM_SUBMIT_RC: opts.npmFails ? '1' : '0',
+        // The registry's actual words on the failing submit. The step classifies the failure from the
+        // captured log, so a test has to be able to present the message the registry really sends.
+        STUB_NPM_SUBMIT_ERR: opts.npmSubmitErr ?? '',
         // The step writes the bundle under $RUNNER_TEMP. With `set -u` an unset value aborts the
         // step, so it is provided here exactly as the runner would provide it.
         RUNNER_TEMP: tmp,
@@ -253,6 +257,41 @@ test('a matching host tag still publishes, so the guards did not over-tighten', 
   const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
   assert.equal(r.status, 0, `expected acceptance, got exit ${r.status}:\n${r.stderr}`);
   assert.match(r.stdout, new RegExp(SUBMIT + ' --access public --provenance'), 'host must submit to npm');
+});
+
+test('an OIDC submit rejected with 404 names both candidate causes', () => {
+  // The whole reason this exists. npm's OIDC failures are log.verbose only, so a rejected trusted
+  // publisher arrives as a bare registry 404 -- byte-identical in the log to a package that does not
+  // exist. Two different settings produce it, and picking between them by hand cost three releases.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, directPublish: 'true', npmToken: '',
+    npmFails: true, npmSubmitErr: 'npm error code E404',
+  });
+  assert.equal(r.status, 1, 'a failed submit must still fail the job');
+  const out = r.stdout + r.stderr;
+  assert.match(out, /direct publishing is not enabled/, 'must name the stage-only setting');
+  assert.match(out, /workflow filename release\.yml/, 'must name the three things the publisher matches');
+});
+
+test('a token-mode failure does not get the OIDC explanation', () => {
+  // The hint is only true of the OIDC path. Printing it under a token would send the operator to a
+  // settings page that has nothing to do with the failure.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmFails: true, npmSubmitErr: 'npm error code E404' });
+  assert.equal(r.status, 1);
+  assert.ok(!/direct publishing is not enabled/.test(r.stdout + r.stderr),
+    'the OIDC hint must not appear when a token was used');
+});
+
+test('an already-published version is reported as such, not as a credential problem', () => {
+  // The failure a re-tagged release actually produces, and the one most likely to be misread as auth.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', npmFails: true,
+    npmSubmitErr: 'npm error code EPUBLISHCONFLICT',
+  });
+  assert.equal(r.status, 1);
+  const out = r.stdout + r.stderr;
+  assert.match(out, /already on the registry/, 'must name the real cause');
+  assert.ok(!/direct publishing is not enabled/.test(out), 'must not blame the credential');
 });
 
 test('the OIDC diagnostic prints the claim npm actually matches', () => {
