@@ -69,7 +69,7 @@ function runTag(
   opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
     directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean;
     npmSubmitErr?: string; exchange?: string; exchangeExit?: number;
-    exchange2?: string; exchange2Exit?: number } = {},
+    exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -144,14 +144,23 @@ function runTag(
       + 'for a in "$@"; do case "$a" in http*) url="$a" ;; esac; done\n'
       + 'case "$url" in\n'
       + '  *idToken*) printf \'%s\' "{\\"value\\":\\"${STUB_JWT}\\"}" ;;\n'
-      + '  *oidc/token/exchange*) n=0; [ -f "' + tmp + '/exchange.count" ] && n=$(cat "' + tmp + '/exchange.count");\n'
-      + '    n=$((n+1)); printf "%s" "$n" > "${tmp}exchange.count";\n'
-      // The step probes two audiences in a fixed order, so the call number is what distinguishes
-      // them here. Without per-call control the interesting case -- one audience accepted and the
-      // other refused, which is what a provenance-style configuration would look like -- cannot be
-      // expressed at all.
-      + '    if [ "$n" = "2" ]; then printf \'%s\' "${STUB_EXCHANGE_2-${STUB_EXCHANGE:-}}"; exit "${STUB_EXCHANGE_2_EXIT:-${STUB_EXCHANGE_EXIT:-0}}"; fi\n'
-      + '    printf \'%s\' "${STUB_EXCHANGE:-}"; exit "${STUB_EXCHANGE_EXIT:-0}" ;;\n'
+      + '  *oidc/token/exchange*)\n'
+      + '    n=0; [ -f "' + tmp + '/exchange.count" ] && n=$(cat "' + tmp + '/exchange.count");\n'
+      + '    n=$((n+1)); printf "%s" "$n" > "' + tmp + '/exchange.count";\n'
+      // Two dimensions decide which canned answer to replay. The package is visible in the URL, so
+      // the control package is separated that way. The audience is not in the URL at all, so the
+      // call number carries it: the step probes two audiences and, for each, ours then the control,
+      // so calls 1-2 are the first audience and 3-4 the second.
+      + '    case "$url" in *left-pad*) which=CONTROL ;; *) which=OURS ;; esac\n'
+      + '    if [ "$n" -le 2 ]; then a=1; else a=2; fi\n'
+      + '    if [ "$which" = OURS ]; then\n'
+      + '      if [ "$a" = 1 ]; then body="${STUB_EXCHANGE_OURS1-$STUB_EXCHANGE}"; code="${STUB_EXCHANGE_OURS1_EXIT-$STUB_EXCHANGE_EXIT}";\n'
+      + '      else body="${STUB_EXCHANGE_OURS2-$STUB_EXCHANGE}"; code="${STUB_EXCHANGE_OURS2_EXIT-$STUB_EXCHANGE_EXIT}"; fi\n'
+      + '    else\n'
+      + '      if [ "$a" = 1 ]; then body="${STUB_EXCHANGE_CONTROL1-${STUB_EXCHANGE_CONTROL-$STUB_EXCHANGE}}"; code="${STUB_EXCHANGE_CONTROL1_EXIT-${STUB_EXCHANGE_CONTROL_EXIT-$STUB_EXCHANGE_EXIT}}";\n'
+      + '      else body="${STUB_EXCHANGE_CONTROL2-${STUB_EXCHANGE_CONTROL-$STUB_EXCHANGE}}"; code="${STUB_EXCHANGE_CONTROL2_EXIT-${STUB_EXCHANGE_CONTROL_EXIT-$STUB_EXCHANGE_EXIT}}"; fi\n'
+      + '    fi\n'
+      + '    printf "%s" "$body"; exit "$code" ;;\n'
       + '  *) exit 22 ;;\n'
       + 'esac\nexit 0\n');
     chmodSync(curlStub, 0o755);
@@ -199,8 +208,12 @@ function runTag(
           event_name: 'workflow_dispatch', workflow: 'Release' }),
         STUB_EXCHANGE: opts.exchange ?? '',
         STUB_EXCHANGE_EXIT: String(opts.exchangeExit ?? 0),
-        STUB_EXCHANGE_2: opts.exchange2 ?? opts.exchange ?? '',
-        STUB_EXCHANGE_2_EXIT: String(opts.exchange2Exit ?? opts.exchangeExit ?? 0),
+        STUB_EXCHANGE_OURS1: opts.exchange ?? '',
+        STUB_EXCHANGE_OURS1_EXIT: String(opts.exchangeExit ?? 0),
+        STUB_EXCHANGE_OURS2: opts.exchange2 ?? opts.exchange ?? '',
+        STUB_EXCHANGE_OURS2_EXIT: String(opts.exchange2Exit ?? opts.exchangeExit ?? 0),
+        STUB_EXCHANGE_CONTROL: opts.control ?? opts.exchange ?? '',
+        STUB_EXCHANGE_CONTROL_EXIT: String(opts.controlExit ?? opts.exchangeExit ?? 0),
         // Explicit for the same reason as the two above: the submission verb now depends on this
         // variable, so inheriting it would let a stray shell variable flip the mode under test.
         NPM_DIRECT_PUBLISH: opts.directPublish ?? '',
@@ -789,7 +802,7 @@ test('a rehearsal performs the token exchange npm would perform', () => {
     exchange: JSON.stringify({ token: 'npm-'.padEnd(140, 'z') }),
   });
   assert.equal(r.status, 0, 'an accepted exchange must not fail the rehearsal');
-  assert.match(r.stdout, /oidc exchange \[[^\]]+\]: ACCEPTED/, 'must report the exchange result');
+  assert.match(r.stdout, /oidc exchange \[[^\]]+\] @aywengo%2Fmercury: ACCEPTED/, 'must report the exchange result');
   assert.match(r.stdout, /issued a 140-char/, 'must report that a credential came back');
 });
 
@@ -814,9 +827,10 @@ test('a refused exchange fails the rehearsal and quotes npm', () => {
   });
   assert.equal(r.status, 1, 'a refusal must fail the rehearsal');
   const out = r.stdout + r.stderr;
-  assert.match(out, /oidc exchange \[[^\]]+\]: REFUSED/, 'must name the failure and which audience');
+  assert.match(out, /oidc exchange \[[^\]]+\] @aywengo%2Fmercury: REFUSED/, 'must name the failure and which audience');
   assert.match(out, /no trusted publishing configuration/, 'must quote what npm actually said');
-  assert.match(out, /Trusted Publisher/, 'must point at the setting that decides it');
+  // Not asserted: which setting to blame. With the control answering identically the step is
+  // deliberately forbidden from naming one -- see the control tests below.
 });
 
 test('a non-JSON exchange answer is inconclusive, not a refusal', () => {
@@ -827,7 +841,7 @@ test('a non-JSON exchange answer is inconclusive, not a refusal', () => {
     exchange: '<html>403 Forbidden</html>',
   });
   assert.equal(r.status, 0, 'an answer that is not from npm must not fail the release rehearsal');
-  assert.match(r.stdout, /INCONCLUSIVE/, 'must say it learned nothing rather than guess');
+  assert.match(r.stdout, /NO_ANSWER/, 'must say it learned nothing rather than guess');
 });
 
 test('a real release does not run the exchange probe', () => {
@@ -869,8 +883,8 @@ test('one audience accepted and the other refused still passes the rehearsal', (
   });
   assert.equal(r.status, 0, 'an accepted audience must outweigh a refused one');
   const out = r.stdout + r.stderr;
-  assert.match(out, /npm:registry\.npmjs\.org\]: REFUSED/, 'must still report the refusal it saw');
-  assert.match(out, /https:\/\/registry\.npmjs\.org\]: ACCEPTED/, 'and the acceptance it saw');
+  assert.match(out, /npm:registry\.npmjs\.org\] @aywengo%2Fmercury: REFUSED/, 'must still report the refusal it saw');
+  assert.match(out, /https:\/\/registry\.npmjs\.org\] @aywengo%2Fmercury: ACCEPTED/, 'and the acceptance it saw');
   assert.match(out, /npm trusts this workflow/, 'and the conclusion the operator acts on');
 });
 
@@ -882,7 +896,7 @@ test('both audiences refused fails the rehearsal', () => {
   assert.equal(r.status, 1, 'a refusal on every audience that answered must fail the rehearsal');
   const out = r.stdout + r.stderr;
   assert.match(out, /every audience that answered refused/, 'must state the aggregate, not one line');
-  assert.match(out, /Trusted Publisher/, 'must point at the setting that decides it');
+  assert.match(out, /distinguishes nothing/, 'and must not blame a setting it cannot distinguish');
 });
 
 test('every curl in the release step is bounded', () => {
@@ -897,4 +911,34 @@ test('every curl in the release step is bounded', () => {
     .filter((l) => /\bcurl\b/.test(l) && !l.startsWith('#'))
     .filter((l) => !/--max-time/.test(l));
   assert.deepEqual(unbounded, [], 'every curl must carry --max-time');
+});
+
+test('an identical answer for an unrelated package is reported as distinguishing nothing', () => {
+  // The control exists because "unauthorized" arrived with no detail at all, and the obvious reading
+  // -- "our trusted publisher does not match" -- is only correct if the registry says something
+  // DIFFERENT about a package that has no configuration. If it says the same thing to everyone, the
+  // line is not evidence about our configuration and the log must not imply that it is.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
+    exchange: JSON.stringify({ message: 'OIDC token exchange error - unauthorized' }),
+  });
+  assert.equal(r.status, 1);
+  const out = r.stdout + r.stderr;
+  assert.match(out, /left-pad: REFUSED -- OIDC token exchange error - unauthorized/,
+    'the control package must be probed and shown');
+  assert.match(out, /distinguishes nothing/, 'an identical answer must be labelled as no evidence');
+});
+
+test('a different answer for the control package means the configuration is being evaluated', () => {
+  // The other half of the control: if an unrelated package gets a different reply, the registry does
+  // tell these cases apart, and our refusal therefore points at a real mismatch worth going to fix.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
+    exchange: JSON.stringify({ message: 'OIDC token exchange error - unauthorized' }),
+    control: JSON.stringify({ message: 'this package has no trusted publishing configuration' }),
+  });
+  assert.equal(r.status, 1);
+  const out = r.stdout + r.stderr;
+  assert.match(out, /the registry does/, 'must conclude that the answers differ');
+  assert.match(out, /bare name/, 'must name the field most often entered wrong');
 });
