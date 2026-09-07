@@ -192,6 +192,11 @@ before(async () => {
     .withProjectName(PROJECT)
     .withAutoCleanup(!keepOnFail())
     .withStartupTimeout(LIMITS.startupMs)
+    // Pinned, not defaulted. compose.yml reads ${MERCURY_E2E_MOCK_RPC_MODE:-happy}, so an ambient
+    // `export MERCURY_E2E_MOCK_RPC_MODE=input` in a developer's shell would otherwise change what the
+    // deterministic journey means without saying so -- the suite would still be green while testing
+    // something else. The mock-RPC file sets its own value explicitly; this one pins its own.
+    .withEnvironment({ MERCURY_E2E_MOCK_RPC_MODE: 'happy' })
     .withWaitStrategy(FIXTURE_WAIT_KEY, Wait.forOneShotStartup())
     .withWaitStrategy(SVC.api, Wait.forHealthCheck())
     // The design calls for plain running-state here. The worker logs "worker started" once its

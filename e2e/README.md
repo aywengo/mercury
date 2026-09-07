@@ -15,6 +15,7 @@ implementation; the design document stays authoritative for intent and trade-off
 | `helpers.test.ts` | Control-flow tests for the above against a stub HTTP server. Needs no Docker daemon. |
 | `prepr.ts` | The one-command pre-PR gate: build, verify, e2e -- each under its own deadline. |
 | `prepr.test.ts` | Guards on the gate itself: bounded stages, propagated status, image layer order, and staying out of CI. |
+| `mock-rpc.test.ts` | The human-input journey: a `primeagent` Run parked on `NEEDS_INPUT`, answered through the public API, against the repository's mock RPC fixture. |
 
 ## Commands
 
@@ -53,6 +54,17 @@ suite.
 
 A running Docker (or Podman) daemon with Compose v2. If it is missing, the gate says so during
 preflight rather than failing a scenario.
+
+### `MERCURY_E2E_MOCK_RPC_MODE`
+
+`compose.yml` sets the mock RPC fixture's behaviour from this variable, defaulting to `happy`. Each
+suite pins its own value through Testcontainers rather than inheriting the shell, so exporting it in
+your environment changes nothing: `system.test.ts` pins `happy` and `mock-rpc.test.ts` pins `input`.
+Set it by hand only when driving `docker compose` directly, e.g.
+
+```bash
+MERCURY_E2E_MOCK_RPC_MODE=input docker compose -f e2e/compose.yml up worker
+```
 
 No `sqlite3` binary on the host. The client helpers used to shell out to it, which made the suite
 pass on macOS and CI and fail in any slim container; they use `node:sqlite` now (issue #290).
@@ -99,5 +111,5 @@ status it saw, and points at the logs.
 
 ## Status
 
-Phases 1-3 of the design. Not implemented: the mock-RPC human-input journey (Phase 4) and the
-robustness hardening of Phase 5. Nothing here is wired into CI.
+Phases 1-4 of the design. Not implemented: the robustness hardening of Phase 5 and the opt-in tiers
+above it. Nothing here is wired into CI.

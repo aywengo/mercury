@@ -1,13 +1,14 @@
 # Local pre-PR end-to-end testing
 
-Status: **Phases 1-3 implemented** (foundation + fake-agent system journey + the full pre-PR gate).
-Phases 0-3 are shipped; Phases 4-8 below are still design. See section 17 for the per-phase state.
+Status: **Phases 1-4 implemented** (foundation, fake-agent system journey, the full pre-PR gate, and
+the mock-RPC human-input journey). Phases 0-4 are shipped; Phases 5-8 below are still design. See
+section 17 for the per-phase state.
 
 Implemented so far: `e2e/Dockerfile`, `e2e/compose.yml`, `e2e/preflight.ts`, `e2e/helpers.ts`,
-`e2e/helpers.test.ts`, `e2e/prepr.ts`, `e2e/prepr.test.ts`, `e2e/system.test.ts`, `e2e/README.md`,
-`.dockerignore`, and the `prepr` / `test:e2e` / `test:e2e:config` scripts. `npm run prepr` runs the
-whole local gate -- image build, then typecheck and the existing suites inside that image, then the
-system journey. The mock-RPC human-input journey is Phase 4 and is not implemented.
+`e2e/helpers.test.ts`, `e2e/prepr.ts`, `e2e/prepr.test.ts`, `e2e/system.test.ts`,
+`e2e/mock-rpc.test.ts`, `e2e/README.md`, `.dockerignore`, and the `prepr` / `test:e2e` /
+`test:e2e:config` scripts. `npm run prepr` runs the whole local gate -- image build, then typecheck
+and the existing suites inside that image, then the system journey and the mock-RPC journey.
 
 This document designs a local end-to-end test gate for Mercury. The gate runs on a
 developer workstation before a pull request is opened. It is deliberately separate
@@ -1119,7 +1120,7 @@ One environment note for macOS contributors: under a non-interactive session, `d
 can fail while booting BuildKit because Docker Desktop reaches for the login keychain to resolve
 registry credentials -- including for its own BuildKit image. It is recorded in `e2e/README.md`.
 
-### Phase 4 — mock PrimeAgent RPC journey
+### Phase 4 — mock PrimeAgent RPC journey — **DONE**
 
 Deliverables:
 
@@ -1136,6 +1137,41 @@ Acceptance gate:
 - no provider credential or external network access is used.
 
 Recommended PR boundary: deterministic adapter integration.
+
+Notes against the wording above:
+
+- **The worker's `primeagent` wiring was broken from Phase 1 and nothing could notice until now.**
+  `compose.yml` pointed `MERCURY_PRIMEAGENT_CMD` at the node binary and passed the fixture as
+  `MERCURY_PRIMEAGENT_ARGS`. The adapter always spawns `<cmd> --mode rpc <args...>`, and `--mode rpc`
+  is prime-agent's CLI, not Node's, so the spawn was `node --mode rpc <script>`:
+
+    node: bad option: --mode     (exit 9, ~160ms)
+
+  Every Phase 2 and Phase 3 run passed because they used the `fake` adapter, so the misconfigured
+  path was never executed. The fixture is executable and carries a node shebang, so it is the command
+  and takes those flags as its own argv -- which is exactly how the adapter's own unit tests wire it.
+  A configuration that is only exercised by the layer that did not exist yet is the definition of the
+  gap this document is about.
+
+- **"the mock process is gone after completion" is asserted against `/proc/<pid>/cmdline` inside the
+  worker container**, using the pid the fixture records, rather than `kill -0`, so PID reuse cannot
+  produce a false pass. `NOPID` is a failure, not a pass: the fixture writes the file unconditionally
+  at startup, so an absent file means the subprocess never ran, and accepting it would report "the
+  process is gone" about a process that never existed.
+
+- **"API input reaches the mock subprocess" is proved by the value, not by the status.** The fixture
+  echoes what it received, and the assertion looks for the exact submitted string in the persisted
+  event stream. A Run merely leaving `NEEDS_INPUT` would also satisfy a status-only assertion while
+  the answer went nowhere. Verified live by asserting a value that was never submitted:
+
+    mutation: expect "e2e-answer-99" -> fail=1, "the subprocess must acknowledge the exact value"
+
+- The fixture's mode is selected per stack through `${MERCURY_E2E_MOCK_RPC_MODE:-happy}` in
+  `compose.yml`, driven by Testcontainers' `withEnvironment`. The default keeps every other stack
+  exactly as before, so the human-input scenario does not hijack the deterministic journey.
+
+- **"no provider credential is used" reads the worker's own environment** and asserts a non-empty key
+  list first, so the check cannot pass vacuously on a container it failed to inspect.
 
 ### Phase 5 — robustness hardening
 
