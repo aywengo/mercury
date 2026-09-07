@@ -196,13 +196,22 @@ Prefer account 2FA. A bypass-2FA token may work today, but npm is removing direc
 those tokens (github.blog changelog, 2026-07-31, targeting January 2027), so it is a dead end.
 
 1. Enable 2FA on npmjs.com under **Account Settings -> Two-Factor Authentication**.
-2. From a clean checkout of the tag: `npm publish --access public --tag rc`. The `--tag` matters:
-   npm's default dist-tag is `latest` for *any* version, prerelease included, so publishing an
-   `-rc` without it makes `npm install @aywengo/mercury` resolve to the release candidate.
-3. Configure trusted publishing on the package's npmjs.com settings page -- repository
-   `aywengo/mercury`, workflow `release.yml`, event `push` -- for both `@aywengo/mercury` and
-   `@aywengo/mercury-fleet`. Note that npm stages trusted publishes by default and makes direct
-   publishing opt-in per configuration.
+2. From a clean checkout of the tag: `npm publish --access public --tag <dist-tag>`, where the tag
+   is `rc` for an `-rc` prerelease and `latest` for a stable version -- match the version, do not
+   copy the flag blindly. The `--tag` matters because npm's default dist-tag is `latest` for *any*
+   version, prerelease included, so publishing an `-rc` without it makes
+   `npm install @aywengo/mercury` resolve to the release candidate. Passing `--tag rc` for a stable
+   first version has the mirror defect: the package lands under a tag no default install reads.
+   Note that npm initialises `latest` to the first version ever published regardless of `--tag`, and
+   refuses to delete that tag afterwards, so a prerelease published first will also be `latest`
+   until a stable version replaces it.
+3. Configure trusted publishing on the package's npmjs.com settings page -- owner `aywengo`,
+   repository `mercury`, workflow filename `release.yml` -- for each package you publish. The page
+   only exists once the package does, so **each package needs its own interactive first publish
+   before it can be configured**; `@aywengo/mercury-fleet` is not an exception, and there is no way
+   to configure it in advance. Note that npm stages trusted publishes by default and makes direct
+   publishing opt-in per configuration, and that the workflow chooses direct publishing when the
+   repository variable `NPM_DIRECT_PUBLISH` is set, so the two must agree.
 4. From then on a tag push needs no credential at all: `release.yml` uses the runner's OIDC
    id-token, and `NPM_TOKEN` can be deleted.
 
@@ -261,22 +270,32 @@ Then, from a real machine with a real Homebrew:
 7. `brew audit --strict` on the generated formula reported no findings.
 
 One consequence of the formula worth knowing before it surprises a user: it depends on `node`, so
-`brew install mercury-ai` installs or upgrades Homebrew's `node`. On the machine used for the test
-above that silently moved the active `node` from 24.1.0 to 26.8.1. This is ordinary Homebrew
-behaviour for a `depends_on "node"` formula, not a defect in this one, but it is not obvious from
-the install command and a user who pins a Node major version should expect it.
+`brew install mercury-ai` installs or upgrades **Homebrew's** `node`. On the machine used for the
+test above that moved the shell's active `node` from 24.1.0 to 26.8.1, because that machine resolves
+`node` through Homebrew. It will not move the active version for someone using nvm, asdf, or a PATH
+that puts another Node first -- what changes is the Homebrew-managed copy, and whether that is the
+one they run depends on their setup. This is ordinary Homebrew behaviour for a `depends_on "node"`
+formula, not a defect in this one, but it is not obvious from the install command and a user who
+pins a Node major version should check which Node they are actually running.
 
 Still not observed:
 
-- **A successful npm submission.** Both write paths are refused for the credential class npm
-  leaves standing, and creating the first version of a package is an interactive action. See
-  "First release only" above. This is the only channel that does not work, and since #281 it no
-  longer blocks the others.
+- **A successful npm submission from the release workflow.** `0.1.0-rc1` is on the registry,
+  published interactively, and the channel works. What has not yet run is the submit that
+  `release.yml` performs under an OIDC id-token: the workflow had never reached that call until the
+  credential was replaced, and every earlier attempt failed on authentication. The rehearsal covers
+  everything up to it and prints the three claims npm matches, but a rehearsal deliberately does not
+  submit, so the last call is unexercised until the next tag is pushed.
+- **Whether the trusted publisher permits direct publishing.** npm always allows
+  `npm stage publish`; direct `npm publish` is opt-in per configuration, and the repository variable
+  `NPM_DIRECT_PUBLISH` is set, so the two must agree. The setting cannot be read without publish
+  rights, so a mismatch surfaces only on a real release -- which the job now names as a candidate
+  cause rather than leaving as a bare 404.
 
 ## Decisions
 
 - **An npm failure does not block the Homebrew release.** Decided in response to #277, after the coupling stopped being hypothetical: a registry policy change made both npm write paths fail, and because the job aborted at that call the bundle and the formula were never built, so a channel that needs nothing from npm went down with it. The invariant the job protects is that the release body accurately describes what is installable, not that a release requires npm to have succeeded; the body now states the npm state explicitly and the job still goes red, at the end. Red means "npm needs attention", not "Mercury cannot be installed".
-- **CI stages the npm package instead of publishing it directly.** Decided from the live registry rather than from preference: direct publish is refused for the credential class npm leaves standing, staging is accepted, and npm recommends staging for CI anyway. The cost is one human approval per release, which the release body discloses so the notes cannot overstate availability.
+- **CI stages by default and publishes directly only when told to.** Staging was the original default because it was the only write path the credential class of the moment allowed, and npm recommends it for CI. It is now opt-out rather than forced: with trusted publishing in place the identity behind a tag push is a specific workflow, so `NPM_DIRECT_PUBLISH=true` publishes straight to the registry and skips the human approval on npmjs.com. Unset the variable to go back to staging, which costs one approval per release and is disclosed in the release body either way so the notes cannot overstate availability.
 - **npm authentication prefers OIDC over a long-lived token.** Decided after two valid tokens were refused direct publish. The token path is kept because it still works for accounts whose tokens retain publish, but it is no longer a requirement, and the OIDC path logs verbosely because npm's OIDC helper reports every failure at `verbose` and never throws.
 - **The bundle vendors its production `node_modules`.** Decided by implementation and
   measured: the whole production tree is `express` plus 67 transitive packages, 3.9 MB,
