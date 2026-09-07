@@ -13,12 +13,14 @@ name: CI
 #     markdown outside `docs/`, README.md, QUICKSTART.md, AGENTS.md, ARCHITECTURE.md and
 #     deploy/README.md (`.agents/skills/**/SKILL.md` is the one that surprises people) -> `code`
 #     is true, full dual-Node matrix runs.
-#   - markdown only, all of it inside the denylist, and at least one of the four contract files
-#     (README, QUICKSTART, docs/remote-client-setup.md, docs/releasing.md, docs/distribution.md,
-#     docs/status.md, docs/README.md, deploy/README.md) -> `code` false,
-#     `contract_docs` true, so the
-#     cheap `docs-contract` job runs and the matrix is skipped. Those files are pinned by
-#     test/nodeFloor.test.ts and test/deployDocs.test.ts, which is what that job runs.
+#   - markdown only, all of it inside the denylist, and at least one of the contract files listed
+#     in the filter below (README, QUICKSTART, docs/remote-client-setup.md, docs/releasing.md,
+#     docs/distribution.md, docs/status.md, docs/README.md, docs/releases/**/*.md,
+#     deploy/README.md) -> `code` false, `contract_docs` true, so the cheap `docs-contract` job runs
+#     and the matrix is skipped. The allowlist must cover every file the tests in that job read:
+#     releaseHygiene reads docs/releases/<product>/<version>.md, so release notes are contract files
+#     too. Miss one and a docs-only PR skips the very job that guards it, merges green, and leaves
+#     main red for the next code PR -- which is exactly how #355 was found.
 #   - markdown only, no contract file -> both outputs false and nothing but `changes` runs.
 #
 # `contract_docs` is a plain allowlist with no exclusions, so mixing a contract file with excluded
@@ -91,6 +93,7 @@ jobs:
               - 'docs/distribution.md'
               - 'docs/status.md'
               - 'docs/README.md'
+              - 'docs/releases/**/*.md'
               - 'deploy/README.md'
 
       - name: Set path-filter outputs
