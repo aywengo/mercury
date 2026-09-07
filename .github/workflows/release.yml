@@ -458,6 +458,13 @@ jobs:
           # body is completed here. Every npm state gets its own wording; a body that stayed silent would
           # advertise an `npm install` that does not resolve, which is the overstatement class of the
           # deleted cli-* tag.
+          # The body must not name an install path that does not exist. The formula is pushed by the
+          # LAST step of a successful release, and no release has ever completed, so the tap has no
+          # mercury-ai.rb at all -- the raw URL 404s today. Asking costs one unauthenticated request
+          # against a public repository, and it is the only way the sentence below can be true.
+          formula_live=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+            "https://raw.githubusercontent.com/aywengo/homebrew-tap/main/Formula/mercury-ai.rb" \
+            || echo 000)
           if [ "$npm_ok" = "0" ]; then
             {
               echo ""
@@ -473,7 +480,14 @@ jobs:
               echo "Install this release without npm:"
               echo ""
               if [ "$product" = "host" ]; then
-                echo "- Homebrew: \`brew install aywengo/mercury/mercury-ai\`"
+                if [ "$formula_live" = "200" ]; then
+                  echo "- Homebrew: \`brew install aywengo/mercury/mercury-ai\`"
+                else
+                  echo "- Homebrew: **not available yet.** The tap has no \`mercury-ai.rb\`, so"
+                  echo "  \`brew install aywengo/mercury/mercury-ai\` fails with a 404. The formula is"
+                  echo "  written by the last step of a release whose npm submission succeeded, and no"
+                  echo "  release has completed that far."
+                fi
                 echo "- The asset attached to this release: download and unpack the bundle."
               else
                 echo "**None. Fleet ships only through npm**, and this release attaches no asset and"
@@ -491,9 +505,13 @@ jobs:
               echo "proof-of-presence to a maintainer, so \`npm install\` will not resolve this version"
               echo "until it is approved on npmjs.com under **Published packages -> Staged packages**."
               echo ""
-              if [ "$product" = "host" ]; then
+              if [ "$product" = "host" ] && [ "$formula_live" = "200" ]; then
                 echo "The assets attached to this release and the Homebrew formula are already live and"
                 echo "need no npm approval."
+              elif [ "$product" = "host" ]; then
+                echo "The asset attached to this release is live and needs no npm approval. The Homebrew"
+                echo "formula is not in the tap yet, so \`brew install\` does not work for this"
+                echo "product until a release completes its final step."
               else
                 echo "Nothing else is attached to this release and there is no Homebrew formula for"
                 echo "Fleet, so approval on npmjs.com is the only way this version becomes installable."

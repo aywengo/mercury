@@ -68,7 +68,7 @@ function runTag(
   tag: string,
   opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
     directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean;
-    pkgHttp?: string;
+    pkgHttp?: string; formulaHttp?: string;
     npmSubmitErr?: string; exchange?: string; exchangeExit?: number;
     exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
     control2?: string; control2Exit?: number } = {},
@@ -163,6 +163,9 @@ function runTag(
       + '      else body="${STUB_EXCHANGE_CONTROL2-${STUB_EXCHANGE_CONTROL-$STUB_EXCHANGE}}"; code="${STUB_EXCHANGE_CONTROL2_EXIT-${STUB_EXCHANGE_CONTROL_EXIT-$STUB_EXCHANGE_EXIT}}"; fi\n'
       + '    fi\n'
       + '    printf "%s" "$body"; exit "$code" ;;\n'
+      // The tap is public too, and the release body now checks it before naming Homebrew as an
+      // install path. Default 404, because that is what the tap actually returns today.
+      + '  *raw.githubusercontent.com*) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_FORMULA_HTTP:-404}"; exit 0; fi; exit 22 ;;\n'
       // Package metadata is public, and the failure classifier now reads it to tell a rejected
       // publisher apart from a package that has never existed. STUB_PKG_HTTP is that answer.
       + '  *) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_PKG_HTTP:-200}"; exit 0; fi; exit 22 ;;\n'
@@ -213,6 +216,7 @@ function runTag(
         STUB_EXCHANGE: opts.exchange ?? '',
         STUB_EXCHANGE_EXIT: String(opts.exchangeExit ?? 0),
         STUB_PKG_HTTP: opts.pkgHttp ?? '200',
+        STUB_FORMULA_HTTP: opts.formulaHttp ?? '404',
         STUB_EXCHANGE_OURS1: opts.exchange ?? '',
         STUB_EXCHANGE_OURS1_EXIT: String(opts.exchangeExit ?? 0),
         STUB_EXCHANGE_OURS2: opts.exchange2 ?? opts.exchange ?? '',
@@ -611,7 +615,10 @@ test('a staged release says the npm package is awaiting approval', () => {
   // The release notes are committed before the run and cannot know the submission was only staged.
   // Without this notice the page tells a user to `npm install` a version that does not resolve --
   // the same class of overstatement as the deleted cli-* tag, reached from the other direction.
-  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  // formulaHttp 200: this test is about the staged state, so it presents a tap that has the formula.
+  // What the body says when it does not is covered by the test below, not by quietly asserting a
+  // tap state that no longer matches reality.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], formulaHttp: '200' });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.notesOut, /awaiting maintainer approval/, 'release notes must disclose the staged state');
   assert.match(r.notesOut, /already live/, 'and must say the Homebrew path is unaffected');
@@ -1078,4 +1085,39 @@ test('the claims probe prints the issuer, the one claim npm matches before any o
   const script = extractReleaseScript();
   assert.match(script, /"iss"/, 'the issuer must be printed');
   assert.match(script, /"enterprise"/, 'and the enterprise claim that explains a scoped issuer');
+});
+
+test('the release body does not offer a Homebrew install the tap cannot serve', () => {
+  // The body's own rule is that it must describe what is actually installable. The formula is written
+  // by the LAST step of a release whose npm submission succeeded, and no release has ever got that
+  // far, so aywengo/homebrew-tap has no mercury-ai.rb -- the raw URL 404s today. Offering
+  // `brew install aywengo/mercury/mercury-ai` as the fallback for a failed npm publish therefore
+  // sent users to a 404 while telling them the npm gap was the only problem.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', npmFails: true, npmSubmitErr: 'npm error code E401',
+  });
+  assert.equal(r.status, 1);
+  assert.match(r.notesOut, /not available yet/, 'must say the formula is missing');
+  assert.match(r.notesOut, /fails with a 404/, 'and say what the command actually does');
+  assert.ok(!/^- Homebrew: `brew install/m.test(r.notesOut),
+    'must not list the brew command as an available install path');
+  assert.match(r.notesOut, /download and unpack the bundle/, 'the asset really is attached, so it stays');
+});
+
+test('the body offers Homebrew once the formula exists', () => {
+  // The converse: suppressing it unconditionally would understate a release that genuinely installs
+  // two ways, which is the same error in the other direction.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', npmFails: true,
+    npmSubmitErr: 'npm error code E401', formulaHttp: '200',
+  });
+  assert.match(r.notesOut, /^- Homebrew: `brew install aywengo\/mercury\/mercury-ai`/m);
+  assert.ok(!/not available yet/.test(r.notesOut));
+});
+
+test('a staged host release does not claim a formula that is not in the tap', () => {
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], oidc: true, npmToken: '' });
+  assert.equal(r.status, 0);
+  assert.ok(!/Homebrew formula are already live/.test(r.notesOut));
+  assert.match(r.notesOut, /not in the tap yet/);
 });
