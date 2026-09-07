@@ -335,8 +335,10 @@ jobs:
               echo "  Fleet ships only through npm, so this tag would create a GitHub Release with no" >&2
               echo "  asset and then fail -- nothing installable." >&2
               echo "  Trusted publishing is configured on the package page, which cannot be configured" >&2
-              echo "  before the package exists, so the first publish needs a credential:" >&2
-              echo "  npm publish --access public --tag rc, with an npm token." >&2
+              echo "  before the package exists, so the first publish needs a credential, run" >&2
+              echo "  INSIDE the Fleet package:" >&2
+              echo "    cd fleet && cp ../LICENSE LICENSE && npm publish --access public --tag rc" >&2
+              echo "  At the repository root that command publishes @aywengo/mercury, not Fleet." >&2
               echo "  After that, a fleet tag needs no secret at all." >&2
               exit 1
             fi
