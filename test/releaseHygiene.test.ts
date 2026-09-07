@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { join, relative } from 'node:path';
 import { HOST_PRODUCT, HOST_VERSION } from '../src/version.ts';
@@ -309,6 +309,11 @@ function brokenMarkdownLinks(root: string, files: string[]): string[] {
   const broken: string[] = [];
   for (const rel of files) {
     const full = join(root, rel);
+    // `git ls-files` reports the index, and the index can hold a file the worktree no longer has --
+    // an interrupted rebase, an unstaged `rm`. Reading it throws ENOENT, which surfaces as a crash
+    // with no mention of markdown. A deleted file has no links to strand, so it is skipped rather
+    // than reported.
+    if (!existsSync(full)) continue;
     const dir = join(root, rel.slice(0, rel.lastIndexOf('/') + 1));
     const text = readFileSync(full, 'utf8');
     for (const m of text.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/g)) {
@@ -357,6 +362,23 @@ test('the markdown link guard ignores untracked files', () => {
     // README.md is tracked by makeGitRepo itself; the point is that neither scratch file appears.
     assert.deepEqual(listed.sort(), ['README.md', 'docs/guide.md', 'docs/other.md'], 'scratch markdown must not be scanned');
     assert.deepEqual(brokenMarkdownLinks(dir, listed), []);
+  }
+});
+
+test('a tracked file deleted from the worktree does not crash the guard', () => {
+  // `git ls-files` lists the index. An unstaged `rm`, or a rebase left half-applied, leaves an index
+  // entry with no file behind it, and readFileSync threw ENOENT -- a stack trace about nothing a
+  // reader could act on, on the one run where the gate is already being blamed for something else.
+  const dir = tempDir('mercury-linkdeleted-');
+  {
+    makeGitRepo(dir);
+    mkdirSync(join(dir, 'docs'), { recursive: true });
+    writeFileSync(join(dir, 'docs', 'doomed.md'), '[gone](missing.md)\n');
+    spawnSync('git', ['-C', dir, 'add', '.'], { stdio: 'ignore' });
+    rmSync(join(dir, 'docs', 'doomed.md'));
+    // Still in the index, gone from disk: the exact state that used to throw.
+    assert.ok(trackedMarkdownFiles(dir).includes('docs/doomed.md'), 'precondition: index still lists it');
+    assert.deepEqual(brokenMarkdownLinks(dir, trackedMarkdownFiles(dir)), []);
   }
 });
 
