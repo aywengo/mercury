@@ -176,16 +176,20 @@ test('releasing.md never instructs an operator to push a cli tag', () => {
     'step 1 must say when a CLI change actually reaches users');
 });
 
-test('step 6 names the two products that publish and promises no third', () => {
+test('the step that describes the release job names both products and promises no third', () => {
+  // Located by content, not by number. The procedure was renumbered when the rehearsal moved ahead of the
+  // tag step, and a test anchored on "6. [" broke -- while staying invisible, because a markdown-only PR
+  // skips the Node matrix that runs this file. Pinning the sentence rather than its index means the
+  // procedure can be reordered without a test that only fails later, on main.
   const doc = read('docs/releasing.md');
-  const start = doc.indexOf('6. [');
-  assert.ok(start >= 0, 'the release procedure must keep its numbered step 6');
-  const step6 = doc.slice(start, doc.indexOf('The `NPM_TOKEN`', start) > start
-    ? doc.indexOf('The `NPM_TOKEN`', start) : start + 900);
-  assert.match(step6, /host/, 'step 6 must name the products that publish');
-  assert.match(step6, /fleet/);
-  assert.ok(!/cli/i.test(step6),
-    'step 6 still describes a cli tag; there is no cli tag, so this promises a release that cannot happen');
+  const start = doc.search(/^\d+\. \[`\.github\/workflows\/release\.yml`\]/m);
+  assert.ok(start >= 0, 'the procedure must keep a step describing what release.yml does');
+  const next = doc.indexOf('The `NPM_TOKEN`', start);
+  const step = doc.slice(start, next > start ? next : start + 900);
+  assert.match(step, /host/, 'that step must name the products that publish');
+  assert.match(step, /fleet/);
+  assert.ok(!/cli/i.test(step),
+    'it still describes a cli tag; there is no cli tag, so it promises a release that cannot happen');
 });
 
 test('release.yml admits exactly host and fleet, and fails closed on anything else', () => {
