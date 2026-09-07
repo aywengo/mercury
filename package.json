@@ -3,6 +3,22 @@
   "version": "0.1.0-rc1",
   "private": false,
   "license": "MIT",
+  "author": "Roman Melnyk",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aywengo/mercury.git"
+  },
+  "homepage": "https://github.com/aywengo/mercury#readme",
+  "bugs": {
+    "url": "https://github.com/aywengo/mercury/issues"
+  },
+  "keywords": [
+    "orchestration",
+    "coding-agent",
+    "primeagent",
+    "long-running-jobs",
+    "cli"
+  ],
   "description": "Durable long-running coding orchestration for PrimeAgent and other agent backends",
   "type": "module",
   "engines": {
