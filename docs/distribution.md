@@ -214,8 +214,10 @@ those tokens (github.blog changelog, 2026-07-31, targeting January 2027), so it 
    only exists once the package does, so **each package needs its own interactive first publish
    before it can be configured**; `@aywengo/mercury-fleet` is not an exception, and there is no way
    to configure it in advance. Note that npm stages trusted publishes by default and makes direct
-   publishing opt-in per configuration, and that the workflow chooses direct publishing when the
-   repository variable `NPM_DIRECT_PUBLISH` is set, so the two must agree.
+   publishing opt-in per configuration: a publisher created after 2026-09-03 permits
+   `npm stage publish` only unless you also select direct publishing. The workflow chooses direct
+   publishing when the repository variable `NPM_DIRECT_PUBLISH` is set, so the variable and the
+   publisher setting must agree -- if they do not, the release fails.
 4. From then on a tag push needs no credential at all: `release.yml` uses the runner's OIDC
    id-token, and `NPM_TOKEN` can be deleted.
 
@@ -243,8 +245,9 @@ Everything after the first release is the procedure below.
 
 Set the repository variable `NPM_DIRECT_PUBLISH` to `true` only after confirming on npmjs.com that
 this package's Trusted Publisher permits direct `npm publish`. A publisher created after 2026-09-03
-does not by default, and with that configuration the variable turns a would-be staged release into a
-failed one.
+does not by default permit direct `npm publish` -- it permits `npm stage publish` only -- so with that
+configuration the variable does not skip an approval, it turns a would-be staged release into a failed
+one.
 
 `fleet-v<version>` publishes Fleet to npm only; Fleet has no Homebrew formula.
 
