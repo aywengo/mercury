@@ -15,8 +15,9 @@ name: CI
 #     Filter code = true
 #     Matching files: README.md
 #
-# so both Node matrices ran and the cheap `docs-contract` job was skipped -- it requires
-# `code != 'true'`, which a change to any file satisfies. The cheap path is inert.
+# so both Node matrices ran and the cheap `docs-contract` job was skipped: it requires
+# `code != 'true'`, and on that run `code` was reported true. Whether every change does the same is
+# exactly what is unknown, so the sentence stops at the one case that was observed.
 #
 # Why is not established, and an earlier version of this comment invented a reason. It said the
 # `!`-negations "do not subtract"; the parsed filter is in fact `["**", "!docs/**/*.md", ...,
@@ -34,7 +35,7 @@ name: CI
 #
 # `contract_docs` is kept because it is still read by `docs-contract`; if the allowlist version of
 # this filter is ever written, that job is what makes narrative markdown cheaper than code.
-# Tracked as the issue linked from the PR that added this comment.
+# Tracked in #313.
 
 on:
   push:
