@@ -103,8 +103,18 @@ test('the client does not read Mercury state directly', () => {
   // bypass the API, and the API is where owner scoping and secret redaction live. A client that read
   // the database directly would also silently ignore the owner scoping that keeps one operator from
   // seeing another's Runs.
+  // Test helpers are excluded, for the reason the process-spawn guard two tests below already
+  // states: the claim is about the SHIPPED client, and a helper that seeds a database row to build
+  // a scenario is not `mercuryctl` bypassing the API. The helper did this through the `sqlite3` CLI
+  // until issue #290 moved it onto the same driver the product uses -- and this guard never saw
+  // that, because it matches the module name rather than the effect. Excluding the test directory
+  // costs nothing that the guard was actually detecting, and it keeps the scan pointed at the code
+  // whose architecture the claim is about.
+  const sources = sourceFiles(CLIENT_DIR).filter((f) => !f.includes(`${sep}test${sep}`));
+  assert.ok(sources.length >= 10, `only ${sources.length} non-test client sources; the scan is broken`);
+
   const offenders: string[] = [];
-  for (const file of sourceFiles(CLIENT_DIR)) {
+  for (const file of sources) {
     const text = readFileSync(file, 'utf8');
     // Assembled at runtime for the same reason as above: this file must not contain the literal
     // module name it is looking for.
