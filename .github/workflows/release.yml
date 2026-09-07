@@ -195,6 +195,8 @@ jobs:
               # enough.
               accepted=0
               evidence=0
+              ours=""
+              control=""
               for aud in npm:registry.npmjs.org https://registry.npmjs.org; do
                 aud_json=$(curl -sS --max-time 30 -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
                   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${aud}" || echo "")
@@ -203,44 +205,65 @@ jobs:
                   echo "  oidc exchange [${aud}]: the runner minted no token"
                   continue
                 fi
-                exchange=$(curl -sS --max-time 30 -X POST -H "Accept: application/json" \
-                  -H "Authorization: bearer ${aud_token}" \
-                  "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${esc}" || echo "")
-                rc=0
-                node -e '
-                  const [aud, raw] = [process.argv[1], process.argv[2]];
-                  let j = null;
-                  try { j = JSON.parse(raw); } catch {}
-                  if (j && typeof j.token === "string" && j.token.length) {
-                    console.log(`  oidc exchange [${aud}]: ACCEPTED -- npm issued a ${j.token.length}-char`);
-                    console.log("    publish token (value not printed; it is a credential)");
-                    process.exit(0);
-                  }
-                  if (!j) {
-                    console.log(`  oidc exchange [${aud}]: INCONCLUSIVE -- not JSON, so nothing learned.`);
-                    console.log("    first 200 bytes: " + raw.slice(0, 200).replace(/\n/g, " "));
-                    process.exit(2);
-                  }
-                  console.log(`  oidc exchange [${aud}]: REFUSED -- `
-                    + (j.message || j.error || JSON.stringify(j)).slice(0, 200));
-                  process.exit(1);
-                ' "$aud" "$exchange" || rc=$?
-                if [ "$rc" -eq 0 ]; then accepted=1; fi
-                if [ "$rc" -ne 2 ]; then evidence=1; fi
+                # The same question is asked of a package this repository has no relationship to.
+                # Without that control, "unauthorized" gets read as "our trusted publisher does not
+                # match", when it may be all the registry ever says to a token it will not exchange
+                # -- in which case the line distinguishes nothing and must not be reported as if it
+                # did. node prints only a one-line description; bash owns the log line, so the
+                # operator sees it instead of having it captured into a variable.
+                for probe_pkg in "$esc" left-pad; do
+                  exchange=$(curl -sS --max-time 30 -X POST -H "Accept: application/json" \
+                    -H "Authorization: bearer ${aud_token}" \
+                    "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${probe_pkg}" || echo "")
+                  rc=0
+                  msg=$(node -e '
+                    const raw = process.argv[1];
+                    let j = null;
+                    try { j = JSON.parse(raw); } catch {}
+                    if (j && typeof j.token === "string" && j.token.length) {
+                      process.stdout.write(`npm issued a ${j.token.length}-char publish token`);
+                      process.exit(0);
+                    }
+                    if (!j) {
+                      process.stdout.write("no JSON: " + raw.slice(0, 80).replace(/\n/g, " "));
+                      process.exit(2);
+                    }
+                    process.stdout.write(String(j.message || j.error || JSON.stringify(j)).slice(0, 160));
+                    process.exit(1);
+                  ' "$exchange") || rc=$?
+                  case "$rc" in
+                    0) st=ACCEPTED ;;
+                    1) st=REFUSED ;;
+                    *) st=NO_ANSWER ;;
+                  esac
+                  echo "  oidc exchange [${aud}] ${probe_pkg}: ${st} -- ${msg}"
+                  if [ "$probe_pkg" = "$esc" ]; then
+                    if [ "$rc" -eq 0 ]; then accepted=1; fi
+                    if [ "$rc" -ne 2 ]; then evidence=1; fi
+                    [ -z "$ours" ] && ours="${st} ${msg}"
+                  else
+                    [ -z "$control" ] && control="${st} ${msg}"
+                  fi
+                done
               done
               if [ "$accepted" = "1" ]; then
                 echo "  => npm trusts this workflow for ${pkg_name}; a real publish would authenticate"
               elif [ "$evidence" = "1" ]; then
-                # Every audience that answered said no. That is evidence about the trust
-                # configuration, and a real release dies on this call, so the rehearsal fails.
-                echo "  => every audience that answered refused. A real publish would fail here." >&2
-                echo "     Check the Trusted Publisher on npmjs.com for ${pkg_name}: owner," >&2
-                echo "     repository, workflow filename, and which actions are allowed." >&2
+                echo "  => every audience that answered refused for ${pkg_name}." >&2
+                if [ "$ours" = "$control" ]; then
+                  echo "     An unrelated package got byte-identical treatment, so this answer" >&2
+                  echo "     distinguishes nothing: it is what the registry says to a token it will" >&2
+                  echo "     not exchange. It does NOT establish that a trusted publisher is missing" >&2
+                  echo "     or misconfigured." >&2
+                else
+                  echo "     An unrelated package got a different answer, so the registry does" >&2
+                  echo "     distinguish. A configuration for ${pkg_name} is being evaluated and does" >&2
+                  echo "     not match this run. Check, in order: the workflow filename entered as a" >&2
+                  echo "     bare name (release.yml, not a path), the user and repository fields, and" >&2
+                  echo "     any Environment name, which must equal the job's environment." >&2
+                fi
                 exit 1
               else
-                # A proxy, a WAF or a rate limiter can answer this call with HTML. That is not evidence
-                # about the trust configuration, and failing here would train people to ignore a red
-                # rehearsal.
                 echo "  => nothing answered with JSON; nothing learned about the trust configuration"
               fi
             fi
