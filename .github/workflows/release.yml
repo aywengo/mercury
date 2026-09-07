@@ -108,9 +108,11 @@ jobs:
           if [ -n "$NODE_AUTH_TOKEN" ]; then
             echo "publish auth: NPM_TOKEN"
             npm_loglevel=normal
+            npm_auth_mode=token
           elif [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
             echo "publish auth: OIDC trusted publishing (no repository secret)"
             npm_loglevel=verbose
+            npm_auth_mode=oidc
             # actions/setup-node writes `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into a
             # PROJECT .npmrc because registry-url is set. With no secret that is an empty credential at
             # project scope, which outranks the user-scope token npm's OIDC exchange installs via
@@ -232,6 +234,7 @@ jobs:
           # the half-release this repo has repeatedly refused -- but red now means "npm needs attention",
           # not "nobody can install Mercury".
           npm_ok=1
+          npm_log="${RUNNER_TEMP}/npm-submit.log"
           if [ "${DRY_RUN:-}" = "true" ]; then
             # `npm publish --dry-run` builds the tarball and prints what would go up, and performs no
             # registry write. --provenance is omitted because attestation needs the registry
@@ -244,10 +247,10 @@ jobs:
               (cd fleet && npm publish --dry-run --access public --tag "$dist_tag") || npm_ok=0
             fi
           elif [ "$product" = "host" ]; then
-            npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel" || npm_ok=0
+            npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel" 2>&1 | tee "$npm_log" || npm_ok=0
           elif [ "$product" = "fleet" ]; then
             cp LICENSE fleet/LICENSE
-            (cd fleet && npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel") || npm_ok=0
+            (cd fleet && npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel" 2>&1) | tee "$npm_log" || npm_ok=0
           fi
           if [ "${DRY_RUN:-}" = "true" ]; then
             # Not "submission succeeded": nothing was submitted, and a rehearsal log that reads like
@@ -257,6 +260,29 @@ jobs:
             echo "npm submission succeeded (${npm_verb})"
           else
             echo "npm submission FAILED (${npm_verb}); continuing so the Homebrew artifacts are still produced" >&2
+            # Name the cause when the log identifies one. Every failure path in npm's OIDC exchange is
+            # log.verbose, so a rejected trusted-publisher configuration arrives as a bare registry 404
+            # -- which is indistinguishable, in the log, from a package that does not exist. Three real
+            # releases here failed on credentials before this existed, and each one had to be read out
+            # of the raw log by hand.
+            if grep -qE 'EPUBLISHCONFLICT|cannot publish over|previously published' "$npm_log"; then
+              echo "  cause: ${product} ${version} is already on the registry. A version number cannot" >&2
+              echo "         be reused; delete the tag and cut the next one." >&2
+            elif [ "${npm_auth_mode:-}" = "oidc" ] && grep -qE 'E404|404 Not Found|E401|401 Unauthorized' "$npm_log"; then
+              echo "  cause: the registry refused the OIDC credential. Two configurations produce this," >&2
+              echo "         and they look identical in the log:" >&2
+              echo "           1. direct publishing is not enabled for this trusted publisher. npm" >&2
+              echo "              always allows 'npm stage publish'; direct 'npm publish' is opt-in, and" >&2
+              echo "              this run chose direct because NPM_DIRECT_PUBLISH is set. Either enable" >&2
+              echo "              it on the package's Trusted Publisher settings, or unset the variable." >&2
+              echo "           2. the publisher does not match this run. It must be owner aywengo," >&2
+              echo "              repository mercury, workflow filename release.yml. The claims printed" >&2
+              echo "              above carry all three; compare them against the settings page." >&2
+            elif grep -qE 'E401|ENEEDAUTH|Unable to authenticate' "$npm_log"; then
+              echo "  cause: the npm credential was rejected. NPM_TOKEN is set but not permitted to" >&2
+              echo "         publish, or has expired. This is distinct from having no credential, which" >&2
+              echo "         the job refuses earlier, before creating any release." >&2
+            fi
           fi
 
           # The release notes are committed before the run and cannot know how the submission went, so the
