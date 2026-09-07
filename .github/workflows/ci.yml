@@ -10,12 +10,20 @@ name: CI
 # behaviour rather than an accident waiting to be fixed.
 #
 # The filter below was written to spare the dual-Node matrix for narrative-markdown-only changes,
-# and it does not do that. `code` is built as `'**'` plus a list of `!`-negations, and the negations
-# do not subtract: PR #303 changed only README.md and the job logged `Filter code = true /
-# Matching files: README.md`, so both Node matrices ran and the cheap `docs-contract` job was
-# skipped -- `docs-contract` requires `code != 'true'`, which a change to any file satisfies. The
-# cheap path is therefore inert, and the comment that promised it was describing intent, not
-# behaviour.
+# and in practice it does not. PR #303 changed only README.md and the job logged
+#
+#     Filter code = true
+#     Matching files: README.md
+#
+# so both Node matrices ran and the cheap `docs-contract` job was skipped -- it requires
+# `code != 'true'`, which a change to any file satisfies. The cheap path is inert.
+#
+# Why is not established, and an earlier version of this comment invented a reason. It said the
+# `!`-negations "do not subtract"; the parsed filter is in fact `["**", "!docs/**/*.md", ...,
+# "!README.md", ...]`, which is the shape the action documents for exactly this, so the config is
+# right and the outcome still contradicts it. The cause is tracked rather than guessed at here.
+# What the cause turns out to be does not change the decision below, which is why the safe response
+# to an unexplained classifier is to keep running everything.
 #
 # It is left inert deliberately. The failure modes are not symmetric. A filter that wrongly
 # classifies a code change as docs-only merges that change with no tests at all; a filter that
@@ -26,6 +34,7 @@ name: CI
 #
 # `contract_docs` is kept because it is still read by `docs-contract`; if the allowlist version of
 # this filter is ever written, that job is what makes narrative markdown cheaper than code.
+# Tracked as the issue linked from the PR that added this comment.
 
 on:
   push:
