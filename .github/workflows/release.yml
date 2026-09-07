@@ -137,8 +137,14 @@ jobs:
             # real release and a branch on a rehearsal. Printing only a
             # selected subset is what produced the claim here that no claim carried the filename at
             # all -- the key was missing from the list, which is not the same as it not existing.
+            # The audience has to be the one npm itself asks for, or this prints claims from a token
+            # that takes part in no decision. npm/cli's lib/utils/oidc.js builds its audience as
+            # `npm:${new URL(registry).hostname}` -- `npm:registry.npmjs.org` -- and lib/commands/
+            # publish.js calls that same oidc() helper, so it is the only token a publish presents.
+            # GitHub's identity claims are identical across audiences, so the list below stayed
+            # correct either way; the value of `aud` printed next to them did not.
             id_json=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://registry.npmjs.org" || echo "")
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" || echo "")
             id_token=$(node -e 'try{console.log(JSON.parse(process.argv[1]).value||"")}catch{console.log("")}' "$id_json")
             if [ -n "$id_token" ]; then
               node -e 'const c=JSON.parse(Buffer.from(process.argv[1].split(".")[1],"base64url").toString());
@@ -149,6 +155,59 @@ jobs:
               echo "  'workflow' above is the display name and is not matched"
             else
               echo "  the runner refused to mint an id token; npm cannot authenticate via OIDC" >&2
+            fi
+
+            # Perform the exchange npm would perform, but only in a rehearsal.
+            #
+            # npm never sends the id token to the registry as an assertion. It POSTs it as a bearer
+            # credential to /-/npm/v1/oidc/token/exchange/package/<name> and publishes with the
+            # short-lived npm token that comes back. That exchange is the whole of the trust check,
+            # and no rehearsal had ever reached it: `npm publish --dry-run` does not authenticate, so
+            # every rehearsal to date proved the tarball, the version and the claims, and nothing
+            # whatever about whether npm trusts this workflow. The one open question about this
+            # repository's release path -- would npm accept a publish from it -- sat exactly there.
+            #
+            # A rehearsal can answer it, because the exchange only mints a credential; it publishes
+            # nothing. The response body IS a credential, so it is never written to disk and never
+            # printed: only its length is reported.
+            #
+            # A structured refusal is fatal, because it is evidence about the trust configuration and
+            # a real release would die on the same call. Anything that is not JSON is not evidence
+            # about the trust configuration -- a proxy, a WAF or a rate limiter can all answer here --
+            # so it warns rather than failing a rehearsal for something the registry never said.
+            if [ "${DRY_RUN:-}" = "true" ] && [ -n "$id_token" ]; then
+              if [ "$product" = "host" ]; then
+                pkg_name=$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).name)")
+              else
+                pkg_name=$(node -e "console.log(JSON.parse(require('fs').readFileSync('fleet/package.json','utf8')).name)")
+              fi
+              # npa's escapedName, which is what npm puts in this path: the leading "@" stays literal
+              # and only the slash is encoded.
+              esc=${pkg_name//\//%2F}
+              exchange=$(curl -sS --max-time 30 -X POST -H "Accept: application/json" \
+                -H "Authorization: bearer ${id_token}" \
+                "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${esc}" || echo "")
+              node -e '
+                const raw = process.argv[1];
+                let j = null;
+                try { j = JSON.parse(raw); } catch {}
+                if (j && typeof j.token === "string" && j.token.length) {
+                  console.log(`  oidc exchange: ACCEPTED -- npm issued a ${j.token.length}-char publish token`);
+                  console.log("  (the token is not printed; a real publish would use it and stop there)");
+                  process.exit(0);
+                }
+                if (!j) {
+                  console.log("  oidc exchange: INCONCLUSIVE -- the registry did not answer with JSON,");
+                  console.log("  so this says nothing about the trust configuration. First 200 bytes:");
+                  console.log("  " + raw.slice(0, 200).replace(/\n/g, " "));
+                  process.exit(0);
+                }
+                console.error("  oidc exchange: REFUSED -- a real publish would fail at this call");
+                console.error("  npm said: " + (j.message || j.error || JSON.stringify(j)).slice(0, 300));
+                console.error("  check the Trusted Publisher on npmjs.com for this package: owner,");
+                console.error("  repository, workflow filename, and which actions are allowed.");
+                process.exit(1);
+              ' "$exchange"
             fi
           else
             echo "refusing ${tag}: no NPM_TOKEN and no OIDC id-token available; npm publish would fail after the release is created" >&2

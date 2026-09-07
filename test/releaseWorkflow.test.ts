@@ -21,6 +21,13 @@ import { tempDir } from './helpers.ts';
 const ROOT = join(import.meta.dirname, '..');
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as { version: string };
 
+/** A JWT-shaped string with the given claims, so the step's claim printer has something to decode. */
+function fakeJwt(claims: Record<string, string>): string {
+  const b64 = (o: unknown) =>
+    Buffer.from(JSON.stringify(o)).toString('base64url');
+  return `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64(claims)}.sig`;
+}
+
 /**
  * Pull the `run: |` body out of the release workflow.
  *
@@ -61,7 +68,7 @@ function runTag(
   tag: string,
   opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
     directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean;
-    npmSubmitErr?: string } = {},
+    npmSubmitErr?: string; exchange?: string; exchangeExit?: number } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -121,6 +128,26 @@ function runTag(
     // `diff --cached --quiet` case exits 1 on purpose: that is git's "there ARE staged changes"
     // answer, which is the branch that commits and pushes. Without it the stub would always report a
     // clean tree and the push path would never be exercised.
+    // Stub curl. Without it the OIDC branch reached the real GitHub token endpoint and, once the
+    // rehearsal began probing npm's token exchange, the real registry: a test suite whose result
+    // depends on two third-party services is neither hermetic nor debuggable, and a registry that
+    // rate-limits would turn a green suite red for no reason in the diff.
+    //
+    // It answers the two URLs the step knows. The id-token endpoint returns the JWT in STUB_JWT so
+    // a test controls the claims; the exchange endpoint replays STUB_EXCHANGE with STUB_EXCHANGE_EXIT
+    // so a test controls whether npm trusts the workflow.
+    const curlStub = join(bin, 'curl');
+    writeFileSync(curlStub,
+      '#!/bin/sh\n'
+      + 'url=""\n'
+      + 'for a in "$@"; do case "$a" in http*) url="$a" ;; esac; done\n'
+      + 'case "$url" in\n'
+      + '  *idToken*) printf \'%s\' "{\\"value\\":\\"${STUB_JWT}\\"}" ;;\n'
+      + '  *oidc/token/exchange*) printf \'%s\' "${STUB_EXCHANGE:-}"; exit "${STUB_EXCHANGE_EXIT:-0}" ;;\n'
+      + '  *) exit 22 ;;\n'
+      + 'esac\nexit 0\n');
+    chmodSync(curlStub, 0o755);
+
     const gitStub = join(bin, 'git');
     writeFileSync(gitStub,
       '#!/bin/sh\necho "git $*" >> "' + tmp + '/calls.log"\n'
@@ -155,6 +182,15 @@ function runTag(
         // inside GitHub Actions -- locally-green, CI-red, or the reverse.
         ACTIONS_ID_TOKEN_REQUEST_URL: opts.oidc ? 'https://token.actions.githubusercontent.com/idToken' : undefined,
         ACTIONS_ID_TOKEN_REQUEST_TOKEN: opts.oidc ? 'oidc-request-token' : undefined,
+        // The curl stub replays these. Default exchange body is empty, which the step treats as
+        // "not JSON, therefore no evidence" -- so existing OIDC tests stay on the branch they were
+        // written for instead of every one of them suddenly asserting about trust.
+        STUB_JWT: fakeJwt({ repository_owner: 'aywengo', repository: 'aywengo/mercury',
+          job_workflow_ref: 'aywengo/mercury/.github/workflows/release.yml@refs/heads/main',
+          aud: 'npm:registry.npmjs.org', ref: 'refs/heads/main', ref_type: 'branch',
+          event_name: 'workflow_dispatch', workflow: 'Release' }),
+        STUB_EXCHANGE: opts.exchange ?? '',
+        STUB_EXCHANGE_EXIT: String(opts.exchangeExit ?? 0),
         // Explicit for the same reason as the two above: the submission verb now depends on this
         // variable, so inheriting it would let a stray shell variable flip the mode under test.
         NPM_DIRECT_PUBLISH: opts.directPublish ?? '',
@@ -732,4 +768,79 @@ test('a fleet tag never touches the formula', () => {
   assert.equal(r.status, 0, `fleet release should succeed: ${r.stderr}`);
   assert.ok(!/Formula\/mercury-ai\.rb/.test(r.stdout), `fleet must not write the host formula:\n${r.stdout}`);
   assert.ok(!/git push/.test(r.stdout), 'fleet must not push to main');
+});
+
+test('a rehearsal performs the token exchange npm would perform', () => {
+  // The gap this closes: `npm publish --dry-run` never authenticates, so every rehearsal before this
+  // proved the tarball and the claims and nothing about whether npm trusts the workflow. The one
+  // open question about the release path lived in the exchange call.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
+    exchange: JSON.stringify({ token: 'npm-'.padEnd(140, 'z') }),
+  });
+  assert.equal(r.status, 0, 'an accepted exchange must not fail the rehearsal');
+  assert.match(r.stdout, /oidc exchange: ACCEPTED/, 'must report the exchange result');
+  assert.match(r.stdout, /-char publish token/, 'must report that a credential came back');
+});
+
+test('the issued publish token is never printed', () => {
+  // The exchange response IS a credential that can publish this package. Reporting that npm issued
+  // one is the point; putting the value in a log anyone with read access to the run can open is not.
+  const secret = 'npm-'.padEnd(140, 'z');
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
+    exchange: JSON.stringify({ token: secret }),
+  });
+  assert.equal(r.status, 0);
+  assert.ok(!(r.stdout + r.stderr).includes(secret), 'the token value must not reach the log');
+});
+
+test('a refused exchange fails the rehearsal and quotes npm', () => {
+  // A structured refusal is direct evidence about the trust configuration, and a real release dies
+  // on this same call. A rehearsal that printed it and went green would be worse than no rehearsal.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
+    exchange: JSON.stringify({ message: 'this package has no trusted publishing configuration' }),
+  });
+  assert.equal(r.status, 1, 'a refusal must fail the rehearsal');
+  const out = r.stdout + r.stderr;
+  assert.match(out, /oidc exchange: REFUSED/, 'must name the failure');
+  assert.match(out, /no trusted publishing configuration/, 'must quote what npm actually said');
+  assert.match(out, /Trusted Publisher/, 'must point at the setting that decides it');
+});
+
+test('a non-JSON exchange answer is inconclusive, not a refusal', () => {
+  // A proxy, a WAF or a rate limiter can all answer this call with HTML. That is not evidence about
+  // npm's trust configuration, and failing here would train people to ignore a red rehearsal.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
+    exchange: '<html>403 Forbidden</html>',
+  });
+  assert.equal(r.status, 0, 'an answer that is not from npm must not fail the release rehearsal');
+  assert.match(r.stdout, /INCONCLUSIVE/, 'must say it learned nothing rather than guess');
+});
+
+test('a real release does not run the exchange probe', () => {
+  // On a tag push npm performs the exchange itself as part of publishing. Doing it again would mint
+  // a second credential for nothing, and a probe that runs on the path it claims to predict cannot
+  // distinguish its own result from the real one.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'push',
+    exchange: JSON.stringify({ token: 'x'.repeat(120) }),
+  });
+  assert.match(r.stdout, /oidc sub = /, 'sanity: the OIDC branch did run, so the probe was skipped on purpose');
+  assert.equal(r.status, 0);
+  assert.ok(!(r.stdout + r.stderr).includes('oidc exchange'),
+    'the probe is a rehearsal-only diagnostic');
+});
+
+test('the probe asks for the audience npm itself uses', () => {
+  // npm/cli builds the audience as `npm:${hostname}` and publishes with the token minted under it.
+  // Minting under any other audience still yields the same identity claims, which is exactly why
+  // getting this wrong is invisible in the claim dump and only shows up as a trust mismatch.
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  assert.match(wf, /audience=npm:registry\.npmjs\.org/,
+    'the id token must be minted with the audience npm asks for');
+  assert.ok(!/audience=https:\/\/registry\.npmjs\.org/.test(wf),
+    'the old audience produced a token no publish would present');
 });
