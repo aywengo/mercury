@@ -1050,8 +1050,11 @@ test('a failed fleet submit does not advertise Homebrew or a bundle that Fleet d
   // installable -- which is also the only wording that makes #329 visible to whoever reads the release.
   const r = runTag(`fleet-v${V}`, {
     notes: [`fleet/${V}.md`], oidc: true, npmToken: '',
-    npmFails: true, npmSubmitErr: 'npm error code E404', pkgHttp: '404',
+    npmFails: true, npmSubmitErr: 'npm error code E401', pkgHttp: '200',
   });
+  // pkgHttp 200: a package that 404s is now refused before any release is made (see the gate added for
+  // #329), so reaching the disclosure block at all requires the package to exist. E401 is the realistic
+  // failure once it does -- a publisher that does not match this run.
   assert.equal(r.status, 1);
   assert.ok(!/brew install/.test(r.notesOut), 'Fleet has no formula; naming one sends users to another product');
   assert.ok(!/download and unpack the bundle/.test(r.notesOut), 'Fleet attaches no asset');
@@ -1181,4 +1184,37 @@ test('the exchange probe sends the same request shape npm sends', () => {
   assert.match(script, /-H "Authorization: bearer \$\{aud_token\}"/, 'the id_token is the credential');
   assert.match(script, /-H "content-type: application\/json"/, 'npm-registry-fetch always sets it');
   assert.match(script, /-H "Accept: application\/json"/, 'and expects JSON back');
+});
+
+test('a fleet tag for a package that has never existed is refused before a release is made', () => {
+  // Fleet ships only through npm: no bundle, no formula. When the npm step fails the job still creates
+  // a GitHub Release, and that release contains nothing a user can install. One variant of that is
+  // certain up front -- trusted publishing is configured on the package page, the page cannot be
+  // configured before the package exists, and the first publish therefore needs a credential. So a
+  // fleet tag with no credential, for a package that 404s, cannot succeed whatever else is true.
+  const r = runTag(`fleet-v${V}`, { notes: [`fleet/${V}.md`], oidc: true, npmToken: '', pkgHttp: '404' });
+  assert.equal(r.status, 1, 'the run must fail');
+  const out = r.stdout + r.stderr;
+  assert.match(out, /does not exist on the registry \(HTTP 404\)/, 'and say which package');
+  assert.match(out, /first publish needs a credential/, 'and the bootstrap reason');
+  assert.match(out, /npm publish --access public/, 'and name the remedy that works');
+  assert.ok(!/gh release create/.test(r.stdout),
+    'and must not create a GitHub Release that ships nothing');
+});
+
+test('a fleet tag proceeds once the package exists', () => {
+  // The gate asks the registry rather than naming the package, so it removes itself when the bootstrap
+  // publish has happened. Suppressing fleet releases forever would be a worse bug than the empty one.
+  const r = runTag(`fleet-v${V}`, { notes: [`fleet/${V}.md`], oidc: true, npmToken: '', pkgHttp: '200' });
+  assert.ok(!/does not exist on the registry/.test(r.stdout + r.stderr), 'must not refuse a package that exists');
+  assert.match(r.stdout, /gh release create/, 'and must go on to make the release');
+});
+
+test('a token still bootstraps a package that does not exist yet', () => {
+  // A credential is exactly how the first publish gets made, so the gate must not fire in token mode.
+  const r = runTag(`fleet-v${V}`, {
+    notes: [`fleet/${V}.md`], npmToken: 'npm-placeholder-token', oidc: true, pkgHttp: '404',
+  });
+  assert.ok(!/does not exist on the registry/.test(r.stdout + r.stderr), 'a token can create the package');
+  assert.match(r.stdout, /gh release create/);
 });
