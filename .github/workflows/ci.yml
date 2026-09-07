@@ -9,16 +9,20 @@ name: CI
 # Path policy, stated as the gating actually works. All three conditions below are on pull requests;
 # any push to main runs the full suite.
 #
-#   - touches any non-markdown file  -> `code` is true, full dual-Node matrix runs.
-#   - markdown only, and at least one of the four contract files (README, QUICKSTART,
-#     docs/remote-client-setup.md, deploy/README.md) -> `code` false, `contract_docs` true, so the
+#   - touches anything the `code` denylist does not exclude -- every non-markdown file, and any
+#     markdown outside `docs/`, README.md, QUICKSTART.md, AGENTS.md, ARCHITECTURE.md and
+#     deploy/README.md (`.agents/skills/**/SKILL.md` is the one that surprises people) -> `code`
+#     is true, full dual-Node matrix runs.
+#   - markdown only, all of it inside the denylist, and at least one of the four contract files
+#     (README, QUICKSTART, docs/remote-client-setup.md, deploy/README.md) -> `code` false,
+#     `contract_docs` true, so the
 #     cheap `docs-contract` job runs and the matrix is skipped. Those files are pinned by
 #     test/nodeFloor.test.ts and test/deployDocs.test.ts, which is what that job runs.
 #   - markdown only, no contract file -> both outputs false and nothing but `changes` runs.
 #
-# `contract_docs` is a plain allowlist with no exclusions, so mixing a contract file with narrative
-# markdown still lands in the second row. That is the safe direction: it runs the doc tests rather
-# than skipping them.
+# `contract_docs` is a plain allowlist with no exclusions, so mixing a contract file with excluded
+# narrative markdown still lands in the second row. That is the safe direction: it runs the doc tests
+# rather than skipping them.
 #
 # This worked for about a year and then quietly stopped working, and the reason is worth recording
 # because both plausible explanations were wrong. `code` is written as `'**'` plus `!`-negations, and a
