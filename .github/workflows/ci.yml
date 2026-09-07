@@ -6,36 +6,26 @@ name: CI
 # unverifiable from a fresh clone, and nothing caught it because nothing ran on a fresh clone.
 # The fix is a job that installs dependencies before running anything.
 #
-# Path policy: in practice every pull request runs the full suite, and that is the intended
-# behaviour rather than an accident waiting to be fixed.
+# Path policy: a pull request that changes only narrative markdown skips the dual-Node matrix; a
+# contract-markdown-only change runs the cheap `docs-contract` job instead (those files are pinned by
+# test/nodeFloor.test.ts and test/deployDocs.test.ts); anything else, and any push to main, runs the
+# full suite.
 #
-# The filter below was written to spare the dual-Node matrix for narrative-markdown-only changes,
-# and in practice it does not. PR #303 changed only README.md and the job logged
+# This worked for about a year and then quietly stopped working, and the reason is worth recording
+# because both plausible explanations were wrong. `code` is written as `'**'` plus `!`-negations, and a
+# README-only PR reported `Filter code = true / Matching files: README.md`. That is not "negations do
+# not subtract" -- and it is not "negations work, the config is fine" either. The action's default
+# `predicate-quantifier` is `some`, which means *a file matches if it matches at least one pattern*:
+# exclusions are not consulted at all on that path. `**` matches README.md, so the filter matched, and
+# the `!` lines were inert decoration. `some-with-excludes` -- include if at least one pattern matches
+# AND no negated pattern matches -- is what this config has always meant, and it only exists from v4.
 #
-#     Filter code = true
-#     Matching files: README.md
+# So the denylist was never unsafe-by-design; it was unspeakable-in-this-version. v4 also moves the
+# action to Node 24, which silences the deprecation warning this job was logging on every run.
 #
-# so both Node matrices ran and the cheap `docs-contract` job was skipped: it requires
-# `code != 'true'`, and on that run `code` was reported true. Whether every change does the same is
-# exactly what is unknown, so the sentence stops at the one case that was observed.
-#
-# Why is not established, and an earlier version of this comment invented a reason. It said the
-# `!`-negations "do not subtract"; the parsed filter is in fact `["**", "!docs/**/*.md", ...,
-# "!README.md", ...]`, which is the shape the action documents for exactly this, so the config is
-# right and the outcome still contradicts it. The cause is tracked rather than guessed at here.
-# What the cause turns out to be does not change the decision below, which is why the safe response
-# to an unexplained classifier is to keep running everything.
-#
-# It is left inert deliberately. The failure modes are not symmetric. A filter that wrongly
-# classifies a code change as docs-only merges that change with no tests at all; a filter that
-# wrongly classifies docs as code costs some runner minutes. Optimising the cheap path means
-# replacing a denylist with an explicit allowlist of code paths, and every future directory added
-# to this repository would then have to be remembered here or its changes would go untested --
-# a silent, recurring version of the first failure. Runner minutes are the cheaper mistake.
-#
-# `contract_docs` is kept because it is still read by `docs-contract`; if the allowlist version of
-# this filter is ever written, that job is what makes narrative markdown cheaper than code.
-# Tracked in #313.
+# The exclusions are all markdown, which is what makes the cheap path safe to enable: a change to any
+# executable file still matches `'**'` with nothing to exclude it, so no code change can ever be
+# classified as docs-only.
 
 on:
   push:
@@ -64,10 +54,12 @@ jobs:
       - uses: actions/checkout@v4
 
       # On push to main always run the full suite. On PRs, classify the file set.
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         if: github.event_name == 'pull_request'
         with:
+          # Without this the `!` lines below are ignored (see the path-policy note above).
+          predicate-quantifier: some-with-excludes
           filters: |
             code:
               - '**'
