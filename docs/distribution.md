@@ -199,9 +199,10 @@ those tokens (github.blog changelog, 2026-07-31, targeting January 2027), so it 
 2. From a clean checkout of the tag: `npm publish --access public --tag <dist-tag>`, where the tag
    is the one `release.yml` would derive from the version -- **not** a literal `rc`. The rule the
    workflow implements is: a stable version goes to `latest`; a prerelease goes to its first
-   identifier with trailing digits and sub-parts removed, so `0.1.0-rc1` and `0.1.0-rc.2` give `rc`,
-   `1.2.0-beta.3` gives `beta`, and a prerelease with no alphabetic identifier (`1.0.0-1`) falls back
-   to `next`. Match it, or the manual publish and every later automated one disagree. The `--tag` matters because npm's default dist-tag is `latest` for *any*
+   identifier with everything from the first digit onward removed, so `0.1.0-rc1` and `0.1.0-rc.2`
+   give `rc`, and `1.2.0-beta.3` gives `beta`.
+   An identifier that starts with a digit has no leading prefix left to use, so `1.0.0-1` falls back
+   to `next`. Match the rule, or the manual publish and every later automated one disagree. The `--tag` matters because npm's default dist-tag is `latest` for *any*
    version, prerelease included, so publishing an `-rc` without it makes
    `npm install @aywengo/mercury` resolve to the release candidate. Passing `--tag rc` for a stable
    first version has the mirror defect: the package lands under a tag no default install reads.
