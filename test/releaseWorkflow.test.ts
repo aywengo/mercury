@@ -1032,3 +1032,39 @@ test('a refused publisher is still blamed on the credential when the package doe
   assert.match(out, /the registry refused the OIDC credential/, 'must keep the credential diagnosis');
   assert.ok(!/does not exist on the registry/.test(out), 'and must not invent a missing package');
 });
+
+test('a failed fleet submit does not advertise Homebrew or a bundle that Fleet does not have', () => {
+  // The disclosure block exists to stop the release body advertising an `npm install` that does not
+  // resolve. It was doing the same thing one level up: telling Fleet readers to run `brew install`
+  // (which installs a different product) and to download a bundle that is attached only to host
+  // releases. Fleet attaches no asset and has no formula, so the honest sentence is that nothing is
+  // installable -- which is also the only wording that makes #329 visible to whoever reads the release.
+  const r = runTag(`fleet-v${V}`, {
+    notes: [`fleet/${V}.md`], oidc: true, npmToken: '',
+    npmFails: true, npmSubmitErr: 'npm error code E404', pkgHttp: '404',
+  });
+  assert.equal(r.status, 1);
+  assert.ok(!/brew install/.test(r.notesOut), 'Fleet has no formula; naming one sends users to another product');
+  assert.ok(!/download and unpack the bundle/.test(r.notesOut), 'Fleet attaches no asset');
+  assert.match(r.notesOut, /Fleet ships only through npm/, 'must say what is actually true');
+  assert.match(r.notesOut, /unavailable by every channel/, 'and say it plainly');
+});
+
+test('a failed host submit still names both host install paths', () => {
+  // The converse, and the reason this is a branch rather than a deletion: for host the alternatives
+  // are real, and omitting them would understate a release that genuinely is installable two ways.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', npmFails: true, npmSubmitErr: 'npm error code E401',
+  });
+  assert.equal(r.status, 1);
+  assert.match(r.notesOut, /brew install aywengo\/mercury\/mercury-ai/, 'host really does have a formula');
+  assert.match(r.notesOut, /download and unpack the bundle/, 'and really does attach the bundle');
+});
+
+test('a staged fleet release does not claim assets or a formula are live', () => {
+  const r = runTag(`fleet-v${V}`, { notes: [`fleet/${V}.md`], oidc: true, npmToken: '' });
+  assert.equal(r.status, 0);
+  assert.ok(!/Homebrew formula are already live/.test(r.notesOut),
+    'nothing else is attached to a Fleet release');
+  assert.match(r.notesOut, /only way this version becomes installable/);
+});
