@@ -116,6 +116,21 @@ docker volume ls -q --filter name=mercury | xargs -r docker volume rm
 
 Do not prune broadly (`docker system prune -a`) from a workstation that runs other projects.
 
+### A service that dies after it looks ready
+
+`up()` returning is not proof that anything is running. A compose healthcheck reports `healthy` from
+the moment its probe first succeeds, so a process that answers the probe and then dies -- the API
+binding its port and then failing to open its database, for example -- passes readiness and every
+later test fails with an error that does not mention the cause.
+
+The suite re-checks liveness after startup and prints the dead service's state and log tail. If you
+see `a service died during startup`, read the log lines under it; that is the real failure. The
+diagnostics directory it prints is kept on disk for startup failures even without
+`MERCURY_E2E_KEEP_ON_FAIL`, because no test ran and those logs are the only record.
+
+`crash-override.yml` reproduces this on purpose and is used only by the test that proves the guard
+reports. Nothing in the normal gate reads it.
+
 ### A stage or suite hangs
 
 Nothing in this directory waits without a bound: requests, startup, teardown, diagnostics and each

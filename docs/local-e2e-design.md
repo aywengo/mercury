@@ -1074,6 +1074,31 @@ Two acceptance items needed notes against the wording above:
   sequence 0, which then looks like a sequence violation. Frames without a numeric `sequence` are
   skipped.
 
+- **"forced API exit ... produce useful diagnostics" was not met, and the reason is a race in the
+  readiness check rather than a missing test.** A compose healthcheck reports `healthy` from the
+  moment its probe first succeeds, and Testcontainers' wait strategy returns on that first `healthy`.
+  A process that answers the probe and then dies -- reproduced by pointing `MERCURY_DB` at the mount
+  point instead of a file inside it, so the API binds its port, passes the healthcheck, and then fails
+  to open the database -- lets `up()` resolve over a dead container. What a developer then got was
+  `Cannot get container "api-1" as it is not running`, repeated once per test, eleven times, with the
+  actual `ERR_SQLITE_ERROR: unable to open database file` nowhere in the output.
+
+  Two things were missing and both are now asserted:
+
+  - **Liveness is re-checked after `up()`** (`deadServiceReport`), before anything touches a handle,
+    and the report carries the container state plus the log tail. `e2e/crash-override.yml` reproduces
+    the death for real, so the guard is proven to *report* rather than merely to stay quiet on a
+    healthy stack.
+  - **Diagnostics run when `before()` fails.** A failing `before()` hook makes `node:test` skip every
+    test, so the per-test diagnostics path never executed -- on the one failure where it is the only
+    possible record. Collection now happens in the `before()` catch, through the compose CLI (which
+    reads containers that never became ready), and `after()` keeps the directory instead of deleting
+    it. Verified end to end: the reason appears in the failure output, `api.log` on disk carries it,
+    and nothing leaks.
+
+  The same collection path now serves ordinary failures too, so the dead-service path is the code that
+  runs on every failure rather than a branch that is almost never exercised.
+
 ### Phase 3 — full pre-PR gate — **DONE**
 
 Deliverables:
@@ -1219,6 +1244,11 @@ Notes against the wording above:
   `preflight.ts`, used by `system.test.ts` rather than duplicated, so the collector and the guard on
   it cannot drift. A wrong project name in the printed cleanup would make `down -v` delete nothing,
   or the wrong thing.
+- **"Success and failure leave no Compose resources" was verified by hand, not by a test.** The
+  Phase 2 gate item had no assertion behind it -- the clean-up was observed repeatedly from the
+  command line and never pinned. It is now asserted on the stack whose service *died*, which is the
+  teardown most likely to be partial: after `down()`, both the container list and the volume list for
+  that project must be empty, filtered by the compose project label rather than by name prefix.
 
 ### Phase 6 — one real-agent compatibility check
 

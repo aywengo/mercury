@@ -16,7 +16,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { DockerComposeEnvironment, StartedDockerComposeEnvironment, Wait } from 'testcontainers';
-import { COMPOSE_FILE, DIAGNOSTIC_CAP_BYTES, teardownOutcome, E2E_DIR, LIMITS, capBuffer, composeModel, inspectionCommands, keepOnFail, preflight, verbose } from './preflight.ts';
+import { COMPOSE_FILE, DIAGNOSTIC_CAP_BYTES, teardownOutcome, E2E_DIR, LIMITS, capBuffer, composeModel, containerStates, deadServiceReport, inspectionCommands, keepOnFail, preflight, serviceLogs, verbose } from './preflight.ts';
 import { client, pollRun, readSse, TERMINAL, type RunEvent, type RunView } from './helpers.ts';
 
 /**
@@ -49,6 +49,7 @@ let env: StartedDockerComposeEnvironment | undefined;
 let apiBase = '';
 let preflightInfo = { node: '', docker: '', compose: '' };
 let scenarioError: unknown;
+let startupFailed = false;
 let alice = { base: '', token: '' } as unknown as ReturnType<typeof client>;
 let bob = { base: '', token: '' } as unknown as ReturnType<typeof client>;
 /** Shared across the sequential journeys: the Run created by the lifecycle test is the one the
@@ -154,29 +155,27 @@ async function collectDiagnostics(reason: string): Promise<void> {
   try {
     mkdirSync(DIAG_DIR, { recursive: true });
     const summary: Record<string, unknown> = { project: PROJECT, reason, at: new Date().toISOString() };
-    // Concurrent: each service read is capped at 5s, and doing them in series would double the
-    // delay between a failure and the developer seeing why.
-    await Promise.all(['api', 'worker'].map(async (service) => {
-      const key = service as 'api' | 'worker';
+    // Every service goes through the compose CLI, not `container.logs()`. A process that dies during
+    // or just after startup is the case where diagnostics matter most and the only case where the
+    // Testcontainers handle is unreliable -- it describes what `up()` started, not what is alive now.
+    // Routing all three through one path means the dead-service path is the same code that is
+    // exercised on every ordinary failure, rather than a rarely-run branch.
+    for (const service of [FIXTURE_SERVICE, 'api', 'worker']) {
       try {
-        const container = env!.getContainer(SVC[key]);
-        const stream = await container.logs({ tail: 400 });
-        writeFileSync(join(DIAG_DIR, `${service}.log`), await readBounded(stream, DIAGNOSTIC_CAP_BYTES, 5_000));
-        summary[service] = { id: container.getId(), name: container.getName() };
+        const logs = await serviceLogs(PROJECT, service);
+        writeFileSync(join(DIAG_DIR, `${service}.log`), capBuffer(Buffer.from(logs)));
+        summary[service] = { collectedVia: 'docker compose logs', bytes: Buffer.byteLength(logs) };
       } catch (err) {
         summary[service] = { error: (err as Error).message };
       }
-    }));
-
-    // The one-shot has exited and is no longer tracked, so its output comes from compose itself.
+    }
     try {
-      const logs = await composeLogs(FIXTURE_SERVICE);
-      writeFileSync(join(DIAG_DIR, `${FIXTURE_SERVICE}.log`), capBuffer(logs));
-      summary[FIXTURE_SERVICE] = { collectedVia: 'docker compose logs', bytes: logs.length };
+      summary.states = await containerStates(PROJECT);
     } catch (err) {
-      summary[FIXTURE_SERVICE] = { error: (err as Error).message };
+      summary.states = { error: (err as Error).message };
     }
     writeFileSync(join(DIAG_DIR, 'summary.json'), JSON.stringify(summary, null, 2));
+    console.error(`e2e: diagnostics written to ${DIAG_DIR}`);
   } catch (err) {
     // Diagnostics must never mask the original failure.
     console.error(`e2e: diagnostics collection failed: ${(err as Error).message}`);
@@ -186,7 +185,20 @@ async function collectDiagnostics(reason: string): Promise<void> {
 before(async () => {
   preflightInfo = await preflight();
   if (verbose()) console.error(`e2e: project=${PROJECT} docker=${preflightInfo.docker}`);
+  try {
+    await bringUp();
+  } catch (err) {
+    // A failing before() hook makes node:test skip every test in the file, so `guarded()` never runs
+    // and the diagnostics path would never execute -- on precisely the failure where a developer most
+    // needs it. Collect here, through the compose CLI, which reads the logs of containers that never
+    // became ready.
+    startupFailed = true;
+    await collectDiagnostics('startup failed');
+    throw err;
+  }
+});
 
+async function bringUp(): Promise<void> {
   const started = await new DockerComposeEnvironment(E2E_DIR, 'compose.yml')
     .withBuild()
     .withProjectName(PROJECT)
@@ -206,6 +218,15 @@ before(async () => {
     .up();
 
   env = started;
+  // Before anything touches a handle: `getContainer()` throws "Cannot get container \"api-1\" as it
+  // is not running" for a service that died, and node:test repeats that identical line for every test
+  // in the file -- eleven failures, none of them containing the reason. A compose healthcheck reports
+  // `healthy` from the moment its probe first succeeds, and the wait strategy returns on that first
+  // `healthy`, so a process that answers the probe and then dies (here: failing to open its database)
+  // lets `up()` resolve over a dead container. This re-check runs first so the reason is in the output.
+  const dead = await deadServiceReport(PROJECT, ['api', 'worker']);
+  assert.equal(dead, '', 'a service died during startup; `up()` does not prove liveness:\n' + dead);
+
   // Fail here, with the names that DO exist, rather than from every test separately.
   for (const [service, key] of Object.entries(SVC)) {
     assert.ok(started.getContainer(key), `${service} must be reachable as "${key}"`);
@@ -215,18 +236,25 @@ before(async () => {
   // The tokens are the fixed test identities declared in compose.yml, not secrets.
   alice = client(apiBase, 'tok-alice');
   bob = client(apiBase, 'tok-bob');
-});
+}
 
 after(async () => {
   if (!env) return;
-  if (scenarioError && keepOnFail()) {
+  // A startup failure is the one case where the on-disk logs are the ONLY record: no test ran, so
+  // there is no assertion output, and the containers are about to be removed. Keep the directory
+  // regardless of MERCURY_E2E_KEEP_ON_FAIL and say where it is.
+  if (startupFailed) {
+    console.error(`e2e: startup failed; diagnostics kept at ${DIAG_DIR}`
+      + `\n  ${inspectionCommands(PROJECT, COMPOSE_FILE).join('\n  ')}`);
+  }
+  if ((scenarioError || startupFailed) && keepOnFail()) {
     console.error(`e2e: FAILED and keeping resources for inspection.\n  diagnostics: ${DIAG_DIR}`
       + `\n  ${inspectionCommands(PROJECT, COMPOSE_FILE).join('\n  ')}`);
     return;
   }
   try {
     await withDeadline('compose teardown', LIMITS.teardownMs, env.down({ removeVolumes: true }));
-    rmSync(DIAG_DIR, { recursive: true, force: true });
+    if (!startupFailed) rmSync(DIAG_DIR, { recursive: true, force: true });
   } catch (err) {
     // A cleanup problem is reported, but it must not replace the scenario failure that caused it.
     const outcome = teardownOutcome(scenarioError, err as Error);

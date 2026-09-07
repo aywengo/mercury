@@ -1,0 +1,13 @@
+# Deliberately broken override, used only by the dead-service test in robustness.test.ts.
+#
+# Pointing MERCURY_DB at the mount point instead of a file inside it reproduces the failure shape the
+# gate has to survive: the API binds its port and answers the healthcheck, then dies while opening
+# the database. That ordering is the whole point -- a service that fails before its healthcheck ever
+# passes is caught by the wait strategy, and needs no extra guard.
+#
+# Nothing in the normal gate reads this file. It is passed explicitly, so it cannot affect a run that
+# does not ask for it.
+services:
+  api:
+    environment:
+      MERCURY_DB: /state

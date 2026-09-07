@@ -190,6 +190,65 @@ export function capBuffer(buf: Buffer, maxBytes: number = DIAGNOSTIC_CAP_BYTES):
 }
 
 /**
+ * The state Docker reports for every container of a project, as `name -> "running" | ...`.
+ *
+ * Uses the CLI rather than the Testcontainers handle because the case that matters is a container
+ * that has already exited: `getContainer()` hands back a handle regardless of whether the process
+ * behind it is alive, so a handle is not evidence of life.
+ */
+export async function containerStates(project: string): Promise<Record<string, string>> {
+  const { code, out } = await run('docker', ['ps', '-a',
+    '--filter', `label=com.docker.compose.project=${project}`, '--format', '{{.Names}}\t{{.State}}'],
+    LIMITS.runtimeProbeMs);
+  if (code !== 0) throw new PreflightError(`docker ps failed for project ${project}: ${out}`);
+  const states: Record<string, string> = {};
+  for (const line of out.split('\n')) {
+    const [name, state] = line.split('\t');
+    if (name && state) states[name] = state;
+  }
+  return states;
+}
+
+/**
+ * Tail a service's logs through the compose CLI.
+ *
+ * `container.logs()` needs a container Testcontainers tracked as started, and it is the wrong tool
+ * for a process that died during or just after startup -- the exact case this exists for. The compose
+ * CLI reads the container's log file and works whether the process is alive, dead, or one-shot.
+ */
+export async function serviceLogs(project: string, service: string, tail = 60): Promise<string> {
+  const { out } = await run('docker', ['compose', '-p', project, 'logs', '--no-color',
+    '--tail', String(tail), service], LIMITS.diagnosticsMs);
+  return out;
+}
+
+/**
+ * Name every service of a project that is not running, with the log tail that says why.
+ *
+ * A compose healthcheck can report `healthy` and the process can die immediately afterwards: the API
+ * binds its port, answers the probe, then fails while opening the database. Testcontainers' health
+ * wait strategy returns the moment it sees `healthy`, so `up()` resolves over a dead service and
+ * every later test then fails with ECONNREFUSED instead of the real cause. This is the re-check that
+ * closes that window.
+ *
+ * Resolves to '' when everything is up, so a caller can use it as a guard without a second query.
+ */
+export async function deadServiceReport(project: string, services: string[]): Promise<string> {
+  const states = await containerStates(project);
+  const problems: string[] = [];
+  for (const service of services) {
+    const name = `${project}-${service}-1`;
+    const state = states[name];
+    if (state === undefined) { problems.push(`${service}: container ${name} does not exist`); continue; }
+    if (state !== 'running') {
+      const logs = capBuffer(Buffer.from(await serviceLogs(project, service))).toString('utf8');
+      problems.push(`${service}: state=${state}\n${logs}`);
+    }
+  }
+  return problems.join('\n\n');
+}
+
+/**
  * The exact commands to inspect and remove a retained project.
  *
  * Printed only when the gate deliberately leaves containers running, and printed verbatim-runnable:

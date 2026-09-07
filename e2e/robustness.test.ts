@@ -21,8 +21,8 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { DockerComposeEnvironment, StartedDockerComposeEnvironment, Wait } from 'testcontainers';
 import {
-  COMPOSE_FILE, DIAGNOSTIC_CAP_BYTES, E2E_DIR, LIMITS,
-  capBuffer, inspectionCommands, preflight, teardownOutcome,
+  COMPOSE_FILE, DIAGNOSTIC_CAP_BYTES, E2E_DIR, LIMITS, PROJECT_PREFIX,
+  capBuffer, deadServiceReport, inspectionCommands, preflight, teardownOutcome,
 } from './preflight.ts';
 import { client, pollRun } from './helpers.ts';
 
@@ -235,4 +235,51 @@ test('every container the gate starts is visible to the reaper', async () => {
     spawnSync('bash', ['-c', 'docker ps -aq --filter ancestor=alpine:latest --filter status=running | xargs -r docker rm -f >/dev/null 2>&1'],
       { encoding: 'utf8', timeout: 120_000 });
   }
+});
+
+/**
+ * The guard that `up()` cannot provide, proven by a service that actually dies.
+ *
+ * A compose healthcheck reports `healthy` from the moment the probe succeeds, and Testcontainers'
+ * wait strategy returns on the first `healthy` it sees. A process that answers the probe and then
+ * dies -- here, the API failing to open its database -- therefore lets `up()` resolve over a dead
+ * container. Every test after that fails with ECONNREFUSED, and the one line that explains why is
+ * nowhere in the output.
+ *
+ * This test exists because a guard whose only evidence is "no violations on a healthy stack" is not
+ * proven to report anything. The override makes the API die for real, and the assertion is that the
+ * report names it and carries the reason.
+ */
+test('a service that dies after its healthcheck passes is named, with its reason', async () => {
+  await preflight();
+  const project = `${PROJECT_PREFIX}-dead-${suffix()}`;
+  const env = await new DockerComposeEnvironment(E2E_DIR, ['compose.yml', 'crash-override.yml'])
+    .withProjectName(project)
+    .withStartupTimeout(LIMITS.startupMs)
+    .withWaitStrategy('fixture-1', Wait.forOneShotStartup())
+    .withWaitStrategy('api-1', Wait.forHealthCheck())
+    .up();
+  running.push(env);
+
+  const report = await deadServiceReport(project, ['api', 'worker']);
+  assert.match(report, /^api: state=/m,
+    'the dead API must be named; an empty report here means the guard is blind to the exact race it exists for');
+  assert.match(report, /state=exited/, 'the report must carry the container state, not just a name');
+  assert.match(report, /unable to open database file/,
+    'the report must carry the log line that explains the death, or the reader still has to go find it');
+  assert.ok(!/^worker: state=/m.test(report),
+    'the worker is healthy in this scenario; a report that blames everything is not a diagnosis');
+
+  // Same stack, so this also closes the design gate item "success and failure leave no Compose
+  // resources": teardown of a project whose service died must be complete, not best-effort.
+  await env.down({ removeVolumes: true });
+  const idx = running.indexOf(env);
+  if (idx >= 0) running.splice(idx, 1);
+  const { spawnSync } = await import('node:child_process');
+  const left = spawnSync('docker', ['ps', '-aq', '--filter', `label=com.docker.compose.project=${project}`],
+    { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(left.stdout.trim(), '', `teardown left containers behind: ${left.stdout}`);
+  const vols = spawnSync('docker', ['volume', 'ls', '-q', '--filter', `label=com.docker.compose.project=${project}`],
+    { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(vols.stdout.trim(), '', `teardown left the state volume behind: ${vols.stdout}`);
 });
