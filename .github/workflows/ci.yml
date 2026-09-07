@@ -6,10 +6,26 @@ name: CI
 # unverifiable from a fresh clone, and nothing caught it because nothing ran on a fresh clone.
 # The fix is a job that installs dependencies before running anything.
 #
-# Path policy: narrative markdown alone does not burn the dual-Node matrix. Contract markdown
-# (README / QUICKSTART / remote-client-setup / deploy README) still runs the cheap docs-contract
-# job — those files are pinned by test/nodeFloor.test.ts and test/deployDocs.test.ts. Anything
-# else (or any push to main) runs the full suite.
+# Path policy: in practice every pull request runs the full suite, and that is the intended
+# behaviour rather than an accident waiting to be fixed.
+#
+# The filter below was written to spare the dual-Node matrix for narrative-markdown-only changes,
+# and it does not do that. `code` is built as `'**'` plus a list of `!`-negations, and the negations
+# do not subtract: PR #303 changed only README.md and the job logged `Filter code = true /
+# Matching files: README.md`, so both Node matrices ran and the cheap `docs-contract` job was
+# skipped -- `docs-contract` requires `code != 'true'`, which a change to any file satisfies. The
+# cheap path is therefore inert, and the comment that promised it was describing intent, not
+# behaviour.
+#
+# It is left inert deliberately. The failure modes are not symmetric. A filter that wrongly
+# classifies a code change as docs-only merges that change with no tests at all; a filter that
+# wrongly classifies docs as code costs some runner minutes. Optimising the cheap path means
+# replacing a denylist with an explicit allowlist of code paths, and every future directory added
+# to this repository would then have to be remembered here or its changes would go untested --
+# a silent, recurring version of the first failure. Runner minutes are the cheaper mistake.
+#
+# `contract_docs` is kept because it is still read by `docs-contract`; if the allowlist version of
+# this filter is ever written, that job is what makes narrative markdown cheaper than code.
 
 on:
   push:
