@@ -1068,3 +1068,14 @@ test('a staged fleet release does not claim assets or a formula are live', () =>
     'nothing else is attached to a Fleet release');
   assert.match(r.notesOut, /only way this version becomes installable/);
 });
+
+test('the claims probe prints the issuer, the one claim npm matches before any other', () => {
+  // npm trusts exactly one issuer URL. A GitHub Enterprise with include_enterprise_slug makes GitHub
+  // mint `.../<slug>` instead, and npm/cli#9203 shows the exchange then fails with
+  // "OIDC token exchange error - unauthorized" while repository, owner and workflow all match --
+  // closed as a duplicate, not fixed. The claim is unreadable unless the probe prints it, and this
+  // step has already been wrong once about a token because it printed a chosen subset of it.
+  const script = extractReleaseScript();
+  assert.match(script, /"iss"/, 'the issuer must be printed');
+  assert.match(script, /"enterprise"/, 'and the enterprise claim that explains a scoped issuer');
+});

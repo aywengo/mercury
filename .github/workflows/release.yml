@@ -158,11 +158,21 @@ jobs:
             id_token=$(node -e 'try{console.log(JSON.parse(process.argv[1]).value||"")}catch{console.log("")}' "$id_json")
             if [ -n "$id_token" ]; then
               node -e 'const c=JSON.parse(Buffer.from(process.argv[1].split(".")[1],"base64url").toString());
-                for (const k of ["sub","aud","ref","ref_type","repository","repository_owner","workflow",
-                                 "job_workflow_ref","event_name"])
+                for (const k of ["iss","enterprise","sub","aud","ref","ref_type","repository",
+                                 "repository_owner","workflow","job_workflow_ref","event_name"])
                   console.log(`  oidc ${k} = ${c[k]}`)' "$id_token"
               echo "  npm matches repository_owner + repository + the filename inside job_workflow_ref;"
               echo "  'workflow' above is the display name and is not matched"
+              # `iss` is printed because npm's registry trusts exactly one issuer URL, and a GitHub
+              # Enterprise with include_enterprise_slug makes GitHub mint
+              # `https://token.actions.githubusercontent.com/<slug>` instead. npm/cli#9203 reports that
+              # this is refused with "OIDC token exchange error - unauthorized" while every other claim
+              # matches; closed as a duplicate, not fixed. It is the only known cause that produces this
+              # repository's exact symptom, and it is invisible unless the claim is printed -- which is
+              # how a previous version of this probe managed to describe the token from a subset of it.
+              # Read `iss` above: anything other than exactly
+              # https://token.actions.githubusercontent.com means npm will refuse the exchange no matter
+              # how well the other claims match, and no setting on npmjs.com will change that.
             else
               echo "  the runner refused to mint an id token; npm cannot authenticate via OIDC" >&2
             fi
