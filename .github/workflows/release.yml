@@ -9,6 +9,14 @@ on:
     tags:
       - 'host-v*.*.*'
       - 'fleet-v*.*.*'
+  # Rehearsal. A manual run executes everything a real release does -- tag parsing, the version and
+  # release-notes checks, install, bundle build, the OIDC exchange -- and then stops short of the
+  # three things that touch the outside world: `npm publish`, `gh release create`, and the Homebrew
+  # formula push. It takes no input and cannot publish, on purpose: a manual trigger that could
+  # publish is a manual trigger someone eventually pulls by accident. This exists because the tag
+  # path had failed three times in a row and every diagnosis required burning a real tag to learn
+  # anything.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -31,9 +39,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_DIRECT_PUBLISH: ${{ vars.NPM_DIRECT_PUBLISH }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            # A dispatch carries a branch, not a tag. Derive the tag a real release of this commit
+            # would use so every check below runs against the same inputs a real run would see.
+            tag="host-v$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).version)")"
+            echo "rehearsal: derived ${tag} from package.json; a dispatch carries no tag"
+          fi
           if [[ ! "$tag" =~ ^(host|fleet)-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
             echo "refusing tag ${tag}; expected host-vX.Y.Z[-prerelease] or fleet-vX.Y.Z[-prerelease]" >&2
             exit 1
@@ -107,6 +122,20 @@ jobs:
             # hard dependency of this step.
             if [ -f .npmrc ]; then
               node -e 'const fs=require("fs");const p=".npmrc";fs.writeFileSync(p,fs.readFileSync(p,"utf8").split("\n").filter((l)=>!/:_authToken=\s*$/.test(l)).join("\n"))'
+            fi
+            # Print the claims npm will match this run against. A GitHub trusted publisher is keyed
+            # on owner + repository + workflow filename, and npm reports a mismatch the same way it
+            # reports a missing configuration -- an opaque registry 404 with no reason. The decoded
+            # token is the only way to see the cause without pushing a real tag and finding out.
+            id_json=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://registry.npmjs.org" || echo "")
+            id_token=$(node -e 'try{console.log(JSON.parse(process.argv[1]).value||"")}catch{console.log("")}' "$id_json")
+            if [ -n "$id_token" ]; then
+              node -e 'const c=JSON.parse(Buffer.from(process.argv[1].split(".")[1],"base64url").toString());
+                for (const k of ["sub","aud","ref","ref_type","repository","repository_owner","workflow","event_name"])
+                  console.log(`  oidc ${k} = ${c[k]}`)' "$id_token"
+            else
+              echo "  the runner refused to mint an id token; npm cannot authenticate via OIDC" >&2
             fi
           else
             echo "refusing ${tag}: no NPM_TOKEN and no OIDC id-token available; npm publish would fail after the release is created" >&2
@@ -192,7 +221,18 @@ jobs:
           # the half-release this repo has repeatedly refused -- but red now means "npm needs attention",
           # not "nobody can install Mercury".
           npm_ok=1
-          if [ "$product" = "host" ]; then
+          if [ "${DRY_RUN}" = "true" ]; then
+            # `npm publish --dry-run` builds the tarball and prints what would go up, and performs no
+            # registry write. --provenance is omitted because attestation needs the registry
+            # round-trip a rehearsal deliberately does not make.
+            echo "DRY RUN: not submitting to npm; packing only"
+            if [ "$product" = "host" ]; then
+              npm publish --dry-run --access public --tag "$dist_tag" || npm_ok=0
+            elif [ "$product" = "fleet" ]; then
+              cp LICENSE fleet/LICENSE
+              (cd fleet && npm publish --dry-run --access public --tag "$dist_tag") || npm_ok=0
+            fi
+          elif [ "$product" = "host" ]; then
             npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel" || npm_ok=0
           elif [ "$product" = "fleet" ]; then
             cp LICENSE fleet/LICENSE
@@ -237,7 +277,9 @@ jobs:
             } >> "$notes"
           fi
 
-          if [ "$product" = "host" ]; then
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "DRY RUN: not creating the GitHub Release for ${tag}"
+          elif [ "$product" = "host" ]; then
             gh release create "$tag" --title "$title" --notes-file "$notes" "$bundle"
           else
             gh release create "$tag" --title "$title" --notes-file "$notes"
@@ -249,7 +291,9 @@ jobs:
           # to correlate it to. main is not branch-protected, so the contents:write token this job
           # already has is sufficient -- no cross-repository credential is needed because the formula
           # lives here rather than in a separate tap repo.
-          if [ "$product" = "host" ]; then
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "DRY RUN: not touching Formula/mercury-ai.rb (bundle sha256=${bundle_sha:-n/a})"
+          elif [ "$product" = "host" ]; then
             node scripts/update-formula.mjs --version "$version" --sha256 "$bundle_sha"
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
