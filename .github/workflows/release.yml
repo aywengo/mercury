@@ -271,15 +271,17 @@ jobs:
             elif [ "${npm_auth_mode:-}" = "oidc" ] && grep -qE 'E404|404 Not Found|E401|401 Unauthorized|ENEEDAUTH|Unable to authenticate' "$npm_log"; then
               echo "  cause: the registry refused the OIDC credential. These configurations produce it," >&2
               echo "         and they look identical in the log:" >&2
-              if [ "$npm_verb" = "publish" ]; then
+              # Gate on the variable, not on the verb: `npm_verb` is also `publish` when the runner's
+              # npm is too old to stage, and in that case nothing about NPM_DIRECT_PUBLISH is true.
+              if [ "${NPM_DIRECT_PUBLISH:-}" = "true" ]; then
                 echo "           1. direct publishing is not enabled for this trusted publisher. npm" >&2
                 echo "              always allows 'npm stage publish'; direct 'npm publish' is opt-in," >&2
                 echo "              and this run asked for direct because NPM_DIRECT_PUBLISH is set." >&2
                 echo "              Either enable it on the package's Trusted Publisher settings, or" >&2
                 echo "              unset the variable to stage instead." >&2
               else
-                echo "           1. this run staged rather than published, so direct publishing is not" >&2
-                echo "              the issue; the publisher itself was refused." >&2
+                echo "           1. this run did not ask for direct publishing (verb: ${npm_verb}), so" >&2
+                echo "              that setting is not the cause; the publisher itself was refused." >&2
               fi
               echo "           - the publisher does not match this run. It must be owner aywengo," >&2
               echo "             repository mercury, workflow filename release.yml. The claims printed" >&2

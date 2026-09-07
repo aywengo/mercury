@@ -312,7 +312,23 @@ test('a staging run is not told to unset NPM_DIRECT_PUBLISH', () => {
   assert.match(out, /cause: the registry refused the OIDC credential/, 'still identifies the auth failure');
   assert.ok(!/this run asked for direct because NPM_DIRECT_PUBLISH is set/.test(out),
     `a staging run must not be told it published directly:\n${out}`);
-  assert.match(out, /staged rather than published/, 'must say which mode it actually ran in');
+  assert.match(out, /did not ask for direct publishing/, 'must say which mode it actually ran in');
+});
+
+test('an npm too old to stage is not told it chose direct publishing', () => {
+  // `npm_verb` is `publish` in two different situations: the operator asked for it, and the runner's
+  // npm predates staging. Gating the hint on the verb conflated them, so the fallback path got advice
+  // about a variable that was never set. Gate on the variable.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', npmHasStage: false,
+    npmFails: true, npmSubmitErr: 'npm error code ENEEDAUTH',
+  });
+  assert.equal(r.status, 1);
+  const out = r.stdout + r.stderr;
+  assert.match(out, /cause: the registry refused the OIDC credential/, 'still identifies the auth failure');
+  assert.ok(!/NPM_DIRECT_PUBLISH is set/.test(out),
+    `the fallback path must not blame a variable that is unset:\n${out}`);
+  assert.match(out, /did not ask for direct publishing/, 'must describe the mode it actually ran in');
 });
 
 test('an already-published version is reported as such, not as a credential problem', () => {
