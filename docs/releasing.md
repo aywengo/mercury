@@ -28,6 +28,13 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    `## [X.Y.Z] - YYYY-MM-DD`.
 3. Add `docs/releases/<product>/X.Y.Z.md` (GitHub Release body).
 4. Open a PR, merge to `main`.
+   **Fleet's first release is the one exception.** `fleet-*` tags publish only to npm, and trusted
+   publishing is configured on the package page, which cannot exist before the package does. So the very
+   first `@aywengo/mercury-fleet` publish needs a credential; a `fleet-*` tag pushed without one is
+   refused up front rather than creating a GitHub Release that ships nothing. Once the package exists the
+   tag path needs no secret, and the workflow discovers this by asking the registry, so nothing has to be
+   edited when the bootstrap happens.
+
 5. On the merge commit:
 
    ```bash
@@ -91,6 +98,31 @@ page (which only exists once the package has been published at least once):
 
 - It matches **owner, repository and workflow filename** -- `aywengo`, `mercury`, `release.yml`. Not a
   branch, so tag-push releases are covered.
+- It matches those fields **only if npm gets that far.** GitHub mints the `sub` claim in two shapes, and
+  the one this repository presents changed underneath the configuration:
+
+  | | subject GitHub presented | who checked it | result |
+  | --- | --- | --- | --- |
+  | 2026-09-06, `host-v0.1.0-rc1` | `repo:aywengo/mercury:ref:refs/tags/...` | sigstore Fulcio | **certificate issued** |
+  | 2026-09-07 onward | `repo:aywengo@800531/mercury@1349412409:ref:...` | npm registry | **exchange refused** |
+
+  The first row is not a guess: the provenance statement that run signed is in the public Rekor log at
+  `logIndex=2742821710`, and its certificate SAN is
+  `https://github.com/aywengo/mercury/.github/workflows/release.yml@refs/tags/host-v0.1.0-rc1`. sigstore
+  derives that URI from a name-only `sub`. Verify it yourself:
+
+  ```bash
+  curl -s "https://rekor.sigstore.dev/api/v1/log/entries?logIndex=2742821710" \
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const e=JSON.parse(s);
+      const b=JSON.parse(Buffer.from(e[Object.keys(e)[0]].body,"base64").toString());
+      process.stdout.write(Buffer.from(b.spec.signatures[0].verifier,"base64").toString())})' \
+    > /tmp/leaf.pem
+  openssl x509 -in /tmp/leaf.pem -noout -text | grep -A1 "Subject Alternative Name"
+  ```
+
+  The rehearsal prints `!! sub carries numeric repository IDs` when the ID shape is in use. That is a
+  diagnostic, not a verdict -- see issue #335 for what is and is not established. The setting is
+  **Settings -> Actions -> General -> OIDC subject claim format**.
 - **Direct publishing is opt-in.** `npm stage publish` is always allowed; publishing straight to the
   registry must be enabled per configuration. The repository variable `NPM_DIRECT_PUBLISH=true` tells
   the workflow to publish directly, so it must be matched by that setting or the submit is rejected.
