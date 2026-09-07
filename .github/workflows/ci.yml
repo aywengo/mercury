@@ -198,6 +198,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24.x'
+      # releaseHygiene spawns the CLI for several of its assertions, so it needs node_modules. It does not
+      # need a build: with dependencies present the file is green without dist/, verified locally. The job
+      # was written for tests that only read files, and after #356 added releaseHygiene every CLI test in
+      # it failed -- invisibly, because #356 and #357 both touched ci.yml, which classifies as code and
+      # skips docs-contract. The first docs-only PR afterwards ran the job as configured and caught it.
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
       - name: Docs contract tests
         # Every test that reads a file under docs/ belongs here, not only the ones named after docs.
         # releaseHygiene asserts claims made in docs/releasing.md, docs/distribution.md and
