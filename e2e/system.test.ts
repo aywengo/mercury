@@ -238,7 +238,9 @@ guarded('preflight reports a usable runtime', () => {
 guarded('the compose model mounts no host paths and publishes only a loopback port', async () => {
   const model = await composeModel();
   const services = Object.keys(model.services).sort();
-  assert.deepEqual(services, ['api', 'fixture', 'worker'], 'unexpected services in the resolved model');
+  // `verify` joins the topology in Phase 3. It is listed rather than tolerated: this assertion is a
+  // deny-by-default check, so a service that appears without being named here fails the gate.
+  assert.deepEqual(services, ['api', 'fixture', 'verify', 'worker'], 'unexpected services in the resolved model');
 
   for (const [name, svc] of Object.entries(model.services)) {
     for (const mount of svc.volumes ?? []) {
