@@ -195,8 +195,7 @@ jobs:
               # enough.
               accepted=0
               evidence=0
-              ours=""
-              control=""
+              distinguishes=0""
               for aud in npm:registry.npmjs.org https://registry.npmjs.org; do
                 aud_json=$(curl -sS --max-time 30 -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
                   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${aud}" || echo "")
@@ -205,6 +204,14 @@ jobs:
                   echo "  oidc exchange [${aud}]: the runner minted no token"
                   continue
                 fi
+                # Compared per audience, and only between two answers that are both JSON. Comparing
+                # the first answer seen for each package instead is wrong twice over: a non-JSON
+                # reply on the first audience would lock in a comparison against nothing, and a pair
+                # that genuinely differs on the second audience would never be looked at.
+                aud_ours=""
+                aud_control=""
+                aud_ours_ok=0
+                aud_control_ok=0
                 # The same question is asked of a package this repository has no relationship to.
                 # Without that control, "unauthorized" gets read as "our trusted publisher does not
                 # match", when it may be all the registry ever says to a token it will not exchange
@@ -239,16 +246,19 @@ jobs:
                   echo "  oidc exchange [${aud}] ${probe_pkg}: ${st} -- ${msg}"
                   if [ "$probe_pkg" = "$esc" ]; then
                     if [ "$rc" -eq 0 ]; then accepted=1; fi
-                    if [ "$rc" -ne 2 ]; then evidence=1; fi
-                    [ -z "$ours" ] && ours="${st} ${msg}"
-                  else
-                    [ -z "$control" ] && control="${st} ${msg}"
+                    if [ "$rc" -ne 2 ]; then evidence=1; aud_ours="${msg}"; aud_ours_ok=1; fi
+                  elif [ "$rc" -ne 2 ]; then
+                    aud_control="${msg}"; aud_control_ok=1
                   fi
                 done
+                if [ "$aud_ours_ok" = "1" ] && [ "$aud_control_ok" = "1" ] \
+                  && [ "$aud_ours" != "$aud_control" ]; then
+                  distinguishes=1
+                fi
               done
               if [ "$accepted" = "1" ]; then
                 echo "  => npm trusts this workflow for ${pkg_name}; a real publish would authenticate"
-              elif [ "$evidence" = "1" ] && [ "$ours" != "$control" ]; then
+              elif [ "$distinguishes" = "1" ]; then
                 # Only now is there evidence. The registry answered two different questions with two
                 # different answers, so a configuration for this package is being evaluated and does
                 # not match this run -- which is also what a real publish would die on.
