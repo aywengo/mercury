@@ -343,7 +343,7 @@ test('a real npm install puts a working mercuryctl on the PATH', () => {
   }
 });
 
-test('installing from a git source builds dist/, so both binaries run (issue #266)', () => {
+test('installing from a git source builds dist/, so both binaries run (issue #266)', (t) => {
   // The tarball tests above cannot see this defect: `npm pack` runs the build, and the install that
   // follows passes --ignore-scripts, so no lifecycle runs at install time either. A git dependency is
   // the opposite -- npm runs `prepare` in the checkout and nothing else. With only `prepack` defined,
@@ -351,6 +351,16 @@ test('installing from a git source builds dist/, so both binaries run (issue #26
   // `npm install` exited 0 and reported success.
   //
   // Uses a local bare clone, so no network is required for the source itself.
+  //
+  // It does require the checkout to BE a repository. The E2E image is built from a source copy with
+  // `.git/` excluded by .dockerignore, so there is nothing to clone there and the bare clone dies with
+  // `fatal: repository '/app' does not exist` -- a failure of the harness, not of the packaging, and
+  // reporting it as one sends the next reader hunting for a build regression. Skip with the reason,
+  // the same way test/backup.test.ts skips when its `sqlite3` prerequisite is absent.
+  if (!existsSync(join(ROOT, '.git'))) {
+    t.skip(`${ROOT} is not a git checkout; this test installs from a git source and needs one`);
+    return;
+  }
   const tmp = mkdtempSync(join(tmpdir(), 'mercury-gitinstall-'));
   try {
     const bare = join(tmp, 'origin.git');

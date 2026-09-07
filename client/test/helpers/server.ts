@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
+import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export const REPO = join(import.meta.dirname, '..', '..', '..');
@@ -160,6 +161,29 @@ export async function createRunViaApi(server: { url: string }, task: string): Pr
 }
 
 /**
+ * Open the server's SQLite file, run one thing against it, close it.
+ *
+ * These helpers used to shell out to the `sqlite3` CLI. That made the client suite depend on a
+ * binary the repository never declared: it happens to exist on macOS and on GitHub-hosted runners,
+ * so the only environment that noticed was a slim container, where `spawnSync` returns
+ * `status: null` and `stderr: undefined` and every failure message ended in the word "undefined"
+ * instead of naming the missing tool (issue #290). `node:sqlite` is the driver the product itself
+ * uses, so this needs nothing from the host.
+ *
+ * `busy_timeout` matters: the server process holds this database open, and a helper that gives up
+ * on the first SQLITE_BUSY would be flakier than the CLI it replaced.
+ */
+function withDb<T>(db: string, fn: (handle: DatabaseSync) => T): T {
+  const handle = new DatabaseSync(db);
+  try {
+    handle.exec('PRAGMA busy_timeout = 5000;');
+    return fn(handle);
+  } finally {
+    handle.close();
+  }
+}
+
+/**
  * Put a Run into NEEDS_INPUT directly in the database.
  *
  * Needed because no adapter except the real PrimeAgent one ever produces that status, and driving a
@@ -170,12 +194,9 @@ export async function createRunViaApi(server: { url: string }, task: string): Pr
  */
 export function forceNeedsInput(server: LiveServer, runId: string): void {
   const db = join(server.dir, 'contract.db');
-  const r = spawnSync(
-    'sqlite3',
-    [db, `UPDATE runs SET status = 'NEEDS_INPUT' WHERE id = '${runId}';`],
-    { encoding: 'utf8', timeout: 15_000 },
-  );
-  if (r.status !== 0) throw new Error(`could not set NEEDS_INPUT: ${r.stderr}`);
+  const changed = withDb(db, (handle) =>
+    handle.prepare("UPDATE runs SET status = 'NEEDS_INPUT' WHERE id = ?").run(runId).changes);
+  if (Number(changed) !== 1) throw new Error(`could not set NEEDS_INPUT: ${changed} rows matched ${runId}`);
 }
 
 /**
@@ -237,28 +258,33 @@ export function seedEvents(
   // Continue from the Run's existing maximum rather than starting at 1. Creating a Run already writes
   // run.created and run.queued, so seeding from 1 collides with the (run_id, sequence) unique index --
   // and a helper that only works on a Run with no events would be useless for testing paging.
-  const maxOut = spawnSync('sqlite3', [db, `SELECT COALESCE(MAX(sequence), 0) FROM events WHERE run_id = '${runId}';`],
-    { encoding: 'utf8', timeout: 15_000 });
-  if (maxOut.status !== 0) throw new Error(`could not read max sequence: ${maxOut.stderr}`);
-  const startSequence = Number(maxOut.stdout.trim()) + 1;
-  const statements = events.map((event, index) => {
-    const payload = JSON.stringify(event.payload ?? { note: `event ${index + 1}` });
-    const escaped = payload.replace(/'/g, "''");
-    const seq = startSequence + index;
-    return `INSERT INTO events (id, run_id, type, sequence, timestamp, payload_json) VALUES ` +
-      `('evt_seed_${runId}_${seq}', '${runId}', '${event.type}', ${seq}, '${now}', '${escaped}');`;
+  const maxSequence = withDb(db, (handle) =>
+    Number(handle.prepare('SELECT COALESCE(MAX(sequence), 0) AS m FROM events WHERE run_id = ?').get(runId)?.['m'] ?? 0));
+  const startSequence = maxSequence + 1;
+  withDb(db, (handle) => {
+    const insert = handle.prepare(
+      'INSERT INTO events (id, run_id, type, sequence, timestamp, payload_json) VALUES (?, ?, ?, ?, ?, ?)',
+    );
+    handle.exec('BEGIN');
+    try {
+      events.forEach((event, index) => {
+        const seq = startSequence + index;
+        insert.run(`evt_seed_${runId}_${seq}`, runId, event.type, seq, now,
+          JSON.stringify(event.payload ?? { note: `event ${index + 1}` }));
+      });
+      handle.exec('COMMIT');
+    } catch (err) {
+      handle.exec('ROLLBACK');
+      throw err;
+    }
   });
-  const r = spawnSync('sqlite3', [db, statements.join(' ')], { encoding: 'utf8', timeout: 20_000 });
-  if (r.status !== 0) throw new Error(`could not seed events: ${r.stderr}`);
 }
 
 /** Set a Run's status directly, for terminal-state tests that no CLI command can reach on its own. */
 export function forceStatus(server: LiveServer, runId: string, status: string): void {
   const db = join(server.dir, 'contract.db');
-  const r = spawnSync(
-    'sqlite3',
-    [db, `UPDATE runs SET status = '${status}', completed_at = '${new Date().toISOString()}' WHERE id = '${runId}';`],
-    { encoding: 'utf8', timeout: 15_000 },
-  );
-  if (r.status !== 0) throw new Error(`could not set status: ${r.stderr}`);
+  const changed = withDb(db, (handle) =>
+    handle.prepare('UPDATE runs SET status = ?, completed_at = ? WHERE id = ?')
+      .run(status, new Date().toISOString(), runId).changes);
+  if (Number(changed) !== 1) throw new Error(`could not set status ${status}: ${changed} rows matched ${runId}`);
 }
