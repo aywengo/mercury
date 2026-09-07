@@ -195,7 +195,7 @@ jobs:
               # enough.
               accepted=0
               evidence=0
-              distinguishes=0""
+              distinguishes=0
               for aud in npm:registry.npmjs.org https://registry.npmjs.org; do
                 aud_json=$(curl -sS --max-time 30 -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
                   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${aud}" || echo "")

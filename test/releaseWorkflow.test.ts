@@ -982,3 +982,17 @@ test('a non-JSON control is never compared against a real refusal', () => {
   assert.ok(!(r.stdout + r.stderr).includes('The registry does distinguish'),
     'must not claim a difference it never observed');
 });
+
+test('the release step contains no empty-string concatenation on an assignment', () => {
+  // `distinguishes=0""` shipped, survived `bash -n`, and survived 58 tests, because bash reads it as
+  // `distinguishes=0`. It was an editing accident, not a construct, and it sat on the line that
+  // initialises the variable deciding whether a release rehearsal fails. Nothing catches that class
+  // of typo, so this does: an assignment whose value is a number glued to an empty string is never
+  // intentional here.
+  const script = extractReleaseScript();
+  const offenders = script
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^[A-Za-z_][A-Za-z0-9_]*=(-?[0-9]+)+""/.test(l));
+  assert.deepEqual(offenders, [], 'numeric assignments must not be glued to an empty string');
+});
