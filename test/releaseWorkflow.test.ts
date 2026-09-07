@@ -68,7 +68,7 @@ function runTag(
   tag: string,
   opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
     directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean;
-    pkgHttp?: string; formulaHttp?: string; sub?: string;
+    pkgHttp?: string; formulaHttp?: string; sub?: string; rawJwt?: string;
     npmSubmitErr?: string; exchange?: string; exchangeExit?: number;
     exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
     control2?: string; control2Exit?: number } = {},
@@ -209,7 +209,10 @@ function runTag(
         // The curl stub replays these. Default exchange body is empty, which the step treats as
         // "not JSON, therefore no evidence" -- so existing OIDC tests stay on the branch they were
         // written for instead of every one of them suddenly asserting about trust.
-        STUB_JWT: fakeJwt({ sub: opts.sub ?? 'repo:aywengo/mercury:ref:refs/heads/main',
+        // rawJwt hands the step a string that is not a JWT at all, which fakeJwt cannot express: it
+        // always produces three decodable segments, so a "malformed token" test written with it silently
+        // exercises the happy path and passes for the wrong reason.
+        STUB_JWT: opts.rawJwt ?? fakeJwt({ sub: opts.sub ?? 'repo:aywengo/mercury:ref:refs/heads/main',
           repository_owner: 'aywengo', repository: 'aywengo/mercury',
           job_workflow_ref: 'aywengo/mercury/.github/workflows/release.yml@refs/heads/main',
           aud: 'npm:registry.npmjs.org', ref: 'refs/heads/main', ref_type: 'branch',
@@ -1248,10 +1251,12 @@ test('a malformed token never warns and never prints a stack trace', () => {
   // The check decodes a JWT the runner minted. If that ever is not a decodable JWT, the right answer is
   // silence: a diagnostic that throws hands the operator a Node stack trace in place of the one sentence
   // they came to read.
-  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], oidc: true, npmToken: '', sub: 'not-a-jwt' });
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], oidc: true, npmToken: '',
+    rawJwt: 'header.<<<not json>>>.sig' });
   assert.ok(!/sub carries numeric repository IDs/.test(r.stderr), 'must not warn on garbage');
   assert.ok(!/SyntaxError|at JSON.parse|Traceback|ERR_ASSERTION/.test(r.stderr),
     'and must not leak a decoder failure into the log: ' + r.stderr.slice(-300));
+  assert.match(r.stdout, /not a decodable JWT/, 'it must say what went wrong instead');
 });
 
 test('a ref that merely contains @<digits> is not read as repository IDs', () => {
