@@ -51,14 +51,28 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    rehearsal and a rehearsal is never a release.
 
    The OIDC part is the reason to run it before tagging rather than after. The log prints the claims npm
-   matches the run against, and then performs the exchange npm itself performs -- the POST to
+   matches the run against -- `repository_owner`, `repository`, and the workflow filename inside
+   `job_workflow_ref` -- which is worth reading, because npm reports a trusted-publishing mismatch as an
+   opaque registry 404 with no reason.
+
+   It then attempts the exchange npm itself performs, the POST to
    `/-/npm/v1/oidc/token/exchange/package/<name>` that turns the id token into a short-lived publish
-   credential -- and reports `ACCEPTED`, `REFUSED` or `INCONCLUSIVE`. A refusal fails the rehearsal,
-   because a real release would die on the same call. This matters because `npm publish --dry-run` does
-   not authenticate: before the exchange was probed, a green rehearsal said nothing whatever about
-   whether npm trusts the workflow, which is the one thing a release candidate most often gets wrong.
-   npm reports a trusted-publishing mismatch as an opaque registry 404 with no reason, so the exchange
-   result and the claims are the only way to see the cause without burning a version number.
+   credential, and asks the same question of an unrelated package as a control. Read it this way:
+
+   - `ACCEPTED` for this package means npm trusts the workflow, and a real publish would authenticate.
+   - `REFUSED` for this package **and a different answer** for the control means a configuration is
+     being evaluated and does not match. The rehearsal fails, and the log lists the fields to check,
+     starting with the workflow filename, which npm wants as a bare name (`release.yml`, not a path).
+   - `REFUSED` for this package **and the same answer** for the control means nothing. That is what the
+     registry says to a token it will not exchange, from anywhere. The rehearsal continues, because a
+     check that is red on every run is a check people stop reading.
+
+   That third case is the one observed today: this package and `left-pad` are refused identically, on
+   both candidate audiences. So the probe currently establishes nothing about this repository's trust
+   configuration, and it is deliberately silent rather than confident. The reason it exists at all is
+   that `npm publish --dry-run` does not authenticate -- before it, a green rehearsal said nothing
+   whatever about npm's trust -- and the day npm answers the two packages differently, this says
+   something no rehearsal could before. What settles trust is the publish itself.
 
 6. [`.github/workflows/release.yml`](../.github/workflows/release.yml) creates the GitHub Release from
    the notes file for that tag and publishes to npm with provenance. It handles `host` and `fleet` tags

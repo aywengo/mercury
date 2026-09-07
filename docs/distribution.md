@@ -295,11 +295,18 @@ Still not observed:
   `NPM_DIRECT_PUBLISH` is set, so the two must agree. The setting cannot be read without publish
   rights, so a mismatch surfaces only on a real release -- which the job now names as a candidate
   cause rather than leaving as a bare 404.
-- **Whether the credential npm issues may be spent on a direct publish.** The rehearsal now performs
-  the exchange and so does establish that npm trusts this repository and workflow for this package --
-  `ACCEPTED` or `REFUSED` in the log, no tag required. It does not establish what the resulting
-  credential is allowed to do. A token minted for staging and a token minted for publishing look
-  identical from here, and spending one to find out is the release itself.
+- **Whether npm trusts this workflow at all.** The rehearsal attempts the same token exchange a publish
+  does, and also attempts it against an unrelated package as a control. Both are refused with the
+  identical message, `OIDC token exchange error - unauthorized`, on both candidate audiences. An
+  unrelated package with no trusted publisher of any kind is treated exactly the same, so the message
+  is what the registry says to a token it will not exchange from anywhere; it is not evidence about
+  this repository's configuration. An earlier version of this document claimed the rehearsal
+  established trust from an `ACCEPTED` or `REFUSED` line. It does not, and the claim was made from one
+  observation before the control existed.
+- **Whether the credential npm issues may be spent on a direct publish.** Unreachable from here, and
+  for a second reason: `stage/publish.js` is `class StagePublish extends Publish`, so staging and
+  direct publishing go through the identical exchange call. The allowed-actions setting therefore
+  cannot be probed by choosing a verb -- both verbs ask the same question the same way.
 
 ## Decisions
 
