@@ -167,7 +167,17 @@ jobs:
               # against: the operator sees a stack about node -e instead of the claims.
               node -e 'let c=null;
                 try { c=JSON.parse(Buffer.from(String(process.argv[1].split(".")[1]||""),"base64url").toString()); }
-                catch { console.log("  oidc claims: the id_token is not a decodable JWT; nothing to report"); process.exit(0) }
+                catch {
+                  console.log("  oidc claims: the id_token is not a decodable JWT; nothing to report");
+                  process.exit(0);
+                }
+                // A parse that succeeds is not the same as a claim set. The payload `null` parses fine and
+                // then throws TypeError on the first property read, which is the exact stack trace this
+                // guard exists to prevent -- so the shape is checked, not just the syntax.
+                if (c===null || typeof c!=="object" || Array.isArray(c)) {
+                  console.log("  oidc claims: the id_token payload is not a JSON object; nothing to report");
+                  process.exit(0);
+                }
                 for (const k of ["iss","enterprise","sub","aud","ref","ref_type","repository",
                                  "repository_owner","workflow","job_workflow_ref","event_name"])
                   console.log(`  oidc ${k} = ${c[k]}`)' "$id_token"

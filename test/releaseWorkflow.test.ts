@@ -18,6 +18,11 @@ import { join } from 'node:path';
 
 import { tempDir } from './helpers.ts';
 
+/** base64url without padding, the way a JWT segment is written. */
+function b64url(s: string): string {
+  return Buffer.from(s).toString('base64url').replace(/=+$/, '');
+}
+
 const ROOT = join(import.meta.dirname, '..');
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as { version: string };
 
@@ -1265,4 +1270,17 @@ test('a ref that merely contains @<digits> is not read as repository IDs', () =>
   const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], oidc: true, npmToken: '',
     sub: 'repo:aywengo/mercury:ref:refs/heads/feature@123' });
   assert.ok(!/sub carries numeric repository IDs/.test(r.stderr), r.stderr.slice(-300));
+});
+
+test('a payload that parses but is not an object is not read as a claim set', () => {
+  // JSON.parse("null") succeeds. The loop that follows then throws TypeError on the first property read,
+  // which is precisely the stack trace the guard above was added to stop -- catching the throw without
+  // checking the shape only moves the crash one line down.
+  for (const payload of ['null', 'true', '42', '"a string"', '[]']) {
+    const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], oidc: true, npmToken: '',
+      rawJwt: `hdr.${b64url(payload)}.sig` });
+    assert.ok(!/TypeError|Cannot read properties|is not iterable/.test(r.stderr),
+      `${payload} must not throw: ` + r.stderr.slice(-260));
+    assert.match(r.stdout, /payload is not a JSON object/, `${payload} must be reported as unusable`);
+  }
 });
