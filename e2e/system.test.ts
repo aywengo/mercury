@@ -48,7 +48,7 @@ const DIAG_DIR = `/tmp/${PROJECT}`;
 let env: StartedDockerComposeEnvironment | undefined;
 let apiBase = '';
 let preflightInfo = { node: '', docker: '', compose: '' };
-let scenarioFailed = false;
+let scenarioError: unknown;
 let alice = { base: '', token: '' } as unknown as ReturnType<typeof client>;
 let bob = { base: '', token: '' } as unknown as ReturnType<typeof client>;
 /** Shared across the sequential journeys: the Run created by the lifecycle test is the one the
@@ -91,7 +91,7 @@ function guarded(name: string, fn: () => Promise<void> | void): void {
     try {
       await fn();
     } catch (err) {
-      scenarioFailed = true;
+      scenarioError = err;
       await withDeadline('diagnostics', LIMITS.diagnosticsMs, collectDiagnostics(name));
       throw err;
     }
@@ -219,7 +219,7 @@ before(async () => {
 
 after(async () => {
   if (!env) return;
-  if (scenarioFailed && keepOnFail()) {
+  if (scenarioError && keepOnFail()) {
     console.error(`e2e: FAILED and keeping resources for inspection.\n  diagnostics: ${DIAG_DIR}`
       + `\n  ${inspectionCommands(PROJECT, COMPOSE_FILE).join('\n  ')}`);
     return;
@@ -229,7 +229,7 @@ after(async () => {
     rmSync(DIAG_DIR, { recursive: true, force: true });
   } catch (err) {
     // A cleanup problem is reported, but it must not replace the scenario failure that caused it.
-    const outcome = teardownOutcome(scenarioFailed, err as Error);
+    const outcome = teardownOutcome(scenarioError, err as Error);
     console.error(outcome.log);
     if (outcome.propagate) throw err;
   }

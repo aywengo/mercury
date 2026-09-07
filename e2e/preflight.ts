@@ -221,13 +221,25 @@ export const PROJECT_PREFIX = 'mercury-e2e';
  * sent to the wrong file. But with no scenario failure, teardown IS the only failure, so it has to
  * propagate or the gate would report green over a leaked stack.
  *
+ * It takes the scenario *error*, not a boolean, for two reasons. A boolean lets the log point at a
+ * failure it cannot name -- "that is the failure to read" while never saying what it is -- and it lets
+ * a caller hand in a flag while holding the real error somewhere else, which is how the two get out of
+ * sync. Requiring the error makes that impossible and makes the message useful.
+ *
+ * It does not surface the scenario error itself: the test runner reports that, because `guarded()`
+ * rethrows. This decides only whether teardown ADDS a second failure on top.
+ *
  * Extracted because that asymmetry is exactly the kind of thing an inline `if` loses on a later
  * edit, and it is invisible until someone is misled by it.
  */
-export function teardownOutcome(scenarioFailed: boolean, teardownError: Error): { propagate: boolean; log: string } {
+export function teardownOutcome(scenarioError: unknown, teardownError: Error): { propagate: boolean; log: string } {
+  const failed = scenarioError !== undefined && scenarioError !== null;
+  const names = failed ? `: ${scenarioError instanceof Error ? scenarioError.message : String(scenarioError)}` : '';
   return {
-    propagate: !scenarioFailed,
+    propagate: !failed,
     log: `e2e: teardown reported a problem: ${teardownError.message}`
-      + (scenarioFailed ? ' (not raised: a scenario already failed, and that is the failure to read)' : ''),
+      + (failed
+        ? ` (not raised: a scenario already failed and that is the failure to read${names})`
+        : ''),
   };
 }

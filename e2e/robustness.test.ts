@@ -141,16 +141,24 @@ test('a teardown failure never replaces the scenario failure -- no Docker daemon
   const scenario = new Error('run run_x never left QUEUED');
   const busy = new Error('volume is in use');
 
-  const afterFailure = teardownOutcome(true, busy);
+  const afterFailure = teardownOutcome(scenario, busy);
   assert.equal(afterFailure.propagate, false,
     'raising the teardown error would hide the scenario failure that caused it');
   assert.match(afterFailure.log, /volume is in use/, 'the teardown problem must still be reported');
   assert.match(afterFailure.log, /already failed/, 'and must say why it is not being raised');
+  // The message claims the scenario failure "is the failure to read". A pointer that never names its
+  // target sends the reader back to square one, so the claim is asserted rather than decorated.
+  assert.match(afterFailure.log, /run run_x never left QUEUED/,
+    'the log must name the scenario failure it tells the reader to go and read');
 
-  const cleanRun = teardownOutcome(false, busy);
+  const cleanRun = teardownOutcome(undefined, busy);
   assert.equal(cleanRun.propagate, true,
     'with no scenario failure the teardown IS the failure; swallowing it would report green over a leak');
-  void scenario;
+  assert.ok(!cleanRun.log.includes('already failed'),
+    'a clean run must not claim a scenario failed');
+
+  // A non-Error throw must still be named rather than rendered as "undefined".
+  assert.match(teardownOutcome('boom', busy).log, /boom/, 'a thrown non-Error must still be named');
 });
 
 /**
@@ -204,7 +212,12 @@ test('every container the gate starts is visible to the reaper', async () => {
       '-f', '{{index .Config.Labels "org.testcontainers.session-id"}}|{{index .Config.Labels "org.testcontainers.ryuk"}}',
       containerId], { encoding: 'utf8', timeout: 30_000 });
     assert.equal(inspect.status, 0, `probe container ${containerId.slice(0, 12)} was not inspectable: ${inspect.stderr}`);
-    const [session, isReaper] = inspect.stdout.trim().split('|');
+    // Assert the shape before destructuring. Without this a line missing the separator leaves
+    // `isReaper` undefined and the expression below throws "Cannot read properties of undefined",
+    // which reads as a bug in the test rather than "docker answered in a shape I did not expect".
+    const parts = inspect.stdout.trim().split('|');
+    assert.equal(parts.length, 2, `unexpected inspect output, wanted "<session>|<ryuk>": ${inspect.stdout}`);
+    const [session, isReaper] = parts;
     assert.ok(session.length > 0 && !isReaper.length,
       `container carries no reaper session label (got "${session}"); Ryuk cannot reap what it cannot `
       + 'attribute to a session, so it would outlive a killed harness');
