@@ -238,7 +238,11 @@ jobs:
             cp LICENSE fleet/LICENSE
             (cd fleet && npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel") || npm_ok=0
           fi
-          if [ "$npm_ok" = "1" ]; then
+          if [ "${DRY_RUN}" = "true" ]; then
+            # Not "submission succeeded": nothing was submitted, and a rehearsal log that reads like
+            # a publish is the overstatement this repo treats as a defect wherever it appears.
+            echo "DRY RUN: rehearsal complete; nothing was submitted to npm"
+          elif [ "$npm_ok" = "1" ]; then
             echo "npm submission succeeded (${npm_verb})"
           else
             echo "npm submission FAILED (${npm_verb}); continuing so the Homebrew artifacts are still produced" >&2
