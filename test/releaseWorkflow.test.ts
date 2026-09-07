@@ -60,7 +60,7 @@ interface Run {
 function runTag(
   tag: string,
   opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
-    directPublish?: string; npmHasStage?: boolean; npmFails?: boolean } = {},
+    directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -168,6 +168,14 @@ function runTag(
         // Always present on a real runner; the formula push builds its remote from it. With `set -u`
         // an unset value aborts the step, so the harness has to provide it the way the runner does.
         GITHUB_REPOSITORY: 'aywengo/mercury',
+        // Explicit for the same reason as the three above. DRY_RUN selects the rehearsal path, and it
+        // is derived from the event name on a real runner; inheriting either would let a stray shell
+        // variable silently change which of the two paths a test is asserting about.
+        GITHUB_EVENT_NAME: opts.event ?? 'push',
+        // `undefined` is omitted from the child environment by spawnSync, which is how a test models
+        // the variable being absent altogether rather than merely empty.
+        DRY_RUN: opts.omitDryRunVar ? undefined
+          : (opts.event ?? 'push') === 'workflow_dispatch' ? 'true' : 'false',
       },
     });
     const calls = existsSync(join(tmp, 'calls.log')) ? readFileSync(join(tmp, 'calls.log'), 'utf8') : '';
@@ -245,6 +253,45 @@ test('a matching host tag still publishes, so the guards did not over-tighten', 
   const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
   assert.equal(r.status, 0, `expected acceptance, got exit ${r.status}:\n${r.stderr}`);
   assert.match(r.stdout, new RegExp(SUBMIT + ' --access public --provenance'), 'host must submit to npm');
+});
+
+test('a dispatch rehearsal submits nothing, releases nothing and pushes nothing', () => {
+  // The rehearsal exists because this workflow failed three times and every diagnosis cost a real tag
+  // push. That only pays off if a rehearsal provably cannot publish, so assert the absence of all
+  // three external effects rather than the presence of a log line saying it was careful.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], event: 'workflow_dispatch' });
+  assert.equal(r.status, 0, `expected a clean rehearsal, got exit ${r.status}:\n${r.stdout}\n${r.stderr}`);
+  // The rehearsal must still do the real work, or it proves nothing about a real run.
+  assert.match(r.stdout, /bundle sha256=/, 'a rehearsal that skips the bundle is not a rehearsal');
+  assert.match(r.stdout, /npm publish --dry-run/, 'the rehearsal should pack what a real run would ship');
+  // ... and must not touch anything outside the runner.
+  assert.ok(!new RegExp(SUBMIT + ' --access public --provenance').test(r.stdout),
+    `a dispatch must never submit to npm:\n${r.stdout}`);
+  assert.ok(!/gh release create/.test(r.stdout), `a dispatch must never create a release:\n${r.stdout}`);
+  assert.ok(!/git push/.test(r.stdout), `a dispatch must never push the formula:\n${r.stdout}`);
+});
+
+test('a tag push is still a real release, so the rehearsal gate did not swallow it', () => {
+  // The mirror image of the test above. Without it, a DRY_RUN that was true for every event would
+  // pass the rehearsal assertions while silently turning real releases into no-ops that still go
+  // green -- the one failure mode worse than a failed publish.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  assert.equal(r.status, 0, `expected acceptance, got exit ${r.status}:\n${r.stderr}`);
+  assert.match(r.stdout, new RegExp(SUBMIT + ' --access public --provenance'), 'a tag push must submit');
+  assert.match(r.stdout, /gh release create/, 'a tag push must create the release');
+  assert.match(r.stdout, /git push/, 'a tag push must push the formula');
+  assert.ok(!/npm publish --dry-run/.test(r.stdout), 'a tag push must not be a rehearsal');
+});
+
+test('a matching host tag with DRY_RUN unset still publishes', () => {
+  // `${DRY_RUN:-}` rather than `${DRY_RUN}`: the step runs under `set -u`, and the first CI run of
+  // the rehearsal feature died with `DRY_RUN: unbound variable` in exactly this situation. The
+  // default also matters in the safe direction -- unset means "publish", matching the behaviour
+  // before the rehearsal existed, whereas defaulting to a rehearsal would turn a missing variable
+  // into a green run that silently publishes nothing.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], omitDryRunVar: true });
+  assert.equal(r.status, 0, `expected acceptance, got exit ${r.status}:\n${r.stderr}`);
+  assert.match(r.stdout, new RegExp(SUBMIT + ' --access public --provenance'), 'unset DRY_RUN must publish');
 });
 
 test('a host tag with no notes file is still refused', () => {
