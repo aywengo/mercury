@@ -161,7 +161,13 @@ jobs:
               "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org" || echo "")
             id_token=$(node -e 'try{console.log(JSON.parse(process.argv[1]).value||"")}catch{console.log("")}' "$id_json")
             if [ -n "$id_token" ]; then
-              node -e 'const c=JSON.parse(Buffer.from(process.argv[1].split(".")[1],"base64url").toString());
+              # Guarded, because this block exists to explain a failure. An undecodable token used to
+              # throw out of JSON.parse and print a Node stack trace in place of every claim, which is the
+              # worst possible outcome for the one diagnostic that reads the identity npm will match
+              # against: the operator sees a stack about node -e instead of the claims.
+              node -e 'let c=null;
+                try { c=JSON.parse(Buffer.from(String(process.argv[1].split(".")[1]||""),"base64url").toString()); }
+                catch { console.log("  oidc claims: the id_token is not a decodable JWT; nothing to report"); process.exit(0) }
                 for (const k of ["iss","enterprise","sub","aud","ref","ref_type","repository",
                                  "repository_owner","workflow","job_workflow_ref","event_name"])
                   console.log(`  oidc ${k} = ${c[k]}`)' "$id_token"
