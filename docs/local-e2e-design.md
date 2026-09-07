@@ -1129,6 +1129,15 @@ Notes against the wording above:
 - **"no stage is unbounded"** is asserted over the exported `STAGES` array: every stage must carry a
   finite positive deadline. Deadlines are 15-20 minutes against measured costs of seconds to ~2
   minutes, because they exist to catch a hang, not to police a slow machine.
+- **The build ceiling is 15 minutes, not the 10 that section 19 suggests.** Deliberate, and recorded
+  here because an unexplained divergence between this document and the code is how a "temporary"
+  number becomes permanent. The measured cost of the stage is 1.7s cached and roughly a minute or
+  ninety seconds cold (image pull plus `npm ci`), so both figures are far above any real build and
+  neither is chosen for speed. The longer ceiling is preferred because the two failure modes are not
+  symmetric: a ceiling that is too tight fails a healthy cold build on a slow connection, which reads
+  as a broken gate and teaches the developer to re-run until green; a ceiling that is too loose only
+  delays a verdict that is already correct. The property section 19 actually asks for -- a build
+  ceiling separate from the other stages, finite, with a visible timer -- is what is implemented.
 - **"Docker build cache invalidates when package manifests change"** is guarded two ways. A test
   asserts the Dockerfile's instruction order (manifest copy -> `npm ci` -> source copy), which is the
   property itself. The behaviour was also measured in both directions: a source-only edit leaves
