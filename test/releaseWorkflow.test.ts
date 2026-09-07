@@ -68,7 +68,7 @@ function runTag(
   tag: string,
   opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
     directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean;
-    pkgHttp?: string; formulaHttp?: string;
+    pkgHttp?: string; formulaHttp?: string; sub?: string;
     npmSubmitErr?: string; exchange?: string; exchangeExit?: number;
     exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
     control2?: string; control2Exit?: number } = {},
@@ -209,7 +209,8 @@ function runTag(
         // The curl stub replays these. Default exchange body is empty, which the step treats as
         // "not JSON, therefore no evidence" -- so existing OIDC tests stay on the branch they were
         // written for instead of every one of them suddenly asserting about trust.
-        STUB_JWT: fakeJwt({ repository_owner: 'aywengo', repository: 'aywengo/mercury',
+        STUB_JWT: fakeJwt({ sub: opts.sub ?? 'repo:aywengo/mercury:ref:refs/heads/main',
+          repository_owner: 'aywengo', repository: 'aywengo/mercury',
           job_workflow_ref: 'aywengo/mercury/.github/workflows/release.yml@refs/heads/main',
           aud: 'npm:registry.npmjs.org', ref: 'refs/heads/main', ref_type: 'branch',
           event_name: 'workflow_dispatch', workflow: 'Release' }),
@@ -1219,4 +1220,26 @@ test('a token still bootstraps a package that does not exist yet', () => {
   });
   assert.ok(!/does not exist on the registry/.test(r.stdout + r.stderr), 'a token can create the package');
   assert.match(r.stdout, /gh release create/);
+});
+
+test('an ID-bearing subject claim is called out, not left in the claim dump', () => {
+  // The Rekor certificate for the rc1 provenance statement proves this repository presented a name-only
+  // `sub` on the one run that got as far as signing, and every run since presents
+  // `repo:aywengo@<id>/mercury@<id>:ref:...`. That is fifteen lines deep in a claim dump; the operator
+  // reading a failed release has to notice it among issuer, audience, ref and workflow name. Say it.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '',
+    sub: 'repo:aywengo@800531/mercury@1349412409:ref:refs/heads/main',
+  });
+  assert.match(r.stderr, /sub carries numeric repository IDs/);
+  assert.match(r.stderr, /#335/, 'and point at the issue that holds the evidence');
+  assert.match(r.stderr, /not a verdict/, 'without claiming it is the cause');
+});
+
+test('a name-only subject claim is not flagged', () => {
+  // The warning has to be conditional or it becomes the next red-on-every-run line that trains people
+  // to skip the block. This is the shape the rc1 certificate actually carried.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], oidc: true, npmToken: '',
+    sub: 'repo:aywengo/mercury:ref:refs/tags/host-v0.1.0-rc1' });
+  assert.ok(!/sub carries numeric repository IDs/.test(r.stderr), r.stderr.slice(0, 300));
 });
