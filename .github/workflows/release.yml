@@ -456,10 +456,19 @@ jobs:
               echo "The \`npm ${npm_verb}\` step failed, so this version is **not** on the npm registry."
               echo "Do not follow any \`npm install\` instruction below for this version."
               echo ""
+              # Which alternatives exist depends on the product, and getting this wrong is the exact
+              # overstatement this block exists to prevent: Fleet attaches no asset and has no formula,
+              # so the host wording would send Fleet readers to a \`brew install\` that installs a
+              # different product and to a bundle that was never uploaded.
               echo "Install this release without npm:"
               echo ""
-              echo "- Homebrew: \`brew install aywengo/mercury/mercury-ai\`"
-              echo "- The asset attached to this release: download and unpack the bundle."
+              if [ "$product" = "host" ]; then
+                echo "- Homebrew: \`brew install aywengo/mercury/mercury-ai\`"
+                echo "- The asset attached to this release: download and unpack the bundle."
+              else
+                echo "**None. Fleet ships only through npm**, and this release attaches no asset and"
+                echo "has no Homebrew formula, so this version is unavailable by every channel."
+              fi
               echo ""
               echo "The job that produced this release is marked failed so the npm gap stays visible."
             } >> "$notes"
@@ -472,8 +481,13 @@ jobs:
               echo "proof-of-presence to a maintainer, so \`npm install\` will not resolve this version"
               echo "until it is approved on npmjs.com under **Published packages -> Staged packages**."
               echo ""
-              echo "The assets attached to this release and the Homebrew formula are already live and"
-              echo "need no npm approval."
+              if [ "$product" = "host" ]; then
+                echo "The assets attached to this release and the Homebrew formula are already live and"
+                echo "need no npm approval."
+              else
+                echo "Nothing else is attached to this release and there is no Homebrew formula for"
+                echo "Fleet, so approval on npmjs.com is the only way this version becomes installable."
+              fi
             } >> "$notes"
           fi
 
