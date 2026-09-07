@@ -21,8 +21,8 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { DockerComposeEnvironment, StartedDockerComposeEnvironment, Wait } from 'testcontainers';
 import {
-  COMPOSE_FILE, DIAGNOSTIC_CAP_BYTES, E2E_DIR, LIMITS,
-  capBuffer, inspectionCommands, preflight, teardownOutcome,
+  COMPOSE_FILE, DIAGNOSTIC_CAP_BYTES, E2E_DIR, LIMITS, PROJECT_PREFIX,
+  capBuffer, deadServices, assertServicesAlive, inspectionCommands, preflight, teardownOutcome,
 } from './preflight.ts';
 import { client, pollRun } from './helpers.ts';
 
@@ -235,4 +235,96 @@ test('every container the gate starts is visible to the reaper', async () => {
     spawnSync('bash', ['-c', 'docker ps -aq --filter ancestor=alpine:latest --filter status=running | xargs -r docker rm -f >/dev/null 2>&1'],
       { encoding: 'utf8', timeout: 120_000 });
   }
+});
+
+/**
+ * The guard that `up()` cannot provide, proven by a service that actually dies.
+ *
+ * A compose healthcheck reports `healthy` from the moment the probe succeeds, and Testcontainers'
+ * wait strategy returns on the first `healthy` it sees. A process that answers the probe and then
+ * dies -- here, the API failing to open its database -- therefore lets `up()` resolve over a dead
+ * container. Every test after that fails with ECONNREFUSED, and the one line that explains why is
+ * nowhere in the output.
+ *
+ * This test exists because a guard whose only evidence is "no violations on a healthy stack" is not
+ * proven to report anything. The override makes the API die for real, and the assertion is that the
+ * report names it and carries the reason.
+ */
+test('a service that dies after its healthcheck passes is named, with its reason', async () => {
+  await preflight();
+  const project = `${PROJECT_PREFIX}-dead-${suffix()}`;
+  const env = await new DockerComposeEnvironment(E2E_DIR, ['compose.yml', 'crash-override.yml'])
+    .withProjectName(project)
+    .withStartupTimeout(LIMITS.startupMs)
+    .withWaitStrategy('fixture-1', Wait.forOneShotStartup())
+    .withWaitStrategy('api-1', Wait.forHealthCheck())
+    .up();
+  running.push(env);
+
+  // assertServicesAlive is what system.test.ts's startup path calls, so this exercises the guard the
+  // gate actually relies on rather than a helper that merely resembles it.
+  const failure = await assertServicesAlive(project, ['api', 'worker']).then(
+    () => null, (err: unknown) => (err as Error).message);
+  assert.ok(failure !== null,
+    'the guard returned cleanly over a dead API; the suite would proceed and fail eleven times for a reason it never prints');
+  assert.match(failure, /api-1: state=/,
+    'the dead API must be named; a clean return here means the guard is blind to the exact race it exists for');
+  assert.match(failure, /state=exited/, 'the report must carry the container state, not just a name');
+  assert.match(failure, /unable to open database file/,
+    'the report must carry the log line that explains the death, or the reader still has to go find it');
+  assert.ok(!/worker-1: state=/m.test(failure),
+    'the worker is healthy in this scenario; a report that blames everything is not a diagnosis');
+
+  // Same stack, so this also closes the design gate item "success and failure leave no Compose
+  // resources": teardown of a project whose service died must be complete, not best-effort.
+  await env.down({ removeVolumes: true });
+  const idx = running.indexOf(env);
+  if (idx >= 0) running.splice(idx, 1);
+  const { spawnSync } = await import('node:child_process');
+  const left = spawnSync('docker', ['ps', '-aq', '--filter', `label=com.docker.compose.project=${project}`],
+    { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(left.stdout.trim(), '', `teardown left containers behind: ${left.stdout}`);
+  const vols = spawnSync('docker', ['volume', 'ls', '-q', '--filter', `label=com.docker.compose.project=${project}`],
+    { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(vols.stdout.trim(), '', `teardown left the state volume behind: ${vols.stdout}`);
+});
+
+/**
+ * The naming rule, without a Docker daemon.
+ *
+ * Compose names containers `<project>-<service>-<index>`. A guard that hardcodes index 1 says "all
+ * fine" while `api-2` dies behind a live `api-1`, and that is invisible until someone scales a
+ * service. These cases pin the rule that the live test above cannot reach.
+ */
+test('the liveness guard covers every replica, not just the first -- no Docker daemon', () => {
+  const P = 'mercury-e2e-x';
+  const alive = { [`${P}-api-1`]: 'running', [`${P}-worker-1`]: 'running' };
+  assert.deepEqual(deadServices(alive, P, ['api', 'worker']), [], 'a healthy stack must produce no problems');
+
+  // The case a hardcoded "-1" misses.
+  const secondDead = { [`${P}-api-1`]: 'running', [`${P}-api-2`]: 'exited', [`${P}-worker-1`]: 'running' };
+  assert.deepEqual(deadServices(secondDead, P, ['api', 'worker']), [`${P}-api-2: state=exited`],
+    'a dead second replica behind a live first one must still be reported');
+
+  // Every replica, not just the first dead one.
+  const allDead = { [`${P}-api-1`]: 'exited', [`${P}-api-2`]: 'dead' };
+  assert.equal(deadServices(allDead, P, ['api']).length, 2, 'every dead replica must be listed');
+
+  // A service that never got a container is a problem, not a pass.
+  assert.match(deadServices({}, P, ['api'])[0], /no container matching api-<n>/,
+    'a missing service must be reported rather than silently absent');
+
+  // One-shot services legitimately exit, so they are simply not in the expected list -- and only the
+  // services named there are judged. A missing expected service is still reported, which is the point.
+  const withFixture = { [`${P}-api-1`]: 'running', [`${P}-fixture-1`]: 'exited' };
+  assert.deepEqual(deadServices(withFixture, P, ['api']), [],
+    'an exited one-shot must not be blamed when it is not an expected long-lived service');
+  assert.equal(deadServices(withFixture, P, ['api', 'worker']).length, 1,
+    'a service that is expected but absent must still be reported, one-shot or not');
+
+  // A project name containing regex metacharacters must not widen or break the match.
+  const tricky = 'mercury.e2e+x';
+  const trickyStates = { 'mercuryXe2eXapi-1': 'exited', [`${tricky}-api-1`]: 'running' };
+  assert.deepEqual(deadServices(trickyStates, tricky, ['api']), [],
+    'an unescaped project name lets "." and "+" match unrelated containers and misreport them');
 });

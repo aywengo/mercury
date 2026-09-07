@@ -190,6 +190,101 @@ export function capBuffer(buf: Buffer, maxBytes: number = DIAGNOSTIC_CAP_BYTES):
 }
 
 /**
+ * The state Docker reports for every container of a project, as `name -> "running" | ...`.
+ *
+ * Uses the CLI rather than the Testcontainers handle because the case that matters is a container
+ * that has already exited: `getContainer()` hands back a handle regardless of whether the process
+ * behind it is alive, so a handle is not evidence of life.
+ */
+export async function containerStates(project: string): Promise<Record<string, string>> {
+  const { code, out } = await run('docker', ['ps', '-a',
+    '--filter', `label=com.docker.compose.project=${project}`, '--format', '{{.Names}}\t{{.State}}'],
+    LIMITS.runtimeProbeMs);
+  if (code !== 0) throw new PreflightError(`docker ps failed for project ${project}: ${out}`);
+  const states: Record<string, string> = {};
+  for (const line of out.split('\n')) {
+    const [name, state] = line.split('\t');
+    if (name && state) states[name] = state;
+  }
+  return states;
+}
+
+/**
+ * Tail a service's logs through the compose CLI.
+ *
+ * `container.logs()` needs a container Testcontainers tracked as started, and it is the wrong tool
+ * for a process that died during or just after startup -- the exact case this exists for. The compose
+ * CLI reads the container's log file and works whether the process is alive, dead, or one-shot.
+ */
+export async function serviceLogs(project: string, service: string, tail = 60): Promise<string> {
+  const { out } = await run('docker', ['compose', '-p', project, 'logs', '--no-color',
+    '--tail', String(tail), service], LIMITS.diagnosticsMs);
+  return out;
+}
+
+/**
+ * Which of a project's expected services are not running, derived from a container-state map.
+ *
+ * Pure, so the naming rule it encodes is testable without a Docker daemon.
+ *
+ * The rule is deliberately NOT "<service>-1". Compose names containers `<project>-<service>-<index>`,
+ * and a guard that hardcodes index 1 reports "all fine" when `api-1` is up and `api-2` died -- a
+ * silent weakening that only shows up once something is scaled, which is exactly when it matters.
+ * Matching any index also survives a naming change instead of reporting a container that "does not
+ * exist" while the real one dies unreported.
+ */
+export function deadServices(states: Record<string, string>, project: string, services: string[]): string[] {
+  const esc = project.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const problems: string[] = [];
+  for (const service of services) {
+    const pattern = new RegExp(`^${esc}-${service}-\\d+$`);
+    const mine = Object.entries(states).filter(([name]) => pattern.test(name));
+    if (mine.length === 0) {
+      problems.push(`${service}: no container matching ${service}-<n> exists in project ${project}`);
+      continue;
+    }
+    for (const [name, state] of mine.filter(([, st]) => st !== 'running')) problems.push(`${name}: state=${state}`);
+  }
+  return problems;
+}
+
+/**
+ * Name every service of a project that is not running, with the log tail that says why.
+ *
+ * A compose healthcheck can report `healthy` and the process can die immediately afterwards: the API
+ * binds its port, answers the probe, then fails while opening the database. Testcontainers' health
+ * wait strategy returns the moment it sees `healthy`, so `up()` resolves over a dead service and
+ * every later test then fails with `Cannot get container "api-1" as it is not running` -- repeated
+ * once per test, none of them containing the reason. This is the re-check that closes that window.
+ *
+ * Resolves to '' when everything is up, so a caller can use it as a guard without a second query.
+ */
+export async function deadServiceReport(project: string, services: string[]): Promise<string> {
+  const states = await containerStates(project);
+  const detailed: string[] = [];
+  for (const problem of deadServices(states, project, services)) {
+    // Only a located container has logs to fetch; "no container exists" does not.
+    const named = /^([a-z0-9_-]+): state=/.exec(problem);
+    if (!named) { detailed.push(problem); continue; }
+    const service = named[1].replace(new RegExp(`^${project}-`), '').replace(/-\d+$/, '');
+    const logs = capBuffer(Buffer.from(await serviceLogs(project, service))).toString('utf8');
+    detailed.push(`${problem}\n${logs}`);
+  }
+  return detailed.join('\n\n');
+}
+
+/**
+ * Throw with the reason if any expected service is not running.
+ *
+ * This is what the startup path calls, so a test of the guard exercises the same function the gate
+ * relies on rather than a helper that merely resembles it.
+ */
+export async function assertServicesAlive(project: string, services: string[]): Promise<void> {
+  const report = await deadServiceReport(project, services);
+  if (report !== '') throw new Error(`service(s) not running in project ${project}:\n${report}`);
+}
+
+/**
  * The exact commands to inspect and remove a retained project.
  *
  * Printed only when the gate deliberately leaves containers running, and printed verbatim-runnable:
