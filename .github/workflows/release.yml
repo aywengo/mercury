@@ -105,6 +105,15 @@ jobs:
           # so a missing configuration surfaces as an opaque registry 404 rather than a reason -- which
           # is exactly how the failure above presented itself. OIDC mode therefore raises the log level
           # so the actual cause lands in the log instead of having to be inferred.
+          # Resolved here rather than inside the rehearsal probe because the failure classifier below
+          # needs it too. npa's escapedName, which is what the registry accepts in a path: the leading
+          # "@" stays literal and only the slash is encoded.
+          if [ "$product" = "host" ]; then
+            pkg_name=$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).name)")
+          else
+            pkg_name=$(node -e "console.log(JSON.parse(require('fs').readFileSync('fleet/package.json','utf8')).name)")
+          fi
+          pkg_esc=${pkg_name//\//%2F}
           if [ -n "$NODE_AUTH_TOKEN" ]; then
             echo "publish auth: NPM_TOKEN"
             npm_loglevel=normal
@@ -177,14 +186,7 @@ jobs:
             # about the trust configuration -- a proxy, a WAF or a rate limiter can all answer here --
             # so it warns rather than failing a rehearsal for something the registry never said.
             if [ "${DRY_RUN:-}" = "true" ]; then
-              if [ "$product" = "host" ]; then
-                pkg_name=$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).name)")
-              else
-                pkg_name=$(node -e "console.log(JSON.parse(require('fs').readFileSync('fleet/package.json','utf8')).name)")
-              fi
-              # npa's escapedName, which is what npm puts in this path: the leading "@" stays literal
-              # and only the slash is encoded.
-              esc=${pkg_name//\//%2F}
+              esc="$pkg_esc"
               # Try BOTH audiences, because which one the registry accepts is precisely what is
               # unknown here. npm/cli builds `npm:${hostname}` and publishes with the token minted
               # under it, so that is the one a publish presents; a provenance-style trusted publisher
@@ -405,6 +407,18 @@ jobs:
             if grep -qE 'EPUBLISHCONFLICT|cannot publish over|previously published' "$npm_log"; then
               echo "  cause: ${product} ${version} is already on the registry. A version number cannot" >&2
               echo "         be reused; delete the tag and cut the next one." >&2
+            elif [ "$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+                     "https://registry.npmjs.org/${pkg_esc}" || echo 000)" = "404" ]; then
+              # The comment above says a rejected publisher and a nonexistent package look identical in
+              # npm's log. They do -- but not to the registry, whose package metadata is public. One
+              # request settles which this is, and the Fleet product makes the difference concrete:
+              # @aywengo/mercury-fleet has never been published, so without this a fleet tag sends the
+              # operator to a Trusted Publisher settings page that does not exist, for a package that
+              # does not exist, blaming a credential that was never the problem.
+              echo "  cause: ${pkg_name} does not exist on the registry. It has never been published," >&2
+              echo "         and trusted publishing is configured on the package page, so it cannot be" >&2
+              echo "         set up before the package exists. Publish it once with a token" >&2
+              echo "         (npm publish --access public), then add the trusted publisher." >&2
             elif [ "${npm_auth_mode:-}" = "oidc" ] && grep -qE 'E404|404 Not Found|E401|401 Unauthorized|ENEEDAUTH|Unable to authenticate' "$npm_log"; then
               echo "  cause: the registry refused the OIDC credential. These configurations produce it," >&2
               echo "         and they look identical in the log:" >&2
