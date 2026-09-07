@@ -14,7 +14,8 @@ name: CI
 #     deploy/README.md (`.agents/skills/**/SKILL.md` is the one that surprises people) -> `code`
 #     is true, full dual-Node matrix runs.
 #   - markdown only, all of it inside the denylist, and at least one of the four contract files
-#     (README, QUICKSTART, docs/remote-client-setup.md, deploy/README.md) -> `code` false,
+#     (README, QUICKSTART, docs/remote-client-setup.md, docs/releasing.md, docs/distribution.md,
+#     deploy/README.md) -> `code` false,
 #     `contract_docs` true, so the
 #     cheap `docs-contract` job runs and the matrix is skipped. Those files are pinned by
 #     test/nodeFloor.test.ts and test/deployDocs.test.ts, which is what that job runs.
@@ -86,6 +87,8 @@ jobs:
               - 'README.md'
               - 'QUICKSTART.md'
               - 'docs/remote-client-setup.md'
+              - 'docs/releasing.md'
+              - 'docs/distribution.md'
               - 'deploy/README.md'
 
       - name: Set path-filter outputs
@@ -191,7 +194,7 @@ jobs:
         with:
           node-version: '24.x'
       - name: Docs contract tests
-        run: node --test --test-timeout=180000 test/nodeFloor.test.ts test/deployDocs.test.ts
+        run: node --test --test-timeout=180000 test/nodeFloor.test.ts test/deployDocs.test.ts test/releaseDocs.test.ts
 
   # Always reports a single status so narrative-only PRs are not stuck waiting on skipped required jobs.
   ci:
