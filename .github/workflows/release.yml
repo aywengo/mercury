@@ -175,7 +175,12 @@ jobs:
               # that got as far as signing; every run since presents the ID form, and npm refuses the
               # exchange on all of them. A claim that changes underneath a working configuration and is
               # printed as one line among fifteen is not a diagnostic.
-              if printf '%s' "$id_token" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(Buffer.from(s.split(".")[1],"base64").toString());process.exit(/@[0-9]+/.test(p.sub||"")?0:1)})'; then
+              # base64url, not base64: the claim printer above uses base64url, and a JWT payload is
+              # base64url-encoded. Decoding `-`/`_` as base64 yields garbage, JSON.parse throws, and the
+              # diagnostic prints a Node stack trace into a failed release log instead of a sentence.
+              # The regex is anchored to the repository segment rather than the whole claim: a branch
+              # named feature@123 would otherwise warn about repository IDs that are not present.
+              if printf '%s' "$id_token" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const p=JSON.parse(Buffer.from(String(s.split(".")[1]||""),"base64url").toString());process.exit(/^repo:[^:]*@\d+/.test(p.sub||"")?0:1)}catch{process.exit(1)}})'; then
                 echo "  !! sub carries numeric repository IDs. Third-party registries match on the" >&2
                 echo "     name-only shape; see issue #335 and Settings -> Actions -> General ->" >&2
                 echo "     OIDC subject claim format. This is a diagnostic, not a verdict." >&2

@@ -1243,3 +1243,21 @@ test('a name-only subject claim is not flagged', () => {
     sub: 'repo:aywengo/mercury:ref:refs/tags/host-v0.1.0-rc1' });
   assert.ok(!/sub carries numeric repository IDs/.test(r.stderr), r.stderr.slice(0, 300));
 });
+
+test('a malformed token never warns and never prints a stack trace', () => {
+  // The check decodes a JWT the runner minted. If that ever is not a decodable JWT, the right answer is
+  // silence: a diagnostic that throws hands the operator a Node stack trace in place of the one sentence
+  // they came to read.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], oidc: true, npmToken: '', sub: 'not-a-jwt' });
+  assert.ok(!/sub carries numeric repository IDs/.test(r.stderr), 'must not warn on garbage');
+  assert.ok(!/SyntaxError|at JSON.parse|Traceback|ERR_ASSERTION/.test(r.stderr),
+    'and must not leak a decoder failure into the log: ' + r.stderr.slice(-300));
+});
+
+test('a ref that merely contains @<digits> is not read as repository IDs', () => {
+  // The IDs live in the repository segment (`repo:owner@1/repo@2:...`), not in the ref. Matching the
+  // whole claim would warn on a branch named feature@123 and teach the reader to ignore the warning.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], oidc: true, npmToken: '',
+    sub: 'repo:aywengo/mercury:ref:refs/heads/feature@123' });
+  assert.ok(!/sub carries numeric repository IDs/.test(r.stderr), r.stderr.slice(-300));
+});
