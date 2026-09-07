@@ -198,6 +198,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24.x'
+          cache: npm
       # releaseHygiene spawns the CLI for several of its assertions, so it needs node_modules. It does not
       # need a build: with dependencies present the file is green without dist/, verified locally. The job
       # was written for tests that only read files, and after #356 added releaseHygiene every CLI test in

@@ -104,9 +104,11 @@ before creating any release if neither credential is available.
 Trusted publishing can fail in a way that is not a misconfiguration on this side. The rehearsal's exchange
 probe reports `REFUSED` for this package and for an unrelated control package identically, which means the
 registry is rejecting the token before it looks at any publisher configuration. See issue #335: GitHub now
-mints `sub` with numeric owner and repository IDs for this repository, and GitHub documents **no way back**
-to the name-only shape for a repository created after the cutoff -- renaming or transferring moves *to* the
-immutable format, not away from it.
+mints `sub` with numeric owner and repository IDs for this repository. GitHub's OpenID Connect reference
+documents only an **opt in** to that format, and says renames and transfers also move *toward* it; it
+documents no setting that returns a repository created after the cutoff to the name-only shape. So the
+subject-claim setting below is worth reading, but for this repository it is not a lever that has ever been
+shown to point the other way. Issue #335 carries the evidence and the open question.
 
 **The fallback is a short-lived token, and it does not cost you provenance.** The `host-v0.1.0-rc1` run
 authenticated with `NPM_TOKEN` and still signed and published provenance:
@@ -159,7 +161,9 @@ page (which only exists once the package has been published at least once):
 
   The rehearsal prints `!! sub carries numeric repository IDs` when the ID shape is in use. That is a
   diagnostic, not a verdict -- see issue #335 for what is and is not established. The setting is
-  **Settings -> Actions -> General -> OIDC subject claim format**.
+  **Settings -> Actions -> General -> OIDC subject claim format**, which GitHub documents as an opt **in**
+  to the ID-bearing format; this repository already presents that format, and the reference describes no
+  way back for a repository created after the cutoff.
 - **Direct publishing is opt-in.** `npm stage publish` is always allowed; publishing straight to the
   registry must be enabled per configuration. The repository variable `NPM_DIRECT_PUBLISH=true` tells
   the workflow to publish directly, so it must be matched by that setting or the submit is rejected.
