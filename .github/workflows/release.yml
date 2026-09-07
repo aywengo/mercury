@@ -116,7 +116,11 @@ jobs:
           pkg_esc=${pkg_name//\//%2F}
           if [ -n "$NODE_AUTH_TOKEN" ]; then
             echo "publish auth: NPM_TOKEN"
-            npm_loglevel=normal
+            # npm's accepted set is silent|error|warn|notice|http|info|verbose|silly. `normal` is not in
+            # it: the real 0.1.0-rc1 run logged `npm warn invalid config loglevel="normal" set in command
+            # line options` and ignored the flag, so a token failure arrived with no more detail than
+            # "Unable to authenticate". notice is npm's default and is a valid member of the set.
+            npm_loglevel=notice
             npm_auth_mode=token
           elif [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
             echo "publish auth: OIDC trusted publishing (no repository secret)"

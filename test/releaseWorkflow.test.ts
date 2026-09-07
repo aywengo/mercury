@@ -680,14 +680,16 @@ test('OIDC mode publishes verbosely so npm states why a trusted-publishing confi
   assert.match(r.stdout, new RegExp(SUBMIT + '[^\\n]*--loglevel verbose'), `expected a verbose submission: ${r.stdout}`);
 });
 
-test('a token is preferred over OIDC and publishes at normal log level', () => {
+test('a token is preferred over OIDC and publishes at npm\'s default level', () => {
   // With both available the step must not silently take the newer path: the token is the explicit
   // operator choice, and verbose npm output on every routine token publish buries the lines that
-  // matter.
+  // matter. The level has to be one npm accepts -- the value here used to be `normal`, which npm
+  // rejects with a warning and then ignores, so the flag bought nothing.
   const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmToken: 'npm-placeholder-token', oidc: true });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /publish auth: NPM_TOKEN/, 'the token must win when both are present');
-  assert.match(r.stdout, new RegExp(SUBMIT + '[^\\n]*--loglevel normal'));
+  assert.match(r.stdout, new RegExp(SUBMIT + '[^\\n]*--loglevel notice'));
+  assert.ok(!/invalid config loglevel/.test(r.stdout), 'npm must accept the level it is given');
 });
 
 test('OIDC mode removes the empty project-scope token that setup-node writes', () => {
@@ -1148,4 +1150,19 @@ test('the formula probe targets the repository that is the tap', () => {
     'must not probe the unrelated homebrew-tap repository');
   assert.match(wf, /raw\.githubusercontent\.com\/\$\{GITHUB_REPOSITORY\}\/main\/Formula\/mercury-ai\.rb/,
     'must probe this repository, which is the tap the formula step pushes to');
+});
+
+test('every loglevel passed to npm is one npm accepts', () => {
+  // The 0.1.0-rc1 tag push failed with a bare E401 and no detail, and the reason was in the log two
+  // lines above it: `npm warn invalid config loglevel="normal"`. `normal` is not one of npm's accepted
+  // levels, so the flag that existed to make an auth failure explainable was silently discarded. A
+  // diagnostic whose only failure mode is a warning nobody reads is not a diagnostic.
+  const script = extractReleaseScript();
+  const assigned = [...script.matchAll(/^\s*npm_loglevel=(\S+)\s*$/gm)].map((m) => m[1]);
+  assert.ok(assigned.length >= 2, 'both auth modes must set a level, found: ' + assigned.join(','));
+  const valid = new Set(['silent','error','warn','notice','http','info','verbose','silly']);
+  for (const level of assigned) {
+    assert.ok(valid.has(level), `npm rejects loglevel "${level}"`);
+  }
+  assert.match(script, /--loglevel "\$\{?npm_loglevel\}?/, 'and the level must actually be passed');
 });
