@@ -28,8 +28,9 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    `## [X.Y.Z] - YYYY-MM-DD`.
 3. Add `docs/releases/<product>/X.Y.Z.md` (GitHub Release body).
 4. Open a PR, merge to `main`.
-   **Fleet's first release is the one exception.** `fleet-*` tags publish only to npm, and trusted
-   publishing is configured on the package page, which cannot exist before the package does. So the very
+   **Fleet's first release is the one exception.** The npm package is Fleet's only installable artifact --
+   a Fleet release attaches no bundle and there is no Fleet formula -- and trusted publishing is
+   configured on the package page, which cannot exist before the package does. So the very
    first `@aywengo/mercury-fleet` publish needs a credential; a `fleet-*` tag pushed without one is
    refused up front rather than creating a GitHub Release that ships nothing. Once the package exists the
    tag path needs no secret, and the workflow discovers this by asking the registry, so nothing has to be
@@ -112,7 +113,7 @@ page (which only exists once the package has been published at least once):
   derives that URI from a name-only `sub`. Verify it yourself:
 
   ```bash
-  curl -s "https://rekor.sigstore.dev/api/v1/log/entries?logIndex=2742821710" \
+  curl -fsS --max-time 30 "https://rekor.sigstore.dev/api/v1/log/entries?logIndex=2742821710" \
     | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const e=JSON.parse(s);
       const b=JSON.parse(Buffer.from(e[Object.keys(e)[0]].body,"base64").toString());
       process.stdout.write(Buffer.from(b.spec.signatures[0].verifier,"base64").toString())})' \
