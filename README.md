@@ -106,13 +106,19 @@ Installing with `npm install <git-url>` instead of a clone also works.
 **From npm and Homebrew.** These serve the published artifacts; see
 [Releases](https://github.com/aywengo/mercury/releases) for what is currently
 available. Prereleases are published under a matching dist-tag, so pin one with
-`@aywengo/mercury@rc` rather than expecting an RC to appear under `latest`:
+`@aywengo/mercury@rc`:
 
 ```bash
-npm install -g @aywengo/mercury          # stable
+npm install -g @aywengo/mercury@rc
 brew tap aywengo/mercury https://github.com/aywengo/mercury
 brew install mercury-ai                  # not `mercury`: that is a different project
 ```
+
+Until the first stable release ships, `latest` also points at the prerelease. That is not a
+misconfiguration and it cannot be removed: npm initialises `latest` to the first version ever
+published regardless of the `--tag` used, and refuses to delete the tag afterwards (`400 Bad Request`).
+So `npm install -g @aywengo/mercury` currently installs `0.1.0-rc1`. Pin `@rc` and you get the same
+bytes either way, and you will not be surprised when `0.1.0` replaces it.
 
 There is no CLI-only channel. `mercuryctl` is inside the host package, so any install
 that provides one provides the other.
