@@ -31,7 +31,7 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    **Fleet's first release is the one exception.** The npm package is Fleet's only installable artifact --
    a Fleet release attaches no bundle and there is no Fleet formula -- and trusted publishing is
    configured on the package page, which cannot exist before the package does. So the very
-   first `@aywengo/mercury-fleet` publish needs a credential; a `fleet-*` tag pushed without one is
+   first `@aywengo/mercury-fleet` publish needs a credential; a `fleet-vX.Y.Z` tag pushed without one is
    refused up front rather than creating a GitHub Release that ships nothing. Once the package exists the
    tag path needs no secret, and the workflow discovers this by asking the registry, so nothing has to be
    edited when the bootstrap happens.
