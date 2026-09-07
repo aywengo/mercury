@@ -273,6 +273,20 @@ test('an OIDC submit rejected with 404 names both candidate causes', () => {
   assert.match(out, /workflow filename release\.yml/, 'must name the three things the publisher matches');
 });
 
+test('an OIDC failure does not get the token explanation', () => {
+  // The converse of the test below, and the one missing from the first version of this feature --
+  // which is how an ungated branch survived review. npm's OIDC exchange can surface as ENEEDAUTH, and
+  // without the gate the job then blames NPM_TOKEN on a run that has no token at all.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '',
+    npmFails: true, npmSubmitErr: 'npm error code ENEEDAUTH',
+  });
+  assert.equal(r.status, 1);
+  const out = r.stdout + r.stderr;
+  assert.match(out, /direct publishing is not enabled/, 'OIDC auth errors must get the OIDC explanation');
+  assert.ok(!/NPM_TOKEN is set/.test(out), 'must not blame a secret this run does not have');
+});
+
 test('a token-mode failure does not get the OIDC explanation', () => {
   // The hint is only true of the OIDC path. Printing it under a token would send the operator to a
   // settings page that has nothing to do with the failure.

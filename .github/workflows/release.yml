@@ -268,7 +268,7 @@ jobs:
             if grep -qE 'EPUBLISHCONFLICT|cannot publish over|previously published' "$npm_log"; then
               echo "  cause: ${product} ${version} is already on the registry. A version number cannot" >&2
               echo "         be reused; delete the tag and cut the next one." >&2
-            elif [ "${npm_auth_mode:-}" = "oidc" ] && grep -qE 'E404|404 Not Found|E401|401 Unauthorized' "$npm_log"; then
+            elif [ "${npm_auth_mode:-}" = "oidc" ] && grep -qE 'E404|404 Not Found|E401|401 Unauthorized|ENEEDAUTH|Unable to authenticate' "$npm_log"; then
               echo "  cause: the registry refused the OIDC credential. Two configurations produce this," >&2
               echo "         and they look identical in the log:" >&2
               echo "           1. direct publishing is not enabled for this trusted publisher. npm" >&2
@@ -278,7 +278,7 @@ jobs:
               echo "           2. the publisher does not match this run. It must be owner aywengo," >&2
               echo "              repository mercury, workflow filename release.yml. The claims printed" >&2
               echo "              above carry all three; compare them against the settings page." >&2
-            elif grep -qE 'E401|ENEEDAUTH|Unable to authenticate' "$npm_log"; then
+            elif [ "${npm_auth_mode:-}" = "token" ] && grep -qE 'E401|ENEEDAUTH|Unable to authenticate' "$npm_log"; then
               echo "  cause: the npm credential was rejected. NPM_TOKEN is set but not permitted to" >&2
               echo "         publish, or has expired. This is distinct from having no credential, which" >&2
               echo "         the job refuses earlier, before creating any release." >&2
