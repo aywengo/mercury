@@ -16,7 +16,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { DockerComposeEnvironment, StartedDockerComposeEnvironment, Wait } from 'testcontainers';
-import { COMPOSE_FILE, DIAGNOSTIC_CAP_BYTES, teardownOutcome, E2E_DIR, LIMITS, capBuffer, composeModel, containerStates, deadServiceReport, inspectionCommands, keepOnFail, preflight, serviceLogs, verbose } from './preflight.ts';
+import { COMPOSE_FILE, DIAGNOSTIC_CAP_BYTES, teardownOutcome, E2E_DIR, LIMITS, capBuffer, composeModel, assertServicesAlive, containerStates, inspectionCommands, keepOnFail, preflight, serviceLogs, verbose } from './preflight.ts';
 import { client, pollRun, readSse, TERMINAL, type RunEvent, type RunView } from './helpers.ts';
 
 /**
@@ -224,8 +224,11 @@ async function bringUp(): Promise<void> {
   // `healthy` from the moment its probe first succeeds, and the wait strategy returns on that first
   // `healthy`, so a process that answers the probe and then dies (here: failing to open its database)
   // lets `up()` resolve over a dead container. This re-check runs first so the reason is in the output.
-  const dead = await deadServiceReport(PROJECT, ['api', 'worker']);
-  assert.equal(dead, '', 'a service died during startup; `up()` does not prove liveness:\n' + dead);
+  try {
+    await assertServicesAlive(PROJECT, ['api', 'worker']);
+  } catch (err) {
+    throw new Error(`a service died during startup; \`up()\` does not prove liveness:\n${(err as Error).message}`);
+  }
 
   // Fail here, with the names that DO exist, rather than from every test separately.
   for (const [service, key] of Object.entries(SVC)) {

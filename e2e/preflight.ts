@@ -223,29 +223,65 @@ export async function serviceLogs(project: string, service: string, tail = 60): 
 }
 
 /**
+ * Which of a project's expected services are not running, derived from a container-state map.
+ *
+ * Pure, so the naming rule it encodes is testable without a Docker daemon.
+ *
+ * The rule is deliberately NOT "<service>-1". Compose names containers `<project>-<service>-<index>`,
+ * and a guard that hardcodes index 1 reports "all fine" when `api-1` is up and `api-2` died -- a
+ * silent weakening that only shows up once something is scaled, which is exactly when it matters.
+ * Matching any index also survives a naming change instead of reporting a container that "does not
+ * exist" while the real one dies unreported.
+ */
+export function deadServices(states: Record<string, string>, project: string, services: string[]): string[] {
+  const esc = project.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const problems: string[] = [];
+  for (const service of services) {
+    const pattern = new RegExp(`^${esc}-${service}-\\d+$`);
+    const mine = Object.entries(states).filter(([name]) => pattern.test(name));
+    if (mine.length === 0) {
+      problems.push(`${service}: no container matching ${service}-<n> exists in project ${project}`);
+      continue;
+    }
+    for (const [name, state] of mine.filter(([, st]) => st !== 'running')) problems.push(`${name}: state=${state}`);
+  }
+  return problems;
+}
+
+/**
  * Name every service of a project that is not running, with the log tail that says why.
  *
  * A compose healthcheck can report `healthy` and the process can die immediately afterwards: the API
  * binds its port, answers the probe, then fails while opening the database. Testcontainers' health
  * wait strategy returns the moment it sees `healthy`, so `up()` resolves over a dead service and
- * every later test then fails with ECONNREFUSED instead of the real cause. This is the re-check that
- * closes that window.
+ * every later test then fails with `Cannot get container "api-1" as it is not running` -- repeated
+ * once per test, none of them containing the reason. This is the re-check that closes that window.
  *
  * Resolves to '' when everything is up, so a caller can use it as a guard without a second query.
  */
 export async function deadServiceReport(project: string, services: string[]): Promise<string> {
   const states = await containerStates(project);
-  const problems: string[] = [];
-  for (const service of services) {
-    const name = `${project}-${service}-1`;
-    const state = states[name];
-    if (state === undefined) { problems.push(`${service}: container ${name} does not exist`); continue; }
-    if (state !== 'running') {
-      const logs = capBuffer(Buffer.from(await serviceLogs(project, service))).toString('utf8');
-      problems.push(`${service}: state=${state}\n${logs}`);
-    }
+  const detailed: string[] = [];
+  for (const problem of deadServices(states, project, services)) {
+    // Only a located container has logs to fetch; "no container exists" does not.
+    const named = /^([a-z0-9_-]+): state=/.exec(problem);
+    if (!named) { detailed.push(problem); continue; }
+    const service = named[1].replace(new RegExp(`^${project}-`), '').replace(/-\d+$/, '');
+    const logs = capBuffer(Buffer.from(await serviceLogs(project, service))).toString('utf8');
+    detailed.push(`${problem}\n${logs}`);
   }
-  return problems.join('\n\n');
+  return detailed.join('\n\n');
+}
+
+/**
+ * Throw with the reason if any expected service is not running.
+ *
+ * This is what the startup path calls, so a test of the guard exercises the same function the gate
+ * relies on rather than a helper that merely resembles it.
+ */
+export async function assertServicesAlive(project: string, services: string[]): Promise<void> {
+  const report = await deadServiceReport(project, services);
+  if (report !== '') throw new Error(`service(s) not running in project ${project}:\n${report}`);
 }
 
 /**
