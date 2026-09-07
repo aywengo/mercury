@@ -68,6 +68,7 @@ function runTag(
   tag: string,
   opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
     directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean;
+    pkgHttp?: string;
     npmSubmitErr?: string; exchange?: string; exchangeExit?: number;
     exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
     control2?: string; control2Exit?: number } = {},
@@ -142,7 +143,7 @@ function runTag(
     writeFileSync(curlStub,
       '#!/bin/sh\n'
       + 'url=""\n'
-      + 'for a in "$@"; do case "$a" in http*) url="$a" ;; esac; done\n'
+      + 'for a in "$@"; do case "$a" in http*) url="$a" ;; "%{http_code}") wfmt=1 ;; esac; done\n'
       + 'case "$url" in\n'
       + '  *idToken*) printf \'%s\' "{\\"value\\":\\"${STUB_JWT}\\"}" ;;\n'
       + '  *oidc/token/exchange*)\n'
@@ -162,7 +163,9 @@ function runTag(
       + '      else body="${STUB_EXCHANGE_CONTROL2-${STUB_EXCHANGE_CONTROL-$STUB_EXCHANGE}}"; code="${STUB_EXCHANGE_CONTROL2_EXIT-${STUB_EXCHANGE_CONTROL_EXIT-$STUB_EXCHANGE_EXIT}}"; fi\n'
       + '    fi\n'
       + '    printf "%s" "$body"; exit "$code" ;;\n'
-      + '  *) exit 22 ;;\n'
+      // Package metadata is public, and the failure classifier now reads it to tell a rejected
+      // publisher apart from a package that has never existed. STUB_PKG_HTTP is that answer.
+      + '  *) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_PKG_HTTP:-200}"; exit 0; fi; exit 22 ;;\n'
       + 'esac\nexit 0\n');
     chmodSync(curlStub, 0o755);
 
@@ -209,6 +212,7 @@ function runTag(
           event_name: 'workflow_dispatch', workflow: 'Release' }),
         STUB_EXCHANGE: opts.exchange ?? '',
         STUB_EXCHANGE_EXIT: String(opts.exchangeExit ?? 0),
+        STUB_PKG_HTTP: opts.pkgHttp ?? '200',
         STUB_EXCHANGE_OURS1: opts.exchange ?? '',
         STUB_EXCHANGE_OURS1_EXIT: String(opts.exchangeExit ?? 0),
         STUB_EXCHANGE_OURS2: opts.exchange2 ?? opts.exchange ?? '',
@@ -995,4 +999,36 @@ test('the release step contains no empty-string concatenation on an assignment',
     .map((l) => l.trim())
     .filter((l) => /^[A-Za-z_][A-Za-z0-9_]*=(-?[0-9]+)+""/.test(l));
   assert.deepEqual(offenders, [], 'numeric assignments must not be glued to an empty string');
+});
+
+test('a submit failure for a package that has never existed is named as that', () => {
+  // The workflow used to say a rejected publisher and a nonexistent package are indistinguishable in
+  // npm's log. In the log, true; to the registry, false -- package metadata is public, and one
+  // request turns a wrong diagnosis into the right one. Fleet is the live case:
+  // @aywengo/mercury-fleet has never been published, so a fleet tag would otherwise be told to go
+  // configure a Trusted Publisher on a package page that does not exist.
+  const r = runTag(`fleet-v${V}`, {
+    notes: [`fleet/${V}.md`], oidc: true, npmToken: '',
+    npmFails: true, npmSubmitErr: 'npm error code E404', pkgHttp: '404',
+  });
+  assert.equal(r.status, 1, 'a failed submit still fails the job');
+  const out = r.stdout + r.stderr;
+  assert.match(out, /does not exist on the registry/, 'must name the actual cause');
+  assert.ok(!/the registry refused the OIDC credential/.test(out),
+    'must not blame the credential for a package that was never there');
+  assert.ok(!/Trusted Publisher settings/.test(out),
+    'must not send the operator to settings that cannot exist yet');
+});
+
+test('a refused publisher is still blamed on the credential when the package does exist', () => {
+  // The converse, and the reason the new branch sits ahead of the OIDC one rather than replacing it:
+  // with the package present, a 404 really is an auth-shaped answer.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, directPublish: 'true', npmToken: '',
+    npmFails: true, npmSubmitErr: 'npm error code E404', pkgHttp: '200',
+  });
+  assert.equal(r.status, 1);
+  const out = r.stdout + r.stderr;
+  assert.match(out, /the registry refused the OIDC credential/, 'must keep the credential diagnosis');
+  assert.ok(!/does not exist on the registry/.test(out), 'and must not invent a missing package');
 });
