@@ -19,6 +19,8 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { DockerComposeEnvironment, StartedDockerComposeEnvironment, Wait } from 'testcontainers';
 import { COMPOSE_FILE, E2E_DIR, LIMITS, composeModel, keepOnFail, preflight } from './preflight.ts';
 import { client, pollRun, type RunEvent, type RunView } from './helpers.ts';
@@ -91,13 +93,36 @@ after(async () => {
 });
 
 test('the worker is wired to the repository mock, not to a real agent binary', async () => {
-  // Structural, and it runs first on purpose: if the adapter ever points back at a real `prime-agent`
-  // on PATH, every scenario below would try to reach a provider. Checking the resolved model rather
-  // than the YAML means a future rewrite of the mount or the env anchor cannot slip past.
+  // This runs first on purpose: if the adapter ever points back at a real `prime-agent` on PATH, every
+  // scenario below would try to reach a provider.
+  //
+  // It asserts the WIRING, not a nearby structural fact. An earlier version of this test checked only
+  // that the worker publishes no port -- which stayed green through the exact defect this file exists
+  // to prevent, because pointing MERCURY_PRIMEAGENT_CMD back at the node binary changes nothing about
+  // ports. A guard that cannot fail for the bug it names is not a guard.
   const model = await composeModel();
   const worker = model.services.worker;
   assert.ok(worker, 'worker service missing');
+  const env = (worker as unknown as { environment?: Record<string, string | number | null> }).environment ?? {};
+  const cmd = String(env.MERCURY_PRIMEAGENT_CMD ?? '');
+
+  assert.ok(cmd.endsWith('/test/fixtures/mock-prime-agent-rpc.mjs'),
+    `the gate must run the repository mock, got MERCURY_PRIMEAGENT_CMD="${cmd}"`);
+  // The defect itself, named: the adapter prepends `--mode rpc`, which is prime-agent's CLI and not
+  // Node's, so an interpreter here dies with "node: bad option: --mode" (exit 9).
+  assert.ok(!/(^|\/)(node|npm|npx|sh|bash)$/.test(cmd),
+    `MERCURY_PRIMEAGENT_CMD must be the command itself, not an interpreter that receives --mode rpc: "${cmd}"`);
+  assert.ok(!('MERCURY_PRIMEAGENT_ARGS' in env),
+    'the fixture must not be passed as an argument to an interpreter; that is how the exit-9 wiring happened');
   assert.ok(!worker.ports || worker.ports.length === 0, 'the worker must publish no port');
+
+  // Why the fixture can be the command at all: it is executable and carries a node shebang, so the
+  // adapter's `--mode rpc` prefix lands in its argv and is ignored, exactly as in the adapter's unit
+  // tests. Without both properties the wiring above would be wrong in a different way.
+  const fixture = readFileSync(join(E2E_DIR, '..', 'test', 'fixtures', 'mock-prime-agent-rpc.mjs'), 'utf8');
+  assert.match(fixture.split('\n')[0], /^#!\/usr\/bin\/env node/, 'the fixture needs a node shebang to be a command');
+  const mode = statSync(join(E2E_DIR, '..', 'test', 'fixtures', 'mock-prime-agent-rpc.mjs')).mode;
+  assert.ok(mode & 0o111, 'the fixture must be executable to be spawned directly');
 });
 
 test('a primeagent Run reaches NEEDS_INPUT and the answer reaches the subprocess', async () => {
@@ -149,6 +174,9 @@ test('the mock subprocess is gone once the Run is terminal', async () => {
       'pid=$(cat /state/mock.pid 2>/dev/null || echo ""); '
       + 'if [ -z "$pid" ]; then echo NOPID; exit 0; fi; '
       + 'if [ -r /proc/$pid/cmdline ]; then tr "\\0" " " < /proc/$pid/cmdline; else echo GONE; fi']);
+    // A failed exec must not read as "the process is gone": `docker compose exec` prints its own
+    // error and exits non-zero, and treating that as GONE would pass whenever the worker is unhealthy.
+    assert.equal(probe.code, 0, `could not inspect the worker container (exit ${probe.code}): ${probe.out.trim()}`);
     const out = probe.out.trim();
     // NOPID is a FAILURE, not a pass. The fixture writes this file unconditionally at startup, so an
     // absent file means the subprocess never ran -- and a test that accepted it would report "the

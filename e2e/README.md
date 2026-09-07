@@ -55,6 +55,17 @@ suite.
 A running Docker (or Podman) daemon with Compose v2. If it is missing, the gate says so during
 preflight rather than failing a scenario.
 
+### `MERCURY_E2E_MOCK_RPC_MODE`
+
+`compose.yml` sets the mock RPC fixture's behaviour from this variable, defaulting to `happy`. Each
+suite pins its own value through Testcontainers rather than inheriting the shell, so exporting it in
+your environment changes nothing: `system.test.ts` pins `happy` and `mock-rpc.test.ts` pins `input`.
+Set it by hand only when driving `docker compose` directly, e.g.
+
+```bash
+MERCURY_E2E_MOCK_RPC_MODE=input docker compose -f e2e/compose.yml up worker
+```
+
 No `sqlite3` binary on the host. The client helpers used to shell out to it, which made the suite
 pass on macOS and CI and fail in any slim container; they use `node:sqlite` now (issue #290).
 
