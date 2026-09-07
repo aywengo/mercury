@@ -75,3 +75,26 @@ test('the runbooks do not give Fleet an artifact it does not have', () => {
     }
   }
 });
+
+test('the runbook tag annotation matches the release title the workflow creates', () => {
+  // The workflow titles releases "Mercury host v..." and "Mercury Fleet v..." -- host lowercase, Fleet
+  // capitalised, because that is what shipped in rc1 and a release title is user-visible history. A
+  // runbook snippet that interpolates the raw product name produces "Mercury fleet", which reads as a
+  // different product. The runbook is copy-pasted at the moment of highest stakes, so it has to produce
+  // the same string, and the check reads both sides rather than restating either.
+  const wf = read(WORKFLOW);
+  const titles = [...wf.matchAll(/title="Mercury (\S+) v\$\{version\}"/g)].map((m) => m[1]);
+  assert.deepEqual(titles.sort(), ['Fleet', 'host'], 'the workflow titles both products; update this test if that changes');
+
+  const runbook = read('docs/releasing.md');
+  const block = (runbook.match(/```bash\n([\s\S]*?git push origin[\s\S]*?)```/) ?? [])[1];
+  assert.ok(block, 'the tag snippet must be present in the runbook');
+  for (const display of titles) {
+    assert.ok(
+      block.includes(display),
+      `the tag snippet must produce the display name "${display}" that the workflow uses`,
+    );
+  }
+  assert.ok(!/-m "Mercury \$\{product\}/.test(block),
+    'and must not interpolate the raw product name, which lowercases Fleet');
+});

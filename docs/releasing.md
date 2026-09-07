@@ -80,7 +80,8 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
 
    ```bash
    product=host    # or: fleet
-   git tag -a "${product}-vX.Y.Z" -m "Mercury ${product} vX.Y.Z"
+   display=$([ "$product" = fleet ] && echo Fleet || echo host)
+   git tag -a "${product}-vX.Y.Z" -m "Mercury ${display} vX.Y.Z"
    git push origin "${product}-vX.Y.Z"
    ```
 
