@@ -129,6 +129,11 @@ export interface ComposeService {
   volumes?: ComposeMount[];
   ports?: ComposePort[] | null;
   user?: string | null;
+  /** Compose normalises `restart: "no"` here; a one-shot must never restart. */
+  restart?: string | null;
+  /** The resolved command. Compose keeps a list as a list and folds a string into one. */
+  command?: string[] | string | null;
+  healthcheck?: { test?: string[] | string | null } | null;
 }
 
 export interface ComposeModel {

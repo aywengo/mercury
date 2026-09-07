@@ -29,6 +29,29 @@ x-state-volume: &state-volume
   - mercury-e2e-state:/state
 
 services:
+  # One-shot: proves the copied checkout is installable and passes the existing local
+  # quality gate, using the SAME image the system stack runs -- so a dependency or a
+  # build that only works on one developer's machine fails here instead of in CI.
+  #
+  # Deliberately mounts no volume and starts no Mercury process: it verifies the
+  # checkout, not the runtime. `prepr` runs it alone in a short-lived project and tears
+  # it down before the system stack starts, so a typecheck failure never pays for
+  # containers it will not use.
+  verify:
+    image: mercury-e2e:local
+    restart: "no"
+    command:
+      - sh
+      - -ec
+      - |
+        set -eu
+        echo "verify: node $$(node --version), npm $$(npm --version)"
+        echo "verify: typecheck"
+        npm run typecheck
+        echo "verify: existing test suites"
+        npm test
+        echo "verify: ok"
+
   # One-shot: creates the disposable Git repository the worker checks out. API and
   # worker start only after it exits zero.
   fixture:

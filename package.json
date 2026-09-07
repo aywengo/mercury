@@ -46,7 +46,8 @@
     "test:client": "node --test --test-timeout=180000 'client/test/*.test.ts'",
     "fleet": "node fleet/cli.ts",
     "test:e2e": "node --test --test-timeout=900000 'e2e/*.test.ts'",
-    "test:e2e:config": "docker compose -f e2e/compose.yml config --quiet"
+    "test:e2e:config": "docker compose -f e2e/compose.yml config --quiet",
+    "prepr": "node e2e/prepr.ts"
   },
   "dependencies": {
     "express": "^4.21.2"

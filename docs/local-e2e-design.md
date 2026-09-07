@@ -1,12 +1,13 @@
 # Local pre-PR end-to-end testing
 
-Status: **Phases 1-2 implemented** (foundation + fake-agent system journey). Phases 0-2 are
-shipped; Phases 3-8 below are still design. See section 17 for the per-phase state.
+Status: **Phases 1-3 implemented** (foundation + fake-agent system journey + the full pre-PR gate).
+Phases 0-3 are shipped; Phases 4-8 below are still design. See section 17 for the per-phase state.
 
 Implemented so far: `e2e/Dockerfile`, `e2e/compose.yml`, `e2e/preflight.ts`, `e2e/helpers.ts`,
-`e2e/system.test.ts`, `e2e/README.md`, `.dockerignore`, and the `test:e2e` / `test:e2e:config`
-scripts. `npm run prepr` does not exist yet -- that is Phase 3. The mock-RPC human-input journey is
-Phase 4 and is not implemented.
+`e2e/helpers.test.ts`, `e2e/prepr.ts`, `e2e/prepr.test.ts`, `e2e/system.test.ts`, `e2e/README.md`,
+`.dockerignore`, and the `prepr` / `test:e2e` / `test:e2e:config` scripts. `npm run prepr` runs the
+whole local gate -- image build, then typecheck and the existing suites inside that image, then the
+system journey. The mock-RPC human-input journey is Phase 4 and is not implemented.
 
 This document designs a local end-to-end test gate for Mercury. The gate runs on a
 developer workstation before a pull request is opened. It is deliberately separate
@@ -1072,7 +1073,7 @@ Two acceptance items needed notes against the wording above:
   sequence 0, which then looks like a sequence violation. Frames without a numeric `sequence` are
   skipped.
 
-### Phase 3 — full pre-PR gate
+### Phase 3 — full pre-PR gate — **DONE**
 
 Deliverables:
 
@@ -1091,6 +1092,32 @@ Acceptance gate:
 - E2E remains outside `npm test` and CI.
 
 Recommended PR boundary: local developer workflow and documentation.
+
+Notes against the wording above:
+
+- **"a failure returns the failing stage's non-zero status"** is decided by a pure `exitCodeFor()`
+  rather than inline in the run loop, so the rule is testable without starting containers. A gate that
+  flattens every failure to 1, or that reports success after a stage said no, is worse than no gate --
+  it reads as a pass. A killed stage reports 124 rather than its signal-derived code, so a caller can
+  tell "the tool said no" from "the tool never answered".
+- **"no stage is unbounded"** is asserted over the exported `STAGES` array: every stage must carry a
+  finite positive deadline. Deadlines are 15-20 minutes against measured costs of seconds to ~2
+  minutes, because they exist to catch a hang, not to police a slow machine.
+- **"Docker build cache invalidates when package manifests change"** is guarded two ways. A test
+  asserts the Dockerfile's instruction order (manifest copy -> `npm ci` -> source copy), which is the
+  property itself. The behaviour was also measured in both directions: a source-only edit leaves
+  `RUN npm ci` `CACHED` and rebuilds in 7s, while a manifest edit busts the layer and reinstalls.
+- The `verify` stage paid for itself before it was merged. Running the existing suites inside the
+  image surfaced **12 failures that passed on macOS and in CI**: the client test helpers shelled out
+  to the `sqlite3` CLI, a binary the repository never declared and that a slim image does not have.
+  Every failure message ended in the word "undefined", because the helper reported the CLI's stderr
+  and there was no CLI. Fixed in issue #290 by moving onto `node:sqlite`, the driver the product
+  already uses. This is the class of defect the stage exists to find: nothing in an in-process test
+  can notice that the environment happens to provide a program.
+
+One environment note for macOS contributors: under a non-interactive session, `docker compose build`
+can fail while booting BuildKit because Docker Desktop reaches for the login keychain to resolve
+registry credentials -- including for its own BuildKit image. It is recorded in `e2e/README.md`.
 
 ### Phase 4 — mock PrimeAgent RPC journey
 
