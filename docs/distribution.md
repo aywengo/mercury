@@ -295,6 +295,11 @@ Still not observed:
   `NPM_DIRECT_PUBLISH` is set, so the two must agree. The setting cannot be read without publish
   rights, so a mismatch surfaces only on a real release -- which the job now names as a candidate
   cause rather than leaving as a bare 404.
+- **Whether the credential npm issues may be spent on a direct publish.** The rehearsal now performs
+  the exchange and so does establish that npm trusts this repository and workflow for this package --
+  `ACCEPTED` or `REFUSED` in the log, no tag required. It does not establish what the resulting
+  credential is allowed to do. A token minted for staging and a token minted for publishing look
+  identical from here, and spending one to find out is the release itself.
 
 ## Decisions
 

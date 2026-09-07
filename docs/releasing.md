@@ -48,9 +48,17 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    Homebrew bundle, the OIDC exchange, and the real `npm publish` pack -- then stops short of the three
    things that touch the outside world: `npm publish`, `gh release create`, and the formula push. It
    takes no input and cannot publish; the mode is derived from the event name, so a tag push is never a
-   rehearsal and a rehearsal is never a release. The log prints the OIDC claims npm will match the run
-   against, which is the only way to see a trusted-publishing mismatch: npm reports one as an opaque
-   registry 404 with no reason.
+   rehearsal and a rehearsal is never a release.
+
+   The OIDC part is the reason to run it before tagging rather than after. The log prints the claims npm
+   matches the run against, and then performs the exchange npm itself performs -- the POST to
+   `/-/npm/v1/oidc/token/exchange/package/<name>` that turns the id token into a short-lived publish
+   credential -- and reports `ACCEPTED`, `REFUSED` or `INCONCLUSIVE`. A refusal fails the rehearsal,
+   because a real release would die on the same call. This matters because `npm publish --dry-run` does
+   not authenticate: before the exchange was probed, a green rehearsal said nothing whatever about
+   whether npm trusts the workflow, which is the one thing a release candidate most often gets wrong.
+   npm reports a trusted-publishing mismatch as an opaque registry 404 with no reason, so the exchange
+   result and the claims are the only way to see the cause without burning a version number.
 
 6. [`.github/workflows/release.yml`](../.github/workflows/release.yml) creates the GitHub Release from
    the notes file for that tag and publishes to npm with provenance. It handles `host` and `fleet` tags
