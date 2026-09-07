@@ -128,21 +128,22 @@ jobs:
             # reason -- so the decoded token is the only way to see a cause without pushing a real tag
             # and finding out.
             #
-            # Read these claims for what they actually contain. A GitHub trusted publisher is keyed on
-            # owner + repository + WORKFLOW FILENAME, but the id-token has no filename claim: the
-            # `workflow` claim below is the workflow's display NAME (`name:` in the file), not
-            # `release.yml`. So the claims can confirm the owner and repository npm will match, and
-            # cannot confirm the filename. A wrong filename still fails as a 404 with nothing in this
-            # log pointing at it.
+            # A GitHub trusted publisher is keyed on owner + repository + workflow filename, so print
+            # the claim that carries each. `workflow` is the workflow's display NAME (`name:` in this
+            # file), which npm does NOT match; the filename lives in `job_workflow_ref`, shaped like
+            # `aywengo/mercury/.github/workflows/release.yml@refs/heads/main`. Printing only a
+            # selected subset is what produced the claim here that no claim carried the filename at
+            # all -- the key was missing from the list, which is not the same as it not existing.
             id_json=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
               "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://registry.npmjs.org" || echo "")
             id_token=$(node -e 'try{console.log(JSON.parse(process.argv[1]).value||"")}catch{console.log("")}' "$id_json")
             if [ -n "$id_token" ]; then
               node -e 'const c=JSON.parse(Buffer.from(process.argv[1].split(".")[1],"base64url").toString());
-                for (const k of ["sub","aud","ref","ref_type","repository","repository_owner","workflow","event_name"])
+                for (const k of ["sub","aud","ref","ref_type","repository","repository_owner","workflow",
+                                 "job_workflow_ref","event_name"])
                   console.log(`  oidc ${k} = ${c[k]}`)' "$id_token"
-              echo "  note: 'workflow' above is the workflow NAME, not the filename; npm matches"
-              echo "        release.yml, and no claim here carries it"
+              echo "  npm matches repository_owner + repository + the filename inside job_workflow_ref;"
+              echo "  'workflow' above is the display name and is not matched"
             else
               echo "  the runner refused to mint an id token; npm cannot authenticate via OIDC" >&2
             fi

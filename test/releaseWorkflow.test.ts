@@ -255,6 +255,25 @@ test('a matching host tag still publishes, so the guards did not over-tighten', 
   assert.match(r.stdout, new RegExp(SUBMIT + ' --access public --provenance'), 'host must submit to npm');
 });
 
+test('the OIDC diagnostic prints the claim npm actually matches', () => {
+  // A trusted publisher is keyed on owner + repository + workflow filename. The filename is not in
+  // `workflow` (that is the display name) -- it is in `job_workflow_ref`. A first version of this
+  // diagnostic printed a hand-picked list of claims that omitted it, and from that omission the
+  // conclusion was drawn that no claim carried the filename at all. A diagnostic that cannot see the
+  // field it is meant to explain is worse than none, because it invites a confident wrong answer.
+  const script = extractReleaseScript();
+  // Scope to the key list itself. A first version matched `job_workflow_ref` anywhere in the step and
+  // survived a mutation that removed it from the printed list, because the word also appears in the
+  // comment above -- the guard passed on prose while the diagnostic had regressed.
+  const keyList = script.match(/for \(const k of \[([\s\S]*?)\]\)/);
+  assert.ok(keyList, 'could not find the OIDC claim key list; the probe shape changed');
+  const keys = keyList[1].split(',').map((k) => k.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+  for (const needed of ['job_workflow_ref', 'repository_owner', 'repository']) {
+    assert.ok(keys.includes(needed),
+      `the claims probe must print ${needed}; got ${JSON.stringify(keys)}`);
+  }
+});
+
 test('a dispatch rehearsal submits nothing, releases nothing and pushes nothing', () => {
   // The rehearsal exists because this workflow failed three times and every diagnosis cost a real tag
   // push. That only pays off if a rehearsal provably cannot publish, so assert the absence of all
