@@ -1166,3 +1166,19 @@ test('every loglevel passed to npm is one npm accepts', () => {
   }
   assert.match(script, /--loglevel "\$\{?npm_loglevel\}?/, 'and the level must actually be passed');
 });
+
+test('the exchange probe sends the same request shape npm sends', () => {
+  // The probe exists to answer "would a real publish authenticate", so it is only evidence while it
+  // matches what npm/cli actually does. npm/cli posts to /-/npm/v1/oidc/token/exchange/package/<escaped>
+  // with audience `npm:<host>`, presents the id_token as the bearer credential, and npm-registry-fetch
+  // sets `content-type: application/json` on every JSON request -- body or no body. A probe that omits
+  // one of those can be refused for its own shape rather than for anything about this repository's
+  // trust, which is precisely how a wrong conclusion got published twice already.
+  const script = extractReleaseScript();
+  assert.match(script, /-\/npm\/v1\/oidc\/token\/exchange\/package\//, 'same path as npm/cli');
+  assert.match(script, /audience=\$\{aud\}/, 'audience is appended to the runner request');
+  assert.match(script, /for aud in npm:registry\.npmjs\.org/, 'audience is npm:<host>');
+  assert.match(script, /-H "Authorization: bearer \$\{aud_token\}"/, 'the id_token is the credential');
+  assert.match(script, /-H "content-type: application\/json"/, 'npm-registry-fetch always sets it');
+  assert.match(script, /-H "Accept: application\/json"/, 'and expects JSON back');
+});
