@@ -20,10 +20,15 @@ x-mercury-env: &mercury-env
   MERCURY_API_TOKENS: tok-alice:alice,tok-bob:bob
   MERCURY_POLL_MS: "50"
   MERCURY_LOG_LEVEL: info
-  # The default gate performs no LLM call. The PrimeAgent adapter is wired to the
-  # repository's own mock RPC fixture, which speaks the real JSONL protocol.
-  MERCURY_PRIMEAGENT_CMD: /usr/local/bin/node
-  MERCURY_PRIMEAGENT_ARGS: /app/test/fixtures/mock-prime-agent-rpc.mjs
+  # The default gate performs no LLM call. The PrimeAgent adapter is wired to the repository's own
+  # mock RPC fixture, which speaks the real JSONL protocol.
+  #
+  # The fixture is the COMMAND, not an argument to node. The adapter always spawns
+  # `<cmd> --mode rpc <args...>`, and `--mode rpc` belongs to prime-agent's CLI, not to Node's --
+  # pointing cmd at the node binary produced `node --mode rpc <script>`, which dies immediately with
+  # `node: bad option: --mode` (exit 9). The fixture is executable and carries a node shebang, so it
+  # takes those flags as its own argv and ignores them, exactly as the adapter's unit tests do.
+  MERCURY_PRIMEAGENT_CMD: /app/test/fixtures/mock-prime-agent-rpc.mjs
 
 x-state-volume: &state-volume
   - mercury-e2e-state:/state
@@ -106,7 +111,16 @@ services:
     image: mercury-e2e:local
     restart: "no"
     command: ["node", "src/cli.ts", "worker"]
-    environment: *mercury-env
+    environment:
+      <<: *mercury-env
+      # The mock RPC fixture's behaviour is set per STACK rather than baked in, so the deterministic
+      # journey and the human-input journey share one compose file without fighting over the
+      # adapter. Default `happy` keeps the existing behaviour for every stack that does not ask.
+      MOCK_RPC_MODE: ${MERCURY_E2E_MOCK_RPC_MODE:-happy}
+      # The fixture records its own pid and the MERCURY_* slice of its environment, which is how the
+      # mock-RPC journey asserts the subprocess actually died instead of trusting the adapter.
+      MOCK_RPC_PID_FILE: /state/mock.pid
+      MOCK_RPC_ENV_FILE: /state/mock-env.json
     volumes: *state-volume
     depends_on:
       fixture:

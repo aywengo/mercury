@@ -15,6 +15,7 @@ implementation; the design document stays authoritative for intent and trade-off
 | `helpers.test.ts` | Control-flow tests for the above against a stub HTTP server. Needs no Docker daemon. |
 | `prepr.ts` | The one-command pre-PR gate: build, verify, e2e -- each under its own deadline. |
 | `prepr.test.ts` | Guards on the gate itself: bounded stages, propagated status, image layer order, and staying out of CI. |
+| `mock-rpc.test.ts` | The human-input journey: a `primeagent` Run parked on `NEEDS_INPUT`, answered through the public API, against the repository's mock RPC fixture. |
 
 ## Commands
 
@@ -99,5 +100,5 @@ status it saw, and points at the logs.
 
 ## Status
 
-Phases 1-3 of the design. Not implemented: the mock-RPC human-input journey (Phase 4) and the
-robustness hardening of Phase 5. Nothing here is wired into CI.
+Phases 1-4 of the design. Not implemented: the robustness hardening of Phase 5 and the opt-in tiers
+above it. Nothing here is wired into CI.
