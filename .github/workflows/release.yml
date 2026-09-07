@@ -235,7 +235,15 @@ jobs:
                 # did. node prints only a one-line description; bash owns the log line, so the
                 # operator sees it instead of having it captured into a variable.
                 for probe_pkg in "$esc" left-pad; do
+                  # The request shape mirrors npm/cli exactly: same path, same audience, the id_token as
+                  # the bearer credential, and -- the part that was missing -- the same content type.
+                  # npm-registry-fetch sets `content-type: application/json` on every JSON request even
+                  # when there is no body, and a registry that routes on it answers a bare POST
+                  # differently. The probe refused for this package and for left-pad identically; until
+                  # the request actually matches the one npm sends, that refusal cannot be attributed to
+                  # npm at all.
                   exchange=$(curl -sS --max-time 30 -X POST -H "Accept: application/json" \
+                    -H "content-type: application/json" \
                     -H "Authorization: bearer ${aud_token}" \
                     "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${probe_pkg}" || echo "")
                   rc=0
