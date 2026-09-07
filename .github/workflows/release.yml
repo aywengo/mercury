@@ -248,21 +248,31 @@ jobs:
               done
               if [ "$accepted" = "1" ]; then
                 echo "  => npm trusts this workflow for ${pkg_name}; a real publish would authenticate"
-              elif [ "$evidence" = "1" ]; then
-                echo "  => every audience that answered refused for ${pkg_name}." >&2
-                if [ "$ours" = "$control" ]; then
-                  echo "     An unrelated package got byte-identical treatment, so this answer" >&2
-                  echo "     distinguishes nothing: it is what the registry says to a token it will" >&2
-                  echo "     not exchange. It does NOT establish that a trusted publisher is missing" >&2
-                  echo "     or misconfigured." >&2
-                else
-                  echo "     An unrelated package got a different answer, so the registry does" >&2
-                  echo "     distinguish. A configuration for ${pkg_name} is being evaluated and does" >&2
-                  echo "     not match this run. Check, in order: the workflow filename entered as a" >&2
-                  echo "     bare name (release.yml, not a path), the user and repository fields, and" >&2
-                  echo "     any Environment name, which must equal the job's environment." >&2
-                fi
+              elif [ "$evidence" = "1" ] && [ "$ours" != "$control" ]; then
+                # Only now is there evidence. The registry answered two different questions with two
+                # different answers, so a configuration for this package is being evaluated and does
+                # not match this run -- which is also what a real publish would die on.
+                echo "  => every audience that answered refused for ${pkg_name}, and an unrelated" >&2
+                echo "     package got a different answer. The registry does distinguish these" >&2
+                echo "     cases, so a configuration for ${pkg_name} is being evaluated and does not" >&2
+                echo "     match this run. Check, in order: the workflow filename entered as a bare" >&2
+                echo "     name (release.yml, not a path), the user and repository fields, and any" >&2
+                echo "     Environment name, which must equal the job's environment." >&2
                 exit 1
+              elif [ "$evidence" = "1" ]; then
+                # Observed, not theorised: the very first rehearsal with a control got a byte-identical
+                # refusal for `left-pad`, a package with no connection to this repository and no
+                # trusted publisher of any kind. So this refusal is what the registry says to a token
+                # it will not exchange, from anywhere, and it says nothing about whether a publish
+                # would authenticate.
+                #
+                # It therefore must not fail the run. A check that is red for every run is a check that
+                # gets ignored, and the ignoring is what costs: the day it turns red for a real reason
+                # looks exactly like every day it was red for no reason.
+                echo "  => refused for ${pkg_name}, and refused identically for an unrelated package."
+                echo "     This exchange says nothing about whether a real publish would"
+                echo "     authenticate, so the rehearsal continues. It is a diagnostic, not a gate."
+                echo "     The only thing that settles npm's trust is the publish itself." 
               else
                 echo "  => nothing answered with JSON; nothing learned about the trust configuration"
               fi

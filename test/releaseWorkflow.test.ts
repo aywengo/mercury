@@ -824,6 +824,7 @@ test('a refused exchange fails the rehearsal and quotes npm', () => {
   const r = runTag(`host-v${V}`, {
     notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
     exchange: JSON.stringify({ message: 'this package has no trusted publishing configuration' }),
+    control: JSON.stringify({ message: 'unrelated package answered differently' }),
   });
   assert.equal(r.status, 1, 'a refusal must fail the rehearsal');
   const out = r.stdout + r.stderr;
@@ -888,15 +889,16 @@ test('one audience accepted and the other refused still passes the rehearsal', (
   assert.match(out, /npm trusts this workflow/, 'and the conclusion the operator acts on');
 });
 
-test('both audiences refused fails the rehearsal', () => {
+test('a refusal the control does not share fails the rehearsal', () => {
   const r = runTag(`host-v${V}`, {
     notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
     exchange: JSON.stringify({ message: 'unauthorized' }),
+    control: JSON.stringify({ message: 'a different answer entirely' }),
   });
-  assert.equal(r.status, 1, 'a refusal on every audience that answered must fail the rehearsal');
+  assert.equal(r.status, 1, 'a refusal the control does not share must fail the rehearsal');
   const out = r.stdout + r.stderr;
-  assert.match(out, /every audience that answered refused/, 'must state the aggregate, not one line');
-  assert.match(out, /distinguishes nothing/, 'and must not blame a setting it cannot distinguish');
+  assert.match(out, /The registry does distinguish/, 'must say the answers differ');
+  assert.match(out, /bare\s+name/, 'and name the field most often entered wrong');
 });
 
 test('every curl in the release step is bounded', () => {
@@ -922,11 +924,16 @@ test('an identical answer for an unrelated package is reported as distinguishing
     notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
     exchange: JSON.stringify({ message: 'OIDC token exchange error - unauthorized' }),
   });
-  assert.equal(r.status, 1);
+  // This is what the registry actually returns today, for our package and for `left-pad` alike. A
+  // rehearsal that fails on it is red on every run, and a check that is always red is a check people
+  // stop reading -- which costs exactly the run where it means something.
+  assert.equal(r.status, 0, 'a refusal the control shares must not fail the rehearsal');
   const out = r.stdout + r.stderr;
   assert.match(out, /left-pad: REFUSED -- OIDC token exchange error - unauthorized/,
     'the control package must be probed and shown');
-  assert.match(out, /distinguishes nothing/, 'an identical answer must be labelled as no evidence');
+  assert.match(out, /says nothing about whether a real publish would/,
+    'an identical answer must be labelled as no evidence');
+  assert.match(out, /diagnostic, not a gate/, 'and must say so in the terms the operator acts on');
 });
 
 test('a different answer for the control package means the configuration is being evaluated', () => {
@@ -939,6 +946,6 @@ test('a different answer for the control package means the configuration is bein
   });
   assert.equal(r.status, 1);
   const out = r.stdout + r.stderr;
-  assert.match(out, /the registry does/, 'must conclude that the answers differ');
-  assert.match(out, /bare name/, 'must name the field most often entered wrong');
+  assert.match(out, /The registry does distinguish/, 'must conclude that the answers differ');
+  assert.match(out, /bare\s+name/, 'must name the field most often entered wrong');
 });
