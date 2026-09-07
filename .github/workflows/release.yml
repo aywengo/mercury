@@ -269,15 +269,21 @@ jobs:
               echo "  cause: ${product} ${version} is already on the registry. A version number cannot" >&2
               echo "         be reused; delete the tag and cut the next one." >&2
             elif [ "${npm_auth_mode:-}" = "oidc" ] && grep -qE 'E404|404 Not Found|E401|401 Unauthorized|ENEEDAUTH|Unable to authenticate' "$npm_log"; then
-              echo "  cause: the registry refused the OIDC credential. Two configurations produce this," >&2
+              echo "  cause: the registry refused the OIDC credential. These configurations produce it," >&2
               echo "         and they look identical in the log:" >&2
-              echo "           1. direct publishing is not enabled for this trusted publisher. npm" >&2
-              echo "              always allows 'npm stage publish'; direct 'npm publish' is opt-in, and" >&2
-              echo "              this run chose direct because NPM_DIRECT_PUBLISH is set. Either enable" >&2
-              echo "              it on the package's Trusted Publisher settings, or unset the variable." >&2
-              echo "           2. the publisher does not match this run. It must be owner aywengo," >&2
-              echo "              repository mercury, workflow filename release.yml. The claims printed" >&2
-              echo "              above carry all three; compare them against the settings page." >&2
+              if [ "$npm_verb" = "publish" ]; then
+                echo "           1. direct publishing is not enabled for this trusted publisher. npm" >&2
+                echo "              always allows 'npm stage publish'; direct 'npm publish' is opt-in," >&2
+                echo "              and this run asked for direct because NPM_DIRECT_PUBLISH is set." >&2
+                echo "              Either enable it on the package's Trusted Publisher settings, or" >&2
+                echo "              unset the variable to stage instead." >&2
+              else
+                echo "           1. this run staged rather than published, so direct publishing is not" >&2
+                echo "              the issue; the publisher itself was refused." >&2
+              fi
+              echo "           - the publisher does not match this run. It must be owner aywengo," >&2
+              echo "             repository mercury, workflow filename release.yml. The claims printed" >&2
+              echo "             above carry all three; compare them against the settings page." >&2
             elif [ "${npm_auth_mode:-}" = "token" ] && grep -qE 'E401|ENEEDAUTH|Unable to authenticate' "$npm_log"; then
               echo "  cause: the npm credential was rejected. NPM_TOKEN is set but not permitted to" >&2
               echo "         publish, or has expired. This is distinct from having no credential, which" >&2

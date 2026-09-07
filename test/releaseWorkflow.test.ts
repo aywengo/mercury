@@ -269,8 +269,11 @@ test('an OIDC submit rejected with 404 names both candidate causes', () => {
   });
   assert.equal(r.status, 1, 'a failed submit must still fail the job');
   const out = r.stdout + r.stderr;
-  assert.match(out, /direct publishing is not enabled/, 'must name the stage-only setting');
+  // Match the stable header, not one candidate cause: the wording under it is exactly the part that
+  // has to change when the run stages instead of publishing.
+  assert.match(out, /cause: the registry refused the OIDC credential/, 'must identify the auth failure');
   assert.match(out, /workflow filename release\.yml/, 'must name the three things the publisher matches');
+  assert.match(out, /direct publishing is not enabled/, 'a direct-publish run must get that candidate');
 });
 
 test('an OIDC failure does not get the token explanation', () => {
@@ -283,7 +286,7 @@ test('an OIDC failure does not get the token explanation', () => {
   });
   assert.equal(r.status, 1);
   const out = r.stdout + r.stderr;
-  assert.match(out, /direct publishing is not enabled/, 'OIDC auth errors must get the OIDC explanation');
+  assert.match(out, /cause: the registry refused the OIDC credential/, 'OIDC auth errors get the OIDC explanation');
   assert.ok(!/NPM_TOKEN is set/.test(out), 'must not blame a secret this run does not have');
 });
 
@@ -294,6 +297,22 @@ test('a token-mode failure does not get the OIDC explanation', () => {
   assert.equal(r.status, 1);
   assert.ok(!/direct publishing is not enabled/.test(r.stdout + r.stderr),
     'the OIDC hint must not appear when a token was used');
+});
+
+test('a staging run is not told to unset NPM_DIRECT_PUBLISH', () => {
+  // The hint used to assert, unconditionally, that this run chose direct publishing. When the
+  // repository variable is unset the run stages, and the advice sends the operator to a variable that
+  // is not in effect -- the same class of overstatement this repo keeps removing from its docs.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '',
+    npmFails: true, npmSubmitErr: 'npm error code ENEEDAUTH',
+  });
+  assert.equal(r.status, 1);
+  const out = r.stdout + r.stderr;
+  assert.match(out, /cause: the registry refused the OIDC credential/, 'still identifies the auth failure');
+  assert.ok(!/this run asked for direct because NPM_DIRECT_PUBLISH is set/.test(out),
+    `a staging run must not be told it published directly:\n${out}`);
+  assert.match(out, /staged rather than published/, 'must say which mode it actually ran in');
 });
 
 test('an already-published version is reported as such, not as a credential problem', () => {
