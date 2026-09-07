@@ -75,12 +75,16 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
 
 6. Once the rehearsal is green, on the same merge commit:
 
+   Tag the product you are shipping. Host and Fleet are independent version streams, so a Fleet-only
+   release gets a `fleet-` tag and nothing else:
+
    ```bash
-   git tag -a host-vX.Y.Z -m "Mercury host vX.Y.Z"
-   git push origin host-vX.Y.Z
+   product=host    # or: fleet
+   git tag -a "${product}-vX.Y.Z" -m "Mercury ${product} vX.Y.Z"
+   git push origin "${product}-vX.Y.Z"
    ```
 
-   Same commit may also carry `fleet-vX.Y.Z` if both products ship together.
+   When both ship together, push both tags from the same commit; each runs its own release job.
 
 7. [`.github/workflows/release.yml`](../.github/workflows/release.yml) creates the GitHub Release from
    the notes file for that tag and publishes to npm with provenance. It handles `host` and `fleet` tags
