@@ -304,9 +304,10 @@ Still not observed:
   established trust from an `ACCEPTED` or `REFUSED` line. It does not, and the claim was made from one
   observation before the control existed.
 - **Whether the credential npm issues may be spent on a direct publish.** Unreachable from here, and
-  for a second reason: `stage/publish.js` is `class StagePublish extends Publish`, so staging and
-  direct publishing go through the identical exchange call. The allowed-actions setting therefore
-  cannot be probed by choosing a verb -- both verbs ask the same question the same way.
+  for a second reason: in the npm CLI's own implementation (`lib/commands/stage/publish.js` in
+  `npm/cli`, not a file in this repository) staging is `class StagePublish extends Publish`, so
+  staging and direct publishing go through the identical exchange call. The allowed-actions setting
+  therefore cannot be probed by choosing a verb -- both verbs ask the same question the same way.
 
 ## Decisions
 
