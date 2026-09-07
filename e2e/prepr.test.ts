@@ -10,10 +10,12 @@
  * Needs the docker CLI for the Compose model, like the rest of e2e/.
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { test } from 'node:test';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import assert from 'node:assert/strict';
-import { STAGES, exitCodeFor, type Result, type Stage } from './prepr.ts';
+import { CLEANUP_DEADLINE_MS, STAGES, exitCodeFor, runStage, type Result, type Stage } from './prepr.ts';
 import { composeModel, E2E_DIR } from './preflight.ts';
 
 function result(stage: Partial<Stage> & { code: number; timedOut?: boolean }): Result {
@@ -114,4 +116,47 @@ test('the gate stays out of npm test and out of CI', () => {
   const workflows = readFileSync(`${E2E_DIR}/../.github/workflows/ci.yml`, 'utf8');
   assert.ok(!/prepr/.test(workflows), 'CI must not run `prepr` -- it is the local gate');
   assert.ok(!/test:e2e/.test(workflows), 'CI must not run the E2E suite');
+});
+
+test('teardown runs even when the stage is killed by its own deadline', async () => {
+  // The regression this holds: teardown used to sit after an early `return` on the timeout path, so
+  // the one moment that most needed it -- a stage killed with containers still running -- skipped it,
+  // and the leaked volume made the NEXT run start dirty.
+  const marker = join(tmpdir(), `prepr-teardown-${process.pid}-${Date.now()}`);
+  rmSync(marker, { force: true });
+  const result = await runStage({
+    name: 'probe',
+    hint: '',
+    deadlineMs: 500,
+    argv: ['sh', '-c', 'sleep 30'],
+    cleanup: ['sh', '-c', `touch ${marker}`],
+  });
+  try {
+    assert.ok(result.timedOut, 'the stage should have been killed by its deadline');
+    assert.equal(result.code, 124, 'a killed stage reports the conventional timeout status');
+    assert.ok(existsSync(marker),
+      'teardown must run on the timeout path too; that is when containers are most likely left behind');
+  } finally {
+    rmSync(marker, { force: true });
+  }
+});
+
+test('teardown is bounded, so a wedged daemon cannot hang the gate', async () => {
+  // A stage deadline must tolerate a cold image build. A `compose down` that takes minutes means the
+  // daemon is wedged, and it blocks AFTER the real result is already known -- so an unbounded
+  // teardown can turn a completed run into a hung one.
+  assert.ok(Number.isFinite(CLEANUP_DEADLINE_MS) && CLEANUP_DEADLINE_MS > 0,
+    'teardown needs its own finite deadline');
+  const startedAt = Date.now();
+  const result = await runStage({
+    name: 'probe',
+    hint: '',
+    deadlineMs: 60_000,
+    cleanupDeadlineMs: 500,
+    argv: ['sh', '-c', 'true'],
+    cleanup: ['sh', '-c', 'sleep 30'],
+  });
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(result.code, 0, 'the stage itself passed; a hung teardown must not rewrite that');
+  assert.ok(elapsedMs < 30_000, `teardown was not bounded: runStage took ${elapsedMs}ms`);
 });

@@ -34,9 +34,17 @@ export interface Stage {
   argv: string[];
   /** Run after the stage, success or not. Used to tear the verify project down. */
   cleanup?: string[];
+  /** Override the teardown deadline. Production uses CLEANUP_DEADLINE_MS; tests need it short. */
+  cleanupDeadlineMs?: number;
 }
 
 const MINUTE = 60_000;
+
+/**
+ * Teardown gets its own, much shorter, deadline. A stage deadline has to tolerate a cold image build;
+ * a `compose down` that takes minutes means the daemon is wedged, and waiting longer does not help.
+ */
+export const CLEANUP_DEADLINE_MS = 2 * MINUTE;
 
 /**
  * Deadlines are generous on purpose: they exist to catch a HANG, not to police a slow
@@ -89,63 +97,88 @@ export function exitCodeFor(results: Result[]): number {
 }
 
 /**
- * Run one stage under its own deadline.
+ * Spawn one command under a deadline, killing it if the deadline passes.
  *
- * Output is inherited rather than captured: a developer watching a 2-minute stage needs to see
- * it working, and the failing tool already prints its own diagnosis. The deadline is what makes
- * inheriting safe -- an infinite silent stream is turned into a named timeout.
+ * Shared by stages and by teardown, because teardown has the same failure mode in a worse shape: a
+ * `docker compose down` against a wedged daemon blocks forever, and it blocks AFTER the real result
+ * is already known -- so an unbounded cleanup can turn a completed run into a hung one.
  */
-async function runStage(stage: Stage): Promise<Result> {
-  const startedAt = Date.now();
-  process.stdout.write(`\n\u2500\u2500 ${stage.name} ${'\u2500'.repeat(Math.max(2, 46 - stage.name.length))}\n`);
-  const child = spawn(stage.argv[0] as string, stage.argv.slice(1), { stdio: 'inherit' });
+async function spawnBounded(
+  argv: string[],
+  deadlineMs: number,
+  stdio: 'inherit' | 'ignore',
+): Promise<{ code: number; timedOut: boolean }> {
+  const child = spawn(argv[0] as string, argv.slice(1), { stdio });
 
-  const timedOut = await new Promise<boolean>((resolve) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      resolve(true);
-    }, stage.deadlineMs);
-
-    child.on('error', (err) => {
-      process.stderr.write(`\n${stage.name}: cannot start \`${stage.argv.join(' ')}\`: ${err.message}\n`);
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        resolve(false);
-      }
-      child.kill('SIGKILL');
-    });
+  // One promise, created BEFORE anything can kill the child. The first version of this awaited a
+  // fresh `child.on('close')` after escalating, but by then close had usually already fired, so the
+  // new listener never ran and the stage hung forever. `child.exitCode !== null` did not catch it
+  // either: a process stopped by a signal has exitCode null and signalCode set, so the guard meant
+  // to detect "already finished" was false for exactly the processes this path kills.
+  let closed = false;
+  const onClosed = new Promise<void>((resolve) => {
     child.on('close', () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(false);
+      closed = true;
+      resolve();
+    });
+    child.on('error', (err) => {
+      closed = true;
+      process.stderr.write(`\n${argv[0]}: cannot start \`${argv.join(' ')}\`: ${err.message}\n`);
+      resolve();
     });
   });
 
-  if (timedOut) {
-    // Escalate: a container-aware parent may ignore SIGTERM, and a stage that has already
-    // blown a 15-minute deadline is not going to be persuaded.
-    child.kill('SIGTERM');
-    await delay(5_000);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = await Promise.race([
+    onClosed.then(() => false),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(true), deadlineMs);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (!timedOut) return { code: child.exitCode ?? 1, timedOut: false };
+
+  // Escalate, but never wait on something that may have already happened.
+  child.kill('SIGTERM');
+  await Promise.race([onClosed, delay(5_000)]);
+  if (!closed) {
     child.kill('SIGKILL');
-    await new Promise<void>((resolve) => (child.exitCode !== null ? resolve() : child.on('close', () => resolve())));
-    return { stage, code: 124, timedOut: true, ms: Date.now() - startedAt };
+    await Promise.race([onClosed, delay(5_000)]);
+  }
+  return { code: 124, timedOut: true };
+}
+
+/**
+ * Run one stage, then ALWAYS run its teardown.
+ *
+ * The teardown used to sit after an early `return` on the timeout path, so the one situation that
+ * most needed it -- a stage killed mid-flight with containers still up -- was the one that skipped
+ * it. The leaked volume then makes the NEXT run start from dirty state, which is the exact failure
+ * the teardown exists to prevent.
+ */
+export async function runStage(stage: Stage): Promise<Result> {
+  const startedAt = Date.now();
+  process.stdout.write(`\n\u2500\u2500 ${stage.name} ${'\u2500'.repeat(Math.max(2, 46 - stage.name.length))}\n`);
+
+  // Output is inherited rather than captured: a developer watching a 2-minute stage needs to see it
+  // working, and the failing tool already prints its own diagnosis. The deadline is what makes
+  // inheriting safe -- an infinite silent stream becomes a named timeout.
+  const ran = await spawnBounded(stage.argv, stage.deadlineMs, 'inherit');
+
+  if (stage.cleanup) {
+    // Best-effort: a teardown problem must not mask the stage's own result, but it must not stay
+    // silent either.
+    const down = await spawnBounded(stage.cleanup, stage.cleanupDeadlineMs ?? CLEANUP_DEADLINE_MS, 'ignore');
+    if (down.timedOut) {
+      process.stderr.write(`\n${stage.name}: cleanup did not finish in `
+        + `${seconds(stage.cleanupDeadlineMs ?? CLEANUP_DEADLINE_MS)}; `
+        + 'check `docker ps -a` and `docker volume ls`\n');
+    } else if (down.code !== 0) {
+      process.stderr.write(`${stage.name}: cleanup exited ${down.code}; check \`docker volume ls\`\n`);
+    }
   }
 
-  const code = child.exitCode ?? 1;
-  if (stage.cleanup) {
-    // Best-effort: a teardown failure must not mask the stage's own result, but it must not
-    // stay silent either -- a leaked volume is how the next run starts from a dirty state.
-    const down = spawn(stage.cleanup[0] as string, stage.cleanup.slice(1), { stdio: 'ignore' });
-    await new Promise<void>((resolve) => down.on('close', (c) => {
-      if (c !== 0) process.stderr.write(`${stage.name}: cleanup exited ${c}; check \`docker volume ls\`\n`);
-      resolve();
-    }));
-  }
-  return { stage, code, timedOut: false, ms: Date.now() - startedAt };
+  return { stage, code: ran.timedOut ? 124 : ran.code, timedOut: ran.timedOut, ms: Date.now() - startedAt };
 }
 
 function seconds(ms: number): string {
