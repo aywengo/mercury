@@ -197,8 +197,11 @@ those tokens (github.blog changelog, 2026-07-31, targeting January 2027), so it 
 
 1. Enable 2FA on npmjs.com under **Account Settings -> Two-Factor Authentication**.
 2. From a clean checkout of the tag: `npm publish --access public --tag <dist-tag>`, where the tag
-   is `rc` for an `-rc` prerelease and `latest` for a stable version -- match the version, do not
-   copy the flag blindly. The `--tag` matters because npm's default dist-tag is `latest` for *any*
+   is the one `release.yml` would derive from the version -- **not** a literal `rc`. The rule the
+   workflow implements is: a stable version goes to `latest`; a prerelease goes to its first
+   identifier with trailing digits and sub-parts removed, so `0.1.0-rc1` and `0.1.0-rc.2` give `rc`,
+   `1.2.0-beta.3` gives `beta`, and a prerelease with no alphabetic identifier (`1.0.0-1`) falls back
+   to `next`. Match it, or the manual publish and every later automated one disagree. The `--tag` matters because npm's default dist-tag is `latest` for *any*
    version, prerelease included, so publishing an `-rc` without it makes
    `npm install @aywengo/mercury` resolve to the release candidate. Passing `--tag rc` for a stable
    first version has the mirror defect: the package lands under a tag no default install reads.
