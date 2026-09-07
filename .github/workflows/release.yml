@@ -221,7 +221,7 @@ jobs:
           # the half-release this repo has repeatedly refused -- but red now means "npm needs attention",
           # not "nobody can install Mercury".
           npm_ok=1
-          if [ "${DRY_RUN}" = "true" ]; then
+          if [ "${DRY_RUN:-}" = "true" ]; then
             # `npm publish --dry-run` builds the tarball and prints what would go up, and performs no
             # registry write. --provenance is omitted because attestation needs the registry
             # round-trip a rehearsal deliberately does not make.
@@ -238,7 +238,7 @@ jobs:
             cp LICENSE fleet/LICENSE
             (cd fleet && npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel") || npm_ok=0
           fi
-          if [ "${DRY_RUN}" = "true" ]; then
+          if [ "${DRY_RUN:-}" = "true" ]; then
             # Not "submission succeeded": nothing was submitted, and a rehearsal log that reads like
             # a publish is the overstatement this repo treats as a defect wherever it appears.
             echo "DRY RUN: rehearsal complete; nothing was submitted to npm"
@@ -281,7 +281,7 @@ jobs:
             } >> "$notes"
           fi
 
-          if [ "${DRY_RUN}" = "true" ]; then
+          if [ "${DRY_RUN:-}" = "true" ]; then
             echo "DRY RUN: not creating the GitHub Release for ${tag}"
           elif [ "$product" = "host" ]; then
             gh release create "$tag" --title "$title" --notes-file "$notes" "$bundle"
@@ -295,7 +295,7 @@ jobs:
           # to correlate it to. main is not branch-protected, so the contents:write token this job
           # already has is sufficient -- no cross-repository credential is needed because the formula
           # lives here rather than in a separate tap repo.
-          if [ "${DRY_RUN}" = "true" ]; then
+          if [ "${DRY_RUN:-}" = "true" ]; then
             echo "DRY RUN: not touching Formula/mercury-ai.rb (bundle sha256=${bundle_sha:-n/a})"
           elif [ "$product" = "host" ]; then
             node scripts/update-formula.mjs --version "$version" --sha256 "$bundle_sha"
