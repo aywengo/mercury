@@ -241,8 +241,10 @@ Everything after the first release is the procedure below.
    Homebrew formula are already live.
 4. Verify: npm dist-tag, GitHub Release assets, `brew install` from the tap.
 
-Set the repository variable `NPM_DIRECT_PUBLISH` to `true` to skip staging once an OIDC
-configuration with direct publishing is in place.
+Set the repository variable `NPM_DIRECT_PUBLISH` to `true` only after confirming on npmjs.com that
+this package's Trusted Publisher permits direct `npm publish`. A publisher created after 2026-09-03
+does not by default, and with that configuration the variable turns a would-be staged release into a
+failed one.
 
 `fleet-v<version>` publishes Fleet to npm only; Fleet has no Homebrew formula.
 
@@ -292,9 +294,9 @@ Still not observed:
   submit, so the last call is unexercised until the next tag is pushed.
 - **Whether the trusted publisher permits direct publishing.** npm always allows
   `npm stage publish`; direct `npm publish` is opt-in per configuration, and the repository variable
-  `NPM_DIRECT_PUBLISH` is set, so the two must agree. The setting cannot be read without publish
-  rights, so a mismatch surfaces only on a real release -- which the job now names as a candidate
-  cause rather than leaving as a bare 404.
+  `NPM_DIRECT_PUBLISH` makes the workflow ask for direct publishing, so the two must agree. The
+  setting cannot be read without publish rights, so a mismatch surfaces only on a real release --
+  which the job now names as a candidate cause rather than leaving as a bare 404.
 - **Whether npm trusts this workflow at all.** The rehearsal attempts the same token exchange a publish
   does, and also attempts it against an unrelated package as a control. Both are refused with the
   identical message, `OIDC token exchange error - unauthorized`, on both candidate audiences. An
@@ -318,10 +320,12 @@ Still not observed:
   The date matters. npm's own documentation says a trusted publisher **created after 2026-09-03 is
   automatically set to allow `npm stage publish` only**, and that permitting direct publishing is a
   separate selection. This repository's publisher was created in that window, so `NPM_DIRECT_PUBLISH`
-  was set on an assumption that npm would accept direct publishes, and it is removed again: with that
-  configuration the variable does not skip an approval, it fails the release. Setting it to `true` is
-  correct only once the package's Trusted Publisher settings explicitly permit direct publishing, and
-  that setting cannot be read without publish rights.
+  was set on an assumption that npm would accept direct publishes. It was removed once the date rule
+  was read, because with that configuration the variable does not skip an approval -- it fails the
+  release. Stated as an invariant, without reference to what the variable currently holds:
+  **`NPM_DIRECT_PUBLISH` may be set only when the package's Trusted Publisher explicitly permits direct
+  publishing.** That permission cannot be read without publish rights, so it is confirmed on npmjs.com
+  rather than inferred; inferring it is what put the variable there.
 - **A release body states its npm state explicitly.** Staging costs one maintainer approval per release
   and the body says so, so the notes cannot overstate availability whichever verb was used.
 - **npm authentication prefers OIDC over a long-lived token.** Decided after two valid tokens were refused direct publish. The token path is kept because it still works for accounts whose tokens retain publish, but it is no longer a requirement, and the OIDC path logs verbosely because npm's OIDC helper reports every failure at `verbose` and never throws.
