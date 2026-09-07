@@ -69,7 +69,8 @@ function runTag(
   opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
     directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean;
     npmSubmitErr?: string; exchange?: string; exchangeExit?: number;
-    exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number } = {},
+    exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
+    control2?: string; control2Exit?: number } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -214,6 +215,8 @@ function runTag(
         STUB_EXCHANGE_OURS2_EXIT: String(opts.exchange2Exit ?? opts.exchangeExit ?? 0),
         STUB_EXCHANGE_CONTROL: opts.control ?? opts.exchange ?? '',
         STUB_EXCHANGE_CONTROL_EXIT: String(opts.controlExit ?? opts.exchangeExit ?? 0),
+        STUB_EXCHANGE_CONTROL2: opts.control2 ?? opts.control ?? opts.exchange ?? '',
+        STUB_EXCHANGE_CONTROL2_EXIT: String(opts.control2Exit ?? opts.controlExit ?? opts.exchangeExit ?? 0),
         // Explicit for the same reason as the two above: the submission verb now depends on this
         // variable, so inheriting it would let a stray shell variable flip the mode under test.
         NPM_DIRECT_PUBLISH: opts.directPublish ?? '',
@@ -948,4 +951,34 @@ test('a different answer for the control package means the configuration is bein
   const out = r.stdout + r.stderr;
   assert.match(out, /The registry does distinguish/, 'must conclude that the answers differ');
   assert.match(out, /bare\s+name/, 'must name the field most often entered wrong');
+});
+
+test('a differing pair on the second audience still gates, even if the first was noise', () => {
+  // The bug both reviewers found in the version this replaces: the comparison used the first answer
+  // seen for each package, so a non-JSON reply on the first audience locked the comparison against
+  // nothing and a genuine difference on the second audience was never examined.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
+    exchange: JSON.stringify({ message: 'refused for a real reason' }),
+    exchange2: JSON.stringify({ message: 'refused for a real reason' }),
+    control: '<html>rate limited</html>',
+    control2: JSON.stringify({ message: 'a different answer' }),
+  });
+  assert.equal(r.status, 1, 'a comparable pair that differs must gate regardless of which audience produced it');
+  assert.match(r.stdout + r.stderr, /The registry does distinguish/);
+});
+
+test('a non-JSON control is never compared against a real refusal', () => {
+  // The converse: noise on the control side must not manufacture a difference and fail the release
+  // rehearsal for something the registry never said.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
+    exchange: JSON.stringify({ message: 'unauthorized' }),
+    exchange2: JSON.stringify({ message: 'unauthorized' }),
+    control: '<html>rate limited</html>',
+    control2: '<html>rate limited</html>',
+  });
+  assert.equal(r.status, 0, 'no comparable pair means no evidence, and no evidence means no gate');
+  assert.ok(!(r.stdout + r.stderr).includes('The registry does distinguish'),
+    'must not claim a difference it never observed');
 });
