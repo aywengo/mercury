@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { join, relative } from 'node:path';
 import { HOST_PRODUCT, HOST_VERSION } from '../src/version.ts';
+import { makeGitRepo, tempDir } from './helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..');
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
@@ -292,31 +293,85 @@ test('releasing.md does not call the CLI an independent release stream', () => {
     'releasing.md must say the CLI ships inside the host package');
 });
 
+// Enumerated from the git index rather than the filesystem. Walking the tree picked up whatever a
+// developer happened to have lying around: `npm pack && tar -xzf *.tgz` -- a perfectly normal thing
+// to do while inspecting what actually ships -- drops a `package/` directory of markdown at the repo
+// root whose relative links resolve against `package/` instead of the repo, and the gate went red
+// with twenty failures that had nothing to do with the change under review. A release gate that can
+// be reddened by untracked scratch trains people to ignore it.
+function trackedMarkdownFiles(root: string): string[] {
+  const r = spawnSync('git', ['-C', root, 'ls-files', '-z', '--', '*.md'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `git ls-files failed: ${r.stderr}`);
+  return r.stdout.split('\0').filter((f) => f !== '');
+}
+
+function brokenMarkdownLinks(root: string, files: string[]): string[] {
+  const broken: string[] = [];
+  for (const rel of files) {
+    const full = join(root, rel);
+    const dir = join(root, rel.slice(0, rel.lastIndexOf('/') + 1));
+    const text = readFileSync(full, 'utf8');
+    for (const m of text.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/g)) {
+      const target = m[1];
+      if (/^(https?:|mailto:|#|\/)/.test(target)) continue;
+      const path = target.split('#')[0];
+      if (path === '') continue;
+      // `relative(ROOT, full)`, not `relative(full, ROOT)`. The swapped form returns `../..` for
+      // every file exactly two levels deep, so the failure named nothing and a real stranded link
+      // meant reading the file list by hand.
+      if (!existsSync(join(dir, path))) broken.push(`${relative(root, full)} -> ${target}`);
+    }
+  }
+  return broken;
+}
+
 test('every relative markdown link in the repo resolves to a real file', () => {
   // Renaming docs/releases/{host,fleet}/0.1.0.md to 0.1.0-rc1.md silently broke two links in
   // docs/README.md. Nothing failed: no test had ever opened a markdown link and checked that its
   // target exists, so a rename could strand links across the whole doc set unnoticed. This is the
   // general guard, not a rule about release notes -- any rename that strands a link fails here.
-  const skip = new Set(['node_modules', '.git', 'dist', 'coverage']);
-  const broken: string[] = [];
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (skip.has(entry.name)) continue;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) { walk(full); continue; }
-      if (!entry.name.endsWith('.md')) continue;
-      const text = readFileSync(full, 'utf8');
-      for (const m of text.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/g)) {
-        const target = m[1];
-        if (/^(https?:|mailto:|#|\/)/.test(target)) continue;
-        const path = target.split('#')[0];
-        if (path === '') continue;
-        if (!existsSync(join(dir, path))) broken.push(`${relative(full, ROOT)} -> ${target}`);
-      }
-    }
-  };
-  walk(ROOT);
-  assert.deepEqual(broken, [], `markdown links point at files that do not exist:\n  ${broken.join('\n  ')}`);
+  assert.deepEqual(
+    brokenMarkdownLinks(ROOT, trackedMarkdownFiles(ROOT)),
+    [],
+    'markdown links point at files that do not exist',
+  );
+});
+
+test('the markdown link guard ignores untracked files', () => {
+  // The guard above is only as good as its file list. Proven against a real repository rather than
+  // a mock, because the bug was the enumeration, not the scan.
+  const dir = tempDir('mercury-linkguard-');
+  {
+    makeGitRepo(dir);
+    mkdirSync(join(dir, 'docs'), { recursive: true });
+    writeFileSync(join(dir, 'docs', 'guide.md'), '[ok](other.md)\n');
+    writeFileSync(join(dir, 'docs', 'other.md'), 'target\n');
+    spawnSync('git', ['-C', dir, 'add', '.'], { stdio: 'ignore' });
+    // An extracted tarball, the exact shape that broke the real gate: tracked content plus scratch
+    // markdown whose relative links cannot resolve from where they sit.
+    mkdirSync(join(dir, 'package', 'docs'), { recursive: true });
+    writeFileSync(join(dir, 'package', 'README.md'), '[gone](docs/operations.md)\n');
+    writeFileSync(join(dir, 'scratch.md'), '[gone](docs/nope.md)\n');
+
+    const listed = trackedMarkdownFiles(dir);
+    // README.md is tracked by makeGitRepo itself; the point is that neither scratch file appears.
+    assert.deepEqual(listed.sort(), ['README.md', 'docs/guide.md', 'docs/other.md'], 'scratch markdown must not be scanned');
+    assert.deepEqual(brokenMarkdownLinks(dir, listed), []);
+  }
+});
+
+test('a stranded link is reported by file name, not by a path that names nothing', () => {
+  // The message is the whole value of this gate. Before the fix it printed `../.. -> docs/x.md` for
+  // every depth-2 file, which is identical for all of them and points at no file at all.
+  const dir = tempDir('mercury-linkreport-');
+  {
+    makeGitRepo(dir);
+    mkdirSync(join(dir, 'docs'), { recursive: true });
+    writeFileSync(join(dir, 'docs', 'guide.md'), '[gone](missing.md)\n[kept](other.md)\n');
+    writeFileSync(join(dir, 'docs', 'other.md'), 'target\n');
+    spawnSync('git', ['-C', dir, 'add', '.'], { stdio: 'ignore' });
+    assert.deepEqual(brokenMarkdownLinks(dir, trackedMarkdownFiles(dir)), ['docs/guide.md -> missing.md']);
+  }
 });
 
 test('docs/status.md does not deny that the operator CLI is implemented', () => {
