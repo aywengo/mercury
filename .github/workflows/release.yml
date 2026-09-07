@@ -167,6 +167,19 @@ jobs:
                   console.log(`  oidc ${k} = ${c[k]}`)' "$id_token"
               echo "  npm matches repository_owner + repository + the filename inside job_workflow_ref;"
               echo "  'workflow' above is the display name and is not matched"
+              # Flag the one claim whose SHAPE has been shown to matter here, rather than leaving it in a
+              # list of fifteen for a reader to notice. GitHub mints `sub` two ways: name-only
+              # (`repo:aywengo/mercury:ref:...`) and, for repositories under the enforced default, with
+              # numeric IDs (`repo:aywengo@800531/mercury@1349412409:ref:...`). The rc1 provenance
+              # certificate in Rekor proves this repository presented the name-only form on the one run
+              # that got as far as signing; every run since presents the ID form, and npm refuses the
+              # exchange on all of them. A claim that changes underneath a working configuration and is
+              # printed as one line among fifteen is not a diagnostic.
+              if printf '%s' "$id_token" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(Buffer.from(s.split(".")[1],"base64").toString());process.exit(/@[0-9]+/.test(p.sub||"")?0:1)})'; then
+                echo "  !! sub carries numeric repository IDs. Third-party registries match on the" >&2
+                echo "     name-only shape; see issue #335 and Settings -> Actions -> General ->" >&2
+                echo "     OIDC subject claim format. This is a diagnostic, not a verdict." >&2
+              fi
               # `iss` is printed because npm's registry trusts exactly one issuer URL, and a GitHub
               # Enterprise with include_enterprise_slug makes GitHub mint
               # `https://token.actions.githubusercontent.com/<slug>` instead. npm/cli#9203 reports that
