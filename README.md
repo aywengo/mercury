@@ -117,8 +117,11 @@ brew install mercury-ai                  # not `mercury`: that is a different pr
 Until the first stable release ships, `latest` also points at the prerelease. That is not a
 misconfiguration and it cannot be removed: npm initialises `latest` to the first version ever
 published regardless of the `--tag` used, and refuses to delete the tag afterwards (`400 Bad Request`).
-So `npm install -g @aywengo/mercury` currently installs `0.1.0-rc1`. Pin `@rc` and you get the same
-bytes either way, and you will not be surprised when `0.1.0` replaces it.
+So `npm install -g @aywengo/mercury` currently installs `0.1.0-rc1`. Both tags resolve to that
+version today, but they mean different things from here: `@rc` follows the prerelease channel and will
+pick up `0.1.0-rc2` if one is published, while `latest` moves to `0.1.0` when the first stable release
+ships. Neither tag is fixed -- pin `@rc` to stay on release candidates, and drop the suffix to follow
+stable.
 
 There is no CLI-only channel. `mercuryctl` is inside the host package, so any install
 that provides one provides the other.

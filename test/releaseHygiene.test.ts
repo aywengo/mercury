@@ -325,6 +325,14 @@ test('the release docs tell the operator to rehearse before tagging', () => {
 // root whose relative links resolve against `package/` instead of the repo, and the gate went red
 // with twenty failures that had nothing to do with the change under review. A release gate that can
 // be reddened by untracked scratch trains people to ignore it.
+// `stdio: 'ignore'` on a fixture's `git add` hides the reason the fixture is broken, and the
+// assertion that follows then fails about a missing file rather than about git. Review of #299
+// caught all three call sites doing this.
+function gitAddAll(dir: string): void {
+  const r = spawnSync('git', ['-C', dir, 'add', '.'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `git add failed in fixture ${dir}: ${r.stderr}`);
+}
+
 function trackedMarkdownFiles(root: string): string[] {
   const r = spawnSync('git', ['-C', root, 'ls-files', '-z', '--', '*.md'], { encoding: 'utf8' });
   assert.equal(r.status, 0, `git ls-files failed: ${r.stderr}`);
@@ -378,7 +386,7 @@ test('the markdown link guard ignores untracked files', () => {
     mkdirSync(join(dir, 'docs'), { recursive: true });
     writeFileSync(join(dir, 'docs', 'guide.md'), '[ok](other.md)\n');
     writeFileSync(join(dir, 'docs', 'other.md'), 'target\n');
-    spawnSync('git', ['-C', dir, 'add', '.'], { stdio: 'ignore' });
+    gitAddAll(dir);
     // An extracted tarball, the exact shape that broke the real gate: tracked content plus scratch
     // markdown whose relative links cannot resolve from where they sit.
     mkdirSync(join(dir, 'package', 'docs'), { recursive: true });
@@ -401,7 +409,7 @@ test('a tracked file deleted from the worktree does not crash the guard', () => 
     makeGitRepo(dir);
     mkdirSync(join(dir, 'docs'), { recursive: true });
     writeFileSync(join(dir, 'docs', 'doomed.md'), '[gone](missing.md)\n');
-    spawnSync('git', ['-C', dir, 'add', '.'], { stdio: 'ignore' });
+    gitAddAll(dir);
     rmSync(join(dir, 'docs', 'doomed.md'));
     // Still in the index, gone from disk: the exact state that used to throw.
     assert.ok(trackedMarkdownFiles(dir).includes('docs/doomed.md'), 'precondition: index still lists it');
@@ -418,7 +426,7 @@ test('a stranded link is reported by file name, not by a path that names nothing
     mkdirSync(join(dir, 'docs'), { recursive: true });
     writeFileSync(join(dir, 'docs', 'guide.md'), '[gone](missing.md)\n[kept](other.md)\n');
     writeFileSync(join(dir, 'docs', 'other.md'), 'target\n');
-    spawnSync('git', ['-C', dir, 'add', '.'], { stdio: 'ignore' });
+    gitAddAll(dir);
     assert.deepEqual(brokenMarkdownLinks(dir, trackedMarkdownFiles(dir)), ['docs/guide.md -> missing.md']);
   }
 });
