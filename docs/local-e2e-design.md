@@ -1259,6 +1259,56 @@ Notes against the wording above:
   teardown most likely to be partial: after `down()`, both the container list and the volume list for
   that project must be empty, filtered by the compose project label rather than by name prefix.
 
+- **Goals 3 and 5 ("the host acts only as the Testcontainers controller and public API client", "drive
+  Mercury only through public HTTP and SSE") were true and unpinned.** The harness imports nothing but
+  `node:*`, its own files, and `testcontainers`. That is the property both goals describe, and it is
+  the kind that erodes one convenient import at a time: pulling in a domain type to build a request
+  body, or a store helper to seed state, keeps every test green while making them stop testing the
+  surface that ships -- a test like that would still pass if the HTTP route were deleted. A guard now
+  reads the harness directory and rejects any import that is not a builtin, `testcontainers`, or a
+  harness file. It scans the directory rather than a file list, so a new harness file is covered the
+  moment it appears. Proven by adding one product type import:
+
+    mutation: `import type { RunView } from '../src/domain/types.ts'` in helpers.ts
+    -> fail=1  "helpers.ts: '../src/domain/types.ts'"
+
+  Four versions of that guard were wrong before it was right, and each failure is worth recording
+  because they are the four ways a static scan quietly stops meaning anything:
+
+  1. It matched any `from '...'` and flagged the sentence "the tool never answered" in a comment as a
+     module import. A guard with false positives gets deleted, so the pattern is anchored to real
+     `import`/`export ... from` syntax and dynamic `import()`.
+  2. It allowed any specifier beginning with `./`. That is a string prefix, not a boundary:
+     `'./../src/domain/types.ts'` satisfies it while resolving straight into product code.
+  3. It used `resolve()`, which is purely lexical and never follows a symlink, so an `e2e/src_alias`
+     link to `../src` keeps every specifier under it looking local. It resolves through the nearest
+     existing ancestor instead.
+  4. It tested the bare identifier `createRequire` and so flagged **itself** -- the guard's own
+     message string contained the token it hunts for. A guard that reports itself can never pass,
+     which is at least honest; the failure mode to fear is the one that reports nothing. Detection is
+     now the call form, and the message avoids the literal.
+
+  `require()` reaches the same modules through a call expression, invisible to an import-syntax scan,
+  so it is matched too. The full matrix, each row measured by editing a harness file and restoring it:
+
+    clean tree                 -> fail=0
+    '../src/domain/types.ts'   -> fail=1  (resolved: src/domain/types.ts)
+    './../src/domain/types.ts' -> fail=1  (resolved: src/domain/types.ts)      <- bypass 2
+    await import('../src/...') -> fail=1
+    export * from '../src/...' -> fail=1
+    require('../src/...')       -> fail=1                                      <- bypass, call form
+    createRequire(import.meta.url) -> fail=1                                   <- bypass, loader
+    './src_alias/...' via symlink  -> fail=1  (resolved: src/domain/types.ts)  <- bypass 3
+
+  What this does NOT claim is to be a sandbox. It is a tripwire against the ordinary way this erodes
+  -- someone borrowing one type to build a request body -- and a determined author can always defeat a
+  text scan. Stating that limit is part of the guard: the alternative is a check that reads as
+  authoritative and is trusted beyond what it enforces.
+
+- **Goal 10 names containers, networks and volumes; the teardown assertion covered two of the three.**
+  A network is the one a partial teardown most often leaves -- invisible in `docker ps`, holding no
+  data, accumulating until a name collision or address exhaustion complains. It is asserted now.
+
 ### Phase 6 — one real-agent compatibility check
 
 Deliverables:
