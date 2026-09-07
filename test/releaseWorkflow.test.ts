@@ -884,3 +884,17 @@ test('both audiences refused fails the rehearsal', () => {
   assert.match(out, /every audience that answered refused/, 'must state the aggregate, not one line');
   assert.match(out, /Trusted Publisher/, 'must point at the setting that decides it');
 });
+
+test('every curl in the release step is bounded', () => {
+  // A hung request is indistinguishable from a slow one, and this step has four of them against two
+  // third-party services. The workflow timeout is the only thing that would ever notice, which turns
+  // a network stall into a ten-minute wait with no diagnosis. One line of the probe was already
+  // bounded and the one that mints the id token was not -- exactly the shape a guard catches.
+  const script = extractReleaseScript();
+  const unbounded = script
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /\bcurl\b/.test(l) && !l.startsWith('#'))
+    .filter((l) => !/--max-time/.test(l));
+  assert.deepEqual(unbounded, [], 'every curl must carry --max-time');
+});
