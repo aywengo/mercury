@@ -131,7 +131,8 @@ jobs:
             # A GitHub trusted publisher is keyed on owner + repository + workflow filename, so print
             # the claim that carries each. `workflow` is the workflow's display NAME (`name:` in this
             # file), which npm does NOT match; the filename lives in `job_workflow_ref`, shaped like
-            # `aywengo/mercury/.github/workflows/release.yml@refs/heads/main`. Printing only a
+            # `aywengo/mercury/.github/workflows/release.yml@refs/<ref>`, where the ref is the tag on a
+            # real release and a branch on a rehearsal. Printing only a
             # selected subset is what produced the claim here that no claim carried the filename at
             # all -- the key was missing from the list, which is not the same as it not existing.
             id_json=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
