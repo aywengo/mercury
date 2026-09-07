@@ -36,16 +36,7 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    tag path needs no secret, and the workflow discovers this by asking the registry, so nothing has to be
    edited when the bootstrap happens.
 
-5. On the merge commit:
-
-   ```bash
-   git tag -a host-vX.Y.Z -m "Mercury host vX.Y.Z"
-   git push origin host-vX.Y.Z
-   ```
-
-   Same commit may also carry `fleet-vX.Y.Z` if both products ship together.
-
-5a. **Rehearse before you tag.** A tag is a published artifact, so a mistake in the release job costs a
+5. **Rehearse before you tag.** A tag is a published artifact, so a mistake in the release job costs a
    burned version number. Run the workflow by hand instead:
 
    ```bash
@@ -82,7 +73,16 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    whatever about npm's trust -- and the day npm answers the two packages differently, this says
    something no rehearsal could before. What settles trust is the publish itself.
 
-6. [`.github/workflows/release.yml`](../.github/workflows/release.yml) creates the GitHub Release from
+6. Once the rehearsal is green, on the same merge commit:
+
+   ```bash
+   git tag -a host-vX.Y.Z -m "Mercury host vX.Y.Z"
+   git push origin host-vX.Y.Z
+   ```
+
+   Same commit may also carry `fleet-vX.Y.Z` if both products ship together.
+
+7. [`.github/workflows/release.yml`](../.github/workflows/release.yml) creates the GitHub Release from
    the notes file for that tag and publishes to npm with provenance. It handles `host` and `fleet` tags
    only; any other tag is refused.
 
