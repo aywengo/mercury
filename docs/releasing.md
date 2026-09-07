@@ -37,12 +37,42 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
 
    Same commit may also carry `fleet-vX.Y.Z` if both products ship together.
 
-6. [`.github/workflows/release.yml`](../.github/workflows/release.yml) creates the GitHub Release from
-   the notes file for that tag and runs `npm publish --access public --provenance`. It handles `host`
-   and `fleet` tags only; any other tag is refused.
+5a. **Rehearse before you tag.** A tag is a published artifact, so a mistake in the release job costs a
+   burned version number. Run the workflow by hand instead:
 
-The `NPM_TOKEN` repository secret must exist on `aywengo/mercury` before the
-first tag. npm publish fails closed without it. This is intended.
+   ```bash
+   gh workflow run release.yml --repo aywengo/mercury --ref main
+   ```
+
+   It does everything a real release does -- tag parsing, the manifest and notes checks, install, the
+   Homebrew bundle, the OIDC exchange, and the real `npm publish` pack -- then stops short of the three
+   things that touch the outside world: `npm publish`, `gh release create`, and the formula push. It
+   takes no input and cannot publish; the mode is derived from the event name, so a tag push is never a
+   rehearsal and a rehearsal is never a release. The log prints the OIDC claims npm will match the run
+   against, which is the only way to see a trusted-publishing mismatch: npm reports one as an opaque
+   registry 404 with no reason.
+
+6. [`.github/workflows/release.yml`](../.github/workflows/release.yml) creates the GitHub Release from
+   the notes file for that tag and publishes to npm with provenance. It handles `host` and `fleet` tags
+   only; any other tag is refused.
+
+## Publishing credential
+
+**There is none, and that is the intended steady state.** The package publishes through npm's trusted
+publishing: the workflow exchanges the GitHub Actions OIDC id-token for a short-lived credential, so no
+long-lived secret exists in the repository. `NPM_TOKEN` was deleted once trusted publishing was
+configured. The workflow still prefers `NPM_TOKEN` if the secret is ever re-added, and refuses the tag
+before creating any release if neither credential is available.
+
+Two things to know about the npm-side configuration, both on the package's *Trusted Publisher* settings
+page (which only exists once the package has been published at least once):
+
+- It matches **owner, repository and workflow filename** -- `aywengo`, `mercury`, `release.yml`. Not a
+  branch, so tag-push releases are covered.
+- **Direct publishing is opt-in.** `npm stage publish` is always allowed; publishing straight to the
+  registry must be enabled per configuration. The repository variable `NPM_DIRECT_PUBLISH=true` tells
+  the workflow to publish directly, so it must be matched by that setting or the submit is rejected.
+  Unset the variable to stage instead, which defers to a maintainer approving it on npmjs.com.
 
 ## Prereleases
 

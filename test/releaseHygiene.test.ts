@@ -293,6 +293,32 @@ test('releasing.md does not call the CLI an independent release stream', () => {
     'releasing.md must say the CLI ships inside the host package');
 });
 
+test('the release docs describe the credential the release job actually uses', () => {
+  // Fifth instance of the same defect: a document keeps asserting a precondition the repository has
+  // since removed. releasing.md said the NPM_TOKEN secret "must exist ... before the first tag" after
+  // the secret had been deleted in favour of trusted publishing, and distribution.md still listed npm
+  // as "blocked on NPM_TOKEN" after 0.1.0-rc1 went live. Both would send an operator hunting for a
+  // secret that does not exist, at the exact moment they are trying to ship.
+  const releasing = read('docs/releasing.md');
+  const distribution = read('docs/distribution.md');
+  for (const pattern of [/NPM_TOKEN[^.]*must exist/i, /must exist[^.]*NPM_TOKEN/i, /blocked on `NPM_TOKEN`/]) {
+    assert.ok(!pattern.test(releasing), `releasing.md still requires a secret the job no longer uses: ${pattern}`);
+    assert.ok(!pattern.test(distribution), `distribution.md still calls npm blocked: ${pattern}`);
+  }
+  assert.match(releasing, /trusted publishing/i, 'releasing.md must name the mechanism that replaced the secret');
+  assert.match(releasing, /NPM_DIRECT_PUBLISH/,
+    'releasing.md must state that direct publishing is opt-in on the npm side, since the variable is set');
+});
+
+test('the release docs tell the operator to rehearse before tagging', () => {
+  // The rehearsal only reduces risk if the person cutting the release knows it exists. A capability
+  // that lives solely in the workflow file is a capability nobody uses at the moment it matters.
+  const releasing = read('docs/releasing.md');
+  assert.match(releasing, /gh workflow run release\.yml/, 'releasing.md must give the rehearsal command');
+  assert.match(releasing, /cannot publish/i,
+    'releasing.md must say the rehearsal cannot publish, or it reads as a way to ship');
+});
+
 // Enumerated from the git index rather than the filesystem. Walking the tree picked up whatever a
 // developer happened to have lying around: `npm pack && tar -xzf *.tgz` -- a perfectly normal thing
 // to do while inspecting what actually ships -- drops a `package/` directory of markdown at the repo
@@ -329,6 +355,7 @@ function brokenMarkdownLinks(root: string, files: string[]): string[] {
   }
   return broken;
 }
+
 
 test('every relative markdown link in the repo resolves to a real file', () => {
   // Renaming docs/releases/{host,fleet}/0.1.0.md to 0.1.0-rc1.md silently broke two links in
