@@ -17,7 +17,8 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { DockerComposeEnvironment, StartedDockerComposeEnvironment, Wait } from 'testcontainers';
 import {
@@ -26,6 +27,27 @@ import {
 } from './preflight.ts';
 import { client, pollRun } from './helpers.ts';
 
+/**
+ * Resolve a path through any symlinks, tolerating a target that does not exist.
+ *
+ * `realpathSync` throws on a missing path, and most specifiers in a static scan point at files that
+ * exist only at runtime or not at all. Walking to the nearest existing ancestor and re-appending the
+ * remainder keeps symlink resolution without turning a missing file into a scan failure.
+ */
+function realAncestor(target: string): string {
+  let probe = target;
+  const tail: string[] = [];
+  while (!existsSync(probe)) {
+    const parent = dirname(probe);
+    if (parent === probe) return target;
+    tail.unshift(basename(probe));
+    probe = parent;
+  }
+  try { probe = realpathSync(probe); } catch { /* leave the lexical path */ }
+  return tail.length ? join(probe, ...tail) : probe;
+}
+
+const G = dirname(E2E_DIR);
 const suffix = () => Math.random().toString(36).slice(2, 10);
 const running: StartedDockerComposeEnvironment[] = [];
 
@@ -287,6 +309,12 @@ test('a service that dies after its healthcheck passes is named, with its reason
   const vols = spawnSync('docker', ['volume', 'ls', '-q', '--filter', `label=com.docker.compose.project=${project}`],
     { encoding: 'utf8', timeout: 30_000 });
   assert.equal(vols.stdout.trim(), '', `teardown left the state volume behind: ${vols.stdout}`);
+  // Networks too. The goal names containers, networks AND volumes, and a network is the one of the
+  // three that a partial teardown most often leaves: it is invisible in `docker ps`, holds no data,
+  // and accumulates silently until address space or a name collision complains.
+  const nets = spawnSync('docker', ['network', 'ls', '-q', '--filter', `label=com.docker.compose.project=${project}`],
+    { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(nets.stdout.trim(), '', `teardown left the project network behind: ${nets.stdout}`);
 });
 
 /**
@@ -327,4 +355,65 @@ test('the liveness guard covers every replica, not just the first -- no Docker d
   const trickyStates = { 'mercuryXe2eXapi-1': 'exited', [`${tricky}-api-1`]: 'running' };
   assert.deepEqual(deadServices(trickyStates, tricky, ['api']), [],
     'an unescaped project name lets "." and "+" match unrelated containers and misreport them');
+});
+
+/**
+ * The harness must reach Mercury only through public interfaces.
+ *
+ * Two goals depend on this and neither was pinned. "The host test process acts only as the
+ * Testcontainers controller and public API client" and "drive Mercury only through public HTTP and
+ * SSE interfaces" both hold today -- the harness imports nothing but `node:*`, its own files, and
+ * `testcontainers` -- and both are exactly the properties that erode one convenient import at a
+ * time. Importing a domain type to build a request body, or a store helper to seed state, keeps the
+ * tests green while quietly making them stop testing the deployed surface: the test would pass even
+ * if the HTTP route were deleted.
+ *
+ * Checked over the directory rather than a hardcoded file list, so a new harness file is covered the
+ * moment it is added.
+ */
+test('the harness never imports product code -- no Docker daemon', () => {
+  const harness = readdirSync(E2E_DIR).filter((f) => /\.(?:ts|mjs)$/.test(f) && !f.endsWith('.d.ts'));
+  assert.ok(harness.length >= 5, `expected the harness files to be present, saw ${harness.length}`);
+
+  const offenders: string[] = [];
+  for (const file of harness) {
+    const text = readFileSync(join(E2E_DIR, file), 'utf8');
+    // Only real import syntax. A bare `from '...'` also occurs in prose and comments -- the first
+    // version of this guard flagged the sentence "the tool never answered" as a module import, which
+    // is the kind of false positive that gets a guard deleted rather than trusted.
+    const imports = [
+      ...[...text.matchAll(/^[ \t]*(?:import|export)\b[^\n]*?\bfrom\s+['"]([^'"]+)['"]/gm)].map((m) => m[1]),
+      ...[...text.matchAll(/\bimport\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]),
+      // `require()` reaches the same modules through a call expression, so an import-syntax scan
+      // never sees it. `createRequire` exists only to obtain such a function, so both are named
+      // rather than patterned: the point is to stop a convenient shortcut, and a half-caught
+      // shortcut still ships the test that passes with the route deleted.
+      ...[...text.matchAll(/\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]),
+    ];
+    // Match the call, not the word. The first version tested the bare identifier and so flagged this
+    // very file: the guard's own message string contained the token it hunts for. A guard that
+    // reports itself is not wrong about the code, it is wrong about everything -- it can never pass.
+    if (/\bcreateRequire\s*\(/.test(text)) offenders.push(`${file}: 'createRequire' loader`);
+    for (const spec of imports) {
+      if (spec.startsWith('node:')) continue;
+      if (spec.startsWith('.') || spec.startsWith('/')) {
+        // Resolve, then ask where it actually lands. A prefix test on the raw specifier is not a
+        // check: `'./../src/domain/types.ts'` starts with `./` and resolves straight out of the
+        // harness into product code, so a naive allowlist waves it through.
+        const target = resolve(dirname(join(E2E_DIR, file)), spec);
+        // resolve() is purely lexical and never follows a symlink, so `e2e/src_alias -> ../src`
+        // keeps every specifier under it looking local. Realpath first; fall back to the lexical
+        // path when the target does not exist, which is the normal case for a not-yet-written file.
+        const real = realAncestor(target);
+        if (real === E2E_DIR || real.startsWith(E2E_DIR + sep)) continue;
+        offenders.push(`${file}: '${spec}' -> ${relative(G, real)}`);
+        continue;
+      }
+      if (spec === 'testcontainers') continue;
+      offenders.push(`${file}: '${spec}'`);
+    }
+  }
+  assert.deepEqual(offenders, [],
+    'the E2E harness may only import node builtins, testcontainers and its own files; importing '
+    + 'product code would let a test pass against internals while the public surface goes untested');
 });
