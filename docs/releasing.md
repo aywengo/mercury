@@ -99,6 +99,37 @@ long-lived secret exists in the repository. `NPM_TOKEN` was deleted once trusted
 configured. The workflow still prefers `NPM_TOKEN` if the secret is ever re-added, and refuses the tag
 before creating any release if neither credential is available.
 
+### When the OIDC exchange is refused
+
+Trusted publishing can fail in a way that is not a misconfiguration on this side. The rehearsal's exchange
+probe reports `REFUSED` for this package and for an unrelated control package identically, which means the
+registry is rejecting the token before it looks at any publisher configuration. See issue #335: GitHub now
+mints `sub` with numeric owner and repository IDs for this repository, and GitHub documents **no way back**
+to the name-only shape for a repository created after the cutoff -- renaming or transferring moves *to* the
+immutable format, not away from it.
+
+**The fallback is a short-lived token, and it does not cost you provenance.** The `host-v0.1.0-rc1` run
+authenticated with `NPM_TOKEN` and still signed and published provenance:
+
+```
+publish auth: NPM_TOKEN
+npm notice stage Provenance statement published to transparency log: ...logIndex=2742821710
+```
+
+npm mints a separate OIDC token for sigstore, independent of the trusted-publisher exchange, so Fulcio
+accepts it either way. Verify a published version carries attestations:
+
+```bash
+curl -sS --max-time 30 -o /dev/null -w '%{http_code}\n' \
+  "https://registry.npmjs.org/-/npm/v1/attestations/@aywengo%2fmercury@0.1.0-rc1"
+```
+
+`200` means the version has attestations; `404` means it does not. `-f` is deliberately absent: the
+answer you want is often an HTTP error, and `curl -f` exits non-zero on 404, so the command would both
+print the result and report failure. A token publish is a workaround for a
+blocked exchange, not the steady state: delete the secret afterwards, because the workflow prefers
+`NPM_TOKEN` whenever it is present and would keep using it.
+
 Two things to know about the npm-side configuration, both on the package's *Trusted Publisher* settings
 page (which only exists once the package has been published at least once):
 
