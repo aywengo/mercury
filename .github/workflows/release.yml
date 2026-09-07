@@ -175,7 +175,7 @@ jobs:
             # a real release would die on the same call. Anything that is not JSON is not evidence
             # about the trust configuration -- a proxy, a WAF or a rate limiter can all answer here --
             # so it warns rather than failing a rehearsal for something the registry never said.
-            if [ "${DRY_RUN:-}" = "true" ] && [ -n "$id_token" ]; then
+            if [ "${DRY_RUN:-}" = "true" ]; then
               if [ "$product" = "host" ]; then
                 pkg_name=$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).name)")
               else
@@ -184,30 +184,64 @@ jobs:
               # npa's escapedName, which is what npm puts in this path: the leading "@" stays literal
               # and only the slash is encoded.
               esc=${pkg_name//\//%2F}
-              exchange=$(curl -sS --max-time 30 -X POST -H "Accept: application/json" \
-                -H "Authorization: bearer ${id_token}" \
-                "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${esc}" || echo "")
-              node -e '
-                const raw = process.argv[1];
-                let j = null;
-                try { j = JSON.parse(raw); } catch {}
-                if (j && typeof j.token === "string" && j.token.length) {
-                  console.log(`  oidc exchange: ACCEPTED -- npm issued a ${j.token.length}-char publish token`);
-                  console.log("  (the token is not printed; a real publish would use it and stop there)");
-                  process.exit(0);
-                }
-                if (!j) {
-                  console.log("  oidc exchange: INCONCLUSIVE -- the registry did not answer with JSON,");
-                  console.log("  so this says nothing about the trust configuration. First 200 bytes:");
-                  console.log("  " + raw.slice(0, 200).replace(/\n/g, " "));
-                  process.exit(0);
-                }
-                console.error("  oidc exchange: REFUSED -- a real publish would fail at this call");
-                console.error("  npm said: " + (j.message || j.error || JSON.stringify(j)).slice(0, 300));
-                console.error("  check the Trusted Publisher on npmjs.com for this package: owner,");
-                console.error("  repository, workflow filename, and which actions are allowed.");
-                process.exit(1);
-              ' "$exchange"
+              # Try BOTH audiences, because which one the registry accepts is precisely what is
+              # unknown here. npm/cli builds `npm:${hostname}` and publishes with the token minted
+              # under it, so that is the one a publish presents; a provenance-style trusted publisher
+              # is keyed differently and may expect the registry URL instead. Probing one audience and
+              # reporting "npm refuses us" would repeat the mistake that produced this whole detour --
+              # printing a subset of claims and concluding the rest did not exist. The first rehearsal
+              # with this probe refused on `npm:` alone, which is exactly the evidence that one is not
+              # enough.
+              accepted=0
+              evidence=0
+              for aud in npm:registry.npmjs.org https://registry.npmjs.org; do
+                aud_json=$(curl -sS --max-time 30 -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                  "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${aud}" || echo "")
+                aud_token=$(node -e 'try{console.log(JSON.parse(process.argv[1]).value||"")}catch{console.log("")}' "$aud_json")
+                if [ -z "$aud_token" ]; then
+                  echo "  oidc exchange [${aud}]: the runner minted no token"
+                  continue
+                fi
+                exchange=$(curl -sS --max-time 30 -X POST -H "Accept: application/json" \
+                  -H "Authorization: bearer ${aud_token}" \
+                  "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${esc}" || echo "")
+                rc=0
+                node -e '
+                  const [aud, raw] = [process.argv[1], process.argv[2]];
+                  let j = null;
+                  try { j = JSON.parse(raw); } catch {}
+                  if (j && typeof j.token === "string" && j.token.length) {
+                    console.log(`  oidc exchange [${aud}]: ACCEPTED -- npm issued a ${j.token.length}-char`);
+                    console.log("    publish token (value not printed; it is a credential)");
+                    process.exit(0);
+                  }
+                  if (!j) {
+                    console.log(`  oidc exchange [${aud}]: INCONCLUSIVE -- not JSON, so nothing learned.`);
+                    console.log("    first 200 bytes: " + raw.slice(0, 200).replace(/\n/g, " "));
+                    process.exit(2);
+                  }
+                  console.log(`  oidc exchange [${aud}]: REFUSED -- `
+                    + (j.message || j.error || JSON.stringify(j)).slice(0, 200));
+                  process.exit(1);
+                ' "$aud" "$exchange" || rc=$?
+                if [ "$rc" -eq 0 ]; then accepted=1; fi
+                if [ "$rc" -ne 2 ]; then evidence=1; fi
+              done
+              if [ "$accepted" = "1" ]; then
+                echo "  => npm trusts this workflow for ${pkg_name}; a real publish would authenticate"
+              elif [ "$evidence" = "1" ]; then
+                # Every audience that answered said no. That is evidence about the trust
+                # configuration, and a real release dies on this call, so the rehearsal fails.
+                echo "  => every audience that answered refused. A real publish would fail here." >&2
+                echo "     Check the Trusted Publisher on npmjs.com for ${pkg_name}: owner," >&2
+                echo "     repository, workflow filename, and which actions are allowed." >&2
+                exit 1
+              else
+                # A proxy, a WAF or a rate limiter can answer this call with HTML. That is not evidence
+                # about the trust configuration, and failing here would train people to ignore a red
+                # rehearsal.
+                echo "  => nothing answered with JSON; nothing learned about the trust configuration"
+              fi
             fi
           else
             echo "refusing ${tag}: no NPM_TOKEN and no OIDC id-token available; npm publish would fail after the release is created" >&2

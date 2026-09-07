@@ -68,7 +68,8 @@ function runTag(
   tag: string,
   opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
     directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean;
-    npmSubmitErr?: string; exchange?: string; exchangeExit?: number } = {},
+    npmSubmitErr?: string; exchange?: string; exchangeExit?: number;
+    exchange2?: string; exchange2Exit?: number } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -143,7 +144,14 @@ function runTag(
       + 'for a in "$@"; do case "$a" in http*) url="$a" ;; esac; done\n'
       + 'case "$url" in\n'
       + '  *idToken*) printf \'%s\' "{\\"value\\":\\"${STUB_JWT}\\"}" ;;\n'
-      + '  *oidc/token/exchange*) printf \'%s\' "${STUB_EXCHANGE:-}"; exit "${STUB_EXCHANGE_EXIT:-0}" ;;\n'
+      + '  *oidc/token/exchange*) n=0; [ -f "' + tmp + '/exchange.count" ] && n=$(cat "' + tmp + '/exchange.count");\n'
+      + '    n=$((n+1)); printf "%s" "$n" > "${tmp}exchange.count";\n'
+      // The step probes two audiences in a fixed order, so the call number is what distinguishes
+      // them here. Without per-call control the interesting case -- one audience accepted and the
+      // other refused, which is what a provenance-style configuration would look like -- cannot be
+      // expressed at all.
+      + '    if [ "$n" = "2" ]; then printf \'%s\' "${STUB_EXCHANGE_2-${STUB_EXCHANGE:-}}"; exit "${STUB_EXCHANGE_2_EXIT:-${STUB_EXCHANGE_EXIT:-0}}"; fi\n'
+      + '    printf \'%s\' "${STUB_EXCHANGE:-}"; exit "${STUB_EXCHANGE_EXIT:-0}" ;;\n'
       + '  *) exit 22 ;;\n'
       + 'esac\nexit 0\n');
     chmodSync(curlStub, 0o755);
@@ -191,6 +199,8 @@ function runTag(
           event_name: 'workflow_dispatch', workflow: 'Release' }),
         STUB_EXCHANGE: opts.exchange ?? '',
         STUB_EXCHANGE_EXIT: String(opts.exchangeExit ?? 0),
+        STUB_EXCHANGE_2: opts.exchange2 ?? opts.exchange ?? '',
+        STUB_EXCHANGE_2_EXIT: String(opts.exchange2Exit ?? opts.exchangeExit ?? 0),
         // Explicit for the same reason as the two above: the submission verb now depends on this
         // variable, so inheriting it would let a stray shell variable flip the mode under test.
         NPM_DIRECT_PUBLISH: opts.directPublish ?? '',
@@ -779,8 +789,8 @@ test('a rehearsal performs the token exchange npm would perform', () => {
     exchange: JSON.stringify({ token: 'npm-'.padEnd(140, 'z') }),
   });
   assert.equal(r.status, 0, 'an accepted exchange must not fail the rehearsal');
-  assert.match(r.stdout, /oidc exchange: ACCEPTED/, 'must report the exchange result');
-  assert.match(r.stdout, /-char publish token/, 'must report that a credential came back');
+  assert.match(r.stdout, /oidc exchange \[[^\]]+\]: ACCEPTED/, 'must report the exchange result');
+  assert.match(r.stdout, /issued a 140-char/, 'must report that a credential came back');
 });
 
 test('the issued publish token is never printed', () => {
@@ -804,7 +814,7 @@ test('a refused exchange fails the rehearsal and quotes npm', () => {
   });
   assert.equal(r.status, 1, 'a refusal must fail the rehearsal');
   const out = r.stdout + r.stderr;
-  assert.match(out, /oidc exchange: REFUSED/, 'must name the failure');
+  assert.match(out, /oidc exchange \[[^\]]+\]: REFUSED/, 'must name the failure and which audience');
   assert.match(out, /no trusted publishing configuration/, 'must quote what npm actually said');
   assert.match(out, /Trusted Publisher/, 'must point at the setting that decides it');
 });
@@ -834,13 +844,43 @@ test('a real release does not run the exchange probe', () => {
     'the probe is a rehearsal-only diagnostic');
 });
 
-test('the probe asks for the audience npm itself uses', () => {
-  // npm/cli builds the audience as `npm:${hostname}` and publishes with the token minted under it.
-  // Minting under any other audience still yields the same identity claims, which is exactly why
-  // getting this wrong is invisible in the claim dump and only shows up as a trust mismatch.
+test('the probe covers both candidate audiences, not just the one npm uses', () => {
+  // npm/cli builds the audience as `npm:${hostname}` and publishes with that token, so it must be
+  // probed. But the first rehearsal refused on it alone, and a refusal on one audience is not
+  // evidence that npm distrusts the workflow -- it may be evidence that the wrong audience was
+  // asked. Probing both is what turns "npm said no" into something a reader can act on.
   const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
-  assert.match(wf, /audience=npm:registry\.npmjs\.org/,
-    'the id token must be minted with the audience npm asks for');
-  assert.ok(!/audience=https:\/\/registry\.npmjs\.org/.test(wf),
-    'the old audience produced a token no publish would present');
+  assert.match(wf, /for aud in npm:registry\.npmjs\.org https:\/\/registry\.npmjs\.org/,
+    'both candidate audiences must be probed');
+  assert.match(wf, /&audience=\$\{aud\}/,
+    'the token must be minted per audience rather than once with a fixed one');
+});
+
+test('one audience accepted and the other refused still passes the rehearsal', () => {
+  // The case the first version of this probe could not express, and the reason it probes both
+  // audiences. A provenance-style trusted publisher may accept the registry URL where npm's own
+  // `npm:${hostname}` audience is refused -- or the reverse. Failing on the first refusal would
+  // report "npm does not trust this workflow" on a configuration that works fine, and a rehearsal
+  // that cries wolf is a rehearsal nobody reads.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
+    exchange: JSON.stringify({ message: 'unauthorized' }),
+    exchange2: JSON.stringify({ token: 'npm-'.padEnd(140, 'z') }),
+  });
+  assert.equal(r.status, 0, 'an accepted audience must outweigh a refused one');
+  const out = r.stdout + r.stderr;
+  assert.match(out, /npm:registry\.npmjs\.org\]: REFUSED/, 'must still report the refusal it saw');
+  assert.match(out, /https:\/\/registry\.npmjs\.org\]: ACCEPTED/, 'and the acceptance it saw');
+  assert.match(out, /npm trusts this workflow/, 'and the conclusion the operator acts on');
+});
+
+test('both audiences refused fails the rehearsal', () => {
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
+    exchange: JSON.stringify({ message: 'unauthorized' }),
+  });
+  assert.equal(r.status, 1, 'a refusal on every audience that answered must fail the rehearsal');
+  const out = r.stdout + r.stderr;
+  assert.match(out, /every audience that answered refused/, 'must state the aggregate, not one line');
+  assert.match(out, /Trusted Publisher/, 'must point at the setting that decides it');
 });
