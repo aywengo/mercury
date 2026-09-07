@@ -1197,7 +1197,9 @@ test('a fleet tag for a package that has never existed is refused before a relea
   const out = r.stdout + r.stderr;
   assert.match(out, /does not exist on the registry \(HTTP 404\)/, 'and say which package');
   assert.match(out, /first publish needs a credential/, 'and the bootstrap reason');
-  assert.match(out, /npm publish --access public/, 'and name the remedy that works');
+  assert.match(out, /cd fleet && .*npm publish --access public/,
+    'the remedy must run in the Fleet package; at the root it publishes the host package instead');
+  assert.match(out, /publishes @aywengo\/mercury, not Fleet/, 'and warn about that trap explicitly');
   assert.ok(!/gh release create/.test(r.stdout),
     'and must not create a GitHub Release that ships nothing');
 });
