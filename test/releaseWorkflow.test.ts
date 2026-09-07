@@ -1088,11 +1088,10 @@ test('the claims probe prints the issuer, the one claim npm matches before any o
 });
 
 test('the release body does not offer a Homebrew install the tap cannot serve', () => {
-  // The body's own rule is that it must describe what is actually installable. The formula is written
-  // by the LAST step of a release whose npm submission succeeded, and no release has ever got that
-  // far, so aywengo/homebrew-tap has no mercury-ai.rb -- the raw URL 404s today. Offering
-  // `brew install aywengo/mercury/mercury-ai` as the fallback for a failed npm publish therefore
-  // sent users to a 404 while telling them the npm gap was the only problem.
+  // The body's own rule is that it must describe what is actually installable, and it now asks the
+  // repository before naming Homebrew. This models the probe answering 404: the body must then withhold
+  // the `brew install` line instead of offering a command that would fail, while still naming the
+  // release asset, which really is attached by this point.
   const r = runTag(`host-v${V}`, {
     notes: [`host/${V}.md`], oidc: true, npmToken: '', npmFails: true, npmSubmitErr: 'npm error code E401',
     formulaHttp: '404',

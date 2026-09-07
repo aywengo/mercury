@@ -458,10 +458,11 @@ jobs:
           # body is completed here. Every npm state gets its own wording; a body that stayed silent would
           # advertise an `npm install` that does not resolve, which is the overstatement class of the
           # deleted cli-* tag.
-          # The body must not name an install path that does not exist. The formula is pushed by the
-          # LAST step of a successful release, and no release has ever completed, so the tap has no
-          # mercury-ai.rb at all -- the raw URL 404s today. Asking costs one unauthenticated request
-          # against a public repository, and it is the only way the sentence below can be true.
+          # The body must not name an install path it has not checked. Whether the formula is present
+          # is a fact about the repository at the moment the body is written, and the body is written
+          # before the formula step below runs, so it cannot be reasoned about from here: it has to be
+          # asked. One unauthenticated request against a public repository answers it, and the wording
+          # below branches on the answer rather than on an assumption about release history.
           # The repository IS the tap: the formula step below commits Formula/mercury-ai.rb to this
           # repository and pushes it here, and the workflow comment says so in as many words ("the
           # formula lives here rather than in a separate tap repo"). Probing aywengo/homebrew-tap --
