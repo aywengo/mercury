@@ -34,7 +34,17 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    first `@aywengo/mercury-fleet` publish needs a credential; a `fleet-vX.Y.Z` tag pushed without one is
    refused up front rather than creating a GitHub Release that ships nothing. Once the package exists the
    tag path needs no secret, and the workflow discovers this by asking the registry, so nothing has to be
-   edited when the bootstrap happens.
+   edited when the bootstrap happens. The command, which the refusal prints as well:
+
+   ```bash
+   cd fleet                      # REQUIRED: from the repo root this publishes @aywengo/mercury, not fleet
+   cp ../LICENSE LICENSE         # fleet/ declares MIT but ships no LICENSE file
+   npm publish --access public --tag rc
+   ```
+
+   Run it from a clean checkout of the commit you intend to release, with an npm credential that can
+   publish, and configure trusted publishing on the new package page immediately afterwards so the very
+   next release needs no secret.
 
 5. **Rehearse before you tag.** A tag is a published artifact, so a mistake in the release job costs a
    burned version number. Run the workflow by hand instead:
