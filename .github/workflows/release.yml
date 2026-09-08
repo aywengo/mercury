@@ -370,7 +370,7 @@ jobs:
                 echo "     package up before refusing. Our refusal is about trust, not about the name."
               else
                 echo "  => a nonexistent package gets the SAME answer, so this exchange cannot tell"
-                echo "     "no trusted publisher" from "publisher does not match". Check the package"
+                echo "     'no trusted publisher' from 'publisher does not match'. Check the package"
                 echo "     page directly; the rehearsal cannot settle it."
               fi
               echo "  => refused for ${pkg_name}, and refused identically for an unrelated package."
