@@ -52,10 +52,12 @@ let scenarioError: unknown;
 let startupFailed = false;
 // Definite assignment rather than a placeholder object. The old initialiser was `{ base: '', token: '' }`
 // -- an object with no `get` or `post` -- and needed `as unknown as` to compile at all, which is the sign
-// of the problem: the cast existed to silence the compiler noticing the placeholder was not a client. If a
-// future refactor moved an assertion above the `before()` that assigns these, the placeholder would fail
-// later with a confusing TypeError inside a request; `!` says "assigned before use" and lets the compiler
-// keep checking the real shape.
+// of the problem: the cast existed to silence the compiler noticing the placeholder was not a client.
+//
+// `!` is a compile-time assertion and nothing more. It does not detect use before `before()` runs; such a
+// use would still fail at runtime, on `undefined` instead of on a missing method. The win is only that the
+// declaration now states the truth -- these hold a real Client, assigned in `before()` -- so neither a
+// lying placeholder nor a double cast is needed to make the file compile.
 let alice!: ReturnType<typeof client>;
 let bob!: ReturnType<typeof client>;
 /** Shared across the sequential journeys: the Run created by the lifecycle test is the one the
