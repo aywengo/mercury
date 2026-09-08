@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join } from 'node:path';
 
 /**
  * ci.yml decides which tests run for which files, and nothing checked that decision. Two real bugs slipped
@@ -59,68 +59,76 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp('^' + re + '$');
 }
 
-const covered = (p: string) => contractDocsGlobs().some((g) => globToRegExp(g).test(p));
-
-/**
- * Every markdown path a test names literally. A template literal such as `docs/releases/${name}.md`
- * yields its static prefix (`docs/releases/`), which is exactly the granularity the coverage question
- * needs: does some filter trigger on that directory?
- */
-// The policy governs a fixed set of locations: everything under docs/, deploy/README.md, and the two root
-// documents the filter names.
+// The policy governs everything under docs/, plus deploy/README.md and the two root documents the filter
+// names. Anything else a test happens to mention is out of scope here.
 const GOVERNED = /^(docs\/|deploy\/README\.md$|README\.md$|QUICKSTART\.md$)/;
 
+const norm = (p: string) => {
+  const out: string[] = [];
+  for (const part of p.split('/')) {
+    if (part === '.' || part === '') continue;
+    if (part === '..') out.pop();
+    else out.push(part);
+  }
+  return out.join('/');
+};
+
 /**
- * Which governed documents a test file actually reads.
+ * Which governed documents a test file actually reads, resolved to repo-relative paths.
  *
- * "Mentions the path" is the wrong signal, and the first version of this test proved it: backup.test.ts,
- * sandbox.test.ts and workspaceGC.test.ts all name README.md and deploy/README.md, but they write those
- * files into a temp workspace and assert on the copy. They would be reported as guards on the repo's own
- * README, and the rule would be wrong on three of its first four findings.
+ * "Mentions the path" is the wrong signal. The first version of this test proved it three ways over:
+ *   - backup.test.ts, sandbox.test.ts and workspaceGC.test.ts name README.md, but they write it into a
+ *     temp workspace and assert on the copy. Those are not guards on the repo's own documents.
+ *   - deployDocs.test.ts reaches README.md through `join(DEPLOY, 'README.md')`, where DEPLOY is itself a
+ *     join off import.meta.dirname. Keying on a literal `join(ROOT, ...)` missed it entirely.
+ *   - client/test/cli.test.ts reads docs/cli-tui-design.md through a two-level `join(import.meta.dirname,
+ *     '..', '..', 'docs', ...)`. Missing that left a real document unguarded.
  *
- * So this keys on the read call itself -- read('docs/x.md'), readFileSync(join(ROOT, ...)) -- and ignores
- * writeFileSync, existsSync and rm. Comments are stripped first, because a comment that names a path is
- * documentation about a path, not a read of it.
+ * So this resolves the read call's path the way the test itself would: expand import.meta.dirname against
+ * the file's own directory, follow one level of const indirection, and ignore writeFileSync/existsSync.
+ * Comments are stripped, because a comment naming a path is documentation about a path, not a read.
  */
-function markdownPathsIn(src: string): string[] {
-  const code = src
-    .split('\n')
-    .filter((l) => !/^\s*(\/\/|\*)/.test(l))
-    .join('\n');
+function markdownPathsIn(rel: string): string[] {
+  const src = readFileSync(join(ROOT, rel), 'utf8');
+  const fileDir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+  const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+
+  // const DEPLOY = join(import.meta.dirname, '..', 'deploy')
+  const consts = new Map<string, string>();
+  for (const m of code.matchAll(/const (\w+) = join\(\s*import\.meta\.dirname((?:\s*,\s*'[^']*')*)\s*\)/g)) {
+    const parts = (m[2].match(/'([^']*)'/g) || []).map((x) => '/' + x.slice(1, -1)).join('');
+    consts.set(m[1], norm(`${fileDir}${parts}`));
+  }
+
   const out = new Set<string>();
   const keep = (p: string) => {
-    if (!p || !GOVERNED.test(p)) return;
-    if (existsSync(join(ROOT, p))) { out.add(p); return; }
-    // A literal that stops at an interpolation names a directory: `docs/releases/host/${v}.md`.
-    const dir = p.replace(/\/[A-Za-z0-9_.-]*$/, '');
+    const resolved = norm(p);
+    if (!GOVERNED.test(resolved)) return;
+    if (existsSync(join(ROOT, resolved))) { out.add(resolved); return; }
+    // A path that stops at an interpolation names a directory: `docs/releases/host/${v}.md`.
+    const dir = resolved.replace(/\/[^/]*$/, '');
     if (dir && existsSync(join(ROOT, dir))) out.add(dir + '/');
   };
-  // read('docs/status.md') and readFileSync('README.md', ...)
-  for (const m of code.matchAll(/\b(?:read|readFileSync|readDoc)\(\s*['"`]([A-Za-z0-9_./-]+\.md)/g)) keep(m[1]);
-  // read(`docs/releases/host/${pkg.version}.md`) -- a template literal, which is how releaseHygiene names
-  // the release notes. Missing this left docs/releases/**/*.md in the filter with nothing proving it.
-  for (const m of code.matchAll(/\b(?:read|readFileSync|readDoc)\(\s*`([^`]*)`/g)) {
-    keep(m[1].replace(/\$\{[^}]*\}/g, 'x'));
-  }
-  // readFileSync(join(ROOT, 'docs', 'status.md'), ...) and the template-literal variant
-  for (const m of code.matchAll(/\b(?:read|readFileSync)\(\s*join\(\s*ROOT\s*,([^)]*)\)/g)) {
-    const parts = [...m[1].matchAll(/['"`]([^'"`]+)['"`]/g)].map((x) => x[1]);
-    const tmpl = /`([^`]*)`/.exec(m[1]);
-    if (tmpl) parts.push(tmpl[1].replace(/\$\{[^}]*\}/g, 'x') + (tmpl[1].endsWith('}') ? '.md' : ''));
-    if (parts.length) keep(parts.join('/'));
+
+  // Take each read call's argument, then resolve whatever shape it turns out to be.
+  const calls = [...code.matchAll(/\b(?:read|readFileSync|readDoc)\(((?:[^()]|\([^()]*\))*)\)/g)].map((m) => m[1]);
+  for (const arg of calls) {
+    const lits = [...arg.matchAll(/'([^']*)'|`([^`]*)`/g)].map((m) => m[1] ?? m[2].replace(/\$\{[^}]*\}/g, 'x'));
+    if (!lits.length) continue;
+    // The encoding argument is a quoted string too: readFileSync(join(..., 'x.md'), 'utf8'). Anything
+    // after the document name is not part of its path.
+    const stop = lits.findIndex((x) => x.endsWith('.md'));
+    const segs = stop < 0 ? lits : lits.slice(0, stop + 1);
+    if (/import\.meta\.dirname/.test(arg)) {
+      // import.meta.dirname itself is not a quoted literal, so every entry in lits is a real segment.
+      keep(fileDir + segs.map((x) => '/' + x).join(''));
+      continue;
+    }
+    const head = segs[0];
+    if (consts.has(head)) keep(consts.get(head)! + segs.slice(1).map((x) => '/' + x).join(''));
+    else if (/\.md$/.test(head)) keep(head);
   }
   return [...out].sort();
-}
-
-/** Test files that read a document that exists in this repo, with the paths they name. */
-function docsReadingTests(): { file: string; paths: string[] }[] {
-  const out: { file: string; paths: string[] }[] = [];
-  for (const name of readdirSync(join(ROOT, 'test')).sort()) {
-    if (!name.endsWith('.test.ts')) continue;
-    const paths = markdownPathsIn(readFileSync(join(ROOT, 'test', name), 'utf8'));
-    if (paths.length) out.push({ file: name, paths });
-  }
-  return out;
 }
 
 /** A read path is triggered if a filter matches it, or matches its directory when it is one. */
@@ -131,13 +139,27 @@ function triggered(p: string): boolean {
   return false;
 }
 
+/** Every suite `npm test` runs. Scanning only test/ would miss client/test reading docs/. */
+const SUITES = ['test', 'fleet/test', 'client/test'];
+
+function docsReadingTests(): { file: string; paths: string[] }[] {
+  const out: { file: string; paths: string[] }[] = [];
+  for (const suite of SUITES) {
+    const dir = join(ROOT, suite);
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir).sort()) {
+      if (!name.endsWith('.test.ts')) continue;
+      const paths = markdownPathsIn(`${suite}/${name}`);
+      if (paths.length) out.push({ file: `${suite}/${name}`, paths });
+    }
+  }
+  return out;
+}
+
 const contract = jobBlock('docs-contract');
 const runTests = (contract.match(/node --test ([^\n]+)/) || [])[1] || '';
 // Flags such as --test-timeout are part of the same line; they are not test files.
-const runsFiles = runTests
-  .split(/\s+/)
-  .filter((f) => f && !f.startsWith('-'))
-  .map((f) => basename(f));
+const runsFiles = runTests.split(/\s+/).filter((f) => f && !f.startsWith('-'));
 
 test('docs-contract installs dependencies, because its tests spawn the CLI', () => {
   // #359: the job was written for tests that only read files, then inherited one that does not.
@@ -147,7 +169,7 @@ test('docs-contract installs dependencies, because its tests spawn the CLI', () 
 
 test('every test file docs-contract names exists', () => {
   assert.ok(runsFiles.length >= 3, `expected several test files in the run line, saw ${runsFiles.length}`);
-  for (const f of runsFiles) assert.ok(existsSync(join(ROOT, 'test', f)), `docs-contract runs missing test/${f}`);
+  for (const f of runsFiles) assert.ok(existsSync(join(ROOT, f)), `docs-contract runs missing ${f}`);
 });
 
 test('every test that reads a real docs file runs in docs-contract', () => {
