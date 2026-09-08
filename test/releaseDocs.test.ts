@@ -57,9 +57,9 @@ test('every curl in the runbooks is bounded', () => {
       for (const line of joined.split('\n')) {
         if (/\bcurl\b/.test(line)) {
           // Any non-empty value bounds the request: `--max-time 30`, `--max-time=30` and
-            // `--max-time "$CURL_TIMEOUT"` all do the job; requiring digits after whitespace would fail a
-            // correctly bounded command, and a guard that fails on valid code gets switched off.
-            assert.match(line, /--max-time(\s+\S+|=\S+)/, `${doc}: unbounded curl in a runbook block: ${line.trim()}`);
+          // `--max-time "$CURL_TIMEOUT"` all do the job; requiring digits after whitespace would fail a
+          // correctly bounded command, and a guard that fails on valid code gets switched off.
+          assert.match(line, /--max-time(\s+\S+|=\S+)/, `${doc}: unbounded curl in a runbook block: ${line.trim()}`);
         }
       }
     }
@@ -143,8 +143,15 @@ test('the documented OIDC probe tag cannot trigger a real release', () => {
   const wf = read(WORKFLOW);
   // Scope to the probe's own bash block and allow flags: an annotated `git tag -a NAME` or a second
   // `git tag` snippet elsewhere must not silently change which name this guard checks.
-  const probeBlock = (doc.match(/```[a-z]*\n[^`]*?gh workflow run release\.yml[^`]*?```/) ?? [])[1] ?? doc;
-  const m = probeBlock.match(/git tag (?:-\S+\s+|"[^"]+"\s+)?([A-Za-z0-9][A-Za-z0-9._-]*)/);
+  // The capture group is the point. Without it `[1]` is undefined and `?? doc` silently restores the
+  // unscoped behaviour this line exists to remove -- the guard would still pass, checking the wrong text.
+  // Scoping to the dispatch command alone is not enough either: the rehearsal section has its own
+  // `gh workflow run release.yml` block with no tag in it, and it comes first. The probe block is the one
+  // that does both.
+  const blocks = [...doc.matchAll(/```[a-z]*\n([^`]*?)```/g)].map((x) => x[1]);
+  const probeBlock = blocks.filter((b) => /git tag /.test(b) && /gh workflow run release\.yml/.test(b));
+  assert.equal(probeBlock.length, 1, `expected exactly one probe block, found ${probeBlock.length}`);
+  const m = probeBlock[0].match(/git tag (?:-\S+\s+|"[^"]+"\s+)?([A-Za-z0-9][A-Za-z0-9._-]*)/);
   assert.ok(m, 'the runbook must show the probe tag name it means');
   const probe = m[1];
 
