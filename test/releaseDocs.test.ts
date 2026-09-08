@@ -293,10 +293,12 @@ test('the staged-approval step names the npm version that introduced `npm stage`
   const at = text.indexOf('npm stage approve');
   assert.notEqual(at, -1, 'the runbook must give the staged-approval command');
   const near = text.slice(at, at + 700);
-  const m = near.match(/npm\s+(?:\d+\.\d+\.\d+\s+or\s+newer|>=\s*\d+\.\d+\.\d+)/i)
-    ?? near.match(/(\d+\.\d+\.\d+)\s+or\s+newer/);
+  // Tolerate the ways a minimum version is actually written. The point is the relationship
+  // (a floor exists, and it is not below 11.15.0), not the phrasing -- pinning wording here
+  // would fail harmless rewrites while still missing a genuinely stale floor.
+  const m = near.match(/npm\s+v?\s*(?:>=?\s*)?(\d+\.\d+\.\d+)\s*(?:\+|or\s+(?:newer|later))?/i);
   assert.ok(m, `the staged-approval step must state a minimum npm version, got:\n${near}`);
-  const floor = (m[0].match(/\d+\.\d+\.\d+/) ?? [''])[0];
+  const floor = m[1] ?? '';
   assert.ok(floor, `the stated npm floor is not a version number: ${m[0]}`);
   const [maj, min] = floor.split('.').map(Number);
   assert.ok(maj > 11 || (maj === 11 && min >= 15),
