@@ -136,8 +136,8 @@ Trusted publishing can fail in a way that is not a misconfiguration on this side
 probe reports `REFUSED` for this package and for an unrelated control package identically, which means the
 registry is rejecting the token before it looks at any publisher configuration.
 
-**The cause is measured, not guessed.** A third probe asks about a package that **does not exist**, and it
-is refused with the same bytes:
+**What is measured: the token is rejected before npm reads any package record.** A third probe asks about
+a package that **does not exist**, and it is refused with the same bytes:
 
 ```
 @aywengo%2Fmercury               REFUSED -- OIDC token exchange error - unauthorized
@@ -146,18 +146,24 @@ left-pad                         REFUSED -- OIDC token exchange error - unauthor
 ```
 
 A nonexistent package cannot have a trusted publisher, so no per-package setting explains this. The token
-is rejected on its face. The reason is that GitHub issues this repository the **immutable** subject format
--- `repo:aywengo@800531/mercury@1349412409:ref:...` -- because the repository was created after
-2026-07-15, when GitHub made that format automatic for new repositories. npm matches publishers against the
-name-only shape. Issue #376 carries the evidence and the fix to try; #335 records the false lead that came
-before it.
+is rejected on its face. npm documents its failure for a *publisher mismatch* as a 404; we get
+`unauthorized`, which is a token-level rejection rather than a matching failure. #335 records the false lead
+that came before this.
+
+**The leading suspect, not a proven cause.** GitHub issues this repository the **immutable** subject format
+-- `repo:aywengo@800531/mercury@1349412409:ref:...` -- because it was created after 2026-07-15, when GitHub
+made that format automatic for new repositories. The immutable format is documented to break OIDC trust with
+other providers. What has **not** been established is that npm rejects it: npm's trusted-publishing docs
+never mention the `sub` claim at all. So this is the best available explanation for a token-level rejection,
+and the experiment below is cheap to settle -- it is not a finding. #376 carries the full evidence and says
+which parts are measured.
 
 Read the format GitHub is actually issuing, rather than inferring it from a log line:
 
 ```bash
 gh api repos/aywengo/mercury/actions/oidc/customization/sub --jq .sub_claim_prefix
-# repo:aywengo/mercury  -> npm can match this
-# repo:aywengo@<id>/mercury@<id>  -> it cannot, and no npmjs.com setting changes that
+# repo:aywengo/mercury            -> the name-only shape every provider documents
+# repo:aywengo@<id>/mercury@<id>  -> what this repository gets; see #376 for what is and is not proven
 ```
 
 Whether a custom subject template returns a post-cutoff repository to the name-only shape is **unverified**;
