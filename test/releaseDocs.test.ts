@@ -127,3 +127,27 @@ test('the runbook does not claim a rehearsal predicts a tag publish', () => {
     assert.deepEqual(claims, [], `${name} asserts a rehearsal authenticates a real publish`);
   }
 });
+
+test('the documented OIDC probe tag cannot trigger a real release', () => {
+  // docs/releasing.md tells an operator to push a throwaway tag and dispatch the release workflow at it,
+  // to get a tag-subject OIDC token without publishing. The tag name is the only thing standing between
+  // that procedure and a real release: `on.push.tags` fires on `host-v*.*.*` and `fleet-v*.*.*`, and the
+  // obvious-looking `host-v0.0.0-probe` MATCHES, because `*` swallows `-probe`. A runbook step that
+  // silently publishes a version is worse than no runbook step, so the name is pinned here.
+  const doc = read('docs/releasing.md');
+  const wf = read(WORKFLOW);
+  const m = doc.match(/git tag ([a-z0-9][A-Za-z0-9._-]*)/);
+  assert.ok(m, 'the runbook must show the probe tag name it means');
+  const probe = m[1];
+
+  const patterns = [...wf.matchAll(/^\s+- '((?:host|fleet)-v[^']*)'$/gm)].map((x) => x[1]);
+  assert.ok(patterns.length >= 2, 'could not read the release tag triggers from the workflow');
+  // GitHub glob semantics for these patterns: `*` matches any run of characters except `/`.
+  const toRe = (g: string) => new RegExp('^' + g.split('*').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*') + '$');
+  const matched = patterns.filter((g) => toRe(g).test(probe));
+  assert.deepEqual(matched, [], `probe tag ${probe} would trigger a real release via ${matched.join(', ')}`);
+
+  // The procedure is only safe if the reader knows WHY the name is odd, so the constraint must be stated
+  // next to it rather than living only in this test.
+  for (const g of patterns) assert.ok(doc.includes(`\`${g}\``), `the runbook must name the trigger ${g} it is avoiding`);
+});

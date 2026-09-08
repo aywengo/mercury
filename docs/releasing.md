@@ -105,6 +105,31 @@ long-lived secret exists in the repository. `NPM_TOKEN` was deleted once trusted
 configured. The workflow still prefers `NPM_TOKEN` if the secret is ever re-added, and refuses the tag
 before creating any release if neither credential is available.
 
+### Testing trusted publishing without publishing anything
+
+The exchange probe on a normal rehearsal holds a **branch**-subject token, so it cannot tell you what a tag
+push will do. It can be made to hold a tag-subject token, and this is the only way to ask npm about trust
+before you spend a version number.
+
+`workflow_dispatch` reads the workflow from the ref it is given, and the OIDC subject is built from that ref.
+So tag the commit you would release, with a name that matches **neither** `host-v*.*.*` **nor**
+`fleet-v*.*.*`, and dispatch against it:
+
+```bash
+git tag probe-host-v0.0.0 && git push origin probe-host-v0.0.0
+gh workflow run release.yml --repo aywengo/mercury --ref probe-host-v0.0.0
+git push origin :refs/tags/probe-host-v0.0.0    # nothing references it afterwards
+```
+
+The name matters twice over. It must not match the release triggers, or pushing it performs a real release;
+and `host-v0.0.0-probe` **does** match `host-v*.*.*`, because `*` swallows `-probe`. `test/releaseDocs.test.ts`
+asserts the documented name cannot trigger a release. The run stays a rehearsal, because `DRY_RUN` comes from
+the event name and not the ref, so it publishes nothing, creates no GitHub Release and touches no formula.
+
+Read the `oidc sub` line to confirm you actually got a tag subject -- `...:ref:refs/tags/probe-...` -- and
+then read the exchange. `test/releaseDocs.test.ts` also pins that the probe tag name in this document is the
+one the guard checks, so the two cannot drift apart.
+
 ### When the OIDC exchange is refused
 
 Trusted publishing can fail in a way that is not a misconfiguration on this side. The rehearsal's exchange
