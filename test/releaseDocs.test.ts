@@ -296,13 +296,27 @@ test('the staged-approval step names the npm version that introduced `npm stage`
   // Tolerate the ways a minimum version is actually written. The point is the relationship
   // (a floor exists, and it is not below 11.15.0), not the phrasing -- pinning wording here
   // would fail harmless rewrites while still missing a genuinely stale floor.
-  const m = near.match(/npm\s+v?\s*(?:>=?\s*)?(\d+\.\d+\.\d+)\s*(?:\+|or\s+(?:newer|later))?/i);
+  const m = near.match(/npm\s+v?\s*(>=)?\s*(\d+\.\d+\.\d+)\s*(\+|or\s+(?:newer|later))?/i);
+  // A floor must be *claimed*. With both the `>=` prefix and the `+`/`or newer` suffix optional,
+  // a bare `npm 11.15.0` matched -- so the docs could drop the minimum entirely and still pass.
+  // `>` alone is rejected: it is an exclusive bound, not the inclusive floor `npm stage` needs.
+  if (m && !m[1] && !m[3]) m.splice(0);
   assert.ok(m, `the staged-approval step must state a minimum npm version, got:\n${near}`);
-  const floor = m[1] ?? '';
+  const floor = m[2] ?? '';
   assert.ok(floor, `the stated npm floor is not a version number: ${m[0]}`);
   const [maj, min] = floor.split('.').map(Number);
   assert.ok(maj > 11 || (maj === 11 && min >= 15),
     `stated npm floor ${floor} predates the release of \`npm stage\` (11.15.0)`);
   // The fallback must not depend on a recent npm, or the floor is a dead end.
   assert.ok(/npmjs\.com/.test(near), 'must offer a fallback that needs no particular npm version');
+  // Regression guard for the matcher itself: a bare version is not a floor claim.
+  const floorClaim = (s: string) => {
+    const g = s.match(/npm\s+v?\s*(>=)?\s*(\d+\.\d+\.\d+)\s*(\+|or\s+(?:newer|later))?/i);
+    return g !== null && Boolean(g[1] || g[3]);
+  };
+  const cases: Array<[string, boolean]> = [['npm 11.15.0 or newer', true], ['npm >=11.15.0', true],
+    ['npm v11.15.0+', true], ['npm 11.15.0+', true], ['npm 11.15.0', false], ['npm >11.15.0', false]];
+  for (const [ph, want] of cases) {
+    assert.equal(floorClaim(ph), want, `matcher must ${want ? 'accept' : 'reject'} \`${ph}\``);
+  }
 });
