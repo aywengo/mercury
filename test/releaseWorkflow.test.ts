@@ -1210,3 +1210,21 @@ test('the 2xx verdict matches the log line npm actually writes', () => {
       new RegExp(verdict[1]), `${code} must not be reported as a successful exchange`);
   }
 });
+
+test('the stage id is extracted from the line npm actually prints', () => {
+  // Approval is `npm stage approve <uuid>` and needs a 2FA code, so this job can never finish the
+  // release itself; the most useful thing it can do is name the id. The extraction is a grep over npm's
+  // output, and a grep written against a remembered format silently finds nothing -- which is exactly
+  // how the 2xx verdict ended up always reporting failure. Pin the real npm wording, taken from
+  // lib/commands/publish.js: `+ ${pkgContents.id} (staged with id ${stageId})`.
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  const m = wf.match(/grep -oE '(staged with id [^']+)'/);
+  assert.ok(m, 'the stage-id extraction must exist');
+  const re = new RegExp(m[1]);
+  const uuid = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
+  assert.match(`+ @aywengo/mercury@0.1.0-rc2 (staged with id ${uuid})`, re,
+    'must match npm\'s real staged line');
+  const got = `+ pkg (staged with id ${uuid})`.match(re)![0].split(' ').pop();
+  assert.equal(got, uuid, 'the id must be the last field so awk can pick it out');
+  assert.ok(!re.test('staged with id not-a-uuid'), 'must not match a malformed id');
+});
