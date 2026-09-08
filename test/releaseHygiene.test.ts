@@ -607,3 +607,19 @@ test('the credential gate asserts the exec exit code before scanning the environ
   assert.ok(parse > 0 && codeCheck < parse,
     'the exit code must be asserted before the output is parsed, or a failed exec is scanned as if it were an environment');
 });
+
+test('every teardown check that reads empty docker output first proves the command ran', () => {
+  // Three teardown checks read `stdout.trim() === ""` as "teardown left nothing behind". A failed docker
+  // call writes to stderr and leaves stdout empty, so all three would report a clean teardown on a host
+  // where the check never ran. Each must assert exit status 0 before the output is read.
+  const src = readFileSync(join(ROOT, 'e2e', 'robustness.test.ts'), 'utf8');
+  const empties = [...src.matchAll(/assert\.equal\((\w+)\.stdout\.trim\(\),\s*''/g)];
+  assert.ok(empties.length >= 3, `expected the three teardown checks to still exist, found ${empties.length}`);
+  const unguarded = empties.map((m) => m[1]).filter((v) => {
+    const decl = src.lastIndexOf(`const ${v} = spawnSync(`);
+    const between = src.slice(decl, src.indexOf(`assert.equal(${v}.stdout.trim(), ''`, decl));
+    return !new RegExp(`assert\\.equal\\(${v}\\.status,\\s*0`).test(between);
+  });
+  assert.deepEqual(unguarded, [],
+    `these read empty output without proving the command succeeded: ${unguarded.join(', ')}`);
+});
