@@ -514,9 +514,13 @@ test('a prerelease host tag is accepted and published under dist-tag rc, not lat
   // (`npm config get tag` prints "latest"), so publishing 0.1.0-rc1 the old way would have made
   // `npm install @aywengo/mercury` resolve to the release candidate for everyone. The stubbed npm on
   // PATH records the exact argv, so this asserts the flag the real publish would carry.
-  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`] });
+  // Pinned to an explicit prerelease rather than derived from the repository's current version: main is
+  // now a stable 0.1.0, and reusing that here would silently turn this into a second stable test while
+  // still claiming to prove prerelease routing.
+  const pre = '0.9.0-rc1';
+  const r = runTag(`host-v${pre}`, { notes: [`host/${pre}.md`], pkgVersion: pre });
   assert.equal(r.status, 0, `a prerelease tag matching package.json must be accepted: ${r.stderr}`);
-  assert.match(r.stdout, new RegExp(`gh release create host-v${V.replace(/\./g, '\\.')}`));
+  assert.match(r.stdout, new RegExp(`gh release create host-v${pre.replace(/\./g, '\\.')}`));
   assert.match(r.stdout, new RegExp(SUBMIT + ' [^\\n]*--tag rc\\b'),
     `prerelease must publish under dist-tag rc, got:\n${r.stdout}`);
   assert.ok(!/--tag latest/.test(r.stdout), 'a prerelease must NOT be published under latest');

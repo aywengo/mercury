@@ -8,6 +8,17 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-08
+
+First stable host release. **The source is identical to 0.1.0-rc1** -- `[Unreleased]` was empty -- and that
+is deliberate. `0.1.0-rc1` was published to npm by hand without `--tag`, so npm applied `latest` to a
+prerelease and `npm install -g @aywengo/mercury` has resolved to an RC ever since. npm refuses to delete
+`latest` (400 Bad Request), so the only way to move it onto a real release is to publish one. This version
+does that: the release workflow derives `dist_tag=latest` for a plain `X.Y.Z` and leaves prereleases on
+their own tag.
+
+No functional change from 0.1.0-rc1. See issue #368 for the dist-tag history.
+
 ## [0.1.0-rc1] - 2026-09-06
 
 First public host release, as a release candidate. Published to the npm dist-tag **`rc`**
