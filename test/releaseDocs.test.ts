@@ -148,10 +148,13 @@ test('the documented OIDC probe tag cannot trigger a real release', () => {
   // Scoping to the dispatch command alone is not enough either: the rehearsal section has its own
   // `gh workflow run release.yml` block with no tag in it, and it comes first. The probe block is the one
   // that does both.
-  const blocks = [...doc.matchAll(/```[a-z]*\n([^`]*?)```/g)].map((x) => x[1]);
-  const probeBlock = blocks.filter((b) => /git tag /.test(b) && /gh workflow run release\.yml/.test(b));
-  assert.equal(probeBlock.length, 1, `expected exactly one probe block, found ${probeBlock.length}`);
-  const m = probeBlock[0].match(/git tag (?:-\S+\s+|"[^"]+"\s+)?([A-Za-z0-9][A-Za-z0-9._-]*)/);
+  // `[sS]*?` rather than a backtick-free class: a fence body may legitimately contain backticks (a
+  // `$(command)` substitution, an inline comment), and stopping at the first one would hand this guard a
+  // truncated block -- or the wrong block entirely, since the count assertion would then see zero or two.
+  const blocks = [...doc.matchAll(/```[a-z]*\r?\n([\s\S]*?)```/g)].map((x) => x[1]);
+  const probeBlocks = blocks.filter((b) => /git tag /.test(b) && /gh workflow run release\.yml/.test(b));
+  assert.equal(probeBlocks.length, 1, `expected exactly one probe block, found ${probeBlocks.length}`);
+  const m = probeBlocks[0].match(/git tag (?:-\S+\s+|"[^"]+"\s+)?([A-Za-z0-9][A-Za-z0-9._-]*)/);
   assert.ok(m, 'the runbook must show the probe tag name it means');
   const probe = m[1];
 
