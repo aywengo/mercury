@@ -190,7 +190,9 @@ test('the runbook does not state an inferred cause as a measured one', () => {
   // A fixed character window is not a paragraph: a hedge in the NEXT paragraph would still land inside
   // it, which is precisely the failure being guarded against. Split on blank lines and check the one
   // paragraph that makes the claim.
-  const paras = doc.split(/\n\s*\n/);
+  // Normalise first. The file's other matchers already accept CRLF, and a \r surviving into a paragraph
+  // body would make this split disagree with them about where paragraphs are.
+  const paras = doc.replace(/\r\n/g, '\n').split(/\n\s*\n/);
   const claiming = paras.filter((x) => /immutable.{0,40}subject format/is.test(x));
   assert.equal(claiming.length, 1, `expected exactly one paragraph making the subject-format claim, got ${claiming.length}`);
   assert.match(claiming[0], /not a proven cause|not established|has not been established|not a finding/i,
