@@ -246,6 +246,7 @@ jobs:
               accepted=0
               evidence=0
               distinguishes=0
+              looks_up=0
               for aud in npm:registry.npmjs.org https://registry.npmjs.org; do
                 aud_json=$(curl -sS --max-time 30 -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
                   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${aud}" || echo "")
@@ -260,15 +261,22 @@ jobs:
                 # that genuinely differs on the second audience would never be looked at.
                 aud_ours=""
                 aud_control=""
+                aud_missing=""
                 aud_ours_ok=0
                 aud_control_ok=0
+                aud_missing_ok=0
                 # The same question is asked of a package this repository has no relationship to.
                 # Without that control, "unauthorized" gets read as "our trusted publisher does not
                 # match", when it may be all the registry ever says to a token it will not exchange
                 # -- in which case the line distinguishes nothing and must not be reported as if it
                 # did. node prints only a one-line description; bash owns the log line, so the
                 # operator sees it instead of having it captured into a variable.
-                for probe_pkg in "$esc" left-pad; do
+                # Three names, not two. `left-pad` is real and unrelated, so it answers "does the registry
+                # evaluate per-package trust at all". The third is deliberately nonexistent: it answers
+                # whether the endpoint looks the package up BEFORE deciding. Without it, a refusal on our
+                # package cannot be told apart from a refusal that never consulted the package record --
+                # the same ambiguity the publish path resolves with a registry GET.
+                for probe_pkg in "$esc" left-pad "@aywengo%2Fno-such-package-probe"; do
                   # The request shape mirrors npm/cli exactly: same path, same audience, the id_token as
                   # the bearer credential, and -- the part that was missing -- the same content type.
                   # npm-registry-fetch sets `content-type: application/json` on every JSON request even
@@ -302,16 +310,26 @@ jobs:
                     *) st=NO_ANSWER ;;
                   esac
                   echo "  oidc exchange [${aud}] ${probe_pkg}: ${st} -- ${msg}"
+                  # Three roles, named. A bare `else` here would let the third probe overwrite the
+                  # control and quietly change what `distinguishes` means.
                   if [ "$probe_pkg" = "$esc" ]; then
                     if [ "$rc" -eq 0 ]; then accepted=1; fi
                     if [ "$rc" -ne 2 ]; then evidence=1; aud_ours="${msg}"; aud_ours_ok=1; fi
+                  elif [ "$probe_pkg" = "left-pad" ]; then
+                    if [ "$rc" -ne 2 ]; then aud_control="${msg}"; aud_control_ok=1; fi
                   elif [ "$rc" -ne 2 ]; then
-                    aud_control="${msg}"; aud_control_ok=1
+                    aud_missing="${msg}"; aud_missing_ok=1
                   fi
                 done
                 if [ "$aud_ours_ok" = "1" ] && [ "$aud_control_ok" = "1" ] \
                   && [ "$aud_ours" != "$aud_control" ]; then
                   distinguishes=1
+                fi
+                # If a nonexistent package gets a different answer than ours, the endpoint consulted the
+                # package record before refusing, so our refusal is about trust and not about the name.
+                if [ "$aud_ours_ok" = "1" ] && [ "$aud_missing_ok" = "1" ] \
+                  && [ "$aud_ours" != "$aud_missing" ]; then
+                  looks_up=1
                 fi
               done
               if [ "$accepted" = "1" ]; then
@@ -340,7 +358,17 @@ jobs:
                 # It therefore must not fail the run. A check that is red for every run is a check that
                 # gets ignored, and the ignoring is what costs: the day it turns red for a real reason
                 # looks exactly like every day it was red for no reason.
-                echo "  => refused for ${pkg_name}, and refused identically for an unrelated package."
+                # Whether the endpoint consulted the package record at all is a separate fact from whether
+              # it distinguished two packages, and it changes what the refusal means.
+              if [ "$looks_up" = "1" ]; then
+                echo "  => a nonexistent package gets a DIFFERENT answer, so the registry does look the"
+                echo "     package up before refusing. Our refusal is about trust, not about the name."
+              else
+                echo "  => a nonexistent package gets the SAME answer, so this exchange cannot tell"
+                echo "     "no trusted publisher" from "publisher does not match". Check the package"
+                echo "     page directly; the rehearsal cannot settle it."
+              fi
+              echo "  => refused for ${pkg_name}, and refused identically for an unrelated package."
                 echo "     This exchange says nothing about whether a real publish would"
                 echo "     authenticate, so the rehearsal continues. It is a diagnostic, not a gate."
                 echo "     The only thing that settles npm's trust is the publish itself." 
