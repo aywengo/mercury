@@ -96,8 +96,11 @@ docker ps -aq --filter name=mercury    # leftover E2E containers
 ```
 
 Normal teardown removes both. So does an abrupt exit: Testcontainers runs Ryuk, which reaps its
-session's containers the moment the test process dies, and `e2e/robustness.test.ts` asserts that by
-SIGKILLing a probe process and requiring its container to disappear. If Ryuk is disabled
+session's containers when the test process dies, and `e2e/robustness.test.ts` checks the property that
+makes this ours to guarantee -- that every container the gate starts carries the session label Ryuk
+reaps on, and that a reaper is running. It does NOT assert how fast a killed probe's container goes
+away: Ryuk is shared across processes, so reaping is only observed once the last client disconnects
+(~11s alone, over 60s with another compose suite running). If Ryuk is disabled
 (`TESTCONTAINERS_RYUK_DISABLED=true`), that guarantee is gone and cleanup is manual:
 
 ```bash
