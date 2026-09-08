@@ -93,7 +93,7 @@ function runTag(
   opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
     directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean;
     pkgHttp?: string; formulaHttp?: string; sub?: string; rawJwt?: string;
-    npmSubmitErr?: string; exchange?: string; exchangeExit?: number;
+    npmSubmitErr?: string; exchange?: string; exchangeExit?: number; missing?: string; missingExit?: number;
     exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
     control2?: string; control2Exit?: number } = {},
 ): Run {
@@ -177,9 +177,11 @@ function runTag(
       // the control package is separated that way. The audience is not in the URL at all, so the
       // call number carries it: the step probes two audiences and, for each, ours then the control,
       // so calls 1-2 are the first audience and 3-4 the second.
-      + '    case "$url" in *left-pad*) which=CONTROL ;; *) which=OURS ;; esac\n'
+      + '    case "$url" in *no-such-package-probe*) which=MISSING ;; *left-pad*) which=CONTROL ;; *) which=OURS ;; esac\n'
       + '    if [ "$n" -le 2 ]; then a=1; else a=2; fi\n'
-      + '    if [ "$which" = OURS ]; then\n'
+      + '    if [ "$which" = MISSING ]; then\n'
+      + '      body="${STUB_EXCHANGE_MISSING-$STUB_EXCHANGE}"; code="${STUB_EXCHANGE_MISSING_EXIT-$STUB_EXCHANGE_EXIT}";\n'
+      + '    elif [ "$which" = OURS ]; then\n'
       + '      if [ "$a" = 1 ]; then body="${STUB_EXCHANGE_OURS1-$STUB_EXCHANGE}"; code="${STUB_EXCHANGE_OURS1_EXIT-$STUB_EXCHANGE_EXIT}";\n'
       + '      else body="${STUB_EXCHANGE_OURS2-$STUB_EXCHANGE}"; code="${STUB_EXCHANGE_OURS2_EXIT-$STUB_EXCHANGE_EXIT}"; fi\n'
       + '    else\n'
@@ -243,6 +245,8 @@ function runTag(
           event_name: 'workflow_dispatch', workflow: 'Release' }),
         STUB_EXCHANGE: opts.exchange ?? '',
         STUB_EXCHANGE_EXIT: String(opts.exchangeExit ?? 0),
+        STUB_EXCHANGE_MISSING: opts.missing ?? '',
+        STUB_EXCHANGE_MISSING_EXIT: String(opts.missingExit ?? opts.exchangeExit ?? 0),
         STUB_PKG_HTTP: opts.pkgHttp ?? '200',
         STUB_FORMULA_HTTP: opts.formulaHttp ?? '200',
         STUB_EXCHANGE_OURS1: opts.exchange ?? '',
@@ -1278,8 +1282,15 @@ test('an ID-bearing subject claim is called out, not left in the claim dump', ()
     sub: 'repo:aywengo@800531/mercury@1349412409:ref:refs/heads/main',
   });
   assert.match(r.stderr, /sub carries numeric repository IDs/);
-  assert.match(r.stderr, /#335/, 'and point at the issue that holds the evidence');
-  assert.match(r.stderr, /not a verdict/, 'without claiming it is the cause');
+  assert.match(r.stderr, /#376/, 'point at the issue that now holds the cause');
+  // No longer hedged. #375 measured that a package which does not exist is refused with these same
+  // bytes, so the refusal cannot be about per-package configuration. A warning that still said
+  // "not a verdict" after that measurement would be describing a smaller result than we have.
+  assert.match(r.stderr, /does not exist is refused/);
+  assert.match(r.stderr, /before consulting any/);
+  assert.ok(!/not a verdict/.test(r.stderr), 'the hedge is retired');
+  // And hand the operator the one read that shows the format, rather than a settings path to guess at.
+  assert.match(r.stderr, /sub_claim_prefix/);
 });
 
 test('a name-only subject claim is not flagged', () => {
@@ -1321,4 +1332,34 @@ test('a payload that parses but is not an object is not read as a claim set', ()
       `${payload} must not throw: ` + r.stderr.slice(-260));
     assert.match(r.stdout, /payload is not a JSON object/, `${payload} must be reported as unusable`);
   }
+});
+
+test('a different answer for a nonexistent package says the registry looked the name up', () => {
+  // The refusal this probe exists to explain arrives as a bare "unauthorized", which reads the same
+  // whether npm never consulted the package record or consulted it and declined. A nonexistent package
+  // separates the two: if the registry answers differently for a name with no record at all, then our
+  // refusal came after a lookup, and it is about trust rather than about the name being wrong.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
+    exchange: JSON.stringify({ message: 'OIDC token exchange error - unauthorized' }), exchangeExit: 1,
+    missing: JSON.stringify({ message: 'package not found' }), missingExit: 1,
+  });
+  const out = r.stdout + r.stderr;
+  assert.match(out, /@aywengo%2Fno-such-package-probe: REFUSED -- package not found/, 'must show the third answer');
+  assert.match(out, /the registry does look the/, 'must conclude that a lookup happened');
+  assert.ok(!/cannot tell/.test(out), 'must not also say it cannot tell');
+});
+
+test('an identical answer for a nonexistent package is reported as uninformative', () => {
+  // The other direction, and the one observed in the real rehearsal: every name gets the same bytes. Then
+  // the exchange cannot distinguish "no trusted publisher configured" from "publisher does not match", and
+  // saying otherwise would send an operator to fix the wrong thing.
+  const r = runTag(`host-v${V}`, {
+    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
+    exchange: JSON.stringify({ message: 'OIDC token exchange error - unauthorized' }), exchangeExit: 1,
+  });
+  const out = r.stdout + r.stderr;
+  assert.match(out, /cannot tell/, 'must admit the limit');
+  assert.match(out, /Check the package\s+page directly/, 'and point at the thing that can settle it');
+  assert.ok(!/does look the/.test(out), 'must not claim a lookup it did not observe');
 });

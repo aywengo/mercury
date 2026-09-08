@@ -134,12 +134,34 @@ one the guard checks, so the two cannot drift apart.
 
 Trusted publishing can fail in a way that is not a misconfiguration on this side. The rehearsal's exchange
 probe reports `REFUSED` for this package and for an unrelated control package identically, which means the
-registry is rejecting the token before it looks at any publisher configuration. See issue #335: GitHub now
-mints `sub` with numeric owner and repository IDs for this repository. GitHub's OpenID Connect reference
-documents only an **opt in** to that format, and says renames and transfers also move *toward* it; it
-documents no setting that returns a repository created after the cutoff to the name-only shape. So the
-subject-claim setting below is worth reading, but for this repository it is not a lever that has ever been
-shown to point the other way. Issue #335 carries the evidence and the open question.
+registry is rejecting the token before it looks at any publisher configuration.
+
+**The cause is measured, not guessed.** A third probe asks about a package that **does not exist**, and it
+is refused with the same bytes:
+
+```
+@aywengo%2Fmercury               REFUSED -- OIDC token exchange error - unauthorized
+left-pad                         REFUSED -- OIDC token exchange error - unauthorized
+@aywengo%2Fno-such-package-probe REFUSED -- OIDC token exchange error - unauthorized
+```
+
+A nonexistent package cannot have a trusted publisher, so no per-package setting explains this. The token
+is rejected on its face. The reason is that GitHub issues this repository the **immutable** subject format
+-- `repo:aywengo@800531/mercury@1349412409:ref:...` -- because the repository was created after
+2026-07-15, when GitHub made that format automatic for new repositories. npm matches publishers against the
+name-only shape. Issue #376 carries the evidence and the fix to try; #335 records the false lead that came
+before it.
+
+Read the format GitHub is actually issuing, rather than inferring it from a log line:
+
+```bash
+gh api repos/aywengo/mercury/actions/oidc/customization/sub --jq .sub_claim_prefix
+# repo:aywengo/mercury  -> npm can match this
+# repo:aywengo@<id>/mercury@<id>  -> it cannot, and no npmjs.com setting changes that
+```
+
+Whether a custom subject template returns a post-cutoff repository to the name-only shape is **unverified**;
+the same read answers it one second after you try. #376 gives the commands and the one-line revert.
 
 **The fallback is a short-lived token, and it does not cost you provenance.** The `host-v0.1.0-rc1` run
 authenticated with `NPM_TOKEN` and still signed and published provenance:
