@@ -252,6 +252,7 @@ jobs:
               evidence=0
               distinguishes=0
               looks_up=0
+              claims_checked=0
               for aud in npm:registry.npmjs.org https://registry.npmjs.org; do
                 aud_json=$(curl -sS --max-time 30 -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
                   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${aud}" || echo "")
@@ -325,6 +326,31 @@ jobs:
                   elif [ "$rc" -ne 2 ]; then
                     aud_missing="${msg}"; aud_missing_ok=1
                   fi
+                # Control: the same request with a bearer that is not a JWT at all. If npm answers this
+                # differently than it answered our real token, then npm parsed and validated our token and
+                # rejected it on its claims -- which puts the cause in the claims, not in transport,
+                # issuer or signature. If the answers are identical, this endpoint says nothing at all
+                # about the contents of our token and no conclusion about the subject is safe.
+                bogus=$(curl -sS --max-time 30 -X POST -H "Accept: application/json" \
+                  -H "content-type: application/json" \
+                  -H "Authorization: bearer not.a.real.jwt" \
+                  "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${esc}" || echo "")
+                bogus_msg=$(node -e '
+                  const raw = process.argv[1];
+                  let j = null;
+                  try { j = JSON.parse(raw); } catch {}
+                  process.stdout.write(String((j && (j.message || j.error)) || raw).slice(0, 160));
+                ' "$bogus")
+                echo "  oidc exchange [control] not-a-jwt: ${bogus_msg}"
+                if [ "$aud_ours_ok" = "1" ] && [ -n "$bogus_msg" ] && [ "$bogus_msg" != "$aud_ours" ]; then
+                  echo "  => npm answered our token differently from a malformed one, so it parsed and"
+                  echo "     validated our token before refusing it. The refusal is about the claims."
+                  claims_checked=1
+                else
+                  echo "  => npm answered our token exactly as it answered a malformed one, so this"
+                  echo "     endpoint did not get far enough to judge our claims. Do not conclude"
+                  echo "     anything about the subject format from this run."
+                fi
                 done
                 if [ "$aud_ours_ok" = "1" ] && [ "$aud_control_ok" = "1" ] \
                   && [ "$aud_ours" != "$aud_control" ]; then
