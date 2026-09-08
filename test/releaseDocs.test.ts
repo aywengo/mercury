@@ -246,3 +246,20 @@ test('the runbook does not let a rehearsal stand in for provenance signing', () 
   assert.match(claim[0], /id-token|ACTIONS_ID_TOKEN_REQUEST/,
     'it must say what actually gates the exchange, not the flag');
 });
+
+test('the runbook gives the fleet bootstrap command and warns where to run it', () => {
+  // @aywengo/mercury-fleet does not exist yet, so its first publish cannot use trusted publishing -- the
+  // package page that configures it requires the package to exist first. The one command that can do it is
+  // dangerous in a specific way: `npm publish` from the repository root publishes @aywengo/mercury, the host
+  // package, not fleet. Naming the directory is therefore not formatting, it is the difference between
+  // bootstrapping fleet and accidentally shipping a host version.
+  const doc = read('docs/releasing.md').replace(/\r\n/g, '\n');
+  const paras = doc.split(/[ \t]*\n[ \t]*\n/);
+  const boot = paras.filter(x => /cd fleet/.test(x));
+  assert.equal(boot.length, 1, 'exactly one paragraph must carry the fleet bootstrap');
+  assert.match(boot[0], /npm publish --access public/, 'it must give the publish command');
+  assert.match(boot[0], /cp \.\.\/LICENSE LICENSE/,
+    'it must copy the LICENSE, since fleet/ declares MIT but ships no such file');
+  assert.match(boot[0], /repo(?:sitory)? root.*@aywengo\/mercury|publishes @aywengo\/mercury/,
+    'it must warn that the root publishes the host package instead');
+});
