@@ -175,10 +175,13 @@ function runTag(
       + '    n=$((n+1)); printf "%s" "$n" > "' + tmp + '/exchange.count";\n'
       // Two dimensions decide which canned answer to replay. The package is visible in the URL, so
       // the control package is separated that way. The audience is not in the URL at all, so the
-      // call number carries it: the step probes two audiences and, for each, ours then the control,
-      // so calls 1-2 are the first audience and 3-4 the second.
+      // call number carries it: the step probes two audiences and, for each, ours then the control then
+      // the nonexistent probe, so calls 1-3 are the first audience and 4-6 the second. The boundary below
+      // counts all three: the MISSING branch ignores the audience entirely, which is why a stale boundary
+      // of 2 still produced right answers -- correct by accident, and it breaks the moment the probe order
+      // changes.
       + '    case "$url" in *no-such-package-probe*) which=MISSING ;; *left-pad*) which=CONTROL ;; *) which=OURS ;; esac\n'
-      + '    if [ "$n" -le 2 ]; then a=1; else a=2; fi\n'
+      + '    if [ "$n" -le 3 ]; then a=1; else a=2; fi\n'
       + '    if [ "$which" = MISSING ]; then\n'
       + '      body="${STUB_EXCHANGE_MISSING-$STUB_EXCHANGE}"; code="${STUB_EXCHANGE_MISSING_EXIT-$STUB_EXCHANGE_EXIT}";\n'
       + '    elif [ "$which" = OURS ]; then\n'
@@ -1360,6 +1363,10 @@ test('an identical answer for a nonexistent package is reported as uninformative
   });
   const out = r.stdout + r.stderr;
   assert.match(out, /cannot tell/, 'must admit the limit');
+  // Nested double quotes inside a double-quoted echo are silently eaten by the shell: the line still
+  // exits 0, and the operator reads "no trusted publisher from publisher does not match" with the quotes
+  // gone and the words subject to splitting. Pin the punctuation, not just the words.
+  assert.match(out, /'no trusted publisher' from 'publisher does not match'/, 'quotes must survive the shell');
   assert.match(out, /Check the package\s+page directly/, 'and point at the thing that can settle it');
   assert.ok(!/does look the/.test(out), 'must not claim a lookup it did not observe');
 });
