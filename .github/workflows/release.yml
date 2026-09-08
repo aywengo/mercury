@@ -197,9 +197,14 @@ jobs:
               # The regex is anchored to the repository segment rather than the whole claim: a branch
               # named feature@123 would otherwise warn about repository IDs that are not present.
               if printf '%s' "$id_token" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const p=JSON.parse(Buffer.from(String(s.split(".")[1]||""),"base64url").toString());process.exit(/^repo:[^:]*@\d+/.test(p.sub||"")?0:1)}catch{process.exit(1)}})'; then
-                echo "  !! sub carries numeric repository IDs. Third-party registries match on the" >&2
-                echo "     name-only shape; see issue #335 and Settings -> Actions -> General ->" >&2
-                echo "     OIDC subject claim format. This is a diagnostic, not a verdict." >&2
+                echo "  !! sub carries numeric repository IDs, so GitHub is issuing the immutable" >&2
+                echo "     subject format. This repository was created after 2026-07-15, when GitHub" >&2
+                echo "     made that format automatic, and npm matches trusted publishers against the" >&2
+                echo "     name-only shape. Measured in #375: a package that does not exist is refused" >&2
+                echo "     with these same bytes, so npm rejects the token before consulting any" >&2
+                echo "     package -- no setting on npmjs.com can account for that. See issue #376." >&2
+                echo "     Check it with: gh api repos/aywengo/mercury/actions/oidc/customization/sub" >&2
+                echo "       --jq .sub_claim_prefix      # want: repo:aywengo/mercury" >&2
               fi
               # `iss` is printed because npm's registry trusts exactly one issuer URL, and a GitHub
               # Enterprise with include_enterprise_slug makes GitHub mint

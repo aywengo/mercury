@@ -1282,8 +1282,15 @@ test('an ID-bearing subject claim is called out, not left in the claim dump', ()
     sub: 'repo:aywengo@800531/mercury@1349412409:ref:refs/heads/main',
   });
   assert.match(r.stderr, /sub carries numeric repository IDs/);
-  assert.match(r.stderr, /#335/, 'and point at the issue that holds the evidence');
-  assert.match(r.stderr, /not a verdict/, 'without claiming it is the cause');
+  assert.match(r.stderr, /#376/, 'point at the issue that now holds the cause');
+  // No longer hedged. #375 measured that a package which does not exist is refused with these same
+  // bytes, so the refusal cannot be about per-package configuration. A warning that still said
+  // "not a verdict" after that measurement would be describing a smaller result than we have.
+  assert.match(r.stderr, /does not exist is refused/);
+  assert.match(r.stderr, /before consulting any/);
+  assert.ok(!/not a verdict/.test(r.stderr), 'the hedge is retired');
+  // And hand the operator the one read that shows the format, rather than a settings path to guess at.
+  assert.match(r.stderr, /sub_claim_prefix/);
 });
 
 test('a name-only subject claim is not flagged', () => {
