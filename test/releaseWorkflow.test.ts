@@ -1218,19 +1218,27 @@ test('the stage id is extracted from the line npm actually prints', () => {
   // how the 2xx verdict ended up always reporting failure. Pin the real npm wording, taken from
   // lib/commands/publish.js: `+ ${pkgContents.id} (staged with id ${stageId})`.
   const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
-  const m = wf.match(/grep -oEm1 '(staged with id [^']+)'/);
+  const m = wf.match(/grep -o([a-zA-Z0-9]*) '(staged with id [^']+)'/);
   assert.ok(m, 'the stage-id extraction must exist');
-  const re = new RegExp(m[1]);
+  // grep flags live outside the pattern, so mirror them into the RegExp. Without this the test would
+  // disagree with the shell about case, which is the opposite of pinning it.
+  const re = new RegExp(m[2], m[1].includes('i') ? 'i' : '');
   const uuid = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
   assert.match(`+ @aywengo/mercury@0.1.0-rc2 (staged with id ${uuid})`, re,
     'must match npm\'s real staged line');
   const got = `+ pkg (staged with id ${uuid})`.match(re);
   assert.ok(got, 'the extraction must match npm\'s line');
   assert.equal(got[0].split(' ').pop(), uuid, 'the id must be the last field so awk can pick it out');
-  // Rejects shapes that are 36 chars of hex-and-dash but not a UUID: npm's own validateUUID would refuse
-  // them, so printing one would hand the operator a command that only errors.
-  for (const bad of ['staged with id not-a-uuid', `staged with id ${uuid.replace(/-/g, '')}`,
+  // Shapes the previous loose class [0-9a-fA-F-]{36} accepted but npm's validateUUID rejects, so printing
+  // one would hand the operator an `npm stage approve` that only errors. The 36-char hex digest is the
+  // regression this tightening exists for: it is exactly 36 chars of the old class.
+  for (const bad of ['staged with id not-a-uuid',
+                     `staged with id ${uuid.replace(/-/g, '')}`,
+                     `staged with id ${'0'.repeat(36)}`,
                      `staged with id ${uuid.slice(0, 35)}z`]) {
     assert.ok(!re.test(bad), `must not match a non-canonical id: ${bad}`);
   }
+  // npm's own regex carries /i and the registry, not us, picks the case -- so uppercase must still extract.
+  assert.match(`+ pkg (staged with id ${uuid.toUpperCase()})`, re,
+    'must accept an uppercase id, as npm does');
 });
