@@ -518,8 +518,10 @@ jobs:
             # npm prints "(staged with id <uuid>)" and approval is `npm stage approve <uuid>`, which
             # needs a 2FA code and so can never be done by this job. Naming the id turns "go find it in
             # the UI" into one command, and makes it obvious which staged version this run created when
-            # several are waiting.
-            stage_id=$(grep -oE 'staged with id [0-9a-fA-F-]{36}' "$npm_log" | head -1 | awk '{print $NF}' || true)
+            # several are waiting. The shape is npm's own UUID_REGEX from lib/utils/validate-uuid.js, so
+            # what we extract is exactly what `npm stage approve` will accept -- a looser class would
+            # happily capture a 36-char hex digest and print a command that errors out.
+            stage_id=$(grep -oEm1 'staged with id [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$npm_log" | awk '{print $NF}' || true)
             {
               echo ""
               echo "## npm package awaiting maintainer approval"
