@@ -170,7 +170,10 @@ test('a falsy JSON body still gets Content-Type, and no body gets none', async (
   }
 });
 
-test('a credential scan over exec output must not pass when the exec failed', async () => {
+// This is a REPRODUCTION of the failure shape, not a guard on the gate: it uses its own command and its
+// own parsing, so deleting the exit-code assertion in e2e/mock-rpc.test.ts would not fail it. The real
+// guard lives in test/releaseHygiene.test.ts, which reads the gate's source.
+test('reproduction: exec output that folds in stderr can look like a clean credential scan', async () => {
   // The real check runs `docker compose exec -T worker sh -c env`, and the helper that runs it folds
   // stderr into the same string as stdout. So a failed exec -- no worker, bad service name, daemon down --
   // yields NON-EMPTY output, the "did we read anything" guard passes, and a credential regex then matches

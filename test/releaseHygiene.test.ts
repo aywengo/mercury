@@ -585,3 +585,20 @@ test('every document that lists install channels lists all of them', () => {
     assert.deepEqual(missing, [], `${doc} lists install channels but omits: ${missing.join(', ')}`);
   }
 });
+
+test('the credential gate asserts the exec exit code before scanning the environment', () => {
+  // The gate reads the worker environment through a helper that folds stderr into stdout, so a failed
+  // exec yields non-empty output and a non-empty guard alone would report clean credentials on a worker
+  // that was never read. The exit code is the only thing separating "no credentials" from "we never
+  // asked", so pin that it is checked -- and checked BEFORE the output is parsed.
+  const src = readFileSync(join(ROOT, 'e2e', 'mock-rpc.test.ts'), 'utf8');
+  const gate = src.slice(src.indexOf('no provider credential reaches the worker'));
+  assert.ok(gate.length > 0, 'the credential gate must exist');
+  // Anchor on the assertion itself. Anchoring on `inspect.code` alone matched the copy inside the failure
+  // message and then looked for `assert.equal(` to the right of it, which is the wrong side.
+  const codeCheck = gate.search(/assert\.equal\(inspect\.code,\s*0\s*,/);
+  const parse = gate.indexOf(".split('\\n')");
+  assert.ok(codeCheck > 0, 'the gate must assert the exec exit code is 0 before drawing conclusions');
+  assert.ok(parse > 0 && codeCheck < parse,
+    'the exit code must be asserted before the output is parsed, or a failed exec is scanned as if it were an environment');
+});
