@@ -515,13 +515,28 @@ jobs:
               echo "The job that produced this release is marked failed so the npm gap stays visible."
             } >> "$notes"
           elif [ "$npm_verb" = "stage publish" ]; then
+            # npm prints "(staged with id <uuid>)" and approval is `npm stage approve <uuid>`, which
+            # needs a 2FA code and so can never be done by this job. Naming the id turns "go find it in
+            # the UI" into one command, and makes it obvious which staged version this run created when
+            # several are waiting.
+            stage_id=$(grep -oE 'staged with id [0-9a-fA-F-]{36}' "$npm_log" | head -1 | awk '{print $NF}' || true)
             {
               echo ""
               echo "## npm package awaiting maintainer approval"
               echo ""
               echo "This run **staged** the package on the npm registry. Staged publishing defers"
               echo "proof-of-presence to a maintainer, so \`npm install\` will not resolve this version"
-              echo "until it is approved on npmjs.com under **Published packages -> Staged packages**."
+              echo "until it is approved."
+              if [ -n "$stage_id" ]; then
+                echo ""
+                echo "\`\`\`bash"
+                echo "npm stage approve $stage_id     # needs a 2FA code; run it locally"
+                echo "\`\`\`"
+                echo ""
+                echo "Or on npmjs.com under **Published packages -> Staged packages**."
+              else
+                echo "Approve it on npmjs.com under **Published packages -> Staged packages**."
+              fi
               echo ""
               if [ "$product" = "host" ] && [ "$formula_live" = "200" ]; then
                 echo "The assets attached to this release and the Homebrew formula are already live and"
