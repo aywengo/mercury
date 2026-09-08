@@ -132,3 +132,40 @@ test('the SSE parser names the raw frame when JSON is malformed', async () => {
     await new Promise<void>((resolve) => sse.close(() => resolve()));
   }
 });
+
+test('a falsy JSON body still gets Content-Type, and no body gets none', async () => {
+  // The header used `body ?` while the payload used `body === undefined`. Those disagree for every
+  // falsy-but-real JSON value, so `post(path, 0)` sent "0" with no Content-Type and the server had to
+  // guess. A POST with no body must still omit the header, or the server waits for a payload that never
+  // arrives -- so both directions are pinned.
+  const seen: { type?: string; body?: string }[] = [];
+  const srv = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ type: req.headers['content-type'] as string | undefined, body: raw });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  try {
+    const c = client(url, 'tok');
+    for (const v of [null, 0, false, '', { ok: true }] as unknown[]) {
+      await c.post('/api/x', v, 'post');
+    }
+    await c.get('/api/y', 'get');
+    for (const [i, v] of [null, 0, false, '', { ok: true }].entries()) {
+      assert.equal(seen[i].type, 'application/json',
+        `a body of ${JSON.stringify(v)} is a real JSON payload and must be typed`);
+      assert.equal(seen[i].body, JSON.stringify(v),
+        `the payload for ${JSON.stringify(v)} must be sent`);
+    }
+    // Five posts occupy 0..4; the GET is the sixth request.
+    assert.equal(seen[5].type, undefined, 'a GET with no body must not claim a Content-Type');
+    assert.equal(seen[5].body, '', 'a GET must send no payload');
+  } finally {
+    await new Promise<void>((r) => srv.close(() => r()));
+  }
+});
