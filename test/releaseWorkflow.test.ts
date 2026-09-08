@@ -1383,8 +1383,9 @@ test('the 2xx verdict matches the log line npm actually writes', () => {
   const verdict = wf.match(/grep -qE '(npm http fetch POST [^']+)'/);
   assert.ok(verdict, 'the 2xx verdict grep must exist');
   assert.match(realLine, new RegExp(verdict[1]), 'the verdict regex must match npm\'s real log line');
-  // The message says "2xx", so the grep has to mean 2xx. `20[0-9]` covers 200-209 only, and a 202
-  // Accepted would have been reported as a failure by a guard whose whole job is accuracy.
+  // The message says "2xx", so the grep has to mean 2xx. `20[0-9]` covers 200-209 only, so a 299 would
+  // have been reported as a failure by a guard whose whole job is accuracy. (202 is inside 200-209 and
+  // would have matched; the first code the old regex missed is 210.)
   for (const code of ['200', '201', '202', '204', '299']) {
     assert.match(`npm http fetch POST ${code} https://r.npmjs.org/-/npm/v1/oidc/token/exchange/x 1ms`,
       new RegExp(verdict[1]), `the verdict must treat ${code} as success, as its message claims`);
