@@ -50,8 +50,14 @@ let apiBase = '';
 let preflightInfo = { node: '', docker: '', compose: '' };
 let scenarioError: unknown;
 let startupFailed = false;
-let alice = { base: '', token: '' } as unknown as ReturnType<typeof client>;
-let bob = { base: '', token: '' } as unknown as ReturnType<typeof client>;
+// Definite assignment rather than a placeholder object. The old initialiser was `{ base: '', token: '' }`
+// -- an object with no `get` or `post` -- and needed `as unknown as` to compile at all, which is the sign
+// of the problem: the cast existed to silence the compiler noticing the placeholder was not a client. If a
+// future refactor moved an assertion above the `before()` that assigns these, the placeholder would fail
+// later with a confusing TypeError inside a request; `!` says "assigned before use" and lets the compiler
+// keep checking the real shape.
+let alice!: ReturnType<typeof client>;
+let bob!: ReturnType<typeof client>;
 /** Shared across the sequential journeys: the Run created by the lifecycle test is the one the
  *  owner-scoping test inspects, which is what makes the second test cheap and meaningful. */
 let sharedRunId = '';
