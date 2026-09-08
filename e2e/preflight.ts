@@ -75,9 +75,13 @@ export async function effectiveFloor(root: string = REPO_ROOT): Promise<{ floor:
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      // Name the path that was actually opened, not the literal: `root` is a parameter, and a caller that
+      // overrides it gets a message pointing somewhere the failure was not. Unknown throwables are
+      // formatted rather than asserted to be Errors, so a non-Error throw still says something useful.
+      const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
       throw new PreflightError(
-        `cannot read the testcontainers floor from node_modules/testcontainers/package.json: `
-        + `${(err as Error).message}. Refusing to assume its floor is the repository's.`,
+        `cannot read the testcontainers floor from ${join(root, 'node_modules', 'testcontainers', 'package.json')}: `
+        + `${detail}. Refusing to assume its floor is the repository's.`,
       );
     }
   }

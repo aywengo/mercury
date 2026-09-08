@@ -46,9 +46,15 @@ test('a dependency manifest that exists but cannot be parsed is an error, not a 
     await mkdir(join(dir, 'node_modules', 'testcontainers'), { recursive: true });
     await writeFile(join(dir, 'package.json'), JSON.stringify({ engines: { node: '>=22.18.0' } }));
     await writeFile(join(dir, 'node_modules', 'testcontainers', 'package.json'), '{ not json');
-    await assert.rejects(() => effectiveFloor(dir), (err: unknown) =>
-      err instanceof PreflightError && /cannot read the testcontainers floor/.test(err.message),
-      'a malformed dependency manifest must surface, not be swallowed');
+    await assert.rejects(() => effectiveFloor(dir), (err: unknown) => {
+      assert.ok(err instanceof PreflightError, 'must be a PreflightError');
+      // Substring checks, not a regex: the temp path contains slashes and hyphens that only need to be
+      // present, and escaping it for a pattern is how this assertion became unreadable the first time.
+      assert.match(err.message, /cannot read the testcontainers floor from /);
+      assert.ok(err.message.includes(dir), `message must name the root actually opened, got: ${err.message}`);
+      assert.ok(err.message.includes('testcontainers'), 'message must name the dependency');
+      return true;
+    });
     // Absent dependency stays ignorable: its floor is genuinely not in play.
     await rm(join(dir, 'node_modules', 'testcontainers'), { recursive: true, force: true });
     const { floor, from } = await effectiveFloor(dir);
