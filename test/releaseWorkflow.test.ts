@@ -940,7 +940,12 @@ test('one audience accepted and the other refused still passes the rehearsal', (
   const out = r.stdout + r.stderr;
   assert.match(out, /npm:registry\.npmjs\.org\] @aywengo%2Fmercury: REFUSED/, 'must still report the refusal it saw');
   assert.match(out, /https:\/\/registry\.npmjs\.org\] @aywengo%2Fmercury: ACCEPTED/, 'and the acceptance it saw');
-  assert.match(out, /npm trusts this workflow/, 'and the conclusion the operator acts on');
+  // The conclusion must not outrun the evidence. The rehearsal holds a branch-subject token, so an
+  // acceptance says the publisher matches THAT subject; a tag push presents a different one. The old
+  // wording ("npm trusts this workflow; a real publish would authenticate") invited exactly that leap.
+  assert.match(out, /npm exchanged this rehearsal's token/, 'must report what was actually observed');
+  assert.match(out, /BRANCH-subject token/, 'and name the subject it tested');
+  assert.match(out, /not\s*\n?\s*proof that the tag push will authenticate/, 'without promising the tag push');
 });
 
 test('a refusal the control does not share fails the rehearsal', () => {

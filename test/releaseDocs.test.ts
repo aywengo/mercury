@@ -98,3 +98,32 @@ test('the runbook tag annotation matches the release title the workflow creates'
   assert.ok(!/-m "Mercury \$\{product\}/.test(block),
     'and must not interpolate the raw product name, which lowercases Fleet');
 });
+
+test('the runbook does not claim a rehearsal predicts a tag publish', () => {
+  // A rehearsal is a workflow_dispatch run, so DRY_RUN is true and the token it holds carries
+  // `...:ref:refs/heads/<branch>`. A real release is a tag push and carries
+  // `...:ref:refs/tags/<tag>`. The subjects differ by construction, so the exchange result cannot
+  // transfer between them in either direction -- yet the runbook used to say `ACCEPTED` "means npm
+  // trusts the workflow, and a real publish would authenticate". An operator who believed that would
+  // tag a release on the strength of a token npm had only ever seen on a branch.
+  const doc = read('docs/releasing.md');
+  const wf = read(WORKFLOW);
+  assert.match(doc, /refs\/heads\/<branch>/, 'the runbook must name the subject the rehearsal actually holds');
+  assert.match(doc, /refs\/tags\/<tag>/, 'and the subject a real release holds');
+  // The phrase "would authenticate" is fine under a negation -- the workflow says the exchange "says
+  // nothing about whether a real publish would authenticate", which is the correct reading. What must not
+  // come back is the positive claim, so that is what is pinned.
+  for (const [name, text] of [['docs/releasing.md', doc], ['release.yml', wf]] as const) {
+    // Judged by statement, not by line: the honest sentence in release.yml wraps, so the fragment
+    // carrying "would authenticate" has no negation on it and reads as a claim.
+    const claims = text
+      .split('\n')
+      .map((l) => l.replace(/^\s*(#|\/\/)?\s?/, '').trim())
+      .join('\n')
+      .split(/\n\s*\n|\.\n\s*\n/)
+      .map((b) => b.replace(/\s+/g, ' ').trim())
+      .filter((b) => /would authenticate/.test(b))
+      .filter((b) => !/\b(nothing|not|never|no)\b/i.test(b));
+    assert.deepEqual(claims, [], `${name} asserts a rehearsal authenticates a real publish`);
+  }
+});

@@ -315,7 +315,10 @@ jobs:
                 fi
               done
               if [ "$accepted" = "1" ]; then
-                echo "  => npm trusts this workflow for ${pkg_name}; a real publish would authenticate"
+                echo "  => npm exchanged this rehearsal's token for ${pkg_name}: the publisher matches"
+                echo "     a BRANCH-subject token. A tag push carries a different sub"
+                echo "     (...:ref:refs/tags/<tag>, not ...:ref:refs/heads/<branch>), so this is not"
+                echo "     proof that the tag push will authenticate. Only a tag push settles that."
               elif [ "$distinguishes" = "1" ]; then
                 # Only now is there evidence. The registry answered two different questions with two
                 # different answers, so a configuration for this package is being evaluated and does
