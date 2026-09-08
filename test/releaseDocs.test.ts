@@ -56,7 +56,10 @@ test('every curl in the runbooks is bounded', () => {
       const joined = block.replace(/\\\n\s*/g, ' ');
       for (const line of joined.split('\n')) {
         if (/\bcurl\b/.test(line)) {
-          assert.match(line, /--max-time\s+\d+/, `${doc}: unbounded curl in a runbook block: ${line.trim()}`);
+          // Any non-empty value bounds the request: `--max-time 30`, `--max-time=30` and
+            // `--max-time "$CURL_TIMEOUT"` all do the job; requiring digits after whitespace would fail a
+            // correctly bounded command, and a guard that fails on valid code gets switched off.
+            assert.match(line, /--max-time(\s+\S+|=\S+)/, `${doc}: unbounded curl in a runbook block: ${line.trim()}`);
         }
       }
     }
@@ -95,7 +98,9 @@ test('the runbook tag annotation matches the release title the workflow creates'
       `the tag snippet must produce the display name "${display}" that the workflow uses`,
     );
   }
-  assert.ok(!/-m "Mercury \$\{product\}/.test(block),
+  // Both forms interpolate the raw product name; only the braced one was caught before, so an
+  // edit to `$product` would have regressed to "Mercury fleet" while still passing.
+  assert.ok(!/-m "Mercury \$\{?product\b/.test(block),
     'and must not interpolate the raw product name, which lowercases Fleet');
 });
 
@@ -136,11 +141,15 @@ test('the documented OIDC probe tag cannot trigger a real release', () => {
   // silently publishes a version is worse than no runbook step, so the name is pinned here.
   const doc = read('docs/releasing.md');
   const wf = read(WORKFLOW);
-  const m = doc.match(/git tag ([a-z0-9][A-Za-z0-9._-]*)/);
+  // Scope to the probe's own bash block and allow flags: an annotated `git tag -a NAME` or a second
+  // `git tag` snippet elsewhere must not silently change which name this guard checks.
+  const probeBlock = (doc.match(/```[a-z]*\n[^`]*?gh workflow run release\.yml[^`]*?```/) ?? [])[1] ?? doc;
+  const m = probeBlock.match(/git tag (?:-\S+\s+|"[^"]+"\s+)?([A-Za-z0-9][A-Za-z0-9._-]*)/);
   assert.ok(m, 'the runbook must show the probe tag name it means');
   const probe = m[1];
 
-  const patterns = [...wf.matchAll(/^\s+- '((?:host|fleet)-v[^']*)'$/gm)].map((x) => x[1]);
+  // Quote style is formatting; the trigger is the pattern.
+  const patterns = [...wf.matchAll(/^\s+- ['"]?((?:host|fleet)-v[^'"\s]*)['"]?$/gm)].map((x) => x[1]);
   assert.ok(patterns.length >= 2, 'could not read the release tag triggers from the workflow');
   // GitHub glob semantics for these patterns: `*` matches any run of characters except `/`.
   const toRe = (g: string) => new RegExp('^' + g.split('*').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*') + '$');
