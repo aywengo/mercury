@@ -592,8 +592,13 @@ test('the credential gate asserts the exec exit code before scanning the environ
   // that was never read. The exit code is the only thing separating "no credentials" from "we never
   // asked", so pin that it is checked -- and checked BEFORE the output is parsed.
   const src = readFileSync(join(ROOT, 'e2e', 'mock-rpc.test.ts'), 'utf8');
-  const gate = src.slice(src.indexOf('no provider credential reaches the worker'));
-  assert.ok(gate.length > 0, 'the credential gate must exist');
+  // Explicit -1 check. `slice(-1)` returns the LAST CHARACTER when indexOf misses, so a length check on
+  // the slice passes even when the gate has been renamed or deleted -- the assertion looked like it proved
+  // the gate exists and proved nothing. With the anchor missing the guard now fails saying the gate is
+  // gone, instead of misattributing it to a missing exit-code check.
+  const anchor = src.indexOf('no provider credential reaches the worker');
+  assert.notEqual(anchor, -1, 'the credential gate must exist in e2e/mock-rpc.test.ts');
+  const gate = src.slice(anchor);
   // Anchor on the assertion itself. Anchoring on `inspect.code` alone matched the copy inside the failure
   // message and then looked for `assert.equal(` to the right of it, which is the wrong side.
   const codeCheck = gate.search(/assert\.equal\(inspect\.code,\s*0\s*,/);
