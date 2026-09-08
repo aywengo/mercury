@@ -166,7 +166,16 @@ npm publish --dry-run --access public --tag rc --provenance --loglevel verbose
 with read access to the run log could use.
 
 `--dry-run` still authenticates. npm's `lib/commands/publish.js` calls `await oidc(...)` before it looks at
-`dryRun` at all, so the exchange is real and its outcome is logged. Every failure path inside `oidc.js` is
+`dryRun` at all, so the exchange is real and its outcome is logged.
+
+**What the rehearsal does not prove.** `--provenance` has no effect on this exchange: `oidc()` decides
+whether to run purely from `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN`, which
+`permissions: id-token: write` provides -- not from the flag. It is kept so the command matches the real
+release line, not because it contributes. And because `--dry-run` returns before `libpub` is ever called,
+`buildMetadata` and `generateProvenance` never run: **a green rehearsal says nothing about provenance
+signing.** Signing talks to sigstore and the Rekor transparency log, and if either is unreachable the real
+release fails -- before staging anything, so nothing is left half-published. A rehearsal that passes and a
+release that fails on provenance are both normal, and the second is not a credentials problem. Every failure path inside `oidc.js` is
 `log.verbose`, which is why the log level has to be raised -- at the default level a rehearsal proves the
 tarball and nothing about credentials.
 

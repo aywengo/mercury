@@ -221,3 +221,28 @@ test('the runbook says a green run still needs npm approval', () => {
   assert.match(step, /submits the package to npm/,
     'the tag-push step must say the job submits rather than publishes');
 });
+
+test('the runbook does not let a rehearsal stand in for provenance signing', () => {
+  // The rehearsal command carries --provenance, so a reader reasonably concludes it validates provenance.
+  // It cannot: --dry-run returns before libpub, and generateProvenance lives inside it. Saying so is what
+  // stops the next person reading a provenance failure as a credentials failure and going back to npmjs.com
+  // settings that are already correct.
+  const doc = read('docs/releasing.md').replace(/\r\n/g, '\n');
+  const paras = doc.split(/[ \t]*\n[ \t]*\n/);
+  const claim = paras.filter(x => /does not prove|nothing about provenance/i.test(x));
+  assert.equal(claim.length, 1,
+    'exactly one paragraph must scope what the rehearsal proves');
+  assert.match(claim[0], /generateProvenance|provenance signing/i,
+    'it must name the step a rehearsal never reaches');
+  // Presence of the word "provenance" is not the property. The paragraph must actually negate coverage of
+  // it, and must not simultaneously claim the rehearsal validates the whole path -- the earlier version of
+  // this guard passed while the sentence said "a green rehearsal proves the whole release path", because it
+  // only looked for keywords that were still sitting elsewhere in the paragraph.
+  assert.match(claim[0], /never run|says nothing about|does not (?:prove|reach)/i,
+    'the paragraph must negate provenance coverage, not merely mention it');
+  assert.ok(!/rehearsal (?:proves|validates|confirms) the (?:whole|entire|full)/i.test(claim[0]),
+    'the paragraph must not claim the rehearsal covers the whole release path');
+  // The reason --provenance is present must be stated, or someone will "fix" the command by dropping it.
+  assert.match(claim[0], /id-token|ACTIONS_ID_TOKEN_REQUEST/,
+    'it must say what actually gates the exchange, not the flag');
+});
