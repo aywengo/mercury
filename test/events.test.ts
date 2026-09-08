@@ -1320,7 +1320,12 @@ test('a locally-pushed run does not slow the cross-process backstop of another r
       // loop longer instead of failing, and the precondition now only trips when the timer is
       // genuinely not running -- which is what a precondition is for.
       const MIN_TICKS = 10;
-      const deadline = Date.now() + 5_000;
+      // Named so the failure message below reports the value actually in force. It used to read
+      // "in 5000ms" as a literal beside a `5_000` constant, so raising the deadline would have reported a
+      // window the test never waited for -- a wrong number in the one message a developer trusts when a
+      // timing test fails on a loaded CI box.
+      const TICK_DEADLINE_MS = 5_000;
+      const deadline = Date.now() + TICK_DEADLINE_MS;
       while (ticks < MIN_TICKS && Date.now() < deadline) {
         env.events.append(pushed.id, 'agent.message', { n: 1 });
         otherProcess.append(cross.id, 'agent.message', { n: 1 });
@@ -1329,7 +1334,7 @@ test('a locally-pushed run does not slow the cross-process backstop of another r
 
       // Precondition, not verdict: if the timer barely ran, every ratio below is vacuous.
       assert.ok(ticks >= MIN_TICKS,
-        `precondition: the driving timer must reach ${MIN_TICKS} ticks; got ${ticks} in 5000ms`);
+        `precondition: the driving timer must reach ${MIN_TICKS} ticks; got ${ticks} in ${TICK_DEADLINE_MS}ms`);
 
       const crossRatio = (reads[cross.id] ?? 0) / ticks;
       assert.ok(crossRatio >= 0.8,
