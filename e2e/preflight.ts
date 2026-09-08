@@ -61,8 +61,11 @@ export async function effectiveFloor(root: string = REPO_ROOT): Promise<{ floor:
   // Only "not installed" is ignorable. A file that exists but cannot be read or parsed is exactly the case
   // where the dependency floor is real and unknown, and swallowing it would green-light a Node the suite
   // then fails on -- the failure this function exists to prevent.
+  // One binding, used by both the read and the error: two independent joins are how a message ends up
+  // naming a file the code never opened.
+  const depManifest = join(root, 'node_modules', 'testcontainers', 'package.json');
   try {
-    const dep = JSON.parse(await readFile(join(root, 'node_modules', 'testcontainers', 'package.json'), 'utf8')) as {
+    const dep = JSON.parse(await readFile(depManifest, 'utf8')) as {
       engines?: { node?: string };
     };
     if (dep.engines?.node) {
@@ -80,7 +83,7 @@ export async function effectiveFloor(root: string = REPO_ROOT): Promise<{ floor:
       // formatted rather than asserted to be Errors, so a non-Error throw still says something useful.
       const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
       throw new PreflightError(
-        `cannot read the testcontainers floor from ${join(root, 'node_modules', 'testcontainers', 'package.json')}: `
+        `cannot read the testcontainers floor from ${depManifest}: `
         + `${detail}. Refusing to assume its floor is the repository's.`,
       );
     }
