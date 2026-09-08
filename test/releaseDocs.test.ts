@@ -304,6 +304,9 @@ test('the staged-approval step names the npm version that introduced `npm stage`
   const floorClaimed = m !== null && (m[1] !== undefined || m[3] !== undefined);
   assert.ok(floorClaimed,
     `the staged-approval step must state a MINIMUM npm version, not merely mention one; got:\n${near}`);
+  // Narrow explicitly rather than relying on assert.ok throwing above: the next lines index the
+  // match, and a reader (or tsc) should not have to re-derive that floorClaimed implies m is set.
+  if (m === null) assert.fail('unreachable: a floor claim requires a match');
   const floor = m[2] ?? '';
   assert.ok(floor, `the stated npm floor is not a version number: ${m[0]}`);
   const [maj, min] = floor.split('.').map(Number);
