@@ -148,9 +148,11 @@ test('the documented OIDC probe tag cannot trigger a real release', () => {
   // Scoping to the dispatch command alone is not enough either: the rehearsal section has its own
   // `gh workflow run release.yml` block with no tag in it, and it comes first. The probe block is the one
   // that does both.
-  // `[sS]*?` rather than a backtick-free class: a fence body may legitimately contain backticks (a
-  // `$(command)` substitution, an inline comment), and stopping at the first one would hand this guard a
-  // truncated block -- or the wrong block entirely, since the count assertion would then see zero or two.
+  // Capture everything up to the closing fence rather than excluding backticks. A shell block can
+  // legitimately contain a backtick -- old-style command substitution such as `whoami`, or a markdown code
+  // span inside a comment line -- and a backtick-free class would stop at the first one. That hands this
+  // guard a truncated block, or the wrong block entirely: the count below would then see zero candidates
+  // and fail, or two and fail, rather than silently checking something else.
   const blocks = [...doc.matchAll(/```[a-z]*\r?\n([\s\S]*?)```/g)].map((x) => x[1]);
   const probeBlocks = blocks.filter((b) => /git tag /.test(b) && /gh workflow run release\.yml/.test(b));
   assert.equal(probeBlocks.length, 1, `expected exactly one probe block, found ${probeBlocks.length}`);
