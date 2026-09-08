@@ -302,6 +302,23 @@ jobs:
             bundle_json=$(node scripts/build-bundle.mjs --out "$RUNNER_TEMP/bundle")
             bundle=$(node -e "console.log(JSON.parse(process.argv[1]).tarball)" "$bundle_json")
             bundle_sha=$(node -e "console.log(JSON.parse(process.argv[1]).sha256)" "$bundle_json")
+            # The bundler reports its own sha256; nothing else has ever compared that claim to the
+            # bytes it wrote. That sha is what Homebrew verifies on install, so a bundler that hashes
+            # anything other than the final tarball ships a formula whose checksum never resolves.
+            # The formula commit is pushed with GITHUB_TOKEN, so GitHub creates no workflow run for
+            # it (issue #427) and main's tip carries no CI -- this job is the only place that can
+            # notice, and it still has the bytes in hand.
+            if [ ! -f "$bundle" ]; then
+              echo "bundler reported ${bundle} but no such file exists" >&2
+              exit 1
+            fi
+            # node rather than sha256sum/shasum: the step already requires node, and the two coreutils
+            # spellings differ across the platforms this step's tests run on.
+            actual_sha=$(node -e 'const fs=require("fs"),c=require("crypto");process.stdout.write(c.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"))' "$bundle")
+            if [ "$actual_sha" != "$bundle_sha" ]; then
+              echo "bundle checksum mismatch: bundler claims ${bundle_sha}, ${bundle} hashes to ${actual_sha}" >&2
+              exit 1
+            fi
             echo "bundle=${bundle}"
             echo "bundle sha256=${bundle_sha}  -> paste into Formula/mercury-ai.rb in aywengo/homebrew-tap"
           fi
