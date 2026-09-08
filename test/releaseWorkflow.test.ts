@@ -699,6 +699,16 @@ test('a token is preferred over OIDC and publishes at npm\'s default level', () 
   assert.match(r.stdout, /publish auth: NPM_TOKEN/, 'the token must win when both are present');
   assert.match(r.stdout, new RegExp(SUBMIT + '[^\\n]*--loglevel notice'));
   assert.ok(!/invalid config loglevel/.test(r.stdout), 'npm must accept the level it is given');
+  // docs/releasing.md tells an operator blocked on trusted publishing to fall back to a short-lived
+  // token and promises that doing so "does not cost you provenance". That promise is the whole reason
+  // the fallback is acceptable -- a package published without attestations is what the registry is
+  // missing today -- so it has to be pinned here, in the mode the runbook recommends. npm signs
+  // provenance from the runner's own id-token regardless of how the publish itself authenticates, so
+  // --provenance must stay on the submit line whether or not a token is present. Without this
+  // assertion the flag could be moved into the OIDC branch as a tidy-up and the runbook would go
+  // quietly wrong on the one property the fallback exists to preserve.
+  assert.match(r.stdout, new RegExp(SUBMIT + ' --access public --provenance'),
+    'a token publish must still sign provenance, as docs/releasing.md promises');
 });
 
 test('OIDC mode removes the empty project-scope token that setup-node writes', () => {
