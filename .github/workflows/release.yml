@@ -525,8 +525,19 @@ jobs:
             # registry write. --provenance is omitted because attestation needs the registry
             # round-trip a rehearsal deliberately does not make.
             echo "DRY RUN: not submitting to npm; packing only"
+            # `--dry-run` does authenticate. npm's own publish calls `await oidc(...)` before it looks at
+            # dryRun at all (lib/commands/publish.js), so every rehearsal to date has already performed the
+            # real token exchange -- at the default log level, which hides every failure path in it because
+            # they are all log.verbose. Asking npm to run its OWN exchange at silly level is the only
+            # reading that comes from npm rather than from our curl approximation of it, and the two have
+            # disagreed: our probe sends a bearer header, npm sets _authToken and lets npm-registry-fetch
+            # build the request. Capture it and print the oidc lines; that is npm naming its own reason.
             if [ "$product" = "host" ]; then
-              npm publish --dry-run --access public --tag "$dist_tag" || npm_ok=0
+              npm publish --dry-run --access public --tag "$dist_tag" --provenance --loglevel silly \
+                >"${RUNNER_TEMP}/npm-oidc.log" 2>&1 || npm_ok=0
+              echo "--- npm's own OIDC exchange (loglevel=silly) ---"
+              grep -iE 'oidc|provenance|ENEEDAUTH|unauthor|401|403|404' "${RUNNER_TEMP}/npm-oidc.log" \
+                | head -40 || echo "  npm logged nothing about oidc -- it did not attempt the exchange"
             elif [ "$product" = "fleet" ]; then
               cp LICENSE fleet/LICENSE
               (cd fleet && npm publish --dry-run --access public --tag "$dist_tag") || npm_ok=0
