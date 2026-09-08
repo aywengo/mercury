@@ -49,7 +49,9 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    takes no input and cannot publish; the mode is derived from the event name, so a tag push is never a
    rehearsal and a rehearsal is never a release.
 
-   The OIDC part is the reason to run it before tagging rather than after. The log prints the claims npm
+   The OIDC part is worth running before tagging, with one limit stated up front: the rehearsal cannot
+   mint a tag-subject token, so its exchange result is evidence about the claims and about npm's endpoint,
+   not a prediction of the tag push. The log prints the claims npm
    matches the run against -- `repository_owner`, `repository`, and the workflow filename inside
    `job_workflow_ref` -- which is worth reading, because npm reports a trusted-publishing mismatch as an
    opaque registry 404 with no reason.
@@ -58,7 +60,11 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    `/-/npm/v1/oidc/token/exchange/package/<name>` that turns the id token into a short-lived publish
    credential, and asks the same question of an unrelated package as a control. Read it this way:
 
-   - `ACCEPTED` for this package means npm trusts the workflow, and a real publish would authenticate.
+   - `ACCEPTED` for this package means npm exchanged the token this rehearsal was holding. It does **not**
+     settle a real publish: a rehearsal is a `workflow_dispatch` run, so its `sub` ends
+     `:ref:refs/heads/<branch>`, while a tag push carries `:ref:refs/tags/<tag>`. A publisher scoped to a
+     tag pattern can refuse one and accept the other. The claims worth reading are the ones that do carry
+     over -- `repository_owner`, `repository` and the workflow filename in `job_workflow_ref`.
    - `REFUSED` for this package **and a different answer** for the control means a configuration is
      being evaluated and does not match. The rehearsal fails, and the log lists the fields to check,
      starting with the workflow filename, which npm wants as a bare name (`release.yml`, not a path).
