@@ -16,7 +16,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { DockerComposeEnvironment, StartedDockerComposeEnvironment, Wait } from 'testcontainers';
-import { COMPOSE_FILE, DIAGNOSTIC_CAP_BYTES, teardownOutcome, E2E_DIR, LIMITS, capBuffer, composeModel, assertServicesAlive, containerStates, inspectionCommands, keepOnFail, preflight, serviceLogs, verbose } from './preflight.ts';
+import { COMPOSE_FILE, teardownOutcome, E2E_DIR, LIMITS, capBuffer, composeModel, assertServicesAlive, containerStates, inspectionCommands, keepOnFail, preflight, serviceLogs, verbose } from './preflight.ts';
 import { client, pollRun, readSse, TERMINAL, type RunEvent, type RunView } from './helpers.ts';
 
 /**
@@ -163,8 +163,16 @@ async function collectDiagnostics(reason: string): Promise<void> {
     for (const service of [FIXTURE_SERVICE, 'api', 'worker']) {
       try {
         const logs = await serviceLogs(PROJECT, service);
-        writeFileSync(join(DIAG_DIR, `${service}.log`), capBuffer(Buffer.from(logs)));
-        summary[service] = { collectedVia: 'docker compose logs', bytes: Buffer.byteLength(logs) };
+        // Report the bytes that were WRITTEN. The file is capped, so reporting the uncapped length made
+        // the summary overstate the artifact exactly when truncation happened -- which is the only time
+        // anyone reads this number, because it is the number that tells you the log you want is missing.
+        const capped = capBuffer(Buffer.from(logs));
+        writeFileSync(join(DIAG_DIR, `${service}.log`), capped);
+        summary[service] = {
+          collectedVia: 'docker compose logs',
+          bytes: capped.byteLength,
+          collectedBytes: Buffer.byteLength(logs),
+        };
       } catch (err) {
         summary[service] = { error: (err as Error).message };
       }
