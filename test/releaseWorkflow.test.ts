@@ -94,6 +94,7 @@ function runTag(
     directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean;
     pkgHttp?: string; formulaHttp?: string; sub?: string; rawJwt?: string;
     npmSubmitErr?: string; exchange?: string; exchangeExit?: number; missing?: string; missingExit?: number;
+    bundleLie?: string;
     exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
     control2?: string; control2Exit?: number } = {},
 ): Run {
@@ -121,9 +122,20 @@ function runTag(
     // would fail for a reason unrelated to what it is checking. Substitute one that reports a bundle
     // the way the real script does; the bundle's own behaviour is covered by test/bundle.test.ts.
     mkdirSync(join(tmp, 'scripts'), { recursive: true });
+    // The stub writes real bytes and reports their sha256, so the step's checksum cross-check has
+    // something to verify. STUB_BUNDLE_LIE makes it report a sha for bytes it never wrote -- exactly
+    // the bundler bug the cross-check exists to catch.
     writeFileSync(join(tmp, 'scripts', 'build-bundle.mjs'),
-      'console.log(JSON.stringify({ tarball: process.argv[process.argv.indexOf("--out") + 1] '
-      + '+ "/mercury-fake-bundle.tar.gz", version: "0.0.0", sha256: "f".repeat(64) }));\n');
+      'import fs from "node:fs";\n'
+      + 'import crypto from "node:crypto";\n'
+      + 'const out=process.argv[process.argv.indexOf("--out")+1];\n'
+      + 'fs.mkdirSync(out,{recursive:true});\n'
+      + 'const f=out+"/mercury-fake-bundle.tar.gz";\n'
+      + 'const body=Buffer.from("fake bundle payload");\n'
+      + 'fs.writeFileSync(f,body);\n'
+      + 'const real=crypto.createHash("sha256").update(body).digest("hex");\n'
+      + 'const claim=process.env.STUB_BUNDLE_LIE||real;\n'
+      + 'console.log(JSON.stringify({ tarball: f, version: "0.0.0", sha256: claim }));\n');
 
     // Same reasoning as the bundle stub above: the real generator would run against this throwaway
     // tree. It is exercised for real by test/formula.test.ts.
@@ -229,6 +241,8 @@ function runTag(
         // developer's shell happens to export NODE_AUTH_TOKEN -- locally-green, CI-red, or the reverse.
         // The default is a non-empty placeholder: present-but-fake, which is all the guard checks.
         NODE_AUTH_TOKEN: opts.npmToken ?? 'npm-token-placeholder',
+        // The bundler stub reports this instead of the real digest, to exercise the cross-check.
+        STUB_BUNDLE_LIE: opts.bundleLie,
         // Set explicitly for the same reason as NODE_AUTH_TOKEN: the step falls back to OIDC trusted
         // publishing when no token is present, and that fallback is keyed on exactly these two runner
         // variables. Inheriting them would make the result depend on whether the tests happen to run
@@ -1241,4 +1255,21 @@ test('the stage id is extracted from the line npm actually prints', () => {
   // npm's own regex carries /i and the registry, not us, picks the case -- so uppercase must still extract.
   assert.match(`+ pkg (staged with id ${uuid.toUpperCase()})`, re,
     'must accept an uppercase id, as npm does');
+});
+
+test('a bundler that reports a sha256 the bundle does not have fails the release', () => {
+  // The formula ships whatever sha256 the bundler claims, and Homebrew verifies that digest on
+  // install. The formula commit is pushed with GITHUB_TOKEN, so GitHub creates no workflow run for
+  // it (issue #427) and main's tip carries no CI -- so if the claim is wrong, this step is the only
+  // thing that can notice, while it still holds the bytes.
+  const lie = 'a'.repeat(64);
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], bundleLie: lie });
+  assert.notEqual(r.status, 0, 'a bundle whose bytes disagree with the reported sha must fail');
+  assert.match(r.stderr, /checksum mismatch/,
+    `must name the mismatch on stderr, got:\nstdout=${r.stdout}\nstderr=${r.stderr}`);
+  assert.match(r.stderr, /bundler claims a{64}/, 'must show what was claimed');
+  // And it must fail BEFORE anything is published: a release or a formula built on a bad digest is
+  // worse than no release, because brew install then fails with nothing to correlate it to.
+  assert.ok(!/npm (stage )?publish/.test(r.stdout), `must not publish on a bad digest:\n${r.stdout}`);
+  assert.ok(!/gh release create/.test(r.stdout), `must not create a release on a bad digest:\n${r.stdout}`);
 });
