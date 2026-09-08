@@ -115,6 +115,10 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    npm stage approve <stage-id>     # needs a 2FA code; run it locally
    ```
 
+   `npm stage` needs **npm 11.15.0 or newer** -- it is not a plugin, and older npm answers
+   `Unknown command "stage"`. Check with `npm --version`; if you are behind, either update npm
+   (`npm install -g npm@latest`) or use the web UI below, which needs no particular npm version.
+
    Or approve on npmjs.com under **Published packages -> Staged packages**. Until then the GitHub Release
    asset and, for a host release, the Homebrew formula are live, but the npm package is not -- so a user
    following an `npm install -g` instruction gets the previous version. If a run goes green and nobody

@@ -283,3 +283,24 @@ test('the E2E docs do not claim the reaper test asserts disappearance', () => {
   assert.match(design, /does not assert that the container disappears|does NOT assert how fast/i,
     'the design note must record what it deliberately does not assert');
 });
+
+test('the staged-approval step names the npm version that introduced `npm stage`', () => {
+  // `npm stage` is not a plugin: older npm answers `Unknown command "stage"`. Measured by
+  // inspecting published npm tarballs for docs/content/commands/npm-stage.md -- absent through
+  // 11.14.1, present from 11.15.0. Without a stated floor, an operator on an older npm hits
+  // the failure at the last step of a release, with a staged package already waiting.
+  const text = read('docs/releasing.md');
+  const at = text.indexOf('npm stage approve');
+  assert.notEqual(at, -1, 'the runbook must give the staged-approval command');
+  const near = text.slice(at, at + 700);
+  const m = near.match(/npm\s+(?:\d+\.\d+\.\d+\s+or\s+newer|>=\s*\d+\.\d+\.\d+)/i)
+    ?? near.match(/(\d+\.\d+\.\d+)\s+or\s+newer/);
+  assert.ok(m, `the staged-approval step must state a minimum npm version, got:\n${near}`);
+  const floor = (m[0].match(/\d+\.\d+\.\d+/) ?? [''])[0];
+  assert.ok(floor, `the stated npm floor is not a version number: ${m[0]}`);
+  const [maj, min] = floor.split('.').map(Number);
+  assert.ok(maj > 11 || (maj === 11 && min >= 15),
+    `stated npm floor ${floor} predates the release of \`npm stage\` (11.15.0)`);
+  // The fallback must not depend on a recent npm, or the floor is a dead end.
+  assert.ok(/npmjs\.com/.test(near), 'must offer a fallback that needs no particular npm version');
+});
