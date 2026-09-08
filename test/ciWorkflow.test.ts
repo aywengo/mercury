@@ -125,6 +125,15 @@ function markdownPathsIn(rel: string): string[] {
       continue;
     }
     const head = segs[0];
+    // join(ROOT, 'docs', 'README.md') -- ROOT is the repo root, so the segments are already
+    // repo-relative. releaseHygiene.test.ts uses this form for docs/README.md and README.md, and
+    // without this branch those two reads were invisible: the coverage rule could not see that
+    // docs/README.md is genuinely guarded, which is exactly the kind of blind spot this file exists
+    // to close.
+    if (/join\(\s*ROOT\b/.test(arg)) {
+      keep(segs.join('/'));
+      continue;
+    }
     if (consts.has(head)) keep(consts.get(head)! + segs.slice(1).map((x) => '/' + x).join(''));
     else if (/\.md$/.test(head)) keep(head);
   }
