@@ -60,6 +60,25 @@ function extractReleaseScript(): string {
   return script;
 }
 
+/**
+ * The step's executable lines, with full-line comments removed.
+ *
+ * Guards written against the raw step body can be satisfied by prose. That is not hypothetical: the
+ * exchange-probe test asserts the probe posts to /-/npm/v1/oidc/token/exchange/package/, and the comment
+ * directly above it spells that path out. Deleting the path from the curl call left the test green -- the
+ * guard was checking that the file mentions the right thing, not that the workflow does it. Six of the
+ * eleven assertions in that one test had the same weakness.
+ *
+ * Anything that pins what the step DOES belongs here. Assertions about what the step SAYS stay on
+ * extractReleaseScript(), because for those the comment is the thing under test.
+ */
+function extractReleaseCode(): string {
+  return extractReleaseScript()
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l))
+    .join('\n');
+}
+
 interface Run {
   status: number | null;
   stdout: string;
@@ -428,7 +447,7 @@ test('the OIDC diagnostic prints the claim npm actually matches', () => {
   // diagnostic printed a hand-picked list of claims that omitted it, and from that omission the
   // conclusion was drawn that no claim carried the filename at all. A diagnostic that cannot see the
   // field it is meant to explain is worse than none, because it invites a confident wrong answer.
-  const script = extractReleaseScript();
+  const script = extractReleaseCode();
   // Scope to the key list itself. A first version matched `job_workflow_ref` anywhere in the step and
   // survived a mutation that removed it from the printed list, because the word also appears in the
   // comment above -- the guard passed on prose while the diagnostic had regressed.
@@ -941,7 +960,7 @@ test('every curl in the release step is bounded', () => {
   // third-party services. The workflow timeout is the only thing that would ever notice, which turns
   // a network stall into a ten-minute wait with no diagnosis. One line of the probe was already
   // bounded and the one that mints the id token was not -- exactly the shape a guard catches.
-  const script = extractReleaseScript();
+  const script = extractReleaseCode();
   const unbounded = script
     .split('\n')
     .map((l) => l.trim())
@@ -1021,7 +1040,7 @@ test('the release step contains no empty-string concatenation on an assignment',
   // initialises the variable deciding whether a release rehearsal fails. Nothing catches that class
   // of typo, so this does: an assignment whose value is a number glued to an empty string is never
   // intentional here.
-  const script = extractReleaseScript();
+  const script = extractReleaseCode();
   const offenders = script
     .split('\n')
     .map((l) => l.trim())
@@ -1106,7 +1125,7 @@ test('the claims probe prints the issuer, the one claim npm matches before any o
   // "OIDC token exchange error - unauthorized" while repository, owner and workflow all match --
   // closed as a duplicate, not fixed. The claim is unreadable unless the probe prints it, and this
   // step has already been wrong once about a token because it printed a chosen subset of it.
-  const script = extractReleaseScript();
+  const script = extractReleaseCode();
   assert.match(script, /"iss"/, 'the issuer must be printed');
   assert.match(script, /"enterprise"/, 'and the enterprise claim that explains a scoped issuer');
 });
@@ -1179,7 +1198,7 @@ test('every loglevel passed to npm is one npm accepts', () => {
   // lines above it: `npm warn invalid config loglevel="normal"`. `normal` is not one of npm's accepted
   // levels, so the flag that existed to make an auth failure explainable was silently discarded. A
   // diagnostic whose only failure mode is a warning nobody reads is not a diagnostic.
-  const script = extractReleaseScript();
+  const script = extractReleaseCode();
   const assigned = [...script.matchAll(/^\s*npm_loglevel=(\S+)\s*$/gm)].map((m) => m[1]);
   assert.ok(assigned.length >= 2, 'both auth modes must set a level, found: ' + assigned.join(','));
   const valid = new Set(['silent','error','warn','notice','http','info','verbose','silly']);
@@ -1196,7 +1215,7 @@ test('the exchange probe sends the same request shape npm sends', () => {
   // sets `content-type: application/json` on every JSON request -- body or no body. A probe that omits
   // one of those can be refused for its own shape rather than for anything about this repository's
   // trust, which is precisely how a wrong conclusion got published twice already.
-  const script = extractReleaseScript();
+  const script = extractReleaseCode();
   assert.match(script, /-\/npm\/v1\/oidc\/token\/exchange\/package\//, 'same path as npm/cli');
   assert.match(script, /audience=\$\{aud\}/, 'audience is appended to the runner request');
   assert.match(script, /for aud in npm:registry\.npmjs\.org/, 'audience is npm:<host>');
