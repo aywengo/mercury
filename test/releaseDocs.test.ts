@@ -172,3 +172,33 @@ test('the documented OIDC probe tag cannot trigger a real release', () => {
   // next to it rather than living only in this test.
   for (const g of patterns) assert.ok(doc.includes(`\`${g}\``), `the runbook must name the trigger ${g} it is avoiding`);
 });
+
+test('the runbook does not state an inferred cause as a measured one', () => {
+  // The probe proved the token is rejected before any package record is read. It did NOT prove why. The
+  // immutable subject format is the leading suspect, but npm's own trusted-publishing docs never mention
+  // the `sub` claim, so "npm rejects the immutable format" has never been observed anywhere. An earlier
+  // revision of this runbook asserted exactly that, in bold, next to the probe output that did not show
+  // it -- the same drift this file exists to catch, committed by the person writing the guard.
+  const doc = read('docs/releasing.md');
+  const flat = doc.replace(/\s+/g, ' ');
+
+  // What was measured must be stated, or the hedge reads as ignorance rather than as a boundary.
+  assert.match(flat, /before it consults any package record|no per-package setting explains this/,
+    'the measured conclusion must stay in the runbook');
+  // What was inferred must be labelled -- and next to the claim, not merely somewhere in the file. A
+  // hedge in a distant section would let this paragraph assert the inference as fact and still pass.
+  const at = flat.search(/immutable.{0,40}subject format/i);
+  assert.ok(at >= 0, 'the runbook must discuss the immutable subject format at all');
+  const window = flat.slice(at, at + 1200);
+  assert.match(window, /not a proven cause|not established|has not been established|not a finding/i,
+    'the subject-format explanation must be labelled as unproven within the paragraph that makes it');
+
+  // The specific overstatements, phrased as they were when they shipped.
+  for (const claim of [
+    /The cause is measured, not guessed/,
+    /npm matches publishers against the\s+name-only shape/,
+    /it cannot, and no npmjs\.com setting changes that/,
+  ]) {
+    assert.ok(!claim.test(flat), `the runbook asserts an unmeasured npm behaviour as fact: ${claim}`);
+  }
+});
