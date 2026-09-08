@@ -961,11 +961,15 @@ test('every curl in the release step is bounded', () => {
   // a network stall into a ten-minute wait with no diagnosis. One line of the probe was already
   // bounded and the one that mints the id token was not -- exactly the shape a guard catches.
   const script = extractReleaseCode();
-  const unbounded = script
+  // Judged per statement, not per physical line. The step already writes multi-line curls with `\`
+  // continuations, so a line-based check would flag a correctly bounded curl the moment someone
+  // reformatted it -- a guard that fails on valid code gets switched off rather than obeyed.
+  const statements = script
+    .replace(/\\\n\s*/g, ' ')
     .split('\n')
     .map((l) => l.trim())
-    .filter((l) => /\bcurl\b/.test(l) && !l.startsWith('#'))
-    .filter((l) => !/--max-time/.test(l));
+    .filter((l) => /\bcurl\b/.test(l));
+  const unbounded = statements.filter((l) => !/--max-time/.test(l));
   assert.deepEqual(unbounded, [], 'every curl must carry --max-time');
 });
 
@@ -1035,7 +1039,7 @@ test('a non-JSON control is never compared against a real refusal', () => {
 });
 
 test('the release step contains no empty-string concatenation on an assignment', () => {
-  // `distinguishes=0""` shipped, survived `bash -n`, and survived 58 tests, because bash reads it as
+  // `distinguishes=0""` shipped, survived `bash -n`, and survived the whole suite, because bash reads it as
   // `distinguishes=0`. It was an editing accident, not a construct, and it sat on the line that
   // initialises the variable deciding whether a release rehearsal fails. Nothing catches that class
   // of typo, so this does: an assignment whose value is a number glued to an empty string is never
@@ -1044,7 +1048,7 @@ test('the release step contains no empty-string concatenation on an assignment',
   const offenders = script
     .split('\n')
     .map((l) => l.trim())
-    .filter((l) => /^[A-Za-z_][A-Za-z0-9_]*=(-?[0-9]+)+""/.test(l));
+    .filter((l) => /^[A-Za-z_][A-Za-z0-9_]*=-?[0-9]+""/.test(l));
   assert.deepEqual(offenders, [], 'numeric assignments must not be glued to an empty string');
 });
 
