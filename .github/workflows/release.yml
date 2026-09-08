@@ -228,7 +228,7 @@ jobs:
             # //registry.npmjs.org/:_authToken to the id_token and lets npm-registry-fetch build the
             # call; this sends a bearer header. The measured truth, from npm's own code path further
             # down: the exchange returns HTTP 201 and npm logs "Successfully retrieved and set token".
-            # Trusted publishing works for this repository. See docs/releasing.md and issue #381.
+            # Trusted publishing works for this repository. See docs/releasing.md and issue #382.
             #
             # npm never sends the id token to the registry as an assertion. It POSTs it as a bearer
             # credential to /-/npm/v1/oidc/token/exchange/package/<name> and publishes with the
