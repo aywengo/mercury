@@ -94,6 +94,7 @@ jobs:
               - 'docs/status.md'
               - 'docs/README.md'
               - 'docs/releases/**/*.md'
+              - 'docs/cli-tui-design.md'
               - 'deploy/README.md'
 
       - name: Set path-filter outputs
@@ -213,7 +214,7 @@ jobs:
         # that broke it merged green and left main red until the next code PR (#355). The filter is not
         # wrong -- docs-only legitimately skips the matrix -- the mistake is a test over prose that runs
         # only when prose is untouched.
-        run: node --test --test-timeout=180000 test/nodeFloor.test.ts test/deployDocs.test.ts test/releaseDocs.test.ts test/releaseHygiene.test.ts
+        run: node --test --test-timeout=180000 test/nodeFloor.test.ts test/deployDocs.test.ts test/releaseDocs.test.ts test/releaseHygiene.test.ts test/backup.test.ts client/test/cli.test.ts
 
   # Always reports a single status so narrative-only PRs are not stuck waiting on skipped required jobs.
   ci:
