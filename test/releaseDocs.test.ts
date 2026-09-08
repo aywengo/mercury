@@ -187,11 +187,14 @@ test('the runbook does not state an inferred cause as a measured one', () => {
     'the measured conclusion must stay in the runbook');
   // What was inferred must be labelled -- and next to the claim, not merely somewhere in the file. A
   // hedge in a distant section would let this paragraph assert the inference as fact and still pass.
-  const at = flat.search(/immutable.{0,40}subject format/i);
-  assert.ok(at >= 0, 'the runbook must discuss the immutable subject format at all');
-  const window = flat.slice(at, at + 1200);
-  assert.match(window, /not a proven cause|not established|has not been established|not a finding/i,
-    'the subject-format explanation must be labelled as unproven within the paragraph that makes it');
+  // A fixed character window is not a paragraph: a hedge in the NEXT paragraph would still land inside
+  // it, which is precisely the failure being guarded against. Split on blank lines and check the one
+  // paragraph that makes the claim.
+  const paras = doc.split(/\n\s*\n/);
+  const claiming = paras.filter((x) => /immutable.{0,40}subject format/is.test(x));
+  assert.equal(claiming.length, 1, `expected exactly one paragraph making the subject-format claim, got ${claiming.length}`);
+  assert.match(claiming[0], /not a proven cause|not established|has not been established|not a finding/i,
+    'the paragraph that makes the subject-format claim must also label it unproven');
 
   // The specific overstatements, phrased as they were when they shipped.
   for (const claim of [
