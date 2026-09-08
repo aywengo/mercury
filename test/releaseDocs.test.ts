@@ -206,14 +206,16 @@ test('the runbook says a green run still needs npm approval', () => {
   // The job submits with `npm stage publish`, so a green run leaves the version un-installable until a
   // maintainer approves it. A runbook that ends at "the workflow publishes to npm" teaches an operator to
   // push a tag, see green, and announce a release nobody can install. Pin that the doc says otherwise.
-  const doc = readFileSync(join(ROOT, 'docs', 'releasing.md'), 'utf8').replace(/\r\n/g, '\n');
+  const doc = read('docs/releasing.md').replace(/\r\n/g, '\n');
   assert.match(doc, /npm stage approve/,
     'the runbook must give the approval command, not only the UI path');
   assert.match(doc, /green run does not mean|does not mean the version is installable/i,
     'the runbook must say a green run is not an installable release');
   // "publishes to npm" is the wording that hides the gap; the job submits, a human publishes.
   // The step wraps across lines, so take the whole numbered paragraph rather than the line that matched.
-  const paras = doc.split('\n\n');
+  // A blank line inside a Markdown list is often whitespace-only, so tolerate trailing spaces rather than
+  // making this guard fail on formatting trivia.
+  const paras = doc.split(/[ \t]*\n[ \t]*\n/);
   const step = paras.find(x => /creates the GitHub Release from/.test(x)) ?? '';
   assert.ok(step, 'the tag-push step must exist');
   assert.match(step, /submits the package to npm/,
