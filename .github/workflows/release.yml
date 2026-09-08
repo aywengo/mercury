@@ -222,6 +222,11 @@ jobs:
 
             # The OIDC exchange is diagnosed by npm itself, further down, by running
             # `npm publish --dry-run --provenance --loglevel verbose` and printing derived verdicts.
+            # That capture is in the host rehearsal branch only. A fleet rehearsal runs a plain
+            # `npm publish --dry-run` and emits no OIDC verdicts, which is correct rather than an
+            # oversight: @aywengo/mercury-fleet has never been published, so an exchange for it has
+            # nothing to authenticate against and a verdict would be noise. The fleet gate earlier in
+            # this job says so directly.
             #
             # A curl reproduction of this request used to stand here and must not come back. It returned
             # `unauthorized` for every input it was given -- this package, an unrelated package, a
