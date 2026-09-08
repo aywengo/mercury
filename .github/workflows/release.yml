@@ -260,7 +260,6 @@ jobs:
               evidence=0
               distinguishes=0
               looks_up=0
-              claims_checked=0
               for aud in npm:registry.npmjs.org https://registry.npmjs.org; do
                 aud_json=$(curl -sS --max-time 30 -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
                   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${aud}" || echo "")
@@ -362,7 +361,6 @@ jobs:
                 if [ "$aud_ours_ok" = "1" ] && [ -n "$bogus_msg" ] && [ "$bogus_msg" != "$aud_ours" ]; then
                   echo "  => npm answered our token differently from a malformed one, so it parsed and"
                   echo "     validated our token before refusing it. The refusal is about the claims."
-                  claims_checked=1
                 else
                   echo "  => npm answered our token exactly as it answered a malformed one, so this"
                   echo "     endpoint did not get far enough to judge our claims. Do not conclude"
@@ -539,8 +537,9 @@ jobs:
           npm_log="${RUNNER_TEMP}/npm-submit.log"
           if [ "${DRY_RUN:-}" = "true" ]; then
             # `npm publish --dry-run` builds the tarball and prints what would go up, and performs no
-            # registry write. --provenance is omitted because attestation needs the registry
-            # round-trip a rehearsal deliberately does not make.
+            # registry write. --provenance IS passed: it is what makes npm take the OIDC path that
+            # decides whether provenance would be attached, so omitting it would rehearse a different
+            # command than the one the release runs.
             echo "DRY RUN: not submitting to npm; packing only"
             # `--dry-run` does authenticate. npm's own publish calls `await oidc(...)` before it looks at
             # dryRun at all (lib/commands/publish.js), so every rehearsal to date has already performed the
@@ -561,7 +560,7 @@ jobs:
               # and filtering it is a denylist over a secret, which has to be right every time; these
               # print fixed strings computed by grep, so no credential can reach the log by
               # construction. A test pins this.
-              if grep -qE 'npm http fetch POST 20[0-9][^ ]*oidc/token/exchange' "${RUNNER_TEMP}/npm-oidc.log"; then
+              if grep -qE 'npm http fetch POST 20[0-9] [^ ]*oidc/token/exchange' "${RUNNER_TEMP}/npm-oidc.log"; then
                 echo "  => npm's own exchange returned 2xx: a publish credential was issued."
               else
                 echo "  => npm's own exchange did not return 2xx."
@@ -575,6 +574,10 @@ jobs:
               if ! grep -q 'oidc' "${RUNNER_TEMP}/npm-oidc.log"; then
                 echo "  => npm logged nothing about oidc; it did not attempt the exchange."
               fi
+              # The captured log can contain the issued credential. Verdicts above are derived strings;
+              # nothing downstream needs the raw file, so do not leave it readable to later steps or to
+              # anyone who opens the runner's temp directory.
+              rm -f "${RUNNER_TEMP}/npm-oidc.log"
             elif [ "$product" = "fleet" ]; then
               cp LICENSE fleet/LICENSE
               (cd fleet && npm publish --dry-run --access public --tag "$dist_tag") || npm_ok=0

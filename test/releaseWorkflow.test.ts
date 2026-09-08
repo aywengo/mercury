@@ -1370,3 +1370,17 @@ test('an identical answer for a nonexistent package is reported as uninformative
   assert.match(out, /Check the package\s+page directly/, 'and point at the thing that can settle it');
   assert.ok(!/does look the/.test(out), 'must not claim a lookup it did not observe');
 });
+
+test('the 2xx verdict matches the log line npm actually writes', () => {
+  // The verdict grep is the only thing that tells an operator whether npm issued a credential, and it
+  // was written against a remembered shape rather than the real one: it read
+  // `POST 20[0-9][^ ]*oidc/...`, which cannot match `POST 201 https://...` because of the space before
+  // the URL. Every successful exchange would have been reported as "did not return 2xx". The stub's own
+  // log format did not reproduce npm's, so nothing noticed. Pin the real line, copied from run
+  // 34209099291.
+  const realLine = 'npm http fetch POST 201 https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@aywengo%2fmercury 1092ms';
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  const verdict = wf.match(/grep -qE '(npm http fetch POST [^']+)'/);
+  assert.ok(verdict, 'the 2xx verdict grep must exist');
+  assert.match(realLine, new RegExp(verdict[1]), 'the verdict regex must match npm\'s real log line');
+});

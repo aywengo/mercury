@@ -145,8 +145,12 @@ repository. Trusted publishing is configured and working; nothing on npmjs.com n
 The only reliable way to see this is to let **npm** perform the exchange:
 
 ```bash
-npm publish --dry-run --access public --tag rc --provenance --loglevel silly
+npm publish --dry-run --access public --tag rc --provenance --loglevel verbose
 ```
+
+`--loglevel verbose`, never `silly`: every message in npm's `lib/utils/oidc.js` is `log.verbose`, while
+`silly` additionally dumps the exchange response body -- which is a live publish credential that anyone
+with read access to the run log could use.
 
 `--dry-run` still authenticates. npm's `lib/commands/publish.js` calls `await oidc(...)` before it looks at
 `dryRun` at all, so the exchange is real and its outcome is logged. Every failure path inside `oidc.js` is
