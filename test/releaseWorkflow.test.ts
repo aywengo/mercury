@@ -1218,13 +1218,19 @@ test('the stage id is extracted from the line npm actually prints', () => {
   // how the 2xx verdict ended up always reporting failure. Pin the real npm wording, taken from
   // lib/commands/publish.js: `+ ${pkgContents.id} (staged with id ${stageId})`.
   const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
-  const m = wf.match(/grep -oE '(staged with id [^']+)'/);
+  const m = wf.match(/grep -oEm1 '(staged with id [^']+)'/);
   assert.ok(m, 'the stage-id extraction must exist');
   const re = new RegExp(m[1]);
   const uuid = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
   assert.match(`+ @aywengo/mercury@0.1.0-rc2 (staged with id ${uuid})`, re,
     'must match npm\'s real staged line');
-  const got = `+ pkg (staged with id ${uuid})`.match(re)![0].split(' ').pop();
-  assert.equal(got, uuid, 'the id must be the last field so awk can pick it out');
-  assert.ok(!re.test('staged with id not-a-uuid'), 'must not match a malformed id');
+  const got = `+ pkg (staged with id ${uuid})`.match(re);
+  assert.ok(got, 'the extraction must match npm\'s line');
+  assert.equal(got[0].split(' ').pop(), uuid, 'the id must be the last field so awk can pick it out');
+  // Rejects shapes that are 36 chars of hex-and-dash but not a UUID: npm's own validateUUID would refuse
+  // them, so printing one would hand the operator a command that only errors.
+  for (const bad of ['staged with id not-a-uuid', `staged with id ${uuid.replace(/-/g, '')}`,
+                     `staged with id ${uuid.slice(0, 35)}z`]) {
+    assert.ok(!re.test(bad), `must not match a non-canonical id: ${bad}`);
+  }
 });
