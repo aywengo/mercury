@@ -34,7 +34,7 @@ export function parseFloor(spec: string): [number, number, number] {
   return [Number(m[1]), Number(m[2] ?? 0), Number(m[3] ?? 0)];
 }
 
-function cmp(a: [number, number, number], b: [number, number, number]): number {
+export function cmp(a: [number, number, number], b: [number, number, number]): number {
   for (let i = 0; i < 3; i += 1) if (a[i] !== b[i]) return a[i]! - b[i]!;
   return 0;
 }
@@ -46,18 +46,23 @@ function cmp(a: [number, number, number], b: [number, number, number]): number {
  * package floor alone was the wrong question: testcontainers declares `engines.node >= 22.22`, so on
  * 22.18 preflight passed and the suite then failed inside a dependency -- the exact shape of failure this
  * function exists to prevent, arriving late and somewhere else. So the effective floor is the highest of
- * the repository floor and the floor of any e2e-only dependency that is installed.
+ * the repository floor and the floor of `testcontainers`, the one e2e-only dependency with a floor above
+ * the repository's. The scan is deliberately not general: a general scan would raise the gate for every
+ * transitive package that declares a newer engines field, including ones the suite never loads. If another
+ * direct e2e dependency grows a higher floor, add it here explicitly and say why.
  */
-export async function effectiveFloor(): Promise<{ floor: [number, number, number]; from: string }> {
-  const pkg = JSON.parse(await readFile(join(REPO_ROOT, 'package.json'), 'utf8')) as {
+export async function effectiveFloor(root: string = REPO_ROOT): Promise<{ floor: [number, number, number]; from: string }> {
+  const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
     engines?: { node?: string };
   };
   if (!pkg.engines?.node) throw new PreflightError('package.json has no engines.node to read the floor from');
   let floor = parseFloor(pkg.engines.node);
   let from = 'package.json engines.node';
-  // An uninstalled optional dependency raises nothing: the floor it would impose is not in play.
+  // Only "not installed" is ignorable. A file that exists but cannot be read or parsed is exactly the case
+  // where the dependency floor is real and unknown, and swallowing it would green-light a Node the suite
+  // then fails on -- the failure this function exists to prevent.
   try {
-    const dep = JSON.parse(await readFile(join(REPO_ROOT, 'node_modules', 'testcontainers', 'package.json'), 'utf8')) as {
+    const dep = JSON.parse(await readFile(join(root, 'node_modules', 'testcontainers', 'package.json'), 'utf8')) as {
       engines?: { node?: string };
     };
     if (dep.engines?.node) {
@@ -67,8 +72,14 @@ export async function effectiveFloor(): Promise<{ floor: [number, number, number
         from = 'testcontainers engines.node';
       }
     }
-  } catch {
-    /* not installed */
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      throw new PreflightError(
+        `cannot read the testcontainers floor from node_modules/testcontainers/package.json: `
+        + `${(err as Error).message}. Refusing to assume its floor is the repository's.`,
+      );
+    }
   }
   return { floor, from };
 }
