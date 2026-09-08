@@ -169,3 +169,27 @@ test('a falsy JSON body still gets Content-Type, and no body gets none', async (
     await new Promise<void>((r) => srv.close(() => r()));
   }
 });
+
+test('a credential scan over exec output must not pass when the exec failed', async () => {
+  // The real check runs `docker compose exec -T worker sh -c env`, and the helper that runs it folds
+  // stderr into the same string as stdout. So a failed exec -- no worker, bad service name, daemon down --
+  // yields NON-EMPTY output, the "did we read anything" guard passes, and a credential regex then matches
+  // nothing in an error message. That is a green test that checked nothing. This reproduces the shape with
+  // a command that fails and writes to stderr, so no Docker daemon is needed.
+  const { spawnSync } = await import('node:child_process');
+  const failed = spawnSync('/bin/sh', ['-c', 'echo "service not running" 1>&2; exit 1'], { encoding: 'utf8' });
+  const out = failed.stdout + failed.stderr;   // exactly how the helper composes `out`
+  const keys = out.split('\n').map((l) => l.split('=')[0]).filter(Boolean);
+  const credential = /ANTHROPIC|OPENAI|GOOGLE_API|AWS_(ACCESS|SECRET)|AZURE_|NPM_TOKEN|GITHUB_TOKEN|XAI_|GEMINI/i;
+
+  // The old logic, shown passing on a command that never read an environment.
+  assert.ok(keys.length > 0, 'precondition: failed output is non-empty');
+  assert.deepEqual(keys.filter((k) => credential.test(k)), [],
+    'precondition: an error message contains nothing credential-shaped');
+
+  // The exit code is the assertion that carries the weight: it is the only thing here that distinguishes
+  // "the worker has no credentials" from "we never asked the worker".
+  assert.notEqual(failed.status, 0,
+    'control: the command failed, so a check that ignores the exit code would report clean credentials '
+    + 'on a worker that was never read');
+});

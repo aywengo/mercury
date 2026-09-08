@@ -193,6 +193,13 @@ test('the mock subprocess is gone once the Run is terminal', async () => {
 test('no provider credential reaches the worker that runs the adapter', async () => {
   await guarded('no credentials', async () => {
     const inspect = await compose(['exec', '-T', 'worker', 'sh', '-c', 'env']);
+    // `compose()` folds stderr into `out`, so a failed exec -- no worker, bad service name, daemon down --
+    // produces NON-EMPTY output. The old guard only asked for non-empty, so it passed, and the credential
+    // regex then found nothing credential-shaped in an error message. Asserting the exit code is what makes
+    // "no credentials found" mean "we read the environment" rather than "the command never ran".
+    assert.equal(inspect.code, 0,
+      'docker compose exec env did not succeed (exit ' + String(inspect.code) + '); cannot conclude '
+      + 'anything about credentials from its output: ' + inspect.out.slice(0, 300));
     const keys = inspect.out.split('\n').map((l) => l.split('=')[0]).filter(Boolean);
     assert.ok(keys.length > 0, 'could not read the worker environment; the check would pass vacuously');
     const credential = /ANTHROPIC|OPENAI|GOOGLE_API|AWS_(ACCESS|SECRET)|AZURE_|NPM_TOKEN|GITHUB_TOKEN|XAI_|GEMINI/i;
