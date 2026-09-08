@@ -173,37 +173,31 @@ test('the documented OIDC probe tag cannot trigger a real release', () => {
   for (const g of patterns) assert.ok(doc.includes(`\`${g}\``), `the runbook must name the trigger ${g} it is avoiding`);
 });
 
-test('the runbook does not state an inferred cause as a measured one', () => {
-  // The probe proved the token is rejected before any package record is read. It did NOT prove why. The
-  // immutable subject format is the leading suspect, but npm's own trusted-publishing docs never mention
-  // the `sub` claim, so "npm rejects the immutable format" has never been observed anywhere. An earlier
-  // revision of this runbook asserted exactly that, in bold, next to the probe output that did not show
-  // it -- the same drift this file exists to catch, committed by the person writing the guard.
+test('the runbook states the measured exchange result and not the disproved cause', () => {
+  // This guard was written to stop an inferred cause being presented as measured. The inference it
+  // guarded (npm rejecting the immutable subject format) has since been DISPROVED: npm's own code path
+  // returns HTTP 201 and logs "Successfully retrieved and set token". The runbook now has to carry the
+  // measured result, keep the disproved claims out, and keep the reason the probe was wrong -- because
+  // the same mistake is easy to repeat with another curl.
   const doc = read('docs/releasing.md');
   const flat = doc.replace(/\s+/g, ' ');
 
-  // What was measured must be stated, or the hedge reads as ignorance rather than as a boundary.
-  assert.match(flat, /before it consults any package record|no per-package setting explains this/,
-    'the measured conclusion must stay in the runbook');
-  // What was inferred must be labelled -- and next to the claim, not merely somewhere in the file. A
-  // hedge in a distant section would let this paragraph assert the inference as fact and still pass.
-  // A fixed character window is not a paragraph: a hedge in the NEXT paragraph would still land inside
-  // it, which is precisely the failure being guarded against. Split on blank lines and check the one
-  // paragraph that makes the claim.
-  // Normalise first. The file's other matchers already accept CRLF, and a \r surviving into a paragraph
-  // body would make this split disagree with them about where paragraphs are.
-  const paras = doc.replace(/\r\n/g, '\n').split(/\n\s*\n/);
-  const claiming = paras.filter((x) => /immutable.{0,40}subject format/is.test(x));
-  assert.equal(claiming.length, 1, `expected exactly one paragraph making the subject-format claim, got ${claiming.length}`);
-  assert.match(claiming[0], /not a proven cause|not established|has not been established|not a finding/i,
-    'the paragraph that makes the subject-format claim must also label it unproven');
+  // Not a bare /201/: the log block quotes the URL and status, so a looser assertion is satisfied even
+  // when the sentence explaining what 201 means is deleted.
+  assert.match(flat, /`201` plus "Successfully retrieved and set token"/,
+    'must state in prose what the 201 means, not merely contain the digits');
+  assert.match(flat, /Successfully retrieved and set token/, 'must record npm\'s own success message');
+  assert.match(flat, /not\.a\.real\.jwt/, 'must keep the disproof of the curl probe visible');
 
-  // The specific overstatements, phrased as they were when they shipped.
   for (const claim of [
     /The cause is measured, not guessed/,
     /npm matches publishers against the\s+name-only shape/,
     /it cannot, and no npmjs\.com setting changes that/,
+    /no per-package setting explains this/i,
+    /the token is rejected on its face/i,
   ]) {
-    assert.ok(!claim.test(flat), `the runbook asserts an unmeasured npm behaviour as fact: ${claim}`);
+    // Case-insensitive: the disproved sentences were written as sentence starts, and a guard that only
+    // matches them mid-sentence is a guard against the copy, not against the claim.
+    assert.ok(!claim.test(flat), `the runbook repeats a disproved claim: ${claim}`);
   }
 });

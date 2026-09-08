@@ -222,6 +222,14 @@ jobs:
 
             # Perform the exchange npm would perform, but only in a rehearsal.
             #
+            # WARNING: this curl reproduction is NOT equivalent to npm's request, and its answers are
+            # not evidence about npm's trust decision. It returns `unauthorized` for every package --
+            # including one that does not exist, and for a bearer of `not.a.real.jwt`. npm sets
+            # //registry.npmjs.org/:_authToken to the id_token and lets npm-registry-fetch build the
+            # call; this sends a bearer header. The measured truth, from npm's own code path further
+            # down: the exchange returns HTTP 201 and npm logs "Successfully retrieved and set token".
+            # Trusted publishing works for this repository. See docs/releasing.md and issue #381.
+            #
             # npm never sends the id token to the registry as an assertion. It POSTs it as a bearer
             # credential to /-/npm/v1/oidc/token/exchange/package/<name> and publishes with the
             # short-lived npm token that comes back. That exchange is the whole of the trust check,
@@ -252,6 +260,7 @@ jobs:
               evidence=0
               distinguishes=0
               looks_up=0
+              claims_checked=0
               for aud in npm:registry.npmjs.org https://registry.npmjs.org; do
                 aud_json=$(curl -sS --max-time 30 -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
                   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${aud}" || echo "")
@@ -325,6 +334,40 @@ jobs:
                   elif [ "$rc" -ne 2 ]; then
                     aud_missing="${msg}"; aud_missing_ok=1
                   fi
+                # Control: the same request with a bearer that is not a JWT at all. If npm answers this
+                # differently than it answered our real token, then npm parsed and validated our token and
+                # rejected it on its claims -- which puts the cause in the claims, not in transport,
+                # issuer or signature. If the answers are identical, this endpoint says nothing at all
+                # about the contents of our token and no conclusion about the subject is safe.
+                bogus=$(curl -sS --max-time 30 -X POST -H "Accept: application/json" \
+                  -H "content-type: application/json" \
+                  -H "Authorization: bearer not.a.real.jwt" \
+                  "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${esc}" || echo "")
+                bogus_msg=$(node -e '
+                  const raw = process.argv[1];
+                  let j = null;
+                  try { j = JSON.parse(raw); } catch {}
+                  // Never fall back to the raw body. A successful exchange answers with a publish
+                  // credential in `token`, and this line goes straight into the run log. Only a
+                  // message/error field is ever printed; anything else is reported by shape.
+                  if (j && (j.message || j.error)) {
+                    process.stdout.write(String(j.message || j.error).slice(0, 160));
+                  } else if (j && typeof j.token === "string") {
+                    process.stdout.write("answered with a credential body (not printed)");
+                  } else {
+                    process.stdout.write("no message field (" + raw.length + " bytes, not printed)");
+                  }
+                ' "$bogus")
+                echo "  oidc exchange [control] not-a-jwt: ${bogus_msg}"
+                if [ "$aud_ours_ok" = "1" ] && [ -n "$bogus_msg" ] && [ "$bogus_msg" != "$aud_ours" ]; then
+                  echo "  => npm answered our token differently from a malformed one, so it parsed and"
+                  echo "     validated our token before refusing it. The refusal is about the claims."
+                  claims_checked=1
+                else
+                  echo "  => npm answered our token exactly as it answered a malformed one, so this"
+                  echo "     endpoint did not get far enough to judge our claims. Do not conclude"
+                  echo "     anything about the subject format from this run."
+                fi
                 done
                 if [ "$aud_ours_ok" = "1" ] && [ "$aud_control_ok" = "1" ] \
                   && [ "$aud_ours" != "$aud_control" ]; then
@@ -499,8 +542,39 @@ jobs:
             # registry write. --provenance is omitted because attestation needs the registry
             # round-trip a rehearsal deliberately does not make.
             echo "DRY RUN: not submitting to npm; packing only"
+            # `--dry-run` does authenticate. npm's own publish calls `await oidc(...)` before it looks at
+            # dryRun at all (lib/commands/publish.js), so every rehearsal to date has already performed the
+            # real token exchange -- at the default log level, which hides every failure path in it because
+            # they are all log.verbose. Asking npm to run its OWN exchange at silly level is the only
+            # reading that comes from npm rather than from our curl approximation of it, and the two have
+            # disagreed: our probe sends a bearer header, npm sets _authToken and lets npm-registry-fetch
+            # build the request. Capture it and print the oidc lines; that is npm naming its own reason.
             if [ "$product" = "host" ]; then
-              npm publish --dry-run --access public --tag "$dist_tag" || npm_ok=0
+              # verbose, not silly: every message in npm's lib/utils/oidc.js is log.verbose, and silly
+              # additionally dumps the exchange RESPONSE BODY, which is a live publish credential that
+              # anyone with read access to the run log could use. A test pins this.
+              npm publish --dry-run --access public --tag "$dist_tag" --provenance --loglevel verbose \
+                >"${RUNNER_TEMP}/npm-oidc.log" 2>&1 || npm_ok=0
+              echo "--- npm's own OIDC exchange (loglevel=verbose) ---"
+              # Print derived verdicts, never log lines. The exchange response IS a live publish
+              # credential, and npm at verbose level emits lines that contain it. Echoing npm's output
+              # and filtering it is a denylist over a secret, which has to be right every time; these
+              # print fixed strings computed by grep, so no credential can reach the log by
+              # construction. A test pins this.
+              if grep -qE 'npm http fetch POST 20[0-9][^ ]*oidc/token/exchange' "${RUNNER_TEMP}/npm-oidc.log"; then
+                echo "  => npm's own exchange returned 2xx: a publish credential was issued."
+              else
+                echo "  => npm's own exchange did not return 2xx."
+              fi
+              if grep -q 'npm verbose oidc Successfully retrieved and set token' "${RUNNER_TEMP}/npm-oidc.log"; then
+                echo "  => npm logged: Successfully retrieved and set token."
+              fi
+              if grep -qE 'ENEEDAUTH|Unable to authenticate' "${RUNNER_TEMP}/npm-oidc.log"; then
+                echo "  => npm reported it had no usable credential at publish time."
+              fi
+              if ! grep -q 'oidc' "${RUNNER_TEMP}/npm-oidc.log"; then
+                echo "  => npm logged nothing about oidc; it did not attempt the exchange."
+              fi
             elif [ "$product" = "fleet" ]; then
               cp LICENSE fleet/LICENSE
               (cd fleet && npm publish --dry-run --access public --tag "$dist_tag") || npm_ok=0

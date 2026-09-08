@@ -130,44 +130,46 @@ Read the `oidc sub` line to confirm you actually got a tag subject -- `...:ref:r
 then read the exchange. `test/releaseDocs.test.ts` also pins that the probe tag name in this document is the
 one the guard checks, so the two cannot drift apart.
 
-### When the OIDC exchange is refused
+### Confirming the OIDC exchange works
 
-Trusted publishing can fail in a way that is not a misconfiguration on this side. The rehearsal's exchange
-probe reports `REFUSED` for this package and for an unrelated control package identically, which means the
-registry is rejecting the token before it looks at any publisher configuration.
-
-**What is measured: the token is rejected before npm reads any package record.** A third probe asks about
-a package that **does not exist**, and it is refused with the same bytes:
+**It does.** Run the rehearsal and read npm's own log:
 
 ```
-@aywengo%2Fmercury               REFUSED -- OIDC token exchange error - unauthorized
-left-pad                         REFUSED -- OIDC token exchange error - unauthorized
-@aywengo%2Fno-such-package-probe REFUSED -- OIDC token exchange error - unauthorized
+npm http fetch POST 201 https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@aywengo%2fmercury
+npm verbose oidc Successfully retrieved and set token
 ```
 
-A nonexistent package cannot have a trusted publisher, so no per-package setting explains this. The token
-is rejected on its face. npm documents its failure for a *publisher mismatch* as a 404; we get
-`unauthorized`, which is a token-level rejection rather than a matching failure. #335 records the false lead
-that came before this.
+`201` plus "Successfully retrieved and set token" means npm issued a real publish credential for this
+repository. Trusted publishing is configured and working; nothing on npmjs.com needs changing.
 
-**The leading suspect, not a proven cause.** GitHub issues this repository the **immutable** subject format
--- `repo:aywengo@800531/mercury@1349412409:ref:...` -- because it was created after 2026-07-15, when GitHub
-made that format automatic for new repositories. The immutable format is documented to break OIDC trust with
-other providers. What has **not** been established is that npm rejects it: npm's trusted-publishing docs
-never mention the `sub` claim at all. So this is the best available explanation for a token-level rejection,
-and the experiment below is cheap to settle -- it is not a finding. #376 carries the full evidence and says
-which parts are measured.
-
-Read the format GitHub is actually issuing, rather than inferring it from a log line:
+The only reliable way to see this is to let **npm** perform the exchange:
 
 ```bash
-gh api repos/aywengo/mercury/actions/oidc/customization/sub --jq .sub_claim_prefix
-# repo:aywengo/mercury            -> the name-only shape every provider documents
-# repo:aywengo@<id>/mercury@<id>  -> what this repository gets; see #376 for what is and is not proven
+npm publish --dry-run --access public --tag rc --provenance --loglevel silly
 ```
 
-Whether a custom subject template returns a post-cutoff repository to the name-only shape is **unverified**;
-the same read answers it one second after you try. #376 gives the commands and the one-line revert.
+`--dry-run` still authenticates. npm's `lib/commands/publish.js` calls `await oidc(...)` before it looks at
+`dryRun` at all, so the exchange is real and its outcome is logged. Every failure path inside `oidc.js` is
+`log.verbose`, which is why the log level has to be raised -- at the default level a rehearsal proves the
+tarball and nothing about credentials.
+
+**Do not reproduce this exchange with `curl`.** A hand-rolled reproduction in this workflow reported
+`unauthorized` for every package for days, and every wrong conclusion in the release notes and issue
+history traces back to it. It was not equivalent to npm's request: npm sets
+`//registry.npmjs.org/:_authToken` to the id_token and lets `npm-registry-fetch` build the call, while the
+probe sent a bearer header. The disproof was visible in the log the whole time -- the probe returned
+`unauthorized` for the bearer value `not.a.real.jwt`. **A probe that cannot distinguish a valid GitHub OIDC
+token from a fake string is measuring its own request, not the registry's trust decision.**
+
+Two things that are genuinely true and worth knowing, both unrelated to that probe:
+
+- This repository presents the **immutable** subject format,
+  `repo:aywengo@800531/mercury@1349412409:ref:...`, because it was created after 2026-07-15. Read it with
+  `gh api repos/aywengo/mercury/actions/oidc/customization/sub --jq .sub_claim_prefix`. It is **not**
+  blocking anything -- npm exchanges the token anyway -- but it is the kind of claim that gets mistaken for
+  a cause, so it is recorded here as measured and harmless.
+- A `sub` carrying numeric IDs is worth knowing about before adding any *other* OIDC trust (AWS, GCP,
+  Vault), because several providers match on the name-only shape and will not match this one.
 
 **The fallback is a short-lived token, and it does not cost you provenance.** The `host-v0.1.0-rc1` run
 authenticated with `NPM_TOKEN` and still signed and published provenance:
