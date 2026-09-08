@@ -560,7 +560,7 @@ jobs:
               # and filtering it is a denylist over a secret, which has to be right every time; these
               # print fixed strings computed by grep, so no credential can reach the log by
               # construction. A test pins this.
-              if grep -qE 'npm http fetch POST 20[0-9] [^ ]*oidc/token/exchange' "${RUNNER_TEMP}/npm-oidc.log"; then
+              if grep -qE 'npm http fetch POST 2[0-9][0-9] [^ ]*oidc/token/exchange' "${RUNNER_TEMP}/npm-oidc.log"; then
                 echo "  => npm's own exchange returned 2xx: a publish credential was issued."
               else
                 echo "  => npm's own exchange did not return 2xx."
