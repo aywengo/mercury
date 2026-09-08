@@ -296,7 +296,8 @@ test('the staged-approval step names the npm version that introduced `npm stage`
   const m = near.match(/npm\s+(?:\d+\.\d+\.\d+\s+or\s+newer|>=\s*\d+\.\d+\.\d+)/i)
     ?? near.match(/(\d+\.\d+\.\d+)\s+or\s+newer/);
   assert.ok(m, `the staged-approval step must state a minimum npm version, got:\n${near}`);
-  const floor = (m[0].match(/\d+\.\d+\.\d+/) ?? [])[0];
+  const floor = (m[0].match(/\d+\.\d+\.\d+/) ?? [''])[0];
+  assert.ok(floor, `the stated npm floor is not a version number: ${m[0]}`);
   const [maj, min] = floor.split('.').map(Number);
   assert.ok(maj > 11 || (maj === 11 && min >= 15),
     `stated npm floor ${floor} predates the release of \`npm stage\` (11.15.0)`);
