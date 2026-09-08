@@ -296,12 +296,14 @@ test('the staged-approval step names the npm version that introduced `npm stage`
   // Tolerate the ways a minimum version is actually written. The point is the relationship
   // (a floor exists, and it is not below 11.15.0), not the phrasing -- pinning wording here
   // would fail harmless rewrites while still missing a genuinely stale floor.
+  // A floor must be *claimed*: `>=`, a trailing `+`, or the words "or newer"/"or later".
+  // With both the prefix and the suffix optional a bare `npm 11.15.0` matched, so the docs
+  // could drop the minimum entirely and still pass. A bare `>` is an exclusive bound, not the
+  // inclusive floor `npm stage` needs, so only `>=` counts.
   const m = near.match(/npm\s+v?\s*(>=)?\s*(\d+\.\d+\.\d+)\s*(\+|or\s+(?:newer|later))?/i);
-  // A floor must be *claimed*. With both the `>=` prefix and the `+`/`or newer` suffix optional,
-  // a bare `npm 11.15.0` matched -- so the docs could drop the minimum entirely and still pass.
-  // `>` alone is rejected: it is an exclusive bound, not the inclusive floor `npm stage` needs.
-  if (m && !m[1] && !m[3]) m.splice(0);
-  assert.ok(m, `the staged-approval step must state a minimum npm version, got:\n${near}`);
+  const floorClaimed = m !== null && (m[1] !== undefined || m[3] !== undefined);
+  assert.ok(floorClaimed,
+    `the staged-approval step must state a MINIMUM npm version, not merely mention one; got:\n${near}`);
   const floor = m[2] ?? '';
   assert.ok(floor, `the stated npm floor is not a version number: ${m[0]}`);
   const [maj, min] = floor.split('.').map(Number);
@@ -315,7 +317,8 @@ test('the staged-approval step names the npm version that introduced `npm stage`
     return g !== null && Boolean(g[1] || g[3]);
   };
   const cases: Array<[string, boolean]> = [['npm 11.15.0 or newer', true], ['npm >=11.15.0', true],
-    ['npm v11.15.0+', true], ['npm 11.15.0+', true], ['npm 11.15.0', false], ['npm >11.15.0', false]];
+    ['npm >= 11.15.0', true], ['npm v11.15.0 or later', true], ['npm v11.15.0+', true],
+    ['npm 11.15.0+', true], ['npm 11.15.0', false], ['npm >11.15.0', false]];
   for (const [ph, want] of cases) {
     assert.equal(floorClaim(ph), want, `matcher must ${want ? 'accept' : 'reject'} \`${ph}\``);
   }
