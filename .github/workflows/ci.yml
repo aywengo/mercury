@@ -95,6 +95,9 @@ jobs:
               - 'docs/README.md'
               - 'docs/releases/**/*.md'
               - 'docs/cli-tui-design.md'
+              # releaseDocs.test.ts asserts against this design note, so a docs-only edit to it
+              # must still run the job that guards it.
+              - 'docs/local-e2e-design.md'
               - 'deploy/README.md'
 
       - name: Set path-filter outputs

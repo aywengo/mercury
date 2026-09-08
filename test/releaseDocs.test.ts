@@ -263,3 +263,23 @@ test('the runbook gives the fleet bootstrap command and warns where to run it', 
   assert.match(boot[0], /repo(?:sitory)? root.*@aywengo\/mercury|publishes @aywengo\/mercury/,
     'it must warn that the root publishes the host package instead');
 });
+
+test('the E2E docs do not claim the reaper test asserts disappearance', () => {
+  // Both docs used to say `e2e/robustness.test.ts` SIGKILLs a probe and requires its container to
+  // disappear. It does not, deliberately: Ryuk is shared across processes, so that timing is not
+  // Mercury's to assert. A doc quoting a mutation result for a deleted assertion is worse than no doc --
+  // it reads as proof of a guarantee nothing checks. Pin the docs against the test that exists.
+  const design = read('docs/local-e2e-design.md').replace(/\r\n/g, '\n');
+  const readme = read('e2e/README.md').replace(/\r\n/g, '\n');
+  for (const [name, text] of [['design doc', design], ['README', readme]] as const) {
+    const para = text.split(/[ \t]*\n[ \t]*\n/).filter(x => /robustness\.test\.ts/.test(x) && /Ryuk|reaper/i.test(x));
+    assert.equal(para.length, 1, `${name}: exactly one paragraph must describe the reaper guarantee`);
+    assert.ok(!/requir(?:es|ing) its container to disappear|requires the container to disappear/i.test(para[0]),
+      `${name}: must not claim the test asserts disappearance`);
+    assert.match(para[0], /session label|session label Ryuk reaps on/,
+      `${name}: must state the property the test actually asserts`);
+  }
+  // The design note must say plainly that the timing is out of scope, or the next reader re-adds it.
+  assert.match(design, /does not assert that the container disappears|does NOT assert how fast/i,
+    'the design note must record what it deliberately does not assert');
+});
