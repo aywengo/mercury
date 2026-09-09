@@ -1,7 +1,6 @@
 # Fleet end-to-end testing
 
-Status: **Phases 0-3 implemented** (`test/fleetContract.test.ts`, 6 tests, 6/6 mutations caught). Phases
-4-5 are design. See §7.
+Status: **Phases 0-5 implemented** (`test/fleetContract.test.ts`, 9 tests). Phase 6 is design. See §6.
 
 ## 1. Problem
 
@@ -113,7 +112,7 @@ makes.
 | 2 | The real 503 path (app built without `queue`) -> `not_serving` | implemented |
 | 3 | Structural drift guard on the key sets, both directions | implemented |
 | 4 | Capacity changes underneath a live Fleet: finish a Run, re-probe, no stale cache | implemented |
-| 5 | Dispatch across the wire: submit through Fleet, host runs it, Fleet's sweeper reconciles | design |
+| 5 | Dispatch across the wire: submit through Fleet, Run read back from Mercury, idempotency, restart | implemented |
 | 6 | Event mirroring across the wire with the real `EventStream` | design |
 
 ## 6b. Two sharp edges this found by being wrong
@@ -151,6 +150,39 @@ The second row initially **passed**. The drift guard asserted the lease key set 
 truthy, and the test never created a lease, so `workers` was `[]` and the assertion was vacuous. It now
 creates a lease and asserts exactly one exists before comparing keys. A guard whose only observed
 behaviour is "no violations" has not been tested.
+
+## 6d. What the dispatch tests do NOT cover, and why that is fine
+
+Two mutations of the host-facing idempotency path leave all 9 tests green:
+
+- Fleet stops sending the `idempotency-key` header to Mercury.
+- Mercury stops honouring the key on `create()`.
+
+Neither is a gap, and both were checked rather than assumed.
+
+The first is caught by `fleet/test/dispatch.test.ts` -- "THE ORPHAN CASE: a lost response yields one
+child Run, not two" fails when the header is dropped. That is the path where the header matters: Fleet
+retries a submit whose response was lost, and Mercury's key is what stops the retry creating a second
+Run. A replay through a Fleet that still holds the binding never reaches the network at all, so no test
+in this file can see the header.
+
+The second is an **equivalent mutant**, not missing coverage. `create()` dedupes twice: an early
+`findByIdempotencyKey` return, and a `catch` on the UNIQUE violation for the check-then-insert race
+(issue #24). Disabling the first leaves the second to return the same Run, so behaviour is unchanged and
+no test could tell. An uncaught mutation is only a finding if it changes behaviour.
+
+## 6e. A design boundary this found by asserting the wrong thing
+
+A first draft spun up a second Fleet with a fresh database, replayed the same caller idempotency token,
+and expected one Run on Mercury. It got two.
+
+That was a wrong expectation about the product, not a bug in it. Fleet sends Mercury **its own generated
+`fleetRunId`** as the `idempotency-key` header (`dispatch.ts` -> `child.createRun(host, payload,
+fleetRunId)`), never the caller's token. So the caller's token is scoped to one Fleet's binding table,
+and Mercury's key is scoped to one Fleet binding. Two independent Fleets are two idempotency domains, by
+design. The restart test replaced it: same database, new process, and the binding must come back out of
+SQLite rather than out of memory -- which is the case that actually happens when systemd restarts Fleet
+and an operator re-runs a submit.
 
 ## 7. Why this is not just `journey.test.ts` with a different stub
 
