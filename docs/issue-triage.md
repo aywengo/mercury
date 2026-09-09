@@ -1,8 +1,8 @@
 # Mercury — Issue Triage & Fix Methodology
 
-> Working document (not committed). The proven triage and per-issue fix
-> methodology, distilled from the August 2026 mercury triage (22 issues
-> closed end-to-end). Canonical full version:
+> The proven triage and per-issue fix methodology, distilled from the
+> August 2026 mercury triage (22 issues closed end-to-end). Canonical
+> full version:
 > [`.agents/skills/issue-fix-loop/SKILL.md`](../.agents/skills/issue-fix-loop/SKILL.md).
 
 ## Triage
