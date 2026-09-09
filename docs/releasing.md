@@ -126,8 +126,9 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
 
 ## Publishing credential
 
-**There is none, and that is the intended steady state.** The package publishes through npm's trusted
-publishing: the workflow exchanges the GitHub Actions OIDC id-token for a short-lived credential, so no
+**There is none for the host, and that is the intended steady state.** Fleet's first publish is the one
+exception and needs a credential, as the procedure above says; after that it needs none either. The host
+publishes through npm's trusted publishing: the workflow exchanges the GitHub Actions OIDC id-token for a short-lived credential, so no
 long-lived secret exists in the repository. `NPM_TOKEN` was deleted once trusted publishing was
 configured. The workflow still prefers `NPM_TOKEN` if the secret is ever re-added, and refuses the tag
 before creating any release if neither credential is available.

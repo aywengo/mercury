@@ -341,10 +341,12 @@ Fleet runs as a long-lived service on one host, not as a CLI on an operator's la
 question 1, and it is not cosmetic: it changes where secrets live, who authenticates to what, and what a
 crash costs.
 
-**Scope of this section: it is a specification, not a description.** Only Phase 0 exists — registry and
-probe, driven by a CLI. There is no Fleet server, no Fleet unit, no caller authentication, and no redactor.
-Everything below is written before the code so that Phase 1 does not invent it under pressure, and the
-imperative and future tenses are deliberate.
+**Scope of this section: it is a specification, not a description.** It was written before any of it
+existed, so the imperative and future tenses below are deliberate and state intent rather than
+behaviour to read off the code. What has since changed is the status line this section used to open
+with, which claimed there was no Fleet server, no unit, no caller authentication and no redactor. All
+four exist now — `fleet/server.ts`, `deploy/fleet.service`, `fleet/auth.ts`, `fleet/redact.ts` — so
+read the requirements here and the behaviour from the source and its tests.
 
 ### 15.1 Why the service shape forced a decision now
 
@@ -361,10 +363,11 @@ asymmetric and easy to miss — the unit starts, the registry loads, and every p
 because the credential store never resolved.
 
 A service deployment should therefore put the file at `/etc/fleet/credentials.json`, mode `0600`, owned by
-the `fleet` user, and should restrict `ReadWritePaths` to `/var/lib/fleet`. None of this exists yet — there
-is no Fleet unit and no `/etc/fleet`, and the paths above are the intended layout, not the current one. The
-Phase 0 default stays laptop-shaped for development; the unit, when it is written, should set
-`FLEET_CREDENTIALS_FILE` explicitly rather than rely on that default.
+the `fleet` user, and should restrict `ReadWritePaths` to `/var/lib/fleet`. That layout is now the
+documented deployment rather than a proposal: `deploy/fleet.service` sets `ProtectHome=true` and
+`ReadWritePaths=/var/lib/fleet`, `deploy/fleet.env.example` supplies `FLEET_CREDENTIALS_FILE` through
+`EnvironmentFile` rather than relying on the laptop default, and `deploy/README.md` creates
+`/etc/fleet/credentials.json` at mode `0600`. The CLI default stays laptop-shaped for development.
 
 ### 15.3 Fleet authenticates its own callers
 
