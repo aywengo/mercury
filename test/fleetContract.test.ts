@@ -412,9 +412,19 @@ test('work submitted through Fleet lands as a real Run on the real Mercury', asy
     assert.equal(run.id, ack.childRunId);
     assert.equal(run.task, 'do the thing', `Mercury stored a different task than Fleet was asked to send: ${JSON.stringify(run)}`);
     assert.equal(run.agent, 'fake');
-    // ownerId comes from the authenticated Fleet caller, never the request body -- the code calls this
-    // out as a security boundary, so assert the boundary holds across the wire rather than trusting it.
-    assert.equal(run.ownerId, 'alice', `owner did not come from the Fleet caller identity: ${JSON.stringify(run)}`);
+    // Ownership does NOT travel with the Fleet caller. Mercury attributes the Run to whoever its OWN
+    // credential belongs to -- Fleet authenticates to a host with the registry credential, so every Run
+    // any Fleet caller submits lands on Mercury owned by that credential's owner. Measured, not
+    // reasoned: remapping FLEET_API_TOKENS so the Fleet caller is `bob` leaves the Run owned by `alice`,
+    // because `alice` is who HOST_TOKEN resolves to. An earlier draft of this line asserted
+    // ownerId === 'alice' and claimed it proved the Fleet caller's identity crossed the wire. It proved
+    // the opposite, and it could not fail -- both sides were 'alice' by construction.
+    //
+    // This is a real property of the design, not a defect: Fleet is a single-tenant-per-host front, and
+    // per-caller isolation lives in Fleet's own scoping (a caller cannot read or act on a Run bound to a
+    // host they may not see). It does mean Mercury-side ownership cannot distinguish two Fleet callers,
+    // so any future per-caller attribution on the host needs an explicit identity to be threaded through.
+    assert.equal(run.ownerId, 'alice', `Mercury should own the Run by its own credential, not the Fleet caller's: ${JSON.stringify(run)}`);
 
     // And Fleet's own view agrees with Mercury's, which is the whole point of the binding.
     const listed = await f.req('/fleet/runs', CALLER_TOKEN);
