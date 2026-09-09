@@ -5,3 +5,8 @@ dist/
 *.db-shm
 workspaces/
 .env
+
+# fleet/test/published.test.ts mirrors the release workflow by copying the repo LICENSE into
+# fleet/ before packing, and removes it in `finally`. A `finally` does not run when the process is
+# killed, so an interrupted `npm run test:fleet` leaves this behind in the SOURCE tree (issue #438).
+fleet/LICENSE
