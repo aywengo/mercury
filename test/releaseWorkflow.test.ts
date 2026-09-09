@@ -96,7 +96,8 @@ function runTag(
     npmSubmitErr?: string; exchange?: string; exchangeExit?: number; missing?: string; missingExit?: number;
     bundleLie?: string;
     exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
-    control2?: string; control2Exit?: number; rehearsalProduct?: string; fleetPkgVersion?: string; omitFleetManifest?: boolean } = {},
+    control2?: string; control2Exit?: number; rehearsalProduct?: string; fleetPkgVersion?: string; omitFleetManifest?: boolean;
+    pkgVersionHttp?: string } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -212,6 +213,12 @@ function runTag(
       + '  *raw.githubusercontent.com*) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_FORMULA_HTTP:-200}"; exit 0; fi; exit 22 ;;\n'
       // Package metadata is public, and the failure classifier now reads it to tell a rejected
       // publisher apart from a package that has never existed. STUB_PKG_HTTP is that answer.
+      // A VERSION url (…/<pkg>/<semver>) must be answerable separately from the package url: whether
+      // the package exists and whether THIS version exists are different facts, and the release body
+      // now branches on the second. The default is 404, not the package probe's 200: a version whose
+      // publish just failed is absent unless a test says otherwise, and defaulting it to 200 rewrote
+      // every pre-existing "npm failed" test into the already-published branch.
+      + '  */[0-9]*.[0-9]*.[0-9]*) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_PKG_VERSION_HTTP:-404}"; exit 0; fi; exit 22 ;;\n'
       + '  *) if [ -n "${wfmt:-}" ]; then printf "%s" "${STUB_PKG_HTTP:-200}"; exit 0; fi; exit 22 ;;\n'
       + 'esac\nexit 0\n');
     chmodSync(curlStub, 0o755);
@@ -268,6 +275,7 @@ function runTag(
         STUB_EXCHANGE_MISSING: opts.missing ?? '',
         STUB_EXCHANGE_MISSING_EXIT: String(opts.missingExit ?? opts.exchangeExit ?? 0),
         STUB_PKG_HTTP: opts.pkgHttp ?? '200',
+        STUB_PKG_VERSION_HTTP: opts.pkgVersionHttp,
         STUB_FORMULA_HTTP: opts.formulaHttp ?? '200',
         STUB_EXCHANGE_OURS1: opts.exchange ?? '',
         STUB_EXCHANGE_OURS1_EXIT: String(opts.exchangeExit ?? 0),
@@ -1363,4 +1371,60 @@ test('a fleet rehearsal whose fleet manifest is missing fails loudly instead of 
   assert.match(r.stderr, /fleet\/package\.json/,
     `the failure must name the manifest that is missing:\n${r.stderr}`);
   assert.match(r.stderr, /fleet/, 'the failure must say which product was being rehearsed');
+});
+
+
+test('a version already on the registry is not reported as unavailable', () => {
+  // The failure and the body used to disagree out loud. The job said "fleet 0.1.0 is already on the
+  // registry" on stderr while the release body told every reader that the version "is **not** on the
+  // npm registry" and was "unavailable by every channel". The body is the public promise about what is
+  // installable, and it was the false half. Fleet makes this worst case real: it has no bundle and no
+  // formula, so the body told readers there was NO way to install a package that was sitting on npm.
+  const r = runTag(`fleet-v${V}`, {
+    notes: [`fleet/${V}.md`], oidc: true, npmToken: '',
+    npmFails: true,
+    npmSubmitErr: 'npm error code EPUBLISHCONFLICT cannot publish over it previously published',
+    pkgHttp: '200', pkgVersionHttp: '200',
+  });
+  assert.equal(r.status, 1, 'a run that did not publish the version must still go red');
+  assert.match(r.notesOut, /already on the/, 'the body must say why the publish failed');
+  assert.match(r.notesOut, new RegExp(`npm install -g @aywengo/mercury-fleet@${V.replace(/\./g, '\\.')}`),
+    `the body must give the install command that actually works:\n${r.notesOut}`);
+  assert.ok(!/unavailable by every channel/.test(r.notesOut),
+    `must not deny an install that exists:\n${r.notesOut}`);
+  assert.ok(!/\*\*not\*\* on the npm registry/.test(r.notesOut),
+    'must not state the version is absent when the registry says it is present');
+  // Honest about provenance: this run did not create it, so the release must not imply it did.
+  assert.match(r.notesOut, /provenance/i, 'must say the attestation this run would have made is absent');
+});
+
+test('a genuinely absent version is still reported as unavailable', () => {
+  // The fix must not become a blanket "it is fine". With the version really absent, the refusal is the
+  // accurate sentence and removing it would advertise an install that 404s.
+  const r = runTag(`fleet-v${V}`, {
+    notes: [`fleet/${V}.md`], oidc: true, npmToken: '',
+    npmFails: true, npmSubmitErr: 'npm error code E401',
+    pkgHttp: '200', pkgVersionHttp: '404',
+  });
+  assert.equal(r.status, 1);
+  assert.match(r.notesOut, /npm package not available for this release/,
+    `the refusal must survive when the version really is absent:\n${r.notesOut}`);
+  assert.ok(!/npm install -g @aywengo\/mercury-fleet/.test(r.notesOut),
+    'and must not offer an install command');
+});
+
+test('an unconfirmed version is not asserted absent', () => {
+  // A 000/403/5xx from the probe says nothing. The body used to assert absence from the job's exit
+  // status alone; now it must not convert an unknown into a definitive "not on the registry".
+  for (const code of ['000', '403', '503']) {
+    const r = runTag(`fleet-v${V}`, {
+      notes: [`fleet/${V}.md`], oidc: true, npmToken: '',
+      npmFails: true, npmSubmitErr: 'npm error code E401',
+      pkgHttp: '200', pkgVersionHttp: code,
+    });
+    assert.equal(r.status, 1);
+    assert.ok(!/\*\*not\*\* on the npm registry/.test(r.notesOut),
+      `${code} must not be reported as a definitive absence:\n${r.notesOut}`);
+    assert.match(r.notesOut, new RegExp(code), `${code} must be named so a reader can discount it`);
+  }
 });
