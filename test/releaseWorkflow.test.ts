@@ -1125,9 +1125,18 @@ test('a fleet tag for a package that has never existed is refused before a relea
   const out = r.stdout + r.stderr;
   assert.match(out, /does not exist on the registry \(HTTP 404\)/, 'and say which package');
   assert.match(out, /first publish needs a credential/, 'and the bootstrap reason');
-  assert.match(out, /cd fleet && .*npm publish --access public/,
+  assert.match(out, /cd fleet && [\s\S]*npm publish --access public/,
     'the remedy must run in the Fleet package; at the root it publishes the host package instead');
   assert.match(out, /publishes @aywengo\/mercury, not Fleet/, 'and warn about that trap explicitly');
+  // The remedy must not consume the version being released. npm refuses to publish the same version
+  // twice, so a bootstrap that publishes ${V} makes the tagged release of ${V} impossible afterwards
+  // -- the operator would have to bump the version to ship the thing they were trying to ship. The
+  // first version of this guidance said `npm publish --tag rc` at the release version and was wrong.
+  assert.match(out, /THROWAWAY/, 'the remedy must say the bootstrap version is disposable');
+  assert.doesNotMatch(out, new RegExp(`npm publish[^\\n]*--tag[^\\n]*\\s${V.replace(/\./g, '\\.')}(?![0-9A-Za-z.-])`),
+    `the remedy must not publish the release version ${V} itself:\n${out}`);
+  assert.match(out, /npm version --no-git-tag-version (\d+\.\d+\.\d+[-+][0-9A-Za-z.-]+)/,
+    'the remedy must pin a prerelease bootstrap version, so it can never equal a real release version');
   assert.ok(!/gh release create/.test(r.stdout),
     'and must not create a GitHub Release that ships nothing');
 });
