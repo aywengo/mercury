@@ -34,7 +34,17 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    first `@aywengo/mercury-fleet` publish needs a credential; a `fleet-vX.Y.Z` tag pushed without one is
    refused up front rather than creating a GitHub Release that ships nothing. Once the package exists the
    tag path needs no secret, and the workflow discovers this by asking the registry, so nothing has to be
-   edited when the bootstrap happens.
+   edited when the bootstrap happens. The command, which the refusal prints as well:
+
+   ```bash
+   cd fleet                      # REQUIRED: from the repo root this publishes @aywengo/mercury, not fleet
+   cp ../LICENSE LICENSE         # fleet/ declares MIT but ships no LICENSE file
+   npm publish --access public --tag rc
+   ```
+
+   Run it from a clean checkout of the commit you intend to release, with an npm credential that can
+   publish, and configure trusted publishing on the new package page immediately afterwards so the very
+   next release needs no secret.
 
 5. **Rehearse before you tag.** A tag is a published artifact, so a mistake in the release job costs a
    burned version number. Run the workflow by hand instead:
@@ -94,8 +104,25 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    When both ship together, push both tags from the same commit; each runs its own release job.
 
 7. [`.github/workflows/release.yml`](../.github/workflows/release.yml) creates the GitHub Release from
-   the notes file for that tag and publishes to npm with provenance. It handles `host` and `fleet` tags
-   only; any other tag is refused.
+   the notes file for that tag and submits the package to npm with provenance. It handles `host` and
+   `fleet` tags only; any other tag is refused.
+
+8. **A green run does not mean the version is installable.** The job submits with `npm stage publish`,
+   which defers proof-of-presence to a maintainer, so `npm install` will not resolve the version until it
+   is approved. The release body names the id and gives the command:
+
+   ```bash
+   npm stage approve <stage-id>     # needs a 2FA code; run it locally
+   ```
+
+   `npm stage` needs **npm 11.15.0 or newer** -- it is not a plugin, and older npm answers
+   `Unknown command "stage"`. Check with `npm --version`; if you are behind, either update npm
+   (`npm install -g npm@latest`) or use the web UI below, which needs no particular npm version.
+
+   Or approve on npmjs.com under **Published packages -> Staged packages**. Until then the GitHub Release
+   asset and, for a host release, the Homebrew formula are live, but the npm package is not -- so a user
+   following an `npm install -g` instruction gets the previous version. If a run goes green and nobody
+   approves, that is the gap to close; it is not a sign the job failed.
 
 ## Publishing credential
 
@@ -105,16 +132,84 @@ long-lived secret exists in the repository. `NPM_TOKEN` was deleted once trusted
 configured. The workflow still prefers `NPM_TOKEN` if the secret is ever re-added, and refuses the tag
 before creating any release if neither credential is available.
 
-### When the OIDC exchange is refused
+### Testing trusted publishing without publishing anything
 
-Trusted publishing can fail in a way that is not a misconfiguration on this side. The rehearsal's exchange
-probe reports `REFUSED` for this package and for an unrelated control package identically, which means the
-registry is rejecting the token before it looks at any publisher configuration. See issue #335: GitHub now
-mints `sub` with numeric owner and repository IDs for this repository. GitHub's OpenID Connect reference
-documents only an **opt in** to that format, and says renames and transfers also move *toward* it; it
-documents no setting that returns a repository created after the cutoff to the name-only shape. So the
-subject-claim setting below is worth reading, but for this repository it is not a lever that has ever been
-shown to point the other way. Issue #335 carries the evidence and the open question.
+The exchange probe on a normal rehearsal holds a **branch**-subject token, so it cannot tell you what a tag
+push will do. It can be made to hold a tag-subject token, and this is the only way to ask npm about trust
+before you spend a version number.
+
+`workflow_dispatch` reads the workflow from the ref it is given, and the OIDC subject is built from that ref.
+So tag the commit you would release, with a name that matches **neither** `host-v*.*.*` **nor**
+`fleet-v*.*.*`, and dispatch against it:
+
+```bash
+git tag probe-host-v0.0.0 && git push origin probe-host-v0.0.0
+gh workflow run release.yml --repo aywengo/mercury --ref probe-host-v0.0.0
+git push origin :refs/tags/probe-host-v0.0.0    # nothing references it afterwards
+```
+
+The name matters twice over. It must not match the release triggers, or pushing it performs a real release;
+and `host-v0.0.0-probe` **does** match `host-v*.*.*`, because `*` swallows `-probe`. `test/releaseDocs.test.ts`
+asserts the documented name cannot trigger a release. The run stays a rehearsal, because `DRY_RUN` comes from
+the event name and not the ref, so it publishes nothing, creates no GitHub Release and touches no formula.
+
+Read the `oidc sub` line to confirm you actually got a tag subject -- `...:ref:refs/tags/probe-...` -- and
+then read the exchange. `test/releaseDocs.test.ts` also pins that the probe tag name in this document is the
+one the guard checks, so the two cannot drift apart.
+
+### Confirming the OIDC exchange works
+
+**It does.** Run the rehearsal and read npm's own log:
+
+```
+npm http fetch POST 201 https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@aywengo%2fmercury
+npm verbose oidc Successfully retrieved and set token
+```
+
+`201` plus "Successfully retrieved and set token" means npm issued a real publish credential for this
+repository. Trusted publishing is configured and working; nothing on npmjs.com needs changing.
+
+The only reliable way to see this is to let **npm** perform the exchange:
+
+```bash
+npm publish --dry-run --access public --tag rc --provenance --loglevel verbose
+```
+
+`--loglevel verbose`, never `silly`: every message in npm's `lib/utils/oidc.js` is `log.verbose`, while
+`silly` additionally dumps the exchange response body -- which is a live publish credential that anyone
+with read access to the run log could use.
+
+`--dry-run` still authenticates. npm's `lib/commands/publish.js` calls `await oidc(...)` before it looks at
+`dryRun` at all, so the exchange is real and its outcome is logged.
+
+**What the rehearsal does not prove.** `--provenance` has no effect on this exchange: `oidc()` decides
+whether to run purely from `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN`, which
+`permissions: id-token: write` provides -- not from the flag. It is kept so the command matches the real
+release line, not because it contributes. And because `--dry-run` returns before `libpub` is ever called,
+`buildMetadata` and `generateProvenance` never run: **a green rehearsal says nothing about provenance
+signing.** Signing talks to sigstore and the Rekor transparency log, and if either is unreachable the real
+release fails -- before staging anything, so nothing is left half-published. A rehearsal that passes and a
+release that fails on provenance are both normal, and the second is not a credentials problem. Every failure path inside `oidc.js` is
+`log.verbose`, which is why the log level has to be raised -- at the default level a rehearsal proves the
+tarball and nothing about credentials.
+
+**Do not reproduce this exchange with `curl`.** A hand-rolled reproduction in this workflow reported
+`unauthorized` for every package for days, and every wrong conclusion in the release notes and issue
+history traces back to it. It was not equivalent to npm's request: npm sets
+`//registry.npmjs.org/:_authToken` to the id_token and lets `npm-registry-fetch` build the call, while the
+probe sent a bearer header. The disproof was visible in the log the whole time -- the probe returned
+`unauthorized` for the bearer value `not.a.real.jwt`. **A probe that cannot distinguish a valid GitHub OIDC
+token from a fake string is measuring its own request, not the registry's trust decision.**
+
+Two things that are genuinely true and worth knowing, both unrelated to that probe:
+
+- This repository presents the **immutable** subject format,
+  `repo:aywengo@800531/mercury@1349412409:ref:...`, because it was created after 2026-07-15. Read it with
+  `gh api repos/aywengo/mercury/actions/oidc/customization/sub --jq .sub_claim_prefix`. It is **not**
+  blocking anything -- npm exchanges the token anyway -- but it is the kind of claim that gets mistaken for
+  a cause, so it is recorded here as measured and harmless.
+- A `sub` carrying numeric IDs is worth knowing about before adding any *other* OIDC trust (AWS, GCP,
+  Vault), because several providers match on the name-only shape and will not match this one.
 
 **The fallback is a short-lived token, and it does not cost you provenance.** The `host-v0.1.0-rc1` run
 authenticated with `NPM_TOKEN` and still signed and published provenance:

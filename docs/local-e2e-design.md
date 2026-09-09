@@ -1236,14 +1236,24 @@ Notes against the wording above:
   fails loudly rather than silently sharing state. What the mutation does *not* prove is the `404`
   assertion itself -- it failed on image pull during the contended `up`, not on the cross-project read;
   the `404` mechanism is proven separately by the owner-scoping scenario in `system.test.ts`.
-- **Abrupt exit is tested rather than trusted.** A killed harness runs no `after()` hook, so reaping
-  depends entirely on Ryuk. A probe process starts a container, is SIGKILLed with no cleanup of any
-  kind, and the test requires the container to disappear. It cannot pass vacuously: the container is
-  inspected and required to be running *before* the kill. Disabling Ryuk proves it bites:
+- **Abrupt exit is tested rather than trusted, for the one property that is ours to assert.** A killed
+  harness runs no `after()` hook, so reaping depends entirely on Ryuk. In `e2e/robustness.test.ts` a
+  probe process starts a
+  container and is SIGKILLed with no cleanup of any kind; the test then requires that the container
+  carries the session label Ryuk reaps on and that a reaper is running, and cleans the probe up
+  explicitly. It cannot pass vacuously: the container is inspected, and a container with no session
+  label is invisible to Ryuk and would leak on every Ctrl-C.
 
-    mutation: TESTCONTAINERS_RYUK_DISABLED=true
-    -> fail=1  "container a7774a732ef9 survived the death of its client; the harness would leak
-                stacks on every Ctrl-C"
+  **It deliberately does not assert that the container disappears.** Testcontainers shares one Ryuk
+  across processes (`reaper.js`: `findReaperContainers` -> `useExistingReaper`), so reaping is only
+  observed once the last client on that Ryuk disconnects. Measured both ways: reaped in ~11s when this
+  file runs alone, still running after 60s with another compose suite beside it. That timing is a
+  property of the shared reaper and not of Mercury, so encoding it as a gate assertion would
+  manufacture a flake and teach the next reader to distrust this file.
+
+  An earlier version of this note claimed the disappearance assertion and quoted a mutation result for
+  it. That test no longer exists; the claim and the quoted failure message went with it, because a
+  quoted mutation is read as proof of a guarantee the code no longer makes.
 
 - **Teardown-vs-scenario precedence is a pure function** (`teardownOutcome`) rather than an inline
   `if`, because the asymmetry -- report a teardown failure always, raise it only when nothing else

@@ -305,15 +305,27 @@ test('a service that dies after its healthcheck passes is named, with its reason
   const { spawnSync } = await import('node:child_process');
   const left = spawnSync('docker', ['ps', '-aq', '--filter', `label=com.docker.compose.project=${project}`],
     { encoding: 'utf8', timeout: 30_000 });
+  // A failed `docker` call writes to stderr and leaves stdout empty, and the assertion below reads an empty
+  // stdout as "teardown left nothing behind". Without this the suite reports a clean teardown on a host
+  // where the check never ran -- the same shape as the credential gate fixed in #418.
+  assert.equal(left.status, 0, `'docker ps -aq' could not be run (exit ${String(left.status)}): ${String(left.stderr).slice(0, 200)}`);
   assert.equal(left.stdout.trim(), '', `teardown left containers behind: ${left.stdout}`);
   const vols = spawnSync('docker', ['volume', 'ls', '-q', '--filter', `label=com.docker.compose.project=${project}`],
     { encoding: 'utf8', timeout: 30_000 });
+  // A failed `docker` call writes to stderr and leaves stdout empty, and the assertion below reads an empty
+  // stdout as "teardown left nothing behind". Without this the suite reports a clean teardown on a host
+  // where the check never ran -- the same shape as the credential gate fixed in #418.
+  assert.equal(vols.status, 0, `'docker volume ls' could not be run (exit ${String(vols.status)}): ${String(vols.stderr).slice(0, 200)}`);
   assert.equal(vols.stdout.trim(), '', `teardown left the state volume behind: ${vols.stdout}`);
   // Networks too. The goal names containers, networks AND volumes, and a network is the one of the
   // three that a partial teardown most often leaves: it is invisible in `docker ps`, holds no data,
   // and accumulates silently until address space or a name collision complains.
   const nets = spawnSync('docker', ['network', 'ls', '-q', '--filter', `label=com.docker.compose.project=${project}`],
     { encoding: 'utf8', timeout: 30_000 });
+  // A failed `docker` call writes to stderr and leaves stdout empty, and the assertion below reads an empty
+  // stdout as "teardown left nothing behind". Without this the suite reports a clean teardown on a host
+  // where the check never ran -- the same shape as the credential gate fixed in #418.
+  assert.equal(nets.status, 0, `'docker network ls' could not be run (exit ${String(nets.status)}): ${String(nets.stderr).slice(0, 200)}`);
   assert.equal(nets.stdout.trim(), '', `teardown left the project network behind: ${nets.stdout}`);
 });
 

@@ -132,3 +132,67 @@ test('the SSE parser names the raw frame when JSON is malformed', async () => {
     await new Promise<void>((resolve) => sse.close(() => resolve()));
   }
 });
+
+test('a falsy JSON body still gets Content-Type, and no body gets none', async () => {
+  // The header used `body ?` while the payload used `body === undefined`. Those disagree for every
+  // falsy-but-real JSON value, so `post(path, 0)` sent "0" with no Content-Type and the server had to
+  // guess. A POST with no body must still omit the header, or the server waits for a payload that never
+  // arrives -- so both directions are pinned.
+  const seen: { type?: string; body?: string }[] = [];
+  const srv = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      seen.push({ type: req.headers['content-type'] as string | undefined, body: raw });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  try {
+    const c = client(url, 'tok');
+    for (const v of [null, 0, false, '', { ok: true }] as unknown[]) {
+      await c.post('/api/x', v, 'post');
+    }
+    await c.get('/api/y', 'get');
+    for (const [i, v] of [null, 0, false, '', { ok: true }].entries()) {
+      assert.equal(seen[i].type, 'application/json',
+        `a body of ${JSON.stringify(v)} is a real JSON payload and must be typed`);
+      assert.equal(seen[i].body, JSON.stringify(v),
+        `the payload for ${JSON.stringify(v)} must be sent`);
+    }
+    // Five posts occupy 0..4; the GET is the sixth request.
+    assert.equal(seen[5].type, undefined, 'a GET with no body must not claim a Content-Type');
+    assert.equal(seen[5].body, '', 'a GET must send no payload');
+  } finally {
+    await new Promise<void>((r) => srv.close(() => r()));
+  }
+});
+
+// This is a REPRODUCTION of the failure shape, not a guard on the gate: it uses its own command and its
+// own parsing, so deleting the exit-code assertion in e2e/mock-rpc.test.ts would not fail it. The real
+// guard lives in test/releaseHygiene.test.ts, which reads the gate's source.
+test('reproduction: exec output that folds in stderr can look like a clean credential scan', async () => {
+  // The real check runs `docker compose exec -T worker sh -c env`, and the helper that runs it folds
+  // stderr into the same string as stdout. So a failed exec -- no worker, bad service name, daemon down --
+  // yields NON-EMPTY output, the "did we read anything" guard passes, and a credential regex then matches
+  // nothing in an error message. That is a green test that checked nothing. This reproduces the shape with
+  // a command that fails and writes to stderr, so no Docker daemon is needed.
+  const { spawnSync } = await import('node:child_process');
+  const failed = spawnSync('/bin/sh', ['-c', 'echo "service not running" 1>&2; exit 1'], { encoding: 'utf8' });
+  const out = failed.stdout + failed.stderr;   // exactly how the helper composes `out`
+  const keys = out.split('\n').map((l) => l.split('=')[0]).filter(Boolean);
+  const credential = /ANTHROPIC|OPENAI|GOOGLE_API|AWS_(ACCESS|SECRET)|AZURE_|NPM_TOKEN|GITHUB_TOKEN|XAI_|GEMINI/i;
+
+  // The old logic, shown passing on a command that never read an environment.
+  assert.ok(keys.length > 0, 'precondition: failed output is non-empty');
+  assert.deepEqual(keys.filter((k) => credential.test(k)), [],
+    'precondition: an error message contains nothing credential-shaped');
+
+  // The exit code is the assertion that carries the weight: it is the only thing here that distinguishes
+  // "the worker has no credentials" from "we never asked the worker".
+  assert.notEqual(failed.status, 0,
+    'control: the command failed, so a check that ignores the exit code would report clean credentials '
+    + 'on a worker that was never read');
+});

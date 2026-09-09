@@ -52,7 +52,10 @@ export function client(base: string, token: string): Client {
   const send = async (method: string, path: string, body: unknown, label: string) => {
     const res = await fetch(base + path, {
       method,
-      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      // Both conditions must agree on what "has a body" means. `body ?` treated a falsy-but-real JSON
+      // value (null, 0, false, '') as no body, so the request went out with a JSON payload and no
+      // Content-Type -- the server would then have to guess. `undefined` is the only "no body" value here.
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(LIMITS.requestMs),
     });

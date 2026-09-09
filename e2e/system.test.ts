@@ -16,7 +16,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { DockerComposeEnvironment, StartedDockerComposeEnvironment, Wait } from 'testcontainers';
-import { COMPOSE_FILE, DIAGNOSTIC_CAP_BYTES, teardownOutcome, E2E_DIR, LIMITS, capBuffer, composeModel, assertServicesAlive, containerStates, inspectionCommands, keepOnFail, preflight, serviceLogs, verbose } from './preflight.ts';
+import { COMPOSE_FILE, teardownOutcome, E2E_DIR, LIMITS, capBuffer, composeModel, assertServicesAlive, containerStates, inspectionCommands, keepOnFail, preflight, serviceLogs, verbose } from './preflight.ts';
 import { client, pollRun, readSse, TERMINAL, type RunEvent, type RunView } from './helpers.ts';
 
 /**
@@ -50,8 +50,16 @@ let apiBase = '';
 let preflightInfo = { node: '', docker: '', compose: '' };
 let scenarioError: unknown;
 let startupFailed = false;
-let alice = { base: '', token: '' } as unknown as ReturnType<typeof client>;
-let bob = { base: '', token: '' } as unknown as ReturnType<typeof client>;
+// Definite assignment rather than a placeholder object. The old initialiser was `{ base: '', token: '' }`
+// -- an object with no `get` or `post` -- and needed `as unknown as` to compile at all, which is the sign
+// of the problem: the cast existed to silence the compiler noticing the placeholder was not a client.
+//
+// `!` is a compile-time assertion and nothing more. It does not detect use before `before()` runs; such a
+// use would still fail at runtime, on `undefined` instead of on a missing method. The win is only that the
+// declaration now states the truth -- these hold a real Client, assigned in `before()` -- so neither a
+// lying placeholder nor a double cast is needed to make the file compile.
+let alice!: ReturnType<typeof client>;
+let bob!: ReturnType<typeof client>;
 /** Shared across the sequential journeys: the Run created by the lifecycle test is the one the
  *  owner-scoping test inspects, which is what makes the second test cheap and meaningful. */
 let sharedRunId = '';
@@ -163,8 +171,16 @@ async function collectDiagnostics(reason: string): Promise<void> {
     for (const service of [FIXTURE_SERVICE, 'api', 'worker']) {
       try {
         const logs = await serviceLogs(PROJECT, service);
-        writeFileSync(join(DIAG_DIR, `${service}.log`), capBuffer(Buffer.from(logs)));
-        summary[service] = { collectedVia: 'docker compose logs', bytes: Buffer.byteLength(logs) };
+        // Report the bytes that were WRITTEN. The file is capped, so reporting the uncapped length made
+        // the summary overstate the artifact exactly when truncation happened -- which is the only time
+        // anyone reads this number, because it is the number that tells you the log you want is missing.
+        const capped = capBuffer(Buffer.from(logs));
+        writeFileSync(join(DIAG_DIR, `${service}.log`), capped);
+        summary[service] = {
+          collectedVia: 'docker compose logs',
+          bytes: capped.byteLength,
+          collectedBytes: Buffer.byteLength(logs),
+        };
       } catch (err) {
         summary[service] = { error: (err as Error).message };
       }

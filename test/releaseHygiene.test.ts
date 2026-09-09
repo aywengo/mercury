@@ -585,3 +585,41 @@ test('every document that lists install channels lists all of them', () => {
     assert.deepEqual(missing, [], `${doc} lists install channels but omits: ${missing.join(', ')}`);
   }
 });
+
+test('the credential gate asserts the exec exit code before scanning the environment', () => {
+  // The gate reads the worker environment through a helper that folds stderr into stdout, so a failed
+  // exec yields non-empty output and a non-empty guard alone would report clean credentials on a worker
+  // that was never read. The exit code is the only thing separating "no credentials" from "we never
+  // asked", so pin that it is checked -- and checked BEFORE the output is parsed.
+  const src = readFileSync(join(ROOT, 'e2e', 'mock-rpc.test.ts'), 'utf8');
+  // Explicit -1 check. `slice(-1)` returns the LAST CHARACTER when indexOf misses, so a length check on
+  // the slice passes even when the gate has been renamed or deleted -- the assertion looked like it proved
+  // the gate exists and proved nothing. With the anchor missing the guard now fails saying the gate is
+  // gone, instead of misattributing it to a missing exit-code check.
+  const anchor = src.indexOf('no provider credential reaches the worker');
+  assert.notEqual(anchor, -1, 'the credential gate must exist in e2e/mock-rpc.test.ts');
+  const gate = src.slice(anchor);
+  // Anchor on the assertion itself. Anchoring on `inspect.code` alone matched the copy inside the failure
+  // message and then looked for `assert.equal(` to the right of it, which is the wrong side.
+  const codeCheck = gate.search(/assert\.equal\(inspect\.code,\s*0\s*,/);
+  const parse = gate.indexOf(".split('\\n')");
+  assert.ok(codeCheck > 0, 'the gate must assert the exec exit code is 0 before drawing conclusions');
+  assert.ok(parse > 0 && codeCheck < parse,
+    'the exit code must be asserted before the output is parsed, or a failed exec is scanned as if it were an environment');
+});
+
+test('every teardown check that reads empty docker output first proves the command ran', () => {
+  // Three teardown checks read `stdout.trim() === ""` as "teardown left nothing behind". A failed docker
+  // call writes to stderr and leaves stdout empty, so all three would report a clean teardown on a host
+  // where the check never ran. Each must assert exit status 0 before the output is read.
+  const src = readFileSync(join(ROOT, 'e2e', 'robustness.test.ts'), 'utf8');
+  const empties = [...src.matchAll(/assert\.equal\((\w+)\.stdout\.trim\(\),\s*''/g)];
+  assert.ok(empties.length >= 3, `expected the three teardown checks to still exist, found ${empties.length}`);
+  const unguarded = empties.map((m) => m[1]).filter((v) => {
+    const decl = src.lastIndexOf(`const ${v} = spawnSync(`);
+    const between = src.slice(decl, src.indexOf(`assert.equal(${v}.stdout.trim(), ''`, decl));
+    return !new RegExp(`assert\\.equal\\(${v}\\.status,\\s*0`).test(between);
+  });
+  assert.deepEqual(unguarded, [],
+    `these read empty output without proving the command succeeded: ${unguarded.join(', ')}`);
+});

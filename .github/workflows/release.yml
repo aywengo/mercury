@@ -197,9 +197,14 @@ jobs:
               # The regex is anchored to the repository segment rather than the whole claim: a branch
               # named feature@123 would otherwise warn about repository IDs that are not present.
               if printf '%s' "$id_token" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const p=JSON.parse(Buffer.from(String(s.split(".")[1]||""),"base64url").toString());process.exit(/^repo:[^:]*@\d+/.test(p.sub||"")?0:1)}catch{process.exit(1)}})'; then
-                echo "  !! sub carries numeric repository IDs. Third-party registries match on the" >&2
-                echo "     name-only shape; see issue #335 and Settings -> Actions -> General ->" >&2
-                echo "     OIDC subject claim format. This is a diagnostic, not a verdict." >&2
+                echo "  !! sub carries numeric repository IDs, so GitHub is issuing the immutable" >&2
+                echo "     subject format. This repository was created after 2026-07-15, when GitHub" >&2
+                echo "     made that format automatic, and npm matches trusted publishers against the" >&2
+                echo "     name-only shape. Measured in #375: a package that does not exist is refused" >&2
+                echo "     with these same bytes, so npm rejects the token before consulting any" >&2
+                echo "     package -- no setting on npmjs.com can account for that. See issue #376." >&2
+                echo "     Check it with: gh api repos/aywengo/mercury/actions/oidc/customization/sub" >&2
+                echo "       --jq .sub_claim_prefix      # want: repo:aywengo/mercury" >&2
               fi
               # `iss` is printed because npm's registry trusts exactly one issuer URL, and a GitHub
               # Enterprise with include_enterprise_slug makes GitHub mint
@@ -215,139 +220,25 @@ jobs:
               echo "  the runner refused to mint an id token; npm cannot authenticate via OIDC" >&2
             fi
 
-            # Perform the exchange npm would perform, but only in a rehearsal.
+            # The OIDC exchange is diagnosed by npm itself, further down, by running
+            # `npm publish --dry-run --provenance --loglevel verbose` and printing derived verdicts.
+            # That capture is in the host rehearsal branch only. A fleet rehearsal runs a plain
+            # `npm publish --dry-run` and emits no OIDC verdicts, which is correct rather than an
+            # oversight: @aywengo/mercury-fleet has never been published, so an exchange for it has
+            # nothing to authenticate against and a verdict would be noise. The fleet gate earlier in
+            # this job says so directly.
             #
-            # npm never sends the id token to the registry as an assertion. It POSTs it as a bearer
-            # credential to /-/npm/v1/oidc/token/exchange/package/<name> and publishes with the
-            # short-lived npm token that comes back. That exchange is the whole of the trust check,
-            # and no rehearsal had ever reached it: `npm publish --dry-run` does not authenticate, so
-            # every rehearsal to date proved the tarball, the version and the claims, and nothing
-            # whatever about whether npm trusts this workflow. The one open question about this
-            # repository's release path -- would npm accept a publish from it -- sat exactly there.
+            # A curl reproduction of this request used to stand here and must not come back. It returned
+            # `unauthorized` for every input it was given -- this package, an unrelated package, a
+            # package that does not exist, and a bearer of `not.a.real.jwt` -- so it could not
+            # distinguish a valid GitHub OIDC token from a fake string, and every answer it produced
+            # described its own malformed request rather than the registry's trust decision. npm sets
+            # //registry.npmjs.org/:_authToken to the id_token and lets npm-registry-fetch build the
+            # call; the probe sent a bearer header.
             #
-            # A rehearsal can answer it, because the exchange only mints a credential; it publishes
-            # nothing. The response body IS a credential, so it is never written to disk and never
-            # printed: only its length is reported.
-            #
-            # A structured refusal is fatal, because it is evidence about the trust configuration and
-            # a real release would die on the same call. Anything that is not JSON is not evidence
-            # about the trust configuration -- a proxy, a WAF or a rate limiter can all answer here --
-            # so it warns rather than failing a rehearsal for something the registry never said.
-            if [ "${DRY_RUN:-}" = "true" ]; then
-              esc="$pkg_esc"
-              # Try BOTH audiences, because which one the registry accepts is precisely what is
-              # unknown here. npm/cli builds `npm:${hostname}` and publishes with the token minted
-              # under it, so that is the one a publish presents; a provenance-style trusted publisher
-              # is keyed differently and may expect the registry URL instead. Probing one audience and
-              # reporting "npm refuses us" would repeat the mistake that produced this whole detour --
-              # printing a subset of claims and concluding the rest did not exist. The first rehearsal
-              # with this probe refused on `npm:` alone, which is exactly the evidence that one is not
-              # enough.
-              accepted=0
-              evidence=0
-              distinguishes=0
-              for aud in npm:registry.npmjs.org https://registry.npmjs.org; do
-                aud_json=$(curl -sS --max-time 30 -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-                  "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${aud}" || echo "")
-                aud_token=$(node -e 'try{console.log(JSON.parse(process.argv[1]).value||"")}catch{console.log("")}' "$aud_json")
-                if [ -z "$aud_token" ]; then
-                  echo "  oidc exchange [${aud}]: the runner minted no token"
-                  continue
-                fi
-                # Compared per audience, and only between two answers that are both JSON. Comparing
-                # the first answer seen for each package instead is wrong twice over: a non-JSON
-                # reply on the first audience would lock in a comparison against nothing, and a pair
-                # that genuinely differs on the second audience would never be looked at.
-                aud_ours=""
-                aud_control=""
-                aud_ours_ok=0
-                aud_control_ok=0
-                # The same question is asked of a package this repository has no relationship to.
-                # Without that control, "unauthorized" gets read as "our trusted publisher does not
-                # match", when it may be all the registry ever says to a token it will not exchange
-                # -- in which case the line distinguishes nothing and must not be reported as if it
-                # did. node prints only a one-line description; bash owns the log line, so the
-                # operator sees it instead of having it captured into a variable.
-                for probe_pkg in "$esc" left-pad; do
-                  # The request shape mirrors npm/cli exactly: same path, same audience, the id_token as
-                  # the bearer credential, and -- the part that was missing -- the same content type.
-                  # npm-registry-fetch sets `content-type: application/json` on every JSON request even
-                  # when there is no body, and a registry that routes on it answers a bare POST
-                  # differently. The probe refused for this package and for left-pad identically; until
-                  # the request actually matches the one npm sends, that refusal cannot be attributed to
-                  # npm at all.
-                  exchange=$(curl -sS --max-time 30 -X POST -H "Accept: application/json" \
-                    -H "content-type: application/json" \
-                    -H "Authorization: bearer ${aud_token}" \
-                    "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${probe_pkg}" || echo "")
-                  rc=0
-                  msg=$(node -e '
-                    const raw = process.argv[1];
-                    let j = null;
-                    try { j = JSON.parse(raw); } catch {}
-                    if (j && typeof j.token === "string" && j.token.length) {
-                      process.stdout.write(`npm issued a ${j.token.length}-char publish token`);
-                      process.exit(0);
-                    }
-                    if (!j) {
-                      process.stdout.write("no JSON: " + raw.slice(0, 80).replace(/\n/g, " "));
-                      process.exit(2);
-                    }
-                    process.stdout.write(String(j.message || j.error || JSON.stringify(j)).slice(0, 160));
-                    process.exit(1);
-                  ' "$exchange") || rc=$?
-                  case "$rc" in
-                    0) st=ACCEPTED ;;
-                    1) st=REFUSED ;;
-                    *) st=NO_ANSWER ;;
-                  esac
-                  echo "  oidc exchange [${aud}] ${probe_pkg}: ${st} -- ${msg}"
-                  if [ "$probe_pkg" = "$esc" ]; then
-                    if [ "$rc" -eq 0 ]; then accepted=1; fi
-                    if [ "$rc" -ne 2 ]; then evidence=1; aud_ours="${msg}"; aud_ours_ok=1; fi
-                  elif [ "$rc" -ne 2 ]; then
-                    aud_control="${msg}"; aud_control_ok=1
-                  fi
-                done
-                if [ "$aud_ours_ok" = "1" ] && [ "$aud_control_ok" = "1" ] \
-                  && [ "$aud_ours" != "$aud_control" ]; then
-                  distinguishes=1
-                fi
-              done
-              if [ "$accepted" = "1" ]; then
-                echo "  => npm exchanged this rehearsal's token for ${pkg_name}: the publisher matches"
-                echo "     a BRANCH-subject token. A tag push carries a different sub"
-                echo "     (...:ref:refs/tags/<tag>, not ...:ref:refs/heads/<branch>), so this is not"
-                echo "     proof that the tag push will authenticate. Only a tag push settles that."
-              elif [ "$distinguishes" = "1" ]; then
-                # Only now is there evidence. The registry answered two different questions with two
-                # different answers, so a configuration for this package is being evaluated and does
-                # not match this run -- which is also what a real publish would die on.
-                echo "  => every audience that answered refused for ${pkg_name}, and an unrelated" >&2
-                echo "     package got a different answer. The registry does distinguish these" >&2
-                echo "     cases, so a configuration for ${pkg_name} is being evaluated and does not" >&2
-                echo "     match this run. Check, in order: the workflow filename entered as a bare" >&2
-                echo "     name (release.yml, not a path), the user and repository fields, and any" >&2
-                echo "     Environment name, which must equal the job's environment." >&2
-                exit 1
-              elif [ "$evidence" = "1" ]; then
-                # Observed, not theorised: the very first rehearsal with a control got a byte-identical
-                # refusal for `left-pad`, a package with no connection to this repository and no
-                # trusted publisher of any kind. So this refusal is what the registry says to a token
-                # it will not exchange, from anywhere, and it says nothing about whether a publish
-                # would authenticate.
-                #
-                # It therefore must not fail the run. A check that is red for every run is a check that
-                # gets ignored, and the ignoring is what costs: the day it turns red for a real reason
-                # looks exactly like every day it was red for no reason.
-                echo "  => refused for ${pkg_name}, and refused identically for an unrelated package."
-                echo "     This exchange says nothing about whether a real publish would"
-                echo "     authenticate, so the rehearsal continues. It is a diagnostic, not a gate."
-                echo "     The only thing that settles npm's trust is the publish itself." 
-              else
-                echo "  => nothing answered with JSON; nothing learned about the trust configuration"
-              fi
-            fi
+            # Measured truth, from npm's own code path: the exchange returns HTTP 201 and npm logs
+            # "Successfully retrieved and set token". Trusted publishing works for this repository.
+            # See docs/releasing.md.
           else
             echo "refusing ${tag}: no NPM_TOKEN and no OIDC id-token available; npm publish would fail after the release is created" >&2
             exit 1
@@ -411,6 +302,23 @@ jobs:
             bundle_json=$(node scripts/build-bundle.mjs --out "$RUNNER_TEMP/bundle")
             bundle=$(node -e "console.log(JSON.parse(process.argv[1]).tarball)" "$bundle_json")
             bundle_sha=$(node -e "console.log(JSON.parse(process.argv[1]).sha256)" "$bundle_json")
+            # The bundler reports its own sha256; nothing else has ever compared that claim to the
+            # bytes it wrote. That sha is what Homebrew verifies on install, so a bundler that hashes
+            # anything other than the final tarball ships a formula whose checksum never resolves.
+            # The formula commit is pushed with GITHUB_TOKEN, so GitHub creates no workflow run for
+            # it (issue #427) and main's tip carries no CI -- this job is the only place that can
+            # notice, and it still has the bytes in hand.
+            if [ ! -f "$bundle" ]; then
+              echo "bundler reported ${bundle} but no such file exists" >&2
+              exit 1
+            fi
+            # node rather than sha256sum/shasum: the step already requires node, and the two coreutils
+            # spellings differ across the platforms this step's tests run on.
+            actual_sha=$(node -e 'const fs=require("fs"),c=require("crypto");process.stdout.write(c.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"))' "$bundle")
+            if [ "$actual_sha" != "$bundle_sha" ]; then
+              echo "bundle checksum mismatch: bundler claims ${bundle_sha}, ${bundle} hashes to ${actual_sha}" >&2
+              exit 1
+            fi
             echo "bundle=${bundle}"
             echo "bundle sha256=${bundle_sha}  -> paste into Formula/mercury-ai.rb in aywengo/homebrew-tap"
           fi
@@ -463,11 +371,47 @@ jobs:
           npm_log="${RUNNER_TEMP}/npm-submit.log"
           if [ "${DRY_RUN:-}" = "true" ]; then
             # `npm publish --dry-run` builds the tarball and prints what would go up, and performs no
-            # registry write. --provenance is omitted because attestation needs the registry
-            # round-trip a rehearsal deliberately does not make.
+            # registry write. --provenance IS passed: it is what makes npm take the OIDC path that
+            # decides whether provenance would be attached, so omitting it would rehearse a different
+            # command than the one the release runs.
             echo "DRY RUN: not submitting to npm; packing only"
+            # `--dry-run` does authenticate. npm's own publish calls `await oidc(...)` before it looks at
+            # dryRun at all (lib/commands/publish.js), so every rehearsal to date has already performed the
+            # real token exchange -- at the default log level, which hides every failure path in it because
+            # they are all log.verbose. Asking npm to run its OWN exchange at silly level is the only
+            # reading that comes from npm rather than from our curl approximation of it, and the two have
+            # disagreed: our probe sends a bearer header, npm sets _authToken and lets npm-registry-fetch
+            # build the request. Capture it and print the oidc lines; that is npm naming its own reason.
             if [ "$product" = "host" ]; then
-              npm publish --dry-run --access public --tag "$dist_tag" || npm_ok=0
+              # verbose, not silly: every message in npm's lib/utils/oidc.js is log.verbose, and silly
+              # additionally dumps the exchange RESPONSE BODY, which is a live publish credential that
+              # anyone with read access to the run log could use. A test pins this.
+              npm publish --dry-run --access public --tag "$dist_tag" --provenance --loglevel verbose \
+                >"${RUNNER_TEMP}/npm-oidc.log" 2>&1 || npm_ok=0
+              echo "--- npm's own OIDC exchange (loglevel=verbose) ---"
+              # Print derived verdicts, never log lines. The exchange response IS a live publish
+              # credential, and npm at verbose level emits lines that contain it. Echoing npm's output
+              # and filtering it is a denylist over a secret, which has to be right every time; these
+              # print fixed strings computed by grep, so no credential can reach the log by
+              # construction. A test pins this.
+              if grep -qE 'npm http fetch POST 2[0-9][0-9] [^ ]*oidc/token/exchange' "${RUNNER_TEMP}/npm-oidc.log"; then
+                echo "  => npm's own exchange returned 2xx: a publish credential was issued."
+              else
+                echo "  => npm's own exchange did not return 2xx."
+              fi
+              if grep -q 'npm verbose oidc Successfully retrieved and set token' "${RUNNER_TEMP}/npm-oidc.log"; then
+                echo "  => npm logged: Successfully retrieved and set token."
+              fi
+              if grep -qE 'ENEEDAUTH|Unable to authenticate' "${RUNNER_TEMP}/npm-oidc.log"; then
+                echo "  => npm reported it had no usable credential at publish time."
+              fi
+              if ! grep -q 'oidc' "${RUNNER_TEMP}/npm-oidc.log"; then
+                echo "  => npm logged nothing about oidc; it did not attempt the exchange."
+              fi
+              # The captured log can contain the issued credential. Verdicts above are derived strings;
+              # nothing downstream needs the raw file, so do not leave it readable to later steps or to
+              # anyone who opens the runner's temp directory.
+              rm -f "${RUNNER_TEMP}/npm-oidc.log"
             elif [ "$product" = "fleet" ]; then
               cp LICENSE fleet/LICENSE
               (cd fleet && npm publish --dry-run --access public --tag "$dist_tag") || npm_ok=0
@@ -588,13 +532,31 @@ jobs:
               echo "The job that produced this release is marked failed so the npm gap stays visible."
             } >> "$notes"
           elif [ "$npm_verb" = "stage publish" ]; then
+            # npm prints "(staged with id <uuid>)" and approval is `npm stage approve <uuid>`, which
+            # needs a 2FA code and so can never be done by this job. Naming the id turns "go find it in
+            # the UI" into one command, and makes it obvious which staged version this run created when
+            # several are waiting. The shape is npm's own UUID_REGEX from lib/utils/validate-uuid.js, so
+            # what we extract is exactly what `npm stage approve` will accept -- a looser class would
+            # happily capture a 36-char hex digest and print a command that errors out. -i mirrors the
+            # /i on npm's own regex: the registry generates the id, so its case is not ours to assume.
+            stage_id=$(grep -oiEm1 'staged with id [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$npm_log" | awk '{print $NF}' || true)
             {
               echo ""
               echo "## npm package awaiting maintainer approval"
               echo ""
               echo "This run **staged** the package on the npm registry. Staged publishing defers"
               echo "proof-of-presence to a maintainer, so \`npm install\` will not resolve this version"
-              echo "until it is approved on npmjs.com under **Published packages -> Staged packages**."
+              echo "until it is approved."
+              if [ -n "$stage_id" ]; then
+                echo ""
+                echo "\`\`\`bash"
+                echo "npm stage approve $stage_id     # needs a 2FA code; run it locally"
+                echo "\`\`\`"
+                echo ""
+                echo "Or on npmjs.com under **Published packages -> Staged packages**."
+              else
+                echo "Approve it on npmjs.com under **Published packages -> Staged packages**."
+              fi
               echo ""
               if [ "$product" = "host" ] && [ "$formula_live" = "200" ]; then
                 echo "The assets attached to this release and the Homebrew formula are already live and"

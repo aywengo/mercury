@@ -93,7 +93,8 @@ function runTag(
   opts: { notes?: string[]; pkgVersion?: string; npmToken?: string; oidc?: boolean; npmrc?: string;
     directPublish?: string; npmHasStage?: boolean; npmFails?: boolean; event?: string; omitDryRunVar?: boolean;
     pkgHttp?: string; formulaHttp?: string; sub?: string; rawJwt?: string;
-    npmSubmitErr?: string; exchange?: string; exchangeExit?: number;
+    npmSubmitErr?: string; exchange?: string; exchangeExit?: number; missing?: string; missingExit?: number;
+    bundleLie?: string;
     exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
     control2?: string; control2Exit?: number } = {},
 ): Run {
@@ -121,9 +122,20 @@ function runTag(
     // would fail for a reason unrelated to what it is checking. Substitute one that reports a bundle
     // the way the real script does; the bundle's own behaviour is covered by test/bundle.test.ts.
     mkdirSync(join(tmp, 'scripts'), { recursive: true });
+    // The stub writes real bytes and reports their sha256, so the step's checksum cross-check has
+    // something to verify. STUB_BUNDLE_LIE makes it report a sha for bytes it never wrote -- exactly
+    // the bundler bug the cross-check exists to catch.
     writeFileSync(join(tmp, 'scripts', 'build-bundle.mjs'),
-      'console.log(JSON.stringify({ tarball: process.argv[process.argv.indexOf("--out") + 1] '
-      + '+ "/mercury-fake-bundle.tar.gz", version: "0.0.0", sha256: "f".repeat(64) }));\n');
+      'import fs from "node:fs";\n'
+      + 'import crypto from "node:crypto";\n'
+      + 'const out=process.argv[process.argv.indexOf("--out")+1];\n'
+      + 'fs.mkdirSync(out,{recursive:true});\n'
+      + 'const f=out+"/mercury-fake-bundle.tar.gz";\n'
+      + 'const body=Buffer.from("fake bundle payload");\n'
+      + 'fs.writeFileSync(f,body);\n'
+      + 'const real=crypto.createHash("sha256").update(body).digest("hex");\n'
+      + 'const claim=process.env.STUB_BUNDLE_LIE||real;\n'
+      + 'console.log(JSON.stringify({ tarball: f, version: "0.0.0", sha256: claim }));\n');
 
     // Same reasoning as the bundle stub above: the real generator would run against this throwaway
     // tree. It is exercised for real by test/formula.test.ts.
@@ -175,11 +187,16 @@ function runTag(
       + '    n=$((n+1)); printf "%s" "$n" > "' + tmp + '/exchange.count";\n'
       // Two dimensions decide which canned answer to replay. The package is visible in the URL, so
       // the control package is separated that way. The audience is not in the URL at all, so the
-      // call number carries it: the step probes two audiences and, for each, ours then the control,
-      // so calls 1-2 are the first audience and 3-4 the second.
-      + '    case "$url" in *left-pad*) which=CONTROL ;; *) which=OURS ;; esac\n'
-      + '    if [ "$n" -le 2 ]; then a=1; else a=2; fi\n'
-      + '    if [ "$which" = OURS ]; then\n'
+      // call number carries it: the step probes two audiences and, for each, ours then the control then
+      // the nonexistent probe, so calls 1-3 are the first audience and 4-6 the second. The boundary below
+      // counts all three: the MISSING branch ignores the audience entirely, which is why a stale boundary
+      // of 2 still produced right answers -- correct by accident, and it breaks the moment the probe order
+      // changes.
+      + '    case "$url" in *no-such-package-probe*) which=MISSING ;; *left-pad*) which=CONTROL ;; *) which=OURS ;; esac\n'
+      + '    if [ "$n" -le 3 ]; then a=1; else a=2; fi\n'
+      + '    if [ "$which" = MISSING ]; then\n'
+      + '      body="${STUB_EXCHANGE_MISSING-$STUB_EXCHANGE}"; code="${STUB_EXCHANGE_MISSING_EXIT-$STUB_EXCHANGE_EXIT}";\n'
+      + '    elif [ "$which" = OURS ]; then\n'
       + '      if [ "$a" = 1 ]; then body="${STUB_EXCHANGE_OURS1-$STUB_EXCHANGE}"; code="${STUB_EXCHANGE_OURS1_EXIT-$STUB_EXCHANGE_EXIT}";\n'
       + '      else body="${STUB_EXCHANGE_OURS2-$STUB_EXCHANGE}"; code="${STUB_EXCHANGE_OURS2_EXIT-$STUB_EXCHANGE_EXIT}"; fi\n'
       + '    else\n'
@@ -224,6 +241,8 @@ function runTag(
         // developer's shell happens to export NODE_AUTH_TOKEN -- locally-green, CI-red, or the reverse.
         // The default is a non-empty placeholder: present-but-fake, which is all the guard checks.
         NODE_AUTH_TOKEN: opts.npmToken ?? 'npm-token-placeholder',
+        // The bundler stub reports this instead of the real digest, to exercise the cross-check.
+        STUB_BUNDLE_LIE: opts.bundleLie,
         // Set explicitly for the same reason as NODE_AUTH_TOKEN: the step falls back to OIDC trusted
         // publishing when no token is present, and that fallback is keyed on exactly these two runner
         // variables. Inheriting them would make the result depend on whether the tests happen to run
@@ -243,6 +262,8 @@ function runTag(
           event_name: 'workflow_dispatch', workflow: 'Release' }),
         STUB_EXCHANGE: opts.exchange ?? '',
         STUB_EXCHANGE_EXIT: String(opts.exchangeExit ?? 0),
+        STUB_EXCHANGE_MISSING: opts.missing ?? '',
+        STUB_EXCHANGE_MISSING_EXIT: String(opts.missingExit ?? opts.exchangeExit ?? 0),
         STUB_PKG_HTTP: opts.pkgHttp ?? '200',
         STUB_FORMULA_HTTP: opts.formulaHttp ?? '200',
         STUB_EXCHANGE_OURS1: opts.exchange ?? '',
@@ -851,57 +872,24 @@ test('a fleet tag never touches the formula', () => {
   assert.ok(!/git push/.test(r.stdout), 'fleet must not push to main');
 });
 
-test('a rehearsal performs the token exchange npm would perform', () => {
-  // The gap this closes: `npm publish --dry-run` never authenticates, so every rehearsal before this
-  // proved the tarball and the claims and nothing about whether npm trusts the workflow. The one
-  // open question about the release path lived in the exchange call.
-  const r = runTag(`host-v${V}`, {
-    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
-    exchange: JSON.stringify({ token: 'npm-'.padEnd(140, 'z') }),
-  });
-  assert.equal(r.status, 0, 'an accepted exchange must not fail the rehearsal');
-  assert.match(r.stdout, /oidc exchange \[[^\]]+\] @aywengo%2Fmercury: ACCEPTED/, 'must report the exchange result');
-  assert.match(r.stdout, /issued a 140-char/, 'must report that a credential came back');
+
+test('the credential-bearing npm log is deleted once the verdicts are derived', () => {
+  // The rehearsal captures npm's own verbose output to a file, and that output can contain the publish
+  // credential npm just issued. The safety property is structural, not a filter: the workflow prints
+  // only fixed strings computed by grep, and then removes the file. Asserting the structure is what
+  // still means something now that the curl probe -- which used to be the thing that could leak -- is
+  // gone; the previous version of this test fed a fake token to that probe and would now pass
+  // whether or not anything was safe.
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  assert.match(wf, /rm -f "\$\{RUNNER_TEMP\}\/npm-oidc\.log"/,
+    'the captured npm log must be removed after the verdicts are read');
+  // The verdicts must be fixed strings, not log content: no echo of a variable read from that file.
+  const block = wf.slice(wf.indexOf('npm-oidc.log'), wf.indexOf('rm -f "${RUNNER_TEMP}/npm-oidc.log"'));
+  assert.ok(!/echo "[^"]*\$\{?(bogus_msg|msg|aud_|npm_out)/.test(block),
+    'verdicts must be fixed strings, never interpolated log content');
 });
 
-test('the issued publish token is never printed', () => {
-  // The exchange response IS a credential that can publish this package. Reporting that npm issued
-  // one is the point; putting the value in a log anyone with read access to the run can open is not.
-  const secret = 'npm-'.padEnd(140, 'z');
-  const r = runTag(`host-v${V}`, {
-    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
-    exchange: JSON.stringify({ token: secret }),
-  });
-  assert.equal(r.status, 0);
-  assert.ok(!(r.stdout + r.stderr).includes(secret), 'the token value must not reach the log');
-});
 
-test('a refused exchange fails the rehearsal and quotes npm', () => {
-  // A structured refusal is direct evidence about the trust configuration, and a real release dies
-  // on this same call. A rehearsal that printed it and went green would be worse than no rehearsal.
-  const r = runTag(`host-v${V}`, {
-    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
-    exchange: JSON.stringify({ message: 'this package has no trusted publishing configuration' }),
-    control: JSON.stringify({ message: 'unrelated package answered differently' }),
-  });
-  assert.equal(r.status, 1, 'a refusal must fail the rehearsal');
-  const out = r.stdout + r.stderr;
-  assert.match(out, /oidc exchange \[[^\]]+\] @aywengo%2Fmercury: REFUSED/, 'must name the failure and which audience');
-  assert.match(out, /no trusted publishing configuration/, 'must quote what npm actually said');
-  // Not asserted: which setting to blame. With the control answering identically the step is
-  // deliberately forbidden from naming one -- see the control tests below.
-});
-
-test('a non-JSON exchange answer is inconclusive, not a refusal', () => {
-  // A proxy, a WAF or a rate limiter can all answer this call with HTML. That is not evidence about
-  // npm's trust configuration, and failing here would train people to ignore a red rehearsal.
-  const r = runTag(`host-v${V}`, {
-    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
-    exchange: '<html>403 Forbidden</html>',
-  });
-  assert.equal(r.status, 0, 'an answer that is not from npm must not fail the release rehearsal');
-  assert.match(r.stdout, /NO_ANSWER/, 'must say it learned nothing rather than guess');
-});
 
 test('a real release does not run the exchange probe', () => {
   // On a tag push npm performs the exchange itself as part of publishing. Doing it again would mint
@@ -917,52 +905,8 @@ test('a real release does not run the exchange probe', () => {
     'the probe is a rehearsal-only diagnostic');
 });
 
-test('the probe covers both candidate audiences, not just the one npm uses', () => {
-  // npm/cli builds the audience as `npm:${hostname}` and publishes with that token, so it must be
-  // probed. But the first rehearsal refused on it alone, and a refusal on one audience is not
-  // evidence that npm distrusts the workflow -- it may be evidence that the wrong audience was
-  // asked. Probing both is what turns "npm said no" into something a reader can act on.
-  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
-  assert.match(wf, /for aud in npm:registry\.npmjs\.org https:\/\/registry\.npmjs\.org/,
-    'both candidate audiences must be probed');
-  assert.match(wf, /&audience=\$\{aud\}/,
-    'the token must be minted per audience rather than once with a fixed one');
-});
 
-test('one audience accepted and the other refused still passes the rehearsal', () => {
-  // The case the first version of this probe could not express, and the reason it probes both
-  // audiences. A provenance-style trusted publisher may accept the registry URL where npm's own
-  // `npm:${hostname}` audience is refused -- or the reverse. Failing on the first refusal would
-  // report "npm does not trust this workflow" on a configuration that works fine, and a rehearsal
-  // that cries wolf is a rehearsal nobody reads.
-  const r = runTag(`host-v${V}`, {
-    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
-    exchange: JSON.stringify({ message: 'unauthorized' }),
-    exchange2: JSON.stringify({ token: 'npm-'.padEnd(140, 'z') }),
-  });
-  assert.equal(r.status, 0, 'an accepted audience must outweigh a refused one');
-  const out = r.stdout + r.stderr;
-  assert.match(out, /npm:registry\.npmjs\.org\] @aywengo%2Fmercury: REFUSED/, 'must still report the refusal it saw');
-  assert.match(out, /https:\/\/registry\.npmjs\.org\] @aywengo%2Fmercury: ACCEPTED/, 'and the acceptance it saw');
-  // The conclusion must not outrun the evidence. The rehearsal holds a branch-subject token, so an
-  // acceptance says the publisher matches THAT subject; a tag push presents a different one. The old
-  // wording ("npm trusts this workflow; a real publish would authenticate") invited exactly that leap.
-  assert.match(out, /npm exchanged this rehearsal's token/, 'must report what was actually observed');
-  assert.match(out, /BRANCH-subject token/, 'and name the subject it tested');
-  assert.match(out, /not\s*\n?\s*proof that the tag push will authenticate/, 'without promising the tag push');
-});
 
-test('a refusal the control does not share fails the rehearsal', () => {
-  const r = runTag(`host-v${V}`, {
-    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
-    exchange: JSON.stringify({ message: 'unauthorized' }),
-    control: JSON.stringify({ message: 'a different answer entirely' }),
-  });
-  assert.equal(r.status, 1, 'a refusal the control does not share must fail the rehearsal');
-  const out = r.stdout + r.stderr;
-  assert.match(out, /The registry does distinguish/, 'must say the answers differ');
-  assert.match(out, /bare\s+name/, 'and name the field most often entered wrong');
-});
 
 test('every curl in the release step is bounded', () => {
   // A hung request is indistinguishable from a slow one, and this step has four of them against two
@@ -982,70 +926,9 @@ test('every curl in the release step is bounded', () => {
   assert.deepEqual(unbounded, [], 'every curl must carry --max-time');
 });
 
-test('an identical answer for an unrelated package is reported as distinguishing nothing', () => {
-  // The control exists because "unauthorized" arrived with no detail at all, and the obvious reading
-  // -- "our trusted publisher does not match" -- is only correct if the registry says something
-  // DIFFERENT about a package that has no configuration. If it says the same thing to everyone, the
-  // line is not evidence about our configuration and the log must not imply that it is.
-  const r = runTag(`host-v${V}`, {
-    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
-    exchange: JSON.stringify({ message: 'OIDC token exchange error - unauthorized' }),
-  });
-  // This is what the registry actually returns today, for our package and for `left-pad` alike. A
-  // rehearsal that fails on it is red on every run, and a check that is always red is a check people
-  // stop reading -- which costs exactly the run where it means something.
-  assert.equal(r.status, 0, 'a refusal the control shares must not fail the rehearsal');
-  const out = r.stdout + r.stderr;
-  assert.match(out, /left-pad: REFUSED -- OIDC token exchange error - unauthorized/,
-    'the control package must be probed and shown');
-  assert.match(out, /says nothing about whether a real publish would/,
-    'an identical answer must be labelled as no evidence');
-  assert.match(out, /diagnostic, not a gate/, 'and must say so in the terms the operator acts on');
-});
 
-test('a different answer for the control package means the configuration is being evaluated', () => {
-  // The other half of the control: if an unrelated package gets a different reply, the registry does
-  // tell these cases apart, and our refusal therefore points at a real mismatch worth going to fix.
-  const r = runTag(`host-v${V}`, {
-    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
-    exchange: JSON.stringify({ message: 'OIDC token exchange error - unauthorized' }),
-    control: JSON.stringify({ message: 'this package has no trusted publishing configuration' }),
-  });
-  assert.equal(r.status, 1);
-  const out = r.stdout + r.stderr;
-  assert.match(out, /The registry does distinguish/, 'must conclude that the answers differ');
-  assert.match(out, /bare\s+name/, 'must name the field most often entered wrong');
-});
 
-test('a differing pair on the second audience still gates, even if the first was noise', () => {
-  // The bug both reviewers found in the version this replaces: the comparison used the first answer
-  // seen for each package, so a non-JSON reply on the first audience locked the comparison against
-  // nothing and a genuine difference on the second audience was never examined.
-  const r = runTag(`host-v${V}`, {
-    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
-    exchange: JSON.stringify({ message: 'refused for a real reason' }),
-    exchange2: JSON.stringify({ message: 'refused for a real reason' }),
-    control: '<html>rate limited</html>',
-    control2: JSON.stringify({ message: 'a different answer' }),
-  });
-  assert.equal(r.status, 1, 'a comparable pair that differs must gate regardless of which audience produced it');
-  assert.match(r.stdout + r.stderr, /The registry does distinguish/);
-});
 
-test('a non-JSON control is never compared against a real refusal', () => {
-  // The converse: noise on the control side must not manufacture a difference and fail the release
-  // rehearsal for something the registry never said.
-  const r = runTag(`host-v${V}`, {
-    notes: [`host/${V}.md`], oidc: true, npmToken: '', event: 'workflow_dispatch',
-    exchange: JSON.stringify({ message: 'unauthorized' }),
-    exchange2: JSON.stringify({ message: 'unauthorized' }),
-    control: '<html>rate limited</html>',
-    control2: '<html>rate limited</html>',
-  });
-  assert.equal(r.status, 0, 'no comparable pair means no evidence, and no evidence means no gate');
-  assert.ok(!(r.stdout + r.stderr).includes('The registry does distinguish'),
-    'must not claim a difference it never observed');
-});
 
 test('the release step contains no empty-string concatenation on an assignment', () => {
   // `distinguishes=0""` shipped, survived `bash -n`, and survived the whole suite, because bash reads it as
@@ -1221,21 +1104,6 @@ test('every loglevel passed to npm is one npm accepts', () => {
   assert.match(script, /--loglevel "\$\{?npm_loglevel\}?/, 'and the level must actually be passed');
 });
 
-test('the exchange probe sends the same request shape npm sends', () => {
-  // The probe exists to answer "would a real publish authenticate", so it is only evidence while it
-  // matches what npm/cli actually does. npm/cli posts to /-/npm/v1/oidc/token/exchange/package/<escaped>
-  // with audience `npm:<host>`, presents the id_token as the bearer credential, and npm-registry-fetch
-  // sets `content-type: application/json` on every JSON request -- body or no body. A probe that omits
-  // one of those can be refused for its own shape rather than for anything about this repository's
-  // trust, which is precisely how a wrong conclusion got published twice already.
-  const script = extractReleaseCode();
-  assert.match(script, /-\/npm\/v1\/oidc\/token\/exchange\/package\//, 'same path as npm/cli');
-  assert.match(script, /audience=\$\{aud\}/, 'audience is appended to the runner request');
-  assert.match(script, /for aud in npm:registry\.npmjs\.org/, 'audience is npm:<host>');
-  assert.match(script, /-H "Authorization: bearer \$\{aud_token\}"/, 'the id_token is the credential');
-  assert.match(script, /-H "content-type: application\/json"/, 'npm-registry-fetch always sets it');
-  assert.match(script, /-H "Accept: application\/json"/, 'and expects JSON back');
-});
 
 test('a fleet tag for a package that has never existed is refused before a release is made', () => {
   // Fleet ships only through npm: no bundle, no formula. When the npm step fails the job still creates
@@ -1282,8 +1150,15 @@ test('an ID-bearing subject claim is called out, not left in the claim dump', ()
     sub: 'repo:aywengo@800531/mercury@1349412409:ref:refs/heads/main',
   });
   assert.match(r.stderr, /sub carries numeric repository IDs/);
-  assert.match(r.stderr, /#335/, 'and point at the issue that holds the evidence');
-  assert.match(r.stderr, /not a verdict/, 'without claiming it is the cause');
+  assert.match(r.stderr, /#376/, 'point at the issue that now holds the cause');
+  // No longer hedged. #375 measured that a package which does not exist is refused with these same
+  // bytes, so the refusal cannot be about per-package configuration. A warning that still said
+  // "not a verdict" after that measurement would be describing a smaller result than we have.
+  assert.match(r.stderr, /does not exist is refused/);
+  assert.match(r.stderr, /before consulting any/);
+  assert.ok(!/not a verdict/.test(r.stderr), 'the hedge is retired');
+  // And hand the operator the one read that shows the format, rather than a settings path to guess at.
+  assert.match(r.stderr, /sub_claim_prefix/);
 });
 
 test('a name-only subject claim is not flagged', () => {
@@ -1325,4 +1200,80 @@ test('a payload that parses but is not an object is not read as a claim set', ()
       `${payload} must not throw: ` + r.stderr.slice(-260));
     assert.match(r.stdout, /payload is not a JSON object/, `${payload} must be reported as unusable`);
   }
+});
+
+
+
+test('the 2xx verdict matches the log line npm actually writes', () => {
+  // The verdict grep is the only thing that tells an operator whether npm issued a credential, and it
+  // was written against a remembered shape rather than the real one: it read
+  // `POST 20[0-9][^ ]*oidc/...`, which cannot match `POST 201 https://...` because of the space before
+  // the URL. Every successful exchange would have been reported as "did not return 2xx". The stub's own
+  // log format did not reproduce npm's, so nothing noticed. Pin the real line, copied from run
+  // 34209099291.
+  const realLine = 'npm http fetch POST 201 https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@aywengo%2fmercury 1092ms';
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  const verdict = wf.match(/grep -qE '(npm http fetch POST [^']+)'/);
+  assert.ok(verdict, 'the 2xx verdict grep must exist');
+  assert.match(realLine, new RegExp(verdict[1]), 'the verdict regex must match npm\'s real log line');
+  // The message says "2xx", so the grep has to mean 2xx. `20[0-9]` covers 200-209 only, so a 299 would
+  // have been reported as a failure by a guard whose whole job is accuracy. (202 is inside 200-209 and
+  // would have matched; the first code the old regex missed is 210.)
+  for (const code of ['200', '201', '202', '204', '299']) {
+    assert.match(`npm http fetch POST ${code} https://r.npmjs.org/-/npm/v1/oidc/token/exchange/x 1ms`,
+      new RegExp(verdict[1]), `the verdict must treat ${code} as success, as its message claims`);
+  }
+  for (const code of ['300', '401', '500']) {
+    assert.doesNotMatch(`npm http fetch POST ${code} https://r.npmjs.org/-/npm/v1/oidc/token/exchange/x 1ms`,
+      new RegExp(verdict[1]), `${code} must not be reported as a successful exchange`);
+  }
+});
+
+test('the stage id is extracted from the line npm actually prints', () => {
+  // Approval is `npm stage approve <uuid>` and needs a 2FA code, so this job can never finish the
+  // release itself; the most useful thing it can do is name the id. The extraction is a grep over npm's
+  // output, and a grep written against a remembered format silently finds nothing -- which is exactly
+  // how the 2xx verdict ended up always reporting failure. Pin the real npm wording, taken from
+  // lib/commands/publish.js: `+ ${pkgContents.id} (staged with id ${stageId})`.
+  const wf = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  const m = wf.match(/grep -o([a-zA-Z0-9]*) '(staged with id [^']+)'/);
+  assert.ok(m, 'the stage-id extraction must exist');
+  // grep flags live outside the pattern, so mirror them into the RegExp. Without this the test would
+  // disagree with the shell about case, which is the opposite of pinning it.
+  const re = new RegExp(m[2], m[1].includes('i') ? 'i' : '');
+  const uuid = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
+  assert.match(`+ @aywengo/mercury@0.1.0-rc2 (staged with id ${uuid})`, re,
+    'must match npm\'s real staged line');
+  const got = `+ pkg (staged with id ${uuid})`.match(re);
+  assert.ok(got, 'the extraction must match npm\'s line');
+  assert.equal(got[0].split(' ').pop(), uuid, 'the id must be the last field so awk can pick it out');
+  // Shapes the previous loose class [0-9a-fA-F-]{36} accepted but npm's validateUUID rejects, so printing
+  // one would hand the operator an `npm stage approve` that only errors. The 36-char hex digest is the
+  // regression this tightening exists for: it is exactly 36 chars of the old class.
+  for (const bad of ['staged with id not-a-uuid',
+                     `staged with id ${uuid.replace(/-/g, '')}`,
+                     `staged with id ${'0'.repeat(36)}`,
+                     `staged with id ${uuid.slice(0, 35)}z`]) {
+    assert.ok(!re.test(bad), `must not match a non-canonical id: ${bad}`);
+  }
+  // npm's own regex carries /i and the registry, not us, picks the case -- so uppercase must still extract.
+  assert.match(`+ pkg (staged with id ${uuid.toUpperCase()})`, re,
+    'must accept an uppercase id, as npm does');
+});
+
+test('a bundler that reports a sha256 the bundle does not have fails the release', () => {
+  // The formula ships whatever sha256 the bundler claims, and Homebrew verifies that digest on
+  // install. The formula commit is pushed with GITHUB_TOKEN, so GitHub creates no workflow run for
+  // it (issue #427) and main's tip carries no CI -- so if the claim is wrong, this step is the only
+  // thing that can notice, while it still holds the bytes.
+  const lie = 'a'.repeat(64);
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], bundleLie: lie });
+  assert.notEqual(r.status, 0, 'a bundle whose bytes disagree with the reported sha must fail');
+  assert.match(r.stderr, /checksum mismatch/,
+    `must name the mismatch on stderr, got:\nstdout=${r.stdout}\nstderr=${r.stderr}`);
+  assert.match(r.stderr, /bundler claims a{64}/, 'must show what was claimed');
+  // And it must fail BEFORE anything is published: a release or a formula built on a bad digest is
+  // worse than no release, because brew install then fails with nothing to correlate it to.
+  assert.ok(!/npm (stage )?publish/.test(r.stdout), `must not publish on a bad digest:\n${r.stdout}`);
+  assert.ok(!/gh release create/.test(r.stdout), `must not create a release on a bad digest:\n${r.stdout}`);
 });

@@ -6,7 +6,8 @@
  */
 
 import { access, readFile } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,14 +24,80 @@ export const LIMITS = {
   diagnosticsMs: 20_000,
 } as const;
 
-/** The Node floor from package.json engines, parsed once. */
-const FLOOR = [22, 18, 0];
+/** Parse `>=22.18.0` or `>= 22.22` into a triple. Missing parts read as 0. */
+export function parseFloor(spec: string): [number, number, number] {
+  // Any leading range operator is irrelevant here: what matters is the lowest version the spec can
+  // admit, and every shape npm ships (`>=22.18.0`, `>= 22.22`, `^22.18.0`, `20.x || >=22.22.0`) states it
+  // as the first version-looking token. Requiring a literal `>` broke on `^`, which is a real engines value.
+  const m = /(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(spec);
+  if (!m) throw new PreflightError(`cannot read a Node version out of engines spec ${JSON.stringify(spec)}`);
+  return [Number(m[1]), Number(m[2] ?? 0), Number(m[3] ?? 0)];
+}
+
+export function cmp(a: [number, number, number], b: [number, number, number]): number {
+  for (let i = 0; i < 3; i += 1) if (a[i] !== b[i]) return a[i]! - b[i]!;
+  return 0;
+}
+
+/**
+ * The floor this gate actually needs, which is NOT simply package.json's.
+ *
+ * The comment here used to claim the value was parsed while the next line hard-coded it. Worse, the
+ * package floor alone was the wrong question: testcontainers declares `engines.node >= 22.22`, so on
+ * 22.18 preflight passed and the suite then failed inside a dependency -- the exact shape of failure this
+ * function exists to prevent, arriving late and somewhere else. So the effective floor is the highest of
+ * the repository floor and the floor of `testcontainers`, the one e2e-only dependency with a floor above
+ * the repository's. The scan is deliberately not general: a general scan would raise the gate for every
+ * transitive package that declares a newer engines field, including ones the suite never loads. If another
+ * direct e2e dependency grows a higher floor, add it here explicitly and say why.
+ */
+export async function effectiveFloor(root: string = REPO_ROOT): Promise<{ floor: [number, number, number]; from: string }> {
+  const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+    engines?: { node?: string };
+  };
+  if (!pkg.engines?.node) throw new PreflightError('package.json has no engines.node to read the floor from');
+  let floor = parseFloor(pkg.engines.node);
+  let from = 'package.json engines.node';
+  // Only "not installed" is ignorable. A file that exists but cannot be read or parsed is exactly the case
+  // where the dependency floor is real and unknown, and swallowing it would green-light a Node the suite
+  // then fails on -- the failure this function exists to prevent.
+  // One binding, used by both the read and the error: two independent joins are how a message ends up
+  // naming a file the code never opened.
+  const depManifest = join(root, 'node_modules', 'testcontainers', 'package.json');
+  try {
+    const dep = JSON.parse(await readFile(depManifest, 'utf8')) as {
+      engines?: { node?: string };
+    };
+    if (dep.engines?.node) {
+      const depFloor = parseFloor(dep.engines.node);
+      if (cmp(depFloor, floor) > 0) {
+        floor = depFloor;
+        from = 'testcontainers engines.node';
+      }
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      // Name the path that was actually opened, not the literal: `root` is a parameter, and a caller that
+      // overrides it gets a message pointing somewhere the failure was not. Unknown throwables are
+      // formatted rather than asserted to be Errors, so a non-Error throw still says something useful.
+      const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      throw new PreflightError(
+        `cannot read the testcontainers floor from ${depManifest}: `
+        + `${detail}. Refusing to assume its floor is the repository's.`,
+      );
+    }
+  }
+  return { floor, from };
+}
 
 export class PreflightError extends Error {}
 
 function run(cmd: string, args: string[], timeoutMs: number): Promise<{ code: number; out: string }> {
   return new Promise((resolve, reject) => {
-    let child;
+    // Named rather than left to evolve: with stdio ['ignore','pipe','pipe'] the streams are guaranteed,
+    // and an untyped `let child` loses that and re-narrows to possibly-null at every use.
+    let child: ChildProcessByStdio<null, Readable, Readable>;
     try {
       child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (err) {
@@ -61,14 +128,14 @@ function run(cmd: string, args: string[], timeoutMs: number): Promise<{ code: nu
 
 /** Fail fast, with the reason a developer can act on, before Docker is touched. */
 export async function preflight(): Promise<{ node: string; docker: string; compose: string }> {
-  const [major, minor, patch] = process.versions.node.split('.').map(Number);
-  const older = major < FLOOR[0]
-    || (major === FLOOR[0] && minor < FLOOR[1])
-    || (major === FLOOR[0] && minor === FLOOR[1] && patch < FLOOR[2]);
-  if (older) {
+  const { floor, from } = await effectiveFloor();
+  const here = process.versions.node.split('.').map(Number) as [number, number, number];
+  if (cmp(here, floor) < 0) {
     throw new PreflightError(
-      `Node ${process.versions.node} is older than the supported floor ${FLOOR.join('.')}. `
-      + 'Mercury runs TypeScript directly, which the floor release enables.',
+      `Node ${process.versions.node} is older than the floor ${floor.join('.')} required by ${from}. `
+      + (from === 'package.json engines.node'
+        ? 'Mercury runs TypeScript directly, which the floor release enables.'
+        : 'The E2E suite needs it even though the repository itself runs lower.'),
     );
   }
 
