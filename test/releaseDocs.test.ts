@@ -731,10 +731,16 @@ test('the registry attestations still match what the runbook records', async (t)
       return -1;
     }
   };
+  // Only 200 and 404 are ANSWERS. A 503 from the registry -- which is what this probe returned on the
+  // first CI run, on node 22 only, while node 24 got 200 for the same version minutes apart -- says
+  // nothing about attestations. Treating a thrown fetch as "unreachable" while letting an error status
+  // fall through to the assertion is the exact mistake #447 fixed in the release body: an unconfirmed
+  // probe must never be reported as a confirmed absence.
+  const ANSWERED = (s: number) => s === 200 || s === 404;
   const rc1 = await probe('0.1.0-rc1');
-  if (rc1 === -1) { t.skip('registry unreachable'); return; }
+  if (!ANSWERED(rc1)) { t.skip(`registry gave ${rc1} for 0.1.0-rc1; not an answer`); return; }
   const stable = await probe('0.1.0');
-  if (stable === -1) { t.skip('registry unreachable'); return; }
+  if (!ANSWERED(stable)) { t.skip(`registry gave ${stable} for 0.1.0; not an answer`); return; }
   assert.equal(rc1, 404,
     'the runbook records rc1 (token-published) as having no attestations; if that changed, correct the doc');
   assert.equal(stable, 200,
