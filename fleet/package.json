@@ -2,20 +2,24 @@
   "name": "@aywengo/mercury-fleet",
   "version": "0.1.0-rc1",
   "license": "MIT",
-  "description": "Federation layer for independent Mercury hosts: registry and probe (Phase 0, no dispatch)",
+  "description": "Federation layer for independent Mercury hosts: host registry, probing, Run dispatch and routing, reconciliation, event aggregation and a Prometheus rollup",
   "type": "module",
   "engines": {
     "node": ">=22.18.0"
   },
   "bin": {
-    "fleet": "cli.ts"
+    "fleet": "dist/cli.js"
   },
   "files": [
-    "*.ts",
+    "dist/",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "scripts": {
+    "prepare": "node -e \"const fs=require('node:fs');const p='../node_modules/typescript/bin/tsc';if(!fs.existsSync(p)){console.error('fleet: TypeScript is not installed. Run npm ci at the repository root before packing or publishing fleet/.');process.exit(1)}\" && node ../node_modules/typescript/bin/tsc -p ../tsconfig.fleet.json"
   }
 }
