@@ -1,0 +1,25 @@
+{
+  // Fleet ships as compiled JavaScript, not as TypeScript.
+  //
+  // Node refuses to type-strip a file under node_modules -- ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING
+  // -- on every version that can strip types at all, so a package whose `bin` points at a `.ts` file
+  // installs cleanly and then fails on its first command. Fleet used to ship `bin: {"fleet": "cli.ts"}`,
+  // which is exactly that: `npm install` succeeded, `fleet --version` did not. The host has always
+  // shipped dist/*.js for this reason; this config gives Fleet the same treatment.
+  //
+  // `rewriteRelativeImportExtensions` is what makes it a small change rather than a rewrite: the
+  // sources keep their `.ts` import specifiers, which Node needs in order to run them from a checkout
+  // (`npm run fleet`), and tsc rewrites them to `.js` on emit. tsconfig.server.json does the same for
+  // the host.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "fleet",
+    "outDir": "fleet/dist",
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["fleet"],
+  // The test suite runs from source under `node --test`, where type stripping works fine. Shipping it
+  // would put test-only files in the published package and pull in nothing that belongs there.
+  "exclude": ["fleet/test", "fleet/dist"]
+}

@@ -55,6 +55,7 @@
     "typecheck": "tsc --noEmit",
     "build:client": "tsc -p tsconfig.client.json",
     "build:server": "tsc -p tsconfig.server.json",
+    "build:fleet": "tsc -p tsconfig.fleet.json",
     "prepare": "npm run build:client && npm run build:server",
     "test": "npm run test:core && npm run test:fleet && npm run test:client",
     "test:core": "node --test --test-timeout=180000 'test/*.test.ts'",
