@@ -477,10 +477,15 @@ test('a Fleet restart does not double-book: the binding survives in its own data
   // scoped to one Fleet binding. A first draft of this test spun up a second Fleet with a fresh
   // database, expected one Run, and got two -- which was a wrong expectation about the product, not a
   // bug in it. Verified: the two child Run ids differed, and Mercury was right to create both.
-  const dir = tempDir('fleet-restart-');
-  const mercury = await realMercury();
+  // Acquired INSIDE the try, same rule withStack() follows: a resource taken before the try is
+  // unreachable from the finally if the acquisition itself throws. This was reintroduced here after
+  // being fixed in withStack(), and a reviewer caught it.
+  let dir: string | null = null;
+  let mercury: Awaited<ReturnType<typeof realMercury>> | null = null;
   let a: Awaited<ReturnType<typeof realFleet>> | null = null;
   try {
+    dir = tempDir('fleet-restart-');
+    mercury = await realMercury();
     a = await realFleet(mercury.url, dir, 'a');
     assert.equal((await a.registerHost()).status, 201);
     assert.equal((await a.probe()).status, 200);
@@ -519,7 +524,7 @@ test('a Fleet restart does not double-book: the binding survives in its own data
     }
   } finally {
     if (a) await a.close();
-    await mercury.close();
-    rmSync(dir, { recursive: true, force: true });
+    if (mercury) await mercury.close();
+    if (dir) rmSync(dir, { recursive: true, force: true });
   }
 });
