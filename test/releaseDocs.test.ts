@@ -388,3 +388,14 @@ test('docs never present the unpublished Fleet package as installable', () => {
   assert.ok(!fences.some((b) => /npm install[^\n]*mercury-fleet/.test(b)),
     `the Fleet notes must not offer a runnable install for a package that does not exist: ${fences}`);
 });
+
+test('the Fleet changelog does not offer an npm install for a package that is not published', () => {
+  // fleet/CHANGELOG.md announced "First public Fleet release" with `npm install -g
+  // @aywengo/mercury-fleet`. The package 404s, so the only working path is a source checkout.
+  const log = read('fleet/CHANGELOG.md');
+  const fences = log.match(/```(?:bash|sh|shell)[\s\S]*?```/g) ?? [];
+  assert.ok(!fences.some((b) => /npm install[^\n]*mercury-fleet/.test(b)),
+    'no runnable npm install for the unpublished Fleet package');
+  assert.match(log, /never published|not on the npm registry/i,
+    'the Fleet changelog must say the version was never published');
+});
