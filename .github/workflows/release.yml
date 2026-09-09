@@ -293,10 +293,15 @@ jobs:
               echo "  asset and then fail -- nothing installable." >&2
               echo "  Trusted publishing is configured on the package page, which cannot be configured" >&2
               echo "  before the package exists, so the first publish needs a credential, run" >&2
-              echo "  INSIDE the Fleet package:" >&2
-              echo "    cd fleet && cp ../LICENSE LICENSE && npm publish --access public --tag rc" >&2
+              echo "  INSIDE the Fleet package." >&2
+              echo "  Bootstrap with a THROWAWAY version, never ${version}: npm refuses to publish an" >&2
+              echo "  version twice, so a hand-run first publish at ${version} would consume the very" >&2
+              echo "  version this tag is for and leave no way to ship it with provenance." >&2
+              echo "    cd fleet && cp ../LICENSE LICENSE" >&2
+              echo "    npm version --no-git-tag-version 0.0.1-bootstrap && npm publish --access public --tag bootstrap" >&2
+              echo "  Then add this workflow as a trusted publisher on the package page, restore the" >&2
+              echo "  version in a commit, and push ${tag}; from there it needs no secret at all." >&2
               echo "  At the repository root that command publishes @aywengo/mercury, not Fleet." >&2
-              echo "  After that, a fleet tag needs no secret at all." >&2
               exit 1
             fi
           fi
