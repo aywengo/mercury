@@ -5,8 +5,9 @@
 import { test } from 'node:test';
 import { tempFile } from './helpers.ts';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const TEST_DIR = import.meta.dirname;
 
@@ -104,4 +105,45 @@ test('the guard ignores an identifier inside a trailing comment (issue #73 L8 re
   assert.equal(codeOnly(url), url, 'a // inside a string literal must not truncate the line');
   // Real code must still be caught.
   assert.match(codeOnly(`const d = ${word}('/tmp/x');`), new RegExp('\\b' + word + '\\b'));
+});
+
+test('a killed test:fleet run cannot dirty the tree with fleet/LICENSE (issue #438)', () => {
+  // fleet/test/published.test.ts copies the repo LICENSE into fleet/ to mirror the release workflow,
+  // and removes it in `finally`. That cleanup is correct for a normal exit and for a thrown assertion,
+  // but a `finally` does not run when the process is killed -- a timeout, Ctrl-C, or an OOM kill leaves
+  // an untracked file in the SOURCE tree, byte-identical to LICENSE, where `git add -A` sweeps it into
+  // a commit. Observed on a real checkout. The file is a build-time mirror, never source, and
+  // fleet/package.json already lists it under `files`, so ignoring it does not affect packaging.
+  const ignored = readFileSync(join(import.meta.dirname, '..', '.gitignore'), 'utf8');
+  assert.ok(ignored.includes('fleet/LICENSE'),
+    'fleet/LICENSE must be gitignored: an interrupted test:fleet run leaves it in the source tree');
+
+  // The rule must actually match the path. A pattern like `/LICENSE` or `LICENSE/` would satisfy a
+  // substring check above while ignoring nothing, so ask git itself rather than trusting the text.
+  const probe = join(import.meta.dirname, '..', 'fleet', 'LICENSE');
+  writeFileSync(probe, 'ignored artifact probe\n');
+  try {
+    const check = spawnSync('git', ['check-ignore', '-q', 'fleet/LICENSE'], {
+      cwd: join(import.meta.dirname, '..'), encoding: 'utf8', timeout: 30_000,
+    });
+    assert.equal(check.status, 0, 'git does not treat fleet/LICENSE as ignored, despite the entry');
+  } finally {
+    rmSync(probe, { force: true });
+  }
+});
+
+test('.gitignore still ignores the paths that keep test artifacts out of the tree', () => {
+  // Six entries -- node_modules/, dist/, *.db and its WAL siblings, workspaces/, .env -- are what stop
+  // `npm test` from dirtying the checkout: the suites build into dist/, open SQLite files, and create
+  // workspace dirs. Nothing guarded the file, so an edit that silently truncated it to a single entry
+  // passed CI while making every one of those paths committable. That happened for real while writing
+  // the rule below it: `open(p,'w').write(open(p).read() + ...)` truncates BEFORE the read runs, so the
+  // original contents were gone before they were read. CI said nothing.
+  const lines = readFileSync(join(import.meta.dirname, '..', '.gitignore'), 'utf8')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'));
+  for (const essential of ['node_modules/', 'dist/', '*.db', '*.db-wal', '*.db-shm', 'workspaces/', '.env', 'fleet/LICENSE']) {
+    assert.ok(lines.includes(essential), `.gitignore lost ${essential}`);
+  }
 });
