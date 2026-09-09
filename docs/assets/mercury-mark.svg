@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+<defs>
+  <radialGradient id="bg" cx="50%" cy="30%" r="80%"><stop offset="0" stop-color="#1a2658"/><stop offset="1" stop-color="#070b22"/></radialGradient>
+  <radialGradient id="planet" cx="38%" cy="32%" r="75%"><stop offset="0" stop-color="#fff2c8"/><stop offset="0.35" stop-color="#ffb347"/><stop offset="0.75" stop-color="#d9531e"/><stop offset="1" stop-color="#6b1d0e"/></radialGradient>
+  <radialGradient id="glow" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#ffb347" stop-opacity="0.6"/><stop offset="0.6" stop-color="#ff8a3d" stop-opacity="0.12"/><stop offset="1" stop-color="#ff8a3d" stop-opacity="0"/></radialGradient>
+  <clipPath id="tile"><rect width="512" height="512" rx="112"/></clipPath>
+</defs>
+<circle cx="256.0" cy="256.0" r="255" fill="url(#glow)"/>
+<path d="M 31.0 256.0 A 225 62 0 0 1 481.0 256.0" fill="none" stroke="#cfe3ff" stroke-opacity="0.45" stroke-width="10" stroke-linecap="round"/>
+<circle cx="256.0" cy="256.0" r="150" fill="url(#planet)"/>
+<circle cx="204" cy="226" r="18" fill="#000" opacity="0.13"/>
+<circle cx="294" cy="271" r="24" fill="#000" opacity="0.13"/>
+<circle cx="241" cy="324" r="14" fill="#000" opacity="0.13"/>
+<circle cx="324" cy="196" r="11" fill="#000" opacity="0.13"/>
+<path d="M 31.0 256.0 A 225 62 0 0 0 481.0 256.0" fill="none" stroke="#e6f0ff" stroke-width="12" stroke-linecap="round"/>
+<circle cx="418" cy="299" r="16" fill="#ffffff"/>
+</svg>
