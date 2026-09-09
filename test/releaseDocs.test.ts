@@ -291,6 +291,14 @@ test('the runbook gives the fleet bootstrap command and warns where to run it', 
     'the trusted publisher must be allowed to stage-publish; the workflow uses `npm stage publish`');
   assert.match(trustCmd, /--file\s+release\.yml[\s\S]{0,80}--repo\s+aywengo\/mercury|--repo\s+aywengo\/mercury[\s\S]{0,80}--file\s+release\.yml/,
     'the trusted publisher must name the workflow and repository that will actually run');
+  // The bump is not inert. `fleet/test/version.test.ts` asserts fleet/package.json equals
+  // fleet/version.ts, so the suite is red for as long as it is present, and a checkout left holding it
+  // -- which is exactly what happened during the real bootstrap -- invites committing a bootstrap
+  // version into the release. The runbook created that state and never mentioned undoing it.
+  assert.match(after, /git checkout -- fleet\/package\.json|git restore fleet\/package\.json/,
+    'the runbook must say how to discard the disposable version bump');
+  assert.match(after, /version\.test\.ts/,
+    'it must name the test the bump breaks, so a red suite is not mistaken for a broken bootstrap');
 });
 
 test('the E2E docs do not claim the reaper test asserts disappearance', () => {

@@ -50,6 +50,22 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    release version. The bootstrap also carries no provenance, because a token publish cannot attest; the
    tagged release is what adds it.
 
+   The bump is **local and disposable**: `fleet/test/version.test.ts` asserts `fleet/package.json`
+   equals `fleet/version.ts`, so the suite goes red while it is present, and committing it would make
+   the bootstrap version the released one. Publish, then discard it before doing anything else:
+
+   ```bash
+   git checkout -- fleet/package.json
+   ```
+
+   It cannot be done from a copy outside the repository: `prepare` compiles `dist/` with
+   `../node_modules/typescript`, which only resolves inside the checkout.
+
+   Expect the bootstrap artifact to report the wrong version. `fleet --version` prints the compiled
+   `FLEET_VERSION` constant, not `package.json`, so a `0.0.1-bootstrap` tarball prints
+   `mercury-fleet 0.1.0`. Measured by installing the published bootstrap from the registry. Harmless
+   for a placeholder, and it is one more reason the bootstrap must never be the release version.
+
    Run it from a clean checkout, with an npm credential that can publish, then immediately create the
    trusted publisher so the next release needs no secret. This needs interactive 2FA, so it is a human
    step; `--dry-run` validates the shape without one:
