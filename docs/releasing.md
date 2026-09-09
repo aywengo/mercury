@@ -39,12 +39,28 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    ```bash
    cd fleet                      # REQUIRED: from the repo root this publishes @aywengo/mercury, not fleet
    cp ../LICENSE LICENSE         # fleet/ declares MIT but ships no LICENSE file
-   npm publish --access public --tag rc
+   npm version --no-git-tag-version 0.0.1-bootstrap
+   npm publish --access public --tag bootstrap
    ```
 
-   Run it from a clean checkout of the commit you intend to release, with an npm credential that can
-   publish, and configure trusted publishing on the new package page immediately afterwards so the very
-   next release needs no secret.
+   **Publish a throwaway version, never the version you are releasing.** npm refuses to publish the same
+   version twice. A bootstrap at `0.1.0` consumes it, so the `fleet-v0.1.0` tag -- the one that carries
+   SLSA provenance and creates the GitHub Release -- then fails with "cannot publish over it", and the
+   only way out is to bump the version you were trying to ship. A prerelease cannot collide with a real
+   release version. The bootstrap also carries no provenance, because a token publish cannot attest; the
+   tagged release is what adds it.
+
+   Run it from a clean checkout, with an npm credential that can publish, then immediately create the
+   trusted publisher so the next release needs no secret. This needs interactive 2FA, so it is a human
+   step; `--dry-run` validates the shape without one:
+
+   ```bash
+   npm trust github @aywengo/mercury-fleet --file release.yml --repo aywengo/mercury \
+     --allow-publish --allow-stage-publish
+   ```
+
+   `--allow-stage-publish` is required, not optional: the workflow uses `npm stage publish` whenever the
+   runner's npm has it, and a publisher created with `--allow-publish` alone refuses that command.
 
 5. **Rehearse before you tag.** A tag is a published artifact, so a mistake in the release job costs a
    burned version number. Run the workflow by hand instead:

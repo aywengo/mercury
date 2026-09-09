@@ -262,6 +262,35 @@ test('the runbook gives the fleet bootstrap command and warns where to run it', 
     'it must copy the LICENSE, since fleet/ declares MIT but ships no such file');
   assert.match(boot[0], /repo(?:sitory)? root.*@aywengo\/mercury|publishes @aywengo\/mercury/,
     'it must warn that the root publishes the host package instead');
+  // The command used to be `npm publish --access public --tag rc` at whatever version fleet/package.json
+  // held, which was 0.1.0. npm refuses to publish a version twice, so an operator who followed it
+  // consumed the exact version the release was for: the fleet-v0.1.0 tag would then fail with "cannot
+  // publish over it", leaving no way to ship 0.1.0 with provenance and no route but a version bump.
+  // The workflow message was corrected in #442; the runbook carried the same instruction and a guard
+  // pinned it, so the wrong command was the version under test. Pin the invariant, not the wording.
+  assert.match(boot[0], /npm version --no-git-tag-version \d+\.\d+\.\d+[-+][0-9A-Za-z.-]+/,
+    'the bootstrap must pin a PRERELEASE version, which cannot collide with a real release version');
+  assert.ok(!/npm publish[^\n]*--tag\s+rc\b/.test(boot[0]),
+    'the bootstrap must not publish under rc at the release version');
+  // The WHY lives in the prose after the fence, and `paras` splits on blank lines, so it is not part of
+  // boot[0]. Read the section that follows rather than loosening the paragraph split for every other
+  // assertion in this test.
+  const after = doc.slice(doc.indexOf(boot[0]), doc.indexOf(boot[0]) + 2600);
+  assert.match(after, /refuses to publish|twice|consume/i,
+    'it must explain WHY the bootstrap version is disposable');
+  // The trusted publisher is what makes the tag path secretless, and the workflow submits with
+  // `npm stage publish` whenever the runner has it. A publisher without that permission refuses the
+  // real command, so a runbook that omits it produces a bootstrap that cannot be followed by a release.
+  // Scope to the command itself. An earlier version matched `npm trust github ... --allow-stage-publish`
+  // across the whole section, and passed on a doc whose command omitted the flag while the prose merely
+  // mentioned it -- a mutation that deleted the flag went uncaught.
+  const trustFence = (after.match(/```(?:bash|sh|shell)?\n[\s\S]*?npm trust github[\s\S]*?```/) ?? [''])[0];
+  const trustCmd = trustFence;
+  assert.ok(trustCmd, 'the runbook must give the npm trust github command');
+  assert.match(trustCmd, /--allow-stage-publish/,
+    'the trusted publisher must be allowed to stage-publish; the workflow uses `npm stage publish`');
+  assert.match(trustCmd, /--file\s+release\.yml[\s\S]{0,80}--repo\s+aywengo\/mercury|--repo\s+aywengo\/mercury[\s\S]{0,80}--file\s+release\.yml/,
+    'the trusted publisher must name the workflow and repository that will actually run');
 });
 
 test('the E2E docs do not claim the reaper test asserts disappearance', () => {
