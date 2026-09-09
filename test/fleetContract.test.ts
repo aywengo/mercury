@@ -78,13 +78,20 @@ async function realMercury(opts: { queue?: boolean } = {}) {
   };
 }
 
+/** Distinct loopback ports per logical Fleet, so two can run in one test. */
+const ID_OFFSETS: Record<string, number> = { a: 0, b: 7 };
+
 /** A real `fleet serve` child, pointed at `mercuryUrl`, with a real 0600 credential file. */
-async function realFleet(mercuryUrl: string, dir: string) {
-  const credFile = join(dir, 'credentials.json');
+async function realFleet(mercuryUrl: string, dir: string, id = 'a') {
+  const credFile = join(dir, `credentials-${id}.json`);
   writeFileSync(credFile, JSON.stringify({ 'contract-host': HOST_TOKEN }));
   chmodSync(credFile, 0o600);
 
-  const port = 21_000 + (process.pid % 20_000);
+  // Each Fleet needs its own port AND its own database. Deriving the port from process.pid alone gives
+  // every Fleet in a test the same port, and reusing `dir` for the SQLite path makes two "separate"
+  // Fleets share one registry -- which made a second Fleet answer 400 "duplicate id" for a host the
+  // first one had already registered, instead of being the independent instance the test needs.
+  const port = 21_000 + (process.pid % 20_000) + ID_OFFSETS[id]!;
   const base = `http://127.0.0.1:${port}`;
   const logs: string[] = [];
   const child = spawn(process.execPath, [join(FLEET_DIR, 'cli.ts'), 'serve'], {
@@ -94,7 +101,7 @@ async function realFleet(mercuryUrl: string, dir: string) {
       NO_COLOR: '1',
       FLEET_BIND_HOST: '127.0.0.1',
       FLEET_PORT: String(port),
-      FLEET_DB: join(dir, 'fleet.db'),
+      FLEET_DB: join(dir, `fleet-${id}.db`),
       FLEET_CREDENTIALS_FILE: credFile,
       FLEET_ADMIN_TOKEN: ADMIN_TOKEN,
       FLEET_API_TOKENS: `${CALLER_TOKEN}:alice:*`,
@@ -365,4 +372,159 @@ test('this test reaches Fleet only over a socket, never by import', async () => 
   // The guard must be capable of failing. A regex that matches nothing at all is indistinguishable from
   // a file with no violations, so assert the scan is actually reading this file.
   assert.ok(specifiers.length > 5, `the import scan found only ${specifiers.length} specifiers; it is not reading this file`);
+});
+
+test('work submitted through Fleet lands as a real Run on the real Mercury', async () => {
+  // The product journey Fleet exists for: a caller talks to Fleet, and the work appears on Mercury.
+  // Every existing dispatch test drives submitRun() in-process against a stubbed child, so none of them
+  // has ever seen the real host accept a real POST /api/runs with the body Fleet builds. Fleet strips
+  // `host` and `idempotency` from the request and injects nothing else, so a drift in what the host's
+  // create endpoint accepts would surface here and nowhere else.
+  await withStack(async (m, f) => {
+    const added = await f.registerHost();
+    assert.equal(added.status, 201, added.text.slice(0, 200));
+    const probed = await f.probe();
+    assert.equal(probed.status, 200, `probe first so routing has real agent data: ${probed.text.slice(0, 200)}`);
+
+    const submitted = await f.req('/fleet/runs', CALLER_TOKEN, {
+      method: 'POST',
+      body: JSON.stringify({ host: 'lab-1', task: 'do the thing', agent: 'fake' }),
+    });
+    assert.equal(submitted.status, 201, `dispatch failed: ${submitted.status} ${submitted.text.slice(0, 400)}`);
+    const ack = submitted.json() as unknown as {
+      fleetRunId: string; hostId: string; childRunId: string | null; pending: boolean;
+    };
+    assert.equal(ack.hostId, 'lab-1');
+    assert.ok(ack.childRunId, `Fleet reported no child Run id; the submit never reached Mercury: ${submitted.text.slice(0, 400)}`);
+
+    // The claim that matters: read the Run back FROM MERCURY, not from Fleet's own binding table.
+    // A test that only asserted Fleet's bookkeeping would pass against a host that rejected the body.
+    const onHost = await fetch(`${m.url}/api/runs/${ack.childRunId}`, {
+      headers: { authorization: `Bearer ${HOST_TOKEN}` }, signal: AbortSignal.timeout(15_000),
+    });
+    // Read the body ONCE. `fetch` bodies are single-use, and an assertion message is an argument, so it
+    // is evaluated eagerly even when the assertion passes -- writing ${(await res.text())} inside
+    // assert.equal's message consumes the stream and the later .json() dies with "Body is unusable".
+    const hostBody = await onHost.text();
+    assert.equal(onHost.status, 200, `Mercury has no such Run: ${onHost.status} ${hostBody.slice(0, 300)}`);
+    // The host wraps it: GET /api/runs/:runId answers { run, skills }, not the Run bare.
+    const run = (JSON.parse(hostBody) as { run: { id: string; task: string; agent: string; status: string; ownerId: string } }).run;
+    assert.equal(run.id, ack.childRunId);
+    assert.equal(run.task, 'do the thing', `Mercury stored a different task than Fleet was asked to send: ${JSON.stringify(run)}`);
+    assert.equal(run.agent, 'fake');
+    // Ownership does NOT travel with the Fleet caller. Mercury attributes the Run to whoever its OWN
+    // credential belongs to -- Fleet authenticates to a host with the registry credential, so every Run
+    // any Fleet caller submits lands on Mercury owned by that credential's owner. Measured, not
+    // reasoned: remapping FLEET_API_TOKENS so the Fleet caller is `bob` leaves the Run owned by `alice`,
+    // because `alice` is who HOST_TOKEN resolves to. An earlier draft of this line asserted
+    // ownerId === 'alice' and claimed it proved the Fleet caller's identity crossed the wire. It proved
+    // the opposite, and it could not fail -- both sides were 'alice' by construction.
+    //
+    // This is a real property of the design, not a defect: Fleet is a single-tenant-per-host front, and
+    // per-caller isolation lives in Fleet's own scoping (a caller cannot read or act on a Run bound to a
+    // host they may not see). It does mean Mercury-side ownership cannot distinguish two Fleet callers,
+    // so any future per-caller attribution on the host needs an explicit identity to be threaded through.
+    assert.equal(run.ownerId, 'alice', `Mercury should own the Run by its own credential, not the Fleet caller's: ${JSON.stringify(run)}`);
+
+    // And Fleet's own view agrees with Mercury's, which is the whole point of the binding.
+    const listed = await f.req('/fleet/runs', CALLER_TOKEN);
+    assert.equal(listed.status, 200, listed.text.slice(0, 200));
+    const runs = (listed.json() as unknown as { runs: Array<Record<string, unknown>> }).runs;
+    assert.equal(runs.length, 1, `Fleet listed ${runs.length} runs: ${listed.text.slice(0, 300)}`);
+    assert.equal(runs[0]!.childRunId, ack.childRunId);
+  });
+});
+
+test('a replay through the same Fleet returns the same child Run instead of a second one', async () => {
+  // What this proves, precisely: Fleet's OWN binding table dedupes a repeated client token before it
+  // reaches the network. That was measured, not assumed -- dropping the `idempotency-key` header Fleet
+  // sends to Mercury, and making Mercury ignore that header, BOTH leave this test green, because the
+  // second submit never leaves Fleet at all. The host-side key is exercised by the next test, which
+  // uses a second Fleet that has never seen the first one's binding.
+  await withStack(async (m, f) => {
+    assert.equal((await f.registerHost()).status, 201);
+    assert.equal((await f.probe()).status, 200);
+
+    const body = JSON.stringify({ host: 'lab-1', task: 'idempotent thing', agent: 'fake', idempotency: 'key-abc' });
+    const first = await f.req('/fleet/runs', CALLER_TOKEN, { method: 'POST', body });
+    assert.equal(first.status, 201, `first submit: ${first.status} ${first.text.slice(0, 300)}`);
+    const second = await f.req('/fleet/runs', CALLER_TOKEN, { method: 'POST', body });
+    // 200 (reused), not 201: the route distinguishes a fresh create from a replay.
+    assert.equal(second.status, 200, `a replay must not report a fresh create: ${second.status} ${second.text.slice(0, 300)}`);
+    const a = first.json() as unknown as { childRunId: string };
+    const b = second.json() as unknown as { childRunId: string; reused: boolean };
+    assert.equal(b.childRunId, a.childRunId, 'the replay bound to a different child Run');
+    assert.equal(b.reused, true);
+
+    // Ground truth on Mercury: exactly one Run exists.
+    const hostRuns = await (await fetch(`${m.url}/api/runs?limit=50`, {
+      headers: { authorization: `Bearer ${HOST_TOKEN}` }, signal: AbortSignal.timeout(15_000),
+    })).json() as { runs: Array<{ task: string }> };
+    const dupes = hostRuns.runs.filter((r) => r.task === 'idempotent thing');
+    assert.equal(dupes.length, 1, `Mercury holds ${dupes.length} Runs for one idempotency key`);
+  });
+});
+
+test('a Fleet restart does not double-book: the binding survives in its own database', async () => {
+  // The recovery case that actually happens: an operator restarts Fleet (or it crashes and systemd
+  // brings it back) and a retried submit arrives with the same idempotency token. The binding has to
+  // come back out of Fleet's SQLite file, not out of process memory, or the retry does the work twice.
+  //
+  // What this deliberately does NOT claim: that two INDEPENDENT Fleets dedupe against each other. They
+  // do not, and that is the design. Fleet sends Mercury its own generated fleetRunId as the
+  // `idempotency-key` header (dispatch.ts -> child.createRun(host, payload, fleetRunId)), not the
+  // caller's token, so the caller's token is scoped to one Fleet's binding table and Mercury's key is
+  // scoped to one Fleet binding. A first draft of this test spun up a second Fleet with a fresh
+  // database, expected one Run, and got two -- which was a wrong expectation about the product, not a
+  // bug in it. Verified: the two child Run ids differed, and Mercury was right to create both.
+  // Acquired INSIDE the try, same rule withStack() follows: a resource taken before the try is
+  // unreachable from the finally if the acquisition itself throws. This was reintroduced here after
+  // being fixed in withStack(), and a reviewer caught it.
+  let dir: string | null = null;
+  let mercury: Awaited<ReturnType<typeof realMercury>> | null = null;
+  let a: Awaited<ReturnType<typeof realFleet>> | null = null;
+  try {
+    dir = tempDir('fleet-restart-');
+    mercury = await realMercury();
+    a = await realFleet(mercury.url, dir, 'a');
+    assert.equal((await a.registerHost()).status, 201);
+    assert.equal((await a.probe()).status, 200);
+    const body = JSON.stringify({ host: 'lab-1', task: 'survive the restart', agent: 'fake', idempotency: 'restart-key-1' });
+    const first = await a.req('/fleet/runs', CALLER_TOKEN, { method: 'POST', body });
+    assert.equal(first.status, 201, `first submit: ${first.status} ${first.text.slice(0, 300)}`);
+    const firstChild = (first.json() as unknown as { childRunId: string }).childRunId;
+    const firstFleetId = (first.json() as unknown as { fleetRunId: string }).fleetRunId;
+
+    // Hard stop, then a NEW process on the SAME database. Nothing carries over in memory.
+    await a.close();
+    a = null;
+    const b = await realFleet(mercury.url, dir, 'a');
+    try {
+      // The registry survived too -- otherwise this would be testing a fresh Fleet, not a restarted one.
+      const hosts = await b.hosts();
+      const listed = (hosts.json() as unknown as { hosts: Array<{ id: string }> }).hosts;
+      assert.deepEqual(listed.map((h) => h.id), ['lab-1'], `registry did not survive the restart: ${hosts.text.slice(0, 200)}`);
+
+      const again = await b.req('/fleet/runs', CALLER_TOKEN, { method: 'POST', body });
+      assert.ok([200, 201].includes(again.status), `replay after restart: ${again.status} ${again.text.slice(0, 300)}`);
+      const replay = again.json() as unknown as { childRunId: string; fleetRunId: string };
+      assert.equal(replay.fleetRunId, firstFleetId,
+        `the restart minted a new binding instead of reusing it: ${firstFleetId} vs ${replay.fleetRunId}`);
+      assert.equal(replay.childRunId, firstChild,
+        `the replay booked a second child Run: ${firstChild} vs ${replay.childRunId}`);
+
+      const hostRuns = await (await fetch(`${mercury.url}/api/runs?limit=50`, {
+        headers: { authorization: `Bearer ${HOST_TOKEN}` }, signal: AbortSignal.timeout(15_000),
+      })).text();
+      const dupes = (JSON.parse(hostRuns) as { runs: Array<{ task: string }> }).runs
+        .filter((r) => r.task === 'survive the restart');
+      assert.equal(dupes.length, 1, `Mercury holds ${dupes.length} Runs after a Fleet restart`);
+    } finally {
+      await b.close();
+    }
+  } finally {
+    if (a) await a.close();
+    if (mercury) await mercury.close();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
 });
