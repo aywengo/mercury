@@ -326,3 +326,28 @@ test('the staged-approval step names the npm version that introduced `npm stage`
     assert.equal(floorClaim(ph), want, `matcher must ${want ? 'accept' : 'reject'} \`${ph}\``);
   }
 });
+
+test('the docs do not still describe latest as a prerelease channel', () => {
+  // Before 0.1.0 shipped, README explained that `latest` pointed at a prerelease and that both tags
+  // resolved to the same version. That was true only while no stable release existed, and nothing
+  // guarded it -- so it would have sat there contradicting `npm view` indefinitely. Pin the
+  // relationship that must now hold, and forbid the specific stale assertions.
+  const readme = read('README.md');
+  for (const phrase of [
+    /latest`? also points at the prerelease/i,
+    /both tags resolve to the\s+same version/i,
+    /Until the first stable release ships/i,
+    /latest`? moves when the first stable release ships/i,
+  ]) {
+    assert.ok(!phrase.test(readme), `README still asserts a pre-stable state: ${phrase}`);
+  }
+  assert.match(readme, /`latest` is the stable channel/,
+    'README must state which channel bare installs follow');
+
+  // The 0.1.0 notes once claimed the source was identical to rc1 with nothing merged between them.
+  // fb1317e (#285) disproves that; the claim survived a CHANGELOG fix and had to be caught here.
+  const notes = read('docs/releases/host/0.1.0.md');
+  assert.ok(!/identical to `0\.1\.0-rc1`; nothing was merged/i.test(notes),
+    'the 0.1.0 notes must not claim equivalence with rc1 -- #285 landed between them');
+  assert.match(notes, /#285/, 'the 0.1.0 notes must name the functional delta from rc1');
+});
