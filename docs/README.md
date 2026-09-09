@@ -26,7 +26,8 @@ what each artifact contains, see [`distribution.md`](distribution.md).
 - [`Host 0.1.0`](releases/host/0.1.0.md) -- first stable release, npm `latest`
 - [`Host 0.1.0-rc2`](releases/host/0.1.0-rc2.md)
 - [`Host 0.1.0-rc1`](releases/host/0.1.0-rc1.md)
-- [`Fleet 0.1.0-rc1`](releases/fleet/0.1.0-rc1.md) -- **never published**; the package does not exist on npm
+- [`Fleet 0.1.0`](releases/fleet/0.1.0.md) -- **not published yet**; the package does not exist on npm, and the first publish needs a credential
+- [`Fleet 0.1.0-rc1`](releases/fleet/0.1.0-rc1.md) -- **never published**; superseded by 0.1.0 before anything shipped
 - [`Host changelog`](../CHANGELOG.md)
 - [`Fleet changelog`](../fleet/CHANGELOG.md)
 
