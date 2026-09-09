@@ -244,16 +244,34 @@ Two things that are genuinely true and worth knowing, both unrelated to that pro
 - A `sub` carrying numeric IDs is worth knowing about before adding any *other* OIDC trust (AWS, GCP,
   Vault), because several providers match on the name-only shape and will not match this one.
 
-**The fallback is a short-lived token, and it does not cost you provenance.** The `host-v0.1.0-rc1` run
-authenticated with `NPM_TOKEN` and still signed and published provenance:
+**The fallback is a short-lived token, and it DOES cost you provenance.** The `host-v0.1.0-rc1` run
+authenticated with `NPM_TOKEN`, and its log line is real:
 
 ```
 publish auth: NPM_TOKEN
 npm notice stage Provenance statement published to transparency log: ...logIndex=2742821710
 ```
 
-npm mints a separate OIDC token for sigstore, independent of the trusted-publisher exchange, so Fulcio
-accepts it either way. Verify a published version carries attestations:
+That line was read here as "the package has provenance", and that reading is wrong. Measured on the
+registry, for the three versions this repository has published:
+
+| version | publish auth | `/-/npm/v1/attestations/...` | SLSA provenance |
+| --- | --- | --- | --- |
+| `0.1.0-rc1` | `NPM_TOKEN` | **404 -- none** | **absent** |
+| `0.1.0-rc2` | OIDC trusted publisher | 200, 2 attestations | `slsa.dev/provenance/v1` |
+| `0.1.0` | OIDC trusted publisher | 200, 2 attestations | `slsa.dev/provenance/v1` |
+
+Both halves of that are true at once, and the distinction is the whole point. npm did mint a separate
+OIDC token for sigstore and Fulcio did issue a certificate -- `logIndex=2742821710` is a real DSSE entry
+whose leaf certificate carries the SAN
+`https://github.com/aywengo/mercury/.github/workflows/release.yml@refs/tags/host-v0.1.0-rc1`. So the
+statement exists **in the Rekor transparency log**. What never happened is npm **attaching it to the
+published version**. The consequence is not academic: `npm audit signatures`, the registry attestations
+API, and every consumer that checks the package rather than Rekor see nothing at all for `0.1.0-rc1`.
+
+So a token fallback buys a release whose provenance is unverifiable by the tooling people actually use.
+Treat it as a downgrade, not a workaround, and say so in the release notes if you use it. Verify a
+published version carries attestations:
 
 ```bash
 curl -sS --max-time 30 -o /dev/null -w '%{http_code}\n' \
@@ -262,9 +280,11 @@ curl -sS --max-time 30 -o /dev/null -w '%{http_code}\n' \
 
 `200` means the version has attestations; `404` means it does not. `-f` is deliberately absent: the
 answer you want is often an HTTP error, and `curl -f` exits non-zero on 404, so the command would both
-print the result and report failure. A token publish is a workaround for a
-blocked exchange, not the steady state: delete the secret afterwards, because the workflow prefers
-`NPM_TOKEN` whenever it is present and would keep using it.
+print the result and report failure. `0.1.0-rc1` is the version to point at when someone
+argues the log line is proof enough: run the command against it and read the 404. A token publish is a
+last resort for a blocked exchange, never the steady state, and it leaves the artifact unattested --
+delete the secret afterwards either way, because the workflow prefers `NPM_TOKEN` whenever it is present
+and would keep using it.
 
 Two things to know about the npm-side configuration, both on the package's *Trusted Publisher* settings
 page (which only exists once the package has been published at least once):

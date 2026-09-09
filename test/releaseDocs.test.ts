@@ -684,3 +684,59 @@ test('the docs do not call the Fleet package absent while the registry serves it
   // And the placeholder is a live trap: `latest` points at a non-release that prints `0.1.0`.
   assert.match(docs, /placeholder/, 'the docs must warn that latest points at a bootstrap placeholder');
 });
+
+test('the runbook does not claim a token publish preserves attestations', () => {
+  // The runbook used to say, in bold: "The fallback is a short-lived token, and it does not cost you
+  // provenance." It cited a real log line and a real Rekor entry, and was still wrong. Measured on the
+  // registry, `@aywengo/mercury@0.1.0-rc1` -- the very run cited -- has NO attestations (404), while
+  // `0.1.0-rc2` and `0.1.0`, both published through OIDC trusted publishing, each carry two including
+  // `slsa.dev/provenance/v1`. npm wrote the statement to Rekor but never attached it to the version, so
+  // `npm audit signatures` and the registry API see nothing. This is the most consequential doc error
+  // in the release path, because it is the argument that talks an operator into silently downgrading a
+  // release while believing they kept its security property.
+  const doc = read('docs/releasing.md').replace(/\r\n/g, '\n');
+  const paras = doc.split(/[ \t]*\n[ \t]*\n/);
+  const claim = paras.filter((x) => /short-lived token/.test(x));
+  assert.equal(claim.length, 1, 'exactly one paragraph must carry the token-fallback guidance');
+  assert.match(claim[0], /DOES cost you provenance|does cost you provenance/i,
+    'the guidance must state that the token fallback costs provenance');
+  assert.ok(!/does not cost you provenance/i.test(claim[0]),
+    'the disproven claim must not come back');
+  // The correction is only useful if it names the measured evidence rather than just the conclusion.
+  // Scoped to the fallback section. `Rekor` is discussed legitimately further down the file, so a
+  // whole-document match was satisfied even with the explanation deleted here -- the same scope error
+  // that bit the bootstrap guard.
+  const section = doc.slice(doc.indexOf(claim[0]), doc.indexOf(claim[0]) + 3000);
+  assert.match(section, /0\.1\.0-rc1[^|]*\|[^|]*`?NPM_TOKEN`?[^|]*\|[^|]*404/,
+    'the table must show rc1 (token) as having no attestations');
+  // The claim, not the keyword: the point is that the statement reached Rekor but npm never attached it
+  // to the version. Asserting bare /Rekor/ was satisfied by the unrelated verification section further
+  // down the same file, so deleting the explanation here went uncaught.
+  assert.match(section, /Rekor[\s\S]{0,400}?(?:never|not)[\s\S]{0,80}?attach\w* it to the\s+published version/i,
+    'it must say the statement reached Rekor but was never attached to the published version');
+  assert.match(section, /npm audit signatures/, 'and name the tooling that therefore sees nothing');
+});
+
+test('the registry attestations still match what the runbook records', async (t) => {
+  // The corrected passage is a set of claims about three immutable published versions. Pinning the
+  // wording would let the claims rot silently; this checks them against npm and skips when the network
+  // is unavailable, so CI never depends on a third party it does not control.
+  const probe = async (ver: string): Promise<number> => {
+    try {
+      const res = await fetch(
+        `https://registry.npmjs.org/-/npm/v1/attestations/@aywengo/mercury@${ver}`,
+        { signal: AbortSignal.timeout(20_000) });
+      return res.status;
+    } catch (e) {
+      return -1;
+    }
+  };
+  const rc1 = await probe('0.1.0-rc1');
+  if (rc1 === -1) { t.skip('registry unreachable'); return; }
+  const stable = await probe('0.1.0');
+  if (stable === -1) { t.skip('registry unreachable'); return; }
+  assert.equal(rc1, 404,
+    'the runbook records rc1 (token-published) as having no attestations; if that changed, correct the doc');
+  assert.equal(stable, 200,
+    'the runbook records 0.1.0 (OIDC-published) as carrying attestations; if that changed, correct the doc');
+});
