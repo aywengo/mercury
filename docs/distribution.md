@@ -8,7 +8,7 @@ Status header: npm, GitHub Release and Homebrew are all implemented in `release.
 
 | Channel | Command | Ships | State |
 | --- | --- | --- | --- |
-| npm | `npm install -g @aywengo/mercury@<tag>` | host + `mercuryctl` | live; `0.1.0` on `latest`, `0.1.0-rc2` on `rc` |
+| npm | `npm install -g @aywengo/mercury@<tag>` | host + `mercuryctl` | live; stable on `latest`, prereleases on `rc` (`npm view @aywengo/mercury dist-tags`) |
 | GitHub Release | download asset, or `git clone` | host + `mercuryctl` | implemented |
 | Git checkout | `git clone` + `npm ci` | host + `mercuryctl` | implemented (see #266) |
 | Homebrew | `brew tap aywengo/mercury https://github.com/aywengo/mercury` then `brew install mercury-ai` | host + `mercuryctl` | wired into the release job |
