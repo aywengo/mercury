@@ -526,12 +526,50 @@ jobs:
           formula_live=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
             "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/Formula/mercury-ai.rb" \
             || echo 000)
+          # Whether this VERSION is installable is a different fact from whether THIS RUN published
+          # it, and the body is a promise to readers about the former. A publish can fail on a version
+          # that is already on the registry -- a re-tag, or a version published outside CI -- and the
+          # job then correctly says "already on the registry" while the body said "not on the npm
+          # registry" and "unavailable by every channel". Both sentences were in the same run. Ask the
+          # registry which is true rather than inferring installability from this job's exit status.
+          version_live="000"
           if [ "$npm_ok" = "0" ]; then
+            version_live=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+              "https://registry.npmjs.org/${pkg_esc}/${version}" || echo 000)
+          fi
+          if [ "$npm_ok" = "0" ] && [ "$version_live" = "200" ]; then
+            {
+              echo ""
+              echo "## npm package: this version is published, but not by this run"
+              echo ""
+              echo "\`npm ${npm_verb}\` failed because \`${pkg_name}@${version}\` is **already on the"
+              echo "registry**. It is installable:"
+              echo ""
+              echo "\`\`\`bash"
+              echo "npm install -g ${pkg_name}@${version}"
+              echo "\`\`\`"
+              echo ""
+              echo "This run did not publish it, so nothing here attests to where it came from: the"
+              echo "provenance this job would have created does not exist, and whoever published that"
+              echo "version is not recorded in this release. Confirm its origin before treating it as"
+              echo "the release artifact."
+              echo ""
+              echo "The job that produced this release is marked failed so the discrepancy stays visible."
+            } >> "$notes"
+          elif [ "$npm_ok" = "0" ]; then
             {
               echo ""
               echo "## npm package not available for this release"
               echo ""
-              echo "The \`npm ${npm_verb}\` step failed, so this version is **not** on the npm registry."
+              # Only a 404 on the version itself licenses "not on the registry". A 000 from curl, or a
+              # 403/5xx from a rate limit, says nothing, and the sentence below is a refusal: it stops
+              # readers installing something that may in fact be there.
+              if [ "$version_live" = "404" ]; then
+                NOT_ON_REGISTRY='this version is **not** on the npm registry.'
+              else
+                NOT_ON_REGISTRY="the registry could not confirm this version (HTTP \`${version_live}\`);"
+              fi
+              echo "The \`npm ${npm_verb}\` step failed, and ${NOT_ON_REGISTRY}"
               echo "Do not follow any \`npm install\` instruction below for this version."
               echo ""
               # Which alternatives exist depends on the product, and getting this wrong is the exact
