@@ -384,7 +384,9 @@ test('docs never present the unpublished Fleet package as installable', () => {
     'the Fleet release notes must state up front that the release never happened');
   // Forbid it as an executable instruction, not as a quoted correction: the correction block has to
   // name the command it is retracting, and forbidding that would force history to be erased.
-  const fences = notes.match(/```(?:bash|sh|shell)[\s\S]*?```/g) ?? [];
+  // Any fence, tagged or not: an untyped ``` block is just as runnable, and so is any language tag
+  // a future editor might reach for. Matching only bash|sh|shell would let the command back in.
+  const fences = notes.match(/```[^\n]*\n[\s\S]*?```/g) ?? [];
   assert.ok(!fences.some((b) => /npm install[^\n]*mercury-fleet/.test(b)),
     `the Fleet notes must not offer a runnable install for a package that does not exist: ${fences}`);
 });
@@ -393,7 +395,7 @@ test('the Fleet changelog does not offer an npm install for a package that is no
   // fleet/CHANGELOG.md announced "First public Fleet release" with `npm install -g
   // @aywengo/mercury-fleet`. The package 404s, so the only working path is a source checkout.
   const log = read('fleet/CHANGELOG.md');
-  const fences = log.match(/```(?:bash|sh|shell)[\s\S]*?```/g) ?? [];
+  const fences = log.match(/```[^\n]*\n[\s\S]*?```/g) ?? [];
   assert.ok(!fences.some((b) => /npm install[^\n]*mercury-fleet/.test(b)),
     'no runnable npm install for the unpublished Fleet package');
   assert.match(log, /never published|not on the npm registry/i,
