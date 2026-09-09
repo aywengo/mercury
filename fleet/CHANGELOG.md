@@ -10,8 +10,10 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [0.1.0-rc1] - 2026-09-06
 
-First public Fleet release (Phase 0). Install from git or
-`npm install -g @aywengo/mercury-fleet`.
+Fleet Phase 0, recorded here as a version but **never published**: `@aywengo/mercury-fleet`
+is not on the npm registry (404), there is no `fleet-v0.1.0-rc1` tag and no GitHub Release for it, so
+`npm install -g @aywengo/mercury-fleet` does not work. Fleet can only be run from a source checkout
+(`npm run fleet`). See [`../docs/releases/fleet/0.1.0-rc1.md`](../docs/releases/fleet/0.1.0-rc1.md).
 
 ### Added
 

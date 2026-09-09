@@ -242,11 +242,12 @@ retried.
 `GET /healthz` is unauthenticated and returns:
 
 ```json
-{ "ok": true, "ts": "2026-09-05T12:00:00.000Z", "product": "host", "version": "0.1.0-rc1" }
+{ "ok": true, "ts": "2026-09-05T12:00:00.000Z", "product": "host", "version": "0.1.0" }
 ```
 
-`product` is always `host` on this process. `version` matches
-`package.json` / `HOST_VERSION`. This is not a capabilities API.
+`product` is always `host` on this process. `version` is the running build's SemVer, taken from
+`package.json` / `HOST_VERSION`, so the value above is a sample and not a promise about what a given
+server reports. This is not a capabilities API.
 
 `/healthz/workers` returns `503` when the API was started without queue
 dependencies. That means “reachable but not serving Runs,” not “host down.”
