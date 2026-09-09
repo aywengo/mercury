@@ -368,3 +368,23 @@ test('the distribution table describes channels, not pinned versions', () => {
   assert.match(state, /latest/, 'must name the stable channel');
   assert.match(state, /dist-tags|npm view/, 'must point at the registry for the current value');
 });
+
+test('docs never present the unpublished Fleet package as installable', () => {
+  // @aywengo/mercury-fleet returns 404, there is no fleet tag and no fleet GitHub Release, and
+  // release.yml says outright that it "has never been published". The Fleet release notes nonetheless
+  // told readers it was published to `rc` and gave a working install command. SECURITY.md listed it as
+  // a supported product. Both are now corrections, and this guard keeps them corrections.
+  const sec = read('SECURITY.md');
+  const fleetRow = sec.split('\n').find((l) => /mercury-fleet/.test(l));
+  assert.ok(fleetRow, 'SECURITY.md should keep its Fleet row');
+  assert.match(fleetRow, /Not released/, `Fleet must not be listed as supported: ${fleetRow}`);
+
+  const notes = read('docs/releases/fleet/0.1.0-rc1.md');
+  assert.match(notes, /never (been )?published/i,
+    'the Fleet release notes must state up front that the release never happened');
+  // Forbid it as an executable instruction, not as a quoted correction: the correction block has to
+  // name the command it is retracting, and forbidding that would force history to be erased.
+  const fences = notes.match(/```(?:bash|sh|shell)[\s\S]*?```/g) ?? [];
+  assert.ok(!fences.some((b) => /npm install[^\n]*mercury-fleet/.test(b)),
+    `the Fleet notes must not offer a runnable install for a package that does not exist: ${fences}`);
+});
