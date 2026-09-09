@@ -253,7 +253,7 @@ jobs:
             # `npm publish --dry-run --provenance --loglevel verbose` and printing derived verdicts.
             # That capture is in the host rehearsal branch only. A fleet rehearsal runs a plain
             # `npm publish --dry-run` and emits no OIDC verdicts, which is correct rather than an
-            # oversight: @aywengo/mercury-fleet has never been published, so an exchange for it has
+            # oversight: no Fleet release has ever been published, so an exchange for it has
             # nothing to authenticate against and a verdict would be noise. The fleet gate earlier in
             # this job says so directly.
             #
@@ -279,7 +279,7 @@ jobs:
           # One variant of that outcome is certain before anything else runs. Trusted publishing is
           # configured on the package page, so the page must exist first; creating the page needs a first
           # publish; and a first publish cannot use trusted publishing, because there is no page to trust
-          # yet. So a fleet tag pushed without a credential, for a package that has never been published,
+          # yet. So a fleet tag pushed without a credential, for a version that has never been published,
           # cannot succeed whatever else is true. Say that here rather than after making an empty release.
           #
           # The gate asks the registry instead of hard-coding the package name, so it removes itself the
@@ -477,7 +477,7 @@ jobs:
               # The comment above says a rejected publisher and a nonexistent package look identical in
               # npm's log. They do -- but not to the registry, whose package metadata is public. One
               # request settles which this is, and the Fleet product makes the difference concrete:
-              # @aywengo/mercury-fleet has never been published, so without this a fleet tag sends the
+              # No Fleet release has ever been published, so without this a fleet tag sends the
               # operator to a Trusted Publisher settings page that does not exist, for a package that
               # does not exist, blaming a credential that was never the problem.
               echo "  cause: ${pkg_name} does not exist on the registry. It has never been published," >&2

@@ -10,9 +10,10 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [0.1.0] - not yet published
 
-First published Fleet release, **pending**: `@aywengo/mercury-fleet` is still not on the npm
-registry, so nothing here is installable yet. Fleet runs from a source checkout with
-`npm run fleet`. See [the release notes](../docs/releases/fleet/0.1.0.md) for what publishing
+First published Fleet release, **pending**: `0.1.0` is not on the npm registry, so nothing here is
+installable yet. Fleet runs from a source checkout with `npm run fleet`. The package page exists --
+created by a `0.0.1-bootstrap` placeholder that trusted publishing requires first -- and `latest`
+points at it, so do not read a bare `npm install -g @aywengo/mercury-fleet` as installing a release. See [the release notes](../docs/releases/fleet/0.1.0.md) for what publishing
 still requires.
 
 The one packaging change since `0.1.0-rc1` matters more than it looks: the package now ships
@@ -30,10 +31,11 @@ under `node_modules`, so the package would have installed cleanly and failed on 
 
 ## [0.1.0-rc1] - 2026-09-06
 
-Recorded here as a version but **never published**: `@aywengo/mercury-fleet`
-is not on the npm registry (404), there is no `fleet-v0.1.0-rc1` tag and no GitHub Release for it, so
-`npm install -g @aywengo/mercury-fleet` does not work. Fleet can only be run from a source checkout
-(`npm run fleet`). See [`../docs/releases/fleet/0.1.0-rc1.md`](../docs/releases/fleet/0.1.0-rc1.md).
+Recorded here as a version but **never published**: `0.1.0-rc1` is not on the
+npm registry, there is no `fleet-v0.1.0-rc1` tag and no GitHub Release for it. A bare
+`npm install -g @aywengo/mercury-fleet` does not install this version either -- it resolves `latest`,
+which currently points at the `0.0.1-bootstrap` placeholder that created the package page, not at any
+Fleet release. Fleet runs from a source checkout (`npm run fleet`). See [`../docs/releases/fleet/0.1.0-rc1.md`](../docs/releases/fleet/0.1.0-rc1.md).
 
 ### Added
 

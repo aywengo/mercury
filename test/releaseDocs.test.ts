@@ -16,6 +16,34 @@ import { join } from 'node:path';
  */
 
 const ROOT = join(import.meta.dirname, '..');
+/**
+ * Does this text claim the Fleet PACKAGE is absent, as opposed to one VERSION of it?
+ *
+ * Anchoring on the package name was the first attempt and it missed `docs/README.md`, which says only
+ * "the package does not exist on npm" without ever naming it. The signal that actually separates the
+ * two claims is a version qualifier: "`0.1.0` is not on the registry" stays true after the bootstrap
+ * publish, "the package is not on the registry" becomes false. So look for an absence phrase with no
+ * SemVer in the run-up to it.
+ */
+function claimsPackageAbsent(text: string): boolean {
+  const phrase = /\b(?:does not exist|doesn't exist|is still absent|is not on the npm registry|absent from the npm registry|returns? `?404`?)/gi;
+  for (const m of text.matchAll(phrase)) {
+    // Scope to the CLAUSE, not a fixed character window. A window picked up versions from adjacent
+    // markdown links and headings, which suppressed real claims: "Fleet 0.1.0](...) -- the package
+    // does not exist on npm" looked version-qualified because the link text two clauses away names a
+    // version. The qualifier that matters is the subject of THIS clause.
+    const start = Math.max(
+      text.lastIndexOf('.', m.index!), text.lastIndexOf('\n', m.index!), text.lastIndexOf(';', m.index!),
+      text.lastIndexOf(':', m.index!), text.lastIndexOf(',', m.index!),
+      m.index! - 2 > 0 && text.slice(m.index! - 2, m.index!) === '--' ? m.index! - 2 : -1,
+      text.lastIndexOf('>', m.index!), 0);
+    const clause = text.slice(start, m.index!);
+    const aboutPackage = /\bpackage\b|mercury-fleet/i.test(clause);
+    const versionQualified = /\d+\.\d+\.\d+/.test(clause);
+    if (aboutPackage && !versionQualified) return true;
+  }
+  return false;
+}
 const read = (p: string) => readFileSync(join(ROOT, p), 'utf8');
 
 const WORKFLOW = '.github/workflows/release.yml';
@@ -248,7 +276,7 @@ test('the runbook does not let a rehearsal stand in for provenance signing', () 
 });
 
 test('the runbook gives the fleet bootstrap command and warns where to run it', () => {
-  // @aywengo/mercury-fleet does not exist yet, so its first publish cannot use trusted publishing -- the
+  // No Fleet release exists yet, so the first release publish cannot use trusted publishing -- the
   // package page that configures it requires the package to exist first. The one command that can do it is
   // dangerous in a specific way: `npm publish` from the repository root publishes @aywengo/mercury, the host
   // package, not fleet. Naming the directory is therefore not formatting, it is the difference between
@@ -407,8 +435,8 @@ test('the distribution table describes channels, not pinned versions', () => {
 });
 
 test('docs never present the unpublished Fleet package as installable', () => {
-  // @aywengo/mercury-fleet returns 404, there is no fleet tag and no fleet GitHub Release, and
-  // release.yml says outright that it "has never been published". The Fleet release notes nonetheless
+  // No Fleet release version has ever been published, there is no fleet tag and no fleet GitHub
+  // Release. The Fleet release notes nonetheless
   // told readers it was published to `rc` and gave a working install command. SECURITY.md listed it as
   // a supported product. Both are now corrections, and this guard keeps them corrections.
   const sec = read('SECURITY.md');
@@ -528,6 +556,8 @@ type FleetDocState = {
   docsOfferInstall: boolean;
   /** SECURITY.md presents Fleet as a released, supported product. */
   securitySaysReleased: boolean;
+  /** Docs state that the PACKAGE itself is absent from the registry. */
+  docsClaimPackageAbsent: boolean;
 };
 
 function fleetDocDrift(s: FleetDocState): string[] {
@@ -544,6 +574,14 @@ function fleetDocDrift(s: FleetDocState): string[] {
   if (s.securitySaysReleased !== published) {
     problems.push(`SECURITY.md says released=${s.securitySaysReleased} while the registry says ${published}`);
   }
+  // A separate fact from whether a RELEASE version exists. The bootstrap publish created the package
+  // page, so "the package does not exist on npm" became false while "0.1.0 is not published" stayed
+  // true. Four documents asserted the first, and every guard in this file was satisfied by both,
+  // because none of them distinguished the package from the version.
+  if (s.registryVersions.length > 0 && s.docsClaimPackageAbsent) {
+    problems.push(`the registry serves ${s.registryVersions.join(', ')} but the docs say the package `
+      + 'itself does not exist');
+  }
   return problems;
 }
 
@@ -552,7 +590,7 @@ test('the registry comparison fires when docs claim an install that is not publi
   // quiet, which is also what a guard that can never fire looks like.
   const problems = fleetDocDrift({
     registryVersions: ['0.0.1-bootstrap'], manifestVersion: '0.1.0',
-    docsOfferInstall: true, securitySaysReleased: true,
+    docsOfferInstall: true, securitySaysReleased: true, docsClaimPackageAbsent: false,
   });
   assert.equal(problems.length, 2, `expected both the install and SECURITY.md to be reported: ${problems}`);
   assert.match(problems.join('\n'), /offer an install but the registry has no 0\.1\.0/);
@@ -564,7 +602,7 @@ test('the registry comparison fires when docs withhold an install that is publis
   // telling anyone the package is installable.
   const problems = fleetDocDrift({
     registryVersions: ['0.0.1-bootstrap', '0.1.0'], manifestVersion: '0.1.0',
-    docsOfferInstall: false, securitySaysReleased: false,
+    docsOfferInstall: false, securitySaysReleased: false, docsClaimPackageAbsent: false,
   });
   assert.equal(problems.length, 2, `expected both to be reported: ${problems}`);
   assert.match(problems.join('\n'), /still refuse to offer an install/);
@@ -575,6 +613,7 @@ test('an unreachable registry is not reported as drift', () => {
   // network is down, which is the fastest way to get a useful guard deleted.
   assert.deepEqual(fleetDocDrift({
     registryVersions: null, manifestVersion: '0.1.0', docsOfferInstall: false, securitySaysReleased: false,
+    docsClaimPackageAbsent: true,
   }), []);
 });
 
@@ -601,7 +640,8 @@ test('the Fleet docs match what the npm registry actually serves', async (t) => 
   }
 
   const notesDir = join(ROOT, 'docs', 'releases', 'fleet');
-  const docsText = ['fleet/CHANGELOG.md', ...readdirSync(notesDir).filter((f) => f.endsWith('.md'))
+  const docsText = ['fleet/CHANGELOG.md', 'docs/README.md',
+    ...readdirSync(notesDir).filter((f) => f.endsWith('.md'))
     .map((f) => join('docs/releases/fleet', f))].map((f) => read(f)).join('\n');
   // Only a command inside a fenced block counts as an offer: prose that merely names the package is not
   // something a reader runs, and the original defect was a runnable command.
@@ -610,11 +650,37 @@ test('the Fleet docs match what the npm registry actually serves', async (t) => 
   const secRow = read('SECURITY.md').split('\n').find((l) => /mercury-fleet/.test(l)) ?? '';
   assert.ok(secRow, 'SECURITY.md must keep its Fleet row');
 
+  // "The package does not exist" and "this version is not published" are different claims, and the
+  // bootstrap publish made the first false while the second stayed true. Detect the first by looking for
+  // the package name near an absence claim with no version between them.
+  const docsClaimPackageAbsent = claimsPackageAbsent(docsText);
   const state: FleetDocState = {
     registryVersions, manifestVersion: manifest.version, docsOfferInstall,
-    securitySaysReleased: !/Not released/i.test(secRow),
+    securitySaysReleased: !/Not released/i.test(secRow), docsClaimPackageAbsent,
   };
   assert.deepEqual(fleetDocDrift(state), [],
     `docs and registry disagree (registry serves ${registryVersions.join(', ') || 'nothing'}, `
     + `docs offer install=${docsOfferInstall}):\n${read('docs/releases/fleet/0.1.0.md').slice(0, 200)}`);
+});
+
+test('the registry comparison fires when docs call an existing package absent', () => {
+  // The bootstrap publish created the package page. Four documents kept saying the package "does not
+  // exist on npm", which was then false, while "0.1.0 is not published" remained true. Every guard in
+  // this file passed throughout, because none distinguished the package from the version.
+  const problems = fleetDocDrift({
+    registryVersions: ['0.0.1-bootstrap'], manifestVersion: '0.1.0',
+    docsOfferInstall: false, securitySaysReleased: false, docsClaimPackageAbsent: true,
+  });
+  assert.equal(problems.length, 1, `expected exactly the package-absence claim: ${problems}`);
+  assert.match(problems[0], /package itself does not exist/);
+});
+
+test('the docs do not call the Fleet package absent while the registry serves it', () => {
+  // The textual half of the same invariant, so a regression is caught even where the live read skips.
+  const docs = ['fleet/CHANGELOG.md', 'docs/README.md', 'docs/releases/fleet/0.1.0.md',
+    'docs/releases/fleet/0.1.0-rc1.md'].map((f) => read(f)).join('\n');
+  assert.ok(!claimsPackageAbsent(docs),
+    'the package page exists; say which VERSION is unpublished instead of calling the package absent');
+  // And the placeholder is a live trap: `latest` points at a non-release that prints `0.1.0`.
+  assert.match(docs, /placeholder/, 'the docs must warn that latest points at a bootstrap placeholder');
 });
