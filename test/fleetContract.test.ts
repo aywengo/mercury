@@ -109,18 +109,39 @@ async function realFleet(mercuryUrl: string, dir: string) {
   child.stdout!.on('data', (c: string) => logs.push(c));
   child.stderr!.on('data', (c: string) => logs.push(c));
 
+  // Everything from spawn() to the returned close() must kill the child on the way out. If startup
+  // throws and the caller never receives an object, nobody can close it: the child survives holding
+  // FLEET_PORT, and the next test in the file gets EADDRINUSE or, worse, talks to the orphan. A leak
+  // that only happens when something already failed is the kind a green suite never shows you.
+  //
+  // Both throw paths below call the same kill(). The early-exit path is exercised for real: removing
+  // FLEET_ADMIN_TOKEN makes `fleet serve` die on a config error, and the suite then fails with the
+  // child's own log and leaves no `fleet/cli.ts` process behind. The 30s timeout path shares this
+  // helper but is NOT exercised by a test -- forcing it needs a child that stays alive yet never serves
+  // 200, and Fleet refuses to bind any address but exactly 127.0.0.1 without TLS (assertServeable in
+  // fleet/config.ts), so there is no deterministic way to get one.
+  const kill = () => new Promise<void>((done) => {
+    if (child.exitCode !== null) return done();
+    const t = setTimeout(() => { child.kill('SIGKILL'); done(); }, 5_000);
+    child.on('exit', () => { clearTimeout(t); done(); });
+    child.kill('SIGTERM');
+  });
   const started = Date.now();
   let last = 'no response';
+  let ready = false;
   while (Date.now() - started < 30_000) {
-    if (child.exitCode !== null) throw new Error(`fleet serve exited early (${child.exitCode}):\n${logs.join('')}`);
+    if (child.exitCode !== null) { await kill(); throw new Error(`fleet serve exited early (${child.exitCode}):\n${logs.join('')}`); }
     try {
       const r = await fetch(`${base}/healthz`, { signal: AbortSignal.timeout(5_000) });
-      if (r.status === 200) break;
+      if (r.status === 200) { ready = true; break; }
       last = String(r.status);
     } catch (e) { last = String(e); }
     await new Promise((r) => setTimeout(r, 200));
   }
-  if (last !== 'no response' && child.exitCode !== null) throw new Error(`fleet serve died: ${logs.join('')}`);
+  if (!ready) {
+    await kill();
+    throw new Error(`fleet serve never became healthy within 30s; last: ${last}\n${logs.join('')}`);
+  }
 
   const req = async (path: string, token: string | null, init?: RequestInit) => {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -139,15 +160,7 @@ async function realFleet(mercuryUrl: string, dir: string) {
     },
     async probe(id = 'lab-1') { return req(`/fleet/hosts/${id}/probe`, ADMIN_TOKEN, { method: 'POST' }); },
     async hosts() { return req('/fleet/hosts', CALLER_TOKEN); },
-    async close() {
-      if (child.exitCode === null) {
-        child.kill('SIGTERM');
-        await new Promise<void>((done) => {
-          const t = setTimeout(() => { child.kill('SIGKILL'); done(); }, 5_000);
-          child.on('exit', () => { clearTimeout(t); done(); });
-        });
-      }
-    },
+    close: kill,
   };
 }
 
@@ -155,16 +168,21 @@ async function withStack(
   run: (m: Awaited<ReturnType<typeof realMercury>>, f: Awaited<ReturnType<typeof realFleet>>) => Promise<void>,
   opts: { queue?: boolean } = {},
 ) {
-  const dir = tempDir('fleet-contract');
-  const mercury = await realMercury(opts);
+  // Every resource is acquired INSIDE the try. Acquiring before it means a throw between acquisition
+  // and the try leaves the resource unreachable by the finally -- the shape that orphaned a temp dir
+  // and, with realFleet, a live child holding a port.
+  let dir: string | null = null;
+  let mercury: Awaited<ReturnType<typeof realMercury>> | null = null;
   let fleet: Awaited<ReturnType<typeof realFleet>> | null = null;
   try {
+    dir = tempDir('fleet-contract');
+    mercury = await realMercury(opts);
     fleet = await realFleet(mercury.url, dir);
     await run(mercury, fleet);
   } finally {
     if (fleet) await fleet.close();
-    await mercury.close();
-    rmSync(dir, { recursive: true, force: true });
+    if (mercury) await mercury.close();
+    if (dir) rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -320,7 +338,31 @@ test('this test reaches Fleet only over a socket, never by import', async () => 
   // here to "simplify" the harness, the test stops proving processes agree and starts proving modules
   // agree, which is a much weaker claim that in-process tests already make.
   const src = await import('node:fs').then((fs) => fs.readFileSync(import.meta.dirname + '/fleetContract.test.ts', 'utf8'));
-  const imports = [...src.matchAll(/from\s+['"]([^'"]+)['"]/g)].map((m) => m[1]!);
-  const fleetImports = imports.filter((s) => s.includes('/fleet/') || s.startsWith('../fleet'));
+  // Strip comments first: this file's own prose mentions "fleet/", and matching prose would report a
+  // violation that is not an import. Same reason testHygiene.test.ts carries a codeOnly() helper.
+  const code = src
+    .split('\n')
+    .filter((l) => !l.trim().startsWith('//'))
+    .map((l) => {
+      const i = l.search(/\s\/\//);
+      if (i < 0) return l;
+      const before = l.slice(0, i);
+      return (before.match(/(?<!\\)['"`]/g) ?? []).length % 2 === 0 ? before : l;
+    })
+    .join('\n');
+
+  // Every way a module can be pulled in, not just the static form. A guard matching only `from '...'`
+  // passes while an import() or require() reaches straight into fleet/, and reports "no fleet imports"
+  // about a file that has one -- worse than no guard, because it looks like a check.
+  const specifiers = [
+    ...[...code.matchAll(/\bfrom\s+['"`]([^'"`]+)['"`]/g)].map((m) => m[1]!),
+    ...[...code.matchAll(/\bimport\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g)].map((m) => m[1]!),
+    ...[...code.matchAll(/\brequire\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g)].map((m) => m[1]!),
+  ];
+  const fleetImports = specifiers.filter((spec) => spec.includes('/fleet/') || spec.startsWith('../fleet'));
   assert.deepEqual(fleetImports, [], `this file must reach Fleet by process + HTTP only, but imports: ${fleetImports.join(', ')}`);
+
+  // The guard must be capable of failing. A regex that matches nothing at all is indistinguishable from
+  // a file with no violations, so assert the scan is actually reading this file.
+  assert.ok(specifiers.length > 5, `the import scan found only ${specifiers.length} specifiers; it is not reading this file`);
 });
