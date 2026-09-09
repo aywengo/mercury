@@ -496,3 +496,117 @@ test('no Fleet doc claims a shipped capability is absent', () => {
     }
   }
 });
+
+/**
+ * Does the documentation match what the registry actually serves?
+ *
+ * Every other guard in this file is textual, which has a specific blind spot: it cannot tell whether the
+ * package exists. That blind spot is how the original false claim shipped -- `docs/releases/fleet/0.1.0.md`
+ * told readers Fleet was published to `rc` and gave a working install command while the package returned
+ * 404, and SECURITY.md listed it as a supported product. A textual guard was satisfied by the corrected
+ * wording afterwards, and would have been equally satisfied by an early re-flip to "installable".
+ *
+ * So the decision is factored out as a pure function and tested against BOTH directions with synthetic
+ * inputs. A guard whose only passing evidence is "no violations today" is unproven; these prove it fires.
+ * The live registry read is kept in one test that skips when the network is unavailable, so CI never
+ * depends on a third party it does not control.
+ */
+type FleetDocState = {
+  /** Versions the registry serves, or null when the registry could not be reached. */
+  registryVersions: string[] | null;
+  /** The version fleet/package.json is releasing. */
+  manifestVersion: string;
+  /** Docs offer a runnable `npm install` of the Fleet package. */
+  docsOfferInstall: boolean;
+  /** SECURITY.md presents Fleet as a released, supported product. */
+  securitySaysReleased: boolean;
+};
+
+function fleetDocDrift(s: FleetDocState): string[] {
+  if (s.registryVersions === null) return [];
+  const published = s.registryVersions.includes(s.manifestVersion);
+  const problems: string[] = [];
+  if (published && !s.docsOfferInstall) {
+    problems.push(`the registry serves ${s.manifestVersion} but the docs still refuse to offer an install`);
+  }
+  if (!published && s.docsOfferInstall) {
+    problems.push(`the docs offer an install but the registry has no ${s.manifestVersion} `
+      + `(it serves ${s.registryVersions.join(', ') || 'nothing'})`);
+  }
+  if (s.securitySaysReleased !== published) {
+    problems.push(`SECURITY.md says released=${s.securitySaysReleased} while the registry says ${published}`);
+  }
+  return problems;
+}
+
+test('the registry comparison fires when docs claim an install that is not published', () => {
+  // The #431 defect, expressed as data. Without this case the guard's only evidence is that it stayed
+  // quiet, which is also what a guard that can never fire looks like.
+  const problems = fleetDocDrift({
+    registryVersions: ['0.0.1-bootstrap'], manifestVersion: '0.1.0',
+    docsOfferInstall: true, securitySaysReleased: true,
+  });
+  assert.equal(problems.length, 2, `expected both the install and SECURITY.md to be reported: ${problems}`);
+  assert.match(problems.join('\n'), /offer an install but the registry has no 0\.1\.0/);
+  assert.match(problems.join('\n'), /SECURITY\.md/);
+});
+
+test('the registry comparison fires when docs withhold an install that is published', () => {
+  // The other direction: after the release lands, the same docs become a false understatement and stop
+  // telling anyone the package is installable.
+  const problems = fleetDocDrift({
+    registryVersions: ['0.0.1-bootstrap', '0.1.0'], manifestVersion: '0.1.0',
+    docsOfferInstall: false, securitySaysReleased: false,
+  });
+  assert.equal(problems.length, 2, `expected both to be reported: ${problems}`);
+  assert.match(problems.join('\n'), /still refuse to offer an install/);
+});
+
+test('an unreachable registry is not reported as drift', () => {
+  // Absent evidence is not evidence of absence. Reporting drift here would make CI red whenever the
+  // network is down, which is the fastest way to get a useful guard deleted.
+  assert.deepEqual(fleetDocDrift({
+    registryVersions: null, manifestVersion: '0.1.0', docsOfferInstall: false, securitySaysReleased: false,
+  }), []);
+});
+
+test('the Fleet docs match what the npm registry actually serves', async (t) => {
+  const manifest = JSON.parse(read('fleet/package.json')) as { version: string };
+  let registryVersions: string[] | null = null;
+  try {
+    const res = await fetch('https://registry.npmjs.org/@aywengo%2fmercury-fleet',
+      { signal: AbortSignal.timeout(20_000) });
+    // A 404 is a real answer, not a failure: the package genuinely does not exist yet.
+    if (res.status === 404) registryVersions = [];
+    else if (res.ok) {
+      // Read the body exactly once. `fetch` bodies are single-use, and an assertion message that
+      // interpolates `await res.text()` consumes it even when the assertion passes.
+      const body = await res.text();
+      registryVersions = Object.keys(JSON.parse(body).versions ?? {});
+    } else {
+      t.skip(`registry answered ${res.status}`);
+      return;
+    }
+  } catch (e) {
+    t.skip(`registry unreachable: ${(e as Error).name}`);
+    return;
+  }
+
+  const notesDir = join(ROOT, 'docs', 'releases', 'fleet');
+  const docsText = ['fleet/CHANGELOG.md', ...readdirSync(notesDir).filter((f) => f.endsWith('.md'))
+    .map((f) => join('docs/releases/fleet', f))].map((f) => read(f)).join('\n');
+  // Only a command inside a fenced block counts as an offer: prose that merely names the package is not
+  // something a reader runs, and the original defect was a runnable command.
+  const fences = docsText.match(/```[^\n]*\n[\s\S]*?```/g) ?? [];
+  const docsOfferInstall = fences.some((b) => /npm (?:install|i)\b[^\n]*mercury-fleet/.test(b));
+  const secRow = read('SECURITY.md').split('\n').find((l) => /mercury-fleet/.test(l)) ?? '';
+  assert.ok(secRow, 'SECURITY.md must keep its Fleet row');
+
+  const state: FleetDocState = {
+    registryVersions, manifestVersion: manifest.version, docsOfferInstall,
+    securitySaysReleased: !/Not released/i.test(secRow),
+  };
+  assert.deepEqual(fleetDocDrift(state), [],
+    `docs and registry disagree (registry serves ${registryVersions.join(', ') || 'nothing'}, `
+    + `docs offer install=${docsOfferInstall}):\n${read('docs/releases/fleet/0.1.0.md').slice(0, 200)}`);
+});
