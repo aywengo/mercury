@@ -16,7 +16,21 @@ on:
   # publish is a manual trigger someone eventually pulls by accident. This exists because the tag
   # path had failed three times in a row and every diagnosis required burning a real tag to learn
   # anything.
+  # `product` chooses which release to rehearse. It does NOT weaken the rule above: DRY_RUN still
+  # derives from the event name alone, so a dispatch cannot publish whatever it is pointed at. Without
+  # this the tag is always derived from the host manifest, which means a Fleet release -- a product
+  # whose tag path has never run once -- could not be rehearsed at all, and the only way to learn
+  # anything about it was to push a real tag. That is precisely the cost this trigger exists to remove.
   workflow_dispatch:
+    inputs:
+      product:
+        description: 'Which product to rehearse. A dispatch never publishes, for either product.'
+        required: true
+        type: choice
+        default: 'host'
+        options:
+          - host
+          - fleet
 
 permissions:
   contents: write
@@ -40,14 +54,29 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_DIRECT_PUBLISH: ${{ vars.NPM_DIRECT_PUBLISH }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+          # Which product a rehearsal derives its tag from. Passed as an env var rather than
+          # interpolated into the script body, so the step stays free of ${{ }} expressions and the
+          # harness in test/releaseWorkflow.test.ts can execute this script directly.
+          REHEARSAL_PRODUCT: ${{ inputs.product }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             # A dispatch carries a branch, not a tag. Derive the tag a real release of this commit
-            # would use so every check below runs against the same inputs a real run would see.
-            tag="host-v$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).version)")"
-            echo "rehearsal: derived ${tag} from package.json; a dispatch carries no tag"
+            # would use so every check below runs against the same inputs a real run would see. The
+            # manifest must be the one the chosen product publishes from, or a fleet rehearsal silently
+            # rehearses the host release and reports success about the wrong product. There is no
+            # explicit existence check on the manifest: `node -e` already aborts the step with an ENOENT
+            # naming the file, and a check added here proved untestable -- deleting it changed nothing
+            # observable, because the fallback failure is already loud. The behaviour is pinned by a test
+            # instead of the code being pinned by a comment.
+            rehearsal_product="${REHEARSAL_PRODUCT:-host}"
+            case "$rehearsal_product" in
+              fleet) rehearsal_manifest='fleet/package.json' ;;
+              *)     rehearsal_manifest='package.json' ;;
+            esac
+            tag="${rehearsal_product}-v$(node -e "console.log(JSON.parse(require('fs').readFileSync('${rehearsal_manifest}','utf8')).version)")"
+            echo "rehearsal: derived ${tag} from ${rehearsal_manifest}; a dispatch carries no tag"
           fi
           if [[ ! "$tag" =~ ^(host|fleet)-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
             echo "refusing tag ${tag}; expected host-vX.Y.Z[-prerelease] or fleet-vX.Y.Z[-prerelease]" >&2

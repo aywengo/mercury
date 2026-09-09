@@ -96,7 +96,7 @@ function runTag(
     npmSubmitErr?: string; exchange?: string; exchangeExit?: number; missing?: string; missingExit?: number;
     bundleLie?: string;
     exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
-    control2?: string; control2Exit?: number } = {},
+    control2?: string; control2Exit?: number; rehearsalProduct?: string; fleetPkgVersion?: string; omitFleetManifest?: boolean } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -106,8 +106,11 @@ function runTag(
       JSON.stringify({ name: '@aywengo/mercury', version: opts.pkgVersion ?? pkg.version }));
     writeFileSync(join(tmp, 'fleet-package-dir-marker'), '');
     mkdirSync(join(tmp, 'fleet'), { recursive: true });
-    writeFileSync(join(tmp, 'fleet', 'package.json'),
-      JSON.stringify({ name: '@aywengo/mercury-fleet', version: opts.pkgVersion ?? pkg.version }));
+    // Omitted only by the test that checks a fleet rehearsal refuses to fall back to the host manifest.
+    if (!opts.omitFleetManifest) {
+      writeFileSync(join(tmp, 'fleet', 'package.json'),
+        JSON.stringify({ name: '@aywengo/mercury-fleet', version: opts.fleetPkgVersion ?? opts.pkgVersion ?? pkg.version }));
+    }
     // The fleet branch copies LICENSE into fleet/ before publishing. Without it the fleet PUBLISH path
     // could not be exercised at all -- the only pre-existing fleet test asserted a version mismatch,
     // which exits before the cp, so the gap stayed invisible.
@@ -299,6 +302,12 @@ function runTag(
         // the variable being absent altogether rather than merely empty.
         DRY_RUN: opts.omitDryRunVar ? undefined
           : (opts.event ?? 'push') === 'workflow_dispatch' ? 'true' : 'false',
+        // The runner sets this from the workflow_dispatch `product` input. On a push event the input
+        // is absent and the step falls back to host. Set explicitly rather than inherited, so a stray
+        // shell variable cannot silently change which product a rehearsal is about.
+        REHEARSAL_PRODUCT: (opts.event ?? 'push') === 'workflow_dispatch'
+          ? (opts.rehearsalProduct ?? 'host')
+          : undefined,
       },
     });
     const calls = existsSync(join(tmp, 'calls.log')) ? readFileSync(join(tmp, 'calls.log'), 'utf8') : '';
@@ -1276,4 +1285,73 @@ test('a bundler that reports a sha256 the bundle does not have fails the release
   // worse than no release, because brew install then fails with nothing to correlate it to.
   assert.ok(!/npm (stage )?publish/.test(r.stdout), `must not publish on a bad digest:\n${r.stdout}`);
   assert.ok(!/gh release create/.test(r.stdout), `must not create a release on a bad digest:\n${r.stdout}`);
+});
+
+test('a fleet dispatch rehearsal derives its tag from the FLEET manifest, not the host one', () => {
+  // The dispatch trigger derives the tag a real release would use, because a dispatch carries a branch
+  // rather than a tag. It used to hardcode host-v<package.json version>, which meant a Fleet release
+  // could not be rehearsed at all -- and Fleet is a product whose tag path has never once run. The
+  // versions below are deliberately DIFFERENT: if the step read the wrong manifest the derived tag
+  // would carry the host number, and a test using one shared version could not tell the two apart.
+  const HOST = '9.1.1';
+  const FLEET = '9.2.2';
+  const r = runTag(`main`, {
+    event: 'workflow_dispatch', rehearsalProduct: 'fleet',
+    pkgVersion: HOST, fleetPkgVersion: FLEET,
+    notes: [`fleet/${FLEET}.md`],
+  });
+  assert.equal(r.status, 0, `expected a clean fleet rehearsal, got exit ${r.status}:\n${r.stdout}\n${r.stderr}`);
+  assert.match(r.stdout, new RegExp(`fleet-v${FLEET}`),
+    `the rehearsal did not derive the fleet tag from fleet/package.json:\n${r.stdout}`);
+  assert.ok(!r.stdout.includes(`host-v${HOST}`),
+    `a fleet rehearsal derived a host tag:\n${r.stdout}`);
+});
+
+test('a fleet dispatch rehearsal still cannot publish anything', () => {
+  // The dispatch trigger's whole safety property is that it cannot touch the outside world, and that
+  // must survive gaining a product selector: choosing fleet must not turn a rehearsal into a publish.
+  const FLEET = '9.2.2';
+  const r = runTag('main', {
+    event: 'workflow_dispatch', rehearsalProduct: 'fleet', fleetPkgVersion: FLEET,
+    notes: [`fleet/${FLEET}.md`], oidc: true,
+  });
+  assert.equal(r.status, 0, `exit ${r.status}:\n${r.stdout}\n${r.stderr}`);
+  const out = r.stdout + r.stderr;
+  assert.ok(!/npm publish(?!\s+--dry-run)/.test(out.split('\n').filter((l) => l.includes('STUB')).join('\n')),
+    `a fleet rehearsal attempted a real publish:\n${out}`);
+  assert.ok(!out.includes('gh release create'), 'a fleet rehearsal created a GitHub Release');
+  assert.match(out, /rehearsal/i, 'a fleet rehearsal should say it is a rehearsal');
+});
+
+test('a host dispatch rehearsal is unchanged by the product selector', () => {
+  // Regression guard for the default: omitting the selector, or choosing host, must keep deriving the
+  // host tag from the root manifest. Without this the new branch could silently retarget every
+  // existing rehearsal at the fleet manifest.
+  const HOST = '9.1.1';
+  const FLEET = '9.2.2';
+  for (const product of ['host', undefined]) {
+    const r = runTag('main', {
+      event: 'workflow_dispatch', rehearsalProduct: product,
+      pkgVersion: HOST, fleetPkgVersion: FLEET, notes: [`host/${HOST}.md`],
+    });
+    assert.equal(r.status, 0, `product=${product}: exit ${r.status}:\n${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, new RegExp(`host-v${HOST}`), `product=${product} did not derive the host tag:\n${r.stdout}`);
+  }
+});
+
+test('a fleet rehearsal whose fleet manifest is missing fails loudly instead of rehearsing the host', () => {
+  // Falling back to package.json here would report success about the wrong product, which is the exact
+  // failure this whole change exists to remove.
+  const r = runTag('main', {
+    event: 'workflow_dispatch', rehearsalProduct: 'fleet', pkgVersion: '9.1.1',
+    notes: ['fleet/9.1.1.md'], omitFleetManifest: true,
+  });
+  assert.notEqual(r.status, 0, `a missing fleet manifest must fail the rehearsal:\n${r.stdout}\n${r.stderr}`);
+  // The exit code alone does not prove the guard works: with it removed, `node -e` still throws on the
+  // absent file and `set -e` still aborts, so the step fails either way and an assertion on status alone
+  // is satisfied by a mutant that deleted the guard. What the guard uniquely provides is a message that
+  // names the manifest and the product, instead of a raw ENOENT stack from inside a node -e.
+  assert.match(r.stderr, /fleet\/package\.json/,
+    `the failure must name the manifest that is missing:\n${r.stderr}`);
+  assert.match(r.stderr, /fleet/, 'the failure must say which product was being rehearsed');
 });
