@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -400,4 +400,56 @@ test('the Fleet changelog does not offer an npm install for a package that is no
     'no runnable npm install for the unpublished Fleet package');
   assert.match(log, /never published|not on the npm registry/i,
     'the Fleet changelog must say the version was never published');
+});
+
+test('no Fleet doc claims a shipped capability is absent', () => {
+  // Every one of these contradictions came from the same habit: a document written at Phase 0 that
+  // nobody re-read after Phases 1-6 landed. `fleet/CHANGELOG.md` carried "Dispatch: Fleet cannot
+  // start a Run" while `fleet/dispatch.ts` and its tests were in the tree, and `docs/fleet-design.md`
+  // section 15 opened by stating there was "no Fleet server, no Fleet unit, no caller
+  // authentication, and no redactor" while all four existed. Neither sentence was checked against
+  // anything, so both stayed true-looking for months.
+  //
+  // The check is a relationship, not a wording pin: a capability that ships may not be described as
+  // missing. Rewriting the prose freely stays possible; contradicting the tree does not.
+  const shipped: Array<{ file: string; inAbsenceList: RegExp; deniedAs: string }> = [
+    { file: 'fleet/dispatch.ts', inAbsenceList: /\bdispatch\b/i, deniedAs: 'dispatch' },
+    { file: 'fleet/sweep.ts', inAbsenceList: /\b(?:sweep|reconcil\w*)\b/i, deniedAs: 'sweep' },
+    { file: 'fleet/routing.ts', inAbsenceList: /\brouting\b/i, deniedAs: 'routing' },
+    { file: 'fleet/interact.ts', inAbsenceList: /\binteraction\b/i, deniedAs: 'interact' },
+    { file: 'fleet/metrics.ts', inAbsenceList: /\brollup\b/i, deniedAs: 'metrics' },
+    { file: 'fleet/server.ts', inAbsenceList: /\b(?:fleet )?server\b/i, deniedAs: 'server' },
+    { file: 'fleet/auth.ts', inAbsenceList: /caller authentication/i, deniedAs: 'authentication' },
+    { file: 'fleet/redact.ts', inAbsenceList: /\bredactor\b/i, deniedAs: 'redactor' },
+    // The unit is not a fleet/*.ts file, and it was one of the four things section 15 denied.
+    { file: 'deploy/fleet.service', inAbsenceList: /\b(?:systemd )?unit\b/i, deniedAs: 'unit' },
+  ];
+  const missing = shipped.filter((s) => !existsSync(join(ROOT, s.file))).map((s) => s.file);
+  assert.deepEqual(missing, [], 'every artifact listed here must be in the tree, or the guard proves nothing');
+
+  // A section that enumerates what is missing, up to the next heading or end of file. The body must
+  // be consumed with a negative lookahead on the *next heading*: an end-of-string alternative like
+  // `\s*$` under the `m` flag matches the blank line right after the heading, which silently yields
+  // an empty body and a guard that passes everything.
+  const absenceBody = /^#{2,4}[^\n]*\bnot (?:in this release|included|shipped)\b[^\n]*\n((?:(?!^#{2,4}\s)[\s\S])*)/gim;
+
+  for (const doc of ['fleet/CHANGELOG.md', 'docs/releases/fleet/0.1.0-rc1.md', 'docs/fleet-design.md']) {
+    const text = read(doc);
+    const blocks = [...text.matchAll(absenceBody)].map((m) => m[1]);
+    if (doc === 'fleet/CHANGELOG.md') {
+      // Prove the extractor works before trusting a pass over it.
+      assert.ok(blocks.length > 0 && blocks.some((b) => b.trim().length > 0),
+        'the absence-section extractor found nothing, so this guard would pass vacuously');
+    }
+
+    for (const { file, inAbsenceList, deniedAs } of shipped) {
+      for (const block of blocks) {
+        assert.ok(!inAbsenceList.test(block),
+          `${doc}: ${file} ships, so it must not appear under a heading saying it does not`);
+      }
+      const denial = new RegExp(
+        `there (?:is|are) no[^.]*\\b${deniedAs}\\b|\\b${deniedAs}\\b[^.]{0,40}does not exist yet`, 'i');
+      assert.ok(!denial.test(text), `${doc}: denies "${deniedAs}" while ${file} is in the tree`);
+    }
+  }
 });
