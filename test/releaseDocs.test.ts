@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -379,16 +379,30 @@ test('docs never present the unpublished Fleet package as installable', () => {
   assert.ok(fleetRow, 'SECURITY.md should keep its Fleet row');
   assert.match(fleetRow, /Not released/, `Fleet must not be listed as supported: ${fleetRow}`);
 
-  const notes = read('docs/releases/fleet/0.1.0-rc1.md');
-  assert.match(notes, /never (been )?published/i,
-    'the Fleet release notes must state up front that the release never happened');
-  // Forbid it as an executable instruction, not as a quoted correction: the correction block has to
-  // name the command it is retracting, and forbidding that would force history to be erased.
-  // Any fence, tagged or not: an untyped ``` block is just as runnable, and so is any language tag
-  // a future editor might reach for. Matching only bash|sh|shell would let the command back in.
-  const fences = notes.match(/```[^\n]*\n[\s\S]*?```/g) ?? [];
-  assert.ok(!fences.some((b) => /npm install[^\n]*mercury-fleet/.test(b)),
-    `the Fleet notes must not offer a runnable install for a package that does not exist: ${fences}`);
+  // Every Fleet notes file, not just the one that was wrong. A new release note is exactly where a
+  // premature install command would appear, and a guard pinned to one filename would not see it.
+  const notesDir = join(ROOT, 'docs', 'releases', 'fleet');
+  const notesFiles = readdirSync(notesDir).filter((f) => f.endsWith('.md')).sort();
+  assert.ok(notesFiles.length > 0, 'no Fleet release notes found to check');
+  for (const notesFile of notesFiles) {
+    const notes = read(join('docs', 'releases', 'fleet', notesFile));
+    // rc1 says it was never published; 0.1.0 says it is not published yet. Both are true and both
+    // must stay, so the guard accepts either rather than pinning one file's phrasing.
+    // "Up front" is the requirement, so the check is positional: the statement must appear before
+    // the first section heading. Asserting only that the file contains the phrase is not enough --
+    // 0.1.0.md discusses rc1 having "never published" further down, so a buried historical aside
+    // would satisfy a whole-file match while the reader saw no warning at all.
+    const preamble = notes.split(/^##\s/m)[0];
+    assert.match(preamble, /never (?:been )?published|not (?:yet )?published|not published yet/i,
+      `docs/releases/fleet/${notesFile} must state before its first heading that the release has not happened`);
+    // Forbid it as an executable instruction, not as a quoted correction: the correction block has to
+    // name the command it is retracting, and forbidding that would force history to be erased.
+    // Any fence, tagged or not: an untyped ``` block is just as runnable, and so is any language tag
+    // a future editor might reach for. Matching only bash|sh|shell would let the command back in.
+    const fences = notes.match(/```[^\n]*\n[\s\S]*?```/g) ?? [];
+    assert.ok(!fences.some((b) => /npm install[^\n]*mercury-fleet/.test(b)),
+      `docs/releases/fleet/${notesFile} must not offer a runnable install for a package that does not exist`);
+  }
 });
 
 test('the Fleet changelog does not offer an npm install for a package that is not published', () => {

@@ -5,4 +5,4 @@ export const FLEET_PRODUCT = 'fleet';
  * Fleet SemVer. Must equal `fleet/package.json` `"version"`.
  * `fleet/test/version.test.ts` asserts the two stay the same.
  */
-export const FLEET_VERSION = '0.1.0-rc1';
+export const FLEET_VERSION = '0.1.0';

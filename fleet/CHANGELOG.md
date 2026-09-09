@@ -8,6 +8,26 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - not yet published
+
+First published Fleet release, **pending**: `@aywengo/mercury-fleet` is still not on the npm
+registry, so nothing here is installable yet. Fleet runs from a source checkout with
+`npm run fleet`. See [the release notes](../docs/releases/fleet/0.1.0.md) for what publishing
+still requires.
+
+The one packaging change since `0.1.0-rc1` matters more than it looks: the package now ships
+compiled JavaScript in `dist/` with `bin` pointing at `dist/cli.js`. It previously shipped
+TypeScript sources with `bin` pointing at `cli.ts`, and Node refuses to strip types from a file
+under `node_modules`, so the package would have installed cleanly and failed on its first command.
+
+### Changed
+
+- Ship `dist/*.js` instead of `*.ts`, so the installed package runs. `bin` now points at
+  `dist/cli.js`; `files` now ships `dist/`.
+- The package description names what Fleet actually does. It said "Phase 0, no dispatch" long
+  after dispatch, routing, reconciliation, event mirroring and the metrics rollup had landed, and
+  that string is what npm renders on the package page.
+
 ## [0.1.0-rc1] - 2026-09-06
 
 Recorded here as a version but **never published**: `@aywengo/mercury-fleet`
