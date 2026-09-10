@@ -56,7 +56,13 @@ vocabulary degrades into prose and prose cannot be matched:
   (`AGENTS.md`, `SOUL.md`, `CLAUDE.md`)
 - `humanInput` — maps to `input.required` (already `input.enabled`)
 - `resume` — already `resume.enabled`
-- `mcp`, `subagents`, `skills`, `modelSelection`
+- `mcp`, `subagents`, `modelSelection`
+- `skills.workspacePaths` — accepts skills as materialized workspace paths
+  (PrimeAgent) versus `skills.nativeNames` — resolves skills in the harness' own
+  store (Hermes). These are **not** interchangeable, and treating them as one
+  `skills` flag is what makes Hermes unable to run any Run at all; see
+  [`teams.md`](teams.md) §3. A harness with neither capability must receive no
+  skills rather than a guess.
 
 **Affinity** — where operators believe it is strong, as enumerated task domains:
 `code-edit`, `code-review`, `ops-infra`, `long-autonomous`, `retrieval-heavy`,

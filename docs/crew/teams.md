@@ -39,7 +39,60 @@ rules.
 - Handoff is through Run records and workspace artifacts only. No shared mutable
   workspace, no Mercury-level agent-to-agent channel (NG4 stands).
 
-## 3. Do not rebuild Hermes kanban
+## 3. Every harness is a sub-team
+
+A harness is not a backend that receives Mercury's configuration. It is a
+**sub-team** with its own namespace, its own registry and its own idea of what a
+skill is. The team level must not name things inside a sub-team's namespace.
+
+This is not a stylistic preference. It is forced by a reproduced failure.
+
+Mercury auto-selects skills from **its own** registry and hands the resulting ids
+to whichever harness the Run targets. `skillSelector` ends with
+`return picked.length > 0 ? picked : FALLBACK.filter(...)`, so a Run **always**
+carries at least one skill — a task that matches nothing still gets the fallback
+set. Verified: `"Say hello."` selects `planning, implementation, testing, git-pr`.
+
+Those ids then mean different things per harness:
+
+| Harness | How skills arrive | Namespace |
+| --- | --- | --- |
+| PrimeAgent | `--skill <workspace path>` | files Mercury materialized into the workspace |
+| Hermes | `-s <name>` | Hermes' own installed skill store |
+
+Hermes has 81 installed skills. None of them is named `planning`,
+`implementation`, `testing` or `git-pr`. Hermes rejects an unknown name and exits
+non-zero, so the Run fails in under a second:
+
+```
+agent.message  {"text": "Error: Unknown skill(s): git-pr, implementation"}
+run.failed     {"error": "Agent exited with code 1 (signal none)", "durationMs": 766}
+```
+
+Because the fallback guarantees at least one skill, and the API offers no way to
+request zero skills, **Hermes cannot execute any Run through Mercury as it stands.**
+PrimeAgent works only because Mercury materializes skills into the workspace and
+passes paths, which happens to be the namespace PrimeAgent reads.
+
+So the boundary is:
+
+- **Team level** speaks capabilities and intents only — `persona.append`,
+  `code-edit`, `needs-review`. Never a skill name, never a model id, never a flag.
+- **Sub-team level** (one per harness) owns resolution inside its own namespace:
+  which of *its* skills satisfy an intent, where its persona goes, what its model
+  is called there.
+- **Handoff** between sub-teams is artifacts and Run records, as before.
+
+Two consequences for the roadmap:
+
+1. Skill selection moves out of `RunService` and into the sub-team resolver. A
+   Run records the *intent*, and each sub-team records what it resolved that
+   intent to. This also makes the snapshot honest: today the snapshot stores
+   Mercury skill ids that a foreign harness cannot dereference.
+2. A Run must be able to carry zero skills. Today it cannot, which turns a
+   namespace mismatch from a degraded run into a guaranteed failure.
+
+## 4. Do not rebuild Hermes kanban
 
 Hermes already ships intra-host team scheduling, verified from its CLI:
 
@@ -64,7 +117,7 @@ scope:
 The rule: Mercury owns the record of coordination; a backend may own the
 mechanics of coordination inside one stage.
 
-## 4. The auditability problem this creates
+## 5. The auditability problem this creates
 
 Hermes has native cross-machine agent messaging:
 
@@ -88,7 +141,7 @@ Decision needed before building. Options:
 Recommend 3 for v1: it keeps the guarantee cheap, and states plainly that a
 self-organizing Hermes swarm is not a Crew Team.
 
-## 5. Placement across a mixed team
+## 6. Placement across a mixed team
 
 Each stage declares required capabilities and an affinity domain, not a harness
 id. Fleet resolves stage → harness → host:
@@ -101,7 +154,7 @@ A stage that requires `persona.append` must never land on a harness that silentl
 ignores persona. Silent degradation produces a Run that completed and did the
 wrong thing, which is the worst failure mode available here.
 
-## 6. Phase order
+## 7. Phase order
 
 1. **Phase 0 — per-Run capabilities** (`appendSystemPrompt`, `workspaceFiles`,
    `model`) on at least PrimeAgent and Hermes, proven by a real Run whose output
@@ -116,7 +169,7 @@ wrong thing, which is the worst failure mode available here.
 Phase 0 and 1 are small, independently useful, and they are the ones that make
 the heterogeneous idea real rather than aspirational.
 
-## 7. Not designed here
+## 8. Not designed here
 
 Cost and token metering (`budgetTokens`/`budgetCost` are recorded-only until
 adapters report usage); network egress allowlists (`allowedNetworks` is `none` or
