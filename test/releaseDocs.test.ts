@@ -434,40 +434,78 @@ test('the distribution table describes channels, not pinned versions', () => {
   assert.match(state, /dist-tags|npm view/, 'must point at the registry for the current value');
 });
 
-test('docs never present the unpublished Fleet package as installable', () => {
-  // No Fleet release version has ever been published, there is no fleet tag and no fleet GitHub
-  // Release. The Fleet release notes nonetheless
-  // told readers it was published to `rc` and gave a working install command. SECURITY.md listed it as
-  // a supported product. Both are now corrections, and this guard keeps them corrections.
-  const sec = read('SECURITY.md');
-  const fleetRow = sec.split('\n').find((l) => /mercury-fleet/.test(l));
-  assert.ok(fleetRow, 'SECURITY.md should keep its Fleet row');
-  assert.match(fleetRow, /Not released/, `Fleet must not be listed as supported: ${fleetRow}`);
-
-  // Every Fleet notes file, not just the one that was wrong. A new release note is exactly where a
-  // premature install command would appear, and a guard pinned to one filename would not see it.
+test('a Fleet notes file only ever offers an install for the version it documents', () => {
+  // The original defect was `docs/releases/fleet/0.1.0-rc1.md` advertising
+  // `npm install -g @aywengo/mercury-fleet@rc` -- a dist-tag, for a version that had never been
+  // published. Whether that version is on the registry is a question for the live guard below; this one
+  // pins the narrower rule that a notes file may never point a reader at a DIFFERENT version or a
+  // channel, which is how the false claim was actually phrased.
   const notesDir = join(ROOT, 'docs', 'releases', 'fleet');
   const notesFiles = readdirSync(notesDir).filter((f) => f.endsWith('.md')).sort();
-  assert.ok(notesFiles.length > 0, 'no Fleet release notes found to check');
+  assert.ok(notesFiles.length > 0, 'no Fleet notes found to check');
   for (const notesFile of notesFiles) {
+    const own = notesFile.replace(/\.md$/, '');
     const notes = read(join('docs', 'releases', 'fleet', notesFile));
-    // rc1 says it was never published; 0.1.0 says it is not published yet. Both are true and both
-    // must stay, so the guard accepts either rather than pinning one file's phrasing.
-    // "Up front" is the requirement, so the check is positional: the statement must appear before
-    // the first section heading. Asserting only that the file contains the phrase is not enough --
-    // 0.1.0.md discusses rc1 having "never published" further down, so a buried historical aside
-    // would satisfy a whole-file match while the reader saw no warning at all.
-    const preamble = notes.split(/^##\s/m)[0];
-    assert.match(preamble, /never (?:been )?published|not (?:yet )?published|not published yet/i,
-      `docs/releases/fleet/${notesFile} must state before its first heading that the release has not happened`);
-    // Forbid it as an executable instruction, not as a quoted correction: the correction block has to
-    // name the command it is retracting, and forbidding that would force history to be erased.
-    // Any fence, tagged or not: an untyped ``` block is just as runnable, and so is any language tag
-    // a future editor might reach for. Matching only bash|sh|shell would let the command back in.
     const fences = notes.match(/```[^\n]*\n[\s\S]*?```/g) ?? [];
-    assert.ok(!fences.some((b) => /npm install[^\n]*mercury-fleet/.test(b)),
-      `docs/releases/fleet/${notesFile} must not offer a runnable install for a package that does not exist`);
+    for (const fence of fences) {
+      for (const m of fence.matchAll(/npm (?:install|i)\b[^\n]*mercury-fleet(?:@([^\s`]+))?/g)) {
+        const target = m[1];
+        assert.ok(target === undefined || target === own,
+          `docs/releases/fleet/${notesFile} offers @${target}; a notes file may only name its own `
+          + `version ${own} (or none at all)`);
+      }
+    }
   }
+});
+
+test('the Fleet notes preamble matches whether that version is actually published', async (t) => {
+  // This rule cannot be textual, and the reason is a deadlock this repository built for itself. The
+  // guard that replaced the #431 false claim required EVERY Fleet notes file to state, before its first
+  // heading, that the release had not happened. That is correct while no Fleet release exists and is
+  // unsatisfiable the moment one does: a notes file for a published release must not say "not
+  // published", yet it is also the GitHub Release body, so leaving it in place would publish a release
+  // announcing that it is not installable. The release PR was therefore unmergeable, and the tag would
+  // have produced a false body -- the release needed either a lie or a red build.
+  //
+  // The rule is now driven by the registry, per version: unpublished versions must warn up front,
+  // published versions must instead offer the install for their own version.
+  const notesDir = join(ROOT, 'docs', 'releases', 'fleet');
+  const notesFiles = readdirSync(notesDir).filter((f) => f.endsWith('.md')).sort();
+  assert.ok(notesFiles.length > 0, 'no Fleet notes found to check');
+  let published: string[] | null = null;
+  try {
+    const res = await fetch('https://registry.npmjs.org/@aywengo%2fmercury-fleet',
+      { signal: AbortSignal.timeout(20_000) });
+    // Only 200 and 404 answer the question; a 503 says nothing and must not be read as absence.
+    if (res.status === 404) published = [];
+    else if (res.status === 200) {
+      const body = await res.text();
+      published = Object.keys(JSON.parse(body).versions ?? {});
+    } else { t.skip(`registry answered ${res.status}`); return; }
+  } catch (e) { t.skip(`registry unreachable: ${(e as Error).name}`); return; }
+
+  let warned = 0, offered = 0;
+  for (const notesFile of notesFiles) {
+    const own = notesFile.replace(/\.md$/, '');
+    const notes = read(join('docs', 'releases', 'fleet', notesFile));
+    const preamble = notes.split(/^##\s/m)[0];
+    const saysUnpublished = /never (?:been )?published|not (?:yet )?published|not published yet/i.test(preamble);
+    const offersOwnInstall = new RegExp(
+      `npm (?:install|i)\\b[^\\n]*mercury-fleet@${own.replace(/\./g, '\\.')}`).test(notes);
+    if (published.includes(own)) {
+      assert.ok(!saysUnpublished,
+        `docs/releases/fleet/${notesFile} says the release has not happened, but ${own} is on the registry`);
+      assert.ok(offersOwnInstall,
+        `docs/releases/fleet/${notesFile} must offer the install for ${own}, which is published`);
+      offered++;
+    } else {
+      assert.ok(saysUnpublished,
+        `docs/releases/fleet/${notesFile} must state before its first heading that ${own} has not been `
+        + 'published; the warning is positional, so a historical aside further down does not count');
+      warned++;
+    }
+  }
+  assert.equal(warned + offered, notesFiles.length, 'every notes file must be classified');
 });
 
 test('the Fleet changelog does not offer an npm install for a package that is not published', () => {
@@ -639,10 +677,15 @@ test('the Fleet docs match what the npm registry actually serves', async (t) => 
     return;
   }
 
-  const notesDir = join(ROOT, 'docs', 'releases', 'fleet');
-  const docsText = ['fleet/CHANGELOG.md', 'docs/README.md',
-    ...readdirSync(notesDir).filter((f) => f.endsWith('.md'))
-    .map((f) => join('docs/releases/fleet', f))].map((f) => read(f)).join('\n');
+  // Only the EVERGREEN docs are compared with the registry. A per-version release-notes file describes
+  // the release it documents, not the state of the registry at the moment it is read: `host/0.1.0.md`
+  // says "Published to the npm dist-tag `latest`" and is merged in the release PR, minutes before the
+  // tag exists. Including notes in this check made the Fleet release PR unmergeable, while leaving the
+  // notes unflipped would have published a GitHub Release whose body said "Not published yet" for a
+  // version that had just been published -- so the release needed either a false body or a red build.
+  // Notes are still constrained, just not against the registry: see the own-version check below.
+  const evergreen = ['fleet/CHANGELOG.md', 'docs/README.md', 'SECURITY.md'];
+  const docsText = evergreen.map((f) => read(f)).join('\n');
   // Only a command inside a fenced block counts as an offer: prose that merely names the package is not
   // something a reader runs, and the original defect was a runnable command.
   const fences = docsText.match(/```[^\n]*\n[\s\S]*?```/g) ?? [];
