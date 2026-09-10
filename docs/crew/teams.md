@@ -246,7 +246,22 @@ Team events are Team-scoped and separate from Run events, per `README.md`
 invariant 4: a stage that never produced a Run is a log or audit record, not a Run
 event.
 
-## 8. Phase order
+## 8. Persistence
+
+- `team_runs` — one row per Team: `id`, `owner_id`, `manifest_id`,
+  `manifest_version`, `manifest_hash`, `status`, `created_at`.
+- `team_stages` — one row per stage: `team_run_id`, `stage_id`, `child_run_id`,
+  `host_id`, `agent`, `placement_reason`, `status`. `child_run_id` is a foreign key
+  into `runs`, which is what keeps the Team from owning Run state.
+
+`status` on `team_runs` is **derived and cached**, never authoritative: it is
+recomputed from `team_stages`, which are themselves derived from `runs.status`. A
+write path that sets Team status directly is a defect, because it creates a second
+state machine that can disagree with the Runs it claims to summarise.
+
+Crew tables start after the current last migration, per `README.md` §6.
+
+## 9. Phase order
 
 0. **Phase -1 — let a Run carry zero skills.** Smallest change in the whole plan
    and it unblocks Hermes completely: today `skillSelector` cannot return an empty
@@ -266,7 +281,7 @@ Phases -1, 0 and 1 are each small and independently useful, and they are the one
 that make the heterogeneous idea real rather than aspirational. Nothing after them
 is worth building until a second harness completes a Run end to end.
 
-## 9. Not designed here
+## 10. Not designed here
 
 Cost and token metering (`budgetTokens`/`budgetCost` are recorded-only until
 adapters report usage); network egress allowlists (`allowedNetworks` is `none` or

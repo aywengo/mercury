@@ -172,7 +172,27 @@ Owner-scoped throughout; a missing or foreign template is `404`, never `403`.
 `POST /api/templates/validate` must be reachable before any write path exists, so
 an operator can check a template against a host before that host can run it.
 
-## 6. Where drafts live, and what Fleet may do
+## 6. Persistence
+
+Follows the `run_skills` precedent rather than inventing a second snapshot
+mechanism.
+
+- `agent_templates` — one row per template version: `id`, `version`, `owner_id`,
+  `content_hash`, `manifest_json`, `persona_text`, `source` (`builtin`, `mirror`,
+  `draft`), `created_at`. `source` is what assigns trust; the manifest never does.
+- `run_templates` — one row per Run: `run_id`, `template_id`, `template_version`,
+  `content_hash`, `resolved_json`, `rendered_as`. `rendered_as` records which
+  capability the adapter actually used (`persona.append` vs
+  `persona.workspaceFile`), so a replay can show what the agent really received.
+
+Crew tables start after the current last migration, per `README.md` §6.
+
+The known gap there still gates this: the worker re-resolves skills from the live
+registry instead of executing the stored snapshot. A persona that is re-resolved
+the same way would silently change what an old Run means, so snapshot execution
+must be fixed before templates claim reproducibility.
+
+## 7. Where drafts live, and what Fleet may do
 
 The Git mirror in [`preset-store.md`](preset-store.md) stays the source of truth.
 Drafts are owner-scoped on the host.
@@ -199,7 +219,7 @@ Either way there is no version negotiation between Fleet and a host today. Addin
 template routes needs a capability advertisement, or an old host fails at the
 first template call rather than at registration.
 
-## 7. Open questions
+## 8. Open questions
 
 1. Does a Hermes persona render into a **profile** (shared, persistent, affects
    other Runs on that host) or only into the isolated workspace? A profile write
