@@ -508,15 +508,24 @@ test('the Fleet notes preamble matches whether that version is actually publishe
   assert.equal(warned + offered, notesFiles.length, 'every notes file must be classified');
 });
 
-test('the Fleet changelog does not offer an npm install for a package that is not published', () => {
-  // fleet/CHANGELOG.md announced "First public Fleet release" with `npm install -g
-  // @aywengo/mercury-fleet`. The package 404s, so the only working path is a source checkout.
+test('the Fleet changelog keeps its warning on the version that was never published', () => {
+  // This test used to read "the package 404s, so nothing may offer an install", and passed that way
+  // until 0.1.0 shipped on 2026-09-10. That premise is now false, and a rule built on it would forbid
+  // the very install the release exists to provide: offering `@aywengo/mercury-fleet` is correct now,
+  // and the live registry comparison above is what keeps that offer honest.
+  //
+  // What still needs guarding is narrower and per-version. `0.1.0-rc1` was recorded in the changelog
+  // and never published, and the registry will never have it, so no live check can ever notice a
+  // bogus install offer for it. That is the gap this closes.
   const log = read('fleet/CHANGELOG.md');
-  const fences = log.match(/```[^\n]*\n[\s\S]*?```/g) ?? [];
-  assert.ok(!fences.some((b) => /npm install[^\n]*mercury-fleet/.test(b)),
-    'no runnable npm install for the unpublished Fleet package');
-  assert.match(log, /never published|not on the npm registry/i,
-    'the Fleet changelog must say the version was never published');
+  const at = log.indexOf('## [0.1.0-rc1]');
+  assert.ok(at >= 0, 'fleet/CHANGELOG.md must keep its 0.1.0-rc1 entry');
+  const rc1 = log.slice(at);
+  assert.match(rc1, /never published/i,
+    'the 0.1.0-rc1 entry must keep saying it was never published');
+  const fences = rc1.match(/```[^\n]*\n[\s\S]*?```/g) ?? [];
+  assert.ok(!fences.some((b) => /npm (?:install|i)\b[^\n]*mercury-fleet/.test(b)),
+    'no runnable npm install inside the never-published 0.1.0-rc1 entry');
 });
 
 test('no Fleet doc claims a shipped capability is absent', () => {
