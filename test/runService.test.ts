@@ -549,3 +549,53 @@ test('worker.ts does not read the budget constraints, so they cannot be called e
     'worker.ts now reads the budget constraints -- either enforce them properly and rename back '
     + 'to maxTokens/maxCost, or delete this test with a reason');
 });
+
+// Issue #459: an explicitly empty skill list must mean "no skills", not "choose for
+// me". Before the fix these two callers were indistinguishable, so every Run carried
+// the selector's fallback set and Hermes -- which resolves `-s <id>` in its own skill
+// store and dies on an unknown name -- could not execute any Run.
+test('skills: [] creates a Run with no skills (issue #459)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'smoke', skills: [] });
+    assert.deepEqual(env.runService.getSkills(run.id), []);
+  } finally {
+    env.close();
+  }
+});
+
+test('omitting skills still auto-selects (issue #459 must not regress)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'smoke' });
+    assert.ok(
+      env.runService.getSkills(run.id).length > 0,
+      'a caller that omits skills must keep getting automatic selection',
+    );
+  } finally {
+    env.close();
+  }
+});
+
+test('skills: null is treated as omitted, not as none (issue #459)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'smoke', skills: null as unknown as string[] });
+    assert.ok(
+      env.runService.getSkills(run.id).length > 0,
+      'a JSON caller sending null must not silently lose its skills',
+    );
+  } finally {
+    env.close();
+  }
+});
+
+test('an explicit non-empty skill list is still honoured exactly (issue #459)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'smoke', skills: ['testing'] });
+    assert.deepEqual(env.runService.getSkills(run.id).map((s) => s.id), ['testing']);
+  } finally {
+    env.close();
+  }
+});

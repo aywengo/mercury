@@ -77,9 +77,17 @@ export class RunService {
       throw new ValidationError(`Unknown agent: ${agent} (known: ${this.deps.knownAgents.join(', ')})`);
     }
     const available = this.deps.skills.list();
-    const skillIds = input.skills && input.skills.length > 0
-      ? input.skills
-      : this.deps.selector.select(input.task, available, 4);
+    // An omitted `skills` means "choose for me"; an explicitly empty array means
+    // "no skills". Collapsing the two (issue #459) made every Run carry at least one
+    // skill, because select() falls back rather than returning nothing -- and a Run
+    // that always carries skill ids cannot be handed to a backend that resolves them
+    // in its own namespace. HermesAgentAdapter passes `-s <id>`, Hermes looks that up
+    // in its installed-skill store, and an unknown name is a fatal exit, so Hermes
+    // could not execute any Run at all. `null` stays "omitted" so a JSON caller that
+    // sends null keeps today's behaviour.
+    const skillIds = input.skills === undefined || input.skills === null
+      ? this.deps.selector.select(input.task, available, 4)
+      : input.skills;
     const resolved = this.deps.skills.resolve(skillIds);
 
     const constraints: RunConstraints = {

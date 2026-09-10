@@ -135,6 +135,22 @@ test('argv construction: task via stdin, skills, budgets, yolo, accept-hooks, --
   assert.equal(env.MERCURY_TRACE_ID, 'run_hermes');
 });
 
+// Issue #459: Hermes resolves `-s <name>` in its OWN installed-skill store and exits 1
+// on an unknown name, so a Run that carries skills Hermes has never heard of cannot run
+// at all. The RunService side now allows zero skills; this pins the adapter half -- a
+// context with no skills must produce no `-s` flags, otherwise the fix buys nothing.
+test('a context with no skills produces no -s flags (issue #459)', async () => {
+  const argvFile = tempFile('hermes-argv-noskills', 'json');
+  const { context } = makeContext({ skills: [] });
+  const a = adapter({ env: { MOCK_HERMES_ARGV_FILE: argvFile } });
+  const handle = await a.start(context);
+  await collectAll(handle);
+
+  const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+  assert.ok(!argv.includes('-s'), `expected no -s flags, got: ${argv.join(' ')}`);
+  assert.ok(argv.includes('--in'), 'the rest of argv must still be built normally');
+});
+
 test('session id captured from stderr for resume', async () => {
   const { context } = makeContext();
   const a = adapter({ env: { MOCK_HERMES_SESSION: 'sess-abc123' } });
