@@ -5,7 +5,7 @@
 | Product | Version | Supported |
 | --- | --- | --- |
 | Mercury host (`@aywengo/mercury`) | 0.1.x | Yes |
-| Mercury Fleet (`@aywengo/mercury-fleet`) | — | Not released |
+| Mercury Fleet (`@aywengo/mercury-fleet`) | 0.1.x | Yes |
 | `mercuryctl` | — | Not released |
 
 ## Reporting a vulnerability

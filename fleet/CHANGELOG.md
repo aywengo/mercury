@@ -8,13 +8,19 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0] - not yet published
+## [0.1.0] - 2026-09-10
 
-First published Fleet release, **pending**: `0.1.0` is not on the npm registry, so nothing here is
-installable yet. Fleet runs from a source checkout with `npm run fleet`. The package page exists --
-created by a `0.0.1-bootstrap` placeholder that trusted publishing requires first -- and `latest`
-points at it, so do not read a bare `npm install -g @aywengo/mercury-fleet` as installing a release. See [the release notes](../docs/releases/fleet/0.1.0.md) for what publishing
-still requires.
+First published Fleet release. `0.1.0` is on the npm registry and the `latest` dist-tag points
+at it, so `npm install -g @aywengo/mercury-fleet` installs a real Fleet release. It was published
+by the `fleet-v0.1.0` tag through GitHub Actions trusted publishing, with no repository secret,
+and carries SLSA v1 provenance bound to that tag and commit. See
+[the release notes](../docs/releases/fleet/0.1.0.md).
+
+`latest` used to point at `0.0.1-bootstrap`, a throwaway version published once to create the
+package page that trusted publishing requires before any tag can publish. That placeholder is
+still on the registry under its own `bootstrap` tag and is not a release. Note that
+`fleet --version` prints a compiled constant rather than reading `package.json`, so it reports
+`0.1.0` even when the placeholder is what actually got installed; pin a version if that matters.
 
 The one packaging change since `0.1.0-rc1` matters more than it looks: the package now ships
 compiled JavaScript in `dist/` with `bin` pointing at `dist/cli.js`. It previously shipped

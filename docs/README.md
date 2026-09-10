@@ -26,7 +26,7 @@ what each artifact contains, see [`distribution.md`](distribution.md).
 - [`Host 0.1.0`](releases/host/0.1.0.md) -- first stable release, npm `latest`
 - [`Host 0.1.0-rc2`](releases/host/0.1.0-rc2.md)
 - [`Host 0.1.0-rc1`](releases/host/0.1.0-rc1.md)
-- [`Fleet 0.1.0`](releases/fleet/0.1.0.md) -- **not published yet**; the npm package page exists (created by a `0.0.1-bootstrap` placeholder) but no Fleet release has been published
+- [`Fleet 0.1.0`](releases/fleet/0.1.0.md) -- first stable Fleet release, npm `latest`
 - [`Fleet 0.1.0-rc1`](releases/fleet/0.1.0-rc1.md) -- **never published**; superseded by 0.1.0 before anything shipped
 - [`Host changelog`](../CHANGELOG.md)
 - [`Fleet changelog`](../fleet/CHANGELOG.md)
@@ -71,6 +71,11 @@ what each artifact contains, see [`distribution.md`](distribution.md).
 
 Fleet federates several independent Mercury installations over HTTP. It does
 not share their databases or execute agents itself.
+
+```bash
+npm install -g @aywengo/mercury-fleet
+fleet --version   # mercury-fleet 0.1.0
+```
 
 - [`Fleet operator guide`](../fleet/README.md)
 - [`Fleet architecture and design`](fleet-design.md)
