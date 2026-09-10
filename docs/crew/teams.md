@@ -195,9 +195,21 @@ Hard validation errors:
 - a `template` that does not resolve, or whose own `requires.capabilities` are not
   a superset of the stage's `requires`.
 
-The graph is deliberately a bounded DAG of stages with no timers, no loops, no
-dynamic stage creation and no human-task inbox. Those are `README.md` non-goals and
-this design does not quietly reintroduce them.
+The graph is a bounded DAG of stages: no timers, no loops, no dynamic stage
+creation and no human-task inbox.
+
+Being precise about `README.md` §9, because this design does cross two of its
+lines: that list is scoped to the **Role Preset MVP**, and `README.md` §3 already
+schedules Workflows as milestone 4, with [`workflows.md`](workflows.md) as its
+design. Gates and child Runs are therefore deferred, not forbidden forever. Teams
+introduces exactly those two and nothing else from the list:
+
+- **crosses** `gates` — a stage has a `gate`, and `dependsOn` forms a DAG;
+- **crosses** `child Runs` — a stage owns a `childRunId`;
+- **does not cross** loops, timers, dynamic stage creation, a human-task inbox, a
+  general workflow engine, or a new Fleet scheduler.
+
+Stating this beats claiming blanket conformance, which the previous wording did.
 
 ### 7.1 Execution record
 
@@ -258,6 +270,10 @@ event.
 recomputed from `team_stages`, which are themselves derived from `runs.status`. A
 write path that sets Team status directly is a defect, because it creates a second
 state machine that can disagree with the Runs it claims to summarise.
+
+The stored column is a read cache only. It is invalidated by the same Run
+transition that changes any child stage, and a read that finds the cache stale
+recomputes rather than trusting it. Cached status may lag; it may never win.
 
 Crew tables start after the current last migration, per `README.md` §6.
 

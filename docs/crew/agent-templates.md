@@ -90,13 +90,21 @@ on the persona. Until that passes, template distribution is inert.
 
 ## 5. Manifest
 
-An Agent Template is a `RolePresetManifest` at `schemaVersion: 2`. Only the delta
-is shown; everything in `role-presets.md` §2 still applies, including the rule that
-a manifest cannot declare itself trusted.
+An Agent Template is a **separate manifest type** that reuses the Role Preset
+shape. It is deliberately *not* `schemaVersion: 2` of `RolePresetManifest`:
+`role-presets.md` §2.1 makes `schemaVersion` not exactly `1` a hard error, so
+bumping the number would either break that rule or force a version dispatcher into
+the preset validator for a change that is not breaking. A new type with its own
+version keeps both validators single-versioned, which is the property that rule
+exists to protect.
+
+Structurally it reuses the preset fields, and everything in `role-presets.md` §2
+still applies to them — including the rule that a manifest cannot declare itself
+trusted.
 
 ```ts
-interface AgentTemplateManifest extends RolePresetManifest {
-  schemaVersion: 2;
+interface AgentTemplateManifest extends Omit<RolePresetManifest, 'schemaVersion'> {
+  schemaVersion: 1;                 // version of THIS manifest, not the preset's
 
   persona?: {
     file: string;                 // SOUL.md, PERSONA.md, ...
@@ -153,7 +161,10 @@ Hard errors, on top of `role-presets.md` §2.1:
   `persona.append` nor `persona.workspaceFile` — fail closed rather than run an
   agent that will silently ignore the persona;
 - `requires.capabilities` contains a name outside the closed vocabulary above;
-- `skills.none` is true and `skills.defaults` or `skills.required` is non-empty;
+- `skills.none` is true and any of `skills.defaults`, `skills.required` or
+  `skills.intent` is non-empty, or `skills.autoSelect` is true, or `skills.max` is
+  set. `none` means none, so every other skills field is a contradiction rather
+  than something to order by precedence;
 - `skills.intent` is present and the resolved agent advertises neither skills
   capability.
 
@@ -168,6 +179,13 @@ Owner-scoped throughout; a missing or foreign template is `404`, never `403`.
 | `POST /api/templates/validate` | dry-run validation, structured findings, stores nothing |
 | `POST /api/templates` | create an owner-scoped draft |
 | `POST /api/runs` with `template: { id, version? }` | resolve, snapshot, create one Run |
+
+`template` and `preset` on `POST /api/runs` are **mutually exclusive**: supplying
+both is a `400` with a named conflict, never a precedence rule. Precedence would
+mean one silently loses, and a Run whose instruction came from a field nobody
+mentioned is exactly the kind of surprise a snapshot is supposed to make
+impossible. Supplying neither is today's behaviour, unchanged. A Team stage always
+names a `template`, never a `preset`, so the two never meet inside a Team.
 
 `POST /api/templates/validate` must be reachable before any write path exists, so
 an operator can check a template against a host before that host can run it.
