@@ -1013,6 +1013,69 @@ test('a failed fleet submit does not advertise Homebrew or a bundle that Fleet d
   assert.match(r.notesOut, /unavailable by every channel/, 'and say it plainly');
 });
 
+test('a failed fleet submit tells the operator nothing is installable, not that Homebrew is live', () => {
+  // #452. The release BODY has been product-aware since #329, and every test above asserts on
+  // `notesOut` -- which is precisely how this survived them all. The operator-facing block that runs
+  // after the body was still product-agnostic, so on the first real Fleet release it printed
+  // "Homebrew and the release asset are live" for a product that attaches no bundle and has no
+  // formula: it asserted a channel that does not exist, on the one failure where nothing at all is
+  // installable. Assert on stdout+stderr, never notesOut, or this test checks the wrong artifact.
+  const r = runTag(`fleet-v${V}`, {
+    notes: [`fleet/${V}.md`], oidc: true, npmToken: '',
+    npmFails: true, npmSubmitErr: 'npm error code E401',
+    pkgHttp: '200', pkgVersionHttp: '404',
+  });
+  assert.equal(r.status, 1);
+  const out = r.stdout + r.stderr;
+  assert.ok(!/Homebrew .*are live|release asset are live/.test(out),
+    `Fleet has no formula and attaches no asset; the console must not claim either:\n${out}`);
+  assert.match(out, /NOTHING from this release is installable/,
+    `the one case where nothing ships must be stated plainly:\n${out}`);
+  assert.match(out, /::error::/, 'nothing installable must be an error, not a warning');
+});
+
+test('a failed host submit still says Homebrew is live, because for the host it is', () => {
+  // The converse, and the reason the fix branches instead of deleting the sentence. For the host the
+  // bundle and the formula really are produced, so suppressing the claim would understate a channel
+  // that works -- the same inaccuracy, pointed the other way.
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], npmFails: true });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /Homebrew and the release asset are live/);
+});
+
+test('a failed fleet submit on an already-published version does not claim nothing is installable', () => {
+  // Installability is a fact about the registry, not about this job's exit status -- the discipline
+  // the body already applies. "NOTHING is installable" would be as false here as "Homebrew is live"
+  // was, only in the other direction.
+  const r = runTag(`fleet-v${V}`, {
+    notes: [`fleet/${V}.md`], oidc: true, npmToken: '',
+    npmFails: true, npmSubmitErr: 'npm error code EPUBLISHCONFLICT cannot publish over it previously published',
+    pkgHttp: '200', pkgVersionHttp: '200',
+  });
+  assert.equal(r.status, 1, 'a run that did not publish the version must still go red');
+  const out = r.stdout + r.stderr;
+  assert.ok(!/NOTHING from this release is installable/.test(out),
+    `the version is installable, so do not deny it:\n${out}`);
+  assert.match(out, /not published by this run/, 'and say the version came from somewhere else');
+});
+
+test('a failed fleet submit with an unreachable registry names the code instead of denying installability', () => {
+  // A 000, 403 or 5xx answers nothing. Asserting absence here would repeat the same error on an npm
+  // outage -- the exact outage this fail-last block exists to survive (#277).
+  for (const code of ['000', '403', '503']) {
+    const r = runTag(`fleet-v${V}`, {
+      notes: [`fleet/${V}.md`], oidc: true, npmToken: '',
+      npmFails: true, npmSubmitErr: 'npm error code E401',
+      pkgHttp: '200', pkgVersionHttp: code,
+    });
+    assert.equal(r.status, 1);
+    const out = r.stdout + r.stderr;
+    assert.ok(!/NOTHING from this release is installable/.test(out),
+      `${code} must not be read as a definitive absence:\n${out}`);
+    assert.match(out, new RegExp(`HTTP ${code}`), `${code} must be named so the operator can tell why`);
+  }
+});
+
 test('a failed host submit still names both host install paths', () => {
   // The converse, and the reason this is a branch rather than a deletion: for host the alternatives
   // are real, and omitting them would understate a release that genuinely is installable two ways.

@@ -673,13 +673,49 @@ jobs:
             fi
           fi
 
-          # Fail LAST. Everything a user can install has been produced by now: the release, its bundle,
-          # the formula. Failing here rather than at the npm call is what keeps the Homebrew channel alive
-          # through an npm outage while still refusing to pretend the npm channel worked. Red means "npm
-          # needs attention", not "Mercury cannot be installed".
+          # Fail LAST, so everything installable is produced before the job goes red. But what
+          # "everything installable" MEANS is product-specific, and the operator-facing text has to
+          # branch on it or it becomes the exact overstatement this file keeps having to remove.
+          #
+          # Host: the bundle and the formula are both produced above and need nothing from npm, so an
+          # npm failure is a degraded release. Red means "npm needs attention", not "Mercury cannot be
+          # installed".
+          #
+          # Fleet: no bundle is attached and no formula exists, so npm is the ONLY installable channel.
+          # The host wording told the operator "Homebrew and the release asset are live" on a real Fleet
+          # release that shipped neither -- it asserted a channel that does not exist, on the single
+          # failure where nothing at all is installable (#452). That is also the moment the message
+          # should be loudest, so Fleet gets ::error:: rather than ::warning::.
+          #
+          # Same discipline as the release body above: branch on what the registry actually answers,
+          # never on this job's exit status. A submit can fail on a version that is already published,
+          # and "nothing is installable" would then be as false as "Homebrew is live" was.
           if [ "$npm_ok" = "0" ]; then
-            echo "::warning::npm ${npm_verb} failed for ${tag}; the GitHub Release and Homebrew formula were still produced"
-            echo "npm submission failed for ${tag}." >&2
-            echo "Homebrew and the release asset are live; see the release body for what is and is not installable." >&2
+            if [ "$product" = "fleet" ]; then
+              if [ "$version_live" = "200" ]; then
+                echo "::warning::npm ${npm_verb} failed for ${tag}; ${pkg_name}@${version} is on the registry but was not published by this run, and Fleet has no other install channel"
+                echo "npm submission failed for ${tag}." >&2
+                echo "${pkg_name}@${version} IS installable -- but it was not published by this run and" >&2
+                echo "carries no provenance from it. Fleet ships only through npm." >&2
+              elif [ "$version_live" = "404" ]; then
+                echo "::error::npm ${npm_verb} failed for ${tag}; Fleet ships only through npm, so this release has no installable artifact at all"
+                echo "npm submission failed for ${tag}." >&2
+                echo "Fleet attaches no bundle and has no Homebrew formula: npm is its only installable" >&2
+                echo "channel, and ${pkg_name}@${version} is not on the registry." >&2
+                echo "NOTHING from this release is installable. Fix npm and re-tag; see the release body." >&2
+              else
+                # A 000 or a 403/5xx answers nothing. Saying "not installable" here would repeat the
+                # mistake in the other direction, on an npm outage -- the outage this block exists to
+                # survive.
+                echo "::warning::npm ${npm_verb} failed for ${tag}; Fleet ships only through npm and the registry did not answer (HTTP ${version_live})"
+                echo "npm submission failed for ${tag}." >&2
+                echo "Fleet ships only through npm. The registry returned HTTP ${version_live}, which does" >&2
+                echo "not answer whether ${pkg_name}@${version} is installable -- check before concluding." >&2
+              fi
+            else
+              echo "::warning::npm ${npm_verb} failed for ${tag}; the GitHub Release and Homebrew formula were still produced"
+              echo "npm submission failed for ${tag}." >&2
+              echo "Homebrew and the release asset are live; see the release body for what is and is not installable." >&2
+            fi
             exit 1
           fi
