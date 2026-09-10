@@ -54,7 +54,21 @@ the Hermes renderer writes.
 | --- | --- | --- |
 | Hermes | write `SOUL.md` into the profile/workspace Hermes resolves; Hermes injects it itself | `--ignore-rules` help text; `profile_dir / "SOUL.md"` |
 | PrimeAgent | `--append-system-prompt <persona>`, plus `AGENTS.md` in the workspace for project context | `prime-agent --help` |
-| Claude | `CLAUDE.md` in the workspace | adapter docs |
+| Claude | write `CLAUDE.md` into the workspace; the adapter sets `cwd` to the workspace and Claude Code reads it from there | `cli.js` for claude 1.0.3 references `CLAUDE.md` 20 times; `--help` for 1.0.3 exposes **no** system-prompt flag, so a workspace file is the only path |
+
+What is verified and what is not: the Hermes and PrimeAgent rows were checked
+against the installed binaries. The Claude row is verified only as far as
+`CLAUDE.md` being read by claude 1.0.3 and no persona flag existing; that
+`CLAUDE.md` is discovered from the working directory specifically, rather than from
+a parent directory or a config path, was **not** verified. Two Claude installs exist
+on this machine (1.0.3 and 2.1.260) and the adapter header says it was verified
+against 1.0.3, so any Claude persona work must re-verify against whichever build a
+host actually runs.
+
+No adapter materializes a persona today. `claudeCodeAdapter.js` writes no workspace
+files and passes only `--output-format`, `--verbose`, `--model`, `--mcp-config` and
+`--dangerously-skip-permissions`. `workspaceFiles` from Phase 0 is what would let
+it.
 
 **Never use `--system-prompt`.** It replaces PrimeAgent's default system prompt,
 which carries its own tool-calling harness. A template that replaces it disables
