@@ -13,6 +13,7 @@ const pkg = JSON.parse(readFileSync(join(FLEET_DIR, 'package.json'), 'utf8')) as
   name: string;
   version: string;
   dependencies?: Record<string, string>;
+  repository?: { type?: string; url?: string; directory?: string };
 };
 
 function latestChangelogVersion(text: string): string | undefined {
@@ -43,6 +44,29 @@ test('fleet/package.json is the public Fleet package and has no dependencies', (
   assert.equal(pkg.name, '@aywengo/mercury-fleet');
   assert.equal(pkg.version, FLEET_VERSION);
   assert.deepEqual(pkg.dependencies ?? {}, {});
+});
+
+test('fleet/package.json declares the repository npm validates provenance against', () => {
+  // npm derives the source repository from the GitHub OIDC context, embeds it in the sigstore
+  // provenance bundle, and the registry refuses the publish unless the manifest declares the same
+  // repository. A real Fleet release died with
+  //   422 Unprocessable Entity - Error verifying sigstore provenance bundle:
+  //   Failed to validate repository info
+  // AFTER npm had already signed the statement and pushed it to the transparency log (#451).
+  // Trusted publishing itself was healthy -- the OIDC exchange returned 201 -- so nothing else in
+  // the pipeline reports this. npm names the cause once, at publish time, and only on the real
+  // release. This is the only place it can be caught before a tag is spent.
+  const root = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as {
+    repository?: { type?: string; url?: string };
+  };
+  assert.ok(root.repository?.url, 'root package.json must declare repository.url to compare against');
+  assert.equal(typeof pkg.repository, 'object',
+    'fleet/package.json must declare "repository" -- npm rejects the provenance bundle without it (#451)');
+  assert.equal(pkg.repository?.type, 'git');
+  assert.equal(pkg.repository?.url, root.repository?.url,
+    'fleet must declare the same repository as the root package; it is published from this repository');
+  assert.equal(pkg.repository?.directory, 'fleet',
+    'fleet must name its subdirectory, or npm resolves the package to the repository root');
 });
 
 test('FLEET_VERSION matches the Fleet changelog and notes file', () => {

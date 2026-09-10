@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "license": "MIT",
   "description": "Federation layer for independent Mercury hosts: host registry, probing, Run dispatch and routing, reconciliation, event aggregation and a Prometheus rollup",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aywengo/mercury.git",
+    "directory": "fleet"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.18.0"
