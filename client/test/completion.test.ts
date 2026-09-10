@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { COMMAND_SUMMARIES, IMPLEMENTED } from '../cli.ts';
 import { SUPPORTED_SHELLS } from '../commands/completion.ts';
+import { EXIT } from '../exitCodes.ts';
 
 /**
  * Shell completion (docs/cli-tui-design.md §16 Milestone 4).
@@ -25,7 +26,23 @@ function cli(args: string[], xdg: string, extra: Record<string, string> = {}) {
   const r = spawnSync(process.execPath, ['--no-warnings', BIN, ...args], {
     encoding: 'utf8',
     timeout: 60_000,
-    env: { ...process.env, XDG_CONFIG_HOME: xdg, MERCURY_URL_PLACEHOLDER: '', ...extra },
+    // Issue #463: XDG_CONFIG_HOME alone only isolates the config FILES. An operator who
+    // exports MERCURY_CLIENT_URL / MERCURY_CLIENT_TOKEN still hands the spawned CLI an
+    // endpoint and a credential, which contradicts emptyXdg()'s documented premise ("no
+    // endpoint, no credential") and the test name "offline and with no credential".
+    // Nothing asserts on that premise today -- measured, 8/8 pass with an ambient
+    // endpoint and a sentinel token -- so this is the premise being enforced rather than
+    // a live failure fixed. Same shape as #458: a test whose result depends on state it
+    // never created. Blanked before `extra` so a test that wants an endpoint still sets
+    // one, matching config-commands.test.ts and the cli.test.ts fix.
+    env: {
+      ...process.env,
+      XDG_CONFIG_HOME: xdg,
+      MERCURY_CLIENT_URL: '',
+      MERCURY_CLIENT_TOKEN: '',
+      MERCURY_URL_PLACEHOLDER: '',
+      ...extra,
+    },
   });
   return { code: r.status, out: r.stdout ?? '', err: r.stderr ?? '', all: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
@@ -155,5 +172,35 @@ test('bash and zsh both accept the script they are given', () => {
     const r = spawnSync(exe, ['-n', file], { encoding: 'utf8', timeout: 60_000 });
     if (r.error) continue;   // interpreter absent on this host; the functional test above still covers bash
     assert.equal(r.status, 0, `${shell} -n failed: ${r.stderr}`);
+  }
+});
+
+// Issue #463: the isolation inside cli() is the ONLY thing that makes "offline and with no
+// credential" true, and until now nothing enforced it -- it was a comment on emptyXdg() and a
+// phrase in a test name. That is the same shape as #458, where an expected exit code depended
+// on state the test never created and stayed green purely because CI has no profile.
+test('cli() does not leak an ambient endpoint or credential into the spawned CLI (issue #463)', () => {
+  const previous = { url: process.env.MERCURY_CLIENT_URL, token: process.env.MERCURY_CLIENT_TOKEN };
+  // Port 1 is never listening. If the ambient endpoint reaches the child, the CLI attempts a
+  // request and fails at the transport (EXIT.TRANSPORT, 7); if isolation holds it short-circuits
+  // on unusable local configuration (EXIT.USAGE, 2) before any request is sent. Those two codes
+  // are the observable difference between "the CLI saw the ambient endpoint" and "it did not".
+  process.env.MERCURY_CLIENT_URL = 'http://127.0.0.1:1';
+  process.env.MERCURY_CLIENT_TOKEN = TOKEN;
+  try {
+    const r = cli(['runs', 'list'], emptyXdg());
+    assert.equal(
+      r.code,
+      EXIT.USAGE,
+      `the CLI reached the network, so an ambient endpoint leaked into it: code=${r.code} ${r.all}`,
+    );
+    assert.ok(!r.all.includes(TOKEN), `the ambient credential leaked into output: ${r.all}`);
+  } finally {
+    // Restore exactly, including "was previously unset", or every later test in this file
+    // inherits an endpoint the rest of the file assumes is absent.
+    if (previous.url === undefined) delete process.env.MERCURY_CLIENT_URL;
+    else process.env.MERCURY_CLIENT_URL = previous.url;
+    if (previous.token === undefined) delete process.env.MERCURY_CLIENT_TOKEN;
+    else process.env.MERCURY_CLIENT_TOKEN = previous.token;
   }
 });
