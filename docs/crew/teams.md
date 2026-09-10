@@ -154,8 +154,104 @@ A stage that requires `persona.append` must never land on a harness that silentl
 ignores persona. Silent degradation produces a Run that completed and did the
 wrong thing, which is the worst failure mode available here.
 
-## 7. Phase order
+## 7. Manifest and record
 
+A Team is authored as a manifest and executed as a record. The manifest names
+capabilities, never harnesses.
+
+```ts
+interface TeamManifest {
+  schemaVersion: 1;
+  id: string;
+  version: string;
+  description: string;
+
+  stages: Array<{
+    id: string;
+    template: { id: string; version?: string };
+    requires?: { capabilities: string[] };   // placement input, not an agent id
+    dependsOn?: string[];                    // bounded and acyclic
+    gate?: 'onSuccess' | 'onArtifact' | 'onReview';
+    inputs?: Array<{ from: string; artifact: string }>;
+    maxAttempts?: number;
+  }>;
+
+  limits?: {
+    maxStages?: number;      // system-capped
+    maxRuns?: number;        // system-capped
+    maxDurationMs?: number;
+  };
+}
+```
+
+Hard validation errors:
+
+- `stages` empty, or exceeding the system stage cap;
+- a stage `id` duplicated, or `dependsOn` naming an unknown stage;
+- `dependsOn` containing a cycle — detected, reported with the cycle path, and
+  rejected. A cycle is not scheduled "best effort";
+- `inputs.from` referencing a stage that is not reachable in `dependsOn`, which
+  would read an artifact that may not exist;
+- a `template` that does not resolve, or whose own `requires.capabilities` are not
+  a superset of the stage's `requires`.
+
+The graph is deliberately a bounded DAG of stages with no timers, no loops, no
+dynamic stage creation and no human-task inbox. Those are `README.md` non-goals and
+this design does not quietly reintroduce them.
+
+### 7.1 Execution record
+
+```ts
+interface TeamRun {
+  id: string;
+  ownerId: string;
+  manifestId: string;
+  manifestVersion: string;
+  manifestHash: string;              // resolved bytes, not a mutable pointer
+  status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+  stages: Array<{
+    id: string;
+    childRunId: string | null;
+    hostId: string | null;
+    agent: string | null;
+    placementReason: string;         // why this harness, this host
+    status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'SKIPPED';
+  }>;
+}
+```
+
+Two rules carry the weight here.
+
+**The Team never transitions a Run.** Child Runs move only through
+`RunStore.transition`. Team status is *derived* from child Run status, so adding
+Teams cannot introduce a second, competing state machine — the invariant that
+keeps retry, cancel and stuck-run handling working unchanged.
+
+**`placementReason` is required, not optional.** A mixed-harness team that silently
+routes work to an unexpected harness is undebuggable. Recording the reason at
+placement time is cheap; reconstructing it later from logs is not.
+
+### 7.2 API
+
+Owner-scoped; foreign or missing Teams return `404`.
+
+| Method and path | Purpose |
+| --- | --- |
+| `POST /api/teams` | resolve the manifest, create the record and its first stage Runs |
+| `GET /api/teams/:id` | the record, including per-stage placement reason |
+| `GET /api/teams/:id/events` | Team-level event stream, monotonic and Team-scoped |
+| `POST /api/teams/:id/cancel` | request cancellation of the Team and its child Runs |
+
+Team events are Team-scoped and separate from Run events, per `README.md`
+invariant 4: a stage that never produced a Run is a log or audit record, not a Run
+event.
+
+## 8. Phase order
+
+0. **Phase -1 — let a Run carry zero skills.** Smallest change in the whole plan
+   and it unblocks Hermes completely: today `skillSelector` cannot return an empty
+   list and `RunService` cannot be asked for no skills, so every harness with its
+   own skill namespace fails on the fallback set. See §3 and issue #459.
 1. **Phase 0 — per-Run capabilities** (`appendSystemPrompt`, `workspaceFiles`,
    `model`) on at least PrimeAgent and Hermes, proven by a real Run whose output
    depends on the persona. Everything else is inert without this.
@@ -166,10 +262,11 @@ wrong thing, which is the worst failure mode available here.
 4. **Phase 3 — Teams**: bounded stages, mixed harnesses, artifact handoff.
 5. **Phase 4 — kanban delegation** for Hermes stages, after the §4 decision.
 
-Phase 0 and 1 are small, independently useful, and they are the ones that make
-the heterogeneous idea real rather than aspirational.
+Phases -1, 0 and 1 are each small and independently useful, and they are the ones
+that make the heterogeneous idea real rather than aspirational. Nothing after them
+is worth building until a second harness completes a Run end to end.
 
-## 8. Not designed here
+## 9. Not designed here
 
 Cost and token metering (`budgetTokens`/`budgetCost` are recorded-only until
 adapters report usage); network egress allowlists (`allowedNetworks` is `none` or

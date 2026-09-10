@@ -88,7 +88,91 @@ Rules:
 Ship Phase 0 alone, and prove it with a real PrimeAgent Run whose reply depends
 on the persona. Until that passes, template distribution is inert.
 
-## 5. Where drafts live, and what Fleet may do
+## 5. Manifest
+
+An Agent Template is a `RolePresetManifest` at `schemaVersion: 2`. Only the delta
+is shown; everything in `role-presets.md` §2 still applies, including the rule that
+a manifest cannot declare itself trusted.
+
+```ts
+interface AgentTemplateManifest extends RolePresetManifest {
+  schemaVersion: 2;
+
+  persona?: {
+    file: string;                 // SOUL.md, PERSONA.md, ...
+    required?: boolean;           // default true when the block is present
+  };
+
+  skills?: {
+    defaults?: string[];
+    required?: string[];
+    autoSelect?: boolean;
+    max?: number;
+    none?: boolean;               // explicit "no skills", distinct from unset
+    intent?: string[];            // resolved per harness by the sub-team resolver
+  };
+
+  requires?: {
+    sandbox?: boolean;
+    capabilities?: Array<
+      | 'persona.append'
+      | 'persona.workspaceFile'
+      | 'skills.workspacePaths'
+      | 'skills.nativeNames'
+      | 'humanInput'
+      | 'resume'
+      | 'mcp'
+      | 'modelSelection'
+    >;
+  };
+}
+```
+
+`persona` is a file reference, never inline text, so a template diff reviews like
+the instruction diff it belongs with. `SOUL.md` is the Hermes filename; the field
+name stays backend-neutral.
+
+`skills.none` exists because today nothing can express it. `RunService` computes
+`input.skills && input.skills.length > 0 ? input.skills : select(...)`, and
+`skillSelector` cannot return an empty list, so "no skills" is currently
+inexpressible and Hermes therefore unusable — see [`teams.md`](teams.md) §3.
+`none: true` alongside `defaults` or `required` is a hard error, not a precedence
+rule.
+
+`skills.intent` is the sub-team seam: the template states what the skills are for,
+and each harness resolves that inside its own namespace. A template must not list
+native skill names for a specific harness.
+
+### 5.1 Additional validation
+
+Hard errors, on top of `role-presets.md` §2.1:
+
+- `persona.file` is absolute, contains `..`, crosses a symlink, leaves the template
+  directory, is not UTF-8, or exceeds the instruction size cap;
+- `persona` is present but the resolved agent advertises neither
+  `persona.append` nor `persona.workspaceFile` — fail closed rather than run an
+  agent that will silently ignore the persona;
+- `requires.capabilities` contains a name outside the closed vocabulary above;
+- `skills.none` is true and `skills.defaults` or `skills.required` is non-empty;
+- `skills.intent` is present and the resolved agent advertises neither skills
+  capability.
+
+### 5.2 API
+
+Owner-scoped throughout; a missing or foreign template is `404`, never `403`.
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/templates` | list templates visible to the caller |
+| `GET /api/templates/:id` | one template plus its resolved capabilities |
+| `POST /api/templates/validate` | dry-run validation, structured findings, stores nothing |
+| `POST /api/templates` | create an owner-scoped draft |
+| `POST /api/runs` with `template: { id, version? }` | resolve, snapshot, create one Run |
+
+`POST /api/templates/validate` must be reachable before any write path exists, so
+an operator can check a template against a host before that host can run it.
+
+## 6. Where drafts live, and what Fleet may do
 
 The Git mirror in [`preset-store.md`](preset-store.md) stays the source of truth.
 Drafts are owner-scoped on the host.
@@ -115,7 +199,7 @@ Either way there is no version negotiation between Fleet and a host today. Addin
 template routes needs a capability advertisement, or an old host fails at the
 first template call rather than at registration.
 
-## 6. Open questions
+## 7. Open questions
 
 1. Does a Hermes persona render into a **profile** (shared, persistent, affects
    other Runs on that host) or only into the isolated workspace? A profile write
