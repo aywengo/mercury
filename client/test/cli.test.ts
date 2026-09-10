@@ -14,6 +14,29 @@ import { EXIT } from '../exitCodes.ts';
 
 const BIN = join(import.meta.dirname, '..', 'bin.ts');
 
+/**
+ * An empty config root, so the CLI can never discover the operator's own profile.
+ *
+ * Issue #458: these tests spawn the real entry point, and `run()` used to hand it
+ * `{ ...process.env }` untouched. On a machine where mercuryctl is configured -- a
+ * profile under ~/.config/mercury, or MERCURY_CLIENT_URL/MERCURY_CLIENT_TOKEN in the
+ * shell -- commands that the tests expect to die on unusable local configuration
+ * (EXIT.USAGE, 2) instead reach a live host and succeed with 0. `--timeout accepts
+ * s/m/ms suffixes` was the visible failure, but the whole file was ambient-dependent:
+ * it passed on CI only because CI has no profile. A test whose expected exit code
+ * depends on state it never created is not testing the CLI, it is testing the
+ * developer's home directory.
+ *
+ * Isolation lives here rather than in each test because this is the only spawn site in
+ * the file, so no future test can forget it. The defaults sit BEFORE the caller's `env`
+ * so a test that genuinely wants a profile still sets one, exactly as
+ * completion.test.ts and version.test.ts do. The empty strings clear inherited
+ * overrides: configDir() treats a blank XDG_CONFIG_HOME as unset, and a blank
+ * MERCURY_CLIENT_URL/TOKEN falls through the same way (the idiom packaging.test.ts
+ * already relies on).
+ */
+const ISOLATED_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'mercury-cli-test-xdg-'));
+
 function run(args: string[], env: Record<string, string> = {}) {
   // --no-warnings suppresses Node's own type-stripping notice. Without it the "stderr is clean"
   // assertion below would be about Node's banner rather than about what this CLI writes, and would
@@ -21,7 +44,13 @@ function run(args: string[], env: Record<string, string> = {}) {
   const r = spawnSync(process.execPath, ['--no-warnings', BIN, ...args], {
     encoding: 'utf8',
     timeout: 30_000,
-    env: { ...process.env, ...env },
+    env: {
+      ...process.env,
+      XDG_CONFIG_HOME: ISOLATED_CONFIG_HOME,
+      MERCURY_CLIENT_URL: '',
+      MERCURY_CLIENT_TOKEN: '',
+      ...env,
+    },
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
