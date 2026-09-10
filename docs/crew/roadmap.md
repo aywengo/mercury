@@ -12,6 +12,9 @@ with Mercury. Every phase is independently reviewable and must keep
 
 Related: [`README.md`](README.md),
 [`role-presets.md`](role-presets.md),
+[`agent-templates.md`](agent-templates.md),
+[`harness-capabilities.md`](harness-capabilities.md),
+[`teams.md`](teams.md),
 [`mcp-security.md`](mcp-security.md),
 [`preset-store.md`](preset-store.md),
 [`workflows.md`](workflows.md).
@@ -99,12 +102,26 @@ Estimate: **2–3 days**. Blocking for Role Presets.
 - Define a shared adapter capability shape without yet adding MCP.
 - Refresh source-level documentation that still claims the old snapshot or
   transaction behavior.
+- Let a Run carry **zero** skills. `skillSelector` ends in
+  `picked.length > 0 ? picked : FALLBACK.filter(...)`, and `RunService` treats an
+  empty `skills` array as unspecified, so "no skills" is inexpressible. Concretely
+  broken: Hermes resolves `-s <name>` in its own store, has 81 skills, and none of
+  the four the fallback always sends, so Hermes cannot execute any Run
+  ([#459](https://github.com/aywengo/mercury/issues/459),
+  [`teams.md`](teams.md) §3).
+- Advertise per-agent capabilities on `/api/agents`, which today returns bare names
+  ([`harness-capabilities.md`](harness-capabilities.md) §2), and add a version or
+  capability field to `/healthz` so an old host fails at registration rather than at
+  first use.
 
 ### Likely files
 
 - `src/worker/worker.ts`
 - `src/runs/runService.ts`
 - `src/skills/skillRegistry.ts`
+- `src/skills/skillSelector.ts`
+- `src/adapters/hermesAgentAdapter.ts`
+- `src/api/routes.ts` (`/api/agents`, `/healthz`)
 - `src/workspace/workspaceManager.ts`
 - `src/domain/types.ts`
 - `test/skills.test.ts`
@@ -118,7 +135,13 @@ Estimate: **2–3 days**. Blocking for Role Presets.
 2. Retry uses the parent's exact skill snapshot and hash.
 3. A deliberately hanging Git fixture reaches a bounded failure.
 4. Git cannot open an interactive credential prompt.
-5. Existing Runs and adapters behave unchanged.
+5. A Run can be created with no skills, and a second harness (Hermes) completes a
+   Run end to end against a real workspace. Until this passes, no template or team
+   work is scheduled: a design only one harness can execute is not a heterogeneous
+   design.
+6. `/api/agents` reports capabilities, not just names, and a caller can filter on
+   them.
+7. Existing Runs and adapters behave unchanged.
 
 ### Deferred
 
