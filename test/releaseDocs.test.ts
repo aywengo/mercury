@@ -789,3 +789,30 @@ test('the registry attestations still match what the runbook records', async (t)
   assert.equal(stable, 200,
     'the runbook records 0.1.0 (OIDC-published) as carrying attestations; if that changed, correct the doc');
 });
+
+test('the runbook verifies the channels a release lands on, not only the version', () => {
+  // A green run plus a staged-publish approval still does not say which version a plain `npm install`
+  // resolves to. That gap is not hypothetical: Fleet's bootstrap published `0.0.1-bootstrap` to create
+  // the package page, it was the only version npm had ever seen, and `latest` came to point at a
+  // placeholder that is not a Fleet release and prints `mercury-fleet 0.1.0`. Nothing in the runbook
+  // asked which version the channels pointed at, so nothing noticed.
+  const doc = read('docs/releasing.md').replace(/\r\n/g, '\n');
+  // Scoped to the verification step. `/-\/npm\/v1\/attestations/` also appears in the credential
+  // section's host-specific check, so a whole-document match stayed green with the new step's
+  // attestation command deleted -- the third time this session a whole-file match on a term that
+  // legitimately recurs elsewhere let a mutation through.
+  const start = doc.indexOf('Verify the channels');
+  assert.ok(start >= 0, 'the runbook must carry a post-release channel-verification step');
+  const end = doc.indexOf('\n## ', start);
+  const step = doc.slice(start, end === -1 ? doc.length : end);
+  assert.match(step, /npm view [^\n]*dist-tags/,
+    'it must check what the dist-tags actually point at, not just that the version exists');
+  assert.match(step, /npm view [^\n]*@<version> version/,
+    'it must check the released version resolves');
+  assert.match(step, /-\/npm\/v1\/attestations/,
+    'it must check the artifact carries attestations, for either product');
+  // The trap has to be named, or the check reads as ceremony and gets skipped.
+  assert.match(step, /placeholder/i, 'it must name the placeholder trap that motivated the check');
+  assert.match(step, /never be the release version/i,
+    'it must state that a bootstrap version must never be the release version');
+});

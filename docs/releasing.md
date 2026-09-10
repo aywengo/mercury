@@ -156,6 +156,26 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    following an `npm install -g` instruction gets the previous version. If a run goes green and nobody
    approves, that is the gap to close; it is not a sign the job failed.
 
+9. **Verify the channels, not just the version.** A green run plus an approval still does not say which
+   version a plain `npm install` resolves to, and that is the part users feel:
+
+   ```bash
+   npm view <package>@<version> version
+   npm view <package> dist-tags
+   curl -sS --max-time 30 -o /dev/null -w '%{http_code}\n' \
+     "https://registry.npmjs.org/-/npm/v1/attestations/<package>@<version>"
+   ```
+
+   Read all three. The first says the version exists, the second says what `latest` and `rc` point at,
+   and the third says the artifact carries attestations -- `200` yes, `404` no.
+
+   This is not a formality. Fleet's bootstrap published `0.0.1-bootstrap` to create the package page,
+   and because it was the only version npm had ever seen, **`latest` came to point at a placeholder that
+   is not a Fleet release and prints `mercury-fleet 0.1.0` while being no such release**. Nothing
+   noticed, because nothing in this runbook asked which version the channels pointed at. A bootstrap
+   version must therefore never be the release version, and `latest` must be checked after any publish
+   that is not a normal tagged release.
+
 ## Publishing credential
 
 **There is none for the host, and that is the intended steady state.** Fleet's first publish is the one
