@@ -90,10 +90,15 @@ the work into independently shippable products:
 - [`Per-run MCP security`](crew/mcp-security.md)
 - [`Preset Store`](crew/preset-store.md)
 - [`Workflow Templates`](crew/workflows.md)
+- [`Agent Templates`](crew/agent-templates.md) — persona-bearing agent definitions
+  and the per-Run capability that gates them
+- [`Harness capabilities`](crew/harness-capabilities.md) — best-fit placement
+  across PrimeAgent, Hermes, Pi, Oh my Pi and Claude
+- [`Agent Teams`](crew/teams.md) — mixed-harness orchestration
 - [`Crew roadmap`](crew/roadmap.md)
 
-The original [`Crew agent preset store`](crew-design.md) document is retained
-as a superseded historical proposal.
+The original all-in-one Crew proposal was removed as superseded; it is available
+from git history and is not an implementation guide.
 
 ## Architecture
 

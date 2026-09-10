@@ -17,8 +17,9 @@ Reviewed at commit `d005fad` (`main`), 2026-08-31. Node v26.7.0.
 Scope: all of `src/` (7,262 lines of TypeScript), `ui/`, `test/`, `deploy/`,
 measured against [`ARCHITECTURE.md`](../ARCHITECTURE.md).
 
-Companion: [`docs/crew-design.md`](crew-design.md) (the Crew feature design, which
-depends on several findings below).
+Companion: [`docs/crew/README.md`](crew/README.md) (the Crew feature design, which
+depends on several findings below). The original `docs/crew-design.md` cited here
+was later removed as superseded; this review text is unchanged as a dated record.
 
 ---
 
@@ -613,7 +614,8 @@ Two items survived remediation as design work rather than defects, and both are 
   M16 (races simulated rather than multi-process) is a standing requirement on any design there:
   the cross-process path is currently untested by construction, so a push design must be validated
   with a real spawned worker process and not an in-process SQL insert.
-- **Role presets ("crews")** — [`crew-design.md`](crew-design.md). Its Phase 0 dependency was the
+- **Role presets ("crews")** — [`crew/README.md`](crew/README.md) (originally
+  `crew-design.md`, since removed as superseded). Its Phase 0 dependency was the
   skill path containment work in #58, which landed as step 2 above.
 
 ---

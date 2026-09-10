@@ -8,9 +8,10 @@ skill set, agent preference and constraints.
 Status: **design only.** None of the types, APIs or storage described in this
 directory are implemented unless a section explicitly says otherwise.
 
-This directory supersedes the original
-[`docs/crew-design.md`](../crew-design.md), which is retained as a historical
-proposal.
+This directory supersedes the original all-in-one `docs/crew-design.md`, which
+was removed as superseded. Its content is history, available from git history at
+the commit that deleted it; it is not an implementation guide and is not linked
+from here.
 
 ## 1. The user problem
 
@@ -177,6 +178,13 @@ restrict egress by destination, the design describes network access as
 
 - [`role-presets.md`](role-presets.md) — MVP schema, resolution, snapshots,
   persistence, API, UI and adapter contract.
+- [`agent-templates.md`](agent-templates.md) — persona-bearing Agent Templates,
+  per-backend rendering, and the per-Run capability gap that gates them.
+- [`harness-capabilities.md`](harness-capabilities.md) — declared capability and
+  affinity per harness, and best-fit placement across PrimeAgent, Hermes, Pi,
+  Oh my Pi and Claude.
+- [`teams.md`](teams.md) — mixed-harness Agent Teams, and the boundary against
+  Hermes-native `kanban` and `peer` scheduling.
 - [`mcp-security.md`](mcp-security.md) — per-run MCP capability, secret and
   network boundaries.
 - [`preset-store.md`](preset-store.md) — Git mirror, owner drafts, uploads and
