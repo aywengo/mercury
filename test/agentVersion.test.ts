@@ -35,12 +35,17 @@ test('v7 migration adds the version columns and leaves existing Runs unknown', (
   try {
     db.exec('PRAGMA journal_mode = WAL;');
     db.exec('PRAGMA foreign_keys = ON;');
+    // Located by content, not by position. `MIGRATIONS.length - 1` silently becomes wrong the
+    // moment anyone appends a migration: it would apply the newest one and assert about v7,
+    // failing for a reason that has nothing to do with the change under review.
+    const V7 = MIGRATIONS.findIndex((m) => m.includes('agent_version_recorded'));
+    assert.ok(V7 > 0, 'the v7 migration was not found');
     // Everything before v7.
-    for (const sql of MIGRATIONS.slice(0, -1)) db.exec(sql);
+    for (const sql of MIGRATIONS.slice(0, V7)) db.exec(sql);
     const before = db.prepare("SELECT name FROM pragma_table_info('runs') WHERE name IN ('agent_version','agent_version_raw')").all();
     assert.deepEqual(before, [], 'the columns existed before v7');
 
-    db.exec(MIGRATIONS[MIGRATIONS.length - 1]);
+    db.exec(MIGRATIONS[V7]);
     const cols = (db.prepare("SELECT name FROM pragma_table_info('runs') WHERE name IN ('agent_version','agent_version_raw') ORDER BY name").all() as { name: string }[])
       .map((r) => r.name);
     assert.deepEqual(cols, ['agent_version', 'agent_version_raw']);

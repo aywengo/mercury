@@ -164,6 +164,11 @@ export interface GoalState {
   lastError?: string;
   pausedReason?: string;
   source?: 'harness' | 'operator';
+  /**
+   * Whether the Run ever reached RUNNING, present once Mercury settles an abandoned goal.
+   * Absent means no answer yet, which is NOT false: an unsettled goal has no answer to give.
+   */
+  attempted?: boolean;
   updatedAt: string;
 }
 
@@ -428,6 +433,9 @@ function parseGoal(value: unknown): GoalState {
     ...(typeof o.lastReason === 'string' ? { lastReason: o.lastReason } : {}),
     ...(typeof o.lastError === 'string' ? { lastError: o.lastError } : {}),
     ...(typeof o.pausedReason === 'string' ? { pausedReason: o.pausedReason } : {}),
+    // A non-boolean is dropped rather than coerced: absent means "no answer", and coercing a
+    // malformed value to false would claim the Run never started.
+    ...(typeof o.attempted === 'boolean' ? { attempted: o.attempted } : {}),
     ...(o.source === 'harness' || o.source === 'operator' ? { source: o.source } : {}),
   };
 }

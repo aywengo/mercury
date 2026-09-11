@@ -133,6 +133,57 @@ test('goalLabel keeps the run page badge distinct from the status badge', () => 
   assert.match(goalLabel({ status: 'complete' }).text, /^goal: /);
 });
 
+test('an unmet goal that never started reads differently from one that ran', () => {
+  // Issue #489. Both are genuinely unmet, but one is the signal and the other is a Run that died
+  // before the harness received the objective. Rendered identically, a routine infrastructure
+  // failure carries the same weight as the pair this feature exists to expose.
+  const ran = goalLabel({ status: 'unmet', attempted: true });
+  const never = goalLabel({ status: 'unmet', attempted: false });
+  assert.notEqual(never.text, ran.text, 'never-started reads the same as attempted');
+  assert.match(never.text, /never started/);
+  assert.notEqual(never.cls, ran.cls, 'never-started is styled identically');
+  assert.match(never.cls, /goal-unattempted/);
+  // The distinction is stated, not hidden behind a hover.
+  assert.match(never.title, /terminal status before the harness/);
+
+  // Absent means no answer, and must not be read as "never started" -- that would relabel every
+  // unsettled goal on the dashboard.
+  assert.equal(goalLabel({ status: 'unmet' }).cls, 'goal-unmet');
+  assert.equal(goalLabel({ status: 'unmet', attempted: undefined }).cls, 'goal-unmet');
+});
+
+test('goal badge colours keep opposite meanings distinguishable', () => {
+  // Colour is the fast channel on this view. The first .goal-unattempted rule used var(--muted),
+  // which is exactly what .goal-none ("no goal") and .goal-unknown ("server does not report goals")
+  // use -- so "the objective was not met", "there is no goal" and "we do not know" shared one colour.
+  // That reintroduces, in CSS, the conflation issue #489 exists to remove, and no JS test can see it.
+  const css = readFileSync(join(UI_DIR, 'style.css'), 'utf8');
+  const colorOf = (cls: string): string => {
+    const m = new RegExp(`\\.goal-${cls}\\s*\\{([^}]*)\\}`).exec(css);
+    assert.ok(m, `.goal-${cls} rule missing from style.css`);
+    const c = /color:\s*([^;]+);/.exec(m[1]);
+    assert.ok(c, `.goal-${cls} declares no colour`);
+    return c[1].trim();
+  };
+  const unmet = colorOf('unmet');
+  const unattempted = colorOf('unattempted');
+  const none = colorOf('none');
+  const unknown = colorOf('unknown');
+
+  // Never-started stays in the unmet colour family: quieter, not a different statement.
+  assert.equal(unattempted, unmet,
+    `never-started (${unattempted}) left the unmet colour family (${unmet}) -- muting it reads as "nothing to report"`);
+  // And none of the three opposite states may share a colour.
+  assert.notEqual(unmet, none, 'unmet and "no goal" are the same colour');
+  assert.notEqual(unattempted, unknown, 'never-started and "unknown" are the same colour');
+  assert.notEqual(unmet, unknown, 'unmet and "unknown" are the same colour');
+
+  // De-escalated by weight, so it is still visibly subordinate to a real unmet.
+  const weight = (cls: string): string =>
+    new RegExp(`\\.goal-${cls}\\s*\\{[^}]*font-weight:\\s*([^;]+);`).exec(css)?.[1]?.trim() ?? 'default';
+  assert.notEqual(weight('unattempted'), weight('unmet'), 'never-started shouts at the same weight');
+});
+
 test('the run page renders goal status BESIDE run status, and never instead of it', () => {
   // The rendering rule is a requirement, not polish. Asserted on the markup and the renderer
   // together: an element that exists but is never filled is as bad as one that was never added.

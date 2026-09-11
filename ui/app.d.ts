@@ -29,6 +29,11 @@ export interface UiGoal {
   objective?: string;
   source?: string;
   gates?: UiGoalGate[];
+  /**
+   * Whether the Run ever reached RUNNING. Absent means no answer yet, which is NOT false --
+   * an unsettled goal has none to give.
+   */
+  attempted?: boolean;
 }
 
 /**

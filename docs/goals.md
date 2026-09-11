@@ -11,6 +11,7 @@ deferred. Concretely, today:
 | capability + version detection per agent (Phase 0a), with per-field goal capability | gate OUTCOME events -- no harness reports them, so there is no emitter (Phase 4b) |
 | `GET /api/runs/:id/goal` and `POST /api/runs/:id/goal/cancel`; `cancelled` finally has a writer | |
 | a mid-run objective replacement reported by the harness is recorded, redacted and bounded (9) | |
+| `run_goals.attempted` separates "never started" from "attempted and stopped short" on the gauge, in `runs show` and on the dashboard badge (14) | |
 | `run_goals` table, `GoalSpec` validation, `goal.*` event types | Hermes goals (Phase 5, blocked upstream) |
 | `POST /api/runs` accepts `goal`, refused unless the agent can track it | budget enforcement (Phase 6, deferred pending real usage data) |
 | `goal.unmet` when a Run ends with the objective still open, and `mercury_goals_in_status` | |
@@ -902,13 +903,34 @@ the counter that answers it rather than leaving the question to anecdote.
 Two further questions surfaced while checking the capability surface, and unlike these
 they block implementation rather than funding:
 
-1. **Where does goal capability come from?** Largely answered by
-   [section 13](#13-compatibility-matrix): declarative per-adapter thresholds keyed on
-   Mercury-usable features, config-supplied for the declarative adapters, surfaced as a
-   parallel `capabilities` field, failing closed. What remains is the shape of the
-   config key for `LocalAgentAdapter`/`RpcAgentAdapter`/`RemoteAgentAdapter`, and whether
-   the version probe runs at adapter construction or lazily on first use.
-2. **When must `unmet` NOT fire?** A Run cancelled or timed out before the worker claimed
-   it never started its goal. Emitting `unmet` there is noise, and noise on the single
-   signal Phase 1 exists to produce would discredit the feature before the counter in
-   section 10 could be trusted.
+1. **Where does goal capability come from?** **Closed -- both halves, and neither needed
+   new code.** The config key is `goalSupport` in the JSON adapter config that
+   `LocalAgentRegistry`/`RpcAgentRegistry`/`RemoteAgentRegistry` load from
+   `MERCURY_LOCAL_AGENTS_DIR` / `MERCURY_RPC_AGENTS_DIR` / `MERCURY_REMOTE_AGENTS_DIR`.
+   It is not an environment variable and never was: these adapters exist to add agents
+   without per-agent code, so the operator states support in the same file that states the
+   command, and Mercury verifies the claim against the detected version rather than
+   trusting it. Verified end to end -- a config file carrying
+   `"goalSupport": {"set":"1.0.0","track":"1.0.0"}` yields
+   `capabilities: {"goals":{"set":"1.0.0","track":"1.0.0"}}`.
+
+   Probe timing is **neither** construction nor lazy-on-first-use. `AgentCapabilityRegistry.start()`
+   fires every probe at boot and does not await them; `settle()` exists for callers that need
+   a settled answer. Unknown-until-landed is the intended steady state, because 13.5 requires
+   that a capability nobody can answer about degrades the goal feature and never blocks the Run.
+
+2. **When must `unmet` NOT fire?** **Answered: never -- but it must say which kind it is.**
+   Suppressing it would restore the dangling open goal Phase 1 removed, and would erase the
+   record that an operator asked for a goal on a Run that died before the harness ever saw it.
+   The right answer was not a different status but a second dimension on the same one.
+
+   The original resolution put the distinction in the `goal.unmet` event payload only, which
+   left every aggregate surface unable to see it: `mercury_goals_in_status` counted a Run
+   cancelled while QUEUED, and the routine `FAILED(infrastructure)` workspace-setup path, in
+   the same bucket as the `COMPLETED`-with-objective-open pair the feature exists to expose.
+   Three Runs, one signal, gauge reads three -- exactly the noise this question was asked to
+   prevent. Fixed in issue #489: `run_goals.attempted` (migration v8, nullable because an
+   unsettled goal genuinely has no answer), carried on `GoalState`, broken out as an
+   `attempted` label on the gauge, and spelled out in `runs show` and the dashboard badge.
+   The query an operator wants is now
+   `mercury_goals_in_status{status="unmet",attempted="true"}`.

@@ -267,6 +267,9 @@ test('label values are escaped so a value cannot forge metric lines', () => {
     // as well. A guard that only covers the metric that existed when it was written is how the
     // next one ships unescaped.
     goalsByStatus: { [evil]: 1 },
+    // The attempted label is a THIRD label path added after this guard was written, so it is
+    // routed through the same injection attempt. This is the case the comment above predicts.
+    goalsByStatusAndAttempted: { [evil]: { [evil]: 1 } },
     durationByStatus: new Map(),
     queueWait: { buckets: new Map([['+Inf', 0]]), sum: 0, count: 0 },
     errorsByKind: {},
@@ -728,19 +731,44 @@ test('goal status is reported as an aggregate, including unmet', () => {
     mk('c', 'complete');
     mk('d', 'unmet');
     mk('e', 'paused');
+    // Two more unmet goals, split by whether the Run ever started. Without these the metric cannot
+    // be shown to separate the signal from the noise, which is the only reason the label exists
+    // (issue #489).
+    mk('f', 'unmet');
+    mk('g', 'unmet');
+    const unmetIds = (env.db
+      .prepare('SELECT run_id FROM run_goals WHERE objective IN (?,?,?) ORDER BY objective')
+      .all('d', 'f', 'g') as { run_id: string }[]).map((r) => r.run_id);
+    assert.equal(unmetIds.length, 3, 'fixture did not seed three unmet goals');
+    env.goals.update(unmetIds[0], { attempted: true }, 'now');    // the real signal
+    env.goals.update(unmetIds[1], { attempted: false }, 'now');   // died before the harness saw it
+    // unmetIds[2] left NULL: unmet with no answer yet.
 
     const snap = collectMetrics(env.db);
     assert.equal(snap.goalsByStatus.active, 2);
     assert.equal(snap.goalsByStatus.complete, 1);
-    assert.equal(snap.goalsByStatus.unmet, 1);
     assert.equal(snap.goalsByStatus.paused, 1);
     // Seeded at zero rather than absent, so a fresh install reads 0 and not "no data".
     assert.equal(snap.goalsByStatus.budget_limited, 0);
     // `absent` means "no goal row"; it is not a goal state and must not appear as a label.
     assert.ok(!('absent' in snap.goalsByStatus), 'absent leaked into the goal label set');
 
+    // The marginal still adds up, so an existing dashboard reading the total is not silently
+    // wrong after the label was added.
+    assert.equal(snap.goalsByStatus.unmet, 3);
+    // The split is the point of the label: one real signal, one never-attempted, one unsettled.
+    assert.deepEqual(snap.goalsByStatusAndAttempted.unmet,
+      { true: 1, false: 1, unknown: 1 },
+      'unmet no longer separates the signal from the noise');
+    // An unsettled goal is `unknown`, never `false`. Reading it as false would classify the whole
+    // open population as never-started.
+    assert.deepEqual(snap.goalsByStatusAndAttempted.active,
+      { true: 0, false: 0, unknown: 2 });
+
     const body = renderPrometheus(snap);
-    assert.match(body, /mercury_goals_in_status\{status="unmet"\} 1/);
+    // The query an operator actually wants: goals the harness held and never declared met.
+    assert.match(body, /mercury_goals_in_status\{attempted="true",status="unmet"\} 1/);
+    assert.match(body, /mercury_goals_in_status\{attempted="false",status="unmet"\} 1/);
     assert.match(body, /# TYPE mercury_goals_in_status gauge/);
   } finally { env.close(); }
 });

@@ -72,7 +72,10 @@ export function settleGoalOnTerminal(deps: GoalSettlementDeps, run: Run, to: Run
 
   const started = run.startedAt !== null && run.startedAt !== undefined;
   const now = (deps.now ?? (() => new Date().toISOString()))();
-  deps.goals.update(run.id, { status: 'unmet' }, now);
+  // `attempted` rides in the same write as the status. It used to live only in the event below,
+  // which left every aggregate surface counting a Run that never started in the same bucket as the
+  // COMPLETED-with-open-objective pair this feature exists to expose (issue #489).
+  deps.goals.update(run.id, { status: 'unmet', attempted: started }, now);
   deps.events.append(run.id, 'goal.unmet', {
     runId: run.id,
     status: 'unmet',

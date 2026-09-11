@@ -70,6 +70,21 @@ export interface MetricsSnapshot {
    * to the Run count and hide the thing you are looking for.
    */
   goalsByStatus: Record<string, number>;
+  /**
+   * Goals by status AND by whether the Run ever reached RUNNING.
+   *
+   * `unmet` alone answers two different questions and cannot tell them apart (issue #489): the
+   * harness held the objective, worked, and never declared it met -- the signal -- versus the Run
+   * died before the harness ever received the goal, which includes the routine
+   * FAILED(infrastructure) workspace-setup path. Counting them together makes the one aggregate
+   * surface for this feature unusable for the judgement it was built to support, which is what
+   * docs/goals.md 14 warned about.
+   *
+   * `unknown` is the third value and it is not a catch-all: it means the goal has not been
+   * settled, so the question has no answer yet. Every live goal is `unknown`, and reading
+   * `unknown` as `false` would render the entire open population as never-started.
+   */
+  goalsByStatusAndAttempted: Record<string, Record<string, number>>;
   /** Runs that ever had a sandbox policy applied. */
   sandboxEnabled: number;
   /** Total runs ever created. Pair with sandboxEnabled in PromQL for an enablement RATE. */
@@ -252,6 +267,21 @@ export interface CollectOptions {
 }
 
 /** Compute the current metrics snapshot. Read-only; safe to call on every scrape. */
+/**
+ * The `attempted` label values, in render order.
+ *
+ * `unknown` is a real state, not a parse failure: an unsettled goal has no answer to whether the
+ * Run started. It is spelled the same as the version-unknown rule in docs/goals.md 13.5 so that
+ * "Mercury does not know yet" reads identically across metrics.
+ */
+export const GOAL_ATTEMPTED_VALUES = ['true', 'false', 'unknown'] as const;
+
+function attemptedLabel(attempted: number | null): string {
+  if (attempted === 1) return 'true';
+  if (attempted === 0) return 'false';
+  return 'unknown';
+}
+
 export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): MetricsSnapshot {
   const now = opts.now ?? Date.now();
 
@@ -272,9 +302,21 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
   const goalsByStatus: Record<string, number> = {};
   for (const st of GOAL_STATUS_VALUES) goalsByStatus[st] = 0;
   const goalRows = db
-    .prepare('SELECT status, COUNT(*) AS n FROM run_goals GROUP BY status')
-    .all() as { status: string; n: number }[];
-  for (const r of goalRows) goalsByStatus[r.status] = Number(r.n);
+    .prepare('SELECT status, attempted, COUNT(*) AS n FROM run_goals GROUP BY status, attempted')
+    .all() as { status: string; attempted: number | null; n: number }[];
+  // Seeded across the full cross product for the same reason as the marginals: a GROUP BY returns
+  // no row for a combination that has not occurred, and a panel reading "no data" instead of zero
+  // is a panel that pages someone. The label set is closed, so this cannot grow cardinality.
+  const goalsByStatusAndAttempted: Record<string, Record<string, number>> = {};
+  for (const st of GOAL_STATUS_VALUES) {
+    goalsByStatusAndAttempted[st] = {};
+    for (const at of GOAL_ATTEMPTED_VALUES) goalsByStatusAndAttempted[st][at] = 0;
+  }
+  for (const r of goalRows) {
+    goalsByStatus[r.status] = (goalsByStatus[r.status] ?? 0) + Number(r.n);
+    const bucket = goalsByStatusAndAttempted[r.status];
+    if (bucket) bucket[attemptedLabel(r.attempted)] += Number(r.n);
+  }
 
   const durationSql = bucketedQuery(
     secondsBetween('started_at', 'completed_at'),
@@ -316,6 +358,7 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
   return {
     runsByStatus,
     goalsByStatus,
+    goalsByStatusAndAttempted,
     durationByStatus,
     queueWait,
     errorsByKind,
