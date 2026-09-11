@@ -271,7 +271,7 @@ export interface GoalGate {
 }
 
 export interface GoalSpec {
-  /** Omitted or empty means "the Run's `task` is the objective" -- see section 13.
+  /** Omitted or empty means "the Run's `task` is the objective" -- see section 14.
    *  Resolved at creation, so `GoalState.objective` is always non-empty and the
    *  4000-char cap applies to the resolved value (it matches PrimeAgent's
    *  MAX_THREAD_GOAL_OBJECTIVE_CHARS). A task longer than the cap with no explicit
@@ -494,6 +494,15 @@ Two cautions, because this is where a plausible design goes wrong:
 
 Ordered; each phase ships something usable on its own.
 
+**Phase 0a — capability and version detection.**
+Prerequisite, not optional polish: Phase 0's rejection rule cannot be written until
+Mercury knows which harness it is talking to. Adapters learn and cache the harness version,
+parse it per adapter, and record it on the Run. `GET /api/agents` gains a parallel
+`capabilities` field — parallel, because the dashboard's `loadAgents()` bails out on a
+non-array `agents` and would silently revert to two hardcoded options. Ships on its own
+merit: the harness version on a Run is the datum whose absence made #465 hard to close,
+where the fix was on `main` and the installed artifact was still broken.
+
 **Phase 0 — contract, no behaviour.**
 Add `GoalSpec`/`GoalState`/`GoalContract`/`GoalGate` types, the `run_goals` migration,
 and the new `EVENT_TYPES` entries. `POST /api/runs` accepts `goal`, persists it, emits
@@ -542,7 +551,8 @@ settled.
 
 | Phase | Depends on | Ships | Blocked by |
 | --- | --- | --- | --- |
-| 0 | — | types, migration, validation, honest rejection | — |
+| 0a | — | harness version detection, capability surface | — |
+| 0 | 0a | types, migration, validation, honest rejection | — |
 | 1 | 0 | `goal.unmet` — works for every adapter | — |
 | 2 | 0, 1 | PrimeAgent goals set + tracked | — |
 | 3 | 1, 2 | dashboard, `mercuryctl`, SSE | — |
@@ -550,7 +560,7 @@ settled.
 | 5 | 2 | Hermes goals | upstream `--goal` on `chat`, or a scoped kanban route |
 | 6 | 2 | `budgetTokens` enforcement (issue #63) | real per-run usage data |
 
-Phases 0–3 are the whole useful product. Phase 1 alone may justify the feature, and it
+Phases 0a–3 are the whole useful product. Phase 1 alone may justify the feature, and it
 is a small change to the finalisation path.
 
 ## 12. Non-goals
@@ -573,7 +583,185 @@ is a small change to the finalisation path.
   stopped judging; `NEEDS_INPUT` is the agent asking the operator a question. Folding
   them together would make both unreadable.
 
-## 13. Decisions and remaining questions
+## 13. Compatibility matrix
+
+Goals are not a property of a harness. They are a property of a harness **at a version**,
+and Mercury currently knows neither half of that.
+
+### 13.1 What was measured
+
+Versions installed on the machine this design was written on, and the version each feature
+actually landed in, taken from each project's own history rather than its docs:
+
+| Harness | Installed | Feature | Introduced | Mercury can use it |
+| --- | --- | --- | --- | --- |
+| PrimeAgent | 0.9.4 | `/goal` (interactive) | 0.0.1 — 2026-05-18 | no — interactive only |
+| PrimeAgent | 0.9.4 | `--goal`, `--goal-token-budget` | **0.3.3 — 2026-07-23** (PR #514) | **yes** |
+| Hermes | v0.20.5 (2026.8.19), upstream `933c209e` | `/goal`, `GoalContract`, gates | not determinable locally | **no** |
+| Claude Code | 1.0.3 | none — `claude --help` has no goal surface | — | no |
+
+Two things fall out of this table, and they are different problems.
+
+**The same harness has several goal features with different thresholds.** PrimeAgent has had
+`/goal` since its first release, but the headless flags Mercury needs arrived 14 minor
+versions later. A matrix that recorded "PrimeAgent: goals yes" would be true and useless —
+it would green-light a `--goal` invocation against a 0.2.x install that would reject the
+flag at parse time.
+
+**Hermes' introduction version cannot be determined from this install.** The checkout is a
+shallow clone: one commit, no tags, no changelog. That is not a gap to fill in later, it is
+a fact about how the harness ships, and the design has to survive it.
+
+### 13.2 The rule the table forces
+
+**The matrix describes what Mercury can do with a harness at a version, not what the harness
+can do.** Hermes has goals. Mercury cannot reach them. A matrix keyed on harness capability
+would record `hermes: goals yes`, and Mercury would send a goal, get no status back, and
+report a Run as goal-tracked when nothing was tracked. That is issue #459 — an advertised
+capability the serving path does not honour — rebuilt inside the compatibility table.
+
+So every row is keyed on a **Mercury-usable feature**, and "the harness supports it" is not
+sufficient evidence for a row. The Hermes row is `no` *because of section 7*, and it stays
+`no` until one of section 7's options lands, regardless of how capable `goals.py` is.
+
+### 13.3 Mercury does not know harness versions at all
+
+There is no version detection anywhere: no adapter invokes `--version`, and neither `Run`
+nor the agent registry carries a harness version. The only `version` fields in the domain are
+`ResolvedSkill.version` and `RunSkill.skillVersion`, which are about skills.
+
+So the matrix has a prerequisite before it can be consulted: **the adapter has to learn
+which harness it is talking to.**
+
+- **Probe once, cache, and record it on the Run.** `<cmd> --version` at adapter
+  construction, not per Run. Store the resolved version on the Run so a later diagnosis
+  knows what actually executed it — the absence of that datum is what made issue #465 hard
+  to close, where the fix was on `main` and the installed artifact was still broken.
+- **Parse per adapter, not universally.** The three version strings in the table above are
+  `0.9.4`, `v0.20.5 (2026.8.19) · upstream 933c209e`, and `1.0.3`. One shared semver parser
+  would fail on Hermes' date component and its trailing upstream sha. Each adapter owns the
+  parse for its own harness and yields a comparable value plus the raw string.
+- **Keep the raw string.** The parsed value drives comparison; the raw string is what goes in
+  the event and the UI, because when a parse is wrong the raw string is the only evidence of
+  why.
+
+### 13.4 The matrix
+
+Declarative, per adapter, keyed on Mercury-usable features with a minimum version each:
+
+```ts
+/** Feature names are Mercury's, and mean "Mercury can exercise this against this
+ *  harness" -- NOT "this harness has this feature". See 13.2. */
+export interface AgentGoalSupport {
+  /** Mercury can set an objective at launch. */
+  set?: string;             // minimum harness version, or absent = never
+  /** Mercury can observe objective status. */
+  track?: string;
+  /** Mercury can pass a token budget through. */
+  tokenBudget?: string;
+  /** Objective carries a verification contract. */
+  contract?: string;
+  /** Deterministic gates are reported back to Mercury. */
+  gates?: string;
+}
+```
+
+| Agent | `set` | `track` | `tokenBudget` | `contract` | `gates` |
+| --- | --- | --- | --- | --- | --- |
+| `primeagent` (rpc) | `0.3.3` | `0.3.3` | `0.3.3` | — | — |
+| `primeagent` (daemon) | — | — | — | — | — |
+| `hermes` | — | — | — | — | — |
+| `claude` | — | — | — | — | — |
+| `fake` | — | — | — | — | — |
+| declarative local/rpc/remote | from config | from config | from config | from config | from config |
+
+A dash means *never*, not *unknown* — the difference matters, because `never` is a
+statement Mercury can render as a reason and `unknown` is not.
+
+`contract` and `gates` are `—` for PrimeAgent deliberately: it has no equivalent concept, so
+Mercury must reject those fields rather than accept and drop them. Hermes has both concepts
+and still gets `—`, per 13.2.
+
+**The declarative adapters must take this from config.** `LocalAgentAdapter`,
+`RpcAgentAdapter` and `RemoteAgentAdapter` exist to add agents without per-agent code, so a
+hardcoded per-class table would leave them permanently unable to declare support — which
+would quietly make every third-party agent second-class. Mercury cannot know a third-party
+CLI's feature history; the operator configures it, and Mercury's job is to verify the claim
+against the detected version rather than to trust it blindly.
+
+### 13.5 Unknown version fails closed, and never blocks the Run
+
+This is the part most likely to be implemented wrong, so both halves are load-bearing.
+
+**Fail closed on capability.** If the probe fails, the output does not parse, or the version
+is older than the threshold, the feature is unavailable. Unknown must not mean assume-yes —
+that is #459 — and it must not mean assume-newest either, since the newest version is the
+one an attacker or a stale mirror could claim.
+
+**But capability failure must degrade the feature, never the Run.** An unparseable or
+unexpectedly-new PrimeAgent must not stop Mercury running it. The Run proceeds, the goal is
+rejected at creation with a reason, and the operator sees why. Refusing to execute an agent
+because its version string changed would brick every harness upgrade until Mercury's parser
+caught up, which is a far worse failure than a goal nobody can set.
+
+The error names the fix, because "unsupported" without a threshold is not actionable:
+
+```
+400 goal requires primeagent >= 0.3.3; detected 0.2.7 (/Users/x/.local/bin/prime-agent).
+    Upgrade the harness or omit `goal`.
+```
+
+And the two failure modes stay distinguishable in the UI, because they want different
+responses: *too old* means upgrade, *cannot tell* means fix the probe.
+
+### 13.6 Surfacing it
+
+`GET /api/agents` returns bare strings today, so neither the UI nor `mercuryctl` can know
+what a server accepts. Add a parallel field rather than reshaping `agents: string[]`: the
+dashboard's `loadAgents()` does `if (!Array.isArray(agents)) return;` and would silently fall
+back to two hardcoded options.
+
+```json
+{
+  "agents": ["fake", "primeagent"],
+  "defaultAgent": "fake",
+  "capabilities": {
+    "primeagent": {
+      "version": "0.9.4",
+      "versionRaw": "0.9.4",
+      "goals": { "set": "0.3.3", "track": "0.3.3", "tokenBudget": "0.3.3" },
+      "goalSupported": true
+    },
+    "hermes": { "version": null, "goals": {}, "goalSupported": false,
+                "goalReason": "no non-interactive goal interface" }
+  }
+}
+```
+
+`mercuryctl agents list` gains a goal column — that command exists precisely so an operator
+can discover what a server accepts before writing a create request. The UI disables the goal
+fields with the reason attached rather than hiding them, and refuses to switch to an
+unsupported agent while a goal is filled in rather than silently discarding the input.
+
+The client may warn from cached capability data, but **the server's `400` stays the
+authority.** A client-side check alone means a stale cache silently drops a goal, which is
+the same defect one layer up.
+
+### 13.7 Keeping it honest
+
+A matrix is a table that goes stale, and a stale table is worse than none because it looks
+authoritative.
+
+- **A guard test asserts every registered adapter has a matrix entry**, so adding an adapter
+  without declaring goal support fails CI instead of defaulting to a guess.
+- **Thresholds are verified against a real binary, not asserted.** The `0.3.3` row came from
+  PrimeAgent's own changelog; the next one should come from the same kind of evidence, and
+  the doc that records it should cite it.
+- **Undetermined is a legal value, and it must render.** Hermes' introduction version is
+  unknown and the matrix still works, because the Hermes row is `never` for reasons that do
+  not depend on it. Do not invent a version to fill a cell.
+
+## 14. Decisions and remaining questions
 
 ### Decided
 
@@ -599,14 +787,12 @@ the counter that answers it rather than leaving the question to anecdote.
 Two further questions surfaced while checking the capability surface, and unlike these
 they block implementation rather than funding:
 
-1. **Where does goal capability come from?** `GET /api/agents` returns bare strings, so
-   neither the UI nor `mercuryctl` can know which agents accept a goal. It cannot be
-   derived from the agent id either: `primeagent` resolves to `PrimeAgentAdapter` or
-   `DaemonAgentAdapter` on `MERCURY_AGENT_MODE`, and only the former has any goal path.
-   Three of the eight adapters (`LocalAgentAdapter`, `RpcAgentAdapter`,
-   `RemoteAgentAdapter`) are declarative-config adapters whose whole purpose is adding
-   agents without per-agent code, so a hardcoded per-class capability flag would leave
-   them permanently unable to declare support.
+1. **Where does goal capability come from?** Largely answered by
+   [section 13](#13-compatibility-matrix): declarative per-adapter thresholds keyed on
+   Mercury-usable features, config-supplied for the declarative adapters, surfaced as a
+   parallel `capabilities` field, failing closed. What remains is the shape of the
+   config key for `LocalAgentAdapter`/`RpcAgentAdapter`/`RemoteAgentAdapter`, and whether
+   the version probe runs at adapter construction or lazily on first use.
 2. **When must `unmet` NOT fire?** A Run cancelled or timed out before the worker claimed
    it never started its goal. Emitting `unmet` there is noise, and noise on the single
    signal Phase 1 exists to produce would discredit the feature before the counter in
