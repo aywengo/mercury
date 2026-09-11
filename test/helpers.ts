@@ -15,7 +15,7 @@ import { RunStore } from '../src/runs/runStore.ts';
 import { RunService } from '../src/runs/runService.ts';
 import { AgentCapabilityRegistry } from '../src/adapters/capabilities.ts';
 import { GoalStore } from '../src/runs/goalStore.ts';
-import { SkillRegistry } from '../src/skills/skillRegistry.ts';
+import { settleGoalOnTerminal } from '../src/runs/goalSettlement.ts';import { SkillRegistry } from '../src/skills/skillRegistry.ts';
 import { createSkillSelector } from '../src/skills/skillSelector.ts';
 import { WorkspaceManager } from '../src/workspace/workspaceManager.ts';
 import { FakeAgentAdapter, type FakeAgentConfig } from '../src/adapters/fakeAgentAdapter.ts';
@@ -73,8 +73,14 @@ export function makeEnv(opts: {
 } = {}): TestEnv {
   const dir = mkdtempSync(join(tmpdir(), 'mercury-test-'));
   const db = openDatabase(join(dir, 'test.db'));
-  const runs = new RunStore(db);
   const events = new EventStore(db, opts.redactor);
+  // Mirror the production composition root (src/cli.ts): a terminal Run settles an abandoned
+  // goal. Tests must exercise the same wiring the deployed system uses, or they prove nothing
+  // about the exit routes they are meant to cover.
+  const goals = new GoalStore(db);
+  const runs = new RunStore(db, {
+    onTerminalTransition: (run, to) => settleGoalOnTerminal({ goals, events }, run, to),
+  });
   const queue = new RunQueue(db, runs);
   const skills = new SkillRegistry(SKILLS_DIR);
   const workspace = new WorkspaceManager({
@@ -91,8 +97,6 @@ export function makeEnv(opts: {
   // subprocesses, and a test that wants them opts in with `probeCapabilities`. Left alone,
   // every agent reports its declared support against an unknown version -- exactly what a
   // server sees for its first moment after boot.
-  const goals = new GoalStore(db);
-
   const agentCapabilities = new AgentCapabilityRegistry(adapters);
   if (opts.probeCapabilities) agentCapabilities.start();
 

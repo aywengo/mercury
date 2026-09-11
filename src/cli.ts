@@ -24,7 +24,9 @@ import { RunQueue } from './queue/runQueue.ts';
 import { RunStore } from './runs/runStore.ts';
 import { RunService } from './runs/runService.ts';
 import { AgentCapabilityRegistry } from './adapters/capabilities.ts';
-import { GoalStore } from './runs/goalStore.ts';import { SkillRegistry } from './skills/skillRegistry.ts';
+import { GoalStore } from './runs/goalStore.ts';
+import { settleGoalOnTerminal } from './runs/goalSettlement.ts';
+import { SkillRegistry } from './skills/skillRegistry.ts';
 import { createSkillSelector } from './skills/skillSelector.ts';
 import { WorkspaceManager } from './workspace/workspaceManager.ts';
 import { WorkspaceGC } from './workspace/workspaceGC.ts';
@@ -122,8 +124,14 @@ async function main(): Promise<void> {
   mkdirSync(resolve(config.workspaceBase), { recursive: true });
 
   const db = openDatabase(config.dbPath);
-  const runs = new RunStore(db);
   const events = new EventStore(db, redactor);
+  const goals = new GoalStore(db);
+  // A Run reaching a terminal status settles any goal the harness never closed, in the same
+  // transaction as the status write. Hooked at the one place every status change goes through
+  // so no exit route has to remember it (see RunStoreHooks and goalSettlement.ts).
+  const runs = new RunStore(db, {
+    onTerminalTransition: (run, to) => settleGoalOnTerminal({ goals, events }, run, to),
+  });
   const queue = new RunQueue(db, runs);
   const skills = new SkillRegistry(SKILLS_DIR);
   const selector = createSkillSelector();
@@ -189,8 +197,6 @@ async function main(): Promise<void> {
   // wait for `--version` to come back, so a missing or slow harness cannot delay or fail
   // startup, and goals read as `version-unknown` for the first moment instead of guessing
   // either way (docs/goals.md 13.3, 13.5).
-  const goals = new GoalStore(db);
-
   const agentCapabilities = new AgentCapabilityRegistry(adapters);
   agentCapabilities.start();
 

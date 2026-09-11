@@ -263,6 +263,10 @@ test('label values are escaped so a value cannot forge metric lines', () => {
   const evil = 'x",le="1}\nmercury_runs_total 9999';
   const rendered = renderPrometheus({
     runsByStatus: { [evil]: 1 },
+    // The new goal gauge is a fresh label path, so the injection attempt is routed through it
+    // as well. A guard that only covers the metric that existed when it was written is how the
+    // next one ships unescaped.
+    goalsByStatus: { [evil]: 1 },
     durationByStatus: new Map(),
     queueWait: { buckets: new Map([['+Inf', 0]]), sum: 0, count: 0 },
     errorsByKind: {},
@@ -705,5 +709,38 @@ test('mercury_event_wakeups_total appears only when the wake-up socket is wired 
     const without = renderPrometheus(collectMetrics(env.db));
     assert.ok(!without.includes('mercury_event_wakeups_total'),
       'the series must be absent, not zero, when MERCURY_EVENT_WAKEUP_SOCKET is unset');
+  } finally { env.close(); }
+});
+
+test('goal status is reported as an aggregate, including unmet', () => {
+  // A metric that can only ever read zero proves nothing, so this seeds real rows in several
+  // statuses and asserts the numbers come back -- in particular the `unmet` count, which is
+  // the whole point of the metric.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const mk = (objective: string, status: string) => {
+      const run = env.runService.create({ ownerId: 'a', task: objective, agent: 'fake' });
+      env.goals.insert({ runId: run.id, status: 'active', objective, source: 'operator', updatedAt: 'u' });
+      if (status !== 'active') env.goals.update(run.id, { status } as never, 'now');
+      return run.id;
+    };
+    mk('a', 'active'); mk('b', 'active');
+    mk('c', 'complete');
+    mk('d', 'unmet');
+    mk('e', 'paused');
+
+    const snap = collectMetrics(env.db);
+    assert.equal(snap.goalsByStatus.active, 2);
+    assert.equal(snap.goalsByStatus.complete, 1);
+    assert.equal(snap.goalsByStatus.unmet, 1);
+    assert.equal(snap.goalsByStatus.paused, 1);
+    // Seeded at zero rather than absent, so a fresh install reads 0 and not "no data".
+    assert.equal(snap.goalsByStatus.budget_limited, 0);
+    // `absent` means "no goal row"; it is not a goal state and must not appear as a label.
+    assert.ok(!('absent' in snap.goalsByStatus), 'absent leaked into the goal label set');
+
+    const body = renderPrometheus(snap);
+    assert.match(body, /mercury_goals_in_status\{status="unmet"\} 1/);
+    assert.match(body, /# TYPE mercury_goals_in_status gauge/);
   } finally { env.close(); }
 });

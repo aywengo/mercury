@@ -422,11 +422,16 @@ test('a concurrent cancellation is not silently overwritten by a later transitio
     env.runs.transition(run.id, 'RUNNING');
     const dbPath = join(env.dir, 'test.db');
 
-    // A second connection cancels the run and holds the write lock open. WAL does not
-    // block readers, so the contender below still reads RUNNING and passes
-    // assertTransition, while its UPDATE is forced to wait until AFTER the cancellation
-    // commits. That is exactly the interleaving the old read -> validate -> unconditional
-    // UPDATE lost: it wrote COMPLETED over CANCELLED and nothing complained.
+    // A second connection cancels the run and holds the write lock open. That is exactly the
+    // interleaving the old read -> validate -> unconditional UPDATE lost: it wrote COMPLETED
+    // over CANCELLED and nothing complained.
+    //
+    // The contender can now be stopped at either of two points. Its UPDATE is forced to wait
+    // until AFTER the cancellation commits, and the guarded write then reports `lost a race`;
+    // or, because transition() wraps the write in BEGIN IMMEDIATE, it waits for the lock
+    // BEFORE reading and assertTransition rejects `CANCELLED -> COMPLETED` outright. Both are
+    // asserted below, so this test keeps failing if the overwrite ever comes back while
+    // staying honest about which guard fires.
     const holder = openDatabase(dbPath);
     holder.exec('BEGIN IMMEDIATE');
     holder.prepare("UPDATE runs SET status = 'CANCELLED' WHERE id = ?").run(run.id);
@@ -474,7 +479,15 @@ test('a concurrent cancellation is not silently overwritten by a later transitio
       unlock();
 
       assert.ok(!result.ok, 'transition should have lost the race, but it committed');
-      assert.match(result.err ?? '', /lost a race/);
+      // Either refusal is acceptable, and which one you get depends on WHEN the contender
+      // discovers the truth. The guarded UPDATE reports `lost a race`; since transition()
+      // began wrapping its write in BEGIN IMMEDIATE the contender can also block on the lock
+      // and then read the real status, so assertTransition rejects it first with `Invalid
+      // transition`. That is the earlier of the two detections and the strictly better one --
+      // the read is no longer able to be stale. Pinning one message would pin the mechanism,
+      // and the invariant this test owns is "COMPLETED never lands on CANCELLED", not which
+      // guard catches it.
+      assert.match(result.err ?? '', /lost a race|Invalid transition/);
       assert.equal(env.runs.get(run.id)!.status, 'CANCELLED', 'the cancellation must survive');
     } finally {
       clearTimeout(release);

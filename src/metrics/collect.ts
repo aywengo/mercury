@@ -58,6 +58,18 @@ export interface MetricsSnapshot {
   queueWait: Histogram;
   /** Failed runs by error kind. */
   errorsByKind: Record<string, number>;
+  /**
+   * Goals currently in each status, labelled by GoalStatus.
+   *
+   * A SQL aggregate over run_goals rather than a counter incremented at the emit site: a
+   * counter would drift from the table the moment one write succeeded and the other did not,
+   * and would reset on restart while the rows stayed. Same reasoning as design decision 1.
+   *
+   * `absent` is deliberately NOT a label value -- it means "this Run has no goal row", which is
+   * the absence of a series, not a goal state. Counting it here would make the numbers add up
+   * to the Run count and hide the thing you are looking for.
+   */
+  goalsByStatus: Record<string, number>;
   /** Runs that ever had a sandbox policy applied. */
   sandboxEnabled: number;
   /** Total runs ever created. Pair with sandboxEnabled in PromQL for an enablement RATE. */
@@ -218,6 +230,12 @@ function fill(h: Histogram, row: Record<string, unknown>, buckets: readonly numb
  * these arrays match the union, so drift fails loudly instead of silently dropping a series.
  */
 const RUN_STATUS_VALUES = ['QUEUED', 'STARTING', 'RUNNING', 'NEEDS_INPUT', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
+
+/**
+ * Goal statuses that can actually appear in run_goals. `absent` is excluded: it is the domain's
+ * way of saying "no goal", not a stored row, so it has no series to label.
+ */
+const GOAL_STATUS_VALUES = ['active', 'paused', 'budget_limited', 'error', 'complete', 'cancelled', 'unmet'] as const;
 const ERROR_KIND_VALUES = ['infrastructure', 'agent', 'task', 'unspecified'] as const;
 
 const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'];
@@ -248,6 +266,15 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
     .prepare('SELECT status, COUNT(*) AS n FROM runs GROUP BY status')
     .all() as { status: string; n: number }[];
   for (const r of statusRows) runsByStatus[r.status] = Number(r.n);
+
+  // Seeded for the same reason as runsByStatus: a GROUP BY returns nothing for an empty status,
+  // and a panel that reads "no data" instead of zero is a panel that pages someone.
+  const goalsByStatus: Record<string, number> = {};
+  for (const st of GOAL_STATUS_VALUES) goalsByStatus[st] = 0;
+  const goalRows = db
+    .prepare('SELECT status, COUNT(*) AS n FROM run_goals GROUP BY status')
+    .all() as { status: string; n: number }[];
+  for (const r of goalRows) goalsByStatus[r.status] = Number(r.n);
 
   const durationSql = bucketedQuery(
     secondsBetween('started_at', 'completed_at'),
@@ -288,6 +315,7 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
 
   return {
     runsByStatus,
+    goalsByStatus,
     durationByStatus,
     queueWait,
     errorsByKind,

@@ -1,7 +1,19 @@
 # Goals: setting objectives on a Run and tracking whether they were met
 
-**Status: design only. Nothing here is implemented.** No `goal` column, no `goal.*`
-event type, no `--goal` plumbing exists in Mercury today.
+**Status: partially implemented.** Phases 0a, 0 and 1 are shipped; Phases 2-4 are
+not; Phase 5 is blocked upstream and Phase 6 is deferred. Concretely, today:
+
+| shipped | not shipped |
+| --- | --- |
+| capability + version detection per agent (Phase 0a) | anything telling you a harness made progress toward a goal (Phase 2) |
+| `run_goals` table, `GoalSpec` validation, `goal.*` event types | goal status in the dashboard, CLI or SSE timeline (Phase 3) |
+| `POST /api/runs` accepts `goal`, refused unless the agent can track it | gate evaluation or gate events (Phase 4) |
+| `goal.unmet` when a Run ends with the objective still open, and `mercury_goals_in_status` | Hermes goals (Phase 5, blocked), budget enforcement (Phase 6, deferred) |
+
+So a goal can be **set, validated, refused, and closed** — and nothing yet reports
+progress while the Run is in flight. `unmet` is the only status Mercury originates;
+every other status is a harness report, and no adapter relays one yet. Read Phase 2
+as the difference between a goal that is recorded and a goal that is tracked.
 
 **Scope:** the host. Fleet's role is covered in [API](#8-api) and is deliberately
 thin.
