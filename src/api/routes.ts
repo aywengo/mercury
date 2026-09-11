@@ -150,7 +150,9 @@ export function createRoutes(deps: RoutesDeps): Router {
       limit,
       cursor,
     });
-    res.json({ runs, nextCursor });
+    // `goals` is parallel to `runs`, never merged into it: `runs` stays an array of Run, and a
+    // goal status must not become reachable as `run.status` (docs/goals.md 4).
+    res.json({ runs, nextCursor, goals: deps.runService.goalStatuses(runs.map((r) => r.id)) });
   });
 
   // GET /api/runs/:runId
@@ -160,7 +162,11 @@ export function createRoutes(deps: RoutesDeps): Router {
       res.status(404).json({ error: 'run not found' });
       return;
     }
-    res.json({ run, skills: deps.runService.getSkills(run.id) });
+    // `goal` is a sibling of `run`, not a field on it. See docs/goals.md 4: goal status and Run
+    // status are orthogonal axes, and the pair -- Run COMPLETED with goal unmet -- is the thing
+    // a reader has to be able to see together. Folding them would let a client read one and
+    // believe the other.
+    res.json({ run, skills: deps.runService.getSkills(run.id), goal: deps.runService.getGoal(run.id) });
   });
 
   // POST /api/runs/:runId/input

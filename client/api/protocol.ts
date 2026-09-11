@@ -110,8 +110,71 @@ export interface AgentsResponse {
   capabilities?: Record<string, AgentCapabilitySummary>;
 }
 export interface CreateRunResponse { runId: string; status: RunStatus }
-export interface RunListResponse { runs: Run[]; nextCursor: string | null }
-export interface RunDetailResponse { run: Run; skills: ResolvedSkill[] }
+export interface RunListResponse {
+  runs: Run[];
+  nextCursor: string | null;
+  /**
+   * Goal status keyed by run id. Absent key means the Run has no goal -- that is not the same
+   * as a goal of status `absent`, and a renderer must not draw the two the same way.
+   */
+  goals?: Record<string, GoalStatus>;
+}
+/** The subset of goal state a list row needs. Status only, by design. */
+export interface GoalSummary {
+  status: GoalStatus;
+}
+
+/**
+ * Full persisted goal state. Mirrors the host's `GoalState`; `objective` is what Mercury
+ * stored (validated and redacted at admission), not whatever the harness echoed back.
+ */
+export interface GoalState {
+  runId: string;
+  status: GoalStatus;
+  objective: string;
+  tokenBudget?: number;
+  tokensUsed?: number;
+  timeUsedSeconds?: number;
+  turnsUsed?: number;
+  lastVerdict?: 'done' | 'continue' | 'skipped';
+  lastReason?: string;
+  lastError?: string;
+  pausedReason?: string;
+  source?: 'harness' | 'operator';
+  updatedAt: string;
+}
+
+/**
+ * Goal statuses. `unmet` is the only one Mercury originates; the rest are harness reports and
+ * `cancelled` is an operator action. `absent` is not a state -- no goal means the field is
+ * null or the run id is missing from the map.
+ */
+export type GoalStatus =
+  | 'absent'
+  | 'active'
+  | 'paused'
+  | 'budget_limited'
+  | 'error'
+  | 'complete'
+  | 'cancelled'
+  | 'unmet';
+
+export interface RunDetailResponse {
+  run: Run;
+  skills: ResolvedSkill[];
+  /**
+   * Sibling of `run`, never a field on it. Goal status and Run status are orthogonal, and the
+   * pair (Run COMPLETED, goal unmet) is the thing a reader must see together.
+   *
+   * Three states, and the third is not optional to honour:
+   *   GoalState -- the Run has a goal
+   *   null      -- the server answered, and the Run has no goal
+   *   undefined -- the server predates goals, so nothing is known
+   * Collapsing undefined into null would render "no goal" for an old server, which is the
+   * same lie as rendering an undetected capability as "unsupported".
+   */
+  goal?: GoalState | null;
+}
 
 export interface EventPage {
   events: MercuryEvent[];
@@ -285,11 +348,29 @@ export function parseRunListResponse(value: unknown): RunListResponse {
   if (nextCursor !== null && typeof nextCursor !== 'string') {
     throw new ProtocolError(`run list response.nextCursor must be a string or null, got ${typeof nextCursor}`);
   }
-  return { runs, nextCursor };
+  // Parallel map, optional for the same reason as the detail field: an older server simply
+  // does not know about goals, and that must stay distinguishable from "no goals exist".
+  let goals: Record<string, GoalStatus> | undefined;
+  if (o.goals !== undefined) {
+    const go = asObject(o.goals, 'run list response.goals');
+    goals = {};
+    for (const [runId, status] of Object.entries(go)) {
+      if (typeof status !== 'string' || !GOAL_STATUSES.has(status)) {
+        throw new ProtocolError(`unknown goal status "${String(status)}" for run ${runId}`);
+      }
+      goals[runId] = status as GoalStatus;
+    }
+  }
+  return { runs, nextCursor, ...(goals === undefined ? {} : { goals }) };
 }
 
 export function parseRunDetailResponse(value: unknown): RunDetailResponse {
   const o = asObject(value, 'run detail response');
+  // `goal` is optional on the wire so a client can talk to a server that predates goals. An
+  // absent key stays undefined rather than becoming null: "this server never told us" and
+  // "this Run has no goal" are different answers, and drawing them the same is how a UI starts
+  // lying about a Run it has no information about.
+  const goal = o.goal === undefined ? undefined : o.goal === null ? null : parseGoal(o.goal);
   return {
     run: parseRun(o.run),
     // Skills are display data; a server that has not snapshotted any returns [].
@@ -297,6 +378,33 @@ export function parseRunDetailResponse(value: unknown): RunDetailResponse {
       const so = asObject(s, 'skill');
       return { ...(so as unknown as ResolvedSkill), id: reqString(so.id, 'id', 'skill') };
     }),
+    ...(goal === undefined ? {} : { goal }),
+  };
+}
+
+const GOAL_STATUSES = new Set(['absent', 'active', 'paused', 'budget_limited', 'error', 'complete', 'cancelled', 'unmet']);
+
+function parseGoal(value: unknown): GoalState {
+  const o = asObject(value, 'goal');
+  const status = reqString(o.status, 'goal.status', 'goal');
+  if (!GOAL_STATUSES.has(status)) {
+    // Rejecting an unknown status is the same call made for event types: a status the client
+    // cannot name must not be rendered as if it were one it can.
+    throw new ProtocolError(`unknown goal status "${status}"`);
+  }
+  return {
+    runId: reqString(o.runId, 'goal.runId', 'goal'),
+    status: status as GoalStatus,
+    objective: reqString(o.objective, 'goal.objective', 'goal'),
+    updatedAt: reqString(o.updatedAt, 'goal.updatedAt', 'goal'),
+    ...(typeof o.tokenBudget === 'number' ? { tokenBudget: o.tokenBudget } : {}),
+    ...(typeof o.tokensUsed === 'number' ? { tokensUsed: o.tokensUsed } : {}),
+    ...(typeof o.timeUsedSeconds === 'number' ? { timeUsedSeconds: o.timeUsedSeconds } : {}),
+    ...(typeof o.turnsUsed === 'number' ? { turnsUsed: o.turnsUsed } : {}),
+    ...(typeof o.lastReason === 'string' ? { lastReason: o.lastReason } : {}),
+    ...(typeof o.lastError === 'string' ? { lastError: o.lastError } : {}),
+    ...(typeof o.pausedReason === 'string' ? { pausedReason: o.pausedReason } : {}),
+    ...(o.source === 'harness' || o.source === 'operator' ? { source: o.source } : {}),
   };
 }
 

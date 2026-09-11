@@ -1,20 +1,26 @@
 # Goals: setting objectives on a Run and tracking whether they were met
 
-**Status: partially implemented.** Phases 0a, 0, 1 and 2 are shipped; Phases 3-4 are
+**Status: partially implemented.** Phases 0a, 0, 1, 2 and 3 are shipped; Phase 4 is
 not; Phase 5 is blocked upstream and Phase 6 is deferred. Concretely, today:
 
 | shipped | not shipped |
 | --- | --- |
-| capability + version detection per agent (Phase 0a) | goal status in the dashboard, CLI or SSE timeline (Phase 3) |
-| `run_goals` table, `GoalSpec` validation, `goal.*` event types | gate evaluation or gate events (Phase 4) |
-| `POST /api/runs` accepts `goal`, refused unless the agent can track it | Hermes goals (Phase 5, blocked), budget enforcement (Phase 6, deferred) |
+| capability + version detection per agent (Phase 0a) | gate specs validated, persisted and rendered (Phase 4) |
+| `run_goals` table, `GoalSpec` validation, `goal.*` event types | Hermes goals (Phase 5, blocked upstream) |
+| `POST /api/runs` accepts `goal`, refused unless the agent can track it | budget enforcement (Phase 6, deferred pending real usage data) |
 | `goal.unmet` when a Run ends with the objective still open, and `mercury_goals_in_status` | |
-| PrimeAgent seeded with `--goal` / `--goal-token-budget`, and its `goal_update` reports relayed into the row and the timeline (Phase 2) | |
+| PrimeAgent seeded with `--goal` / `--goal-token-budget`; its `goal_update` reports relayed into the row and the timeline (Phase 2) | |
+| goal status beside Run status in the dashboard, `mercuryctl runs list` / `runs show`, and goal events in the SSE timeline (Phase 3) | |
 
-A goal is now **set, refused, tracked while the Run runs, and closed when the Run ends**.
-What is missing is anywhere to look: the state is correct and persisted, and Phase 3 is
-what surfaces it. `unmet` is the only status Mercury originates; every other status is a
-harness report relayed verbatim.
+A goal is now **set, refused, tracked while the Run runs, closed when the Run ends, and
+visible**. `unmet` is the only status Mercury originates; every other status is a harness
+report relayed verbatim.
+
+The rendering rule from section 4 is enforced by tests, not by care: goal status is a
+**sibling** of the Run on every read path (`{ run, skills, goal }`, and a parallel `goals`
+map on the list), never a field on the Run, and never written into the status column. A
+surface that shows `COMPLETED` while hiding `unmet` reproduces the original problem with
+extra steps, so "both values present, on separate lines" is what the tests assert.
 
 **Scope:** the host. Fleet's role is covered in [API](#8-api) and is deliberately
 thin.

@@ -222,8 +222,17 @@ test('runs show: no escape byte survives with colour off', () => {
     error: HOSTILE, errorKind: HOSTILE, finalCommits: [HOSTILE, HOSTILE],
     repository: { url: HOSTILE, localPath: HOSTILE },
   };
+  // The goal block is a second render path over the same hostile data. It is included here
+  // deliberately: this file's own header records that a reviewer once found `agent` sanitised in
+  // `runs list` and left raw in `runs show`, and calls that "exactly the mistake a field-by-field
+  // audit makes". Adding a renderer and not extending this fixture would repeat it.
+  const goal = {
+    runId: HOSTILE, status: 'unmet', objective: HOSTILE, updatedAt: HOSTILE,
+    tokensUsed: 1, tokenBudget: 2, turnsUsed: 3,
+    lastReason: HOSTILE, lastError: HOSTILE, pausedReason: HOSTILE, source: 'harness',
+  };
   const out = renderRunDetail(
-    { run: run as never, skills: [{ id: HOSTILE, version: HOSTILE } as never] },
+    { run: run as never, skills: [{ id: HOSTILE, version: HOSTILE } as never], goal: goal as never },
     OFF, false,
   );
   assertNoEscape('runs show', out);

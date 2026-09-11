@@ -53,6 +53,8 @@ export type Colorize = (text: string) => string;
  * The non-TTY rule matters more than the flag: `mercuryctl runs list | less` must not be full of
  * escape codes, and CI captures are never a TTY.
  */
+export type ColorName = keyof typeof ANSI;
+
 export function makeColorizer(options: { noColor: boolean; isTty: boolean; json: boolean }): {
   color: (name: keyof typeof ANSI, text: string) => string;
   dim: Colorize;
