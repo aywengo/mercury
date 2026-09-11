@@ -80,6 +80,17 @@ fleet --version   # mercury-fleet 0.1.0
 - [`Fleet operator guide`](../fleet/README.md)
 - [`Fleet architecture and design`](fleet-design.md)
 
+## Knowledge base
+
+A design for one project-scoped knowledge base shared by every host and harness: memory is
+gathered from sub-harnesses at Run finalize, curated in a central service, and served back
+into every Run. Design only; nothing is implemented.
+
+- [`Knowledge base design`](knowledge-base.md) — claims versus history, the note model,
+  the decision-record convention for the project repository, host outbox and replica,
+  per-harness injection, the Atlas service, curation, bootstrapping a new host, and Fleet's
+  read-only role.
+
 ## Crew
 
 Crew is a design for reusable execution configuration. The active design splits
@@ -133,6 +144,7 @@ Use the narrowest document for a change:
 - active limitation → `docs/status.md`;
 - goal/objective tracking design → `docs/goals.md`;
 - Crew design → `docs/crew/`;
+- knowledge base design → `docs/knowledge-base.md`;
 - host release notes → `docs/releases/host/`;
 - Fleet release notes → `docs/releases/fleet/`;
 - how to cut a release → `docs/releasing.md`;
