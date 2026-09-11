@@ -135,6 +135,9 @@ export function makeEnv(opts: {
     adapters,
     runService,
     goals,
+    // Mirrors production: the worker reads the same cached registry the API serves, so a test
+    // that settles probes sees the worker record the same version the API advertises.
+    agentCapabilities,
     logger: captureLogger ?? logger,
     backlogAlertThreshold: opts.backlogAlertThreshold,
     backlogCheckIntervalMs: opts.backlogCheckIntervalMs,

@@ -92,6 +92,11 @@ function renderRun(r, skills, goal) {
   renderGoal(data.goal);
   $('run-task').textContent = r.task;
   $('f-agent').textContent = r.agent;
+  // Which harness actually ran, kept separate from the agent id for the reason in docs/goals.md
+  // 13.1: issue #465 was hard to close because the fix was on `main` while the installed artifact
+  // was still broken, and nothing recorded which binary a Run had talked to. "unknown" is printed
+  // rather than left blank -- a blank reads as "same as always" to someone skimming.
+  $('f-harness').textContent = harnessLabel(data.run);
   $('f-attempt').textContent = r.attempt;
   // innerHTML, not textContent: this builds an anchor, and textContent renders the markup as
   // literal text (the link showed up as "<a href=\"/run.html?run=...\">"). Both interpolated

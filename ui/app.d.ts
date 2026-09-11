@@ -49,6 +49,9 @@ export interface UiGoalGate {
  * goal, or a goal with no gates -- so the caller can hide the row entirely. Renders the SPEC and
  * never an outcome: no pass/fail styling, because Mercury does not execute gates.
  */
+/** The harness build that executed a Run, as display text. Never a guessed version. */
+export function harnessLabel(run: { agentVersion?: string | null; agentVersionRaw?: string | null } | null | undefined): string;
+
 export function goalGatesHtml(goal: ({ gates?: UiGoalGate[] } & Record<string, unknown>) | null | undefined): string;
 
 /** Badge text/class/title for the run page. Same three states as goalBadge. */

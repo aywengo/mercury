@@ -265,6 +265,9 @@ async function main(): Promise<void> {
       adapters,
       runService,
       goals,
+      // Cached probe answers, so the worker records the harness version on the Run without
+      // spawning a probe per Run (docs/goals.md 13.1).
+      agentCapabilities,
       logger,
       workerId,
       leaseMs: config.leaseMs,

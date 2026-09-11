@@ -62,6 +62,24 @@ export interface Run {
   cancellationRequestedAt: string | null;
   finalCommits: string[];
   prUrl: string | null;
+  /**
+   * The harness version that actually executed this Run, and the raw string it printed
+   * (docs/goals.md 13.1). Recorded once at claim time, from the same probe the capability
+   * registry cached, so the Run keeps the answer even after the server restarts or the operator
+   * upgrades.
+   *
+   * Null means the probe produced nothing usable -- binary missing, output unparsable, or the
+   * adapter has no probe. That is a distinct answer from a version, and 13.7 requires it to
+   * render as itself rather than as a blank or as "unknown latest". `agentVersionRaw` is kept
+   * because when a parse is wrong, the raw string is the only evidence of why.
+   *
+   * Optional rather than required because rows written before this column existed are NULL in
+   * exactly the same way, and no sentinel can recover a version nobody recorded. Both render as
+   * "unknown", which is the truth in either case; the distinction would be a state with no
+   * action behind it.
+   */
+  agentVersion?: string | null;
+  agentVersionRaw?: string | null;
 }
 
 export interface ResolvedSkill {

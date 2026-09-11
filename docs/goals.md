@@ -7,6 +7,7 @@ deferred. Concretely, today:
 
 | shipped | not shipped |
 | --- | --- |
+| the harness version that executed each Run, recorded at claim time (13.1) | |
 | capability + version detection per agent (Phase 0a), with per-field goal capability | gate OUTCOME events -- no harness reports them, so there is no emitter (Phase 4b) |
 | `GET /api/runs/:id/goal` and `POST /api/runs/:id/goal/cancel`; `cancelled` finally has a writer | |
 | `run_goals` table, `GoalSpec` validation, `goal.*` event types | Hermes goals (Phase 5, blocked upstream) |
@@ -719,6 +720,13 @@ which harness it is talking to.**
   construction, not per Run. Store the resolved version on the Run so a later diagnosis
   knows what actually executed it — the absence of that datum is what made issue #465 hard
   to close, where the fix was on `main` and the installed artifact was still broken.
+  **Implemented** (migration v7: `agent_version`, `agent_version_raw`, `agent_version_recorded`).
+  The worker reads the registry CACHE at claim time, so this costs a map lookup and not a
+  subprocess per Run. Written at most once: the value describes the binary that ran, so a later
+  probe must not rewrite it, and a Run that recorded nothing stays unknown rather than being
+  filled in from a probe taken after the Run may have seen an upgrade. `agent_version_recorded`
+  exists because "never written" and "probed, no answer" are both NULL and must behave
+  differently -- a test written to prove "record once" against a bare NULL check found that.
 - **Probe the configured command path, never the bare name.** This is not hypothetical:
   the machine this design was written on has two Claude Code installs, 1.0.3 at
   `/opt/homebrew/bin/claude` (an npm global) and 2.1.260 at

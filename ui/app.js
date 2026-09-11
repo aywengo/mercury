@@ -219,6 +219,29 @@ export function goalBadge(goals, runId) {
  * String() through esc() anyway rather than trusted, because they arrive over the wire and a
  * server that sends a string there should produce escaped text, not markup.
  */
+/**
+ * The harness build that executed a Run, as text (docs/goals.md 13.1).
+ *
+ * Separate from the agent id on purpose: the agent says which adapter ran, this says which binary
+ * it talked to, and the second is the datum whose absence made issue #465 hard to close.
+ *
+ * Three answers, and the two unknowns are distinguished because they want different actions:
+ *   "0.9.4 (prime-agent 0.9.4)"  -- resolved, with the raw output when it differs
+ *   "unknown (dev build)"        -- probed and got something unparsable: the probe needs fixing
+ *   "unknown"                    -- nothing was probed or recorded: nothing to fix, just no data
+ *
+ * Returns plain text for textContent, so no escaping is needed or wanted here.
+ */
+export function harnessLabel(run) {
+  if (!run) return 'unknown';
+  if (run.agentVersion) {
+    const raw = run.agentVersionRaw;
+    return raw && raw !== run.agentVersion ? `${run.agentVersion} (${raw})` : String(run.agentVersion);
+  }
+  if (run.agentVersionRaw) return `unknown (${run.agentVersionRaw})`;
+  return 'unknown';
+}
+
 export function goalGatesHtml(goal) {
   if (!goal || !Array.isArray(goal.gates) || goal.gates.length === 0) return '';
   const items = goal.gates.map((g) => {

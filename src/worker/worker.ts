@@ -11,7 +11,8 @@ import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts'
 import type { Redactor } from '../domain/redact.ts';
 import { isEventType } from '../domain/types.ts';
 import type {
-  AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, ErrorKind, Run, RunContext, ResolvedSkill,
+  AgentAdapter,
+  AgentCapabilitySummary, AgentEvent, AgentExit, AgentHandle, AgentInput, ErrorKind, Run, RunContext, ResolvedSkill,
 } from '../domain/types.ts';
 import type { EventStore } from '../events/eventStore.ts';
 import type { Logger } from '../logger.ts';
@@ -33,6 +34,15 @@ export interface WorkerDeps {
   adapters: Record<string, AgentAdapter>;
   runService: RunService;
   /** Goal persistence. Absent means goal reports are appended as events but not tracked. */
+  /**
+   * Cached harness capability/version answers, from the same registry the API serves.
+   *
+   * The worker reads the CACHE rather than calling `adapter.detectVersion()`, because 13.1
+   * requires one probe per adapter at construction and not one per Run -- a per-Run probe would
+   * spawn a subprocess for every Run on every worker. Absent means nothing is known, and the Run
+   * records an unknown version rather than a guessed one.
+   */
+  agentCapabilities?: { snapshot(): Record<string, AgentCapabilitySummary> };
   goals?: GoalStore;
   logger: Logger;
   workerId: string;
@@ -286,6 +296,22 @@ export class Worker {
 
       const adapter = this.deps.adapters[run.agent];
       if (!adapter) throw new Error(`No adapter for agent: ${run.agent}`);
+
+      // Record which harness actually executed this Run (docs/goals.md 13.1). Read from the
+      // registry cache so this costs one map lookup, not a subprocess. Written at most once --
+      // see RunStore.setAgentVersion for why a later probe must not rewrite it.
+      // Must not be able to fail the Run. Section 13.5: capability can gate the goal feature and
+      // nothing else, so a registry that throws -- an adapter with a malformed declaration, a
+      // snapshot mid-refresh -- degrades to "version unknown" and the Run proceeds. An earlier
+      // version of this block had no guard and turned a missing `capabilities` field into
+      // FAILED(infrastructure) before the adapter was even asked to start, which is precisely the
+      // failure mode that rule exists to prevent.
+      try {
+        const cap = this.deps.agentCapabilities?.snapshot()[run.agent];
+        if (cap) this.deps.runs.setAgentVersion(run.id, cap.version, cap.versionRaw);
+      } catch (err) {
+        log.warn({ agent: run.agent, err: String(err) }, 'could not record the harness version on the Run');
+      }
 
       if (sandbox && sandbox.requiresSandbox(run)) {
         this.deps.events.append(run.id, 'sandbox.enabled', { policy: sandbox.describe(run) });

@@ -77,6 +77,7 @@ export function renderRunDetail(response: RunDetailResponse, ctx: CommandContext
     // problem this feature exists to expose (docs/goals.md 4).
     ...goalLines(response, color),
     field('agent', sanitizeForTerminal(run.agent)),
+    ...harnessVersionLines(run, field, color),
     field('owner', sanitizeForTerminal(run.ownerId)),
     field('attempt', String(run.attempt)),
     field('created', sanitizeForTerminal(run.createdAt)),
@@ -131,4 +132,34 @@ function goalGateLines(
     const meta = color('dim', ` (timeout ${timeout}${retries})`);
     return field(`gate ${i + 1}`, `${sanitizeForTerminal(g.command)}${meta}`);
   });
+}
+/**
+ * Which harness actually executed the Run (docs/goals.md 13.1).
+ *
+ * Rendered as its own line rather than folded into `agent`, because the two answer different
+ * questions and the second is the one that made issue #465 hard to close: `agent` says which
+ * adapter ran, this says which binary it talked to. "unknown" is printed in full rather than
+ * left blank -- 13.7 requires undetermined to render as itself, and a blank reads as "same as
+ * always" to someone skimming, which is exactly the wrong inference when the whole point is that
+ * the installed artifact may not be what `main` expects.
+ */
+function harnessVersionLines(
+  run: RunDetailResponse['run'],
+  field: (label: string, value: string) => string,
+  color: (c: ColorName, s: string) => string,
+): string[] {
+  const version = run.agentVersion;
+  if (version) {
+    const raw = run.agentVersionRaw && run.agentVersionRaw !== version
+      ? color('dim', ` (${sanitizeForTerminal(run.agentVersionRaw)})`)
+      : '';
+    return [field('harness', `${sanitizeForTerminal(version)}${raw}`)];
+  }
+  const raw = run.agentVersionRaw;
+  if (raw) {
+    // Probed and got something, but it was not a parsable version. Showing the raw output is the
+    // difference between "the probe is broken" being diagnosable and being a mystery.
+    return [field('harness', color('yellow', `version unknown (${sanitizeForTerminal(raw)})`))];
+  }
+  return [field('harness', color('dim', 'version unknown'))];
 }
