@@ -77,6 +77,16 @@ export function renderPrometheus(m: MetricsSnapshot): string {
       .map(([status, n]) => [{ status }, n]),
   );
 
+  writeGauge(
+    out,
+    'mercury_goals_in_status',
+    'Goals currently in each goal status. Independent of run status: a COMPLETED run with an '
+      + 'unmet goal is the pair this metric exists to expose.',
+    Object.entries(m.goalsByStatus)
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([status, n]) => [{ status }, n]),
+  );
+
   writeHistogram(
     out,
     'mercury_run_duration_seconds',

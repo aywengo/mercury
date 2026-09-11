@@ -58,11 +58,31 @@ export function rowToRun(row: RunRow): Run {
   };
 }
 
+/**
+ * Side effects that must commit or roll back WITH a Run status write.
+ *
+ * Injected rather than imported so RunStore stays free of any knowledge of goals, events or
+ * the worker: it only announces that a Run reached a terminal status, and the composition root
+ * decides what that means. See src/runs/goalSettlement.ts for the one thing wired here today.
+ */
+export interface RunStoreHooks {
+  /**
+   * Invoked inside the SAME transaction as a terminal status write, so a goal settled to
+   * `unmet` can never disagree with the Run status that caused it -- a half-applied settle
+   * would leave `goal = unmet` on a Run that is still RUNNING, or a Run terminal with a goal
+   * still `active` and no event explaining it.
+   */
+  onTerminalTransition?: (run: Run, to: RunStatus) => void;
+}
+
 export class RunStore {
+  private readonly hooks: RunStoreHooks;
+
   private db: DatabaseSync;
 
-  constructor(db: DatabaseSync) {
+  constructor(db: DatabaseSync, hooks: RunStoreHooks = {}) {
     this.db = db;
+    this.hooks = hooks;
   }
 
   insert(run: Run): void {
@@ -200,6 +220,42 @@ export class RunStore {
   }
 
   transition(id: string, to: RunStatus, extra?: Partial<Omit<Run, 'error' | 'errorKind'>>): Run {
+    // The status write and any terminal side effect commit or roll back together. tx() is
+    // re-entrant, so a caller already inside a transaction keeps the atomicity it arranged
+    // and this adds nothing; BEGIN IMMEDIATE is what lets the guarded write below wait for
+    // the lock instead of failing outright (issue #49).
+    return tx(this.db, () => {
+      const updated = this.applyTransition(id, to, extra);
+      // One choke point for "this Run is finished". The alternative -- asking each of the six
+      // terminal call sites in worker.ts and runService.ts to remember the goal bookkeeping --
+      // is how an exit route gets missed, and an exit route that misses it is a goal that
+      // stays `active` forever on a Run nobody is running.
+      if (isTerminal(to)) this.hooks.onTerminalTransition?.(updated, to);
+      return updated;
+    });
+  }
+
+  /**
+   * Fire the terminal hook for a Run whose terminal status was written by something other than
+   * transition().
+   *
+   * This exists because the choke point is not quite single. Lease-loss reaping
+   * (queue/runQueue.ts) marks a Run FAILED with raw SQL, deliberately, because it clears
+   * lease_owner in the same statement -- issue #53 explains why that coupling matters and it is
+   * not worth re-plumbing through transition(). Without this call, a goal on a reaped Run stays
+   * `active` forever and the "no exit route is missed" claim is simply false.
+   *
+   * Callers must already hold the transaction they want the side effect to join, exactly as
+   * transition() does.
+   */
+  notifyTerminal(id: string, to: RunStatus): void {
+    if (!isTerminal(to)) return;
+    const run = this.get(id);
+    if (!run) return;
+    this.hooks.onTerminalTransition?.(run, to);
+  }
+
+  private applyTransition(id: string, to: RunStatus, extra?: Partial<Omit<Run, 'error' | 'errorKind'>>): Run {
     const run = this.get(id);
     if (!run) throw new Error(`Run ${id} not found`);
     assertTransition(run.status, to);
@@ -219,6 +275,17 @@ export class RunStore {
     // was correct in isolation and unenforced at the only place that matters.
     // A conditional write also needs issue #49's BEGIN IMMEDIATE to be useful --
     // under a deferred BEGIN the write could fail outright instead of waiting.
+    //
+    // HONEST STATUS: since transition() began wrapping read + validate + write in one
+    // BEGIN IMMEDIATE, no other writer can interleave, so this branch is no longer
+    // reachable through the public path -- measured, not assumed: instrumenting the throw
+    // and running the whole suite produces zero hits, and the issue #48 test now fails at
+    // assertTransition with `Invalid transition` instead. It is kept deliberately as
+    // defence in depth. It costs one extra WHERE term, and the failure it prevents is a
+    // silent overwrite of a terminal status; deleting it because a transaction currently
+    // makes it redundant is the trade this repo has already paid for once. Anyone who
+    // later calls applyTransition from inside a caller-owned transaction, or weakens
+    // transition()'s locking, re-arms it -- which is the point.
     params.push(id, run.status);
     const result = this.db
       .prepare(`UPDATE runs SET ${sets.join(', ')} WHERE id = ? AND status = ?`)
