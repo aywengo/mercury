@@ -19,3 +19,22 @@ export function statusClass(status: string): string;
 export function repoLabel(repo: { localPath?: string; url?: string } | null): string;
 export function shortId(id: string): string;
 export function pretty(v: unknown): string;
+
+/** Goal status as the API reports it. `absent` is never sent; no goal means no key. */
+export type UiGoalStatus =
+  | 'active' | 'paused' | 'budget_limited' | 'error' | 'complete' | 'cancelled' | 'unmet';
+
+export interface UiGoal {
+  status: UiGoalStatus;
+  objective?: string;
+  source?: string;
+}
+
+/**
+ * Badge markup for a list row. `goals` is the parallel map from the API: undefined means the
+ * server predates goals, a missing key means the run has no goal. Both render, differently.
+ */
+export function goalBadge(goals: Record<string, UiGoalStatus> | undefined, runId: string): string;
+
+/** Badge text/class/title for the run page. Same three states as goalBadge. */
+export function goalLabel(goal: UiGoal | null | undefined): { text: string; cls: string; title: string };

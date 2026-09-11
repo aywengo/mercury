@@ -24,6 +24,9 @@
     <div class="row" style="margin-bottom:10px">
       <h2 style="margin:0" class="mono" id="run-id"></h2>
       <span id="status-badge"></span>
+      <!-- Goal status sits beside Run status and never replaces it: a COMPLETED run with an
+           unmet goal has to show both words. -->
+      <span id="goal-badge"></span>
       <span class="spacer" style="flex:1"></span>
       <button class="secondary small" id="cancel-btn">cancel</button>
       <button class="secondary small" id="retry-btn">retry</button>
@@ -33,6 +36,9 @@
       <div>
         <h2 class="section">Run</h2>
         <dl class="kv">
+                    <dt>Goal</dt><dd id="f-goal"></dd>
+          <dt>Objective</dt><dd id="f-objective"></dd>
+          <dt>Goal usage</dt><dd id="f-goal-usage"></dd>
           <dt>Agent</dt><dd id="f-agent"></dd>
           <dt>Attempt</dt><dd id="f-attempt"></dd>
           <dt>Retry of</dt><dd id="f-retryof"></dd>

@@ -8,6 +8,15 @@
 import type { Run, RunListResponse } from '../api/protocol.ts';
 import { renderTable, makeColorizer, sanitizeForTerminal, ellipsis, statusColor, age } from '../output/human.ts';
 import type { CommandContext } from './context.ts';
+import type { ColorName } from '../output/human.ts';
+
+/** `unmet` is the status an operator is scanning the list to find. */
+function goalTone(status: string): ColorName {
+  if (status === 'complete') return 'green';
+  if (status === 'unmet' || status === 'error') return 'red';
+  if (status === 'paused' || status === 'budget_limited') return 'yellow';
+  return 'dim';
+}
 
 export function renderRunList(response: RunListResponse, ctx: CommandContext, isTty: boolean): string {
   if (ctx.json) return JSON.stringify(response);
@@ -19,16 +28,30 @@ export function renderRunList(response: RunListResponse, ctx: CommandContext, is
   // Run can put a control sequence in another operator's terminal. `status` is validated against a fixed
   // enum by the parser and is safe today; sanitising it costs nothing and does not rely on that staying
   // true.
+  // GOAL sits beside STATUS and never replaces it. A COMPLETED row with an unmet goal must show
+  // both words, or the list reproduces the original problem: the process status hiding whether
+  // the work was achieved (docs/goals.md 4).
+  //
+  // Three renderings, matching the protocol's three states. A missing map means the server
+  // predates goals and prints `?`; a map without this run means the Run genuinely has no goal
+  // and prints `-`. Collapsing those two would claim knowledge the client does not have.
+  const goals = response.goals;
+  const goalFor = (run: Run): string => {
+    if (goals === undefined) return '?';
+    return goals[run.id] ?? '-';
+  };
   const rows = response.runs.map((run: Run) => [
     sanitizeForTerminal(run.id),
     sanitizeForTerminal(run.status),
+    sanitizeForTerminal(goalFor(run)),
     sanitizeForTerminal(run.agent),
     age(run.startedAt ?? run.createdAt),
     ellipsis(sanitizeForTerminal(run.task.replace(/\s+/g, ' ').trim()), 48),
   ]);
-  const table = renderTable(['ID', 'STATUS', 'AGENT', 'AGE', 'TASK'], rows,
+  const table = renderTable(['ID', 'STATUS', 'GOAL', 'AGENT', 'AGE', 'TASK'], rows,
     (text, column) => {
       if (column === 1) return color(statusColor(text), text);
+      if (column === 2) return color(goalTone(text), text);
       if (column === 0) return color('cyan', text);
       return text;
     },

@@ -169,6 +169,45 @@ export function safeUrl(s) {
   return url.href;
 }
 
+/**
+ * Goal status badge markup. Shared by the list and the run page so the two cannot drift into
+ * describing the same status differently.
+ *
+ * `goals` is the parallel map from the API, keyed by run id. Three states, three renderings:
+ *   map has the run  -- the Run has a goal with this status
+ *   map, no such key -- the server answered and the Run has no goal
+ *   no map at all    -- the server predates goals, so nothing is known
+ *
+ * The third must not read "no goal". That would assert an absence on the strength of a server
+ * that never had the field, which is the same lie as rendering an undetected capability as
+ * "unsupported".
+ *
+ * Returns escaped markup: the status is interpolated through esc() because it becomes an
+ * attribute value and element text, and every caller assigns the result to innerHTML.
+ */
+export function goalBadge(goals, runId) {
+  if (goals === undefined) {
+    return '<span class="badge goal-unknown" title="server does not report goals">?</span>';
+  }
+  const status = goals[runId];
+  if (!status) return '<span class="badge goal-none" title="this run has no goal">\u2014</span>';
+  return `<span class="badge goal-${esc(status)}" title="goal status, independent of run status">${esc(status)}</span>`;
+}
+
+/**
+ * Goal status as a short label for the run page badge.
+ *
+ * Same three states as goalBadge. Kept separate from statusClass on purpose: goal status and
+ * Run status are orthogonal axes, and sharing a class lookup would invite someone to render one
+ * in place of the other.
+ */
+export function goalLabel(goal) {
+  if (goal === undefined) return { text: 'goal ?', cls: 'goal-unknown', title: 'server does not report goals' };
+  if (goal === null) return { text: 'no goal', cls: 'goal-none', title: 'this run has no goal' };
+  return { text: `goal: ${goal.status}`, cls: `goal-${goal.status}`, title: 'goal status (independent of Run status)' };
+}
+
+
 export function statusClass(status) {
   return 'status-' + String(status).toLowerCase();
 }

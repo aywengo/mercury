@@ -163,6 +163,24 @@ export class GoalStore {
   }
 
   /** True when the Run carries a goal that is still open. Drives the `unmet` decision. */
+  /**
+   * Goal status for each of the given Runs, in one query.
+   *
+   * Bounded by the caller's page size, so this cannot grow with the table. Runs with no goal
+   * are absent from the result rather than mapped to a status: "no goal" is not a goal state,
+   * and inventing one here would make the dashboard unable to tell the two apart.
+   */
+  statusesFor(runIds: readonly string[]): Record<string, GoalStatus> {
+    if (runIds.length === 0) return {};
+    const marks = runIds.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(`SELECT run_id, status FROM run_goals WHERE run_id IN (${marks})`)
+      .all(...runIds) as { run_id: string; status: string }[];
+    const out: Record<string, GoalStatus> = {};
+    for (const r of rows) out[r.run_id] = r.status as GoalStatus;
+    return out;
+  }
+
   isOpen(runId: string): boolean {
     const row = this.db.prepare('SELECT status FROM run_goals WHERE run_id = ?').get(runId) as { status: string } | undefined;
     return row?.status === 'active';

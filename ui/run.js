@@ -1,7 +1,7 @@
 // Run detail page: info, skills, event timeline, live SSE, cancel/retry/input.
 
 import {
-  api, logout, currentUser, esc, fmtTime, fmtDuration, statusClass,
+  api, logout, currentUser, esc, fmtTime, fmtDuration, statusClass, goalLabel,
   repoLabel, shortId, pretty, sse, safeUrl,
 } from './app.js';
 
@@ -27,7 +27,7 @@ function showError(msg) {
 async function loadRun() {
   const data = await api('/api/runs/' + encodeURIComponent(runId));
   run = data.run;
-  renderRun(data.run, data.skills || []);
+  renderRun(data.run, data.skills || [], data.goal);
   // Page through history until caught up (issue #54).
   //
   // The endpoint returns at most 1000 events per call, and `lastSequence` is the run's TRUE
@@ -50,9 +50,37 @@ async function loadRun() {
   connectSse();
 }
 
-function renderRun(r, skills) {
+
+/**
+ * Goal status beside Run status, never in place of it.
+ *
+ * A Run that COMPLETED with the goal unmet has to show both words; showing only one reproduces
+ * the problem this feature exists to expose (docs/goals.md 4). The three-state decision lives in
+ * app.js goalLabel() so the list and this page cannot describe the same status differently.
+ */
+function renderGoal(goal) {
+  const set = (id, text) => { const el = $(id); if (el) el.textContent = text; };
+  const { text, cls, title } = goalLabel(goal);
+  $('goal-badge').innerHTML = `<span class="badge ${esc(cls)}" title="${esc(title)}">${esc(text)}</span>`;
+  if (!goal) {
+    set('f-goal', goal === undefined ? 'unknown (server does not report goals)' : 'none');
+    set('f-objective', '—');
+    set('f-goal-usage', '—');
+    return;
+  }
+  set('f-goal', goal.status + (goal.source ? ` (${goal.source})` : ''));
+  set('f-objective', goal.objective);
+  const bits = [];
+  if (goal.tokensUsed !== undefined) bits.push(goal.tokenBudget ? `${goal.tokensUsed}/${goal.tokenBudget} tokens` : `${goal.tokensUsed} tokens`);
+  if (goal.turnsUsed !== undefined) bits.push(`${goal.turnsUsed} turns`);
+  if (goal.timeUsedSeconds !== undefined) bits.push(`${goal.timeUsedSeconds}s`);
+  set('f-goal-usage', bits.length ? bits.join(' · ') : '—');
+}
+
+function renderRun(r, skills, goal) {
   $('run-id').textContent = r.id;
   $('status-badge').innerHTML = `<span class="badge ${statusClass(r.status)}">${esc(r.status)}</span>`;
+  renderGoal(data.goal);
   $('run-task').textContent = r.task;
   $('f-agent').textContent = r.agent;
   $('f-attempt').textContent = r.attempt;
@@ -150,6 +178,10 @@ function appendEvent(e) {
     stopSse?.();
     loadRun(); // refresh final state
   }
+  // Goal reports change the header badge, not just the timeline. Without this the badge shows
+  // whatever it was when the page loaded and the timeline disagrees with it -- two views of the
+  // same Run saying different things, which is the failure this feature exists to prevent.
+  if (e.type.startsWith('goal.')) loadRun();
 }
 
 function connectSse() {

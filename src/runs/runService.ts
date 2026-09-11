@@ -6,7 +6,7 @@ import { tx } from '../db/database.ts';
 import { isTerminal } from '../domain/stateMachine.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.ts';
 import type { Redactor } from '../domain/redact.ts';
-import type { AgentCapabilitySummary, GoalState, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
+import type { AgentCapabilitySummary, GoalState, GoalStatus, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
 import { goalCapabilityMessage } from '../domain/goalSupport.ts';
 import { GoalValidationError, resolveGoalSpec } from '../domain/goalSpec.ts';
 import type { GoalStore } from './goalStore.ts';
@@ -273,6 +273,34 @@ export class RunService {
       limit: opts.limit,
       cursor: opts.cursor,
     });
+  }
+
+  /**
+   * The goal attached to a Run, or null.
+   *
+   * Exposed as a SEPARATE field from the Run rather than folded into it, for two reasons. The
+   * Run type mirrors the `runs` table and is persisted and replayed as that shape; and a
+   * consumer that reads `run.status` must not be able to mistake a goal status for it -- the
+   * two are orthogonal axes and the whole feature is about keeping them apart.
+   */
+  getGoal(runId: string): GoalState | null {
+    return this.deps.goals?.get(runId) ?? null;
+  }
+
+  /**
+   * Goal status per Run for a page of Runs, as a map keyed by run id.
+   *
+   * Deliberately only the status. The list view needs one word per row; carrying objectives
+   * here would put up to 4000 chars times the page limit into every poll of the dashboard, and
+   * the detail endpoint already returns the full row for the one Run a person is looking at.
+   *
+   * A map rather than a field on each Run for the same reason `/api/agents` gained a parallel
+   * `capabilities` field: `runs` stays an array of Run, and existing clients keep working.
+   */
+  goalStatuses(runIds: string[]): Record<string, GoalStatus> {
+    const goals = this.deps.goals;
+    if (!goals || runIds.length === 0) return {};
+    return goals.statusesFor(runIds);
   }
 
   getSkills(runId: string): ResolvedSkill[] {

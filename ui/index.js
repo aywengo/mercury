@@ -1,6 +1,6 @@
 // Run list page: login, create run, list + filter + poll.
 
-import { api, login, logout, currentUser, esc, fmtTime, fmtDuration, statusClass, repoLabel, shortId } from './app.js';
+import { api, login, logout, currentUser, esc, fmtTime, fmtDuration, statusClass, goalBadge, repoLabel, shortId } from './app.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -89,13 +89,16 @@ async function loadRuns() {
   const q = status ? '?status=' + encodeURIComponent(status) + '&limit=100' : '?limit=100';
   try {
     const data = await api('/api/runs' + q);
-    renderRuns(data.runs || []);
+    // `goals` is a parallel map, not a field on each run: goal status and Run status are
+    // separate axes and must stay separately visible in the row.
+    renderRuns(data.runs || [], data.goals);
   } catch (err) {
     showError(err.message);
   }
 }
 
-function renderRuns(runs) {
+
+function renderRuns(runs, goals) {
   const tbody = $('runs-body');
   $('empty').classList.toggle('hidden', runs.length > 0);
   tbody.innerHTML = runs.map((r) => {
@@ -106,6 +109,7 @@ function renderRuns(runs) {
       <td class="mono">${esc(repoLabel(r.repository))}</td>
       <td>${esc(r.agent)}</td>
       <td><span class="badge ${statusClass(r.status)}">${esc(r.status)}</span></td>
+      <td>${goalBadge(goals, r.id)}</td>
       <td class="muted">${esc(fmtTime(r.createdAt))}</td>
       <td class="muted">${esc(dur)}</td>
     </tr>`;
