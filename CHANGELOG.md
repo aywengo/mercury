@@ -8,6 +8,35 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-11
+
+Patch release. **Hermes could not execute a single Run in any published version**; this is the
+first release in which the `hermes` adapter works, so `0.1.0` users who were told the backend
+was available need it (#465).
+
+### Added
+
+- **The dashboard now has a favicon and brand marks (#429).** `ui/favicon.svg` and
+  `ui/favicon.ico`, linked from both dashboard pages. Cosmetic; no behaviour change.
+
+### Fixed
+
+- **A Run can now carry zero skills, which is what lets a second harness run at all (#459).**
+  `RunService.create()` treated an explicitly empty `skills` array as "unspecified" and fell
+  through to automatic selection, whose fallback guarantees at least one skill. So every Run
+  carried skill ids resolved from Mercury's own registry. PrimeAgent receives
+  `--skill <workspace path>` and is unaffected; Hermes receives `-s <name>` and resolves it in
+  its *own* installed-skill store, where none of those names exist and an unknown name is a
+  fatal exit. Hermes therefore failed every Run in under a second with
+  `Error: Unknown skill(s): ...` while `/api/agents` advertised it as available. An omitted
+  `skills` still auto-selects and `null` still means omitted, so existing callers are
+  unchanged.
+- **`client/test/cli.test.ts` no longer reads the operator's real mercuryctl config (#458).**
+  Test-only; no runtime effect.
+- **`client/test/completion.test.ts` now enforces its own "no endpoint, no credential"
+  premise (#463).** Test-only; no runtime effect.
+
+
 ## [0.1.0] - 2026-09-08
 
 First stable host release, and the release that moves the npm `latest` dist-tag onto a real version.
