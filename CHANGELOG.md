@@ -14,6 +14,11 @@ Patch release. **Hermes could not execute a single Run in any published version*
 first release in which the `hermes` adapter works, so `0.1.0` users who were told the backend
 was available need it (#465).
 
+### Added
+
+- **The dashboard now has a favicon and brand marks (#429).** `ui/favicon.svg` and
+  `ui/favicon.ico`, linked from both dashboard pages. Cosmetic; no behaviour change.
+
 ### Fixed
 
 - **A Run can now carry zero skills, which is what lets a second harness run at all (#459).**
