@@ -106,6 +106,9 @@ from git history and is not an implementation guide.
   boundaries and lifecycle.
 - [`Cross-process event push`](cross-process-event-push.md) — event-delivery
   measurements and same-host wake-up design.
+- [`Goals: objectives and completion tracking`](goals.md) — design for setting a
+  goal on a Run and reporting whether the harness met it; includes the verified
+  PrimeAgent/Hermes goal capabilities and the Hermes gap.
 
 ## Reviews
 
@@ -128,6 +131,7 @@ Use the narrowest document for a change:
 - deployment commands → `deploy/README.md`;
 - architectural invariant → `ARCHITECTURE.md`;
 - active limitation → `docs/status.md`;
+- goal/objective tracking design → `docs/goals.md`;
 - Crew design → `docs/crew/`;
 - host release notes → `docs/releases/host/`;
 - Fleet release notes → `docs/releases/fleet/`;
