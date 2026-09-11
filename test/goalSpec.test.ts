@@ -75,3 +75,21 @@ test('a non-object goal is rejected rather than treated as empty', () => {
     assert.throws(() => resolveGoalSpec(bad, 'task'), /goal must be an object/, `accepted ${JSON.stringify(bad)}`);
   }
 });
+
+test('the objective cap is never more permissive than the harness cap (docs/goals.md 2)', () => {
+  // PrimeAgent validates the SAME 4000 limit but counts CODE POINTS (`[...objective].length`),
+  // while Mercury counts UTF-16 code units (`objective.length`). For astral characters those
+  // differ by 2x, so the two could disagree about who accepts a value.
+  //
+  // The direction is the whole point: Mercury must never accept something the harness will
+  // then reject, because that turns a clean 400 at admission into a Run that dies at spawn.
+  // Counting UTF-16 units makes Mercury strictly stricter, so the safe side always wins.
+  const astral = '\u{1F3AF}'.repeat(MAX_GOAL_OBJECTIVE_CHARS); // 4000 code points, 8000 UTF-16 units
+  assert.equal([...astral].length, MAX_GOAL_OBJECTIVE_CHARS);
+  assert.ok(astral.length > MAX_GOAL_OBJECTIVE_CHARS, 'precondition: UTF-16 count exceeds the cap');
+  assert.throws(
+    () => resolveGoalSpec({ objective: astral }, 'task'),
+    /over the .* limit/,
+    'Mercury accepted an objective the harness would reject',
+  );
+});
