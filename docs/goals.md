@@ -598,9 +598,10 @@ actually landed in, taken from each project's own history rather than its docs:
 | PrimeAgent | 0.9.4 | `/goal` (interactive) | 0.0.1 — 2026-05-18 | no — interactive only |
 | PrimeAgent | 0.9.4 | `--goal`, `--goal-token-budget` | **0.3.3 — 2026-07-23** (PR #514) | **yes** |
 | Hermes | v0.20.5 (2026.8.19), upstream `933c209e` | `/goal`, `GoalContract`, gates | not determinable locally | **no** |
-| Claude Code | 1.0.3 | none — `claude --help` has no goal surface | — | no |
+| Claude Code | 1.0.3 at `/opt/homebrew/bin/claude` | none — no goal surface in `--help` | — | no |
+| Claude Code (same machine, second install) | 2.1.260 at `/Users/roman/.local/bin/claude` | none | — | no |
 
-Two things fall out of this table, and they are different problems.
+Three things fall out of this table, and they are three different problems.
 
 **The same harness has several goal features with different thresholds.** PrimeAgent has had
 `/goal` since its first release, but the headless flags Mercury needs arrived 14 minor
@@ -611,6 +612,12 @@ flag at parse time.
 **Hermes' introduction version cannot be determined from this install.** The checkout is a
 shallow clone: one commit, no tags, no changelog. That is not a gap to fill in later, it is
 a fact about how the harness ships, and the design has to survive it.
+
+**A version number means nothing without the path it came from.** This machine has two
+Claude Code installs, and neither the harness name nor `PATH` says which one Mercury runs.
+That is the third problem, and [13.3](#133-mercury-does-not-know-harness-versions-at-all)
+deals with it. It is also the reason both Claude rows are kept: the row that matters is the
+one at the configured path, and recording only that one would hide the trap.
 
 ### 13.2 The rule the table forces
 
@@ -637,6 +644,16 @@ which harness it is talking to.**
   construction, not per Run. Store the resolved version on the Run so a later diagnosis
   knows what actually executed it — the absence of that datum is what made issue #465 hard
   to close, where the fix was on `main` and the installed artifact was still broken.
+- **Probe the configured command path, never the bare name.** This is not hypothetical:
+  the machine this design was written on has two Claude Code installs, 1.0.3 at
+  `/opt/homebrew/bin/claude` (an npm global) and 2.1.260 at
+  `/Users/roman/.local/bin/claude` (a native installer under `~/.local/share/claude/`).
+  A shell's `claude --version` answers with whichever its `PATH` happens to resolve first,
+  which is a different answer in two terminals on one machine. Mercury is configured with
+  `MERCURY_CLAUDE_CMD=/opt/homebrew/bin/claude`, so 1.0.3 is the version that matters and
+  2.1.260 is a fact about a binary Mercury never executes. Probing `claude` instead of the
+  configured path would report a version for the wrong program and then gate features
+  against it. The same applies to every adapter: probe `cmd`, record what it resolved to.
 - **Parse per adapter, not universally.** The three version strings in the table above are
   `0.9.4`, `v0.20.5 (2026.8.19) · upstream 933c209e`, and `1.0.3`. One shared semver parser
   would fail on Hermes' date component and its trailing upstream sha. Each adapter owns the
