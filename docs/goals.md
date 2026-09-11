@@ -10,6 +10,7 @@ deferred. Concretely, today:
 | the harness version that executed each Run, recorded at claim time (13.1) | |
 | capability + version detection per agent (Phase 0a), with per-field goal capability | gate OUTCOME events -- no harness reports them, so there is no emitter (Phase 4b) |
 | `GET /api/runs/:id/goal` and `POST /api/runs/:id/goal/cancel`; `cancelled` finally has a writer | |
+| a mid-run objective replacement reported by the harness is recorded, redacted and bounded (9) | |
 | `run_goals` table, `GoalSpec` validation, `goal.*` event types | Hermes goals (Phase 5, blocked upstream) |
 | `POST /api/runs` accepts `goal`, refused unless the agent can track it | budget enforcement (Phase 6, deferred pending real usage data) |
 | `goal.unmet` when a Run ends with the objective still open, and `mercury_goals_in_status` | |
