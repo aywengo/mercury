@@ -1,7 +1,7 @@
 // Run detail page: info, skills, event timeline, live SSE, cancel/retry/input.
 
 import {
-  api, logout, currentUser, esc, fmtTime, fmtDuration, statusClass, goalLabel,
+  api, logout, currentUser, esc, fmtTime, fmtDuration, statusClass, goalLabel, goalGatesHtml,
   repoLabel, shortId, pretty, sse, safeUrl,
 } from './app.js';
 
@@ -66,6 +66,8 @@ function renderGoal(goal) {
     set('f-goal', goal === undefined ? 'unknown (server does not report goals)' : 'none');
     set('f-objective', '—');
     set('f-goal-usage', '—');
+    const gEl = $('f-goal-gates');
+    if (gEl) { gEl.innerHTML = ''; gEl.classList.add('hidden'); }
     return;
   }
   set('f-goal', goal.status + (goal.source ? ` (${goal.source})` : ''));
@@ -75,6 +77,13 @@ function renderGoal(goal) {
   if (goal.turnsUsed !== undefined) bits.push(`${goal.turnsUsed} turns`);
   if (goal.timeUsedSeconds !== undefined) bits.push(`${goal.timeUsedSeconds}s`);
   set('f-goal-usage', bits.length ? bits.join(' · ') : '—');
+  // Declared gates, spec only. The markup (and the decision to render nothing when there are
+  // none) lives in app.js so the same rule cannot drift from the list page's.
+  const gatesEl = $('f-goal-gates');
+  if (gatesEl) {
+    gatesEl.innerHTML = goalGatesHtml(goal);
+    gatesEl.classList.toggle('hidden', gatesEl.innerHTML === '');
+  }
 }
 
 function renderRun(r, skills, goal) {

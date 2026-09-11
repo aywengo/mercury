@@ -4,7 +4,7 @@
 // that explicitly waits for an outcome encodes that outcome in its exit status, otherwise
 // `mercuryctl runs show $id || ...` would treat "I successfully told you it failed" as a new failure.
 
-import type { RunDetailResponse } from '../api/protocol.ts';
+import type { GoalState, RunDetailResponse } from '../api/protocol.ts';
 import { makeColorizer, sanitizeForTerminal, statusColor, type ColorName } from '../output/human.ts';
 import type { CommandContext } from './context.ts';
 
@@ -38,6 +38,9 @@ function goalLines(response: RunDetailResponse, color: (c: ColorName, s: string)
     lines.push(field('goal tokens', String(goal.tokensUsed)));
   }
   if (goal.turnsUsed !== undefined) lines.push(field('goal turns', String(goal.turnsUsed)));
+  for (const line of goalGateLines(goal.gates, field, color)) {
+    lines.push(line);
+  }
   if (goal.pausedReason) lines.push(field('goal paused', sanitizeForTerminal(goal.pausedReason)));
   if (goal.lastError) lines.push(field('goal error', color('red', sanitizeForTerminal(goal.lastError))));
   if (goal.lastReason && !goal.pausedReason) lines.push(field('goal reason', sanitizeForTerminal(goal.lastReason)));
@@ -100,4 +103,32 @@ export function renderRunDetail(response: RunDetailResponse, ctx: CommandContext
     }
   }
   return lines.join('\n');
+}
+/**
+ * One line per declared gate.
+ *
+ * Rendered as what was ASKED FOR, never as an outcome: Mercury records the spec and does not
+ * execute gates (docs/goals.md 5), so a gate list next to a COMPLETED Run must not read as a
+ * passing test report. The label says "gate" and nothing else -- no tick, no colour implying
+ * success -- because the nearest thing to that misreading this repo already has a number
+ * (`test.*` events cover real results).
+ *
+ * The command is attacker-influenced text that came from the caller and came back around, so it
+ * goes through sanitizeForTerminal like every other free-text field here.
+ */
+function goalGateLines(
+  gates: GoalState['gates'],
+  field: (label: string, value: string) => string,
+  color: (c: ColorName, s: string) => string,
+): string[] {
+  if (!gates || gates.length === 0) return [];
+  return gates.map((g, i) => {
+    const seconds = g.timeoutMs / 1000;
+    const timeout = Number.isInteger(seconds) && seconds >= 1
+      ? `${seconds}s`
+      : `${g.timeoutMs}ms`;
+    const retries = g.maxRetries > 0 ? `, ${g.maxRetries} ${g.maxRetries === 1 ? 'retry' : 'retries'}` : '';
+    const meta = color('dim', ` (timeout ${timeout}${retries})`);
+    return field(`gate ${i + 1}`, `${sanitizeForTerminal(g.command)}${meta}`);
+  });
 }

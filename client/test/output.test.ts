@@ -230,6 +230,9 @@ test('runs show: no escape byte survives with colour off', () => {
     runId: HOSTILE, status: 'unmet', objective: HOSTILE, updatedAt: HOSTILE,
     tokensUsed: 1, tokenBudget: 2, turnsUsed: 3,
     lastReason: HOSTILE, lastError: HOSTILE, pausedReason: HOSTILE, source: 'harness',
+    // Gate commands are the same class of caller-supplied text as the objective, and Phase 4
+    // added a third render path over them. Left out, this fixture would cover two of three.
+    gates: [{ command: HOSTILE, timeoutMs: 60000, maxRetries: 2 }],
   };
   const out = renderRunDetail(
     { run: run as never, skills: [{ id: HOSTILE, version: HOSTILE } as never], goal: goal as never },

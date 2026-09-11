@@ -7,7 +7,7 @@ import { isTerminal } from '../domain/stateMachine.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.ts';
 import type { Redactor } from '../domain/redact.ts';
 import type { AgentCapabilitySummary, GoalState, GoalStatus, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
-import { goalCapabilityMessage } from '../domain/goalSupport.ts';
+import { goalCapabilityMessage, goalFieldCapabilityMessage } from '../domain/goalSupport.ts';
 import { GoalValidationError, resolveGoalSpec } from '../domain/goalSpec.ts';
 import type { GoalStore } from './goalStore.ts';
 import { EventStore } from '../events/eventStore.ts';
@@ -123,6 +123,21 @@ export class RunService {
         throw new ValidationError(
           goalCapabilityMessage(agent, cap ?? { supported: false, reason: 'unsupported' }),
         );
+      }
+      // `set` being supported says nothing about the rest of the spec. Each supplied field is
+      // checked against its own matrix entry, because accepting a field the backend cannot act
+      // on is the exact failure this feature was written to prevent (issue #459) -- and it is
+      // worse than dropping it, since the field is persisted and rendered, so the operator sees
+      // gates or a contract that nothing will ever evaluate while the Run sails to COMPLETED.
+      //
+      // Checked on the RESOLVED spec rather than the raw input: `contract: {}` normalises away
+      // to nothing, and refusing that would reject a request that carries no contract at all.
+      for (const field of ['tokenBudget', 'contract', 'gates', 'maxTurns'] as const) {
+        if (spec[field] === undefined) continue;
+        const fieldCap = cap.fields?.[field] ?? { supported: false, reason: 'unsupported' as const };
+        if (!fieldCap.supported) {
+          throw new ValidationError(goalFieldCapabilityMessage(agent, field, fieldCap));
+        }
       }
       // Redact before persisting. `runs.task` is redacted at write time because tasks
       // carry credentials (issue #43); resolving the objective from the RAW task and storing

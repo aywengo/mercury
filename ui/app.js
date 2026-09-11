@@ -201,6 +201,35 @@ export function goalBadge(goals, runId) {
  * Run status are orthogonal axes, and sharing a class lookup would invite someone to render one
  * in place of the other.
  */
+/**
+ * Declared gates as escaped markup for the Run page.
+ *
+ * Renders the SPEC, never an outcome. Mercury records gate specs and does not execute them
+ * (docs/goals.md 5), so this list says what the harness was asked to enforce -- it is not
+ * evidence that anything passed. There is deliberately no pass/fail styling and no tick: a
+ * green tick next to `npm test` under a COMPLETED Run would be a fabricated result, and the
+ * design's whole point is that Mercury does not judge completion.
+ *
+ * Returns '' when there is nothing to say: no goal, or a goal with no gates. Not a placeholder
+ * line, because "no gates" is the ordinary case and a permanent empty section would train the
+ * eye to skip it -- which is how the interesting case gets missed too.
+ *
+ * `command` is caller-supplied text that round-trips through the API and lands in innerHTML, so
+ * it goes through esc(). The timeout and retry count are numbers, but they are interpolated via
+ * String() through esc() anyway rather than trusted, because they arrive over the wire and a
+ * server that sends a string there should produce escaped text, not markup.
+ */
+export function goalGatesHtml(goal) {
+  if (!goal || !Array.isArray(goal.gates) || goal.gates.length === 0) return '';
+  const items = goal.gates.map((g) => {
+    const timeout = esc(String(g.timeoutMs));
+    const retries = Number(g.maxRetries) > 0 ? ` <span class="gate-meta">+${esc(String(g.maxRetries))} retries</span>` : '';
+    return `<li><code>${esc(String(g.command))}</code>`
+      + `<span class="gate-meta">timeout ${timeout}ms${retries}</span></li>`;
+  });
+  return `<ul class="goal-gates">${items.join('')}</ul>`;
+}
+
 export function goalLabel(goal) {
   if (goal === undefined) return { text: 'goal ?', cls: 'goal-unknown', title: 'server does not report goals' };
   if (goal === null) return { text: 'no goal', cls: 'goal-none', title: 'this run has no goal' };

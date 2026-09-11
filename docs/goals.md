@@ -1,16 +1,19 @@
 # Goals: setting objectives on a Run and tracking whether they were met
 
-**Status: partially implemented.** Phases 0a, 0, 1, 2 and 3 are shipped; Phase 4 is
-not; Phase 5 is blocked upstream and Phase 6 is deferred. Concretely, today:
+**Status: partially implemented.** Phases 0a, 0, 1, 2, 3 and the implementable half of 4 are
+shipped. Phase 4's second half -- rendering harness-reported gate *outcomes* -- has no emitter to
+ship against and is blocked the same way Phase 5 is; Phase 5 is blocked upstream and Phase 6 is
+deferred. Concretely, today:
 
 | shipped | not shipped |
 | --- | --- |
-| capability + version detection per agent (Phase 0a) | gate specs validated, persisted and rendered (Phase 4) |
+| capability + version detection per agent (Phase 0a), with per-field goal capability | gate OUTCOME events -- no harness reports them, so there is no emitter (Phase 4b) |
 | `run_goals` table, `GoalSpec` validation, `goal.*` event types | Hermes goals (Phase 5, blocked upstream) |
 | `POST /api/runs` accepts `goal`, refused unless the agent can track it | budget enforcement (Phase 6, deferred pending real usage data) |
 | `goal.unmet` when a Run ends with the objective still open, and `mercury_goals_in_status` | |
 | PrimeAgent seeded with `--goal` / `--goal-token-budget`; its `goal_update` reports relayed into the row and the timeline (Phase 2) | |
 | goal status beside Run status in the dashboard, `mercuryctl runs list` / `runs show`, and goal events in the SSE timeline (Phase 3) | |
+| gate specs validated (bounded `timeoutMs`, sane `maxRetries`), persisted, and rendered as a spec in the dashboard and `runs show` (Phase 4a) | |
 
 A goal is now **set, refused, tracked while the Run runs, closed when the Run ends, and
 visible**. `unmet` is the only status Mercury originates; every other status is a harness
@@ -563,6 +566,23 @@ reproduces the original problem with extra steps.
 Validate and persist gate specs; render harness-reported gate outcomes. No Mercury-side
 execution.
 
+Shipped as 4a; 4b is blocked, and the split is a finding rather than a scoping choice. 4a
+validates the spec, refuses it when the backend cannot act on it, persists it, and renders it as
+a spec. 4b -- rendering reported outcomes -- needs `goal.gate.passed` / `goal.gate.failed`, and
+per section 6 those types must land in the same change as their first emitter. There is no
+emitter: the section 13.2 matrix gives `gates` a dash for every shipped adapter, PrimeAgent has
+no gate concept at all, and the one harness with gates is Hermes, whose goals are blocked by
+Phase 5. Adding the types now would mean either inventing a wire shape no harness sends, or
+landing event types that can never fire -- and a type that can never fire is how a surface comes
+to advertise something nobody implemented.
+
+What 4a does enforce is the part that was actually broken. Admission used to ask only whether an
+agent could `set` a goal, so `goal.gates` was accepted, persisted, and rendered on a Run whose
+harness will never evaluate it. That is issue #459 -- advertise a capability nobody honours --
+reproduced inside the feature built to prevent it, and it is worse than silently dropping the
+field, because the operator sees gates that nothing will run while the Run sails to COMPLETED.
+Every goal field is now resolved against its own matrix entry.
+
 **Phase 5 — Hermes.**
 Blocked on section 7. Option (a) preferred; option (b) as an opt-in experiment if the
 need is real. Until then the `400` stays, because a silently ignored goal is the #459
@@ -581,7 +601,8 @@ settled.
 | 1 | 0 | `goal.unmet` — works for every adapter | — |
 | 2 | 0, 1 | PrimeAgent goals set + tracked | — |
 | 3 | 1, 2 | dashboard, `mercuryctl`, SSE | — |
-| 4 | 0 | gate specs recorded and rendered | — |
+| 4a | 0 | gate specs validated, refused per-field, persisted, rendered as a spec | — |
+| 4b | 4a, 2 | gate outcome events | no harness reports gate outcomes (13.2 matrix); Hermes goals (Phase 5) |
 | 5 | 2 | Hermes goals | upstream `--goal` on `chat`, or a scoped kanban route |
 | 6 | 2 | `budgetTokens` enforcement (issue #63) | real per-run usage data |
 
@@ -705,23 +726,34 @@ export interface AgentGoalSupport {
   contract?: string;
   /** Deterministic gates are reported back to Mercury. */
   gates?: string;
+  /** A per-goal turn cap can be passed through. */
+  maxTurns?: string;
 }
 ```
 
-| Agent | `set` | `track` | `tokenBudget` | `contract` | `gates` |
-| --- | --- | --- | --- | --- | --- |
-| `primeagent` (rpc) | `0.3.3` | `0.3.3` | `0.3.3` | — | — |
-| `primeagent` (daemon) | — | — | — | — | — |
-| `hermes` | — | — | — | — | — |
-| `claude` | — | — | — | — | — |
-| `fake` | — | — | — | — | — |
-| declarative local/rpc/remote | from config | from config | from config | from config | from config |
+| Agent | `set` | `track` | `tokenBudget` | `contract` | `gates` | `maxTurns` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `primeagent` (rpc) | `0.3.3` | `0.3.3` | `0.3.3` | — | — | — |
+| `primeagent` (daemon) | — | — | — | — | — | — |
+| `hermes` | — | — | — | — | — | — |
+| `claude` | — | — | — | — | — | — |
+| `fake` | — | — | — | — | — | — |
+| declarative local/rpc/remote | from config | from config | from config | from config | from config | from config |
 
 A dash means *never*, not *unknown* — the difference matters, because `never` is a
 statement Mercury can render as a reason and `unknown` is not.
 
 `contract` and `gates` are `—` for PrimeAgent deliberately: it has no equivalent concept, so
-Mercury must reject those fields rather than accept and drop them. Hermes has both concepts
+Mercury must reject those fields rather than accept and drop them. **This is enforced, not
+advisory** -- admission resolves every goal field against its own column, because asking only
+"can this agent carry a goal" let `goal.gates` through for an agent that has no gates.
+
+`maxTurns` is `—` for every shipped adapter, which is a correction rather than a new
+restriction. Section 5 says it "maps to Hermes `--goal-max-turns`", but the only Hermes turn cap
+that works today is the global `MERCURY_HERMES_MAX_TURNS`, applied to every Run whether or not
+it carries a goal; there is no `max_turns` column and no adapter receives a per-goal value. So
+`goal.maxTurns` was validated and then dropped -- accepted and silently not honoured. It is
+refused until an adapter declares the column. Hermes has both concepts
 and still gets `—`, per 13.2.
 
 **The declarative adapters must take this from config.** `LocalAgentAdapter`,

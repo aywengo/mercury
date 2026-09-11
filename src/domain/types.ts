@@ -285,6 +285,23 @@ export interface GoalPatch {
 export const MAX_GOAL_OBJECTIVE_CHARS = 4000;
 
 /**
+ * Ceiling on a gate's `timeoutMs`.
+ *
+ * The design requires `timeoutMs` to be "bounded" (docs/goals.md 5), and a positive-number
+ * check does not deliver that: a year passes it, and a gate that may run for a year is
+ * indistinguishable from a hung one, which is the reason the field is mandatory in the first
+ * place. Mercury does not execute gates, so this is not a runtime limit -- it is a limit on
+ * what Mercury will record as a sane request, and it keeps a typo (`timeoutMs: 3600000000`)
+ * from being persisted and rendered as a legitimate expectation.
+ *
+ * One hour is deliberately generous: a gate is a deterministic check at a turn boundary that
+ * the agent iterates against, so anything slower than a full test suite is a pipeline and
+ * belongs elsewhere. Set higher only with a reason, since the value's whole job is to be a
+ * ceiling.
+ */
+export const MAX_GOAL_GATE_TIMEOUT_MS = 3_600_000;
+
+/**
  * Goal support for one agent backend, expressed as the MINIMUM harness version at
  * which Mercury can exercise each feature. Absent means Mercury cannot do it at any
  * version.
@@ -311,6 +328,9 @@ export interface AgentGoalSupport {
   contract?: string;
   /** Deterministic gates are reported back to Mercury. */
   gates?: string;
+  /** A per-goal turn cap can be passed through. Distinct from the adapter's own global
+   *  MERCURY_HERMES_MAX_TURNS, which applies to every Run regardless of goal. */
+  maxTurns?: string;
 }
 
 /** What Mercury can do with an adapter, independent of which version is installed. */
@@ -340,7 +360,22 @@ export interface AgentGoalCapability {
   /** What the harness reported, for the operator to act on. */
   detectedVersion?: string | null;
   detectedRaw?: string | null;
+  /**
+   * Per-field resolution, so a caller can ask whether one PART of a goal spec means anything
+   * to this backend. `supported` above answers only "can it carry a goal" (the `set` field),
+   * and that is not the same question: PrimeAgent carries objectives and has no gate or
+   * contract concept at all.
+   *
+   * Nested inside `goals` rather than added beside it because `/api/agents`' top-level key set
+   * is pinned by test/fleetContract.test.ts, which compares the keys Fleet parses against the
+   * keys the host sends.
+   */
+  fields?: Partial<Record<GoalCapabilityField, AgentGoalCapability>>;
 }
+
+/** One entry per goal capability question. Mirrors the matrix columns in docs/goals.md 13.2. */
+export type GoalCapabilityField =
+  | 'set' | 'track' | 'tokenBudget' | 'contract' | 'gates' | 'maxTurns';
 
 export interface AgentCapabilitySummary {
   /** null while the detached probe is still in flight, or if it never resolved. */

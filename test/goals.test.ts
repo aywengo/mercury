@@ -20,7 +20,13 @@ import type { AgentAdapter, AgentCapabilities, AgentVersionInfo, RunContext } fr
 
 /** An adapter that can carry goals, given a version to report. */
 function capableAdapter(version: string | null): AgentAdapter {
-  const capabilities: AgentCapabilities = { goals: { set: '0.3.3', track: '0.3.3' } };
+  // Every field declared: these tests exercise budgets and contracts, and per-field admission
+  // (docs/goals.md 13.2) refuses a field the adapter has not declared. Declaring only set/track
+  // here was the under-declaration that admission now catches -- refusal of an undeclared field
+  // is covered deliberately in test/goalFields.test.ts, not here.
+  const capabilities: AgentCapabilities = {
+    goals: { set: '0.3.3', track: '0.3.3', tokenBudget: '0.3.3', contract: '0.3.3', gates: '0.3.3' },
+  };
   return {
     capabilities,
     detectVersion: async (): Promise<AgentVersionInfo> =>
