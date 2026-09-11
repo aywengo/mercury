@@ -15,10 +15,30 @@ export function renderAgents(response: AgentsResponse, ctx: CommandContext, isTt
   // (or a shared deployment whose agent registry someone else configures) could emit an escape sequence
   // that the operator's terminal would obey. Comparison happens on the raw value; only rendering
   // sanitises, so the "default" marker still lines up.
+  // Goal support is rendered as three states, not two, because they want different actions
+  // from the operator: "too old" means upgrade the harness, "unknown" means fix the probe,
+  // and "no" means pick a different agent. Collapsing them into yes/no would hide the one
+  // case the operator can actually fix (docs/goals.md 13.5).
+  const goalsCell = (id: string): string => {
+    const cap = response.capabilities?.[id]?.goals;
+    // An older server sends no capabilities block. That is unknown, NOT unsupported --
+    // rendering it as "no" would tell the operator a capability is absent when the client
+    // simply was not told.
+    if (!cap) return dim('unknown');
+    if (cap.supported) return color('green', 'yes');
+    switch (cap.reason) {
+      case 'version-too-old':
+        return `no: needs ${sanitizeForTerminal(cap.requiredVersion ?? '?')}, has ${sanitizeForTerminal(cap.detectedVersion ?? '?')}`;
+      case 'version-unknown':
+        return `unknown: version not detected (needs ${sanitizeForTerminal(cap.requiredVersion ?? '?')})`;
+      default:
+        return 'no';
+    }
+  };
   const rows = response.agents.map((id) =>
-    [sanitizeForTerminal(id), id === response.defaultAgent ? 'default' : ''],
+    [sanitizeForTerminal(id), goalsCell(id), id === response.defaultAgent ? 'default' : ''],
   );
-  const table = renderTable(['AGENT', ''], rows,
+  const table = renderTable(['AGENT', 'GOALS', ''], rows,
     (text, column) => (column === 0 ? color('cyan', text) : color('dim', text)),
     (text) => dim(text),
   );

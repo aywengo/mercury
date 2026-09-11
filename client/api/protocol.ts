@@ -80,7 +80,35 @@ export interface MercuryEvent {
   payload: unknown;
 }
 
-export interface AgentsResponse { agents: string[]; defaultAgent: string }
+/**
+ * Goal support for one agent, as reported by the server. Mirrors the server's
+ * AgentGoalCapability; declared here because the client package does not import from
+ * src/domain.
+ */
+export interface AgentGoalCapability {
+  supported: boolean;
+  reason?: 'unsupported' | 'version-too-old' | 'version-unknown';
+  requiredVersion?: string;
+  detectedVersion?: string | null;
+  detectedRaw?: string | null;
+}
+
+export interface AgentCapabilitySummary {
+  /** null while the server's detached version probe is still in flight. */
+  version: string | null;
+  versionRaw: string | null;
+  goals: AgentGoalCapability;
+}
+
+export interface AgentsResponse {
+  agents: string[];
+  defaultAgent: string;
+  /**
+   * Optional: an older server omits it, and a newer client must not treat that as
+   * "no agent supports goals". Render as unknown, not as false.
+   */
+  capabilities?: Record<string, AgentCapabilitySummary>;
+}
 export interface CreateRunResponse { runId: string; status: RunStatus }
 export interface RunListResponse { runs: Run[]; nextCursor: string | null }
 export interface RunDetailResponse { run: Run; skills: ResolvedSkill[] }

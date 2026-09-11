@@ -250,3 +250,69 @@ test('event lines: no escape byte survives with colour off', () => {
   };
   assertNoEscape('event line', renderEventLine(event as never, OFF));
 });
+
+// --- `agents list` goal column (docs/goals.md 13.5, 13.6) ---------------------
+
+const CAPS_OFF = { json: false, noColor: true, isTty: false } as never;
+
+test('the goal column distinguishes too-old from unknown from unsupported', () => {
+  // Three states, three actions: upgrade the harness, fix the probe, or pick another
+  // agent. Rendering all three as "no" hides the one the operator can actually fix.
+  const out = renderAgents(
+    {
+      agents: ['primeagent', 'hermes', 'cloud'],
+      defaultAgent: 'primeagent',
+      capabilities: {
+        primeagent: { version: '0.2.7', versionRaw: '0.2.7',
+          goals: { supported: false, reason: 'version-too-old', requiredVersion: '0.3.3', detectedVersion: '0.2.7' } },
+        hermes: { version: '0.20.5', versionRaw: 'x', goals: { supported: false, reason: 'unsupported' } },
+        cloud: { version: null, versionRaw: null,
+          goals: { supported: false, reason: 'version-unknown', requiredVersion: '1.0.0' } },
+      },
+    },
+    OFF,
+    false,
+  );
+  assert.match(out, /needs 0\.3\.3, has 0\.2\.7/, `too-old not actionable:\n${out}`);
+  assert.match(out, /version not detected/, `unknown not distinguished from "no":\n${out}`);
+  // Unsupported is a plain no -- there is nothing to upgrade toward.
+  const hermesRow = out.split('\n').find((l) => l.includes('hermes')) ?? '';
+  assert.ok(!/needs/.test(hermesRow), `unsupported must not name a threshold:\n${hermesRow}`);
+});
+
+test('a server that sends no capabilities block renders unknown, not "no"', () => {
+  // An older server simply omits the field. Rendering that as "no" would tell the operator
+  // a capability is absent when the client was merely not told -- the same class of lie as
+  // advertising a capability the serving path does not honour, pointed the other way.
+  const out = renderAgents({ agents: ['primeagent'], defaultAgent: 'primeagent' }, OFF, false);
+  assert.match(out, /unknown/, `missing capabilities must render as unknown:\n${out}`);
+  assert.ok(!/\bno\b/.test(out.split('\n').find((l) => l.includes('primeagent')) ?? ''),
+    'an absent capabilities block must not be reported as unsupported');
+});
+
+test('a supported agent renders a bare yes with no noise', () => {
+  const out = renderAgents(
+    { agents: ['primeagent'], defaultAgent: 'primeagent',
+      capabilities: { primeagent: { version: '0.9.4', versionRaw: '0.9.4', goals: { supported: true, detectedVersion: '0.9.4' } } } },
+    OFF,
+    false,
+  );
+  const row = out.split('\n').find((l) => l.includes('primeagent')) ?? '';
+  assert.match(row, /yes/, row);
+  assert.ok(!/needs/.test(row), row);
+});
+
+test('a hostile version string cannot inject terminal sequences into the goal column', () => {
+  // The goal column prints server-supplied version strings. The agent-id column already
+  // sanitises; a new column is exactly where that discipline gets forgotten.
+  const hostile = '1.0\u001b]0;pwned\u0007';
+  const out = renderAgents(
+    { agents: ['x'], defaultAgent: 'x',
+      capabilities: { x: { version: hostile, versionRaw: hostile,
+        goals: { supported: false, reason: 'version-too-old', requiredVersion: hostile, detectedVersion: hostile } } } },
+    OFF,
+    false,
+  );
+  assert.ok(!out.includes('\u001b]0;pwned'), 'escape payload survived the goal column');
+  assert.ok(!out.includes('pwned\u0007'), 'OSC payload reached the terminal intact');
+});

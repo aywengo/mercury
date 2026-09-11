@@ -98,8 +98,19 @@ export function createRoutes(deps: RoutesDeps): Router {
   router.use(requireAuth);
 
   // GET /api/agents — registered agent ids for the UI dropdown
+  //
+  // `capabilities` is a PARALLEL field, deliberately not a reshaping of `agents`. The
+  // dashboard's loadAgents() does `if (!Array.isArray(agents)) return;` to keep its static
+  // fallback options, so turning `agents` into objects would make it silently discard every
+  // server-registered agent and render two hardcoded ones -- a working server showing a
+  // shorter list, with no error anywhere. Existing clients keep reading `agents` unchanged
+  // (docs/goals.md 13.6).
   router.get('/agents', (_req: Request, res: Response) => {
-    res.json({ agents: deps.runService.listAgents(), defaultAgent: deps.runService.defaultAgent() });
+    res.json({
+      agents: deps.runService.listAgents(),
+      defaultAgent: deps.runService.defaultAgent(),
+      capabilities: deps.runService.listAgentCapabilities(),
+    });
   });
 
   // POST /api/runs

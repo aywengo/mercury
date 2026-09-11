@@ -21,9 +21,9 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
-import type {
-  AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run, RunConstraints, RunContext,
-} from '../domain/types.ts';
+import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run, RunConstraints, RunContext, AgentCapabilities, AgentVersionInfo } from '../domain/types.ts';
+
+import { probeVersion } from './versionProbe.ts';
 import { RpcClient, type RpcEvent } from './rpc/rpcClient.ts';
 import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
@@ -75,6 +75,29 @@ interface Session {
 const DONE: AgentEvent = { type: '__done__', payload: {} };
 
 export class PrimeAgentAdapter implements AgentAdapter {
+  /**
+   * PrimeAgent is the only backend Mercury can drive a goal through today.
+   *
+   * The thresholds are not decoration. `/goal` has existed since 0.0.1, but it is an
+   * interactive slash command; the headless argv Mercury needs -- `--goal` and
+   * `--goal-token-budget` -- landed fourteen minor versions later in 0.3.3 (2026-07-23,
+   * upstream PR #514). A row reading "primeagent: goals yes" would green-light a `--goal`
+   * against a 0.2.x install, which rejects the flag at argument-parse time.
+   *
+   * `contract` and `gates` are absent on purpose: PrimeAgent has no equivalent concept, so
+   * Mercury must reject those fields rather than accept and silently drop them.
+   */
+  readonly capabilities: AgentCapabilities = {
+    goals: { set: '0.3.3', track: '0.3.3', tokenBudget: '0.3.3' },
+  };
+
+  /** PrimeAgent prints a bare dotted version (`0.9.4`), so the default parser applies.
+   *  Probes `this.cmd` -- the configured path -- never a bare `prime-agent` resolved
+   *  through PATH (docs/goals.md 13.3). */
+  detectVersion(): Promise<AgentVersionInfo> {
+    return probeVersion({ cmd: this.cmd });
+  }
+
   private cmd: string;
   private opts: PrimeAgentAdapterOptions;
   private sessions = new Map<string, Session>();

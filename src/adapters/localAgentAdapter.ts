@@ -9,9 +9,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
-import type {
-  AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext,
-} from '../domain/types.ts';
+import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentGoalSupport, AgentCapabilities, AgentVersionInfo } from '../domain/types.ts';
+import { probeVersion } from './versionProbe.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 
 // --- config schema (docs/agent-adapters.md section 4.1) ---------------------
@@ -83,6 +82,17 @@ export interface LocalAgentSkills {
 }
 
 export interface LocalAgentConfig {
+  /**
+   * Goal support Mercury can exercise against this agent, keyed on the minimum
+   * harness version for each feature. Absent means no goals.
+
+   * Config-supplied rather than hardcoded because these adapters exist to add agents
+   * without per-agent code: a per-class table would leave every third-party agent
+   * permanently unable to declare support. Mercury cannot know a third-party CLI's
+   * feature history, so the operator states it and Mercury verifies the claim against
+   * the DETECTED version rather than trusting it (docs/goals.md 13.4).
+   */
+  goalSupport?: AgentGoalSupport;
   id: string;
   description: string;
   command: string;
@@ -175,6 +185,18 @@ const DEFAULT_DRAIN_GRACE_MS = 5000;
 // --- adapter ----------------------------------------------------------------
 
 export class LocalAgentAdapter implements AgentAdapter {
+  /** Declared by config; absent means no goals (fail closed).
+   *  Read live from the config object rather than snapshotted, so a registry that
+   *  mutates a config before startup is reflected instead of silently stale. */
+  get capabilities(): AgentCapabilities {
+    const goals = this.cfg.goalSupport;
+    return goals ? { goals } : {};
+  }
+
+  /** Probes the configured `command`, not a bare name on PATH. */
+  detectVersion(): Promise<AgentVersionInfo> {
+    return probeVersion({ cmd: this.cfg.command });
+  }
   private cfg: LocalAgentConfig;
   private opts: LocalAgentAdapterOptions;
   private sessions = new Map<string, Session>();

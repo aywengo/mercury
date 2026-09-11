@@ -153,7 +153,91 @@ export interface RunContext {
   resumeSessionFile?: string;
 }
 
+/**
+ * Goal support for one agent backend, expressed as the MINIMUM harness version at
+ * which Mercury can exercise each feature. Absent means Mercury cannot do it at any
+ * version.
+ *
+ * These are Mercury-side features, NOT harness features. Hermes has goals -- a
+ * GoalContract, deterministic gates, an auxiliary judge -- and every field here is
+ * absent for it, because nothing about that machinery is reachable from the
+ * `hermes chat -Q` invocation Mercury drives. A matrix keyed on what the harness can
+ * do would advertise a capability the serving path does not honour, which is issue
+ * #459 rebuilt inside a compatibility table. See docs/goals.md section 13.2.
+ *
+ * Thresholds are version strings in whatever scheme the harness itself prints; the
+ * adapter owns parsing its own output (docs/goals.md section 13.3), so there is no
+ * single grammar this has to fit.
+ */
+export interface AgentGoalSupport {
+  /** Mercury can set an objective at launch. */
+  set?: string;
+  /** Mercury can observe objective status. */
+  track?: string;
+  /** Mercury can pass a token budget through. */
+  tokenBudget?: string;
+  /** The objective carries a verification contract. */
+  contract?: string;
+  /** Deterministic gates are reported back to Mercury. */
+  gates?: string;
+}
+
+/** What Mercury can do with an adapter, independent of which version is installed. */
+export interface AgentCapabilities {
+  goals?: AgentGoalSupport;
+}
+
+/** Result of asking a harness binary which version it is. `raw` is kept because when
+ *  a parse is wrong the raw string is the only evidence of why (docs/goals.md 13.3). */
+export interface AgentVersionInfo {
+  version: string | null;
+  raw: string | null;
+  /** Set when the probe ran but produced nothing usable (binary missing, unparsable
+   *  output). Reported to the operator as "cannot tell", which is deliberately not the
+   *  same as "too old" -- one means upgrade, the other means fix the probe. */
+  error?: string;
+}
+
+/** Resolved goal support for one agent, after comparing the matrix against the
+ *  detected version. `unknown` is a real answer and must render as one. */
+export interface AgentGoalCapability {
+  supported: boolean;
+  /** Why not, when it is not. Stable machine-readable values. */
+  reason?: 'unsupported' | 'version-too-old' | 'version-unknown';
+  /** Minimum version Mercury needs for `set`, when the matrix declares one. */
+  requiredVersion?: string;
+  /** What the harness reported, for the operator to act on. */
+  detectedVersion?: string | null;
+  detectedRaw?: string | null;
+}
+
+export interface AgentCapabilitySummary {
+  /** null while the detached probe is still in flight, or if it never resolved. */
+  version: string | null;
+  versionRaw: string | null;
+  goals: AgentGoalCapability;
+}
+
 export interface AgentAdapter {
+  /**
+   * What Mercury can do with this backend. REQUIRED, with no default: an adapter that
+   * forgets to declare it is a compile error rather than a runtime guess. Absent goal
+   * support is declared as `{}`, which is a statement ("never"), not an omission.
+   *
+   * Making this optional would reintroduce the failure this whole surface exists to
+   * prevent -- silently advertising a capability nobody implemented -- so it is
+   * deliberately not defaulted and not optional.
+   */
+  capabilities: AgentCapabilities;
+  /**
+   * Report the installed harness version. Probed once at startup, detached from boot
+   * (docs/goals.md 13.3): a missing or slow binary must not delay or fail startup.
+   *
+   * Optional because not every backend has a local binary to ask (remote HTTP agents).
+   * Absent means the version stays unknown, which fails closed for goals but must never
+   * stop the agent from running.
+   */
+  detectVersion?(): Promise<AgentVersionInfo>;
   start(context: RunContext): Promise<AgentHandle>;
   sendInput(runId: string, input: AgentInput): Promise<void>;
   cancel(runId: string): Promise<void>;

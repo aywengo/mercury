@@ -21,9 +21,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
-import type {
-  AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext,
-} from '../domain/types.ts';
+import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 
 export interface HermesAgentAdapterOptions {
@@ -90,6 +88,18 @@ const DEFAULT_DRAIN_GRACE_MS = 5000;
 const SESSION_ID_RE = /session_id:\s*(\S+)/;
 
 export class HermesAgentAdapter implements AgentAdapter {
+  /**
+   * Hermes has the richer goal model of any backend here -- GoalContract, deterministic
+   * gates, an auxiliary judge -- and Mercury can reach none of it. Slash dispatch is
+   * interactive only, so a task beginning `/goal` is handed to the model as a literal
+   * message; the sole non-interactive entry point is `hermes kanban create --goal`; and
+   * goal state never reaches stdout, only Hermes' own SessionDB.
+   *
+   * This is the case that proves the matrix must be keyed on Mercury-usable features:
+   * keyed on harness capability this row would read "goals: yes" and Mercury would report
+   * a goal as tracked when nothing was ever reported back (docs/goals.md 13.2, section 7).
+   */
+  readonly capabilities: AgentCapabilities = {};
   private opts: HermesAgentAdapterOptions;
   private sessions = new Map<string, Session>();
 

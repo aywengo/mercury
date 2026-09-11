@@ -38,9 +38,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import { isRecord } from './eventTranslation.ts';
-import type {
-  AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext,
-} from '../domain/types.ts';
+import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 
 export interface ClaudeCodeAdapterOptions {
@@ -112,6 +110,9 @@ const DEFAULT_DRAIN_GRACE_MS = 5000;
 const MAX_ERR_TAIL = 4000;
 
 export class ClaudeCodeAdapter implements AgentAdapter {
+  /** Claude Code exposes no goal surface: `claude --help` has no goal flag on either
+   *  install measured (1.0.3 and 2.1.260), and the adapter emits no goal argv. */
+  readonly capabilities: AgentCapabilities = {};
   private opts: ClaudeCodeAdapterOptions;
   private sessions = new Map<string, Session>();
 

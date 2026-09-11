@@ -220,6 +220,52 @@ test('GET /api/agents returns the registered agent ids (issue #13)', async () =>
   }
 });
 
+
+test('GET /api/agents reports capabilities as a PARALLEL field, leaving agents a string[]', async () => {
+  // The dashboard's loadAgents() bails out with `if (!Array.isArray(agents)) return;` to
+  // keep its static fallback options. Reshaping `agents` into objects would therefore make
+  // a healthy server silently render two hardcoded agents instead of the registered set --
+  // a shorter list and no error anywhere. So `agents` stays string[] forever and capability
+  // rides alongside it (docs/goals.md 13.6).
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const res = await fetch(`${base}/api/agents`, { headers: { authorization: 'Bearer tok-alice' } });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as {
+        agents: unknown;
+        capabilities?: unknown;
+      };
+      // Read each field into an annotated local rather than narrowing `body` in place:
+      // `Array.isArray(body.agents)` narrows the whole object and makes inference on the
+      // sibling property circular.
+      const agentIds: unknown = body.agents;
+      const caps: Record<string, { version: string | null; goals: { supported: boolean; reason?: string } }>
+        = body.capabilities as never;
+      assert.ok(Array.isArray(agentIds), 'agents must remain an array');
+      assert.ok((agentIds as unknown[]).every((a) => typeof a === 'string'), 'agents must remain an array of strings');
+      assert.ok(caps && typeof caps === 'object', 'capabilities must be present');
+      // Every advertised agent must have a capability entry, or the UI has to guess for it.
+      for (const id of agentIds as string[]) {
+        const cap = caps[id];
+        assert.ok(cap, `no capability entry for agent ${id}`);
+        assert.equal(typeof cap.goals.supported, 'boolean');
+      }
+      // The fake adapter has no goal interface: "unsupported", not "unknown".
+      assert.equal(caps.fake?.goals.supported, false);
+      assert.equal(caps.fake?.goals.reason, 'unsupported');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
 test('SSE stream delivers events and supports reconnect via after', async () => {
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');

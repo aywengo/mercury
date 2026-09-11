@@ -36,7 +36,7 @@ import { createConnection, type Socket } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { attachJsonlLineReader, serializeJsonLine } from './rpc/jsonl.ts';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
-import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext } from '../domain/types.ts';
+import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 import { EventTranslator, buildExtensionUiResponse, isRecord, type RpcEvent } from './eventTranslation.ts';
 import {
@@ -177,6 +177,15 @@ const DONE: AgentEvent = { type: '__done__', payload: {} };
  * need it most (issue #55). Same rule as primeAgentAdapter.ts.
  */
 export class DaemonAgentAdapter implements AgentAdapter {
+  /**
+   * The daemon protocol carries no goal channel: it has no goal event type and no way to
+   * seed an objective, so a goal set through `primeagent` in daemon mode would be accepted
+   * and then never reported. Declared empty rather than omitted so the API can say
+   * "does not support" instead of "unknown" -- and note this is the SAME agent id as
+   * PrimeAgentAdapter, which does support goals. Capability is a property of the resolved
+   * adapter, not of the agent name (docs/goals.md 13.4).
+   */
+  readonly capabilities: AgentCapabilities = {};
   private opts: DaemonAgentAdapterOptions;
   private sessions = new Map<string, DaemonSession>();
   private cmd: string;
