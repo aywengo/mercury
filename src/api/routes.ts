@@ -189,6 +189,34 @@ export function createRoutes(deps: RoutesDeps): Router {
     }
   });
 
+  // GET /api/runs/:runId/goal
+  //
+  // The dedicated read from docs/goals.md 8. Note what it is NOT for: it returns the goal on its
+  // own, so it cannot show a Run status next to a goal status, which is the pairing the whole
+  // feature exists to make visible. `GET /api/runs/:runId` returns both and is what any renderer
+  // should use; this exists for callers that only need the goal and for the documented contract.
+  router.get('/runs/:runId/goal', (req: Request, res: Response) => {
+    const run = deps.runService.get(req.params.runId, req.auth!.ownerId, req.auth!.isAdmin);
+    if (!run) { res.status(404).json({ error: 'run not found' }); return; }
+    const goal = deps.runService.getGoal(run.id);
+    if (!goal) { res.status(404).json({ error: 'run has no goal' }); return; }
+    res.json({ goal });
+  });
+
+  // POST /api/runs/:runId/goal/cancel
+  //
+  // Operator drop. Deliberately NOT a general goal-mutation endpoint: there is no route that can
+  // set a status, an objective, or a `complete` (docs/goals.md 12). Cancel is the one action that
+  // asserts nothing about whether the work was done.
+  router.post('/runs/:runId/goal/cancel', (req: Request, res: Response) => {
+    try {
+      const goal = deps.runService.cancelGoal(req.params.runId, req.auth!.ownerId, req.auth!.isAdmin);
+      res.json({ goal });
+    } catch (err) {
+      sendError(res, err, deps.logger);
+    }
+  });
+
   // POST /api/runs/:runId/retry
   router.post('/runs/:runId/retry', (req: Request, res: Response) => {
     try {

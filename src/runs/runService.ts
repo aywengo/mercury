@@ -4,6 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tx } from '../db/database.ts';
 import { isTerminal } from '../domain/stateMachine.ts';
+import { TERMINAL_GOAL_STATUSES } from '../domain/goalEvents.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.ts';
 import type { Redactor } from '../domain/redact.ts';
 import type { AgentCapabilitySummary, GoalState, GoalStatus, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
@@ -300,6 +301,56 @@ export class RunService {
    */
   getGoal(runId: string): GoalState | null {
     return this.deps.goals?.get(runId) ?? null;
+  }
+
+  /**
+   * Drop a goal on operator instruction (docs/goals.md 8: `POST /api/runs/:id/goal/cancel`).
+   *
+   * This is the ONLY writer of `cancelled`, and it existed as a documented capability with no
+   * implementation for three phases: `cancelled` sits in MERCURY_ONLY_GOAL_STATUSES, so a harness
+   * is refused if it reports it, and nothing else set it. The status, the `goal.cancelled` event
+   * type, the dashboard badge and the CLI colour were all live while no code path could produce
+   * them -- surface built as if a feature existed.
+   *
+   * Cancel is a mutation the design allows. Section 12 forbids an operator REPLACING the
+   * objective and FORBIDS an operator-authored `complete`, because both would put a
+   * Mercury-originated judgement where only the harness may speak. Dropping a goal is neither:
+   * it asserts nothing about whether the work was done, and `unmet` -- the status a terminal Run
+   * would otherwise produce -- makes a claim about the harness falling short that an operator who
+   * deliberately stopped tracking should be able to prevent.
+   *
+   * Owner-scoped through get(), so another owner's Run is a 404 rather than a 403, matching the
+   * repo's standing rule that a Run must not be confirmable at all.
+   */
+  cancelGoal(runId: string, ownerId: string, isAdmin: boolean): GoalState {
+    const run = this.get(runId, ownerId, isAdmin);
+    if (!run) throw new NotFoundError('run not found');
+    const goals = this.deps.goals;
+    if (!goals) throw new ValidationError('goals are not enabled on this server');
+    const goal = goals.get(runId);
+    if (!goal) throw new NotFoundError('run has no goal');
+    if (TERMINAL_GOAL_STATUSES.has(goal.status)) {
+      // Refusing rather than no-op'ing matters: `complete` and `unmet` are verdicts, and an
+      // operator cancelling a goal that already completed would erase the thing the feature
+      // exists to record.
+      throw new ConflictError(`goal is already ${goal.status}`);
+    }
+    const now = new Date().toISOString();
+    let updated: GoalState | null = null;
+    // Row and event in one transaction, like every other goal write: a `cancelled` row with no
+    // event leaves the timeline claiming the goal was still active, and the reverse makes the
+    // timeline the only true record of a state the row denies.
+    tx(this.deps.db, () => {
+      updated = goals.update(runId, { status: 'cancelled', source: 'operator' }, now);
+      // Checked rather than asserted. Inside this transaction the row cannot vanish, so null
+      // means the invariant is already broken -- but a non-null assertion would return
+      // undefined to the caller as if the cancel had succeeded, and the event below would then
+      // announce a state change that the row denies. Failing here keeps the transaction the
+      // authority.
+      if (!updated) throw new ConflictError('goal disappeared while being cancelled');
+      this.deps.events.append(runId, 'goal.cancelled', { source: 'operator', runStatus: run.status });
+    });
+    return updated!;
   }
 
   /**
