@@ -154,6 +154,109 @@ export interface RunContext {
 }
 
 /**
+ * What the caller asked to be achieved, and how "achieved" is decided
+ * (docs/goals.md section 5).
+ *
+ * A goal is NOT Run status. `Run.status` describes what happened to the process; a goal
+ * describes whether the work was achieved, and the two are never derived from each other.
+ * The combination that matters -- Run COMPLETED with the goal still active -- is the whole
+ * reason this exists, and collapsing the two would erase it.
+ */
+export interface GoalContract {
+  /** What must be true at the end. */
+  outcome?: string;
+  /** How that gets checked: a command, a test, an artifact. */
+  verification?: string;
+  /** What the agent must not do. */
+  constraints?: string;
+  /** What is out of scope. */
+  boundaries?: string;
+  /** When to stop even if the outcome is only partly met. */
+  stopWhen?: string;
+}
+
+/**
+ * A deterministic check that must pass before the objective can be declared met.
+ *
+ * Execution belongs to the harness, which can fail a gate DURING the run so the agent
+ * iterates against it. Mercury records outcomes only: running gates afterwards would turn
+ * the mechanism into a post-hoc test report, which `test.*` events already cover.
+ */
+export interface GoalGate {
+  command: string;
+  /** Mandatory. An unbounded gate is indistinguishable from a hung one. */
+  timeoutMs: number;
+  maxRetries: number;
+}
+
+export interface GoalSpec {
+  /**
+   * Omitted or empty means "the Run's task is the objective" (docs/goals.md section 14).
+   * The caller still opts in by sending `goal`, so defaulting does not imply a judgement
+   * was made -- the judgement stays the harness's.
+   *
+   * The 4000-char cap matches PrimeAgent's MAX_THREAD_GOAL_OBJECTIVE_CHARS and applies to
+   * the RESOLVED value. A task longer than the cap with no explicit objective is a 400,
+   * not a silent truncation: a truncated objective is a different objective.
+   */
+  objective?: string;
+  contract?: GoalContract;
+  gates?: GoalGate[];
+  /** Positive integer; absent means unbounded. PrimeAgent enforces this itself. */
+  tokenBudget?: number;
+  /** Maps to Hermes' --goal-max-turns; ignored by adapters that have no such notion. */
+  maxTurns?: number;
+}
+
+/**
+ * Goal lifecycle. Orthogonal to RunStatus and never derived from it.
+ *
+ * `unmet` is the only value Mercury originates, and it is deliberately not a judgement about
+ * the work: it means the harness stopped reporting before it ever said `complete`. It must
+ * render distinctly from `paused`, which is the harness asking for help.
+ */
+export type GoalStatus =
+  | 'absent'
+  | 'active'
+  | 'paused'
+  | 'budget_limited'
+  | 'error'
+  | 'complete'
+  | 'cancelled'
+  | 'unmet';
+
+/** Persisted goal state: the spec plus whatever the harness has reported back. */
+export interface GoalState {
+  runId: string;
+  status: GoalStatus;
+  objective: string;
+  contract?: GoalContract;
+  gates?: GoalGate[];
+  tokenBudget?: number;
+  tokensUsed?: number;
+  timeUsedSeconds?: number;
+  /** Hermes only; PrimeAgent has no judge verdict. */
+  lastVerdict?: 'done' | 'continue' | 'skipped';
+  /** Harness-supplied agent text: redacted and length-bounded before persistence. */
+  lastReason?: string;
+  /** PrimeAgent's `error` status detail. Agent-controlled text: redact and bound it too. */
+  lastError?: string;
+  pausedReason?: string;
+  /**
+   * Turn/continuation count. PrimeAgent reports continuationsUsed, Hermes counts turns
+   * against --goal-max-turns. Same idea, different denominators: never compare the two
+   * across backends or render them in one column.
+   */
+  turnsUsed?: number;
+  /** Who last changed it. Only a harness may set `complete`; an operator may cancel. */
+  source: 'harness' | 'operator';
+  updatedAt: string;
+}
+
+/** Maximum accepted objective length; mirrors PrimeAgent's MAX_THREAD_GOAL_OBJECTIVE_CHARS. */
+export const MAX_GOAL_OBJECTIVE_CHARS = 4000;
+
+/**
  * Goal support for one agent backend, expressed as the MINIMUM harness version at
  * which Mercury can exercise each feature. Absent means Mercury cannot do it at any
  * version.
@@ -296,6 +399,25 @@ export const EVENT_TYPES = new Set([
   // emits (issue #60). A test now fails if any append uses a type absent from this set.
   'lease.lost',
   'sandbox.enabled',
+  // Goal lifecycle (docs/goals.md section 6). Appended by the worker and by adapters that
+  // can observe a goal; NEVER by anything that judges whether the work was done. Mercury
+  // records what the harness reported -- `goal.unmet` is the sole exception and it asserts
+  // only that the harness stopped reporting, not that the work failed.
+  //
+  // Named `goal.completed` rather than the doc's `goal.complete` to match the existing
+  // past-participle convention (run.completed, skill.completed, test.completed).
+  //
+  // Gate events (goal.gate.passed / goal.gate.failed) are deliberately NOT added here yet:
+  // nothing emits them until Phase 4, and an event type with no emitter is a vocabulary
+  // claim with no evidence behind it.
+  'goal.created',
+  'goal.updated',
+  'goal.paused',
+  'goal.budget_limited',
+  'goal.error',
+  'goal.completed',
+  'goal.cancelled',
+  'goal.unmet',
 ]);
 
 /**

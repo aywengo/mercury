@@ -118,6 +118,38 @@ export const MIGRATIONS: string[] = [
     worker_id TEXT NOT NULL
   );
   `,
+  // v6: run goals (docs/goals.md section 5).
+  //
+  // One row per Run, updated in place. The event stream is already the history, so a second
+  // append-only copy of the same facts would just be a second source of truth to fall out of
+  // agreement with the first.
+  //
+  // `time_used_seconds`, deliberately NOT `time_used_ms`: the harness reports seconds
+  // (PrimeAgent's goalState.time_used_seconds), and a column named _ms holding seconds is a
+  // unit bug waiting to be discovered at the worst possible moment.
+  //
+  // `status` is NOT derived from runs.status and runs.status is never derived from it. A Run
+  // that COMPLETED with the goal still active is the case this table exists to make visible.
+  `
+  CREATE TABLE IF NOT EXISTS run_goals (
+    run_id              TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    objective           TEXT NOT NULL,
+    contract_json       TEXT,
+    gates_json          TEXT,
+    token_budget        INTEGER,
+    status              TEXT NOT NULL,
+    tokens_used         INTEGER,
+    time_used_seconds   INTEGER,
+    turns_used          INTEGER,
+    last_verdict        TEXT,
+    last_reason         TEXT,
+    last_error          TEXT,
+    paused_reason       TEXT,
+    source              TEXT NOT NULL,
+    updated_at          TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_run_goals_status ON run_goals(status);
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

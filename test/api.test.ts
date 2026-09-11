@@ -1530,3 +1530,56 @@ test('POSITIVE CONTROL: a client that keeps reading is NOT closed by the backpre
     env.close();
   }
 });
+
+test('POST /api/runs refuses a goal the selected agent cannot carry, with the reason', async () => {
+  // The HTTP surface of the fail-closed rule. A 201 here would store a goal nobody will ever
+  // report on -- accepted and silently ignored, which is issue #459.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const res = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ task: 'do it', agent: 'fake', goal: { objective: 'done' } }),
+      });
+      assert.equal(res.status, 400, `expected 400, got ${res.status}`);
+      const body = (await res.json()) as { error?: string };
+      assert.match(body.error ?? '', /does not support goals/i, JSON.stringify(body));
+      // And no Run exists: the refusal happens before any write.
+      const list = await fetch(`${base}/api/runs?limit=10`, { headers });
+      const runs = (await list.json()) as { runs: unknown[] };
+      assert.equal(runs.runs.length, 0, 'a rejected goal left a Run behind');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('POST /api/runs rejects a malformed goal with a 400, not a 500', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      for (const goal of [{ gates: [{ command: 'x' }] }, { objectiv: 'typo' }, { tokenBudget: 0 }, 'yes']) {
+        const res = await fetch(`${base}/api/runs`, {
+          method: 'POST', headers, body: JSON.stringify({ task: 't', agent: 'fake', goal }),
+        });
+        assert.equal(res.status, 400, `goal ${JSON.stringify(goal)} -> ${res.status}`);
+      }
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});

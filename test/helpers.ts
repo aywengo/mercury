@@ -14,6 +14,7 @@ import { RunQueue } from '../src/queue/runQueue.ts';
 import { RunStore } from '../src/runs/runStore.ts';
 import { RunService } from '../src/runs/runService.ts';
 import { AgentCapabilityRegistry } from '../src/adapters/capabilities.ts';
+import { GoalStore } from '../src/runs/goalStore.ts';
 import { SkillRegistry } from '../src/skills/skillRegistry.ts';
 import { createSkillSelector } from '../src/skills/skillSelector.ts';
 import { WorkspaceManager } from '../src/workspace/workspaceManager.ts';
@@ -36,6 +37,8 @@ export interface TestEnv {
   runService: RunService;
   worker: Worker;
   adapters: Record<string, AgentAdapter>;
+  goals: GoalStore;
+  agentCapabilities: AgentCapabilityRegistry;
   close(): void;
 }
 
@@ -88,6 +91,8 @@ export function makeEnv(opts: {
   // subprocesses, and a test that wants them opts in with `probeCapabilities`. Left alone,
   // every agent reports its declared support against an unknown version -- exactly what a
   // server sees for its first moment after boot.
+  const goals = new GoalStore(db);
+
   const agentCapabilities = new AgentCapabilityRegistry(adapters);
   if (opts.probeCapabilities) agentCapabilities.start();
 
@@ -99,6 +104,7 @@ export function makeEnv(opts: {
     selector: createSkillSelector(),
     knownAgents: Object.keys(adapters),
     agentCapabilities: () => agentCapabilities.snapshot(),
+    goals,
     defaultAgent: opts.defaultAgent ?? 'fake',
     defaultMaxDurationMs: 60_000,
     defaultMaxRetries: opts.maxRetries ?? 2,
@@ -152,6 +158,8 @@ export function makeEnv(opts: {
     runService,
     worker,
     adapters,
+    goals,
+    agentCapabilities,
     close: () => {
       worker.stop();
       db.close();

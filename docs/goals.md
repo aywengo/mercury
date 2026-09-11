@@ -322,7 +322,7 @@ CREATE TABLE run_goals (
   gates_json     TEXT,
   status         TEXT NOT NULL,          -- GoalStatus
   tokens_used    INTEGER,
-  time_used_ms   INTEGER,
+  time_used_seconds INTEGER,
   turns_used     INTEGER,
   last_verdict   TEXT,
   last_reason    TEXT,
@@ -331,6 +331,12 @@ CREATE TABLE run_goals (
   updated_at     TEXT NOT NULL
 );
 ```
+
+The migration in [src/db/database.ts](../src/db/database.ts) is the authoritative schema;
+this sketch is illustrative. Two places it already differs, both deliberate: the duration
+column is `time_used_seconds` because harnesses report seconds and a column named `_ms`
+holding seconds is a unit bug waiting to surface, and gate events are absent from
+`EVENT_TYPES` until Phase 4 has an emitter for them.
 
 One row per Run, not a history table: the event stream is already the history, and a
 second append-only copy of the same facts is how two sources of truth start arguing.
@@ -359,7 +365,7 @@ in the same change as the first emitter, or the emitter throws.
 | `goal.paused` | `{ pausedReason, turnsUsed? }` | harness paused the loop |
 | `goal.budgetLimited` | `{ tokenBudget, tokensUsed }` | harness stopped for want of budget |
 | `goal.error` | `{ lastError }` | the goal runtime itself failed |
-| `goal.complete` | `{ tokensUsed?, timeUsedSeconds?, completionBudgetReport? }` | harness declared the objective met |
+| `goal.completed` | `{ tokensUsed?, timeUsedSeconds?, completionBudgetReport? }` | harness declared the objective met |
 | `goal.cancelled` | `{ source }` | operator or harness dropped it |
 | `goal.unmet` | `{ runStatus, lastVerdict?, turnsUsed? }` | Run finalised while goal was `active` |
 | `goal.gate.failed` | `{ command, exitCode?, truncated, attempt }` | harness reported a gate failure |
@@ -525,7 +531,7 @@ feature is decoration and Phase 3 should not be funded.
 
 **Phase 2 — PrimeAgent end to end.**
 `PrimeAgentAdapter` passes `--goal` / `--goal-token-budget`; translates `goal_update`
-into `goal.updated` / `goal.paused` / `goal.complete`; persists state. PrimeAgent is the
+into `goal.updated` / `goal.paused` / `goal.completed`; persists state. PrimeAgent is the
 only backend that can do this today, so it is where the design gets proven.
 
 **Phase 3 — surface it.**
