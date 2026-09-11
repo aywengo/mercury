@@ -23,7 +23,8 @@ import { WakeupListener, WakeupWriter } from './events/wakeup.ts';
 import { RunQueue } from './queue/runQueue.ts';
 import { RunStore } from './runs/runStore.ts';
 import { RunService } from './runs/runService.ts';
-import { AgentCapabilityRegistry } from './adapters/capabilities.ts';import { SkillRegistry } from './skills/skillRegistry.ts';
+import { AgentCapabilityRegistry } from './adapters/capabilities.ts';
+import { GoalStore } from './runs/goalStore.ts';import { SkillRegistry } from './skills/skillRegistry.ts';
 import { createSkillSelector } from './skills/skillSelector.ts';
 import { WorkspaceManager } from './workspace/workspaceManager.ts';
 import { WorkspaceGC } from './workspace/workspaceGC.ts';
@@ -188,6 +189,8 @@ async function main(): Promise<void> {
   // wait for `--version` to come back, so a missing or slow harness cannot delay or fail
   // startup, and goals read as `version-unknown` for the first moment instead of guessing
   // either way (docs/goals.md 13.3, 13.5).
+  const goals = new GoalStore(db);
+
   const agentCapabilities = new AgentCapabilityRegistry(adapters);
   agentCapabilities.start();
 
@@ -199,6 +202,7 @@ async function main(): Promise<void> {
     selector,
     knownAgents: Object.keys(adapters),
     agentCapabilities: () => agentCapabilities.snapshot(),
+    goals,
     defaultAgent: config.defaultAgent,
     defaultMaxDurationMs: 60 * 60 * 1000,
     defaultMaxRetries: config.maxRetries,

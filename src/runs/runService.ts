@@ -6,7 +6,10 @@ import { tx } from '../db/database.ts';
 import { isTerminal } from '../domain/stateMachine.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.ts';
 import type { Redactor } from '../domain/redact.ts';
-import type { AgentCapabilitySummary, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
+import type { AgentCapabilitySummary, GoalState, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
+import { goalCapabilityMessage } from '../domain/goalSupport.ts';
+import { GoalValidationError, resolveGoalSpec } from '../domain/goalSpec.ts';
+import type { GoalStore } from './goalStore.ts';
 import { EventStore } from '../events/eventStore.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { SkillSelector } from '../skills/skillSelector.ts';
@@ -21,6 +24,12 @@ export interface CreateRunInput {
   agent?: string;
   skills?: string[];
   constraints?: Partial<RunConstraints>;
+  /**
+   * Optional objective for the Run (docs/goals.md). `undefined` means no goal and the Run
+   * behaves exactly as before. Validated and resolved against `task` in create(); an
+   * omitted objective defaults to the task text.
+   */
+  goal?: unknown;
   idempotencyKey?: string;
 }
 
@@ -41,6 +50,8 @@ export interface RunServiceDeps {
    * would freeze every agent as version-unknown for the process lifetime.
    */
   agentCapabilities?: () => Record<string, AgentCapabilitySummary>;
+  /** Goal persistence. Absent means goals are not wired and any `goal` input is rejected. */
+  goals?: GoalStore;
   /** Agent id used when create input omits `agent` (MERCURY_DEFAULT_AGENT; default `fake`). */
   defaultAgent: string;
   defaultMaxDurationMs: number;
@@ -90,6 +101,40 @@ export class RunService {
     const agent = input.agent ?? this.deps.defaultAgent;
     if (!this.deps.knownAgents.includes(agent)) {
       throw new ValidationError(`Unknown agent: ${agent} (known: ${this.deps.knownAgents.join(', ')})`);
+    }
+
+    // Goal admission. Everything about this block is fail-closed, because the failure mode
+    // this feature was designed against is accepting a goal and silently not honouring it
+    // (issue #459). A goal that cannot be tracked is refused here with the reason, before any
+    // state is written -- not accepted, stored, and then never updated.
+    let goalState: GoalState | null = null;
+    if (input.goal !== undefined && input.goal !== null) {
+      let spec;
+      try {
+        spec = resolveGoalSpec(input.goal, input.task);
+      } catch (err) {
+        throw new ValidationError(err instanceof GoalValidationError ? err.message : `invalid goal: ${String(err)}`);
+      }
+      if (!this.deps.goals) {
+        throw new ValidationError('goals are not enabled on this server');
+      }
+      const cap = this.deps.agentCapabilities?.()[agent]?.goals;
+      if (!cap?.supported) {
+        throw new ValidationError(
+          goalCapabilityMessage(agent, cap ?? { supported: false, reason: 'unsupported' }),
+        );
+      }
+      goalState = {
+        runId: '',
+        status: 'active',
+        objective: spec.objective,
+        contract: spec.contract,
+        gates: spec.gates,
+        tokenBudget: spec.tokenBudget,
+        // The caller set this; a harness reports back under 'harness'.
+        source: 'operator',
+        updatedAt: new Date().toISOString(),
+      };
     }
     const available = this.deps.skills.list();
     // An omitted `skills` means "choose for me"; an explicitly empty array means
@@ -167,6 +212,16 @@ export class RunService {
         }
         this.deps.events.append(run.id, 'run.created', { runId: run.id, agent, status: 'QUEUED' });
         this.deps.events.append(run.id, 'run.queued', { runId: run.id });
+        if (goalState) {
+          // runId is only known here, so the row is built after the run id exists.
+          this.deps.goals!.insert({ ...goalState, runId: run.id });
+          this.deps.events.append(run.id, 'goal.created', {
+            objective: goalState.objective,
+            contract: goalState.contract,
+            gates: goalState.gates,
+            tokenBudget: goalState.tokenBudget,
+          });
+        }
         for (const skill of resolved) {
           this.deps.events.append(run.id, 'skill.selected', { skill: skill.id, version: skill.version, hash: skill.hash });
         }

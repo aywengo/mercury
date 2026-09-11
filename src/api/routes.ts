@@ -125,6 +125,9 @@ export function createRoutes(deps: RoutesDeps): Router {
         agent: body.agent,
         skills: body.skills,
         constraints: body.constraints,
+        // Passed through unresolved: RunService owns validation and resolution, so the
+        // rules are identical for HTTP callers and in-process callers.
+        goal: body.goal,
         idempotencyKey: typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined,
       });
       res.status(201).json({ runId: run.id, status: run.status });
