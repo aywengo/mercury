@@ -506,9 +506,12 @@ Worker finalisation appends `goal.unmet` when a Run reaches a terminal status wi
 goal still `active`. This is the highest value per line in the whole design: it needs
 no harness cooperation, works for every adapter, and it is the row that today cannot be
 expressed. Ship it and measure before building more. The measurement is part of the phase, not an
-afterthought: expose a `mercury_goal_unmet_total` counter alongside the existing
+afterthought: expose goal status counts through the existing
 [`/metrics`](operations.md#metrics) projections so the answer is one query rather than a manual
-sweep. If `unmet` is rare the display work is still worth it; if it never fires, the
+sweep. Compute them as SQL aggregates over `run_goals`, matching the standing design decision
+in [src/metrics/collect.ts](../src/metrics/collect.ts) to read from the database rather than
+keep counters — a Prometheus counter incremented at the emit site would drift from the table it
+describes and disagree with it after any restart. If `unmet` is rare the display work is still worth it; if it never fires, the
 feature is decoration and Phase 3 should not be funded.
 
 **Phase 2 — PrimeAgent end to end.**
