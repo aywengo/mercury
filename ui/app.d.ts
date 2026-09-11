@@ -40,7 +40,13 @@ export interface UiGoal {
  * Badge markup for a list row. `goals` is the parallel map from the API: undefined means the
  * server predates goals, a missing key means the run has no goal. Both render, differently.
  */
-export function goalBadge(goals: Record<string, UiGoalStatus> | undefined, runId: string): string;
+export interface UiGoalSummary {
+  status: UiGoalStatus;
+  /** Absent means no answer yet, which is NOT false. */
+  attempted?: boolean;
+}
+
+export function goalBadge(goals: Record<string, UiGoalSummary> | undefined, runId: string): string;
 
 /** A declared gate spec. Mercury records these and never runs them. */
 export interface UiGoalGate {

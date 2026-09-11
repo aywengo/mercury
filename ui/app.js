@@ -189,9 +189,20 @@ export function goalBadge(goals, runId) {
   if (goals === undefined) {
     return '<span class="badge goal-unknown" title="server does not report goals">?</span>';
   }
-  const status = goals[runId];
-  if (!status) return '<span class="badge goal-none" title="this run has no goal">\u2014</span>';
-  return `<span class="badge goal-${esc(status)}" title="goal status, independent of run status">${esc(status)}</span>`;
+  const goal = goals[runId];
+  if (!goal) return '<span class="badge goal-none" title="this run has no goal">\u2014</span>';
+  // The map value became an object so the two kinds of `unmet` can be told apart here, in the
+  // most-scanned view (issue #492). `status` is still interpolated through esc(): unlike
+  // mercuryctl, this page assigns innerHTML from raw fetch data and does not run it through the
+  // protocol parser, so escaping is the only thing between a hostile server and an attribute.
+  const status = goal.status;
+  const neverStarted = status === 'unmet' && goal.attempted === false;
+  const text = neverStarted ? 'unmet (never started)' : status;
+  const cls = neverStarted ? `goal-${esc(status)} goal-unattempted` : `goal-${esc(status)}`;
+  const title = neverStarted
+    ? 'the Run ended before the harness ever received the objective'
+    : 'goal status, independent of run status';
+  return `<span class="badge ${cls}" title="${esc(title)}">${esc(text)}</span>`;
 }
 
 /**

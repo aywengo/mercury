@@ -8,7 +8,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import type { Redactor } from '../domain/redact.ts';
-import type { GoalContract, GoalGate, GoalPatch, GoalState, GoalStatus } from '../domain/types.ts';
+import type { GoalContract, GoalGate, GoalPatch, GoalState, GoalStatus, GoalSummary } from '../domain/types.ts';
 
 interface GoalRow {
   run_id: string;
@@ -185,14 +185,23 @@ export class GoalStore {
    * are absent from the result rather than mapped to a status: "no goal" is not a goal state,
    * and inventing one here would make the dashboard unable to tell the two apart.
    */
-  statusesFor(runIds: readonly string[]): Record<string, GoalStatus> {
+  statusesFor(runIds: readonly string[]): Record<string, GoalSummary> {
     if (runIds.length === 0) return {};
     const marks = runIds.map(() => '?').join(', ');
+    // `attempted` rides along because a list that shows only the status cannot tell the one
+    // unmet goal an operator should act on from the one that is an infrastructure artefact
+    // (issue #492). It is selected here rather than joined later so the map cannot drift out of
+    // step with the status it describes -- the reason this is one map and not two.
     const rows = this.db
-      .prepare(`SELECT run_id, status FROM run_goals WHERE run_id IN (${marks})`)
-      .all(...runIds) as { run_id: string; status: string }[];
-    const out: Record<string, GoalStatus> = {};
-    for (const r of rows) out[r.run_id] = r.status as GoalStatus;
+      .prepare(`SELECT run_id, status, attempted FROM run_goals WHERE run_id IN (${marks})`)
+      .all(...runIds) as { run_id: string; status: string; attempted: number | null }[];
+    const out: Record<string, GoalSummary> = {};
+    for (const r of rows) {
+      // NULL means "no answer yet", and stays absent rather than becoming false.
+      out[r.run_id] = r.attempted === null
+        ? { status: r.status as GoalStatus }
+        : { status: r.status as GoalStatus, attempted: r.attempted === 1 };
+    }
     return out;
   }
 

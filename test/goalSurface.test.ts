@@ -98,11 +98,14 @@ test('run list carries goal statuses in parallel, leaving runs an array of Run',
     const plain = env.runService.create({ ownerId: 'alice', task: 'untracked', agent: 'fake' });
     await withServer(env, async (base) => {
       const body = await (await fetch(`${base}/api/runs?limit=50`, { headers: AUTH })).json() as
-        { runs: Record<string, unknown>[]; goals: Record<string, string> };
+        { runs: Record<string, unknown>[]; goals: Record<string, { status: string; attempted?: boolean }> };
       assert.ok(Array.isArray(body.runs), 'runs must stay an array -- existing clients check it');
       assert.ok(body.runs.every((r) => !('goal' in r) && !('goalStatus' in r)),
         'goal status leaked onto the Run objects');
-      assert.equal(body.goals[withGoal.id], 'active');
+      assert.equal(body.goals[withGoal.id].status, 'active');
+      // Unsettled, so `attempted` is absent rather than false.
+      assert.equal('attempted' in body.goals[withGoal.id], false,
+        'an unsettled goal reported an attempted answer it does not have');
       // "no goal" is the ABSENCE of a key, not a status value. Inventing `absent` here would
       // make it impossible for a renderer to tell "no goal" from "goal of status absent".
       assert.ok(!(plain.id in body.goals), 'a goalless run appeared in the goals map');
@@ -115,13 +118,15 @@ test('goalBadge renders the three states differently, and escapes what it interp
   // dashboard actually calls.
   assert.match(goalBadge(undefined, 'r1'), /goal-unknown/);
   assert.match(goalBadge({}, 'r1'), /goal-none/);
-  assert.match(goalBadge({ r1: 'unmet' }, 'r1'), /goal-unmet/);
+  assert.match(goalBadge({ r1: { status: 'unmet' } }, 'r1'), /goal-unmet/);
   // "server said nothing" must not read as "no goal".
   assert.notEqual(goalBadge(undefined, 'r1'), goalBadge({}, 'r1'));
   // Cast: the type system already forbids this value, and the parser rejects it upstream. This
   // asserts the renderer does not depend on either of those, because a badge that trusts its
   // input is one schema change away from stored XSS.
-  const xss = goalBadge({ r1: 'active"><img src=x onerror=alert(1)>' } as never, 'r1');
+  // Routed through the object shape the map now carries: the badge reads `goal.status` from raw
+  // fetch data, so the escape has to hold on the new path, not just the old one.
+  const xss = goalBadge({ r1: { status: 'active"><img src=x onerror=alert(1)>' } } as never, 'r1');
   assert.ok(!xss.includes('<img'), `unescaped status reached markup: ${xss}`);
 });
 

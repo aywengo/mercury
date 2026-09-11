@@ -293,6 +293,21 @@ export interface GoalState {
 }
 
 /**
+ * What the run list reports about a Run's goal: enough to render the row, not the whole state.
+ *
+ * A status alone cannot distinguish the two kinds of `unmet`, and the list is the most-scanned
+ * view there is -- showing both identically hides the one case an operator needs to act on behind
+ * an infrastructure artefact (issue #492). So the map carries the one extra field that separates
+ * them, and nothing else: objective, usage and gates belong on the detail endpoint.
+ *
+ * `attempted` is absent when the goal has not been settled, which is NOT the same as false.
+ */
+export interface GoalSummary {
+  status: GoalStatus;
+  attempted?: boolean;
+}
+
+/**
  * Fields a caller may change after a goal row exists.
  *
  * `objective` is written at creation and may then be replaced by a harness report: PrimeAgent
