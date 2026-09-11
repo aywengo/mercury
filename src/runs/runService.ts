@@ -124,12 +124,31 @@ export class RunService {
           goalCapabilityMessage(agent, cap ?? { supported: false, reason: 'unsupported' }),
         );
       }
+      // Redact before persisting. `runs.task` is redacted at write time because tasks
+      // carry credentials (issue #43); resolving the objective from the RAW task and storing
+      // it unredacted in a new table would route around that protection entirely, so this is
+      // a leak rather than an audit note.
+      //
+      // Applied to the resolved value, not just the default: an explicit objective is free
+      // text supplied by the same caller that supplies the task, and is no less likely to
+      // carry a key. Contract fields and gate commands are the same kind of text.
+      const redact = this.deps.redactor;
+      const safeObjective = redact ? redact.redact(spec.objective) : spec.objective;
+      const safeContract = spec.contract && redact
+        ? Object.fromEntries(
+            Object.entries(spec.contract).map(([k, v]) => [k, redact.redact(v)]),
+          ) as GoalState['contract']
+        : spec.contract;
+      const safeGates = spec.gates && redact
+        ? spec.gates.map((g) => ({ ...g, command: redact.redact(g.command) }))
+        : spec.gates;
+
       goalState = {
         runId: '',
         status: 'active',
-        objective: spec.objective,
-        contract: spec.contract,
-        gates: spec.gates,
+        objective: safeObjective,
+        contract: safeContract,
+        gates: safeGates,
         tokenBudget: spec.tokenBudget,
         // The caller set this; a harness reports back under 'harness'.
         source: 'operator',
@@ -303,6 +322,18 @@ export class RunService {
     // original.repository carries the pinned base commit (set when the original
     // workspace was created); a fresh resolve happens only when the original
     // never got a base commit (setup failed before workspace creation).
+    // A goal is inherited like the task, repository, agent, skills and constraints are.
+    // Retry re-attempts the SAME work, and the objective is part of what that work is --
+    // inheriting everything about the work except its success condition is incoherent, and
+    // the retry endpoint takes no body, so without this a retried Run could never carry a
+    // goal at all.
+    //
+    // Only the SPEC is copied, never the status: the new Run starts its own attempt, so the
+    // objective is open again. If the goal can no longer be honoured -- harness downgraded,
+    // version now undetectable -- create() rejects the retry with the reason rather than
+    // producing an untracked retry that looks like the original.
+    const originalGoal = this.deps.goals?.get(runId);
+
     const created = this.create({
       ownerId: original.ownerId,
       task: original.task,
@@ -311,6 +342,14 @@ export class RunService {
       agent: original.agent,
       skills,
       constraints: { ...original.constraints },
+      goal: originalGoal
+        ? {
+            objective: originalGoal.objective,
+            contract: originalGoal.contract,
+            gates: originalGoal.gates,
+            tokenBudget: originalGoal.tokenBudget,
+          }
+        : undefined,
     });
     // link the retry to its original (retryOf) and bump the attempt counter
     this.deps.db

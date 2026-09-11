@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { makeEnv } from './helpers.ts';
+import { createRedactor } from '../src/domain/redact.ts';
 import { GoalStore } from '../src/runs/goalStore.ts';
 import { openDatabase } from '../src/db/database.ts';
 import { tempDir } from './helpers.ts';
@@ -197,4 +198,95 @@ test('isOpen is true only while the goal is active', () => {
     assert.equal(store.isOpen('r1'), false, 'a completed goal must not be reported as open');
     db.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('retry inherits the goal spec but starts a fresh status', async () => {
+  // Retry already inherits the task, repository, agent, skills and constraints. Dropping only
+  // the success condition is incoherent -- and the retry endpoint takes no body, so without
+  // this a retried Run could never carry a goal at all.
+  const env = makeEnv({
+    workerEnabled: false, adapters: { capable: capableAdapter('0.9.4') }, probeCapabilities: true,
+  });
+  try {
+    await env.agentCapabilities.settle();
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'fix it', agent: 'capable',
+      goal: { objective: 'tests pass', tokenBudget: 4000 },
+    });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+    const retry = env.runService.retry(run.id, 'alice', false);
+
+    const inherited = env.goals.get(retry.id);
+    assert.ok(inherited, 'retry lost the goal entirely');
+    assert.equal(inherited!.objective, 'tests pass');
+    assert.equal(inherited!.tokenBudget, 4000);
+    // The spec carries over; the STATUS does not. A new attempt has an open objective, not the
+    // previous attempt's verdict.
+    assert.equal(inherited!.status, 'active');
+    assert.deepEqual(goalEvents(env, retry.id), ['goal.created']);
+    // The original keeps its own row; goals do not merge across Runs.
+    assert.equal(env.goals.get(run.id)!.objective, 'tests pass');
+  } finally { env.close(); }
+});
+
+test('a retry without a goal still has no goal', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'plain', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+    const retry = env.runService.retry(run.id, 'alice', false);
+    assert.equal(env.goals.get(retry.id), null);
+    assert.deepEqual(goalEvents(env, retry.id), []);
+  } finally { env.close(); }
+});
+
+test('a retry is refused when the goal can no longer be honoured, rather than going untracked', async () => {
+  // The original ran on a capable agent; the replacement cannot carry the goal. Producing an
+  // untracked retry that looks like the original is the silent-ignore failure, so the retry
+  // fails loudly instead.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'plain', agent: 'fake' });
+    // Hand-attach a goal row to simulate a Run that once had one.
+    env.goals.insert({ runId: run.id, status: 'active', objective: 'was tracked', source: 'operator', updatedAt: 'u' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+    assert.throws(
+      () => env.runService.retry(run.id, 'alice', false),
+      /does not support goals/i,
+      'retry should refuse rather than produce an untracked Run',
+    );
+  } finally { env.close(); }
+});
+
+test('a goal objective is redacted before it is stored', async () => {
+  // `runs.task` is redacted at write time because tasks carry credentials (issue #43).
+  // Resolving the objective from the RAW task and storing it unredacted in run_goals would
+  // route around that protection, so this asserts the new table is no less redacted than the
+  // old one. Applies to explicit objectives too: same caller, same kind of free text.
+  const redactor = createRedactor(['sk-LEAKME9999']);
+  const env = makeEnv({
+    workerEnabled: false, redactor,
+    adapters: { capable: capableAdapter('0.9.4') }, probeCapabilities: true,
+  });
+  try {
+    await env.agentCapabilities.settle();
+    const run = env.runService.create({
+      ownerId: 'a', task: 'fix the bug using sk-LEAKME9999', agent: 'capable', goal: {},
+    });
+    const stored = env.goals.get(run.id)!;
+    assert.ok(!stored.objective.includes('sk-LEAKME9999'),
+      `secret survived into run_goals: ${stored.objective}`);
+    assert.equal(stored.objective, run.task, 'the stored objective must match the stored task exactly');
+
+    const explicit = env.runService.create({
+      ownerId: 'a', task: 'plain task', agent: 'capable',
+      goal: { objective: 'rotate sk-LEAKME9999 now', contract: { verification: 'run with sk-LEAKME9999' } },
+    });
+    const stored2 = env.goals.get(explicit.id)!;
+    assert.ok(!stored2.objective.includes('sk-LEAKME9999'), stored2.objective);
+    assert.ok(!(stored2.contract?.verification ?? '').includes('sk-LEAKME9999'), JSON.stringify(stored2.contract));
+  } finally { env.close(); }
 });
