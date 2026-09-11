@@ -235,6 +235,26 @@ export class RunStore {
     });
   }
 
+  /**
+   * Fire the terminal hook for a Run whose terminal status was written by something other than
+   * transition().
+   *
+   * This exists because the choke point is not quite single. Lease-loss reaping
+   * (queue/runQueue.ts) marks a Run FAILED with raw SQL, deliberately, because it clears
+   * lease_owner in the same statement -- issue #53 explains why that coupling matters and it is
+   * not worth re-plumbing through transition(). Without this call, a goal on a reaped Run stays
+   * `active` forever and the "no exit route is missed" claim is simply false.
+   *
+   * Callers must already hold the transaction they want the side effect to join, exactly as
+   * transition() does.
+   */
+  notifyTerminal(id: string, to: RunStatus): void {
+    if (!isTerminal(to)) return;
+    const run = this.get(id);
+    if (!run) return;
+    this.hooks.onTerminalTransition?.(run, to);
+  }
+
   private applyTransition(id: string, to: RunStatus, extra?: Partial<Omit<Run, 'error' | 'errorKind'>>): Run {
     const run = this.get(id);
     if (!run) throw new Error(`Run ${id} not found`);

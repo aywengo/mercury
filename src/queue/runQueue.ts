@@ -244,6 +244,11 @@ export class RunQueue {
           // reaper or the owning worker's finalize may have won the race).
           if (res.changes === 1) {
             failed.push(row.id);
+            // This FAILED is written by raw SQL rather than RunStore.transition(), so the
+            // terminal hook has to be fired by hand. Without it a goal on a reaped Run stays
+            // `active` forever -- the one state this feature exists to eliminate. Inside the
+            // surrounding tx, so the goal settles or rolls back with the status.
+            this.runs.notifyTerminal(row.id, 'FAILED');
             // Inside the tx, deliberately: see the onFailed contract above. If it throws, the
             // whole reap rolls back rather than leaving a FAILED run whose events never landed.
             onFailed?.(row.id);

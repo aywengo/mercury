@@ -146,3 +146,32 @@ test('a goal settled to unmet rolls back if the event append fails', () => {
     assert.equal(env.goals.get(run.id)!.status, 'active', 'goal settled despite the rollback');
   } finally { env.close(); }
 });
+
+test('lease loss closes the goal too, even though that FAILED is written by raw SQL', () => {
+  // The choke point is not quite single: lease-loss reaping marks a Run FAILED with raw SQL so
+  // it can clear lease_owner in the same statement (issue #53). That bypasses transition(), so
+  // without an explicit notify the goal on a reaped Run stays `active` forever -- the exact
+  // state this feature exists to remove.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = seed(env, 'finish the migration');
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING', { startedAt: new Date().toISOString() });
+    // A lease that expired an hour ago, owned by a worker that is gone.
+    env.db
+      .prepare('UPDATE runs SET lease_owner = ?, lease_expires_at = ? WHERE id = ?')
+      .run('worker-dead', new Date(Date.now() - 3_600_000).toISOString(), run.id);
+
+    const { failed } = env.queue.reapExpiredLeases(Date.now());
+    assert.deepEqual(failed, [run.id], 'the reaper did not fail the run');
+    assert.equal(env.runs.get(run.id)!.status, 'FAILED');
+
+    const g = env.goals.get(run.id)!;
+    assert.equal(g.status, 'unmet', 'lease loss left the goal open -- an exit route was missed');
+    const ev = env.events.list(run.id).find((e) => e.type === 'goal.unmet');
+    assert.ok(ev, 'no goal.unmet event after lease loss');
+    const payload = ev!.payload as Record<string, unknown>;
+    assert.equal(payload.terminalStatus, 'FAILED');
+    assert.equal(payload.attempted, true);
+  } finally { env.close(); }
+});
