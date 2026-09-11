@@ -331,8 +331,16 @@ test('the wire contract: the keys Fleet parses are the keys the host sends', asy
     assert.equal(leases.length, 1, `this test needs a live lease to assert its shape, got ${leases.length}`);
     assert.deepEqual(Object.keys(leases[0]!).sort(), ['activeRuns', 'oldestLeaseExpiresAt', 'workerId'].sort(),
       'ActiveLease shape changed; fleet/probe.ts reads workerId and activeRuns, and the drift guard reads all three');
-    assert.deepEqual(Object.keys(agents).sort(), ['agents', 'defaultAgent'].sort(),
+    assert.deepEqual(Object.keys(agents).sort(), ['agents', 'capabilities', 'defaultAgent'].sort(),
       '/api/agents shape changed; fleet/probe.ts reads agents');
+    // `capabilities` was added for goal support (docs/goals.md 13.6) and is ADDITIVE: Fleet
+    // reads only `agents`, and `agents` deliberately stayed string[] rather than becoming an
+    // array of capability objects. Assert that here, because the key-set check above would
+    // still pass if someone reshaped `agents` and dropped `defaultAgent` -- and a reshaped
+    // `agents` is the change that would silently break the dashboard's loadAgents().
+    assert.ok(Array.isArray(agents.agents), 'agents must stay an array; Fleet and the UI both index it');
+    assert.ok((agents.agents as unknown[]).every((a) => typeof a === 'string'),
+      'agents must stay an array of STRINGS; the dashboard bails to hardcoded options otherwise');
     assert.equal(typeof workers.queueDepth, 'number', 'queueDepth must stay a number; Fleet sums it');
     assert.equal(typeof health.ok, 'boolean', 'healthz.ok must stay a boolean; Fleet identifies Mercury by it');
   });

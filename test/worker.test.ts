@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { makeEnv, makeGitRepo, sleep, tempDir, waitFor } from './helpers.ts';
 import { PrimeAgentAdapter } from '../src/adapters/primeAgentAdapter.ts';
 import { createRedactor } from '../src/domain/redact.ts';
-import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, RunContext } from '../src/domain/types.ts';
+import type { AgentAdapter, AgentCapabilities, AgentEvent, AgentExit, AgentHandle, RunContext } from '../src/domain/types.ts';
 
 test('happy path: create -> queue -> run -> events -> completed', async () => {
   const repo = makeGitRepo(tempDir('mercury-repo-'));
@@ -473,6 +473,7 @@ test('skills are snapshotted per run', () => {
 
 /** Resume-capable fake: records start/resume calls, emits a scripted sequence. */
 class ResumableFakeAdapter implements AgentAdapter {
+  readonly capabilities: AgentCapabilities = {};
   public startCalls = 0;
   public resumeCalls = 0;
   public resumedSessionFiles: (string | undefined)[] = [];
@@ -705,6 +706,7 @@ test('an unknown agent event type is dropped, and the run still completes (issue
  * never terminated its agent, and a run that threw mid-drive unwound past cleanup.
  */
 class RecordingAdapter implements AgentAdapter {
+  readonly capabilities: AgentCapabilities = {};
   terminateCalls = 0;
   cancelCalls = 0;
   mode: 'ok' | 'throw-midway';
@@ -881,6 +883,7 @@ test('a throwing adapter dispose() must not strand the lease (issue #62, #97)', 
   try {
     const inner = env.adapters.fake;
     const hostile: AgentAdapter = {
+      capabilities: {},
       start: (ctx) => inner.start(ctx),
       sendInput: (id, input) => inner.sendInput(id, input),
       cancel: (id) => inner.cancel(id),

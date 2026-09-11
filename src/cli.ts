@@ -23,7 +23,7 @@ import { WakeupListener, WakeupWriter } from './events/wakeup.ts';
 import { RunQueue } from './queue/runQueue.ts';
 import { RunStore } from './runs/runStore.ts';
 import { RunService } from './runs/runService.ts';
-import { SkillRegistry } from './skills/skillRegistry.ts';
+import { AgentCapabilityRegistry } from './adapters/capabilities.ts';import { SkillRegistry } from './skills/skillRegistry.ts';
 import { createSkillSelector } from './skills/skillSelector.ts';
 import { WorkspaceManager } from './workspace/workspaceManager.ts';
 import { WorkspaceGC } from './workspace/workspaceGC.ts';
@@ -184,6 +184,13 @@ async function main(): Promise<void> {
     ).load(),
   };
 
+  // Resolve what each registered agent can actually do. Probing is detached: boot does not
+  // wait for `--version` to come back, so a missing or slow harness cannot delay or fail
+  // startup, and goals read as `version-unknown` for the first moment instead of guessing
+  // either way (docs/goals.md 13.3, 13.5).
+  const agentCapabilities = new AgentCapabilityRegistry(adapters);
+  agentCapabilities.start();
+
   const runService = new RunService({
     db,
     runs,
@@ -191,6 +198,7 @@ async function main(): Promise<void> {
     skills,
     selector,
     knownAgents: Object.keys(adapters),
+    agentCapabilities: () => agentCapabilities.snapshot(),
     defaultAgent: config.defaultAgent,
     defaultMaxDurationMs: 60 * 60 * 1000,
     defaultMaxRetries: config.maxRetries,

@@ -13,6 +13,7 @@ import { EventStore } from '../src/events/eventStore.ts';
 import { RunQueue } from '../src/queue/runQueue.ts';
 import { RunStore } from '../src/runs/runStore.ts';
 import { RunService } from '../src/runs/runService.ts';
+import { AgentCapabilityRegistry } from '../src/adapters/capabilities.ts';
 import { SkillRegistry } from '../src/skills/skillRegistry.ts';
 import { createSkillSelector } from '../src/skills/skillSelector.ts';
 import { WorkspaceManager } from '../src/workspace/workspaceManager.ts';
@@ -63,6 +64,9 @@ export function makeEnv(opts: {
   adapters?: Record<string, AgentAdapter>;
   /** Agent id used when create omits `agent` (default `fake`). */
   defaultAgent?: string;
+  /** Run the detached harness version probes at construction. Off by default because they
+   *  spawn real subprocesses; tests asserting a detected version opt in. */
+  probeCapabilities?: boolean;
 } = {}): TestEnv {
   const dir = mkdtempSync(join(tmpdir(), 'mercury-test-'));
   const db = openDatabase(join(dir, 'test.db'));
@@ -79,6 +83,14 @@ export function makeEnv(opts: {
   if (opts.primeagent) {
     adapters.primeagent = new PrimeAgentAdapter(opts.primeagent.cmd, { args: opts.primeagent.args, sandbox: opts.sandbox });
   }
+  // Mirrors the production wiring in src/cli.ts so capability assertions here describe the
+  // same object the server serves. Probes are NOT started by default: they spawn real
+  // subprocesses, and a test that wants them opts in with `probeCapabilities`. Left alone,
+  // every agent reports its declared support against an unknown version -- exactly what a
+  // server sees for its first moment after boot.
+  const agentCapabilities = new AgentCapabilityRegistry(adapters);
+  if (opts.probeCapabilities) agentCapabilities.start();
+
   const runService = new RunService({
     db,
     runs,
@@ -86,6 +98,7 @@ export function makeEnv(opts: {
     skills,
     selector: createSkillSelector(),
     knownAgents: Object.keys(adapters),
+    agentCapabilities: () => agentCapabilities.snapshot(),
     defaultAgent: opts.defaultAgent ?? 'fake',
     defaultMaxDurationMs: 60_000,
     defaultMaxRetries: opts.maxRetries ?? 2,

@@ -6,7 +6,7 @@ import { tx } from '../db/database.ts';
 import { isTerminal } from '../domain/stateMachine.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.ts';
 import type { Redactor } from '../domain/redact.ts';
-import type { RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
+import type { AgentCapabilitySummary, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
 import { EventStore } from '../events/eventStore.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { SkillSelector } from '../skills/skillSelector.ts';
@@ -31,6 +31,16 @@ export interface RunServiceDeps {
   skills: SkillRegistry;
   selector: SkillSelector;
   knownAgents: string[];
+  /**
+   * Per-agent capability snapshot, resolved from what each adapter declares plus the
+   * harness version detected at startup. Optional: absent means nothing is known, which
+   * resolves to "no agent supports goals" rather than "all do".
+   *
+   * Supplied as a function rather than a value because the underlying probes are
+   * detached -- the answer changes once they land, and a snapshot taken at construction
+   * would freeze every agent as version-unknown for the process lifetime.
+   */
+  agentCapabilities?: () => Record<string, AgentCapabilitySummary>;
   /** Agent id used when create input omits `agent` (MERCURY_DEFAULT_AGENT; default `fake`). */
   defaultAgent: string;
   defaultMaxDurationMs: number;
@@ -57,6 +67,11 @@ export class RunService {
   listAgents(): string[] {
     return [...this.deps.knownAgents];
   }
+  /** Capability snapshot for every registered agent (docs/goals.md 13.6). */
+  listAgentCapabilities(): Record<string, AgentCapabilitySummary> {
+    return this.deps.agentCapabilities?.() ?? {};
+  }
+
 
   /** Agent id used when create input omits `agent`. */
   defaultAgent(): string {

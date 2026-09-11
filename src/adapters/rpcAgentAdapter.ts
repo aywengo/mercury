@@ -16,9 +16,8 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
-import type {
-  AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run, RunConstraints, RunContext,
-} from '../domain/types.ts';
+import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run, RunConstraints, RunContext, AgentGoalSupport, AgentCapabilities, AgentVersionInfo } from '../domain/types.ts';
+import { probeVersion } from './versionProbe.ts';
 import { RpcClient, type RpcEvent } from './rpc/rpcClient.ts';
 import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
 import type { LocalAgentEventMap } from './localAgentAdapter.ts';
@@ -60,6 +59,17 @@ export interface RpcAgentResumeConfig {
 }
 
 export interface RpcAgentConfig {
+  /**
+   * Goal support Mercury can exercise against this agent, keyed on the minimum
+   * harness version for each feature. Absent means no goals.
+
+   * Config-supplied rather than hardcoded because these adapters exist to add agents
+   * without per-agent code: a per-class table would leave every third-party agent
+   * permanently unable to declare support. Mercury cannot know a third-party CLI's
+   * feature history, so the operator states it and Mercury verifies the claim against
+   * the DETECTED version rather than trusting it (docs/goals.md 13.4).
+   */
+  goalSupport?: AgentGoalSupport;
   id: string;
   description: string;
   /** Binary path or name (e.g. "pi", "omp", "prime-agent"). */
@@ -129,6 +139,18 @@ const DONE: AgentEvent = { type: '__done__', payload: {} };
 // --- adapter ----------------------------------------------------------------
 
 export class RpcAgentAdapter implements AgentAdapter {
+  /** Declared by config; absent means no goals (fail closed).
+   *  Read live from the config object rather than snapshotted, so a registry that
+   *  mutates a config before startup is reflected instead of silently stale. */
+  get capabilities(): AgentCapabilities {
+    const goals = this.cfg.goalSupport;
+    return goals ? { goals } : {};
+  }
+
+  /** Probes the configured `command`, not a bare name on PATH. */
+  detectVersion(): Promise<AgentVersionInfo> {
+    return probeVersion({ cmd: this.cfg.command });
+  }
   private cfg: RpcAgentConfig;
   private opts: RpcAgentAdapterOptions;
   private sessions = new Map<string, Session>();

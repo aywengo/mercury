@@ -1,7 +1,7 @@
 // Deterministic fake agent for tests (Mercury.md section 29).
 // Emits a scripted event sequence; supports input requests, cancellation and failure.
 
-import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext } from '../domain/types.ts';
+import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities } from '../domain/types.ts';
 
 export interface FakeStep {
   event?: { type: string; payload?: unknown };
@@ -21,6 +21,8 @@ export interface FakeAgentConfig {
 }
 
 export class FakeAgentAdapter implements AgentAdapter {
+  /** Test double. No harness, so no goal interface to reach. */
+  readonly capabilities: AgentCapabilities = {};
   private cancelled = new Set<string>();
   private inputs = new Map<string, AgentInput[]>();
   private inputWaiters = new Map<string, (input: AgentInput) => void>();
