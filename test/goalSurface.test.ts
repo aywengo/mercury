@@ -16,14 +16,14 @@ import { goalBadge, goalLabel } from '../ui/app.js';
 
 const UI_DIR = join(import.meta.dirname, '..', 'ui');
 
-function makeApi(env: ReturnType<typeof makeEnv>) {
+function makeApi(env: ReturnType<typeof makeEnv>, tokens: [string, string][] = [['tok-alice', 'alice']]) {
   const stream = new EventStream(env.db, env.events, 10);
   stream.start();
   const app = createApp({
     runService: env.runService,
     events: env.events,
     stream,
-    apiTokens: new Map([['tok-alice', 'alice']]),
+    apiTokens: new Map(tokens),
     adminToken: null,
   });
   return { app, close: () => stream.stop() };
@@ -48,8 +48,12 @@ function seed(env: ReturnType<typeof makeEnv>, objective = 'make tests pass') {
   return run;
 }
 
-async function withServer<T>(env: ReturnType<typeof makeEnv>, fn: (base: string) => Promise<T>): Promise<T> {
-  const { app, close } = makeApi(env);
+async function withServer<T>(
+  env: ReturnType<typeof makeEnv>,
+  fn: (base: string) => Promise<T>,
+  tokens?: [string, string][],
+): Promise<T> {
+  const { app, close } = makeApi(env, tokens);
   const srv = await listen(app);
   try {
     return await fn(`http://127.0.0.1:${srv.port}`);
@@ -157,4 +161,34 @@ test('a goal report refreshes the header, so badge and timeline cannot disagree'
   // views of one Run saying different things, which is the failure the feature exists to remove.
   const js = readFileSync(join(UI_DIR, 'run.js'), 'utf8');
   assert.match(js, /if \(e\.type\.startsWith\('goal\.'\)\) loadRun\(\);/);
+});
+
+test('the goals map is scoped to the runs the caller may already see', async () => {
+  // The map is keyed by run id and built from the page the caller was given, so it cannot
+  // enumerate another owner's goals. Asserted rather than assumed: a leaking map would expose
+  // goal status -- and via the detail endpoint, objectives -- across an owner boundary while
+  // every existing list assertion still looked correct.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const aliceRun = env.runService.create({ ownerId: 'alice', task: 'alice work', agent: 'fake' });
+    env.goals.insert({ runId: aliceRun.id, status: 'unmet', objective: 'alice objective', source: 'operator', updatedAt: 'u' });
+    const bobRun = env.runService.create({ ownerId: 'bob', task: 'bob work', agent: 'fake' });
+    env.goals.insert({ runId: bobRun.id, status: 'active', objective: 'bob objective', source: 'operator', updatedAt: 'u' });
+
+    await withServer(env, async (base) => {
+      const bobRes = await fetch(`${base}/api/runs?limit=50`, { headers: { authorization: 'Bearer tok-bob' } });
+      const bobList = await bobRes.json() as { runs: { id: string }[]; goals: Record<string, string> };
+
+      assert.deepEqual(bobList.runs.map((r) => r.id), [bobRun.id]);
+      assert.deepEqual(Object.keys(bobList.goals), [bobRun.id], 'the goals map crossed an owner boundary');
+      assert.equal(bobList.goals[aliceRun.id], undefined);
+
+      // 404, not 403: another owner's Run must not be confirmable at all, and that covers its
+      // goal as much as its status.
+      const detail = await fetch(`${base}/api/runs/${aliceRun.id}`, {
+        headers: { authorization: 'Bearer tok-bob' },
+      });
+      assert.equal(detail.status, 404);
+    }, [['tok-alice', 'alice'], ['tok-bob', 'bob']]);
+  } finally { env.close(); }
 });
