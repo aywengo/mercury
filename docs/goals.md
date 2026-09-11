@@ -52,8 +52,36 @@ source, not against documentation. Versions: PrimeAgent 0.9.4, Hermes v0.20.5
 | Set, non-interactive | `--goal <objective>`, `--goal-token-budget <n>` — "Seed a persistent goal for a new root session" |
 | Set, in-session | `goal.create(objective, token_budget?)`, `goal.complete()`, `goal.get()` (async; kernel-only, via the host bridge) |
 | Observe | emits `{ type: "goal_update", goal: <goalState> }` on the event stream |
-| Status values | `idle`, `active`, `paused`, `complete`, `cancelled` |
-| Budget | token budget; `null` means unbounded |
+| Status values | `idle`, `active`, `paused`, `budget_limited`, `complete`, `error` |
+| Budget | `tokenBudget`; absent means unbounded. Exhaustion is its own status, `budget_limited` |
+| Objective limit | `MAX_THREAD_GOAL_OBJECTIVE_CHARS = 4000` |
+
+The authoritative declaration is PrimeAgent's own type file,
+`dist/core/goals.d.ts` (PrimeAgent 0.9.4):
+
+```ts
+export type GoalStatus =
+  | "idle" | "active" | "paused" | "budget_limited" | "complete" | "error";
+
+export interface GoalState {
+  active: boolean;          // read this alongside status; do not infer from status alone
+  status: GoalStatus;
+  goalId?: string;
+  objective?: string;
+  tokenBudget?: number;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  continuationsUsed: number;
+  createdAt?: number;
+  updatedAt?: number;
+  lastReason?: string;
+  lastError?: string;
+}
+```
+
+`idle` is the no-goal state (`emptyGoalState()`), and the kernel-facing serialization
+narrows it away — `SerializedGoal.status` is `Exclude<GoalStatus, "idle">` — so a
+consumer never sees `idle` alongside a real objective.
 
 `goalState` shape, read from a live session:
 
@@ -163,7 +191,9 @@ The combinations are all real and all must be displayable:
 | --- | --- | --- |
 | `COMPLETED` | `complete` | the normal good case |
 | `COMPLETED` | `active` | **the case that matters**: the process ended and the objective was never met |
-| `COMPLETED` | `paused` | harness gave up judging (budget, broken judge); needs a human |
+| `COMPLETED` | `paused` | harness stopped judging and wants attention |
+| `COMPLETED` | `budget_limited` | objective not reached because the token budget ran out |
+| `FAILED` | `error` | the goal runtime broke; the Run failure and the goal failure are the same event |
 | `FAILED` | `complete` | the work finished and something else broke afterwards |
 | `TIMED_OUT` | `active` | wall-clock deadline hit mid-objective |
 | `COMPLETED` | `absent` | today's behaviour; no judgement was made |
@@ -177,12 +207,35 @@ PrimeAgent's and Hermes', with two additions:
 
 | Mercury | PrimeAgent | Hermes | Meaning |
 | --- | --- | --- | --- |
-| `absent` | — | — | no goal on this Run |
+| `absent` | `idle` / no goal | — | no goal on this Run |
 | `active` | `active` | `active` | objective open |
 | `paused` | `paused` | `paused` | loop stopped, needs attention; `pausedReason` says why |
+| `budget_limited` | `budget_limited` | — | token budget exhausted; the harness stopped for want of budget, not of evidence |
+| `error` | `error` | — | the goal runtime itself failed; `lastError` says how |
 | `complete` | `complete` | `done` | the harness judged the objective met |
-| `cancelled` | `cancelled` | `cleared` | a human or the harness dropped it |
+| `cancelled` | — | `cleared` | a human dropped the objective |
 | `unmet` | — | — | **Mercury-side, and never silent**: the Run reached a terminal status while the goal was still `active` |
+
+Three things this table has to carry, each of which is a real asymmetry rather than
+tidiness:
+
+**PrimeAgent has no `cancelled`.** Only Hermes can have an objective dropped out from
+under it (`/goal clear`), because only Hermes runs a long-lived loop a human can talk to
+mid-session. PrimeAgent's goal ends by completing, erroring, or being budget-limited.
+Mercury keeps `cancelled` because Hermes needs it, and it will simply never arrive from
+PrimeAgent.
+
+**`budget_limited` must not fold into `paused`.** They call for opposite responses:
+`paused` means "a human should look at this", `budget_limited` means "the budget was too
+small, accept the partial result or raise it". Hermes has no equivalent status — it
+reports turn-budget exhaustion as `paused` with a `paused_reason` — so Mercury will see
+budget exhaustion in two different shapes depending on backend, and must not pretend
+those are the same input.
+
+**`error` must not fold into `paused` either.** It reports that the goal machinery broke,
+which is an infrastructure signal about the harness, not a statement about the work or a
+request for help. Folding it into `paused` would hide a harness bug behind a status that
+tells an operator to go reason about the objective.
 
 `unmet` is the only state Mercury originates, and it is deliberately not a judgement
 about the work. It means: the harness stopped reporting before it ever said `complete`.
@@ -218,26 +271,35 @@ export interface GoalGate {
 }
 
 export interface GoalSpec {
-  objective: string;              // required, non-empty, 1..4000 chars
+  objective: string;              // required, non-empty; 4000-char cap matches
+                                  // PrimeAgent's MAX_THREAD_GOAL_OBJECTIVE_CHARS
   contract?: GoalContract;
   gates?: GoalGate[];
-  tokenBudget?: number;           // positive integer; absent = unbounded
+  tokenBudget?: number;           // positive integer; absent = unbounded. PrimeAgent
+                                  // enforces this itself and reports `budget_limited`
   maxTurns?: number;              // maps to Hermes --goal-max-turns; ignored by PrimeAgent
 }
 
-export type GoalStatus = 'absent' | 'active' | 'paused' | 'complete' | 'cancelled' | 'unmet';
+export type GoalStatus =
+  | 'absent' | 'active' | 'paused' | 'budget_limited' | 'error'
+  | 'complete' | 'cancelled' | 'unmet';
 
 export interface GoalState {
   status: GoalStatus;
   objective: string;
   contract?: GoalContract;
   gates?: GoalGate[];
+  tokenBudget?: number;
   tokensUsed?: number;
   timeUsedSeconds?: number;
   remainingTokens?: number | null;
-  lastVerdict?: 'done' | 'continue' | 'skipped';
+  lastVerdict?: 'done' | 'continue' | 'skipped';  // Hermes only
   lastReason?: string;            // harness-supplied, bounded, redacted
+  lastError?: string;             // PrimeAgent `error` status; bounded, redacted
   pausedReason?: string;
+  /** Turn/continuation count. PrimeAgent reports `continuationsUsed`, Hermes counts
+   *  turns against `--goal-max-turns`. Same idea, different denominators: never
+   *  compare the two across backends or render them in one column. */
   turnsUsed?: number;
   source: 'harness' | 'operator'; // who last changed it
   updatedAt: string;
@@ -288,8 +350,10 @@ in the same change as the first emitter, or the emitter throws.
 | Type | Payload | Emitted when |
 | --- | --- | --- |
 | `goal.created` | `{ objective, contract?, gates?, tokenBudget? }` | Run created with a goal |
-| `goal.updated` | `{ status, tokensUsed?, turnsUsed?, lastVerdict?, lastReason? }` | a `goal_update` arrives from a harness |
+| `goal.updated` | `{ status, objective?, tokensUsed?, turnsUsed?, lastVerdict?, lastReason? }` | a `goal_update` arrives from a harness; `objective` is present only when the harness replaced it |
 | `goal.paused` | `{ pausedReason, turnsUsed? }` | harness paused the loop |
+| `goal.budgetLimited` | `{ tokenBudget, tokensUsed }` | harness stopped for want of budget |
+| `goal.error` | `{ lastError }` | the goal runtime itself failed |
 | `goal.complete` | `{ tokensUsed?, timeUsedSeconds?, completionBudgetReport? }` | harness declared the objective met |
 | `goal.cancelled` | `{ source }` | operator or harness dropped it |
 | `goal.unmet` | `{ runStatus, lastVerdict?, turnsUsed? }` | Run finalised while goal was `active` |
@@ -364,8 +428,18 @@ same field as a harness judgement, and the two would become unreadable apart. An
 operator who disagrees cancels the goal and says so in a comment; the record then shows
 a human decision rather than impersonating a machine one.
 
-Goals are settable only at creation. Setting one mid-run would require an input channel
-into the harness session that does not exist for either backend.
+Mercury sets a goal only at creation — pushing a new objective into a live session needs
+an input channel neither backend offers Mercury today. But **the objective is not
+immutable in Mercury's hands**, and pretending otherwise would be another advertised-
+capability error: PrimeAgent replaces a live objective when a new one is set while one is
+active, emitting a goal context of kind `objective_updated` (see `goalContextPrompt` in
+`dist/core/goals.js`). So Mercury must accept an objective changing mid-run and record
+each change through `goal.updated`, rather than treating a second objective as a
+protocol violation.
+
+What stays closed is *operator-initiated* mutation: there is no endpoint to change a
+goal, because Mercury has no way to deliver one and an endpoint that silently no-ops is
+exactly the #459 mistake.
 
 `goal` and `task` are both required to be non-empty and mean different things: `task`
 is the instruction the agent starts on, `objective` is the condition for stopping. For
@@ -385,6 +459,14 @@ incrementally via `goal_update`.
 That is the missing input for issue #63. Once Mercury stores per-goal usage it can
 enforce `budgetTokens` in the drive loop next to the `maxDurationMs` deadline — exactly
 where [types.ts](../src/domain/types.ts) says enforcement belongs.
+
+Better still, **PrimeAgent already enforces it.** `budget_limited` is a status the
+harness reaches on its own when `tokensUsed` passes `tokenBudget`, with a dedicated
+budget-limit prompt and `continuationsUsed` counting the turns it spent. So for
+PrimeAgent the work is not to build enforcement but to pass the budget down and record
+the outcome — which is a much smaller and more trustworthy change than Mercury polling
+usage and killing a Run itself. Mercury-side enforcement is then only needed for backends
+that lack it, and should be framed that way rather than as the general mechanism.
 
 Two cautions, because this is where a plausible design goes wrong:
 
@@ -459,7 +541,8 @@ is a small change to the finalisation path.
   level objectives belong to [`crew/teams.md`](crew/teams.md) if they belong anywhere.
 - **No cross-Run goals.** A goal lives and dies with its Run; retry gets its own.
 - **No goal-based scheduling or placement.** That is Crew's job.
-- **No mid-run goal mutation.**
+- **No operator-initiated goal mutation.** The harness may replace the objective itself
+  (PrimeAgent's `objective_updated`); Mercury records that but never originates it.
 - **No operator-authored `complete`.**
 - **No Mercury-side gate execution.**
 - **No reuse of `NEEDS_INPUT` for `paused`.** `paused` is the harness telling us it
