@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeEnv } from './helpers.ts';
+import { makeEnv, tempDir, waitFor } from './helpers.ts';
 import { RunStore } from '../src/runs/runStore.ts';
 import { GoalStore } from '../src/runs/goalStore.ts';
 import { settleGoalOnTerminal } from '../src/runs/goalSettlement.ts';
@@ -173,5 +173,30 @@ test('lease loss closes the goal too, even though that FAILED is written by raw 
     const payload = ev!.payload as Record<string, unknown>;
     assert.equal(payload.terminalStatus, 'FAILED');
     assert.equal(payload.attempted, true);
+  } finally { env.close(); }
+});
+
+test('the real worker settles the goal on both its tx-wrapped failure path and completion', async () => {
+  // Two of the six terminal transitions are issued INSIDE an outer tx() in worker.ts, so they
+  // reach the hook through tx() re-entrancy rather than by opening their own BEGIN IMMEDIATE.
+  // Everything above calls transition() directly and would still pass if that nesting were
+  // broken, so this drives the actual worker.
+  const { tmpdir } = await import('node:os');
+  const repo = tempDir('mercury-worker-goal-');
+  const env = makeEnv({
+    fakeScript: [
+      { event: { type: 'agent.message', payload: { text: 'working' } } },
+      { fail: true },
+    ],
+  });
+  try {
+    const run = env.runService.create({ ownerId: 'a', task: 'x', agent: 'fake', repository: { localPath: repo } });
+    env.goals.insert({ runId: run.id, status: 'active', objective: 'make it green', source: 'operator', updatedAt: 'u' });
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    await waitFor(() => env.goals.get(run.id)!.status === 'unmet', 3_000);
+    assert.equal(env.goals.get(run.id)!.status, 'unmet');
+    const ev = env.events.list(run.id).find((e) => e.type === 'goal.unmet');
+    assert.ok(ev, 'worker failure path produced no goal.unmet');
+    assert.equal((ev!.payload as Record<string, unknown>).attempted, true);
   } finally { env.close(); }
 });
