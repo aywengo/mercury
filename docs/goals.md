@@ -12,6 +12,7 @@ deferred. Concretely, today:
 | `GET /api/runs/:id/goal` and `POST /api/runs/:id/goal/cancel`; `cancelled` finally has a writer | |
 | a mid-run objective replacement reported by the harness is recorded, redacted and bounded (9) | |
 | `run_goals.attempted` separates "never started" from "attempted and stopped short" on the gauge, in `runs show` and on the dashboard badge (14) | |
+| the run list carries `attempted` too, so `runs list` and the dashboard GOAL column distinguish the two kinds of `unmet` (14) | |
 | `run_goals` table, `GoalSpec` validation, `goal.*` event types | Hermes goals (Phase 5, blocked upstream) |
 | `POST /api/runs` accepts `goal`, refused unless the agent can track it | budget enforcement (Phase 6, deferred pending real usage data) |
 | `goal.unmet` when a Run ends with the objective still open, and `mercury_goals_in_status` | |
@@ -934,3 +935,14 @@ they block implementation rather than funding:
    `attempted` label on the gauge, and spelled out in `runs show` and the dashboard badge.
    The query an operator wants is now
    `mercury_goals_in_status{status="unmet",attempted="true"}`.
+
+   Fixing the gauge and the detail page left the **list** still conflating them, which is the view
+   an operator actually scans -- so the distinction was invisible exactly where it was most needed.
+   The cause was a shape: `GET /api/runs` returned `goals: Record<string, GoalStatus>`, a bare
+   status string with nowhere to put the answer. The map value is now
+   `{ status, attempted? }`. Both shapes are deliberately NOT accepted by the client parser -- the
+   published 0.1.1 artifact contains no goal code at all, so there is no consumer to be compatible
+   with, and a parser that quietly reads two shapes keeps the ambiguity forever. A bare string is
+   rejected with a message naming the version skew rather than the generic "expected an object".
+   `attempted` is the only field that earned a place beside the status; objectives would put 4000
+   chars per row into every dashboard poll.

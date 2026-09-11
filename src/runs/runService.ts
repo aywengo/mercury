@@ -7,7 +7,7 @@ import { isTerminal } from '../domain/stateMachine.ts';
 import { TERMINAL_GOAL_STATUSES } from '../domain/goalEvents.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.ts';
 import type { Redactor } from '../domain/redact.ts';
-import type { AgentCapabilitySummary, GoalState, GoalStatus, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
+import type { AgentCapabilitySummary, GoalState, GoalStatus, GoalSummary, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
 import { goalCapabilityMessage, goalFieldCapabilityMessage } from '../domain/goalSupport.ts';
 import { GoalValidationError, resolveGoalSpec } from '../domain/goalSpec.ts';
 import type { GoalStore } from './goalStore.ts';
@@ -356,14 +356,20 @@ export class RunService {
   /**
    * Goal status per Run for a page of Runs, as a map keyed by run id.
    *
-   * Deliberately only the status. The list view needs one word per row; carrying objectives
-   * here would put up to 4000 chars times the page limit into every poll of the dashboard, and
-   * the detail endpoint already returns the full row for the one Run a person is looking at.
+   * Deliberately narrow: status plus `attempted`, not the whole row. The list view needs a word
+   * per row, and carrying objectives here would put up to 4000 chars times the page limit into
+   * every dashboard poll; the detail endpoint already returns the full row for the one Run a person
+   * is looking at.
+   *
+   * `attempted` is the one field that earns its place beside the status. Status alone renders the
+   * two kinds of `unmet` identically, and the list is where an operator actually looks, so the
+   * distinction the gauge gained in #489 was invisible exactly where it was most needed (issue
+   * #492). Nothing else did.
    *
    * A map rather than a field on each Run for the same reason `/api/agents` gained a parallel
    * `capabilities` field: `runs` stays an array of Run, and existing clients keep working.
    */
-  goalStatuses(runIds: string[]): Record<string, GoalStatus> {
+  goalStatuses(runIds: string[]): Record<string, GoalSummary> {
     const goals = this.deps.goals;
     if (!goals || runIds.length === 0) return {};
     return goals.statusesFor(runIds);

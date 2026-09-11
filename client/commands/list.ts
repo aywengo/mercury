@@ -38,7 +38,13 @@ export function renderRunList(response: RunListResponse, ctx: CommandContext, is
   const goals = response.goals;
   const goalFor = (run: Run): string => {
     if (goals === undefined) return '?';
-    return goals[run.id] ?? '-';
+    const goal = goals[run.id];
+    if (!goal) return '-';
+    // Spelled out rather than marked with a symbol: a dagger or a dimmed cell is the same trick
+    // that hid this in the first place, and a terminal has no hover. `attempted === false` only,
+    // so the common reading stays one word -- and absent means unknown, never "never started".
+    if (goal.status === 'unmet' && goal.attempted === false) return 'unmet (never started)';
+    return goal.status;
   };
   const rows = response.runs.map((run: Run) => [
     sanitizeForTerminal(run.id),

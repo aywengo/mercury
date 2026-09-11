@@ -53,7 +53,7 @@ test('an unknown goal status is rejected rather than rendered', () => {
     (e: unknown) => e instanceof ProtocolError && /unknown goal status/.test(e.message),
   );
   assert.throws(
-    () => parseRunListResponse({ runs: [RUN], nextCursor: null, goals: { run_1: 'teleported' } }),
+    () => parseRunListResponse({ runs: [RUN], nextCursor: null, goals: { run_1: { status: 'teleported' } } }),
     (e: unknown) => e instanceof ProtocolError && /unknown goal status/.test(e.message),
   );
 });
@@ -108,7 +108,7 @@ test('runs show says "unknown" for a server that predates goals, never "none"', 
 
 test('runs list shows a Goal column with all three states', () => {
   const withGoal = renderRunList(
-    { runs: [RUN as never], nextCursor: null, goals: { run_1: 'unmet' } } as never, OFF, false,
+    { runs: [RUN as never], nextCursor: null, goals: { run_1: { status: 'unmet' } } } as never, OFF, false,
   );
   assert.match(withGoal, /STATUS\s+GOAL\s+AGENT/);
   assert.match(withGoal, /COMPLETED\s+unmet/);
@@ -124,7 +124,7 @@ test('goal status never overwrites run status in list output', () => {
   // A regression that would be easy to introduce: writing the goal into the status column when
   // a goal exists. Assert the status column keeps the Run status even when the goal disagrees.
   const out = renderRunList(
-    { runs: [RUN as never], nextCursor: null, goals: { run_1: 'unmet' } } as never, OFF, false,
+    { runs: [RUN as never], nextCursor: null, goals: { run_1: { status: 'unmet' } } } as never, OFF, false,
   );
   assert.match(out, /COMPLETED/);
   assert.ok(!/^\s*unmet\s+COMPLETED/m.test(out), 'goal and run status swapped columns');

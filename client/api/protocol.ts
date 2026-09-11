@@ -124,11 +124,23 @@ export interface RunListResponse {
    * Goal status keyed by run id. Absent key means the Run has no goal -- that is not the same
    * as a goal of status `absent`, and a renderer must not draw the two the same way.
    */
-  goals?: Record<string, GoalStatus>;
+  goals?: Record<string, GoalSummary>;
 }
-/** The subset of goal state a list row needs. Status only, by design. */
+/**
+ * The subset of goal state a list row needs: the status, plus the one field that makes the
+ * status actionable.
+ *
+ * Status alone renders the two kinds of `unmet` the same way -- the harness held the objective and
+ * never declared it met, versus the Run died before the harness received it -- and the list is the
+ * view an operator actually scans, so that is where hiding the distinction hurt most (issue #492).
+ * Nothing else from the goal row belongs here; objectives would put 4000 chars per row into every
+ * dashboard poll.
+ *
+ * `attempted` absent means no answer yet, which is NOT false.
+ */
 export interface GoalSummary {
   status: GoalStatus;
+  attempted?: boolean;
 }
 
 /**
@@ -378,15 +390,33 @@ export function parseRunListResponse(value: unknown): RunListResponse {
   }
   // Parallel map, optional for the same reason as the detail field: an older server simply
   // does not know about goals, and that must stay distinguishable from "no goals exist".
-  let goals: Record<string, GoalStatus> | undefined;
+  let goals: Record<string, GoalSummary> | undefined;
   if (o.goals !== undefined) {
     const go = asObject(o.goals, 'run list response.goals');
     goals = {};
-    for (const [runId, status] of Object.entries(go)) {
+    for (const [runId, entry] of Object.entries(go)) {
+      // The value is an object, not a bare status string. Both shapes are NOT accepted: no
+      // released client reads this key at all (the published 0.1.1 artifact contains no goal
+      // code), so there is nothing to be compatible with, and a parser that quietly accepts two
+      // shapes keeps the ambiguity alive forever. A string here is a version skew to fail on.
+      // A bare string is the shape this map used to have. Naming it beats "expected a JSON
+      // object": the operator reading the failure is almost certainly running a new client
+      // against an old server (or the reverse), and "expected an object" sends them looking in
+      // the wrong place.
+      if (typeof entry === 'string') {
+        throw new ProtocolError(
+          `run list response.goals.${runId} is a bare status string "${entry}"; `
+          + 'this client expects { status, attempted? } -- the server and mercuryctl are out of step');
+      }
+      const eo = asObject(entry, `run list response.goals.${runId}`);
+      const status = eo.status;
       if (typeof status !== 'string' || !GOAL_STATUSES.has(status)) {
         throw new ProtocolError(`unknown goal status "${String(status)}" for run ${runId}`);
       }
-      goals[runId] = status as GoalStatus;
+      // Absent, not false: an unsettled goal has no answer to whether the Run started.
+      goals[runId] = typeof eo.attempted === 'boolean'
+        ? { status: status as GoalStatus, attempted: eo.attempted }
+        : { status: status as GoalStatus };
     }
   }
   return { runs, nextCursor, ...(goals === undefined ? {} : { goals }) };
