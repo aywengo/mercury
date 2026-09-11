@@ -8,8 +8,10 @@
 //   extension_ui_request (dialog)-> input.required (select/confirm/input/editor)
 //   agent_end                    -> run completion (exit code 0)
 //   compaction_* / auto_retry_*  -> agent.message (informational)
+//   goal_update                -> goal.updated | goal.paused | goal.budget_limited | goal.error | goal.completed
 
 import type { AgentEvent } from '../domain/types.ts';
+import { translateHarnessGoal, type HarnessGoalReport } from '../domain/goalEvents.ts';
 
 export interface RpcEvent {
   type: string;
@@ -26,6 +28,8 @@ export interface RpcEvent {
   placeholder?: string;
   prefill?: string;
   assistantMessageEvent?: { type?: string; delta?: string };
+  /** Carried by `goal_update`. Typed loosely on purpose -- see HarnessGoalReport. */
+  goal?: HarnessGoalReport;
 }
 
 export const DIALOG_METHODS = new Set(['select', 'confirm', 'input', 'editor']);
@@ -104,6 +108,15 @@ export class EventTranslator {
           },
         }];
       }
+      case 'goal_update': {
+        // Before this, `goal_update` fell through to `default: return []` -- the harness
+        // reported goal state and Mercury discarded it. That is the accept-and-ignore failure
+        // at the event layer: the Run advertised a goal, the harness honoured it, and nothing
+        // recorded a single byte of what came back.
+        const translated = translateHarnessGoal(ev.goal);
+        if (!translated) return []; // no goal set, or nothing reported
+        return [{ type: translated.eventType, payload: stripUndefined({ ...ev.goal }) }];
+      }
       case 'agent_end': {
         return [{ type: 'agent.end', payload: { code: ev.result ?? 0 } }];
       }
@@ -126,6 +139,10 @@ export class EventTranslator {
   clearPending(): void {
     this.pendingInput = null;
   }
+}
+
+function stripUndefined(obj: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
 }
 
 function summarizeResult(result: unknown): string {

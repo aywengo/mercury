@@ -9,6 +9,11 @@
 //   fail   - prompt -> agent_start, then exit(1) without agent_end
 //   hang   - prompt -> agent_start, never agent_end (timeout path)
 //   ignore - never responds to any command (send-timeout path)
+//   goal   - prompt -> goal_update frames walking active -> paused -> budget_limited ->
+//            complete, then agent_end. Proves goal state survives the real RPC protocol
+//            instead of falling through the translator's default branch.
+// MOCK_RPC_GOAL_UNRECOGNISED: '1' = also emit a status Mercury has never seen, to prove
+//            an unrecognised report is surfaced rather than discarded.
 //
 // MOCK_RPC_SESSION_FILE: path reported by get_state.
 // MOCK_RPC_ARGV_FILE:     write the spawned argv (minus node/script) here.
@@ -79,6 +84,20 @@ function runPromptScript() {
   }
   send({ type: 'agent_start' });
   send({ type: 'turn_start' });
+  if (mode === 'goal') {
+    // Shapes copied from PrimeAgent's own GoalState declaration (dist/core/goals.d.ts), not
+    // invented: `active` plus `status`, snake-free camelCase on the wire, and
+    // continuationsUsed rather than turnsUsed.
+    send({ type: 'goal_update', goal: { active: true, status: 'active', goalId: 'g1', objective: 'make tests pass', tokenBudget: 5000, tokensUsed: 120, timeUsedSeconds: 9, continuationsUsed: 1 } });
+    if (process.env.MOCK_RPC_GOAL_UNRECOGNISED === '1') {
+      send({ type: 'goal_update', goal: { active: true, status: 'teleported', tokensUsed: 130, timeUsedSeconds: 10, continuationsUsed: 1 } });
+    }
+    send({ type: 'goal_update', goal: { active: true, status: 'paused', goalId: 'g1', objective: 'make tests pass', tokensUsed: 240, timeUsedSeconds: 20, continuationsUsed: 2, lastReason: 'waiting for a decision' } });
+    send({ type: 'goal_update', goal: { active: true, status: 'budget_limited', goalId: 'g1', tokensUsed: 5000, timeUsedSeconds: 31, continuationsUsed: 3, lastReason: 'token budget reached' } });
+    send({ type: 'goal_update', goal: { active: true, status: 'complete', goalId: 'g1', tokensUsed: 5200, timeUsedSeconds: 33, continuationsUsed: 3 } });
+    send({ type: 'agent_end', messages: [] });
+    return;
+  }
   if (mode === 'input') {
     send({
       type: 'extension_ui_request',

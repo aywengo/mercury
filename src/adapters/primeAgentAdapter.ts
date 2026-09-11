@@ -107,6 +107,31 @@ export class PrimeAgentAdapter implements AgentAdapter {
     this.opts = opts;
   }
 
+  /**
+   * Goal flags for a fresh session.
+   *
+   * Only ever added to `start()`, never to `resume()`: `--goal` seeds a goal for a NEW root
+   * session, and a resumed session already carries its goal in the session file. Re-seeding on
+   * resume would either be rejected or reset the objective mid-flight, and a goal that silently
+   * restarts its usage counters on every resume makes the budget meaningless.
+   *
+   * The objective is passed verbatim as one argv element, never through a shell, so quoting is
+   * not a concern and the value cannot inject arguments.
+   */
+  private goalArgs(context: RunContext): string[] {
+    const goal = context.goal;
+    if (!goal) return [];
+    const args: string[] = ['--goal', goal.objective];
+    if (goal.tokenBudget !== undefined) {
+      // PrimeAgent rejects a non-positive budget at parse time. Mercury validated it at
+      // admission, so reaching here with a bad value means something upstream regressed; pass it
+      // through and let the harness refuse rather than silently dropping the budget -- a goal
+      // that quietly loses its budget is a goal that will not stop when intended.
+      args.push('--goal-token-budget', String(goal.tokenBudget));
+    }
+    return args;
+  }
+
   /** Wrap the spawn command in a container when the run requests isolation. */
   private wrapForSandbox(run: RunContext, args: string[]): { cmd: string; args: string[] } {
     const sandbox = this.opts.sandbox;
@@ -194,6 +219,7 @@ export class PrimeAgentAdapter implements AgentAdapter {
       '--cwd', workspacePath,
       '--session-dir', sessionDir,
       ...skillArgs,
+      ...this.goalArgs(context),
       ...(this.opts.args ?? []),
     ]);
     const client = new RpcClient({
@@ -342,6 +368,8 @@ export class PrimeAgentAdapter implements AgentAdapter {
       '--mode', 'rpc',
       '--cwd', session.workspacePath,
       '--resume', sessionFile,
+      // No goal flags here on purpose -- see goalArgs(). The resumed session already owns the
+      // goal it was started with.
       ...(this.opts.args ?? []),
     ]);
     const client = new RpcClient({

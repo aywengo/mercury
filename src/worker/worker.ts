@@ -6,6 +6,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isTerminal, STUCK_CANDIDATE_STATUSES } from '../domain/stateMachine.ts';
+import { harnessMayRevise, translateHarnessGoal, type HarnessGoalReport } from '../domain/goalEvents.ts';
 import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts';
 import type { Redactor } from '../domain/redact.ts';
 import { isEventType } from '../domain/types.ts';
@@ -17,6 +18,7 @@ import type { Logger } from '../logger.ts';
 import { RunQueue, LEASE_EXPIRED_ERROR } from '../queue/runQueue.ts';
 import type { RunService } from '../runs/runService.ts';
 import { RunStore } from '../runs/runStore.ts';
+import type { GoalStore } from '../runs/goalStore.ts';
 import { tx } from '../db/database.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { WorkspaceManager } from '../workspace/workspaceManager.ts';
@@ -30,6 +32,8 @@ export interface WorkerDeps {
   workspace: WorkspaceManager;
   adapters: Record<string, AgentAdapter>;
   runService: RunService;
+  /** Goal persistence. Absent means goal reports are appended as events but not tracked. */
+  goals?: GoalStore;
   logger: Logger;
   workerId: string;
   leaseMs: number;
@@ -294,6 +298,9 @@ export class Worker {
         workspace,
         skills,
         constraints: run.constraints,
+        // Adapters get the goal by value. Reading it here rather than in the adapter keeps the
+        // database behind the worker.
+        goal: this.deps.goals?.get(run.id) ?? undefined,
       };
 
       // Resume wiring (roadmap p11): a retry run resumes the parent's agent
@@ -625,6 +632,10 @@ export class Worker {
       this.deps.events.append(run.id, ev.type, ev.payload);
       return 'ok';
     }
+    if (ev.type.startsWith('goal.')) {
+      this.recordGoalReport(run, ev, log);
+      return 'ok';
+    }
     if (ev.type === 'git.commit') {
       this.deps.events.append(run.id, 'git.commit', ev.payload);
       return 'ok';
@@ -650,6 +661,81 @@ export class Worker {
     }
     this.deps.events.append(run.id, ev.type, ev.payload);
     return 'ok';
+  }
+
+  /**
+   * Persist one harness goal report: append the event AND update the row, atomically.
+   *
+   * Both halves matter and neither may land alone. An event with no row leaves the timeline
+   * claiming a status the current-state table contradicts; a row with no event means the
+   * dashboard can see the status but nothing explains when or why it changed. Same reasoning as
+   * the terminal goal settlement in goalSettlement.ts.
+   *
+   * A report for a Run with no goal row is discarded on purpose. The row is created only by
+   * admission, which already refused any agent that cannot track goals, so a report arriving
+   * without one means the harness volunteered state nobody asked it to track -- recording it
+   * would invent a goal the operator never set.
+   */
+  private recordGoalReport(run: Run, ev: AgentEvent, log: Logger): void {
+    const goals = this.deps.goals;
+    if (!goals) {
+      this.deps.events.append(run.id, ev.type, ev.payload);
+      return;
+    }
+    const translated = translateHarnessGoal(ev.payload as HarnessGoalReport);
+    if (!translated) {
+      this.deps.events.append(run.id, ev.type, ev.payload);
+      return;
+    }
+    if (translated.unrecognized !== undefined) {
+      log.warn({ status: translated.unrecognized }, 'harness reported an unrecognised goal status');
+    }
+    const current = goals.get(run.id);
+    if (current && translated.patch.status !== undefined && !harnessMayRevise(current.status)) {
+      // The goal already has a final verdict. Keep the usage numbers -- they are still true --
+      // but refuse the status change, and say so in the event rather than dropping it silently.
+      log.warn(
+        { from: current.status, to: translated.patch.status },
+        'refusing to move a settled goal off its final status',
+      );
+      const usageOnly = { ...translated.patch, status: undefined };
+      tx(this.deps.db, () => {
+        goals.update(run.id, usageOnly, new Date().toISOString());
+        this.deps.events.append(run.id, ev.type, {
+          ...(ev.payload as Record<string, unknown>),
+          status: current.status,
+          ignoredStatus: translated.patch.status,
+          warning: `goal already settled as ${current.status}; the reported status was ignored`,
+        });
+      });
+      return;
+    }
+    // Mercury's own explanation of the report, when it differs from the harness's words. An
+    // unrecognised status produces a `goal.error` whose raw payload contains nothing error-like,
+    // so without this the timeline shows an unexplained error and the reason survives only in a
+    // worker log line nobody reads while triaging a Run.
+    const explanation = translated.unrecognized !== undefined
+      ? { lastError: translated.patch.lastError }
+      : {};
+
+    tx(this.deps.db, () => {
+      const updated = goals.update(run.id, translated.patch, new Date().toISOString());
+      if (!updated) {
+        // No row: nothing to update, and the event is still worth keeping -- it is evidence the
+        // harness is reporting goal state for a Run that was never admitted with a goal.
+        this.deps.events.append(run.id, ev.type, {
+          ...(ev.payload as Record<string, unknown>),
+          ...explanation,
+          warning: 'no goal row for this run',
+        });
+        return;
+      }
+      this.deps.events.append(run.id, ev.type, {
+          ...(ev.payload as Record<string, unknown>),
+          ...explanation,
+          status: updated.status,
+        });
+    });
   }
 
   /**

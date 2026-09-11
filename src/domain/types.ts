@@ -151,6 +151,14 @@ export interface RunContext {
    *  executing a retry run with resume support). Adapters use it to resume the
    *  parent's agent session instead of starting fresh. */
   resumeSessionFile?: string;
+  /**
+   * The goal this Run is trying to achieve, when it has one.
+   *
+   * Passed in rather than read by the adapter because adapters must not touch the database: an
+   * adapter that could read Run state could also invent it. Adapters use this to seed the
+   * harness's own goal tracking, and nothing more.
+   */
+  goal?: GoalState;
 }
 
 /**
@@ -251,6 +259,26 @@ export interface GoalState {
   /** Who last changed it. Only a harness may set `complete`; an operator may cancel. */
   source: 'harness' | 'operator';
   updatedAt: string;
+}
+
+/**
+ * Fields a caller may change after a goal row exists.
+ *
+ * `objective` is present but is only ever written by the path that created it -- Mercury never
+ * rewrites an objective from a harness report. The harness echoes text that was validated and
+ * redacted on the way in, so overwriting the stored copy with an echoed one would undo both.
+ */
+export interface GoalPatch {
+  status?: GoalStatus;
+  objective?: string;
+  tokensUsed?: number;
+  timeUsedSeconds?: number;
+  turnsUsed?: number;
+  lastVerdict?: GoalState['lastVerdict'];
+  lastReason?: string;
+  lastError?: string;
+  pausedReason?: string;
+  source?: 'harness' | 'operator';
 }
 
 /** Maximum accepted objective length; mirrors PrimeAgent's MAX_THREAD_GOAL_OBJECTIVE_CHARS. */
