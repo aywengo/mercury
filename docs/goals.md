@@ -484,7 +484,10 @@ capability error: PrimeAgent replaces a live objective when a new one is set whi
 active, emitting a goal context of kind `objective_updated` (see `goalContextPrompt` in
 `dist/core/goals.js`). So Mercury must accept an objective changing mid-run and record
 each change through `goal.updated`, rather than treating a second objective as a
-protocol violation.
+protocol violation. **Implemented** -- the reported objective rides into the patch alongside the
+usage numbers, is redacted and bounded on the way into the row like every other harness string,
+and an empty or whitespace-only value is ignored rather than stored, because a non-empty objective
+is an invariant of `GoalState` (section 14) and `NOT NULL` does not enforce that.
 
 What stays closed is *operator-initiated* mutation: there is no endpoint to change a
 goal, because Mercury has no way to deliver one and an endpoint that silently no-ops is

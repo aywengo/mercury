@@ -107,6 +107,14 @@ export function translateHarnessGoal(report: HarnessGoalReport | null | undefine
   if (NO_GOAL_STATUSES.has(raw)) return null;
 
   const usage: GoalPatch = {
+    // The objective is not immutable in Mercury's hands. PrimeAgent replaces a live objective
+    // when a new one is set while one is active -- it does this on purpose, so the objective
+    // survives context compaction -- and docs/goals.md 9 requires each change to be recorded
+    // rather than treated as a protocol violation. Before this, the field was accepted and
+    // dropped, which is worse than dropping it unseen: the dashboard kept rendering the ORIGINAL
+    // objective as if it were current, showing the operator a success condition the harness had
+    // already replaced.
+    objective: text(report.objective),
     tokensUsed: num(report.tokensUsed),
     timeUsedSeconds: num(report.timeUsedSeconds),
     // PrimeAgent counts continuations, Hermes counts turns against --goal-max-turns. Same idea,

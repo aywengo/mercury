@@ -128,7 +128,11 @@ export class GoalStore {
     const next: GoalState = {
       ...existing,
       status: patch.status ?? existing.status,
-      objective: patch.objective ?? existing.objective,
+      // Sanitized like every other persisted string here. Creation redacts the objective because
+      // tasks carry credentials (issue #43); a harness-reported replacement arriving later would
+      // otherwise be a second door into the same column, bypassing the redaction boundary that
+      // the first door goes through.
+      objective: nextObjective(patch.objective, existing.objective, this.redactor),
       tokensUsed: patch.tokensUsed ?? existing.tokensUsed,
       timeUsedSeconds: patch.timeUsedSeconds ?? existing.timeUsedSeconds,
       turnsUsed: patch.turnsUsed ?? existing.turnsUsed,
@@ -185,4 +189,24 @@ export class GoalStore {
     const row = this.db.prepare('SELECT status FROM run_goals WHERE run_id = ?').get(runId) as { status: string } | undefined;
     return row?.status === 'active';
   }
+}
+/**
+ * Resolve an objective patch against the stored value.
+ *
+ * An absent patch means "no change". An empty or whitespace-only patch is ignored rather than
+ * stored: section 14 makes a non-empty objective an invariant of GoalState, and an empty one would
+ * render as a goal with nothing to satisfy. The translation layer already cannot produce one, but
+ * the store is the last thing between any caller and the column, and the column is only NOT NULL
+ * -- which an empty string satisfies.
+ */
+function nextObjective(
+  patch: string | undefined,
+  current: string,
+  redactor: Redactor | null,
+): string {
+  if (patch === undefined) return current;
+  const value = (redactor ? redactor.redact(patch) : patch).trim();
+  if (value.length === 0) return current;
+  const bounded = bound(value);
+  return bounded === null ? current : bounded;
 }
