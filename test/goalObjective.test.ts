@@ -68,6 +68,34 @@ test('a replacement cannot be an empty objective', () => {
   } finally { env.close(); }
 });
 
+test('a secret straddling the bound is redacted, not truncated around', () => {
+  // Ordering proof. Redaction must run BEFORE bounding. If the text is cut to MAX_GOAL_TEXT_CHARS
+  // first, a configured secret that straddles the cut no longer matches itself, so the redactor
+  // silently does nothing and the stored row carries a fragment of a credential with no REDACTED
+  // marker anywhere -- an operator auditing the row could not tell redaction had been skipped.
+  //
+  // A short secret cannot detect this: it sits inside the kept prefix under either order. The
+  // padding places the secret across the boundary on purpose, so this test fails the bound-first
+  // order and only that order. Without it the ordering is a comment, not an invariant.
+  const secret = ['zz', 'ACME-7f3c91be2d5a'].join('-'); // 20 chars
+  // Positioned so the secret crosses the 2000-char cut while the [REDACTED] marker that replaces it
+  // stays inside the kept prefix. If the marker were pushed past the cut it would be truncated away
+  // under BOTH orders and the test would prove nothing -- so the geometry is asserted, not assumed.
+  const text = `filler ${'x'.repeat(1977)} ${secret} tail`;
+  const at = text.indexOf(secret);
+  assert.ok(text.length > 2000, 'fixture must exceed the bound for the ordering to be observable');
+  assert.ok(at < 2000 && at + secret.length > 2000, `secret must straddle the bound (starts at ${at})`);
+  assert.ok(at + '[REDACTED]'.length < 2000, 'the marker must survive the cut, or both orders look alike');
+
+  const { env, goals, runId } = seeded('original objective', createRedactor([secret]));
+  try {
+    goals.update(runId, { objective: text, status: 'active' }, '2026-01-01T00:04:00Z');
+    const stored = goals.get(runId)!.objective;
+    assert.ok(!stored.includes(secret), 'the whole secret was stored');
+    assert.match(stored, /REDACTED/, 'redaction was skipped without saying so -- bound ran first');
+  } finally { env.close(); }
+});
+
 test('a change is announced as goal.updated, not as a new goal', () => {
   const t = translateHarnessGoal({ status: 'active', objective: 'v2' });
   assert.equal(t?.eventType, 'goal.updated');
