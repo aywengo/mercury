@@ -58,6 +58,13 @@ export interface Run {
   cancellationRequestedAt: string | null;
   finalCommits: string[];
   prUrl: string | null;
+  /**
+   * The harness version that executed this Run, and the raw string it printed
+   * (docs/goals.md 13.1). Absent on a server that predates the field, null when the probe
+   * produced nothing usable -- both render as "unknown", and neither may be shown as a version.
+   */
+  agentVersion?: string | null;
+  agentVersionRaw?: string | null;
 }
 
 export interface ResolvedSkill {

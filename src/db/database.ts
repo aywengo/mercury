@@ -150,6 +150,30 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX IF NOT EXISTS idx_run_goals_status ON run_goals(status);
   `,
+  // v7: record which harness actually executed each Run (docs/goals.md 13.1).
+  //
+  // "Store the resolved version on the Run so a later diagnosis knows what actually executed
+  // it." The design names the reason: issue #465 was hard to close because the fix was on `main`
+  // while the installed artifact was still broken, and nothing recorded which binary a given Run
+  // had talked to. The registry cache answers "what is installed now"; only the Run can answer
+  // "what ran then", and a server that restarts or an operator who upgrades mid-day changes the
+  // former without touching the latter.
+  //
+  // Both columns are nullable and stay null when the probe produced nothing. That is a real
+  // answer, not a gap: 13.7 requires "undetermined" to be representable and to render as itself,
+  // distinct from a version that was resolved. `agent_version_raw` is kept for the same reason
+  // the registry keeps it -- when a parse is wrong, the raw string is the only evidence of why.
+  //
+  // `agent_version_recorded` exists because "never written" and "probed, no answer" are both NULL
+  // in the two columns above and must behave differently: the first may be written, the second
+  // must not. A test written to prove "record once" against a bare NULL check found this -- that
+  // guard let a null be filled in from a later probe, which would have asserted that the binary
+  // had not changed while the Run was executing.
+  `
+  ALTER TABLE runs ADD COLUMN agent_version TEXT;
+  ALTER TABLE runs ADD COLUMN agent_version_raw TEXT;
+  ALTER TABLE runs ADD COLUMN agent_version_recorded INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

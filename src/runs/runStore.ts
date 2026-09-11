@@ -29,6 +29,9 @@ export interface RunRow {
   cancellation_requested_at: string | null;
   final_commits_json: string;
   pr_url: string | null;
+  agent_version: string | null;
+  agent_version_raw: string | null;
+  agent_version_recorded: number;
 }
 
 export function rowToRun(row: RunRow): Run {
@@ -55,6 +58,8 @@ export function rowToRun(row: RunRow): Run {
     cancellationRequestedAt: row.cancellation_requested_at,
     finalCommits: JSON.parse(row.final_commits_json) as string[],
     prUrl: row.pr_url,
+    agentVersion: row.agent_version_recorded ? row.agent_version : null,
+    agentVersionRaw: row.agent_version_recorded ? row.agent_version_raw : null,
   };
 }
 
@@ -326,6 +331,29 @@ export class RunStore {
     this.db
       .prepare('UPDATE runs SET final_commits_json = ?, pr_url = ? WHERE id = ?')
       .run(JSON.stringify(commits), prUrl, id);
+  }
+
+  /**
+   * Record which harness executed this Run, at most once (docs/goals.md 13.1).
+   *
+   * `WHERE agent_version IS NULL` is the whole design. The value describes the binary that ran,
+   * so a later probe must not overwrite it: if the operator upgraded mid-Run, the claim-time
+   * answer is the true one and the later one is a fact about a different Run. Probes are detached
+   * and may resolve after the first Run is claimed, which makes "don't overwrite" load-bearing
+   * rather than theoretical -- without it, a Run that recorded a real version could later be
+   * rewritten with whatever the harness reported minutes afterwards.
+   *
+   * A Run that recorded null stays null. Filling it in from a later probe would assert that the
+   * binary did not change while the Run was executing, which is exactly the thing this column
+   * exists to avoid guessing about.
+   */
+  setAgentVersion(id: string, version: string | null, raw: string | null): void {
+    this.db
+      .prepare(
+        `UPDATE runs SET agent_version = ?, agent_version_raw = ?, agent_version_recorded = 1
+         WHERE id = ? AND agent_version_recorded = 0`,
+      )
+      .run(version, raw, id);
   }
 
   requestCancellation(id: string): void {
