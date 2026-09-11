@@ -6,7 +6,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isTerminal, STUCK_CANDIDATE_STATUSES } from '../domain/stateMachine.ts';
-import { translateHarnessGoal, type HarnessGoalReport } from '../domain/goalEvents.ts';
+import { harnessMayRevise, translateHarnessGoal, type HarnessGoalReport } from '../domain/goalEvents.ts';
 import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts';
 import type { Redactor } from '../domain/redact.ts';
 import { isEventType } from '../domain/types.ts';
@@ -689,6 +689,26 @@ export class Worker {
     }
     if (translated.unrecognized !== undefined) {
       log.warn({ status: translated.unrecognized }, 'harness reported an unrecognised goal status');
+    }
+    const current = goals.get(run.id);
+    if (current && translated.patch.status !== undefined && !harnessMayRevise(current.status)) {
+      // The goal already has a final verdict. Keep the usage numbers -- they are still true --
+      // but refuse the status change, and say so in the event rather than dropping it silently.
+      log.warn(
+        { from: current.status, to: translated.patch.status },
+        'refusing to move a settled goal off its final status',
+      );
+      const usageOnly = { ...translated.patch, status: undefined };
+      tx(this.deps.db, () => {
+        goals.update(run.id, usageOnly, new Date().toISOString());
+        this.deps.events.append(run.id, ev.type, {
+          ...(ev.payload as Record<string, unknown>),
+          status: current.status,
+          ignoredStatus: translated.patch.status,
+          warning: `goal already settled as ${current.status}; the reported status was ignored`,
+        });
+      });
+      return;
     }
     // Mercury's own explanation of the report, when it differs from the harness's words. An
     // unrecognised status produces a `goal.error` whose raw payload contains nothing error-like,

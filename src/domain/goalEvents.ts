@@ -73,6 +73,26 @@ function text(value: unknown): string | undefined {
 }
 
 /**
+ * Goal statuses no harness report may move away from.
+ *
+ * Without this guard a report arriving after `complete` -- a late frame, a resumed session
+ * replaying its state, or any harness bug -- puts the row back to `active`. The Run then
+ * finishes, Phase 1's settlement sees `active`, and Mercury writes `unmet` over the harness's
+ * own `complete`. That is the one promise this whole feature exists to keep: Mercury never
+ * overwrites the harness's verdict with an inference.
+ *
+ * `paused`, `budget_limited` and `error` are deliberately NOT here. Those are recoverable -- a
+ * human resumes a paused goal, a budget is raised -- so a later report must be able to move
+ * them. Only genuinely final statuses are protected.
+ */
+export const TERMINAL_GOAL_STATUSES: ReadonlySet<string> = new Set(['complete', 'cancelled', 'unmet']);
+
+/** True when a harness report may change the status away from `current`. */
+export function harnessMayRevise(current: string): boolean {
+  return !TERMINAL_GOAL_STATUSES.has(current);
+}
+
+/**
  * Translate one harness goal report.
  *
  * Returns null when there is nothing to record: no status at all, or a status meaning "no goal

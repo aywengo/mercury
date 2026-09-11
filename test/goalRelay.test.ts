@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeEnv, tempDir, waitFor } from './helpers.ts';
-import { translateHarnessGoal, MERCURY_ONLY_GOAL_STATUSES } from '../src/domain/goalEvents.ts';
+import { translateHarnessGoal, harnessMayRevise, MERCURY_ONLY_GOAL_STATUSES } from '../src/domain/goalEvents.ts';
 import { EventTranslator } from '../src/adapters/eventTranslation.ts';
 import { GoalStore } from '../src/runs/goalStore.ts';
 import { createRedactor } from '../src/domain/redact.ts';
@@ -193,4 +193,67 @@ const env = makeEnv({
     const ev = env.events.list(run.id).find((e) => e.type === 'goal.error')!;
     assert.match(JSON.stringify(ev.payload), /unrecognized harness goal status/);
   } finally { env.close(); }
+});
+
+test('a late report cannot move a settled goal, and cannot make Mercury overwrite `complete`', async () => {
+  // The danger in full: harness says `complete`, a later frame says `active`, the Run finishes,
+  // and Phase 1's settlement sees `active` and writes `unmet` over the harness's own verdict.
+  // That is the one promise this feature exists to keep, so it is tested end to end rather than
+  // only at the predicate.
+  const repo = tempDir('mercury-goal-settle-');
+  const env = makeEnv({
+    workerEnabled: false,
+    fakeScript: [
+      { event: { type: 'goal.completed', payload: { ...base, status: 'complete', tokensUsed: 900 } } },
+      { event: { type: 'goal.updated', payload: { ...base, status: 'active', tokensUsed: 950 } } },
+    ],
+  });
+  try {
+    const run = seedGoal(env, repo);
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 10_000);
+    const g = env.goals.get(run.id)!;
+    assert.equal(g.status, 'complete', 'a late active report un-settled the goal');
+    assert.notEqual(g.status, 'unmet', 'Mercury overwrote the harness verdict');
+    // Usage still lands -- it is true even though the status was refused.
+    assert.equal(g.tokensUsed, 950);
+    const evs = env.events.list(run.id).filter((e) => e.type.startsWith('goal.'));
+    const ignored = evs.find((e) => JSON.stringify(e.payload).includes('ignoredStatus'));
+    assert.ok(ignored, 'the refusal was silent');
+    assert.match(JSON.stringify(ignored!.payload), /already settled as complete/);
+  } finally { env.close(); }
+});
+
+test('recoverable statuses can still move', async () => {
+  // `paused` and `budget_limited` are not final: a human resumes, a budget is raised. Refusing
+  // those would strand a goal that is genuinely still running.
+  const repo = tempDir('mercury-goal-resume-');
+  const env = makeEnv({
+    workerEnabled: false,
+    fakeScript: [
+      { event: { type: 'goal.paused', payload: { ...base, status: 'paused', lastReason: 'waiting' } } },
+      { event: { type: 'goal.updated', payload: { ...base, status: 'active', tokensUsed: 40 } } },
+      { event: { type: 'goal.budget_limited', payload: { ...base, status: 'budget_limited', tokensUsed: 60 } } },
+      { event: { type: 'goal.updated', payload: { ...base, status: 'active', tokensUsed: 80 } } },
+    ],
+  });
+  try {
+    const run = seedGoal(env, repo);
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 10_000);
+    // Every transition applied, so the last one before terminal wins...
+    const g = env.goals.get(run.id)!;
+    // ...and the Run then finished with the objective open, which is a legitimate `unmet`.
+    assert.equal(g.status, 'unmet');
+    assert.equal(g.tokensUsed, 80);
+  } finally { env.close(); }
+});
+
+test('harnessMayRevise protects exactly the final statuses', () => {
+  for (const s of ['complete', 'cancelled', 'unmet']) {
+    assert.equal(harnessMayRevise(s), false, `${s} was revivable`);
+  }
+  for (const s of ['active', 'paused', 'budget_limited', 'error']) {
+    assert.equal(harnessMayRevise(s), true, `${s} was frozen`);
+  }
 });
