@@ -8,6 +8,7 @@ deferred. Concretely, today:
 | shipped | not shipped |
 | --- | --- |
 | capability + version detection per agent (Phase 0a), with per-field goal capability | gate OUTCOME events -- no harness reports them, so there is no emitter (Phase 4b) |
+| `GET /api/runs/:id/goal` and `POST /api/runs/:id/goal/cancel`; `cancelled` finally has a writer | |
 | `run_goals` table, `GoalSpec` validation, `goal.*` event types | Hermes goals (Phase 5, blocked upstream) |
 | `POST /api/runs` accepts `goal`, refused unless the agent can track it | budget enforcement (Phase 6, deferred pending real usage data) |
 | `goal.unmet` when a Run ends with the objective still open, and `mercury_goals_in_status` | |
@@ -456,6 +457,19 @@ GET  /api/runs/:id/goal      -> { goal: GoalState }        (404 when absent)
 POST /api/runs/:id/goal/cancel -> { goal: GoalState }      (operator override)
 ```
 
+`GET /api/runs/:id` also returns the goal, as a **sibling** of `run`, and `GET /api/runs`
+returns a parallel `goals` map keyed by run id. Those are the endpoints a renderer should use:
+the dedicated `/:id/goal` returns the goal on its own and therefore cannot show a Run status next
+to a goal status, which is the pairing section 4 exists to make visible. It is kept for callers
+that need only the goal.
+
+Cancel is the only goal mutation, and the only writer of `cancelled`. That status sits in
+`MERCURY_ONLY_GOAL_STATUSES`, so a harness reporting it is refused -- which meant that until this
+route existed nothing whatsoever could set it, while the status, the `goal.cancelled` event, the
+dashboard badge and the CLI colour were all live. A goal already carrying a verdict (`complete`,
+`unmet`, `cancelled`) is a 409 rather than a silent no-op, because those are the records the
+feature exists to keep.
+
 Deliberately **no** `POST /api/runs/:id/goal/complete`. Only the harness may declare an
 objective met; an operator override would put a Mercury-originated `complete` in the
 same field as a harness judgement, and the two would become unreadable apart. An
@@ -583,6 +597,20 @@ reproduced inside the feature built to prevent it, and it is worse than silently
 field, because the operator sees gates that nothing will run while the Run sails to COMPLETED.
 Every goal field is now resolved against its own matrix entry.
 
+**Phase 4c — operator cancel.**
+Not in the original phase plan; it came out of auditing the implementation against this document.
+`POST /api/runs/:id/goal/cancel` was in section 8 from the start, and `cancelled` was in
+`GoalStatus`, in the event table, in the dashboard and in the CLI -- but nothing wrote it, and
+`MERCURY_ONLY_GOAL_STATUSES` forbids a harness from writing it either. The feature was documented
+and rendered and unreachable.
+
+Cancel is the one mutation section 12 permits an operator. It forbids replacing an objective and
+forbids an operator-authored `complete`, because both would put a Mercury-originated judgement
+where only the harness may speak. Dropping a goal asserts nothing about whether the work was
+done. It does prevent `unmet`, which is a claim the harness fell short -- and an operator who
+stopped tracking deliberately has not earned that record. So a cancelled goal survives its Run
+finishing, which is asserted directly rather than assumed.
+
 **Phase 5 — Hermes.**
 Blocked on section 7. Option (a) preferred; option (b) as an opt-in experiment if the
 need is real. Until then the `400` stays, because a silently ignored goal is the #459
@@ -603,6 +631,7 @@ settled.
 | 3 | 1, 2 | dashboard, `mercuryctl`, SSE | — |
 | 4a | 0 | gate specs validated, refused per-field, persisted, rendered as a spec | — |
 | 4b | 4a, 2 | gate outcome events | no harness reports gate outcomes (13.2 matrix); Hermes goals (Phase 5) |
+| 4c | 0, 1 | operator goal cancel -- the only writer of `cancelled` | — |
 | 5 | 2 | Hermes goals | upstream `--goal` on `chat`, or a scoped kanban route |
 | 6 | 2 | `budgetTokens` enforcement (issue #63) | real per-run usage data |
 
