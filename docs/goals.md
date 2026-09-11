@@ -271,8 +271,13 @@ export interface GoalGate {
 }
 
 export interface GoalSpec {
-  objective: string;              // required, non-empty; 4000-char cap matches
-                                  // PrimeAgent's MAX_THREAD_GOAL_OBJECTIVE_CHARS
+  /** Omitted or empty means "the Run's `task` is the objective" -- see section 13.
+   *  Resolved at creation, so `GoalState.objective` is always non-empty and the
+   *  4000-char cap applies to the resolved value (it matches PrimeAgent's
+   *  MAX_THREAD_GOAL_OBJECTIVE_CHARS). A task longer than the cap with no explicit
+   *  objective is a 400, not a silent truncation: a truncated objective is a
+   *  different objective. */
+  objective?: string;
   contract?: GoalContract;
   gates?: GoalGate[];
   tokenBudget?: number;           // positive integer; absent = unbounded. PrimeAgent
@@ -415,8 +420,9 @@ POST /api/runs
   { task, repository, agent, skills?,
     goal?: { objective, contract?, gates?, tokenBudget?, maxTurns? } }
   -> 201 { runId, status }
-  400 when: objective empty/oversized; gate timeoutMs missing or non-positive;
-      goal supplied for an agent with no goal support (see section 7)
+  400 when: resolved objective (explicit, else the task) exceeds 4000 chars;
+      gate timeoutMs missing or non-positive; goal supplied for an agent with no
+      goal support (see section 7)
 
 GET  /api/runs/:id/goal      -> { goal: GoalState }        (404 when absent)
 POST /api/runs/:id/goal/cancel -> { goal: GoalState }      (operator override)
@@ -449,6 +455,13 @@ the difference earns its keep.
 **Fleet** proxies goal endpoints to the host rather than owning a second store, for the
 same reason Crew templates do: otherwise the host that executed the Run stops being the
 authority on what it executed.
+
+`paused` surfaces in Fleet as an **alert requiring human interaction**, not as another
+cell in a status column. It is the one goal status that means a named human has
+something to do, and a status that only changes the colour of a row nobody is reading is
+a queue that silently stops making progress. The alert carries the Run id, the objective,
+and `pausedReason`, because "why" is the first thing the responder asks and making them
+open the Run to get it costs a round trip per incident.
 
 ## 9. Budgets: the thing that could actually be enforced
 
@@ -492,8 +505,11 @@ byte-identical to today; a goal for an unsupported agent is a `400` naming the r
 Worker finalisation appends `goal.unmet` when a Run reaches a terminal status with the
 goal still `active`. This is the highest value per line in the whole design: it needs
 no harness cooperation, works for every adapter, and it is the row that today cannot be
-expressed. Ship it and look at real Runs before building more — if almost nothing ever
-goes `unmet`, the feature is answering a question nobody asked.
+expressed. Ship it and measure before building more. The measurement is part of the phase, not an
+afterthought: expose a `mercury_goal_unmet_total` counter alongside the existing
+[`/metrics`](operations.md#metrics) projections so the answer is one query rather than a manual
+sweep. If `unmet` is rare the display work is still worth it; if it never fires, the
+feature is decoration and Phase 3 should not be funded.
 
 **Phase 2 — PrimeAgent end to end.**
 `PrimeAgentAdapter` passes `--goal` / `--goal-token-budget`; translates `goal_update`
@@ -541,6 +557,11 @@ is a small change to the finalisation path.
   level objectives belong to [`crew/teams.md`](crew/teams.md) if they belong anywhere.
 - **No cross-Run goals.** A goal lives and dies with its Run; retry gets its own.
 - **No goal-based scheduling or placement.** That is Crew's job.
+- **No goals on Crew templates.** A template carries persona -- who the agent is, how it
+  behaves. An objective is the work a specific Run was asked to do. Putting a goal on a
+  template would mean every Run from it inherits the same objective, which is almost
+  never what a reusable persona means, and it would make the objective invisible to the
+  person starting the Run. Goals are per-Run only.
 - **No operator-initiated goal mutation.** The harness may replace the objective itself
   (PrimeAgent's `objective_updated`); Mercury records that but never originates it.
 - **No operator-authored `complete`.**
@@ -549,14 +570,41 @@ is a small change to the finalisation path.
   stopped judging; `NEEDS_INPUT` is the agent asking the operator a question. Folding
   them together would make both unreadable.
 
-## 13. Open questions
+## 13. Decisions and remaining questions
 
-1. **Does `unmet` fire often enough to matter?** Measure after Phase 1 before funding
-   Phase 3. If it is rare, the display work is still worth it; if it never fires, the
-   feature is decoration.
-2. **Should `objective` default to `task`?** Convenience against the risk of implying a
-   judgement was made when only an instruction was given.
-3. **How should `paused` surface in Fleet's aggregate views** — as a Run state, a goal
-   state, or an alert? It is the one status that implies a human should act.
-4. **Does a goal belong on a Crew template?** Templates carry persona; an objective is
-   per-Run work. Probably no, but the boundary should be stated rather than assumed.
+### Decided
+
+**`objective` defaults to the Run's `task`.** Supplying `goal: {}` means "track whether
+the task was achieved", which is the common case and should not require restating the
+task. The risk weighed against this was implying a judgement had been made when only an
+instruction was given; it does not apply, because the caller still opts in by sending
+`goal`, and the judgement remains the harness's. The resolved value is stored, so
+`GoalState.objective` is never empty and a reader can always see what was actually
+judged.
+
+**`paused` is a Fleet alert requiring human interaction**, not a status cell. Reasoning in
+[section 8](#8-api).
+
+**No goals on Crew templates.** Templates carry persona; objectives are per-Run work.
+Reasoning in [section 12](#12-non-goals).
+
+### Still open
+
+**Does `unmet` fire often enough to matter?** Needs investigation, and Phase 1 now ships
+the counter that answers it rather than leaving the question to anecdote.
+
+Two further questions surfaced while checking the capability surface, and unlike these
+they block implementation rather than funding:
+
+1. **Where does goal capability come from?** `GET /api/agents` returns bare strings, so
+   neither the UI nor `mercuryctl` can know which agents accept a goal. It cannot be
+   derived from the agent id either: `primeagent` resolves to `PrimeAgentAdapter` or
+   `DaemonAgentAdapter` on `MERCURY_AGENT_MODE`, and only the former has any goal path.
+   Three of the eight adapters (`LocalAgentAdapter`, `RpcAgentAdapter`,
+   `RemoteAgentAdapter`) are declarative-config adapters whose whole purpose is adding
+   agents without per-agent code, so a hardcoded per-class capability flag would leave
+   them permanently unable to declare support.
+2. **When must `unmet` NOT fire?** A Run cancelled or timed out before the worker claimed
+   it never started its goal. Emitting `unmet` there is noise, and noise on the single
+   signal Phase 1 exists to produce would discredit the feature before the counter in
+   section 10 could be trusted.
