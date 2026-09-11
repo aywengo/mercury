@@ -128,10 +128,26 @@ export interface GoalSummary {
  * Full persisted goal state. Mirrors the host's `GoalState`; `objective` is what Mercury
  * stored (validated and redacted at admission), not whatever the harness echoed back.
  */
+/**
+ * A deterministic gate the harness was asked to run at turn boundaries. Mercury records the
+ * spec and never executes it (docs/goals.md 5), so this is a statement of what the harness was
+ * expected to check -- not evidence that anything was checked.
+ */
+export interface GoalGate {
+  command: string;
+  timeoutMs: number;
+  maxRetries: number;
+}
+
 export interface GoalState {
   runId: string;
   status: GoalStatus;
   objective: string;
+  /**
+   * Declared gates, in the order they were requested. Absent means none were requested; an
+   * empty array is normalised away server-side, so both read as "no gates".
+   */
+  gates?: GoalGate[];
   tokenBudget?: number;
   tokensUsed?: number;
   timeUsedSeconds?: number;
@@ -397,6 +413,7 @@ function parseGoal(value: unknown): GoalState {
     status: status as GoalStatus,
     objective: reqString(o.objective, 'goal.objective', 'goal'),
     updatedAt: reqString(o.updatedAt, 'goal.updatedAt', 'goal'),
+    ...(parseGoalGates(o.gates).length > 0 ? { gates: parseGoalGates(o.gates) } : {}),
     ...(typeof o.tokenBudget === 'number' ? { tokenBudget: o.tokenBudget } : {}),
     ...(typeof o.tokensUsed === 'number' ? { tokensUsed: o.tokensUsed } : {}),
     ...(typeof o.timeUsedSeconds === 'number' ? { timeUsedSeconds: o.timeUsedSeconds } : {}),
@@ -406,6 +423,29 @@ function parseGoal(value: unknown): GoalState {
     ...(typeof o.pausedReason === 'string' ? { pausedReason: o.pausedReason } : {}),
     ...(o.source === 'harness' || o.source === 'operator' ? { source: o.source } : {}),
   };
+}
+
+/**
+ * Gate specs are caller-supplied text that comes back around, so they are parsed rather than
+ * passed through: a `command` that is not a string would otherwise reach a terminal or an
+ * innerHTML sink unchecked. A malformed gate is rejected outright instead of skipped, because a
+ * silently shortened gate list would understate what the harness was asked to enforce.
+ */
+function parseGoalGates(value: unknown): GoalGate[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new ProtocolError('goal.gates must be an array');
+  return value.map((g, i) => {
+    const at = `goal.gates[${i}]`;
+    const o = asObject(g, at);
+    const command = reqString(o.command, `${at}.command`, at);
+    if (typeof o.timeoutMs !== 'number' || !Number.isFinite(o.timeoutMs)) {
+      throw new ProtocolError(`${at}.timeoutMs must be a finite number`);
+    }
+    if (typeof o.maxRetries !== 'number' || !Number.isFinite(o.maxRetries)) {
+      throw new ProtocolError(`${at}.maxRetries must be a finite number`);
+    }
+    return { command, timeoutMs: o.timeoutMs, maxRetries: o.maxRetries };
+  });
 }
 
 export function parseEvent(value: unknown): MercuryEvent {

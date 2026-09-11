@@ -42,8 +42,22 @@ export function numericCore(raw: string): number[] {
   return m[0].split('.').map((n) => Number.parseInt(n, 10));
 }
 
+/** The individual things Mercury may want to do with a goal. */
+export type GoalCapabilityField =
+  | 'set' | 'track' | 'tokenBudget' | 'contract' | 'gates' | 'maxTurns';
+
+/** Every field, in matrix order. One list so the registry and any future surface agree. */
+export const GOAL_CAPABILITY_FIELDS: readonly GoalCapabilityField[] = [
+  'set', 'track', 'tokenBudget', 'contract', 'gates', 'maxTurns',
+];
+
 /**
- * Decide whether Mercury can set a goal on this agent right now.
+ * Decide whether Mercury can do `field` with a goal on this agent right now.
+ *
+ * `field` defaults to `set`, which is the question "can this agent carry a goal at all".
+ * The other fields answer a different and equally load-bearing question: whether a
+ * particular PART of the goal spec means anything to this backend. See
+ * resolveGoalFieldCapability.
  *
  * The ordering is the whole point and each branch is load-bearing:
  *
@@ -62,8 +76,9 @@ export function numericCore(raw: string): number[] {
 export function resolveGoalCapability(
   support: AgentGoalSupport | undefined,
   info: AgentVersionInfo | null,
+  field: GoalCapabilityField = 'set',
 ): AgentGoalCapability {
-  const required = support?.set;
+  const required = support?.[field];
   if (!required) {
     return { supported: false, reason: 'unsupported', detectedVersion: info?.version ?? null, detectedRaw: info?.raw ?? null };
   }
@@ -90,6 +105,28 @@ export function resolveGoalCapability(
 }
 
 /**
+ * Decide whether one specific goal field means anything to this backend.
+ *
+ * This exists because `set` answering yes does NOT imply the rest do. PrimeAgent carries an
+ * objective and reports its status, and has no concept of a deterministic gate or a
+ * verification contract at all (docs/goals.md 13.2). Before this function, admission asked
+ * only about `set`, so `goal.gates` was accepted, persisted, and rendered on a Run whose
+ * harness will never evaluate it -- which is the issue #459 failure mode (advertise a
+ * capability nobody honours) reproduced inside the feature built to prevent it.
+ *
+ * Persisting a field is worse than dropping it here: dropping is invisible, persisting and
+ * rendering it shows an operator a list of gates that nothing will ever run, and the Run
+ * still reaches COMPLETED. The honest answer is a 400 naming the field.
+ */
+export function resolveGoalFieldCapability(
+  support: AgentGoalSupport | undefined,
+  info: AgentVersionInfo | null,
+  field: GoalCapabilityField,
+): AgentGoalCapability {
+  return resolveGoalCapability(support, info, field);
+}
+
+/**
  * Human-facing reason string. Names the threshold and the detected version, because
  * "unsupported" without either is not actionable -- the operator cannot tell whether to
  * upgrade the harness, fix the probe, or drop the goal.
@@ -105,5 +142,39 @@ export function goalCapabilityMessage(agent: string, cap: AgentGoalCapability): 
       return `goal requires ${agent} >= ${cap.requiredVersion}; detected ${cap.detectedVersion}`;
     default:
       return `${agent} does not support goals`;
+  }
+}
+/** How each field reads in a 400. `goal.gates` alone is terse; naming the concept tells the
+ *  operator what to look for in their harness's documentation. */
+const FIELD_LABEL: Record<GoalCapabilityField, string> = {
+  set: 'goal',
+  track: 'goal tracking',
+  tokenBudget: 'goal.tokenBudget',
+  contract: 'goal.contract',
+  gates: 'goal.gates',
+  maxTurns: 'goal.maxTurns',
+};
+
+/**
+ * Reason string for a rejected goal FIELD. Distinct from goalCapabilityMessage because the
+ * question differs: there it is "can this agent carry a goal", here it is "does this part of
+ * your goal mean anything to it". The answer must name the field, or the caller narrows the
+ * wrong thing and retries with the same gates.
+ */
+export function goalFieldCapabilityMessage(
+  agent: string,
+  field: GoalCapabilityField,
+  cap: AgentGoalCapability,
+): string {
+  const label = FIELD_LABEL[field];
+  switch (cap.reason) {
+    case 'version-unknown':
+      return `${label} requires ${agent} >= ${cap.requiredVersion}; the installed version could not be determined`;
+    case 'version-too-old':
+      return `${label} requires ${agent} >= ${cap.requiredVersion}; detected ${cap.detectedVersion}`;
+    default:
+      // `unsupported` is a statement about the backend, not a transient probe failure, so it
+      // is worth saying plainly that retrying will not help.
+      return `${label} is not supported by ${agent} (it has no equivalent concept that reports back to Mercury)`;
   }
 }

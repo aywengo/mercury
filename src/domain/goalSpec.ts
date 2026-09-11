@@ -5,7 +5,7 @@
  * has to be testable without a database, a harness, or a worker.
  */
 
-import { MAX_GOAL_OBJECTIVE_CHARS } from './types.ts';
+import { MAX_GOAL_GATE_TIMEOUT_MS, MAX_GOAL_OBJECTIVE_CHARS } from './types.ts';
 import type { GoalContract, GoalGate, GoalSpec } from './types.ts';
 
 export class GoalValidationError extends Error {
@@ -89,7 +89,13 @@ export function resolveGoalSpec(input: unknown, task: string): ResolvedGoalSpec 
 
   if (raw.gates !== undefined && raw.gates !== null) {
     if (!Array.isArray(raw.gates)) throw new GoalValidationError('goal.gates must be an array');
-    out.gates = raw.gates.map((g, i) => validateGate(g, i));
+    const gates = raw.gates.map((g, i) => validateGate(g, i));
+    // An empty list is normalised away, matching the contract handling below. `gates: []` asks
+    // for no gates, which is the same request as omitting the field -- and leaving `[]` in the
+    // resolved spec would make capability admission refuse a caller who asked for nothing, while
+    // the identical caller who omitted the field got through. That asymmetry has no meaning to
+    // hang on the request, and it would also store `[]` where null already means the same thing.
+    if (gates.length > 0) out.gates = gates;
   }
 
   if (raw.tokenBudget !== undefined && raw.tokenBudget !== null) {
@@ -127,6 +133,14 @@ function validateGate(input: unknown, index: number): GoalGate {
   }
   if (typeof g.timeoutMs !== 'number' || !Number.isFinite(g.timeoutMs) || g.timeoutMs <= 0) {
     throw new GoalValidationError(`${at}.timeoutMs must be a positive number`);
+  }
+  if (g.timeoutMs > MAX_GOAL_GATE_TIMEOUT_MS) {
+    // Positive is not the same as bounded. See MAX_GOAL_GATE_TIMEOUT_MS for why the ceiling
+    // is the point of the field rather than a detail of it.
+    throw new GoalValidationError(
+      `${at}.timeoutMs is ${g.timeoutMs}ms, over the ${MAX_GOAL_GATE_TIMEOUT_MS}ms ceiling `
+      + '(a gate that may run indefinitely is indistinguishable from a hung one)',
+    );
   }
   if (typeof g.maxRetries !== 'number' || !Number.isInteger(g.maxRetries) || g.maxRetries < 0) {
     throw new GoalValidationError(`${at}.maxRetries must be a non-negative integer`);

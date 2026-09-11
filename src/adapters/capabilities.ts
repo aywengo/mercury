@@ -15,12 +15,13 @@
  * every harness upgrade until a parser caught up.
  */
 
-import { resolveGoalCapability } from '../domain/goalSupport.ts';
+import { GOAL_CAPABILITY_FIELDS, resolveGoalCapability } from '../domain/goalSupport.ts';
 import type {
   AgentAdapter,
   AgentCapabilitySummary,
   AgentGoalCapability,
   AgentVersionInfo,
+  GoalCapabilityField,
 } from '../domain/types.ts';
 
 export class AgentCapabilityRegistry {
@@ -72,7 +73,22 @@ export class AgentCapabilityRegistry {
   goalCapability(agent: string): AgentGoalCapability | null {
     const adapter = this.adapters[agent];
     if (!adapter) return null;
-    return resolveGoalCapability(adapter.capabilities.goals, this.detected.get(agent) ?? null);
+    const info = this.detected.get(agent) ?? null;
+    const goals = resolveGoalCapability(adapter.capabilities.goals, info);
+    // Resolve every field, not just `set`. Admission needs to refuse `goal.gates` on a backend
+    // that has no gate concept, and the answer comes from the same matrix and the same detected
+    // version -- computing it here keeps one snapshot consistent, so a probe landing between two
+    // reads cannot make `set` look new and `gates` look old.
+    const fields: Partial<Record<GoalCapabilityField, AgentGoalCapability>> = {};
+    for (const field of GOAL_CAPABILITY_FIELDS) {
+      fields[field] = resolveGoalCapability(adapter.capabilities.goals, info, field);
+    }
+    return { ...goals, fields };
+  }
+
+  /** Resolution for one goal field. Null when the agent is not registered. */
+  goalFieldCapability(agent: string, field: GoalCapabilityField): AgentGoalCapability | null {
+    return this.goalCapability(agent)?.fields?.[field] ?? null;
   }
 
   snapshot(): Record<string, AgentCapabilitySummary> {

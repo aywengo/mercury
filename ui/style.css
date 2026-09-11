@@ -165,3 +165,11 @@ h2.section { font-size: 14px; text-transform: uppercase; letter-spacing: 0.6px; 
 .toast.error { border-color: var(--red); color: var(--red); }
 .toast.ok { border-color: var(--green); color: var(--green); }
 .hidden { display: none !important; }
+
+/* Declared gate specs. Monospace command, dimmed metadata, no pass/fail colour anywhere:
+   these are what the harness was ASKED to enforce, never a result, and any styling that reads
+   as a verdict would put words in Mercury's mouth (docs/goals.md 12, non-goals). */
+.goal-gates { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.goal-gates li { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.goal-gates code { font-family: var(--mono, ui-monospace, monospace); font-size: 12px; word-break: break-all; }
+.gate-meta { opacity: 0.65; font-size: 11px; }

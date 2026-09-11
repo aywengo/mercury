@@ -28,6 +28,7 @@ export interface UiGoal {
   status: UiGoalStatus;
   objective?: string;
   source?: string;
+  gates?: UiGoalGate[];
 }
 
 /**
@@ -35,6 +36,20 @@ export interface UiGoal {
  * server predates goals, a missing key means the run has no goal. Both render, differently.
  */
 export function goalBadge(goals: Record<string, UiGoalStatus> | undefined, runId: string): string;
+
+/** A declared gate spec. Mercury records these and never runs them. */
+export interface UiGoalGate {
+  command: string;
+  timeoutMs: number;
+  maxRetries: number;
+}
+
+/**
+ * Gate specs as escaped markup for the run page. Returns '' when there is nothing to say -- no
+ * goal, or a goal with no gates -- so the caller can hide the row entirely. Renders the SPEC and
+ * never an outcome: no pass/fail styling, because Mercury does not execute gates.
+ */
+export function goalGatesHtml(goal: ({ gates?: UiGoalGate[] } & Record<string, unknown>) | null | undefined): string;
 
 /** Badge text/class/title for the run page. Same three states as goalBadge. */
 export function goalLabel(goal: UiGoal | null | undefined): { text: string; cls: string; title: string };
