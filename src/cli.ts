@@ -125,7 +125,7 @@ async function main(): Promise<void> {
 
   const db = openDatabase(config.dbPath);
   const events = new EventStore(db, redactor);
-  const goals = new GoalStore(db);
+  const goals = new GoalStore(db, redactor);
   // A Run reaching a terminal status settles any goal the harness never closed, in the same
   // transaction as the status write. Hooked at the one place every status change goes through
   // so no exit route has to remember it (see RunStoreHooks and goalSettlement.ts).
@@ -264,6 +264,7 @@ async function main(): Promise<void> {
       workspace,
       adapters,
       runService,
+      goals,
       logger,
       workerId,
       leaseMs: config.leaseMs,

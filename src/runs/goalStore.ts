@@ -7,7 +7,8 @@
  */
 
 import type { DatabaseSync } from 'node:sqlite';
-import type { GoalContract, GoalGate, GoalState, GoalStatus } from '../domain/types.ts';
+import type { Redactor } from '../domain/redact.ts';
+import type { GoalContract, GoalGate, GoalPatch, GoalState, GoalStatus } from '../domain/types.ts';
 
 interface GoalRow {
   run_id: string;
@@ -55,26 +56,32 @@ function rowToGoal(row: GoalRow): GoalState {
   };
 }
 
-/** Fields a caller may change after creation. `objective` is absent on purpose: Mercury
- *  never rewrites an objective, it records one the harness replaced. */
-export interface GoalPatch {
-  status?: GoalStatus;
-  objective?: string;
-  tokensUsed?: number;
-  timeUsedSeconds?: number;
-  turnsUsed?: number;
-  lastVerdict?: GoalState['lastVerdict'];
-  lastReason?: string;
-  lastError?: string;
-  pausedReason?: string;
-  source?: 'harness' | 'operator';
-}
-
 export class GoalStore {
   private db: DatabaseSync;
+  private redactor: Redactor | null;
 
-  constructor(db: DatabaseSync) {
+  /**
+   * `redactor` is optional for the same reason EventStore takes one optionally: a caller with
+   * no configured secrets has nothing to redact. Production always passes one.
+   */
+  constructor(db: DatabaseSync, redactor?: Redactor) {
     this.db = db;
+    this.redactor = redactor ?? null;
+  }
+
+  /**
+   * Sanitise agent-controlled text before it reaches a row.
+   *
+   * Order matters: redact FIRST, then bound. Bounding first can cut a secret in half and leave
+   * the tail looking innocuous, and redaction can only shorten, so the cap still holds after.
+   *
+   * This is not redundant with EventStore's redaction. Goal text is written straight to
+   * `run_goals` here and never passes through the event path, so without this a credential in
+   * harness `lastReason` would sit unredacted in a column that the dashboard and CLI read.
+   */
+  private sanitize(text: string | undefined | null): string | null {
+    if (text === undefined || text === null) return null;
+    return bound(this.redactor ? this.redactor.redact(text) : text);
   }
 
   insert(goal: GoalState): void {
@@ -126,9 +133,9 @@ export class GoalStore {
       timeUsedSeconds: patch.timeUsedSeconds ?? existing.timeUsedSeconds,
       turnsUsed: patch.turnsUsed ?? existing.turnsUsed,
       lastVerdict: patch.lastVerdict ?? existing.lastVerdict,
-      lastReason: patch.lastReason !== undefined ? bound(patch.lastReason) ?? undefined : existing.lastReason,
-      lastError: patch.lastError !== undefined ? bound(patch.lastError) ?? undefined : existing.lastError,
-      pausedReason: patch.pausedReason !== undefined ? bound(patch.pausedReason) ?? undefined : existing.pausedReason,
+      lastReason: patch.lastReason !== undefined ? this.sanitize(patch.lastReason) ?? undefined : existing.lastReason,
+      lastError: patch.lastError !== undefined ? this.sanitize(patch.lastError) ?? undefined : existing.lastError,
+      pausedReason: patch.pausedReason !== undefined ? this.sanitize(patch.pausedReason) ?? undefined : existing.pausedReason,
       source: patch.source ?? existing.source,
       updatedAt: now,
     };

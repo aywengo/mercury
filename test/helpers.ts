@@ -77,7 +77,7 @@ export function makeEnv(opts: {
   // Mirror the production composition root (src/cli.ts): a terminal Run settles an abandoned
   // goal. Tests must exercise the same wiring the deployed system uses, or they prove nothing
   // about the exit routes they are meant to cover.
-  const goals = new GoalStore(db);
+  const goals = new GoalStore(db, opts.redactor);
   const runs = new RunStore(db, {
     onTerminalTransition: (run, to) => settleGoalOnTerminal({ goals, events }, run, to),
   });
@@ -134,6 +134,7 @@ export function makeEnv(opts: {
     workspace,
     adapters,
     runService,
+    goals,
     logger: captureLogger ?? logger,
     backlogAlertThreshold: opts.backlogAlertThreshold,
     backlogCheckIntervalMs: opts.backlogCheckIntervalMs,

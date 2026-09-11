@@ -1,19 +1,20 @@
 # Goals: setting objectives on a Run and tracking whether they were met
 
-**Status: partially implemented.** Phases 0a, 0 and 1 are shipped; Phases 2-4 are
+**Status: partially implemented.** Phases 0a, 0, 1 and 2 are shipped; Phases 3-4 are
 not; Phase 5 is blocked upstream and Phase 6 is deferred. Concretely, today:
 
 | shipped | not shipped |
 | --- | --- |
-| capability + version detection per agent (Phase 0a) | anything telling you a harness made progress toward a goal (Phase 2) |
-| `run_goals` table, `GoalSpec` validation, `goal.*` event types | goal status in the dashboard, CLI or SSE timeline (Phase 3) |
-| `POST /api/runs` accepts `goal`, refused unless the agent can track it | gate evaluation or gate events (Phase 4) |
-| `goal.unmet` when a Run ends with the objective still open, and `mercury_goals_in_status` | Hermes goals (Phase 5, blocked), budget enforcement (Phase 6, deferred) |
+| capability + version detection per agent (Phase 0a) | goal status in the dashboard, CLI or SSE timeline (Phase 3) |
+| `run_goals` table, `GoalSpec` validation, `goal.*` event types | gate evaluation or gate events (Phase 4) |
+| `POST /api/runs` accepts `goal`, refused unless the agent can track it | Hermes goals (Phase 5, blocked), budget enforcement (Phase 6, deferred) |
+| `goal.unmet` when a Run ends with the objective still open, and `mercury_goals_in_status` | |
+| PrimeAgent seeded with `--goal` / `--goal-token-budget`, and its `goal_update` reports relayed into the row and the timeline (Phase 2) | |
 
-So a goal can be **set, validated, refused, and closed** — and nothing yet reports
-progress while the Run is in flight. `unmet` is the only status Mercury originates;
-every other status is a harness report, and no adapter relays one yet. Read Phase 2
-as the difference between a goal that is recorded and a goal that is tracked.
+A goal is now **set, refused, tracked while the Run runs, and closed when the Run ends**.
+What is missing is anywhere to look: the state is correct and persisted, and Phase 3 is
+what surfaces it. `unmet` is the only status Mercury originates; every other status is a
+harness report relayed verbatim.
 
 **Scope:** the host. Fleet's role is covered in [API](#8-api) and is deliberately
 thin.
