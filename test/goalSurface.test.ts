@@ -133,6 +133,25 @@ test('goalLabel keeps the run page badge distinct from the status badge', () => 
   assert.match(goalLabel({ status: 'complete' }).text, /^goal: /);
 });
 
+test('an unmet goal that never started reads differently from one that ran', () => {
+  // Issue #489. Both are genuinely unmet, but one is the signal and the other is a Run that died
+  // before the harness received the objective. Rendered identically, a routine infrastructure
+  // failure carries the same weight as the pair this feature exists to expose.
+  const ran = goalLabel({ status: 'unmet', attempted: true });
+  const never = goalLabel({ status: 'unmet', attempted: false });
+  assert.notEqual(never.text, ran.text, 'never-started reads the same as attempted');
+  assert.match(never.text, /never started/);
+  assert.notEqual(never.cls, ran.cls, 'never-started is styled identically');
+  assert.match(never.cls, /goal-unattempted/);
+  // The distinction is stated, not hidden behind a hover.
+  assert.match(never.title, /terminal status before the harness/);
+
+  // Absent means no answer, and must not be read as "never started" -- that would relabel every
+  // unsettled goal on the dashboard.
+  assert.equal(goalLabel({ status: 'unmet' }).cls, 'goal-unmet');
+  assert.equal(goalLabel({ status: 'unmet', attempted: undefined }).cls, 'goal-unmet');
+});
+
 test('the run page renders goal status BESIDE run status, and never instead of it', () => {
   // The rendering rule is a requirement, not polish. Asserted on the markup and the renderer
   // together: an element that exists but is never filled is as bad as one that was never added.

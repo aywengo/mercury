@@ -174,6 +174,24 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE runs ADD COLUMN agent_version_raw TEXT;
   ALTER TABLE runs ADD COLUMN agent_version_recorded INTEGER NOT NULL DEFAULT 0;
   `,
+  // v8: make "never attempted" separable from "attempted and stopped short" on aggregate
+  // surfaces (issue #489).
+  //
+  // Phase 1 settled every terminal Run's goal to `unmet` and put the never-started distinction
+  // in the event payload only. That left the sole aggregate surface -- mercury_goals_in_status --
+  // counting a Run cancelled while QUEUED, and a Run that died in workspace setup before the
+  // harness ever received the goal, in the same bucket as the pair the whole feature exists to
+  // expose: COMPLETED with the objective never declared met. docs/goals.md 14 predicted exactly
+  // this ("noise on the single signal Phase 1 exists to produce would discredit the feature").
+  //
+  // NULL rather than NOT NULL DEFAULT 0, and the difference is load-bearing. A goal that has not
+  // been settled yet has no answer to "was it attempted" -- defaulting it to 0 would read every
+  // live goal as never-started, which is the same class of error as coercing an unreported
+  // tokensUsed to zero. 1 means the Run reached RUNNING, 0 means it reached a terminal status
+  // without ever getting there.
+  `
+  ALTER TABLE run_goals ADD COLUMN attempted INTEGER;
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

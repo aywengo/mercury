@@ -22,7 +22,10 @@ import type { CommandContext } from './context.ts';
  */
 function goalLines(response: RunDetailResponse, color: (c: ColorName, s: string) => string): string[] {
   const goal = response.goal;
-  const field = (label: string, value: string): string => `${color('dim', label.padEnd(12))}${value}`;
+  // 14, not 12: `goal started` is 12 characters, so a pad equal to the longest label emitted
+  // `goal startednever -- ...` with no separator at all. The width has to exceed the longest label
+  // that can reach it, not equal it.
+  const field = (label: string, value: string): string => `${color('dim', label.padEnd(14))}${value}`;
   if (goal === undefined) {
     return [field('goal', color('dim', 'unknown (server does not report goals)'))];
   }
@@ -40,6 +43,13 @@ function goalLines(response: RunDetailResponse, color: (c: ColorName, s: string)
   if (goal.turnsUsed !== undefined) lines.push(field('goal turns', String(goal.turnsUsed)));
   for (const line of goalGateLines(goal.gates, field, color)) {
     lines.push(line);
+  }
+  // `unmet` alone does not say whether the harness ever held the objective, and the two cases want
+  // opposite reactions: one is "the agent finished and never claimed success", the other is
+  // "nothing ran at all" (issue #489). Said only when it is false, so the common reading stays
+  // quiet and the surprising case is the one that takes up a line.
+  if (goal.status === 'unmet' && goal.attempted === false) {
+    lines.push(field('goal started', color('yellow', 'never -- the harness never received the objective')));
   }
   if (goal.pausedReason) lines.push(field('goal paused', sanitizeForTerminal(goal.pausedReason)));
   if (goal.lastError) lines.push(field('goal error', color('red', sanitizeForTerminal(goal.lastError))));
@@ -61,7 +71,9 @@ export function renderRunDetail(response: RunDetailResponse, ctx: CommandContext
   const { color } = makeColorizer({ noColor: ctx.noColor, isTty, json: ctx.json });
   const run = response.run;
   const field = (label: string, value: string): string =>
-    `${color('dim', `${label.padEnd(12)}`)}${value}`;
+    // 14 to match goalLines(): one view, one column. Two widths in the same block reads as two
+    // tables that were never lined up.
+    `${color('dim', `${label.padEnd(14)}`)}${value}`;
 
   // Every value below is sanitised at the point it enters the line, BEFORE colouring -- sanitising after
   // colouring would strip the colour codes along with any injected sequence. A reviewer caught that

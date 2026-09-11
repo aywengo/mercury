@@ -77,14 +77,27 @@ export function renderPrometheus(m: MetricsSnapshot): string {
       .map(([status, n]) => [{ status }, n]),
   );
 
+  // Carries `attempted` alongside `status` so the signal is separable from the noise (issue #489).
+  // `unmet` alone conflates "the harness held the objective and never declared it met" with "the
+  // Run died before the harness ever received it", and the second includes ordinary infrastructure
+  // failures. The query an operator wants is {status="unmet",attempted="true"}.
+  //
+  // The full cross product is emitted, including attempted="unknown" for statuses that are never
+  // settled. Omitting those would make an absent series ambiguous between "zero" and "not
+  // applicable", which is the ambiguity that produced the bug.
   writeGauge(
     out,
     'mercury_goals_in_status',
     'Goals currently in each goal status. Independent of run status: a COMPLETED run with an '
-      + 'unmet goal is the pair this metric exists to expose.',
-    Object.entries(m.goalsByStatus)
+      + 'unmet goal is the pair this metric exists to expose. attempted is "true" when the Run '
+      + 'reached RUNNING, "false" when it reached a terminal status without starting, and '
+      + '"unknown" while the goal is unsettled.',
+    Object.entries(m.goalsByStatusAndAttempted)
       .sort(([a], [b]) => (a < b ? -1 : 1))
-      .map(([status, n]) => [{ status }, n]),
+      .flatMap(([status, byAttempted]) =>
+        Object.entries(byAttempted)
+          .sort(([a], [b]) => (a < b ? -1 : 1))
+          .map(([attempted, n]) => [{ status, attempted }, n] as [{ status: string; attempted: string }, number])),
   );
 
   writeHistogram(

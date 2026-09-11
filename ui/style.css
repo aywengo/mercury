@@ -102,6 +102,13 @@ button.small { padding: 3px 9px; font-size: 12px; }
 .goal-active { color: #7cc0ff; }
 .goal-complete { color: var(--green); }
 .goal-unmet { color: var(--red); font-weight: 800; }
+
+/* An unmet goal whose Run never started is real but is not the signal, and it must not shout at
+   the same weight as one that did. .goal-unmet is deliberately the loudest badge on the page;
+   giving the never-started case the same treatment is how a routine infrastructure failure drowns
+   out the pair this view exists to surface (issue #489). Still red, still legible -- dimmed and
+   unbolded, not hidden. */
+.goal-unattempted { color: var(--muted, #6b7684); font-weight: 400; }
 .goal-paused { color: var(--yellow); }
 .goal-budget_limited { color: var(--yellow); }
 .goal-error { color: var(--red); }

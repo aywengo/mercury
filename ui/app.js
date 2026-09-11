@@ -256,6 +256,18 @@ export function goalGatesHtml(goal) {
 export function goalLabel(goal) {
   if (goal === undefined) return { text: 'goal ?', cls: 'goal-unknown', title: 'server does not report goals' };
   if (goal === null) return { text: 'no goal', cls: 'goal-none', title: 'this run has no goal' };
+  // An unmet goal whose Run never started is a different fact from one that ran and never declared
+  // success, and the badge used to render them identically -- so the dashboard showed an ordinary
+  // infrastructure failure with the same weight as the signal the feature exists to surface
+  // (issue #489). Spelled out rather than left to a tooltip: hiding the distinction behind a hover
+  // reproduces the problem at one interaction deeper.
+  if (goal.status === 'unmet' && goal.attempted === false) {
+    return {
+      text: 'goal: unmet (never started)',
+      cls: 'goal-unmet goal-unattempted',
+      title: 'the Run reached a terminal status before the harness ever received the objective',
+    };
+  }
   return { text: `goal: ${goal.status}`, cls: `goal-${goal.status}`, title: 'goal status (independent of Run status)' };
 }
 

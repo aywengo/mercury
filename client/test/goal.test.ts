@@ -58,6 +58,28 @@ test('an unknown goal status is rejected rather than rendered', () => {
   );
 });
 
+test('runs show says so when an unmet goal was never attempted', () => {
+  // Issue #489. `unmet` alone does not tell the operator whether the harness ever held the
+  // objective, and the two cases want opposite reactions.
+  const never = renderRunDetail(
+    { run: RUN as never, skills: [], goal: { ...GOAL, attempted: false } as never },
+    OFF, false,
+  );
+  assert.match(never, /goal started\s+never/, 'never-started not distinguished');
+
+  // The common case stays quiet: an attempted unmet goal needs no disclaimer, and printing one
+  // everywhere is how the distinction stops being readable.
+  const ran = renderRunDetail(
+    { run: RUN as never, skills: [], goal: { ...GOAL, attempted: true } as never },
+    OFF, false,
+  );
+  assert.doesNotMatch(ran, /goal started/);
+
+  // Absent means no answer, not "never started".
+  const unknown = renderRunDetail({ run: RUN as never, skills: [], goal: GOAL as never }, OFF, false);
+  assert.doesNotMatch(unknown, /goal started/);
+});
+
 test('runs show prints Run status AND goal status together', () => {
   // The headline pair the feature exists to expose: a COMPLETED run whose objective was not met.
   // If either word can be missing, the CLI has reproduced the original problem.

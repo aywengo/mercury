@@ -25,6 +25,8 @@ interface GoalRow {
   last_error: string | null;
   paused_reason: string | null;
   source: string;
+  /** 1 reached RUNNING, 0 terminal before RUNNING, NULL not yet settled. */
+  attempted: number | null;
   updated_at: string;
 }
 
@@ -52,6 +54,9 @@ function rowToGoal(row: GoalRow): GoalState {
     lastError: row.last_error ?? undefined,
     pausedReason: row.paused_reason ?? undefined,
     source: row.source as GoalState['source'],
+    // NULL is "no answer yet", not false. Collapsing it would render every live goal as
+    // never-started, which is the same mistake as coercing an unreported tokensUsed to zero.
+    attempted: row.attempted === null ? undefined : row.attempted === 1,
     updatedAt: row.updated_at,
   };
 }
@@ -89,8 +94,8 @@ export class GoalStore {
       `INSERT INTO run_goals (
          run_id, objective, contract_json, gates_json, token_budget, status,
          tokens_used, time_used_seconds, turns_used, last_verdict, last_reason,
-         last_error, paused_reason, source, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         last_error, paused_reason, source, attempted, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       goal.runId,
       goal.objective,
@@ -106,6 +111,7 @@ export class GoalStore {
       bound(goal.lastError),
       bound(goal.pausedReason),
       goal.source,
+      goal.attempted === undefined ? null : (goal.attempted ? 1 : 0),
       goal.updatedAt,
     );
   }
@@ -141,13 +147,17 @@ export class GoalStore {
       lastError: patch.lastError !== undefined ? this.sanitize(patch.lastError) ?? undefined : existing.lastError,
       pausedReason: patch.pausedReason !== undefined ? this.sanitize(patch.pausedReason) ?? undefined : existing.pausedReason,
       source: patch.source ?? existing.source,
+      // Carried forward, not defaulted. A patch that says nothing about `attempted` must not
+      // erase the settlement's answer: the harness relay path patches usage on a goal that may
+      // already be settled, and a bare `patch.attempted` would turn a recorded 0 back into NULL.
+      attempted: patch.attempted ?? existing.attempted,
       updatedAt: now,
     };
     this.db.prepare(
       `UPDATE run_goals SET
          objective = ?, status = ?, tokens_used = ?, time_used_seconds = ?, turns_used = ?,
          last_verdict = ?, last_reason = ?, last_error = ?, paused_reason = ?,
-         source = ?, updated_at = ?
+         source = ?, attempted = ?, updated_at = ?
        WHERE run_id = ?`,
     ).run(
       next.objective,
@@ -160,6 +170,7 @@ export class GoalStore {
       next.lastError ?? null,
       next.pausedReason ?? null,
       next.source,
+      next.attempted === undefined ? null : (next.attempted ? 1 : 0),
       next.updatedAt,
       runId,
     );

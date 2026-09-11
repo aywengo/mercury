@@ -276,15 +276,29 @@ export interface GoalState {
   turnsUsed?: number;
   /** Who last changed it. Only a harness may set `complete`; an operator may cancel. */
   source: 'harness' | 'operator';
+  /**
+   * Whether the Run ever reached RUNNING, recorded when Mercury settles an abandoned goal.
+   *
+   * `undefined` means the question has no answer yet: the goal has not been settled. It must not
+   * be read as false -- every live goal would then look never-started, which is the same mistake
+   * as coercing an unreported tokensUsed to zero.
+   *
+   * This exists because `unmet` covers two very different facts: the harness had the objective,
+   * worked, and never declared it met (the signal the feature exists to surface), versus the Run
+   * died before the harness ever received the goal (noise). Both are genuinely unmet, so the
+   * status is right and the aggregate needs to tell them apart. Issue #489.
+   */
+  attempted?: boolean;
   updatedAt: string;
 }
 
 /**
  * Fields a caller may change after a goal row exists.
  *
- * `objective` is present but is only ever written by the path that created it -- Mercury never
- * rewrites an objective from a harness report. The harness echoes text that was validated and
- * redacted on the way in, so overwriting the stored copy with an echoed one would undo both.
+ * `objective` is written at creation and may then be replaced by a harness report: PrimeAgent
+ * replaces a live objective deliberately, so that it survives context compaction (docs/goals.md
+ * 9). A replacement is redacted and bounded on the way in, exactly as the original was -- the
+ * harness value is agent-controlled text and gets no weaker treatment for arriving later.
  */
 export interface GoalPatch {
   status?: GoalStatus;
@@ -297,6 +311,8 @@ export interface GoalPatch {
   lastError?: string;
   pausedReason?: string;
   source?: 'harness' | 'operator';
+  /** Set only by goal settlement. See GoalState.attempted. */
+  attempted?: boolean;
 }
 
 /** Maximum accepted objective length; mirrors PrimeAgent's MAX_THREAD_GOAL_OBJECTIVE_CHARS. */
