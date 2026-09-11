@@ -152,6 +152,38 @@ test('an unmet goal that never started reads differently from one that ran', () 
   assert.equal(goalLabel({ status: 'unmet', attempted: undefined }).cls, 'goal-unmet');
 });
 
+test('goal badge colours keep opposite meanings distinguishable', () => {
+  // Colour is the fast channel on this view. The first .goal-unattempted rule used var(--muted),
+  // which is exactly what .goal-none ("no goal") and .goal-unknown ("server does not report goals")
+  // use -- so "the objective was not met", "there is no goal" and "we do not know" shared one colour.
+  // That reintroduces, in CSS, the conflation issue #489 exists to remove, and no JS test can see it.
+  const css = readFileSync(join(UI_DIR, 'style.css'), 'utf8');
+  const colorOf = (cls: string): string => {
+    const m = new RegExp(`\\.goal-${cls}\\s*\\{([^}]*)\\}`).exec(css);
+    assert.ok(m, `.goal-${cls} rule missing from style.css`);
+    const c = /color:\s*([^;]+);/.exec(m[1]);
+    assert.ok(c, `.goal-${cls} declares no colour`);
+    return c[1].trim();
+  };
+  const unmet = colorOf('unmet');
+  const unattempted = colorOf('unattempted');
+  const none = colorOf('none');
+  const unknown = colorOf('unknown');
+
+  // Never-started stays in the unmet colour family: quieter, not a different statement.
+  assert.equal(unattempted, unmet,
+    `never-started (${unattempted}) left the unmet colour family (${unmet}) -- muting it reads as "nothing to report"`);
+  // And none of the three opposite states may share a colour.
+  assert.notEqual(unmet, none, 'unmet and "no goal" are the same colour');
+  assert.notEqual(unattempted, unknown, 'never-started and "unknown" are the same colour');
+  assert.notEqual(unmet, unknown, 'unmet and "unknown" are the same colour');
+
+  // De-escalated by weight, so it is still visibly subordinate to a real unmet.
+  const weight = (cls: string): string =>
+    new RegExp(`\\.goal-${cls}\\s*\\{[^}]*font-weight:\\s*([^;]+);`).exec(css)?.[1]?.trim() ?? 'default';
+  assert.notEqual(weight('unattempted'), weight('unmet'), 'never-started shouts at the same weight');
+});
+
 test('the run page renders goal status BESIDE run status, and never instead of it', () => {
   // The rendering rule is a requirement, not polish. Asserted on the markup and the renderer
   // together: an element that exists but is never filled is as bad as one that was never added.
