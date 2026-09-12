@@ -48,6 +48,20 @@ const DOCS: Record<string, string> = {
  * already-shipped migration ("migration v7: agent_version") is a historical fact and must NOT be
  * flagged, so only forward-looking constructions are matched.
  */
+/**
+ * A `vN` within a sentence of the word "migration" where N is beyond the last applied migration.
+ *
+ * Phrasing-independent, which is the point: enumerating verbs ("add", "the next migration is",
+ * "start after") only catches the phrasings someone thought of. A number above the applied range
+ * cannot be a historical reference, so it is a forward reservation no matter how it is worded --
+ * and a forward reservation is exactly what rots.
+ *
+ * Residual gap, deliberately accepted: "we should add v11 for backups" never says "migration", and
+ * flagging a bare `vN` would flag every version reference in a planning doc. A reservation phrased
+ * without the word "migration" is not caught.
+ */
+const FORWARD = /\bmigration[s]?\b[^.\n]{0,40}?\bv(\d+)\b|\bv(\d+)\b[^.\n]{0,40}?\bmigration[s]?\b/gi;
+
 const RESERVATION = [
   /\badd(?:ing)? (?:the )?(?:next free )?migration(?: v(\d+))?/gi,
   /\bmigration v(\d+) for\b/gi,
@@ -58,22 +72,71 @@ const RESERVATION = [
   /\bafter the current v(\d+)/gi,
 ];
 
+/**
+ * Every migration-number reservation in `text`, phrased however the author phrased it.
+ *
+ * ONE implementation, used both by the assertion over the real docs and by the phrasing tests
+ * below. When the phrasing tests re-derived the match themselves, mutating the threshold here
+ * left every test green -- the guard was being tested against a copy of itself rather than
+ * against itself.
+ */
+function reservations(text: string, shipped: number): string[] {
+  const found: string[] = [];
+  for (const re of RESERVATION) {
+    re.lastIndex = 0;
+    for (const m of text.matchAll(re)) {
+      if (m[1] !== undefined && Number(m[1]) <= shipped) found.push(`v${m[1]}: ${m[0].trim()}`);
+    }
+  }
+  FORWARD.lastIndex = 0;
+  for (const m of text.matchAll(FORWARD)) {
+    const n = Number(m[1] ?? m[2]);
+    if (n > shipped) found.push(`v${n}: ${m[0].trim()}`);
+  }
+  return found;
+}
+
 test('planning docs never reserve a migration number that is already taken', () => {
   const shipped = migrationCount();
   const offenders: string[] = [];
   for (const [name, text] of Object.entries(DOCS)) {
-    for (const re of RESERVATION) {
-      re.lastIndex = 0;
-      for (const m of text.matchAll(re)) {
-        const n = m[1] === undefined ? undefined : Number(m[1]);
-        // "Add the next free migration" with no number is the correct form and passes.
-        if (n !== undefined && n <= shipped) {
-          offenders.push(`${name}: reserves v${n}, but v1-v${shipped} are already applied (${m[0].trim()})`);
-        }
-      }
-    }
+    for (const hit of reservations(text, shipped)) offenders.push(`${name}: ${hit}`);
   }
   assert.deepEqual(offenders, [], `stale migration reservations:\n${offenders.join('\n')}`);
+});
+
+test('a forward reservation is caught whatever verb the author chose', () => {
+  // The verb list only catches phrasings someone anticipated; FORWARD is what closes the rest.
+  // Both this test and the one above go through reservations(), so weakening either fails here.
+  const shipped = migrationCount();
+  const future = `v${shipped + 2}`;
+  for (const text of [
+    `Migration ${future} will handle the outbox`,
+    `Reserve migration ${future}`,
+    `Create a new migration for ${future} tracking`,
+    `The upcoming migration is ${future}`,
+  ]) {
+    assert.ok(reservations(text, shipped).length > 0, `not caught: "${text}"`);
+  }
+  // The verb list needs positive coverage too. Without it a mutation that makes every verb
+  // pattern never fire left the whole suite green, because only the forward rule had a case.
+  for (const text of [
+    `Add migration v${shipped} for \`run_presets\``,
+    `The next migration is v${shipped}`,
+    `Crew changes start after v${shipped}`,
+    `One migration, **v${shipped}**, appended to MIGRATIONS`,
+  ]) {
+    assert.ok(reservations(text, shipped).length > 0, `verb phrasing not caught: "${text}"`);
+  }
+
+  // Historical prose naming applied migrations must stay clean, or the guard gets deleted.
+  for (const text of [
+    'v6 `run_goals`, v7 `agent_version` and v8 `run_goals.attempted` were each reserved first',
+    'Add the next free migration for `run_presets`',
+    'v8 was taken by `run_goals.attempted` before any of this was built',
+  ]) {
+    assert.deepEqual(reservations(text, shipped), [], `false positive on historical prose: "${text}"`);
+  }
 });
 
 test('no doc claims how many migrations the schema contains', () => {
