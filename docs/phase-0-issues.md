@@ -24,11 +24,30 @@ dependency graph and cross-references are written in terms of them.
 | P0-6 | #511 | #513 | `b1255a0` |
 | P0-7 | #512 | #514 | `1c8796b` |
 
-**One acceptance criterion is not met, deliberately.** P0-2 acceptance 4 requires a Hermes Run that
-completes end to end against a real workspace on a machine with `hermes` installed, recording the Run id
-and Hermes version. It has not been observed. The requirement says "a real binary, not a mock", so it was
-not simulated. As the criterion itself states, **Crew roadmap §4 acceptance 5 stays open** and no
-Teams/Templates work should be scheduled on the assumption that Hermes Runs work.
+**All acceptance criteria are now met.** P0-2 acceptance 4 — a Hermes Run completing end to end against a
+real workspace on a machine with `hermes` installed, recording the Run id and Hermes version — was
+observed on 2026-09-12: **Run `run_f3a4e81644be4081`**, `COMPLETED`, on
+**Hermes Agent v0.21.2 (2026.9.11) · upstream b7b35a84**. The Run carried **zero** `run_skills` rows and
+emitted **zero** `skill.selected` events, and completed anyway -- which is the behaviour this issue set
+exists to produce. Full evidence, including the negative control, is in
+[#507](https://github.com/aywengo/mercury/issues/507).
+
+The negative control is worth reading, because it is the only place the original failure is demonstrated
+rather than described. All four of Mercury's `FALLBACK` skill ids, passed as `-s` to the real binary, are
+rejected in **0.6-0.7s with exit 1, before any LLM call**:
+
+```
+-s planning        rc=1  Error: Unknown skill(s): planning
+-s implementation  rc=1  Error: Unknown skill(s): implementation
+-s testing         rc=1  Error: Unknown skill(s): testing
+-s git-pr          rc=1  Error: Unknown skill(s): git-pr
+```
+
+Before P0-2, every Hermes Run created by a caller who omitted `skills` died exactly there. A genuinely
+installed Hermes skill (`-s codebase-inspection`) returns `rc=0`.
+
+**Crew roadmap §4 acceptance 5 is therefore no longer blocked by this**, and Teams/Templates work may be
+scheduled.
 
 Two things the implementation changed about this document's own plan:
 
