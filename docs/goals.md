@@ -110,28 +110,50 @@ export interface GoalState {
 narrows it away — `SerializedGoal.status` is `Exclude<GoalStatus, "idle">` — so a
 consumer never sees `idle` alongside a real objective.
 
-`goalState` shape, read from a live session:
+**The shape Mercury actually parses.** PrimeAgent emits the goal on the RPC event stream
+with its own field names, camelCase, straight from the `GoalState` declaration above:
 
-```json
-{
-  "goal": {
-    "goal_id": "fb30529e-d343-47f0-870d-a442e39a5d28",
-    "objective": "resolve open issues …",
-    "status": "complete",
-    "tokens_used": 632007,
-    "time_used_seconds": 4695,
-    "created_at": 1789078222975,
-    "updated_at": 1789082975082
-  },
-  "remaining_tokens": null,
-  "completion_budget_report": null
-}
+```js
+// dist/core/agent-session.js
+_emitGoalUpdate() { this._emit({ type: "goal_update", goal: this.goalState }); }
+get goalState() { return { ...this._goalWithCurrentWallClock() }; }
 ```
 
-Two things matter here. First, **both directions exist**: Mercury can set a goal at
-launch through argv and watch it change through events PrimeAgent already emits.
-Second, `tokens_used` is **per-goal usage reported by the harness** — the first real
-usage signal Mercury has ever had access to. See [Budgets](#9-budgets-the-thing-that-could-actually-be-enforced).
+```json
+{ "type": "goal_update",
+  "goal": { "active": true, "status": "complete", "goalId": "fb30529e-d343-47f0-870d-a442e39a5d28",
+            "objective": "resolve open issues …", "tokenBudget": 800000,
+            "tokensUsed": 632007, "timeUsedSeconds": 4695, "continuationsUsed": 35,
+            "createdAt": 1789078222975, "updatedAt": 1789082975082 } }
+```
+
+`_goalWithCurrentWallClock()` only recomputes `timeUsedSeconds` for an active goal; it does
+not rename anything. So the wire casing is the declaration casing, and
+`HarnessGoalReport` in `src/domain/goalEvents.ts` matches it. The mock RPC fixture copies the
+same shape and says so: "snake-free camelCase on the wire, and `continuationsUsed` rather
+than `turnsUsed`."
+
+**Do not confuse this with the kernel-bridge shape.** PrimeAgent has a second, snake_case
+serialization that is *not* on the event stream. `SerializedGoal` in `dist/core/goals.d.ts`
+is documented as "Goal payload returned to the kernel-side goal skill. Keys are
+Python-conventional snake_case", and `goalHostResponse()` wraps it:
+
+```json
+{ "goal": { "goal_id": "fb30529e-…", "objective": "resolve open issues …", "status": "complete",
+            "token_budget": 800000, "tokens_used": 632007, "time_used_seconds": 4695,
+            "created_at": 1789078222975, "updated_at": 1789082975082 },
+  "remaining_tokens": 167993, "completion_budget_report": null }
+```
+
+That is the `goal.get()` host bridge a Python kernel calls. **Mercury never sees it**, and
+nothing in Mercury parses it. Reading `tokens_used` off an event would yield `undefined` for
+every goal forever, and because an absent number stays absent by design (a fabricated zero
+would be worse), the failure would be silent and the suite would stay green.
+
+Two things matter about the real shape. First, **both directions exist**: Mercury can set a
+goal at launch through argv and watch it change through events PrimeAgent already emits.
+Second, `tokensUsed` is **per-goal usage reported by the harness** — the first real usage
+signal Mercury has ever had access to. See [Budgets](#9-budgets-the-thing-that-could-actually-be-enforced).
 
 PrimeAgent also injects a `<goal_context>` block into the model's context each turn,
 so the objective survives compaction. Mercury does not need to reproduce that and must
@@ -324,7 +346,10 @@ export interface GoalState {
   tokenBudget?: number;
   tokensUsed?: number;
   timeUsedSeconds?: number;
-  remainingTokens?: number | null;
+  // No `remainingTokens`. PrimeAgent's `remaining_tokens` belongs to the kernel host bridge
+  // (see 2.1) and is derived there as `tokenBudget - tokensUsed`; it is never on the event
+  // stream, so Mercury has no received value to put here. A consumer that needs it can derive
+  // it, and must then say so rather than presenting it as reported state.
   lastVerdict?: 'done' | 'continue' | 'skipped';  // Hermes only
   lastReason?: string;            // harness-supplied, bounded, redacted
   lastError?: string;             // PrimeAgent `error` status; bounded, redacted
