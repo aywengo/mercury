@@ -67,6 +67,12 @@ export function makeEnv(opts: {
   adapters?: Record<string, AgentAdapter>;
   /** Agent id used when create omits `agent` (default `fake`). */
   defaultAgent?: string;
+  /**
+   * Skill registry root (default: this repo's `.agents/skills`). Needed by tests that mutate a
+   * skill on disk -- the point of #506 is what happens when the live registry diverges from a
+   * Run's stored snapshot, and doing that against the real skill library would corrupt it.
+   */
+  skillsDir?: string;
   /** Run the detached harness version probes at construction. Off by default because they
    *  spawn real subprocesses; tests asserting a detected version opt in. */
   probeCapabilities?: boolean;
@@ -82,7 +88,7 @@ export function makeEnv(opts: {
     onTerminalTransition: (run, to) => settleGoalOnTerminal({ goals, events }, run, to),
   });
   const queue = new RunQueue(db, runs);
-  const skills = new SkillRegistry(SKILLS_DIR);
+  const skills = new SkillRegistry(opts.skillsDir ?? SKILLS_DIR);
   const workspace = new WorkspaceManager({
     baseDir: join(dir, 'workspaces'),
     mode: opts.workspaceMode ?? 'copy',

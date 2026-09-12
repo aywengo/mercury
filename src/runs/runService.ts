@@ -24,6 +24,15 @@ export interface CreateRunInput {
   repositories?: RepositoryContext[];
   agent?: string;
   skills?: string[];
+  /**
+   * Skill snapshots to store verbatim instead of resolving `skills` against the live registry.
+   *
+   * Only retry uses this (#506). A Run's skill rows are a snapshot for a reason: they pin the
+   * exact bytes, version and hash the Run was created with. Re-resolving by id at execution time
+   * silently substitutes whatever the registry holds now, so editing a skill changes what an
+   * already-queued Run does, and deleting one makes `resolveOne` throw and the Run fail to start.
+   */
+  skillSnapshots?: ResolvedSkill[];
   constraints?: Partial<RunConstraints>;
   /**
    * Optional objective for the Run (docs/goals.md). `undefined` means no goal and the Run
@@ -180,10 +189,14 @@ export class RunService {
     // in its installed-skill store, and an unknown name is a fatal exit, so Hermes
     // could not execute any Run at all. `null` stays "omitted" so a JSON caller that
     // sends null keeps today's behaviour.
-    const skillIds = input.skills === undefined || input.skills === null
-      ? this.deps.selector.select(input.task, available, 4)
-      : input.skills;
-    const resolved = this.deps.skills.resolve(skillIds);
+    // A snapshot, when the caller supplies one, replaces resolution rather than supplementing it:
+    // resolving the parent's ids here would read the live registry anyway, and would throw for a
+    // skill deleted since the parent ran (#506).
+    const resolved = input.skillSnapshots ?? this.deps.skills.resolve(
+      input.skills === undefined || input.skills === null
+        ? this.deps.selector.select(input.task, available, 4)
+        : input.skills,
+    );
 
     const constraints: RunConstraints = {
       maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
@@ -418,7 +431,10 @@ export class RunService {
     if (original.attempt >= original.constraints.maxRetries + 1) {
       throw new ConflictError(`Max retries reached (${original.constraints.maxRetries})`);
     }
-    const skills = this.getSkills(runId).map((s) => s.id);
+    // The parent's stored snapshots, not its ids (#506). Passing ids would re-resolve against the
+    // live registry, so a retried Run would execute skill bytes its parent never saw -- and if a
+    // skill had been deleted, create() would throw and the retry could not be attempted at all.
+    const skillSnapshots = this.getSkills(runId);
     // original.repository carries the pinned base commit (set when the original
     // workspace was created); a fresh resolve happens only when the original
     // never got a base commit (setup failed before workspace creation).
@@ -440,7 +456,7 @@ export class RunService {
       repository: { ...original.repository },
       repositories: original.repositories,
       agent: original.agent,
-      skills,
+      skillSnapshots,
       constraints: { ...original.constraints },
       goal: originalGoal
         ? {
