@@ -12,6 +12,7 @@ import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentGoalSupport, AgentCapabilities, AgentVersionInfo } from '../domain/types.ts';
 import { probeVersion } from './versionProbe.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
+import { assertNoUnknownKeys, GOAL_SUPPORT_SCHEMA, leaf, object, openMap, type ConfigSchema, type ExactKeys } from './configSchema.ts';
 
 // --- config schema (docs/agent-adapters.md section 4.1) ---------------------
 
@@ -121,11 +122,64 @@ export interface LocalAgentAdapterOptions {
   drainGraceMs?: number;
 }
 
+// --- key schema (issue #500) -------------------------------------------------
+//
+// Mirrors the interfaces above. `openMap` marks the objects whose keys are operator-chosen by
+// design: eventMap maps arbitrary agent event type names, env carries arbitrary variable names.
+// Everything else is closed, so a misspelling anywhere inside it is a load error.
+
+const LOCAL_TASK_INPUT = object({ mode: leaf, flag: leaf, filePath: leaf });
+const LOCAL_OUTPUT = object({ format: leaf, stream: leaf, eventPath: leaf });
+const LOCAL_INPUT = object({ mode: leaf, flag: leaf, filePath: leaf, promptEvent: leaf });
+const LOCAL_CANCEL = object({ signal: leaf, graceMs: leaf });
+const LOCAL_RESUME = object({ flag: leaf, sessionIdSource: leaf, sessionIdPath: leaf });
+const LOCAL_SANDBOX = object({ policyFlag: leaf, policyValue: leaf });
+const LOCAL_SKILLS = object({ flag: leaf, values: openMap() });
+
+// Deliberately NOT annotated `: ConfigSchema` -- that widens the key set to `string` and makes
+// the ExactKeys checks below compare `string` against the interface, i.e. always pass.
+export const LOCAL_AGENT_CONFIG_SCHEMA = object({
+  goalSupport: GOAL_SUPPORT_SCHEMA,
+  id: leaf,
+  description: leaf,
+  command: leaf,
+  args: leaf,
+  cwd: leaf,
+  taskInput: LOCAL_TASK_INPUT,
+  output: LOCAL_OUTPUT,
+  eventMap: openMap(),
+  input: LOCAL_INPUT,
+  cancel: LOCAL_CANCEL,
+  resume: LOCAL_RESUME,
+  sandbox: LOCAL_SANDBOX,
+  skills: LOCAL_SKILLS,
+  env: openMap(),
+});
+
+// Schema/interface drift is otherwise silent in whichever direction hurts most: a key in the
+// schema that the interface lacks accepts a key nothing ever reads. These make it a compile error.
+type _LocalKeysExact = ExactKeys<keyof (typeof LOCAL_AGENT_CONFIG_SCHEMA)['keys'], keyof LocalAgentConfig>;
+const _localKeysExact: _LocalKeysExact = true;
+const _localTaskInputExact: ExactKeys<keyof (typeof LOCAL_TASK_INPUT)['keys'], keyof LocalAgentTaskInput> = true;
+const _localOutputExact: ExactKeys<keyof (typeof LOCAL_OUTPUT)['keys'], keyof LocalAgentOutput> = true;
+const _localInputExact: ExactKeys<keyof (typeof LOCAL_INPUT)['keys'], keyof LocalAgentInput> = true;
+const _localCancelExact: ExactKeys<keyof (typeof LOCAL_CANCEL)['keys'], keyof LocalAgentCancel> = true;
+const _localResumeExact: ExactKeys<keyof (typeof LOCAL_RESUME)['keys'], keyof LocalAgentResume> = true;
+const _localSandboxExact: ExactKeys<keyof (typeof LOCAL_SANDBOX)['keys'], keyof LocalAgentSandbox> = true;
+const _localSkillsExact: ExactKeys<keyof (typeof LOCAL_SKILLS)['keys'], keyof LocalAgentSkills> = true;
+const _localGoalExact: ExactKeys<keyof (typeof GOAL_SUPPORT_SCHEMA)['keys'], keyof AgentGoalSupport> = true;
+void [_localKeysExact, _localTaskInputExact, _localOutputExact, _localInputExact,
+      _localCancelExact, _localResumeExact, _localSandboxExact, _localSkillsExact, _localGoalExact];
+
 // --- validation -------------------------------------------------------------
 
 export function validateLocalAgentConfig(cfg: LocalAgentConfig): void {
   const err = (msg: string): never => { throw new Error(`LocalAgentConfig "${cfg.id}": ${msg}`); };
   if (!cfg.id) err('id is required');
+  // Key checking first, before any shape check: a typo is the more likely cause and the more
+  // useful message, and reporting "taskInput.flag required" for a config whose real problem is
+  // `taskInput: { mode: 'arg', flg: '--task' }` sends the operator to the wrong line.
+  assertNoUnknownKeys(cfg, LOCAL_AGENT_CONFIG_SCHEMA, 'LocalAgentConfig');
   if (!cfg.command) err('command is required');
   if (!cfg.taskInput || !['arg', 'stdin', 'file'].includes(cfg.taskInput.mode)) err('taskInput.mode must be arg|stdin|file');
   if (cfg.taskInput.mode === 'arg' && !cfg.taskInput.flag) err('taskInput.flag required for mode=arg');

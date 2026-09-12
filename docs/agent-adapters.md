@@ -660,7 +660,7 @@ api:
   events: { method: "GET", path: "/sessions/{id}/events", eventField: "events", eventTypeField: "type" }
   sendInput: { method: "POST", path: "/sessions/{id}/messages", body: { message: "{input}" } }
   cancel: { method: "POST", path: "/sessions/{id}/cancel" }
-poll: { intervalMs: 5000 }
+poll: { intervalMs: 5000, timeoutMs: 900000 }
 eventMap:
   message: "agent.message"
   tool_started: "tool.started"
@@ -677,7 +677,7 @@ api:
   createTask: { method: "POST", path: "/api/sessions", body: { prompt: "{task}" }, idField: "session_id" }
   getTask: { method: "GET", path: "/api/sessions/{id}", statusField: "status", statusMap: { running: "running", stopped: "completed", error: "failed" } }
   events: { method: "GET", path: "/api/sessions/{id}/events", eventField: "events", eventTypeField: "type" }
-poll: { intervalMs: 2000 }
+poll: { intervalMs: 2000, timeoutMs: 900000 }
 eventMap:
   agent_message: "agent.message"
   tool_call: "tool.started"
@@ -860,6 +860,76 @@ path (no per-agent translation forks).
 | **Observability** | All adapters inherit the trace env (`MERCURY_RUN_ID`/`MERCURY_TRACE_ID`/`MERCURY_WORKER_ID`) and structured logs. |
 | **Docs** | Each adapter gets a section in this file + a `docs/agents/<id>.md` with the exact flags/API used. |
 
+### Unknown config keys are rejected at every level — ✅ implemented (issue #500)
+
+The three declarative adapters (`LocalAgentAdapter`, `RpcAgentAdapter`, `RemoteAgentAdapter`) are
+configured by operator-authored JSON. Their validators used to check required fields and value
+shapes while ignoring any key they did not recognise, which made a misspelling indistinguishable
+from a deliberate omission.
+
+For most fields that is merely confusing. For `goalSupport` it is the worst available outcome:
+`"goalSuport": { "set": "1.0.0" }` yields no `goalSupport`, so the adapter reports no goals — a
+legitimate value. The operator believes goals are enabled, and every attempt is refused with a
+message that is technically true: *this agent has no goal support*.
+
+**The nested case was worse than the top-level one.** `"goalSupport": { "sett": "1.0.0" }` is a
+truthy object, so the capability getter returns `{ goals }` and Mercury **advertises** goal support
+backed by a version claim that does not exist. That fails later, further from the cause, and in the
+opposite direction from the fail-closed default. So the check is recursive: it descends into every
+known key rather than only inspecting the level it was handed.
+
+```
+LocalAgentConfig: unknown config key goalSupport.sett (did you mean 'set'?). Unknown keys are
+rejected rather than ignored, because an ignored typo is read as a deliberate choice.
+```
+
+Implemented as one shared helper, `assertNoUnknownKeys` in `src/adapters/configSchema.ts`, consumed
+by all three validators. Parity comes from a single implementation rather than from a test
+asserting that three implementations agree — three validators that are "the same shape" is exactly
+how local/rpc/remote behaviour drifts in the first place.
+
+**Openness is declared per node, not assumed globally.** Some objects carry operator-chosen keys by
+design and must stay open, or the check would reject the feature it guards:
+
+| Open | Why arbitrary keys are the point |
+| --- | --- |
+| `eventMap` | maps arbitrary **agent** event type names to Mercury event types (`tool_started`, any vendor frame) |
+| `env` | environment variable names |
+| `createTask.body`, `sendInput.body` | vendor request payloads |
+| `getTask.statusMap` | the vendor's own status vocabulary |
+| `skills.values` | skill ids |
+
+Everything else is closed, including `goalSupport`, `taskInput`, `output`, `input`, `cancel
+`, `resume`, `sandbox`, `protocol`, `api`, `auth`, and every endpoint object.
+
+Each schema is pinned to the interface it mirrors by a compile-time `ExactKeys` assertion, in both
+directions: a field added to the interface but not the schema, and a key in the schema that nothing
+reads, are both build failures naming the offending key.
+
+#### Forward-compatibility decision
+
+**Rejected outright. No `_allowUnknownKeys` escape hatch.**
+
+These are operator-authored local files validated at boot, and the standing posture here is
+fail-closed and loud — the same reasoning that makes an unknown `EVENT_TYPES` value throw at
+`EventStore.append` rather than drop the event.
+
+An opt-out was considered and rejected because it re-introduces exactly the silence being removed,
+and it is sticky: set once to unblock a boot, never removed again, and the config is permanently
+back to ignoring typos. If forward compatibility becomes a real requirement rather than a
+hypothetical one, the answer is an explicit `configVersion` field with defined handling — a
+versioned schema can be migrated, whereas "ignore what you do not understand" cannot.
+
+This is a deliberate behaviour change at boot: a config carrying a key from a newer Mercury now
+refuses to start instead of being silently ignored. A downgrade, or a config directory shared
+between two Mercury versions, will surface as a load error naming the key. That is the intended
+trade.
+
+**Also in scope, because validation only catches one shape of the mistake:** adapter load emits the
+resolved capability set per agent — `agent=claude-local goals=none`, or
+`agent=primeagent goals=set@0.3.3,track@0.3.3,tokenBudget@0.3.3`. The log line catches the class of
+problem behind the typo: wrong file loaded, an env override pointing at another directory, or an
+adapter that legitimately has no goal support whose operator assumed otherwise.
 ### Known gaps (worker-level, affect every adapter) — ✅ both fixed
 
 Two gaps lived in the **worker** (`src/worker/worker.ts`), not in any adapter.

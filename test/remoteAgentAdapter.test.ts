@@ -375,19 +375,30 @@ test('resume without task id -> throws', async () => {
 
 test('config validation rejects bad configs', () => {
   assert.throws(() => validateRemoteAgentConfig({} as RemoteAgentConfig), /id is required/);
-  assert.throws(
-    () => validateRemoteAgentConfig({ id: 'x', description: 'd', api: { baseUrl: 'ftp://x', auth: { type: 'bearer', headerName: 'Authorization', envVar: 'K' }, createTask: { method: 'POST', path: '/s', body: {}, idField: 'id' }, getTask: { method: 'GET', path: '/s/{id}', statusField: 'status', statusMap: { ok: 'completed' } }, poll: { intervalMs: 100, timeoutMs: 1000 }, eventMap: {} } } as unknown as RemoteAgentConfig),
-    /http\(s\) URL/,
-  );
-  assert.throws(
-    () => validateRemoteAgentConfig({ id: 'x', description: 'd', api: { baseUrl: 'http://x', auth: { type: 'bearer', envVar: 'K' }, createTask: { method: 'POST', path: '/s', body: {}, idField: 'id' }, getTask: { method: 'GET', path: '/s/{id}', statusField: 'status', statusMap: { ok: 'completed' } }, poll: { intervalMs: 100, timeoutMs: 1000 }, eventMap: {} } } as unknown as RemoteAgentConfig),
-    /headerName required/,
-  );
-  assert.throws(
-    () => validateRemoteAgentConfig({ id: 'x', description: 'd', api: { baseUrl: 'http://x', auth: { type: 'bearer', headerName: 'Authorization', envVar: 'K' }, createTask: { method: 'POST', path: '/s', body: {}, idField: 'id' }, getTask: { method: 'GET', path: '/s/{id}', statusField: 'status', statusMap: {} }, poll: { intervalMs: 100, timeoutMs: 1000 }, eventMap: {} } } as unknown as RemoteAgentConfig),
-    /statusMap/,
-  );
+  // Each case carries exactly ONE defect, on an otherwise valid config. These fixtures used to
+  // nest `poll` and `eventMap` inside `api`, where they do not belong; the unknown-key check
+  // (issue #500) now rejects that first, so the intended assertion never ran. A fixture that is
+  // accidentally invalid for a second reason tests nothing.
+  const base = () => ({
+    id: 'x',
+    description: 'd',
+    api: {
+      baseUrl: 'http://x',
+      auth: { type: 'bearer', headerName: 'Authorization', envVar: 'K' },
+      createTask: { method: 'POST', path: '/s', body: {}, idField: 'id' },
+      getTask: { method: 'GET', path: '/s/{id}', statusField: 'status', statusMap: { ok: 'completed' } },
+    },
+    poll: { intervalMs: 100, timeoutMs: 1000 },
+    eventMap: {},
+  });
+  const withApi = (patch: Record<string, unknown>) =>
+    validateRemoteAgentConfig({ ...base(), api: { ...base().api, ...patch } } as unknown as RemoteAgentConfig);
+
+  assert.throws(() => withApi({ baseUrl: 'ftp://x' }), /http\(s\) URL/);
+  assert.throws(() => withApi({ auth: { type: 'bearer', envVar: 'K' } }), /headerName required/);
+  assert.throws(() => withApi({ getTask: { ...base().api.getTask, statusMap: {} } }), /statusMap/);
 });
+
 
 test('registry: loads JSON configs from a directory', async () => {
   const { port } = await startMockServer({ MOCK_REMOTE_MODE: 'happy' });

@@ -7,6 +7,7 @@
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentGoalSupport, AgentCapabilities, AgentVersionInfo } from '../domain/types.ts';
 import type { LocalAgentEventMap } from './localAgentAdapter.ts';
+import { assertNoUnknownKeys, GOAL_SUPPORT_SCHEMA, leaf, object, openMap, type ExactKeys } from './configSchema.ts';
 
 // --- config schema (docs/agent-adapters.md section 5.1) ---------------------
 
@@ -83,11 +84,52 @@ export interface RemoteAgentAdapterOptions {
   now?: () => number;
 }
 
+// --- key schema (issue #500) -------------------------------------------------
+
+const REMOTE_AUTH = object({ type: leaf, headerName: leaf, envVar: leaf });
+// Every remote endpoint extends RemoteAgentEndpoint, so the two extra-field shapes are
+// spelled out rather than inherited; a shared base would hide which keys are legal where.
+const REMOTE_ENDPOINT = object({ method: leaf, path: leaf });
+const REMOTE_CREATE_TASK = object({ method: leaf, path: leaf, body: openMap(), idField: leaf });
+const REMOTE_GET_TASK = object({ method: leaf, path: leaf, statusField: leaf, statusMap: openMap() });
+const REMOTE_EVENTS = object({ method: leaf, path: leaf, eventField: leaf, eventTypeField: leaf });
+const REMOTE_SEND_INPUT = object({ method: leaf, path: leaf, body: openMap() });
+const REMOTE_API = object({
+  baseUrl: leaf, auth: REMOTE_AUTH, createTask: REMOTE_CREATE_TASK, getTask: REMOTE_GET_TASK,
+  events: REMOTE_EVENTS, sendInput: REMOTE_SEND_INPUT, cancel: REMOTE_ENDPOINT,
+});
+const REMOTE_POLL = object({ intervalMs: leaf, timeoutMs: leaf });
+
+export const REMOTE_AGENT_CONFIG_SCHEMA = object({
+  goalSupport: GOAL_SUPPORT_SCHEMA,
+  id: leaf,
+  description: leaf,
+  api: REMOTE_API,
+  poll: REMOTE_POLL,
+  eventMap: openMap(),
+});
+
+type _RemoteApi = RemoteAgentConfig['api'];
+type _RemotePoll = RemoteAgentConfig['poll'];
+const _remoteKeysExact: ExactKeys<keyof (typeof REMOTE_AGENT_CONFIG_SCHEMA)['keys'], keyof RemoteAgentConfig> = true;
+const _remoteApiExact: ExactKeys<keyof (typeof REMOTE_API)['keys'], keyof _RemoteApi> = true;
+const _remotePollExact: ExactKeys<keyof (typeof REMOTE_POLL)['keys'], keyof _RemotePoll> = true;
+const _remoteAuthExact: ExactKeys<keyof (typeof REMOTE_AUTH)['keys'], keyof RemoteAgentAuth> = true;
+const _remoteCreateExact: ExactKeys<keyof (typeof REMOTE_CREATE_TASK)['keys'], keyof RemoteAgentCreateTask> = true;
+const _remoteGetExact: ExactKeys<keyof (typeof REMOTE_GET_TASK)['keys'], keyof RemoteAgentGetTask> = true;
+const _remoteEventsExact: ExactKeys<keyof (typeof REMOTE_EVENTS)['keys'], keyof RemoteAgentEvents> = true;
+const _remoteSendExact: ExactKeys<keyof (typeof REMOTE_SEND_INPUT)['keys'], keyof RemoteAgentSendInput> = true;
+const _remoteCancelExact: ExactKeys<keyof (typeof REMOTE_ENDPOINT)['keys'], keyof RemoteAgentEndpoint> = true;
+const _remoteGoalExact: ExactKeys<keyof (typeof GOAL_SUPPORT_SCHEMA)['keys'], keyof AgentGoalSupport> = true;
+void [_remoteKeysExact, _remoteApiExact, _remotePollExact, _remoteAuthExact, _remoteCreateExact,
+      _remoteGetExact, _remoteEventsExact, _remoteSendExact, _remoteCancelExact, _remoteGoalExact];
+
 // --- validation -------------------------------------------------------------
 
 export function validateRemoteAgentConfig(cfg: RemoteAgentConfig): void {
   const err = (msg: string): never => { throw new Error(`RemoteAgentConfig "${cfg.id}": ${msg}`); };
   if (!cfg.id) err('id is required');
+  assertNoUnknownKeys(cfg, REMOTE_AGENT_CONFIG_SCHEMA, 'RemoteAgentConfig');
   if (!cfg.api?.baseUrl) err('api.baseUrl is required');
   if (!/^https?:\/\//.test(cfg.api.baseUrl)) err('api.baseUrl must be an http(s) URL');
   const auth = cfg.api.auth;
