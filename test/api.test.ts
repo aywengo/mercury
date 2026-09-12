@@ -57,10 +57,15 @@ test('GET /healthz is public and reports host product and version', async () => 
     try {
       const res = await fetch(`http://127.0.0.1:${srv.port}/healthz`);
       await expectStatus(res, 200, 'GET /healthz');
-      const body = await res.json() as { ok: boolean; ts: string; product: string; version: string };
+      const body = await res.json() as { ok: boolean; ts: string; product: string; version: string; api: number };
       assert.equal(body.ok, true);
       assert.equal(body.product, HOST_PRODUCT);
       assert.equal(body.version, HOST_VERSION);
+      // `api` is a number, not a semver string: Fleet compares it with < to decide whether it can
+      // read this host at all. A string would make that comparison silently true or false depending
+      // on operand order.
+      assert.equal(typeof body.api, 'number');
+      assert.ok(Number.isInteger(body.api) && body.api >= 1, `api must be a positive integer, got ${body.api}`);
       assert.equal(typeof body.ts, 'string');
       assert.ok(body.ts.length > 0);
     } finally {

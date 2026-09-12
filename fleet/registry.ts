@@ -14,7 +14,13 @@ export type ProbeOutcome =
   | 'not_mercury'
   | 'not_serving'
   | 'http_error'
-  | 'timeout';
+  | 'timeout'
+  /**
+   * The host answered, is Mercury, and is reachable -- but its response shapes are outside what
+   * this Fleet build can read. Distinct from every other outcome because the fix is to upgrade one
+   * side, not to fix a network, a credential, or a worker.
+   */
+  | 'incompatible';
 
 export interface HostRecord {
   id: string;
@@ -32,6 +38,17 @@ export interface HostRecord {
 export interface ProbeRecord {
   hostId: string;
   outcome: ProbeOutcome;
+  /**
+   * Host release version from /healthz, recorded so `hosts list --live` can show what is actually
+   * running. Null when the host predates the field or did not answer /healthz.
+   */
+  hostVersion?: string | null;
+  /**
+   * Host response-shape version from /healthz. Null means the host did not report one, which is NOT
+   * the same as an incompatible one: a host predating the field serves exactly the shapes this
+   * Fleet was written against, so refusing it would take a healthy host out of rotation.
+   */
+  hostApi?: number | null;
   detail: string | null;
   activeRuns: number | null;
   queueDepth: number | null;
@@ -125,6 +142,8 @@ interface ProbeRow {
   agents: string | null;
   probed_at: string;
   last_error: string | null;
+  host_version: string | null;
+  host_api: number | null;
 }
 
 function rowToHost(row: HostRow): HostRecord {
@@ -153,6 +172,8 @@ function rowToProbe(row: ProbeRow): ProbeRecord {
     agents: row.agents === null ? null : parseJson<string[]>(row.agents, null as unknown as string[]),
     probedAt: row.probed_at,
     lastError: row.last_error,
+    hostVersion: row.host_version,
+    hostApi: row.host_api,
   };
 }
 
@@ -278,13 +299,15 @@ export class HostRegistry {
     this.db
       .prepare(
         `INSERT INTO host_probe
-           (host_id, outcome, detail, active_runs, queue_depth, worker_count, worker_id, agents, probed_at, last_error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (host_id, outcome, detail, active_runs, queue_depth, worker_count, worker_id, agents, probed_at, last_error,
+            host_version, host_api)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(host_id) DO UPDATE SET
            outcome = excluded.outcome, detail = excluded.detail,
            active_runs = excluded.active_runs, queue_depth = excluded.queue_depth,
            worker_count = excluded.worker_count, worker_id = excluded.worker_id,
-           agents = excluded.agents, probed_at = excluded.probed_at, last_error = excluded.last_error`,
+           agents = excluded.agents, probed_at = excluded.probed_at, last_error = excluded.last_error,
+           host_version = excluded.host_version, host_api = excluded.host_api`,
       )
       .run(
         rec.hostId,
@@ -297,6 +320,9 @@ export class HostRegistry {
         rec.agents === null ? null : JSON.stringify(rec.agents),
         rec.probedAt,
         rec.lastError,
+        // NULL, not 0, when the host reported no schema: see the ProbeRecord comment and migration v4.
+        rec.hostVersion ?? null,
+        rec.hostApi ?? null,
       );
     if (rec.outcome === 'ok') {
       this.db

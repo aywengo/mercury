@@ -31,6 +31,13 @@ export interface ProbeResult {
   workerId: string | null;
   agents: string[] | null;
   lastError: string | null;
+  /** Host release version, from /healthz. Null when absent or /healthz did not answer. */
+  hostVersion: string | null;
+  /**
+   * Host response-shape version, from /healthz. Null means the host reported no `api` field, which
+   * is a host predating the field rather than an incompatible one.
+   */
+  hostApi: number | null;
 }
 
 interface FetchLike {
@@ -66,6 +73,28 @@ interface WorkersResponse {
 interface AgentsResponse {
   agents?: unknown;
 }
+
+/** Shape of Mercury's /healthz. */
+interface HealthResponse {
+  ok?: boolean;
+  product?: string;
+  version?: string;
+  /** Response-shape version of the routes Fleet reads. Absent on a host predating the field. */
+  api?: number;
+}
+
+/**
+ * The lowest host `api` this Fleet build can read.
+ *
+ * Bump in lockstep with the host's API_SCHEMA_VERSION when a shape inside fleet/child.ts's allowlist
+ * changes incompatibly. Deliberately a Fleet-side constant rather than something negotiated: it
+ * encodes what THIS binary understands, which is the only thing this binary can know.
+ *
+ * A host that reports no `api` at all is treated as compatible, not as zero. Such a host predates
+ * the field and serves exactly the shapes this build was written against, so treating absence as
+ * incompatibility would take every healthy older host out of rotation -- the opposite of the point.
+ */
+export const MIN_HOST_API = 1;
 
 /**
  * One HTTP call with a hard deadline.
@@ -120,6 +149,8 @@ export async function probeHost(target: ProbeTarget, fetchImpl: FetchLike = fetc
     workerId: null,
     agents: null,
     lastError: null,
+    hostVersion: null,
+    hostApi: null,
   };
 
   // 1) Liveness. Nothing else is meaningful until we know something is listening.
@@ -148,6 +179,29 @@ export async function probeHost(target: ProbeTarget, fetchImpl: FetchLike = fetc
       outcome: 'http_error',
       detail: `HTTP ${health.status} from /healthz`,
       lastError: `HTTP ${health.status} from ${base}/healthz`,
+    };
+  }
+
+  // 1b) Shape compatibility. The host is Mercury and it answered, so read what it says it speaks.
+  //
+  // This is checked here, at registration time, rather than at first use: an old host behind a new
+  // Fleet otherwise fails on the first dispatch, in a place that reports it as a task or agent error
+  // and sends the operator to the wrong diagnosis.
+  const healthBody = (health.json ?? {}) as HealthResponse;
+  const hostVersion = typeof healthBody.version === 'string' ? stripTerminalControls(healthBody.version) : null;
+  const hostApi = typeof healthBody.api === 'number' && Number.isFinite(healthBody.api) ? healthBody.api : null;
+  if (hostApi !== null && hostApi < MIN_HOST_API) {
+    const detail =
+      `host speaks API schema ${hostApi}, this Fleet requires at least ${MIN_HOST_API}. ` +
+      `Upgrade the Mercury host at ${base} (it reports version ${hostVersion ?? 'unknown'}) or use an ` +
+      `older Fleet; the host is healthy and reachable, only the response shapes differ.`;
+    return {
+      ...empty,
+      outcome: 'incompatible',
+      detail,
+      hostVersion,
+      hostApi,
+      lastError: detail,
     };
   }
 
@@ -227,15 +281,18 @@ export async function probeHost(target: ProbeTarget, fetchImpl: FetchLike = fetc
   // healthy, because that is the condition blocking Fleet from using it.
   if (unauthorized) {
     return { ...empty, outcome: 'unauthorized', detail: agentsDetail, agents: null,
-             activeRuns, queueDepth, workerCount, workerId, lastError: agentsDetail };
+             activeRuns, queueDepth, workerCount, workerId, lastError: agentsDetail,
+             hostVersion, hostApi };
   }
   if (notServingDetail) {
     return { ...empty, outcome: 'not_serving', detail: notServingDetail, agents: agentList,
-             activeRuns, queueDepth, workerCount, workerId, lastError: notServingDetail };
+             activeRuns, queueDepth, workerCount, workerId, lastError: notServingDetail,
+             hostVersion, hostApi };
   }
   if (agentsDetail) {
     return { ...empty, outcome: 'http_error', detail: agentsDetail, agents: agentList,
-             activeRuns, queueDepth, workerCount, workerId, lastError: agentsDetail };
+             activeRuns, queueDepth, workerCount, workerId, lastError: agentsDetail,
+             hostVersion, hostApi };
   }
   return {
     outcome: 'ok',
@@ -246,6 +303,8 @@ export async function probeHost(target: ProbeTarget, fetchImpl: FetchLike = fetc
     workerId,
     agents: agentList,
     lastError: null,
+    hostVersion,
+    hostApi,
   };
 }
 
@@ -264,6 +323,8 @@ export async function probeAndRecord(
     workerCount: r.workerCount,
     workerId: r.workerId,
     agents: r.agents,
+    hostVersion: r.hostVersion,
+    hostApi: r.hostApi,
     probedAt: new Date().toISOString(),
     lastError: r.lastError,
   };

@@ -173,3 +173,69 @@ test('bad input fails with usage rather than a stack trace', async () => {
   assert.equal(r.code, 2);
   assert.match(r.out, /expects key=value/);
 });
+
+
+// --- API schema refusal at registration (issue #510) ------------------------
+
+/**
+ * A minimal Mercury whose /healthz shape is chosen by the caller.
+ *
+ * In-process on purpose: the CLI runs as a subprocess, so an in-process server can answer while the
+ * child asks. Doing this with spawnSync deadlocks every probe against the probe timeout.
+ */
+async function fakeHost(healthBody: Record<string, unknown>): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (req.url === '/healthz') res.end(JSON.stringify(healthBody));
+    else if (req.url === '/healthz/workers') res.end(JSON.stringify({ workers: [], queueDepth: 0 }));
+    else res.end(JSON.stringify({ agents: ['fake'] }));
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address() as AddressInfo;
+  return { url: `http://127.0.0.1:${port}`, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
+
+test('hosts add refuses a host below the minimum API schema, naming both numbers', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-cli-api-'));
+  const e = env(dir, { 'lan-token': SECRET });
+  const fake = await fakeHost({ ok: true, ts: new Date().toISOString(), product: 'host', version: '0.0.9', api: 0 });
+  try {
+    const r = await fleet(['hosts', 'add', 'old', '--url', fake.url, '--credential', 'lan-token'], e);
+    assert.equal(r.code, 2, 'an incompatible host must not be added silently');
+    // Both numbers, because the operator's decision is "upgrade the host or downgrade Fleet".
+    assert.match(r.out, /api schema 0/i, 'must name the host schema');
+    assert.match(r.out, /requires at least 1/i, 'must name the required schema');
+    assert.match(r.out, /0\.0\.9/, 'must name the host version');
+    // Refusing must not half-write. A registry entry that Fleet then probes as incompatible is worse
+    // than a clean refusal, because it shows up as a permanently broken host.
+    const list = await fleet(['hosts', 'list'], e);
+    assert.doesNotMatch(list.out, /\bold\b/, 'a refused add must leave nothing in the registry');
+  } finally { await fake.close(); }
+});
+
+test('hosts add still accepts a host that is merely down', async () => {
+  // The counterpart to the refusal above. Only POSITIVE incompatibility blocks an add; a host that
+  // is not listening yet is a normal thing to register, and refusing it would break the documented
+  // workflow of adding a host before starting it.
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-cli-down-'));
+  const e = env(dir, { 'lan-token': SECRET });
+  const r = await fleet(['hosts', 'add', 'later', '--url', 'http://127.0.0.1:1', '--credential', 'lan-token'], e);
+  assert.equal(r.code, 0, 'an unreachable host must still be addable');
+  assert.match(r.out, /added later/);
+  assert.match((await fleet(['hosts', 'list'], e)).out, /later/);
+});
+
+test('hosts list --live shows the host version', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-cli-live-'));
+  const e = env(dir, { 'lan-token': SECRET });
+  const fake = await fakeHost({ ok: true, ts: new Date().toISOString(), product: 'host', version: '0.1.1', api: 1 });
+  try {
+    const add = await fleet(['hosts', 'add', 'here', '--url', fake.url, '--credential', 'lan-token'], e);
+    assert.equal(add.code, 0);
+    assert.match(add.out, /0\.1\.1/, 'add should report the version it just saw');
+    const live = await fleet(['hosts', 'list', '--live'], e);
+    assert.equal(live.code, 0);
+    assert.match(live.out, /HOST/, 'the table needs a column an operator can read');
+    assert.match(live.out, /0\.1\.1/, 'hosts list --live must show the host version');
+  } finally { await fake.close(); }
+});

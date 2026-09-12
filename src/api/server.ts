@@ -19,7 +19,7 @@ import type { Logger } from '../logger.ts';
 import type { DatabaseSync } from 'node:sqlite';
 import { collectMetrics } from '../metrics/collect.ts';
 import { renderPrometheus } from '../metrics/prometheus.ts';
-import { HOST_PRODUCT, HOST_VERSION } from '../version.ts';
+import { API_SCHEMA_VERSION, HOST_PRODUCT, HOST_VERSION } from '../version.ts';
 
 // Dashboard UI (Mercury.md section 23): static SPA served at /.
 // The UI authenticates with a session cookie (POST /api/auth/login);
@@ -103,12 +103,19 @@ export function createApp(deps: ServerDeps): Express {
   // Credential resolution only (bearer token or session cookie); never blocks.
   app.use(createAuthMiddleware(deps.apiTokens, deps.adminToken, sessions));
 
+  // `api` is the response-shape version of the routes Fleet reads, not the release version; see
+  // src/version.ts. Fleet refuses a host whose `api` is below the minimum it was written against,
+  // which turns "old host, new Fleet" into a registration error instead of a failure at first use.
+  //
+  // test/fleetContract.test.ts pins this key set and test/api.test.ts asserts each field, so adding
+  // or renaming a field here fails loudly next to the Fleet reader that consumes it.
   app.get('/healthz', (_req, res) => {
     res.json({
       ok: true,
       ts: new Date().toISOString(),
       product: HOST_PRODUCT,
       version: HOST_VERSION,
+      api: API_SCHEMA_VERSION,
     });
   });
 

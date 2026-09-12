@@ -26,7 +26,7 @@ import { openFleetDb } from './db.ts';
 import { HostRegistry, RegistryError, type HostView, type ProbeRecord } from './registry.ts';
 import { loadCredentials, CredentialError, type CredentialStore } from './credentials.ts';
 import { createProber } from './prober.ts';
-import { probeAndRecord } from './probe.ts';
+import { MIN_HOST_API, probeAndRecord, probeHost } from './probe.ts';
 import { createFleetServer } from './server.ts';
 import { assertServeable } from './config.ts';
 import { createServiceRedactor } from './redact.ts';
@@ -56,6 +56,9 @@ const STATE_LABEL: Record<ProbeRecord['outcome'], string> = {
   not_serving: 'no-worker',
   http_error: 'http-error',
   timeout: 'timeout',
+  // Reachable, healthy, and Mercury -- but its response shapes are outside what this Fleet build
+  // reads. The fix is to upgrade one side, so it must not be folded into 'down'.
+  incompatible: 'api-incompatible',
 };
 
 interface ParsedArgs {
@@ -113,13 +116,16 @@ function stateOf(view: HostView): string {
 }
 
 function renderTable(rows: HostView[]): string {
-  const header = ['ID', 'STATE', 'SEEN', 'WORKERS', 'RUNS', 'QUEUE', 'AGENTS', 'URL'];
+  const header = ['ID', 'STATE', 'SEEN', 'HOST', 'WORKERS', 'RUNS', 'QUEUE', 'AGENTS', 'URL'];
   const body = rows.map((r) => {
     const p = r.probe;
     return [
       r.id,
       stateOf(r),
       ago(p?.probedAt ?? r.lastSeenAt),
+      // The host's own reported version, so an operator can see a fleet of mixed hosts without
+      // ssh-ing. '-' means never probed or the host predates the field, not that the host is broken.
+      p?.hostVersion ?? '-',
       p?.workerCount === null || p?.workerCount === undefined ? '-' : String(p.workerCount),
       p?.activeRuns === null || p?.activeRuns === undefined ? '-' : String(p.activeRuns),
       p?.queueDepth === null || p?.queueDepth === undefined ? '-' : String(p.queueDepth),
@@ -270,6 +276,7 @@ export async function main(argv: string[]): Promise<number> {
 
   return withRegistry((registry) => {
     if (action === 'add') {
+      return (async () => {
       const id = positionals[2];
       const url = flags.get('url');
       const cred = flags.get('credential');
@@ -283,7 +290,28 @@ export async function main(argv: string[]): Promise<number> {
       // Validate the ref resolves NOW. Accepting a typo here would defer the failure to a probe that
       // reports the host as auth-fail, pointing at the host when the mistake is in this command.
       const store = openStore(config);
-      store.secret(cred);
+      const token = store.secret(cred);
+      // Refuse a host whose response shapes this Fleet cannot read, at ADD time rather than at first
+      // dispatch -- where the same fault surfaces as a task or agent error and sends the operator to
+      // the wrong machine.
+      //
+      // Only a POSITIVE incompatibility blocks the add. A host that does not answer, answers with an
+      // error, or reports no `api` field at all is still added: it may be temporarily down, and a
+      // host predating the `api` field serves exactly the shapes this build was written against.
+      // Refusing those would turn a version check into an outage.
+      const probe = await probeHost(
+        { hostId: id, baseUrl: url, token, timeoutMs: config.probeTimeoutMs },
+      );
+      if (probe.outcome === 'incompatible') {
+        process.stderr.write(
+          `refused: ${id} reports API schema ${probe.hostApi}, this Fleet requires at least ${MIN_HOST_API}.\n` +
+            `  host version: ${probe.hostVersion ?? 'unknown'}\n` +
+            `  ${probe.detail}\n` +
+            `  Nothing was written to the registry. Upgrade the host, or use a Fleet built against `
+            + `API schema ${probe.hostApi}.\n`,
+        );
+        return 2;
+      }
       registry.add({
         id,
         baseUrl: url,
@@ -292,8 +320,17 @@ export async function main(argv: string[]): Promise<number> {
         localPaths: multi.get('path') ?? [],
         enabled: flags.get('disabled') !== true,
       });
-      process.stdout.write(`added ${id}\n`);
+      // Report what the probe already learned, rather than making the operator run `hosts probe`
+      // to find out what they just added.
+      const seen = probe.hostVersion ? ` (Mercury ${probe.hostVersion}, api ${probe.hostApi ?? 'unreported'})` : '';
+      process.stdout.write(`added ${id}${seen}\n`);
+      if (probe.outcome !== 'ok') {
+        // Added anyway: the host may simply be down, and `hosts add` must work against a host that
+        // is not up yet. The probe result is reported rather than acted on.
+        process.stderr.write(`  note: added, but the probe reported ${probe.outcome}: ${probe.detail ?? ''}\n`);
+      }
       return 0;
+      })();
     }
 
     if (action === 'list') {

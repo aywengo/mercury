@@ -132,6 +132,23 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE run_state ADD COLUMN events_drained INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 4,
+    sql: `
+      -- CACHE, same table and same rules as the rest of host_probe: rebuildable by one sweep.
+      --
+      -- host_api is the host's response-shape version, read from /healthz. It is stored NULL rather
+      -- than 0 when the host reported no field, because those are different facts: NULL means the
+      -- host predates the field and serves shapes this Fleet understands, while 0 would mean an
+      -- incompatible host. Collapsing them would take every healthy older host out of rotation.
+      --
+      -- The outcome column also gained a value, 'incompatible'. It is TEXT with no CHECK constraint,
+      -- so no schema change is needed for that; the comment in v1 is now incomplete and this is where
+      -- the addition is recorded.
+      ALTER TABLE host_probe ADD COLUMN host_version TEXT;
+      ALTER TABLE host_probe ADD COLUMN host_api INTEGER;
+    `,
+  },
 ];
 
 export interface FleetDb {
