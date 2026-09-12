@@ -1,6 +1,9 @@
 {
   "id": "omp",
   "description": "Oh my Pi (omp.sh) \u2014 coding agent with IDE wired in (Stencil Labs)",
+  "capabilities": {
+    "skills": "workspacePaths"
+  },
   "command": "omp",
   "args": [],
   "protocol": {

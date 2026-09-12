@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Express } from 'express';
 import { createApp } from '../src/api/server.ts';
@@ -135,20 +135,61 @@ test('mercuryctl agents list renders the SKILLS column', () => {
   assert.ok(!/none/.test(legacyLine), `silence must not render as 'none': ${legacyLine}`);
 });
 
-test('the skills value is not invented for pi/omp: unverified stays absent', () => {
-  // The issue is explicit that persona.append for pi/omp is unverified. This pins that the shipped
-  // docs-derived RPC fixture does not claim it, so a future edit has to make a deliberate choice.
-  const dir = tempDir('mercury-rpc-unverified-');
-  writeFileSync(join(dir, 'pi.json'), JSON.stringify({
-    id: 'pi', description: 'Pi Agent', command: process.execPath, args: [],
-    protocol: { modeFlag: '--mode', modeValue: 'rpc' }, eventMap: {},
-    capabilities: { skills: 'nativeNames' },
-  }));
-  const adapter = new RpcAgentRegistry(dir).load()['pi'];
-  assert.equal(adapter.capabilities.static?.skills, 'nativeNames');
-  assert.equal(adapter.capabilities.static?.personaAppend, undefined,
-    'personaAppend is unverified for pi and must be absent, not false and certainly not true');
+test('every SHIPPED declarative agent config declares how it receives skills (issue #521)', () => {
+  // This test exists because the one it replaces did not read the files it was named after.
+  //
+  // The old test was called "the skills value is not invented for pi/omp" and wrote a synthetic
+  // fixture into a temp dir with `capabilities: { skills: 'nativeNames' }`, then asserted on the
+  // fixture. It never opened rpc-agents/pi.json. The shipped file declared NO capabilities at all, so
+  // /api/agents advertised pi and omp with an unknown delivery mode -- the silent `undefined` #508
+  // exists to prevent -- while this test stayed green and its name asserted the opposite. A test
+  // named after a shipped artifact must read the shipped artifact.
+  //
+  // Shipped JSON configs are shipped artifacts. They reach /api/agents exactly as a code adapter
+  // does, so the "every adapter states a delivery mode" rule has to cover them too.
+  const dirs = ['rpc-agents', 'local-agents', 'remote-agents'];
+  const modes = new Set(['workspacePaths', 'nativeNames', 'none']);
+  let checked = 0;
+  for (const dir of dirs) {
+    const abs = join(import.meta.dirname, '..', dir);
+    if (!existsSync(abs)) continue;
+    for (const file of readdirSync(abs).filter((f) => f.endsWith('.json'))) {
+      const cfg = JSON.parse(readFileSync(join(abs, file), 'utf8')) as {
+        id?: string; capabilities?: { skills?: string };
+      };
+      const label = `${dir}/${file}`;
+      // The id must match the filename: the registry keys adapters by the `id` field, so a file named
+      // pi.json declaring id "p1" would be advertised under a name nobody can find in the repo.
+      assert.equal(cfg.id, file.replace(/\.json$/, ''), `${label}: id must match the filename`);
+      assert.ok(cfg.capabilities, `${label}: no capabilities block; /api/agents advertises an unknown delivery mode`);
+      assert.ok(modes.has(cfg.capabilities.skills ?? ''),
+        `${label}: capabilities.skills=${JSON.stringify(cfg.capabilities.skills)} is not one of ${[...modes].join(' | ')}`);
+      checked++;
+    }
+  }
+  // A guard that silently checks nothing is worse than no guard: it reports confidence with no evidence.
+  assert.ok(checked >= 2, `expected the shipped rpc-agents configs to be checked, found ${checked}`);
 });
+
+test('the shipped pi/omp configs say workspacePaths, because the prompt points them at the workspace', () => {
+  // Measured, not assumed. Two facts make this the only correct value:
+  //   1. worker.ts calls writeSkills() for EVERY Run regardless of adapter, so the files are there.
+  //   2. rpcAgentAdapter buildPrompt() tells the harness: "The selected skills are available under
+  //      .agents/skills/ -- read the relevant SKILL.md files and follow their guidance."
+  // The skills array in .mercury-context.json carries id/version/hash as CONTEXT, not as names to
+  // resolve. Declaring `nativeNames` here would be actively harmful: under #507 that makes
+  // RunService.create() skip skill selection entirely, silently stripping skills from every pi/omp Run.
+  const reg = new RpcAgentRegistry(join(import.meta.dirname, '..', 'rpc-agents')).load();
+  for (const id of ['pi', 'omp']) {
+    assert.ok(reg[id], `the shipped ${id} config must load`);
+    assert.equal(reg[id].capabilities.static?.skills, 'workspacePaths',
+      `${id}: wrong delivery mode; see the comment in this test for what a wrong value costs`);
+    // personaAppend stays absent: unverified is a different claim from false.
+    assert.equal(reg[id].capabilities.static?.personaAppend, undefined,
+      `${id}: personaAppend is unverified and must be absent, not false and certainly not true`);
+  }
+});
+
 // --- review round: the closed schema guarded the KEY but not the VALUE -------------------------
 //
 // The PR body justified a closed `capabilities` block by saying a typo in `skills` would silently

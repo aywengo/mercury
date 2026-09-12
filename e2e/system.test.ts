@@ -498,6 +498,134 @@ guarded('unauthenticated requests are refused on the API surface', async () => {
  *
  * It runs last: stopping a container is destructive to the shared stack, and teardown follows.
  */
+// --- Phase 0 contracts, seen from outside the process -------------------------------------------
+//
+// Each Phase 0 fix was proven by a unit test, and a unit test proves the code does what the author
+// believed about the code. These four assert the same fixes through the production shape: public HTTP,
+// a separate worker process, and the container filesystem an operator actually deploys. Two of them
+// (#506, #510) are only observable across a process boundary at all.
+
+guarded('the health endpoint advertises the API schema version (#510)', async () => {
+  // Fleet refuses to register a host whose schema it cannot speak. That negotiation is worthless if
+  // the number is absent, and worthless if it is a string a client has to guess the meaning of.
+  const res = await fetch(`${apiBase}/healthz`, { signal: AbortSignal.timeout(LIMITS.requestMs) });
+  assert.equal(res.status, 200, '/healthz must answer without a token');
+  const health = await res.json() as { ok: boolean; product: string; version: string; api?: unknown };
+  // A real typeof check rather than assert.equal(typeof ...): TS does not narrow `unknown` through an
+  // assertion, and a guard that cannot narrow is a guard the next edit will cast away.
+  if (typeof health.api !== 'number') {
+    throw new Error(`/healthz api must be a number, got ${JSON.stringify(health.api)}`);
+  }
+  assert.ok(Number.isInteger(health.api) && health.api >= 1,
+    `api schema version must be a positive integer, got ${health.api}`);
+  // Absent is not zero. A host that predates the field reports nothing; a host reporting 0 would be
+  // removed from rotation, turning a compatibility check into an outage.
+  assert.notEqual(health.api, 0, 'api must never be 0; absent and incompatible are different facts');
+});
+
+guarded('every advertised agent declares how it receives skills (#508)', async () => {
+  // The value that decides behaviour is `static.skills`: workspace paths or native names. A caller
+  // choosing a skill namespace from this response must never receive `undefined` and silently fall
+  // back to a guess -- that silent-default is what made Hermes unusable for months.
+  //
+  // `capabilities` is a PARALLEL map keyed by agent id, and `agents` stays a plain string[]. That is
+  // deliberate: the dashboard does `if (!Array.isArray(agents)) return;`, so reshaping `agents` into
+  // objects would make it silently discard every server-registered agent and render two hardcoded
+  // ones -- a working server showing a shorter list, with no error anywhere.
+  //
+  // Scope, stated precisely: this asserts the SERVER half. It catches `agents` being reshaped into
+  // objects, which is the change that would silently empty the dropdown. It does NOT exercise the
+  // dashboard, so it cannot prove ui/index.js still renders -- that guard lives in the dashboard's own
+  // defensive check, and a dashboard-side regression needs the Playwright tier (docs/local-e2e-design.md
+  // Phase 8, not built). A test that reads only the capabilities map would not notice the array being
+  // broken, which is why the array is asserted at all.
+  const res = await alice.get<{
+    agents: unknown;
+    defaultAgent: string;
+    capabilities?: Record<string, { static?: { skills?: string } }>;
+  }>('/api/agents', 'agents');
+  assert.ok(Array.isArray(res.agents),
+    '`agents` must stay a string[]; reshaping it makes the dashboard silently drop every real agent');
+  const ids = res.agents as string[];
+  assert.ok(ids.length > 0, 'the stack must advertise at least one agent');
+  assert.ok(res.capabilities, 'capabilities must be present; an absent map reads as "no agent supports goals"');
+
+  const modes = new Set(['workspacePaths', 'nativeNames', 'none']);
+  for (const id of ids) {
+    const caps = res.capabilities[id];
+    assert.ok(caps, `${id}: advertised but absent from the capabilities map`);
+    assert.ok(caps.static && typeof caps.static === 'object',
+      `${id}: no static capability block; a caller cannot tell how it receives skills`);
+    assert.ok(modes.has(caps.static.skills ?? ''),
+      `${id}: skills="${caps.static.skills}" is not one of ${[...modes].join(' | ')}`);
+  }
+  // The stack's default agent is `fake`, which executes nothing and therefore receives nothing.
+  assert.equal(res.defaultAgent, 'fake', 'compose sets MERCURY_DEFAULT_AGENT=fake');
+  assert.equal(res.capabilities.fake.static?.skills, 'none',
+    'fake executes nothing, so it must not claim a delivery mode');
+});
+
+guarded('an explicit empty skills list yields a zero-skill Run that still completes (#507)', async () => {
+  // `skills: []` means "no skills"; an omitted `skills` means "choose for me". Collapsing them made
+  // every Run carry at least one Mercury skill id, which a backend resolving names in its own store
+  // rejects fatally. The distinction has to survive the HTTP body, the queue, and a second process.
+  const created = await alice.post<{ runId: string; status: string }>(
+    '/api/runs',
+    { task: 'E2E zero-skill run', agent: 'fake', skills: [],
+      repository: { localPath: '/state/fixture-repo', baseBranch: 'main' } },
+    'create zero-skill run',
+  );
+  assert.equal(created.status, 201, `create failed: ${JSON.stringify(created.body)}`);
+  const runId = created.body.runId;
+  const view = await pollRun(alice, runId, (r) => r.status === 'COMPLETED', 'a completed zero-skill Run', 90_000);
+  assert.equal(view.status, 'COMPLETED', `zero-skill run did not complete: ${JSON.stringify(view)}`);
+
+  const detail = await alice.get<{ run: { id: string }; skills: Array<{ id: string }> }>(
+    `/api/runs/${runId}`, 'zero-skill detail');
+  assert.deepEqual(detail.skills, [],
+    `skills:[] was coerced into an automatic selection: ${JSON.stringify(detail.skills.map((s) => s.id))}`);
+});
+
+guarded('a Run still executes its stored skill snapshot after the skill vanishes from the worker (#506)', async () => {
+  // The strongest of the four, and the only one that needs two filesystems.
+  //
+  // The worker used to re-resolve the Run's skill ids against the LIVE registry at claim time. Delete
+  // or rename one skill and every queued Run naming it died with "Skill not found" -- and could not be
+  // retried, because retry re-resolved too. The fix makes the worker execute the snapshot persisted at
+  // create time. That is a cross-process claim: it can only be observed by changing one container's
+  // filesystem and letting the other one submit.
+  //
+  // Deleting BEFORE creating removes any race with the claim loop. The API container still has the
+  // skill, so create() snapshots it normally; the worker container does not, so a worker that still
+  // consulted its own registry would fail exactly as production did.
+  const skillId = 'testing';
+  const skillDir = `/app/.agents/skills/${skillId}`;
+  const before = await inService('worker', `test -d ${skillDir} && echo present || echo absent`);
+  assert.equal(before, 'present', `expected ${skillDir} in the worker image before deleting it`);
+  await inService('worker', `rm -rf ${skillDir}`);
+  const after = await inService('worker', `test -d ${skillDir} && echo present || echo absent`);
+  assert.equal(after, 'absent', `could not remove ${skillDir}; the scenario would prove nothing`);
+
+  const created = await alice.post<{ runId: string; status: string }>(
+    '/api/runs',
+    { task: 'E2E snapshot run', agent: 'fake', skills: [skillId],
+      repository: { localPath: '/state/fixture-repo', baseBranch: 'main' } },
+    'create snapshot run',
+  );
+  assert.equal(created.status, 201, `create failed: ${JSON.stringify(created.body)}`);
+  const runId = created.body.runId;
+
+  // The snapshot is durable at create time: id, version and content hash, not just a name to look up.
+  const detail = await alice.get<{ run: { id: string }; skills: Array<{ id: string; version?: string; hash?: string }> }>(
+    `/api/runs/${runId}`, 'snapshot detail');
+  assert.deepEqual(detail.skills.map((s) => s.id), [skillId], 'the Run must carry exactly the named skill');
+  assert.ok(detail.skills[0].hash, 'the stored skill record must carry a content hash');
+
+  const view = await pollRun(alice, runId, (r) => TERMINAL.has(r.status), 'a terminal state', 90_000);
+  assert.equal(view.status, 'COMPLETED',
+    `the worker re-resolved against its own registry instead of the snapshot: ${JSON.stringify(view)}`);
+});
+
 guarded('the gate fails clearly when no worker is consuming the queue', async () => {
   // Stop the worker BEFORE submitting. Stopping after submission let the claim loop pick the Run up
   // first, so it reached STARTING and the scenario tested a different interleaving than it claimed.
