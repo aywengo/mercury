@@ -4,6 +4,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { LocalAgentAdapter, type LocalAgentConfig } from '../src/adapters/localAgentAdapter.ts';
+import { RpcAgentAdapter, type RpcAgentConfig } from '../src/adapters/rpcAgentAdapter.ts';
+import { RemoteAgentAdapter, type RemoteAgentConfig } from '../src/adapters/remoteAgentAdapter.ts';
 
 import { AgentCapabilityRegistry } from '../src/adapters/capabilities.ts';
 import { ClaudeCodeAdapter } from '../src/adapters/claudeCodeAdapter.ts';
@@ -82,8 +85,11 @@ test('an unknown agent id resolves to no capability rather than throwing', () =>
 
 test('every shipped adapter DECLARES capabilities rather than omitting them', () => {
   // The interface makes `capabilities` required, so this is already a compile error if a
-  // new adapter forgets. This test keeps that true for adapters constructed dynamically
-  // and documents the intent: absent means "never", which is a claim, not a shrug.
+  // new adapter forgets. NOTE (issue #496): the comment here used to claim this test "keeps
+  // that true for adapters constructed dynamically" while listing five adapters and omitting
+  // the three config-driven ones -- the only ones with no compile-time protection at all.
+  // The real coverage lives in `ALL EIGHT shipped adapters...` below; this one is kept
+  // because it documents the intent: absent means "never", which is a claim, not a shrug.
   const shipped: Record<string, AgentAdapter> = {
     primeagent: new PrimeAgentAdapter('prime-agent'),
     daemon: new DaemonAgentAdapter('prime-agent', {}),
@@ -124,4 +130,144 @@ test('Hermes declares no goal support despite having the richest goal model', ()
   assert.equal(new HermesAgentAdapter({}).capabilities.goals?.set, undefined);
   assert.equal(new ClaudeCodeAdapter({}).capabilities.goals?.set, undefined);
   assert.equal(new FakeAgentAdapter({ script: [] }).capabilities.goals?.set, undefined);
+});
+
+
+// --- the guard itself, and proof that it reports (issue #496) -----------------
+
+/**
+ * The check the coverage guard applies, extracted so it can be aimed at something that
+ * SHOULD fail. A guard whose only evidence is "no violations today" proves nothing: it
+ * passes just as happily when it has stopped looking at anything.
+ *
+ * `capabilities` is required on the interface, so omitting it is a compile error for a
+ * statically written adapter. What the interface cannot catch is the shape of the value,
+ * and it says nothing at all about the three config-driven adapters, whose declaration is
+ * built at runtime from a JSON file.
+ */
+function declarationViolations(id: string, adapter: AgentAdapter): string[] {
+  const v: string[] = [];
+  const caps = (adapter as { capabilities?: unknown }).capabilities;
+  if (caps === undefined) return [`${id}: declares no capabilities at all`];
+  if (typeof caps !== 'object' || caps === null || Array.isArray(caps)) {
+    return [`${id}: capabilities must be a plain object, got ${typeof caps}`];
+  }
+  const goals = (caps as { goals?: unknown }).goals;
+  if (goals !== undefined) {
+    if (typeof goals !== 'object' || goals === null) v.push(`${id}: goals must be an object`);
+    else if (Object.keys(goals).length === 0) v.push(`${id}: goals is present but empty -- declare no goals key instead`);
+    else {
+      for (const [field, min] of Object.entries(goals as Record<string, unknown>)) {
+        if (typeof min !== 'string' || !/^\d+\.\d+\.\d+/.test(min)) {
+          v.push(`${id}: goals.${field} must be a minimum version string, got ${JSON.stringify(min)}`);
+        }
+      }
+    }
+  }
+  return v;
+}
+
+function localCfg(overrides: Partial<LocalAgentConfig> = {}): LocalAgentConfig {
+  return {
+    id: 'cfg-agent',
+    description: 'declarative local agent',
+    command: process.execPath,
+    args: [],
+    taskInput: { mode: 'arg', flag: '--task' },
+    output: { format: 'jsonl', stream: true, eventPath: 'type' },
+    eventMap: { completed: 'done' },
+    cancel: { signal: 'SIGTERM', graceMs: 100 },
+    ...overrides,
+  } as LocalAgentConfig;
+}
+
+function rpcCfg(overrides: Partial<RpcAgentConfig> = {}): RpcAgentConfig {
+  return {
+    id: 'cfg-rpc',
+    description: 'declarative rpc agent',
+    command: process.execPath,
+    args: [],
+    protocol: { modeFlag: '--mode', modeValue: 'rpc' },
+    eventMap: {},
+    input: { enabled: false },
+    resume: { enabled: false },
+    ...overrides,
+  } as RpcAgentConfig;
+}
+
+function remoteCfg(overrides: Partial<RemoteAgentConfig> = {}): RemoteAgentConfig {
+  return {
+    id: 'cfg-remote',
+    description: 'declarative remote agent',
+    api: {
+      baseUrl: 'https://example.invalid',
+      auth: { type: 'bearer', envVar: 'CFG_TOKEN', headerName: 'Authorization' },
+      createTask: { method: 'POST', path: '/tasks', body: {}, idField: 'id' },
+      getTask: { method: 'GET', path: '/tasks/{id}', statusField: 'state', statusMap: { done: 'completed' } },
+    },
+    poll: { intervalMs: 500, timeoutMs: 60_000 },
+    eventMap: {},
+    ...overrides,
+  } as RemoteAgentConfig;
+}
+
+/** Every adapter that implements AgentAdapter in src/adapters, not a subset of them. */
+function allShippedAdapters(): Record<string, AgentAdapter> {
+  return {
+    primeagent: new PrimeAgentAdapter('prime-agent'),
+    daemon: new DaemonAgentAdapter('prime-agent', {}),
+    hermes: new HermesAgentAdapter({}),
+    claude: new ClaudeCodeAdapter({}),
+    fake: new FakeAgentAdapter({ script: [] }),
+    local: new LocalAgentAdapter(localCfg(), {}),
+    rpc: new RpcAgentAdapter(rpcCfg(), {}),
+    remote: new RemoteAgentAdapter(remoteCfg(), {}),
+  };
+}
+
+test('ALL EIGHT shipped adapters declare capabilities in a usable shape', () => {
+  const shipped = allShippedAdapters();
+  // The old guard listed five and its comment claimed it covered "adapters constructed
+  // dynamically" while omitting exactly the three config-driven ones.
+  assert.equal(Object.keys(shipped).length, 8, 'the guard must cover every AgentAdapter implementation');
+  const violations = Object.entries(shipped).flatMap(([id, a]) => declarationViolations(id, a));
+  assert.deepEqual(violations, []);
+});
+
+test('the guard REPORTS a bad declaration instead of passing quietly', () => {
+  // Without this, the test above is indistinguishable from a guard that stopped looking.
+  const broken: [string, AgentAdapter][] = [
+    ['omits-capabilities', { detectVersion: async () => ({ version: 'version-unknown', raw: '' }) } as unknown as AgentAdapter],
+    ['capabilities-not-an-object', { capabilities: 'yes', detectVersion: async () => ({ version: 'version-unknown', raw: '' }) } as unknown as AgentAdapter],
+    ['empty-goals-object', { capabilities: { goals: {} }, detectVersion: async () => ({ version: 'version-unknown', raw: '' }) } as unknown as AgentAdapter],
+    ['unparsable-minimum-version', { capabilities: { goals: { set: 'yes please' } }, detectVersion: async () => ({ version: 'version-unknown', raw: '' }) } as unknown as AgentAdapter],
+  ];
+  for (const [id, adapter] of broken) {
+    const v = declarationViolations(id, adapter);
+    assert.ok(v.length > 0, `the guard stayed silent about ${id}`);
+  }
+});
+
+test('a declarative adapter with no goalSupport declares NO goals, and fails closed', () => {
+  // Absent config key means "never", which is a claim rather than a shrug. This is the
+  // behaviour the three config-driven adapters share, and nothing asserted it before.
+  for (const [label, adapter] of [
+    ['local', new LocalAgentAdapter(localCfg(), {})],
+    ['rpc', new RpcAgentAdapter(rpcCfg(), {})],
+    ['remote', new RemoteAgentAdapter(remoteCfg(), {})],
+  ] as [string, AgentAdapter][]) {
+    assert.deepEqual(adapter.capabilities, {}, `${label}: a config with no goalSupport must declare nothing`);
+    assert.deepEqual(declarationViolations(label, adapter), []);
+  }
+});
+
+test('a declarative adapter WITH goalSupport declares exactly what the config claims', () => {
+  const support = { set: '1.0.0', track: '1.2.0' };
+  const local = new LocalAgentAdapter(localCfg({ goalSupport: support }), {});
+  assert.deepEqual(local.capabilities.goals, support);
+  const rpc = new RpcAgentAdapter(rpcCfg({ goalSupport: support }), {});
+  assert.deepEqual(rpc.capabilities.goals, support);
+  // A claim is only a claim until the detected version is checked; declaring here is not
+  // the same as being admitted, which is what 13.5 is about.
+  assert.deepEqual(declarationViolations('local', local), []);
 });

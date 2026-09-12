@@ -935,8 +935,13 @@ the same defect one layer up.
 A matrix is a table that goes stale, and a stale table is worse than none because it looks
 authoritative.
 
-- **A guard test asserts every registered adapter has a matrix entry**, so adding an adapter
-  without declaring goal support fails CI instead of defaulting to a guess.
+- **A guard test asserts every shipped adapter declares capabilities in a usable shape**, and
+  asserts that it *reports*: a deliberately broken declaration must produce a violation, so the
+  guard cannot pass by having stopped looking. It covers all eight `AgentAdapter`
+  implementations, including the three config-driven ones that have no compile-time protection.
+  What it does **not** do is check the table below -- no test reads this document, so matrix
+  coverage is a review obligation, not an enforced one. Claiming otherwise was issue #496;
+  a stale claim about a guard is worse than no guard, because it stops people from checking.
 - **Thresholds are verified against a real binary, not asserted.** The `0.3.3` row came from
   PrimeAgent's own changelog; the next one should come from the same kind of evidence, and
   the doc that records it should cite it.
