@@ -99,7 +99,14 @@ export class HermesAgentAdapter implements AgentAdapter {
    * keyed on harness capability this row would read "goals: yes" and Mercury would report
    * a goal as tracked when nothing was ever reported back (docs/goals.md 13.2, section 7).
    */
-  readonly capabilities: AgentCapabilities = {};
+  readonly capabilities: AgentCapabilities = {
+    static: {
+      // Measured: buildArgv() emits `-s <skill.id>`, so Hermes resolves the name in ITS OWN installed
+      // store. This is the value #507 exists to make readable -- a Mercury skill id Hermes does not
+      // have installed is a fatal exit, not a warning.
+      skills: 'nativeNames',
+    },
+  };
   private opts: HermesAgentAdapterOptions;
   private sessions = new Map<string, Session>();
 

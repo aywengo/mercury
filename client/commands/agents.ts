@@ -35,10 +35,22 @@ export function renderAgents(response: AgentsResponse, ctx: CommandContext, isTt
         return 'no';
     }
   };
+  // How a backend receives skills (#508). Rendered because it is the one capability an operator
+  // cannot infer from anything else: an agent that takes skill NAMES hard-fails on a Run whose skills
+  // exist only as Mercury workspace files, and the failure reads like a bad skill choice rather than
+  // a namespace mismatch.
+  const skillsCell = (id: string): string => {
+    const skills = response.capabilities?.[id]?.static?.skills;
+    // Absent means the server did not say, which is unknown rather than 'none'. Rendering an older
+    // server's silence as 'none' would tell an operator to stop using skills on an agent that
+    // supports them.
+    if (!skills) return dim('unknown');
+    return sanitizeForTerminal(skills);
+  };
   const rows = response.agents.map((id) =>
-    [sanitizeForTerminal(id), goalsCell(id), id === response.defaultAgent ? 'default' : ''],
+    [sanitizeForTerminal(id), goalsCell(id), skillsCell(id), id === response.defaultAgent ? 'default' : ''],
   );
-  const table = renderTable(['AGENT', 'GOALS', ''], rows,
+  const table = renderTable(['AGENT', 'GOALS', 'SKILLS', ''], rows,
     (text, column) => (column === 0 ? color('cyan', text) : color('dim', text)),
     (text) => dim(text),
   );

@@ -100,11 +100,30 @@ export interface AgentGoalCapability {
   detectedRaw?: string | null;
 }
 
+/**
+ * Mirrors the server's AgentStaticCapabilities. Declared here because the client package does not
+ * import from src/domain. Every field is optional: an absent field is UNVERIFIED, which is not the
+ * same claim as `false`.
+ */
+export interface AgentStaticCapabilities {
+  skills?: 'workspacePaths' | 'nativeNames' | 'none';
+  personaAppend?: boolean;
+  personaFiles?: string[];
+  humanInput?: boolean;
+  resume?: boolean;
+  knowledge?: boolean;
+}
+
 export interface AgentCapabilitySummary {
   /** null while the server's detached version probe is still in flight. */
   version: string | null;
   versionRaw: string | null;
   goals: AgentGoalCapability;
+  /**
+   * Static, non-version-gated capabilities (issue #508). Optional because an older server omits it;
+   * absent must render as unknown, never as "this agent cannot". Mirrors src/domain/types.ts.
+   */
+  static?: AgentStaticCapabilities;
 }
 
 export interface AgentsResponse {

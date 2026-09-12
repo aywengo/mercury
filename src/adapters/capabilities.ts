@@ -138,6 +138,15 @@ export class AgentCapabilityRegistry {
         version: goals.detectedVersion ?? null,
         versionRaw: goals.detectedRaw ?? null,
         goals,
+        // Passed through unresolved. These describe the adapter, not the installed harness, so
+        // there is nothing to compare against a detected version (#508).
+        // Omitted when absent OR empty. An empty `static: {}` reads as "this backend declares
+      // nothing" -- the same claim an absent key makes, but one nobody made, and `if (caps.static)`
+      // would take it as a declaration. The declarative adapters already omit it at the source;
+      // this is the choke point, so a hand-written adapter cannot reintroduce the leak.
+      ...(this.adapters[id].capabilities.static
+        && Object.keys(this.adapters[id].capabilities.static).length > 0
+        ? { static: this.adapters[id].capabilities.static } : {}),
       };
     }
     return out;

@@ -72,6 +72,66 @@ export const GOAL_SUPPORT_SCHEMA = object({
   maxTurns: leaf,
 });
 
+/**
+ * The static capability block for a declarative adapter (issue #508).
+ *
+ * Closed rather than an open map, for the same reason GOAL_SUPPORT_SCHEMA is closed: an unknown key
+ * here is not merely ignored, it is a capability the operator believes is advertised and is not.
+ * `skills` is the field #507 reads to decide which namespace to select from, so a typo in it would
+ * silently change which skills a Run gets.
+ */
+export const CAPABILITIES_SCHEMA = object({
+  skills: leaf,
+  personaAppend: leaf,
+  personaFiles: leaf,
+  humanInput: leaf,
+  resume: leaf,
+  knowledge: leaf,
+});
+
+/** The three ways a backend can receive skills. Mirrors AgentSkillDelivery in domain/types.ts. */
+export const SKILL_DELIVERY_MODES = ['workspacePaths', 'nativeNames', 'none'] as const;
+
+/**
+ * Validate the static capability block's VALUES, not just its keys.
+ *
+ * assertNoUnknownKeys() catches a misspelled KEY (`skillz`), and this catches a misspelled VALUE
+ * (`"workspace_paths"`). Both matter, but the value case is the dangerous one: a wrong key is
+ * rejected loudly, while a wrong value used to load silently and be advertised on /api/agents as
+ * though it were real. A consumer choosing a skill namespace from `"workspace_paths"` gets `undefined`
+ * and behaves exactly as if nothing had been declared -- the silent failure this block exists to
+ * prevent. One shared helper for all three declarative adapters, for the same reason
+ * assertNoUnknownKeys is shared: three copies drift.
+ *
+ * `label` is the adapter's own error prefix, so the message names the config file that is wrong.
+ */
+export function assertCapabilities(
+  capabilities: { skills?: unknown; personaAppend?: unknown; personaFiles?: unknown;
+    humanInput?: unknown; resume?: unknown; knowledge?: unknown } | undefined,
+  label: string,
+): void {
+  if (capabilities === undefined) return;
+  if (typeof capabilities !== 'object' || capabilities === null || Array.isArray(capabilities)) {
+    throw new Error(`${label}: capabilities must be an object`);
+  }
+  const bad = (msg: string): never => { throw new Error(`${label}: ${msg}`); };
+  const { skills, personaAppend, personaFiles, humanInput, resume, knowledge } = capabilities;
+  if (skills !== undefined
+    && !(typeof skills === 'string' && (SKILL_DELIVERY_MODES as readonly string[]).includes(skills))) {
+    bad(`capabilities.skills must be one of ${SKILL_DELIVERY_MODES.join(' | ')}, got ${JSON.stringify(skills)}`);
+  }
+  for (const [name, val] of [['personaAppend', personaAppend], ['humanInput', humanInput],
+                             ['resume', resume], ['knowledge', knowledge]] as const) {
+    if (val !== undefined && typeof val !== 'boolean') {
+      bad(`capabilities.${name} must be a boolean, got ${JSON.stringify(val)}`);
+    }
+  }
+  if (personaFiles !== undefined
+    && !(Array.isArray(personaFiles) && personaFiles.every((x) => typeof x === 'string'))) {
+    bad(`capabilities.personaFiles must be an array of strings, got ${JSON.stringify(personaFiles)}`);
+  }
+}
+
 export interface UnknownKey {
   /** Dotted path to the offending object, '' for the config root. */
   path: string;

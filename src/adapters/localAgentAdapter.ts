@@ -9,10 +9,10 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
-import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentGoalSupport, AgentCapabilities, AgentVersionInfo } from '../domain/types.ts';
+import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentGoalSupport, AgentCapabilities, AgentStaticCapabilities, AgentVersionInfo } from '../domain/types.ts';
 import { probeVersion } from './versionProbe.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
-import { assertNoUnknownKeys, GOAL_SUPPORT_SCHEMA, leaf, object, openMap, type ConfigSchema, type ExactKeys } from './configSchema.ts';
+import { assertNoUnknownKeys, CAPABILITIES_SCHEMA, GOAL_SUPPORT_SCHEMA, assertCapabilities, leaf, object, openMap, type ConfigSchema, type ExactKeys } from './configSchema.ts';
 
 // --- config schema (docs/agent-adapters.md section 4.1) ---------------------
 
@@ -94,6 +94,8 @@ export interface LocalAgentConfig {
    * the DETECTED version rather than trusting it (docs/goals.md 13.4).
    */
   goalSupport?: AgentGoalSupport;
+  /** Static capabilities (issue #508). Absent means nothing is advertised, not that it is false. */
+  capabilities?: AgentStaticCapabilities;
   id: string;
   description: string;
   command: string;
@@ -140,6 +142,7 @@ const LOCAL_SKILLS = object({ flag: leaf, values: openMap() });
 // the ExactKeys checks below compare `string` against the interface, i.e. always pass.
 export const LOCAL_AGENT_CONFIG_SCHEMA = object({
   goalSupport: GOAL_SUPPORT_SCHEMA,
+  capabilities: CAPABILITIES_SCHEMA,
   id: leaf,
   description: leaf,
   command: leaf,
@@ -180,6 +183,9 @@ export function validateLocalAgentConfig(cfg: LocalAgentConfig): void {
   // useful message, and reporting "taskInput.flag required" for a config whose real problem is
   // `taskInput: { mode: 'arg', flg: '--task' }` sends the operator to the wrong line.
   assertNoUnknownKeys(cfg, LOCAL_AGENT_CONFIG_SCHEMA, 'LocalAgentConfig');
+  // Keys are checked by the schema; VALUES need their own check. A valid key holding an invalid
+  // value used to load silently and be advertised on /api/agents as though it were real (#508 review).
+  assertCapabilities(cfg.capabilities, 'LocalAgentConfig');
   if (!cfg.command) err('command is required');
   if (!cfg.taskInput || !['arg', 'stdin', 'file'].includes(cfg.taskInput.mode)) err('taskInput.mode must be arg|stdin|file');
   if (cfg.taskInput.mode === 'arg' && !cfg.taskInput.flag) err('taskInput.flag required for mode=arg');
@@ -244,7 +250,17 @@ export class LocalAgentAdapter implements AgentAdapter {
    *  mutates a config before startup is reflected instead of silently stale. */
   get capabilities(): AgentCapabilities {
     const goals = this.cfg.goalSupport;
-    return goals ? { goals } : {};
+    const stat = this.cfg.capabilities;
+    // Independent halves: a backend may advertise skills while supporting no goals at all, which is
+    // the common case for a harness with no objective surface.
+    //
+    // An EMPTY block is omitted rather than surfaced as `static: {}`. An empty object reads as "this
+    // backend declares nothing" -- the same claim an absent key makes, but one that was never made.
+    const hasStatic = stat !== undefined && Object.keys(stat).length > 0;
+    return {
+      ...(goals ? { goals } : {}),
+      ...(hasStatic ? { static: stat } : {}),
+    };
   }
 
   /** Probes the configured `command`, not a bare name on PATH. */

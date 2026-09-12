@@ -16,13 +16,13 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
-import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run, RunConstraints, RunContext, AgentGoalSupport, AgentCapabilities, AgentVersionInfo } from '../domain/types.ts';
+import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run, RunConstraints, RunContext, AgentGoalSupport, AgentCapabilities, AgentStaticCapabilities, AgentVersionInfo } from '../domain/types.ts';
 import { probeVersion } from './versionProbe.ts';
 import { RpcClient, type RpcEvent } from './rpc/rpcClient.ts';
 import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
 import type { LocalAgentEventMap } from './localAgentAdapter.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
-import { assertNoUnknownKeys, GOAL_SUPPORT_SCHEMA, leaf, object, openMap, type ExactKeys } from './configSchema.ts';
+import { assertNoUnknownKeys, CAPABILITIES_SCHEMA, GOAL_SUPPORT_SCHEMA, assertCapabilities, leaf, object, openMap, type ExactKeys } from './configSchema.ts';
 
 const SESSION_DIR_NAME = '.mercury-sessions';
 const SESSION_PATH_FILE = '.mercury-session-path';
@@ -71,6 +71,8 @@ export interface RpcAgentConfig {
    * the DETECTED version rather than trusting it (docs/goals.md 13.4).
    */
   goalSupport?: AgentGoalSupport;
+  /** Static capabilities (issue #508). Absent means nothing is advertised, not that it is false. */
+  capabilities?: AgentStaticCapabilities;
   id: string;
   description: string;
   /** Binary path or name (e.g. "pi", "omp", "prime-agent"). */
@@ -105,6 +107,7 @@ const RPC_RESUME = object({ enabled: leaf, sessionDirFlag: leaf });
 // compare `string` against the interface, i.e. always pass.
 export const RPC_AGENT_CONFIG_SCHEMA = object({
   goalSupport: GOAL_SUPPORT_SCHEMA,
+  capabilities: CAPABILITIES_SCHEMA,
   id: leaf,
   description: leaf,
   command: leaf,
@@ -131,6 +134,9 @@ export function validateRpcAgentConfig(cfg: RpcAgentConfig): void {
   const err = (msg: string): never => { throw new Error(`RpcAgentConfig "${cfg.id}": ${msg}`); };
   if (!cfg.id) err('id is required');
   assertNoUnknownKeys(cfg, RPC_AGENT_CONFIG_SCHEMA, 'RpcAgentConfig');
+  // Keys are checked by the schema; VALUES need their own check. A valid key holding an invalid
+  // value used to load silently and be advertised on /api/agents as though it were real (#508 review).
+  assertCapabilities(cfg.capabilities, 'RpcAgentConfig');
   if (!cfg.command) err('command is required');
   if (cfg.protocol?.modeFlag !== undefined && !cfg.protocol.modeFlag) err('protocol.modeFlag must be a non-empty string');
   if (cfg.protocol?.modeValue !== undefined && !cfg.protocol.modeValue) err('protocol.modeValue must be a non-empty string');
@@ -178,7 +184,17 @@ export class RpcAgentAdapter implements AgentAdapter {
    *  mutates a config before startup is reflected instead of silently stale. */
   get capabilities(): AgentCapabilities {
     const goals = this.cfg.goalSupport;
-    return goals ? { goals } : {};
+    const stat = this.cfg.capabilities;
+    // Independent halves: a backend may advertise skills while supporting no goals at all, which is
+    // the common case for a harness with no objective surface.
+    //
+    // An EMPTY block is omitted rather than surfaced as `static: {}`. An empty object reads as "this
+    // backend declares nothing" -- the same claim an absent key makes, but one that was never made.
+    const hasStatic = stat !== undefined && Object.keys(stat).length > 0;
+    return {
+      ...(goals ? { goals } : {}),
+      ...(hasStatic ? { static: stat } : {}),
+    };
   }
 
   /** Probes the configured `command`, not a bare name on PATH. */
