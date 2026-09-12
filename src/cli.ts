@@ -23,7 +23,7 @@ import { WakeupListener, WakeupWriter } from './events/wakeup.ts';
 import { RunQueue } from './queue/runQueue.ts';
 import { RunStore } from './runs/runStore.ts';
 import { RunService } from './runs/runService.ts';
-import { AgentCapabilityRegistry } from './adapters/capabilities.ts';
+import { AgentCapabilityRegistry, logAdapterCapabilities } from './adapters/capabilities.ts';
 import { GoalStore } from './runs/goalStore.ts';
 import { settleGoalOnTerminal } from './runs/goalSettlement.ts';
 import { SkillRegistry } from './skills/skillRegistry.ts';
@@ -197,6 +197,16 @@ async function main(): Promise<void> {
   // wait for `--version` to come back, so a missing or slow harness cannot delay or fail
   // startup, and goals read as `version-unknown` for the first moment instead of guessing
   // either way (docs/goals.md 13.3, 13.5).
+  // Emit the resolved capability set per agent at load (issue #500). One line per agent, so a
+  // capability surprise is visible in the boot log without opening a config file.
+  //
+  // Only for commands that actually serve Runs. `gc` prints a JSON report on stdout and the
+  // unknown-command path must leave stdout empty so usage stays distinguishable from help;
+  // logging adapter capabilities for either would put startup noise where a machine reads.
+  if (cmd === 'server' || cmd === 'dev' || cmd === 'worker') {
+    logAdapterCapabilities(adapters, logger);
+  }
+
   const agentCapabilities = new AgentCapabilityRegistry(adapters);
   agentCapabilities.start();
 

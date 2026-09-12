@@ -22,6 +22,7 @@ import { RpcClient, type RpcEvent } from './rpc/rpcClient.ts';
 import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
 import type { LocalAgentEventMap } from './localAgentAdapter.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
+import { assertNoUnknownKeys, GOAL_SUPPORT_SCHEMA, leaf, object, openMap, type ExactKeys } from './configSchema.ts';
 
 const SESSION_DIR_NAME = '.mercury-sessions';
 const SESSION_PATH_FILE = '.mercury-session-path';
@@ -92,11 +93,44 @@ export interface RpcAgentAdapterOptions {
   workerId?: string;
 }
 
+// --- key schema (issue #500) -------------------------------------------------
+
+const RPC_PROTOCOL = object({
+  modeFlag: leaf, modeValue: leaf, readyDelayMs: leaf, stopGraceMs: leaf, ignoreEventTypes: leaf,
+});
+const RPC_INPUT = object({ enabled: leaf, dialogMethods: leaf });
+const RPC_RESUME = object({ enabled: leaf, sessionDirFlag: leaf });
+
+// Not annotated `: ConfigSchema`: that widens the key set to `string` and makes ExactKeys
+// compare `string` against the interface, i.e. always pass.
+export const RPC_AGENT_CONFIG_SCHEMA = object({
+  goalSupport: GOAL_SUPPORT_SCHEMA,
+  id: leaf,
+  description: leaf,
+  command: leaf,
+  args: leaf,
+  cwd: leaf,
+  protocol: RPC_PROTOCOL,
+  eventMap: openMap(),
+  input: RPC_INPUT,
+  resume: RPC_RESUME,
+  env: openMap(),
+});
+
+type _RpcKeysExact = ExactKeys<keyof (typeof RPC_AGENT_CONFIG_SCHEMA)['keys'], keyof RpcAgentConfig>;
+const _rpcKeysExact: _RpcKeysExact = true;
+const _rpcProtocolExact: ExactKeys<keyof (typeof RPC_PROTOCOL)['keys'], keyof RpcAgentProtocolConfig> = true;
+const _rpcInputExact: ExactKeys<keyof (typeof RPC_INPUT)['keys'], keyof RpcAgentInputConfig> = true;
+const _rpcResumeExact: ExactKeys<keyof (typeof RPC_RESUME)['keys'], keyof RpcAgentResumeConfig> = true;
+const _rpcGoalExact: ExactKeys<keyof (typeof GOAL_SUPPORT_SCHEMA)['keys'], keyof AgentGoalSupport> = true;
+void [_rpcKeysExact, _rpcProtocolExact, _rpcInputExact, _rpcResumeExact, _rpcGoalExact];
+
 // --- validation -------------------------------------------------------------
 
 export function validateRpcAgentConfig(cfg: RpcAgentConfig): void {
   const err = (msg: string): never => { throw new Error(`RpcAgentConfig "${cfg.id}": ${msg}`); };
   if (!cfg.id) err('id is required');
+  assertNoUnknownKeys(cfg, RPC_AGENT_CONFIG_SCHEMA, 'RpcAgentConfig');
   if (!cfg.command) err('command is required');
   if (cfg.protocol?.modeFlag !== undefined && !cfg.protocol.modeFlag) err('protocol.modeFlag must be a non-empty string');
   if (cfg.protocol?.modeValue !== undefined && !cfg.protocol.modeValue) err('protocol.modeValue must be a non-empty string');
