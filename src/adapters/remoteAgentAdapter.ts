@@ -5,9 +5,9 @@
 // cancel endpoints, polling, event mapping. No per-agent code.
 
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
-import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentGoalSupport, AgentCapabilities, AgentVersionInfo } from '../domain/types.ts';
+import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentGoalSupport, AgentCapabilities, AgentStaticCapabilities, AgentVersionInfo } from '../domain/types.ts';
 import type { LocalAgentEventMap } from './localAgentAdapter.ts';
-import { assertNoUnknownKeys, GOAL_SUPPORT_SCHEMA, leaf, object, openMap, type ExactKeys } from './configSchema.ts';
+import { assertNoUnknownKeys, CAPABILITIES_SCHEMA, GOAL_SUPPORT_SCHEMA, assertCapabilities, leaf, object, openMap, type ExactKeys } from './configSchema.ts';
 
 // --- config schema (docs/agent-adapters.md section 5.1) ---------------------
 
@@ -58,6 +58,8 @@ export interface RemoteAgentConfig {
    * the DETECTED version rather than trusting it (docs/goals.md 13.4).
    */
   goalSupport?: AgentGoalSupport;
+  /** Static capabilities (issue #508). Absent means nothing is advertised, not that it is false. */
+  capabilities?: AgentStaticCapabilities;
   id: string;
   description: string;
   api: {
@@ -102,6 +104,7 @@ const REMOTE_POLL = object({ intervalMs: leaf, timeoutMs: leaf });
 
 export const REMOTE_AGENT_CONFIG_SCHEMA = object({
   goalSupport: GOAL_SUPPORT_SCHEMA,
+  capabilities: CAPABILITIES_SCHEMA,
   id: leaf,
   description: leaf,
   api: REMOTE_API,
@@ -130,6 +133,9 @@ export function validateRemoteAgentConfig(cfg: RemoteAgentConfig): void {
   const err = (msg: string): never => { throw new Error(`RemoteAgentConfig "${cfg.id}": ${msg}`); };
   if (!cfg.id) err('id is required');
   assertNoUnknownKeys(cfg, REMOTE_AGENT_CONFIG_SCHEMA, 'RemoteAgentConfig');
+  // Keys are checked by the schema; VALUES need their own check. A valid key holding an invalid
+  // value used to load silently and be advertised on /api/agents as though it were real (#508 review).
+  assertCapabilities(cfg.capabilities, 'RemoteAgentConfig');
   if (!cfg.api?.baseUrl) err('api.baseUrl is required');
   if (!/^https?:\/\//.test(cfg.api.baseUrl)) err('api.baseUrl must be an http(s) URL');
   const auth = cfg.api.auth;
@@ -215,7 +221,17 @@ export class RemoteAgentAdapter implements AgentAdapter {
    *  mutates a config before startup is reflected instead of silently stale. */
   get capabilities(): AgentCapabilities {
     const goals = this.cfg.goalSupport;
-    return goals ? { goals } : {};
+    const stat = this.cfg.capabilities;
+    // Independent halves: a backend may advertise skills while supporting no goals at all, which is
+    // the common case for a harness with no objective surface.
+    //
+    // An EMPTY block is omitted rather than surfaced as `static: {}`. An empty object reads as "this
+    // backend declares nothing" -- the same claim an absent key makes, but one that was never made.
+    const hasStatic = stat !== undefined && Object.keys(stat).length > 0;
+    return {
+      ...(goals ? { goals } : {}),
+      ...(hasStatic ? { static: stat } : {}),
+    };
   }
   private cfg: RemoteAgentConfig;
   private opts: RemoteAgentAdapterOptions;

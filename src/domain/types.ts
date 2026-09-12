@@ -382,9 +382,50 @@ export interface AgentGoalSupport {
   maxTurns?: string;
 }
 
+/**
+ * How a backend receives the skills a Run carries. Measured per adapter, not assumed:
+ *
+ *   workspacePaths -- Mercury materialises skill files into the workspace and the backend reads
+ *                     them from there (PrimeAgent: written to .agents/skills AND passed as paths).
+ *   nativeNames    -- Mercury passes skill NAMES and the backend resolves them in its own store
+ *                     (Hermes: `-s <id>`; the daemon protocol sends id/version/hash).
+ *   none           -- the backend is told nothing. Mercury still writes the workspace snapshot, but
+ *                     nothing in the backend reads it, so claiming otherwise would advertise a
+ *                     capability nobody implemented.
+ *
+ * This is the field #507 needs. A backend on `nativeNames` cannot be handed a Mercury skill id that
+ * it does not have installed -- that is a fatal exit for Hermes, not a warning -- so selection has
+ * to know which namespace it is choosing from.
+ */
+export type AgentSkillDelivery = 'workspacePaths' | 'nativeNames' | 'none';
+
+/** Static capability declarations. Unlike `goals`, these are NOT version-resolved: they describe
+ *  what the ADAPTER does, which is a property of Mercury's integration rather than of the installed
+ *  harness. A field is absent when it is unverified, which is deliberately different from false. */
+export interface AgentStaticCapabilities {
+  skills?: AgentSkillDelivery;
+  /** Can Mercury append text to the agent's persona/system prompt? */
+  personaAppend?: boolean;
+  /** Workspace-relative files the backend reads as persona/context, if any. */
+  personaFiles?: string[];
+  /** The backend accepts mid-Run human input. Derived from the adapter's input support. */
+  humanInput?: boolean;
+  /** The backend can resume a session after a restart. Derived from resume support. */
+  resume?: boolean;
+  /** Can Mercury hand this backend a knowledge base? Unverified for every shipped backend. */
+  knowledge?: boolean;
+}
+
 /** What Mercury can do with an adapter, independent of which version is installed. */
 export interface AgentCapabilities {
   goals?: AgentGoalSupport;
+  /**
+   * Static, non-version-gated capabilities (issue #508). Kept separate from `goals` rather than
+   * flattened into it because `goals` is a version MATRIX -- each field is a minimum version string
+   * resolved against the detected harness -- while these are plain declarations about the adapter.
+   * Merging them would force every consumer to know which kind each field is.
+   */
+  static?: AgentStaticCapabilities;
 }
 
 /** Result of asking a harness binary which version it is. `raw` is kept because when
@@ -431,6 +472,12 @@ export interface AgentCapabilitySummary {
   version: string | null;
   versionRaw: string | null;
   goals: AgentGoalCapability;
+  /**
+   * The adapter's static declarations, passed through unresolved. Present even when `goals` is empty,
+   * because "no goals" and "no skills" are different statements and a consumer choosing a skill
+   * namespace must see the latter.
+   */
+  static?: AgentStaticCapabilities;
 }
 
 export interface AgentAdapter {

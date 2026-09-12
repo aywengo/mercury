@@ -185,7 +185,14 @@ export class DaemonAgentAdapter implements AgentAdapter {
    * PrimeAgentAdapter, which does support goals. Capability is a property of the resolved
    * adapter, not of the agent name (docs/goals.md 13.4).
    */
-  readonly capabilities: AgentCapabilities = {};
+  readonly capabilities: AgentCapabilities = {
+    static: {
+      // Measured: the daemon protocol start payload carries id/version/hash per skill and no file
+      // contents, so the daemon must resolve names in its own namespace.
+      skills: 'nativeNames',
+      humanInput: true,
+    },
+  };
   private opts: DaemonAgentAdapterOptions;
   private sessions = new Map<string, DaemonSession>();
   private cmd: string;

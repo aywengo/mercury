@@ -164,8 +164,77 @@ function declarationViolations(id: string, adapter: AgentAdapter): string[] {
       }
     }
   }
+
+  // Static capabilities (#508). `skills` is REQUIRED rather than optional: #507 chooses a skill
+  // namespace from this value, and an absent one is indistinguishable from an unmeasured one --
+  // which is how Hermes ended up being handed Mercury skill ids it could not resolve.
+  // Shape only. An operator's declarative config with no capabilities block is legitimately `{}` --
+  // fail-closed, advertising nothing -- so "missing" is not a shape violation here. The requirement
+  // that every SHIPPED adapter state a value lives in missingSkillDeclaration() below.
+  // Shape only. An operator's declarative config with no capabilities block is legitimately `{}` --
+  // fail-closed, advertising nothing -- so "missing" is not a shape violation here. The requirement
+  // that every SHIPPED adapter state a value lives in missingSkillDeclaration() below.
+  const stat = (caps as { static?: unknown }).static;
+  if (stat !== undefined) {
+    if (typeof stat !== 'object' || stat === null || Array.isArray(stat)) {
+      v.push(`${id}: static must be a plain object, got ${typeof stat}`);
+    } else {
+      const SKILL_MODES = ['workspacePaths', 'nativeNames', 'none'];
+      const skills = (stat as { skills?: unknown }).skills;
+      if (skills !== undefined && (typeof skills !== 'string' || !SKILL_MODES.includes(skills))) {
+        v.push(`${id}: static.skills must be one of ${SKILL_MODES.join('|')}, got ${JSON.stringify(skills)}`);
+      }
+      for (const flag of ['personaAppend', 'humanInput', 'resume', 'knowledge'] as const) {
+        const val = (stat as Record<string, unknown>)[flag];
+        if (val !== undefined && typeof val !== 'boolean') {
+          v.push(`${id}: static.${flag} must be a boolean, got ${JSON.stringify(val)}`);
+        }
+      }
+      const files = (stat as { personaFiles?: unknown }).personaFiles;
+      if (files !== undefined
+        && !(Array.isArray(files) && files.every((x) => typeof x === 'string'))) {
+        v.push(`${id}: static.personaFiles must be an array of strings`);
+      }
+    }
+  }
   return v;
 }
+
+/**
+ * Every SHIPPED adapter must state how it receives skills (#508).
+ *
+ * Separate from declarationViolations() on purpose. An operator writing a declarative JSON adapter
+ * may legitimately omit the capabilities block, and the honest reading of that is "advertises
+ * nothing" -- fail-closed, exactly as goalSupport works. What is NOT acceptable is a shipped adapter
+ * in this repository leaving the question unanswered, because #507 must pick a skill namespace from
+ * this value and an absent one is indistinguishable from an unmeasured one. That is how Hermes ended
+ * up handed Mercury skill ids it could not resolve.
+ */
+function missingSkillDeclaration(id: string, adapter: AgentAdapter): string | null {
+  const skills = (adapter.capabilities as { static?: { skills?: unknown } })?.static?.skills;
+  if (skills === undefined) return `${id}: no static.skills declared`;
+  if (!['workspacePaths', 'nativeNames', 'none'].includes(String(skills))) {
+    return `${id}: static.skills "${String(skills)}" is not a known delivery mode`;
+  }
+  return null;
+}
+
+test('every shipped adapter declares how it receives skills', () => {
+  const shipped = allShippedAdapters();
+  const missing = Object.entries(shipped).map(([id, a]) => missingSkillDeclaration(id, a)).filter(Boolean);
+  assert.deepEqual(missing, [], `adapters with an unanswered skills question:\n${missing.join('\n')}`);
+});
+
+test('the skills guard REPORTS rather than passing quietly', () => {
+  const broken: [string, AgentAdapter][] = [
+    ['no-static', { capabilities: {} } as unknown as AgentAdapter],
+    ['static-without-skills', { capabilities: { static: { humanInput: true } } } as unknown as AgentAdapter],
+    ['invented-mode', { capabilities: { static: { skills: 'telepathy' } } } as unknown as AgentAdapter],
+  ];
+  for (const [id, adapter] of broken) {
+    assert.ok(missingSkillDeclaration(id, adapter), `the skills guard stayed silent about ${id}`);
+  }
+});
 
 function localCfg(overrides: Partial<LocalAgentConfig> = {}): LocalAgentConfig {
   return {
@@ -177,6 +246,7 @@ function localCfg(overrides: Partial<LocalAgentConfig> = {}): LocalAgentConfig {
     output: { format: 'jsonl', stream: true, eventPath: 'type' },
     eventMap: { completed: 'done' },
     cancel: { signal: 'SIGTERM', graceMs: 100 },
+    capabilities: { skills: 'workspacePaths' },
     ...overrides,
   } as LocalAgentConfig;
 }
@@ -191,6 +261,7 @@ function rpcCfg(overrides: Partial<RpcAgentConfig> = {}): RpcAgentConfig {
     eventMap: {},
     input: { enabled: false },
     resume: { enabled: false },
+    capabilities: { skills: 'nativeNames' },
     ...overrides,
   } as RpcAgentConfig;
 }
@@ -207,6 +278,7 @@ function remoteCfg(overrides: Partial<RemoteAgentConfig> = {}): RemoteAgentConfi
     },
     poll: { intervalMs: 500, timeoutMs: 60_000 },
     eventMap: {},
+    capabilities: { skills: 'none' },
     ...overrides,
   } as RemoteAgentConfig;
 }
@@ -241,6 +313,7 @@ test('the guard REPORTS a bad declaration instead of passing quietly', () => {
     ['capabilities-not-an-object', { capabilities: 'yes', detectVersion: async () => ({ version: 'version-unknown', raw: '' }) } as unknown as AgentAdapter],
     ['empty-goals-object', { capabilities: { goals: {} }, detectVersion: async () => ({ version: 'version-unknown', raw: '' }) } as unknown as AgentAdapter],
     ['unparsable-minimum-version', { capabilities: { goals: { set: 'yes please' } }, detectVersion: async () => ({ version: 'version-unknown', raw: '' }) } as unknown as AgentAdapter],
+    ['non-boolean-capability-flag', { capabilities: { static: { skills: 'none', resume: 'yes' } }, detectVersion: async () => ({ version: 'version-unknown', raw: '' }) } as unknown as AgentAdapter],
   ];
   for (const [id, adapter] of broken) {
     const v = declarationViolations(id, adapter);
@@ -252,10 +325,12 @@ test('a declarative adapter with no goalSupport declares NO goals, and fails clo
   // Absent config key means "never", which is a claim rather than a shrug. This is the
   // behaviour the three config-driven adapters share, and nothing asserted it before.
   for (const [label, adapter] of [
-    ['local', new LocalAgentAdapter(localCfg(), {})],
-    ['rpc', new RpcAgentAdapter(rpcCfg(), {})],
-    ['remote', new RemoteAgentAdapter(remoteCfg(), {})],
+    ['local', new LocalAgentAdapter(localCfg({ capabilities: undefined }), {})],
+    ['rpc', new RpcAgentAdapter(rpcCfg({ capabilities: undefined }), {})],
+    ['remote', new RemoteAgentAdapter(remoteCfg({ capabilities: undefined }), {})],
   ] as [string, AgentAdapter][]) {
+    // capabilities: undefined is explicit here. The shared fixtures now carry a capabilities block so
+    // they model a realistic shipped config, and this test is about the ABSENT case.
     assert.deepEqual(adapter.capabilities, {}, `${label}: a config with no goalSupport must declare nothing`);
     assert.deepEqual(declarationViolations(label, adapter), []);
   }

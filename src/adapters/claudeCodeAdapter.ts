@@ -112,7 +112,14 @@ const MAX_ERR_TAIL = 4000;
 export class ClaudeCodeAdapter implements AgentAdapter {
   /** Claude Code exposes no goal surface: `claude --help` has no goal flag on either
    *  install measured (1.0.3 and 2.1.260), and the adapter emits no goal argv. */
-  readonly capabilities: AgentCapabilities = {};
+  readonly capabilities: AgentCapabilities = {
+    static: {
+      // Measured: this adapter references no skill at all. Mercury still writes the workspace
+      // snapshot, but nothing here tells Claude Code to read it, so 'none' is the honest value --
+      // 'workspacePaths' would advertise a capability nobody implemented.
+      skills: 'none',
+    },
+  };
   private opts: ClaudeCodeAdapterOptions;
   private sessions = new Map<string, Session>();
 

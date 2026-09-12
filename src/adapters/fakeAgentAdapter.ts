@@ -22,7 +22,16 @@ export interface FakeAgentConfig {
 
 export class FakeAgentAdapter implements AgentAdapter {
   /** Test double. No harness, so no goal interface to reach. */
-  readonly capabilities: AgentCapabilities = {};
+  readonly capabilities: AgentCapabilities = {
+    static: {
+      // The test double executes nothing, so it consumes no skills. Declared rather than left absent
+      // because the guard test requires every adapter to state a value, and an absent value is
+      // indistinguishable from an unmeasured one.
+      skills: 'none',
+      humanInput: true,
+      resume: true,
+    },
+  };
   private cancelled = new Set<string>();
   private inputs = new Map<string, AgentInput[]>();
   private inputWaiters = new Map<string, (input: AgentInput) => void>();

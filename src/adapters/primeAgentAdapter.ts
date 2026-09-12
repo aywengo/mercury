@@ -89,6 +89,13 @@ export class PrimeAgentAdapter implements AgentAdapter {
    */
   readonly capabilities: AgentCapabilities = {
     goals: { set: '0.3.3', track: '0.3.3', tokenBudget: '0.3.3' },
+    static: {
+      // Measured: the worker writes skill files to <workspace>/.agents/skills and this adapter also
+      // passes each skill's workspace path on argv, so PrimeAgent reads them from disk.
+      skills: 'workspacePaths',
+      humanInput: true,
+      resume: true,
+    },
   };
 
   /** PrimeAgent prints a bare dotted version (`0.9.4`), so the default parser applies.
