@@ -192,7 +192,7 @@ Estimate: **3–5 days**. Depends on Phase 1.
 
 - Resolve a requested preset in `RunService.create()`.
 - Implement explicit agent/model/skill/constraint precedence.
-- Add migration v6 for `run_presets`.
+- Add the next free migration for `run_presets` -- one past the last entry of `MIGRATIONS` in `src/db/database.ts` at the time this is implemented. Do not pre-reserve a number here; v6 was claimed by `run_goals` before this line was updated.
 - Store preset and skill snapshots in the Run creation transaction.
 - Materialize the preset from snapshot bytes in the worker.
 - Extend `.mercury-context.json`.
