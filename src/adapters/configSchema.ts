@@ -142,16 +142,27 @@ export function findUnknownKeys(value: unknown, schema: ConfigSchema, path = '')
  * matters most when the file is in the wrong directory and is being validated by the wrong
  * adapter -- a real failure mode, since the three declarative directories sit side by side.
  */
+export const MAX_REPORTED_KEYS = 8;
+
 export function assertNoUnknownKeys(value: unknown, schema: ConfigSchema, label: string): void {
   const unknown = findUnknownKeys(value, schema);
   if (unknown.length === 0) return;
   const where = (k: UnknownKey): string => (k.path ? `${k.path}.${k.key}` : k.key);
-  const described = unknown.map((k) => {
-    const at = where(k);
-    return k.suggestion ? `${at} (did you mean '${k.suggestion}'?)` : at;
-  });
+  // A config that is wrong wholesale (wrong schema version, wrong file entirely) can carry dozens
+  // of unrecognised keys. Listing them all buries the one the operator needs, so report a bounded
+  // number and prefer the ones with a suggestion -- those are actionable typos rather than noise.
+  const described = unknown
+    .slice()
+    .sort((a, b) => Number(Boolean(b.suggestion)) - Number(Boolean(a.suggestion)))
+    .map((k) => {
+      const at = where(k);
+      return k.suggestion ? `${at} (did you mean '${k.suggestion}'?)` : at;
+    });
+  const shown = described.slice(0, MAX_REPORTED_KEYS);
+  const more = described.length - shown.length;
+  const list = more > 0 ? `${shown.join(', ')} (and ${more} more)` : shown.join(', ');
   throw new Error(
-    `${label}: unknown config ${unknown.length === 1 ? 'key' : 'keys'} ${described.join(', ')}. `
+    `${label}: unknown config ${unknown.length === 1 ? 'key' : 'keys'} ${list}. `
     + 'Unknown keys are rejected rather than ignored, because an ignored typo is read as a '
     + 'deliberate choice.',
   );

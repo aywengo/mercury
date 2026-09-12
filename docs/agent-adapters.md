@@ -660,7 +660,7 @@ api:
   events: { method: "GET", path: "/sessions/{id}/events", eventField: "events", eventTypeField: "type" }
   sendInput: { method: "POST", path: "/sessions/{id}/messages", body: { message: "{input}" } }
   cancel: { method: "POST", path: "/sessions/{id}/cancel" }
-poll: { intervalMs: 5000 }
+poll: { intervalMs: 5000, timeoutMs: 900000 }
 eventMap:
   message: "agent.message"
   tool_started: "tool.started"
@@ -677,7 +677,7 @@ api:
   createTask: { method: "POST", path: "/api/sessions", body: { prompt: "{task}" }, idField: "session_id" }
   getTask: { method: "GET", path: "/api/sessions/{id}", statusField: "status", statusMap: { running: "running", stopped: "completed", error: "failed" } }
   events: { method: "GET", path: "/api/sessions/{id}/events", eventField: "events", eventTypeField: "type" }
-poll: { intervalMs: 2000 }
+poll: { intervalMs: 2000, timeoutMs: 900000 }
 eventMap:
   agent_message: "agent.message"
   tool_call: "tool.started"

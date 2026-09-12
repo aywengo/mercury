@@ -298,3 +298,21 @@ test('the capability log line is actually wired into the composition root', () =
   }
   void call;
 });
+
+test('a config wrong at every level still yields a readable message', () => {
+  // The bound exists because a wrong-schema-version config produces dozens of unknown keys, and
+  // a 40-key message buries the typo the operator is looking for. Suggestions sort first: they
+  // are actionable, bare names are not.
+  const noisy = { ...localCfg() } as Record<string, unknown>;
+  for (let i = 0; i < 40; i += 1) noisy[`zz_unrecognised_${i}`] = 1;
+  noisy.goalSuport = { set: '1.0.0' };
+  assert.throws(
+    () => validateLocalAgentConfig(noisy as never),
+    (err: Error) => {
+      assert.match(err.message, /did you mean 'goalSupport'/, 'the actionable typo must survive truncation');
+      assert.match(err.message, /and 33 more\)/, 'the remainder must be counted, not silently dropped');
+      assert.ok(err.message.length < 600, `message grew with the config: ${err.message.length} chars`);
+      return true;
+    },
+  );
+});
