@@ -127,8 +127,14 @@ Docs: [Hermes Agent installation](https://hermes-agent.nousresearch.com/docs/get
 `HermesAgentAdapter` runs Hermes in quiet programmatic mode:
 
 ```text
-hermes chat -Q --query-file - --in <workspace> -s <skill> ...
+hermes chat -Q --query-file - --in <workspace>
 ```
+
+Mercury deliberately passes **no** `-s`/`--skills` flag. Hermes resolves that flag against its OWN
+installed-skill store and exits non-zero on a name it does not have -- measured on Hermes v0.21.2, all
+four of Mercury's fallback skill ids are rejected in 0.6-0.7s with `Error: Unknown skill(s): <name>`,
+before any model call. Mercury skill ids and Hermes skill names are different namespaces, so forwarding
+them guaranteed a fatal exit for every Run whose caller omitted `skills` (issue #507).
 
 Task text goes through stdin. The final text becomes `agent.message`, and a
 session id found on stderr supports resume.
