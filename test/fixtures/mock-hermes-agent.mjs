@@ -30,7 +30,18 @@
 //
 // The default store deliberately contains NO Mercury skill id. Mercury's fallback set is
 // planning/implementation/testing/git-pr; none of those is here, which is the exact collision #507 was
-// about (docs/crew/teams.md: Hermes has 81 installed skills, none named `planning`).
+// about. Measured on v0.21.2 against all 141 installed skills (58 bundled + 83 user): zero matches for
+// any of the four. The near-misses are what make the collision insidious rather than obvious -- a real
+// `plan`, `test-driven-development` and `github-code-review` exist, so a fuzzy matcher would silently
+// resolve to the wrong skill instead of failing loudly.
+//
+// Measured rejection behaviour on v0.21.2, all four fallback ids:
+//   -s planning        rc=1 0.7s  Error: Unknown skill(s): planning
+//   -s implementation  rc=1 0.6s  Error: Unknown skill(s): implementation
+//   -s testing         rc=1 0.6s  Error: Unknown skill(s): testing
+//   -s git-pr          rc=1 0.6s  Error: Unknown skill(s): git-pr
+// Rejected before any model call. Note the real CLI checks an empty --query-file FIRST (rc=2), so a
+// probe must send a non-empty query to reach skill validation.
 
 import { writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -41,7 +52,14 @@ const argv = process.argv.slice(2);
 // Validate `-s` before reading stdin, because the real CLI fails before it does any work. Doing it
 // here also means a rejected Run cannot emit a response and then fail -- a half-succeeded Run is the
 // worst possible outcome to model, because the adapter would report output AND a non-zero exit.
-const installed = new Set((process.env.MOCK_HERMES_SKILLS ?? 'code-review,web-research,note-taking')
+// The default store uses names that REALLY exist in Hermes' installed-skill store, measured against
+// Hermes Agent v0.21.2 (2026.9.11) - upstream b7b35a84. It used to default to
+// 'code-review,web-research,note-taking'; none of those three exists in a real Hermes install, and
+// `code-review` IS a Mercury registry id. So the fixture accepted `-s code-review`, certifying that
+// Mercury's own code-review skill would work against Hermes -- the exact false guarantee this file was
+// written to stop giving. Real Hermes rejects all three.
+const installed = new Set((process.env.MOCK_HERMES_SKILLS
+  ?? 'codebase-inspection,requesting-code-review,systematic-debugging')
   .split(',').map((x) => x.trim()).filter(Boolean));
 const requested = [];
 for (let i = 0; i < argv.length; i++) {
@@ -49,8 +67,10 @@ for (let i = 0; i < argv.length; i++) {
 }
 const unknown = requested.filter((n) => n === undefined || !installed.has(n));
 if (unknown.length > 0) {
-  process.stderr.write(`error: unknown skill '${unknown.join("', '")}'\n`);
-  process.stderr.write(`installed skills: ${[...installed].join(', ')}\n`);
+  // Byte-for-byte the real CLI's wording, measured on v0.21.2:
+  //   Error: Unknown skill(s): planning
+  // docs/crew/teams.md already quotes this format; the fixture is what had drifted.
+  process.stderr.write(`Error: Unknown skill(s): ${unknown.join(', ')}\n`);
   process.exitCode = 1;
   // Exit now rather than falling through to the stdin handler: real Hermes is gone in well under a
   // second, and a bounded adapter timeout must not be what makes this test finish.

@@ -361,7 +361,9 @@ test('the mock rejects a Mercury skill id in -s, the way real Hermes does (issue
   const res = await runMock(historical);
   assert.notEqual(res.code, 0,
     `the mock accepted the argv that broke every real Hermes Run: ${res.out}`);
-  assert.match(res.out, /unknown skill/, `expected a named-skill error, got: ${res.out}`);
+  // Asserted against the wording measured on real Hermes v0.21.2, not a paraphrase: a fixture that
+  // drifts from the real CLI stops being evidence about production.
+  assert.match(res.out, /Error: Unknown skill\(s\): planning/, `expected the real CLI's error, got: ${res.out}`);
   // It must fail BEFORE producing a response. A fixture that prints output and then exits non-zero
   // models a half-succeeded Run, which is the least useful thing to test against.
   assert.ok(!res.out.includes('Hello from mock hermes'),
@@ -371,7 +373,10 @@ test('the mock rejects a Mercury skill id in -s, the way real Hermes does (issue
 test('the mock still accepts a name that IS in its installed store', async () => {
   // Without this, "rejects unknown names" could be satisfied by a fixture that rejects everything --
   // which would make the previous test pass for the wrong reason.
-  const res = await runMock(['chat', '-Q', '--query-file', '-', '-s', 'code-review']);
+  // A name that REALLY exists in Hermes' installed store, measured on v0.21.2. It used to be
+  // `code-review`, which is a Mercury registry id and is NOT a real Hermes skill -- so this test was
+  // asserting that the mock accepts a name production rejects, the exact inversion #525 exists to fix.
+  const res = await runMock(['chat', '-Q', '--query-file', '-', '-s', 'codebase-inspection']);
   assert.equal(res.code, 0, `a legitimately installed skill was rejected: ${res.out}`);
   assert.match(res.out, /Hello from mock hermes/);
   // And the store is configurable, so a test can model a host whose namespace DOES collide with a
@@ -379,6 +384,19 @@ test('the mock still accepts a name that IS in its installed store', async () =>
   const colliding = await runMock(['chat', '-Q', '--query-file', '-', '-s', 'testing'],
     { MOCK_HERMES_SKILLS: 'testing,planning' });
   assert.equal(colliding.code, 0, 'a configured store must be honoured');
+});
+
+test('the default simulated store contains no Mercury skill id (issue #525)', async () => {
+  // The fixture's whole premise is that Mercury ids and Hermes names are disjoint namespaces. That holds
+  // only if the DEFAULT store stays free of Mercury ids -- it previously shipped `code-review`, which is
+  // both a Mercury id and not a real Hermes skill, so the mock certified a Run that production rejects.
+  const mercuryIds = ['code-review', 'debugging', 'deployment', 'documentation', 'frontend', 'git-pr',
+    'implementation', 'issue-fix-loop', 'planning', 'repository-analysis', 'security-review', 'testing'];
+  for (const id of mercuryIds) {
+    const res = await runMock(['chat', '-Q', '--query-file', '-', '-s', id]);
+    assert.notEqual(res.code, 0,
+      `the default store accepts Mercury id '${id}'; real Hermes has no such skill, so this certifies a Run that fails in production`);
+  }
 });
 
 test('the argv HermesAgentAdapter emits today is accepted by the faithful mock', async () => {

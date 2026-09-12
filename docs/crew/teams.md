@@ -66,8 +66,9 @@ Those ids then mean different things per harness:
 | PrimeAgent | `--skill <workspace path>` | files Mercury materialized into the workspace |
 | Hermes | `-s <name>` | Hermes' own installed skill store |
 
-Hermes has 81 installed skills. None of them is named `planning`,
-`implementation`, `testing` or `git-pr`. Hermes rejects an unknown name and exits
+Hermes ships dozens of installed skills. None of them is named `planning`,
+`implementation`, `testing` or `git-pr` -- verified against all 141 skills on a real
+v0.21.2 install (58 bundled + 83 user), zero matches. Hermes rejects an unknown name and exits
 non-zero, so the Run fails in under a second:
 
 ```
