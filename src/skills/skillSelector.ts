@@ -128,13 +128,30 @@ export function termMatches(term: string, lowerTask: string): boolean {
 /** The scoring terms for a skill (capabilities + hyphen variants + KEYWORDS). */
 export function termsForSkill(skill: SkillMeta): string[] { return termsFor(skill); }
 
+export interface SelectOptions {
+  /**
+   * Apply the fixed FALLBACK set when nothing scored above zero.
+   *
+   * Defaults to true, which is today's behaviour, and MUST stay the default: every existing
+   * PrimeAgent caller depends on an omitted `skills` still producing skills. Flipping it silently
+   * would change what thousands of Runs execute (issue #507; Crew Phase 2 is where the default is
+   * revisited deliberately).
+   *
+   * False is for a backend that cannot use Mercury skill ids at all. Passing a fallback set to
+   * Hermes is not a neutral choice -- Hermes resolves names in its OWN store and exits non-zero on
+   * one it does not have, so four plausible-looking Mercury ids guarantee failure.
+   */
+  allowFallback?: boolean;
+}
+
 export interface SkillSelector {
-  select(task: string, available: SkillMeta[], maxSkills: number): string[];
+  select(task: string, available: SkillMeta[], maxSkills: number, opts?: SelectOptions): string[];
 }
 
 export function createSkillSelector(): SkillSelector {
   return {
-    select(task, available, maxSkills = 4) {
+    select(task, available, maxSkills = 4, opts: SelectOptions = {}) {
+      const allowFallback = opts.allowFallback ?? true;
       const lower = task.toLowerCase();
       const scored: { id: string; score: number }[] = [];
       for (const skill of available) {
@@ -147,7 +164,11 @@ export function createSkillSelector(): SkillSelector {
       }
       scored.sort((a, b) => b.score - a.score || compareSkillIds(a.id, b.id));
       const picked = scored.slice(0, maxSkills).map((s) => s.id);
-      return picked.length > 0 ? picked : FALLBACK.filter((id) => available.some((a) => a.id === id));
+      if (picked.length > 0) return picked;
+      // An honest empty answer beats a confident wrong one. With fallback suppressed the selector
+      // returns [] rather than four Mercury ids the target backend cannot resolve.
+      if (!allowFallback) return [];
+      return FALLBACK.filter((id) => available.some((a) => a.id === id));
     },
   };
 }

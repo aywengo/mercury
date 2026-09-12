@@ -120,9 +120,13 @@ test('argv construction: task via stdin, skills, budgets, yolo, accept-hooks, --
   assert.ok(argv.includes('10'));
   assert.ok(argv.includes('--run-budget'));
   assert.ok(argv.includes('300'));
-  assert.ok(argv.includes('-s'));
-  assert.ok(argv.includes('git-pr'));
-  assert.ok(argv.includes('testing'));
+  // This test used to assert `-s`, `git-pr` and `testing` WERE present. That assertion pinned the
+  // defect (#507): Hermes resolves `-s <name>` in its own installed store and exits 1 on an unknown
+  // name, so a Run carrying Mercury ids could never run. See the #459 note below for how the earlier
+  // test let this survive.
+  assert.ok(!argv.includes('-s'), `Mercury forwarded -s to Hermes: ${argv.join(' ')}`);
+  assert.ok(!argv.includes('git-pr') && !argv.includes('testing'),
+    `Mercury skill ids reached Hermes argv: ${argv.join(' ')}`);
   assert.ok(argv.includes('--yolo'));
   assert.ok(argv.includes('--accept-hooks'));
   assert.ok(argv.includes('--source'));
@@ -139,6 +143,13 @@ test('argv construction: task via stdin, skills, budgets, yolo, accept-hooks, --
 // on an unknown name, so a Run that carries skills Hermes has never heard of cannot run
 // at all. The RunService side now allows zero skills; this pins the adapter half -- a
 // context with no skills must produce no `-s` flags, otherwise the fix buys nothing.
+//
+// Worth keeping, and worth naming what it failed to catch. This test pinned the SHAPE of the
+// workaround -- "a caller who sends skills:[] gets no -s" -- rather than the bug. It passed for
+// months while every normal caller, who sends nothing and gets the fallback set, produced a Run
+// that died in under a second. A test that verifies the escape hatch instead of the main road lets
+// the escape hatch become the only way to use the feature. #507 removed the flag entirely, so the
+// empty-skills case below is now one instance of a much broader rule.
 test('a context with no skills produces no -s flags (issue #459)', async () => {
   const argvFile = tempFile('hermes-argv-noskills', 'json');
   const { context } = makeContext({ skills: [] });

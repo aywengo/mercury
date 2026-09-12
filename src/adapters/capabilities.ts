@@ -112,14 +112,22 @@ export class AgentCapabilityRegistry {
     const adapter = this.adapters[agent];
     if (!adapter) return null;
     const info = this.detected.get(agent) ?? null;
-    const goals = resolveGoalCapability(adapter.capabilities.goals, info);
+    // `capabilities` is required by the type, so this `?? {}` looks redundant -- it is not. A
+    // hand-rolled fixture reaches AgentAdapter through `as unknown as`, which erases the requirement,
+    // and section 13.5 makes the runtime behaviour explicit: a capability lookup must never brick
+    // execution. An unguarded read here once produced FAILED(infrastructure) before the adapter was
+    // even asked to start, and test/agentVersion.test.ts pins that regression. Reading it as "declares
+    // nothing" is not a guess about intent -- it is the same answer an adapter with `capabilities: {}`
+    // gets, which the type already sanctions as "never".
+    const declared = adapter.capabilities ?? {};
+    const goals = resolveGoalCapability(declared.goals, info);
     // Resolve every field, not just `set`. Admission needs to refuse `goal.gates` on a backend
     // that has no gate concept, and the answer comes from the same matrix and the same detected
     // version -- computing it here keeps one snapshot consistent, so a probe landing between two
     // reads cannot make `set` look new and `gates` look old.
     const fields: Partial<Record<GoalCapabilityField, AgentGoalCapability>> = {};
     for (const field of GOAL_CAPABILITY_FIELDS) {
-      fields[field] = resolveGoalCapability(adapter.capabilities.goals, info, field);
+      fields[field] = resolveGoalCapability(declared.goals, info, field);
     }
     return { ...goals, fields };
   }
@@ -140,11 +148,15 @@ export class AgentCapabilityRegistry {
         goals,
         // Passed through unresolved. These describe the adapter, not the installed harness, so
         // there is nothing to compare against a detected version (#508).
-        // Omitted when absent OR empty. An empty `static: {}` reads as "this backend declares
+      // Omitted when absent OR empty. An empty `static: {}` reads as "this backend declares
       // nothing" -- the same claim an absent key makes, but one nobody made, and `if (caps.static)`
-      // would take it as a declaration. The declarative adapters already omit it at the source;
-      // this is the choke point, so a hand-written adapter cannot reintroduce the leak.
-      ...(this.adapters[id].capabilities.static
+      // would take it as a declaration. The declarative adapters already omit it at the source; this
+      // is the choke point, so a hand-written adapter cannot reintroduce the leak.
+      //
+      // The optional chain is not redundant with that check: a fixture-built adapter reaching
+      // AgentAdapter through `as unknown as` has no `capabilities` at all, and a snapshot read must
+      // not brick execution (section 13.5).
+      ...(this.adapters[id].capabilities?.static
         && Object.keys(this.adapters[id].capabilities.static).length > 0
         ? { static: this.adapters[id].capabilities.static } : {}),
       };

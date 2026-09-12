@@ -119,9 +119,18 @@ export class HermesAgentAdapter implements AgentAdapter {
     if (resumeId) argv.push('--resume', resumeId);
     if (this.opts.maxTurns !== undefined) argv.push('--max-turns', String(this.opts.maxTurns));
     if (this.opts.runBudgetSeconds !== undefined) argv.push('--run-budget', String(this.opts.runBudgetSeconds));
-    for (const skill of context.skills) {
-      argv.push('-s', skill.id);
-    }
+    // No `-s` for Mercury skills, ever (#507).
+    //
+    // Hermes resolves `-s <name>` in its OWN installed-skill store and exits non-zero on a name it
+    // does not have -- under a second, before any work starts. Mercury skill ids live in a different
+    // namespace, so every Run that carried one was guaranteed to fail. This is the K2 violation
+    // docs/knowledge-base.md 4 describes: Mercury naming things inside a sub-harness's namespace.
+    //
+    // The old comment here treated `-s` as the skill delivery mechanism. It never was one that worked;
+    // the workspace snapshot is what any backend can read, and Hermes reads no such thing, so the
+    // honest value for Hermes is that Mercury hands it nothing. Skills remain materialised into the
+    // workspace by the worker; they are simply not named on Hermes's command line.
+
     if (this.opts.yolo) argv.push('--yolo');
     if (this.opts.acceptHooks) argv.push('--accept-hooks');
     if (this.opts.source) argv.push('--source', this.opts.source);
