@@ -24,10 +24,20 @@ export function pretty(v: unknown): string;
 export type UiGoalStatus =
   | 'active' | 'paused' | 'budget_limited' | 'error' | 'complete' | 'cancelled' | 'unmet';
 
+/** What "met" meant, as the operator stated it. Every field optional; absent means no contract. */
+export interface UiGoalContract {
+  outcome?: string;
+  verification?: string;
+  constraints?: string;
+  boundaries?: string;
+  stopWhen?: string;
+}
+
 export interface UiGoal {
   status: UiGoalStatus;
   objective?: string;
   source?: string;
+  contract?: UiGoalContract;
   gates?: UiGoalGate[];
   /**
    * Whether the Run ever reached RUNNING. Absent means no answer yet, which is NOT false --
@@ -64,6 +74,7 @@ export interface UiGoalGate {
 export function harnessLabel(run: { agentVersion?: string | null; agentVersionRaw?: string | null } | null | undefined): string;
 
 export function goalGatesHtml(goal: ({ gates?: UiGoalGate[] } & Record<string, unknown>) | null | undefined): string;
+export function goalContractHtml(goal: UiGoal | null | undefined): string;
 
 /** Badge text/class/title for the run page. Same three states as goalBadge. */
 export function goalLabel(goal: UiGoal | null | undefined): { text: string; cls: string; title: string };

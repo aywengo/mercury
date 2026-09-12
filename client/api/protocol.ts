@@ -158,10 +158,29 @@ export interface GoalGate {
   maxRetries: number;
 }
 
+/**
+ * What "met" means, as the operator stated it at creation (docs/goals.md 5). Mercury records
+ * the contract and never evaluates it -- judging completion is the harness' job, and Mercury
+ * judging it would be the thing the whole feature refuses to do.
+ *
+ * Every field is free-form prose and every one is optional; an all-empty contract is
+ * normalised to absent, because `{}` and "no contract" must not be two ways to say the same
+ * thing.
+ */
+export interface GoalContract {
+  outcome?: string;
+  verification?: string;
+  constraints?: string;
+  boundaries?: string;
+  stopWhen?: string;
+}
+
 export interface GoalState {
   runId: string;
   status: GoalStatus;
   objective: string;
+  /** The completion contract, if one was set. Absent means none, not empty. */
+  contract?: GoalContract;
   /**
    * Declared gates, in the order they were requested. Absent means none were requested; an
    * empty array is normalised away server-side, so both read as "no gates".
@@ -455,6 +474,7 @@ function parseGoal(value: unknown): GoalState {
     status: status as GoalStatus,
     objective: reqString(o.objective, 'goal.objective', 'goal'),
     updatedAt: reqString(o.updatedAt, 'goal.updatedAt', 'goal'),
+    ...(parseGoalContract(o.contract) ? { contract: parseGoalContract(o.contract)! } : {}),
     ...(parseGoalGates(o.gates).length > 0 ? { gates: parseGoalGates(o.gates) } : {}),
     ...(typeof o.tokenBudget === 'number' ? { tokenBudget: o.tokenBudget } : {}),
     ...(typeof o.tokensUsed === 'number' ? { tokensUsed: o.tokensUsed } : {}),
@@ -476,6 +496,28 @@ function parseGoal(value: unknown): GoalState {
  * innerHTML sink unchecked. A malformed gate is rejected outright instead of skipped, because a
  * silently shortened gate list would understate what the harness was asked to enforce.
  */
+/** The contract fields Mercury knows. Unknown keys are ignored, not rejected: the contract is
+ *  free-form prose and a newer server may add a field this client predates. */
+const GOAL_CONTRACT_FIELDS = ['outcome', 'verification', 'constraints', 'boundaries', 'stopWhen'] as const;
+
+function parseGoalContract(value: unknown): GoalContract | undefined {
+  if (value === undefined || value === null) return undefined;
+  const o = asObject(value, 'goal.contract');
+  const out: GoalContract = {};
+  for (const field of GOAL_CONTRACT_FIELDS) {
+    const v = o[field];
+    if (v === undefined || v === null) continue;
+    // A non-string is skew or corruption, not something to coerce: rendering `[object Object]`
+    // as the success condition an operator is being judged against would be worse than failing.
+    if (typeof v !== 'string') throw new ProtocolError(`goal.contract.${field} must be a string`);
+    const trimmed = v.trim();
+    if (trimmed.length > 0) out[field] = trimmed;
+  }
+  // Absent, not empty: a contract with no fields says nothing, and rendering an empty block
+  // would read as "a contract exists" next to one that genuinely does not.
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function parseGoalGates(value: unknown): GoalGate[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) throw new ProtocolError('goal.gates must be an array');

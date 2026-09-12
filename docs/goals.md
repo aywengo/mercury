@@ -13,6 +13,7 @@ deferred. Concretely, today:
 | a mid-run objective replacement reported by the harness is recorded, redacted and bounded (9) | |
 | `run_goals.attempted` separates "never started" from "attempted and stopped short" on the gauge, in `runs show` and on the dashboard badge (14) | |
 | the run list carries `attempted` too, so `runs list` and the dashboard GOAL column distinguish the two kinds of `unmet` (14) | |
+| the goal `contract` is readable back: parsed by the client, rendered by `runs show` and the run page (5) | |
 | `run_goals` table, `GoalSpec` validation, `goal.*` event types | Hermes goals (Phase 5, blocked upstream) |
 | `POST /api/runs` accepts `goal`, refused unless the agent can track it | budget enforcement (Phase 6, deferred pending real usage data) |
 | `goal.unmet` when a Run ends with the objective still open, and `mercury_goals_in_status` | |
