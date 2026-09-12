@@ -328,3 +328,74 @@ test('the run settles on the drain grace when stdout never ends (issue #166)', a
   assert.ok(waited < 1_500,
     `settling took ${waited}ms; the 150ms drain grace should end this run, not the 4000ms pipe hold`);
 });
+// --- the fixture's own fidelity, and the bug it now makes reproducible (issue #525) -------------
+//
+// #507 removed `-s` from HermesAgentAdapter and asserted it is absent. Correct, but incomplete: the
+// mock ignored `-s`, so nothing proved the flag was ever harmful. Re-adding `argv.push('-s', skill.id)`
+// would have kept the whole suite green while every real Hermes Run died. A mock that accepts what
+// production rejects certifies the bug.
+
+/** Run the mock CLI directly with an explicit argv and return its exit code plus combined output. */
+async function runMock(cliArgv: string[], env: Record<string, string> = {}): Promise<{ code: number; out: string }> {
+  const { spawn } = await import('node:child_process');
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [MOCK, ...cliArgv], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, ...env },
+    });
+    let out = '';
+    child.stdout.on('data', (c: Buffer) => (out += c.toString()));
+    child.stderr.on('data', (c: Buffer) => (out += c.toString()));
+    // Bounded: real Hermes rejects in well under a second, so a hang here is a fixture defect and must
+    // surface as a failed test rather than a stalled runner.
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('mock hermes did not exit')); }, 15_000);
+    child.once('error', (e) => { clearTimeout(timer); reject(e); });
+    child.once('close', (code) => { clearTimeout(timer); resolve({ code: code ?? -1, out }); });
+    child.stdin.end('do the thing');
+  });
+}
+
+test('the mock rejects a Mercury skill id in -s, the way real Hermes does (issue #525)', async () => {
+  // This is the argv HermesAgentAdapter ACTUALLY emitted before #507, for a Run carrying two skills.
+  const historical = ['chat', '-Q', '--query-file', '-', '-s', 'planning', '-s', 'testing'];
+  const res = await runMock(historical);
+  assert.notEqual(res.code, 0,
+    `the mock accepted the argv that broke every real Hermes Run: ${res.out}`);
+  assert.match(res.out, /unknown skill/, `expected a named-skill error, got: ${res.out}`);
+  // It must fail BEFORE producing a response. A fixture that prints output and then exits non-zero
+  // models a half-succeeded Run, which is the least useful thing to test against.
+  assert.ok(!res.out.includes('Hello from mock hermes'),
+    `the mock emitted a response before rejecting: ${res.out}`);
+});
+
+test('the mock still accepts a name that IS in its installed store', async () => {
+  // Without this, "rejects unknown names" could be satisfied by a fixture that rejects everything --
+  // which would make the previous test pass for the wrong reason.
+  const res = await runMock(['chat', '-Q', '--query-file', '-', '-s', 'code-review']);
+  assert.equal(res.code, 0, `a legitimately installed skill was rejected: ${res.out}`);
+  assert.match(res.out, /Hello from mock hermes/);
+  // And the store is configurable, so a test can model a host whose namespace DOES collide with a
+  // Mercury id -- the case where "just use names" would appear to work.
+  const colliding = await runMock(['chat', '-Q', '--query-file', '-', '-s', 'testing'],
+    { MOCK_HERMES_SKILLS: 'testing,planning' });
+  assert.equal(colliding.code, 0, 'a configured store must be honoured');
+});
+
+test('the argv HermesAgentAdapter emits today is accepted by the faithful mock', async () => {
+  // The other half of the proof. The historical argv fails and the current one passes, against the same
+  // fixture -- so the fix is demonstrated to change the outcome, not merely to change a string.
+  const argvFile = tempFile('hermes-argv-fidelity', 'json');
+  const { context } = makeContext({
+    skills: [
+      { id: 'planning', version: '1', description: '', capabilities: [], path: '', content: '', hash: '', files: {} },
+      { id: 'testing', version: '1', description: '', capabilities: [], path: '', content: '', hash: '', files: {} },
+    ],
+  });
+  const a = adapter({ env: { MOCK_HERMES_ARGV_FILE: argvFile } });
+  const handle = await a.start(context);
+  const { exit } = await collectAll(handle);
+  assert.equal(exit.code, 0,
+    `the current argv was rejected by a faithful Hermes: ${JSON.stringify(exit)}`);
+  const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+  assert.ok(!argv.includes('-s'), `argv grew a -s again: ${argv.join(' ')}`);
+});
