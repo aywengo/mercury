@@ -283,7 +283,13 @@ export class Worker {
         workspace.path,
         workspace.mode === 'git-worktree' ? workspace.baseCommit : undefined,
       );
-      const skills = this.deps.skills.resolve(this.deps.runService.getSkills(run.id).map((s) => s.id));
+      // The Run's own stored snapshots, read verbatim (#506). This used to take the stored skill
+      // IDS and re-resolve them against the live registry, which threw the snapshot away: editing
+      // a skill changed what an already-queued Run executed, and the skill.started events below
+      // reported the live version while run_skills recorded the created-at version, so the two
+      // disagreed on the record. getSkills() already returns full ResolvedSkill rows -- content,
+      // files, version and hash -- so nothing here needs the registry at all.
+      const skills = this.deps.runService.getSkills(run.id);
       await writeSkills(workspace.path, skills);
 
       // STARTING -> RUNNING
