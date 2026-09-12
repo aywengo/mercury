@@ -11,6 +11,80 @@ import type { Run, Workspace } from '../domain/types.ts';
 
 const execFileP = promisify(execFile);
 
+/**
+ * Every git invocation in this file goes through runGit(). There was no choke point, so there was
+ * no default: eleven execFile calls, none with a timeout, and a worker that hangs is indistinguishable
+ * from a worker that is slow except in hindsight.
+ *
+ * Two failure modes, and the second is the one that bites in production:
+ *
+ *   1. A remote is slow or a clone is huge. Bounded by the timeout.
+ *   2. git decides to ASK A QUESTION. The worker is a detached daemon with no controlling terminal,
+ *      so the prompt goes nowhere and the call blocks forever. `git clone` of a private URL with no
+ *      cached credential does this by default, as does anything that opens an editor.
+ *
+ * The env block answers the questions instead of refusing to answer them: GIT_TERMINAL_PROMPT=0 makes
+ * git fail with an error rather than prompt, and GIT_ASKPASS points at a program that prints nothing,
+ * so an auth attempt fails immediately with bad credentials. Failing fast is correct here because the
+ * alternative is not "works" -- it is "hangs".
+ */
+const GIT_ENV: NodeJS.ProcessEnv = {
+  ...process.env,
+  GIT_TERMINAL_PROMPT: '0',
+  // Defence in depth, and NOT independently covered by a test: GIT_TERMINAL_PROMPT=0 already blocks
+  // the terminal fallback that the credential test observes. GIT_ASKPASS covers the paths that ask
+  // an askpass helper rather than the terminal (ssh passphrase, core.askPass), where git would
+  // otherwise wait on a helper that never answers. Stated plainly because a comment that implies
+  // coverage the suite does not provide is its own kind of defect.
+  GIT_ASKPASS: '/bin/true',
+  GIT_EDITOR: 'true',
+  GIT_PAGER: 'cat',
+  GIT_MERGE_AUTOEDIT: 'no',
+};
+
+/** Plumbing: rev-parse, worktree add/remove, branch -D. All local, all sub-second. */
+const GIT_DEFAULT_TIMEOUT_MS = 30_000;
+/** Network: clone and fetch. A large repository legitimately takes minutes. */
+const GIT_NETWORK_TIMEOUT_MS = 600_000;
+
+export interface GitRunOptions {
+  cwd?: string;
+  timeoutMs?: number;
+}
+
+/**
+ * Run git with a deadline and no ability to ask for input.
+ *
+ * The error names the subcommand and the deadline that expired, because "workspace creation failed"
+ * from a worker that has been stuck for an hour tells an operator nothing actionable.
+ */
+export async function runGit(args: string[], opts: GitRunOptions = {}): Promise<{ stdout: string; stderr: string }> {
+  const timeout = opts.timeoutMs ?? GIT_DEFAULT_TIMEOUT_MS;
+  try {
+    return await execFileP('git', args, {
+      cwd: opts.cwd,
+      env: GIT_ENV,
+      timeout,
+      // SIGKILL so the deadline cannot be negotiated. git handles SIGTERM, and a child that is
+      // willing to shut down cleanly may still take time to do it; the worker's own shutdown has a
+      // deadline and cannot absorb an unbounded child on top of it. Not independently covered --
+      // every git process in these tests dies on either signal, so no test distinguishes them.
+      killSignal: 'SIGKILL',
+      maxBuffer: 32 * 1024 * 1024,
+    });
+  } catch (err) {
+    const e = err as Error & { killed?: boolean; code?: number | string; signal?: string };
+    if (e.killed || e.signal === 'SIGKILL') {
+      throw new Error(
+        `git ${args.join(' ')} exceeded its ${timeout} ms deadline and was killed `
+        + `(cwd: ${opts.cwd ?? 'worker cwd'}). Raise MERCURY_GIT_TIMEOUT_MS if this repository `
+        + 'legitimately needs longer.',
+      );
+    }
+    throw err;
+  }
+}
+
 /** Recursive directory size in bytes (symlinks not followed). */
 function dirSize(dir: string): number {
   if (!existsSync(dir)) return 0;
@@ -33,6 +107,10 @@ function dirSize(dir: string): number {
 export interface WorkspaceManagerConfig {
   baseDir: string;
   mode: 'git-worktree' | 'copy';
+  /** Deadline for local git plumbing. Default 30s. */
+  gitTimeoutMs?: number;
+  /** Deadline for clone/fetch. Default 600s. */
+  gitNetworkTimeoutMs?: number;
 }
 
 export class WorkspaceManager {
@@ -40,6 +118,16 @@ export class WorkspaceManager {
 
   constructor(cfg: WorkspaceManagerConfig) {
     this.cfg = cfg;
+  }
+
+  /** Applies this manager's configured deadlines. `network: true` for clone/fetch. */
+  private git(args: string[], opts: { cwd?: string; network?: boolean } = {}): Promise<{ stdout: string; stderr: string }> {
+    return runGit(args, {
+      cwd: opts.cwd,
+      timeoutMs: opts.network
+        ? this.cfg.gitNetworkTimeoutMs ?? GIT_NETWORK_TIMEOUT_MS
+        : this.cfg.gitTimeoutMs ?? GIT_DEFAULT_TIMEOUT_MS,
+    });
   }
 
   async create(run: Run): Promise<Workspace> {
@@ -81,7 +169,7 @@ export class WorkspaceManager {
           filter: (src) => !src.split(/[\/]/).includes('.git'),
         });
       } else {
-        await execFileP('git', ['clone', '--quiet', source, dest]);
+        await this.git(['clone', '--quiet', source, dest], { network: true });
       }
     }
   }
@@ -93,7 +181,7 @@ export class WorkspaceManager {
     if (existsSync(worktreePath)) rmSync(worktreePath, { recursive: true, force: true });
 
     const baseCommit = run.repository.baseCommit ?? (await this.resolveBaseCommit(repoDir, run.repository.baseBranch ?? 'main'));
-    await execFileP('git', ['-C', repoDir, 'worktree', 'add', '-b', branch, worktreePath, baseCommit]);
+    await this.git(['-C', repoDir, 'worktree', 'add', '-b', branch, worktreePath, baseCommit]);
     return { path: worktreePath, branch, baseCommit, mode: 'git-worktree' };
   }
 
@@ -108,19 +196,19 @@ export class WorkspaceManager {
     const repoDir = join(this.cfg.baseDir, 'repos', key);
     if (!existsSync(join(repoDir, '.git'))) {
       mkdirSync(repoDir, { recursive: true });
-      await execFileP('git', ['clone', '--quiet', source, repoDir]);
+      await this.git(['clone', '--quiet', source, repoDir], { network: true });
     } else {
-      await execFileP('git', ['-C', repoDir, 'fetch', '--quiet', 'origin']);
+      await this.git(['-C', repoDir, 'fetch', '--quiet', 'origin'], { network: true });
     }
     return repoDir;
   }
 
   private async resolveBaseCommit(repoDir: string, baseBranch: string): Promise<string> {
     try {
-      const { stdout } = await execFileP('git', ['-C', repoDir, 'rev-parse', `origin/${baseBranch}`]);
+      const { stdout } = await this.git(['-C', repoDir, 'rev-parse', `origin/${baseBranch}`]);
       return stdout.trim();
     } catch {
-      const { stdout } = await execFileP('git', ['-C', repoDir, 'rev-parse', 'HEAD']);
+      const { stdout } = await this.git(['-C', repoDir, 'rev-parse', 'HEAD']);
       return stdout.trim();
     }
   }
@@ -179,9 +267,9 @@ export class WorkspaceManager {
     }
     try {
       const repoDir = await this.ensureRepo(run);
-      await execFileP('git', ['-C', repoDir, 'worktree', 'remove', '--force', target]);
+      await this.git(['-C', repoDir, 'worktree', 'remove', '--force', target]);
       const branch = run.workspaceBranch ?? `agent/${run.id}`;
-      await execFileP('git', ['-C', repoDir, 'branch', '-D', branch]).catch(() => {});
+      await this.git(['-C', repoDir, 'branch', '-D', branch]).catch(() => {});
     } catch {
       // fall back to plain removal if git worktree remove fails
       rmSync(target, { recursive: true, force: true });
@@ -193,7 +281,7 @@ export class WorkspaceManager {
       // Full SHAs, not --oneline display strings: finalCommits is documented as
       // commit identifiers (run.finalCommits, shown in the UI); consumers need
       // extractable SHAs rather than display strings.
-      const { stdout } = await execFileP('git', ['-C', workspacePath, 'log', '--format=%H', '-n', '20']);
+      const { stdout } = await this.git(['-C', workspacePath, 'log', '--format=%H', '-n', '20']);
       return stdout.split('\n').map((l) => l.trim()).filter(Boolean);
     } catch {
       return [];
@@ -207,9 +295,9 @@ export class WorkspaceManager {
     }
     try {
       const repoDir = await this.ensureRepo(run);
-      await execFileP('git', ['-C', repoDir, 'worktree', 'remove', '--force', run.workspacePath]);
+      await this.git(['-C', repoDir, 'worktree', 'remove', '--force', run.workspacePath]);
       if (run.workspaceBranch) {
-        await execFileP('git', ['-C', repoDir, 'branch', '-D', run.workspaceBranch]).catch(() => {});
+        await this.git(['-C', repoDir, 'branch', '-D', run.workspaceBranch]).catch(() => {});
       }
     } catch {
       // best effort
