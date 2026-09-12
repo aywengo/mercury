@@ -1,7 +1,13 @@
 # Agent Teams — mixed-harness orchestration
 
-Status: **design only.** Nothing here is implemented. Refines
-[`workflows.md`](workflows.md) under one added requirement: a team is
+Status: **partly implemented.** The prerequisite in §10 Phase -1 is half done:
+`RunService.create()` honours an explicit `skills: []` (see the `#459` note there),
+so a caller who knows to send it gets a zero-skill Run. What is *not* done is the
+part that matters to a caller who does not know -- `skillSelector` still cannot
+return an empty list, and `HermesAgentAdapter` still forwards Mercury skill ids into
+Hermes's own namespace with `-s`. Both are issue **#507**.
+
+Refines [`workflows.md`](workflows.md) under one added requirement: a team is
 **heterogeneous on purpose**.
 
 ## 1. The requirement
@@ -69,8 +75,11 @@ agent.message  {"text": "Error: Unknown skill(s): git-pr, implementation"}
 run.failed     {"error": "Agent exited with code 1 (signal none)", "durationMs": 766}
 ```
 
-Because the fallback guarantees at least one skill, and the API offers no way to
-request zero skills, **Hermes cannot execute any Run through Mercury as it stands.**
+Because the selector falls back to a fixed set whenever `skills` is omitted, a
+caller who does not know to send `skills: []` always gets at least one Mercury
+skill id -- and `RunService` honours the explicit `[]` but nothing stops the
+fallback, so in practice **Hermes cannot execute any Run through Mercury as it
+stands.**
 PrimeAgent works only because Mercury materializes skills into the workspace and
 passes paths, which happens to be the namespace PrimeAgent reads.
 
@@ -89,8 +98,10 @@ Two consequences for the roadmap:
    Run records the *intent*, and each sub-team records what it resolved that
    intent to. This also makes the snapshot honest: today the snapshot stores
    Mercury skill ids that a foreign harness cannot dereference.
-2. A Run must be able to carry zero skills. Today it cannot, which turns a
-   namespace mismatch from a degraded run into a guaranteed failure.
+2. A Run must be able to carry zero skills. An explicit `skills: []` is honoured
+   today; an *omitted* one still cannot resolve to empty, because the selector falls
+   back to a fixed set. That gap turns a namespace mismatch from a degraded run into
+   a guaranteed failure (issue **#507**).
 
 ## 4. Do not rebuild Hermes kanban
 
@@ -279,15 +290,18 @@ Crew tables start after the current last migration, per `README.md` §6.
 
 ## 9. Phase order
 
-0. **Phase -1 — let a Run carry zero skills.** Smallest change in the whole plan
-   and it unblocks Hermes completely: today `skillSelector` cannot return an empty
-   list and `RunService` cannot be asked for no skills, so every harness with its
-   own skill namespace fails on the fallback set. See §3 and issue #459.
+0. **Phase -1 — let a Run carry zero skills.** Half done. `RunService` *can* be
+   asked for no skills (explicit `[]`, see #459); `skillSelector` still cannot return
+   an empty list, so every harness with its own skill namespace fails on the fallback
+   set when the caller omits the field. See §3, #459 and issue **#507**.
 1. **Phase 0 — per-Run capabilities** (`appendSystemPrompt`, `workspaceFiles`,
    `model`) on at least PrimeAgent and Hermes, proven by a real Run whose output
    depends on the persona. Everything else is inert without this.
 2. **Phase 1 — capability advertisement** on `/api/agents`, plus a version or
-   capability field on `/healthz`.
+   capability field on `/healthz`. Mostly landed: `/api/agents` already returns a
+   `capabilities` map and `/healthz` already returns `product` and `version`. What is
+   missing is an integer `api` schema version for Fleet to refuse an old host on, and
+   the vocabulary beyond `goals` -- **#510** and **#508**.
 3. **Phase 2 — Agent Templates** stored and snapshotted
    ([`agent-templates.md`](agent-templates.md)).
 4. **Phase 3 — Teams**: bounded stages, mixed harnesses, artifact handoff.

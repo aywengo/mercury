@@ -93,7 +93,8 @@ Rules:
    an `args` escape hatch would be tempting.
 2. Advertisable and fail-closed. A template that requires a capability the
    target adapter lacks rejects Run creation with an actionable error
-   (invariant 9). This also gives `/api/agents` something richer than bare names,
+   (invariant 9). This also gives `/api/agents` something richer than the
+   goals-only `capabilities` map it returns today,
    which `README.md` already flags as blocking MCP-aware routing.
 3. Snapshot the resolved bytes. The Run stores persona bytes, hash and rendering
    decision at creation; the worker executes stored bytes and never re-reads a

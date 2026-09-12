@@ -131,6 +131,12 @@ The designs in this directory use the current repository as their baseline:
 - `resolveContained()` and `writeSkills()` already reject traversal and symlink
   escapes. Upload ingestion still needs equivalent read-side and archive
   protections.
+- Per-adapter capabilities already exist and are served: `src/adapters/capabilities.ts`
+  resolves them fail-closed, `src/adapters/versionProbe.ts` probes harness versions off the
+  boot path, and `GET /api/agents` returns them as a `capabilities` map next to the agent
+  names. The vocabulary is goals-only today; extending it is **#508**, the `/healthz`
+  schema field is **#510**, and the skill-namespace declaration is **#507**. Do not build a
+  second capability registry.
 - SQLite transactions already use `BEGIN IMMEDIATE`.
 - The schema's migrations are the `MIGRATIONS` array in [`src/db/database.ts`](../../src/db/database.ts). Crew changes append after its last entry. No number is quoted here on purpose: v6 `run_goals`, v7 `agent_version` and v8 `run_goals.attempted` were each reserved in prose first, and taken by something else before that prose was implemented. `test/migrationDocs.test.ts` fails if a plan names a number that is already taken.
 - Claude has a process-wide `MERCURY_CLAUDE_MCP_CONFIG`. Mercury has no generic
