@@ -9,6 +9,63 @@ Every claim about current code names the file and line-level mechanism, not the 
 Where a Crew document says something the code no longer agrees with, the code wins and the
 doc gets a fix (P0-6, P0-7).
 
+## Status — implemented 2026-09-12
+
+All seven issues are filed, fixed, reviewed and merged. The `P0-n` labels below are kept because the
+dependency graph and cross-references are written in terms of them.
+
+| Doc | Issue | PR | Merge |
+| --- | --- | --- | --- |
+| P0-1 | #506 | #515 | `9833d1d` |
+| P0-2 | #507 | #520 | `586012bf7` |
+| P0-3 | #508 | #519 + #520 | `0087540` |
+| P0-4 | #509 | #517 | `0dde672` |
+| P0-5 | #510 | #516 | `4b4f6b9` |
+| P0-6 | #511 | #513 | `b1255a0` |
+| P0-7 | #512 | #514 | `1c8796b` |
+
+**One acceptance criterion is not met, deliberately.** P0-2 acceptance 4 requires a Hermes Run that
+completes end to end against a real workspace on a machine with `hermes` installed, recording the Run id
+and Hermes version. It has not been observed. The requirement says "a real binary, not a mock", so it was
+not simulated. As the criterion itself states, **Crew roadmap §4 acceptance 5 stays open** and no
+Teams/Templates work should be scheduled on the assumption that Hermes Runs work.
+
+Two things the implementation changed about this document's own plan:
+
+- **P0-3 was built before P0-2, not after.** P0-3 is marked "Blocked by P0-2", but none of its five
+  acceptance criteria need P0-2 — the capability descriptor is a shape the API can carry whether or not
+  anything reads it yet. Building the mechanism first is what made the shape change possible. P0-3
+  acceptance 2 ("P0-2's hardcoded namespace map is replaced by a read of this descriptor") is satisfied by
+  construction rather than by later edit: the map was never written, because `create()` read the
+  descriptor from the start. That is the better outcome of the two — a replacement step that never had to
+  happen cannot be forgotten.
+- **P0-5 was marked "Blocked by P0-3"** and likewise needed nothing from it.
+
+### Follow-ups found during this work
+
+- **#521** (fixed by #522, `d6bfb577e`) — the shipped `rpc-agents/pi.json` and `omp.json` declared no
+  skill delivery mode, so `/api/agents` advertised both as unknown. **Found by the Phase 0 e2e scenarios,
+  not by 900+ unit tests.** The test that should have caught it wrote a synthetic fixture into a temp dir
+  and asserted on the fixture, while its name claimed to cover the shipped files. Both are
+  `workspacePaths`: `writeSkills()` runs for every adapter and `buildPrompt()` points the harness at
+  `.agents/skills/`. `nativeNames` would have been actively wrong — under P0-2 it makes `create()` skip
+  skill selection entirely, silently stripping skills from every pi/omp Run.
+- **#523** — nothing covers the dashboard half of the `/api/agents` shape contract; needs the Playwright
+  tier (`docs/local-e2e-design.md` Phase 8).
+- **#518** — nothing enforces that `API_SCHEMA_VERSION` moves only on a breaking change.
+
+### E2E coverage
+
+Four scenarios in `e2e/system.test.ts` assert the Phase 0 contracts through public HTTP against separate
+API and worker containers: the `/healthz` schema version, per-agent `static.skills`, `skills: []`
+surviving to a completed zero-skill Run, and a Run still executing its stored snapshot after the skill
+directory is deleted from the worker container. The last is proven non-vacuous by reverting the worker to
+re-resolve against the live registry, which reproduces the original `Skill not found` failure. Landed in
+#522 (`d6bfb577e`); `e2e/system.test.ts` is 15/15.
+
+Note for anyone running these: `testcontainers` is a declared devDependency and is not present in every
+checkout's `node_modules`. A suite nobody can install is not a gate.
+
 ## Dependency order
 
 ```
