@@ -685,8 +685,10 @@ logged at `info`/`warn` and exposed as `mercury_knowledge_outbox_depth`,
 
 ### 8.6 Host persistence
 
-One migration, **v8**, appended to `MIGRATIONS` in [`src/db/database.ts`](../src/db/database.ts)
-after the current v7:
+One migration, appended to `MIGRATIONS` in [`src/db/database.ts`](../src/db/database.ts) after its last
+entry. The number is deliberately not fixed here: this section reserved v8 while v7 was current, and v8 was
+taken by `run_goals.attempted` (`goals.md` §14) before any of this was built. Take whatever is free when this
+lands:
 
 | Table | Columns | Role |
 | --- | --- | --- |

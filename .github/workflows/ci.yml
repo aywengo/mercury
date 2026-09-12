@@ -97,6 +97,10 @@ jobs:
               - 'docs/cli-tui-design.md'
               - 'docs/agent-adapters.md'
               - 'docs/agents.md'
+              - 'docs/crew/README.md'
+              - 'docs/crew/roadmap.md'
+              - 'docs/crew/role-presets.md'
+              - 'docs/knowledge-base.md'
               # releaseDocs.test.ts asserts against this design note, so a docs-only edit to it
               # must still run the job that guards it.
               - 'docs/local-e2e-design.md'
@@ -222,7 +226,7 @@ jobs:
         # that broke it merged green and left main red until the next code PR (#355). The filter is not
         # wrong -- docs-only legitimately skips the matrix -- the mistake is a test over prose that runs
         # only when prose is untouched.
-        run: node --test --test-timeout=180000 test/nodeFloor.test.ts test/deployDocs.test.ts test/releaseDocs.test.ts test/goalWireShape.test.ts test/releaseHygiene.test.ts test/backup.test.ts test/goalEventContract.test.ts test/adapterDocExamples.test.ts client/test/cli.test.ts
+        run: node --test --test-timeout=180000 test/nodeFloor.test.ts test/deployDocs.test.ts test/releaseDocs.test.ts test/goalWireShape.test.ts test/releaseHygiene.test.ts test/backup.test.ts test/goalEventContract.test.ts test/adapterDocExamples.test.ts test/migrationDocs.test.ts client/test/cli.test.ts
 
   # Always reports a single status so narrative-only PRs are not stuck waiting on skipped required jobs.
   ci:

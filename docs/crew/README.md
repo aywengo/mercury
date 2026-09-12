@@ -132,7 +132,7 @@ The designs in this directory use the current repository as their baseline:
   escapes. Upload ingestion still needs equivalent read-side and archive
   protections.
 - SQLite transactions already use `BEGIN IMMEDIATE`.
-- The schema currently has five migrations; Crew changes start after v5.
+- The schema's migrations are the `MIGRATIONS` array in [`src/db/database.ts`](../../src/db/database.ts). Crew changes append after its last entry. No number is quoted here on purpose: v6 `run_goals`, v7 `agent_version` and v8 `run_goals.attempted` were each reserved in prose first, and taken by something else before that prose was implemented. `test/migrationDocs.test.ts` fails if a plan names a number that is already taken.
 - Claude has a process-wide `MERCURY_CLAUDE_MCP_CONFIG`. Mercury has no generic
   per-run MCP model.
 - `allowedNetworks: []` selects container network `none`, while any non-empty

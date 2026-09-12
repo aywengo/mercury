@@ -275,7 +275,7 @@ snapshot created by the winning request.
 
 ## 6. Persistence
 
-The first Crew migration follows the current five migrations:
+The first Crew migration appends to `MIGRATIONS` in [`src/db/database.ts`](../../src/db/database.ts), after its last entry at the time of implementation:
 
 ```sql
 CREATE TABLE IF NOT EXISTS run_presets (
