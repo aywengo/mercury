@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { probeHost, stripTerminalControls } from '../probe.ts';
+import { MIN_HOST_API, probeHost, stripTerminalControls } from '../probe.ts';
 
 interface Behavior {
   health?: { status?: number; body?: unknown; delayMs?: number };
@@ -206,4 +206,85 @@ test('stripTerminalControls removes sequences but keeps ordinary text', () => {
   assert.equal(stripTerminalControls('a\u001b]0;stuck'), 'a]0;stuck');
   // eslint-disable-next-line no-control-regex
   assert.ok(!/[\u0000-\u001f\u007f]/.test(stripTerminalControls('a\u001b]0;stuck')));
+});
+
+
+// --- API schema negotiation (issue #510) ------------------------------------
+//
+// /healthz gained `api`, the response-shape version of the routes Fleet reads. The point is to turn
+// "old host, new Fleet" from a failure at first dispatch -- reported as a task or agent error, which
+// sends the operator to the wrong machine -- into a refusal at registration.
+
+const HEALTHY_AGENTS = { agents: ['fake'] };
+
+test('a probe records the host version and api schema it was told', async () => {
+  const fake = await startFakeMercury({
+    health: { body: { ok: true, ts: new Date().toISOString(), product: 'host', version: '0.1.1', api: 1 } },
+    workers: { body: HEALTHY_WORKERS },
+    agents: { body: HEALTHY_AGENTS },
+  });
+  try {
+    const r = await probeHost({ hostId: 'h', baseUrl: fake.url, token: 'tok', timeoutMs: 2000 });
+    assert.equal(r.outcome, 'ok');
+    assert.equal(r.hostVersion, '0.1.1');
+    assert.equal(r.hostApi, 1);
+  } finally { await fake.close(); }
+});
+
+test('a host below the minimum API schema is incompatible, and the message names both numbers', async () => {
+  const fake = await startFakeMercury({
+    health: { body: { ok: true, ts: new Date().toISOString(), product: 'host', version: '0.0.9', api: 0 } },
+    workers: { body: HEALTHY_WORKERS },
+    agents: { body: HEALTHY_AGENTS },
+  });
+  try {
+    const r = await probeHost({ hostId: 'h', baseUrl: fake.url, token: 'tok', timeoutMs: 2000 });
+    assert.equal(r.outcome, 'incompatible');
+    assert.equal(r.hostApi, 0);
+    assert.equal(r.hostVersion, '0.0.9');
+    // An operator deciding "upgrade the host or downgrade Fleet" needs both numbers and nothing else
+    // to read. A message that says only "incompatible" sends them to the docs.
+    assert.match(r.detail ?? '', /0/, 'detail must name the host schema');
+    assert.match(r.detail ?? '', new RegExp(String(MIN_HOST_API)), 'detail must name the required schema');
+    assert.match(r.detail ?? '', /0\.0\.9/, 'detail must name the host version');
+    // Not 'down': the host is healthy, and conflating the two sends the operator to the network.
+    assert.notEqual(r.outcome, 'unreachable');
+  } finally { await fake.close(); }
+});
+
+test('a host that reports no api field is still usable, not incompatible', async () => {
+  // The regression this guards is the over-strict fix. Every Mercury released before `api` existed
+  // omits the field, and serves exactly the shapes this Fleet build was written against. Treating
+  // absence as zero -- the obvious implementation -- would take every healthy older host out of
+  // rotation, turning a compatibility check into an outage.
+  const fake = await startFakeMercury({
+    health: { body: { ok: true, ts: new Date().toISOString(), product: 'host', version: '0.1.0' } },
+    workers: { body: HEALTHY_WORKERS },
+    agents: { body: HEALTHY_AGENTS },
+  });
+  try {
+    const r = await probeHost({ hostId: 'h', baseUrl: fake.url, token: 'tok', timeoutMs: 2000 });
+    assert.equal(r.outcome, 'ok', 'an unreported schema must not remove a working host from rotation');
+    assert.equal(r.hostApi, null, 'unreported must stay distinguishable from a reported zero');
+    assert.equal(r.hostVersion, '0.1.0');
+  } finally { await fake.close(); }
+});
+
+test('a hostile host version string cannot smuggle terminal controls into the report', async () => {
+  // version is child-supplied text that now reaches the operator's terminal via `hosts list --live`.
+  const fake = await startFakeMercury({
+    health: { body: { ok: true, ts: 't', version: '1.0.0\u001b]0;pwned\u0007', api: 1 } },
+    workers: { body: HEALTHY_WORKERS },
+    agents: { body: HEALTHY_AGENTS },
+  });
+  try {
+    const r = await probeHost({ hostId: 'h', baseUrl: fake.url, token: 'tok', timeoutMs: 2000 });
+    // The whole OSC sequence goes, title text included: stripTerminalControls removes control
+    // sequences rather than escaping them, because a surviving "pwned" on a line of its own is still
+    // operator-visible text. What matters is that nothing can set the terminal title or forge a line.
+    assert.equal(r.hostVersion, '1.0.0');
+    assert.ok(!/[\u0000-\u001f\u007f\u001b]/.test(r.hostVersion ?? ''),
+      'no control character may survive into a field the CLI prints');
+    assert.ok(!r.hostVersion!.includes('\n'), 'a version must not be able to forge a second table row');
+  } finally { await fake.close(); }
 });

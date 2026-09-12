@@ -318,8 +318,13 @@ test('the wire contract: the keys Fleet parses are the keys the host sends', asy
     })).json() as Record<string, unknown>;
 
     // What Fleet's probe actually reads out of each response (fleet/probe.ts).
-    assert.deepEqual(Object.keys(health).sort(), ['ok', 'product', 'ts', 'version'].sort(),
-      '/healthz shape changed; fleet/probe.ts reads ok/product/version');
+    assert.deepEqual(Object.keys(health).sort(), ['api', 'ok', 'product', 'ts', 'version'].sort(),
+      '/healthz shape changed; fleet/probe.ts reads ok/product/version/api');
+    // The one field whose entire purpose is to be compared, so its TYPE is the contract: Fleet
+    // decides whether it can read this host with `api < MIN_HOST_API`, and a semver STRING there
+    // would make that comparison depend on operand order.
+    assert.equal(typeof health.api, 'number',
+      'healthz.api must stay a number; Fleet rejects a host with `api < MIN_HOST_API`');
     assert.deepEqual(Object.keys(workers).sort(), ['queueDepth', 'workers'].sort(),
       '/healthz/workers shape changed; fleet/probe.ts reads workers and queueDepth');
     // A lease MUST exist here. Without one, `workers` is [] and the key-set assertion below is
