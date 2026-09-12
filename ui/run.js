@@ -1,7 +1,7 @@
 // Run detail page: info, skills, event timeline, live SSE, cancel/retry/input.
 
 import {
-  api, logout, currentUser, esc, fmtTime, fmtDuration, statusClass, goalLabel, goalGatesHtml,
+  api, logout, currentUser, esc, fmtTime, fmtDuration, statusClass, goalLabel, goalGatesHtml, goalContractHtml,
   repoLabel, shortId, pretty, sse, safeUrl,
 } from './app.js';
 
@@ -68,6 +68,8 @@ function renderGoal(goal) {
     set('f-goal-usage', '—');
     const gEl = $('f-goal-gates');
     if (gEl) { gEl.innerHTML = ''; gEl.classList.add('hidden'); }
+    const cEl = $('f-goal-contract');
+    if (cEl) { cEl.innerHTML = ''; cEl.classList.add('hidden'); }
     return;
   }
   set('f-goal', goal.status + (goal.source ? ` (${goal.source})` : ''));
@@ -83,6 +85,13 @@ function renderGoal(goal) {
   if (gatesEl) {
     gatesEl.innerHTML = goalGatesHtml(goal);
     gatesEl.classList.toggle('hidden', gatesEl.innerHTML === '');
+  }
+  // The contract goes with the objective it defines. Showing `unmet` while hiding what "met"
+  // was supposed to mean reproduces, one level down, the failure section 4 exists to fix.
+  const contractEl = $('f-goal-contract');
+  if (contractEl) {
+    contractEl.innerHTML = goalContractHtml(goal);
+    contractEl.classList.toggle('hidden', contractEl.innerHTML === '');
   }
 }
 

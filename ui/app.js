@@ -253,6 +253,30 @@ export function harnessLabel(run) {
   return 'unknown';
 }
 
+/**
+ * The completion contract, as the operator stated it. Recorded, never evaluated: Mercury does
+ * not judge whether any of it holds (docs/goals.md 5, 12), so nothing here is ticked or
+ * coloured -- a contract block beside a COMPLETED Run must not read as a checklist that passed.
+ *
+ * Returns '' when there is no contract, so the row stays hidden rather than showing an empty
+ * block that would read as "a contract exists".
+ */
+export function goalContractHtml(goal) {
+  const c = goal && goal.contract;
+  if (!c || typeof c !== 'object') return '';
+  const rows = [
+    ['must achieve', c.outcome],
+    ['verified by', c.verification],
+    ['constraints', c.constraints],
+    ['out of scope', c.boundaries],
+    ['stop when', c.stopWhen],
+  ].filter(([, value]) => typeof value === 'string' && value.length > 0);
+  if (rows.length === 0) return '';
+  return '<dl class="goal-contract">'
+    + rows.map(([label, value]) => `<dt>${esc(label)}</dt><dd>${esc(String(value))}</dd>`).join('')
+    + '</dl>';
+}
+
 export function goalGatesHtml(goal) {
   if (!goal || !Array.isArray(goal.gates) || goal.gates.length === 0) return '';
   const items = goal.gates.map((g) => {

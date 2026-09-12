@@ -34,6 +34,13 @@ function goalLines(response: RunDetailResponse, color: (c: ColorName, s: string)
   }
   const lines = [field('goal', color(goalColor(goal.status), sanitizeForTerminal(goal.status)))];
   lines.push(field('objective', sanitizeForTerminal(goal.objective)));
+  // The contract sits with the objective, not with the gates: it is the part that says what
+  // "met" was supposed to mean. Section 4 argues a COMPLETED Run must not be read as "done",
+  // and the thing that defines done is this -- showing `unmet` while hiding the contract
+  // reproduces the readability failure one level down.
+  for (const line of goalContractLines(goal.contract, field, color)) {
+    lines.push(line);
+  }
   if (goal.tokenBudget !== undefined) {
     const used = goal.tokensUsed ?? 0;
     lines.push(field('goal tokens', `${used} / ${goal.tokenBudget}`));
@@ -117,6 +124,37 @@ export function renderRunDetail(response: RunDetailResponse, ctx: CommandContext
   }
   return lines.join('\n');
 }
+/**
+ * The completion contract, one line per field the operator actually filled in.
+ *
+ * Recorded, never evaluated: Mercury does not judge whether any of it holds (docs/goals.md 5,
+ * 12). Nothing here is coloured or ticked, for the same reason the gate list is not -- a
+ * contract block next to a COMPLETED Run must not read as a checklist that passed.
+ *
+ * Free text from whoever created the Run, so it goes through sanitizeForTerminal.
+ */
+function goalContractLines(
+  contract: GoalState['contract'],
+  field: (label: string, value: string) => string,
+  color: (c: ColorName, s: string) => string,
+): string[] {
+  if (!contract) return [];
+  const labels: [keyof NonNullable<GoalState['contract']>, string][] = [
+    ['outcome', 'must achieve'],
+    ['verification', 'verified by'],
+    ['constraints', 'constraints'],
+    ['boundaries', 'out of scope'],
+    ['stopWhen', 'stop when'],
+  ];
+  const lines: string[] = [];
+  for (const [key, label] of labels) {
+    const value = contract[key];
+    if (value === undefined || value.length === 0) continue;
+    lines.push(field(label, color('dim', sanitizeForTerminal(value))));
+  }
+  return lines;
+}
+
 /**
  * One line per declared gate.
  *
