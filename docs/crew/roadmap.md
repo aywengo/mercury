@@ -109,7 +109,9 @@ Estimate: **2–3 days**. Blocking for Role Presets.
   the four the fallback always sends, so Hermes cannot execute any Run
   ([#459](https://github.com/aywengo/mercury/issues/459),
   [`teams.md`](teams.md) §3).
-- Advertise per-agent capabilities on `/api/agents`, which today returns bare names
+- Advertise per-agent capabilities on `/api/agents`, which already returns a
+  `capabilities` map carrying goals and the detected harness version; extend that vocabulary
+  rather than adding a parallel mechanism (issue #508)
   ([`harness-capabilities.md`](harness-capabilities.md) §2), and add a version or
   capability field to `/healthz` so an old host fails at registration rather than at
   first use.

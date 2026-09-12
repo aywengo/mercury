@@ -1,6 +1,19 @@
 # Harness capabilities and best-fit placement
 
-Status: **design only.** Nothing here is implemented.
+Status: **partly implemented.** The capability plumbing exists and ships; the
+vocabulary it carries is goals-only, and that is the gap this document is about.
+
+**What exists today** (verified against `main`, not against this document):
+
+| Claim | Status | Where |
+| --- | --- | --- |
+| Per-adapter capability descriptor, resolved fail-closed | shipped | [`src/adapters/capabilities.ts`](../..//src/adapters/capabilities.ts) |
+| Detached harness version probe (`--version`, never blocks boot) | shipped | [`src/adapters/versionProbe.ts`](../../src/adapters/versionProbe.ts) |
+| `GET /api/agents` exposes a `capabilities` map alongside the names | shipped | `src/api/routes.ts`, `RunService.listAgentCapabilities()` |
+| Harness version recorded on each Run | shipped | migration v7, `docs/goals.md` §13.1 |
+| `capabilities` vocabulary beyond goals (`skills`, `persona`, `humanInput`, `resume`, `knowledge`) | **not built** | this document §3; issue **#508** |
+| `api` schema version on `/healthz`, Fleet rejecting an old host at registration | **not built** | issue **#510** |
+| Skill namespace declared per adapter, so Hermes stops receiving Mercury ids | **not built** | issue **#507** |
 
 This document exists because the point of Crew plus Fleet is **heterogeneous**:
 PrimeAgent, Hermes, Pi, Oh my Pi and Claude on one fleet, each used where it is
@@ -31,14 +44,26 @@ five vendors, and it should not become one.
 
 ## 2. The blocking gap
 
-`GET /api/agents` returns, verified against a live 0.1.0 host:
+`GET /api/agents` returns, verified against `main`:
 
 ```json
-{"agents":["primeagent","fake","hermes","claude","omp","pi"],"defaultAgent":"primeagent"}
+{
+  "agents": ["primeagent", "fake", "hermes", "claude", "omp", "pi"],
+  "defaultAgent": "primeagent",
+  "capabilities": {
+    "primeagent": { "version": null, "goals": { "supported": false, "reason": "version-unknown", "...": "" } },
+    "hermes":     { "version": null, "goals": { "supported": false, "reason": "unsupported" } }
+  }
+}
 ```
 
-Bare names. The `description`, `input.enabled` and `resume.enabled` that the
-registry already holds are not exposed, and there is no notion of strengths
+Names **plus** a per-agent capability map. `version` is `null` in a snapshot taken
+before the detached `--version` probe has returned; that is the documented
+first-moment behaviour in `docs/goals.md` §13.3, not a failure.
+
+What is still missing is the vocabulary, not the plumbing: `goals` is the only
+dimension the map carries. The `description`, `input.enabled` and `resume.enabled`
+that the registry already holds are not exposed, and there is no notion of strengths
 anywhere. Fleet therefore cannot place work by best fit; it can only match a name
 a caller typed. Every statement about "use Hermes for ops and PrimeAgent for code"
 is currently unenforceable, because nothing on the wire says which is which.
