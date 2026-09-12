@@ -465,6 +465,57 @@ test('docs/status.md does not deny that the operator CLI is implemented', () => 
     'docs/status.md must keep the TUI listed as designed-but-unbuilt; that part is still true');
 });
 
+test('docs/status.md describes skill materialization the way the worker actually does it', () => {
+  // Phase 0 (issue #506, PR #515) changed the worker to materialize the stored run_skills snapshot bytes
+  // instead of re-resolving the live registry. docs/status.md still carried the OLD behaviour under
+  // "Active limitations", asserting as current fact that the worker "keeps only their ids and re-resolves
+  // the live filesystem registry" and that "changing a skill while a Run is queued can change the bytes it
+  // executes". Nothing caught it: no guard read that section.
+  //
+  // That is not cosmetic. docs/README.md presents status.md as "Current status and limitations" and tells
+  // readers to prefer it, and docs/phase-0-issues.md warns that building Atlas Phase 2's run_knowledge on
+  // the re-resolution premise "copies a known defect into a second table". A stale limitation is a
+  // specification someone will implement from.
+  //
+  // Asserted in both directions on purpose. The forbidden half stops the doc re-acquiring the claim under
+  // new wording; the affirmative half reads the WORKER SOURCE, so if the code ever regresses to live
+  // resolution this test fails too rather than letting the doc silently become true again.
+  const doc = read('docs/status.md');
+  const start = doc.indexOf('## Active limitations');
+  assert.ok(start >= 0, 'docs/status.md lost its "Active limitations" section');
+  const next = doc.indexOf('\n## ', start + 10);
+  const section = doc.slice(start, next > start ? next : undefined);
+  assert.ok(section.length > 100, 'could not bound the active-limitations section');
+
+  const forbidden = [
+    /re-?resolv\w*[^.]{0,80}live[^.]{0,40}registry/i,
+    /live filesystem registry/i,
+    /snapshot remains an audit record/i,
+    /changing a skill while a Run is queued can change the bytes/i,
+  ];
+  for (const re of forbidden) {
+    assert.ok(!re.test(section), `docs/status.md claims live skill re-resolution as a current limitation (matched ${re})`);
+  }
+
+  // Affirmative half: the code is the source of truth for what the doc may say.
+  const worker = read('src/worker/worker.ts');
+  assert.match(worker, /runService\.getSkills\(/,
+    'the worker no longer materializes from run_skills snapshot bytes; reconcile docs/status.md with the code');
+  const materialize = worker.slice(Math.max(0, worker.indexOf('getSkills(') - 600), worker.indexOf('getSkills(') + 600);
+  assert.ok(!/skillRegistry|resolveSkill\s*\(/.test(materialize),
+    'the worker resolves skills from the live registry again; docs/status.md must stop describing snapshot execution');
+
+  // And the priority list must not keep advertising work that is finished.
+  const prio = doc.indexOf('## Recommended priority');
+  assert.ok(prio >= 0, 'docs/status.md lost its "Recommended priority" section');
+  const prioSection = doc.slice(prio);
+  for (const done of [/Make workers execute stored skill snapshot bytes/i,
+                      /Bound workspace Git clone\/fetch\/worktree commands consistently/i]) {
+    assert.ok(!done.test(prioSection),
+      `docs/status.md still lists completed work as recommended priority (matched ${done})`);
+  }
+});
+
 test('docs/distribution.md agrees with what the release workflow actually produces', () => {
   // Distribution has four channels and they land at different times, so the doc is the kind that goes
   // stale by accident: it either advertises a channel CI does not build, or keeps disclaiming one that

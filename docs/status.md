@@ -50,22 +50,6 @@ Consequences:
 `MERCURY_TRUST_PROXY` fixes source-IP attribution behind a proxy; it does not
 make these stores shared.
 
-### Skill snapshot execution
-
-Run creation stores complete skill content and hashes in `run_skills`. The
-worker currently reads those records, keeps only their ids and re-resolves the
-live filesystem registry before workspace materialization.
-
-Therefore:
-
-- the persisted snapshot remains an audit record;
-- changing a skill while a Run is queued can change the bytes it executes;
-- retry also resolves current skill bytes by id.
-
-Snapshot-backed materialization is Phase 0 of the
-[`Crew roadmap`](crew/roadmap.md), but it is a correctness improvement
-independent of Crew.
-
 ### Network policy granularity
 
 Sandbox network behavior is:
@@ -107,8 +91,13 @@ Not every adapter offers the same fidelity:
   configuration and backend;
 - remote agents execute inside the remote provider's security boundary.
 
-Callers must not infer capabilities from an agent id alone. A richer
-capabilities API remains useful for Fleet routing and future Role Presets.
+Callers must not infer capabilities from an agent id alone. `/api/agents`
+now reports a static capability descriptor per agent -- skill delivery mode,
+persona append and files, human input, resume and knowledge -- so a caller can
+filter on capability rather than on a name. What remains unbuilt is the dynamic
+half: advertising capabilities that depend on which harness version is installed,
+and gate outcomes. `knowledge` is declared but unverified for every shipped
+backend, so it must not be treated as a promise.
 
 ### PrimeAgent daemon mode
 
@@ -209,14 +198,16 @@ Named network destinations remain design-only. Do not treat recorded
 
 ## Recommended priority
 
-1. Make workers execute stored skill snapshot bytes and preserve them on retry.
-2. Bound workspace Git clone/fetch/worktree commands consistently.
-3. Add identity and shared API state only when multi-user or multi-API
+1. Add identity and shared API state only when multi-user or multi-API
    deployment requires it.
-4. Add destination-aware network policy before generic HTTP MCP.
-5. Reverify and repair daemon mode only if resident PrimeAgent sessions provide
+2. Add destination-aware network policy before generic HTTP MCP. This gates Crew
+   Milestone B: `allowedNetworks` names do not yet restrict destinations, so
+   per-run MCP would be advertised on top of a boundary that does not hold.
+3. Reverify and repair daemon mode only if resident PrimeAgent sessions provide
    concrete value over RPC.
-6. Implement Crew in the dependency order documented in its roadmap.
+4. Implement Crew in the dependency order documented in its roadmap. Its Phase 0
+   correctness prerequisites are complete, so Milestone A (Role Presets, Phases
+   1-3) is the next work; Milestone B waits on item 2 above.
 
 ## Sources of truth
 
