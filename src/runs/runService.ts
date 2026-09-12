@@ -192,9 +192,31 @@ export class RunService {
     // A snapshot, when the caller supplies one, replaces resolution rather than supplementing it:
     // resolving the parent's ids here would read the live registry anyway, and would throw for a
     // skill deleted since the parent ran (#506).
+    // Which namespace the target backend resolves skills in, read from the capability descriptor
+    // rather than a hardcoded per-agent map (#507, using the vocabulary #508 added). A hardcoded map
+    // is a second source of truth that drifts from the adapter: the adapter is what actually decides
+    // what reaches the child process, so asking it is the only answer that cannot go stale.
+    const skillDelivery = this.deps.agentCapabilities?.()[agent]?.static?.skills;
+    // ONLY `nativeNames` is disqualifying, and the reason is the failure MODE, not the delivery mode.
+    //
+    //   workspacePaths -- Mercury ids become workspace paths the worker materialised. Usable.
+    //   nativeNames    -- the backend resolves the name in its OWN store and EXITS NON-ZERO on an
+    //                     unknown one. Every selected id is a guaranteed Run failure.
+    //   none           -- the adapter ignores skills entirely. Harmless: the ids are recorded and
+    //                     materialised, nothing forwards them, nothing dies.
+    //
+    // Treating `none` as incompatible was my first attempt and it broke 8 tests, because the `fake`
+    // adapter declares `none` (#508) and every test Run uses it. `none` describes what the adapter
+    // forwards, not whether Mercury may hold skill records -- so it must not change selection.
+    const canUseMercurySkills = skillDelivery !== 'nativeNames';
     const resolved = input.skillSnapshots ?? this.deps.skills.resolve(
       input.skills === undefined || input.skills === null
-        ? this.deps.selector.select(input.task, available, 4)
+        // An omitted `skills` for a nativeNames backend resolves to NOTHING. Not "fallback
+        // suppressed" -- even a well-matched Mercury id is a fatal exit there, so selection is skipped
+        // rather than merely denied its fallback.
+        ? canUseMercurySkills
+          ? this.deps.selector.select(input.task, available, 4)
+          : []
         : input.skills,
     );
 
