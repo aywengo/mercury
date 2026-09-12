@@ -43,6 +43,10 @@ export interface Config {
   /** Stuck-run check interval in ms (MERCURY_STUCK_CHECK_INTERVAL_MS). */
   stuckCheckIntervalMs: number;
   workspaceRetentionMs: number;
+  /** Deadline for local git plumbing (rev-parse, worktree add/remove, branch -D). */
+  gitTimeoutMs: number;
+  /** Deadline for git clone/fetch. A large repository legitimately takes minutes. */
+  gitNetworkTimeoutMs: number;
   workspaceQuotaBytes: number;
   gcIntervalMs: number;
   /** Queue backlog depth that triggers an alert (MERCURY_BACKLOG_ALERT_THRESHOLD). */
@@ -150,6 +154,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     stuckRunThresholdMs: num(env.MERCURY_STUCK_RUN_THRESHOLD_MS, 30 * 60 * 1000),
     stuckCheckIntervalMs: num(env.MERCURY_STUCK_CHECK_INTERVAL_MS, 60_000),
     workspaceRetentionMs: num(env.MERCURY_WORKSPACE_RETENTION_MS, 7 * 24 * 60 * 60 * 1000),
+    gitTimeoutMs: num(env.MERCURY_GIT_TIMEOUT_MS, 30_000),
+    gitNetworkTimeoutMs: num(env.MERCURY_GIT_NETWORK_TIMEOUT_MS, 600_000),
     workspaceQuotaBytes: num(env.MERCURY_WORKSPACE_QUOTA_BYTES, 10 * 1024 * 1024 * 1024),
     gcIntervalMs: num(env.MERCURY_GC_INTERVAL_MS, 60 * 60 * 1000),
     backlogAlertThreshold: num(env.MERCURY_BACKLOG_ALERT_THRESHOLD, 10),

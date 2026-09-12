@@ -135,7 +135,12 @@ async function main(): Promise<void> {
   const queue = new RunQueue(db, runs);
   const skills = new SkillRegistry(SKILLS_DIR);
   const selector = createSkillSelector();
-  const workspace = new WorkspaceManager({ baseDir: config.workspaceBase, mode: config.workspaceMode });
+  const workspace = new WorkspaceManager({
+      baseDir: config.workspaceBase,
+      mode: config.workspaceMode,
+      gitTimeoutMs: config.gitTimeoutMs,
+      gitNetworkTimeoutMs: config.gitNetworkTimeoutMs,
+    });
   const gc = new WorkspaceGC(runs, workspace, {
     retentionMs: config.workspaceRetentionMs,
     quotaBytes: config.workspaceQuotaBytes,
