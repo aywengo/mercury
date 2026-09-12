@@ -11,15 +11,51 @@
 //   MOCK_HERMES_ENV_FILE   write MERCURY_* env vars as JSON
 //   MOCK_HERMES_SESSION    fixed session id (default random)
 //   MOCK_HERMES_RESPONSE   response text (default "Hello from mock hermes")
+//   MOCK_HERMES_SKILLS     comma-separated names in the simulated installed-skill store
+//                          (default: a few Hermes-namespaced names)
 //
 // Reads the task from stdin (--query-file -). In resume mode, prints the
 // resumed session id.
+//
+// ## `-s` is rejected for unknown names, and that is the whole point of this fixture
+//
+// The real Hermes resolves `-s <name>` in its OWN installed-skill store and exits non-zero on a name
+// it does not have, in under a second, before emitting any response. This fixture reproduces that.
+//
+// It used to ignore `-s` entirely. That made the central fact of issue #507 untestable: HermesAgentAdapter
+// used to emit `-s <mercury-skill-id>`, every such Run died in production, and the mock accepted every
+// one so the suite stayed green. A mock that accepts what production rejects does not just fail to
+// catch a bug -- it actively certifies the bug. If you are tempted to delete this validation to make a
+// test pass, the test is telling you it is about to reintroduce #507.
+//
+// The default store deliberately contains NO Mercury skill id. Mercury's fallback set is
+// planning/implementation/testing/git-pr; none of those is here, which is the exact collision #507 was
+// about (docs/crew/teams.md: Hermes has 81 installed skills, none named `planning`).
 
 import { writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 
 const mode = process.env.MOCK_HERMES_MODE ?? 'happy';
 const argv = process.argv.slice(2);
+
+// Validate `-s` before reading stdin, because the real CLI fails before it does any work. Doing it
+// here also means a rejected Run cannot emit a response and then fail -- a half-succeeded Run is the
+// worst possible outcome to model, because the adapter would report output AND a non-zero exit.
+const installed = new Set((process.env.MOCK_HERMES_SKILLS ?? 'code-review,web-research,note-taking')
+  .split(',').map((x) => x.trim()).filter(Boolean));
+const requested = [];
+for (let i = 0; i < argv.length; i++) {
+  if (argv[i] === '-s') requested.push(argv[i + 1]);
+}
+const unknown = requested.filter((n) => n === undefined || !installed.has(n));
+if (unknown.length > 0) {
+  process.stderr.write(`error: unknown skill '${unknown.join("', '")}'\n`);
+  process.stderr.write(`installed skills: ${[...installed].join(', ')}\n`);
+  process.exitCode = 1;
+  // Exit now rather than falling through to the stdin handler: real Hermes is gone in well under a
+  // second, and a bounded adapter timeout must not be what makes this test finish.
+  process.exit(1);
+}
 
 if (process.env.MOCK_HERMES_ARGV_FILE) {
   writeFileSync(process.env.MOCK_HERMES_ARGV_FILE, JSON.stringify(argv, null, 2));
