@@ -405,23 +405,64 @@ Mercury's job: validate the gate spec at creation (bounded `timeoutMs`, sane
 
 ## 6. Events
 
-New types, added to `EVENT_TYPES` in [types.ts](../src/domain/types.ts). That set is
+Eight new types, added to `EVENT_TYPES` in [types.ts](../src/domain/types.ts). That set is
 enforced at `EventStore.append`, the single write choke point, and a test already fails
 if any append uses a type absent from the set (issue #60) — so the set must be updated
-in the same change as the first emitter, or the emitter throws.
+in the same change as the first emitter, or the emitter throws. That rule is also why the
+gate rows at the bottom of the table are **not** in the set: no emitter exists for them.
 
-| Type | Payload | Emitted when |
+The first eight rows are registered in `EVENT_TYPES` and have live emitters. The last two do
+not exist yet -- see the note under the table.
+
+| Type | Payload actually appended | Emitted when |
 | --- | --- | --- |
 | `goal.created` | `{ objective, contract?, gates?, tokenBudget? }` | Run created with a goal |
-| `goal.updated` | `{ status, objective?, tokensUsed?, turnsUsed?, lastVerdict?, lastReason? }` | a `goal_update` arrives from a harness; `objective` is present only when the harness replaced it |
-| `goal.paused` | `{ pausedReason, turnsUsed? }` | harness paused the loop |
-| `goal.budgetLimited` | `{ tokenBudget, tokensUsed }` | harness stopped for want of budget |
-| `goal.error` | `{ lastError }` | the goal runtime itself failed |
-| `goal.completed` | `{ tokensUsed?, timeUsedSeconds?, completionBudgetReport? }` | harness declared the objective met |
-| `goal.cancelled` | `{ source }` | operator or harness dropped it |
-| `goal.unmet` | `{ runStatus, lastVerdict?, turnsUsed? }` | Run finalised while goal was `active` |
-| `goal.gate.failed` | `{ command, exitCode?, truncated, attempt }` | harness reported a gate failure |
-| `goal.gate.passed` | `{ command, attempt }` | harness reported a gate pass |
+| `goal.updated` | *raw harness report* + `status` | a `goal_update` arrives from a harness |
+| `goal.paused` | *raw harness report* + `status` | harness paused the loop |
+| `goal.budget_limited` | *raw harness report* + `status` | harness stopped for want of budget |
+| `goal.error` | *raw harness report* + `status`, plus `lastError` when Mercury supplied the explanation | the goal runtime failed, or a status arrived that Mercury cannot interpret |
+| `goal.completed` | *raw harness report* + `status` | harness declared the objective met |
+| `goal.cancelled` | `{ source, runStatus }` | operator cancelled it (see 8 -- the operator route is the only writer) |
+| `goal.unmet` | `{ runId, status, reason, terminalStatus, attempted, objective, tokensUsed?, timeUsedSeconds?, turnsUsed? }` | Run finalised while the goal was still open |
+
+**"raw harness report" is deliberate, and consumers must not assume Mercury's field names.**
+`Worker.recordGoalReport` appends the harness payload as it arrived, plus Mercury's resolved
+`status`:
+
+```ts
+this.deps.events.append(run.id, ev.type, {
+  ...(ev.payload as Record<string, unknown>), ...explanation, status: updated.status,
+});
+```
+
+So a relayed event carries the harness' own keys -- `tokensUsed`, `continuationsUsed`,
+`lastReason` for PrimeAgent, per 2.1 -- **not** Mercury's normalized `turnsUsed`. The
+normalization into `GoalPatch` happens on the way into the `run_goals` row, not on the event.
+That split is intentional: the event is evidence of what the harness said, the row is
+Mercury's reading of it. A consumer that wants Mercury's vocabulary reads the row through the
+API (section 8), not the timeline.
+
+Three additions Mercury makes to a relayed payload, each so the timeline reads on its own:
+
+- `ignoredStatus` + `warning` -- the harness reported a new status but the goal already carried
+  a final verdict, so the status was refused and the reported one recorded instead of dropped.
+- `warning: 'no goal row for this run'` -- the harness volunteered goal state for a Run that was
+  never admitted with a goal. The event is kept as evidence; **no row is invented.**
+- `lastError` -- when the status was unrecognizable, the raw payload contains nothing
+  error-like, so Mercury's own explanation rides along. Otherwise the timeline shows an
+  unexplained error and the reason survives only in a worker log line nobody reads.
+
+Every payload passes through the redactor at `EventStore.append` regardless (see the rules
+below), so raw harness text is never stored unredacted.
+
+**Gate outcome events are not registered.** `goal.gate.failed` and `goal.gate.passed` were the
+planned shapes in the original design and are *not* in `EVENT_TYPES`, because no shipped
+harness reports gate outcomes -- there is no emitter. Registering a type with no emitter makes
+the vocabulary a claim with no evidence behind it, and would let a future consumer subscribe to
+an event that can never fire. They return only with Phase 4b and a real emitter.
+
+`EventStore.append` rejects any type absent from `EVENT_TYPES` at the single write choke point
+(issue #60), so the set and the emitters must change together or the emitter throws.
 
 Rules that must hold, each of which is a known failure mode elsewhere in this repo:
 

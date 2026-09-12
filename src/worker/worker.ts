@@ -697,10 +697,13 @@ export class Worker {
    * dashboard can see the status but nothing explains when or why it changed. Same reasoning as
    * the terminal goal settlement in goalSettlement.ts.
    *
-   * A report for a Run with no goal row is discarded on purpose. The row is created only by
-   * admission, which already refused any agent that cannot track goals, so a report arriving
-   * without one means the harness volunteered state nobody asked it to track -- recording it
-   * would invent a goal the operator never set.
+   * A report for a Run with no goal row records **no row**, but the event is still kept. The
+   * row is created only by admission, which already refused any agent that cannot track goals,
+   * so a report arriving without one means the harness volunteered state nobody asked it to
+   * track -- inventing a row would create a goal the operator never set. Discarding the event
+   * too would hide the fact that the harness is reporting goal state for an unadmitted Run,
+   * which is exactly the anomaly an operator needs to see, so it is appended with a
+   * `warning` and no row is written.
    */
   private recordGoalReport(run: Run, ev: AgentEvent, log: Logger): void {
     const goals = this.deps.goals;
