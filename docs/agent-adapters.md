@@ -490,36 +490,71 @@ resume?(runId):
 
 ### 4.3 Example configs
 
-```yaml
-# aider as a LocalAgentAdapter
-id: aider
-command: aider
-args: ["--yes-always"]
-taskInput: { mode: "arg", flag: "--message" }
-output: { format: "json", stream: false }
-eventMap:
-  message: "agent.message"
-  completed: "result"
-cancel: { signal: "SIGTERM", graceMs: 5000 }
+**aider as a `LocalAgentAdapter`**
+
+```json
+{
+  "id": "aider",
+  "command": "aider",
+  "args": [
+    "--yes-always"
+  ],
+  "taskInput": {
+    "mode": "arg",
+    "flag": "--message"
+  },
+  "output": {
+    "format": "json",
+    "stream": false
+  },
+  "eventMap": {
+    "message": "agent.message",
+    "completed": "result"
+  },
+  "cancel": {
+    "signal": "SIGTERM",
+    "graceMs": 5000
+  }
+}
 ```
 
-```yaml
-# a hypothetical "my-agent" that emits JSONL
-id: my-agent
-command: my-agent
-args: []
-taskInput: { mode: "stdin" }
-output: { format: "jsonl", stream: true, eventPath: "type" }
-eventMap:
-  started: "run.started"
-  message: "agent.message"
-  toolStarted: "tool.started"
-  toolCompleted: "tool.completed"
-  toolFailed: "tool.failed"
-  completed: "done"
-input: { mode: "stdin", promptEvent: "ask" }
-cancel: { signal: "SIGTERM", graceMs: 3000 }
-resume: { flag: "--resume", sessionIdSource: "event", sessionIdPath: "session_id" }
+**a hypothetical `my-agent` that emits JSONL**
+
+```json
+{
+  "id": "my-agent",
+  "command": "my-agent",
+  "args": [],
+  "taskInput": {
+    "mode": "stdin"
+  },
+  "output": {
+    "format": "jsonl",
+    "stream": true,
+    "eventPath": "type"
+  },
+  "eventMap": {
+    "started": "run.started",
+    "message": "agent.message",
+    "toolStarted": "tool.started",
+    "toolCompleted": "tool.completed",
+    "toolFailed": "tool.failed",
+    "completed": "done"
+  },
+  "input": {
+    "mode": "stdin",
+    "promptEvent": "ask"
+  },
+  "cancel": {
+    "signal": "SIGTERM",
+    "graceMs": 3000
+  },
+  "resume": {
+    "flag": "--resume",
+    "sessionIdSource": "event",
+    "sessionIdPath": "session_id"
+  }
+}
 ```
 
 ### 4.4 Testing (implemented)
@@ -649,39 +684,117 @@ resume?(runId):           if the vendor supports it (e.g. Devin sessions persist
 
 ### 5.4 Example configs
 
-```yaml
-# Devin
-id: devin
-api:
-  baseUrl: "https://api.devin.ai/v1"
-  auth: { type: "bearer", headerName: "Authorization", envVar: "MERCURY_DEVIN_API_KEY" }
-  createTask: { method: "POST", path: "/sessions", body: { prompt: "{task}", repository: "{workspace}" }, idField: "session.id" }
-  getTask: { method: "GET", path: "/sessions/{id}", statusField: "status", statusMap: { running: "running", blocked: "running", success: "completed", error: "failed", cancelled: "cancelled" } }
-  events: { method: "GET", path: "/sessions/{id}/events", eventField: "events", eventTypeField: "type" }
-  sendInput: { method: "POST", path: "/sessions/{id}/messages", body: { message: "{input}" } }
-  cancel: { method: "POST", path: "/sessions/{id}/cancel" }
-poll: { intervalMs: 5000, timeoutMs: 900000 }
-eventMap:
-  message: "agent.message"
-  tool_started: "tool.started"
-  tool_completed: "tool.completed"
-  error: "error"
+**Devin**
+
+```json
+{
+  "id": "devin",
+  "api": {
+    "baseUrl": "https://api.devin.ai/v1",
+    "auth": {
+      "type": "bearer",
+      "headerName": "Authorization",
+      "envVar": "MERCURY_DEVIN_API_KEY"
+    },
+    "createTask": {
+      "method": "POST",
+      "path": "/sessions",
+      "body": {
+        "prompt": "{task}",
+        "repository": "{workspace}"
+      },
+      "idField": "session.id"
+    },
+    "getTask": {
+      "method": "GET",
+      "path": "/sessions/{id}",
+      "statusField": "status",
+      "statusMap": {
+        "running": "running",
+        "blocked": "running",
+        "success": "completed",
+        "error": "failed",
+        "cancelled": "cancelled"
+      }
+    },
+    "events": {
+      "method": "GET",
+      "path": "/sessions/{id}/events",
+      "eventField": "events",
+      "eventTypeField": "type"
+    },
+    "sendInput": {
+      "method": "POST",
+      "path": "/sessions/{id}/messages",
+      "body": {
+        "message": "{input}"
+      }
+    },
+    "cancel": {
+      "method": "POST",
+      "path": "/sessions/{id}/cancel"
+    }
+  },
+  "poll": {
+    "intervalMs": 5000,
+    "timeoutMs": 900000
+  },
+  "eventMap": {
+    "message": "agent.message",
+    "tool_started": "tool.started",
+    "tool_completed": "tool.completed",
+    "error": "error"
+  }
+}
 ```
 
-```yaml
-# OpenHands (server mode)
-id: openhands
-api:
-  baseUrl: "http://localhost:3000"
-  auth: { type: "header", headerName: "X-API-Key", envVar: "MERCURY_OPENHANDS_API_KEY" }
-  createTask: { method: "POST", path: "/api/sessions", body: { prompt: "{task}" }, idField: "session_id" }
-  getTask: { method: "GET", path: "/api/sessions/{id}", statusField: "status", statusMap: { running: "running", stopped: "completed", error: "failed" } }
-  events: { method: "GET", path: "/api/sessions/{id}/events", eventField: "events", eventTypeField: "type" }
-poll: { intervalMs: 2000, timeoutMs: 900000 }
-eventMap:
-  agent_message: "agent.message"
-  tool_call: "tool.started"
-  tool_result: "tool.completed"
+**OpenHands (server mode)**
+
+```json
+{
+  "id": "openhands",
+  "api": {
+    "baseUrl": "http://localhost:3000",
+    "auth": {
+      "type": "header",
+      "headerName": "X-API-Key",
+      "envVar": "MERCURY_OPENHANDS_API_KEY"
+    },
+    "createTask": {
+      "method": "POST",
+      "path": "/api/sessions",
+      "body": {
+        "prompt": "{task}"
+      },
+      "idField": "session_id"
+    },
+    "getTask": {
+      "method": "GET",
+      "path": "/api/sessions/{id}",
+      "statusField": "status",
+      "statusMap": {
+        "running": "running",
+        "stopped": "completed",
+        "error": "failed"
+      }
+    },
+    "events": {
+      "method": "GET",
+      "path": "/api/sessions/{id}/events",
+      "eventField": "events",
+      "eventTypeField": "type"
+    }
+  },
+  "poll": {
+    "intervalMs": 2000,
+    "timeoutMs": 900000
+  },
+  "eventMap": {
+    "agent_message": "agent.message",
+    "tool_call": "tool.started",
+    "tool_result": "tool.completed"
+  }
+}
 ```
 
 ### 5.5 Testing (implemented)
@@ -793,29 +906,52 @@ terminate(runId):         SIGKILL
 
 ### 6.4 Example configs
 
-```yaml
-# Pi Agent
-id: pi
-command: pi
-args: []
-protocol: { modeFlag: "--mode", modeValue: "rpc" }
-eventMap: {}   # use the shared RPC translation defaults
-input: { enabled: true }
-resume: { enabled: true }
+**Pi Agent -- `eventMap: {}` uses the shared RPC translation defaults**
+
+```json
+{
+  "id": "pi",
+  "command": "pi",
+  "args": [],
+  "protocol": {
+    "modeFlag": "--mode",
+    "modeValue": "rpc"
+  },
+  "eventMap": {},
+  "input": {
+    "enabled": true
+  },
+  "resume": {
+    "enabled": true
+  }
+}
 ```
 
-```yaml
-# Oh my Pi (omp) — protocol v2 extras are ignored by default
-id: omp
-command: omp
-args: []
-protocol:
-  modeFlag: "--mode"
-  modeValue: "rpc"
-  ignoreEventTypes: ["negotiate_protocol", "ready", "subagent_lifecycle", "host_tool_call"]
-eventMap: {}
-input: { enabled: true }
-resume: { enabled: true }
+**Oh my Pi (`omp`) -- protocol v2 extras are ignored by default**
+
+```json
+{
+  "id": "omp",
+  "command": "omp",
+  "args": [],
+  "protocol": {
+    "modeFlag": "--mode",
+    "modeValue": "rpc",
+    "ignoreEventTypes": [
+      "negotiate_protocol",
+      "ready",
+      "subagent_lifecycle",
+      "host_tool_call"
+    ]
+  },
+  "eventMap": {},
+  "input": {
+    "enabled": true
+  },
+  "resume": {
+    "enabled": true
+  }
+}
 ```
 
 ### 6.5 Testing
