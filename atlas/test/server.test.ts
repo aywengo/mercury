@@ -265,3 +265,35 @@ test('an admin posting an operator note keeps the host the body names', async ()
   assert.deepEqual(spoof.json.results, [{ rejected: 'host-mismatch' }],
     'the admin exception must not become a way for any caller to name any host');
 });
+
+test('promoting a retired note whose claim is live is a 409 that names the blocker', async () => {
+  // The dedup gate excludes retired rows, so a re-contributed claim lands as a second note. Promotion
+  // never consults claim_hash, so without the transition guard this request would quietly put two live
+  // notes on one claim and the next contribution would pick between them arbitrarily.
+  const claim = 'retried requests use jittered exponential backoff';
+  const first = await call('POST', '/v1/projects/mercury/notes', CONTRIBUTOR,
+    { notes: [contribution(claim)] }, { 'idempotency-key': 'srv-conf-1' });
+  const firstId = first.json.results[0]!.accepted!;
+  assert.equal((await call('POST', `/v1/projects/mercury/notes/${firstId}/retire`, ADMIN,
+    { reason: 'uncorroborated at the time' })).status, 200);
+
+  const again = await call('POST', '/v1/projects/mercury/notes', CONTRIBUTOR,
+    { notes: [contribution(claim)] }, { 'idempotency-key': 'srv-conf-2' });
+  const secondId = again.json.results[0]!.accepted!;
+  assert.ok(secondId && secondId !== firstId, 'the re-contributed claim must land as a fresh note');
+
+  const clash = await call('POST', `/v1/projects/mercury/notes/${firstId}/promote`, ADMIN,
+    { reason: 'reinstate the original' });
+  assert.equal(clash.status, 409, 'a promotion that would create two live notes is a conflict, not a fault');
+  assert.equal(clash.json.code, 'claim-conflict');
+  assert.equal(clash.json.details.conflictingNoteId, secondId,
+    'the response has to name the note to retire, or the operator cannot act on it');
+
+  // Retiring the live one first is the documented way out, and must work.
+  assert.equal((await call('POST', `/v1/projects/mercury/notes/${secondId}/retire`, ADMIN,
+    { reason: 'the original was correct after all' })).status, 200);
+  const reinstated = await call('POST', `/v1/projects/mercury/notes/${firstId}/promote`, ADMIN,
+    { reason: 'reinstate the original' });
+  assert.equal(reinstated.status, 200, `reinstatement after clearing the claim should work: ${reinstated.text}`);
+  assert.equal(reinstated.json.note.tier, 'promoted');
+});

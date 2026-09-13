@@ -25,7 +25,7 @@ import { AuthIndex, hashToken, type Caller } from './auth.ts';
 import { authenticate, HttpError, matchRoute, readJsonBody, sendJson, type Route } from './http.ts';
 import type { Logger } from './logger.ts';
 import { AtlasMetrics } from './metrics.ts';
-import { NoteStore, type PromotionPolicy } from './notes.ts';
+import { ClaimConflictError, NoteStore, type PromotionPolicy } from './notes.ts';
 import { ATLAS_PRODUCT, ATLAS_VERSION } from './version.ts';
 
 export interface AtlasServices {
@@ -144,7 +144,17 @@ export function buildRoutes(services: AtlasServices): Route[] {
         const projectId = ctx.params[0]!;
         requireProject(ctx.caller, projectId);
         const reason = reasonFrom(ctx.body);
-        const note = store.promote(projectId, ctx.params[1]!, 'admin', reason);
+        let note;
+        try {
+          note = store.promote(projectId, ctx.params[1]!, 'admin', reason);
+        } catch (err) {
+          // A promotion that would put two live notes on one claim is a conflict the caller can resolve,
+          // not a server fault: the message names the note to retire first.
+          if (err instanceof ClaimConflictError) {
+            throw new HttpError(409, err.message, 'claim-conflict', { conflictingNoteId: err.conflictingNoteId });
+          }
+          throw err;
+        }
         if (!note) throw new HttpError(404, 'no such note');
         sendJson(res, 200, { note });
       },
