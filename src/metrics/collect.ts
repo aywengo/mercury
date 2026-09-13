@@ -106,6 +106,22 @@ export interface MetricsSnapshot {
    * exactly the endpoint an operator queries.
    */
   knowledgePushFailures: number;
+  /**
+   * How far this host's replica has read into Atlas's sequence, and how many promoted notes it holds
+   * (section 8.5).
+   *
+   * These two are the freshness half of the feature, and they are the reason the puller is observable at
+   * all: a replica that stopped advancing still serves packs, so without this gauge a host can hand every
+   * Run the same stale knowledge indefinitely while every other signal looks healthy.
+   *
+   * Zero when no Atlas is configured, which is honest -- an unconfigured host genuinely has a replica of
+   * zero notes. The distinction an operator needs is between zero-because-off and zero-because-broken,
+   * and that is what `mercury_knowledge_pull_failures_total` is for.
+   */
+  knowledgeReplicaSeq: number;
+  knowledgeReplicaNotes: number;
+  /** Cumulative failed pull attempts. A pull failure costs freshness, never correctness. */
+  knowledgePullFailures: number;
   /** Runs that ever had a sandbox policy applied. */
   sandboxEnabled: number;
   /** Total runs ever created. Pair with sandboxEnabled in PromQL for an enablement RATE. */
@@ -364,6 +380,12 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
   // Knowledge gauges. Both are cheap: the outbox is small by design (it drains), and the sync-state
   // read is a primary-key lookup. Neither is labelled, so neither can grow cardinality.
   const outboxRow = db.prepare('SELECT COUNT(*) AS n FROM knowledge_outbox').get() as { n: number };
+  const replicaRow = db
+    .prepare("SELECT COALESCE(MAX(seq), 0) AS s, SUM(CASE WHEN tier = 'promoted' THEN 1 ELSE 0 END) AS n FROM knowledge_replica")
+    .get() as { s: number | null; n: number | null } | undefined;
+  const pullFailRow = db
+    .prepare("SELECT value FROM knowledge_sync_state WHERE key = 'pull_failures_total'")
+    .get() as { value: string } | undefined;
   const pushFailRow = db
     .prepare("SELECT value FROM knowledge_sync_state WHERE key = 'push_failures_total'")
     .get() as { value: string } | undefined;
@@ -394,6 +416,9 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
     // Parsed rather than trusted: a corrupt value reads as zero rather than as NaN, which would
     // make the whole /metrics body invalid text.
     knowledgePushFailures: Number.isFinite(Number(pushFailRow?.value)) ? Number(pushFailRow?.value) : 0,
+    knowledgeReplicaSeq: Number(replicaRow?.s) || 0,
+    knowledgeReplicaNotes: Number(replicaRow?.n) || 0,
+    knowledgePullFailures: Number.isFinite(Number(pullFailRow?.value)) ? Number(pullFailRow?.value) : 0,
     sandboxEnabled: Number(sandboxRow.n) || 0,
     runsTotal: Number(totalRow.n) || 0,
     workers: leases.length,

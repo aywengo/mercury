@@ -199,6 +199,11 @@ export function createRoutes(deps: RoutesDeps): Router {
         // Passed through unresolved: RunService owns validation and resolution, so the
         // rules are identical for HTTP callers and in-process callers.
         goal: body.goal,
+        // Forwarded unresolved, exactly as `goal` is. This line was missing when the feature landed, and
+        // no test caught it: every other test called runService.create() directly, so the validation was
+        // correct, the route was correct, and the block was unreachable over HTTP. Same shape of defect as
+        // the knowledgeNotes wiring in #539 -- unit tests of both halves cannot see the seam.
+        knowledge: body.knowledge,
         idempotencyKey: typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined,
       });
       res.status(201).json({ runId: run.id, status: run.status });
@@ -237,7 +242,14 @@ export function createRoutes(deps: RoutesDeps): Router {
     // status are orthogonal axes, and the pair -- Run COMPLETED with goal unmet -- is the thing
     // a reader has to be able to see together. Folding them would let a client read one and
     // believe the other.
-    res.json({ run, skills: deps.runService.getSkills(run.id), goal: deps.runService.getGoal(run.id) });
+    res.json({
+      run,
+      skills: deps.runService.getSkills(run.id),
+      goal: deps.runService.getGoal(run.id),
+      // Sibling rather than a field on `run`, for the same reason `goal` is: the pack is a snapshot with
+      // its own lifecycle, and folding it in would make `GET /api/runs` carry a blob nobody lists.
+      knowledge: deps.runService.getKnowledge(run.id),
+    });
   });
 
   // POST /api/runs/:runId/input
@@ -272,6 +284,19 @@ export function createRoutes(deps: RoutesDeps): Router {
     const goal = deps.runService.getGoal(run.id);
     if (!goal) { res.status(404).json({ error: 'run has no goal' }); return; }
     res.json({ goal });
+  });
+
+  // GET /api/runs/:runId/knowledge
+  //
+  // The pack this Run was created with. Owner-scoped by the same `get` as every other Run read, so a
+  // caller who cannot see the Run cannot read its notes -- a pack can contain another team's conventions,
+  // and this route is the only way to read them back out of Mercury.
+  router.get('/runs/:runId/knowledge', (req: Request, res: Response) => {
+    const run = deps.runService.get(req.params.runId, req.auth!.ownerId, req.auth!.isAdmin);
+    if (!run) { res.status(404).json({ error: 'run not found' }); return; }
+    const knowledge = deps.runService.getKnowledge(run.id);
+    if (!knowledge) { res.status(404).json({ error: 'run was created without a knowledge pack' }); return; }
+    res.json({ knowledge });
   });
 
   // POST /api/runs/:runId/goal/cancel

@@ -15,6 +15,28 @@ import { EventStore } from '../events/eventStore.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { SkillSelector } from '../skills/skillSelector.ts';
 import { RunStore, newRunId } from './runStore.ts';
+import type { ReplicaStore } from '../knowledge/replica.ts';
+import { selectPack, type PackSelection } from '../knowledge/pack.ts';
+import { KnowledgeRequestError, knowledgeCapabilityMessage, parseKnowledgeRequest } from '../knowledge/request.ts';
+import type { KnowledgeRequest } from '../knowledge/types.ts';
+
+export interface KnowledgeSelectionDeps {
+  /** The Atlas project this host contributes to and reads (section 5). */
+  projectId: string;
+  replica: ReplicaStore;
+  /** Host ceiling on pack size. A per-Run `maxBytes` is clamped to it, never allowed past it. */
+  packMaxBytes: number;
+  /** MERCURY_KNOWLEDGE_INJECT. When false, Runs get no pack unless they ask for one. */
+  injectByDefault: boolean;
+  /**
+   * Which agents can receive a pack, from the same capability snapshot goals use (section 7.4).
+   *
+   * Supplied as a function because the underlying probes are detached and the answer changes when they
+   * land. An agent absent from the map is UNKNOWN, which fails open: no pack, no error, because an
+   * unverified harness must not brick a Run. `require: true` is what turns unknown into a refusal.
+   */
+  capabilities?: () => Record<string, AgentCapabilitySummary>;
+}
 
 export interface CreateRunInput {
   ownerId: string;
@@ -40,6 +62,12 @@ export interface CreateRunInput {
    * omitted objective defaults to the task text.
    */
   goal?: unknown;
+  /**
+   * Per-Run control over the knowledge pack (docs/knowledge-base.md 9.1). `undefined` means "use the
+   * host default", which never fails; a malformed block is refused. Validated in create() so HTTP and
+   * in-process callers hit identical rules, exactly as `goal` does.
+   */
+  knowledge?: unknown;
   idempotencyKey?: string;
 }
 
@@ -62,6 +90,14 @@ export interface RunServiceDeps {
   agentCapabilities?: () => Record<string, AgentCapabilitySummary>;
   /** Goal persistence. Absent means goals are not wired and any `goal` input is rejected. */
   goals?: GoalStore;
+  /**
+   * Knowledge selection. Absent means the feature is off: no pack is selected, and a `knowledge` block
+   * on the request is rejected rather than ignored (section 8.4).
+   *
+   * Reads the local replica only. Nothing here may reach the network -- that is the decision which
+   * makes an Atlas outage cost freshness instead of costing Run creation (section 8.3).
+   */
+  knowledge?: KnowledgeSelectionDeps;
   /** Agent id used when create input omits `agent` (MERCURY_DEFAULT_AGENT; default `fake`). */
   defaultAgent: string;
   defaultMaxDurationMs: number;
@@ -220,6 +256,26 @@ export class RunService {
         : input.skills,
     );
 
+    // Knowledge admission, validated before anything is written -- the same shape goal admission uses,
+    // for the same reason: a block that is accepted and then quietly ignored leaves the caller believing
+    // a constraint is in force.
+    //
+    // The feature being off is a refusal rather than a no-op. A caller who set `scopes` against a host
+    // with no Atlas configured would otherwise get a normal-looking Run that knew nothing.
+    let knowledgeRequest: KnowledgeRequest | null = null;
+    if (input.knowledge !== undefined && input.knowledge !== null) {
+      if (!this.deps.knowledge) {
+        throw new ValidationError(
+          'knowledge is not configured on this server (set MERCURY_ATLAS_URL); remove the knowledge block',
+        );
+      }
+      try {
+        knowledgeRequest = parseKnowledgeRequest(input.knowledge);
+      } catch (err) {
+        throw new ValidationError(err instanceof KnowledgeRequestError ? err.message : String(err));
+      }
+    }
+
     const constraints: RunConstraints = {
       maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
       maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
@@ -236,6 +292,30 @@ export class RunService {
       ? input.repositories
       : undefined;
     const repository = input.repository ?? (repositories?.[0] ?? {});
+
+    // Whether this Run gets a pack, and whether asking for one is even possible on this agent.
+    //
+    // The asymmetry is deliberate and comes from section 7.4. Ingest fails OPEN: an agent whose ability
+    // to receive a pack is unverified simply gets no pack, because an unknown harness version must not
+    // brick a Run. `require: true` fails CLOSED: a caller who asked for the pack and did not get it was
+    // given something other than what they asked for, and silence is the wrong way to report that.
+    const knowledgeDeps = this.deps.knowledge;
+    const wantsPack = knowledgeDeps !== undefined
+      && (knowledgeRequest?.enabled ?? knowledgeDeps.injectByDefault);
+    const knowledgeCap = knowledgeDeps ? knowledgeDeps.capabilities?.()[agent]?.static?.knowledge : undefined;
+    if (knowledgeRequest?.require && !wantsPack) {
+      throw new ValidationError(
+        knowledgeCapabilityMessage(agent, knowledgeDeps
+          ? 'injection is disabled for this host and knowledge.enabled was false'
+          : 'knowledge is not configured on this server'),
+      );
+    }
+    if (knowledgeRequest?.require && knowledgeCap === false) {
+      throw new ValidationError(knowledgeCapabilityMessage(agent, 'the adapter does not declare knowledge support'));
+    }
+    // Computed inside the transaction below, because it reads the replica and the snapshot must be
+    // consistent with the Run row that references it. Declared here so the event append can see it.
+    let knowledgeSelection: PackSelection | null = null;
 
     const now = new Date().toISOString();
     // Task text and repo URLs can embed secrets (issue #43); redact at write time.
@@ -295,6 +375,42 @@ export class RunService {
         for (const skill of resolved) {
           this.deps.events.append(run.id, 'skill.selected', { skill: skill.id, version: skill.version, hash: skill.hash });
         }
+        if (wantsPack && knowledgeDeps) {
+          knowledgeSelection = selectPack(knowledgeDeps.replica, {
+            projectId: knowledgeDeps.projectId,
+            // The REDACTED task, deliberately. Selection is the one place a task string influences what
+            // the agent is told, and an unretracted path from a secret-bearing task line could otherwise
+            // pull a note into a pack and echo it back through NOTES.md.
+            task: safeTask,
+            agent,
+            repositories: [repository, ...(repositories ?? [])]
+              .map((r) => r.url ?? r.localPath ?? '')
+              .filter((v) => v.length > 0),
+            ...(knowledgeRequest?.scopes ? { scopes: knowledgeRequest.scopes } : {}),
+            // A caller may ask for a smaller pack; the host ceiling still applies, or one Run could ask
+            // for a pack large enough to crowd out the harness's own context.
+            maxBytes: Math.min(knowledgeRequest?.maxBytes ?? knowledgeDeps.packMaxBytes, knowledgeDeps.packMaxBytes),
+          });
+        }
+        if (knowledgeSelection) {
+          // Written here rather than by the worker, so a Run always has a snapshot by the time anything
+          // can observe it. The worker materializes files; this row is the record of what was chosen,
+          // and it must survive the workspace being garbage-collected.
+          this.deps.db.prepare(`
+            INSERT INTO run_knowledge (run_id, pack_hash, notes_json, note_count, byte_size, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(run.id, knowledgeSelection.packHash, JSON.stringify(knowledgeSelection.notes),
+            knowledgeSelection.notes.length, knowledgeSelection.byteSize, now);
+          this.deps.events.append(run.id, 'knowledge.selected', {
+            packHash: knowledgeSelection.packHash,
+            count: knowledgeSelection.notes.length,
+            bytes: knowledgeSelection.byteSize,
+            // The notes that did not fit. Without this a caller comparing two Runs sees a short pack and
+            // cannot tell "nothing else matched" from "the budget cut it off".
+            omitted: knowledgeSelection.omitted,
+            scopes: knowledgeSelection.scopes,
+          });
+        }
       });
       return run;
     } catch (err) {
@@ -336,6 +452,34 @@ export class RunService {
    */
   getGoal(runId: string): GoalState | null {
     return this.deps.goals?.get(runId) ?? null;
+  }
+
+  /**
+   * The knowledge pack a Run was created with, or null when it was given none.
+   *
+   * Read from `run_knowledge`, never re-derived from the replica. That distinction is the point of the
+   * table: notes get revised and retired, and a read that joined the current replica would silently
+   * rewrite what a past Run was told. Answering "what did this Run know?" from today's data is exactly
+   * how an incident review goes wrong.
+   */
+  getKnowledge(runId: string): { packHash: string; noteCount: number; byteSize: number; selectedAt: string; notes: unknown[] } | null {
+    const row = this.deps.db.prepare(
+      'SELECT pack_hash, notes_json, note_count, byte_size, created_at FROM run_knowledge WHERE run_id = ?',
+    ).get(runId) as { pack_hash: string; notes_json: string; note_count: number; byte_size: number; created_at: string } | undefined;
+    if (!row) return null;
+    let notes: unknown[] = [];
+    try {
+      const parsed = JSON.parse(row.notes_json) as unknown;
+      if (Array.isArray(parsed)) notes = parsed;
+    } catch {
+      // A snapshot that will not parse is reported as unreadable rather than as empty. An empty pack
+      // would say "this Run was told nothing", which is a different and much more misleading claim.
+      notes = [{ unreadable: true }];
+    }
+    return {
+      packHash: row.pack_hash, noteCount: Number(row.note_count), byteSize: Number(row.byte_size),
+      selectedAt: row.created_at, notes,
+    };
   }
 
   /**

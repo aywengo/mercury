@@ -1,5 +1,10 @@
 // Core domain types for Mercury (mirrors Mercury.md sections 5-9, 14).
 
+// Type-only, and the only reason this file has an import at all. `ContextKnowledgeBlock` stays in
+// `src/knowledge/types.ts` because that is where the knowledge contract lives and where
+// docs/knowledge-base.md names it; `knowledge/types.ts` imports nothing, so this cannot cycle.
+import type { ContextKnowledgeBlock } from '../knowledge/types.ts';
+
 export type RunStatus =
   | 'QUEUED'
   | 'STARTING'
@@ -177,6 +182,15 @@ export interface RunContext {
    * harness's own goal tracking, and nothing more.
    */
   goal?: GoalState;
+  /**
+   * The knowledge pack materialized into this Run's workspace, when it has one (section 9.2).
+   *
+   * Passed in rather than read by the adapter, for the same reason `goal` is: an adapter that could read
+   * Run state could also invent it. This is a pointer -- hash, path, count -- and not the notes, because
+   * the notes are already on disk and duplicating them into the adapter's payload would create a second
+   * copy that could disagree with the first.
+   */
+  knowledge?: ContextKnowledgeBlock;
 }
 
 /**
@@ -581,14 +595,18 @@ export const EVENT_TYPES = new Set([
   // because only the pusher emits anything today: Atlas refuses a note, and the reason is recorded
   // on the Run that produced it.
   //
-  // `knowledge.selected` arrives with the puller and pack selection, and `knowledge.noted` with the
-  // tier-1 harvester. Adding either now would repeat the mistake this set already documents once --
-  // an event type with no emitter is a vocabulary claim with no evidence behind it.
+  // `knowledge.selected` is emitted by pack selection in RunService.create (section 9.1), added in the
+  // same change as this entry rather than before it.
+  //
+  // `knowledge.noted` still waits for the tier-1 harvester. Adding it now would repeat the mistake this
+  // set already documents once -- an event type with no emitter is a vocabulary claim with no evidence
+  // behind it.
   //
   // Push and pull OUTCOMES are deliberately not events at all. A batch is not a Run, and Crew
   // invariant 4 is explicit that store synchronization with no Run behind it is a log line and a
   // metric.
   'knowledge.rejected',
+  'knowledge.selected',
 ]);
 
 /**

@@ -73,6 +73,16 @@ export function makeEnv(opts: {
    * Run's stored snapshot, and doing that against the real skill library would corrupt it.
    */
   skillsDir?: string;
+  /**
+   * Knowledge selection deps for the RunService, mirroring src/cli.ts.
+   *
+   * Optional and spread rather than always set, so a test that does not ask for knowledge gets a
+   * RunService with the feature genuinely absent -- which is the state that must reject a `knowledge`
+   * block rather than ignore it.
+   */
+  knowledge?: import('../src/runs/runService.ts').KnowledgeSelectionDeps;
+  /** The Atlas project passed to the worker, so it materializes packs the way the CLI does. */
+  knowledgeProject?: string;
   /** Run the detached harness version probes at construction. Off by default because they
    *  spawn real subprocesses; tests asserting a detected version opt in. */
   probeCapabilities?: boolean;
@@ -115,6 +125,7 @@ export function makeEnv(opts: {
     knownAgents: Object.keys(adapters),
     agentCapabilities: () => agentCapabilities.snapshot(),
     goals,
+    ...(opts.knowledge ? { knowledge: opts.knowledge } : {}),
     defaultAgent: opts.defaultAgent ?? 'fake',
     defaultMaxDurationMs: 60_000,
     defaultMaxRetries: opts.maxRetries ?? 2,
@@ -158,6 +169,9 @@ export function makeEnv(opts: {
     retryBackoffMs: opts.retryBackoffMs ?? 50,
     sandbox: opts.sandbox,
     redactor: opts.redactor,
+    // The worker needs the project id to render NOTES.md's header. Set only when a test asks for
+    // knowledge, so every other test runs a worker that reads no knowledge table at all.
+    ...(opts.knowledgeProject ? { knowledgeProject: opts.knowledgeProject } : {}),
   });
   if (opts.workerEnabled !== false) worker.start();
 

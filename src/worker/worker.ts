@@ -20,6 +20,9 @@ import { RunQueue, LEASE_EXPIRED_ERROR } from '../queue/runQueue.ts';
 import type { RunService } from '../runs/runService.ts';
 import { RunStore } from '../runs/runStore.ts';
 import type { GoalStore } from '../runs/goalStore.ts';
+import { NOTES_FILE, materializeKnowledge } from '../knowledge/materialize.ts';
+import type { ContextKnowledgeBlock } from '../knowledge/types.ts';
+import type { Note } from '../knowledge/types.ts';
 import { tx } from '../db/database.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { WorkspaceManager } from '../workspace/workspaceManager.ts';
@@ -90,6 +93,19 @@ export interface WorkerDeps {
    * most notes to push.
    */
   knowledgePusher?: { start(): void; stop(): void };
+  /**
+   * The knowledge puller, started and stopped exactly like the pusher and for the same reason: the
+   * replica has to stay current while a Run executes, not only between Runs.
+   */
+  knowledgePuller?: { start(): void; stop(): void };
+  /**
+   * The Atlas project whose pack was materialized into each Run's workspace.
+   *
+   * Absent means the feature is off, and the worker then reads no knowledge table at all. It is a project
+   * id rather than a boolean because NOTES.md names the project in its header -- a reader looking at a
+   * pack in a bare workspace directory needs to know which project it came from.
+   */
+  knowledgeProject?: string;
 }
 
 export class Worker {
@@ -168,6 +184,7 @@ export class Worker {
     // a pusher that outlives stop() would keep a lease-free process holding the database open past the
     // point where shutdown has decided the process is done.
     this.deps.knowledgePusher?.start();
+    this.deps.knowledgePuller?.start();
     void this.loop();
   }
 
@@ -180,6 +197,7 @@ export class Worker {
     if (this.backlogTimer) clearInterval(this.backlogTimer);
     this.backlogTimer = null;
     this.deps.knowledgePusher?.stop();
+    this.deps.knowledgePuller?.stop();
     // Wake the drive loop of any run in flight so it can requeue itself (issue #51).
     // Without this, stop() only prevented NEW claims: the in-flight run kept driving an
     // agent whose process the shutting-down process was about to abandon, and its lease was
@@ -310,6 +328,30 @@ export class Worker {
       const skills = this.deps.runService.getSkills(run.id);
       await writeSkills(workspace.path, skills);
 
+      // Knowledge materialization (section 9.2), after writeSkills and before the adapter starts, so the
+      // files exist before anything can be told to read them.
+      //
+      // Read from run_knowledge rather than re-selected here. The pack was chosen at creation from the
+      // replica as it stood then; re-running selection now could hand the Run a different pack than the
+      // one its own knowledge.selected event reports, which would make the event a guess.
+      let knowledgePointer: ContextKnowledgeBlock | undefined;
+      const storedPack = this.deps.knowledgeProject ? this.deps.runService.getKnowledge(run.id) : null;
+      if (storedPack) {
+        const notes = storedPack.notes as Note[];
+        const written = materializeKnowledge(workspace.path, {
+          projectId: this.deps.knowledgeProject!, packHash: storedPack.packHash, notes,
+        });
+        knowledgePointer = { packHash: storedPack.packHash, path: NOTES_FILE, count: written.count };
+        if (written.notExcluded.length > 0) {
+          // Loud, because a pack that CAN be committed is a second copy of the knowledge living in git,
+          // which is what K1 exists to prevent. Not fatal: the Run is already queued and the notes are
+          // correct; the risk is a stray file in a pull request, which the operator can act on.
+          log.warn({
+            kind: 'knowledge_exclude_failed', paths: written.notExcluded,
+          }, 'knowledge pack was not excluded from git; a generated file could reach a commit');
+        }
+      }
+
       // STARTING -> RUNNING
       const startedAt = new Date().toISOString();
       this.deps.runs.transition(run.id, 'RUNNING', { startedAt });
@@ -351,6 +393,7 @@ export class Worker {
         // Adapters get the goal by value. Reading it here rather than in the adapter keeps the
         // database behind the worker.
         goal: this.deps.goals?.get(run.id) ?? undefined,
+        ...(knowledgePointer ? { knowledge: knowledgePointer } : {}),
       };
 
       // Resume wiring (roadmap p11): a retry run resumes the parent's agent

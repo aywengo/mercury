@@ -1,11 +1,23 @@
-# Knowledge base: memory gathered from sub-harnesses, shared across the project
+Status: **phases 0 to 2 implemented.** Atlas (sections 11 and 15) exists and is tested: `atlas/`, its
+nine knowledge tables, its `/v1` routes, its `ATLAS_*` environment variables and its CLI. The host side
+now exists too: `knowledge_outbox`, the pusher, the puller, the `knowledge_replica` replica with its
+cursor, deterministic pack selection at Run creation, `run_knowledge`, the materialized workspace files,
+and the `knowledge.rejected` and `knowledge.selected` event types. `MERCURY_ATLAS_URL` and the other
+`MERCURY_*` names below are live configuration, read by `src/config.ts`.
 
-Status: **partly implemented.** The Atlas service described in sections 11 and 15 exists and is
-tested: `atlas/`, its nine knowledge tables, its `/v1` routes, its `ATLAS_*` environment variables and its CLI.
-Nothing on the Mercury host side exists yet. There is no `knowledge_outbox` table, no pusher, no
-replica, no injection into a workspace, and no `knowledge.rejected` or `knowledge.selected` event type;
-`MERCURY_ATLAS_URL` and the other `MERCURY_*` names below are still proposals. So Atlas runs today with
-no one talking to it, which is the intended order (section 16) and not a half-finished integration.
+Still proposals, and named as such where they appear:
+
+- **Phase 3** (section 7.1 tier 1): nothing reads `.mercury/notes.jsonl` back out of a workspace, so the
+  contribution half of the loop is inert. The file is created empty and `NOTES.md` tells an agent to
+  write it, which means the instruction is currently issued with nothing on the other end.
+- **Per-harness rendering** (section 9.3): only the neutral files and the `.mercury-context.json` pointer
+  are written. No adapter renders the pack into a channel its harness reads on its own. The Hermes row
+  was measured rather than assumed -- Hermes reads `AGENTS.md` from the workspace unprompted and does
+  **not** read `.mercury/knowledge/NOTES.md` -- so the row's "blocked" is confirmed, and the `AGENTS.md`
+  channel it did not consider is tracked separately.
+- **Replica metrics**: `mercury_knowledge_replica_seq`, `mercury_knowledge_replica_notes` and
+  `mercury_knowledge_pull_failures_total` are live as of phase 2.
+
 Where a sentence describes current behaviour it says so and names the file.
 
 The service this document introduces is called **Atlas** throughout. The name is a one-line
