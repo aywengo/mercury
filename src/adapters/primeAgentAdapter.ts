@@ -18,7 +18,7 @@
 // Sessions are persisted per Run under <workspace>/.mercury-sessions/ so a Run
 // can be resumed (Mercury.md section 16) via `--resume <sessionFile>`.
 
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run, RunConstraints, RunContext, AgentCapabilities, AgentVersionInfo } from '../domain/types.ts';
@@ -28,6 +28,7 @@ import { RpcClient, type RpcEvent } from './rpc/rpcClient.ts';
 import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts';
+import { SKILL_ID as KNOWLEDGE_SKILL_ID } from '../knowledge/materialize.ts';
 
 const SESSION_DIR_NAME = '.mercury-sessions';
 const SESSION_PATH_FILE = '.mercury-session-path';
@@ -224,6 +225,26 @@ export class PrimeAgentAdapter implements AgentAdapter {
       // a symlink at or below the workspace, not a workspace that happens to live under one.
       const skillPath = resolveContained(workspacePath, join('.agents', 'skills', assertSafeSkillId(skill.id)));
       skillArgs.push('--skill', skillPath);
+    }
+
+    // The pack, rendered as a skill (docs/knowledge-base.md 9.3). PrimeAgent opens this directory
+    // unprompted, so the knowledge reaches the harness through a channel it already reads and no new
+    // protocol is needed. The neutral files under .mercury/ stay in place for every other backend.
+    //
+    // Gated on the directory existing rather than on `context.knowledge` alone. The pointer is written
+    // by the worker in the same step that writes the files, so in the normal path the two agree -- but
+    // advertising a skill directory that is not there would make the Run's own argv a lie about its
+    // workspace, and a Run whose pack was never materialized should look exactly like that.
+    if (context.knowledge && !context.skills.some((sk) => sk.id === KNOWLEDGE_SKILL_ID)) {
+      try {
+        const knowledgeSkillPath = resolveContained(
+          workspacePath, join('.agents', 'skills', assertSafeSkillId(KNOWLEDGE_SKILL_ID)));
+        if (existsSync(join(knowledgeSkillPath, 'SKILL.md'))) skillArgs.push('--skill', knowledgeSkillPath);
+      } catch {
+        // A workspace whose .agents/skills root is a symlink out of the tree. The pack is still in the
+        // neutral files, so the Run loses a rendering and not its knowledge; refusing to spawn over it
+        // would trade a degraded Run for a failed one.
+      }
     }
 
     const spawnCmd = this.wrapForSandbox(context, [

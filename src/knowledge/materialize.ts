@@ -13,7 +13,40 @@
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { resolveContained } from '../skills/skillRegistry.ts';
+import { ValidationError } from '../domain/errors.ts';
 import type { EvidenceRef, Note } from './types.ts';
+
+/**
+ * A generated path that is really inside this workspace.
+ *
+ * `join()` is lexical. A workspace is a git checkout of a repository that may be untrusted, and git
+ * checks out `.mercury` or `.agents/skills` as a symlink without complaint -- so `join(ws, '.mercury',
+ * 'notes.jsonl')` can name a file anywhere on the host the worker can write to, and Mercury would write
+ * the pack there. Measured before this guard existed: a repository shipping `.mercury` as a symlink
+ * received `pack.json`, `NOTES.md` and `notes.jsonl` outside the workspace, and one shipping
+ * `.agents/skills` as a symlink received the generated SKILL.md the same way.
+ *
+ * `resolveContained` is the guard `writeSkills()` already uses for exactly this reason, and reusing it
+ * rather than writing a second one is the point -- two containment helpers is two chances for them to
+ * disagree about what "inside" means. It resolves both sides through realpath, so a workspace under a
+ * symlinked ancestor (macOS `/tmp` is `/private/tmp`) still works, and refuses only a symlink at or below
+ * the workspace root.
+ *
+ * The message is re-thrown in knowledge terms because the shared helper speaks of skill roots, and an
+ * operator reading a log about a knowledge pack should not have to work out why it mentions skills.
+ *
+ * Throwing is deliberate and it fails the Run. The alternative is writing the pack wherever the
+ * repository pointed, which is not a degraded Run but a host compromise dressed up as a successful one.
+ */
+function containedPath(workspacePath: string, rel: string): string {
+  try {
+    return resolveContained(workspacePath, rel);
+  } catch (err) {
+    throw new ValidationError(
+      `knowledge path ${JSON.stringify(rel)} escapes the workspace: ${(err as Error).message}`);
+  }
+}
 
 export const PACK_DIR = '.mercury/knowledge';
 export const PACK_FILE = `${PACK_DIR}/pack.json`;
@@ -21,8 +54,19 @@ export const NOTES_FILE = `${PACK_DIR}/NOTES.md`;
 /** Tier 1: the agent appends here, and the harvester reads it back (section 7.1). */
 export const NOTES_JSONL = '.mercury/notes.jsonl';
 
+/**
+ * The synthetic skill directory of section 9.3, for harnesses that read a skill directory.
+ *
+ * The name is deliberately not configurable. `GENERATED_PATHS` below has to exclude exactly the directory
+ * that gets written, and a name chosen at runtime is a name the exclusion can silently miss -- which
+ * would put a generated pack in a user's pull request, the outcome K1 exists to prevent.
+ */
+export const SKILL_ID = 'mercury-knowledge';
+export const SKILL_DIR = `.agents/skills/${SKILL_ID}`;
+export const SKILL_FILE = `${SKILL_DIR}/SKILL.md`;
+
 /** Paths Mercury generates and no agent should ever commit (section 9.4). */
-export const GENERATED_PATHS = ['.mercury/', '.agents/skills/mercury-knowledge/'];
+export const GENERATED_PATHS = ['.mercury/', `${SKILL_DIR}/`];
 
 const SPECIFICITY: Record<string, number> = { path: 0, repo: 1, project: 2, agent: 3 };
 
@@ -111,10 +155,53 @@ export function renderNotesMd(projectId: string, packHash: string, notes: readon
   return lines.join('\n');
 }
 
+/**
+ * The pack as a skill, for a harness that reads a `.agents/skills/<id>/SKILL.md` directory (section 9.3).
+ *
+ * The body is the same rendered pack the neutral file carries, not a pointer to it. A skill that says
+ * "go read another file" costs the harness a step it has no reason to take, and the whole argument for
+ * the skill channel is that PrimeAgent opens this file unprompted -- so the knowledge has to be inside
+ * the thing it already opens.
+ *
+ * The frontmatter matches what `writeSkills()` produces for a registry skill, because PrimeAgent parses
+ * these the same way and a skill it cannot parse is a skill it skips without saying so.
+ */
+/**
+ * The project id as one YAML-safe line.
+ *
+ * `MERCURY_ATLAS_PROJECT` is operator configuration rather than agent input, so this is defence against a
+ * copy-paste accident and not against an attacker. It is cheap because the failure it prevents is silent:
+ * a value carrying a newline followed by `---` closes the frontmatter block early, and a harness that
+ * cannot parse a skill skips it without reporting anything. The Run would then proceed with no knowledge
+ * and no indication that the pack was there all along.
+ */
+function oneLine(value: string): string {
+  return value.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+const SKILL_DESCRIPTION_PREFIX = 'Project knowledge promoted by the team, gathered from earlier Runs on ';
+
+export function renderSkillMd(projectId: string, packHash: string, notes: readonly Note[]): string {
+  const front = [
+    '---',
+    `name: ${SKILL_ID}`,
+    'version: 1.0.0',
+    `description: ${SKILL_DESCRIPTION_PREFIX}${oneLine(projectId)}.`,
+    'capabilities: [knowledge, context]',
+    '---',
+    '',
+  ].join('\n');
+  return `${front}${renderNotesMd(projectId, packHash, notes)}`;
+}
+
 export interface MaterializedPack {
   packPath: string;
   notesPath: string;
   notesFile: string;
+  /** The synthetic skill of section 9.3, for adapters that render into a skill channel. */
+  skillPath: string;
+  /** True when a SKILL.md was already there and was left alone -- the project owns that name. */
+  skillSkipped: boolean;
   count: number;
   packHash: string;
   /** Paths that could not be excluded from git, if any. */
@@ -132,9 +219,9 @@ export function materializeKnowledge(
   workspacePath: string,
   opts: { projectId: string; packHash: string; notes: readonly Note[] },
 ): MaterializedPack {
-  const packPath = join(workspacePath, PACK_FILE);
-  const notesPath = join(workspacePath, NOTES_FILE);
-  const jsonlPath = join(workspacePath, NOTES_JSONL);
+  const packPath = containedPath(workspacePath, PACK_FILE);
+  const notesPath = containedPath(workspacePath, NOTES_FILE);
+  const jsonlPath = containedPath(workspacePath, NOTES_JSONL);
 
   mkdirSync(dirname(packPath), {recursive: true});
   // Verbatim snapshot, so the workspace copy and run_knowledge agree byte for byte.
@@ -147,9 +234,32 @@ export function materializeKnowledge(
     writeFileSync(jsonlPath, '');
   }
 
+  // The skill rendering, written alongside the neutral files so a harness that reads skills and a harness
+  // that reads files both get the same pack from the same materialization. Written after the neutral
+  // files and before the exclusion pass, so the directory is covered by the exclude it is already in.
+  const skillPath = containedPath(workspacePath, SKILL_FILE);
+  // A SKILL.md already here was put here by the repository checkout or by writeSkills, both of which run
+  // before this -- a workspace is a fresh worktree per Run, so nothing else has had a chance to write it.
+  // That makes it the project's file, and section 9.4 is unambiguous: Mercury never modifies a tracked
+  // file. Overwriting it would also be the one way a pack could show up as a diff in someone's pull
+  // request, since `info/exclude` cannot un-track a path git is already tracking.
+  //
+  // The pack still arrives: the neutral files and the context pointer are written regardless, so losing
+  // the skill rendering costs a channel and not the knowledge. The caller logs the collision, because an
+  // operator who renamed a skill into Mercury's namespace should find out from the Run rather than by
+  // noticing the pack never seems to land.
+  let skillSkipped = false;
+  if (existsSync(skillPath)) {
+    skillSkipped = true;
+  } else {
+    mkdirSync(dirname(skillPath), { recursive: true });
+    writeFileSync(skillPath, renderSkillMd(opts.projectId, opts.packHash, opts.notes));
+  }
+
   const notExcluded = excludeFromGit(workspacePath, GENERATED_PATHS);
   return {
-    packPath, notesPath, notesFile: jsonlPath, count: opts.notes.length, packHash: opts.packHash, notExcluded,
+    packPath, notesPath, notesFile: jsonlPath, skillPath, skillSkipped, count: opts.notes.length,
+    packHash: opts.packHash, notExcluded,
   };
 }
 
