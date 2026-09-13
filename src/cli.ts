@@ -29,6 +29,7 @@ import { KnowledgePuller } from './knowledge/puller.ts';
 import { ReplicaStore } from './knowledge/replica.ts';
 import { OutboxStore } from './knowledge/outbox.ts';
 import { knowledgeStatus } from './knowledge/status.ts';
+import { repoIdentity } from './knowledge/identity.ts';
 import { submitOperatorNote } from './knowledge/operator.ts';
 import { AgentCapabilityRegistry, logAdapterCapabilities } from './adapters/capabilities.ts';
 import { GoalStore } from './runs/goalStore.ts';
@@ -75,6 +76,7 @@ function usageText(): string {
     '                  runs.repository_json, runs.repositories_json',
     '  knowledge       flush        push the knowledge outbox to Atlas now, synchronously,',
     '                               and print what happened (phase 1)',
+    '                identity     print the repo:<hash> scope key for a repository URL or path',
     '                status       outbox depth, last push and pull, replica cursor',
     '',
   ].join('\n');
@@ -119,6 +121,46 @@ async function main(): Promise<void> {
     const db = openDatabase(config.dbPath);
     logger.info({ db: config.dbPath }, 'migrations applied');
     db.close();
+    return;
+  }
+
+  // `knowledge identity` is a pure function of a URL, so it is answered before the database is
+  // opened. An operator trying to work out why a `repo:` scope did not match is very often working
+  // from a host whose configuration is the thing under investigation, and a scope calculator that
+  // refuses to run until the database is healthy is a calculator that cannot answer the question.
+  if (cmd === 'knowledge' && args[0] === 'identity') {
+    const targets = args.slice(1);
+    if (targets.length === 0) {
+      process.stderr.write(
+        'knowledge identity: give one or more repository URLs or paths.\n'
+        + 'Example: mercury knowledge identity https://github.com/acme/api.git\n',
+      );
+      process.exitCode = 1;
+      return;
+    }
+    let bad = 0;
+    for (const raw of targets) {
+      const parsed = repoIdentity(raw);
+      if (!parsed) {
+        process.stderr.write(`knowledge identity: cannot derive a repository identity from ${JSON.stringify(raw)}\n`);
+        bad += 1;
+        continue;
+      }
+      // The `repo:` prefix is printed, not left for the operator to add. The whole point of the command
+      // is that the output goes straight into a scope field, and a bare hash invites a paste that
+      // silently selects nothing -- the exact failure the command exists to prevent.
+      process.stdout.write(`repo:${parsed.hash}  ${parsed.identity}\n`);
+      if (parsed.local) {
+        // The scope key is deliberately host-local (section 5): two hosts with the same path on disk
+        // are not the same repository. An operator pasting a laptop path will get a hash that works
+        // here and matches nothing anywhere else, which looks like a bug in the scope.
+        process.stderr.write(
+          `  note: ${JSON.stringify(raw)} is a local path, so this scope matches only this host.\n`
+          + '  Use the clone URL to get a scope that other hosts agree on.\n',
+        );
+      }
+    }
+    if (bad > 0) process.exitCode = 1;
     return;
   }
 
@@ -177,7 +219,7 @@ async function main(): Promise<void> {
         if (outcome.failed) process.exitCode = 1;
         return;
       }
-      process.stderr.write(`knowledge: unknown subcommand '${sub ?? ''}'. Expected flush or status.\n`);
+      process.stderr.write(`knowledge: unknown subcommand '${sub ?? ''}'. Expected flush, identity or status.\n`);
       process.exitCode = 1;
     } finally {
       db.close();
