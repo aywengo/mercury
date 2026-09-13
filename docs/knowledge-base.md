@@ -324,7 +324,17 @@ is a local filesystem path (which Mercury accepts for `repository`) is normalize
 `file/<absolute path>` and is explicitly host-local -- it can never match another host's
 identity, which is the correct outcome for a path.
 
-The rule at harvest time is a cross-check, not a lookup:
+`node src/cli.ts knowledge identity <url>...` prints this hash for a URL or path the operator
+supplies, in the `repo:<hash>` form a scope key takes. It exists because the hash is the one part of a
+scope key nobody can produce by hand, and `repo:` is the scope that keeps a monorepo's conventions out of
+an unrelated service's pack -- an operator who cannot compute it falls back to `project`, which is broader
+than they meant and cannot be undone once notes accumulate. The command calls the same
+`normalizeRepoIdentity()` that pack selection calls, so the key it prints is the key that selects; a second
+implementation would be a scope that looks right and matches nothing. A local path is answered with its
+`file/...` identity and a note that the scope matches only this host, because that is correct behaviour
+that otherwise reads as a bug. The command reads no database: the person asking why a scope did not match
+is usually on the host whose configuration is the problem.
+
 
 - The host attaches `MERCURY_ATLAS_PROJECT` to every note it pushes.
 - The host also attaches the identity of `run.repository` (and of each entry in
