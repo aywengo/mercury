@@ -13,5 +13,8 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src", "test", "fleet", "client", "e2e"]
+  // `atlas` is listed so the root typecheck covers it, exactly as `fleet` is. The coupling
+  // rule is about imports, not about compilation: sharing a typechecker is how a type error in a
+  // product with no dependencies on the others gets found before release rather than after.
+  "include": ["src", "test", "fleet", "atlas", "client", "e2e"]
 }

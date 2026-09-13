@@ -57,14 +57,17 @@
     "build:server": "tsc -p tsconfig.server.json",
     "build:fleet": "tsc -p tsconfig.fleet.json",
     "prepare": "npm run build:client && npm run build:server",
-    "test": "npm run test:core && npm run test:fleet && npm run test:client",
+    "test": "npm run test:core && npm run test:fleet && npm run test:atlas && npm run test:client",
     "test:core": "node --test --test-timeout=180000 'test/*.test.ts'",
     "test:fleet": "node --test --test-timeout=180000 'fleet/test/*.test.ts'",
     "test:client": "node --test --test-timeout=180000 'client/test/*.test.ts'",
     "fleet": "node fleet/cli.ts",
     "test:e2e": "node --test --test-timeout=900000 'e2e/*.test.ts'",
     "test:e2e:config": "docker compose -f e2e/compose.yml config --quiet",
-    "prepr": "node e2e/prepr.ts"
+    "prepr": "node e2e/prepr.ts",
+    "build:atlas": "tsc -p tsconfig.atlas.json",
+    "test:atlas": "node --test --test-timeout=180000 'atlas/test/*.test.ts'",
+    "atlas": "node atlas/cli.ts"
   },
   "dependencies": {
     "express": "^4.21.2"
