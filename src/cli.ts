@@ -146,7 +146,10 @@ async function main(): Promise<void> {
         bad += 1;
         continue;
       }
-      process.stdout.write(`${parsed.hash}  ${parsed.identity}\n`);
+      // The `repo:` prefix is printed, not left for the operator to add. The whole point of the command
+      // is that the output goes straight into a scope field, and a bare hash invites a paste that
+      // silently selects nothing -- the exact failure the command exists to prevent.
+      process.stdout.write(`repo:${parsed.hash}  ${parsed.identity}\n`);
       if (parsed.local) {
         // The scope key is deliberately host-local (section 5): two hosts with the same path on disk
         // are not the same repository. An operator pasting a laptop path will get a hash that works

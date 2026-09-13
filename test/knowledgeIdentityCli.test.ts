@@ -42,7 +42,7 @@ test('the printed hash is exactly what identityHash produces for the normalized 
   const r = await cli(['knowledge', 'identity', url]);
   assert.equal(r.code, 0, r.stderr);
   const expected = identityHash(normalizeRepoIdentity(url)!);
-  assert.match(clean(r.stdout), new RegExp(`^${expected}  github\\.com/acme/api$`, 'm'),
+  assert.match(clean(r.stdout), new RegExp(`^repo:${expected}  github\\.com/acme/api$`, 'm'),
     'the command must print the same hash the selector uses, not a reimplementation');
 });
 
@@ -51,9 +51,13 @@ test('https and ssh forms of one repository print one hash', async () => {
   // repository must land on one scope, or notes contributed over one transport are invisible to the other.
   const r = await cli(['knowledge', 'identity', 'https://github.com/acme/api.git', 'git@github.com:acme/api.git']);
   assert.equal(r.code, 0, r.stderr);
-  const hashes = clean(r.stdout).split('\n').map((l) => l.split(/\s+/)[0]);
-  assert.equal(hashes.length, 2);
-  assert.equal(hashes[0], hashes[1], `transport changed the scope: ${hashes.join(' vs ')}`);
+  const scopes = clean(r.stdout).split('\n').map((l) => l.split(/\s+/)[0]);
+  assert.equal(scopes.length, 2);
+  assert.equal(scopes[0], scopes[1], `transport changed the scope: ${scopes.join(' vs ')}`);
+  for (const sc of scopes) {
+    assert.match(sc, /^repo:[0-9a-f]{16}$/,
+      'the first column must be a scope key ready to paste, not a bare hash');
+  }
 });
 
 test('the hash the command prints is the hash that selects a note in a pack', async () => {
@@ -61,7 +65,10 @@ test('the hash the command prints is the hash that selects a note in a pack', as
   // a scope key that selects nothing, and it would look correct while doing nothing.
   const url = 'https://github.com/acme/widget.git';
   const r = await cli(['knowledge', 'identity', url]);
-  const hash = clean(r.stdout).split(/\s+/)[0]!;
+  // The printed scope key, used verbatim -- not the hash with `repo:` re-added by the test. If the
+  // command ever prints something that is not a usable scope key, this stops selecting and fails.
+  const printedScope = clean(r.stdout).split(/\s+/)[0]!;
+  assert.match(printedScope, /^repo:[0-9a-f]{16}$/);
   const db = openDatabase(':memory:');
   const replica = new ReplicaStore(db);
   const note = (scope: string, id: string): Note => ({
@@ -70,7 +77,7 @@ test('the hash the command prints is the hash that selects a note in a pack', as
     corroboration: { runs: 1, harnesses: 1, hosts: 1 },
     provenance: { source: 'agent-reported', hostId: 'h', recordedAt: '2026-01-01T00:00:00.000Z' },
   } as Note);
-  replica.applyBatch('p', [note(`repo:${hash}`, 'note_repo'), note('project', 'note_proj')], 2, '2026-01-02T00:00:00.000Z');
+  replica.applyBatch('p', [note(printedScope, 'note_repo'), note('project', 'note_proj')], 2, '2026-01-02T00:00:00.000Z');
   const pack = selectPack(replica, { projectId: 'p', agent: 'primeagent', task: 'touch src/server.ts', repositories: [url], maxBytes: 100_000 });
   const ids = pack.notes.map((n) => n.noteId);
   assert.ok(ids.includes('note_repo'), `the printed scope selected nothing; got ${JSON.stringify(ids)}`);
@@ -85,7 +92,8 @@ test('a local path is reported as host-local rather than silently scoped', async
   // else, which reads as a bug in scopes unless it is said out loud.
   const r = await cli(['knowledge', 'identity', '/home/dev/work/api']);
   assert.equal(r.code, 0, r.stderr);
-  assert.match(clean(r.stdout), /^hash|file\/home\/dev\/work\/api/m);
+  assert.match(clean(r.stdout), /^repo:[0-9a-f]{16}  file\/home\/dev\/work\/api$/,
+    'the scope column must be a real scope key, not the word hash or a bare digest');
   assert.match(r.stderr, /matches only this host/);
   assert.match(r.stderr, /clone URL/);
 });
@@ -120,7 +128,7 @@ test('identity works with an unusable database, unlike status', async () => {
   const broken = { MERCURY_DB: '/dev/null/not-a-real-path/mercury.db' };
   const ok = await cli(['knowledge', 'identity', 'https://github.com/acme/api.git'], broken);
   assert.equal(ok.code, 0, `identity must not need a database: ${ok.stderr}`);
-  assert.match(ok.stdout, /[0-9a-f]{16}  github\.com\/acme\/api/);
+  assert.match(ok.stdout, /^repo:[0-9a-f]{16}  github\.com\/acme\/api$/m);
   // And the contrast is real: status does open the database.
   const bad = await cli(['knowledge', 'status'], broken);
   assert.notEqual(bad.code, 0, 'if status also survived, this test would be proving nothing');

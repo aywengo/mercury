@@ -324,8 +324,9 @@ is a local filesystem path (which Mercury accepts for `repository`) is normalize
 `file/<absolute path>` and is explicitly host-local -- it can never match another host's
 identity, which is the correct outcome for a path.
 
-`node src/cli.ts knowledge identity <url>...` prints this hash for a URL or path the operator
-supplies, in the `repo:<hash>` form a scope key takes. It exists because the hash is the one part of a
+`node src/cli.ts knowledge identity <url>...` prints the scope key itself -- `repo:<hash>` followed by the
+normalized identity it was derived from -- for a URL or path the operator supplies. The prefix is printed
+rather than left to be added, because the output is meant to be pasted straight into a scope field. It exists because the hash is the one part of a
 scope key nobody can produce by hand, and `repo:` is the scope that keeps a monorepo's conventions out of
 an unrelated service's pack -- an operator who cannot compute it falls back to `project`, which is broader
 than they meant and cannot be undone once notes accumulate. The command calls the same
