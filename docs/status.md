@@ -92,16 +92,26 @@ Not every adapter offers the same fidelity:
 - remote agents execute inside the remote provider's security boundary.
 
 Callers must not infer capabilities from an agent id alone. `/api/agents`
-reports a capability descriptor per agent, and it is not static-only: every
-adapter that can answer a version probe is asked at startup, and each
-advertised capability is resolved against the detected version rather than
-against the declaration alone. A caller therefore reads, per agent, the detected
-harness version and its raw string, plus a per-field goal answer that
-distinguishes `unsupported` (the backend has no such concept), `version-unknown`
-(nothing could be probed) and `version-too-old` (declared, but this install
-predates the threshold). Unknown fails closed: it is never reported as supported,
-and never as newest either. Adapters with no probe -- `hermes` and `claude` among
-them -- simply report no version.
+reports two different kinds of answer per agent, and they must be read
+differently. The `static` block is what an adapter declares about itself --
+skill delivery mode, persona append and files, human input, resume, knowledge --
+and it is passed through as declared, because it describes the adapter rather
+than an installed binary and there is no version to compare it against. The goal
+half is version-resolved: every adapter that can answer a version probe is asked
+at startup, and each goal field is then resolved against the detected version
+rather than against the declaration alone. A caller therefore reads, per agent,
+the detected harness version and its raw string, plus a per-field goal answer
+that distinguishes `unsupported` (the backend has no such concept),
+`version-unknown` (nothing could be probed) and `version-too-old` (declared, but
+this install predates the threshold). Unknown fails closed: it is never reported
+as supported, and never as newest either.
+
+Two consequences of that split are easy to misread. Probes are fired at startup
+and are not awaited, so `version` can be null for a moment after boot and goal
+fields read `version-unknown` until they land -- a cold cache, not a verdict
+about the backend. And adapters with no probe at all, `hermes` and `claude`
+among them, report no version permanently; for them `version-unknown` is the
+steady state, and they declare no goal support either.
 
 What remains unbuilt is what happens after that answer is known. No shipped
 backend declares deterministic gates and no gate outcome event exists, so Mercury

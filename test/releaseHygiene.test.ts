@@ -542,6 +542,12 @@ test('docs/status.md states version-resolved capability advertisement as shipped
     /dynamic (half|capabilit\w+)[^.]{0,140}\b(unbuilt|remains|not (yet )?(built|implemented|shipped))\b/i,
     /\b(version[- ]resolved|version[- ]dependent|version[- ]aware)\b[^.]{0,140}\b(unbuilt|remains|not (yet )?(built|implemented|shipped))\b/i,
     /\b(unbuilt|remains unbuilt|not (yet )?(built|implemented|shipped))\b[^.]{0,140}\bharness version\b/i,
+    // The opposite direction, which the first draft of this very fix committed: `static` is passed
+    // through UNRESOLVED (capabilities.ts says so), so "each advertised capability is resolved against
+    // the detected version" overstates it. A doc whose whole point is not overstating capability
+    // resolution must not overstate it in the other direction.
+    /each (advertised|reported) capabilit\w+[^.]{0,80}resolved against the detected version/i,
+    /\bstatic\b[^.]{0,60}\b(version[- ]resolved|resolved against the detected version)\b/i,
   ];
   for (const re of forbidden) {
     assert.ok(!re.test(section),
@@ -569,9 +575,24 @@ test('docs/status.md states version-resolved capability advertisement as shipped
     'goal capabilities are no longer resolved per field against the detected version; reconcile '
     + 'docs/status.md');
   const cli = read('src/cli.ts');
-  assert.match(cli, /agentCapabilities\.start\(\)/,
+  // Anchored at line start so a commented-out call does not satisfy it. That closes the cheap version
+  // of the loophole, not all of them: a call inside a /* */ block would still match, and this is not
+  // a TypeScript parser. What it buys is that deleting the line, or commenting it out the way people
+  // actually do, fails the guard instead of leaving the doc claiming a probe that never runs.
+  assert.match(cli, /^\s*agentCapabilities\.start\(\);/m,
     'harness version probes are no longer started in the composition root, so /api/agents would report '
     + 'no version for any agent and docs/status.md would be wrong');
+  // The doc says probes are fired and NOT awaited, so a caller reading version-unknown right after
+  // boot knows it is a cold cache. If someone awaits the call, that sentence becomes false.
+  assert.doesNotMatch(cli, /await\s+agentCapabilities\.start\(\)/,
+    'the composition root now awaits the version probes, so docs/status.md must stop describing them as '
+    + 'fired without being awaited');
+
+  // And the static block really is passed through unresolved, which is why the doc splits the two.
+  const staticPassthrough = /static:\s*this\.adapters\[id\]\.capabilities\??\.static/.test(caps);
+  assert.ok(staticPassthrough,
+    'the capability snapshot no longer passes `static` through straight from the adapter, so '
+    + 'docs/status.md must stop describing it as declared-but-unresolved');
 });
 
 test('docs/distribution.md agrees with what the release workflow actually produces', () => {
