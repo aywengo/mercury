@@ -31,6 +31,15 @@ export interface AtlasConfig {
   maxDetailBytes: number;
   /** Maximum number of items in a batch request. */
   maxBatch: number;
+  /**
+   * How often the maintenance sweep runs. It retires stale candidates and prunes replay-guard rows;
+   * see `atlas/sweep.ts` for what it deliberately does NOT do.
+   */
+  sweepIntervalMs: number;
+  /** A candidate with no new source for this long is retired by the sweep (section 12). */
+  staleCandidateAgeMs: number;
+  /** Idempotency keys older than this are dropped. They are a replay guard, not a record. */
+  idempotencyRetentionMs: number;
   /** Log level. */
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
@@ -114,6 +123,9 @@ export function loadAtlasConfig(env: Record<string, string | undefined> = proces
     maxClaimBytes: num(env['ATLAS_MAX_CLAIM_BYTES'], 1024),
     maxDetailBytes: num(env['ATLAS_MAX_DETAIL_BYTES'], 4096),
     maxBatch: num(env['ATLAS_MAX_BATCH'], 500),
+    sweepIntervalMs: num(env['ATLAS_SWEEP_INTERVAL_MS'], 60 * 60 * 1000),
+    staleCandidateAgeMs: num(env['ATLAS_STALE_CANDIDATE_AGE_MS'], 30 * 24 * 60 * 60 * 1000),
+    idempotencyRetentionMs: num(env['ATLAS_IDEMPOTENCY_RETENTION_MS'], 7 * 24 * 60 * 60 * 1000),
     logLevel: level(env['ATLAS_LOG_LEVEL']),
   };
 

@@ -255,10 +255,12 @@ Merged and covered by tests:
 
 What is not built, checked against the tree rather than remembered:
 
-- **Atlas does not sweep its own retired notes.** `deleteExpiredRetired()`
-  (`atlas/notes.ts:667`) has no caller and no test, and `retireStaleCandidates()`
-  (`atlas/notes.ts:650`) has a test but no production caller. `docs/knowledge-base.md`
-  documents `ATLAS_RETIRED_RETENTION_MS`, which exists nowhere in the code. Tracked in
+- **Atlas never deletes a note.** A maintenance sweep runs hourly
+  (`ATLAS_SWEEP_INTERVAL_MS`): it retires stale candidates and prunes replay-guard rows. It
+  deliberately does not delete, because a deletion produces no `seq` row and a replica
+  advancing by cursor would never learn the note was gone. Retired notes therefore accumulate
+  in Atlas indefinitely; deleting them safely needs a sequence-bearing tombstone, which is a
+  replication-protocol change. Tracked in
   [#562](https://github.com/aywengo/mercury/issues/562).
 - **No UNIQUE constraint backs the one-live-note-per-claim rule.** It holds because two
   code paths enforce it, not because the schema does. Tracked in

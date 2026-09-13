@@ -44,6 +44,9 @@ test('auth: admin token authentication', () => {
     maxClaimBytes: 1024,
     maxDetailBytes: 4096,
     maxBatch: 500,
+    sweepIntervalMs: 60 * 60 * 1000,
+    staleCandidateAgeMs: 30 * 24 * 60 * 60 * 1000,
+    idempotencyRetentionMs: 7 * 24 * 60 * 60 * 1000,
     logLevel: 'info',
   };
   
@@ -72,6 +75,9 @@ test('auth: invalid token returns null', () => {
     maxClaimBytes: 1024,
     maxDetailBytes: 4096,
     maxBatch: 500,
+    sweepIntervalMs: 60 * 60 * 1000,
+    staleCandidateAgeMs: 30 * 24 * 60 * 60 * 1000,
+    idempotencyRetentionMs: 7 * 24 * 60 * 60 * 1000,
     logLevel: 'info',
   };
   
@@ -102,6 +108,9 @@ test('auth: reader tokens', () => {
     maxClaimBytes: 1024,
     maxDetailBytes: 4096,
     maxBatch: 500,
+    sweepIntervalMs: 60 * 60 * 1000,
+    staleCandidateAgeMs: 30 * 24 * 60 * 60 * 1000,
+    idempotencyRetentionMs: 7 * 24 * 60 * 60 * 1000,
     logLevel: 'info',
   };
   
@@ -131,6 +140,9 @@ test('auth: may access checks project permission', () => {
     maxClaimBytes: 1024,
     maxDetailBytes: 4096,
     maxBatch: 500,
+    sweepIntervalMs: 60 * 60 * 1000,
+    staleCandidateAgeMs: 30 * 24 * 60 * 60 * 1000,
+    idempotencyRetentionMs: 7 * 24 * 60 * 60 * 1000,
     logLevel: 'info',
   };
   

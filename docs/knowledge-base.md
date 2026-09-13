@@ -1073,12 +1073,26 @@ Two rules about what Atlas does **not** do:
   retired note's revision history remains readable; a reader who wants to know what Mercury
   believed before the decision can find out.
 
-Retention applies to notes only (K1). `retired` notes are kept for `ATLAS_RETIRED_RETENTION_MS`
-(default 180 days) and then deleted with their revisions; the promotions and contests rows
-that reference them are kept as the audit trail. `candidate` notes that have not been
-promoted or corroborated within `ATLAS_CANDIDATE_RETENTION_MS` (default 90 days) are retired
-automatically with `reason: stale`, which is how the noise tier 2 inevitably produces is
-drained without an operator having to sweep it.
+Retention applies to notes only (K1), and Atlas **retains retired notes indefinitely**
+(issue #562). Deleting a note produces no `seq` row, and a replica advances by cursor, so a
+replica would never learn the note was gone: it would keep serving a note Atlas had destroyed,
+with no event to reconcile against. That is the same divergence §8.6 was written about, and it
+is why the bare `DELETE` that used to sit in `deleteExpiredRetired()` was removed rather than
+scheduled. Deleting safely needs a tombstone that carries a sequence number, which is a change
+to the replication protocol rather than to a retention setting.
+
+What the maintenance sweep (`atlas/sweep.ts`, `ATLAS_SWEEP_INTERVAL_MS`, default hourly) does
+run is the half that is visible to replicas. `candidate` notes with no new source for
+`ATLAS_STALE_CANDIDATE_AGE_MS` (default 30 days) are retired with `reason: stale` -- which is
+how the noise tier 2 inevitably produces is drained without an operator sweeping it -- and each
+retirement goes through `transition()`, so it emits a `seq` row and every replica applies it.
+Idempotency keys older than `ATLAS_IDEMPOTENCY_RETENTION_MS` (default 7 days) are pruned; they
+are a replay guard with no replica counterpart, so nothing downstream can be wrong about it.
+
+The host side is where replica growth is bounded, by
+`MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS` (default 7 days, §8.6). That is safe on a replica and
+not on the source, because a replica is a cache that can be rebuilt from `bootstrap()` while
+Atlas is the record.
 
 **A retired note is not a permanent dedup sink** (issue #551, fix/issue-551-retired-dedup). The
 dedup query in `contributeOne()` (`atlas/notes.ts`) includes `AND tier != 'retired'`, so a

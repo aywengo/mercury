@@ -26,6 +26,7 @@ import { authenticate, HttpError, matchRoute, readJsonBody, sendJson, type Route
 import type { Logger } from './logger.ts';
 import { AtlasMetrics } from './metrics.ts';
 import { ClaimConflictError, NoteStore, type PromotionPolicy } from './notes.ts';
+import { startMaintenanceSweep } from './sweep.ts';
 import { ATLAS_PRODUCT, ATLAS_VERSION } from './version.ts';
 
 export interface AtlasServices {
@@ -384,12 +385,18 @@ export async function startAtlas(services: AtlasServices): Promise<AtlasServer> 
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : config.port;
   const scheme = config.tlsCert ? 'https' : 'http';
+  // Started only once the socket is listening: a sweep that runs before the service is up would retire
+  // notes against a database the operator may still be about to refuse to serve.
+  const sweep = startMaintenanceSweep({ store: services.store, config, log });
   return {
     server,
     url: `${scheme}://${config.bindHost}:${port}`,
-    close: () => new Promise<void>((resolve) => {
-      server.closeAllConnections?.();
-      server.close(() => resolve());
-    }),
+    close: () => {
+      sweep.stop();
+      return new Promise<void>((resolve) => {
+        server.closeAllConnections?.();
+        server.close(() => resolve());
+      });
+    },
   };
 }

@@ -663,17 +663,15 @@ export class NoteStore {
     return done;
   }
 
-  /** Delete retired notes past their retention. The promotions and contests rows stay (section 12). */
-  deleteExpiredRetired(olderThanMs: number): number {
-    const cutoff = new Date(Date.now() - olderThanMs).toISOString();
-    const rows = this.db.prepare("SELECT note_id FROM notes WHERE tier = 'retired' AND updated_at < ?").all(cutoff) as unknown as { note_id: string }[];
-    for (const row of rows) {
-      this.db.prepare('DELETE FROM note_revisions WHERE note_id = ?').run(row.note_id);
-      this.db.prepare('DELETE FROM note_sources WHERE note_id = ?').run(row.note_id);
-      this.db.prepare('DELETE FROM notes WHERE note_id = ?').run(row.note_id);
-    }
-    return rows.length;
-  }
+  // `deleteExpiredRetired()` used to live here. It was removed rather than wired, and the reason is a
+  // replication invariant rather than tidiness: it issued bare DELETEs, and a deletion produces no `seq`
+  // row. A replica advances by cursor, so it would never learn the note was gone and would keep serving a
+  // note Atlas had destroyed -- permanently, with nothing to reconcile against. That is the divergence
+  // issue #555 was written about, and wiring this method would have created it rather than fixed it.
+  //
+  // Deleting safely needs a tombstone that carries a sequence number, which is a change to the replication
+  // protocol. Until then Atlas retains retired notes indefinitely; hosts prune their own replicas, which
+  // is safe because a replica is a cache that can be rebuilt from bootstrap. See atlas/sweep.ts.
 
   /** Idempotency keys are swept too; they are a replay guard, not a record to keep forever. */
   deleteExpiredIdempotencyKeys(olderThanMs: number): number {

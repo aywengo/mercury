@@ -198,9 +198,10 @@ export class ReplicaStore {
    * knowledgeReplica.test.ts pins both halves of that invariant so a future change that breaks
    * either fails loudly.
    *
-   * NOTE: Atlas's `deleteExpiredRetired()` (atlas/notes.ts) has no caller and runs no sweeps.
-   * Both sides accumulate retired rows until this host-side sweep runs. Wiring Atlas's sweep is
-   * tracked in issue #562.
+   * NOTE: Atlas runs a maintenance sweep (atlas/sweep.ts) but it deliberately never deletes a note.
+   * Deleting produces no `seq` row, so a replica advancing by cursor could never learn the note was gone.
+   * Atlas therefore keeps retired notes forever and this sweep is the only thing that bounds the replica --
+   * which is safe here and only here, because a replica is a cache that can be rebuilt from bootstrap.
    */
   sweepRetired(olderThanMs: number, now: () => number = Date.now): number {
     const cutoff = new Date(now() - olderThanMs).toISOString();
