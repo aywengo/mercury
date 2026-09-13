@@ -22,11 +22,14 @@ Implemented, and no longer a proposal:
 
 Still open, and named as such where they appear:
 
-- **Per-harness rendering** (section 9.3): only the neutral files and the `.mercury-context.json` pointer
-  are written. No adapter renders the pack into a channel its harness reads on its own. The Hermes row was
-  measured rather than assumed -- Hermes reads `AGENTS.md` from the workspace unprompted and does **not**
-  read `.mercury/knowledge/NOTES.md` -- so the row's "blocked" is confirmed for the channel the spec
-  considered, and the `AGENTS.md` channel it did not consider is tracked separately.
+- **Per-harness rendering** (section 9.3), for every backend except PrimeAgent. PrimeAgent now gets the
+  row the spec specifies: `materializeKnowledge` writes `.agents/skills/mercury-knowledge/SKILL.md` and
+  `PrimeAgentAdapter` passes it with the `--skill` flag it already builds, so the pack reaches a channel the
+  harness reads unprompted. The other rows are still unwritten -- only the neutral files and the
+  `.mercury-context.json` pointer reach them. The Hermes row was measured rather than assumed: Hermes reads
+  `AGENTS.md` from the workspace unprompted and does **not** read `.mercury/knowledge/NOTES.md`, so the
+  row's "blocked" is confirmed for the channel the spec considered, and the `AGENTS.md` channel it did not
+  consider is tracked separately.
 - **Remote agents** (section 7.1): they execute on another machine with no workspace for the worker to
   read, so they get tier 2 only. The remote protocol has no way to return notes, and none is designed here.
 
@@ -835,7 +838,7 @@ this design. "Unverified" means nobody has run the combination; it is not a euph
 
 | Backend | Tier 1 (`notes.jsonl`) | Tier 3 native file | Injection channel | Status |
 | --- | --- | --- | --- | --- |
-| `primeagent` | yes -- works in the workspace | `AGENTS.md` deltas | synthetic skill via `--skill` + context pointer | the `--skill` and context-file paths exist and are tested for skills; knowledge itself is unbuilt |
+| `primeagent` | yes -- works in the workspace | `AGENTS.md` deltas | synthetic skill via `--skill` + context pointer | both channels are built for knowledge: `materializeKnowledge` writes the skill and `PrimeAgentAdapter` passes it on argv (#547) |
 | `pi`, `omp` (`rpc-agents/`) | yes -- work in the workspace | unknown | context pointer + prompt line | whether they act on a prompt line pointing at a file is unverified; [`crew/harness-capabilities.md`](crew/harness-capabilities.md) §7 Q3 asks the same about persona |
 | `claude` | yes | `CLAUDE.md` deltas | generated `CLAUDE.md` when none is tracked; else context pointer -- *degraded* | the task-over-stdin path exists; whether a generated `CLAUDE.md` is honoured alongside a tracked one is unverified, hence the fallback |
 | `hermes` | yes | `SOUL.md` deltas | appended persona (`persona.append`) | **blocked**: Hermes cannot complete any Run through Mercury today because of the skill-namespace failure in [`crew/teams.md`](crew/teams.md) §3; nothing about knowledge is testable until Teams Phase -1 and 0 land |
