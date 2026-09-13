@@ -155,9 +155,9 @@ boundaries.
 
 ## Implemented
 
-### Knowledge base (phases 0–2)
+### Knowledge base (phases 0–3)
 
-The host-side knowledge integration is implemented through phase 2. What is live:
+The host-side knowledge integration is implemented through phase 3. What is live:
 
 - `knowledge_outbox` table, the pusher, and the puller;
 - `knowledge_replica` with its cursor;
@@ -166,11 +166,21 @@ The host-side knowledge integration is implemented through phase 2. What is live
 - `knowledge.rejected` and `knowledge.selected` event types;
 - `GET /api/knowledge/status` and `POST /api/knowledge/notes` (admin only);
 - `GET /api/runs/:runId/knowledge` (owner-scoped);
+- tier-1 harvest of `.mercury/notes.jsonl` at finalize, with validation, the K2 rules and the
+  section 7.5 bounds, queued into the outbox in the transaction that completes the Run;
+- `knowledge.noted` and the per-line `knowledge.rejected` reasons;
 - `MERCURY_ATLAS_*` configuration variables including `MERCURY_ATLAS_ADMIN_TOKEN`.
 
-Phase 3 (harvesting `.mercury/notes.jsonl` back out of a completed workspace) is not yet
-implemented. The file is created empty and the agent is instructed to write it, but nothing
-reads it back. See [`docs/knowledge-base.md`](knowledge-base.md) for details.
+The loop is therefore closed end to end: a Run can write a note, and a later Run on a different
+host is told it. `test/knowledgeTeachE2E.test.ts` proves that path against a real Atlas process.
+
+What is not implemented is per-harness rendering (section 9.3): only the neutral files and the
+`.mercury-context.json` pointer are written, and no adapter renders the pack into a channel its
+harness reads unprompted. Measured rather than assumed -- Hermes reads `AGENTS.md` from the
+workspace and does **not** read `.mercury/knowledge/NOTES.md`, so the spec's "blocked" holds for
+the channel it considered and the `AGENTS.md` channel is tracked separately. Remote agents get
+tier 2 only, because they execute on another machine with no workspace for the worker to read.
+See [`docs/knowledge-base.md`](knowledge-base.md) for details.
 
 
 ### Distribution
