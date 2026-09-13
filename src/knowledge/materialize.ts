@@ -21,8 +21,19 @@ export const NOTES_FILE = `${PACK_DIR}/NOTES.md`;
 /** Tier 1: the agent appends here, and the harvester reads it back (section 7.1). */
 export const NOTES_JSONL = '.mercury/notes.jsonl';
 
+/**
+ * The synthetic skill directory of section 9.3, for harnesses that read a skill directory.
+ *
+ * The name is deliberately not configurable. `GENERATED_PATHS` below has to exclude exactly the directory
+ * that gets written, and a name chosen at runtime is a name the exclusion can silently miss -- which
+ * would put a generated pack in a user's pull request, the outcome K1 exists to prevent.
+ */
+export const SKILL_ID = 'mercury-knowledge';
+export const SKILL_DIR = `.agents/skills/${SKILL_ID}`;
+export const SKILL_FILE = `${SKILL_DIR}/SKILL.md`;
+
 /** Paths Mercury generates and no agent should ever commit (section 9.4). */
-export const GENERATED_PATHS = ['.mercury/', '.agents/skills/mercury-knowledge/'];
+export const GENERATED_PATHS = ['.mercury/', `${SKILL_DIR}/`];
 
 const SPECIFICITY: Record<string, number> = { path: 0, repo: 1, project: 2, agent: 3 };
 
@@ -111,10 +122,38 @@ export function renderNotesMd(projectId: string, packHash: string, notes: readon
   return lines.join('\n');
 }
 
+/**
+ * The pack as a skill, for a harness that reads a `.agents/skills/<id>/SKILL.md` directory (section 9.3).
+ *
+ * The body is the same rendered pack the neutral file carries, not a pointer to it. A skill that says
+ * "go read another file" costs the harness a step it has no reason to take, and the whole argument for
+ * the skill channel is that PrimeAgent opens this file unprompted -- so the knowledge has to be inside
+ * the thing it already opens.
+ *
+ * The frontmatter matches what `writeSkills()` produces for a registry skill, because PrimeAgent parses
+ * these the same way and a skill it cannot parse is a skill it skips without saying so.
+ */
+export function renderSkillMd(projectId: string, packHash: string, notes: readonly Note[]): string {
+  const front = [
+    '---',
+    `name: ${SKILL_ID}`,
+    'version: 1.0.0',
+    `description: Project knowledge promoted by the team, gathered from earlier Runs on ${projectId}.`,
+    'capabilities: [knowledge, context]',
+    '---',
+    '',
+  ].join('\n');
+  return `${front}${renderNotesMd(projectId, packHash, notes)}`;
+}
+
 export interface MaterializedPack {
   packPath: string;
   notesPath: string;
   notesFile: string;
+  /** The synthetic skill of section 9.3, for adapters that render into a skill channel. */
+  skillPath: string;
+  /** True when a SKILL.md was already there and was left alone -- the project owns that name. */
+  skillSkipped: boolean;
   count: number;
   packHash: string;
   /** Paths that could not be excluded from git, if any. */
@@ -147,9 +186,32 @@ export function materializeKnowledge(
     writeFileSync(jsonlPath, '');
   }
 
+  // The skill rendering, written alongside the neutral files so a harness that reads skills and a harness
+  // that reads files both get the same pack from the same materialization. Written after the neutral
+  // files and before the exclusion pass, so the directory is covered by the exclude it is already in.
+  const skillPath = join(workspacePath, SKILL_FILE);
+  // A SKILL.md already here was put here by the repository checkout or by writeSkills, both of which run
+  // before this -- a workspace is a fresh worktree per Run, so nothing else has had a chance to write it.
+  // That makes it the project's file, and section 9.4 is unambiguous: Mercury never modifies a tracked
+  // file. Overwriting it would also be the one way a pack could show up as a diff in someone's pull
+  // request, since `info/exclude` cannot un-track a path git is already tracking.
+  //
+  // The pack still arrives: the neutral files and the context pointer are written regardless, so losing
+  // the skill rendering costs a channel and not the knowledge. The caller logs the collision, because an
+  // operator who renamed a skill into Mercury's namespace should find out from the Run rather than by
+  // noticing the pack never seems to land.
+  let skillSkipped = false;
+  if (existsSync(skillPath)) {
+    skillSkipped = true;
+  } else {
+    mkdirSync(dirname(skillPath), { recursive: true });
+    writeFileSync(skillPath, renderSkillMd(opts.projectId, opts.packHash, opts.notes));
+  }
+
   const notExcluded = excludeFromGit(workspacePath, GENERATED_PATHS);
   return {
-    packPath, notesPath, notesFile: jsonlPath, count: opts.notes.length, packHash: opts.packHash, notExcluded,
+    packPath, notesPath, notesFile: jsonlPath, skillPath, skillSkipped, count: opts.notes.length,
+    packHash: opts.packHash, notExcluded,
   };
 }
 

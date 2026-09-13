@@ -361,6 +361,13 @@ export class Worker {
           projectId: this.deps.knowledgeProject!, packHash: storedPack.packHash, notes,
         });
         knowledgePointer = { packHash: storedPack.packHash, path: NOTES_FILE, count: written.count };
+        if (written.skillSkipped) {
+          // Not fatal and not silent. The pack is in the neutral files either way; what the Run lost is
+          // the one channel PrimeAgent reads without being told to.
+          log.warn({ kind: 'knowledge_skill_collision', path: written.skillPath },
+            'a skill named mercury-knowledge already exists in this workspace; the knowledge pack was not '
+            + 'rendered as a skill and is available only through the neutral files');
+        }
         if (written.notExcluded.length > 0) {
           // Loud, because a pack that CAN be committed is a second copy of the knowledge living in git,
           // which is what K1 exists to prevent. Not fatal: the Run is already queued and the notes are
