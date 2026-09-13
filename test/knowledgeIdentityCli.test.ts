@@ -60,6 +60,20 @@ test('https and ssh forms of one repository print one hash', async () => {
   }
 });
 
+test('a repository spelled with a `..` segment prints the same scope as its plain spelling', async () => {
+  // The URL parser collapses dot segments on its own; the scp form is not parsed by `new URL()` at all,
+  // so it needs the same work done explicitly (#558). Before that, an operator who pasted an scp URL
+  // containing `..` got a scope key that no host would ever report, and the command showed them a
+  // perfectly plausible-looking `repo:<hash>` with nothing to indicate it selected nothing.
+  const plain = 'git@github.com:acme/api.git';
+  const dotted = 'git@github.com:acme/owner-archive/../api.git';
+  const r = await cli(['knowledge', 'identity', plain, dotted]);
+  assert.equal(r.code, 0, r.stderr);
+  const scopes = clean(r.stdout).split('\n').map((l) => l.split(/\s+/)[0]);
+  assert.equal(scopes.length, 2);
+  assert.equal(scopes[0], scopes[1], `a dot segment changed the scope: ${scopes.join(' vs ')}`);
+});
+
 test('the hash the command prints is the hash that selects a note in a pack', async () => {
   // The agreement that matters. If pack selection ever normalized differently, the command would print
   // a scope key that selects nothing, and it would look correct while doing nothing.

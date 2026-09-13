@@ -62,6 +62,30 @@ function cleanPath(path: string): string {
 }
 
 /**
+ * Remove `.` and `..` segments, the way RFC 3986 §5.24 does for a URL path.
+ *
+ * `new URL()` already does this to every path it parses, so the URL branch of
+ * {@link normalizeRepoIdentity} never sees a dot segment. The scp form is not parsed by `new URL()` at
+ * all -- that is the whole reason it needs its own branch -- so it has to do the same work or the two
+ * spellings of one repository drift apart.
+ *
+ * A `..` that would climb above the first segment is dropped rather than kept. There is no meaningful
+ * identity above the owner, and keeping it is what produced an identity no other host could ever report.
+ */
+function collapseDotSegments(path: string): string {
+  const out: string[] = [];
+  for (const seg of path.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      out.pop();
+      continue;
+    }
+    out.push(seg);
+  }
+  return out.join('/');
+}
+
+/**
  * Normalize one repository reference to its identity string.
  *
  * Returns null only for input that is not a repository reference at all. Callers treat null as
@@ -94,7 +118,13 @@ export function normalizeRepoIdentity(raw: string): string | null {
     const scp = SCP_FORM.exec(trimmed);
     if (scp) {
       const host = scp[1]!.toLowerCase();
-      const path = cleanPath(scp[2]!);
+      // Dot segments are collapsed here as well, because the URL branch above gets that for free from
+      // `new URL()` and this branch does not. Without it the two spellings of the SAME repository
+      // produce different identities -- `https://github.com/acme/../other` yields `github.com/other`
+      // while `git@github.com:acme/../other` yielded `github.com/acme/../other`. A scope key is
+      // replicated to every host, so a host that happens to use the scp form would contribute to a
+      // scope nothing else can name, silently and permanently.
+      const path = collapseDotSegments(cleanPath(scp[2]!));
       return path ? `${host}/${path}` : null;
     }
     return null;

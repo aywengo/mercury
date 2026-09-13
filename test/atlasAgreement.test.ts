@@ -29,6 +29,15 @@ const IDENTITY_VECTORS: [string, string | null][] = [
   ['https://github.com:8443/aywengo/mercury.git', 'github.com:8443/aywengo/mercury'],
   ['ssh://git@github.com:22/aywengo/mercury', 'github.com/aywengo/mercury'],
   ['github.com:aywengo/mercury', 'github.com/aywengo/mercury'],
+  // The scp form is not parsed by `new URL()`, so it does not get dot-segment removal for free the way
+  // the URL branch does. These pin that both copies collapse it identically: a scope key is replicated to
+  // every host, so a host that clones over ssh (scp syntax) and a host that clones over https must land
+  // in the SAME scope for the SAME repository.
+  ['git@github.com:acme/../other', 'github.com/other'],
+  ['https://github.com/acme/../other', 'github.com/other'],
+  ['git@github.com:a/b/../../c', 'github.com/c'],
+  ['git@github.com:acme/./other', 'github.com/acme/other'],
+  ['git@github.com:../escape', 'github.com/escape'],
   ['/Users/roman/devops/mercury', 'file/Users/roman/devops/mercury'],
   ['not-a-repo', null],
   ['', null],
