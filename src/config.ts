@@ -1,5 +1,8 @@
 // Environment configuration (all optional, sensible defaults).
 
+import { hostname } from 'node:os';
+import { DEFAULT_BOUNDS, type KnowledgeBounds } from './knowledge/validation.ts';
+
 export interface Config {
   dbPath: string;
   port: number;
@@ -99,6 +102,39 @@ export interface Config {
    */
   sandboxDiskLimits: boolean;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
+  /**
+   * Knowledge base (docs/knowledge-base.md sections 7.5 and 8.4). Null when Atlas is not
+   * configured, which is the whole feature being off: no tables read, no timers started, no
+   * events emitted, and `POST /api/runs` rejects a `knowledge` block with 400.
+   */
+  knowledge: KnowledgeConfig;
+}
+
+/** Where this host's notes go, and how it authenticates (section 8.4). */
+export interface AtlasConfig {
+  url: string;
+  token: string;
+  project: string;
+  /** Provenance id recorded on every note. Defaults to the hostname. */
+  hostId: string;
+  caFile: string | null;
+}
+
+/**
+ * Knowledge settings. `atlas === null` is the only disabled state; everything below it is read
+ * only when Atlas is configured.
+ */
+export interface KnowledgeConfig {
+  atlas: AtlasConfig | null;
+  /** Whether Runs receive a pack by default (MERCURY_KNOWLEDGE_INJECT). */
+  inject: boolean;
+  packMaxBytes: number;
+  pushIntervalMs: number;
+  pushBatch: number;
+  pullIntervalMs: number;
+  /** Outbox depth that triggers an alert, in the style of `backlogAlertThreshold`. */
+  outboxAlertDepth: number;
+  bounds: KnowledgeBounds;
 }
 
 function parseArgs(raw: string | undefined): string[] {
@@ -183,5 +219,77 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       return /^\d+$/.test(raw) ? Number(raw) : 0;
     })(),
     logLevel: (env.MERCURY_LOG_LEVEL as Config['logLevel']) ?? 'info',
+    knowledge: loadKnowledgeConfig(env),
+  };
+}
+
+/**
+ * Knowledge configuration (docs/knowledge-base.md sections 7.5 and 8.4).
+ *
+ * Unset `MERCURY_ATLAS_URL` means the feature does not exist, and that is the one disabled state.
+ * It is checked first and returns immediately so no other knowledge variable can half-enable
+ * anything: an outbox that fills with nobody draining it, or a puller that polls nothing, are both
+ * worse than absence because they look like activity.
+ *
+ * A URL *without* a token or a project throws rather than disabling. That is the opposite of how
+ * `trustProxy` and the numeric knobs behave, deliberately: those coerce a typo toward the safe
+ * value, whereas this pairing decides **which project a note lands in** (section 5), and silently
+ * running without knowledge is how a documented setting ends up unread. This repository has already
+ * paid for a documented config example that the loader quietly skipped -- issue #505 -- and a
+ * misconfigured Atlas URL that degrades to "no knowledge" is the same failure with a longer fuse.
+ * Failing at boot is loud, costs nothing, and names the missing variable.
+ */
+export function loadKnowledgeConfig(env: NodeJS.ProcessEnv): KnowledgeConfig {
+  const url = env.MERCURY_ATLAS_URL?.trim();
+  if (!url) {
+    return {
+      atlas: null,
+      inject: env.MERCURY_KNOWLEDGE_INJECT !== 'false',
+      packMaxBytes: num(env.MERCURY_KNOWLEDGE_PACK_MAX_BYTES, 32_768),
+      pushIntervalMs: num(env.MERCURY_KNOWLEDGE_PUSH_INTERVAL_MS, 30_000),
+      pushBatch: num(env.MERCURY_KNOWLEDGE_PUSH_BATCH, 100),
+      pullIntervalMs: num(env.MERCURY_KNOWLEDGE_PULL_INTERVAL_MS, 60_000),
+      outboxAlertDepth: num(env.MERCURY_KNOWLEDGE_OUTBOX_ALERT_DEPTH, 1000),
+      bounds: knowledgeBounds(env),
+    };
+  }
+  const missing: string[] = [];
+  if (!env.MERCURY_ATLAS_TOKEN?.trim()) missing.push('MERCURY_ATLAS_TOKEN');
+  if (!env.MERCURY_ATLAS_PROJECT?.trim()) missing.push('MERCURY_ATLAS_PROJECT');
+  if (missing.length > 0) {
+    throw new Error(
+      `MERCURY_ATLAS_URL is set but ${missing.join(' and ')} ${missing.length > 1 ? 'are' : 'is'} not. `
+      + 'A host contributes to exactly one project, so a half-configured Atlas would either drop notes '
+      + 'on the floor or send them somewhere unspecified. Unset MERCURY_ATLAS_URL to disable the '
+      + 'feature entirely.',
+    );
+  }
+  return {
+    atlas: {
+      url: url.replace(/\/+$/, ''),
+      token: env.MERCURY_ATLAS_TOKEN!.trim(),
+      project: env.MERCURY_ATLAS_PROJECT!.trim(),
+      hostId: env.MERCURY_ATLAS_HOST_ID?.trim() || hostname(),
+      caFile: env.MERCURY_ATLAS_CA_FILE ?? null,
+    },
+    inject: env.MERCURY_KNOWLEDGE_INJECT !== 'false',
+    packMaxBytes: num(env.MERCURY_KNOWLEDGE_PACK_MAX_BYTES, 32_768),
+    pushIntervalMs: num(env.MERCURY_KNOWLEDGE_PUSH_INTERVAL_MS, 30_000),
+    pushBatch: num(env.MERCURY_KNOWLEDGE_PUSH_BATCH, 100),
+    pullIntervalMs: num(env.MERCURY_KNOWLEDGE_PULL_INTERVAL_MS, 60_000),
+    outboxAlertDepth: num(env.MERCURY_KNOWLEDGE_OUTBOX_ALERT_DEPTH, 1000),
+    bounds: knowledgeBounds(env),
+  };
+}
+
+/** The ingest bounds of section 7.5. Tightening them is supported; loosening past Atlas's own
+ *  server-side limits only means Atlas rejects what the host accepted, so the host stays honest. */
+function knowledgeBounds(env: NodeJS.ProcessEnv): KnowledgeBounds {
+  return {
+    maxNotesPerRun: num(env.MERCURY_KNOWLEDGE_MAX_NOTES_PER_RUN, DEFAULT_BOUNDS.maxNotesPerRun),
+    maxClaimBytes: num(env.MERCURY_KNOWLEDGE_MAX_CLAIM_BYTES, DEFAULT_BOUNDS.maxClaimBytes),
+    maxDetailBytes: num(env.MERCURY_KNOWLEDGE_MAX_DETAIL_BYTES, DEFAULT_BOUNDS.maxDetailBytes),
+    maxEvidence: num(env.MERCURY_KNOWLEDGE_MAX_EVIDENCE, DEFAULT_BOUNDS.maxEvidence),
+    harvestTimeoutMs: num(env.MERCURY_KNOWLEDGE_HARVEST_TIMEOUT_MS, DEFAULT_BOUNDS.harvestTimeoutMs),
   };
 }

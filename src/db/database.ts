@@ -192,6 +192,42 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE run_goals ADD COLUMN attempted INTEGER;
   `,
+  // v9: the knowledge outbox (docs/knowledge-base.md sections 8.1 and 8.6).
+  //
+  // Only the outbox lands here. The replica, its cursor and run_knowledge arrive with the phases
+  // that write them, for the same reason EVENT_TYPES refuses a type with no emitter: a table nobody
+  // writes is schema a reader has to reason about and that no test can prove correct.
+  //
+  // The outbox is durable precisely so that Atlas being unreachable costs freshness and nothing
+  // else (K4). Rows are inserted in the same transaction that finalizes the Run, so there is no
+  // window in which a Run is complete and its notes exist only in memory.
+  `
+  CREATE TABLE IF NOT EXISTS knowledge_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Nullable: an operator-indexed decision record (section 6.3) and a note pushed by
+    -- 'knowledge flush' after a host rebuild have no Run behind them. The pusher records a
+    -- knowledge.rejected event on the originating Run only when this is set and the Run exists.
+    run_id TEXT,
+    -- Derived from (runId, claimHash) rather than random, so a batch that Atlas applied but whose
+    -- acknowledgement was lost is deduplicated there rather than double-counted as corroboration.
+    -- Unique here: the same note cannot queue twice, which is what makes a retry of a failed
+    -- finalize idempotent.
+    idempotency_key TEXT NOT NULL UNIQUE,
+    -- The NoteContribution as it will be POSTed. Stored as JSON because its shape is Atlas's wire
+    -- contract, not this schema's business; column-per-field would mean a migration every time the
+    -- record gains a field, and the record is designed to gain fields.
+    note_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    -- Bounded backoff reads attempts, so it is a column and not something derived from last_error.
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
+  );
+
+  -- Insertion order is the drain order (section 8.2), and the autoincrement id is that order. This index serves the
+  -- batch read and the depth gauge on /metrics; no ordering index on created_at, because a second
+  -- clock-ordered index would be a second answer to "what is oldest".
+  CREATE INDEX IF NOT EXISTS idx_knowledge_outbox_drain ON knowledge_outbox(id);
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;
