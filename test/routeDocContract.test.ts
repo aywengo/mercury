@@ -54,14 +54,21 @@ function extractRoutes(src: string): { method: string; path: string }[] {
 
 /**
  * Check whether a route path appears in the combined doc text.
- * Accepts the path as-is, or with :id for any param placeholder, or without the /api prefix.
+ *
+ * Two forms are accepted: the path exactly as the router declares it, and the same path with every
+ * `:param` segment renamed to `:id`. The second exists because docs write `/api/runs/:id/goal` where
+ * the code says `:runId`, and that difference is a naming preference rather than a missing route.
+ *
+ * What is deliberately NOT accepted is a match on the path with `/api` stripped. That fallback looked
+ * harmless and was not: `/cancel` is a substring of the documented `/api/runs/:runId/cancel`, so an
+ * undocumented `POST /api/cancel` was reported as documented and the guard passed. Every route in the
+ * router matches one of the two forms above, so the fallback was not carrying any real case -- it was
+ * only ever widening the net. A coverage check that reports green for a route nobody documented is the
+ * exact defect #540 was filed about.
  */
 function isDocumented(path: string, docText: string): boolean {
   if (docText.includes(path)) return true;
-  // Normalise :runId, :id, etc. to :id for loose matching
   if (docText.includes(path.replace(/:[^/]+/g, ':id'))) return true;
-  // Without /api prefix
-  if (docText.includes(path.replace(/^\/api/, ''))) return true;
   return false;
 }
 
@@ -81,12 +88,15 @@ test('every route in src/api/routes.ts appears in docs/api.md or docs/goals.md',
 
 test('the guard can actually fire: a route with no doc entry is caught', () => {
   // Proven with a synthetic source that adds one undocumented route alongside the real ones.
-  const fakeRoute = "router.get('/undocumented-sentinel-route', (req: Request, res: Response) => res.json({}));";
+  // Named with a word that already appears inside other documented paths, because that is the case
+  // the guard has to survive: `/cancel` is a substring of the documented `/api/runs/:runId/cancel`, and
+  // a looser matcher called this route documented.
+  const fakeRoute = "router.post('/cancel', (req: Request, res: Response) => res.json({}));";
   const syntheticSrc = ROUTES_SRC + '\n' + fakeRoute;
   const routes = extractRoutes(syntheticSrc);
   const undoc = routes.filter(({ path }) => !isDocumented(path, ALL_DOC_TEXT));
   assert.ok(
-    undoc.some(({ path }) => path === '/api/undocumented-sentinel-route'),
+    undoc.some(({ path }) => path === '/api/cancel'),
     'the guard must detect a route that appears in source but not in docs',
   );
 });

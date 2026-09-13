@@ -167,7 +167,10 @@ The host-side knowledge integration is implemented through phase 3. What is live
 - `GET /api/knowledge/status` and `POST /api/knowledge/notes` (admin only);
 - `GET /api/runs/:runId/knowledge` (owner-scoped);
 - tier-1 harvest of `.mercury/notes.jsonl` at finalize, with validation, the K2 rules and the
-  section 7.5 bounds, queued into the outbox in the transaction that completes the Run;
+  section 7.5 bounds. The file is read and validated outside the write transaction -- neither may
+  hold a write lock -- and the notes that survive are inserted into the outbox *inside* it,
+  together with the transition that completes the Run, so a Run is never COMPLETED with its notes
+  held only in memory;
 - `knowledge.noted` and the per-line `knowledge.rejected` reasons;
 - `MERCURY_ATLAS_*` configuration variables including `MERCURY_ATLAS_ADMIN_TOKEN`.
 

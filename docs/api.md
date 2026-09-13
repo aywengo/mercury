@@ -95,7 +95,7 @@ curl -X POST http://127.0.0.1:3000/api/knowledge/notes \
   -H "Content-Type: application/json" \
   -d '{
     "kind": "convention",
-    "scope": "src/api",
+    "scope": "project",
     "claim": "Every route returns JSON; no plain-text 200s.",
     "detail": "Confirmed by reading routes.ts end to end.",
     "evidence": []
@@ -107,8 +107,19 @@ Required body fields:
 | Field | Type | Notes |
 | --- | --- | --- |
 | `kind` | string | One of `fact`, `convention`, `pitfall`, `command`, `decision`, `artifact-pointer` |
-| `scope` | string | Path or topic the claim applies to |
+| `scope` | string | A closed grammar, not a free-form path. Exactly one of: `project`; `repo:<16 hex>` naming a repository by its identity hash, optionally `repo:<16 hex>#<relative/path>` to narrow to a path inside it; or `agent:<id>` naming a harness by its registry slug. Anything else is refused with `reason: invalid-scope`. The path form must be relative and may not contain `..` |
 | `claim` | string | The claim text; max `MERCURY_KNOWLEDGE_MAX_CLAIM_BYTES` (default 1024) bytes |
+
+The `scope` value is checked before anything else about the note, and the common mistake is to write a
+directory. `"scope": "src/api"` is refused with `invalid-scope`; `"scope": "project"` is not.
+
+To scope a claim to one repository you need its identity hash: the first 16 hex characters of the SHA-256
+of the normalized repository identity (`host[:port]/path`, with credentials, query and fragment dropped),
+computed by `identityHash()` in `src/knowledge/identity.ts`. Append `#relative/path` to narrow within that
+repository.
+
+No command prints that hash today, so the practical way to get one is to read it back off a note that
+already carries it -- `GET /api/runs/:id/knowledge` returns the notes with their scopes verbatim.
 
 Optional body fields:
 
