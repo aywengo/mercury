@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 /**
  * Route-documentation coverage guard (issue #540).
@@ -13,7 +13,19 @@ import { readFileSync } from 'node:fs';
  * things exist. This guard verifies that existing things are documented. Both are needed.
  */
 
+const API_DIR = new URL('../src/api/', import.meta.url);
 const ROUTES_SRC = readFileSync(new URL('../src/api/routes.ts', import.meta.url), 'utf8');
+
+/**
+ * Route files the coverage check deliberately does not read yet.
+ *
+ * `authRoutes.ts` registers `/login`, `/logout` and `/me`, none of which are documented. They are
+ * pre-existing gaps, not part of issue #540, which is about the knowledge surfaces that shipped
+ * undocumented. Listing the file here rather than widening the extractor keeps that decision visible:
+ * the check below fails if a route-registering file appears that is neither covered nor listed, so the
+ * set cannot grow silently the way `routes.ts` coverage did.
+ */
+const UNCOVERED_ROUTE_FILES = ['authRoutes.ts'];
 const API_DOC    = readFileSync(new URL('../docs/api.md', import.meta.url), 'utf8');
 const GOALS_DOC  = readFileSync(new URL('../docs/goals.md', import.meta.url), 'utf8');
 
@@ -91,4 +103,20 @@ test('the guard extractor finds the known routes', () => {
   ]) {
     assert.ok(paths.includes(expected), `extractor missed expected route ${expected}`);
   }
+});
+
+test('no route-registering file escapes the guard silently', () => {
+  // The failure this guards against is not "authRoutes is undocumented" -- that is known and listed.
+  // It is a third file appearing, or routes being moved into an uncovered file, and the coverage check
+  // going on reporting green because it only ever looked at routes.ts.
+  const registering = readdirSync(API_DIR)
+    .filter((f) => f.endsWith('.ts'))
+    .filter((f) => /router\.(get|post|put|patch|delete)\(/.test(readFileSync(new URL(f, API_DIR), 'utf8')))
+    .sort();
+  const covered = ['routes.ts'];
+  const escaped = registering.filter((f) => !covered.includes(f) && !UNCOVERED_ROUTE_FILES.includes(f));
+  assert.deepEqual(escaped, [], `route file(s) register endpoints but are neither covered by this guard nor listed as known-uncovered: ${escaped.join(', ')}`);
+  // And the allowlist must not go stale in the other direction.
+  const stale = UNCOVERED_ROUTE_FILES.filter((f) => !registering.includes(f));
+  assert.deepEqual(stale, [], `UNCOVERED_ROUTE_FILES names file(s) that no longer register routes: ${stale.join(', ')}`);
 });
