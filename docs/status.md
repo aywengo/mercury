@@ -92,12 +92,34 @@ Not every adapter offers the same fidelity:
 - remote agents execute inside the remote provider's security boundary.
 
 Callers must not infer capabilities from an agent id alone. `/api/agents`
-now reports a static capability descriptor per agent -- skill delivery mode,
-persona append and files, human input, resume and knowledge -- so a caller can
-filter on capability rather than on a name. What remains unbuilt is the dynamic
-half: advertising capabilities that depend on which harness version is installed,
-and gate outcomes. `knowledge` is declared but unverified for every shipped
-backend, so it must not be treated as a promise.
+reports two different kinds of answer per agent, and they must be read
+differently. The `static` block is what an adapter declares about itself --
+skill delivery mode, persona append and files, human input, resume, knowledge --
+and it is passed through as declared, because it describes the adapter rather
+than an installed binary and there is no version to compare it against. The goal
+half is version-resolved: every adapter that can answer a version probe is asked
+at startup, and each goal field is then resolved against the detected version
+rather than against the declaration alone. A caller therefore reads, per agent,
+the detected harness version and its raw string, plus a per-field goal answer
+that distinguishes `unsupported` (the backend has no such concept),
+`version-unknown` (nothing could be probed) and `version-too-old` (declared, but
+this install predates the threshold). Unknown fails closed: it is never reported
+as supported, and never as newest either.
+
+Two consequences of that split are easy to misread. Probes are fired at startup
+and are not awaited, so `version` can be null for a moment after boot and goal
+fields read `version-unknown` until they land -- a cold cache, not a verdict
+about the backend. And adapters with no probe at all, `hermes` and `claude`
+among them, report no version permanently; for them `version-unknown` is the
+steady state, and they declare no goal support either.
+
+What remains unbuilt is what happens after that answer is known. No shipped
+backend declares deterministic gates and no gate outcome event exists, so Mercury
+cannot yet report whether a gate passed or failed; the event vocabulary is
+deliberately absent rather than declared with no emitter behind it. Budget
+enforcement is a separate gap and is listed under *Token and cost budgets*.
+`knowledge` is declared but unverified for every shipped backend, so it must not
+be treated as a promise.
 
 ### PrimeAgent daemon mode
 
