@@ -242,6 +242,11 @@ export class DaemonAgentAdapter implements AgentAdapter {
       baseCommit: context.workspace.baseCommit,
       skills: context.skills.map((s) => ({ id: s.id, version: s.version, hash: s.hash })),
       constraints: context.constraints,
+      // The pointer, not the notes. These adapters' prompts already tell the agent to read this file, so
+      // a harness finds the pack with no prompt change and no new channel (section 9.2). Omitted rather
+      // than written as null when there is no pack, so a Run without knowledge has a context file
+      // identical to the one it had before this feature existed.
+      ...(context.knowledge ? { knowledge: context.knowledge } : {}),
     }, null, 2));
 
     const sessionDir = join(workspacePath, this.opts.sessionDirName ?? SESSION_DIR_NAME);

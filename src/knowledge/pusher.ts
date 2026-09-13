@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto';
 import type { Logger } from '../logger.ts';
 import type { AtlasClient } from './client.ts';
 import { AtlasHttpError, AtlasTransportError } from './client.ts';
-import { SYNC_KEYS, type OutboxRow, type OutboxStore } from './outbox.ts';
+import { bumpCounter, SYNC_KEYS, type OutboxRow, type OutboxStore } from './outbox.ts';
 import type { ContributionResult } from './types.ts';
 
 // The repository's own Logger, not a narrower local shape. Two reasons: the pusher's log lines can
@@ -313,9 +313,4 @@ export class KnowledgePusher {
  */
 export function batchIdempotencyKey(rows: readonly OutboxRow[]): string {
   return createHash('sha256').update(rows.map((r) => r.idempotencyKey).join('\n'), 'utf8').digest('hex');
-}
-
-function bumpCounter(outbox: OutboxStore, key: string): void {
-  const current = Number(outbox.getState(key) ?? '0');
-  outbox.setState(key, String((Number.isFinite(current) ? current : 0) + 1));
 }

@@ -24,6 +24,21 @@ export interface OutboxRow {
 }
 
 /** Keys for `knowledge_sync_state`. Written by the pusher and the puller, read by the status route. */
+/**
+ * Increment a counter held in `knowledge_sync_state`.
+ *
+ * Shared by both synchronization directions on purpose. A counter lives in the database rather than in
+ * process memory because the API process serves `/metrics` and the worker is the one that pushes and
+ * pulls; a per-process counter would report zero to the process an operator actually queries.
+ */
+export function bumpCounter(
+  store: { getState(key: string): string | null; setState(key: string, value: string): void },
+  key: string,
+): void {
+  const current = Number(store.getState(key) ?? '0');
+  store.setState(key, String((Number.isFinite(current) ? current : 0) + 1));
+}
+
 export const SYNC_KEYS = {
   lastPushAt: 'last_push_at',
   lastPushError: 'last_push_error',

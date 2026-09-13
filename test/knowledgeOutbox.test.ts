@@ -283,7 +283,11 @@ test('knowledge status reports depth, last push and the configured project', () 
     assert.equal(off.project, null);
     assert.equal(off.outbox.depth, 0);
     assert.equal(off.outbox.oldest, null);
-    assert.equal(off.replica.cursor, null, 'the replica tables arrive with phase 2');
+    // The tables exist from phase 2 onward, so "absent" is no longer what never-pulled looks like.
+    // What must still hold is that never-pulled is distinguishable from pulled-to-zero: a host that has
+    // never reached Atlas and one that reached it and found no promoted notes need different operators.
+    assert.equal(off.replica.cursor, null, 'no cursor row means this host has never completed a pull');
+    assert.equal(off.replica.notes, 0, 'an empty replica is a count, not an unknown');
 
     const outbox = new OutboxStore(env.db);
     outbox.insert([{ runId: null, contribution: contribution('one') }]);

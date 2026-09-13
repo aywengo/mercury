@@ -60,6 +60,31 @@ export class FakeAgentAdapter implements AgentAdapter {
     };
 
     const runScript = async (): Promise<void> => {
+      // Section 9.3: the test double's job is to make injection observable. It checks the neutral files
+      // are actually on disk and echoes the pack hash into an agent.message, which is what lets an
+      // end-to-end test assert that a Run was GIVEN knowledge rather than merely that a row exists.
+      //
+      // It checks rather than trusts: an adapter that echoed the pointer without looking would pass even
+      // if the worker had never written the files, which is the exact failure this is here to catch.
+      if (context.knowledge) {
+        const { existsSync, readFileSync } = await import('node:fs');
+        const { join } = await import('node:path');
+        const notesPath = join(context.workspace.path, context.knowledge.path);
+        const packPath = join(context.workspace.path, '.mercury/knowledge/pack.json');
+        const readable = existsSync(notesPath) && existsSync(packPath);
+        const bytes = readable ? readFileSync(notesPath, 'utf8').length : 0;
+        push({
+          type: 'agent.message',
+          payload: {
+            text: readable
+              ? `read knowledge pack ${context.knowledge.packHash} (${context.knowledge.count} notes, ${bytes} bytes)`
+              : `knowledge pack ${context.knowledge.packHash} was NOT materialized`,
+            packHash: context.knowledge.packHash,
+            packReadable: readable,
+            packBytes: bytes,
+          },
+        });
+      }
       for (const step of script) {
         if (this.cancelled.has(runId)) return;
         if (step.delayMs) await sleep(step.delayMs);

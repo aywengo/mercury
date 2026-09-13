@@ -61,11 +61,16 @@ export function knowledgeStatus(db: DatabaseSync, config: KnowledgeConfig): Know
 
 function replicaStatus(db: DatabaseSync): { cursor: number | null; notes: number | null } {
   if (!tableExists(db, 'knowledge_replica_cursor')) return { cursor: null, notes: null };
-  const row = db.prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM knowledge_replica_cursor').get() as { seq: number };
+  // The cursor row is absent until the first pull COMMITS, so its absence is the answer to "has this
+  // host ever received knowledge?" -- and that is a different question from "is it at sequence 0?".
+  // Reading MAX(seq) over an empty table would answer both with 0, which is exactly the conflation this
+  // field exists to avoid: a host that has never reached Atlas and a host that reached it and found
+  // nothing look identical, and only one of them needs an operator.
+  const row = db.prepare('SELECT seq FROM knowledge_replica_cursor').get() as { seq: number } | undefined;
   const notes = tableExists(db, 'knowledge_replica')
-    ? (db.prepare('SELECT COUNT(*) AS n FROM knowledge_replica').get() as { n: number }).n
+    ? (db.prepare("SELECT COUNT(*) AS n FROM knowledge_replica WHERE tier = 'promoted'").get() as { n: number }).n
     : null;
-  return { cursor: Number(row.seq) || 0, notes };
+  return { cursor: row === undefined ? null : Number(row.seq), notes };
 }
 
 function tableExists(db: DatabaseSync, name: string): boolean {

@@ -242,6 +242,69 @@ export const MIGRATIONS: string[] = [
     updated_at TEXT NOT NULL
   );
   `,
+  // v10: the local replica and the per-Run knowledge snapshot (docs/knowledge-base.md 8.3, 9.1).
+  `
+  -- A local copy of the project's promoted notes, refreshed by the puller. The point of this table is
+  -- what Run creation does NOT do: it never makes a network call. Selection reads here, so the worst
+  -- Atlas outage produces a pack that is a few minutes stale rather than a Run that cannot start.
+  CREATE TABLE IF NOT EXISTS knowledge_replica (
+    note_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    claim TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    -- Carried rather than inferred from presence: the feed delivers transitions OUT of promoted as well
+    -- (11.2), and a row that silently vanished would be indistinguishable from one that was never
+    -- fetched. Selection reads only tier = 'promoted'.
+    tier TEXT NOT NULL,
+    -- Atlas's per-project sequence number for this note's latest change. Ordering, and the cursor's
+    -- high-water mark.
+    seq INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    evidence_json TEXT NOT NULL,
+    -- Corroboration is stored as delivered and never recomputed here. Atlas derives it; a host that
+    -- re-derived it would be a second answer to "is this trusted yet".
+    corr_runs INTEGER NOT NULL DEFAULT 0,
+    corr_harnesses INTEGER NOT NULL DEFAULT 0,
+    corr_hosts INTEGER NOT NULL DEFAULT 0,
+    claim_hash TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    -- Carried from Atlas rather than recomputed. A pack that includes a contested note must show it as
+    -- contested (12), so this survives the round trip or a Run is handed one side of an open
+    -- disagreement as though it were settled.
+    contested INTEGER NOT NULL DEFAULT 0
+  );
+
+  -- Selection's hot path: filter to promoted, then order by scope and corroboration (9.1). The scope
+  -- column is matched by prefix, so it leads the index; seq is included so the tie-break is covered.
+  CREATE INDEX IF NOT EXISTS idx_knowledge_replica_select ON knowledge_replica(tier, scope, seq);
+
+  -- One row per project: how far the puller has durably applied. Kept separate from the notes so the
+  -- advance is a single-row UPDATE that commits with the batch it describes, and so an empty replica
+  -- with a non-zero cursor (everything retired) is representable -- which MAX(seq) over the notes could
+  -- not express, and would answer by re-pulling from zero.
+  CREATE TABLE IF NOT EXISTS knowledge_replica_cursor (
+    project_id TEXT PRIMARY KEY,
+    seq INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  -- The pack a Run was given, kept verbatim. A Run's behaviour is explained by what it was told, so this
+  -- has to survive the replica moving on: notes get retired and revised, and a snapshot that re-derived
+  -- its notes from the current replica would silently rewrite history whenever Atlas changed its mind.
+  CREATE TABLE IF NOT EXISTS run_knowledge (
+    run_id TEXT PRIMARY KEY,
+    pack_hash TEXT NOT NULL,
+    -- The ordered notes, verbatim, in selection order. Order is part of the snapshot: packHash is over
+    -- the ordered pairs, and NOTES.md renders in this order.
+    notes_json TEXT NOT NULL,
+    note_count INTEGER NOT NULL,
+    byte_size INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

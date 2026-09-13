@@ -25,6 +25,8 @@ import { RunStore } from './runs/runStore.ts';
 import { RunService } from './runs/runService.ts';
 import { AtlasClient } from './knowledge/client.ts';
 import { KnowledgePusher } from './knowledge/pusher.ts';
+import { KnowledgePuller } from './knowledge/puller.ts';
+import { ReplicaStore } from './knowledge/replica.ts';
 import { OutboxStore } from './knowledge/outbox.ts';
 import { knowledgeStatus } from './knowledge/status.ts';
 import { submitOperatorNote } from './knowledge/operator.ts';
@@ -286,6 +288,12 @@ async function main(): Promise<void> {
   const agentCapabilities = new AgentCapabilityRegistry(adapters);
   agentCapabilities.start();
 
+  // Selection reads the local replica, so RunService needs it whether or not this process also runs the
+  // puller. An API-only process gets the table and simply sees a replica the worker keeps current; a
+  // `mercury server`-only deployment still creates Runs with packs, they are just as stale as the last
+  // `knowledge pull` left them.
+  const knowledgeReplica = config.knowledge.atlas ? new ReplicaStore(db) : null;
+
   const runService = new RunService({
     db,
     runs,
@@ -295,6 +303,15 @@ async function main(): Promise<void> {
     knownAgents: Object.keys(adapters),
     agentCapabilities: () => agentCapabilities.snapshot(),
     goals,
+    knowledge: config.knowledge.atlas
+      ? {
+          projectId: config.knowledge.atlas.project,
+          replica: knowledgeReplica!,
+          packMaxBytes: config.knowledge.packMaxBytes,
+          injectByDefault: config.knowledge.inject,
+          capabilities: () => agentCapabilities.snapshot(),
+        }
+      : undefined,
     defaultAgent: config.defaultAgent,
     defaultMaxDurationMs: 60 * 60 * 1000,
     defaultMaxRetries: config.maxRetries,
@@ -363,6 +380,18 @@ async function main(): Promise<void> {
             : undefined,
         })
       : null;
+    // The inbound half. Same lifetime rule as the pusher: started with the worker and stopped with it, so
+    // a worker that is shutting down cannot leave a pull holding the database open.
+    const knowledgePuller = config.knowledge.atlas
+      ? new KnowledgePuller({
+          db,
+          client: new AtlasClient(config.knowledge.atlas),
+          project: config.knowledge.atlas.project,
+          intervalMs: config.knowledge.pullIntervalMs,
+          pageSize: config.knowledge.pushBatch,
+          log: logger,
+        })
+      : null;
     const worker = new Worker({
       db,
       runs,
@@ -392,6 +421,8 @@ async function main(): Promise<void> {
       alertWebhookUrl: config.alertWebhookUrl,
       sandbox,
       knowledgePusher: knowledgePusher ?? undefined,
+      knowledgePuller: knowledgePuller ?? undefined,
+      knowledgeProject: config.knowledge.atlas?.project,
     });
     if (config.eventWakeupSocket) {
       // Registered on the existing append hook rather than at the ~20 append call sites: one seam, and

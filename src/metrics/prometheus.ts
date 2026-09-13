@@ -125,6 +125,30 @@ export function renderPrometheus(m: MetricsSnapshot): string {
     [[{}, m.knowledgePushFailures]],
   );
 
+  writeGauge(
+    out,
+    'mercury_knowledge_replica_seq',
+    "Highest Atlas sequence number this host has durably applied to its local replica. Alert when "
+      + 'this stops advancing while mercury_knowledge_pull_failures_total keeps rising: a replica that '
+      + 'is merely stale still serves packs, so nothing else about the host looks wrong.',
+    [[{}, m.knowledgeReplicaSeq]],
+  );
+
+  writeGauge(
+    out,
+    'mercury_knowledge_replica_notes',
+    'Promoted notes in the local replica. The number of notes a new Run can be given right now.',
+    [[{}, m.knowledgeReplicaNotes]],
+  );
+
+  writeCounter(
+    out,
+    'mercury_knowledge_pull_failures_total',
+    'Cumulative failed attempts to refresh the local replica from Atlas. Counted in the database for '
+      + 'the same reason as the push counter: the API serves this endpoint, the worker does the pulling.',
+    [[{}, m.knowledgePullFailures]],
+  );
+
   writeHistogram(
     out,
     'mercury_run_duration_seconds',
