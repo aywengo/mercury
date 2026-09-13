@@ -16,6 +16,8 @@ import { openDatabase } from '../src/db/database.ts';
 import { ReplicaStore } from '../src/knowledge/replica.ts';
 import { NOTES_FILE, excludeFromGit, materializeKnowledge, renderNotesMd } from '../src/knowledge/materialize.ts';
 import { repoIdentity } from '../src/knowledge/identity.ts';
+import { EventStream } from '../src/events/eventStream.ts';
+import { closeServer, createApp } from '../src/api/server.ts';
 import { makeEnv, makeGitRepo, tempDir, waitFor } from './helpers.ts';
 import type { KnowledgeSelectionDeps } from '../src/runs/runService.ts';
 import type { Note } from '../src/knowledge/types.ts';
@@ -268,9 +270,8 @@ test('a contested note is rendered as contested', () => {
 
 test('GET /api/runs/:id/knowledge is owner-scoped and reports the snapshot', async () => {
   const env = makeEnv({ knowledge: selectionWith([note({ noteId: 'n-a', seq: 1 })]) });
-  const stream = (await import('../src/events/eventStream.ts')).EventStream;
-  const app = (await import('../src/api/server.ts')).createApp({
-    runService: env.runService, events: env.events, stream: new stream(env.db, env.events, 10),
+  const app = createApp({
+    runService: env.runService, events: env.events, stream: new EventStream(env.db, env.events, 10),
     queue: env.queue, db: env.db,
     apiTokens: new Map([['tok-bob', 'bob']]), adminToken: 'tok-admin',
   });
@@ -300,7 +301,7 @@ test('GET /api/runs/:id/knowledge is owner-scoped and reports the snapshot', asy
     const detailBody = await detail.json() as { knowledge: unknown };
     assert.ok(detailBody.knowledge, 'the sibling field is what a renderer should use');
   } finally {
-    (await import('../src/api/server.ts')).closeServer(server);
+    await closeServer(server);
     env.close();
   }
 });
@@ -310,8 +311,6 @@ test('the knowledge block reaches RunService over HTTP', async () => {
   // anyone noticed is that this test exists: every other test in the feature calls create() in-process,
   // so validation was right, the route was right, and the seam between them was empty.
   const env = makeEnv({ knowledge: selectionWith([note({ noteId: 'n-a', seq: 1 })]) });
-  const { EventStream } = await import('../src/events/eventStream.ts');
-  const { closeServer, createApp } = await import('../src/api/server.ts');
   const app = createApp({
     runService: env.runService, events: env.events, stream: new EventStream(env.db, env.events, 10),
     queue: env.queue, db: env.db, apiTokens: new Map([['tok-alice', 'alice']]), adminToken: 'tok-admin',
