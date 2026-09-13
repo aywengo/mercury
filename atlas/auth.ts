@@ -15,6 +15,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AtlasConfig } from './config.ts';
+import { assertUsableHostId } from './types.ts';
 
 export type Caller =
   | { class: 'admin' }
@@ -132,14 +133,17 @@ export function seedContributors(db: DatabaseSync, file: string): string[] {
     ON CONFLICT(token_hash) DO UPDATE SET host_id = excluded.host_id, project_ids_json = excluded.project_ids_json`);
   for (const [token, value] of Object.entries(parsed as Record<string, unknown>)) {
     const entry = value as Partial<ContributorSeed> | null;
-    const hostId = typeof entry?.hostId === 'string' ? entry.hostId.trim() : '';
+    const rawHostId = typeof entry?.hostId === 'string' ? entry.hostId : '';
     const projects = Array.isArray(entry?.projects) ? entry!.projects!.filter((p): p is string => typeof p === 'string' && p !== '') : [];
     // A contributor bound to no project can authenticate and do nothing. That is a safer default than
     // a wildcard, but it is almost certainly a typo in the file, so it is refused loudly at startup
     // rather than discovered by an operator whose host is silently contributing nothing.
-    if (!hostId || projects.length === 0) {
+    if (!rawHostId.trim() || projects.length === 0) {
       throw new Error(`contributor file ${file}: a token is missing hostId or an empty projects list`);
     }
+    // After the empty check, so a missing hostId keeps its existing message and only a present-but-
+    // reserved one reaches this.
+    const hostId = assertUsableHostId(rawHostId, `contributor file ${file}`);
     stmt.run(hashToken(token), hostId, JSON.stringify(projects), now);
     tokens.push(token);
   }

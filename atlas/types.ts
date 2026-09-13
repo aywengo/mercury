@@ -157,3 +157,41 @@ export type ContributionResult =
 export interface ContributionResponse {
   results: ContributionResult[];
 }
+
+/**
+ * Host ids that mean something to Atlas itself and therefore cannot belong to a contributor.
+ *
+ * `contribute()` records an operator batch under the coalesced value `hostId ?? 'admin'`, because the
+ * `contributor` column is part of a PRIMARY KEY and SQL NULLs are never equal to each other -- storing
+ * NULL would let every admin retry look like a first attempt and re-count corroboration. That makes
+ * `'admin'` a name Atlas has already taken.
+ *
+ * Without this guard a host registered as `admin` shares an idempotency namespace with the operator path.
+ * The two then replay each other's cached responses: the host's batch is silently discarded and answered
+ * with the admin's recorded result, or the reverse. Nothing errors, and the notes are simply gone.
+ *
+ * This became reachable rather than merely theoretical when the idempotency reads started using the same
+ * coalesced value as the insert (#552). Before that the admin reads never matched anything, so a colliding
+ * host could not be served the wrong cache entry.
+ */
+export const RESERVED_CONTRIBUTOR_IDS: readonly string[] = ['admin'];
+
+/**
+ * Validate a contributor host id, returning it trimmed.
+ *
+ * Throws rather than coercing. Both callers run at configuration time -- the contributor file is read at
+ * startup and `contributor add` is an explicit operator command -- so a loud failure here is strictly
+ * better than a host that authenticates, contributes, and has its work silently attributed to someone
+ * else's idempotency key.
+ */
+export function assertUsableHostId(hostId: string, context: string): string {
+  const trimmed = hostId.trim();
+  if (RESERVED_CONTRIBUTOR_IDS.includes(trimmed)) {
+    throw new Error(
+      `${context}: host id "${trimmed}" is reserved by Atlas for operator contributions. `
+      + 'Contributions from a host with this id would share an idempotency namespace with operator notes '
+      + 'and be silently discarded. Choose another host id.',
+    );
+  }
+  return trimmed;
+}

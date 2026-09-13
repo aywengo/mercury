@@ -26,7 +26,7 @@ import type { Redactor } from './redact.ts';
 import { repoIdentity } from './identity.ts';
 import { MAX_EVIDENCE, validateDraft, type AtlasBounds } from './validation.ts';
 import {
-  EVIDENCE_REQUIRED_KINDS, NOTE_KINDS, NOTE_TIERS,
+  assertUsableHostId, EVIDENCE_REQUIRED_KINDS, NOTE_KINDS, NOTE_TIERS,
   type ContributionResult, type Corroboration, type Note, type NoteContribution, type NoteTier,
 } from './types.ts';
 
@@ -116,11 +116,14 @@ export class NoteStore {
   // --- contributors ---------------------------------------------------------
 
   addContributor(tokenHash: string, hostId: string, projects: string[]): void {
+    // Same rule as the contributor file loader. Two entry points, one definition, so the CLI cannot
+    // accept what the file loader refuses.
+    const usable = assertUsableHostId(hostId, 'contributor');
     this.db.prepare(`
       INSERT INTO contributors (token_hash, host_id, project_ids_json, created_at, last_seen_at)
       VALUES (?, ?, ?, ?, NULL)
       ON CONFLICT(token_hash) DO UPDATE SET host_id = excluded.host_id, project_ids_json = excluded.project_ids_json`)
-      .run(tokenHash, hostId, JSON.stringify(projects), new Date().toISOString());
+      .run(tokenHash, usable, JSON.stringify(projects), new Date().toISOString());
   }
 
   removeContributor(tokenHash: string): boolean {
@@ -170,9 +173,19 @@ export class NoteStore {
     if (contributions.length > batchLimit) {
       return contributions.map(() => ({ rejected: 'over-batch-limit' }));
     }
+    // One value for the read and the write. The insert below coalesces a null host to 'admin' because
+    // the column is part of a PRIMARY KEY and SQL NULLs are never equal to each other -- storing NULL
+    // would let every admin retry look like a first attempt. The reads were never given the same
+    // treatment, and `contributor = NULL` matches no row, so an admin retry missed its own cached
+    // response, re-evaluated, and then hit the PRIMARY KEY on insert: a 500 that repeats forever, with
+    // the host backing off and resending the same key. Measured before this line existed:
+    //   first call  -> {"accepted":"note_..."}
+    //   retry, same key -> UNIQUE constraint failed: idempotency_keys.contributor, ...key
+    const contributor = hostId ?? 'admin';
+
     if (idempotencyKey) {
       const cached = this.db.prepare('SELECT response_json FROM idempotency_keys WHERE contributor = ? AND key = ?')
-        .get(hostId, idempotencyKey) as { response_json: string } | undefined;
+        .get(contributor, idempotencyKey) as { response_json: string } | undefined;
       if (cached) return JSON.parse(cached.response_json) as ContributionResult[];
     }
 
@@ -181,7 +194,7 @@ export class NoteStore {
       // retry of the same batch could have committed between the read and here.
       if (idempotencyKey) {
         const cached = this.db.prepare('SELECT response_json FROM idempotency_keys WHERE contributor = ? AND key = ?')
-          .get(hostId, idempotencyKey) as { response_json: string } | undefined;
+          .get(contributor, idempotencyKey) as { response_json: string } | undefined;
         if (cached) return JSON.parse(cached.response_json) as ContributionResult[];
       }
       const project = this.getProject(projectId)!;
@@ -189,11 +202,13 @@ export class NoteStore {
       for (const raw of contributions) results.push(this.contributeOne(project, hostId, raw));
 
       if (idempotencyKey) {
-        // Coalesced because the column participates in a UNIQUE constraint, and SQL NULLs are never
-        // equal to each other: storing NULL would let every admin retry look like a first attempt and
-        // re-count corroboration, which is the exact failure the key exists to prevent.
+        // Same `contributor` the two reads above used. It is coalesced because the column participates
+        // in a PRIMARY KEY and SQL NULLs are never equal to each other: storing NULL would let every
+        // admin retry look like a first attempt and re-count corroboration, which is the exact failure
+        // the key exists to prevent. Reading with `hostId` while writing this coalesced value is what
+        // made an admin retry miss its own cache and then violate the key.
         this.db.prepare('INSERT INTO idempotency_keys (contributor, key, response_json, created_at) VALUES (?, ?, ?, ?)')
-          .run(hostId ?? 'admin', idempotencyKey, JSON.stringify(results), new Date().toISOString());
+          .run(contributor, idempotencyKey, JSON.stringify(results), new Date().toISOString());
       }
       return results;
     });
