@@ -83,6 +83,10 @@ export function makeEnv(opts: {
   knowledge?: import('../src/runs/runService.ts').KnowledgeSelectionDeps;
   /** The Atlas project passed to the worker, so it materializes packs the way the CLI does. */
   knowledgeProject?: string;
+  /** Tier-1 harvest settings for the worker. Set together with `knowledgeOutbox`. */
+  knowledgeHarvest?: import('../src/worker/worker.ts').WorkerDeps extends { knowledgeHarvest?: infer H } ? H : never;
+  /** The outbox the worker writes harvested notes into. */
+  knowledgeOutbox?: import('../src/knowledge/outbox.ts').OutboxStore;
   /** Run the detached harness version probes at construction. Off by default because they
    *  spawn real subprocesses; tests asserting a detected version opt in. */
   probeCapabilities?: boolean;
@@ -172,6 +176,7 @@ export function makeEnv(opts: {
     // The worker needs the project id to render NOTES.md's header. Set only when a test asks for
     // knowledge, so every other test runs a worker that reads no knowledge table at all.
     ...(opts.knowledgeProject ? { knowledgeProject: opts.knowledgeProject } : {}),
+    ...(opts.knowledgeHarvest ? { knowledgeHarvest: opts.knowledgeHarvest, knowledgeOutbox: opts.knowledgeOutbox } : {}),
   });
   if (opts.workerEnabled !== false) worker.start();
 

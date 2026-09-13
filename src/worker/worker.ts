@@ -21,6 +21,11 @@ import type { RunService } from '../runs/runService.ts';
 import { RunStore } from '../runs/runStore.ts';
 import type { GoalStore } from '../runs/goalStore.ts';
 import { NOTES_FILE, materializeKnowledge } from '../knowledge/materialize.ts';
+import { harvestNotes } from '../knowledge/harvest.ts';
+import { claimHash } from '../knowledge/validation.ts';
+import { createRedactor } from '../domain/redact.ts';
+import type { OutboxStore } from '../knowledge/outbox.ts';
+import type { KnowledgeBounds } from '../knowledge/validation.ts';
 import type { ContextKnowledgeBlock } from '../knowledge/types.ts';
 import type { Note } from '../knowledge/types.ts';
 import { tx } from '../db/database.ts';
@@ -106,6 +111,20 @@ export interface WorkerDeps {
    * pack in a bare workspace directory needs to know which project it came from.
    */
   knowledgeProject?: string;
+  /**
+   * Tier-1 harvest settings, absent when the host has no Atlas to send notes to.
+   *
+   * Absent rather than defaulted: a host with nowhere to deliver notes must not harvest them into an
+   * outbox that will never drain. The workspace file is still created, because NOTES.md is what tells
+   * the agent it exists, and that instruction is harmless when nothing reads it back yet.
+   */
+  knowledgeHarvest?: {
+    project: string;
+    hostId: string;
+    bounds: KnowledgeBounds;
+  };
+  /** Where harvested notes are made durable, in the same transaction that completes the Run. */
+  knowledgeOutbox?: OutboxStore;
 }
 
 export class Worker {
@@ -938,18 +957,79 @@ export class Worker {
     }
 
     if (outcome.status === 'COMPLETED') {
+      // `recordCommits` is git work over a real repository and stays OUTSIDE the transaction: it can
+      // take seconds, and holding a write transaction open across it would block every other writer for
+      // the duration. Everything that must be atomic is in the tx below.
       const commits = current.workspacePath ? await this.deps.workspace.recordCommits(current.workspacePath) : [];
-      this.deps.runs.setFinalCommits(run.id, commits, null);
-      this.deps.runs.transition(run.id, 'COMPLETED', { completedAt: now });
-      for (const skill of skills) {
-        this.deps.events.append(run.id, 'skill.completed', { skill: skill.id, version: skill.version });
-      }
-      this.deps.events.append(run.id, 'run.completed', {
-        runId: run.id,
-        commits,
-        durationMs: durations.agentDurationMs,
-        queueWaitMs: durations.queueWaitMs,
+
+      // Tier-1 harvest (section 7.1), read here because this is the last moment the workspace is
+      // guaranteed to exist. It runs before the transaction rather than inside it because it does file
+      // I/O and validation, neither of which may hold a write lock -- but its RESULT is inserted inside,
+      // which is what section 8.1 actually requires.
+      const harvest = current.workspacePath && this.deps.knowledgeHarvest
+        ? harvestNotes({
+            workspacePath: current.workspacePath,
+            bounds: this.deps.knowledgeHarvest.bounds,
+            redactor: this.deps.redactor ?? createRedactor([]),
+            provenance: {
+              hostId: this.deps.knowledgeHarvest.hostId,
+              runId: run.id,
+              agent: current.agent,
+              ...(current.agent ? { harnessVersion: this.deps.agentCapabilities?.snapshot()[current.agent]?.version ?? null } : {}),
+            },
+            recordedAt: now,
+          })
+        : null;
+
+      // One transaction for the terminal state AND the harvested notes (section 8.1). The property is
+      // that there is no window in which a Run is complete and its notes are only in memory: if this
+      // commits, both are durable; if it does not, neither is, and the Run gets finalized again.
+      //
+      // This branch used to be the odd one out -- FAILED and the infrastructure paths were transactional
+      // and COMPLETED was not, because it predated them. Adding the outbox insert made that inconsistency
+      // a correctness problem rather than a stylistic one.
+      tx(this.deps.db, () => {
+        this.deps.runs.setFinalCommits(run.id, commits, null);
+        for (const skill of skills) {
+          this.deps.events.append(run.id, 'skill.completed', { skill: skill.id, version: skill.version });
+        }
+        if (harvest) {
+          const project = this.deps.knowledgeHarvest!.project;
+          if (harvest.accepted.length > 0) {
+            this.deps.knowledgeOutbox!.insert(harvest.accepted.map((c) => ({
+              runId: run.id,
+              contribution: { ...c, projectId: project },
+            })));
+          }
+          for (const note of harvest.accepted) {
+            this.deps.events.append(run.id, 'knowledge.noted', {
+              claimHash: claimHash(note.kind, note.scope, note.claim),
+              kind: note.kind,
+              scope: note.scope,
+            });
+          }
+          for (const rej of harvest.rejected) {
+            this.deps.events.append(run.id, 'knowledge.rejected', {
+              reason: rej.reason,
+              ...(rej.line > 0 ? { line: rej.line } : {}),
+              ...(rej.detail ? { detail: rej.detail } : {}),
+            });
+          }
+        }
+        this.deps.runs.transition(run.id, 'COMPLETED', { completedAt: now });
+        this.deps.events.append(run.id, 'run.completed', {
+          runId: run.id,
+          commits,
+          durationMs: durations.agentDurationMs,
+          queueWaitMs: durations.queueWaitMs,
+        });
       });
+      if (harvest && (harvest.accepted.length > 0 || harvest.rejected.length > 0)) {
+        log.info({
+          accepted: harvest.accepted.length, rejected: harvest.rejected.length,
+          lines: harvest.linesSeen, timedOut: harvest.timedOut, overLimit: harvest.overLimit,
+        }, 'knowledge harvested from workspace');
+      }
       log.info({ commits: commits.length, ...durations }, 'run completed');
       return;
     }
