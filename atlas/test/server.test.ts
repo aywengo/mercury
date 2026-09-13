@@ -233,3 +233,35 @@ test('a request target that cannot be parsed is answered, not dropped', async ()
   });
   assert.match(reply, /^HTTP\/1\.1 (400|404)/, 'the service must answer a bad request target');
 });
+
+test('an admin posting an operator note keeps the host the body names', async () => {
+  // An operator note has to say which host recorded it, or it is not attributable. But an admin token is
+  // not bound to any host, and the first version substituted the literal 'admin' for the caller's binding
+  // and then ran the anti-spoofing check against it -- so EVERY operator note was rejected as
+  // host-mismatch, and the feature was dead on arrival while every unit test stayed green.
+  const made = await call('POST', '/v1/projects/mercury/notes', ADMIN, {
+    notes: [{
+      kind: 'convention', scope: 'project', claim: 'an operator wrote this down on host-c',
+      evidence: [],
+      provenance: { source: 'operator', hostId: 'host-c', recordedAt: new Date().toISOString() },
+    }],
+  }, { 'idempotency-key': 'srv-op-1' });
+  assert.equal(made.status, 200);
+  const noteId = made.json.results[0]!.accepted;
+  assert.ok(noteId, `operator note rejected: ${JSON.stringify(made.json.results[0])}`);
+
+  const detail = await call('GET', `/v1/projects/mercury/notes/${noteId}`, ADMIN);
+  assert.equal(detail.json.note.provenance.hostId, 'host-c', 'the attribution the operator gave is kept');
+  assert.equal(detail.json.note.tier, 'promoted', 'operator notes land promoted');
+
+  // The contributor rule is unchanged: a host may still not speak for another host.
+  const spoof = await call('POST', '/v1/projects/mercury/notes', CONTRIBUTOR, {
+    notes: [{
+      kind: 'fact', scope: 'project', claim: 'a host claiming to be someone else',
+      evidence: [],
+      provenance: { source: 'agent-reported', hostId: 'host-victim', runId: 'r9', agent: 'primeagent', harnessVersion: '1.0.0', recordedAt: new Date().toISOString() },
+    }],
+  }, { 'idempotency-key': 'srv-op-2' });
+  assert.deepEqual(spoof.json.results, [{ rejected: 'host-mismatch' }],
+    'the admin exception must not become a way for any caller to name any host');
+});

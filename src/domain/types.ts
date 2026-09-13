@@ -577,6 +577,18 @@ export const EVENT_TYPES = new Set([
   'goal.completed',
   'goal.cancelled',
   'goal.unmet',
+  // Knowledge ingest (docs/knowledge-base.md section 8.5). Only `knowledge.rejected` is here now,
+  // because only the pusher emits anything today: Atlas refuses a note, and the reason is recorded
+  // on the Run that produced it.
+  //
+  // `knowledge.selected` arrives with the puller and pack selection, and `knowledge.noted` with the
+  // tier-1 harvester. Adding either now would repeat the mistake this set already documents once --
+  // an event type with no emitter is a vocabulary claim with no evidence behind it.
+  //
+  // Push and pull OUTCOMES are deliberately not events at all. A batch is not a Run, and Crew
+  // invariant 4 is explicit that store synchronization with no Run behind it is a log line and a
+  // metric.
+  'knowledge.rejected',
 ]);
 
 /**

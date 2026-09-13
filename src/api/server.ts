@@ -20,6 +20,8 @@ import type { DatabaseSync } from 'node:sqlite';
 import { collectMetrics } from '../metrics/collect.ts';
 import { renderPrometheus } from '../metrics/prometheus.ts';
 import { API_SCHEMA_VERSION, HOST_PRODUCT, HOST_VERSION } from '../version.ts';
+import type { KnowledgeStatus } from '../knowledge/status.ts';
+import type { OperatorNoteOutcome } from '../knowledge/operator.ts';
 
 // Dashboard UI (Mercury.md section 23): static SPA served at /.
 // The UI authenticates with a session cookie (POST /api/auth/login);
@@ -37,6 +39,11 @@ export interface ServerDeps {
   stream: EventStream;
   apiTokens: Map<string, string>;
   adminToken: string | null;
+  /** See RoutesDeps.knowledgeStatus. Supplied by the composition root only when this process owns
+   *  the knowledge tables; absent means the route answers 404. */
+  knowledgeStatus?: () => KnowledgeStatus;
+  /** See RoutesDeps.knowledgeNotes. */
+  knowledgeNotes?: (body: unknown) => OperatorNoteOutcome;
   /** Optional session store override (default: in-memory Map, see sessions.ts). */
   sessions?: SessionStore;
   /** Optional run queue for the /healthz/workers endpoint (worker health, Mercury.md section 25). */
@@ -213,7 +220,17 @@ export function createApp(deps: ServerDeps): Express {
   });
   app.post('/api/runs', createRunLimiter);
 
-  app.use('/api', createRoutes({ runService: deps.runService, events: deps.events, stream: deps.stream, logger: deps.logger }));
+  app.use('/api', createRoutes({
+    runService: deps.runService,
+    events: deps.events,
+    stream: deps.stream,
+    logger: deps.logger,
+    knowledgeStatus: deps.knowledgeStatus,
+    // Forwarded explicitly. Declaring it on ServerDeps and reading it in the composition root is not
+    // enough: the route reads it off RoutesDeps, and an omitted line here makes POST /api/knowledge/notes
+    // answer 404 forever while every unit test that calls the underlying function directly stays green.
+    knowledgeNotes: deps.knowledgeNotes,
+  }));
 
   // Last-resort handler for anything that escaped a route (including middleware and body-parser
   // failures). It used to answer `500 { error: err.message }`, which pushed raw internals --

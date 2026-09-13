@@ -10,12 +10,33 @@ import { requireAuth } from './auth.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.ts';
 import type { Logger } from '../logger.ts';
 
+import type { KnowledgeStatus } from '../knowledge/status.ts';
+import type { OperatorNoteOutcome } from '../knowledge/operator.ts';
+
 export interface RoutesDeps {
   runService: RunService;
   events: EventStore;
   stream: EventStream;
   /** Optional; used to record the real cause of a 500, which is never sent to the client. */
   logger?: Logger;
+  /**
+   * Supplies `GET /api/knowledge/status`. A thunk rather than a store, so this module stays free of
+   * database and config plumbing and the route is testable with a fixed answer.
+   *
+   * Absent means this process has no knowledge surface at all -- the API-only process in a
+   * deployment where the worker owns synchronization. The route then answers 404 rather than
+   * reporting an empty status, because "no such surface here" and "configured but idle" are
+   * different facts and an operator reading the second one would go looking for a broken Atlas.
+   */
+  knowledgeStatus?: () => KnowledgeStatus;
+  /**
+   * Validates and queues an operator-authored note. Returns an outcome rather than throwing, because
+   * the two refusals mean different things to the caller and only one of them is the caller's fault.
+   *
+   * Absent means this process does not accept notes; the route answers 404 for the same reason the
+   * status route does.
+   */
+  knowledgeNotes?: (body: unknown) => OperatorNoteOutcome;
 }
 
 /**
@@ -111,6 +132,56 @@ export function createRoutes(deps: RoutesDeps): Router {
       defaultAgent: deps.runService.defaultAgent(),
       capabilities: deps.runService.listAgentCapabilities(),
     });
+  });
+
+  // GET /api/knowledge/status -- admin only (docs/knowledge-base.md section 8.5).
+  //
+  // Admin rather than owner-scoped because it describes the HOST, not a Run: outbox depth, the
+  // configured project, and when this host last pushed. There is no per-owner reading of those, and
+  // inventing one would mean deciding which owner may see which other owners' activity.
+  //
+  // 403 for an authenticated non-admin, not 404. The 404-not-403 rule belongs to Atlas's project
+  // routes, where the existence of a project is itself the secret; here the caller is already
+  // authenticated and the endpoint's existence is in the API docs, so a 404 would be a lie about
+  // what is deployed rather than a protection.
+  router.get('/knowledge/status', (req: Request, res: Response) => {
+    if (!deps.knowledgeStatus) {
+      res.status(404).json({ error: 'knowledge status is not served by this process' });
+      return;
+    }
+    if (!req.auth?.isAdmin) {
+      res.status(403).json({ error: 'knowledge status requires an admin token' });
+      return;
+    }
+    res.json(deps.knowledgeStatus());
+  });
+
+  // POST /api/knowledge/notes -- admin only (docs/knowledge-base.md sections 11.1 and 16 phase 1).
+  //
+  // Admin for the same reason the status route is: an operator note lands PROMOTED, so it is the one
+  // write path that skips curation. A contributor token must never be able to promote its own notes, and
+  // that rule lives in the token class rather than in a check on the note's content.
+  //
+  // 403 rather than 404 for an authenticated non-admin, matching the status route: the endpoint is in the
+  // API docs and the caller is already known, so a 404 would misreport what is deployed.
+  router.post('/knowledge/notes', (req: Request, res: Response) => {
+    if (!deps.knowledgeNotes) {
+      res.status(404).json({ error: 'notes are not accepted by this process' });
+      return;
+    }
+    if (!req.auth?.isAdmin) {
+      res.status(403).json({ error: 'operator notes require an admin token' });
+      return;
+    }
+    const outcome = deps.knowledgeNotes(req.body);
+    if (!outcome.ok) {
+      res.status(outcome.status).json({ error: outcome.error, ...(outcome.reason ? { reason: outcome.reason } : {}) });
+      return;
+    }
+    // 202, not 201: the note is durable here and not yet in Atlas. Claiming 201 would report a
+    // contribution that has not happened, and an operator would have no way to learn that the pusher has
+    // not run. `queued: false` says an identical note was already waiting, which is a success.
+    res.status(202).json({ claimHash: outcome.claimHash, queued: outcome.queued });
   });
 
   // POST /api/runs

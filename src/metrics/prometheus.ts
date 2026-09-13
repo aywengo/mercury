@@ -100,6 +100,31 @@ export function renderPrometheus(m: MetricsSnapshot): string {
           .map(([attempted, n]) => [{ status, attempted }, n] as [{ status: string; attempted: string }, number])),
   );
 
+  // Knowledge synchronization (docs/knowledge-base.md section 8.5). These two are the only
+  // knowledge metrics that describe a push, and both exist because a push failure is deliberately
+  // NOT a Run event: a batch is not a Run, so Crew invariant 4 says it is a log line and a metric.
+  // Without these two series the whole failure mode is invisible to a scraper.
+  writeGauge(
+    out,
+    'mercury_knowledge_outbox_depth',
+    'Notes harvested and awaiting acknowledgement from Atlas. A depth that grows monotonically '
+      + 'means Atlas is unreachable or rejecting everything; Runs keep completing either way, which '
+      + 'is why this is the surface that shows it.',
+    [[{}, m.knowledgeOutboxDepth]],
+  );
+  // A counter, not a gauge: the name ends in _total, and Prometheus derives the family name by
+  // stripping that suffix and requires the TYPE to agree. Declaring it a gauge would make the
+  // scrape fail on the family, which is the same class of mistake the comment above
+  // mercury_runs_in_status records.
+  writeCounter(
+    out,
+    'mercury_knowledge_push_failures_total',
+    'Cumulative failed attempts to deliver a knowledge batch to Atlas, across every worker. Counted '
+      + 'in the database rather than per process, because the API serves this endpoint and the worker '
+      + 'does the pushing.',
+    [[{}, m.knowledgePushFailures]],
+  );
+
   writeHistogram(
     out,
     'mercury_run_duration_seconds',

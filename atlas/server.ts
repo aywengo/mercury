@@ -91,7 +91,9 @@ export function buildRoutes(services: AtlasServices): Route[] {
           && ctx.caller.class !== 'admin') {
           throw new HttpError(403, 'operator notes require an admin token');
         }
-        const hostId = ctx.caller.class === 'admin' ? 'admin' : (ctx.caller as { hostId: string }).hostId;
+        // null, not 'admin': an admin is not bound to a host, and the note's own provenance is the only
+        // attribution an operator note can carry. See NoteStore.contribute.
+        const hostId = ctx.caller.class === 'admin' ? null : (ctx.caller as { hostId: string }).hostId;
         const results = store.contribute(projectId, hostId, notes, idempotencyKey, config.maxBatch);
         metrics.recordContribution(results);
         log.info('knowledge contribution received', { project: projectId, count: notes.length });

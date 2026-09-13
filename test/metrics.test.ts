@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { closeServer, createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
 import { collectMetrics } from '../src/metrics/collect.ts';
+import { OutboxStore } from '../src/knowledge/outbox.ts';
 import { escapeLabelValue, renderPrometheus } from '../src/metrics/prometheus.ts';
 import { EventStore } from '../src/events/eventStore.ts';
 import { expectStatus, makeEnv, waitFor } from './helpers.ts';
@@ -273,6 +274,8 @@ test('label values are escaped so a value cannot forge metric lines', () => {
     durationByStatus: new Map(),
     queueWait: { buckets: new Map([['+Inf', 0]]), sum: 0, count: 0 },
     errorsByKind: {},
+    knowledgeOutboxDepth: 0,
+    knowledgePushFailures: 0,
     sandboxEnabled: 0,
     runsTotal: 0,
     workers: 0,
@@ -771,4 +774,53 @@ test('goal status is reported as an aggregate, including unmet', () => {
     assert.match(body, /mercury_goals_in_status\{attempted="false",status="unmet"\} 1/);
     assert.match(body, /# TYPE mercury_goals_in_status gauge/);
   } finally { env.close(); }
+});
+
+test('knowledge outbox depth and push failures are projected from the database', () => {
+  // Both numbers are read from tables rather than counted at the emit site, so the test has to
+  // create the state the tables describe: rows in the outbox, and a failure counter written by the
+  // pusher into knowledge_sync_state.
+  const env = makeEnv();
+  try {
+    let snap = collectMetrics(env.db);
+    assert.equal(snap.knowledgeOutboxDepth, 0, 'a fresh host has an empty outbox');
+    assert.equal(snap.knowledgePushFailures, 0, 'and no recorded push failures');
+
+    const outbox = new OutboxStore(env.db);
+    const contribution = (claim: string) => ({
+      projectId: 'mercury', kind: 'fact' as const, scope: 'project', claim, evidence: [],
+      provenance: { source: 'agent-reported' as const, hostId: 'host-a', recordedAt: new Date().toISOString() },
+    });
+    outbox.insert([
+      { runId: null, contribution: contribution('first') },
+      { runId: null, contribution: contribution('second') },
+    ]);
+    outbox.setState('push_failures_total', '3');
+
+    snap = collectMetrics(env.db);
+    assert.equal(snap.knowledgeOutboxDepth, 2);
+    assert.equal(snap.knowledgePushFailures, 3);
+
+    const rendered = renderPrometheus(snap);
+    assert.match(rendered, /^mercury_knowledge_outbox_depth 2$/m);
+    assert.match(rendered, /^mercury_knowledge_push_failures_total 3$/m);
+  } finally {
+    env.close();
+  }
+});
+
+test('a corrupt push-failure counter reads as zero rather than poisoning /metrics', () => {
+  // Prometheus text with a NaN sample is invalid, and the whole scrape fails rather than one series.
+  // The value is operator-visible in a SQLite file, so "someone wrote a non-number here" is a
+  // reachable state, not a hypothetical.
+  const env = makeEnv();
+  try {
+    const outbox = new OutboxStore(env.db);
+    outbox.setState('push_failures_total', 'not-a-number');
+    const snap = collectMetrics(env.db);
+    assert.equal(snap.knowledgePushFailures, 0);
+    assert.match(renderPrometheus(snap), /^mercury_knowledge_push_failures_total 0$/m);
+  } finally {
+    env.close();
+  }
 });

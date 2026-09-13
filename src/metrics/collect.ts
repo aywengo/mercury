@@ -85,6 +85,27 @@ export interface MetricsSnapshot {
    * `unknown` as `false` would render the entire open population as never-started.
    */
   goalsByStatusAndAttempted: Record<string, Record<string, number>>;
+  /**
+   * Rows waiting in the knowledge outbox (docs/knowledge-base.md section 8.2).
+   *
+   * A gauge over `knowledge_outbox`, not a counter at the insert site, for the same reason as every
+   * other number here: the table is the record. It is also the metric that makes K4 observable --
+   * a host whose Atlas is down keeps completing Runs and its outbox grows, and "grows" is the only
+   * visible symptom of a knowledge base that has quietly stopped learning.
+   *
+   * Zero when Atlas is unconfigured, which is honest rather than misleading: the table exists and is
+   * empty. Absenting the series would make "not configured" and "configured and drained" identical,
+   * and those two need different answers when something looks wrong.
+   */
+  knowledgeOutboxDepth: number;
+  /**
+   * Cumulative failed push attempts, read from `knowledge_sync_state`.
+   *
+   * In the database rather than in a field on the pusher because the API process serves `/metrics`
+   * and the worker is the process that pushes. A per-process counter would report zero failures from
+   * exactly the endpoint an operator queries.
+   */
+  knowledgePushFailures: number;
   /** Runs that ever had a sandbox policy applied. */
   sandboxEnabled: number;
   /** Total runs ever created. Pair with sandboxEnabled in PromQL for an enablement RATE. */
@@ -340,6 +361,13 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
   for (const k of ERROR_KIND_VALUES) errorsByKind[k] = 0;
   for (const r of errRows) errorsByKind[r.kind] = Number(r.n);
 
+  // Knowledge gauges. Both are cheap: the outbox is small by design (it drains), and the sync-state
+  // read is a primary-key lookup. Neither is labelled, so neither can grow cardinality.
+  const outboxRow = db.prepare('SELECT COUNT(*) AS n FROM knowledge_outbox').get() as { n: number };
+  const pushFailRow = db
+    .prepare("SELECT value FROM knowledge_sync_state WHERE key = 'push_failures_total'")
+    .get() as { value: string } | undefined;
+
   // Needs the idx_events_type index added in migration v4. Without it this is a full scan of the
   // largest table, on an endpoint a scraper hits every few seconds.
   const sandboxRow = db
@@ -362,6 +390,10 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
     durationByStatus,
     queueWait,
     errorsByKind,
+    knowledgeOutboxDepth: Number(outboxRow.n) || 0,
+    // Parsed rather than trusted: a corrupt value reads as zero rather than as NaN, which would
+    // make the whole /metrics body invalid text.
+    knowledgePushFailures: Number.isFinite(Number(pushFailRow?.value)) ? Number(pushFailRow?.value) : 0,
     sandboxEnabled: Number(sandboxRow.n) || 0,
     runsTotal: Number(totalRow.n) || 0,
     workers: leases.length,
