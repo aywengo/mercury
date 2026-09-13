@@ -1003,7 +1003,11 @@ export class Worker {
         if (harvest) {
           const project = this.deps.knowledgeHarvest!.project;
           if (harvest.accepted.length > 0) {
-            this.deps.knowledgeOutbox!.insert(harvest.accepted.map((c) => ({
+            // insertInTx, not insert(): these rows must commit with the terminal state above or not at
+            // all. insert() would also work -- tx() joins an open transaction rather than issuing a second
+            // BEGIN -- but it would make that coupling an accident of the helper instead of a fact visible
+            // at the call site.
+            this.deps.knowledgeOutbox!.insertInTx(harvest.accepted.map((c) => ({
               runId: run.id,
               contribution: { ...c, projectId: project },
             })));
