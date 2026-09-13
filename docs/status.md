@@ -189,10 +189,12 @@ Live and covered by tests:
   provenance rather than a plausible one;
 - `GET /api/knowledge/status` and `POST /api/knowledge/notes` (admin only), and
   `GET /api/runs/:runId/knowledge` (owner-scoped);
-- `mercury knowledge identity <url>...`, which prints the `repo:<hash>` scope key the pack
-  selector computes. It reads no database, so it works on the host whose configuration is the thing
-  under investigation; a local path is answered but reported as host-local, because such a scope
-  works there and matches nothing elsewhere;
+- the `mercury knowledge` subcommands: `status` reports the replica, cursor and outbox depth;
+  `identity <url>...` prints the `repo:<hash>` scope key the pack selector computes and reads no
+  database, so it works on the host whose configuration is the thing under investigation (a local
+  path is answered but reported as host-local, because such a scope works there and matches nothing
+  elsewhere); and `flush` drains the outbox to Atlas in one synchronous pass rather than waiting for
+  the pusher's timer, and refuses with an explanation when no Atlas is configured;
 - retired-row retention on the host (`MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS`).
 
 The loop is closed end to end: a Run can write a note, and a later Run on a different host is told
