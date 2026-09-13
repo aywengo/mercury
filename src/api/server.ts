@@ -20,6 +20,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { collectMetrics } from '../metrics/collect.ts';
 import { renderPrometheus } from '../metrics/prometheus.ts';
 import { API_SCHEMA_VERSION, HOST_PRODUCT, HOST_VERSION } from '../version.ts';
+import type { KnowledgeStatus } from '../knowledge/status.ts';
 
 // Dashboard UI (Mercury.md section 23): static SPA served at /.
 // The UI authenticates with a session cookie (POST /api/auth/login);
@@ -37,6 +38,9 @@ export interface ServerDeps {
   stream: EventStream;
   apiTokens: Map<string, string>;
   adminToken: string | null;
+  /** See RoutesDeps.knowledgeStatus. Supplied by the composition root only when this process owns
+   *  the knowledge tables; absent means the route answers 404. */
+  knowledgeStatus?: () => KnowledgeStatus;
   /** Optional session store override (default: in-memory Map, see sessions.ts). */
   sessions?: SessionStore;
   /** Optional run queue for the /healthz/workers endpoint (worker health, Mercury.md section 25). */
@@ -213,7 +217,13 @@ export function createApp(deps: ServerDeps): Express {
   });
   app.post('/api/runs', createRunLimiter);
 
-  app.use('/api', createRoutes({ runService: deps.runService, events: deps.events, stream: deps.stream, logger: deps.logger }));
+  app.use('/api', createRoutes({
+    runService: deps.runService,
+    events: deps.events,
+    stream: deps.stream,
+    logger: deps.logger,
+    knowledgeStatus: deps.knowledgeStatus,
+  }));
 
   // Last-resort handler for anything that escaped a route (including middleware and body-parser
   // failures). It used to answer `500 { error: err.message }`, which pushed raw internals --

@@ -227,6 +227,20 @@ export const MIGRATIONS: string[] = [
   -- batch read and the depth gauge on /metrics; no ordering index on created_at, because a second
   -- clock-ordered index would be a second answer to "what is oldest".
   CREATE INDEX IF NOT EXISTS idx_knowledge_outbox_drain ON knowledge_outbox(id);
+
+  -- Host-level facts about the two synchronization directions, as a small key/value rather than as
+  -- columns on some future table: they describe the process's relationship with Atlas, not any Run,
+  -- and there is exactly one such relationship per host (section 8.4 gives one project per host).
+  --
+  -- GET /api/knowledge/status (section 8.5) reads this, and so does the operator who asks "is this
+  -- host still learning?". Neither question has an answer derivable from the outbox alone: an empty
+  -- outbox means either "everything drained" or "the pusher is not running", and the only thing that
+  -- distinguishes them is when it last succeeded.
+  CREATE TABLE IF NOT EXISTS knowledge_sync_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
   `,
 ];
 

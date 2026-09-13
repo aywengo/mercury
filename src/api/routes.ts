@@ -10,12 +10,24 @@ import { requireAuth } from './auth.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.ts';
 import type { Logger } from '../logger.ts';
 
+import type { KnowledgeStatus } from '../knowledge/status.ts';
+
 export interface RoutesDeps {
   runService: RunService;
   events: EventStore;
   stream: EventStream;
   /** Optional; used to record the real cause of a 500, which is never sent to the client. */
   logger?: Logger;
+  /**
+   * Supplies `GET /api/knowledge/status`. A thunk rather than a store, so this module stays free of
+   * database and config plumbing and the route is testable with a fixed answer.
+   *
+   * Absent means this process has no knowledge surface at all -- the API-only process in a
+   * deployment where the worker owns synchronization. The route then answers 404 rather than
+   * reporting an empty status, because "no such surface here" and "configured but idle" are
+   * different facts and an operator reading the second one would go looking for a broken Atlas.
+   */
+  knowledgeStatus?: () => KnowledgeStatus;
 }
 
 /**
@@ -111,6 +123,28 @@ export function createRoutes(deps: RoutesDeps): Router {
       defaultAgent: deps.runService.defaultAgent(),
       capabilities: deps.runService.listAgentCapabilities(),
     });
+  });
+
+  // GET /api/knowledge/status -- admin only (docs/knowledge-base.md section 8.5).
+  //
+  // Admin rather than owner-scoped because it describes the HOST, not a Run: outbox depth, the
+  // configured project, and when this host last pushed. There is no per-owner reading of those, and
+  // inventing one would mean deciding which owner may see which other owners' activity.
+  //
+  // 403 for an authenticated non-admin, not 404. The 404-not-403 rule belongs to Atlas's project
+  // routes, where the existence of a project is itself the secret; here the caller is already
+  // authenticated and the endpoint's existence is in the API docs, so a 404 would be a lie about
+  // what is deployed rather than a protection.
+  router.get('/knowledge/status', (req: Request, res: Response) => {
+    if (!deps.knowledgeStatus) {
+      res.status(404).json({ error: 'knowledge status is not served by this process' });
+      return;
+    }
+    if (!req.auth?.isAdmin) {
+      res.status(403).json({ error: 'knowledge status requires an admin token' });
+      return;
+    }
+    res.json(deps.knowledgeStatus());
   });
 
   // POST /api/runs

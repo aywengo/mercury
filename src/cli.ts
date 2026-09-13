@@ -23,6 +23,10 @@ import { WakeupListener, WakeupWriter } from './events/wakeup.ts';
 import { RunQueue } from './queue/runQueue.ts';
 import { RunStore } from './runs/runStore.ts';
 import { RunService } from './runs/runService.ts';
+import { AtlasClient } from './knowledge/client.ts';
+import { KnowledgePusher } from './knowledge/pusher.ts';
+import { OutboxStore } from './knowledge/outbox.ts';
+import { knowledgeStatus } from './knowledge/status.ts';
 import { AgentCapabilityRegistry, logAdapterCapabilities } from './adapters/capabilities.ts';
 import { GoalStore } from './runs/goalStore.ts';
 import { settleGoalOnTerminal } from './runs/goalSettlement.ts';
@@ -56,7 +60,7 @@ const SKILLS_DIR = dataPath('.agents', 'skills');
 // happen to hit.
 function usageText(): string {
   return [
-    'usage: mercury [--version|-V] [--help|-h] | <dev|server|worker|gc|migrate|redact-events>',
+    'usage: mercury [--version|-V] [--help|-h] | <dev|server|worker|gc|migrate|redact-events|knowledge>',
     '',
     '  dev             run the API and the worker in one process (development)',
     '  server          run the API only',
@@ -66,6 +70,9 @@ function usageText(): string {
     '  redact-events   retroactive secret redaction of events.payload_json,',
     '                  run_inputs.input_json, runs.error, runs.task,',
     '                  runs.repository_json, runs.repositories_json',
+    '  knowledge       flush        push the knowledge outbox to Atlas now, synchronously,',
+    '                               and print what happened (phase 1)',
+    '                status       outbox depth, last push and pull, replica cursor',
     '',
   ].join('\n');
 }
@@ -109,6 +116,62 @@ async function main(): Promise<void> {
     const db = openDatabase(config.dbPath);
     logger.info({ db: config.dbPath }, 'migrations applied');
     db.close();
+    return;
+  }
+
+  // Knowledge operator surface (docs/knowledge-base.md sections 8.2 and 8.5).
+  //
+  // `flush` exists for the operator who wants to watch the outbox drain before decommissioning a
+  // host, and for the contract test that stops Atlas, queues a note, and restarts it. Both reasons
+  // are the same reason: the pusher runs on a timer, and a timer is the wrong thing to wait for when
+  // you are trying to see whether something is broken.
+  if (cmd === 'knowledge') {
+    const sub = args[0];
+    const db = openDatabase(config.dbPath);
+    try {
+      if (sub === 'status' || sub === undefined) {
+        process.stdout.write(JSON.stringify(knowledgeStatus(db, config.knowledge), null, 2) + '\n');
+        return;
+      }
+      if (sub === 'flush') {
+        if (!config.knowledge.atlas) {
+          process.stderr.write(
+            'knowledge flush: MERCURY_ATLAS_URL is not set, so this host has no Atlas to push to.\n'
+            + 'The outbox is left untouched; it is durable and will drain if the URL is configured.\n',
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const outbox = new OutboxStore(db);
+        const client = new AtlasClient(config.knowledge.atlas);
+        const pusher = new KnowledgePusher({
+          outbox, client,
+          project: config.knowledge.atlas.project,
+          // Zero: this is one pass, not a service. A timer here would keep the process alive after
+          // the pass completed, which is the opposite of what a synchronous flush means.
+          intervalMs: 0,
+          batch: config.knowledge.pushBatch,
+          log: logger,
+          events: new EventStore(db, redactor),
+          runs: new RunStore(db),
+          alertDepth: 0,
+        });
+        const outcome = await pusher.pushOnce();
+        process.stdout.write(JSON.stringify({
+          project: config.knowledge.atlas.project,
+          ...outcome,
+          remaining: outbox.depth(),
+        }, null, 2) + '\n');
+        // A failed pass is a failed command: `mercury knowledge flush && decommission this host`
+        // must not proceed on a batch that did not leave the machine.
+        if (outcome.failed) process.exitCode = 1;
+        return;
+      }
+      process.stderr.write(`knowledge: unknown subcommand '${sub ?? ''}'. Expected flush or status.\n`);
+      process.exitCode = 1;
+    } finally {
+      db.close();
+    }
     return;
   }
 
@@ -355,6 +418,11 @@ async function main(): Promise<void> {
         // Stage 1 wake-up counter (issue #204). Only present when the socket is configured, so the
         // series stays absent -- rather than reading zero -- in the default deployment.
         wakeupStats: wakeupListener ? () => wakeupListener!.wakeupsReceived : undefined,
+        // Always supplied, including when Atlas is unconfigured: the route then answers
+        // `enabled: false`, which is a clearer answer to "is knowledge working here?" than a 404
+        // that looks like a missing feature. The tables exist either way (migration v9), so this
+        // never reads a table that is not there.
+        knowledgeStatus: () => knowledgeStatus(db, config.knowledge),
       },
       config.port,
       { host: config.bindHost, tls: config.tls ?? undefined },
