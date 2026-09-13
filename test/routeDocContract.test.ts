@@ -25,7 +25,7 @@ const ROUTES_SRC = readFileSync(new URL('../src/api/routes.ts', import.meta.url)
  * the check below fails if a route-registering file appears that is neither covered nor listed, so the
  * set cannot grow silently the way `routes.ts` coverage did.
  */
-const UNCOVERED_ROUTE_FILES = ['authRoutes.ts'];
+const UNCOVERED_ROUTE_FILES: string[] = [];
 const API_DOC    = readFileSync(new URL('../docs/api.md', import.meta.url), 'utf8');
 const GOALS_DOC  = readFileSync(new URL('../docs/goals.md', import.meta.url), 'utf8');
 
@@ -123,7 +123,7 @@ test('no route-registering file escapes the guard silently', () => {
     .filter((f) => f.endsWith('.ts'))
     .filter((f) => /router\.(get|post|put|patch|delete)\(/.test(readFileSync(new URL(f, API_DIR), 'utf8')))
     .sort();
-  const covered = ['routes.ts'];
+  const covered = ['routes.ts', 'authRoutes.ts'];
   const escaped = registering.filter((f) => !covered.includes(f) && !UNCOVERED_ROUTE_FILES.includes(f));
   assert.deepEqual(escaped, [], `route file(s) register endpoints but are neither covered by this guard nor listed as known-uncovered: ${escaped.join(', ')}`);
   // And the allowlist must not go stale in the other direction.
