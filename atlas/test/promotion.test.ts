@@ -260,3 +260,86 @@ test('retireStaleCandidates retires notes nobody re-confirmed and spares recentl
 // again: the first retires it, the second keeps it forever. The implementation takes the first, which
 // is defensible -- a claim no host has re-confirmed in a year is stale even if three once agreed -- but
 // it is a reading, not the only one, and it is worth deciding deliberately rather than by inheritance.
+
+// --- Issue #551: a retired note must not be a permanent dedup sink ---
+
+test('a claim contributed after retirement is accepted fresh, not silently swallowed as a duplicate', () => {
+  // This is the core regression. On main, contributing X after X is retired returns
+  // `{ duplicate: retiredNoteId }`, the outbox row is deleted, and the claim is lost.
+  // After the fix, the answer is `{ accepted: newNoteId }` and the note is a new candidate.
+  const h = setup();
+  const p = h.project();
+  const claim = 'run docker compose up before the integration suite';
+
+  const first = h.send(p, [h.note(claim, { host: 'host-a', run: 'r1' })], 'k1');
+  const originalId = first[0]!.accepted!;
+  assert.equal(h.tierOf(p, originalId), 'candidate');
+
+  h.store.retire(p, originalId, 'system:retention', 'stale');
+  assert.equal(h.tierOf(p, originalId), 'retired');
+
+  // Contribute from two new hosts on different harnesses; policy is minRuns 2 / minDistinctHarnessesOrHosts 2.
+  const second = h.send(p, [h.note(claim, { host: 'host-b', run: 'r2', agent: 'hermes' })], 'k2', 'host-b');
+  assert.ok('accepted' in second[0]!, `expected accepted, got ${JSON.stringify(second[0])}`);
+  const newId = second[0]!.accepted!;
+  assert.notEqual(newId, originalId, 'a fresh note gets a new id, the retired one stays as history');
+
+  const third = h.send(p, [h.note(claim, { host: 'host-c', run: 'r3', agent: 'primeagent' })], 'k3', 'host-c');
+  assert.ok('duplicate' in third[0]!, `expected duplicate on 3rd, got ${JSON.stringify(third[0])}`);
+
+  // Policy satisfied: 2 runs, 2 distinct harnesses. The note must have been promoted.
+  assert.equal(h.tierOf(p, newId), 'promoted', 'the re-contributed note must promote once the policy threshold is met');
+
+  // It must appear in bootstrap and in the promoted feed.
+  const boot = h.store.bootstrap(p);
+  assert.ok(boot.notes.some((n) => n.noteId === newId), 'bootstrap must serve the re-promoted note');
+
+  const feed = h.store.feed(p, 0, 'promoted', { limit: 100 });
+  assert.ok(feed.notes.some((n) => n.noteId === newId), 'promoted feed must serve the re-promoted note');
+});
+
+test('a repo-record contribution after retirement is accepted and lands promoted, not duplicate', () => {
+  // Before the fix: `existing` matched the retired note; `addSource` added a source to it;
+  // `autoPromote` returned false because the note is not a candidate; answer was `duplicate`.
+  // After the fix: the query skips retired notes; `insertNote` is called; source is repo-record,
+  // so the note lands promoted immediately.
+  const h = setup();
+  const p = h.project();
+  const claim = 'all money arithmetic uses integer minor units';
+  const evidence = [{ type: 'repo-file', repo: IDENTITY, path: 'docs/adr/0002-money.md', sha: 'a1b2c3d' }];
+
+  // First: land as a candidate from an agent, then retire it.
+  const first = h.send(p, [h.note(claim, { host: 'host-a', run: 'r1' })], 'k1');
+  const originalId = first[0]!.accepted!;
+  h.store.retire(p, originalId, 'operator', 'superseded');
+
+  // Now contribute the same claim as repo-record (e.g., an accepted decision record merged later).
+  const second = h.send(p, [h.note(claim, { source: 'repo-record', evidence })], 'k2');
+  assert.ok('accepted' in second[0]!, `expected accepted, got ${JSON.stringify(second[0])}`);
+  const newId = second[0]!.accepted!;
+  assert.equal(h.tierOf(p, newId), 'promoted',
+    'a repo-record note bypasses the candidate queue regardless of retirement history');
+
+  // Bootstrap serves it; no stale reference to the retired note.
+  const boot = h.store.bootstrap(p);
+  assert.ok(boot.notes.some((n) => n.noteId === newId), 'bootstrap must serve the newly promoted repo-record note');
+});
+
+test('the existing retirement test still passes: feed carries the retirement, bootstrap excludes it', () => {
+  // This is a copy of the "a retired note still appears in the promoted feed" test to confirm
+  // the fix to issue #551 did not break the existing retirement path.
+  const h = setup();
+  const p = h.project();
+  const noteId = h.send(p, [h.note('every amount is stored in minor units (regression guard)', {
+    source: 'repo-record',
+    evidence: [{ type: 'repo-file', repo: IDENTITY, path: 'docs/adr/1.md', sha: 'a1b2c3d' }],
+  })], 'k1')[0]!.accepted!;
+  assert.equal(h.tierOf(p, noteId), 'promoted');
+
+  h.store.retire(p, noteId, 'operator', 'superseded by a later decision record');
+
+  const promoted = h.store.feed(p, 0, 'promoted', { limit: 100 });
+  assert.deepEqual(promoted.notes.map((n) => n.noteId), [noteId], 'the retirement must reach feed subscribers');
+  assert.equal(h.tierOf(p, noteId), 'retired');
+  assert.deepEqual(h.store.bootstrap(p).notes.map((n) => n.noteId), [], 'bootstrap must exclude retired notes');
+});

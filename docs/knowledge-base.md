@@ -1069,6 +1069,16 @@ promoted or corroborated within `ATLAS_CANDIDATE_RETENTION_MS` (default 90 days)
 automatically with `reason: stale`, which is how the noise tier 2 inevitably produces is
 drained without an operator having to sweep it.
 
+**A retired note is not a permanent dedup sink** (issue #551, fix/issue-551-retired-dedup). The
+dedup query in `contributeOne()` (`atlas/notes.ts`) includes `AND tier != 'retired'`, so a
+retired note does not match. A later contribution of the same claim lands as a fresh note -- a
+new candidate that has to earn its way across again, or a promoted note immediately for
+`repo-record`/`operator` sources. The old retired row stays as history. The alternative
+("revive" the retired note in place) was rejected because an operator who retired a note on
+purpose should not have it reopened by a later host contribution; a new note with a later `seq`
+is the correct outcome and requires no schema change (the `(project_id, claim_hash)` index is a
+plain index, not a UNIQUE constraint).
+
 ## 13. Scaling: bootstrapping a host
 
 This is the sequence the whole design exists for. A new Mercury host, on a project with an

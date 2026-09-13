@@ -291,8 +291,20 @@ export class NoteStore {
     };
 
     const claimHashKey = claimHashOf(contribution);
-    const existing = this.db.prepare('SELECT note_id FROM notes WHERE project_id = ? AND claim_hash = ?')
-      .get(project.id, claimHashKey) as { note_id: string } | undefined;
+    // A retired note is excluded from dedup intentionally (#551). A retired note went through
+    // `retireStaleCandidates` (no corroboration) or an explicit operator retirement; its claim is no
+    // longer in the served set. A later contribution of the same claim should land fresh -- as a new
+    // candidate that can earn its way to promoted again -- rather than silently augmenting a note that
+    // will never be served. The result is therefore `accepted`, not `duplicate`, and the old retired
+    // row stays as history.
+    //
+    // Determinism: because this query is the only insert gate, at most one non-retired note can ever
+    // exist per (project_id, claim_hash). `.get()` therefore returns that unique row or nothing; the
+    // result is not merely likely to be deterministic -- it is structurally guaranteed by the insert
+    // path itself.
+    const existing = this.db.prepare(
+      "SELECT note_id FROM notes WHERE project_id = ? AND claim_hash = ? AND tier != 'retired'",
+    ).get(project.id, claimHashKey) as { note_id: string } | undefined;
     if (existing) {
       this.addSource(existing.note_id, contribution);
       // Re-check promotion here as well as on insert. Corroboration accumulates through the
