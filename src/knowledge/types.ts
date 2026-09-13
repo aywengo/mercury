@@ -95,7 +95,18 @@ export interface Note {
   supersededBy?: string;
   /** Note ids this note was DECLARED to conflict with. Atlas never infers a conflict (section 12). */
   contradicts?: string[];
-  provenance: NoteProvenance;
+  /**
+   * Absent when the note reached a replica before migration v11, which stored no provenance.
+   *
+   * Optional is the honest shape, not a convenience. The alternative -- filling the gap with a value --
+   * is what #553 was: the replica invented `{ source: 'agent-reported', hostId: '' }` for every note, so
+   * an operator note and a note curated in git were both presented as an agent's unverified observation.
+   * A reader that has to handle absence cannot be lied to.
+   *
+   * The gap is transient by construction: v11 resets the pull cursors, so the next pull re-fetches every
+   * row with its real provenance.
+   */
+  provenance?: NoteProvenance;
   corroboration: Corroboration;
   /** Per-project monotonic, assigned by Atlas. A replica never assigns one itself. */
   seq: number;

@@ -9,7 +9,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { tx } from '../db/database.ts';
 import { claimHash } from './validation.ts';
-import type { Note, NoteKind, NoteTier } from './types.ts';
+import { NOTE_SOURCES, type Note, type NoteKind, type NoteSource, type NoteTier } from './types.ts';
 
 export interface ReplicaRow {
   noteId: string;
@@ -26,6 +26,13 @@ export interface ReplicaRow {
   claimHash: string;
   recordedAt: string;
   contested: boolean;
+  /**
+   * Where the note came from, as Atlas reported it. Null for a row written before migration v11, which
+   * stored no provenance at all. Callers must not substitute a plausible value: the whole of #553 is that
+   * a fabricated `agent-reported` understated trust for operator and repo-record notes.
+   */
+  source: NoteSource | null;
+  hostId: string | null;
 }
 
 export interface ApplyResult {
@@ -40,7 +47,7 @@ interface DbRow {
   note_id: string; project_id: string; kind: string; scope: string; claim: string; detail: string;
   tier: string; seq: number; revision: number; evidence_json: string; corr_runs: number;
   corr_harnesses: number; corr_hosts: number; claim_hash: string; recorded_at: string;
-  contested: number;
+  contested: number; source: string; host_id: string;
 }
 
 function toRow(n: Note): DbRow {
@@ -51,6 +58,9 @@ function toRow(n: Note): DbRow {
     corr_runs: n.corroboration?.runs ?? 0, corr_harnesses: n.corroboration?.harnesses ?? 0,
     corr_hosts: n.corroboration?.hosts ?? 0,
     claim_hash: '', recorded_at: n.provenance?.recordedAt ?? '', contested: n.contested ? 1 : 0,
+    // Carried, not inferred. Recorded empty rather than defaulted when absent, because the reader
+    // distinguishes "no provenance was stored" from a source that happens to look like the default.
+    source: n.provenance?.source ?? '', host_id: n.provenance?.hostId ?? '',
   };
 }
 
@@ -101,15 +111,20 @@ export class ReplicaStore {
       const insert = this.db.prepare(`
         INSERT INTO knowledge_replica (
           note_id, project_id, kind, scope, claim, detail, tier, seq, revision, evidence_json,
-          corr_runs, corr_harnesses, corr_hosts, claim_hash, recorded_at, updated_at, contested
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          corr_runs, corr_harnesses, corr_hosts, claim_hash, recorded_at, updated_at, contested,
+          source, host_id
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(note_id) DO UPDATE SET
           kind = excluded.kind, scope = excluded.scope, claim = excluded.claim, detail = excluded.detail,
           tier = excluded.tier, seq = excluded.seq, revision = excluded.revision,
           evidence_json = excluded.evidence_json, corr_runs = excluded.corr_runs,
           corr_harnesses = excluded.corr_harnesses, corr_hosts = excluded.corr_hosts,
           recorded_at = excluded.recorded_at, updated_at = excluded.updated_at,
-          contested = excluded.contested
+          contested = excluded.contested,
+          -- Included in the update as well as the insert. A row written before v11 has an empty source,
+          -- and the cursor reset makes the puller re-send it; if the ON CONFLICT arm left source alone,
+          -- the correction would arrive and be dropped, leaving the row permanently unknown.
+          source = excluded.source, host_id = excluded.host_id
         WHERE excluded.seq >= knowledge_replica.seq
       `);
       for (const note of ordered) {
@@ -125,7 +140,7 @@ export class ReplicaStore {
         insert.run(
           row.note_id, row.project_id, row.kind, row.scope, row.claim, row.detail, row.tier, row.seq,
           row.revision, row.evidence_json, row.corr_runs, row.corr_harnesses, row.corr_hosts,
-          row.claim_hash, row.recorded_at, appliedAt, row.contested,
+          row.claim_hash, row.recorded_at, appliedAt, row.contested, row.source, row.host_id,
         );
         result.applied += 1;
         if (note.tier !== 'promoted') result.retired += 1;
@@ -190,5 +205,9 @@ function fromRow(r: DbRow): ReplicaRow {
     revision: Number(r.revision), evidence,
     corroboration: { runs: Number(r.corr_runs), harnesses: Number(r.corr_harnesses), hosts: Number(r.corr_hosts) },
     claimHash: r.claim_hash, recordedAt: r.recorded_at, contested: r.contested === 1,
+    // Empty string is the pre-v11 marker, not a source name. Read as null so no caller can mistake it
+    // for a value that came from Atlas.
+    source: NOTE_SOURCES.includes(r.source as NoteSource) ? (r.source as NoteSource) : null,
+    hostId: r.host_id === '' ? null : r.host_id,
   };
 }

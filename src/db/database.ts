@@ -305,6 +305,34 @@ export const MIGRATIONS: string[] = [
     created_at TEXT NOT NULL
   );
   `,
+  // v11: carry note provenance into the replica (issue #553).
+  `
+  -- knowledge_replica stored no provenance at all: toRow() kept only recorded_at, so pack selection had
+  -- to invent the rest and every note was served as { source: 'agent-reported', hostId: '' }. An operator
+  -- note and a note curated in git were therefore both presented to GET /api/runs/:id/knowledge as an
+  -- agent's unverified observation from a host with no id -- understating trust for exactly the two most
+  -- trusted sources, in the one snapshot the design points an operator at to answer "why should this Run
+  -- have believed it".
+  --
+  -- Only source and host_id. The agent and runId of the originating source are per-source rather than
+  -- per-note and live in Atlas's note_sources; copying them onto every note would invent an association
+  -- the feed never made.
+  ALTER TABLE knowledge_replica ADD COLUMN source TEXT NOT NULL DEFAULT '';
+  ALTER TABLE knowledge_replica ADD COLUMN host_id TEXT NOT NULL DEFAULT '';
+
+  -- Reset the pull cursors so every existing row is re-fetched and corrected.
+  --
+  -- Rows already in the replica cannot be backfilled: the information was never stored, and any value
+  -- this migration picked would be a second edition of the same fabrication the migration exists to
+  -- remove. The replica is a cache that Atlas can rebuild, and the cursor is the only thing that decides
+  -- what gets re-fetched, so clearing it makes the stale rows self-correcting on the next pull instead of
+  -- leaving them wrong until Atlas happens to revise each one.
+  --
+  -- Rows are NOT deleted. They keep serving packs while the puller re-fetches over them, so there is no
+  -- window where a Run loses its knowledge; and a host that has never pulled has no cursor row anyway,
+  -- which is why this is a DELETE and not an UPDATE to zero.
+  DELETE FROM knowledge_replica_cursor;
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

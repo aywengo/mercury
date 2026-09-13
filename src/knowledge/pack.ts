@@ -226,7 +226,14 @@ function toNote(row: ReplicaRow): Note {
     ...(row.detail ? { detail: row.detail } : {}),
     evidence: row.evidence,
     tier: row.tier,
-    provenance: { source: 'agent-reported', hostId: '', recordedAt: row.recordedAt },
+    // Read from the row, not invented. This line used to be a constant -- every note was served as
+    // `agent-reported` from host `''` -- which made an operator note and a note curated in git look like
+    // an agent's unverified observation, in the snapshot an operator reads to answer "why should this Run
+    // have believed it". Absent is now the answer for a row that predates migration v11; the cursor reset
+    // in that migration makes the gap close on the next pull rather than persist forever.
+    ...(row.source !== null
+      ? { provenance: { source: row.source, hostId: row.hostId ?? '', recordedAt: row.recordedAt } }
+      : {}),
     corroboration: row.corroboration,
     seq: row.seq,
     ...(row.contested ? { contested: true } : {}),
