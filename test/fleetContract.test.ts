@@ -34,49 +34,13 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { chmodSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AddressInfo } from 'node:net';
-import { createApp, closeServer } from '../src/api/server.ts';
-import { EventStream } from '../src/events/eventStream.ts';
-import { makeEnv, tempDir } from './helpers.ts';
+import { realMercury } from './realMercury.ts';
+import { tempDir } from './helpers.ts';
 
 const FLEET_DIR = join(import.meta.dirname, '..', 'fleet');
 const HOST_TOKEN = 'contract-host-token-6f1a2b';
 const ADMIN_TOKEN = 'contract-admin-token-9c3d4e';
 const CALLER_TOKEN = 'contract-caller-token-1a5b';
-
-/** A real Mercury API on loopback, backed by a real queue. */
-async function realMercury(opts: { queue?: boolean } = {}) {
-  const env = makeEnv({ workerEnabled: false });
-  const stream = new EventStream(env.db, env.events, 10);
-  stream.start();
-  const app = createApp({
-    runService: env.runService,
-    events: env.events,
-    stream,
-    apiTokens: new Map([[HOST_TOKEN, 'alice']]),
-    adminToken: null,
-    // Passing `queue` is what makes /healthz/workers answer with real leases. Omitting it reproduces the
-    // 503 "queue not configured" path, which is a separate test below.
-    ...(opts.queue === false ? {} : { queue: env.queue }),
-  } as Parameters<typeof createApp>[0]);
-
-  // Bind loopback EXPLICITLY. app.listen(0) with no host binds the wildcard, and on macOS/BSD a wildcard
-  // bind can coexist with another process already holding 127.0.0.1 on that port, so a request meant for
-  // this app is answered by an unrelated server (issue #185). An explicit host makes it EADDRINUSE.
-  const server = await new Promise<import('node:http').Server>((resolve) => {
-    const s = app.listen(0, '127.0.0.1', () => resolve(s));
-  });
-  const port = (server.address() as AddressInfo).port;
-  return {
-    env,
-    url: `http://127.0.0.1:${port}`,
-    async close() {
-      await closeServer(server);
-      stream.stop();
-      env.close();
-    },
-  };
-}
 
 /** Distinct loopback ports per logical Fleet, so two can run in one test. */
 const ID_OFFSETS: Record<string, number> = { a: 0, b: 7 };
@@ -183,7 +147,7 @@ async function withStack(
   let fleet: Awaited<ReturnType<typeof realFleet>> | null = null;
   try {
     dir = tempDir('fleet-contract');
-    mercury = await realMercury(opts);
+    mercury = await realMercury({ ...opts, token: HOST_TOKEN });
     fleet = await realFleet(mercury.url, dir);
     await run(mercury, fleet);
   } finally {
@@ -310,6 +274,11 @@ test('the wire contract: the keys Fleet parses are the keys the host sends', asy
   // Behavioural tests can agree by accident. This one compares shapes directly, so a rename on EITHER
   // side fails here with a message naming both sides -- which is the failure mode the fake could never
   // produce, because the fake was written to match the probe rather than the host.
+  //
+  // This covers the three endpoints Fleet's PROBE reads. The other seven, which fleet/child.ts calls,
+  // are covered by test/apiSchemaVersion.test.ts against test/fixtures/api-shapes.json; together the
+  // two are the whole allowlist, and that test also decides whether a drift needs an
+  // API_SCHEMA_VERSION bump.
   await withStack(async (m) => {
     const health = await (await fetch(`${m.url}/healthz`)).json() as Record<string, unknown>;
     const workers = await (await fetch(`${m.url}/healthz/workers`)).json() as Record<string, unknown>;
@@ -498,7 +467,7 @@ test('a Fleet restart does not double-book: the binding survives in its own data
   let a: Awaited<ReturnType<typeof realFleet>> | null = null;
   try {
     dir = tempDir('fleet-restart-');
-    mercury = await realMercury();
+    mercury = await realMercury({ token: HOST_TOKEN });
     a = await realFleet(mercury.url, dir, 'a');
     assert.equal((await a.registerHost()).status, 201);
     assert.equal((await a.probe()).status, 200);

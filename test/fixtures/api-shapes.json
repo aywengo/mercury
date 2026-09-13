@@ -1,0 +1,143 @@
+{
+  "_readme": [
+    "Recorded response shapes for every Mercury endpoint Fleet reads, keyed by API_SCHEMA_VERSION.",
+    "",
+    "This file is the evidence behind the rule in src/version.ts: `api` moves ONLY when a shape inside",
+    "Fleet's call allowlist (fleet/child.ts) changes in a way an older Fleet would misread. The guard is",
+    "test/apiSchemaVersion.test.ts and it enforces the rule in both directions:",
+    "  * the live host must still answer the shapes recorded under `current` -- rename or retype a field",
+    "    Fleet reads and this fails, telling you to bump API_SCHEMA_VERSION or revert the shape;",
+    "  * API_SCHEMA_VERSION must equal `current`, and every version from 1 to `current` must carry a",
+    "    snapshot that differs from the one before it by a BREAKING change -- so bumping the number",
+    "    without changing a shape Fleet reads also fails.",
+    "",
+    "Additive is not breaking. A field the host ADDS does not need a bump, because an old Fleet ignores",
+    "unknown keys, so endpoints without `exact` levels are checked as a subset: extra live keys pass.",
+    "The three endpoints Fleet's probe parses keep `exact` levels because test/fleetContract.test.ts has",
+    "always pinned their full key sets; adding a key there fails and the fix is to update this file, not",
+    "to bump `api`.",
+    "",
+    "Fields record the RUNTIME JSON type, not the TypeScript type: the wire is what an old Fleet reads.",
+    "`RunStatus` is a union of string literals and records as `string` for exactly that reason.",
+    "Types: string | number | boolean | null | object | array | json | missing. `json` means 'any JSON",
+    "value, but the key is present' (Fleet tests payload with `!== undefined` and never inspects it).",
+    "`|` unions are allowed, e.g. \"string|null\".",
+    "",
+    "Path grammar: `a.b` is a key inside object `a`; `a[]` is the element type of array `a`; `a[].b` is a",
+    "key inside every element of `a`. `exact` lists the object levels whose live key set must match the",
+    "recorded keys exactly: \"\" is the top-level object, \"workers[]\" is each element of `workers`.",
+    "",
+    "",
+    "Editing this file: change the entry for the path the failure names, and nothing else. The failure",
+    "prints the live value it saw. If the change is additive, editing this file is the whole fix and",
+    "`current` stays where it is."
+  ],
+  "current": 1,
+  "versions": {
+    "1": {
+      "endpoints": {
+        "GET /healthz": {
+          "readBy": "fleet/probe.ts (liveness, product identity, hostApi)",
+          "exact": [
+            ""
+          ],
+          "fields": {
+            "ok": "boolean",
+            "ts": "string",
+            "product": "string",
+            "version": "string",
+            "api": "number"
+          }
+        },
+        "GET /healthz/workers": {
+          "readBy": "fleet/probe.ts (capacity: sums activeRuns, reads queueDepth)",
+          "exact": [
+            "",
+            "workers[]"
+          ],
+          "fields": {
+            "workers": "array",
+            "workers[].workerId": "string",
+            "workers[].activeRuns": "number",
+            "workers[].oldestLeaseExpiresAt": "string",
+            "queueDepth": "number"
+          }
+        },
+        "GET /api/agents": {
+          "readBy": "fleet/probe.ts (credential + capability; reads `agents` only)",
+          "exact": [
+            ""
+          ],
+          "fields": {
+            "agents": "array",
+            "agents[]": "string",
+            "defaultAgent": "string",
+            "capabilities": "object"
+          }
+        },
+        "POST /api/runs": {
+          "readBy": "fleet/child.ts createRun -> fleet/dispatch.ts binds result.value.runId",
+          "fields": {
+            "runId": "string",
+            "status": "string"
+          }
+        },
+        "GET /api/runs/:runId": {
+          "readBy": "fleet/child.ts getRun (unwraps the `run` envelope) -> dispatch/interact read status + error",
+          "fields": {
+            "run": "object",
+            "run.id": "string",
+            "run.status": "string",
+            "run.task": "string",
+            "run.createdAt": "string",
+            "run.completedAt": "string|null",
+            "run.error": "string|null"
+          }
+        },
+        "POST /api/runs/:runId/input": {
+          "readBy": "fleet/child.ts submitInput",
+          "fields": {
+            "ok": "boolean"
+          }
+        },
+        "POST /api/runs/:runId/cancel": {
+          "readBy": "fleet/child.ts cancelRun -> fleet/interact.ts reads status",
+          "fields": {
+            "runId": "string",
+            "status": "string"
+          }
+        },
+        "POST /api/runs/:runId/retry": {
+          "readBy": "fleet/child.ts retryRun -> fleet/interact.ts rebinds to result.value.runId",
+          "fields": {
+            "runId": "string",
+            "status": "string",
+            "retryOf": "string|null"
+          }
+        },
+        "GET /api/runs/:runId/events": {
+          "readBy": "fleet/child.ts getEvents -> fleet/events.ts mirrors; nextCursor is the only resume point",
+          "fields": {
+            "events": "array",
+            "events[].id": "string",
+            "events[].runId": "string",
+            "events[].type": "string",
+            "events[].sequence": "number",
+            "events[].timestamp": "string",
+            "events[].payload": "json",
+            "lastSequence": "number",
+            "nextCursor": "number",
+            "hasMore": "boolean"
+          }
+        },
+        "GET /metrics": {
+          "readBy": "fleet/child.ts getMetrics -> fleet/metrics.ts merges the exposition text",
+          "text": {
+            "status": 200,
+            "contentTypePrefix": "text/plain"
+          }
+        }
+      }
+    }
+  }
+}
