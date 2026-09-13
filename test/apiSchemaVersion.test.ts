@@ -404,8 +404,14 @@ test('the breaking-change rule distinguishes breaking from additive', () => {
 
 test('every endpoint in the Fleet allowlist is covered by the fixture', () => {
   // The fixture is only a guard if it covers the whole allowlist. This reads fleet/child.ts as TEXT
-  // -- importing it would break fleet/test/coupling.test.ts, and reading it keeps this honest as the
-  // allowlist grows: add an endpoint to the allowlist without recording its shape and this fails.
+  // -- importing it would break fleet/test/coupling.test.ts -- so the allowlist stays honest as it
+  // grows: add an endpoint without recording its shape and this fails.
+  //
+  // Known limit, stated rather than glossed: the scan matches the template-literal form
+  // `${host.baseUrl}/path` that every call in fleet/child.ts uses today. A URL built another way --
+  // string concatenation, `new URL(path, base)` -- would be invisible to it, and the floor below
+  // catches a wholesale miss but not a partial one. If the call pattern ever changes, this scan has
+  // to change with it; the floor is what makes that a loud failure rather than a quiet one.
   const src = readFileSync(join(import.meta.dirname, '..', 'fleet', 'child.ts'), 'utf8');
   const urls = [...src.matchAll(/\$\{host\.baseUrl\}([^`]*)`[\s\S]{0,400}?\bmethod:\s*'([A-Z]+)'/g)];
   const allowlist = urls.map((m) => {
