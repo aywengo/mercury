@@ -321,9 +321,9 @@ test('the knowledge block reaches RunService over HTTP', async () => {
   });
   try {
     const base = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
-    const post = (body: unknown) => fetch(`${base}/api/runs`, {
+    const post = (extra: Record<string, unknown>) => fetch(`${base}/api/runs`, {
       method: 'POST', headers: { authorization: 'Bearer tok-admin', 'content-type': 'application/json' },
-      body: JSON.stringify({ task: 'fix the build', ...body }),
+      body: JSON.stringify({ task: 'fix the build', ...extra }),
     });
 
     // A malformed block must come back as 400. If the route drops the block, this answers 201 and the

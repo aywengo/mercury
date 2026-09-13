@@ -117,10 +117,11 @@ test('a promoted note reaches a real agent process through the pack', async () =
         }],
       }),
     });
-    const contributedBody = await contributed.json() as { results?: Record<string, string>[]; error?: string };
+    const contributedBody = await contributed.json() as { results: Record<string, string>[]; error?: string };
     assert.equal(contributed.status, 200, `Atlas refused the note: ${JSON.stringify(contributedBody)}`);
-    const noteId = contributedBody.results[0]!.accepted;
-    assert.ok(noteId, `expected an accepted note, saw ${JSON.stringify(contributedBody.results[0])}`);
+    const first = contributedBody.results[0] ?? {};
+    const noteId = first.accepted;
+    assert.ok(noteId, `expected an accepted note, saw ${JSON.stringify(first)}`);
 
     const promoted = await fetch(`${atlas.url}/v1/projects/${PROJECT}/notes/${noteId}/promote`, {
       method: 'POST', headers: { authorization: `Bearer ${ADMIN}`, 'content-type': 'application/json' },
@@ -130,7 +131,7 @@ test('a promoted note reaches a real agent process through the pack', async () =
 
     // --- Host side: the real puller, against the real Atlas. -------------------------------------
     const hostDb = openDatabase(':memory:');
-    const client = new AtlasClient({ url: atlas.url, token: CONTRIBUTOR, project: PROJECT, hostId: 'host-a', caFile: null });
+    const client = new AtlasClient({ url: atlas.url, token: CONTRIBUTOR, project: PROJECT, hostId: 'host-a', caFile: null, adminToken: null });
     const puller = new KnowledgePuller({ db: hostDb, client, project: PROJECT, intervalMs: 60_000, pageSize: 100, log: QUIET });
     const pulled = await puller.pullOnce();
     assert.equal(pulled.failed, false, pulled.lastError ?? '');

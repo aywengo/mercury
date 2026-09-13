@@ -82,8 +82,16 @@ export class ReplicaStore {
     if (notes.length === 0) {
       // Still advance: a page can be empty because everything between the old cursor and nextSeq was
       // a transition this replica does not carry, and re-asking for it every tick would spin.
-      if (nextSeq > result.cursor) this.setCursor(projectId, nextSeq, appliedAt);
-      result.cursor = this.getCursor(projectId) ?? result.cursor;
+      //
+      // Wrapped in tx() even though a single statement is already atomic, so the invariant stated at the
+      // top of this method -- the cursor only ever moves inside a transaction -- has no exception to
+      // remember. A reader should not have to prove that the one branch which breaks the rule is safe.
+      tx(this.db, () => {
+        if (nextSeq > result.cursor) {
+          this.setCursor(projectId, nextSeq, appliedAt);
+          result.cursor = nextSeq;
+        }
+      });
       return result;
     }
     // Sort defensively. The cursor is a single high-water mark, so applying out of order would let a
