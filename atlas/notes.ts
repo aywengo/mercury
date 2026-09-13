@@ -170,9 +170,19 @@ export class NoteStore {
     if (contributions.length > batchLimit) {
       return contributions.map(() => ({ rejected: 'over-batch-limit' }));
     }
+    // One value for the read and the write. The insert below coalesces a null host to 'admin' because
+    // the column is part of a PRIMARY KEY and SQL NULLs are never equal to each other -- storing NULL
+    // would let every admin retry look like a first attempt. The reads were never given the same
+    // treatment, and `contributor = NULL` matches no row, so an admin retry missed its own cached
+    // response, re-evaluated, and then hit the PRIMARY KEY on insert: a 500 that repeats forever, with
+    // the host backing off and resending the same key. Measured before this line existed:
+    //   first call  -> {"accepted":"note_..."}
+    //   retry, same key -> UNIQUE constraint failed: idempotency_keys.contributor, ...key
+    const contributor = hostId ?? 'admin';
+
     if (idempotencyKey) {
       const cached = this.db.prepare('SELECT response_json FROM idempotency_keys WHERE contributor = ? AND key = ?')
-        .get(hostId, idempotencyKey) as { response_json: string } | undefined;
+        .get(contributor, idempotencyKey) as { response_json: string } | undefined;
       if (cached) return JSON.parse(cached.response_json) as ContributionResult[];
     }
 
@@ -181,7 +191,7 @@ export class NoteStore {
       // retry of the same batch could have committed between the read and here.
       if (idempotencyKey) {
         const cached = this.db.prepare('SELECT response_json FROM idempotency_keys WHERE contributor = ? AND key = ?')
-          .get(hostId, idempotencyKey) as { response_json: string } | undefined;
+          .get(contributor, idempotencyKey) as { response_json: string } | undefined;
         if (cached) return JSON.parse(cached.response_json) as ContributionResult[];
       }
       const project = this.getProject(projectId)!;
@@ -189,11 +199,13 @@ export class NoteStore {
       for (const raw of contributions) results.push(this.contributeOne(project, hostId, raw));
 
       if (idempotencyKey) {
-        // Coalesced because the column participates in a UNIQUE constraint, and SQL NULLs are never
-        // equal to each other: storing NULL would let every admin retry look like a first attempt and
-        // re-count corroboration, which is the exact failure the key exists to prevent.
+        // Same `contributor` the two reads above used. It is coalesced because the column participates
+        // in a PRIMARY KEY and SQL NULLs are never equal to each other: storing NULL would let every
+        // admin retry look like a first attempt and re-count corroboration, which is the exact failure
+        // the key exists to prevent. Reading with `hostId` while writing this coalesced value is what
+        // made an admin retry miss its own cache and then violate the key.
         this.db.prepare('INSERT INTO idempotency_keys (contributor, key, response_json, created_at) VALUES (?, ?, ?, ?)')
-          .run(hostId ?? 'admin', idempotencyKey, JSON.stringify(results), new Date().toISOString());
+          .run(contributor, idempotencyKey, JSON.stringify(results), new Date().toISOString());
       }
       return results;
     });
