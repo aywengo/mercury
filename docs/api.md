@@ -40,6 +40,64 @@ the request is HTTPS, when a trusted proxy reports HTTPS, or when
 Dashboard sessions are stored in memory and are lost when the API process
 restarts. They are not shared between multiple API processes.
 
+### POST /api/auth/login
+
+Exchange a configured API token for a session cookie.
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"token": "tok-alice"}'
+```
+
+Required body fields:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `token` | string | A configured API token (`MERCURY_API_TOKENS` or `MERCURY_ADMIN_TOKEN`) |
+
+On success the response sets a `mercury_session` cookie (`HttpOnly; SameSite=Strict;
+Max-Age=604800`) and returns a JSON body. The cookie carries only the session id; all
+session data is stored server-side.
+
+Responses:
+
+| Status | Body | Notes |
+| --- | --- | --- |
+| `200` | `{ ok: true, ownerId, isAdmin }` | Session created; cookie set |
+| `401` | `{ error: "invalid token" }` | Token unknown, empty, or missing — the error does not distinguish these cases intentionally |
+
+### POST /api/auth/logout
+
+Delete the current session and clear the session cookie.
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/auth/logout \
+  -H "Cookie: mercury_session=<sid>"
+```
+
+Responses:
+
+| Status | Body | Notes |
+| --- | --- | --- |
+| `200` | `{ ok: true }` | Session deleted (if it existed) and cookie cleared (`Max-Age=0`). Returns `200` even when there was no session — logout is idempotent |
+
+### GET /api/auth/me
+
+Return the identity of the currently authenticated caller.
+
+```bash
+curl http://127.0.0.1:3000/api/auth/me \
+  -H "Authorization: Bearer tok-alice"
+```
+
+Responses:
+
+| Status | Body | Notes |
+| --- | --- | --- |
+| `200` | `{ ownerId, isAdmin }` | Caller is authenticated |
+| `401` | `{ error: "authentication required" }` | No valid session cookie or Bearer token |
+
 ## Run endpoints
 
 | Method | Path | Description |
