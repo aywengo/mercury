@@ -413,11 +413,18 @@ export class NoteStore {
       const a = this.db.prepare('SELECT note_id FROM notes WHERE note_id = ? AND project_id = ?').get(noteId, projectId);
       const b = this.db.prepare('SELECT note_id FROM notes WHERE note_id = ? AND project_id = ?').get(contradicts, projectId);
       if (!a || !b || noteId === contradicts) return false;
-      const seq = this.nextSeq(projectId);
       const now = new Date().toISOString();
       // Both directions, so either note's reader sees the pair. A one-way edge would mean the note
       // that was contested keeps being served as though nothing were known against it.
+      //
+      // Each bump takes its OWN seq. Sharing one value between the two notes would put both at seq N,
+      // and a replica paging with a limit below the batch size would read the first, set its cursor to
+      // N, then ask for `seq > N` and never see the second -- the note would be dropped from that
+      // replica forever, silently. The gapless-cursor guarantee of section 11.2 is about distinct
+      // values, not merely increasing ones, and this is the path that was easy to get wrong because
+      // both notes really are part of one event.
       for (const [x, y] of [[noteId, contradicts], [contradicts, noteId]] as const) {
+        const seq = this.nextSeq(projectId);
         this.db.prepare(`
           INSERT INTO contests (note_id, contradicts_note_id, actor, seq, at) VALUES (?, ?, ?, ?, ?)
           ON CONFLICT(note_id, contradicts_note_id) DO NOTHING`).run(x, y, actor, seq, now);
@@ -430,7 +437,13 @@ export class NoteStore {
   private bumpForContest(projectId: string, noteId: string, seq: number, now: string): void {
     const row = this.db.prepare('SELECT * FROM notes WHERE note_id = ?').get(noteId) as NoteRow | undefined;
     if (!row) return;
-    const note = this.getNote(projectId, noteId)!.note;
+    // The stored revision, read raw rather than through getNote(). getNote() is a READ projection and
+    // redacts (section 11.5); persisting its output would fold a read-time view into the record and make
+    // a secret declared after the note was written unrecoverable even from the audit trail.
+    const rev = this.db.prepare('SELECT note_json FROM note_revisions WHERE note_id = ? AND revision = ?')
+      .get(noteId, row.current_revision) as { note_json: string } | undefined;
+    if (!rev) return;
+    const note = JSON.parse(rev.note_json) as Note;
     const revision = row.current_revision + 1;
     this.db.prepare('UPDATE notes SET current_revision = ?, seq = ?, updated_at = ? WHERE note_id = ?')
       .run(revision, seq, now, noteId);
@@ -484,7 +497,9 @@ export class NoteStore {
     if (!note) return null;
     const revisions = (this.db.prepare('SELECT revision, note_json, created_at FROM note_revisions WHERE note_id = ? ORDER BY revision ASC')
       .all(noteId) as unknown as { revision: number; note_json: string; created_at: string }[])
-      .map((r) => ({ revision: r.revision, note: JSON.parse(r.note_json) as Note, createdAt: r.created_at }));
+      // Redacted too. A caller that asks for one note gets its whole history, and a read-time pass that
+      // covered only the current revision would leak the secret through an older one.
+      .map((r) => ({ revision: r.revision, note: this.project(JSON.parse(r.note_json) as Note), createdAt: r.created_at }));
     const sources = (this.db.prepare('SELECT * FROM note_sources WHERE note_id = ? ORDER BY recorded_at ASC').all(noteId) as unknown as SourceRow[])
       .map((s) => ({ hostId: s.host_id, runId: s.run_id || null, agent: s.agent, harnessVersion: s.harness_version, source: s.source, recordedAt: s.recorded_at }));
     return { note, revisions, sources };
@@ -502,7 +517,30 @@ export class NoteStore {
       .get(row.note_id, row.current_revision) as { note_json: string } | undefined;
     if (!rev) return null;
     const note = JSON.parse(rev.note_json) as Note;
-    return { ...note, corroboration: this.corroboration(row.note_id), contested: this.isContested(row.note_id) };
+    return this.project({ ...note, corroboration: this.corroboration(row.note_id), contested: this.isContested(row.note_id) });
+  }
+
+  /**
+   * The read projection: redact, then hand the note to a caller (section 11.5).
+   *
+   * Every read path in this file goes through here -- the feed, bootstrap, and getNote -- so this is the
+   * one place a read can be made safe rather than three places someone has to remember.
+   *
+   * The write path already rejected a note whose text still matched a declared secret, so why redact
+   * again? Because `ATLAS_SECRETS` can GROW. A token that was not declared when the note landed is just
+   * text in the database until it is declared, and a note outlives every workspace that produced it and
+   * is replicated to every host. The write-time pass cannot reach those copies; only a read-time pass
+   * can, which is what makes "add the secret to ATLAS_SECRETS" an action that takes effect immediately
+   * rather than a backfill job that has to run everywhere.
+   *
+   * Only `claim` and `detail` are scanned. They are the two free-text fields (section 3); everything
+   * else comes from a closed vocabulary or a bounded grammar, and scanning structured fields would
+   * spend the read budget on values that cannot contain prose.
+   */
+  private project(note: Note): Note {
+    const claim = this.redactor.redact(note.claim);
+    const detail = note.detail === undefined ? undefined : this.redactor.redact(note.detail);
+    return claim === note.claim && detail === note.detail ? note : { ...note, claim, detail };
   }
 
   private isContested(noteId: string): boolean {

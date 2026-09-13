@@ -50,6 +50,27 @@ export class HttpError extends Error {
   }
 }
 
+/**
+ * Decode one path segment, refusing a malformed one instead of throwing.
+ *
+ * `decodeURIComponent` throws `URIError` on input like `%zz` or a truncated UTF-8 escape. Called from
+ * route matching, that throw happens BEFORE authentication and before the request handler's try/catch,
+ * so it escapes to the process: the socket is never answered and the connection hangs until the client
+ * gives up. An unauthenticated caller could hold a listener's sockets open at will with a single
+ * character in the URL.
+ *
+ * A malformed escape is the client's mistake, so it is a 400 rather than a 404. Returning "no such
+ * route" would be a lie about a route that does exist, and would hide a broken client behind a
+ * not-found.
+ */
+export function decodeSegment(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    throw new HttpError(400, 'the request path contains a malformed percent-escape');
+  }
+}
+
 export function matchRoute(routes: Route[], method: string, path: string): { route: Route; params: string[] } | null {
   const parts = path.split('/').filter(Boolean);
   for (const route of routes) {
@@ -59,7 +80,7 @@ export function matchRoute(routes: Route[], method: string, path: string): { rou
     let ok = true;
     for (let i = 0; i < route.pattern.length; i++) {
       const p = route.pattern[i]!;
-      if (p.startsWith(':')) params.push(decodeURIComponent(parts[i]!));
+      if (p.startsWith(':')) params.push(decodeSegment(parts[i]!));
       else if (p !== parts[i]) { ok = false; break; }
     }
     if (ok) return { route, params };

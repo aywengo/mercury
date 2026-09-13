@@ -312,8 +312,26 @@ export async function startAtlas(services: AtlasServices): Promise<AtlasServer> 
   const { config, log } = services;
 
   const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-    const matched = matchRoute(routes, req.method ?? 'GET', url.pathname);
+    let url: URL;
+    try {
+      // Both of these can throw on input a client controls, and they run before authentication, so
+      // anything outside this try is an unauthenticated way to make a request that is never answered.
+      // `new URL` rejects a malformed authority; `matchRoute` decodes path segments.
+      url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    } catch {
+      sendJson(res, 400, { error: 'the request target could not be parsed' });
+      return;
+    }
+    let matched: { route: Route; params: string[] } | null;
+    try {
+      matched = matchRoute(routes, req.method ?? 'GET', url.pathname);
+    } catch (err) {
+      if (err instanceof HttpError) {
+        sendJson(res, err.status, { error: err.message, code: err.code });
+        return;
+      }
+      throw err;
+    }
     if (!matched) {
       sendJson(res, 404, { error: 'no such route' });
       return;

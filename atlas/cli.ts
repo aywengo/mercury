@@ -60,17 +60,25 @@ async function main(): Promise<void> {
   }
 
   const config = loadAtlasConfig();
-  const redactor = createRedactor(config.secrets);
-  const log = createLogger(redactor, config.logLevel);
+  // Provisional, so the catch below always has something to write with: a failure in openDatabase or
+  // seeding happens before the full secret set is known, and an error that cannot be reported is worse
+  // than one reported with a weaker redactor. It is replaced below once every value is in hand.
+  let log = createLogger(createRedactor(config.secrets), config.logLevel);
   const db = openDatabase(config.dbPath);
 
   try {
     // Contributor tokens are seeded on EVERY start, not only on migrate, so rotating a token is an
-    // edit to a 0600 file plus a restart rather than a database change. The plaintext values are added
-    // to the redactor for the same reason the host seeds its redactor with forwarded credentials: a
-    // pattern pass cannot recognise a bare token it has no label for.
+    // edit to a 0600 file plus a restart rather than a database change.
     const seeded = seedContributors(db, config.contributorsFile);
     const auth = new AuthIndex(db, config);
+
+    // Built AFTER seeding, and from every secret this process holds, because the redactor's literal
+    // pass can only match values it was given. A bare token has no shape a pattern pass can recognise,
+    // so a contributor token that reaches a log line or an error message is caught only if its exact
+    // value is in here. Building the redactor first -- which is how this file originally read, under a
+    // comment claiming the opposite -- left the seeded values out and made that comment false.
+    const redactor = createRedactor([...config.secrets, ...seeded, ...auth.secrets()]);
+    log = createLogger(redactor, config.logLevel);
     const metrics = new AtlasMetrics();
     const store = new NoteStore(db, {
       maxClaimBytes: config.maxClaimBytes,

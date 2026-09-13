@@ -196,3 +196,40 @@ test('an unknown route is 404 and an unsupported method is 405 or 404, never 500
   const wrongMethod = await call('DELETE', '/healthz', null);
   assert.ok(wrongMethod.status === 404 || wrongMethod.status === 405, `got ${wrongMethod.status}`);
 });
+
+test('a malformed percent-escape is answered with 400, not left hanging', async () => {
+  // Route matching decodes path segments, and it runs BEFORE authentication. When the decoder threw,
+  // the throw escaped the handler's try/catch, no response was ever written, and the connection hung
+  // until the client timed out -- an unauthenticated caller could hold every socket on the listener
+  // open with one bad character. So the assertion is not only about the status code: a response must
+  // arrive at all.
+  for (const path of ['/v1/projects/%E0%A4%A/notes', '/v1/projects/x/notes/%zz', '/v1/projects/%/notes']) {
+    const res = await fetch(server.url + path, { signal: AbortSignal.timeout(5_000) });
+    assert.equal(res.status, 400, `${path} must be a client error`);
+    await res.text();
+  }
+  // The listener still serves the next request normally: the bad input must not take anything down.
+  assert.equal((await call('GET', '/healthz', null)).status, 200);
+});
+
+test('a request target that cannot be parsed is answered, not dropped', async () => {
+  // `new URL(req.url, base)` throws on some targets Node will hand over. Written raw on the socket so
+  // fetch cannot normalise the bad target before it gets here.
+  const net = await import('node:net');
+  const reply = await new Promise<string>((done, fail) => {
+    const target = '/v1/projects/%%%/notes HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ' + CONTRIBUTOR + '\r\n\r\n';
+    const port = Number(new URL(server.url).port);
+    const sock = net.connect(port, '127.0.0.1', () => { sock.write('GET ' + target); });
+    let buf = '';
+    const timer = setTimeout(() => { sock.destroy(); fail(new Error('no response to an unparseable request target')); }, 5_000);
+    sock.on('data', (c) => {
+      buf += c.toString();
+      // Answer as soon as the status line is back. The server keeps the connection open, so waiting for
+      // 'end' would wait for a close that a healthy keep-alive connection deliberately does not send.
+      if (buf.includes('\r\n')) { clearTimeout(timer); done(buf); }
+    });
+    sock.on('end', () => { clearTimeout(timer); done(buf); });
+    sock.on('error', (e) => { clearTimeout(timer); fail(e); });
+  });
+  assert.match(reply, /^HTTP\/1\.1 (400|404)/, 'the service must answer a bad request target');
+});

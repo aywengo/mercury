@@ -49,23 +49,35 @@ function findImportSpecifiers(source: string): string[] {
   return specifiers;
 }
 
-/** Walk a directory tree and yield all TypeScript source files. */
+/**
+ * Walk a directory tree and yield all TypeScript source files.
+ *
+ * Test directories are NOT skipped. The rule is that Atlas imports nothing from `src/` or `fleet/`, and
+ * a test file that imported the host would break the isolation just as durably as production code -- it
+ * would make `atlas/` unrunnable on its own and would let the two identity implementations drift back
+ * into a shared import. Skipping `test/` was a hole wide enough to drive the whole rule through, and it
+ * stayed invisible because the scan still reported zero violations.
+ */
 function* walkDir(dir: string): Generator<string> {
+  let entries;
   try {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        // Skip node_modules, dist, test
-        if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === '.git' || entry.name === 'test' || entry.name === '.next') {
-          continue;
-        }
-        yield* walkDir(path);
-      } else if (entry.isFile() && (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx'))) {
-        yield path;
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    // An unreadable directory is not evidence of compliance. Skipping it would let the boundary report
+    // "no violations" while a directory that cannot be opened contains any import at all, so this stops
+    // the run instead of returning quietly.
+    throw new Error(`coupling: cannot read directory ${dir}: ${(err as Error).message}`);
+  }
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === '.git' || entry.name === '.next') {
+        continue;
       }
+      yield* walkDir(path);
+    } else if (entry.isFile() && (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx'))) {
+      yield path;
     }
-  } catch {
-    // silently skip directories we can't read
   }
 }
 
