@@ -516,6 +516,64 @@ test('docs/status.md describes skill materialization the way the worker actually
   }
 });
 
+test('docs/status.md states version-resolved capability advertisement as shipped', () => {
+  // Issue #531. The section used to say: "What remains unbuilt is the dynamic half: advertising
+  // capabilities that depend on which harness version is installed, and gate outcomes." The first half
+  // of that is false and shipped. `AgentCapabilityRegistry.start()` probes every adapter that can
+  // answer, `snapshot()` publishes the detected version per agent, and `goalCapability()` resolves each
+  // goal field against that version -- so the sentence describes work that exists, in the file
+  // docs/README.md presents as authoritative for current limitations. A reader implementing from it
+  // would rebuild version resolution, or read `capabilities.<agent>.version` as a placeholder instead
+  // of a value to route on.
+  //
+  // Bounded to the one section on purpose. An earlier doc guard in this file scanned every sentence
+  // mentioning its subject and was unbreakable, because an unrelated true sentence matched on every
+  // run. Only this section is read.
+  const doc = read('docs/status.md');
+  const start = doc.indexOf('### Agent capability differences');
+  assert.ok(start >= 0, 'docs/status.md lost its "Agent capability differences" section');
+  const next = doc.indexOf('\n### ', start + 10);
+  const section = doc.slice(start, next > start ? next : undefined);
+  assert.ok(section.length > 300, 'could not bound the capability section');
+
+  // Negative half: the overstatement in any wording, not one spelling.
+  const forbidden = [
+    /advertising capabilities that depend on which harness version/i,
+    /dynamic (half|capabilit\w+)[^.]{0,140}\b(unbuilt|remains|not (yet )?(built|implemented|shipped))\b/i,
+    /\b(version[- ]resolved|version[- ]dependent|version[- ]aware)\b[^.]{0,140}\b(unbuilt|remains|not (yet )?(built|implemented|shipped))\b/i,
+    /\b(unbuilt|remains unbuilt|not (yet )?(built|implemented|shipped))\b[^.]{0,140}\bharness version\b/i,
+  ];
+  for (const re of forbidden) {
+    assert.ok(!re.test(section),
+      `docs/status.md calls version-resolved capability advertisement unbuilt (matched ${re}). It ships: `
+      + `/api/agents resolves every advertised capability against the detected harness version. Say what `
+      + `genuinely remains -- gate outcomes and enforcement -- instead.`);
+  }
+
+  // Positive half, part one: the section must still SAY the fact. Deleting the paragraph would satisfy
+  // the negative half by silence, which is how a doc guard quietly stops guarding anything.
+  assert.match(section, /detected harness version|detected version/,
+    'docs/status.md must state that /api/agents reports the detected harness version');
+  assert.match(section, /version-unknown/,
+    'docs/status.md must name the fail-closed reason, so a reader knows unknown is not assumed yes');
+  assert.match(section, /\bgates\b/,
+    'docs/status.md must name gate outcomes as what genuinely remains unbuilt');
+
+  // Positive half, part two: the CODE is the source of truth. If version detection stops being wired
+  // into production, the doc has to fail too rather than quietly become true again.
+  const caps = read('src/adapters/capabilities.ts');
+  assert.match(caps, /version:\s*goals\.detectedVersion/,
+    'the capability snapshot no longer publishes the detected version, so docs/status.md now overstates '
+    + '/api/agents -- reconcile the doc with the code');
+  assert.match(caps, /for \(const field of GOAL_CAPABILITY_FIELDS\)/,
+    'goal capabilities are no longer resolved per field against the detected version; reconcile '
+    + 'docs/status.md');
+  const cli = read('src/cli.ts');
+  assert.match(cli, /agentCapabilities\.start\(\)/,
+    'harness version probes are no longer started in the composition root, so /api/agents would report '
+    + 'no version for any agent and docs/status.md would be wrong');
+});
+
 test('docs/distribution.md agrees with what the release workflow actually produces', () => {
   // Distribution has four channels and they land at different times, so the doc is the kind that goes
   // stale by accident: it either advertises a channel CI does not build, or keeps disclaiming one that
