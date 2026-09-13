@@ -83,7 +83,7 @@ async function startAtlas(dir: string): Promise<Atlas> {
 }
 
 /** A declarative agent that reads the pack and prints what it found. */
-function readerRegistry(dir: string) {
+function readerRegistry() {
   const reg = new LocalAgentRegistry(tempDir('mercury-bridge-agents-'));
   reg.register({
     id: 'pack-reader', description: 'reads the pack', command: process.execPath, args: [READER],
@@ -96,7 +96,7 @@ function readerRegistry(dir: string) {
 }
 
 /** A declarative agent that writes what it learned into the tier-1 file, then exits. */
-function writerRegistry(dir: string) {
+function writerRegistry() {
   const reg = new LocalAgentRegistry(tempDir('mercury-bridge-agents-'));
   reg.register({
     id: 'note-writer', description: 'writes a note', command: process.execPath,
@@ -128,7 +128,7 @@ test('a Run on host A teaches a Run on host B, through Atlas', async () => {
       knowledgeProject: PROJECT,
       knowledgeHarvest: { project: PROJECT, hostId: 'host-a', bounds: { ...DEFAULT_BOUNDS } },
       knowledgeOutbox: outboxA,
-      adapters: writerRegistry(dir).all(),
+      adapters: writerRegistry().all(),
     });
 
     let lessonNoteId = '';
@@ -199,7 +199,7 @@ test('a Run on host A teaches a Run on host B, through Atlas', async () => {
     const envB = makeEnv({
       workspaceMode: 'git-worktree', repoDir: repoB,
       knowledge: selection, knowledgeProject: PROJECT,
-      adapters: readerRegistry(dir).all(),
+      adapters: readerRegistry().all(),
     });
     try {
       const runB = envB.runService.create({

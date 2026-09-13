@@ -11,12 +11,37 @@
  * stored secret with the middle removed is still a stored secret.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import type { Redactor } from '../domain/redact.ts';
 import { NOTES_JSONL } from './materialize.ts';
 import { validateDraft, type RejectReason } from './validation.ts';
 import type { KnowledgeBounds } from './validation.ts';
 import type { NoteContribution, NoteProvenance } from './types.ts';
+
+/**
+ * The largest file that could possibly contain a valid set of notes.
+ *
+ * Derived from the bounds rather than chosen, because the bounds already say what a legal note is:
+ * at most `maxNotesPerRun` of them, each carrying at most `maxClaimBytes` of claim, `maxDetailBytes`
+ * of detail and `maxEvidence` evidence refs. Anything bigger than the sum of those cannot contain a
+ * single note that would survive validation, so reading it would be work performed purely to produce
+ * rejections.
+ *
+ * The reason to enforce it before reading is that the harvest runs on the worker, and the worker is
+ * one loop serving every Run on the host. `readFileSync` of a large file is synchronous and holds the
+ * event loop for the whole read, and the wall-clock bound below cannot fire during it because the
+ * bound is checked between lines. A workspace quota limits the disk; it does not limit how long the
+ * worker is blocked, and those are different failures.
+ */
+export function maxHarvestBytes(bounds: KnowledgeBounds): number {
+  const perNote = bounds.maxClaimBytes + bounds.maxDetailBytes
+    + bounds.maxEvidence * MAX_EVIDENCE_BYTES + NOTE_JSON_OVERHEAD_BYTES;
+  return bounds.maxNotesPerRun * perNote;
+}
+
+/** Generous per-ref and per-note JSON allowance: keys, quoting, and the evidence array. */
+const MAX_EVIDENCE_BYTES = 512;
+const NOTE_JSON_OVERHEAD_BYTES = 1024;
 
 export interface HarvestInput {
   workspacePath: string;
@@ -60,7 +85,21 @@ export function harvestNotes(input: HarvestInput): HarvestResult {
 
   let raw: string;
   try {
-    raw = readFileSync(`${input.workspacePath}/${NOTES_JSONL}`, 'utf8');
+    const path = `${input.workspacePath}/${NOTES_JSONL}`;
+    const ceiling = maxHarvestBytes(input.bounds);
+    const size = statSync(path).size;
+    if (size > ceiling) {
+      // Refuse the whole file without reading it. Every line in it is unvalidatable by construction,
+      // and the alternative is allocating the file in memory on the worker's event loop to discover
+      // that fact one rejection at a time.
+      result.rejected.push({
+        line: 0,
+        reason: 'over-limit',
+        detail: `file is ${size} bytes, above the ${ceiling} byte ceiling implied by the bounds`,
+      });
+      return result;
+    }
+    raw = readFileSync(path, 'utf8');
   } catch {
     // Absent is normal: most Runs learn nothing durable, and a Run that wrote nothing must not look
     // like a Run that broke something.

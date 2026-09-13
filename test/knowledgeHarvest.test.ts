@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { harvestNotes } from '../src/knowledge/harvest.ts';
+import { harvestNotes, maxHarvestBytes } from '../src/knowledge/harvest.ts';
 import { DEFAULT_BOUNDS, type KnowledgeBounds } from '../src/knowledge/validation.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import { tempDir } from './helpers.ts';
@@ -139,4 +139,34 @@ test('a decision with no evidence is refused for the missing evidence, not gener
   assert.equal(r.accepted.length, 0);
   assert.equal(r.rejected[0]!.reason, 'missing-evidence');
   assert.equal(r.rejected[0]!.detail, 'decision', 'the author needs to know which kind demanded evidence');
+});
+
+test('a file larger than the bounds can justify is refused without being read', () => {
+  // The first line is a perfectly good note, and it is refused anyway. That is the point: no set of
+  // notes legal under these bounds fits in this many bytes, so reading the file could only ever
+  // produce rejections -- and the read itself is synchronous work on the worker's event loop, which is
+  // the one thing the wall-clock bound cannot interrupt because that bound is checked between lines.
+  const ceiling = maxHarvestBytes(BOUNDS);
+  const r = harvest(`${GOOD}\n${'x'.repeat(ceiling)}\n`);
+  assert.equal(r.accepted.length, 0, 'a valid line inside an impossible file is still refused');
+  assert.equal(r.rejected.length, 1, 'one rejection for the file, not one per line');
+  assert.equal(r.rejected[0]!.reason, 'over-limit');
+  assert.equal(r.rejected[0]!.line, 0, 'the rejection is about the file, so it names no line');
+  assert.match(r.rejected[0]!.detail ?? '', /ceiling/, 'and says what the limit was');
+});
+
+test('the ceiling is derived from the bounds, not fixed', () => {
+  // Tightening the bounds has to shrink what the harvester is willing to read, or the ceiling is a
+  // second, unrelated limit that an operator cannot reason about from the variables they set.
+  const tight: KnowledgeBounds = { ...BOUNDS, maxNotesPerRun: 1, maxClaimBytes: 64, maxDetailBytes: 64, maxEvidence: 1 };
+  assert.ok(maxHarvestBytes(tight) < maxHarvestBytes(BOUNDS));
+  const r = harvest(`${GOOD}\n${'y'.repeat(maxHarvestBytes(tight))}\n`, { bounds: tight });
+  assert.equal(r.accepted.length, 0);
+  assert.equal(r.rejected[0]!.reason, 'over-limit');
+});
+
+test('a file the bounds can justify is read normally', () => {
+  const r = harvest(`${GOOD}\n`);
+  assert.equal(r.accepted.length, 1, 'the guard must not become a tax on ordinary harvests');
+  assert.equal(r.rejected.length, 0);
 });
