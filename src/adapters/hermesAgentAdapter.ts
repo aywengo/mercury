@@ -20,9 +20,9 @@
 // is deferred per the design.
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENTS_MD_FILE, NOTES_FILE } from '../knowledge/materialize.ts';
+import { AGENTS_MD_FILE, NOTES_FILE, containedPath } from '../knowledge/materialize.ts';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
@@ -90,6 +90,21 @@ const DONE: AgentEvent = { type: '__done__', payload: {} };
 const DEFAULT_DRAIN_GRACE_MS = 5000;
 const SESSION_ID_RE = /session_id:\s*(\S+)/;
 
+/**
+ * True when *anything* occupies the path, including a dangling symlink.
+ *
+ * `existsSync` follows links and reports false for a symlink whose target is missing, which is exactly the
+ * case where writing would create the target somewhere the workspace does not own.
+ */
+function lstatExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export class HermesAgentAdapter implements AgentAdapter {
   /**
    * Hermes has the richer goal model of any backend here -- GoalContract, deterministic
@@ -148,6 +163,7 @@ export class HermesAgentAdapter implements AgentAdapter {
     return sandbox.buildCommand(runWithWs, this.opts.cmd ?? 'hermes', argv);
   }
 
+
   async start(context: RunContext): Promise<AgentHandle> {
     // Write AGENTS.md knowledge channel when none is tracked (docs/knowledge-base.md §9.3).
     //
@@ -163,8 +179,23 @@ export class HermesAgentAdapter implements AgentAdapter {
     // When a tracked AGENTS.md is present, the pack still reaches the Run through the neutral files
     // (.mercury/knowledge/NOTES.md and pack.json) that materializeKnowledge() already wrote.
     if (context.knowledge) {
-      const agentsMdPath = join(context.workspace.path, AGENTS_MD_FILE);
-      if (!existsSync(agentsMdPath)) {
+      // lstat, not exists: a symlink whose target does not exist reports as absent to existsSync, and
+      // writing to it then follows the link. A repository that tracks `AGENTS.md` as a symlink pointing
+      // outside the workspace would get Mercury's pack written to that target -- the same escape
+      // materializeKnowledge already guards with containedPath, and reachable here by a different route.
+      // Anything already at the path is left alone, symlink or not: §9.4 forbids modifying tracked files.
+      // Order matters. lstat first, so a symlink is treated as "something is already here" and left
+      // alone -- which is both what §9.4 asks for and what avoids the escape. Resolving first would
+      // throw instead, and a repository that merely tracks a symlinked AGENTS.md would fail every Run
+      // in it: correct about safety, wrong about what to do with a tracked file.
+      if (!lstatExists(join(context.workspace.path, AGENTS_MD_FILE))) {
+        // Resolved through the same containment guard the neutral files use. For this path it is
+        // defence in depth rather than the load-bearing check: AGENTS.md sits at the workspace root, so
+        // the only component is the file itself and the lstat above already covers it. It is kept so the
+        // write goes through the same guard as every other workspace write, and so moving this file
+        // deeper later cannot quietly drop the check. No test covers this line specifically, because
+        // there is no reachable input at this path where it changes the outcome.
+        const agentsMdPath = containedPath(context.workspace.path, AGENTS_MD_FILE);
         const notesPath = join(context.workspace.path, NOTES_FILE);
         if (existsSync(notesPath)) {
           writeFileSync(agentsMdPath, readFileSync(notesPath, 'utf8'));

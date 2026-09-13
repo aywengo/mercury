@@ -39,7 +39,7 @@ import type { EvidenceRef, Note } from './types.ts';
  * Throwing is deliberate and it fails the Run. The alternative is writing the pack wherever the
  * repository pointed, which is not a degraded Run but a host compromise dressed up as a successful one.
  */
-function containedPath(workspacePath: string, rel: string): string {
+export function containedPath(workspacePath: string, rel: string): string {
   try {
     return resolveContained(workspacePath, rel);
   } catch (err) {

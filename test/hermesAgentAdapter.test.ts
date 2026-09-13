@@ -499,3 +499,43 @@ test('the argv HermesAgentAdapter emits today is accepted by the faithful mock',
   const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
   assert.ok(!argv.includes('-s'), `argv grew a -s again: ${argv.join(' ')}`);
 });
+
+/**
+ * A dangling symlink is the case `existsSync` gets wrong.
+ *
+ * `existsSync` follows the link, so a symlink whose target does not exist yet reports as ABSENT. The
+ * tracked-file guard therefore lets the write proceed, and the write follows the link -- creating a file
+ * wherever the repository pointed. A repository only has to commit `AGENTS.md -> ../../outside` to get
+ * Mercury to write its pack outside the workspace, which is the same escape materializeKnowledge guards
+ * against for the neutral files, reached by a different route.
+ *
+ * The guard is therefore lstat-based (anything at the path is left alone, symlink or not) and the write
+ * target goes through containedPath(), which refuses a symlinked component outright.
+ */
+test('knowledge channel: AGENTS.md as a dangling symlink is not written through', async () => {
+  const { context, workspacePath } = makeContext({ knowledge: true });
+  const notesDir = join(workspacePath, '.mercury', 'knowledge');
+  const { mkdirSync, symlinkSync, lstatSync, rmSync } = await import('node:fs');
+  mkdirSync(notesDir, { recursive: true });
+  writeFileSync(join(workspacePath, NOTES_FILE), '# Project knowledge\npack testhash123 -- 1 note\n');
+
+  // The target lives OUTSIDE the workspace and does not exist yet, so existsSync(AGENTS.md) is false.
+  const outsideDir = tempDir('hermes-symlink-target-');
+  const outsideTarget = join(outsideDir, 'ESCAPED.md');
+  symlinkSync(outsideTarget, join(workspacePath, 'AGENTS.md'));
+  assert.equal(existsSync(join(workspacePath, 'AGENTS.md')), false,
+    'precondition: existsSync must report a dangling symlink as absent, which is the trap');
+
+  try {
+    const a = adapter();
+    const handle = await a.start(context);
+    await collectAll(handle);
+
+    assert.equal(existsSync(outsideTarget), false,
+      'the pack was written THROUGH the symlink, outside the workspace');
+    assert.ok(lstatSync(join(workspacePath, 'AGENTS.md')).isSymbolicLink(),
+      'the symlink itself must be left untouched');
+  } finally {
+    rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
