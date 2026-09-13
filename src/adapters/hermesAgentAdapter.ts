@@ -20,6 +20,9 @@
 // is deferred per the design.
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { AGENTS_MD_FILE, NOTES_FILE, containedPath } from '../knowledge/materialize.ts';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
@@ -87,6 +90,21 @@ const DONE: AgentEvent = { type: '__done__', payload: {} };
 const DEFAULT_DRAIN_GRACE_MS = 5000;
 const SESSION_ID_RE = /session_id:\s*(\S+)/;
 
+/**
+ * True when *anything* occupies the path, including a dangling symlink.
+ *
+ * `existsSync` follows links and reports false for a symlink whose target is missing, which is exactly the
+ * case where writing would create the target somewhere the workspace does not own.
+ */
+function lstatExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export class HermesAgentAdapter implements AgentAdapter {
   /**
    * Hermes has the richer goal model of any backend here -- GoalContract, deterministic
@@ -145,7 +163,45 @@ export class HermesAgentAdapter implements AgentAdapter {
     return sandbox.buildCommand(runWithWs, this.opts.cmd ?? 'hermes', argv);
   }
 
+
   async start(context: RunContext): Promise<AgentHandle> {
+    // Write AGENTS.md knowledge channel when none is tracked (docs/knowledge-base.md §9.3).
+    //
+    // Hermes reads AGENTS.md from the working directory unprompted (measured, Hermes v0.21.2, #541).
+    // It does NOT read .mercury/knowledge/NOTES.md. So AGENTS.md is the only channel that reaches
+    // Hermes without a protocol change.
+    //
+    // The conditional is §9.4: Mercury must never modify a tracked file, and the workspace is a
+    // fresh worktree per Run, so the only AGENTS.md that can exist here before start() is one the
+    // repository tracks. existsSync is the right check -- the same one materializeKnowledge() uses
+    // for the SKILL.md channel (see src/knowledge/materialize.ts). No new git query.
+    //
+    // When a tracked AGENTS.md is present, the pack still reaches the Run through the neutral files
+    // (.mercury/knowledge/NOTES.md and pack.json) that materializeKnowledge() already wrote.
+    if (context.knowledge) {
+      // lstat, not exists: a symlink whose target does not exist reports as absent to existsSync, and
+      // writing to it then follows the link. A repository that tracks `AGENTS.md` as a symlink pointing
+      // outside the workspace would get Mercury's pack written to that target -- the same escape
+      // materializeKnowledge already guards with containedPath, and reachable here by a different route.
+      // Anything already at the path is left alone, symlink or not: §9.4 forbids modifying tracked files.
+      // Order matters. lstat first, so a symlink is treated as "something is already here" and left
+      // alone -- which is both what §9.4 asks for and what avoids the escape. Resolving first would
+      // throw instead, and a repository that merely tracks a symlinked AGENTS.md would fail every Run
+      // in it: correct about safety, wrong about what to do with a tracked file.
+      if (!lstatExists(join(context.workspace.path, AGENTS_MD_FILE))) {
+        // Resolved through the same containment guard the neutral files use. The lstat above handles the
+        // case a repository controls -- a symlink AT AGENTS.md, including a dangling one. This line covers
+        // the case it cannot: lstat follows a symlinked workspace ROOT, so if the root itself is a link the
+        // check above sees nothing wrong and this is the only thing that stops the write. No test covers it,
+        // because the workspace root is chosen by the workspace manager rather than by a repository.
+        const agentsMdPath = containedPath(context.workspace.path, AGENTS_MD_FILE);
+        const notesPath = join(context.workspace.path, NOTES_FILE);
+        if (existsSync(notesPath)) {
+          writeFileSync(agentsMdPath, readFileSync(notesPath, 'utf8'));
+        }
+      }
+    }
+
     const runId = context.run.id;
     const session: Session = {
       runId,

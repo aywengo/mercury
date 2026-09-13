@@ -5,10 +5,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HermesAgentAdapter } from '../src/adapters/hermesAgentAdapter.ts';
+import { NOTES_FILE } from '../src/knowledge/materialize.ts';
 import type { AgentExit, Run, RunContext, ResolvedSkill } from '../src/domain/types.ts';
 import { tempDir, tempFile } from './helpers.ts';
 
@@ -44,7 +45,7 @@ function makeRun(overrides: Partial<Run> = {}): Run {
   };
 }
 
-function makeContext(opts: { run?: Run; skills?: ResolvedSkill[] } = {}): {
+function makeContext(opts: { run?: Run; skills?: ResolvedSkill[]; knowledge?: boolean } = {}): {
   context: RunContext;
   workspacePath: string;
 } {
@@ -56,6 +57,7 @@ function makeContext(opts: { run?: Run; skills?: ResolvedSkill[] } = {}): {
     workspace: { path: workspacePath, branch: 'agent/' + run.id, baseCommit: 'abc123', mode: 'copy' },
     skills: opts.skills ?? [],
     constraints: run.constraints,
+    ...(opts.knowledge ? { knowledge: { packHash: 'testhash123', path: NOTES_FILE, count: 1 } } : {}),
   };
   return { context, workspacePath };
 }
@@ -386,6 +388,86 @@ test('the mock still accepts a name that IS in its installed store', async () =>
   assert.equal(colliding.code, 0, 'a configured store must be honoured');
 });
 
+// --- knowledge channel: AGENTS.md (docs/knowledge-base.md §9.3, issue #541) ---
+
+/**
+ * Hermes reads AGENTS.md from its working directory unprompted (measured, v0.21.2, #541).
+ * When knowledge is present and no AGENTS.md is tracked, the adapter writes one from the
+ * neutral NOTES.md so Hermes receives the pack through the channel it actually reads.
+ *
+ * The workspace starts empty (no checked-out AGENTS.md), NOTES.md is seeded to simulate what
+ * materializeKnowledge() writes before the adapter starts, and we assert AGENTS.md is created
+ * with the same content.
+ *
+ * Mutation: remove the writeFileSync call in HermesAgentAdapter.start() -> AGENTS.md absent -> FAIL.
+ */
+test('knowledge channel: no tracked AGENTS.md -> adapter writes AGENTS.md from NOTES.md', async () => {
+  const { context, workspacePath } = makeContext({ knowledge: true });
+  // Simulate what materializeKnowledge() writes before start() is called.
+  const notesDir = join(workspacePath, '.mercury', 'knowledge');
+  import('node:fs').then(({ mkdirSync }) => mkdirSync(notesDir, { recursive: true }));
+  const { mkdirSync } = await import('node:fs');
+  mkdirSync(notesDir, { recursive: true });
+  const notesContent = '# Project knowledge\npack testhash123 -- 1 note\n';
+  writeFileSync(join(workspacePath, NOTES_FILE), notesContent);
+
+  const a = adapter();
+  const handle = await a.start(context);
+  await collectAll(handle);
+
+  const agentsMd = join(workspacePath, 'AGENTS.md');
+  assert.ok(existsSync(agentsMd), 'AGENTS.md must be written when none was tracked');
+  assert.equal(readFileSync(agentsMd, 'utf8'), notesContent,
+    'AGENTS.md must be byte-identical to NOTES.md so Hermes receives the same pack');
+});
+
+/**
+ * When the repository tracks an AGENTS.md, §9.4 forbids Mercury from overwriting it.
+ * The adapter must leave the file byte-identical and rely on the neutral files for the pack.
+ *
+ * Mutation: remove the existsSync guard -> tracked content overwritten -> FAIL.
+ */
+test('knowledge channel: tracked AGENTS.md is left byte-identical', async () => {
+  const { context, workspacePath } = makeContext({ knowledge: true });
+  const { mkdirSync } = await import('node:fs');
+  mkdirSync(join(workspacePath, '.mercury', 'knowledge'), { recursive: true });
+  writeFileSync(join(workspacePath, NOTES_FILE), '# neutral notes\n');
+
+  const trackedContent = '# Project AGENTS.md (tracked by repo)\nDo not overwrite me.\n';
+  const agentsMdPath = join(workspacePath, 'AGENTS.md');
+  writeFileSync(agentsMdPath, trackedContent);
+  const beforeMtime = readFileSync(agentsMdPath, 'utf8');
+
+  const a = adapter();
+  const handle = await a.start(context);
+  await collectAll(handle);
+
+  assert.equal(readFileSync(agentsMdPath, 'utf8'), beforeMtime,
+    'a tracked AGENTS.md must be byte-identical before and after the adapter runs (§9.4)');
+  assert.equal(readFileSync(agentsMdPath, 'utf8'), trackedContent,
+    'the exact tracked content must be preserved');
+});
+
+/**
+ * Without knowledge context, AGENTS.md must not be written even if NOTES.md exists.
+ * The adapter must not touch the workspace when no pack was injected for this Run.
+ *
+ * Mutation: remove the `if (context.knowledge)` guard -> AGENTS.md written without a pack -> FAIL.
+ */
+test('knowledge channel: no knowledge context -> AGENTS.md is not written', async () => {
+  const { context, workspacePath } = makeContext({ knowledge: false });
+  const { mkdirSync } = await import('node:fs');
+  mkdirSync(join(workspacePath, '.mercury', 'knowledge'), { recursive: true });
+  writeFileSync(join(workspacePath, NOTES_FILE), '# some notes\n');
+
+  const a = adapter();
+  const handle = await a.start(context);
+  await collectAll(handle);
+
+  assert.ok(!existsSync(join(workspacePath, 'AGENTS.md')),
+    'AGENTS.md must not be created when no knowledge pack was injected for this Run');
+});
+
 test('the default simulated store contains no Mercury skill id (issue #525)', async () => {
   // The fixture's whole premise is that Mercury ids and Hermes names are disjoint namespaces. That holds
   // only if the DEFAULT store stays free of Mercury ids -- it previously shipped `code-review`, which is
@@ -416,4 +498,44 @@ test('the argv HermesAgentAdapter emits today is accepted by the faithful mock',
     `the current argv was rejected by a faithful Hermes: ${JSON.stringify(exit)}`);
   const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
   assert.ok(!argv.includes('-s'), `argv grew a -s again: ${argv.join(' ')}`);
+});
+
+/**
+ * A dangling symlink is the case `existsSync` gets wrong.
+ *
+ * `existsSync` follows the link, so a symlink whose target does not exist yet reports as ABSENT. The
+ * tracked-file guard therefore lets the write proceed, and the write follows the link -- creating a file
+ * wherever the repository pointed. A repository only has to commit `AGENTS.md -> ../../outside` to get
+ * Mercury to write its pack outside the workspace, which is the same escape materializeKnowledge guards
+ * against for the neutral files, reached by a different route.
+ *
+ * The guard is therefore lstat-based (anything at the path is left alone, symlink or not) and the write
+ * target goes through containedPath(), which refuses a symlinked component outright.
+ */
+test('knowledge channel: AGENTS.md as a dangling symlink is not written through', async () => {
+  const { context, workspacePath } = makeContext({ knowledge: true });
+  const notesDir = join(workspacePath, '.mercury', 'knowledge');
+  const { mkdirSync, symlinkSync, lstatSync, rmSync } = await import('node:fs');
+  mkdirSync(notesDir, { recursive: true });
+  writeFileSync(join(workspacePath, NOTES_FILE), '# Project knowledge\npack testhash123 -- 1 note\n');
+
+  // The target lives OUTSIDE the workspace and does not exist yet, so existsSync(AGENTS.md) is false.
+  const outsideDir = tempDir('hermes-symlink-target-');
+  const outsideTarget = join(outsideDir, 'ESCAPED.md');
+  symlinkSync(outsideTarget, join(workspacePath, 'AGENTS.md'));
+  assert.equal(existsSync(join(workspacePath, 'AGENTS.md')), false,
+    'precondition: existsSync must report a dangling symlink as absent, which is the trap');
+
+  try {
+    const a = adapter();
+    const handle = await a.start(context);
+    await collectAll(handle);
+
+    assert.equal(existsSync(outsideTarget), false,
+      'the pack was written THROUGH the symlink, outside the workspace');
+    assert.ok(lstatSync(join(workspacePath, 'AGENTS.md')).isSymbolicLink(),
+      'the symlink itself must be left untouched');
+  } finally {
+    rmSync(outsideDir, { recursive: true, force: true });
+  }
 });

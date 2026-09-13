@@ -39,7 +39,7 @@ import type { EvidenceRef, Note } from './types.ts';
  * Throwing is deliberate and it fails the Run. The alternative is writing the pack wherever the
  * repository pointed, which is not a degraded Run but a host compromise dressed up as a successful one.
  */
-function containedPath(workspacePath: string, rel: string): string {
+export function containedPath(workspacePath: string, rel: string): string {
   try {
     return resolveContained(workspacePath, rel);
   } catch (err) {
@@ -66,7 +66,8 @@ export const SKILL_DIR = `.agents/skills/${SKILL_ID}`;
 export const SKILL_FILE = `${SKILL_DIR}/SKILL.md`;
 
 /** Paths Mercury generates and no agent should ever commit (section 9.4). */
-export const GENERATED_PATHS = ['.mercury/', `${SKILL_DIR}/`];
+export const AGENTS_MD_FILE = 'AGENTS.md';
+export const GENERATED_PATHS = ['.mercury/', `${SKILL_DIR}/`, AGENTS_MD_FILE];
 
 const SPECIFICITY: Record<string, number> = { path: 0, repo: 1, project: 2, agent: 3 };
 
