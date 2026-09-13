@@ -56,7 +56,12 @@ function cleanPath(path: string): string {
   let p = path;
   while (p.startsWith('/')) p = p.slice(1);
   while (p.endsWith('/')) p = p.slice(0, -1);
+  // The `.git` strip runs AFTER the trailing-slash loop above, so `acme/.git` leaves `acme/` behind --
+  // an identity with a trailing separator, which is not the single host/path token the format calls for.
+  // Stripping again here is what keeps the scp and URL branches agreeing: both reach this function with a
+  // `.git` suffix, and only one of them additionally collapses dot segments.
   if (p.toLowerCase().endsWith('.git')) p = p.slice(0, -4);
+  while (p.endsWith('/')) p = p.slice(0, -1);
   while (p.includes('//')) p = p.split('//').join('/');
   return p;
 }

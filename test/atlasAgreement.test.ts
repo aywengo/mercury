@@ -38,6 +38,12 @@ const IDENTITY_VECTORS: [string, string | null][] = [
   ['git@github.com:a/b/../../c', 'github.com/c'],
   ['git@github.com:acme/./other', 'github.com/acme/other'],
   ['git@github.com:../escape', 'github.com/escape'],
+  // A repository path ending in `/.git` used to leave a trailing separator (`github.com/acme/`) because
+  // cleanPath stripped `.git` after its trailing-slash loop. Both branches hit that, but only the scp
+  // branch additionally collapses segments, so adding the collapse silently drove scp and URL APART here
+  // -- the opposite of what the change was for. Pinned for both spellings.
+  ['git@github.com:acme/.git', 'github.com/acme'],
+  ['https://github.com/acme/.git', 'github.com/acme'],
   ['/Users/roman/devops/mercury', 'file/Users/roman/devops/mercury'],
   ['not-a-repo', null],
   ['', null],
