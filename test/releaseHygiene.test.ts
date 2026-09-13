@@ -533,8 +533,16 @@ test('docs/status.md states version-resolved capability advertisement as shipped
   const start = doc.indexOf('### Agent capability differences');
   assert.ok(start >= 0, 'docs/status.md lost its "Agent capability differences" section');
   const next = doc.indexOf('\n### ', start + 10);
-  const section = doc.slice(start, next > start ? next : undefined);
-  assert.ok(section.length > 300, 'could not bound the capability section');
+  assert.ok(next > start,
+    'the "Agent capability differences" section is no longer followed by another "### " heading, so '
+    + 'this guard cannot bound it; re-point it at whatever ends the section now');
+  const section = doc.slice(start, next);
+  // A short section is a different failure from an unbounded one, and the message has to name the
+  // condition actually asserted: a section edited down to a stub passes the bound check above and
+  // would otherwise report a bounding problem it does not have.
+  assert.ok(section.length > 300,
+    `the "Agent capability differences" section is unexpectedly short (${section.length} characters), `
+    + 'too short to state what /api/agents reports and what remains unbuilt');
 
   // Negative half: the overstatement in any wording, not one spelling.
   const forbidden = [
