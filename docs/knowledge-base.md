@@ -1,22 +1,34 @@
-Status: **phases 0 to 2 implemented.** Atlas (sections 11 and 15) exists and is tested: `atlas/`, its
+Status: **phases 0 to 3 implemented.** Atlas (sections 11 and 15) exists and is tested: `atlas/`, its
 nine knowledge tables, its `/v1` routes, its `ATLAS_*` environment variables and its CLI. The host side
 now exists too: `knowledge_outbox`, the pusher, the puller, the `knowledge_replica` replica with its
 cursor, deterministic pack selection at Run creation, `run_knowledge`, the materialized workspace files,
 and the `knowledge.rejected` and `knowledge.selected` event types. `MERCURY_ATLAS_URL` and the other
 `MERCURY_*` names below are live configuration, read by `src/config.ts`.
 
-Still proposals, and named as such where they appear:
+Implemented, and no longer a proposal:
 
-- **Phase 3** (section 7.1 tier 1): nothing reads `.mercury/notes.jsonl` back out of a workspace, so the
-  contribution half of the loop is inert. The file is created empty and `NOTES.md` tells an agent to
-  write it, which means the instruction is currently issued with nothing on the other end.
+- **Phase 0** -- the Atlas service (sections 11, 15).
+- **Phase 1** -- the outbox, the pusher, operator notes, and the second host token that operator notes
+  need (sections 8.1, 8.2, 11.1, 11.4).
+- **Phase 2** -- the replica, the puller, deterministic pack selection, `run_knowledge`, the materialized
+  workspace files and the context pointer (sections 8.3, 9.1, 9.2, 9.4).
+- **Phase 3** -- the tier-1 harvest (section 7.1). The worker reads `.mercury/notes.jsonl` during
+  finalize, validates it against the closed vocabularies, the K2 rules and the section 7.5 bounds,
+  refuses any note carrying a declared secret rather than storing it redacted, and queues what survives
+  into the outbox inside the same transaction that marks the Run complete. `knowledge.noted` and
+  `knowledge.rejected` are emitted per line.
+- **Replica metrics** -- `mercury_knowledge_replica_seq`, `mercury_knowledge_replica_notes` and
+  `mercury_knowledge_pull_failures_total`.
+
+Still open, and named as such where they appear:
+
 - **Per-harness rendering** (section 9.3): only the neutral files and the `.mercury-context.json` pointer
-  are written. No adapter renders the pack into a channel its harness reads on its own. The Hermes row
-  was measured rather than assumed -- Hermes reads `AGENTS.md` from the workspace unprompted and does
-  **not** read `.mercury/knowledge/NOTES.md` -- so the row's "blocked" is confirmed, and the `AGENTS.md`
-  channel it did not consider is tracked separately.
-- **Replica metrics**: `mercury_knowledge_replica_seq`, `mercury_knowledge_replica_notes` and
-  `mercury_knowledge_pull_failures_total` are live as of phase 2.
+  are written. No adapter renders the pack into a channel its harness reads on its own. The Hermes row was
+  measured rather than assumed -- Hermes reads `AGENTS.md` from the workspace unprompted and does **not**
+  read `.mercury/knowledge/NOTES.md` -- so the row's "blocked" is confirmed for the channel the spec
+  considered, and the `AGENTS.md` channel it did not consider is tracked separately.
+- **Remote agents** (section 7.1): they execute on another machine with no workspace for the worker to
+  read, so they get tier 2 only. The remote protocol has no way to return notes, and none is designed here.
 
 Where a sentence describes current behaviour it says so and names the file.
 

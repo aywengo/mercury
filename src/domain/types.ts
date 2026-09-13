@@ -598,15 +598,15 @@ export const EVENT_TYPES = new Set([
   // `knowledge.selected` is emitted by pack selection in RunService.create (section 9.1), added in the
   // same change as this entry rather than before it.
   //
-  // `knowledge.noted` still waits for the tier-1 harvester. Adding it now would repeat the mistake this
-  // set already documents once -- an event type with no emitter is a vocabulary claim with no evidence
-  // behind it.
+  // `knowledge.noted` is emitted by the tier-1 harvester in the worker's finalize path, added with its
+  // emitter rather than before it.
   //
   // Push and pull OUTCOMES are deliberately not events at all. A batch is not a Run, and Crew
   // invariant 4 is explicit that store synchronization with no Run behind it is a log line and a
   // metric.
   'knowledge.rejected',
   'knowledge.selected',
+  'knowledge.noted',
 ]);
 
 /**

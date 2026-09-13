@@ -423,6 +423,17 @@ async function main(): Promise<void> {
       knowledgePusher: knowledgePusher ?? undefined,
       knowledgePuller: knowledgePuller ?? undefined,
       knowledgeProject: config.knowledge.atlas?.project,
+      // Harvest needs a destination as well as a source. A host that reads notes but has nowhere to send
+      // them would fill its outbox with rows nothing will ever take, which looks identical on /metrics to
+      // a host whose Atlas is down -- and the second one needs an operator.
+      knowledgeHarvest: config.knowledge.atlas
+        ? {
+            project: config.knowledge.atlas.project,
+            hostId: config.knowledge.atlas.hostId,
+            bounds: config.knowledge.bounds,
+          }
+        : undefined,
+      knowledgeOutbox: config.knowledge.atlas ? new OutboxStore(db) : undefined,
     });
     if (config.eventWakeupSocket) {
       // Registered on the existing append hook rather than at the ~20 append call sites: one seam, and
