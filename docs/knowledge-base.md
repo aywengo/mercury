@@ -735,9 +735,23 @@ lands:
 | Table | Columns | Role |
 | --- | --- | --- |
 | `knowledge_outbox` | `id`, `run_id`, `idempotency_key` (unique), `note_json`, `created_at`, `attempts`, `last_error` | durable queue, §8.1 |
-| `knowledge_replica` | `note_id`, `revision`, `seq`, `kind`, `scope`, `note_json`; indexed on `(scope, kind)` and on `seq` | promoted notes, §8.3 |
-| `knowledge_replica_cursor` | `project_id`, `seq` | one row |
-| `run_knowledge` | `run_id` (FK to `runs`), `pack_hash`, `pack_json`, `selected_at` | the snapshot a Run executed, modeled on `run_skills` |
+| `knowledge_replica` | `note_id`, `project_id`, `kind`, `scope`, `claim`, `detail`, `tier`, `seq`, `revision`, `evidence_json`, `corr_runs`, `corr_harnesses`, `corr_hosts`, `claim_hash`, `recorded_at`, `updated_at`, `contested`, `source`, `host_id` | promoted notes, §8.3 |
+| `knowledge_replica_cursor` | `project_id`, `seq`, `updated_at` | one row per project |
+| `run_knowledge` | `run_id` (PK), `pack_hash`, `notes_json`, `note_count`, `byte_size`, `created_at` | the snapshot a Run executed, modeled on `run_skills` |
+
+The column lists above are the shipped ones, taken from `MIGRATIONS` rather than from this document's
+original sketch; the sketch pre-dated the implementation and named columns such as `note_json` and
+`pack_json` that were never created. Notes are stored as expanded columns, not as one JSON blob, because
+selection filters on `tier` and orders on `seq` and would otherwise have to deserialize every note to rank
+any of them.
+
+`source` and `host_id` arrived in migration v11 (#553). Before that the replica stored no provenance at
+all, so pack selection invented `{ source: 'agent-reported', hostId: '' }` for every note and served it
+into `run_knowledge` and out through `GET /api/runs/:runId/knowledge`. Only these two provenance fields are
+carried: `agent` and `runId` describe the *source* of a note rather than the note, and live in Atlas's
+`note_sources`. A row that predates v11 has an empty `source`, which reads as absent provenance rather than
+as a default, and v11 clears the pull cursors so the next pull corrects those rows instead of leaving them
+wrong until Atlas happens to revise each one.
 
 `run_knowledge` is the table that makes "resolve once, execute the snapshot" true for
 knowledge: a note promoted, revised or retired after a Run was created does not change what
