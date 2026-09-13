@@ -81,9 +81,20 @@ export class OutboxStore {
   /**
    * Queue contributions inside the caller's transaction.
    *
-   * Deliberately does not open a transaction of its own. The finalize path already has one open, and
-   * nesting would either throw or silently commit the Run's terminal state early -- the exact window
-   * section 8.1 exists to close.
+   * Deliberately does not open a transaction of its own, so the caller's atomicity is what governs.
+   *
+   * Nesting `tx()` would in fact be safe here: `tx()` in `src/db/database.ts` keeps a per-database depth
+   * counter and joins an open transaction instead of issuing a second `BEGIN`. This comment previously said
+   * nesting "would either throw or silently commit the Run's terminal state early", which is true of raw
+   * SQLite and false of `tx()`.
+   *
+   * The method still exists because the call site should say what it depends on. The finalize path needs the
+   * outbox rows and the Run's terminal state to commit together (section 8.1); calling `insertInTx` from
+   * inside that transaction states the dependency, whereas calling the self-transacting `insert()` works
+   * only because of a depth counter a reader would have to go and find.
+   *
+   * Do NOT assume the same of `tx()` in `atlas/db.ts`. That one has no depth counter and issues `BEGIN
+   * IMMEDIATE` unconditionally, so a nested call there really does throw.
    */
   insertInTx(items: ReadonlyArray<{ runId: string | null; contribution: NoteContribution }>): number {
     const now = new Date().toISOString();

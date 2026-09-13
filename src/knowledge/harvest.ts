@@ -74,9 +74,16 @@ export interface HarvestResult {
 /**
  * Read and validate `.mercury/notes.jsonl`.
  *
- * Never throws. A harvest runs inside the transaction that finalizes a Run, so an exception here would
- * turn "the agent wrote a file we cannot parse" into "the Run failed", which is the wrong blast radius by
- * a wide margin. Every problem is a rejected line with a reason instead.
+ * Never throws. An exception here would turn "the agent wrote a file we cannot parse" into "the Run
+ * failed", which is the wrong blast radius by a wide margin. Every problem is a rejected line with a reason
+ * instead.
+ *
+ * The caller reads this BEFORE the finalize transaction and commits the RESULT inside it
+ * (`src/worker/worker.ts`). That ordering is not incidental and this comment used to describe the opposite,
+ * claiming the harvest ran inside the transaction. It must not: the read does file I/O under a wall-clock
+ * bound, and doing that while holding `BEGIN IMMEDIATE` would pin the host's single write lock for up to
+ * `harvestTimeoutMs`. Section 8.1 asks that a Run never be complete with its notes still in memory, and the
+ * insert of the result inside the transaction is what satisfies that -- not the read.
  */
 export function harvestNotes(input: HarvestInput): HarvestResult {
   const now = input.now ?? (() => Date.now());

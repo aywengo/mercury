@@ -172,10 +172,20 @@ The host-side knowledge integration is implemented through phase 3. What is live
   together with the transition that completes the Run, so a Run is never COMPLETED with its notes
   held only in memory;
 - `knowledge.noted` and the per-line `knowledge.rejected` reasons;
+- `mercury knowledge identity <url>...`, which prints the `repo:<hash>` scope key for a repository URL or
+  path. It reads no database, so it works on the host whose configuration is the thing under investigation;
+  a local path is answered but reported as host-local, because such a scope works here and matches nothing
+  elsewhere.
 - `MERCURY_ATLAS_*` configuration variables including `MERCURY_ATLAS_ADMIN_TOKEN`.
 
 The loop is therefore closed end to end: a Run can write a note, and a later Run on a different
 host is told it. `test/knowledgeTeachE2E.test.ts` proves that path against a real Atlas process.
+
+Provenance is carried through the replica, so `GET /api/runs/:runId/knowledge` distinguishes an operator
+note from a harvested one and names the contributing host. It previously fabricated
+`{ source: 'agent-reported', hostId: '' }` for every note, which understated trust for the two most trusted
+sources; a note that reached a replica before that column existed reports no provenance rather than a
+plausible one.
 
 PrimeAgent also gets the rendering section 9.3 specifies: the pack is written as
 `.agents/skills/mercury-knowledge/SKILL.md` and passed with the `--skill` flag the adapter already
