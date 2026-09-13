@@ -1,16 +1,198 @@
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
+/**
+ * The HTTP surface (docs/knowledge-base.md sections 11.1 and 11.4).
+ *
+ * Started as a real listener on an ephemeral port rather than by calling route handlers directly.
+ * The properties worth proving are the ones that only exist at the socket: that auth is applied by the
+ * dispatcher rather than remembered in each handler, that a body is parsed or refused before a handler
+ * sees it, and that the status codes are the ones a host will branch on. Calling handlers in process
+ * would let a forgotten `requireAdmin` pass every test here.
+ */
 
-test('server: placeholder - HTTP endpoints require additional setup', () => {
-  // Full HTTP server tests would require:
-  // 1. Starting an Atlas HTTP server on a port
-  // 2. Using fetch() to make requests
-  // 3. Checking response status codes, headers, and bodies
-  //
-  // This is a placeholder to document that server tests exist but require
-  // more complex setup. The coupling test, unit tests for config/auth/metrics,
-  // and the contract test (test/atlasContract.test.ts) in the root suite
-  // cover the HTTP layer.
-  
-  assert.ok(true);
+import { after, before, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { openDatabase } from '../db.ts';
+import { loadAtlasConfig } from '../config.ts';
+import { createRedactor } from '../redact.ts';
+import { createLogger } from '../logger.ts';
+import { AuthIndex, seedContributors } from '../auth.ts';
+import { AtlasMetrics } from '../metrics.ts';
+import { NoteStore } from '../notes.ts';
+import { startAtlas, type AtlasServer } from '../server.ts';
+import { ATLAS_VERSION } from '../version.ts';
+
+const ADMIN = 'server-test-admin-token-0001';
+const CONTRIBUTOR = 'server-test-contributor-token-01';
+const READER = 'server-test-reader-token-00001';
+const IDENTITY = 'github.com/aywengo/mercury';
+
+let dir: string;
+let server: AtlasServer;
+let closeAll: () => Promise<void>;
+
+before(async () => {
+  dir = mkdtempSync(join(tmpdir(), 'atlas-server-'));
+  const contributorsFile = join(dir, 'contributors.json');
+  writeFileSync(contributorsFile, JSON.stringify({
+    [CONTRIBUTOR]: { hostId: 'host-a', projects: ['mercury'] },
+  }), { mode: 0o600 });
+
+  const config = loadAtlasConfig({
+    ATLAS_DB: join(dir, 'atlas.db'),
+    ATLAS_BIND_HOST: '127.0.0.1',
+    ATLAS_PORT: '0',
+    ATLAS_ADMIN_TOKEN: ADMIN,
+    ATLAS_CONTRIBUTORS_FILE: contributorsFile,
+    ATLAS_READER_TOKENS: `${READER}:dashboard:mercury`,
+    ATLAS_LOG_LEVEL: 'error',
+  });
+  const db = openDatabase(config.dbPath);
+  // Seeding is a startup step the CLI performs, not something startAtlas does, so the fixture has to
+  // do it too. A contributor file that never lands is otherwise indistinguishable from a typo in it.
+  assert.deepEqual(seedContributors(db, contributorsFile), [CONTRIBUTOR], 'the seeded token must be reported');
+  const redactor = createRedactor(config.secrets);
+  const store = new NoteStore(db, { maxClaimBytes: config.maxClaimBytes, maxDetailBytes: config.maxDetailBytes, maxEvidence: 8 }, redactor);
+  const auth = new AuthIndex(db, config);
+  server = await startAtlas({ db, config, store, auth, log: createLogger(redactor, 'error'), metrics: new AtlasMetrics() });
+  closeAll = async () => { await server.close(); db.close(); };
+
+  const created = await call('POST', '/v1/projects', ADMIN, {
+    id: 'mercury', name: 'Mercury', repoIdentities: [IDENTITY],
+    promotionPolicy: { auto: null },
+  });
+  assert.equal(created.status, 201, 'the fixture project must exist for the tests below');
+});
+
+after(async () => {
+  await closeAll();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+async function call(method: string, path: string, token: string | null, body?: unknown, headers: Record<string, string> = {}) {
+  const res = await fetch(server.url + path, {
+    method,
+    headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), 'content-type': 'application/json', ...headers },
+    body: body === undefined ? undefined : (typeof body === 'string' ? body : JSON.stringify(body)),
+  });
+  const text = await res.text();
+  let json: unknown = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* a non-JSON body is itself a finding for the caller */ }
+  return { status: res.status, json: json as any, text, headers: res.headers };
+}
+
+function contribution(claim: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    kind: 'fact', scope: 'project', claim, evidence: [],
+    provenance: { source: 'agent-reported', hostId: 'host-a', runId: 'run-1', agent: 'primeagent', harnessVersion: '1.0.0', recordedAt: new Date().toISOString() },
+    repoIdentity: IDENTITY,
+    ...extra,
+  };
+}
+
+test('/healthz needs no token and answers with the shape Fleet probes', async () => {
+  const res = await call('GET', '/healthz', null);
+  assert.equal(res.status, 200);
+  assert.deepEqual(Object.keys(res.json).sort(), ['ok', 'product', 'ts', 'version']);
+  assert.equal(res.json.product, 'atlas');
+  assert.equal(res.json.version, ATLAS_VERSION);
+});
+
+test('a contributor contributes and a reader reads; neither can do the other', async () => {
+  const write = await call('POST', '/v1/projects/mercury/notes', CONTRIBUTOR,
+    { notes: [contribution('the reader token must not be able to write')] }, { 'idempotency-key': 'srv-1' });
+  assert.equal(write.status, 200);
+  assert.ok('accepted' in write.json.results[0]!);
+
+  const readerWrite = await call('POST', '/v1/projects/mercury/notes', READER,
+    { notes: [contribution('a dashboard token must not write knowledge')] }, { 'idempotency-key': 'srv-2' });
+  assert.equal(readerWrite.status, 403, 'a reader is read-only');
+
+  const readerRead = await call('GET', '/v1/projects/mercury/notes?since=0&tier=all', READER);
+  assert.equal(readerRead.status, 200);
+  assert.ok(readerRead.json.notes.length >= 1);
+
+  const anonRead = await call('GET', '/v1/projects/mercury/notes?since=0&tier=all', null);
+  assert.equal(anonRead.status, 401, 'the feed is not public');
+});
+
+test('an unbound project answers 404, not 403', async () => {
+  // Existence is the information. A 403 tells a caller the project exists but they may not see it,
+  // which is exactly what an unbound contributor should not learn.
+  const res = await call('GET', '/v1/projects/not-mine/notes?since=0', CONTRIBUTOR);
+  assert.equal(res.status, 404);
+  const write = await call('POST', '/v1/projects/not-mine/notes', CONTRIBUTOR, { notes: [] }, { 'idempotency-key': 'srv-3' });
+  assert.equal(write.status, 404);
+});
+
+test('an unknown token is 401 and a missing header is 401, not 400', async () => {
+  assert.equal((await call('GET', '/v1/projects', 'totally-unknown-token-0001')).status, 401);
+  assert.equal((await call('GET', '/v1/projects', null)).status, 401);
+});
+
+test('a contribution without an idempotency key is refused', async () => {
+  // Without a key a lost response cannot be retried safely, and the host would have to guess whether
+  // its notes landed. Refusing is louder than accepting and double-counting.
+  const res = await call('POST', '/v1/projects/mercury/notes', CONTRIBUTOR, { notes: [contribution('no key here')] });
+  assert.equal(res.status, 400);
+});
+
+test('a malformed body is a 400, not a crashed connection', async () => {
+  const res = await call('POST', '/v1/projects/mercury/notes', CONTRIBUTOR, '{"notes": [', { 'idempotency-key': 'srv-4' });
+  assert.equal(res.status, 400);
+});
+
+test('curation is admin-only and requires a reason', async () => {
+  const made = await call('POST', '/v1/projects/mercury/notes', CONTRIBUTOR,
+    { notes: [contribution('a note that needs an operator to promote it')] }, { 'idempotency-key': 'srv-5' });
+  const noteId = made.json.results[0]!.accepted!;
+
+  const byContributor = await call('POST', `/v1/projects/mercury/notes/${noteId}/promote`, CONTRIBUTOR, { reason: 'self-serving' });
+  assert.equal(byContributor.status, 403, 'a host must not promote its own notes');
+
+  const noReason = await call('POST', `/v1/projects/mercury/notes/${noteId}/promote`, ADMIN, {});
+  assert.equal(noReason.status, 400, 'a promotion without a reason is an unaudited edit');
+
+  const ok = await call('POST', `/v1/projects/mercury/notes/${noteId}/promote`, ADMIN, { reason: 'reviewed with the team' });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.note.tier, 'promoted');
+});
+
+test('the project registry rejects an id that is not a slug and a missing repo set', async () => {
+  const badId = await call('POST', '/v1/projects', ADMIN, { id: 'Not A Slug', name: 'x', repoIdentities: [IDENTITY] });
+  assert.equal(badId.status, 400);
+  const noRepos = await call('POST', '/v1/projects', ADMIN, { id: 'no-repos', name: 'x' });
+  assert.equal(noRepos.status, 400, 'a project with no identities accepts nothing, so say so at creation');
+});
+
+test('a contributor token is never echoed back and must be long enough', async () => {
+  const short = await call('POST', '/v1/contributors', ADMIN, { token: 'short', hostId: 'host-b', projects: ['mercury'] });
+  assert.equal(short.status, 400);
+
+  const secret = 'a-long-enough-contributor-token-9';
+  const ok = await call('POST', '/v1/contributors', ADMIN, { token: secret, hostId: 'host-b', projects: ['mercury'] });
+  assert.equal(ok.status, 201);
+  assert.ok(!ok.text.includes(secret), 'the response must not carry the token it just stored');
+
+  const list = await call('GET', '/v1/contributors', ADMIN);
+  assert.ok(!list.text.includes(secret), 'the listing must not leak stored tokens');
+});
+
+test('/metrics is Prometheus text and labels rejections by reason', async () => {
+  await call('POST', '/v1/projects/mercury/notes', CONTRIBUTOR,
+    { notes: [contribution('this one carries hunter2secret inline')] }, { 'idempotency-key': 'srv-6' });
+
+  const res = await call('GET', '/metrics', ADMIN);
+  assert.match(res.headers.get('content-type') ?? '', /text\/plain/);
+  assert.match(res.text, /^atlas_notes\{/m);
+  assert.match(res.text, /atlas_rejections_total\{reason="secret-detected"\}/m,
+    'an operator needs to tell "the host sends junk" from "the bounds are too tight"');
+});
+
+test('an unknown route is 404 and an unsupported method is 405 or 404, never 500', async () => {
+  assert.equal((await call('GET', '/v1/nonsense', ADMIN)).status, 404);
+  const wrongMethod = await call('DELETE', '/healthz', null);
+  assert.ok(wrongMethod.status === 404 || wrongMethod.status === 405, `got ${wrongMethod.status}`);
 });

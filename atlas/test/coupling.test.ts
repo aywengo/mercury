@@ -123,8 +123,15 @@ function scanBoundary(dirToCheck: string, forbiddenPatterns: RegExp[]): Array<{ 
           }
         }
       }
-    } catch {
-      // skip files we can't read
+    } catch (err) {
+      // A file this scanner cannot read is NOT evidence of compliance. Skipping it silently would make
+      // the boundary look enforced while an unreadable file could import anything, so the failure has
+      // to surface as a violation of the rule rather than as a pass.
+      violations.push({
+        from: relative(REPO_ROOT, sourcePath),
+        to: `<unreadable: ${(err as Error).message}>`,
+        specifier: '<unreadable>',
+      });
     }
   }
   

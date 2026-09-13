@@ -3,7 +3,20 @@ import assert from 'node:assert/strict';
 import { openDatabase } from '../db.ts';
 import { NoteStore } from '../notes.ts';
 import { createRedactor } from '../redact.ts';
-import type { NoteContribution } from '../types.ts';
+import type { ContributionResult, NoteContribution } from '../types.ts';
+
+/**
+ * Narrow a ContributionResult by which arm it is.
+ *
+ * The result is a closed union, so `result.accepted` does not typecheck without a guard. Repeating
+ * `if ('accepted' in result)` at every assertion would bury the thing under test, and casting the whole
+ * array to `any[]` would let a renamed arm pass silently -- which is the one mistake this file is meant
+ * to catch.
+ */
+function pick(result: ContributionResult | undefined, key: 'accepted' | 'duplicate' | 'rejected'): string | undefined {
+  return result && key in result ? (result as unknown as Record<string, string>)[key] : undefined;
+}
+
 
 function makeContribution(overrides: Partial<NoteContribution> = {}): NoteContribution {
   return {
@@ -62,7 +75,7 @@ test('notes: contribution acceptance', () => {
   const results1 = store.contribute('test-project', 'host-1', [contrib1], undefined, 500);
   
   assert.equal(results1.length, 1);
-  assert.ok(results1[0]?.accepted);
+  assert.ok(pick(results1[0], 'accepted'));
   
   db.close();
 });
@@ -82,8 +95,8 @@ test('notes: deduplication', () => {
   // First contribution
   const contrib1 = makeContribution();
   const result1 = store.contribute('test-project', 'host-1', [contrib1], undefined, 500);
-  assert.ok(result1[0]?.accepted);
-  const noteId = result1[0]?.accepted;
+  assert.ok(pick(result1[0], 'accepted'));
+  const noteId = pick(result1[0], 'accepted');
   
   // Same claim from another host: should be duplicate
   const contrib2 = makeContribution({
@@ -92,8 +105,8 @@ test('notes: deduplication', () => {
   const result2 = store.contribute('test-project', 'host-2', [contrib2], undefined, 500);
   
   assert.equal(result2.length, 1);
-  assert.ok(result2[0]?.duplicate);
-  assert.equal(result2[0]?.duplicate, noteId);
+  assert.ok(pick(result2[0], 'duplicate'));
+  assert.equal(pick(result2[0], 'duplicate'), noteId);
   
   db.close();
 });
@@ -116,8 +129,8 @@ test('notes: batch over limit is rejected', () => {
   
   // All should be rejected with over-batch-limit
   for (const result of results) {
-    assert.ok(result.rejected);
-    assert.equal(result.rejected, 'over-batch-limit');
+    assert.ok(pick(result, 'rejected'));
+    assert.equal(pick(result, 'rejected'), 'over-batch-limit');
   }
   
   db.close();
@@ -135,8 +148,8 @@ test('notes: unknown-project is rejected', () => {
   const results = store.contribute('unknown-project', 'host-1', [contrib], undefined, 500);
   
   assert.equal(results.length, 1);
-  assert.ok(results[0]?.rejected);
-  assert.equal(results[0]?.rejected, 'unknown-project');
+  assert.ok(pick(results[0], 'rejected'));
+  assert.equal(pick(results[0], 'rejected'), 'unknown-project');
   
   db.close();
 });
@@ -160,8 +173,8 @@ test('notes: repo-not-in-project is rejected', () => {
   const results = store.contribute('test-project', 'host-1', [contrib], undefined, 500);
   
   assert.equal(results.length, 1);
-  assert.ok(results[0]?.rejected);
-  assert.equal(results[0]?.rejected, 'repo-not-in-project');
+  assert.ok(pick(results[0], 'rejected'));
+  assert.equal(pick(results[0], 'rejected'), 'repo-not-in-project');
   
   db.close();
 });
@@ -185,8 +198,8 @@ test('notes: secret-detected is rejected', () => {
   const results = store.contribute('test-project', 'host-1', [contrib], undefined, 500);
   
   assert.equal(results.length, 1);
-  assert.ok(results[0]?.rejected);
-  assert.equal(results[0]?.rejected, 'secret-detected');
+  assert.ok(pick(results[0], 'rejected'));
+  assert.equal(pick(results[0], 'rejected'), 'secret-detected');
   
   db.close();
 });
@@ -257,7 +270,7 @@ test('notes: getNote retrieves details', () => {
   
   const contrib = makeContribution();
   const result = store.contribute('test-project', 'host-1', [contrib], undefined, 500);
-  const noteId = result[0]?.accepted;
+  const noteId = pick(result[0], 'accepted');
   assert.ok(noteId);
   
   const detail = store.getNote('test-project', noteId);
