@@ -229,6 +229,53 @@ and no tag of its own. It drives Runs over the public HTTP API: `agents list`;
 `config profiles`, `config current`; shell completion. Operator guide:
 [`client.md`](client.md).
 
+### Knowledge base (Atlas)
+
+Atlas is a separate, optional service: one HTTP endpoint that stores curated project
+knowledge, and one replica per Mercury host. It is off unless configured. Setting
+`MERCURY_ATLAS_URL` (with `MERCURY_ATLAS_HOST_ID`, `MERCURY_ATLAS_PROJECT` and a
+contributor `MERCURY_ATLAS_TOKEN`) turns on the whole path; without it the host runs
+exactly as it did before and no knowledge module is loaded.
+
+Merged and covered by tests:
+
+- a per-host replica pulled from Atlas on `MERCURY_KNOWLEDGE_PULL_INTERVAL_MS`, with a
+  monotonic per-project cursor and a bootstrap path for a host with no cursor yet;
+- deterministic pack selection per Run (scope, kind, corroboration, byte budget), so two
+  hosts with the same replica select the same notes;
+- materialisation into neutral workspace files, plus a synthetic skill directory for
+  PrimeAgent and an `AGENTS.md` channel for Hermes, each written only when the repository
+  does not already own that path;
+- harvest of agent-reported notes from a finished Run, validated and size-bounded before
+  anything is written, with a per-Run cap and rejection rather than scrubbing on a secret
+  match;
+- `mercury knowledge identity <url>...`, which prints the same `repo:<hash>` scope key the
+  pack selector computes, and `mercury knowledge status`;
+- retired-row retention on the host (`MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS`).
+
+What is not built, checked against the tree rather than remembered:
+
+- **Atlas does not sweep its own retired notes.** `deleteExpiredRetired()`
+  (`atlas/notes.ts:667`) has no caller and no test, and `retireStaleCandidates()`
+  (`atlas/notes.ts:650`) has a test but no production caller. `docs/knowledge-base.md`
+  documents `ATLAS_RETIRED_RETENTION_MS`, which exists nowhere in the code. Tracked in
+  [#562](https://github.com/aywengo/mercury/issues/562).
+- **No UNIQUE constraint backs the one-live-note-per-claim rule.** It holds because two
+  code paths enforce it, not because the schema does. Tracked in
+  [#566](https://github.com/aywengo/mercury/issues/566).
+- **Gate outcomes are not reported.** No shipped harness declares deterministic gates and
+  no gate outcome event exists, so the knowledge design's later phases that would learn
+  from gate results have nothing to read. The event vocabulary is deliberately absent
+  rather than declared with no emitter behind it.
+- **Hermes goal support** remains blocked upstream: the adapter has no version probe, so
+  goal fields for `hermes` report `version-unknown` as a steady state.
+
+The `knowledge` flag in the `static` block of `/api/agents` is an adapter's own
+declaration about itself and is unverified for every shipped backend. It is not evidence
+that a particular installed harness reads the files Mercury writes.
+
+Design and invariants: [`knowledge-base.md`](knowledge-base.md).
+
 ## Designed but not implemented
 
 ### Operator TUI
