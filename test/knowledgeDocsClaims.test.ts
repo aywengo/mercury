@@ -66,3 +66,43 @@ test('the matrix and the status header agree about Hermes', () => {
     'the status header and the hermes matrix row disagree: the header says the row was measured '
     + `(header=${headerClaimsMeasured}, row cites evidence=${rowCitesEvidence})`);
 });
+
+// --- docs/status.md: one knowledge section, and the Hermes claim matches the tree ------------------
+//
+// Two sections describing the same subsystem were added to `docs/status.md` in a single day, by two
+// different PRs from the same author, and prose review caught neither. The second was written after an audit
+// that read the file from a working tree on another branch, so it "found" a gap that did not exist on the
+// default branch. The result was not merely redundant: the older section still said the Hermes `AGENTS.md`
+// channel was "tracked separately" after #541 had merged it, so the page carried two opposite answers and the
+// stale one came first.
+
+const STATUS = readFileSync(join(import.meta.dirname, '../docs/status.md'), 'utf8');
+
+/** Every `### Knowledge base...` heading in the status page. */
+function knowledgeHeadings(): string[] {
+  return STATUS.split('\n').filter((l) => /^###\s+Knowledge base/.test(l));
+}
+
+test('status.md describes the knowledge base in exactly one section', () => {
+  const heads = knowledgeHeadings();
+  assert.equal(heads.length, 1,
+    `docs/status.md has ${heads.length} knowledge-base sections (${heads.join(' | ')}). `
+    + 'Two sections describing one subsystem drift apart and eventually contradict each other; merge them.');
+});
+
+test('status.md does not claim the Hermes AGENTS.md channel is still pending', () => {
+  // #541 merged it. The phrasing that survived in the duplicate section was "tracked separately", which reads
+  // as "not built yet" and was the concrete contradiction the duplicate produced.
+  const hermes = STATUS.split('\n').filter((l) => /AGENTS\.md/.test(l)).join('\n');
+  assert.ok(hermes.length > 0, 'the status page no longer mentions the Hermes AGENTS.md channel at all');
+  assert.doesNotMatch(hermes, /tracked separately|is tracked in|not yet built|remains blocked/,
+    'the status page describes the Hermes AGENTS.md channel as unfinished; #541 merged it');
+});
+
+test('status.md names the Hermes channel as measured rather than assumed', () => {
+  // The whole reason the channel exists is a measurement on a real binary. A page that drops the evidence
+  // invites a reader to re-litigate it, which is how the original "blocked" row survived so long.
+  const hermes = STATUS.split('\n').filter((l) => /AGENTS\.md/.test(l)).join('\n');
+  assert.match(hermes, /measured|v0\.21\.2/,
+    'the Hermes channel claim lost its evidence marker; state the version it was measured on');
+});

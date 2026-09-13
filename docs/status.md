@@ -155,49 +155,80 @@ boundaries.
 
 ## Implemented
 
-### Knowledge base (phases 0–3)
+### Knowledge base (Atlas)
 
-The host-side knowledge integration is implemented through phase 3. What is live:
+Atlas is a separate, optional service: one HTTP endpoint holding curated project knowledge,
+and one replica per Mercury host. It is off unless configured. Setting `MERCURY_ATLAS_URL`
+(with `MERCURY_ATLAS_HOST_ID`, `MERCURY_ATLAS_PROJECT` and a contributor `MERCURY_ATLAS_TOKEN`)
+turns on the whole path; without it the host behaves exactly as it did before and no knowledge
+module is loaded. `MERCURY_ATLAS_ADMIN_TOKEN` gates the curation endpoints.
 
-- `knowledge_outbox` table, the pusher, and the puller;
-- `knowledge_replica` with its cursor;
-- deterministic pack selection at Run creation and `run_knowledge` storage;
-- materialized workspace files at Run start, and the PrimeAgent skill rendering of the pack;
-- `knowledge.rejected` and `knowledge.selected` event types;
-- `GET /api/knowledge/status` and `POST /api/knowledge/notes` (admin only);
-- `GET /api/runs/:runId/knowledge` (owner-scoped);
+Live and covered by tests:
+
+- `knowledge_outbox` with its pusher, and `knowledge_replica` with a monotonic per-project
+  cursor plus a bootstrap path for a host that has no cursor yet;
+- deterministic pack selection at Run creation and `run_knowledge` storage, so two hosts holding
+  the same replica select the same notes for the same Run;
+- materialisation into neutral workspace files at Run start, and the PrimeAgent skill rendering
+  of section 9.3: the pack is written to `.agents/skills/mercury-knowledge/SKILL.md` and passed
+  with the `--skill` flag, so it reaches a channel the harness reads unprompted;
+- an `AGENTS.md` channel for Hermes, which was measured (v0.21.2) to read `AGENTS.md` from the
+  workspace and **not** to read `.mercury/knowledge/NOTES.md`. Like the skill file it is written
+  only when the repository does not already own that path;
 - tier-1 harvest of `.mercury/notes.jsonl` at finalize, with validation, the K2 rules and the
   section 7.5 bounds. The file is read and validated outside the write transaction -- neither may
-  hold a write lock -- and the notes that survive are inserted into the outbox *inside* it,
-  together with the transition that completes the Run, so a Run is never COMPLETED with its notes
-  held only in memory;
-- `knowledge.noted` and the per-line `knowledge.rejected` reasons;
-- `mercury knowledge identity <url>...`, which prints the `repo:<hash>` scope key for a repository URL or
-  path. It reads no database, so it works on the host whose configuration is the thing under investigation;
-  a local path is answered but reported as host-local, because such a scope works here and matches nothing
-  elsewhere.
-- `MERCURY_ATLAS_*` configuration variables including `MERCURY_ATLAS_ADMIN_TOKEN`.
+  hold a write lock -- and the surviving notes are inserted into the outbox *inside* it, together
+  with the transition that completes the Run, so a Run is never COMPLETED with its notes held only
+  in memory. Rejection is per line with a stated reason, and a secret match rejects rather than
+  scrubs;
+- `knowledge.selected`, `knowledge.noted` and `knowledge.rejected` events;
+- provenance carried through the replica, so `GET /api/runs/:runId/knowledge` distinguishes an
+  operator note from a harvested one and names the contributing host. It previously fabricated
+  `{ source: 'agent-reported', hostId: '' }` for every note, which understated trust for the two
+  most trusted sources; a note that reached a replica before that column existed reports no
+  provenance rather than a plausible one;
+- `GET /api/knowledge/status` and `POST /api/knowledge/notes` (admin only), and
+  `GET /api/runs/:runId/knowledge` (owner-scoped);
+- `mercury knowledge identity <url>...`, which prints the `repo:<hash>` scope key the pack
+  selector computes. It reads no database, so it works on the host whose configuration is the thing
+  under investigation; a local path is answered but reported as host-local, because such a scope
+  works there and matches nothing elsewhere;
+- retired-row retention on the host (`MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS`).
 
-The loop is therefore closed end to end: a Run can write a note, and a later Run on a different
-host is told it. `test/knowledgeTeachE2E.test.ts` proves that path against a real Atlas process.
+The loop is closed end to end: a Run can write a note, and a later Run on a different host is told
+it. `test/knowledgeTeachE2E.test.ts` proves that path against a real Atlas process.
 
-Provenance is carried through the replica, so `GET /api/runs/:runId/knowledge` distinguishes an operator
-note from a harvested one and names the contributing host. It previously fabricated
-`{ source: 'agent-reported', hostId: '' }` for every note, which understated trust for the two most trusted
-sources; a note that reached a replica before that column existed reports no provenance rather than a
-plausible one.
+Rendering is still missing for every backend other than PrimeAgent and Hermes -- those get only the
+neutral files and the `.mercury-context.json` pointer. Remote agents get tier 2 only, because they
+execute on another machine with no workspace for the worker to read.
 
-PrimeAgent also gets the rendering section 9.3 specifies: the pack is written as
-`.agents/skills/mercury-knowledge/SKILL.md` and passed with the `--skill` flag the adapter already
-builds, so it reaches a channel the harness reads unprompted.
+What is **not** built, each re-checked against the tree rather than carried over from an earlier
+revision of this page:
 
-Rendering is still missing for every other backend -- those get only the neutral files and the
-`.mercury-context.json` pointer. Measured rather than assumed: Hermes reads `AGENTS.md` from the
-workspace and does **not** read `.mercury/knowledge/NOTES.md`, so the spec's "blocked" holds for
-the channel it considered and the `AGENTS.md` channel is tracked separately. Remote agents get
-tier 2 only, because they execute on another machine with no workspace for the worker to read.
-See [`docs/knowledge-base.md`](knowledge-base.md) for details.
+- **Atlas never deletes a note.** A maintenance sweep runs hourly (`ATLAS_SWEEP_INTERVAL_MS`): it
+  retires stale candidates and prunes replay-guard rows. It deliberately does not delete, because a
+  deletion produces no `seq` row and a replica advancing by cursor would never learn the note was
+  gone. Retired notes therefore accumulate in Atlas indefinitely; deleting them safely needs a
+  sequence-bearing tombstone, which is a replication-protocol change. Tracked in
+  [#562](https://github.com/aywengo/mercury/issues/562).
+- **Atlas refuses to start on a database that already holds two live notes for one claim.** A
+  partial UNIQUE index enforces the one-live-note-per-claim rule (`atlas/db.ts`, migration v2), and
+  a precheck names the colliding note ids rather than surfacing a raw constraint error. It will not
+  resolve the collision for you: retiring one side is an operator decision, because Atlas does not
+  pick a winner. Databases written before that migration can contain the collision, so an upgrade
+  may need that manual step.
+- **Gate outcomes are not reported.** No shipped harness declares deterministic gates and no gate
+  outcome event exists, so the later phases of the knowledge design that would learn from gate
+  results have nothing to read. The event vocabulary is deliberately absent rather than declared
+  with no emitter behind it.
+- **Hermes goal support** remains blocked upstream: the adapter has no version probe, so goal
+  fields for `hermes` report `version-unknown` as a steady state.
 
+The `knowledge` flag in the `static` block of `/api/agents` is an adapter's own declaration about
+itself and is unverified for every shipped backend. It is not evidence that a particular installed
+harness reads the files Mercury writes.
+
+Design and invariants: [`knowledge-base.md`](knowledge-base.md).
 
 ### Distribution
 
@@ -228,58 +259,6 @@ and no tag of its own. It drives Runs over the public HTTP API: `agents list`;
 `runs list`, `show`, `create`, `events`, `watch`, `input`, `cancel`, `retry`;
 `config profiles`, `config current`; shell completion. Operator guide:
 [`client.md`](client.md).
-
-### Knowledge base (Atlas)
-
-Atlas is a separate, optional service: one HTTP endpoint that stores curated project
-knowledge, and one replica per Mercury host. It is off unless configured. Setting
-`MERCURY_ATLAS_URL` (with `MERCURY_ATLAS_HOST_ID`, `MERCURY_ATLAS_PROJECT` and a
-contributor `MERCURY_ATLAS_TOKEN`) turns on the whole path; without it the host runs
-exactly as it did before and no knowledge module is loaded.
-
-Merged and covered by tests:
-
-- a per-host replica pulled from Atlas on `MERCURY_KNOWLEDGE_PULL_INTERVAL_MS`, with a
-  monotonic per-project cursor and a bootstrap path for a host with no cursor yet;
-- deterministic pack selection per Run (scope, kind, corroboration, byte budget), so two
-  hosts with the same replica select the same notes;
-- materialisation into neutral workspace files, plus a synthetic skill directory for
-  PrimeAgent and an `AGENTS.md` channel for Hermes, each written only when the repository
-  does not already own that path;
-- harvest of agent-reported notes from a finished Run, validated and size-bounded before
-  anything is written, with a per-Run cap and rejection rather than scrubbing on a secret
-  match;
-- `mercury knowledge identity <url>...`, which prints the same `repo:<hash>` scope key the
-  pack selector computes, and `mercury knowledge status`;
-- retired-row retention on the host (`MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS`).
-
-What is not built, checked against the tree rather than remembered:
-
-- **Atlas never deletes a note.** A maintenance sweep runs hourly
-  (`ATLAS_SWEEP_INTERVAL_MS`): it retires stale candidates and prunes replay-guard rows. It
-  deliberately does not delete, because a deletion produces no `seq` row and a replica
-  advancing by cursor would never learn the note was gone. Retired notes therefore accumulate
-  in Atlas indefinitely; deleting them safely needs a sequence-bearing tombstone, which is a
-  replication-protocol change. Tracked in
-  [#562](https://github.com/aywengo/mercury/issues/562).
-- **Atlas refuses to start on a database that already holds two live notes for one
-  claim.** A partial UNIQUE index enforces the one-live-note-per-claim rule
-  (`atlas/db.ts`, migration v2), and a precheck names the colliding note ids rather than
-  surfacing a raw constraint error. It will not resolve the collision for you: retiring one
-  side is an operator decision, because Atlas does not pick a winners. Databases written
-  before that migration can contain the collision, so an upgrade may need that manual step.
-- **Gate outcomes are not reported.** No shipped harness declares deterministic gates and
-  no gate outcome event exists, so the knowledge design's later phases that would learn
-  from gate results have nothing to read. The event vocabulary is deliberately absent
-  rather than declared with no emitter behind it.
-- **Hermes goal support** remains blocked upstream: the adapter has no version probe, so
-  goal fields for `hermes` report `version-unknown` as a steady state.
-
-The `knowledge` flag in the `static` block of `/api/agents` is an adapter's own
-declaration about itself and is unverified for every shipped backend. It is not evidence
-that a particular installed harness reads the files Mercury writes.
-
-Design and invariants: [`knowledge-base.md`](knowledge-base.md).
 
 ## Designed but not implemented
 
