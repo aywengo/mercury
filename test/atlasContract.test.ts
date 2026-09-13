@@ -15,9 +15,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+
+import { tempDir } from './helpers.ts';
 
 import { ATLAS_VERSION } from '../atlas/version.ts';
 
@@ -119,7 +120,7 @@ function contribution(claim: string, hostId: string, runId: string, agent: strin
 }
 
 test('every enumerated route answers, and its shape has not drifted', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'atlas-contract-'));
+  const dir = tempDir('atlas-contract-');
   let handle: AtlasHandle | null = null;
   try {
     handle = await startAtlas(dir);
@@ -203,12 +204,11 @@ test('every enumerated route answers, and its shape has not drifted', async () =
     assert.match(await res.text(), /^atlas_projects \d+$/m);
   } finally {
     if (handle) await handle.stop();
-    rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test('the sequence survives a restart, so a cursor is still gapless afterwards', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'atlas-restart-'));
+  const dir = tempDir('atlas-restart-');
   let handle: AtlasHandle | null = null;
   try {
     handle = await startAtlas(dir);
@@ -231,12 +231,11 @@ test('the sequence survives a restart, so a cursor is still gapless afterwards',
     assert.deepEqual(notes.map((n) => n.seq).sort((a, b) => a - b), [1, 2], 'the sequence continued');
   } finally {
     if (handle) await handle.stop();
-    rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test('a replayed batch after a restart returns the original answers without corroborating twice', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'atlas-idem-'));
+  const dir = tempDir('atlas-idem-');
   let handle: AtlasHandle | null = null;
   try {
     handle = await startAtlas(dir);
@@ -257,12 +256,11 @@ test('a replayed batch after a restart returns the original answers without corr
     assert.equal(body.sources.length, 1);
   } finally {
     if (handle) await handle.stop();
-    rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test('Atlas refuses to bind beyond loopback without TLS', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'atlas-tls-'));
+  const dir = tempDir('atlas-tls-');
   try {
     // The refusal has to happen before anything listens, so this is a CLI-level assertion rather than
     // a socket one: the process must exit non-zero and say why.
@@ -279,6 +277,5 @@ test('Atlas refuses to bind beyond loopback without TLS', async () => {
     });
     assert.equal(code, 1, 'refusing to start is a failed command, not a silent exit');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
   }
 });
