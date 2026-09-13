@@ -107,8 +107,10 @@ export function createApp(deps: ServerDeps): Express {
   // src/version.ts. Fleet refuses a host whose `api` is below the minimum it was written against,
   // which turns "old host, new Fleet" into a registration error instead of a failure at first use.
   //
-  // test/fleetContract.test.ts pins this key set and test/api.test.ts asserts each field, so adding
-  // or renaming a field here fails loudly next to the Fleet reader that consumes it.
+  // test/fleetContract.test.ts pins this key set, test/api.test.ts asserts each field, and
+  // test/fixtures/api-shapes.json records it as the shape of API_SCHEMA_VERSION 1 -- so adding or
+  // renaming a field here fails loudly next to the Fleet reader that consumes it, and the fixture
+  // says whether the change needs a version bump (adding does not; renaming does).
   app.get('/healthz', (_req, res) => {
     res.json({
       ok: true,

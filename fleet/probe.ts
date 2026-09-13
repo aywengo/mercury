@@ -93,6 +93,10 @@ interface HealthResponse {
  * A host that reports no `api` at all is treated as compatible, not as zero. Such a host predates
  * the field and serves exactly the shapes this build was written against, so treating absence as
  * incompatibility would take every healthy older host out of rotation -- the opposite of the point.
+ *
+ * It must never exceed the host's `API_SCHEMA_VERSION`, or every Fleet of this build refuses every
+ * host of this build at `hosts add`. `test/apiSchemaVersion.test.ts` reads this literal and checks
+ * exactly that.
  */
 export const MIN_HOST_API = 1;
 

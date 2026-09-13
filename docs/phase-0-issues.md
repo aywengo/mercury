@@ -71,7 +71,12 @@ Two things the implementation changed about this document's own plan:
   skill selection entirely, silently stripping skills from every pi/omp Run.
 - **#523** — nothing covers the dashboard half of the `/api/agents` shape contract; needs the Playwright
   tier (`docs/local-e2e-design.md` Phase 8).
-- **#518** — nothing enforces that `API_SCHEMA_VERSION` moves only on a breaking change.
+- **#518** (fixed by #530) — nothing enforced that `API_SCHEMA_VERSION` moves only on a breaking
+  change. `test/fixtures/api-shapes.json` now records the shape of every endpoint Fleet reads, keyed by
+  version, and `test/apiSchemaVersion.test.ts` fails if the live host drifts from the snapshot for the
+  current version **or** if the version moves without a recorded breaking difference. Additive is not
+  breaking: a key the host only added is reported without bump guidance, because bump guidance there is
+  the outage this guards against.
 
 ### E2E coverage
 
