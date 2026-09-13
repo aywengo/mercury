@@ -176,7 +176,7 @@ test('a Run on host A teaches a Run on host B, through Atlas', async () => {
     const pullerB = new KnowledgePuller({
       db: hostBDb,
       client: new AtlasClient({ url: atlas.url, token: TOKEN_B, project: PROJECT, hostId: 'host-b', caFile: null, adminToken: null }),
-      project: PROJECT, intervalMs: 60_000, pageSize: 100, log: QUIET,
+      project: PROJECT, intervalMs: 60_000, pageSize: 100, retiredRetentionMs: 604_800_000, log: QUIET,
     });
     const firstPull = await pullerB.pullOnce();
     assert.equal(firstPull.failed, false, firstPull.lastError ?? '');

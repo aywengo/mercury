@@ -84,7 +84,7 @@ async function startAtlas(dir: string): Promise<Atlas> {
 function hostConfig(url: string): KnowledgeConfig {
   return {
     atlas: { url, token: CONTRIBUTOR, project: PROJECT, hostId: 'host-a', caFile: null, adminToken: ADMIN },
-    inject: true, packMaxBytes: 65536, pushIntervalMs: 30_000, pushBatch: 100, pullIntervalMs: 30_000,
+    inject: true, packMaxBytes: 65536, pushIntervalMs: 30_000, pushBatch: 100, pullIntervalMs: 30_000, retiredRetentionMs: 604_800_000,
     outboxAlertDepth: 0, bounds: DEFAULT_BOUNDS,
   };
 }

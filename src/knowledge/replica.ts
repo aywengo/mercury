@@ -181,6 +181,35 @@ export class ReplicaStore {
     return row?.s === null || row?.s === undefined ? null : Number(row.s);
   }
 
+  /**
+   * Delete non-promoted rows older than `olderThanMs` milliseconds.
+   *
+   * Called by the puller after each successful pull. The retention window must be long enough that
+   * the cursor has advanced past any in-flight page carrying an older revision of the retired note
+   * before that row is removed. In practice one pull tick (default 60 s) is sufficient; the
+   * configured default is 7 days (604_800_000 ms), chosen to match a typical weekly operational
+   * cycle and give operators time to notice and investigate unexpected retirements.
+   *
+   * Safety note: after this method deletes a row, `applyBatch()`'s upsert guard
+   * (`WHERE excluded.seq >= knowledge_replica.seq`) has no reference row to compare against, so
+   * a replay carrying an OLD promoted revision of that note would INSERT it and resurrect it.
+   * That path is unreachable because the cursor is monotonic (setCursor is called only when
+   * `nextSeq > cursor`) and the puller never pages backwards from the current cursor. A test in
+   * knowledgeReplica.test.ts pins both halves of that invariant so a future change that breaks
+   * either fails loudly.
+   *
+   * NOTE: Atlas's `deleteExpiredRetired()` (atlas/notes.ts) has no caller and runs no sweeps.
+   * Both sides accumulate retired rows until this host-side sweep runs. Wiring Atlas's sweep is
+   * tracked in issue #562.
+   */
+  sweepRetired(olderThanMs: number, now: () => number = Date.now): number {
+    const cutoff = new Date(now() - olderThanMs).toISOString();
+    const res = this.db.prepare(
+      "DELETE FROM knowledge_replica WHERE tier != 'promoted' AND updated_at < ?",
+    ).run(cutoff);
+    return Number(res.changes);
+  }
+
   /** Drop everything for a project. Used when a host is rebound to a different Atlas project. */
   clear(projectId: string): number {
     const res = this.db.prepare('DELETE FROM knowledge_replica WHERE project_id = ?').run(projectId);

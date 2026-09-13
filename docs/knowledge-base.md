@@ -681,6 +681,16 @@ On first start with Atlas configured and an empty cursor, the puller performs th
 pull of §13 instead of paging from `seq = 0`. Both paths converge on the same replica state;
 the bootstrap path is simply one round trip instead of many.
 
+**Retired-row retention (host-local).** `promoted()` and `count()` filter on `tier =
+'promoted'`, so retired rows are never served to packs. They are not removed immediately,
+however: a retired row that is still present lets `applyBatch()`'s upsert guard
+(`WHERE excluded.seq >= knowledge_replica.seq`) reject a replayed older revision of that note.
+After `MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS` (default 7 days, 604 800 000 ms) the puller
+sweeps them on the same tick as a successful pull. This retention is host-local: Atlas's
+`deleteExpiredRetired()` (atlas/notes.ts) currently has no caller and performs no sweeps, so
+both sides accumulate retired rows until this sweep runs. Wiring Atlas's sweep is tracked in
+issue #562.
+
 ### 8.4 Configuration
 
 | Variable | Default | Effect |
@@ -694,6 +704,7 @@ the bootstrap path is simply one round trip instead of many.
 | `MERCURY_KNOWLEDGE_PACK_MAX_BYTES` | `32768` | Byte budget of a pack (§9.1). |
 | `MERCURY_KNOWLEDGE_PUSH_INTERVAL_MS`, `MERCURY_KNOWLEDGE_PUSH_BATCH` | `30000`, `100` | §8.2 |
 | `MERCURY_KNOWLEDGE_PULL_INTERVAL_MS` | `60000` | §8.3 |
+| `MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS` | `604800000` (7 days) | How long non-promoted rows are kept in the host replica before being swept. Host-local; §8.3. |
 | `MERCURY_KNOWLEDGE_OUTBOX_ALERT_DEPTH` | `1000` | §8.2 |
 
 Plus the bounds in §7.5. All of it lands in [`src/config.ts`](../src/config.ts) and

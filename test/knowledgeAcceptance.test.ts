@@ -132,7 +132,7 @@ test('a promoted note reaches a real agent process through the pack', async () =
     // --- Host side: the real puller, against the real Atlas. -------------------------------------
     const hostDb = openDatabase(':memory:');
     const client = new AtlasClient({ url: atlas.url, token: CONTRIBUTOR, project: PROJECT, hostId: 'host-a', caFile: null, adminToken: null });
-    const puller = new KnowledgePuller({ db: hostDb, client, project: PROJECT, intervalMs: 60_000, pageSize: 100, log: QUIET });
+    const puller = new KnowledgePuller({ db: hostDb, client, project: PROJECT, intervalMs: 60_000, pageSize: 100, retiredRetentionMs: 604_800_000, log: QUIET });
     const pulled = await puller.pullOnce();
     assert.equal(pulled.failed, false, pulled.lastError ?? '');
     assert.equal(pulled.applied, 1, 'the promoted note landed in the replica');

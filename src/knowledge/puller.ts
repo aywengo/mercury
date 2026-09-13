@@ -21,6 +21,11 @@ export interface PullerDeps {
   intervalMs: number;
   /** Notes per page. Atlas caps what it will return; paging continues until a short page. */
   pageSize: number;
+  /**
+   * How long to retain non-promoted rows before sweeping them (ms).
+   * Read from MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS; default 7 days.
+   */
+  retiredRetentionMs: number;
   log: Logger;
   now?: () => number;
 }
@@ -31,6 +36,8 @@ export interface PullOutcome {
   pages: number;
   applied: number;
   retired: number;
+  /** Retired rows removed from the replica during this pull tick. */
+  sweptRetired: number;
   cursor: number;
   failed: boolean;
   lastError: string | null;
@@ -72,7 +79,7 @@ export class KnowledgePuller {
   async pullOnce(): Promise<PullOutcome> {
     const { client, project, pageSize, log } = this.deps;
     const outcome: PullOutcome = {
-      bootstrapped: false, pages: 0, applied: 0, retired: 0,
+      bootstrapped: false, pages: 0, applied: 0, retired: 0, sweptRetired: 0,
       cursor: this.replica.getCursor(project) ?? 0, failed: false, lastError: null,
     };
     if (this.running) return outcome;
@@ -106,9 +113,15 @@ export class KnowledgePuller {
         }
       }
       new OutboxStore(this.deps.db).setState(SYNC_KEYS.lastPullAt, new Date(this.now()).toISOString());
+      // Sweep retired rows on the same tick as a successful pull. The retention window must be long
+      // enough that the cursor has already advanced past any page that could carry an older revision
+      // of the swept note; with the default 7-day window and 60-second pull interval this holds
+      // with many orders of margin. See ReplicaStore.sweepRetired for the full safety argument.
+      outcome.sweptRetired = this.replica.sweepRetired(this.deps.retiredRetentionMs, this.now);
       log.info({
         project, bootstrapped: outcome.bootstrapped, pages: outcome.pages,
-        applied: outcome.applied, retired: outcome.retired, cursor: outcome.cursor,
+        applied: outcome.applied, retired: outcome.retired,
+        sweptRetired: outcome.sweptRetired, cursor: outcome.cursor,
       }, 'knowledge replica pulled');
       return outcome;
     } catch (err) {
