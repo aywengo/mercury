@@ -26,7 +26,7 @@ import type { Redactor } from './redact.ts';
 import { repoIdentity } from './identity.ts';
 import { MAX_EVIDENCE, validateDraft, type AtlasBounds } from './validation.ts';
 import {
-  EVIDENCE_REQUIRED_KINDS, NOTE_KINDS, NOTE_TIERS,
+  assertUsableHostId, EVIDENCE_REQUIRED_KINDS, NOTE_KINDS, NOTE_TIERS,
   type ContributionResult, type Corroboration, type Note, type NoteContribution, type NoteTier,
 } from './types.ts';
 
@@ -116,11 +116,14 @@ export class NoteStore {
   // --- contributors ---------------------------------------------------------
 
   addContributor(tokenHash: string, hostId: string, projects: string[]): void {
+    // Same rule as the contributor file loader. Two entry points, one definition, so the CLI cannot
+    // accept what the file loader refuses.
+    const usable = assertUsableHostId(hostId, 'contributor');
     this.db.prepare(`
       INSERT INTO contributors (token_hash, host_id, project_ids_json, created_at, last_seen_at)
       VALUES (?, ?, ?, ?, NULL)
       ON CONFLICT(token_hash) DO UPDATE SET host_id = excluded.host_id, project_ids_json = excluded.project_ids_json`)
-      .run(tokenHash, hostId, JSON.stringify(projects), new Date().toISOString());
+      .run(tokenHash, usable, JSON.stringify(projects), new Date().toISOString());
   }
 
   removeContributor(tokenHash: string): boolean {
