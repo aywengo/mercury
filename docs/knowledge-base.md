@@ -1,8 +1,12 @@
 # Knowledge base: memory gathered from sub-harnesses, shared across the project
 
-Status: **design only.** Nothing here is implemented. No package, endpoint, table, event type
-or environment variable named below exists yet; every one of them is a proposal. Where a
-sentence describes current behaviour it says so and names the file.
+Status: **partly implemented.** The Atlas service described in sections 11 and 15 exists and is
+tested: `atlas/`, its nine knowledge tables, its `/v1` routes, its `ATLAS_*` environment variables and its CLI.
+Nothing on the Mercury host side exists yet. There is no `knowledge_outbox` table, no pusher, no
+replica, no injection into a workspace, and no `knowledge.rejected` or `knowledge.selected` event type;
+`MERCURY_ATLAS_URL` and the other `MERCURY_*` names below are still proposals. So Atlas runs today with
+no one talking to it, which is the intended order (section 16) and not a half-finished integration.
+Where a sentence describes current behaviour it says so and names the file.
 
 The service this document introduces is called **Atlas** throughout. The name is a one-line
 decision, not a design choice; nothing below depends on it.

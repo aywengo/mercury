@@ -1,0 +1,30 @@
+{
+  "name": "@aywengo/mercury-atlas",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Project knowledge base for Mercury: holds curated notes and serves them to Mercury hosts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aywengo/mercury.git",
+    "directory": "atlas"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "bin": {
+    "atlas": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "prepare": "node -e \"const fs=require('node:fs');const p='../node_modules/typescript/bin/tsc';if(!fs.existsSync(p)){console.error('atlas: TypeScript is not installed. Run npm ci at the repository root before packing or publishing atlas/.');process.exit(1)}\" && node ../node_modules/typescript/bin/tsc -p ../tsconfig.atlas.json"
+  }
+}
