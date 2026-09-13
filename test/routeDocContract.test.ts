@@ -1,0 +1,94 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+
+/**
+ * Route-documentation coverage guard (issue #540).
+ *
+ * Extracts every router.<method>('<path>', ...) call from src/api/routes.ts and checks that
+ * the path appears in at least one of the checked doc files. Fails when a route exists in code
+ * but is mentioned in no doc.
+ *
+ * This is the inversion of the existing docs-contract check, which verifies that documented
+ * things exist. This guard verifies that existing things are documented. Both are needed.
+ */
+
+const ROUTES_SRC = readFileSync(new URL('../src/api/routes.ts', import.meta.url), 'utf8');
+const API_DOC    = readFileSync(new URL('../docs/api.md', import.meta.url), 'utf8');
+const GOALS_DOC  = readFileSync(new URL('../docs/goals.md', import.meta.url), 'utf8');
+
+const ALL_DOC_TEXT = API_DOC + '\n' + GOALS_DOC;
+
+/**
+ * Extract route paths from the routes source.
+ *
+ * Matches lines like:
+ *   router.get('/agents', ...)
+ *   router.post('/runs/:runId/cancel', ...)
+ *
+ * Returns objects like { method: 'GET', path: '/api/agents' }.
+ * The /api prefix is added because routes.ts defines them without it (mounted under /api).
+ */
+function extractRoutes(src: string): { method: string; path: string }[] {
+  const found: { method: string; path: string }[] = [];
+  // Match: router.get('/path', or router.post('/path',
+  // Using a character class for the quote so the pattern does not end at the escaped quote.
+  const re = /router\.(get|post|put|patch|delete)\(['"]\/([^'"]*)['"]/gi;
+  for (const m of src.matchAll(re)) {
+    found.push({ method: m[1].toUpperCase(), path: `/api/${m[2]}` });
+  }
+  return found;
+}
+
+/**
+ * Check whether a route path appears in the combined doc text.
+ * Accepts the path as-is, or with :id for any param placeholder, or without the /api prefix.
+ */
+function isDocumented(path: string, docText: string): boolean {
+  if (docText.includes(path)) return true;
+  // Normalise :runId, :id, etc. to :id for loose matching
+  if (docText.includes(path.replace(/:[^/]+/g, ':id'))) return true;
+  // Without /api prefix
+  if (docText.includes(path.replace(/^\/api/, ''))) return true;
+  return false;
+}
+
+test('every route in src/api/routes.ts appears in docs/api.md or docs/goals.md', () => {
+  const routes = extractRoutes(ROUTES_SRC);
+  assert.ok(routes.length >= 10,
+    `expected at least 10 routes in routes.ts but found only ${routes.length}; check the extractor`);
+
+  const undocumented = routes.filter(({ path }) => !isDocumented(path, ALL_DOC_TEXT));
+  assert.deepEqual(
+    undocumented.map(({ method, path }) => `${method} ${path}`),
+    [],
+    'Routes exist in src/api/routes.ts but are not mentioned in docs/api.md or docs/goals.md. '
+    + 'Add documentation for each route listed above.',
+  );
+});
+
+test('the guard can actually fire: a route with no doc entry is caught', () => {
+  // Proven with a synthetic source that adds one undocumented route alongside the real ones.
+  const fakeRoute = "router.get('/undocumented-sentinel-route', (req: Request, res: Response) => res.json({}));";
+  const syntheticSrc = ROUTES_SRC + '\n' + fakeRoute;
+  const routes = extractRoutes(syntheticSrc);
+  const undoc = routes.filter(({ path }) => !isDocumented(path, ALL_DOC_TEXT));
+  assert.ok(
+    undoc.some(({ path }) => path === '/api/undocumented-sentinel-route'),
+    'the guard must detect a route that appears in source but not in docs',
+  );
+});
+
+test('the guard extractor finds the known routes', () => {
+  const routes = extractRoutes(ROUTES_SRC);
+  const paths = routes.map((r) => r.path);
+  for (const expected of [
+    '/api/agents',
+    '/api/runs',
+    '/api/knowledge/status',
+    '/api/knowledge/notes',
+    '/api/runs/:runId/knowledge',
+  ]) {
+    assert.ok(paths.includes(expected), `extractor missed expected route ${expected}`);
+  }
+});

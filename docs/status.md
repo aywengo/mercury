@@ -155,6 +155,24 @@ boundaries.
 
 ## Implemented
 
+### Knowledge base (phases 0–2)
+
+The host-side knowledge integration is implemented through phase 2. What is live:
+
+- `knowledge_outbox` table, the pusher, and the puller;
+- `knowledge_replica` with its cursor;
+- deterministic pack selection at Run creation and `run_knowledge` storage;
+- materialized workspace files at Run start;
+- `knowledge.rejected` and `knowledge.selected` event types;
+- `GET /api/knowledge/status` and `POST /api/knowledge/notes` (admin only);
+- `GET /api/runs/:runId/knowledge` (owner-scoped);
+- `MERCURY_ATLAS_*` configuration variables including `MERCURY_ATLAS_ADMIN_TOKEN`.
+
+Phase 3 (harvesting `.mercury/notes.jsonl` back out of a completed workspace) is not yet
+implemented. The file is created empty and the agent is instructed to write it, but nothing
+reads it back. See [`docs/knowledge-base.md`](knowledge-base.md) for details.
+
+
 ### Distribution
 
 Four channels, all built by the release workflow in `release.yml`; what each artifact

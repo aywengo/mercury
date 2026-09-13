@@ -2,7 +2,7 @@ Status: **phases 0 to 3 implemented.** Atlas (sections 11 and 15) exists and is 
 nine knowledge tables, its `/v1` routes, its `ATLAS_*` environment variables and its CLI. The host side
 now exists too: `knowledge_outbox`, the pusher, the puller, the `knowledge_replica` replica with its
 cursor, deterministic pack selection at Run creation, `run_knowledge`, the materialized workspace files,
-and the `knowledge.rejected` and `knowledge.selected` event types. `MERCURY_ATLAS_URL` and the other
+and the `knowledge.rejected` and `knowledge.selected` event types. `GET /api/knowledge/status` and `POST /api/knowledge/notes` (admin only) and `GET /api/runs/:runId/knowledge` are live API routes. `MERCURY_ATLAS_URL` and the other
 `MERCURY_*` names below are live configuration, read by `src/config.ts`.
 
 Implemented, and no longer a proposal:

@@ -56,6 +56,100 @@ restarts. They are not shared between multiple API processes.
 
 All endpoints in this table require authentication.
 
+## Knowledge endpoints
+
+These endpoints are served only by processes that have `knowledgeStatus` or `knowledgeNotes`
+wired in (typically the API process when Atlas is configured). A process that does not have the
+surface wired answers `404` with a message that distinguishes "not on this process" from "not
+found".
+
+**Authentication:** all knowledge endpoints require an **admin token**
+(`MERCURY_ADMIN_TOKEN`). An authenticated non-admin caller receives `403`, not `404`.
+
+### GET /api/knowledge/status
+
+Returns the state of this host's knowledge synchronisation.
+
+```bash
+curl http://127.0.0.1:3000/api/knowledge/status \
+  -H "Authorization: Bearer admin-token"
+```
+
+Responses:
+
+| Status | Meaning |
+| --- | --- |
+| `200` | JSON body with the current `KnowledgeStatus` snapshot |
+| `403` | Authenticated but not an admin token |
+| `404` | Knowledge status is not served by this process |
+
+### POST /api/knowledge/notes
+
+Submit an operator-authored note to the local outbox. The note goes into the durable outbox
+and is delivered to Atlas by the next pusher pass. Because the note is durable but not yet
+in Atlas, the response is `202`, not `201`.
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/knowledge/notes \
+  -H "Authorization: Bearer admin-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kind": "convention",
+    "scope": "src/api",
+    "claim": "Every route returns JSON; no plain-text 200s.",
+    "detail": "Confirmed by reading routes.ts end to end.",
+    "evidence": []
+  }'
+```
+
+Required body fields:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `kind` | string | One of `fact`, `convention`, `pitfall`, `command`, `decision`, `artifact-pointer` |
+| `scope` | string | Path or topic the claim applies to |
+| `claim` | string | The claim text; max `MERCURY_KNOWLEDGE_MAX_CLAIM_BYTES` (default 1024) bytes |
+
+Optional body fields:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `detail` | string | Supporting detail; max `MERCURY_KNOWLEDGE_MAX_DETAIL_BYTES` (default 4096) bytes |
+| `evidence` | array | Evidence references; `decision` and `pitfall` kinds require at least one |
+| `contradicts` | string[] | Claim hashes this note supersedes |
+
+Responses:
+
+| Status | Meaning |
+| --- | --- |
+| `202` | Note accepted; `{ claimHash, queued }`. `queued: false` means an identical note was already waiting — still a success |
+| `400` | Note refused: body did not pass validation. Includes `reason` |
+| `403` | Authenticated but not an admin token |
+| `404` | This process does not accept notes |
+| `409` | Host cannot deliver notes: Atlas not configured (`MERCURY_ATLAS_URL` unset), or `MERCURY_ATLAS_ADMIN_TOKEN` is not set. The error message names the missing variable |
+
+The `409` is a host misconfiguration, not a caller error. A note refused here is never queued;
+it is not silently lost in an outbox that cannot drain.
+
+### GET /api/runs/:runId/knowledge
+
+Returns the knowledge pack the Run was created with.
+
+```bash
+curl http://127.0.0.1:3000/api/runs/run_123/knowledge \
+  -H "Authorization: Bearer tok-alice"
+```
+
+Owner-scoped by the same access check as every other Run read. A caller who cannot see the Run
+cannot read its pack.
+
+Responses:
+
+| Status | Meaning |
+| --- | --- |
+| `200` | `{ knowledge }` — the pack snapshot |
+| `404` | Run not found (or belongs to another owner), or the Run was created without a knowledge pack |
+
 ## Create a Run
 
 ```bash
