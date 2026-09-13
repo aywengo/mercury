@@ -61,9 +61,37 @@ function cleanPath(path: string): string {
   let p = path;
   while (p.startsWith('/')) p = p.slice(1);
   while (p.endsWith('/')) p = p.slice(0, -1);
+  // The `.git` strip runs AFTER the trailing-slash loop above, so `acme/.git` leaves `acme/` behind --
+  // an identity with a trailing separator, which is not the single host/path token the format calls for.
+  // Stripping again here is what keeps the scp and URL branches agreeing: both reach this function with a
+  // `.git` suffix, and only one of them additionally collapses dot segments.
   if (p.toLowerCase().endsWith('.git')) p = p.slice(0, -4);
+  while (p.endsWith('/')) p = p.slice(0, -1);
   while (p.includes('//')) p = p.split('//').join('/');
   return p;
+}
+
+/**
+ * Remove `.` and `..` segments, the way RFC 3986 §5.24 does for a URL path.
+ *
+ * Mirrors src/knowledge/identity.ts exactly. `new URL()` already does this to every path it parses, so
+ * the URL branch never sees a dot segment; the scp form is not parsed by `new URL()` at all, which is
+ * why it needs its own branch and why it has to do the same work here.
+ *
+ * A `..` that would climb above the first segment is dropped: there is no meaningful identity above the
+ * owner, and keeping one produced a scope no other host could ever report.
+ */
+function collapseDotSegments(path: string): string {
+  const out: string[] = [];
+  for (const seg of path.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      out.pop();
+      continue;
+    }
+    out.push(seg);
+  }
+  return out.join('/');
 }
 
 /**
@@ -99,7 +127,13 @@ export function normalizeRepoIdentity(raw: string): string | null {
     const scp = SCP_FORM.exec(trimmed);
     if (scp) {
       const host = scp[1]!.toLowerCase();
-      const path = cleanPath(scp[2]!);
+      // Kept byte-for-byte equivalent to src/knowledge/identity.ts. The two copies are deliberately
+      // independent (Atlas and a host must not share a module they can each change), and
+      // atlasAgreement.test.ts is what holds them together. Dot segments have to be collapsed here too:
+      // the URL branch gets it free from `new URL()` and this branch does not, so a host that spells the
+      // repository in scp form and a host that spells it as a URL would otherwise file the same
+      // convention into two different scopes.
+      const path = collapseDotSegments(cleanPath(scp[2]!));
       return path ? `${host}/${path}` : null;
     }
     return null;
