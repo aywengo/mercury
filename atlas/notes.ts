@@ -63,6 +63,32 @@ export interface FeedPage {
 
 const DEFAULT_AUTO_KINDS = ['fact', 'convention', 'command', 'pitfall'];
 
+/**
+ * Raised when a tier change would put two live notes on one claim.
+ *
+ * It is a domain error rather than an HTTP one because `notes.ts` knows nothing about transports; the
+ * promote route turns it into a 409 that names the note to retire first. A plain Error here would reach
+ * the operator as a bare 500, which is the wrong answer to a request they can actually fix.
+ */
+export class ClaimConflictError extends Error {
+  // Declared rather than declared-and-assigned in the constructor signature: the repo builds with
+  // `erasableSyntaxOnly`, which rejects TypeScript parameter properties.
+  readonly projectId: string;
+  readonly noteId: string;
+  readonly conflictingNoteId: string;
+
+  constructor(projectId: string, noteId: string, conflictingNoteId: string) {
+    super(
+      `note ${noteId} cannot become live: note ${conflictingNoteId} already holds this claim in a live ` +
+        `tier for project ${projectId}. Retire ${conflictingNoteId} first.`,
+    );
+    this.projectId = projectId;
+    this.noteId = noteId;
+    this.conflictingNoteId = conflictingNoteId;
+    this.name = 'ClaimConflictError';
+  }
+}
+
 export class NoteStore {
   private readonly db: DatabaseSync;
   private readonly bounds: AtlasBounds;
@@ -291,8 +317,24 @@ export class NoteStore {
     };
 
     const claimHashKey = claimHashOf(contribution);
-    const existing = this.db.prepare('SELECT note_id FROM notes WHERE project_id = ? AND claim_hash = ?')
-      .get(project.id, claimHashKey) as { note_id: string } | undefined;
+    // A retired note is excluded from dedup intentionally (#551). A retired note went through
+    // `retireStaleCandidates` (no corroboration) or an explicit operator retirement; its claim is no
+    // longer in the served set. A later contribution of the same claim should land fresh -- as a new
+    // candidate that can earn its way to promoted again -- rather than silently augmenting a note that
+    // will never be served. The result is therefore `accepted`, not `duplicate`, and the old retired
+    // row stays as history.
+    //
+    // Determinism: at most one non-retired note exists per (project_id, claim_hash), so `.get()` returns
+    // that row or nothing. Two things hold that up, and neither is this query alone:
+    //   - insertion: this is the only gate before insertNote(), the sole writer of the notes table;
+    //   - revival: transition() refuses to move a note into a live tier while another live note already
+    //     holds the claim, which is what stops an admin promoting an old retired note beside its
+    //     replacement (ClaimConflictError).
+    // There is no UNIQUE constraint backing this, so a future writer that bypasses both would break it
+    // silently; the guard lives in transition() because that is the single place tiers change.
+    const existing = this.db.prepare(
+      "SELECT note_id FROM notes WHERE project_id = ? AND claim_hash = ? AND tier != 'retired'",
+    ).get(project.id, claimHashKey) as { note_id: string } | undefined;
     if (existing) {
       this.addSource(existing.note_id, contribution);
       // Re-check promotion here as well as on insert. Corroboration accumulates through the
@@ -400,6 +442,7 @@ export class NoteStore {
 
   // --- curation -------------------------------------------------------------
 
+
   promote(projectId: string, noteId: string, actor: string, reason: string): Note | null {
     return tx(this.db, () => this.transition(projectId, noteId, 'promoted', actor, reason));
   }
@@ -424,6 +467,17 @@ export class NoteStore {
     if (!row) return null;
     const from = row.tier as NoteTier;
     if (from === to) return this.getNote(projectId, noteId)?.note ?? null;
+    // Bringing a note back into a live tier is the one move the dedup gate cannot see, and it is the one
+    // move that can put two live notes on one claim. contributeOne() only refuses to *insert* beside a
+    // live note; nothing stopped a retired note from being promoted beside the note that replaced it.
+    // Before the retired-claim fix that was harmless -- there was only ever one row per claim -- so this
+    // guard is load-bearing for that change rather than general tidiness.
+    if (to !== 'retired') {
+      const clash = this.db.prepare(
+        "SELECT note_id FROM notes WHERE project_id = ? AND claim_hash = ? AND tier != 'retired' AND note_id != ?",
+      ).get(projectId, row.claim_hash, noteId) as { note_id: string } | undefined;
+      if (clash) throw new ClaimConflictError(projectId, noteId, clash.note_id);
+    }
     const seq = this.nextSeq(projectId);
     const now = new Date().toISOString();
     const revision = row.current_revision + 1;

@@ -21,7 +21,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDatabase, tx } from '../db.ts';
 import { createRedactor } from '../redact.ts';
-import { NoteStore, type PromotionPolicy } from '../notes.ts';
+import { ClaimConflictError, NoteStore, type PromotionPolicy } from '../notes.ts';
 
 const BOUNDS = { maxClaimBytes: 1024, maxDetailBytes: 4096, maxEvidence: 8 };
 const IDENTITY = 'github.com/aywengo/mercury';
@@ -260,3 +260,175 @@ test('retireStaleCandidates retires notes nobody re-confirmed and spares recentl
 // again: the first retires it, the second keeps it forever. The implementation takes the first, which
 // is defensible -- a claim no host has re-confirmed in a year is stale even if three once agreed -- but
 // it is a reading, not the only one, and it is worth deciding deliberately rather than by inheritance.
+
+// --- Issue #551: a retired note must not be a permanent dedup sink ---
+
+test('a claim contributed after retirement is accepted fresh, not silently swallowed as a duplicate', () => {
+  // This is the core regression. On main, contributing X after X is retired returns
+  // `{ duplicate: retiredNoteId }`, the outbox row is deleted, and the claim is lost.
+  // After the fix, the answer is `{ accepted: newNoteId }` and the note is a new candidate.
+  const h = setup();
+  const p = h.project();
+  const claim = 'run docker compose up before the integration suite';
+
+  const first = h.send(p, [h.note(claim, { host: 'host-a', run: 'r1' })], 'k1');
+  const originalId = first[0]!.accepted!;
+  assert.equal(h.tierOf(p, originalId), 'candidate');
+
+  h.store.retire(p, originalId, 'system:retention', 'stale');
+  assert.equal(h.tierOf(p, originalId), 'retired');
+
+  // Contribute from two new hosts on different harnesses; policy is minRuns 2 / minDistinctHarnessesOrHosts 2.
+  const second = h.send(p, [h.note(claim, { host: 'host-b', run: 'r2', agent: 'hermes' })], 'k2', 'host-b');
+  assert.ok('accepted' in second[0]!, `expected accepted, got ${JSON.stringify(second[0])}`);
+  const newId = second[0]!.accepted!;
+  assert.notEqual(newId, originalId, 'a fresh note gets a new id, the retired one stays as history');
+
+  const third = h.send(p, [h.note(claim, { host: 'host-c', run: 'r3', agent: 'primeagent' })], 'k3', 'host-c');
+  assert.ok('duplicate' in third[0]!, `expected duplicate on 3rd, got ${JSON.stringify(third[0])}`);
+
+  // Policy satisfied: 2 runs, 2 distinct harnesses. The note must have been promoted.
+  assert.equal(h.tierOf(p, newId), 'promoted', 'the re-contributed note must promote once the policy threshold is met');
+
+  // It must appear in bootstrap and in the promoted feed.
+  const boot = h.store.bootstrap(p);
+  assert.ok(boot.notes.some((n) => n.noteId === newId), 'bootstrap must serve the re-promoted note');
+
+  const feed = h.store.feed(p, 0, 'promoted', { limit: 100 });
+  assert.ok(feed.notes.some((n) => n.noteId === newId), 'promoted feed must serve the re-promoted note');
+});
+
+test('a repo-record contribution after retirement is accepted and lands promoted, not duplicate', () => {
+  // Before the fix: `existing` matched the retired note; `addSource` added a source to it;
+  // `autoPromote` returned false because the note is not a candidate; answer was `duplicate`.
+  // After the fix: the query skips retired notes; `insertNote` is called; source is repo-record,
+  // so the note lands promoted immediately.
+  const h = setup();
+  const p = h.project();
+  const claim = 'all money arithmetic uses integer minor units';
+  const evidence = [{ type: 'repo-file', repo: IDENTITY, path: 'docs/adr/0002-money.md', sha: 'a1b2c3d' }];
+
+  // First: land as a candidate from an agent, then retire it.
+  const first = h.send(p, [h.note(claim, { host: 'host-a', run: 'r1' })], 'k1');
+  const originalId = first[0]!.accepted!;
+  h.store.retire(p, originalId, 'operator', 'superseded');
+
+  // Now contribute the same claim as repo-record (e.g., an accepted decision record merged later).
+  const second = h.send(p, [h.note(claim, { source: 'repo-record', evidence })], 'k2');
+  assert.ok('accepted' in second[0]!, `expected accepted, got ${JSON.stringify(second[0])}`);
+  const newId = second[0]!.accepted!;
+  assert.equal(h.tierOf(p, newId), 'promoted',
+    'a repo-record note bypasses the candidate queue regardless of retirement history');
+
+  // Bootstrap serves it; no stale reference to the retired note.
+  const boot = h.store.bootstrap(p);
+  assert.ok(boot.notes.some((n) => n.noteId === newId), 'bootstrap must serve the newly promoted repo-record note');
+});
+
+test('the existing retirement test still passes: feed carries the retirement, bootstrap excludes it', () => {
+  // This is a copy of the "a retired note still appears in the promoted feed" test to confirm
+  // the fix to issue #551 did not break the existing retirement path.
+  const h = setup();
+  const p = h.project();
+  const noteId = h.send(p, [h.note('every amount is stored in minor units (regression guard)', {
+    source: 'repo-record',
+    evidence: [{ type: 'repo-file', repo: IDENTITY, path: 'docs/adr/1.md', sha: 'a1b2c3d' }],
+  })], 'k1')[0]!.accepted!;
+  assert.equal(h.tierOf(p, noteId), 'promoted');
+
+  h.store.retire(p, noteId, 'operator', 'superseded by a later decision record');
+
+  const promoted = h.store.feed(p, 0, 'promoted', { limit: 100 });
+  assert.deepEqual(promoted.notes.map((n) => n.noteId), [noteId], 'the retirement must reach feed subscribers');
+  assert.equal(h.tierOf(p, noteId), 'retired');
+  assert.deepEqual(h.store.bootstrap(p).notes.map((n) => n.noteId), [], 'bootstrap must exclude retired notes');
+});
+
+// --- the revival guard: two live notes must never share one claim -------------------------------
+//
+// Excluding retired rows from the dedup gate is what makes a second live note possible, and promotion is
+// the one move the dedup gate cannot see: it never consults claim_hash. Without the guard in transition()
+// an admin reinstating a wrongly-retired note silently creates two live notes on one claim, and the next
+// contribution picks between them arbitrarily.
+
+test('promoting a retired note whose claim is already live is refused', () => {
+  const h = setup();
+  const p = h.project();
+  const first = h.send(p, [h.note('ALWAYS STORE MONEY IN MINOR UNITS', {
+    source: 'repo-record', evidence: [{ type: 'repo-file', repo: IDENTITY, path: 'docs/adr/1.md', sha: 'a1b2c3d' }],
+  })], 'k1')[0]!.accepted!;
+  h.store.retire(p, first, 'operator', 'superseded');
+  const second = h.send(p, [h.note('ALWAYS STORE MONEY IN MINOR UNITS', {
+    host: 'host-b', source: 'repo-record', evidence: [{ type: 'repo-file', repo: IDENTITY, path: 'docs/adr/2.md', sha: 'e4f5a6b' }],
+  })], 'k2', 'host-b')[0]!.accepted!;
+  assert.notEqual(second, first, 'the retired-claim fix must have landed a fresh note');
+
+  assert.throws(
+    () => h.store.promote(p, first, 'admin', 'reinstate the original'),
+    (err: unknown) => {
+      assert.ok(err instanceof ClaimConflictError, `expected ClaimConflictError, got ${err}`);
+      assert.equal((err as ClaimConflictError).conflictingNoteId, second);
+      return true;
+    },
+  );
+  // Refused means unchanged: the retired note stays retired, the live one is untouched.
+  assert.equal(h.tierOf(p, first), 'retired');
+  assert.equal(h.tierOf(p, second), 'promoted');
+});
+
+test('retiring the live note first lets the retired one be promoted', () => {
+  // The guard must refuse the *collision*, not reinstatement in general -- an operator who decides the
+  // original note was right has to be able to say so, by retiring the replacement first.
+  const h = setup();
+  const p = h.project();
+  const first = h.send(p, [h.note('ALWAYS STORE MONEY IN MINOR UNITS', {
+    source: 'repo-record', evidence: [{ type: 'repo-file', repo: IDENTITY, path: 'docs/adr/1.md', sha: 'a1b2c3d' }],
+  })], 'k1')[0]!.accepted!;
+  h.store.retire(p, first, 'operator', 'superseded');
+  const second = h.send(p, [h.note('ALWAYS STORE MONEY IN MINOR UNITS', {
+    host: 'host-b', source: 'repo-record', evidence: [{ type: 'repo-file', repo: IDENTITY, path: 'docs/adr/2.md', sha: 'e4f5a6b' }],
+  })], 'k2', 'host-b')[0]!.accepted!;
+
+  h.store.retire(p, second, 'operator', 'the original was correct after all');
+  const promoted = h.store.promote(p, first, 'admin', 'reinstate the original');
+  assert.equal(promoted?.tier, 'promoted');
+  assert.equal(h.tierOf(p, second), 'retired');
+});
+
+test('retiring is never blocked by the revival guard, even on a database that already holds a collision', () => {
+  // The guard applies only to moves INTO a live tier, and that distinction has to be observable. It is,
+  // because of upgrade data: an Atlas file written before this guard existed can already contain two live
+  // notes on one claim -- that is precisely the state the guard now prevents from being *created*. The
+  // only way out of such a collision is to retire one side, so a guard that also applied to retirement
+  // would make the bad state permanent and unfixable by design.
+  const h = setup();
+  const p = h.project();
+  const noteId = h.send(p, [h.note('USE A SINGLE SHARED DATE FORMAT', {
+    source: 'repo-record', evidence: [{ type: 'repo-file', repo: IDENTITY, path: 'docs/adr/3.md', sha: 'c1d2e3f' }],
+  })], 'k1')[0]!.accepted!;
+
+  // Forge the pre-guard state directly: a second live row carrying the same claim_hash, which the store
+  // itself would now refuse to create. noteId stays live, so the two really do collide.
+  const src = h.db.prepare('SELECT claim_hash FROM notes WHERE note_id = ?').get(noteId) as { claim_hash: string };
+  const seq = (h.db.prepare('SELECT seq FROM notes WHERE note_id = ?').get(noteId) as { seq: number }).seq + 1;
+  h.db.prepare(`INSERT INTO notes (note_id, project_id, current_revision, tier, kind, scope,
+      claim_hash, seq, created_at, updated_at)
+      VALUES ('forged_live', ?, 1, 'candidate', 'fact', 'project', ?, ?,
+      '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`)
+    .run(p, src.claim_hash, seq);
+  // transition() rebuilds the note from its current revision, so a duplicate row without one is not a
+  // faithful copy of the pre-guard state -- it is a corrupt row that crashes for an unrelated reason.
+  const rev = h.db.prepare('SELECT note_json, seq FROM note_revisions WHERE note_id = ? ORDER BY revision DESC')
+    .get(noteId) as { note_json: string; seq: number };
+  h.db.prepare('INSERT INTO note_revisions (note_id, revision, note_json, seq, created_at) VALUES (?, 1, ?, ?, ?)')
+    .run('forged_live', JSON.stringify({ ...JSON.parse(rev.note_json), noteId: 'forged_live', revision: 1 }),
+      seq, '2026-01-01T00:00:00.000Z');
+
+  // The collision is real: two live rows, one claim.
+  const live = h.db.prepare("SELECT note_id FROM notes WHERE project_id = ? AND tier != 'retired'").all(p);
+  assert.equal(live.length, 2, 'precondition: two live rows must share one claim_hash');
+
+  // Retiring either side must still work -- that is how the operator resolves it.
+  assert.equal(h.store.retire(p, 'forged_live', 'operator', 'duplicate of the reinstated original')?.tier, 'retired');
+  assert.equal(h.store.promote(p, noteId, 'admin', 'reinstate the original')?.tier, 'promoted');
+});
