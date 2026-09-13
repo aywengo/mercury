@@ -20,6 +20,9 @@
 // is deferred per the design.
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { AGENTS_MD_FILE, NOTES_FILE } from '../knowledge/materialize.ts';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
@@ -146,6 +149,29 @@ export class HermesAgentAdapter implements AgentAdapter {
   }
 
   async start(context: RunContext): Promise<AgentHandle> {
+    // Write AGENTS.md knowledge channel when none is tracked (docs/knowledge-base.md §9.3).
+    //
+    // Hermes reads AGENTS.md from the working directory unprompted (measured, Hermes v0.21.2, #541).
+    // It does NOT read .mercury/knowledge/NOTES.md. So AGENTS.md is the only channel that reaches
+    // Hermes without a protocol change.
+    //
+    // The conditional is §9.4: Mercury must never modify a tracked file, and the workspace is a
+    // fresh worktree per Run, so the only AGENTS.md that can exist here before start() is one the
+    // repository tracks. existsSync is the right check -- the same one materializeKnowledge() uses
+    // for the SKILL.md channel (see src/knowledge/materialize.ts). No new git query.
+    //
+    // When a tracked AGENTS.md is present, the pack still reaches the Run through the neutral files
+    // (.mercury/knowledge/NOTES.md and pack.json) that materializeKnowledge() already wrote.
+    if (context.knowledge) {
+      const agentsMdPath = join(context.workspace.path, AGENTS_MD_FILE);
+      if (!existsSync(agentsMdPath)) {
+        const notesPath = join(context.workspace.path, NOTES_FILE);
+        if (existsSync(notesPath)) {
+          writeFileSync(agentsMdPath, readFileSync(notesPath, 'utf8'));
+        }
+      }
+    }
+
     const runId = context.run.id;
     const session: Session = {
       runId,

@@ -66,7 +66,8 @@ export const SKILL_DIR = `.agents/skills/${SKILL_ID}`;
 export const SKILL_FILE = `${SKILL_DIR}/SKILL.md`;
 
 /** Paths Mercury generates and no agent should ever commit (section 9.4). */
-export const GENERATED_PATHS = ['.mercury/', `${SKILL_DIR}/`];
+export const AGENTS_MD_FILE = 'AGENTS.md';
+export const GENERATED_PATHS = ['.mercury/', `${SKILL_DIR}/`, AGENTS_MD_FILE];
 
 const SPECIFICITY: Record<string, number> = { path: 0, repo: 1, project: 2, agent: 3 };
 
