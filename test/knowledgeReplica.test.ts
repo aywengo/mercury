@@ -11,13 +11,17 @@ import assert from 'node:assert/strict';
 
 import { openDatabase } from '../src/db/database.ts';
 import { ReplicaStore } from '../src/knowledge/replica.ts';
+import { KnowledgePuller } from '../src/knowledge/puller.ts';
 import { knowledgeStatus } from '../src/knowledge/status.ts';
 import type { Note } from '../src/knowledge/types.ts';
 import type { KnowledgeConfig } from '../src/config.ts';
+import type { AtlasClient } from '../src/knowledge/client.ts';
+
+const QUIET = { info() {}, warn() {}, error() {} } as never;
 
 const CFG: KnowledgeConfig = {
   atlas: { url: 'http://atlas:1', token: 't', project: 'mercury', hostId: 'h', caFile: null, adminToken: null },
-  inject: true, packMaxBytes: 1, pushIntervalMs: 1, pushBatch: 1, pullIntervalMs: 1, outboxAlertDepth: 1,
+  inject: true, packMaxBytes: 1, pushIntervalMs: 1, pushBatch: 1, pullIntervalMs: 1, retiredRetentionMs: 604_800_000, outboxAlertDepth: 1,
   bounds: { maxNotesPerRun: 1, maxClaimBytes: 1, maxDetailBytes: 1, maxEvidence: 1, harvestTimeoutMs: 1 },
 };
 
@@ -120,4 +124,158 @@ test('clear removes both the notes and the cursor, so a rebind starts from boots
   assert.equal(rep.clear('mercury'), 1);
   assert.equal(rep.getCursor('mercury'), null,
     'a stale cursor with an empty replica would page from the middle and never bootstrap');
+});
+
+// ─── sweepRetired and resurrection-invariant tests ───────────────────────────
+
+test('sweepRetired removes non-promoted rows older than the threshold', () => {
+  const db = openDatabase(':memory:');
+  const rep = new ReplicaStore(db);
+  const baseMs = 1_000_000_000_000;
+  const now = () => baseMs;
+  // Apply a retirement
+  rep.applyBatch('mercury', [
+    note({ noteId: 'a', seq: 1 }),
+    note({ noteId: 'b', seq: 2, tier: 'retired' }),
+  ], 2, new Date(baseMs - 10_000).toISOString()); // updated_at = 10 s ago
+
+  // With a 5-second retention, b is old enough to sweep
+  const swept = rep.sweepRetired(5_000, now);
+  assert.equal(swept, 1, 'exactly the one retired row is swept');
+  assert.equal(rep.count('mercury'), 1, 'promoted note a is untouched');
+  const rows = db.prepare("SELECT note_id FROM knowledge_replica").all() as { note_id: string }[];
+  assert.deepEqual(rows.map(r => r.note_id), ['a'], 'only promoted row remains');
+});
+
+test('sweepRetired does not remove rows newer than the threshold', () => {
+  const db = openDatabase(':memory:');
+  const rep = new ReplicaStore(db);
+  const baseMs = 1_000_000_000_000;
+  const now = () => baseMs;
+  rep.applyBatch('mercury', [
+    note({ noteId: 'b', seq: 2, tier: 'retired' }),
+  ], 2, new Date(baseMs - 1_000).toISOString()); // updated_at = 1 s ago
+
+  // With a 5-second retention, b is too fresh to sweep
+  const swept = rep.sweepRetired(5_000, now);
+  assert.equal(swept, 0, 'fresh retired row is left in place');
+});
+
+test('sweepRetired never touches promoted rows regardless of age', () => {
+  const db = openDatabase(':memory:');
+  const rep = new ReplicaStore(db);
+  const baseMs = 1_000_000_000_000;
+  const now = () => baseMs;
+  // Very old promoted row
+  rep.applyBatch('mercury', [note({ noteId: 'a', seq: 1 })], 1, new Date(baseMs - 999_999_999).toISOString());
+  const swept = rep.sweepRetired(0, now); // threshold = 0 ms = sweep everything older than now
+  assert.equal(swept, 0, 'promoted rows are never swept even with a zero threshold');
+  assert.equal(rep.count('mercury'), 1);
+});
+
+/**
+ * Resurrection-invariant test (acceptance item 2).
+ *
+ * The concern: after sweepRetired removes a row, a replayed page for that note (with an older
+ * promoted revision) has no reference row and the upsert guard would INSERT it, resurrecting it
+ * as promoted. This is unreachable TODAY because the cursor is monotonic.
+ *
+ * This test pins BOTH halves of that invariant:
+ *   (a) The cursor never moves backwards -- if setCursor were called unconditionally this fails.
+ *   (b) After sweeping a retired note, a replayed old promoted page cannot resurrect it,
+ *       GIVEN that the cursor is monotonic (a).
+ *
+ * A failure of (a) would be the signal that (b) needs active defence too.
+ */
+test('cursor is monotonic: a lower nextSeq cannot rewind the cursor after it has advanced', () => {
+  const db = openDatabase(':memory:');
+  const rep = new ReplicaStore(db);
+  rep.applyBatch('mercury', [note({ noteId: 'a', seq: 100 })], 100, '2026-01-02T00:00:00.000Z');
+  assert.equal(rep.getCursor('mercury'), 100);
+
+  // Simulate what would happen if the puller sent a page from an earlier seq (impossible today,
+  // but this is the mutation that the safety argument depends on being rejected).
+  rep.applyBatch('mercury', [], 50, '2026-01-03T00:00:00.000Z');
+  assert.equal(rep.getCursor('mercury'), 100,
+    'cursor must not rewind: if this fails, sweepRetired may cause resurrection');
+  rep.applyBatch('mercury', [note({ noteId: 'b', seq: 10 })], 10, '2026-01-03T00:00:00.000Z');
+  assert.equal(rep.getCursor('mercury'), 100,
+    'a batch with a lower-seq note must not rewind the cursor');
+});
+
+test('a swept retired note is not resurrected by a replayed old promoted page', () => {
+  // This test is CONSEQUENTIAL on the cursor-monotonicity test above.
+  // If setCursor were allowed to rewind, the puller could replay a page at seq < cursor,
+  // and a swept row would be re-inserted as promoted. That scenario is blocked by monotonicity,
+  // but we also show that, in the current code path, a direct applyBatch replay after sweep does
+  // see an INSERT (i.e. the guard is gone), to make clear what the invariant is protecting.
+  const db = openDatabase(':memory:');
+  const rep = new ReplicaStore(db);
+  const baseMs = 1_000_000_000_000;
+  const now = () => baseMs;
+
+  // Step 1: apply note 'z' as promoted at seq 1, then retire it at seq 2
+  rep.applyBatch('mercury', [note({ noteId: 'z', seq: 1, tier: 'promoted' })], 1, new Date(baseMs - 100_000).toISOString());
+  rep.applyBatch('mercury', [note({ noteId: 'z', seq: 2, tier: 'retired' })], 2, new Date(baseMs - 10_000).toISOString());
+  assert.equal(rep.count('mercury'), 0, 'note is retired');
+
+  // Step 2: sweep it (5-second threshold; updated_at was 10s ago)
+  const swept = rep.sweepRetired(5_000, now);
+  assert.equal(swept, 1, 'row swept');
+
+  // Step 3: the cursor is at 2. A replay of the old promoted revision at seq 1 would only reach
+  // this point if the cursor were allowed to move back to < 1. Because the cursor is at 2, the
+  // puller as written cannot produce this replay. We document this constraint by asserting the
+  // cursor has not moved.
+  assert.equal(rep.getCursor('mercury'), 2, 'cursor still at 2 after sweep -- replay cannot precede this');
+
+  // Step 4 (direct call, not possible via puller): confirm the upsert behaviour when row is absent.
+  // This shows WHY cursor monotonicity matters: a direct replay WOULD resurrect the note.
+  rep.applyBatch('mercury', [note({ noteId: 'z', seq: 1, tier: 'promoted' })], 1, new Date(baseMs).toISOString());
+  // The cursor is at 2, so nextSeq=1 does not advance it. The note IS inserted (row absent, upsert fires).
+  const count = rep.count('mercury');
+  // We do NOT assert count === 0 here; we assert count === 1 to make explicit that resurrection
+  // WOULD occur if this replay were reachable. The cursor monotonicity test above is what prevents
+  // the puller from making this call. If that test breaks, add defensive sweepRetired recording.
+  assert.equal(count, 1,
+    'direct replay after sweep resurrects note -- cursor monotonicity is what makes this unreachable via puller');
+});
+
+// ─── Puller calls sweepRetired after a successful pull ───────────────────────
+
+test('puller calls sweepRetired after a successful pull', async () => {
+  // This test proves that the puller wires up sweepRetired. It uses a mock AtlasClient so no
+  // real Atlas is needed. If the puller stops calling sweepRetired, this test fails.
+  const db = openDatabase(':memory:');
+  const rep = new ReplicaStore(db);
+  const baseMs = 1_000_000_000_000;
+  let nowMs = baseMs;
+  const now = () => nowMs;
+
+  // Seed a retired row with updated_at well in the past
+  rep.applyBatch('mercury', [
+    note({ noteId: 'old-retired', seq: 1, tier: 'retired' }),
+  ], 1, new Date(baseMs - 100_000).toISOString()); // 100 s ago
+
+  // Advance now so the row is past the retention threshold
+  nowMs = baseMs + 200_000; // 200 s later (threshold is 50 s)
+
+  // Mock client: returns an empty page with nextSeq=1 (already at cursor)
+  const mockClient = {
+    async bootstrap(_project: string) { return { notes: [], nextSeq: 2 }; },
+    async pull(_project: string, _since: number, _tier: string, _pageSize: number) {
+      return { notes: [], nextSeq: 1 };
+    },
+  } as unknown as AtlasClient;
+
+  const puller = new KnowledgePuller({
+    db, client: mockClient, project: 'mercury', intervalMs: 60_000,
+    pageSize: 100, retiredRetentionMs: 50_000, log: QUIET, now,
+  });
+
+  // First pull: cursor is null, takes bootstrap path, then sweeps
+  const outcome = await puller.pullOnce();
+  assert.equal(outcome.failed, false);
+  assert.equal(outcome.sweptRetired, 1, 'puller must have called sweepRetired after the pull');
+  assert.equal(rep.count('mercury'), 0);
 });

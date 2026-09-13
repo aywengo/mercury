@@ -274,7 +274,7 @@ test('knowledge status reports depth, last push and the configured project', () 
     // into the second call's CONFIG parameter; both are objects with an `atlas`-ish shape, so the mistake
     // was invisible until something actually typed it.
     const cfg: KnowledgeConfig = {
-      atlas: null, inject: true, packMaxBytes: 1, pushIntervalMs: 1, pushBatch: 1, pullIntervalMs: 1,
+      atlas: null, inject: true, packMaxBytes: 1, pushIntervalMs: 1, pushBatch: 1, pullIntervalMs: 1, retiredRetentionMs: 604_800_000,
       outboxAlertDepth: 1,
       bounds: { maxNotesPerRun: 1, maxClaimBytes: 1, maxDetailBytes: 1, maxEvidence: 1, harvestTimeoutMs: 1 },
     };
@@ -318,7 +318,7 @@ test('GET /api/knowledge/status is admin-only, and absent where the process does
   try {
     const status = knowledgeStatus(env.db, {
       atlas: { url: 'http://atlas:4100', token: 't', project: 'mercury', hostId: 'host-a', caFile: null, adminToken: null },
-      inject: true, packMaxBytes: 1, pushIntervalMs: 1, pushBatch: 1, pullIntervalMs: 1, outboxAlertDepth: 1,
+      inject: true, packMaxBytes: 1, pushIntervalMs: 1, pushBatch: 1, pullIntervalMs: 1, retiredRetentionMs: 604_800_000, outboxAlertDepth: 1,
       bounds: { maxNotesPerRun: 1, maxClaimBytes: 1, maxDetailBytes: 1, maxEvidence: 1, harvestTimeoutMs: 1 },
     });
     const app = createApp({

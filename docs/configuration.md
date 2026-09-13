@@ -310,6 +310,25 @@ not configure them:
 Declarative remote-agent configurations may name an additional environment
 variable that contains that backend's credential.
 
+## Knowledge base
+
+Requires `MERCURY_ATLAS_URL` to be set; omitting the URL disables the whole feature.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `MERCURY_ATLAS_URL` | unset | Atlas base URL. Required to enable the feature. |
+| `MERCURY_ATLAS_TOKEN` | unset | Contributor token for this host. Required when URL is set. |
+| `MERCURY_ATLAS_PROJECT` | unset | Project identifier this host contributes to. Required when URL is set. |
+| `MERCURY_ATLAS_HOST_ID` | hostname | Host identifier recorded as provenance on notes. |
+| `MERCURY_ATLAS_CA_FILE` | unset | Private CA certificate file for the Atlas endpoint. |
+| `MERCURY_KNOWLEDGE_INJECT` | `true` | Whether Runs receive a knowledge pack by default. |
+| `MERCURY_KNOWLEDGE_PACK_MAX_BYTES` | `32768` | Byte budget for a knowledge pack (§9.1 of knowledge-base.md). |
+| `MERCURY_KNOWLEDGE_PUSH_INTERVAL_MS` | `30000` | How often the pusher sends harvested notes to Atlas (ms). |
+| `MERCURY_KNOWLEDGE_PUSH_BATCH` | `100` | Notes per push batch. |
+| `MERCURY_KNOWLEDGE_PULL_INTERVAL_MS` | `60000` | How often the puller refreshes the local replica from Atlas (ms). |
+| `MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS` | `604800000` | How long non-promoted (retired) rows are kept in the host-side replica before being swept, in ms. Default is 7 days. Must be at least several multiples of `MERCURY_KNOWLEDGE_PULL_INTERVAL_MS` so the cursor has advanced past any in-flight page before a swept row could be replayed. See §8.3 of [knowledge-base.md](../docs/knowledge-base.md). |
+| `MERCURY_KNOWLEDGE_OUTBOX_ALERT_DEPTH` | `1000` | Outbox depth that triggers a `knowledge.outbox.alert` event. |
+
 ## Production-style example
 
 Use one environment file for both API and worker. Set `MERCURY_DEFAULT_AGENT` to

@@ -431,6 +431,7 @@ async function main(): Promise<void> {
           project: config.knowledge.atlas.project,
           intervalMs: config.knowledge.pullIntervalMs,
           pageSize: config.knowledge.pushBatch,
+          retiredRetentionMs: config.knowledge.retiredRetentionMs,
           log: logger,
         })
       : null;

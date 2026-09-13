@@ -144,6 +144,11 @@ export interface KnowledgeConfig {
   pushIntervalMs: number;
   pushBatch: number;
   pullIntervalMs: number;
+  /**
+   * How long to retain non-promoted rows in the replica before the puller sweeps them (ms).
+   * 7 days (604_800_000) by default -- see docs/knowledge-base.md §8.3 for the reasoning.
+   */
+  retiredRetentionMs: number;
   /** Outbox depth that triggers an alert, in the style of `backlogAlertThreshold`. */
   outboxAlertDepth: number;
   bounds: KnowledgeBounds;
@@ -261,6 +266,10 @@ export function loadKnowledgeConfig(env: NodeJS.ProcessEnv): KnowledgeConfig {
       pushIntervalMs: num(env.MERCURY_KNOWLEDGE_PUSH_INTERVAL_MS, 30_000),
       pushBatch: num(env.MERCURY_KNOWLEDGE_PUSH_BATCH, 100),
       pullIntervalMs: num(env.MERCURY_KNOWLEDGE_PULL_INTERVAL_MS, 60_000),
+      // 7 days: long enough for any operational investigation cycle, and orders of magnitude longer
+      // than the pull interval, so the cursor has advanced past any in-flight page before a swept
+      // row could be replayed. See docs/knowledge-base.md §8.3 for the full reasoning.
+      retiredRetentionMs: num(env.MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS, 604_800_000),
       outboxAlertDepth: num(env.MERCURY_KNOWLEDGE_OUTBOX_ALERT_DEPTH, 1000),
       bounds: knowledgeBounds(env),
     };
@@ -293,6 +302,7 @@ export function loadKnowledgeConfig(env: NodeJS.ProcessEnv): KnowledgeConfig {
     pushIntervalMs: num(env.MERCURY_KNOWLEDGE_PUSH_INTERVAL_MS, 30_000),
     pushBatch: num(env.MERCURY_KNOWLEDGE_PUSH_BATCH, 100),
     pullIntervalMs: num(env.MERCURY_KNOWLEDGE_PULL_INTERVAL_MS, 60_000),
+    retiredRetentionMs: num(env.MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS, 604_800_000),
     outboxAlertDepth: num(env.MERCURY_KNOWLEDGE_OUTBOX_ALERT_DEPTH, 1000),
     bounds: knowledgeBounds(env),
   };
