@@ -189,12 +189,11 @@ export class HermesAgentAdapter implements AgentAdapter {
       // throw instead, and a repository that merely tracks a symlinked AGENTS.md would fail every Run
       // in it: correct about safety, wrong about what to do with a tracked file.
       if (!lstatExists(join(context.workspace.path, AGENTS_MD_FILE))) {
-        // Resolved through the same containment guard the neutral files use. For this path it is
-        // defence in depth rather than the load-bearing check: AGENTS.md sits at the workspace root, so
-        // the only component is the file itself and the lstat above already covers it. It is kept so the
-        // write goes through the same guard as every other workspace write, and so moving this file
-        // deeper later cannot quietly drop the check. No test covers this line specifically, because
-        // there is no reachable input at this path where it changes the outcome.
+        // Resolved through the same containment guard the neutral files use. The lstat above handles the
+        // case a repository controls -- a symlink AT AGENTS.md, including a dangling one. This line covers
+        // the case it cannot: lstat follows a symlinked workspace ROOT, so if the root itself is a link the
+        // check above sees nothing wrong and this is the only thing that stops the write. No test covers it,
+        // because the workspace root is chosen by the workspace manager rather than by a repository.
         const agentsMdPath = containedPath(context.workspace.path, AGENTS_MD_FILE);
         const notesPath = join(context.workspace.path, NOTES_FILE);
         if (existsSync(notesPath)) {
