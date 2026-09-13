@@ -17,6 +17,31 @@ const API_DIR = new URL('../src/api/', import.meta.url);
 const ROUTES_SRC = readFileSync(new URL('../src/api/routes.ts', import.meta.url), 'utf8');
 
 /**
+ * Where each route-registering file is mounted, read from `src/api/server.ts`.
+ *
+ * The prefix is not decoration. `routes.ts` is mounted at `/api` and `authRoutes.ts` at `/api/auth`, so
+ * `router.post('/login')` in the second file is really `POST /api/auth/login`. A guard that prefixes
+ * `/api` to everything would look for `/api/login` in the docs, fail to find it, and report a route as
+ * undocumented while the docs are correct -- or, worse, find an unrelated substring and pass. Both files
+ * are listed here so the documentation check actually reads them; a file that is registered but absent
+ * from this map fails the coverage test below rather than being skipped.
+ */
+const MOUNTS: Record<string, string> = {
+  'routes.ts': '/api',
+  'authRoutes.ts': '/api/auth',
+};
+
+/** Every route the API serves, with the path a caller would actually request. */
+function allRoutes(): { method: string; path: string }[] {
+  const out: { method: string; path: string }[] = [];
+  for (const [file, prefix] of Object.entries(MOUNTS)) {
+    const src = readFileSync(new URL(`../src/api/${file}`, import.meta.url), 'utf8');
+    for (const r of extractRoutes(src, prefix)) out.push(r);
+  }
+  return out;
+}
+
+/**
  * Route files the coverage check deliberately does not read yet.
  *
  * `authRoutes.ts` registers `/login`, `/logout` and `/me`, none of which are documented. They are
@@ -41,13 +66,13 @@ const ALL_DOC_TEXT = API_DOC + '\n' + GOALS_DOC;
  * Returns objects like { method: 'GET', path: '/api/agents' }.
  * The /api prefix is added because routes.ts defines them without it (mounted under /api).
  */
-function extractRoutes(src: string): { method: string; path: string }[] {
+function extractRoutes(src: string, prefix = '/api'): { method: string; path: string }[] {
   const found: { method: string; path: string }[] = [];
   // Match: router.get('/path', or router.post('/path',
   // Using a character class for the quote so the pattern does not end at the escaped quote.
   const re = /router\.(get|post|put|patch|delete)\(['"]\/([^'"]*)['"]/gi;
   for (const m of src.matchAll(re)) {
-    found.push({ method: m[1].toUpperCase(), path: `/api/${m[2]}` });
+    found.push({ method: m[1].toUpperCase(), path: `${prefix}/${m[2]}` });
   }
   return found;
 }
@@ -72,16 +97,18 @@ function isDocumented(path: string, docText: string): boolean {
   return false;
 }
 
-test('every route in src/api/routes.ts appears in docs/api.md or docs/goals.md', () => {
-  const routes = extractRoutes(ROUTES_SRC);
-  assert.ok(routes.length >= 10,
-    `expected at least 10 routes in routes.ts but found only ${routes.length}; check the extractor`);
+test('every route the API serves appears in docs/api.md or docs/goals.md', () => {
+  const routes = allRoutes();
+  assert.ok(routes.length >= 17,
+    `expected at least 17 routes across the mounted files but found only ${routes.length}; `
+    + 'the extractor stopped matching something, and a coverage check that silently shrinks is worse '
+    + 'than one that fails');
 
   const undocumented = routes.filter(({ path }) => !isDocumented(path, ALL_DOC_TEXT));
   assert.deepEqual(
     undocumented.map(({ method, path }) => `${method} ${path}`),
     [],
-    'Routes exist in src/api/routes.ts but are not mentioned in docs/api.md or docs/goals.md. '
+    'Routes exist in the API but are not mentioned in docs/api.md or docs/goals.md. '
     + 'Add documentation for each route listed above.',
   );
 });
@@ -102,7 +129,7 @@ test('the guard can actually fire: a route with no doc entry is caught', () => {
 });
 
 test('the guard extractor finds the known routes', () => {
-  const routes = extractRoutes(ROUTES_SRC);
+  const routes = allRoutes();
   const paths = routes.map((r) => r.path);
   for (const expected of [
     '/api/agents',
@@ -110,20 +137,25 @@ test('the guard extractor finds the known routes', () => {
     '/api/knowledge/status',
     '/api/knowledge/notes',
     '/api/runs/:runId/knowledge',
+    '/api/auth/login',
+    '/api/auth/logout',
+    '/api/auth/me',
   ]) {
     assert.ok(paths.includes(expected), `extractor missed expected route ${expected}`);
   }
 });
 
 test('no route-registering file escapes the guard silently', () => {
-  // The failure this guards against is not "authRoutes is undocumented" -- that is known and listed.
-  // It is a third file appearing, or routes being moved into an uncovered file, and the coverage check
-  // going on reporting green because it only ever looked at routes.ts.
+  // The failure this guards against is a route-registering file that the documentation check never
+  // reads. That is not hypothetical: `authRoutes.ts` was once added to a "covered" list used only by
+  // this accounting test while the documentation check still read `routes.ts` alone, so the file was
+  // reported as handled and none of its routes were compared to any doc. Listing a file as covered has
+  // to mean the check reads it, which is why `covered` is derived from the same map the check iterates.
   const registering = readdirSync(API_DIR)
     .filter((f) => f.endsWith('.ts'))
     .filter((f) => /router\.(get|post|put|patch|delete)\(/.test(readFileSync(new URL(f, API_DIR), 'utf8')))
     .sort();
-  const covered = ['routes.ts', 'authRoutes.ts'];
+  const covered = Object.keys(MOUNTS);
   const escaped = registering.filter((f) => !covered.includes(f) && !UNCOVERED_ROUTE_FILES.includes(f));
   assert.deepEqual(escaped, [], `route file(s) register endpoints but are neither covered by this guard nor listed as known-uncovered: ${escaped.join(', ')}`);
   // And the allowlist must not go stale in the other direction.
