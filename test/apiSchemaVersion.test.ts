@@ -227,7 +227,9 @@ async function jsonAt(m: Awaited<ReturnType<typeof realMercury>>, path: string, 
  * fleetContract shape test had), `/input` requires NEEDS_INPUT, and `/retry` requires a terminal
  * parent. Each is reached through the real stores rather than by faking a response.
  */
-async function captureShapes() {
+interface Captured { status: number; contentType: string; body: unknown }
+
+async function captureShapes(): Promise<Record<string, Captured>> {
   const m = await realMercury({ token: TOKEN });
   try {
     const captured: Record<string, { status: number; contentType: string; body: unknown }> = {};
@@ -271,7 +273,9 @@ async function captureShapes() {
     const metrics = await fetch(m.url + '/metrics', { headers: TOKEN_HEADERS });
     captured['GET /metrics'] = { status: metrics.status, contentType: metrics.headers.get('content-type') ?? '',
                                  body: await metrics.text() };
-    return { m, captured };
+    // Only the capture leaves. Handing back `m` would hand back a server the finally has already
+    // closed, and a later reader would have no way to tell that from a live one.
+    return captured;
   } finally {
     await m.close();
   }
@@ -280,7 +284,7 @@ async function captureShapes() {
 // ---------------------------------------------------------------- tests
 
 test('the live host answers every shape recorded for the current API version', async () => {
-  const { captured } = await captureShapes();
+  const captured = await captureShapes();
 
   // Non-vacuity first: a fixture that stopped covering anything, or a capture that silently
   // produced nothing, would make every assertion below pass.
