@@ -953,7 +953,7 @@ handling in substance.
 | --- | --- |
 | `projects` | `id`, `name`, `repo_identities_json`, `promotion_policy_json`, `created_at` |
 | `contributors` | `token_hash`, `host_id`, `project_ids_json`, `created_at`, `last_seen_at`; the secret is never stored, only its hash |
-| `notes` | `note_id`, `project_id`, `current_revision`, `tier`, `kind`, `scope`, `claim_hash`, `seq`; indexed on `(project_id, seq)`, `(project_id, tier, scope)`, `(project_id, claim_hash)` |
+| `notes` | `note_id`, `project_id`, `current_revision`, `tier`, `kind`, `scope`, `claim_hash`, `seq`; indexed on `(project_id, seq)`, `(project_id, tier, scope)`, `(project_id, claim_hash)`, plus a partial UNIQUE on `(project_id, claim_hash) WHERE tier != 'retired'` (migration v2) |
 | `note_revisions` | `note_id`, `revision`, `note_json`, `seq`, `created_at`; immutable rows |
 | `note_sources` | `note_id`, `host_id`, `run_id`, `agent`, `harness_version`, `source`, `recorded_at`; unique on `(note_id, host_id, run_id)`; this is what corroboration is counted from |
 | `promotions` | `note_id`, `from_tier`, `to_tier`, `actor`, `reason`, `seq`, `at` |
@@ -1101,8 +1101,12 @@ new candidate that has to earn its way across again, or a promoted note immediat
 `repo-record`/`operator` sources. The old retired row stays as history. The alternative
 ("revive" the retired note in place) was rejected because an operator who retired a note on
 purpose should not have it reopened by a later host contribution; a new note with a later `seq`
-is the correct outcome and requires no schema change (the `(project_id, claim_hash)` index is a
-plain index, not a UNIQUE constraint).
+is the correct outcome and needed no schema change at the time (the `(project_id, claim_hash)`
+index was a plain index, not a UNIQUE constraint). Migration v2 later added a *partial* UNIQUE
+index on the same columns, `WHERE tier != 'retired'`, so the retired row and the live row that
+replaced it can coexist while a second live row cannot. The application-level checks are kept:
+the index cannot produce the 409 that names the note to retire, because by the time it fires the
+statement has already failed.
 
 ## 13. Scaling: bootstrapping a host
 

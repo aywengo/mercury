@@ -262,9 +262,12 @@ What is not built, checked against the tree rather than remembered:
   in Atlas indefinitely; deleting them safely needs a sequence-bearing tombstone, which is a
   replication-protocol change. Tracked in
   [#562](https://github.com/aywengo/mercury/issues/562).
-- **No UNIQUE constraint backs the one-live-note-per-claim rule.** It holds because two
-  code paths enforce it, not because the schema does. Tracked in
-  [#566](https://github.com/aywengo/mercury/issues/566).
+- **Atlas refuses to start on a database that already holds two live notes for one
+  claim.** A partial UNIQUE index enforces the one-live-note-per-claim rule
+  (`atlas/db.ts`, migration v2), and a precheck names the colliding note ids rather than
+  surfacing a raw constraint error. It will not resolve the collision for you: retiring one
+  side is an operator decision, because Atlas does not pick a winners. Databases written
+  before that migration can contain the collision, so an upgrade may need that manual step.
 - **Gate outcomes are not reported.** No shipped harness declares deterministic gates and
   no gate outcome event exists, so the knowledge design's later phases that would learn
   from gate results have nothing to read. The event vocabulary is deliberately absent
