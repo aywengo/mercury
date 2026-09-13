@@ -77,6 +77,19 @@ export interface WorkerDeps {
   stuckCheckIntervalMs?: number;
   /** Optional sandbox manager for containerized execution (roadmap #2). */
   sandbox?: import('../sandbox/sandboxManager.ts').SandboxManager;
+  /**
+   * The knowledge pusher, built by the composition root and started and stopped here.
+   *
+   * Passed as an opaque start/stop pair rather than as a `KnowledgePusher`, so this file keeps no
+   * dependency on `src/knowledge/`: the worker owns the process's timers, not the payload of each one.
+   *
+   * It belongs with the worker because section 8.2 of docs/knowledge-base.md asks for exactly the pattern
+   * two of these timers already are. Periodic work that must continue WHILE a Run executes needs its own
+   * timer, because the claim loop is blocked inside `await this.execute(run)` for the whole duration of a
+   * Run. A pusher driven from the claim loop would fall silent during the one long Run that produced the
+   * most notes to push.
+   */
+  knowledgePusher?: { start(): void; stop(): void };
 }
 
 export class Worker {
@@ -151,6 +164,10 @@ export class Worker {
       this.deps.backlogCheckIntervalMs ?? 60_000,
     );
     this.backlogTimer.unref?.();
+    // Started here rather than at its own construction so it cannot push while the worker is stopping:
+    // a pusher that outlives stop() would keep a lease-free process holding the database open past the
+    // point where shutdown has decided the process is done.
+    this.deps.knowledgePusher?.start();
     void this.loop();
   }
 
@@ -162,6 +179,7 @@ export class Worker {
     this.stuckTimer = null;
     if (this.backlogTimer) clearInterval(this.backlogTimer);
     this.backlogTimer = null;
+    this.deps.knowledgePusher?.stop();
     // Wake the drive loop of any run in flight so it can requeue itself (issue #51).
     // Without this, stop() only prevented NEW claims: the in-flight run kept driving an
     // agent whose process the shutting-down process was about to abandon, and its lease was

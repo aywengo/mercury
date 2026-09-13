@@ -118,6 +118,18 @@ export interface AtlasConfig {
   /** Provenance id recorded on every note. Defaults to the hostname. */
   hostId: string;
   caFile: string | null;
+  /**
+   * A token able to POST `source: operator` notes. Optional, and separate from `token` on purpose.
+   *
+   * Section 11.1 makes an operator note an ADMIN act, because it lands promoted and skipping curation is
+   * exactly what a contributor token must never be able to do. Section 11.4 makes the host's everyday
+   * token a CONTRIBUTOR for the mirror-image reason. So the durable outbox, which drains with the
+   * contributor token, structurally cannot deliver an operator note -- and the alternative, letting the
+   * host's everyday credential promote notes, would undo the split those two sections exist to create.
+   *
+   * Absent means operator notes are refused at the door rather than queued where they can never leave.
+   */
+  adminToken: string | null;
 }
 
 /**
@@ -271,6 +283,10 @@ export function loadKnowledgeConfig(env: NodeJS.ProcessEnv): KnowledgeConfig {
       project: env.MERCURY_ATLAS_PROJECT!.trim(),
       hostId: env.MERCURY_ATLAS_HOST_ID?.trim() || hostname(),
       caFile: env.MERCURY_ATLAS_CA_FILE ?? null,
+      // Deliberately NOT in the `missing` check above. Every Run-side feature works without it; only
+      // operator notes need it, and refusing to start over an optional token would disable a working
+      // host. What refuses instead is the operator-note route, with a message naming this variable.
+      adminToken: env.MERCURY_ATLAS_ADMIN_TOKEN?.trim() || null,
     },
     inject: env.MERCURY_KNOWLEDGE_INJECT !== 'false',
     packMaxBytes: num(env.MERCURY_KNOWLEDGE_PACK_MAX_BYTES, 32_768),

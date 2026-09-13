@@ -27,6 +27,7 @@ import { AtlasClient } from './knowledge/client.ts';
 import { KnowledgePusher } from './knowledge/pusher.ts';
 import { OutboxStore } from './knowledge/outbox.ts';
 import { knowledgeStatus } from './knowledge/status.ts';
+import { submitOperatorNote } from './knowledge/operator.ts';
 import { AgentCapabilityRegistry, logAdapterCapabilities } from './adapters/capabilities.ts';
 import { GoalStore } from './runs/goalStore.ts';
 import { settleGoalOnTerminal } from './runs/goalSettlement.ts';
@@ -333,6 +334,28 @@ async function main(): Promise<void> {
   let workerRef: Worker | null = null;
 
   if (cmd === 'worker' || (cmd === 'dev' && config.embeddedWorker)) {
+    // The pusher exists only when this host has an Atlas to talk to. When it does not, the outbox is
+    // not merely empty, it is unreadable -- so there is nothing to run and no timer to pay for. Notes
+    // queued in that state (an operator note, or a harvest once phase 3 lands) stay durable and drain
+    // through `mercury knowledge flush` or as soon as the URL is configured and the worker restarts.
+    const knowledgePusher = config.knowledge.atlas
+      ? new KnowledgePusher({
+          outbox: new OutboxStore(db),
+          client: new AtlasClient(config.knowledge.atlas),
+          project: config.knowledge.atlas.project,
+          intervalMs: config.knowledge.pushIntervalMs,
+          batch: config.knowledge.pushBatch,
+          log: logger,
+          events,
+          runs,
+          alertDepth: config.knowledge.outboxAlertDepth,
+          // Only built when the operator token exists, so an unconfigured host reports the specific
+          // cause rather than a generic delivery failure.
+          adminClient: config.knowledge.atlas.adminToken
+            ? new AtlasClient({ ...config.knowledge.atlas, token: config.knowledge.atlas.adminToken })
+            : undefined,
+        })
+      : null;
     const worker = new Worker({
       db,
       runs,
@@ -361,6 +384,7 @@ async function main(): Promise<void> {
       backlogCheckIntervalMs: config.backlogCheckIntervalMs,
       alertWebhookUrl: config.alertWebhookUrl,
       sandbox,
+      knowledgePusher: knowledgePusher ?? undefined,
     });
     if (config.eventWakeupSocket) {
       // Registered on the existing append hook rather than at the ~20 append call sites: one seam, and
@@ -423,6 +447,9 @@ async function main(): Promise<void> {
         // that looks like a missing feature. The tables exist either way (migration v9), so this
         // never reads a table that is not there.
         knowledgeStatus: () => knowledgeStatus(db, config.knowledge),
+        // Supplied unconditionally, like the status thunk. The route exists wherever the API does; the
+        // refusal for an unconfigured host happens inside it, with a message that says what to set.
+        knowledgeNotes: (body) => submitOperatorNote(db, config.knowledge, body),
       },
       config.port,
       { host: config.bindHost, tls: config.tls ?? undefined },

@@ -39,6 +39,14 @@ export interface PusherDeps {
   runs?: { get(id: string): { status: string } | null };
   /** Outbox depth at which to warn. 0 disables. */
   alertDepth?: number;
+  /**
+   * A client carrying the admin token, used ONLY for rows whose source is `operator`.
+   *
+   * Absent means operator notes cannot leave this host. They are then kept and reported rather than
+   * dropped: the outbox's contract is that nothing is lost for being undeliverable, and an operator note
+   * that cannot be delivered is an operator-visible configuration gap, not a note to discard.
+   */
+  adminClient?: AtlasClient;
   /** Clock, for tests. */
   now?: () => number;
 }
@@ -123,9 +131,19 @@ export class KnowledgePusher {
       return outcome;
     }
 
+    // Operator notes are sent separately, under a different token. Atlas requires an admin token for a
+    // note that lands promoted (section 11.1) and gives every host a contributor token precisely so it
+    // cannot promote (section 11.4), so one batch mixing both sources cannot be authorised by either
+    // token. Splitting by source is what lets one outbox carry both.
+    const operatorRows = rows.filter((r) => r.contribution.provenance.source === 'operator');
+    const ordinaryRows = rows.length === operatorRows.length ? [] : rows.filter((r) => r.contribution.provenance.source !== 'operator');
+    if (operatorRows.length > 0 && ordinaryRows.length === 0) {
+      return this.pushOperatorOnly(outcome, operatorRows);
+    }
+
     let results: ContributionResult[];
     try {
-      const response = await client.pushBatch(project, rows.map((r) => r.contribution), batchIdempotencyKey(rows));
+      const response = await client.pushBatch(project, ordinaryRows.map((r) => r.contribution), batchIdempotencyKey(ordinaryRows));
       results = response.results;
     } catch (err) {
       return this.recordFailure(outcome, rows, err);
@@ -134,15 +152,15 @@ export class KnowledgePusher {
     // A short result list is treated as a failure, not as "the rest were ignored". The caller's next
     // move on a result is to DELETE rows, and deleting rows on a partial protocol answer is how
     // knowledge is lost silently.
-    if (results.length < rows.length) {
+    if (results.length < ordinaryRows.length) {
       return this.recordFailure(outcome, rows, new AtlasTransportError(
-        `Atlas answered for ${results.length} of ${rows.length} contributions; keeping every row`,
+        `Atlas answered for ${results.length} of ${ordinaryRows.length} contributions; keeping every row`,
       ));
     }
 
     const drop: number[] = [];
-    for (let i = 0; i < rows.length; i += 1) {
-      const row = rows[i]!;
+    for (let i = 0; i < ordinaryRows.length; i += 1) {
+      const row = ordinaryRows[i]!;
       const result = results[i]!;
       if ('accepted' in result) { outcome.accepted += 1; drop.push(row.id); }
       else if ('duplicate' in result) { outcome.duplicate += 1; drop.push(row.id); }
@@ -163,6 +181,49 @@ export class KnowledgePusher {
       project, attempted: outcome.attempted, accepted: outcome.accepted,
       duplicate: outcome.duplicate, rejected: outcome.rejected, remaining: outbox.depth(),
     }, 'knowledge pushed');
+    return outcome;
+  }
+
+  /**
+   * Drain a batch that contains only operator notes, under the admin token.
+   *
+   * Kept separate from the ordinary path rather than parameterised, because the two differ in more than
+   * the credential: an operator batch that cannot be authorised has a specific and actionable cause, and
+   * folding it in would report "Atlas is unreachable" for what is actually "no admin token configured".
+   */
+  private async pushOperatorOnly(outcome: PushOutcome, rows: OutboxRow[]): Promise<PushOutcome> {
+    const { outbox, project, adminClient } = this.deps;
+    if (!adminClient) {
+      return this.recordFailure(outcome, rows, new AtlasTransportError(
+        `${rows.length} operator note(s) cannot be delivered: MERCURY_ATLAS_ADMIN_TOKEN is not set, `
+        + 'and Atlas accepts a note that lands promoted only from an admin token',
+      ));
+    }
+    let results: ContributionResult[];
+    try {
+      const response = await adminClient.pushBatch(project, rows.map((r) => r.contribution), batchIdempotencyKey(rows));
+      results = response.results;
+    } catch (err) {
+      return this.recordFailure(outcome, rows, err);
+    }
+    if (results.length < rows.length) {
+      return this.recordFailure(outcome, rows, new AtlasTransportError(
+        `Atlas answered for ${results.length} of ${rows.length} operator notes; keeping every row`,
+      ));
+    }
+    const drop: number[] = [];
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i]!;
+      const result = results[i]!;
+      if ('accepted' in result) { outcome.accepted += 1; drop.push(row.id); }
+      else if ('duplicate' in result) { outcome.duplicate += 1; drop.push(row.id); }
+      else if ('rejected' in result) { outcome.rejected += 1; drop.push(row.id); this.recordRejection(row, result.rejected); }
+    }
+    outbox.remove(drop);
+    outbox.setState(SYNC_KEYS.lastPushAt, new Date(this.now()).toISOString());
+    outbox.setState(SYNC_KEYS.lastPushError, '');
+    this.consecutiveFailures = 0;
+    this.notBefore = 0;
     return outcome;
   }
 

@@ -53,7 +53,7 @@ function scriptedTransport(handler: (req: { method: string; url: string; body?: 
 }
 
 function client(transport: AtlasTransport): AtlasClient {
-  return new AtlasClient({ url: 'http://atlas.invalid', token: 'tok', project: 'mercury', hostId: 'host-a', caFile: null }, { transport });
+  return new AtlasClient({ url: 'http://atlas.invalid', token: 'tok', project: 'mercury', hostId: 'host-a', caFile: null, adminToken: null }, { transport });
 }
 
 function pusherFor(env: ReturnType<typeof makeEnv>, script: (req: { method: string; url: string; body?: string }) => { status: number; body: unknown }, extra: { alertDepth?: number } = {}) {
@@ -140,7 +140,7 @@ test('a rejection is not recorded on a Run that no longer exists', async () => {
     const outbox = new OutboxStore(env.db);
     // runId set, but no such Run row: the operator path, or a Run that has since been pruned.
     outbox.insert([{ runId: 'run-gone', contribution: contribution('one') }]);
-    const { pusher } = pusherFor(env, scriptedTransport(() => ({ status: 200, body: { results: [{ rejected: 'repo-not-in-project' }] } })));
+    const { pusher } = pusherFor(env, () => ({ status: 200, body: { results: [{ rejected: 'repo-not-in-project' }] } }));
     await pusher.pushOnce();
     // Nothing to assert on the event stream -- the point is that appending did not throw and did not
     // create an orphan row that no Run owns.
@@ -270,7 +270,15 @@ test('a project id that needs escaping cannot escape its path segment', async ()
 test('knowledge status reports depth, last push and the configured project', () => {
   const env = makeEnv();
   try {
-    const off = knowledgeStatus(env.db, { atlas: null, inject: true, packMaxBytes: 1, pushIntervalMs: 1, pushBatch: 1, pullIntervalMs: 1, outboxAlertDepth: 1, bounds: { maxNotesPerRun: 1, maxClaimBytes: 1, maxDetailBytes: 1, maxEvidence: 1, harvestTimeoutMs: 1 } });
+    // The config is built once and reused. An earlier version spread the STATUS RESULT of the first call
+    // into the second call's CONFIG parameter; both are objects with an `atlas`-ish shape, so the mistake
+    // was invisible until something actually typed it.
+    const cfg: KnowledgeConfig = {
+      atlas: null, inject: true, packMaxBytes: 1, pushIntervalMs: 1, pushBatch: 1, pullIntervalMs: 1,
+      outboxAlertDepth: 1,
+      bounds: { maxNotesPerRun: 1, maxClaimBytes: 1, maxDetailBytes: 1, maxEvidence: 1, harvestTimeoutMs: 1 },
+    };
+    const off = knowledgeStatus(env.db, cfg);
     assert.equal(off.enabled, false);
     assert.equal(off.project, null);
     assert.equal(off.outbox.depth, 0);
@@ -282,8 +290,8 @@ test('knowledge status reports depth, last push and the configured project', () 
     outbox.setState(SYNC_KEYS.lastPushError, 'ECONNREFUSED');
     outbox.setState('push_failures_total', '4');
     const on = knowledgeStatus(env.db, {
-      ...off,
-      atlas: { url: 'http://atlas:4100', token: 't', project: 'mercury', hostId: 'host-a', caFile: null },
+      ...cfg,
+      atlas: { url: 'http://atlas:4100', token: 't', project: 'mercury', hostId: 'host-a', caFile: null, adminToken: null },
     });
     assert.equal(on.enabled, true);
     assert.equal(on.project, 'mercury');
@@ -305,7 +313,7 @@ test('GET /api/knowledge/status is admin-only, and absent where the process does
   const servers: Server[] = [];
   try {
     const status = knowledgeStatus(env.db, {
-      atlas: { url: 'http://atlas:4100', token: 't', project: 'mercury', hostId: 'host-a', caFile: null },
+      atlas: { url: 'http://atlas:4100', token: 't', project: 'mercury', hostId: 'host-a', caFile: null, adminToken: null },
       inject: true, packMaxBytes: 1, pushIntervalMs: 1, pushBatch: 1, pullIntervalMs: 1, outboxAlertDepth: 1,
       bounds: { maxNotesPerRun: 1, maxClaimBytes: 1, maxDetailBytes: 1, maxEvidence: 1, harvestTimeoutMs: 1 },
     });

@@ -153,7 +153,15 @@ export class NoteStore {
    * SAME answers rather than being re-evaluated, which is what makes a retry a no-op instead of a
    * second corroboration.
    */
-  contribute(projectId: string, hostId: string, contributions: unknown[], idempotencyKey: string | undefined, batchLimit: number): ContributionResult[] {
+  /**
+   * `hostId` is the caller's TOKEN BINDING, not a value from the request body.
+   *
+   * `null` means the caller is an admin, which is not bound to any host: an operator posting a note acts
+   * on behalf of a host and names it in the body. Passing the literal string 'admin' instead would make
+   * every operator note fail the `host-mismatch` check below, because the body correctly names the host
+   * that recorded it -- which is exactly what an operator note has to do to be attributable.
+   */
+  contribute(projectId: string, hostId: string | null, contributions: unknown[], idempotencyKey: string | undefined, batchLimit: number): ContributionResult[] {
     if (!this.getProject(projectId)) {
       // Not a 404 for the whole request: a host configured for two projects where one was deleted
       // should learn which notes failed, not lose the whole batch to one status code.
@@ -181,8 +189,11 @@ export class NoteStore {
       for (const raw of contributions) results.push(this.contributeOne(project, hostId, raw));
 
       if (idempotencyKey) {
+        // Coalesced because the column participates in a UNIQUE constraint, and SQL NULLs are never
+        // equal to each other: storing NULL would let every admin retry look like a first attempt and
+        // re-count corroboration, which is the exact failure the key exists to prevent.
         this.db.prepare('INSERT INTO idempotency_keys (contributor, key, response_json, created_at) VALUES (?, ?, ?, ?)')
-          .run(hostId, idempotencyKey, JSON.stringify(results), new Date().toISOString());
+          .run(hostId ?? 'admin', idempotencyKey, JSON.stringify(results), new Date().toISOString());
       }
       return results;
     });
@@ -196,17 +207,22 @@ export class NoteStore {
    * source row on an existing note even as a mere corroboration -- the claim it carries is the thing
    * that leaked, and agreeing with it is a way of repeating it.
    */
-  private contributeOne(project: ProjectRecord, hostId: string, raw: unknown): ContributionResult {
+  private contributeOne(project: ProjectRecord, hostId: string | null, raw: unknown): ContributionResult {
     const draft = validateDraft(raw, { ...this.bounds, maxEvidence: MAX_EVIDENCE });
     if (!draft.ok) return { rejected: draft.reason };
 
     const body = raw as Record<string, unknown>;
     const claimedHost = typeof body.hostId === 'string' ? body.hostId : (body.provenance as { hostId?: string } | undefined)?.hostId;
-    if (claimedHost !== undefined && claimedHost !== hostId) {
-      // Visible, not corrected. Silently rewriting provenance to the token binding would make a host
-      // that misreports work, so the misconfiguration would never be found.
+    // A contributor is bound to one host by its token, and a body that names another is a visible
+    // `host-mismatch` rather than something to correct silently: rewriting provenance to the binding
+    // would make a misreporting host work, so the misconfiguration would never be found.
+    //
+    // An admin is not bound to a host at all. Its binding is null, and the body's host is the only
+    // attribution an operator note can have, so it is taken as given.
+    if (hostId !== null && claimedHost !== undefined && claimedHost !== hostId) {
       return { rejected: 'host-mismatch' };
     }
+    const effectiveHost = hostId ?? claimedHost ?? 'admin';
 
     const claim = this.redactor.redact(draft.draft.claim);
     const detail = draft.draft.detail === undefined ? undefined : this.redactor.redact(draft.draft.detail);
@@ -245,7 +261,7 @@ export class NoteStore {
       ...(draft.draft.contradicts ? { contradicts: draft.draft.contradicts } : {}),
       provenance: {
         source: provenanceSource(provenance.source),
-        hostId,
+        hostId: effectiveHost,
         ...(typeof provenance.runId === 'string' ? { runId: provenance.runId } : {}),
         ...(typeof provenance.agent === 'string' ? { agent: provenance.agent } : {}),
         harnessVersion: typeof provenance.harnessVersion === 'string' ? provenance.harnessVersion : null,
