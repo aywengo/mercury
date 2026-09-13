@@ -119,8 +119,27 @@ export class KnowledgePusher {
    * One push pass. Synchronous in the sense that it runs to completion before resolving, which is
    * what `node src/cli.ts knowledge flush` needs and what a test asserts against.
    */
+  /**
+   * One push pass.
+   *
+   * A batch is split by provenance source and each half is sent under the token that is allowed to post
+   * it, in the SAME pass.
+   *
+   * The split is forced by two rules that are each correct alone: an operator note lands promoted, so
+   * section 11.1 restricts it to an admin token, and section 11.4 gives every host a contributor token
+   * precisely so it cannot promote. A first attempt at this pushed only the non-operator half and left
+   * the operator rows for the next tick, which was not data loss but was still wrong in two ways worth
+   * naming, because both are the kind that no test notices: the outcome reported `attempted` for rows
+   * that were never sent, so a log line said two notes went out when one did; and the pass recorded a
+   * successful push timestamp while a note was still queued, which is the exact field an operator reads
+   * to decide the outbox is healthy.
+   *
+   * Delivery is still per-group and never all-or-nothing. If the operator half cannot be authorised, the
+   * non-operator notes already accepted stay deleted and only the operator rows are retained and counted
+   * -- deleting a delivered row because a DIFFERENT row failed would be its own kind of loss.
+   */
   async pushOnce(): Promise<PushOutcome> {
-    const { outbox, client, project, batch } = this.deps;
+    const { outbox, project, batch } = this.deps;
     const rows = outbox.takeBatch(batch);
     const outcome: PushOutcome = { attempted: rows.length, accepted: 0, duplicate: 0, rejected: 0, failed: false, lastError: null, backoffMs: 0 };
     this.checkDepth(outbox.depth());
@@ -131,36 +150,79 @@ export class KnowledgePusher {
       return outcome;
     }
 
-    // Operator notes are sent separately, under a different token. Atlas requires an admin token for a
-    // note that lands promoted (section 11.1) and gives every host a contributor token precisely so it
-    // cannot promote (section 11.4), so one batch mixing both sources cannot be authorised by either
-    // token. Splitting by source is what lets one outbox carry both.
-    const operatorRows = rows.filter((r) => r.contribution.provenance.source === 'operator');
-    const ordinaryRows = rows.length === operatorRows.length ? [] : rows.filter((r) => r.contribution.provenance.source !== 'operator');
-    if (operatorRows.length > 0 && ordinaryRows.length === 0) {
-      return this.pushOperatorOnly(outcome, operatorRows);
+    const ordinary = rows.filter((r) => r.contribution.provenance.source !== 'operator');
+    const operator = rows.filter((r) => r.contribution.provenance.source === 'operator');
+    const groups: { label: string; rows: OutboxRow[]; client: AtlasClient | null }[] = [];
+    if (ordinary.length > 0) groups.push({ label: 'contributor', rows: ordinary, client: this.deps.client });
+    if (operator.length > 0) groups.push({ label: 'admin', rows: operator, client: this.deps.adminClient ?? null });
+
+    let deliveredAny = false;
+    for (const group of groups) {
+      if (!group.client) {
+        // Named specifically rather than reported as a transport failure: the service is reachable and
+        // the operator's note is refused by this host's own configuration.
+        const err = new AtlasTransportError(
+          `${group.rows.length} operator note(s) cannot be delivered: MERCURY_ATLAS_ADMIN_TOKEN is not `
+          + 'set, and Atlas accepts a note that lands promoted only from an admin token',
+        );
+        this.recordFailure(outcome, group.rows, err);
+        continue;
+      }
+      const result = await this.deliver(outcome, group.rows, group.client);
+      if (!result.ok) {
+        this.recordFailure(outcome, group.rows, result.err);
+        continue;
+      }
+      deliveredAny = true;
     }
 
+    if (!deliveredAny) return outcome;
+    // Only a pass that got at least one group through counts as a successful push. The failure path has
+    // already written lastPushError and armed the backoff; clearing them here would erase the evidence a
+    // partially-failed pass leaves behind.
+    outbox.setState(SYNC_KEYS.lastPushAt, new Date(this.now()).toISOString());
+    this.consecutiveFailures = 0;
+    this.notBefore = 0;
+    this.deps.log.info({
+      project, attempted: outcome.attempted, accepted: outcome.accepted,
+      duplicate: outcome.duplicate, rejected: outcome.rejected,
+      retained: outbox.depth(), partial: outcome.failed,
+    }, 'knowledge pushed');
+    return outcome;
+  }
+
+  /**
+   * Send one group and classify Atlas's per-item answers.
+   *
+   * Returns rather than recording, so the caller can decide whether a failure is the whole pass or one
+   * group of it.
+   */
+  private async deliver(
+    outcome: PushOutcome,
+    rows: OutboxRow[],
+    client: AtlasClient,
+  ): Promise<{ ok: true } | { ok: false; err: unknown }> {
+    const { outbox, project } = this.deps;
     let results: ContributionResult[];
     try {
-      const response = await client.pushBatch(project, ordinaryRows.map((r) => r.contribution), batchIdempotencyKey(ordinaryRows));
+      const response = await client.pushBatch(project, rows.map((r) => r.contribution), batchIdempotencyKey(rows));
       results = response.results;
     } catch (err) {
-      return this.recordFailure(outcome, rows, err);
+      return { ok: false, err };
     }
 
     // A short result list is treated as a failure, not as "the rest were ignored". The caller's next
     // move on a result is to DELETE rows, and deleting rows on a partial protocol answer is how
     // knowledge is lost silently.
-    if (results.length < ordinaryRows.length) {
-      return this.recordFailure(outcome, rows, new AtlasTransportError(
-        `Atlas answered for ${results.length} of ${ordinaryRows.length} contributions; keeping every row`,
-      ));
+    if (results.length < rows.length) {
+      return { ok: false, err: new AtlasTransportError(
+        `Atlas answered for ${results.length} of ${rows.length} contributions; keeping every row`,
+      ) };
     }
 
     const drop: number[] = [];
-    for (let i = 0; i < ordinaryRows.length; i += 1) {
-      const row = ordinaryRows[i]!;
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i]!;
       const result = results[i]!;
       if ('accepted' in result) { outcome.accepted += 1; drop.push(row.id); }
       else if ('duplicate' in result) { outcome.duplicate += 1; drop.push(row.id); }
@@ -173,58 +235,7 @@ export class KnowledgePusher {
     // Deletions happen once, after every row has been classified. Deleting inside the loop would
     // leave the outbox half-drained if a later row threw.
     outbox.remove(drop);
-    outbox.setState(SYNC_KEYS.lastPushAt, new Date(this.now()).toISOString());
-    outbox.setState(SYNC_KEYS.lastPushError, '');
-    this.consecutiveFailures = 0;
-    this.notBefore = 0;
-    this.deps.log.info({
-      project, attempted: outcome.attempted, accepted: outcome.accepted,
-      duplicate: outcome.duplicate, rejected: outcome.rejected, remaining: outbox.depth(),
-    }, 'knowledge pushed');
-    return outcome;
-  }
-
-  /**
-   * Drain a batch that contains only operator notes, under the admin token.
-   *
-   * Kept separate from the ordinary path rather than parameterised, because the two differ in more than
-   * the credential: an operator batch that cannot be authorised has a specific and actionable cause, and
-   * folding it in would report "Atlas is unreachable" for what is actually "no admin token configured".
-   */
-  private async pushOperatorOnly(outcome: PushOutcome, rows: OutboxRow[]): Promise<PushOutcome> {
-    const { outbox, project, adminClient } = this.deps;
-    if (!adminClient) {
-      return this.recordFailure(outcome, rows, new AtlasTransportError(
-        `${rows.length} operator note(s) cannot be delivered: MERCURY_ATLAS_ADMIN_TOKEN is not set, `
-        + 'and Atlas accepts a note that lands promoted only from an admin token',
-      ));
-    }
-    let results: ContributionResult[];
-    try {
-      const response = await adminClient.pushBatch(project, rows.map((r) => r.contribution), batchIdempotencyKey(rows));
-      results = response.results;
-    } catch (err) {
-      return this.recordFailure(outcome, rows, err);
-    }
-    if (results.length < rows.length) {
-      return this.recordFailure(outcome, rows, new AtlasTransportError(
-        `Atlas answered for ${results.length} of ${rows.length} operator notes; keeping every row`,
-      ));
-    }
-    const drop: number[] = [];
-    for (let i = 0; i < rows.length; i += 1) {
-      const row = rows[i]!;
-      const result = results[i]!;
-      if ('accepted' in result) { outcome.accepted += 1; drop.push(row.id); }
-      else if ('duplicate' in result) { outcome.duplicate += 1; drop.push(row.id); }
-      else if ('rejected' in result) { outcome.rejected += 1; drop.push(row.id); this.recordRejection(row, result.rejected); }
-    }
-    outbox.remove(drop);
-    outbox.setState(SYNC_KEYS.lastPushAt, new Date(this.now()).toISOString());
-    outbox.setState(SYNC_KEYS.lastPushError, '');
-    this.consecutiveFailures = 0;
-    this.notBefore = 0;
-    return outcome;
+    return { ok: true };
   }
 
   /**

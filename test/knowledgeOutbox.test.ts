@@ -357,3 +357,75 @@ test('GET /api/knowledge/status is admin-only, and absent where the process does
     env.close();
   }
 });
+
+test('POST /api/knowledge/notes is wired through the app, not just through the function', async () => {
+  // The route reads `knowledgeNotes` off RoutesDeps. The composition root supplies it to createApp, and
+  // createApp has to FORWARD it -- a line that was missing, and that no test caught, because every other
+  // test in this feature calls submitOperatorNote() directly. The route then answered 404 forever: the
+  // feature worked in tests and did not exist over HTTP.
+  const env = makeEnv();
+  const stream = new EventStream(env.db, env.events, 10);
+  stream.start();
+  try {
+    const queued: unknown[] = [];
+    const app = createApp({
+      runService: env.runService, events: env.events, stream, queue: env.queue, db: env.db,
+      apiTokens: new Map([['tok-alice', 'alice']]), adminToken: 'tok-admin',
+      knowledgeNotes: (body) => { queued.push(body); return { ok: true, claimHash: 'a'.repeat(16), queued: true }; },
+    });
+    const server = await new Promise<Server>((resolve) => { const x = app.listen(0, '127.0.0.1', () => resolve(x)); });
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const body = { kind: 'convention', scope: 'project', claim: 'migrations are appended, never edited' };
+      const alice = await fetch(`${base}/api/knowledge/notes`, {
+        method: 'POST', headers: { authorization: 'Bearer tok-alice', 'content-type': 'application/json' }, body: JSON.stringify(body),
+      });
+      assert.equal(alice.status, 403, 'an operator note lands promoted, so it is an admin act');
+      assert.equal(queued.length, 0, 'a non-admin must not reach the enqueue path at all');
+
+      const admin = await fetch(`${base}/api/knowledge/notes`, {
+        method: 'POST', headers: { authorization: 'Bearer tok-admin', 'content-type': 'application/json' }, body: JSON.stringify(body),
+      });
+      // 202, not 201: the note is durable here and not yet in Atlas.
+      assert.equal(admin.status, 202, 'the route must be reachable over HTTP, not 404');
+      assert.equal((await admin.json() as { queued: boolean }).queued, true);
+      assert.equal(queued.length, 1, 'the body reached the enqueue path');
+      assert.equal((queued[0] as { claim: string }).claim, body.claim);
+    } finally {
+      await closeServer(server);
+    }
+  } finally {
+    stream.stop();
+    env.close();
+  }
+});
+
+test('a refusal over HTTP keeps its reason, and an unconfigured host is refused rather than queued', async () => {
+  const env = makeEnv();
+  const stream = new EventStream(env.db, env.events, 10);
+  stream.start();
+  try {
+    const app = createApp({
+      runService: env.runService, events: env.events, stream, queue: env.queue, db: env.db,
+      apiTokens: new Map([['tok-alice', 'alice']]), adminToken: 'tok-admin',
+      knowledgeNotes: () => ({ ok: false, status: 400, error: 'note refused: claim-too-long', reason: 'claim-too-long' as never }),
+    });
+    const server = await new Promise<Server>((resolve) => { const x = app.listen(0, '127.0.0.1', () => resolve(x)); });
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const res = await fetch(`${base}/api/knowledge/notes`, {
+        method: 'POST', headers: { authorization: 'Bearer tok-admin', 'content-type': 'application/json' },
+        body: JSON.stringify({ kind: 'fact', scope: 'project', claim: 'x' }),
+      });
+      assert.equal(res.status, 400);
+      const payload = await res.json() as { error: string; reason?: string };
+      assert.equal(payload.reason, 'claim-too-long',
+        'the closed reason must survive the HTTP boundary, or an operator cannot tell which bound was hit');
+    } finally {
+      await closeServer(server);
+    }
+  } finally {
+    stream.stop();
+    env.close();
+  }
+});

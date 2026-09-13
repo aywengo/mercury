@@ -156,6 +156,13 @@ async function main(): Promise<void> {
           events: new EventStore(db, redactor),
           runs: new RunStore(db),
           alertDepth: 0,
+          // The flush command exists so an operator can watch the outbox drain before decommissioning a
+          // host. Without the admin client it would drain everything EXCEPT the operator notes, and
+          // report a clean flush while leaving notes behind -- the one command meant to prove the outbox
+          // is empty would be the one that lies about it.
+          adminClient: config.knowledge.atlas.adminToken
+            ? new AtlasClient({ ...config.knowledge.atlas, token: config.knowledge.atlas.adminToken })
+            : undefined,
         });
         const outcome = await pusher.pushOnce();
         process.stdout.write(JSON.stringify({

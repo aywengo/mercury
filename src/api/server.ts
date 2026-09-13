@@ -226,6 +226,10 @@ export function createApp(deps: ServerDeps): Express {
     stream: deps.stream,
     logger: deps.logger,
     knowledgeStatus: deps.knowledgeStatus,
+    // Forwarded explicitly. Declaring it on ServerDeps and reading it in the composition root is not
+    // enough: the route reads it off RoutesDeps, and an omitted line here makes POST /api/knowledge/notes
+    // answer 404 forever while every unit test that calls the underlying function directly stays green.
+    knowledgeNotes: deps.knowledgeNotes,
   }));
 
   // Last-resort handler for anything that escaped a route (including middleware and body-parser

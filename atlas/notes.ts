@@ -222,6 +222,12 @@ export class NoteStore {
     if (hostId !== null && claimedHost !== undefined && claimedHost !== hostId) {
       return { rejected: 'host-mismatch' };
     }
+    // The trust boundary, stated because it is not enforced: an admin may attribute a note to a host
+    // that has never registered, and corroboration counts distinct host_ids, so a typo would inflate the
+    // `hosts` figure a promotion policy reads. Validating the name against the contributors table would
+    // not remove the trust -- an admin can already promote, retire and contest at will, and could name a
+    // host that exists but did not agree -- so it would trade a phantom id for a false sense of one. The
+    // audit trail in `promotions` records the actor either way.
     const effectiveHost = hostId ?? claimedHost ?? 'admin';
 
     const claim = this.redactor.redact(draft.draft.claim);
