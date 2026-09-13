@@ -409,8 +409,15 @@ test('retiring is never blocked by the revival guard, even on a database that al
 
   // Forge the pre-guard state directly: a second live row carrying the same claim_hash, which the store
   // itself would now refuse to create. noteId stays live, so the two really do collide.
+  //
+  // The index added by migration v2 (#566) rejects this at the database level, which is the correct
+  // outcome -- it makes the state uncreatable going forward. Such a row can still exist in a file written
+  // before v2, and that is precisely the case this test is about, so the index is dropped first to model a
+  // pre-v2 file. v2's own precheck is what refuses to start on such a file; this test covers what happens
+  // to an operator who clears it enough to start.
   const src = h.db.prepare('SELECT claim_hash FROM notes WHERE note_id = ?').get(noteId) as { claim_hash: string };
   const seq = (h.db.prepare('SELECT seq FROM notes WHERE note_id = ?').get(noteId) as { seq: number }).seq + 1;
+  h.db.exec('DROP INDEX IF EXISTS ux_notes_live_claim');
   h.db.prepare(`INSERT INTO notes (note_id, project_id, current_revision, tier, kind, scope,
       claim_hash, seq, created_at, updated_at)
       VALUES ('forged_live', ?, 1, 'candidate', 'fact', 'project', ?, ?,

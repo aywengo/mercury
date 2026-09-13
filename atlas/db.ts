@@ -20,6 +20,14 @@ import { dirname } from 'node:path';
 export interface Migration {
   version: number;
   sql: string;
+  /**
+   * Optional JS check that runs before `sql`, inside the same transaction.
+   *
+   * Needed because a UNIQUE index cannot be added blindly to a table that may already violate it. The
+   * failure mode without a precheck is `SQLITE_CONSTRAINT_UNIQUE` naming an index, which tells an operator
+   * nothing about which rows to fix and leaves Atlas unable to start. The precheck names the rows instead.
+   */
+  precheck?: (db: DatabaseSync) => void;
 }
 
 export const BUSY_TIMEOUT_MS = 5_000;
@@ -152,6 +160,43 @@ const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 2,
+    // The one-live-note-per-claim rule (issue #551) was enforced only in application code: `contributeOne()`
+    // refuses to insert beside a live note, and `transition()` refuses to revive a retired one beside a live
+    // note. Two correct code paths are not a constraint -- a third writer would break the invariant silently.
+    //
+    // PARTIAL, excluding retired rows, because a retired note and a live note legitimately share a claim: that
+    // is what "this claim was retired and later re-earned" looks like, and #551 depends on it.
+    precheck: (db) => {
+      const clashes = db.prepare(`
+        SELECT project_id, claim_hash, COUNT(*) AS n, GROUP_CONCAT(note_id, ', ') AS note_ids
+        FROM notes
+        WHERE tier != 'retired'
+        GROUP BY project_id, claim_hash
+        HAVING COUNT(*) > 1
+        ORDER BY project_id, claim_hash
+        LIMIT 20`).all() as unknown as { project_id: string; claim_hash: string; n: number; note_ids: string }[];
+      if (clashes.length === 0) return;
+      // Named rows, not a constraint name. And deliberately NOT auto-resolved: section 12 says Atlas does not
+      // pick a winner, so retiring all but the newest here would silently choose, which is the behaviour the
+      // design forbids. The operator chooses; this only tells them where to look.
+      const detail = clashes
+        .map((c) => `    project ${c.project_id} claim_hash ${c.claim_hash}: ${c.n} live notes (${c.note_ids})`)
+        .join('\n');
+      const more = clashes.length === 20 ? '\n    ... (first 20 shown)' : '';
+      throw new Error(
+        `cannot add the live-claim uniqueness constraint: ${clashes.length} claim(s) already have more than `
+        + `one live note.\n${detail}${more}\n`
+        + '  Retire all but one note per claim (POST /v1/projects/:project/notes/:noteId/retire with a reason), '
+        + 'then start Atlas again. Atlas will not choose which note survives.',
+      );
+    },
+    sql: `
+      CREATE UNIQUE INDEX IF NOT EXISTS ux_notes_live_claim
+        ON notes(project_id, claim_hash) WHERE tier != 'retired';
+    `,
+  },
 ];
 
 export { MIGRATIONS };
@@ -216,6 +261,7 @@ export function migrate(db: DatabaseSync): void {
     for (const version of pending(db)) {
       const migration = MIGRATIONS.find((m) => m.version === version);
       if (!migration) throw new Error(`migration ${version} is missing from the MIGRATIONS array`);
+      migration.precheck?.(db);
       db.exec(migration.sql);
       db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
         .run(version, new Date().toISOString());
