@@ -227,6 +227,59 @@ See [`agents.md`](agents.md) and the registry-specific READMEs:
 - [`remote-agents/README.md`](../remote-agents/README.md)
 - [`rpc-agents/README.md`](../rpc-agents/README.md)
 
+
+## Knowledge base
+
+These variables configure the host-side knowledge-base integration. Leave them all unset when
+no Atlas is configured.
+
+`MERCURY_ATLAS_URL` is the gate: unset means the feature is entirely off. Setting it without
+`MERCURY_ATLAS_TOKEN` or `MERCURY_ATLAS_PROJECT` is an error that fails at startup.
+
+### Core Atlas connection
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MERCURY_ATLAS_URL` | unset | Atlas base URL; unset disables the entire knowledge feature |
+| `MERCURY_ATLAS_TOKEN` | unset | Contributor token for pushing Run-derived notes and pulling packs |
+| `MERCURY_ATLAS_PROJECT` | unset | Project id that notes land in and packs are pulled from |
+| `MERCURY_ATLAS_HOST_ID` | hostname | Provenance id recorded on every outgoing note |
+| `MERCURY_ATLAS_CA_FILE` | unset | Path to a CA certificate for Atlas TLS verification |
+| `MERCURY_ATLAS_ADMIN_TOKEN` | unset | Admin token required to accept and deliver operator notes (optional; see below) |
+
+### MERCURY_ATLAS_ADMIN_TOKEN
+
+**Optional.** Operator notes (`POST /api/knowledge/notes`) land in Atlas as promoted, which
+requires an admin token. The everyday `MERCURY_ATLAS_TOKEN` is a contributor credential and
+cannot promote notes.
+
+`MERCURY_ATLAS_ADMIN_TOKEN` is deliberately **excluded from the startup check** that refuses a
+half-configured Atlas when `MERCURY_ATLAS_URL` is set without a token or project. The reason
+is stated in `src/config.ts`: every Run-side feature (outbox drain, pack pull, pack injection)
+works without it, and refusing to start over an optional token would disable a working host
+for an operator who simply has not set up operator notes yet. What refuses instead is the note
+route itself, with a `409` that names this variable.
+
+If this variable is unset, `POST /api/knowledge/notes` returns `409` with a message that names
+`MERCURY_ATLAS_ADMIN_TOKEN`. No note is queued; a queued note that could never be delivered
+would be silently lost rather than durably stored.
+
+### Knowledge synchronisation tuning
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MERCURY_KNOWLEDGE_INJECT` | `true` | Whether Runs receive a pack by default |
+| `MERCURY_KNOWLEDGE_PACK_MAX_BYTES` | `32768` | Maximum pack size delivered to a Run |
+| `MERCURY_KNOWLEDGE_PUSH_INTERVAL_MS` | `30000` | Outbox push interval |
+| `MERCURY_KNOWLEDGE_PUSH_BATCH` | `100` | Notes per push batch |
+| `MERCURY_KNOWLEDGE_PULL_INTERVAL_MS` | `60000` | Replica pull interval |
+| `MERCURY_KNOWLEDGE_OUTBOX_ALERT_DEPTH` | `1000` | Outbox depth that triggers an alert |
+| `MERCURY_KNOWLEDGE_MAX_NOTES_PER_RUN` | `50` | Maximum notes a single Run may contribute |
+| `MERCURY_KNOWLEDGE_MAX_CLAIM_BYTES` | `1024` | Maximum claim length in bytes |
+| `MERCURY_KNOWLEDGE_MAX_DETAIL_BYTES` | `4096` | Maximum detail length in bytes |
+| `MERCURY_KNOWLEDGE_MAX_EVIDENCE` | `8` | Maximum evidence references per note |
+| `MERCURY_KNOWLEDGE_HARVEST_TIMEOUT_MS` | `10000` | Timeout for harvesting notes from a workspace |
+
 ## Events, alerts and observability
 
 | Variable | Default | Purpose |
