@@ -154,3 +154,82 @@ test('the closed-issue guard can actually fail', () => {
     'the pattern no longer matches the phrasing it was written for');
   assert.doesNotMatch(atlasDeletionPassage(), /\bTracked in\s*\[#562\]/, 'the real document already trips it');
 });
+
+/**
+ * Section 16 is the build order the next several weeks get planned from. A sentence there that
+ * describes a shipped prerequisite as unbuilt does not merely read stale: it sends someone to build
+ * a thing that already exists, or to wait on a dependency that already landed. Two of its sentences
+ * were exactly that (issue #591) -- Phase 4 waited on Teams Phase -1, which shipped as #520, and
+ * Phase 5 waited on capability advertisement, which `/api/agents` has served since #519 and #521.
+ *
+ * The guards are on the dependency claims, not on the nouns. "Teams Phase -1" is still in the
+ * document, in the sentence that says Phase 4 no longer waits on it, and a guard that banned the
+ * phrase would have failed on the fix. Same lesson as the #562 guard above.
+ */
+
+/** Section 16 alone, so a phrase elsewhere in a 100 KB spec cannot trip it or hide from it. */
+function section16(): string {
+  const from = DOC.indexOf('## 16. Phase order');
+  const to = DOC.indexOf('## 17.', from);
+  assert.notEqual(from, -1, 'section 16 disappeared; the phase order is what Phase 4 is planned from');
+  assert.notEqual(to, -1, 'section 16 no longer ends before section 17; the slice below would be unbounded');
+  return DOC.slice(from, to);
+}
+
+/** Dependency claims that are false today, each with what makes it false. */
+const STALE_PREREQUISITES: [RegExp, string][] = [
+  [/may wait\s+on\s+Teams Phase/i,
+   'Teams Phase -1 landed as #520 and Hermes completed run_f3a4e81644be4081 through Mercury'],
+  [/capability\s+advertisement[\s\S]{0,240}?\bdoes not exist\b/i,
+   '/api/agents has advertised capabilities since #519 and #521, and /healthz has carried api since #518'],
+];
+
+test('section 16 does not describe a shipped prerequisite as unbuilt', () => {
+  const s16 = section16();
+  for (const [claim, why] of STALE_PREREQUISITES) {
+    assert.doesNotMatch(s16, claim, `section 16 still asserts a prerequisite that has landed (${claim}). ${why}`);
+  }
+});
+
+test('the corrected sentences survive the guard', () => {
+  // Must-pass. Without these the guard could be satisfied only by deleting the evidence, which is the
+  // wrong direction: the section has to keep naming what it depends on and what it no longer does.
+  const s16 = section16();
+  assert.match(s16, /no longer depends on\s+Teams Phase -1/,
+    'the section should say plainly that the old dependency is gone, not go silent about it');
+  assert.match(s16, /#520/, 'the sentence that clears the dependency must cite what landed instead');
+  assert.match(s16, /run_f3a4e81644be4081/,
+    'the second-harness claim must point at the Run that measured it, as the rest of the section does');
+  assert.match(s16, /self-declaration|unverified/,
+    'the narrower truth about capability advertisement is that the knowledge flag is unverified; say that');
+});
+
+test('phase 4 is split, and the deferred half carries its reason', () => {
+  // A phase that bundles a built mechanism with an unbuilt speculative one gets gated as a unit, so
+  // the built half cannot be proven until someone builds the half nobody has shown is needed.
+  const s16 = section16();
+  assert.match(s16, /^4b\. \*\*Tier 2 \(deferred\)\.\*\*/m,
+    'Phase 4 must stay split so auto-promotion can be proven without tier 2');
+  const tier2 = s16.slice(s16.indexOf('4b. **Tier 2'));
+  assert.match(tier2, /deliberately/,
+    'a deferral without a reason reads as an oversight, and the next reader rebuilds it');
+  assert.match(tier2, /#589|record that Run/,
+    'the deferral must name the observation that would end it');
+  assert.match(s16.slice(s16.indexOf('4. **Auto-promotion'), s16.indexOf('4b.')), /#589/,
+    'auto-promotion is gated on the real-harness observation, so the section must say so');
+});
+
+test('the section 16 guard can actually fail', () => {
+  // Positive control, in the style of the #562 guard: reintroduce each claim into the real section and
+  // require the pattern to catch it. A guard nobody has seen fail is a guess about a guard.
+  const s16 = section16();
+  const reintroduced = [
+    s16.replace(/no longer depends on\s+Teams Phase -1/, 'may wait on Teams Phase -1'),
+    s16.replace(/advertisement is not the blocker it was described as/, 'advertisement does not exist yet'),
+  ];
+  reintroduced.forEach((text, i) => {
+    const [claim] = STALE_PREREQUISITES[i];
+    assert.match(text, claim, `pattern ${claim} no longer matches the claim it was written for`);
+    assert.doesNotMatch(s16, claim, 'the real document already trips this guard');
+  });
+});

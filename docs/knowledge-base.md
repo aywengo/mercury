@@ -1212,15 +1212,31 @@ later is worth building until the phase before it has been exercised by a real R
 3. **Tier 1.** `.mercury/notes.jsonl` harvest at finalize, validation, K2 checks, bounds,
    host-side redaction, `knowledge.noted` and `knowledge.rejected`. Proven by a Run on host A
    teaching a Run on host B, through Atlas, in the e2e suite.
-4. **Tier 2 and auto-promotion.** The distillation rules of §7.2 and the corroboration policy
-   of §12. Proven by a candidate crossing to promoted on the second harness without an
-   operator touching it -- which requires a second harness to complete a Run, and so may wait
-   on Teams Phase -1.
+4. **Auto-promotion.** The corroboration policy of §12. The mechanism is built -- `autoPromote()`
+   in `atlas/notes.ts`, its policy and `atlas/test/promotion.test.ts`, and `ux_notes_live_claim`,
+   the partial unique index from #566 that makes one-live-note-per-claim a database constraint
+   rather than a convention. What is missing is the observation this phase's gate names: a tier-1
+   candidate crossing to promoted on the second harness with no operator touching it. That depends
+   on #589, the real-harness observation. It no longer depends on Teams Phase -1: that landed as
+   #520, Hermes has completed a Run through Mercury (`run_f3a4e81644be4081`, v0.21.2), and Hermes
+   has had a knowledge channel since #565.
+
+4b. **Tier 2 (deferred).** The distillation rules of §7.2. Not scheduled, deliberately rather
+   than by omission. By this design's own account §7.2 is the noisiest source of notes -- it is
+   why `retireStaleCandidates()` exists -- while tier 1 and operator notes are what carry real
+   claims today. Build it when a Run shows a fact reachable from the event stream that tier 1 and
+   operator notes did not capture, and record that Run here as the reason. Until then §7.2 stays
+   as design, and this line is the reason it is not a phase.
 5. **Tier 3 and the remaining adapters.** Decision-record harvesting and the operator index
    (§6.3), harness-native deltas, and the `ClaudeCodeAdapter`, `RpcAgentAdapter` and
-   `HermesAgentAdapter` renderings of §9.3 as their capability gates land. Depends on
-   capability advertisement ([`crew/harness-capabilities.md`](crew/harness-capabilities.md)
-   §6), which does not exist yet, and on `persona.append` for Hermes.
+   `HermesAgentAdapter` renderings of §9.3 as their capability gates land. Capability
+   advertisement is not the blocker it was described as: `/api/agents` has carried a
+   `capabilities` field since #519 and #521 -- `skills`, `personaAppend`, `personaFiles`,
+   `humanInput`, `resume`, `knowledge` -- and `/healthz` has carried `api` since #518. What is
+   still true is narrower. The `knowledge` flag is a self-declaration, unverified for every
+   shipped backend; `AgentStaticCapabilities` says so in its own comment. A gate that reads it is
+   reading an assertion, not a measurement, so a phase gated on it must verify the backend rather
+   than trust the flag. Genuinely still missing: `persona.append` for Hermes.
 6. **Fleet reader and hardening.** `FLEET_ATLAS_URL`, the dashboard section, the soft
    placement signal, and the retention sweeps of §12. First Atlas release; `distribution.md`
    and `releasing.md` are updated then, with the tests that hold them to it.
