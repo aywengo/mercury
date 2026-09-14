@@ -254,6 +254,42 @@ export function harnessLabel(run) {
 }
 
 /**
+ * What the agent dropdown should contain, decided from the `/api/agents` payload.
+ *
+ * Extracted from `loadAgents()` so the dashboard half of issue #523 can be tested at all. The server
+ * keeps `agents` a plain `string[]` and adds `capabilities` as a parallel field for exactly one reason
+ * (`src/api/routes.ts`): this code discards the payload unless `agents` is an array, so reshaping it
+ * would leave a working server showing two hardcoded agents with no error anywhere. `e2e/system.test.ts`
+ * pinned the server half of that agreement. Nothing pinned this half -- deleting the guard below would
+ * have been silent, which is the gap #523 was filed about.
+ *
+ * `options: null` means "leave the `<select>` exactly as the page authored it". That is deliberately not
+ * the same as returning a fallback list: the static `fake`/`primeagent` options are markup in
+ * `index.html`, and copying them here would create a second copy free to drift from the first.
+ *
+ * A payload whose `agents` array holds no usable ids is treated the same way as a non-array. The guard
+ * exists to survive a payload this page does not understand, and an array of objects is exactly that --
+ * the old code would have rendered one `<option>` reading `[object Object]` per entry, which is a
+ * dropdown that looks populated and cannot create a Run.
+ *
+ * `value` is the option to select, or null to leave the current selection alone.
+ */
+export function agentOptions(payload) {
+  const agents = payload?.agents;
+  if (!Array.isArray(agents)) return { options: null, value: null };
+  const ids = agents.filter((a) => typeof a === 'string' && a.length > 0);
+  if (agents.length > 0 && ids.length === 0) return { options: null, value: null };
+  // No `typeof payload.defaultAgent === 'string'` guard, deliberately: `ids` holds only strings and
+  // `includes` compares by identity, so a non-string default can never match and falls through on its
+  // own. A guard there would be a branch no input can distinguish, and it was written before that was
+  // checked -- review of #574 found it by trying to mutate it and failing.
+  const preferred = ids.includes(payload.defaultAgent)
+    ? payload.defaultAgent
+    : (ids.includes('fake') ? 'fake' : (ids[0] ?? null));
+  return { options: ids, value: preferred };
+}
+
+/**
  * The completion contract, as the operator stated it. Recorded, never evaluated: Mercury does
  * not judge whether any of it holds (docs/goals.md 5, 12), so nothing here is ticked or
  * coloured -- a contract block beside a COMPLETED Run must not read as a checklist that passed.
