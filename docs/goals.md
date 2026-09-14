@@ -947,15 +947,10 @@ The `fake` entry is **byte-for-byte the response** a `GET /api/agents` returns a
 the default configuration, and a test asserts exactly that rather than trusting this sentence. The
 `primeagent` entry is the real output of `resolveGoalCapability` for an adapter declaring `goalSupport` at
 version 0.9.4, placed beside it so the supported and unsupported cases appear together; three of its six
-`fields` entries are shown for space, and each one shown is complete. Every field entry carries all of
-`supported`, `reason?`, `detectedVersion`, `detectedRaw` -- `reason` is absent only when support is true,
+`fields` entries are shown for space, and each one shown is complete. `fields` carries one entry per goal
+field -- `set`, `track`, `tokenBudget`, `contract`, `gates`, `maxTurns` -- and every entry carries all of
+`supported`, `reason?`, `detectedVersion`, `detectedRaw`; `reason` is absent only when support is true,
 because there is nothing to explain.
-
-Every value above comes from running the code, not from a sketch. The `fake` entry is the verbatim response
-to a live `GET /api/agents` against an embedded worker. The `primeagent` entry is the real output of
-`resolveGoalCapability` for an adapter declaring `goalSupport` at version 0.9.4, assembled next to it so the
-supported and unsupported cases appear together; `fields` carries one entry per goal field
-(`set`, `track`, `tokenBudget`, `contract`, `gates`, `maxTurns`) and two are shown for space.
 
 Three things the shape says that a boolean would not:
 

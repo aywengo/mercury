@@ -444,3 +444,41 @@ test('the fake entry in the 13.6 example is the real response, compared deeply',
     });
   } finally { env.close(); }
 });
+
+test('the count of shown fields in 13.6 matches the example it describes', () => {
+  // #580 argued that a count nothing checks is a count that drifts, and then this very branch shipped one:
+  // a rewrite said "three of its six ... are shown" while the paragraph it replaced still said "two are
+  // shown". Both survived into the same section, so the document contradicted itself about a number anyone
+  // can count by looking.
+  //
+  // The fix is not to delete the number. It is that this example is parseable, so the claim is checkable --
+  // a count tied to the artifact it counts cannot rot the way a count of a test suite can.
+  const sec = section136();
+  const doc = JSON.parse(examplePayload()) as { capabilities: Record<string, { goals?: { fields?: Record<string, unknown> } }> };
+  const shown = Object.keys(doc.capabilities.primeagent.goals?.fields ?? {});
+  assert.ok(shown.length > 0, 'the example no longer shows any primeagent fields');
+
+  const WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+  /*
+   * Any statement of how many entries are shown, not one fixed sentence. The first version required
+   * "N of its six `fields` entries are shown" and so let the older "and two are shown for space" through --
+   * the same mistake as guarding a claim by the phrasing it happened to use the day it was written.
+   */
+  // A tolerant span, not a word-sequence pattern: the real sentence puts a newline and a backtick between
+  // the number and "are shown", and `(?:\s+\w+){0,5}` cannot cross a backtick. Bounded at 40 characters so
+  // it cannot reach across the section and pair an unrelated number with an unrelated verb.
+  const CLAIM = /\b(one|two|three|four|five|six)\b[\s\S]{0,40}?\bare\s+shown\b/gi;
+  const claims = [...sec.matchAll(CLAIM)];
+  assert.equal(claims.length, 1,
+    `expected exactly one statement of how many fields are shown, found ${claims.length}. `
+    + 'Two of them is how this section came to contradict itself.');
+  const stated = WORDS[claims[0][1].toLowerCase()];
+  assert.equal(stated, shown.length,
+    `13.6 says ${claims[0][1]} of six fields are shown; the example shows ${shown.length} (${shown.join(', ')}). `
+    + 'Fix the sentence or the example, but make them agree.');
+
+  // And the six names must still be listed, so deleting the duplicate paragraph cannot drop them.
+  for (const field of ['set', 'track', 'tokenBudget', 'contract', 'gates', 'maxTurns']) {
+    assert.match(sec, new RegExp(`\`${field}\``), `the section no longer names the ${field} field`);
+  }
+});
