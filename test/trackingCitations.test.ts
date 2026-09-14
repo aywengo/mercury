@@ -61,14 +61,25 @@ const STATE_BEFORE = /(?:\b(?:open|closed)\s+issue\s*)$/i;
 const SUBJECTLESS_AFTER = /^(?:[^\n]{0,60}?)?\b(?:not\s+currently\s+tracked|no\s+open\s+issue|nothing\s+currently\s+tracks)\b/i;
 
 /** Text from the citation to the end of its sentence, and from the sentence start to the citation. */
-function windows(text: string, at: number, end: number): { before: string; after: string } {
+function windows(text: string, at: number, end: number): { before: string; wide: string; after: string } {
   // lastIndexOf returns -1 when there is no earlier sentence, and -1 + 2 is 1 -- which silently chopped the
   // first character off every sentence at the start of a paragraph, hiding a state written there.
   const prev = text.lastIndexOf('. ', at);
   const from = prev === -1 ? 0 : prev + 2;
+  // One sentence back as well. `#575 is open. Tracked in [#575](...)` states the state in the PRECEDING
+  // sentence, which is ordinary prose and was missed. Safe to widen because the only check that reads this
+  // wider window is the number-specific one: it requires this issue's own number, so a neighbouring
+  // sentence about a different issue cannot satisfy it.
+  // Search BEFORE the sentence start, not before the citation: searching from the citation lands on the
+  // same boundary and yields the same window, which is how this first appeared to work and did nothing.
+  // `from - 2` steps past the boundary itself. Slicing to `from` leaves the same ". " at the end of the
+  // slice, lastIndexOf finds it again, and the wide window silently equals the narrow one.
+  const prior = text.slice(0, Math.max(0, from - 2));
+  const back = prior.lastIndexOf('. ');
+  const wideFrom = back === -1 ? 0 : back + 2;
   const stop = text.indexOf('. ', end);
   const sentEnd = stop === -1 ? Math.min(text.length, end + 240) : stop + 1;
-  return { before: text.slice(from, at), after: text.slice(end, sentEnd) };
+  return { before: text.slice(from, at), wide: text.slice(wideFrom, at), after: text.slice(end, sentEnd) };
 }
 
 function unqualified(text: string, label: string): string[] {
@@ -79,17 +90,21 @@ function unqualified(text: string, label: string): string[] {
     let end = at + m[0].length;
     // A markdown link's URL follows the text: `[#575](https://...)`. Without stepping over it the "after"
     // window starts inside the parentheses and a following ", which is closed" is never seen.
-    if (text[end] === '(') {
-      const close = text.indexOf(')', end);
+    // Step over the link target. Nested brackets (`[[#575]](url)`) are not valid markdown, but they are
+    // easy to type, and stopping at the `]` would leave the state clause outside the window.
+    let scan = end;
+    while (text[scan] === ']') scan++;
+    if (text[scan] === '(') {
+      const close = text.indexOf(')', scan);
       if (close !== -1) end = close + 1;
     }
-    const { before, after } = windows(text, at, end);
+    const { before, wide, after } = windows(text, at, end);
     const attached = STATE_AFTER.test(after)
       || STATE_PAREN.test(after)
       || STATE_BEFORE.test((before + m[0].slice(0, Math.max(0, m[0].indexOf('[')))).replace(/\s+$/, ' '))
       // The matched span is part of the context: "tracked in the open issue #575 ([#575](...))" puts the
       // state INSIDE the match, so searching only the text around it rejects a correct sentence.
-      || stateFor(num).test(`${before} ${m[0]} ${after}`)
+      || stateFor(num).test(`${wide} ${m[0]} ${after}`)
       || SUBJECTLESS_AFTER.test(after);
     if (!attached) bad.push(`${label} #${num}: ...${(before + m[0] + after).replace(/\s+/g, ' ').slice(-150)}`);
   }
@@ -141,10 +156,27 @@ test('a state word about anything other than the cited issue does not qualify th
     'It is tracked in the open issue #575 ([#575](https://example.com/issues/575)).',
     'See the open issue #575, tracked in [#575](https://example.com/issues/575) for details.',
     'Tracked in [#575](https://example.com/issues/575) (closed); see the linked PR.',
+    // A state in the PRECEDING sentence is ordinary prose, not an evasion.
+    '#575 is open. Tracked in [#575](https://example.com/issues/575) for the rest.',
+    'The daemon work landed. #575 is closed. It is tracked in [#575](https://example.com/issues/575).',
   ];
   for (const s of must_pass) {
     assert.deepEqual(unqualified(s, 'fixture'), [], `rejected a properly qualified citation:\n  ${s}`);
   }
+});
+
+test('the one accepted imprecision is recorded, not forgotten', () => {
+  // Review found that `PR #575 is closed, tracked in [#575]` is accepted: the state is about a pull request
+  // that happens to carry the same number. It is left accepted, for a reason rather than by omission --
+  // GitHub numbers issues and pull requests from ONE sequence, so in this repository #575 is an issue and
+  // there is no PR #575 to be talking about. The sentence cannot refer to two different objects, so there is
+  // nothing for the guard to disambiguate. Verified against the API rather than assumed.
+  //
+  // Pinned as ACCEPTED so that if this ever starts failing, whoever changes the guard learns the reasoning
+  // was load-bearing and re-checks the namespace claim instead of quietly tightening the pattern.
+  const ambiguous = 'PR #575 is closed, tracked in [#575](https://example.com/issues/575).';
+  assert.deepEqual(unqualified(ambiguous, 'fixture'), [],
+    'this now rejects a sentence that cannot occur on GitHub; if the namespace assumption changed, revisit it');
 });
 
 test('the sweep covers every markdown file, not only the two read above', () => {
