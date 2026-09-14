@@ -111,9 +111,9 @@ test('status.md names the Hermes channel as measured rather than assumed', () =>
 /*
  * A closed issue cited as live tracking.
  *
- * Sweeping every `issues/<n>` reference across all 43 markdown files on main and checking each against the
- * API turned up 61 references, 60 of them to closed issues -- which is normal, most are history ("#55 found
- * this"). Exactly one was phrased as ONGOING tracking, and it was this one: the Atlas deletion limitation
+ * Sweeping every `issues/<n>` reference in the markdown on main and checking each against the API turned up
+ * sixty-odd references, the overwhelming majority to closed issues -- which is normal, most are history
+ * ("#55 found this"). Exactly one was phrased as ONGOING tracking, and it was this one: the Atlas deletion limitation
  * ended "Tracked in [#562]". #562 is closed; it landed the sweep and deliberately left deletion out because
  * safe deletion needs a sequence-bearing tombstone, a replication-protocol change.
  *
