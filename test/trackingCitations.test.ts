@@ -31,31 +31,41 @@ const STATUS = readFileSync(join(import.meta.dirname, '..', 'docs', 'status.md')
 const GOALS = readFileSync(join(import.meta.dirname, '..', 'docs', 'goals.md'), 'utf8');
 
 /*
- * The citation itself. Link text may say "issue #575" rather than "#575", and "Follow-up in" is capitalised
- * at the start of a sentence -- both defeated the first version.
+ * The citation itself. Three shapes the first versions missed: link text may say "issue #575" rather than
+ * "#575"; "Follow-up in" is capitalised at the start of a sentence; and prose says "tracked in the open issue
+ * [#575]" with words between the verb and the link, which a pattern demanding `[` immediately after "in"
+ * never matched at all -- a silent coverage hole, worse than a false positive because nothing fails.
  */
-const CITATION = /(?:\btracked in|\btracked under|\bfollow[\s-]up in)\s*\[[^\]]*?#(\d+)\]/gi;
+const CITATION = /(?:\btracked in|\btracked under|\bfollow[\s-]up in)\s+(?:[^\s][^\[\]]{0,40}?)?\[[^\]]*?#(\d+)\]/gi;
 
 /*
- * A tracking state, predicated of the CITED ISSUE. Two things this has to survive, both found by review:
+ * A tracking state, predicated of the CITED ISSUE. Four things this has to survive, every one of them found
+ * by review rather than by thought:
  *
- *  - "the open question" / "the open decision" -- a state word about a nearby noun, not the issue;
- *  - "the chapter is closed but tracked in [#575]" / "tracked in [#575] and the PR is closed" -- a state word
- *    about a DIFFERENT subject in the same sentence. A bare `is closed` branch accepted both, which is the
- *    very defect the guard exists to catch, relocated one clause away.
+ *  - "the open question" / "the open decision" -- a state word about a nearby noun;
+ *  - "the chapter is closed but tracked in [#575]" -- a state word about a different SUBJECT;
+ *  - "While #576 is closed, tracked in [#575]" -- a state word about a different ISSUE;
+ *  - "this is not currently tracked elsewhere, but tracked in [#575]" -- a subjectless state phrase that
+ *    belongs to another clause entirely.
  *
- * So the state must attach to the citation: either it names the issue number, or it is a relative clause
- * immediately following the link, or it is one of the two unambiguous phrases that need no subject at all.
+ * So: the state must either name THIS issue's number, or sit immediately after the link, or be one of the
+ * subjectless phrases and also sit after the link. A `#` is not a word character, so `\b` before `#575`
+ * never matches -- the anchor is an explicit boundary instead.
  */
-const STATE_AFTER = /^\s*(?:,\s*|\s+)which\s+(?:is|remains|was|stays|now)\s+(?:open|closed)/i;
-const STATE_TIGHT = /^\s*(?:is|remains|was|stays|now)\s+(?:open|closed)|\s*\((?:open|closed)\)/i;
+const stateFor = (num: string) => new RegExp(
+  String.raw`(?:^|[\s,;:(])#${num}\s*(?:is|remains|was|stays|now)\s+(?:open|closed)`
+  + String.raw`|(?:^|[\s,;:(])(?:open|closed)\s+issue\s+#${num}\b`, 'i');
+const STATE_AFTER = /^\s*(?:,\s*|\s+|;\s*)?(?:which\s+)?(?:is|remains|was|stays|now)\s+(?:open|closed)/i;
+const STATE_PAREN = /^\s*\((?:open|closed)\)/i;
 const STATE_BEFORE = /(?:\b(?:open|closed)\s+issue\s*)$/i;
-const NAMED = /(?:\b(?:open|closed)\s+issue\s*#?\d*|#\d+\s+(?:is|remains)\s+(?:open|closed))/i;
-const SUBJECTLESS = /not\s+currently\s+tracked|no\s+open\s+issue|nothing\s+currently\s+tracks/i;
+const SUBJECTLESS_AFTER = /^(?:[^\n]{0,60}?)?\b(?:not\s+currently\s+tracked|no\s+open\s+issue|nothing\s+currently\s+tracks)\b/i;
 
 /** Text from the citation to the end of its sentence, and from the sentence start to the citation. */
 function windows(text: string, at: number, end: number): { before: string; after: string } {
-  const from = Math.max(0, text.lastIndexOf('. ', at) + 2);
+  // lastIndexOf returns -1 when there is no earlier sentence, and -1 + 2 is 1 -- which silently chopped the
+  // first character off every sentence at the start of a paragraph, hiding a state written there.
+  const prev = text.lastIndexOf('. ', at);
+  const from = prev === -1 ? 0 : prev + 2;
   const stop = text.indexOf('. ', end);
   const sentEnd = stop === -1 ? Math.min(text.length, end + 240) : stop + 1;
   return { before: text.slice(from, at), after: text.slice(end, sentEnd) };
@@ -64,6 +74,7 @@ function windows(text: string, at: number, end: number): { before: string; after
 function unqualified(text: string, label: string): string[] {
   const bad: string[] = [];
   for (const m of text.matchAll(CITATION)) {
+    const num = m[1];
     const at = m.index ?? 0;
     let end = at + m[0].length;
     // A markdown link's URL follows the text: `[#575](https://...)`. Without stepping over it the "after"
@@ -73,13 +84,14 @@ function unqualified(text: string, label: string): string[] {
       if (close !== -1) end = close + 1;
     }
     const { before, after } = windows(text, at, end);
-    const sentence = (before + m[0] + after).replace(/\s+/g, ' ');
     const attached = STATE_AFTER.test(after)
-      || STATE_TIGHT.test(after)
-      || STATE_BEFORE.test(before.replace(/\s+$/, ' '))
-      || NAMED.test(sentence)
-      || SUBJECTLESS.test(sentence);
-    if (!attached) bad.push(`${label} #${m[1]}: ...${sentence.slice(-150)}`);
+      || STATE_PAREN.test(after)
+      || STATE_BEFORE.test((before + m[0].slice(0, Math.max(0, m[0].indexOf('[')))).replace(/\s+$/, ' '))
+      // The matched span is part of the context: "tracked in the open issue #575 ([#575](...))" puts the
+      // state INSIDE the match, so searching only the text around it rejects a correct sentence.
+      || stateFor(num).test(`${before} ${m[0]} ${after}`)
+      || SUBJECTLESS_AFTER.test(after);
+    if (!attached) bad.push(`${label} #${num}: ...${(before + m[0] + after).replace(/\s+/g, ' ').slice(-150)}`);
   }
   return bad;
 }
@@ -103,6 +115,14 @@ test('a state word about anything other than the cited issue does not qualify th
     'They are tracked in [#575](https://example.com/issues/575). It was closed in another issue.',
     'They are tracked in [issue #575](https://example.com/issues/575).',
     'Follow-up in [#575](https://example.com/issues/575) for the rest.',
+    // A state belonging to a DIFFERENT issue must not qualify this citation.
+    'While #576 is closed, tracked in [#575](https://example.com/issues/575) for the rest.',
+    '#576 is closed, but tracked in [#575](https://example.com/issues/575) as a note.',
+    // A subjectless state phrase belonging to another clause must not qualify it either.
+    'This is not currently tracked elsewhere, but tracked in [#575](https://example.com/issues/575).',
+    'Nothing currently tracks the workaround, but tracked in [#575](https://example.com/issues/575).',
+    'The PR, which is closed, referenced tracked in [#575](https://example.com/issues/575).',
+    'It was tracked in [#575](https://example.com/issues/575); now the branch is closed.',
   ];
   for (const s of must_flag) {
     assert.equal(unqualified(s, 'fixture').length, 1, `accepted a citation with no state on the issue:\n  ${s}`);
@@ -115,6 +135,12 @@ test('a state word about anything other than the cited issue does not qualify th
     'It is tracked in the open issue #575 ([#575](https://example.com/issues/575)).',
     'It is tracked in [#575](https://example.com/issues/575), which remains open.',
     'It is tracked in [#575](https://example.com/issues/575) and is not currently tracked elsewhere.',
+    // `#` is not a word character, so an earlier `\b` anchor made this reject a sentence that states the
+    // state plainly. Pinned because a false positive here teaches contributors to avoid the rule.
+    '#575 is open; tracked in [#575](https://example.com/issues/575).',
+    'It is tracked in the open issue #575 ([#575](https://example.com/issues/575)).',
+    'See the open issue #575, tracked in [#575](https://example.com/issues/575) for details.',
+    'Tracked in [#575](https://example.com/issues/575) (closed); see the linked PR.',
   ];
   for (const s of must_pass) {
     assert.deepEqual(unqualified(s, 'fixture'), [], `rejected a properly qualified citation:\n  ${s}`);
