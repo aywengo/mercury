@@ -287,3 +287,213 @@ test('no first-party client can set a goal, and docs/status.md says so', () => {
     'the status page no longer records the goal-setting gap; if a client can now set goals, that is correct '
     + '-- remove this section and this test together, and close #575.');
 });
+
+
+/*
+ * docs/goals.md 13.6 describes three surfaces for goal capability. Two are shipped and one is not, and the
+ * section used to describe all three as future work -- it opened "GET /api/agents returns bare strings today"
+ * while the handler that returns `capabilities` cites this very section as its spec, and it said
+ * `mercuryctl agents list` "gains a goal column" that the command already renders.
+ *
+ * That is not a cosmetic tense problem. 13.7 says it own way: "a stale table is worse than none because it
+ * looks authoritative." Someone implementing #575 reads 13.6 as the work list, and would have started by
+ * adding an API field and a CLI column that both exist.
+ *
+ * So these assertions bind the section to the code rather than to prose. If a shipped fact changes, the doc
+ * has to change with it; if the dashboard starts reading capabilities, the "not built" claim fails and points
+ * at #575.
+ */
+
+const GOALS_DOC = readFileSync(join(import.meta.dirname, '..', 'docs', 'goals.md'), 'utf8');
+const ROUTES_SRC = readFileSync(join(import.meta.dirname, '..', 'src', 'api', 'routes.ts'), 'utf8');
+const CLI_AGENTS_SRC = readFileSync(join(import.meta.dirname, '..', 'client', 'commands', 'agents.ts'), 'utf8');
+const UI_INDEX_SRC = readFileSync(join(UI_DIR, 'index.js'), 'utf8');
+
+/** The 13.6 section, up to the next heading. */
+function section136(): string {
+  const at = GOALS_DOC.indexOf('### 13.6');
+  assert.notEqual(at, -1, 'docs/goals.md lost section 13.6');
+  const next = GOALS_DOC.indexOf('\n### ', at + 5);
+  return GOALS_DOC.slice(at, next === -1 ? GOALS_DOC.length : next);
+}
+
+test('13.6 does not describe the capability field as still missing', () => {
+  const sec = section136();
+  assert.doesNotMatch(sec, /returns bare strings|bare strings today/,
+    'the handler in src/api/routes.ts returns capabilities alongside agents, and cites 13.6 as its spec');
+  assert.doesNotMatch(sec, /\bmercuryctl agents list`? gains\b/,
+    'mercuryctl already renders a GOALS column; "gains" reads as a to-do');
+
+  // The claims the section now makes about shipped code, checked against that code.
+  assert.match(sec, /"capabilities"/, 'the section no longer shows the shape the endpoint actually returns');
+  // The capability paragraph itself must say it is shipped -- not merely "some part of 13.6 is shipped".
+  // A first version matched /\*\*Shipped/ across the whole section and survived a rewrite that called
+  // ONLY the capability field unbuilt, because the mercuryctl paragraph still carried a Shipped marker.
+  const capPara = sec.slice(0, sec.indexOf('```json'));
+  assert.ok(capPara.length > 0, 'the JSON example is no longer preceded by prose');
+  assert.match(capPara, /\*\*Shipped/,
+    'the capability paragraph no longer says it is shipped; describing it as future work here is the '
+    + 'staleness this section had before');
+  assert.match(ROUTES_SRC, /capabilities\s*:/,
+    'GET /api/agents no longer returns capabilities -- the section and the handler disagree');
+  assert.match(CLI_AGENTS_SRC, /'GOALS'/,
+    'mercuryctl agents list no longer renders a GOALS column -- the section and the CLI disagree');
+});
+
+test('13.6 keeps the dashboard as unbuilt work and points at the open issue', () => {
+  const sec = section136();
+  assert.match(sec, /Not built|not built/, 'the section no longer separates shipped from unbuilt');
+  assert.match(sec, /issues\/575/, 'the unbuilt part lost its link to the open issue');
+  // The claim rests on the UI not reading capabilities at all. If that changes, this fails and the
+  // section must be rewritten -- which is exactly when #575 is being resolved.
+  assert.equal(UI_INDEX_SRC.match(/capabilities/g), null,
+    'ui/index.js now reads capabilities; 13.6 still calls the dashboard unbuilt, and #575 may be resolved');
+});
+
+/*
+ * The example payload in 13.6 was invented.
+ *
+ * It carried `"goalSupported": true`, `"goalReason": "..."` and `"goals": { "set": "0.3.3" }`. None of those
+ * keys exist: `goalSupported` appears nowhere in `src/`, `client/`, `ui/` or `test/` -- it was only ever in
+ * this document. The real `goals` is an `AgentGoalCapability` (`supported`, `reason?`, `detectedVersion?`,
+ * `fields?`), not a map of version strings.
+ *
+ * So the example is now generated from the code and checked against it. Every quoted key in the example must
+ * appear somewhere in `src/`. That is a deliberately blunt rule: it does not validate nesting or value types,
+ * but it makes up a key and the guard fails, which is the failure that actually happened here.
+ */
+const SRC_BLOB = [
+  readFileSync(join(import.meta.dirname, '..', 'src', 'domain', 'types.ts'), 'utf8'),
+  readFileSync(join(import.meta.dirname, '..', 'src', 'domain', 'goalSupport.ts'), 'utf8'),
+  readFileSync(join(import.meta.dirname, '..', 'src', 'adapters', 'capabilities.ts'), 'utf8'),
+  readFileSync(join(import.meta.dirname, '..', 'src', 'api', 'routes.ts'), 'utf8'),
+].join('\n');
+
+/** The first fenced JSON block in 13.6. */
+function examplePayload(): string {
+  const sec = section136();
+  const m = /```json\n([\s\S]*?)```/.exec(sec);
+  assert.ok(m, '13.6 no longer has a JSON example');
+  return m[1];
+}
+
+test('every key in the 13.6 example exists in the source', () => {
+  const json = examplePayload();
+  // Keys under `capabilities` are agent ids, not field names. Taken from the example's own `agents`
+  // array rather than a hardcoded list, so the example cannot smuggle a made-up field past the check by
+  // also naming it an agent.
+  const ids = new Set((/"agents"\s*:\s*\[([^\]]*)\]/.exec(json)?.[1] ?? '').match(/"([^"]+)"/g) ?? []);
+  const keys = new Set<string>();
+  for (const m of json.matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"\s*:/g)) {
+    if (!ids.has(`"${m[1]}"`)) keys.add(m[1]);
+  }
+  assert.ok(keys.size >= 8, `only found ${keys.size} keys -- the example was probably gutted`);
+  const invented = [...keys].filter((k) => !new RegExp(`\\b${k}\\b`).test(SRC_BLOB));
+  assert.deepEqual(invented, [],
+    `these keys are in the documented payload but in no source file: ${invented.join(', ')}. `
+    + 'The example must come from running the code, not from a sketch of it.');
+
+  // The specific fabrications, named, so a reintroduction says what it was.
+  assert.doesNotMatch(examplePayload(), /goalSupported|goalReason/,
+    'these keys never existed anywhere in the code; the real shape is goals.supported / goals.reason');
+  assert.match(examplePayload(), /"supported"/, 'the example lost the real goal-support key');
+  assert.match(examplePayload(), /"detectedVersion"/, 'the example lost the version the operator acts on');
+});
+
+test('docs/status.md does not keep reporting 13.6 as stale now that it is corrected', () => {
+  // Fixing a document silently invalidates the page that described it as broken. status.md said 13.6's
+  // opening line "has been stale since `capabilities` landed"; the change that landed the correction left
+  // that sentence behind, which is the same drift in the opposite direction.
+  const status = readFileSync(join(import.meta.dirname, '..', 'docs', 'status.md'), 'utf8');
+  assert.doesNotMatch(status, /bare strings/,
+    'status.md quotes a line 13.6 no longer contains; drop the quote or restore the claim it replaced');
+  assert.match(status, /13\.6[\s\S]{0,400}separates what ships from what does not/,
+    'status.md no longer says 13.6 distinguishes shipped from unbuilt');
+});
+
+test('the fake entry in the 13.6 example is the real response, compared deeply', async () => {
+  // Key existence was not enough. The example dropped `goals.fields` from the `fake` entry while claiming
+  // to be the verbatim response, and a key-only guard let it through because every key that WAS shown was
+  // real. An example that claims to be a captured response has to be compared against one.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    await withServer(env, async (base) => {
+      const res = await fetch(`${base}/api/agents`, { headers: AUTH });
+      await expectStatus(res, 200, 'GET /api/agents');
+      const real = await res.json() as { agents: string[]; defaultAgent: string; capabilities: Record<string, unknown> };
+      const doc = JSON.parse(examplePayload()) as { agents: string[]; defaultAgent: string; capabilities: Record<string, unknown> };
+
+      assert.ok(real.agents.includes('fake'), 'the default env no longer registers `fake`; retarget this test');
+      assert.deepEqual(doc.capabilities.fake, real.capabilities.fake,
+        'the `fake` entry in docs/goals.md 13.6 is not the response this server returns');
+      assert.equal(doc.defaultAgent, real.defaultAgent, 'the example default disagrees with the server');
+
+      // The primeagent entry is assembled from resolveGoalCapability, so it cannot be compared to a live
+      // server. Its shape can still be pinned: every field entry must carry the same key set the resolver
+      // emits, which is what the last two review rounds kept finding missing.
+      const pa = doc.capabilities.primeagent as { goals: { fields: Record<string, Record<string, unknown>> } };
+      const shown = Object.entries(pa.goals.fields);
+      assert.ok(shown.length >= 2, 'the example shows too few fields to pin their shape');
+      for (const [field, value] of shown) {
+        const keys = Object.keys(value).sort();
+        const want = value.supported === true
+          ? ['detectedRaw', 'detectedVersion', 'supported']
+          : ['detectedRaw', 'detectedVersion', 'reason', 'supported'];
+        assert.deepEqual(keys, want, `fields.${field} does not carry the resolver's key set`);
+      }
+    });
+  } finally { env.close(); }
+});
+
+test('the count of shown fields in 13.6 matches the example it describes', () => {
+  // #580 argued that a count nothing checks is a count that drifts, and then this very branch shipped one:
+  // a rewrite said "three of its six ... are shown" while the paragraph it replaced still said "two are
+  // shown". Both survived into the same section, so the document contradicted itself about a number anyone
+  // can count by looking.
+  //
+  // The fix is not to delete the number. It is that this example is parseable, so the claim is checkable --
+  // a count tied to the artifact it counts cannot rot the way a count of a test suite can.
+  const sec = section136();
+  const doc = JSON.parse(examplePayload()) as { capabilities: Record<string, { goals?: { fields?: Record<string, unknown> } }> };
+  const shown = Object.keys(doc.capabilities.primeagent.goals?.fields ?? {});
+  assert.ok(shown.length > 0, 'the example no longer shows any primeagent fields');
+
+  const WORDS: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+  /*
+   * Any statement of how many entries are shown, not one fixed sentence. The first version required
+   * "N of its six `fields` entries are shown" and so let the older "and two are shown for space" through --
+   * the same mistake as guarding a claim by the phrasing it happened to use the day it was written.
+   */
+  // A tolerant span, not a word-sequence pattern: the real sentence puts a newline and a backtick between
+  // the number and "are shown", and `(?:\s+\w+){0,5}` cannot cross a backtick. Bounded at 40 characters so
+  // it cannot reach across the section and pair an unrelated number with an unrelated verb.
+  const CLAIM = /\b(one|two|three|four|five|six)\b[\s\S]{0,40}?\bare\s+shown\b/gi;
+  const claims = [...sec.matchAll(CLAIM)];
+  assert.equal(claims.length, 1,
+    `expected exactly one statement of how many fields are shown, found ${claims.length}. `
+    + 'Two of them is how this section came to contradict itself.');
+  const stated = WORDS[claims[0][1].toLowerCase()];
+  assert.equal(stated, shown.length,
+    `13.6 says ${claims[0][1]} of six fields are shown; the example shows ${shown.length} (${shown.join(', ')}). `
+    + 'Fix the sentence or the example, but make them agree.');
+
+  // The total is checkable too, and was the one number a prior review found unchecked. Two independent
+  // sources pin it: the field names the section lists, and the `fake` entry, which carries every field.
+  const inFake = Object.keys((JSON.parse(examplePayload()) as any).capabilities.fake.goals.fields).length;
+  assert.equal(inFake, 6, 'the fake entry no longer carries every goal field; retarget the total check');
+  const statedTotal = /\bof\s+its\s+(one|two|three|four|five|six)\b/i.exec(sec);
+  assert.ok(statedTotal, 'the section no longer states how many goal fields exist in total');
+  assert.equal(WORDS[statedTotal[1].toLowerCase()], inFake,
+    `prose says "of its ${statedTotal[1]}" goal fields, but the server returns ${inFake} `
+    + '(counted on the fake entry, which carries them all)');
+  // Distinct names, not occurrences: `set` also appears in the bullets below, and counting mentions made
+  // this fail on a correct document.
+  const named = new Set([...sec.matchAll(/`(set|track|tokenBudget|contract|gates|maxTurns)`/g)].map((m) => m[1]));
+  assert.equal(named.size, inFake,
+    `the section names ${named.size} distinct goal fields but the server returns ${inFake}`);
+
+  // And the six names must still be listed, so deleting the duplicate paragraph cannot drop them.
+  for (const field of ['set', 'track', 'tokenBudget', 'contract', 'gates', 'maxTurns']) {
+    assert.match(sec, new RegExp(`\`${field}\``), `the section no longer names the ${field} field`);
+  }
+});
