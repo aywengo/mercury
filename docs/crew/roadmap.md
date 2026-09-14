@@ -6,9 +6,18 @@ This roadmap ships Crew as four separate products:
 Role Presets -> per-run MCP -> Preset Store -> Workflow Templates
 ```
 
-Status: **design only.** Estimates are engineer-days for one engineer familiar
-with Mercury. Every phase is independently reviewable and must keep
-`npm run typecheck` and `npm test` green.
+Status: **Phase 0 is complete; Phases 1-11 are design only.** Those two facts were collapsed into one
+"design only" line, which made the roadmap say the prerequisite had not been done when it had -- see
+[`../phase-0-issues.md`](../phase-0-issues.md) ("All acceptance criteria are now met") and the Recommended
+priority in [`../status.md`](../status.md), which points at Milestone A as the next work. A contributor
+reading the old line would have re-implemented 2-3 days of merged, reviewed work or waited on a gate that had
+already been passed.
+
+The status of Crew as a whole is owned by [`../status.md`](../status.md); this document keeps the phase
+breakdown and defers to it, so the two cannot disagree again the way they did here.
+
+Estimates are engineer-days for one engineer familiar with Mercury. Every phase is independently reviewable
+and must keep `npm run typecheck` and `npm test` green.
 
 Related: [`README.md`](README.md),
 [`role-presets.md`](role-presets.md),
@@ -89,7 +98,12 @@ after commit handoff and gate evidence are proven.
 
 ## 4. Phase 0 — correctness prerequisites
 
-Estimate: **2–3 days**. Blocking for Role Presets.
+**Status: complete.** Every item below shipped, and every acceptance criterion is met -- recorded in
+[`../phase-0-issues.md`](../phase-0-issues.md). The scope below is kept as written because the
+reasoning behind each item is the part worth keeping -- but three of its present-tense claims about what was
+broken had outlived the fixes, and those are corrected inline rather than left to rot.
+
+Estimate was **2–3 days**. Was blocking for Role Presets; no longer blocks anything.
 
 ### Scope
 
@@ -102,19 +116,25 @@ Estimate: **2–3 days**. Blocking for Role Presets.
 - Define a shared adapter capability shape without yet adding MCP.
 - Refresh source-level documentation that still claims the old snapshot or
   transaction behavior.
-- Let a Run carry **zero** skills. `skillSelector` ends in
-  `picked.length > 0 ? picked : FALLBACK.filter(...)`, and `RunService` treats an
-  empty `skills` array as unspecified, so "no skills" is inexpressible. Concretely
-  broken: Hermes resolves `-s <name>` in its own store, has 81 skills, and none of
-  the four the fallback always sends, so Hermes cannot execute any Run
-  ([#459](https://github.com/aywengo/mercury/issues/459),
-  [`teams.md`](teams.md) §3).
-- Advertise per-agent capabilities on `/api/agents`, which already returns a
+- Let a Run carry **zero** skills. `skillSelector` used to end in
+  `picked.length > 0 ? picked : FALLBACK.filter(...)`, and `RunService` treated an
+  empty `skills` array as unspecified, so "no skills" was inexpressible. Concretely
+  broken at the time: Hermes resolves `-s <name>` in its own store, and none of the four ids the fallback
+  always sends exist there, so Hermes could not execute any Run
+  ([#459](https://github.com/aywengo/mercury/issues/459), [`teams.md`](teams.md) §3).
+  Now fixed: `SelectOptions.allowFallback` returns `[]` when suppressed -- "an honest empty answer beats a
+  confident wrong one" -- and a Hermes Run completes end to end against a real workspace
+  ([`../phase-0-issues.md`](../phase-0-issues.md), acceptance 4).
+  The skill-store size is stated once, in [`teams.md`](teams.md) §3, as **141 skills on a real v0.21.2
+  install (58 bundled + 83 user)**, measured. An earlier figure of 81 appeared here; it was a different,
+  less complete count and is dropped rather than reconciled.
+- Advertise per-agent capabilities on `/api/agents`, which already returned a
   `capabilities` map carrying goals and the detected harness version; extend that vocabulary
   rather than adding a parallel mechanism (issue #508)
   ([`harness-capabilities.md`](harness-capabilities.md) §2), and add a version or
   capability field to `/healthz` so an old host fails at registration rather than at
-  first use.
+  first use. Both landed: `/api/agents` returns `{ agents, defaultAgent, capabilities }` and `/healthz`
+  returns `version` and `api` (`src/api/server.ts`).
 
 ### Likely files
 
@@ -132,15 +152,20 @@ Estimate: **2–3 days**. Blocking for Role Presets.
 
 ### Acceptance
 
+All seven are met; the evidence for each is in
+[`../phase-0-issues.md`](../phase-0-issues.md). They are reproduced here because criterion 5 is the reason
+the phase existed at all.
+
 1. Mutating or deleting a skill after Run creation does not change the bytes
    materialized for that Run.
 2. Retry uses the parent's exact skill snapshot and hash.
 3. A deliberately hanging Git fixture reaches a bounded failure.
 4. Git cannot open an interactive credential prompt.
 5. A Run can be created with no skills, and a second harness (Hermes) completes a
-   Run end to end against a real workspace. Until this passes, no template or team
-   work is scheduled: a design only one harness can execute is not a heterogeneous
-   design.
+   Run end to end against a real workspace. This was the gate: a design only one harness can execute is not
+   a heterogeneous design. **It has passed**, so template and team work is no longer blocked by it -- the
+   remaining blocker for Milestone B is destination-aware network policy, recorded in
+   [`../status.md`](../status.md).
 6. `/api/agents` reports capabilities, not just names, and a caller can filter on
    them.
 7. Existing Runs and adapters behave unchanged.

@@ -201,3 +201,54 @@ test('this suite declares its document reads where the CI guard can see them', (
     );
   }
 });
+
+
+// --- the roadmap's own status, and the two numbers that contradicted other documents ----------------
+//
+// This suite already guarded the class -- "no Crew doc claims a Run cannot carry zero skills" -- and still
+// missed the real regression, because roadmap.md said `"no skills" is inexpressible` and no pattern contained
+// that word. Phrasing-specific patterns guard the sentences someone happened to notice, not the claims. So
+// these assertions are written against the claims themselves: what phase is done, whether Hermes can run,
+// and how big the Hermes skill store is.
+//
+// Issue #579. The concrete harm: roadmap.md said "Status: design only" and "Until this passes, no template
+// or team work is scheduled", while ../status.md and ../phase-0-issues.md both recorded Phase 0 as complete.
+// A contributor following the roadmap would re-implement 2-3 days of merged work or wait on a passed gate.
+
+test('roadmap.md states Phase 0 is complete and does not call the whole roadmap design-only', () => {
+  assert.match(ROADMAP, /\*\*Status: complete\.?\*\*|\*\*Phase 0 is complete/,
+    'roadmap.md must say Phase 0 is complete; two other documents do, and this one is the one a '
+    + 'contributor follows to decide what to build');
+  // "Status: **design only.**" on its own is the bug: true of Phases 1-11, false of Phase 0.
+  const bare = /^Status:\s*\*\*design only\.?\*\*/im.exec(ROADMAP);
+  assert.equal(bare, null,
+    'roadmap.md opens with an unqualified "design only", which reads as Phase 0 being unbuilt. Qualify it '
+    + 'by phase, or defer the overall status to docs/status.md.');
+});
+
+test('no Crew doc claims Hermes cannot execute a Run', () => {
+  const offenders: string[] = [];
+  for (const [name, text] of Object.entries(DOCS)) {
+    for (const m of text.matchAll(/Hermes cannot execute any Run/gi)) {
+      // "could not" is past tense and is the corrected narrative form, so only the present-tense claim is
+      // stale. A present-tense claim inside a passage that goes on to say it was fixed is also fine.
+      const around = text.slice(Math.max(0, m.index - 400), m.index + m[0].length + 400);
+      if (/does execute Runs|now fixed|has passed|was the gate/i.test(around)) continue;
+      offenders.push(`${name}: "${m[0]}"`);
+    }
+  }
+  assert.deepEqual(offenders, [],
+    `stale Hermes claims:\n${offenders.join('\n')}\n`
+    + 'A Hermes Run completes end to end against a real workspace (docs/phase-0-issues.md, acceptance 4).');
+});
+
+test('the Hermes skill-store size is stated once, as the measured figure', () => {
+  // teams.md measured 141 on a real v0.21.2 install and gave the breakdown (58 bundled + 83 user).
+  // roadmap.md carried a bare 81 for the same fact. Two numbers for one measurement is how a reader
+  // ends up trusting neither.
+  assert.match(TEAMS, /141 skills[\s\S]{0,40}v0\.21\.2/,
+    'teams.md should keep carrying the measured figure with its version, since it is the citation');
+  const wrong = Object.entries(DOCS).filter(([, text]) => /\b81 skills\b/.test(text)).map(([n]) => n);
+  assert.deepEqual(wrong, [],
+    `these cite 81 Hermes skills, which contradicts the measured 141 in teams.md: ${wrong.join(', ')}`);
+});
