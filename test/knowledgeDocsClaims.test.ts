@@ -106,3 +106,51 @@ test('status.md names the Hermes channel as measured rather than assumed', () =>
   assert.match(hermes, /measured|v0\.21\.2/,
     'the Hermes channel claim lost its evidence marker; state the version it was measured on');
 });
+
+
+/*
+ * A closed issue cited as live tracking.
+ *
+ * Sweeping every `issues/<n>` reference across all 43 markdown files on main and checking each against the
+ * API turned up 61 references, 60 of them to closed issues -- which is normal, most are history ("#55 found
+ * this"). Exactly one was phrased as ONGOING tracking, and it was this one: the Atlas deletion limitation
+ * ended "Tracked in [#562]". #562 is closed; it landed the sweep and deliberately left deletion out because
+ * safe deletion needs a sequence-bearing tombstone, a replication-protocol change.
+ *
+ * The sentence was not false about the limitation -- Atlas still never deletes. It was false about the
+ * bookkeeping, which is the part a reader acts on: they follow the link, find it closed, and cannot tell
+ * whether the limitation was fixed, rejected or dropped. The honest answer is "deliberately left undone, for
+ * this reason, and nothing tracks it", which is what the page now says.
+ *
+ * The bound, stated rather than hidden. This pins ONE citation and cannot do more: deciding whether
+ * "Tracked in [#N]" is a lie requires GitHub, and this suite runs offline. A first draft of this guard
+ * banned the phrasing outright and immediately failed on "Tracked in [#575]" -- which is correct, because
+ * #575 is open. A guard that forbids legitimate prose is deleted rather than narrowed, so it checks the
+ * citation that was wrong and says so.
+ */
+
+/** The sentence around the #562 citation, spanning its line breaks. */
+function atlasDeletionPassage(): string {
+  const at = STATUS.indexOf('issues/562');
+  assert.notEqual(at, -1, 'the #562 citation disappeared; the reasoning for not deleting lives there');
+  return STATUS.slice(Math.max(0, STATUS.lastIndexOf('\n-', at)), at + 400);
+}
+
+test('the Atlas deletion limitation says what #562 did, not that it is being tracked', () => {
+  const passage = atlasDeletionPassage();
+  assert.doesNotMatch(passage, /\bTracked in\s*\[#562\]/,
+    '#562 is closed; citing it as live tracking leaves a reader unable to tell if the limitation was '
+    + 'fixed, rejected or dropped');
+  assert.match(passage, /closed/, 'the passage no longer says #562 is closed');
+  assert.match(passage, /not currently tracked|no open issue/,
+    'the reader is left to guess whether the deletion path has an owner');
+});
+
+test('the closed-issue guard can actually fail', () => {
+  // Positive control: the exact phrasing this guard exists to catch, applied to the real passage.
+  const reintroduced = atlasDeletionPassage().replace(/\[#562\][^.]*\./,
+    'Tracked in [#562](https://github.com/aywengo/mercury/issues/562).');
+  assert.match(reintroduced, /\bTracked in\s*\[#562\]/,
+    'the pattern no longer matches the phrasing it was written for');
+  assert.doesNotMatch(atlasDeletionPassage(), /\bTracked in\s*\[#562\]/, 'the real document already trips it');
+});
