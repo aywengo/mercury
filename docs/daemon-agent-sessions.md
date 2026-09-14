@@ -19,7 +19,7 @@ on it.
 
 `DaemonAgentAdapter` cannot communicate with a real PrimeAgent daemon. The two sides disagree on the
 wire framing, on the command envelope, on session identity, and on which socket to talk to. Every one
-of the twelve daemon tests passes, because the test fixture implements the protocol the adapter
+of the daemon tests passes, because the test fixture implements the protocol the adapter
 *assumes* rather than the one the daemon *speaks*.
 
 | # | Adapter assumes | Real daemon (verified) |
@@ -119,8 +119,8 @@ The adapter's header comment cites a contract document, `daemon.md`:
 
 **`daemon.md` does not exist** — not in this repository, and not anywhere in the installed
 `prime-agent@0.8.1` package. The first clause of that sentence is contradicted by measurement, and the
-document that would have settled it is absent. That is how a wrong protocol survived twelve green
-tests.
+document that would have settled it is absent. That is how a wrong protocol survived a green
+suite.
 
 Verification therefore used two independent sources, which agreed:
 

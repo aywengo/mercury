@@ -108,9 +108,8 @@ jobs:
               # ARCHITECTURE.md defers to, so an edit here must run the job (#577).
               - 'docs/cross-process-event-push.md'
               # testCountClaims.test.ts asserts none of these quotes a suite size, so an edit to any of
-              # them must run the job that checks it (#580).
+              # them must run the job that checks it (#580). docs/agent-adapters.md is already listed above.
               - 'docs/daemon-agent-sessions.md'
-              - 'docs/agent-adapters.md'
               - 'docs/fleet-e2e-design.md'
               - 'docs/goals.md'
               # routeDocContract.test.ts fails when a route in src/api/routes.ts appears in no doc,

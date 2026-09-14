@@ -41,17 +41,41 @@ const CURRENT_STATE_DOCS: Record<string, string> = {
 };
 
 /*
- * `12 tests`, `187 tests`, and the `12 pass, 0 fail` triple. Two shapes were deliberately left out after
- * they produced false positives: a bare `N files` matched `0600 file`, and a bare `N pass` matched the
- * heading "4.2 Pass `queue` to `createApp`". The `191 tests across 19 files` case is still caught, by its
- * first half. A leading ~ marks a forward-looking estimate, which is allowed.
+ * Two shapes, both in the form the offenders actually took:
+ *
+ *   `12 tests` / `187 tests` / `12 additional tests`
+ *   `12 pass, 0 fail`
+ *
+ * Word-spelled numbers are included because the real offender this change removed was the phrase
+ * "twelve tests" -- a count written out in prose, in a section heading, survived for months while the
+ * suite tripled. A guard that only reads digits would have let it back in.
+ *
+ * One intervening adjective is allowed ("12 passing tests") because that is how someone rewords a count
+ * after a reviewer objects to the bare form. Two or more is prose about something else.
+ *
+ * Deliberately excluded after they produced false positives: a bare `N files` matched `0600 file`, and a
+ * bare `N pass` matched the heading "### 4.2 Pass `queue` to `createApp`". The `191 tests across 19 files`
+ * case is still caught, by its first half. A leading ~ marks a forward-looking estimate, which is allowed.
  */
-const COUNT = /(?<!~)\b\d{1,4}\s+(?:tests?\b|\d*\s*pass,\s*\d*\s*fail\b)/gi;
+/*
+ * `one` is deliberately absent. Every "one test" in the corpus this guard covers means "a single test"
+ * ("the gap is not one test is missing", "caught by at least one test"), never "the suite has one test".
+ * Including it made the guard fire on prose three times in one file, and a guard that cries wolf gets
+ * widened away. A suite-size claim spelled "one" is not a thing that happens here.
+ */
+const WORDNUM = String.raw`\d{1,4}|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|hundred`;
+const COUNT = new RegExp(
+  String.raw`(?<!~)\b(?:${WORDNUM})\s+(?:[a-z]+\s+)?tests?\b`
+  + String.raw`|(?<!~)\b(?:${WORDNUM})\s+pass,\s*\d+\s+fail\b`,
+  'gi',
+);
+// The bare "N pass" form, matched case-sensitively so the heading "4.2 Pass `queue`" cannot satisfy it.
+const PASS_FORM = new RegExp(String.raw`(?<!~)\b(?:${WORDNUM})\s+pass\b`, 'g');
 
 test('docs describing the current suite do not quote its size', () => {
   const offenders: string[] = [];
   for (const [rel, text] of Object.entries(CURRENT_STATE_DOCS)) {
-    for (const m of text.matchAll(COUNT)) {
+    for (const m of [...text.matchAll(COUNT), ...text.matchAll(PASS_FORM)]) {
       const line = text.slice(text.lastIndexOf('\n', m.index) + 1, text.indexOf('\n', m.index + m[0].length)).trim();
       offenders.push(`${rel}: "${m[0]}" :: ${line.slice(0, 90)}`);
     }
@@ -72,4 +96,18 @@ test('the estimate exemption actually exempts, and the count does not', () => {
   // The two shapes deliberately excluded, pinned so nobody re-adds them and calls the noise "coverage".
   assert.equal('### 4.2 Pass `queue` to `createApp`'.match(COUNT), null, 'a section heading was flagged');
   assert.equal('credentials live in a 0600 file'.match(COUNT), null, 'a file permission was flagged');
+  // Word-spelled numbers, and one intervening adjective. The phrase this guard exists to stop was
+  // "twelve tests" -- spelled out, in a heading, and it survived a tripling of the suite.
+  for (const s of ['twelve tests', '12 passing tests', 'twelve daemon tests', 'all 36 tests pass',
+                   'the suite has 187 tests', '12 tests, 12 pass, 0 fail']) {
+    assert.ok(s.match(COUNT), `"${s}" was not flagged`);
+  }
+  assert.ok('twelve pass, 0 fail'.match(COUNT), 'the spelled-out pass/fail triple was not flagged');
+  // Idiomatic "one test" means "a single test", never "the suite has one test".
+  for (const s of ['the gap is not one test is missing', 'caught by at least one test',
+                   'One test in the first draft was wrong']) {
+    assert.equal(s.match(COUNT), null, `"${s}" is prose about a single test, not a suite size`);
+    assert.equal(s.match(PASS_FORM), null, `"${s}" matched the pass form`);
+  }
+  assert.ok('all twelve pass'.match(PASS_FORM), 'bare spelled "N pass" was not flagged');
 });
