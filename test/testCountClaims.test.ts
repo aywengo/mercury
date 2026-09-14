@@ -63,7 +63,7 @@ const CURRENT_STATE_DOCS: Record<string, string> = {
  * Including it made the guard fire on prose three times in one file, and a guard that cries wolf gets
  * widened away. A suite-size claim spelled "one" is not a thing that happens here.
  */
-const WORDNUM = String.raw`\d{1,4}|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|hundred`;
+const WORDNUM = String.raw`\d{1,4}|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:-(?:one|two|three|four|five|six|seven|eight|nine))?|hundred(?:\s+thousand)?`
 const COUNT = new RegExp(
   String.raw`(?<!~)\b(?:${WORDNUM})\s+(?:[a-z]+\s+)?tests?\b`
   + String.raw`|(?<!~)\b(?:${WORDNUM})\s+pass,\s*\d+\s+fail\b`,
@@ -110,4 +110,10 @@ test('the estimate exemption actually exempts, and the count does not', () => {
     assert.equal(s.match(PASS_FORM), null, `"${s}" matched the pass form`);
   }
   assert.ok('all twelve pass'.match(PASS_FORM), 'bare spelled "N pass" was not flagged');
+  // The tens the first pass omitted, and hyphenated compounds. "twenty-one tests" evaded until the
+  // hyphen was handled: `twenty\s+` cannot match across it, and the trailing `one tests` is exempt.
+  for (const s of ['sixty tests', 'seventy tests', 'eighty tests', 'ninety tests', 'twenty-one tests',
+                   'ninety-nine tests', 'one hundred tests', 'a hundred tests']) {
+    assert.ok(s.match(COUNT), `"${s}" was not flagged`);
+  }
 });
