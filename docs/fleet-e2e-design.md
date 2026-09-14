@@ -1,10 +1,10 @@
 # Fleet end-to-end testing
 
-Status: **Phases 0-5 implemented** (`test/fleetContract.test.ts`, 9 tests). Phase 6 is design. See §6.
+Status: **Phases 0-5 implemented** (`test/fleetContract.test.ts`). Phase 6 is design. See §6.
 
 ## 1. Problem
 
-Fleet has 191 tests across 19 files. Almost all of them build a server in-process with
+Fleet has a large suite spread over many files. Almost all of them build a server in-process with
 `createFleetServer(...)`, and the one test that crosses a process boundary — `journey.test.ts`,
 which spawns the real `fleet serve` — points it at a **hand-written fake Mercury**:
 
@@ -153,7 +153,7 @@ behaviour is "no violations" has not been tested.
 
 ## 6d. What the dispatch tests do NOT cover, and why that is fine
 
-Two mutations of the host-facing idempotency path leave all 9 tests green:
+Mutations of the host-facing idempotency path leave the contract suite green:
 
 - Fleet stops sending the `idempotency-key` header to Mercury.
 - Mercury stops honouring the key on `create()`.

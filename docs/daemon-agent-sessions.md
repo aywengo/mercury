@@ -334,11 +334,12 @@ valid across a boundary where it is not — and Mercury's per-run `sequence` has
 
 ---
 
-## 5. Why twelve tests pass
+## 5. Why the mock suite passes
 
-Ran directly, not inferred from CI: `node --test test/daemonAgentAdapter.test.ts` reports
-**12 tests, 12 pass, 0 fail** — including `daemon: happy path — prompt, events, completion`, which
-passes against a mock while the same code path cannot complete against the real daemon.
+Ran directly, not inferred from CI: `node --test test/daemonAgentAdapter.test.ts` is **entirely green** —
+including `daemon: happy path — prompt, events, completion`, which passes against a mock while the same code
+path cannot complete against the real daemon. No count is quoted here on purpose: the figure this sentence
+used had been outgrown before it was even written, and the argument does not depend on how many pass.
 
 The fixture and the adapter were written against the same misunderstanding, so they agree with each
 other and disagree with the daemon. Agreement between an implementation and its own mock is not
@@ -349,7 +350,7 @@ flowchart LR
     subgraph FICTION["Test universe — self-consistent"]
       AD["DaemonAgentAdapter<br/>4-byte framing<br/>bare commands<br/>no activeSessionId"]
       MK["mock-prime-agent-daemon.mjs<br/>4-byte framing<br/>bare commands<br/>no session id"]
-      AD <-->|"12 tests pass"| MK
+      AD <-->|"mock suite green"| MK
     end
     subgraph REAL["Production universe"]
       DA["prime-agent daemon<br/>JSONL envelopes<br/>activeSessionId required"]
@@ -369,7 +370,7 @@ The fixture states its own assumption in a comment, which is the tell:
 Its `HELLO` object even carries the correct `protocol: { name: "prime-agent.daemon", version: 7 }`, so
 the version was known and the framing still was not.
 
-Two of the twelve tests — #55 (terminate must settle the exit) and #68 (coalesced frames must not be
+Two of those tests — #55 (terminate must settle the exit) and #68 (coalesced frames must not be
 dropped) — are real, well-constructed regression tests for genuine adapter bugs. They remain valuable.
 They are simply testing the innards of an adapter that cannot reach its peer, and neither test could
 have detected the protocol mismatch because both drive the mock.
@@ -380,9 +381,10 @@ binary. §11 makes that test exist.
 ### 5.1 What happened to those tests
 
 The fixture was rewritten from the captured real protocol rather than patched, and the adapter's tests
-were rewritten against it. They now number 57 rather than 12 (`test/daemonProtocol.test.ts` 18,
-`test/daemonAgentAdapter.test.ts` 35, `test/agentSelection.test.ts` 4), and — the part the old suite
-could not do — **they fail when the adapter is wrong**. Ten independent mutations of the adapter and its protocol module were applied one at a time;
+were rewritten against it. They now span three files — `test/daemonProtocol.test.ts`, `test/daemonAgentAdapter.test.ts` and
+`test/agentSelection.test.ts` — and — the part the old suite could not do — **they fail when the adapter is
+wrong**. The per-file counts are deliberately not repeated here: the previous sentence gave a total and a
+breakdown, and within a few changes it was wrong by one. Ten independent mutations of the adapter and its protocol module were applied one at a time;
 each was caught by at least one test:
 
 | Mutation | Caught by |
