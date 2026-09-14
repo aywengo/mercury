@@ -1,6 +1,6 @@
 // Run list page: login, create run, list + filter + poll.
 
-import { api, login, logout, currentUser, esc, fmtTime, fmtDuration, statusClass, goalBadge, repoLabel, shortId } from './app.js';
+import { api, login, logout, currentUser, esc, fmtTime, fmtDuration, statusClass, goalBadge, repoLabel, shortId, agentOptions } from './app.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -15,20 +15,20 @@ function showLogin() {
 
 async function loadAgents() {
   try {
-    const { agents, defaultAgent } = await api('/api/agents');
-    if (!Array.isArray(agents)) return; // defensive: keep the static options
+    // Every decision about what to show lives in agentOptions() (ui/app.js), which is tested directly.
+    // This function only writes the result into the DOM, so the guard that keeps the server contract
+    // from silently emptying the dropdown cannot be dropped here without failing a test.
+    const { options, value } = agentOptions(await api('/api/agents'));
+    if (options === null) return; // a payload this page does not understand: keep the static options
     const select = $('agent');
     select.innerHTML = '';
-    for (const a of agents) {
+    for (const id of options) {
       const opt = document.createElement('option');
-      opt.value = a;
-      opt.textContent = a;
+      opt.value = id;
+      opt.textContent = id;
       select.appendChild(opt);
     }
-    const preferred = typeof defaultAgent === 'string' && agents.includes(defaultAgent)
-      ? defaultAgent
-      : (agents.includes('fake') ? 'fake' : agents[0]);
-    if (preferred) select.value = preferred;
+    if (value) select.value = value;
   } catch {
     // keep the static options as a fallback
   }

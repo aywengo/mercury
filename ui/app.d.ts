@@ -78,3 +78,12 @@ export function goalContractHtml(goal: UiGoal | null | undefined): string;
 
 /** Badge text/class/title for the run page. Same three states as goalBadge. */
 export function goalLabel(goal: UiGoal | null | undefined): { text: string; cls: string; title: string };
+
+/** One entry of the `/api/agents` capability map, as the dashboard receives it. */
+export interface UiAgentOptions {
+  /** Agent ids to render, or null to leave the `<select>` as `index.html` authored it. */
+  options: string[] | null;
+  /** The id to select, or null to leave the current selection alone. */
+  value: string | null;
+}
+export function agentOptions(payload: unknown): UiAgentOptions;

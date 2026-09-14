@@ -77,7 +77,15 @@ test('UI pages reference the correct assets', () => {
   assert.match(run, /<script type="module" src="\/run\.js">/);
   // both pages use the shared helpers
   assert.match(readFileSync(join(UI_DIR, 'index.js'), 'utf8'), /from '\.\/app\.js'/);
-  assert.match(readFileSync(join(UI_DIR, 'index.js'), 'utf8'), /defaultAgent/);
+  // The dashboard must still honour the server's default agent. It used to read `defaultAgent` inline in
+  // index.js; #523 moved that decision into agentOptions() so it could be tested at all, so this check
+  // follows the logic to where it now lives instead of being dropped: index.js has to route the payload
+  // through the helper, and the helper is what reads the field. Asserting the call site rather than the
+  // field name here is what keeps the guard honest -- inlining the decision back into index.js and
+  // deleting the helper would fail the agentOptions() unit tests, not this one.
+  const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.match(code(readFileSync(join(UI_DIR, 'index.js'), 'utf8')), /agentOptions\(/);
+  assert.match(code(readFileSync(join(UI_DIR, 'app.js'), 'utf8')), /payload\.defaultAgent/);
   assert.match(readFileSync(join(UI_DIR, 'run.js'), 'utf8'), /from '\.\/app\.js'/);
 });
 
