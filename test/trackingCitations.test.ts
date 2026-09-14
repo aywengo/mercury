@@ -30,55 +30,95 @@ import { join } from 'node:path';
 const STATUS = readFileSync(join(import.meta.dirname, '..', 'docs', 'status.md'), 'utf8');
 const GOALS = readFileSync(join(import.meta.dirname, '..', 'docs', 'goals.md'), 'utf8');
 
-const CITATION = /(?:\b[Tt]racked in|\btracked under|\bfollow[\s-]up in)\s*\[#(\d+)\]/g;
+/*
+ * The citation itself. Link text may say "issue #575" rather than "#575", and "Follow-up in" is capitalised
+ * at the start of a sentence -- both defeated the first version.
+ */
+const CITATION = /(?:\btracked in|\btracked under|\bfollow[\s-]up in)\s*\[[^\]]*?#(\d+)\]/gi;
 
 /*
- * A tracking state, predicated of the issue. Deliberately does not accept a bare "open"/"closed" -- see the
- * header. "not currently tracked" and "no open issue" are states too: they are what a closed citation with no
- * replacement should say.
+ * A tracking state, predicated of the CITED ISSUE. Two things this has to survive, both found by review:
+ *
+ *  - "the open question" / "the open decision" -- a state word about a nearby noun, not the issue;
+ *  - "the chapter is closed but tracked in [#575]" / "tracked in [#575] and the PR is closed" -- a state word
+ *    about a DIFFERENT subject in the same sentence. A bare `is closed` branch accepted both, which is the
+ *    very defect the guard exists to catch, relocated one clause away.
+ *
+ * So the state must attach to the citation: either it names the issue number, or it is a relative clause
+ * immediately following the link, or it is one of the two unambiguous phrases that need no subject at all.
  */
-const STATE = new RegExp([
-  String.raw`(?:it|this|the issue|which)\s+(?:is|remains|was|stays|now)\s+(?:open|closed)`,
-  String.raw`\b(?:open|closed)\s+issue\s*#?\d*`,
-  String.raw`\((?:open|closed)\)`,
-  String.raw`\bis\s+(?:open|closed)\b`,
-  String.raw`not\s+currently\s+tracked`,
-  String.raw`no\s+open\s+issue`,
-].join('|'), 'i');
+const STATE_AFTER = /^\s*(?:,\s*|\s+)which\s+(?:is|remains|was|stays|now)\s+(?:open|closed)/i;
+const STATE_TIGHT = /^\s*(?:is|remains|was|stays|now)\s+(?:open|closed)|\s*\((?:open|closed)\)/i;
+const STATE_BEFORE = /(?:\b(?:open|closed)\s+issue\s*)$/i;
+const NAMED = /(?:\b(?:open|closed)\s+issue\s*#?\d*|#\d+\s+(?:is|remains)\s+(?:open|closed))/i;
+const SUBJECTLESS = /not\s+currently\s+tracked|no\s+open\s+issue|nothing\s+currently\s+tracks/i;
 
-/** The sentence containing the match, tolerant of the line wrapping prose actually gets. */
-function sentence(text: string, at: number, end: number): string {
+/** Text from the citation to the end of its sentence, and from the sentence start to the citation. */
+function windows(text: string, at: number, end: number): { before: string; after: string } {
   const from = Math.max(0, text.lastIndexOf('. ', at) + 2);
   const stop = text.indexOf('. ', end);
-  return text.slice(from, stop === -1 ? Math.min(text.length, end + 240) : stop + 1).replace(/\s+/g, ' ');
+  const sentEnd = stop === -1 ? Math.min(text.length, end + 240) : stop + 1;
+  return { before: text.slice(from, at), after: text.slice(end, sentEnd) };
 }
 
-function offenders(text: string, label: string): string[] {
+function unqualified(text: string, label: string): string[] {
   const bad: string[] = [];
   for (const m of text.matchAll(CITATION)) {
-    const s = sentence(text, m.index ?? 0, (m.index ?? 0) + m[0].length);
-    if (!STATE.test(s)) bad.push(`${label} #${m[1]}: ...${s.slice(-150)}`);
+    const at = m.index ?? 0;
+    let end = at + m[0].length;
+    // A markdown link's URL follows the text: `[#575](https://...)`. Without stepping over it the "after"
+    // window starts inside the parentheses and a following ", which is closed" is never seen.
+    if (text[end] === '(') {
+      const close = text.indexOf(')', end);
+      if (close !== -1) end = close + 1;
+    }
+    const { before, after } = windows(text, at, end);
+    const sentence = (before + m[0] + after).replace(/\s+/g, ' ');
+    const attached = STATE_AFTER.test(after)
+      || STATE_TIGHT.test(after)
+      || STATE_BEFORE.test(before.replace(/\s+$/, ' '))
+      || NAMED.test(sentence)
+      || SUBJECTLESS.test(sentence);
+    if (!attached) bad.push(`${label} #${m[1]}: ...${sentence.slice(-150)}`);
   }
   return bad;
 }
 
 test('every "tracked in [#N]" citation states its tracking state', () => {
-  const found = [...offenders(STATUS, 'docs/status.md'), ...offenders(GOALS, 'docs/goals.md')];
+  const found = [...unqualified(STATUS, 'docs/status.md'), ...unqualified(GOALS, 'docs/goals.md')];
   assert.deepEqual(found, [],
     `these citations do not say whether the issue is open or closed:\n${found.join('\n')}\n`
     + 'Say "which is closed, so nothing currently tracks it", or "the open issue #N". A citation that omits '
     + 'the state reads as live tracking forever.');
 });
 
-test('the guard rejects a state predicated of something other than the issue', () => {
-  // Positive control for the exact wording that defeated the first version.
-  const defeated = 'The unbuilt half is tracked in [#999](https://example.com/issues/999), where the open '
-    + 'decision is whether to build it.';
-  assert.ok(!STATE.test(sentence(defeated, 22, 80)),
-    'the state pattern matched "the open decision", which describes the decision and not the issue');
-  const fixed = 'The unbuilt half was tracked in [#999](https://example.com/issues/999), which is closed, '
-    + 'so nothing currently tracks it.';
-  assert.ok(STATE.test(sentence(fixed, 26, 84)), 'the corrected form is not accepted either');
+test('a state word about anything other than the cited issue does not qualify the citation', () => {
+  // Every string below is a real attack an earlier version accepted. They stay as fixtures because "the guard
+  // is too generous" is invisible unless the generous cases are pinned.
+  const must_flag = [
+    'The chapter is closed but tracked in [#575](https://example.com/issues/575).',
+    'The work is tracked in [#575](https://example.com/issues/575) and the PR is closed.',
+    'The unbuilt half is tracked in [#575](https://example.com/issues/575), where the open decision is pending.',
+    'They are tracked in [#575](https://example.com/issues/575), along with the open question of it.',
+    'They are tracked in [#575](https://example.com/issues/575). It was closed in another issue.',
+    'They are tracked in [issue #575](https://example.com/issues/575).',
+    'Follow-up in [#575](https://example.com/issues/575) for the rest.',
+  ];
+  for (const s of must_flag) {
+    assert.equal(unqualified(s, 'fixture').length, 1, `accepted a citation with no state on the issue:\n  ${s}`);
+  }
+
+  // And the forms that must pass, so the guard cannot be satisfied merely by being strict.
+  const must_pass = [
+    'It was tracked in [#575](https://example.com/issues/575), which is closed, so nothing currently tracks it.',
+    'It is tracked in [#575](https://example.com/issues/575) (open) for the rest.',
+    'It is tracked in the open issue #575 ([#575](https://example.com/issues/575)).',
+    'It is tracked in [#575](https://example.com/issues/575), which remains open.',
+    'It is tracked in [#575](https://example.com/issues/575) and is not currently tracked elsewhere.',
+  ];
+  for (const s of must_pass) {
+    assert.deepEqual(unqualified(s, 'fixture'), [], `rejected a properly qualified citation:\n  ${s}`);
+  }
 });
 
 test('the sweep covers every markdown file, not only the two read above', () => {
@@ -89,6 +129,6 @@ test('the sweep covers every markdown file, not only the two read above', () => 
   const walk = (dir: string): string[] => readdirSync(join(root, dir), { withFileTypes: true })
     .flatMap((d) => d.isDirectory() ? walk(`${dir}/${d.name}`) : (d.name.endsWith('.md') ? [`${dir}/${d.name}`] : []));
   const files = [...walk('docs'), 'ARCHITECTURE.md', 'README.md'];
-  const found = files.flatMap((f) => offenders(readFileSync(join(root, f), 'utf8'), f));
+  const found = files.flatMap((f) => unqualified(readFileSync(join(root, f), 'utf8'), f));
   assert.deepEqual(found, [], `unqualified tracking citations:\n${found.join('\n')}`);
 });
