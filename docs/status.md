@@ -157,9 +157,8 @@ first-party client can set one:
   `--idempotency-key`. There is no `--goal` flag, and `client/` reads goal state for rendering only.
 
 So a goal can currently be created only by hand-writing an HTTP request. `docs/goals.md` section 13.6
-describes the dashboard gating goal fields on the selected agent's capabilities, which presumes goal
-fields exist; it does not state that they are unbuilt, and its opening line ("`GET /api/agents` returns
-bare strings today") has been stale since `capabilities` landed. Tracked in
+separates what ships from what does not: the `capabilities` field and `mercuryctl agents list`'s goal
+column exist, the dashboard has no goal field and never reads `capabilities`. The unbuilt half is tracked in
 [#575](https://github.com/aywengo/mercury/issues/575), where the open decision is whether to build the
 client surface or record goal-setting as deliberately out of scope for first-party clients.
 

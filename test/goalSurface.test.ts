@@ -399,3 +399,14 @@ test('every key in the 13.6 example exists in the source', () => {
   assert.match(examplePayload(), /"supported"/, 'the example lost the real goal-support key');
   assert.match(examplePayload(), /"detectedVersion"/, 'the example lost the version the operator acts on');
 });
+
+test('docs/status.md does not keep reporting 13.6 as stale now that it is corrected', () => {
+  // Fixing a document silently invalidates the page that described it as broken. status.md said 13.6's
+  // opening line "has been stale since `capabilities` landed"; the change that landed the correction left
+  // that sentence behind, which is the same drift in the opposite direction.
+  const status = readFileSync(join(import.meta.dirname, '..', 'docs', 'status.md'), 'utf8');
+  assert.doesNotMatch(status, /bare strings/,
+    'status.md quotes a line 13.6 no longer contains; drop the quote or restore the claim it replaced');
+  assert.match(status, /13\.6[\s\S]{0,400}separates what ships from what does not/,
+    'status.md no longer says 13.6 distinguishes shipped from unbuilt');
+});
