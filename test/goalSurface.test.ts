@@ -248,3 +248,42 @@ test('the goals map is scoped to the runs the caller may already see', async () 
     }, [['tok-alice', 'alice'], ['tok-bob', 'bob']]);
   } finally { env.close(); }
 });
+
+
+// --- the limitation docs/status.md records: no client can SET a goal -------------------------------
+//
+// Goals are wired end to end on the server -- `POST /api/runs` forwards `goal`, the detail page renders
+// it, the list carries it, `/api/agents` advertises support for it -- and yet neither first-party client
+// can create one, so the feature is reachable only by hand-writing HTTP. docs/status.md says so under
+// "Goal setting has no client surface", and #575 holds the decision about whether that is temporary.
+//
+// This assertion exists so the docs cannot silently outlive the fact. Adding `--goal` or a dashboard goal
+// field is the correct fix for #575, not a mistake -- but it must arrive together with the docs and the
+// issue, or the next reader inherits a status page describing a limitation that no longer applies. That is
+// the same drift #572 was about, so it is checked rather than remembered.
+
+test('no first-party client can set a goal, and docs/status.md says so', () => {
+  const cli = readFileSync(join(import.meta.dirname, '..', 'client', 'cli.ts'), 'utf8');
+  const html = readFileSync(join(UI_DIR, 'index.html'), 'utf8');
+  const status = readFileSync(join(import.meta.dirname, '..', 'docs', 'status.md'), 'utf8');
+
+  const createFlags = /'runs create':\s*\[([^\]]*)\]/.exec(cli);
+  assert.ok(createFlags, 'could not find the `runs create` flag list in client/cli.ts -- update this test');
+  assert.ok(
+    !createFlags[1].includes("'--goal'"),
+    'mercuryctl gained --goal. That closes part of #575: update the "Goal setting has no client surface" '
+    + 'section of docs/status.md in the same change, or delete it if both clients can now set goals.',
+  );
+
+  const fields = [...html.matchAll(/<(?:input|select|textarea)[^>]*id="([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(fields.length > 0, 'could not read the create-form fields from ui/index.html -- update this test');
+  assert.ok(
+    !fields.some((f) => /goal/i.test(f)),
+    `ui/index.html gained a goal field (${fields.filter((f) => /goal/i.test(f)).join(', ')}). `
+    + 'Update the "Goal setting has no client surface" section of docs/status.md and #575 in the same change.',
+  );
+
+  assert.match(status, /### Goal setting has no client surface/,
+    'the status page no longer records the goal-setting gap; if a client can now set goals, that is correct '
+    + '-- remove this section and this test together, and close #575.');
+});
