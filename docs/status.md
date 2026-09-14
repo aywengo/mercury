@@ -144,6 +144,25 @@ The dashboard is a small vanilla-JavaScript application with no build step.
 This keeps deployment simple but limits component reuse and richer client-side
 state management.
 
+### Goal setting has no client surface
+
+Goals are a server feature with no way to turn it on from a supported client. `POST /api/runs`
+accepts `goal` and forwards it (`src/api/routes.ts`), the run detail page renders goal state, the run
+list carries a Goal column, and `/api/agents` advertises per-agent goal support -- but neither
+first-party client can set one:
+
+- the dashboard's create form is `task`, `repo`, `branch`, `agent`. There is no goal field, so the
+  Goal column can only ever display a goal that something else created;
+- `mercuryctl runs create` accepts `--file`, `--task`, `--repo`, `--agent`, `--skills` and
+  `--idempotency-key`. There is no `--goal` flag, and `client/` reads goal state for rendering only.
+
+So a goal can currently be created only by hand-writing an HTTP request. `docs/goals.md` section 13.6
+describes the dashboard gating goal fields on the selected agent's capabilities, which presumes goal
+fields exist; it does not state that they are unbuilt, and its opening line ("`GET /api/agents` returns
+bare strings today") has been stale since `capabilities` landed. Tracked in
+[#575](https://github.com/aywengo/mercury/issues/575), where the open decision is whether to build the
+client surface or record goal-setting as deliberately out of scope for first-party clients.
+
 ### Redaction is mitigation
 
 Mercury redacts known patterns and exact credentials it forwards. It cannot
