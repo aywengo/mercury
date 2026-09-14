@@ -9,7 +9,7 @@ import { isTerminal, STUCK_CANDIDATE_STATUSES } from '../domain/stateMachine.ts'
 import { harnessMayRevise, translateHarnessGoal, type HarnessGoalReport } from '../domain/goalEvents.ts';
 import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts';
 import type { Redactor } from '../domain/redact.ts';
-import { isEventType } from '../domain/types.ts';
+import { isEventType, isLifecycleEventType } from '../domain/types.ts';
 import type {
   AgentAdapter,
   AgentCapabilitySummary, AgentEvent, AgentExit, AgentHandle, AgentInput, ErrorKind, Run, RunContext, ResolvedSkill,
@@ -774,6 +774,14 @@ export class Worker {
     // caller. Dropping here as well is deliberate, not redundant: append throwing would
     // propagate out of the drive loop uncaught, so a rogue agent could kill its own run
     // by emitting one odd event type. Reject at the choke point; discard at the boundary.
+    // Adapter lifecycle, not agent output. The adapter already consumed this to drive its own state
+    // machine and pushed it along only because every harness event shares one translation path.
+    // Debug, not warn: this fires on every successful Run, and a warning that fires on every
+    // successful Run is how the warning below stops meaning anything (issue #592).
+    if (isLifecycleEventType(ev.type)) {
+      log.debug({ type: ev.type }, 'adapter lifecycle event consumed, not persisted');
+      return 'ok';
+    }
     if (!isEventType(ev.type)) {
       log.warn({ type: ev.type }, 'dropping agent event with an unknown type');
       return 'ok';
