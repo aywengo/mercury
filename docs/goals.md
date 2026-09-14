@@ -978,9 +978,9 @@ capability is absent when the client simply was not told.
 `capabilities`; the create form has no goal field of any kind. So the two properties this section asks for —
 disable the goal fields with the reason attached rather than hiding them, and refuse to switch to an
 unsupported agent while a goal is filled in rather than silently discarding the input — have no code to
-enforce them yet. They are the remaining work, tracked in
-[#575](https://github.com/aywengo/mercury/issues/575), along with the open question of whether the dashboard
-should set goals at all or whether that stays an operator action `mercuryctl` already covers.
+enforce them yet, and they remain unbuilt. [#575](https://github.com/aywengo/mercury/issues/575) tracked them
+and is closed, so nothing currently tracks them. Whether the dashboard should set goals at all, or whether that
+stays an operator action `mercuryctl` already covers, is not answered by the code either way.
 
 Nothing misleads an operator today: with no goal fields, the dashboard cannot accept a goal it will lose. The
 risk is the next change. Adding goal fields to the create form without also reading `capabilities` ships

@@ -158,9 +158,10 @@ first-party client can set one:
 
 So a goal can currently be created only by hand-writing an HTTP request. `docs/goals.md` section 13.6
 separates what ships from what does not: the `capabilities` field and `mercuryctl agents list`'s goal
-column exist, the dashboard has no goal field and never reads `capabilities`. The unbuilt half is tracked in
-[#575](https://github.com/aywengo/mercury/issues/575), where the open decision is whether to build the
-client surface or record goal-setting as deliberately out of scope for first-party clients.
+column exist, the dashboard has no goal field and never reads `capabilities`. The unbuilt half was tracked in
+[#575](https://github.com/aywengo/mercury/issues/575), which is closed, so nothing currently tracks it;
+whether to build the client surface or record goal-setting as deliberately out of scope for first-party
+clients is still not decided anywhere a contributor can read.
 
 ### Redaction is mitigation
 
