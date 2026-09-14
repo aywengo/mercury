@@ -230,8 +230,10 @@ revision of this page:
   retires stale candidates and prunes replay-guard rows. It deliberately does not delete, because a
   deletion produces no `seq` row and a replica advancing by cursor would never learn the note was
   gone. Retired notes therefore accumulate in Atlas indefinitely; deleting them safely needs a
-  sequence-bearing tombstone, which is a replication-protocol change. Tracked in
-  [#562](https://github.com/aywengo/mercury/issues/562).
+  sequence-bearing tombstone, which is a replication-protocol change.
+  [#562](https://github.com/aywengo/mercury/issues/562) landed the sweep and left deletion out for exactly
+  this reason, so it is closed and the deletion path is **not currently tracked** — reopening #562 or
+  filing a new issue are both reasonable, but no open issue exists today.
 - **Atlas refuses to start on a database that already holds two live notes for one claim.** A
   partial UNIQUE index enforces the one-live-note-per-claim rule (`atlas/db.ts`, migration v2), and
   a precheck names the colliding note ids rather than surfacing a raw constraint error. It will not
