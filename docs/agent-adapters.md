@@ -249,7 +249,7 @@ can deliver. `sendInput()` throws with that explanation instead — the same doc
 ### Phase 3 — HermesAgentAdapter (Nous Research Hermes Agent) — ✅ **implemented**
 
 **Implementation:** `src/adapters/hermesAgentAdapter.ts` (adapter),
-`test/hermesAgentAdapter.test.ts` (10 tests), `test/fixtures/mock-hermes-agent.mjs`
+`test/hermesAgentAdapter.test.ts`, `test/fixtures/mock-hermes-agent.mjs`
 (mock CLI). Wired into `cli.ts` as agent id `hermes` (`MERCURY_HERMES_CMD`,
 `MERCURY_HERMES_ARGS`, `MERCURY_HERMES_MAX_TURNS`, `MERCURY_HERMES_RUN_BUDGET_SECONDS`,
 `MERCURY_HERMES_YOLO`, `MERCURY_HERMES_ACCEPT_HOOKS`).
@@ -384,8 +384,7 @@ A generic adapter for **any local CLI agent** that can run non-interactively.
 No per-agent code: everything is declarative config.
 
 **Implementation status:** `src/adapters/localAgentAdapter.ts` (adapter),
-`src/adapters/localAgentRegistry.ts` (config loader), `test/localAgentAdapter.test.ts`
-(22 tests), `test/fixtures/mock-local-agent.mjs` (generic mock fixture).
+`src/adapters/localAgentRegistry.ts` (config loader), `test/localAgentAdapter.test.ts`, `test/fixtures/mock-local-agent.mjs` (generic mock fixture).
 Config files are **JSON** (zero dependencies); the YAML examples below are the same
 structure. Loaded from `MERCURY_LOCAL_AGENTS_DIR` (default `./local-agents`), one
 `.json` file per agent. `eventMap` accepts **any** agent event type as a key
@@ -577,8 +576,7 @@ A generic adapter for **cloud/SaaS agents** exposed over HTTP. No local install,
 no sandbox needed (the vendor runs it), but network + credentials required.
 
 **Implementation status:** `src/adapters/remoteAgentAdapter.ts` (adapter),
-`src/adapters/remoteAgentRegistry.ts` (config loader), `test/remoteAgentAdapter.test.ts`
-(18 tests), `test/fixtures/mock-remote-agent.mjs` (generic mock HTTP server).
+`src/adapters/remoteAgentRegistry.ts` (config loader), `test/remoteAgentAdapter.test.ts`, `test/fixtures/mock-remote-agent.mjs` (generic mock HTTP server).
 Config files are **JSON** (zero dependencies); the YAML examples below are the same
 structure. Loaded from `MERCURY_REMOTE_AGENTS_DIR` (default `./remote-agents`), one
 `.json` file per agent. Credentials come from `api.auth.envVar` and are only used
@@ -822,7 +820,7 @@ declarative config. Reuses Mercury's existing RPC machinery (`rpcClient.ts` +
 
 **Implementation status:** `src/adapters/rpcAgentAdapter.ts` (adapter +
 `validateRpcAgentConfig`), `src/adapters/rpcAgentRegistry.ts` (config loader),
-`test/rpcAgentAdapter.test.ts` (18 tests), `test/fixtures/mock-prime-agent-rpc.mjs`
+`test/rpcAgentAdapter.test.ts`, `test/fixtures/mock-prime-agent-rpc.mjs`
 (reused; `MOCK_RPC_VENDOR_EXTRAS=1` emits omp-style `ready`/`negotiate_protocol`
 frames to prove they are ignored). Config files are **JSON** (zero dependencies),
 loaded from `MERCURY_RPC_AGENTS_DIR` (default `./rpc-agents`), one file per agent.

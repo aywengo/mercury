@@ -139,6 +139,6 @@ holds can orphan a Run on a machine nobody is watching.
 ## Development
 
 ```bash
-npm run test:fleet    # 187 tests, no network beyond localhost
+npm run test:fleet    # no network beyond localhost
 npm run typecheck     # covers fleet/ as well as src/
 ```
