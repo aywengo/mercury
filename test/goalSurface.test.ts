@@ -410,3 +410,37 @@ test('docs/status.md does not keep reporting 13.6 as stale now that it is correc
   assert.match(status, /13\.6[\s\S]{0,400}separates what ships from what does not/,
     'status.md no longer says 13.6 distinguishes shipped from unbuilt');
 });
+
+test('the fake entry in the 13.6 example is the real response, compared deeply', async () => {
+  // Key existence was not enough. The example dropped `goals.fields` from the `fake` entry while claiming
+  // to be the verbatim response, and a key-only guard let it through because every key that WAS shown was
+  // real. An example that claims to be a captured response has to be compared against one.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    await withServer(env, async (base) => {
+      const res = await fetch(`${base}/api/agents`, { headers: AUTH });
+      await expectStatus(res, 200, 'GET /api/agents');
+      const real = await res.json() as { agents: string[]; defaultAgent: string; capabilities: Record<string, unknown> };
+      const doc = JSON.parse(examplePayload()) as { agents: string[]; defaultAgent: string; capabilities: Record<string, unknown> };
+
+      assert.ok(real.agents.includes('fake'), 'the default env no longer registers `fake`; retarget this test');
+      assert.deepEqual(doc.capabilities.fake, real.capabilities.fake,
+        'the `fake` entry in docs/goals.md 13.6 is not the response this server returns');
+      assert.equal(doc.defaultAgent, real.defaultAgent, 'the example default disagrees with the server');
+
+      // The primeagent entry is assembled from resolveGoalCapability, so it cannot be compared to a live
+      // server. Its shape can still be pinned: every field entry must carry the same key set the resolver
+      // emits, which is what the last two review rounds kept finding missing.
+      const pa = doc.capabilities.primeagent as { goals: { fields: Record<string, Record<string, unknown>> } };
+      const shown = Object.entries(pa.goals.fields);
+      assert.ok(shown.length >= 2, 'the example shows too few fields to pin their shape');
+      for (const [field, value] of shown) {
+        const keys = Object.keys(value).sort();
+        const want = value.supported === true
+          ? ['detectedRaw', 'detectedVersion', 'supported']
+          : ['detectedRaw', 'detectedVersion', 'reason', 'supported'];
+        assert.deepEqual(keys, want, `fields.${field} does not carry the resolver's key set`);
+      }
+    });
+  } finally { env.close(); }
+});
