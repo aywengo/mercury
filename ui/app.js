@@ -279,7 +279,11 @@ export function agentOptions(payload) {
   if (!Array.isArray(agents)) return { options: null, value: null };
   const ids = agents.filter((a) => typeof a === 'string' && a.length > 0);
   if (agents.length > 0 && ids.length === 0) return { options: null, value: null };
-  const preferred = typeof payload.defaultAgent === 'string' && ids.includes(payload.defaultAgent)
+  // No `typeof payload.defaultAgent === 'string'` guard, deliberately: `ids` holds only strings and
+  // `includes` compares by identity, so a non-string default can never match and falls through on its
+  // own. A guard there would be a branch no input can distinguish, and it was written before that was
+  // checked -- review of #574 found it by trying to mutate it and failing.
+  const preferred = ids.includes(payload.defaultAgent)
     ? payload.defaultAgent
     : (ids.includes('fake') ? 'fake' : (ids[0] ?? null));
   return { options: ids, value: preferred };

@@ -85,7 +85,7 @@ test('UI pages reference the correct assets', () => {
   // deleting the helper would fail the agentOptions() unit tests, not this one.
   const code = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
   assert.match(code(readFileSync(join(UI_DIR, 'index.js'), 'utf8')), /agentOptions\(/);
-  assert.match(code(readFileSync(join(UI_DIR, 'app.js'), 'utf8')), /payload\.defaultAgent/);
+  assert.match(code(readFileSync(join(UI_DIR, 'app.js'), 'utf8')), /ids\.includes\(payload\.defaultAgent\)/);
   assert.match(readFileSync(join(UI_DIR, 'run.js'), 'utf8'), /from '\.\/app\.js'/);
 });
 

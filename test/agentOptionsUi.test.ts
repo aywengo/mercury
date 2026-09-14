@@ -132,9 +132,15 @@ test('fake is preferred over the first id when the default is absent', () => {
   assert.equal(opts({ agents: ['hermes', 'local'] }).value, 'hermes');
 });
 
-test('a non-string defaultAgent is ignored rather than compared', () => {
+test('a non-string defaultAgent can never match, so it falls through', () => {
+  // There is no `typeof` guard on defaultAgent, and this is what makes it unnecessary: `ids` holds only
+  // strings and `includes` compares by identity, so 42, null, and an object whose toString() returns a
+  // real id all fail to match and the fallback applies. The object case is the one that would matter --
+  // a truthy non-string that stringifies to a registered id must still not be selected.
   assert.equal(opts({ agents: ['hermes'], defaultAgent: 42 }).value, 'hermes');
   assert.equal(opts({ agents: ['hermes'], defaultAgent: null }).value, 'hermes');
+  assert.equal(opts({ agents: ['hermes'], defaultAgent: { toString: () => 'hermes' } }).value, 'hermes');
+  assert.equal(opts({ agents: ['fake', 'hermes'], defaultAgent: { toString: () => 'hermes' } }).value, 'fake');
 });
 
 test('an empty agents array yields an empty dropdown, not the static options', () => {
