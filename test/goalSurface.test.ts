@@ -326,6 +326,14 @@ test('13.6 does not describe the capability field as still missing', () => {
 
   // The claims the section now makes about shipped code, checked against that code.
   assert.match(sec, /"capabilities"/, 'the section no longer shows the shape the endpoint actually returns');
+  // The capability paragraph itself must say it is shipped -- not merely "some part of 13.6 is shipped".
+  // A first version matched /\*\*Shipped/ across the whole section and survived a rewrite that called
+  // ONLY the capability field unbuilt, because the mercuryctl paragraph still carried a Shipped marker.
+  const capPara = sec.slice(0, sec.indexOf('```json'));
+  assert.ok(capPara.length > 0, 'the JSON example is no longer preceded by prose');
+  assert.match(capPara, /\*\*Shipped/,
+    'the capability paragraph no longer says it is shipped; describing it as future work here is the '
+    + 'staleness this section had before');
   assert.match(ROUTES_SRC, /capabilities\s*:/,
     'GET /api/agents no longer returns capabilities -- the section and the handler disagree');
   assert.match(CLI_AGENTS_SRC, /'GOALS'/,
@@ -340,4 +348,54 @@ test('13.6 keeps the dashboard as unbuilt work and points at the open issue', ()
   // section must be rewritten -- which is exactly when #575 is being resolved.
   assert.equal(UI_INDEX_SRC.match(/capabilities/g), null,
     'ui/index.js now reads capabilities; 13.6 still calls the dashboard unbuilt, and #575 may be resolved');
+});
+
+/*
+ * The example payload in 13.6 was invented.
+ *
+ * It carried `"goalSupported": true`, `"goalReason": "..."` and `"goals": { "set": "0.3.3" }`. None of those
+ * keys exist: `goalSupported` appears nowhere in `src/`, `client/`, `ui/` or `test/` -- it was only ever in
+ * this document. The real `goals` is an `AgentGoalCapability` (`supported`, `reason?`, `detectedVersion?`,
+ * `fields?`), not a map of version strings.
+ *
+ * So the example is now generated from the code and checked against it. Every quoted key in the example must
+ * appear somewhere in `src/`. That is a deliberately blunt rule: it does not validate nesting or value types,
+ * but it makes up a key and the guard fails, which is the failure that actually happened here.
+ */
+const SRC_BLOB = [
+  readFileSync(join(import.meta.dirname, '..', 'src', 'domain', 'types.ts'), 'utf8'),
+  readFileSync(join(import.meta.dirname, '..', 'src', 'domain', 'goalSupport.ts'), 'utf8'),
+  readFileSync(join(import.meta.dirname, '..', 'src', 'adapters', 'capabilities.ts'), 'utf8'),
+  readFileSync(join(import.meta.dirname, '..', 'src', 'api', 'routes.ts'), 'utf8'),
+].join('\n');
+
+/** The first fenced JSON block in 13.6. */
+function examplePayload(): string {
+  const sec = section136();
+  const m = /```json\n([\s\S]*?)```/.exec(sec);
+  assert.ok(m, '13.6 no longer has a JSON example');
+  return m[1];
+}
+
+test('every key in the 13.6 example exists in the source', () => {
+  const json = examplePayload();
+  // Keys under `capabilities` are agent ids, not field names. Taken from the example's own `agents`
+  // array rather than a hardcoded list, so the example cannot smuggle a made-up field past the check by
+  // also naming it an agent.
+  const ids = new Set((/"agents"\s*:\s*\[([^\]]*)\]/.exec(json)?.[1] ?? '').match(/"([^"]+)"/g) ?? []);
+  const keys = new Set<string>();
+  for (const m of json.matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"\s*:/g)) {
+    if (!ids.has(`"${m[1]}"`)) keys.add(m[1]);
+  }
+  assert.ok(keys.size >= 8, `only found ${keys.size} keys -- the example was probably gutted`);
+  const invented = [...keys].filter((k) => !new RegExp(`\\b${k}\\b`).test(SRC_BLOB));
+  assert.deepEqual(invented, [],
+    `these keys are in the documented payload but in no source file: ${invented.join(', ')}. `
+    + 'The example must come from running the code, not from a sketch of it.');
+
+  // The specific fabrications, named, so a reintroduction says what it was.
+  assert.doesNotMatch(examplePayload(), /goalSupported|goalReason/,
+    'these keys never existed anywhere in the code; the real shape is goals.supported / goals.reason');
+  assert.match(examplePayload(), /"supported"/, 'the example lost the real goal-support key');
+  assert.match(examplePayload(), /"detectedVersion"/, 'the example lost the version the operator acts on');
 });

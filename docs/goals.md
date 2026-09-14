@@ -904,24 +904,50 @@ Two of the three surfaces here are shipped. The third is not, and the distinctio
 section is what someone implements from.
 
 **Shipped — the capability field.** `GET /api/agents` returns `agents`, `defaultAgent` **and**
-`capabilities`:
+`capabilities`, one `AgentCapabilitySummary` per agent id:
 
 ```json
 {
   "agents": ["fake", "primeagent"],
   "defaultAgent": "fake",
   "capabilities": {
+    "fake": {
+      "version": null,
+      "versionRaw": null,
+      "goals": { "supported": false, "reason": "unsupported",
+                 "detectedVersion": null, "detectedRaw": null },
+      "static": { "skills": "none", "humanInput": true, "resume": true }
+    },
     "primeagent": {
       "version": "0.9.4",
-      "versionRaw": "0.9.4",
-      "goals": { "set": "0.3.3", "track": "0.3.3", "tokenBudget": "0.3.3" },
-      "goalSupported": true
-    },
-    "hermes": { "version": null, "goals": {}, "goalSupported": false,
-                "goalReason": "no non-interactive goal interface" }
+      "versionRaw": "prime-agent 0.9.4",
+      "goals": {
+        "supported": true, "detectedVersion": "0.9.4", "detectedRaw": "prime-agent 0.9.4",
+        "fields": {
+          "set":     { "supported": true,  "detectedVersion": "0.9.4" },
+          "contract": { "supported": false, "reason": "unsupported", "detectedVersion": "0.9.4" }
+        }
+      }
+    }
   }
 }
 ```
+
+Every value above comes from running the code, not from a sketch. The `fake` entry is the verbatim response
+to a live `GET /api/agents` against an embedded worker. The `primeagent` entry is the real output of
+`resolveGoalCapability` for an adapter declaring `goalSupport` at version 0.9.4, assembled next to it so the
+supported and unsupported cases appear together; `fields` carries one entry per goal field
+(`set`, `track`, `tokenBudget`, `contract`, `gates`, `maxTurns`) and two are shown for space.
+
+Three things the shape says that a boolean would not:
+
+- `goals.supported` answers only "can this backend carry a goal", which is the `set` field. A caller asking
+  whether one *part* of a goal spec means anything reads `fields`, because the answers differ per field.
+- `reason` distinguishes `unsupported` (pick another agent) from `version-too-old` (upgrade it) from
+  `version-unknown` (fix the probe). Probing is detached, so for a moment after boot every agent reads
+  `version-unknown` with `requiredVersion` set — that is a better answer than guessing either way.
+- `static` is present even when `goals` is empty, because "no goals" and "no skills" are different statements
+  and a consumer choosing a skill namespace must see the latter.
 
 It was added as a **parallel field rather than a reshaping of `agents: string[]`**, and that choice is load
 bearing: the dashboard's `loadAgents()` does `if (!Array.isArray(agents)) return;` to keep its static fallback
