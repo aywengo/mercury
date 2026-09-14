@@ -287,3 +287,57 @@ test('no first-party client can set a goal, and docs/status.md says so', () => {
     'the status page no longer records the goal-setting gap; if a client can now set goals, that is correct '
     + '-- remove this section and this test together, and close #575.');
 });
+
+
+/*
+ * docs/goals.md 13.6 describes three surfaces for goal capability. Two are shipped and one is not, and the
+ * section used to describe all three as future work -- it opened "GET /api/agents returns bare strings today"
+ * while the handler that returns `capabilities` cites this very section as its spec, and it said
+ * `mercuryctl agents list` "gains a goal column" that the command already renders.
+ *
+ * That is not a cosmetic tense problem. 13.7 says it own way: "a stale table is worse than none because it
+ * looks authoritative." Someone implementing #575 reads 13.6 as the work list, and would have started by
+ * adding an API field and a CLI column that both exist.
+ *
+ * So these assertions bind the section to the code rather than to prose. If a shipped fact changes, the doc
+ * has to change with it; if the dashboard starts reading capabilities, the "not built" claim fails and points
+ * at #575.
+ */
+
+const GOALS_DOC = readFileSync(join(import.meta.dirname, '..', 'docs', 'goals.md'), 'utf8');
+const ROUTES_SRC = readFileSync(join(import.meta.dirname, '..', 'src', 'api', 'routes.ts'), 'utf8');
+const CLI_AGENTS_SRC = readFileSync(join(import.meta.dirname, '..', 'client', 'commands', 'agents.ts'), 'utf8');
+const UI_INDEX_SRC = readFileSync(join(UI_DIR, 'index.js'), 'utf8');
+
+/** The 13.6 section, up to the next heading. */
+function section136(): string {
+  const at = GOALS_DOC.indexOf('### 13.6');
+  assert.notEqual(at, -1, 'docs/goals.md lost section 13.6');
+  const next = GOALS_DOC.indexOf('\n### ', at + 5);
+  return GOALS_DOC.slice(at, next === -1 ? GOALS_DOC.length : next);
+}
+
+test('13.6 does not describe the capability field as still missing', () => {
+  const sec = section136();
+  assert.doesNotMatch(sec, /returns bare strings|bare strings today/,
+    'the handler in src/api/routes.ts returns capabilities alongside agents, and cites 13.6 as its spec');
+  assert.doesNotMatch(sec, /\bmercuryctl agents list`? gains\b/,
+    'mercuryctl already renders a GOALS column; "gains" reads as a to-do');
+
+  // The claims the section now makes about shipped code, checked against that code.
+  assert.match(sec, /"capabilities"/, 'the section no longer shows the shape the endpoint actually returns');
+  assert.match(ROUTES_SRC, /capabilities\s*:/,
+    'GET /api/agents no longer returns capabilities -- the section and the handler disagree');
+  assert.match(CLI_AGENTS_SRC, /'GOALS'/,
+    'mercuryctl agents list no longer renders a GOALS column -- the section and the CLI disagree');
+});
+
+test('13.6 keeps the dashboard as unbuilt work and points at the open issue', () => {
+  const sec = section136();
+  assert.match(sec, /Not built|not built/, 'the section no longer separates shipped from unbuilt');
+  assert.match(sec, /issues\/575/, 'the unbuilt part lost its link to the open issue');
+  // The claim rests on the UI not reading capabilities at all. If that changes, this fails and the
+  // section must be rewritten -- which is exactly when #575 is being resolved.
+  assert.equal(UI_INDEX_SRC.match(/capabilities/g), null,
+    'ui/index.js now reads capabilities; 13.6 still calls the dashboard unbuilt, and #575 may be resolved');
+});

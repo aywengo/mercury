@@ -900,10 +900,11 @@ responses: *too old* means upgrade, *cannot tell* means fix the probe.
 
 ### 13.6 Surfacing it
 
-`GET /api/agents` returns bare strings today, so neither the UI nor `mercuryctl` can know
-what a server accepts. Add a parallel field rather than reshaping `agents: string[]`: the
-dashboard's `loadAgents()` does `if (!Array.isArray(agents)) return;` and would silently fall
-back to two hardcoded options.
+Two of the three surfaces here are shipped. The third is not, and the distinction matters because this
+section is what someone implements from.
+
+**Shipped — the capability field.** `GET /api/agents` returns `agents`, `defaultAgent` **and**
+`capabilities`:
 
 ```json
 {
@@ -922,14 +923,32 @@ back to two hardcoded options.
 }
 ```
 
-`mercuryctl agents list` gains a goal column — that command exists precisely so an operator
-can discover what a server accepts before writing a create request. The UI disables the goal
-fields with the reason attached rather than hiding them, and refuses to switch to an
-unsupported agent while a goal is filled in rather than silently discarding the input.
+It was added as a **parallel field rather than a reshaping of `agents: string[]`**, and that choice is load
+bearing: the dashboard's `loadAgents()` does `if (!Array.isArray(agents)) return;` to keep its static fallback
+options, so turning `agents` into objects would make it silently discard every server-registered agent and
+render two hardcoded ones — a working server showing a shorter list, with no error anywhere.
 
-The client may warn from cached capability data, but **the server's `400` stays the
-authority.** A client-side check alone means a stale cache silently drops a goal, which is
-the same defect one layer up.
+**Shipped — `mercuryctl agents list`.** It renders `AGENT | GOALS | SKILLS |` where the goals cell has three
+states, because they want different actions from an operator: "too old" means upgrade the harness, "unknown"
+means fix the probe, "no" means pick a different agent. An absent capability block renders `unknown`, not `no`
+— an older server sends no capabilities block at all, and showing that as "no" would tell the operator a
+capability is absent when the client simply was not told.
+
+**Not built — the dashboard.** `ui/index.js` reads `agents` and `defaultAgent` and never reads
+`capabilities`; the create form has no goal field of any kind. So the two properties this section asks for —
+disable the goal fields with the reason attached rather than hiding them, and refuse to switch to an
+unsupported agent while a goal is filled in rather than silently discarding the input — have no code to
+enforce them yet. They are the remaining work, tracked in
+[#575](https://github.com/aywengo/mercury/issues/575), along with the open question of whether the dashboard
+should set goals at all or whether that stays an operator action `mercuryctl` already covers.
+
+Nothing misleads an operator today: with no goal fields, the dashboard cannot accept a goal it will lose. The
+risk is the next change. Adding goal fields to the create form without also reading `capabilities` ships
+exactly the defect this section was written to prevent — a goal the server rejects with a `400`, with no
+reason shown first.
+
+The client may warn from cached capability data, but **the server's `400` stays the authority.** A client-side
+check alone means a stale cache silently drops a goal, which is the same defect one layer up.
 
 ### 13.7 Keeping it honest
 
