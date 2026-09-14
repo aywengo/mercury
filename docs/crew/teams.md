@@ -77,10 +77,16 @@ run.failed     {"error": "Agent exited with code 1 (signal none)", "durationMs":
 ```
 
 Because the selector falls back to a fixed set whenever `skills` is omitted, a
-caller who does not know to send `skills: []` always gets at least one Mercury
-skill id -- and `RunService` honours the explicit `[]` but nothing stops the
-fallback, so in practice **Hermes cannot execute any Run through Mercury as it
-stands.**
+caller who does not know to send `skills: []` still gets at least one Mercury
+skill id, and Hermes rejects the Run in under a second. That fallback is now
+suppressible -- `SelectOptions.allowFallback` returns `[]` instead of four ids the
+target backend cannot resolve -- and with it **Hermes does execute Runs through
+Mercury**, verified end to end against a real workspace
+([`../phase-0-issues.md`](../phase-0-issues.md), acceptance 4).
+
+This sentence used to read "in practice Hermes cannot execute any Run through Mercury as it stands", which
+was true only while the fallback was unconditional. The narrower claim above is the one that is still true:
+omitting `skills` is still a trap for a Hermes Run, and sending `[]` is still what makes it work.
 PrimeAgent works only because Mercury materializes skills into the workspace and
 passes paths, which happens to be the namespace PrimeAgent reads.
 
