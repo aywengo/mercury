@@ -1508,15 +1508,21 @@ flowchart TD
 
 # 30. Implementation Phases
 
-> **Implementation status** (updated 2026-08-26): the vertical slice (§31) is implemented at
-> [.](.) — 32 source files, 112 passing tests, `tsc` clean. Phases 1–8 are
+> **Implementation status**: the vertical slice (§31) is implemented and on `main`, `tsc` clean. Phases 1–8 are
 > functionally complete and verified end-to-end with the real PrimeAgent RPC protocol and
 > the local model. Phase 8 (hardening) is done: workspace isolation, retention/GC,
 > recovery, idempotency, security (offline), resource-limit enforcement (container sandbox,
 > fail-closed) and observability (structured logs with run/worker context, queue-wait and
 > duration metrics, backlog + stuck-run alerts, trace env propagated to the agent process).
-> Remaining work is explicitly scoped below (OIDC/SSO identity, cross-process event push,
-> daemon verification). See the per-phase status and the roadmap at the end of this section.
+> Remaining work is explicitly scoped below (OIDC/SSO identity, daemon verification). Cross-process event
+> delivery is deliberately **not** on that list: it is built for the supported topology of one host with a
+> separate worker process, and the only part left there is multi-host scale, which is blocked on the storage
+> decision recorded in [`docs/status.md`](docs/status.md) under *Single-host storage*. See
+> [`cross-process-event-push.md`](docs/cross-process-event-push.md) for the per-stage status.
+>
+> No file or test counts are quoted here. Two were, and both drifted far from the tree while nothing
+> asserted either number. A count that no test checks is decoration rather than a claim, so the counts are
+> removed instead of refreshed; `test/architectureStatusClaims.test.ts` fails if one comes back.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
@@ -1710,8 +1716,8 @@ observability                (structured logs, durations, backlog + stuck-run al
 
 # 31. PrimeAgent Implementation Instructions
 
-> **Status (2026-08-26):** this mission is **complete**. The vertical slice lives at
-> [.](.) — 32 source files, 12 skills, 112 passing tests, `tsc` clean.
+> **Status:** this mission is **complete**. The vertical slice is on `main`, `tsc` clean; the skills it
+> selects from are the `SKILL.md` directories under `.agents/skills/`.
 > Verified end-to-end: durable Runs, SQLite-backed queue + leases, git-worktree
 > isolation, real `prime-agent --mode rpc` integration (event translation,
 > human-in-the-loop via `extension_ui_request/response`, session persistence +
