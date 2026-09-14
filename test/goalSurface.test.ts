@@ -477,6 +477,21 @@ test('the count of shown fields in 13.6 matches the example it describes', () =>
     `13.6 says ${claims[0][1]} of six fields are shown; the example shows ${shown.length} (${shown.join(', ')}). `
     + 'Fix the sentence or the example, but make them agree.');
 
+  // The total is checkable too, and was the one number a prior review found unchecked. Two independent
+  // sources pin it: the field names the section lists, and the `fake` entry, which carries every field.
+  const inFake = Object.keys((JSON.parse(examplePayload()) as any).capabilities.fake.goals.fields).length;
+  assert.equal(inFake, 6, 'the fake entry no longer carries every goal field; retarget the total check');
+  const statedTotal = /\bof\s+its\s+(one|two|three|four|five|six)\b/i.exec(sec);
+  assert.ok(statedTotal, 'the section no longer states how many goal fields exist in total');
+  assert.equal(WORDS[statedTotal[1].toLowerCase()], inFake,
+    `prose says "of its ${statedTotal[1]}" goal fields, but the server returns ${inFake} `
+    + '(counted on the fake entry, which carries them all)');
+  // Distinct names, not occurrences: `set` also appears in the bullets below, and counting mentions made
+  // this fail on a correct document.
+  const named = new Set([...sec.matchAll(/`(set|track|tokenBudget|contract|gates|maxTurns)`/g)].map((m) => m[1]));
+  assert.equal(named.size, inFake,
+    `the section names ${named.size} distinct goal fields but the server returns ${inFake}`);
+
   // And the six names must still be listed, so deleting the duplicate paragraph cannot drop them.
   for (const field of ['set', 'track', 'tokenBudget', 'contract', 'gates', 'maxTurns']) {
     assert.match(sec, new RegExp(`\`${field}\``), `the section no longer names the ${field} field`);

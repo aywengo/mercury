@@ -950,7 +950,8 @@ version 0.9.4, placed beside it so the supported and unsupported cases appear to
 `fields` entries are shown for space, and each one shown is complete. `fields` carries one entry per goal
 field -- `set`, `track`, `tokenBudget`, `contract`, `gates`, `maxTurns` -- and every entry carries all of
 `supported`, `reason?`, `detectedVersion`, `detectedRaw`; `reason` is absent only when support is true,
-because there is nothing to explain.
+because there is nothing to explain. Nothing in the block above is a sketch of what the shape might be: both
+entries are output, and if you change the response shape the test comparing them fails.
 
 Three things the shape says that a boolean would not:
 
