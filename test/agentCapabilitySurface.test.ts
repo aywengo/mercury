@@ -326,15 +326,17 @@ test('mercuryctl agents says whether tool calls were recorded', () => {
   const out = renderAgents(response, ctx, false);
   assert.match(out, /TOOLS/, 'the column must be labelled, not just add a cell');
   const line = (name: string) => (out.split('\n').find((l) => l.startsWith(name)) ?? '');
-  assert.match(line('hermes'), /not recorded/,
-    'the whole point: a Hermes row must say its tool calls were not recorded');
+  assert.match(line('hermes'), /unobservable/,
+    'the whole point: a Hermes row must say Mercury cannot observe its tool calls. Not "not recorded" -- '
+    + 'Hermes recorded them in its own session store, and that wording sent operators looking for a log '
+    + 'file that exists (src/domain/types.ts, the toolEvents field comment).');
   assert.match(line('primeagent'), /structured/, 'a harness that is observed says so');
 
   // The rule the SKILLS column already enforces, applied here: silence is unknown, not 'none'. An older
   // server that never heard of this field must not be rendered as a harness whose tool calls are invisible.
   const legacy = line('legacy');
   assert.match(legacy, /unknown/, 'an unreported value must render as unknown');
-  assert.ok(!/not recorded|none/.test(legacy), `silence must not render as absent: ${legacy}`);
+  assert.ok(!/unobservable|none/.test(legacy), `silence must not render as absent: ${legacy}`);
 });
 
 test('the TOOLS column cannot be satisfied by a cell that never renders', () => {
@@ -347,7 +349,7 @@ test('the TOOLS column cannot be satisfied by a cell that never renders', () => 
   } as unknown as AgentsResponse;
   const out = renderAgents(withValue, ctx, false);
   const row = out.split('\n').find((l) => l.startsWith('hermes')) ?? '';
-  assert.ok(row.includes('not recorded'), `the value must appear on the agent's own row: ${JSON.stringify(row)}`);
+  assert.ok(row.includes('unobservable'), `the value must appear on the agent's own row: ${JSON.stringify(row)}`);
   const withoutValue = {
     agents: ['hermes'], defaultAgent: 'hermes',
     capabilities: { hermes: { version: null, versionRaw: null, goals: { supported: false }, static: {} } },

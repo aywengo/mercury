@@ -111,6 +111,18 @@ function padVisible(cell: string, width: number): string {
  * the visible text lands eight columns short of its column, and every column to its right shifts left
  * with it. Measured on `mercuryctl agents list` with colour on before this was fixed: the SKILLS column
  * began at visible column 58 in three rows and at 49 in the row whose GOALS cell was green.
+ *
+ * Two contracts follow from measuring here rather than in each caller:
+ *
+ * - `decorate` and `decorateHeader` run AFTER padding, so they may add SGR but must not change a cell's
+ *   visible length. Truncating inside a decorator would re-introduce the misalignment this exists to
+ *   remove, and nothing would catch it. Truncation belongs in the row builder, which is where `runs list`
+ *   already does it with ellipsis().
+ * - Width is counted in UTF-16 code units, not display columns. A CJK ideograph or an emoji occupies two
+ *   columns and counts as one, so free-text columns over-align on those; a combining mark counts as one
+ *   and occupies none. This is unchanged from before, and it is why the fixed-width columns this matters
+ *   for (statuses, ids, capability names) are ASCII by construction. Full grapheme measurement is a
+ *   different change with a different cost, and it is not what ragged columns were caused by.
  */
 export function renderTable(
   headers: string[],

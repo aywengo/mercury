@@ -58,7 +58,12 @@ export function renderAgents(response: AgentsResponse, ctx: CommandContext, isTt
     // server's silence as 'none' would tell an operator that tool calls are unobservable on a harness
     // where they are perfectly visible.
     if (!toolEvents) return dim('unknown');
-    return toolEvents === 'none' ? color('yellow', 'not recorded') : sanitizeForTerminal(toolEvents);
+    // 'unobservable', not 'not recorded'. The server's own field comment says this measures whether
+    // MERCURY can observe the calls, and the Hermes Run that motivated #594 recorded its tool work in
+    // Hermes's own session store the whole time. "not recorded" would tell an operator the harness kept
+    // no record and sent them looking for a log file that exists; the true statement is that Mercury is
+    // the one that cannot see it.
+    return toolEvents === 'none' ? color('yellow', 'unobservable') : sanitizeForTerminal(toolEvents);
   };
   const rows = response.agents.map((id) =>
     [sanitizeForTerminal(id), goalsCell(id), skillsCell(id), toolsCell(id),
