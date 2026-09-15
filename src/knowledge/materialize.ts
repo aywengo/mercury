@@ -220,8 +220,9 @@ export type ExcludeOutcome =
   | { status: 'excluded' }
   /**
    * The workspace is not a git working tree, so there is nothing to exclude. Copy mode strips `.git`,
-   * which also means the agent cannot stage or commit anything and `recordCommits` finds no commits.
-   * The pack is out of the diff by construction rather than by exclusion.
+   * so there is no index for `git add -A` to sweep and `recordCommits` finds no commits; the pack is out
+   * of the diff by construction rather than by exclusion. An agent could still `git init` a throwaway
+   * repository here, but that repository has no remote and is not the project's.
    */
   | { status: 'no-repository'; paths: string[] }
   /** A real git workspace whose ignore file could not be written. The pack is genuinely committable. */
@@ -305,10 +306,13 @@ export function excludeFromGit(workspacePath: string, paths: readonly string[]):
   } catch {
     // `git rev-parse --git-path` fails for exactly one reason worth naming: the directory is not a git
     // working tree. Copy mode strips `.git` (workspaceManager.ts), so every copy-mode Run lands here.
-    // That is not a failure. With no repository there is no index, no `git add -A`, and no commit to
-    // reach -- `recordCommits` runs `git log` in the workspace and gets nothing back. Issue #593: this
-    // branch used to return the paths as a plain failure, so the warning fired on every copy-mode Run
-    // and an operator could not tell it apart from a pack that really was left committable.
+    // That is not a failure. With no repository there is no index for `git add -A` to sweep, and
+    // `recordCommits` runs `git log` and gets nothing back, so the pack cannot reach the project's
+    // history. It is not a sealed container: an agent that ran `git init` here would create a repository
+    // and Mercury would then record its commits -- but that repository has no remote and is not the
+    // project's, which is the boundary section 9.4 actually protects. Issue #593: this branch used to
+    // return the paths as a plain failure, so the warning fired on every copy-mode Run and an operator
+    // could not tell it apart from a pack that really was left committable.
     return { status: 'no-repository', paths: [...paths] };
   }
   try {
