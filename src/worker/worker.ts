@@ -368,13 +368,20 @@ export class Worker {
             'a skill named mercury-knowledge already exists in this workspace; the knowledge pack was not '
             + 'rendered as a skill and is available only through the neutral files');
         }
-        if (written.notExcluded.length > 0) {
+        if (written.exclude.status === 'failed') {
           // Loud, because a pack that CAN be committed is a second copy of the knowledge living in git,
           // which is what K1 exists to prevent. Not fatal: the Run is already queued and the notes are
           // correct; the risk is a stray file in a pull request, which the operator can act on.
           log.warn({
-            kind: 'knowledge_exclude_failed', paths: written.notExcluded,
+            kind: 'knowledge_exclude_failed', paths: written.exclude.paths,
           }, 'knowledge pack was not excluded from git; a generated file could reach a commit');
+        } else if (written.exclude.status === 'no-repository') {
+          // Copy mode strips `.git`, so there is no index to pollute and no commit to reach. Saying so at
+          // debug keeps the reason discoverable without spending the warning above on a case that is
+          // correct by construction -- the same mistake #592 was about (issue #593).
+          log.debug({
+            kind: 'knowledge_exclude_skipped', paths: written.exclude.paths,
+          }, 'workspace is not a git tree, so the knowledge pack is out of the diff by construction');
         }
       }
 
