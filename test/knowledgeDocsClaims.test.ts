@@ -142,8 +142,17 @@ test('the Atlas deletion limitation says what #562 did, not that it is being tra
     '#562 is closed; citing it as live tracking leaves a reader unable to tell if the limitation was '
     + 'fixed, rejected or dropped');
   assert.match(passage, /closed/, 'the passage no longer says #562 is closed');
-  assert.match(passage, /not currently tracked|no open issue/,
-    'the reader is left to guess whether the deletion path has an owner');
+  // #590 specified the tombstone and shipped it, so the deletion path now HAS an owner and a state.
+  // The assertion inverted rather than disappeared: what the reader must still be able to tell is
+  // whether the work is tracked, and the answer changed from "nothing tracks it" to "this shipped".
+  assert.match(passage, /\[#590\]/,
+    'the tombstone that made deletion possible is the substance of this limitation; a reader cannot '
+    + 'reconstruct why Atlas can delete but does not without it');
+  assert.match(passage, /\[#590\][^)]*\)\s*is closed/,
+    'citing #590 without its state is the exact ambiguity this guard was written against');
+  assert.doesNotMatch(passage, /not currently tracked|no open issue|needs a tombstone/,
+    'the tombstone shipped; leaving this phrasing in would tell a reader to go file the issue that '
+    + 'is already closed');
 });
 
 test('the closed-issue guard can actually fail', () => {

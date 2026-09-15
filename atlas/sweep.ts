@@ -5,14 +5,15 @@
  * replay-guard rows all grew without bound while the code read as though a policy were in force. This is
  * the caller.
  *
- * What it does NOT do is delete notes. `NoteStore.deleteExpiredRetired()` was removed rather than wired:
- * it issued bare `DELETE`s, and a deletion produces no `seq` row, so a replica pulling by cursor would
- * never learn the note was gone. It would keep serving a note Atlas had destroyed, permanently, with no
- * event to reconcile against -- the exact divergence issue #555 was written about. Making deletion safe
- * needs a tombstone that carries a sequence number, which is a change to the replication protocol and not
- * something to slip into a retention fix. Atlas therefore retains retired notes indefinitely; the host
- * side prunes its own replica (MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS), which is safe because the replica
- * is a cache that can be rebuilt from bootstrap.
+ * Deletion is here, and it is opt-in (#590). `deleteExpiredRetired()` used to be the thing that did this,
+ * and it was removed rather than wired: it issued bare `DELETE`s, and a deletion produces no `seq` row, so
+ * a replica pulling by cursor would never learn the note was gone -- it would keep serving a note Atlas had
+ * destroyed, permanently, with no event to reconcile against. That is the divergence issue #555 was written
+ * about. The `deleted` tier is what makes the same retention expressible safely: every removal goes through
+ * `transition()`, so it carries a sequence number and every replica applies it like any other write.
+ *
+ * It stays OFF unless `ATLAS_RETIRED_TOMBSTONE_AGE_MS` is set. The replication fix and the retention policy
+ * are two different decisions, and only the first one is settled.
  */
 
 import type { NoteStore } from './notes.ts';
@@ -25,7 +26,7 @@ export interface SweepLogger {
 
 export interface MaintenanceSweep {
   /** One pass, exposed so tests and an operator can drive it without waiting for the interval. */
-  runOnce(): { retired: number; idempotencyKeys: number };
+  runOnce(): { retired: number; tombstoned: number; idempotencyKeys: number };
   stop(): void;
 }
 
@@ -43,10 +44,18 @@ export function startMaintenanceSweep(deps: {
     // Idempotency keys are a replay guard with no replica counterpart, so dropping them is invisible in
     // the worst possible sense: nothing downstream can be wrong about it.
     const idempotencyKeys = store.deleteExpiredIdempotencyKeys(config.idempotencyRetentionMs);
-    if (retired.length || idempotencyKeys) {
-      log.info('atlas maintenance sweep', { retired: retired.length, idempotencyKeys });
+    // Zero means "never", and it is checked here rather than passed down: a store that tombstoned
+    // everything older than epoch would erase the curated set on the first tick after a typo in the
+    // environment file, and the operator would find out from a replica that had already caught up.
+    const tombstoned = config.retiredTombstoneAgeMs > 0
+      ? store.tombstoneExpiredRetired(config.retiredTombstoneAgeMs)
+      : [];
+    if (retired.length || tombstoned.length || idempotencyKeys) {
+      log.info('atlas maintenance sweep', {
+        retired: retired.length, tombstoned: tombstoned.length, idempotencyKeys,
+      });
     }
-    return { retired: retired.length, idempotencyKeys };
+    return { retired: retired.length, tombstoned: tombstoned.length, idempotencyKeys };
   };
 
   // Guarded inside the pass rather than around the timer callback, so every caller is protected and not
@@ -60,7 +69,7 @@ export function startMaintenanceSweep(deps: {
       log.error('atlas maintenance sweep failed', {
         err: err instanceof Error ? err.message : String(err),
       });
-      return { retired: 0, idempotencyKeys: 0 };
+      return { retired: 0, tombstoned: 0, idempotencyKeys: 0 };
     }
   };
 

@@ -333,7 +333,7 @@ export class NoteStore {
     // There is no UNIQUE constraint backing this, so a future writer that bypasses both would break it
     // silently; the guard lives in transition() because that is the single place tiers change.
     const existing = this.db.prepare(
-      "SELECT note_id FROM notes WHERE project_id = ? AND claim_hash = ? AND tier != 'retired'",
+      "SELECT note_id FROM notes WHERE project_id = ? AND claim_hash = ? AND tier NOT IN ('retired', 'deleted')",
     ).get(project.id, claimHashKey) as { note_id: string } | undefined;
     if (existing) {
       this.addSource(existing.note_id, contribution);
@@ -452,6 +452,32 @@ export class NoteStore {
   }
 
   /**
+   * Delete a note, safely (#590).
+   *
+   * This is the only way a note's content ever leaves Atlas, and it is not a DELETE. It writes a final
+   * revision that carries a fresh `seq`, marks the note `deleted`, and holds no claim, no detail and no
+   * evidence. The row survives; the knowledge does not.
+   *
+   * The reason it has to work this way is the cursor. A replica advances by `seq` and trusts that every
+   * change is a row in the feed. A bare DELETE produces no row, so every replica that had already
+   * received the note would keep serving it forever with nothing to reconcile against -- Atlas would
+   * become a service that silently disagrees with its own copies. A tombstone is the DELETE that a
+   * cursor can see.
+   *
+   * What is deliberately NOT removed: the note id, the claim hash, the provenance, and the whole
+   * `promotions` audit trail. An operator asking "what did Mercury believe here in March" must still get
+   * an answer, and section 12 keeps that trail indefinitely. What IS removed is the part that can hurt:
+   * the claim text and anything quoted inside it.
+   *
+   * `reason` is required for the same reason a retirement requires one. A deletion with no recorded
+   * reason is indistinguishable from a bug at 3am.
+   */
+  deleteNote(projectId: string, noteId: string, actor: string, reason: string): Note | null {
+    if (!reason || reason.trim() === '') throw new Error('a deletion requires a reason');
+    return tx(this.db, () => this.transition(projectId, noteId, 'deleted', actor, reason));
+  }
+
+  /**
    * A tier change, and the only place one happens.
    *
    * The reason is required rather than optional. A promotion with no recorded reason is unreconstructable
@@ -472,9 +498,13 @@ export class NoteStore {
     // live note; nothing stopped a retired note from being promoted beside the note that replaced it.
     // Before the retired-claim fix that was harmless -- there was only ever one row per claim -- so this
     // guard is load-bearing for that change rather than general tidiness.
-    if (to !== 'retired') {
+    // `deleted` is exempt alongside `retired`: this guard stops a note being brought BACK into a live
+    // tier beside the note that replaced its claim, and a deletion moves in the opposite direction.
+    // Leaving it out would make deleting the second of two same-claim notes throw, which is the opposite
+    // of what an operator reaching for a delete wants.
+    if (to !== 'retired' && to !== 'deleted') {
       const clash = this.db.prepare(
-        "SELECT note_id FROM notes WHERE project_id = ? AND claim_hash = ? AND tier != 'retired' AND note_id != ?",
+        "SELECT note_id FROM notes WHERE project_id = ? AND claim_hash = ? AND tier NOT IN ('retired', 'deleted') AND note_id != ?",
       ).get(projectId, row.claim_hash, noteId) as { note_id: string } | undefined;
       if (clash) throw new ClaimConflictError(projectId, noteId, clash.note_id);
     }
@@ -482,10 +512,13 @@ export class NoteStore {
     const now = new Date().toISOString();
     const revision = row.current_revision + 1;
     const base = this.getNote(projectId, noteId)!.note;
-    const next: Note = {
-      ...base, revision, tier: to, seq,
-      ...(supersededBy ? { supersededBy } : {}),
-    };
+    // A tombstone carries the identity and the sequence number and nothing else. Emptying the claim here
+    // is the entire point of the operation, so it happens in the one place that writes revisions rather
+    // than in each caller -- a caller that forgot would "delete" a note and leave its text in the
+    // revision table, in the feed, and in every replica that had already pulled it.
+    const next: Note = to === 'deleted'
+      ? { ...base, revision, tier: to, seq, claim: '', detail: undefined, evidence: [], contested: false }
+      : { ...base, revision, tier: to, seq, ...(supersededBy ? { supersededBy } : {}) };
     this.db.prepare('UPDATE notes SET tier = ?, current_revision = ?, seq = ?, updated_at = ? WHERE note_id = ?')
       .run(to, revision, seq, now, noteId);
     this.writeRevision(next, seq, now);
@@ -554,7 +587,12 @@ export class NoteStore {
     const clauses = ['n.project_id = ?', 'n.seq > ?'];
     const params: (string | number)[] = [projectId, since];
     if (tier === 'promoted') {
-      clauses.push(`(n.tier = 'promoted' OR (n.tier = 'retired' AND EXISTS (
+      // A tombstone is in here for the same reason a retirement is, and it matters more: a replica that
+      // misses a retirement keeps serving a stale note, and a replica that misses a DELETION keeps
+      // serving text Atlas was asked to destroy. Only tombstones of notes that once reached `promoted`
+      // are relevant -- the replica holds nothing else -- and the promotions table is what records that
+      // a note ever got there, since the note's own row no longer does.
+      clauses.push(`(n.tier = 'promoted' OR (n.tier IN ('retired', 'deleted') AND EXISTS (
         SELECT 1 FROM promotions p WHERE p.note_id = n.note_id AND p.to_tier = 'promoted')))`)
         ;
     }
@@ -663,15 +701,37 @@ export class NoteStore {
     return done;
   }
 
-  // `deleteExpiredRetired()` used to live here. It was removed rather than wired, and the reason is a
-  // replication invariant rather than tidiness: it issued bare DELETEs, and a deletion produces no `seq`
-  // row. A replica advances by cursor, so it would never learn the note was gone and would keep serving a
-  // note Atlas had destroyed -- permanently, with nothing to reconcile against. That is the divergence
-  // issue #555 was written about, and wiring this method would have created it rather than fixed it.
-  //
-  // Deleting safely needs a tombstone that carries a sequence number, which is a change to the replication
-  // protocol. Until then Atlas retains retired notes indefinitely; hosts prune their own replicas, which
-  // is safe because a replica is a cache that can be rebuilt from bootstrap. See atlas/sweep.ts.
+  /**
+   * Tombstone retired notes older than `olderThanMs` (issue #590).
+   *
+   * This is what `deleteExpiredRetired()` was trying to be before it was removed rather than wired. That
+   * method issued bare DELETEs, and a deletion produces no `seq` row. A replica advances by cursor, so it
+   * would never learn the note was gone and would keep serving a note Atlas had destroyed -- permanently,
+   * with nothing to reconcile against. That is the divergence issue #555 was written about, and wiring the
+   * old method would have created it rather than fixed it.
+   *
+   * The `deleted` tier is what makes the same retention safe. Every removal here is a revision with a
+   * sequence number, so a replica applies it exactly as it applies a retirement: same feed, same cursor,
+   * same ordering guarantees.
+   *
+   * The age is the caller's decision and this method has no default. The sweep reads it from
+   * `ATLAS_RETIRED_TOMBSTONE_AGE_MS`, which is UNSET by default, so Atlas still retains retired notes
+   * indefinitely unless an operator asks otherwise. Making deletion the default would smuggle a data-loss
+   * policy in behind a replication fix, and section 18 open question 6 has not been answered yet.
+   */
+  tombstoneExpiredRetired(olderThanMs: number): string[] {
+    const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+    const rows = this.db.prepare(`
+      SELECT note_id, project_id FROM notes WHERE tier = 'retired' AND updated_at < ?`)
+      .all(cutoff) as unknown as { note_id: string; project_id: string }[];
+    const done: string[] = [];
+    for (const row of rows) {
+      try {
+        if (this.deleteNote(row.project_id, row.note_id, 'system:retention', 'expired')) done.push(row.note_id);
+      } catch { /* one failure must not stop the sweep */ }
+    }
+    return done;
+  }
 
   /** Idempotency keys are swept too; they are a replay guard, not a record to keep forever. */
   deleteExpiredIdempotencyKeys(olderThanMs: number): number {

@@ -47,6 +47,7 @@ test('auth: admin token authentication', () => {
     sweepIntervalMs: 60 * 60 * 1000,
     staleCandidateAgeMs: 30 * 24 * 60 * 60 * 1000,
     idempotencyRetentionMs: 7 * 24 * 60 * 60 * 1000,
+    retiredTombstoneAgeMs: 0,
     logLevel: 'info',
   };
   
@@ -78,6 +79,7 @@ test('auth: invalid token returns null', () => {
     sweepIntervalMs: 60 * 60 * 1000,
     staleCandidateAgeMs: 30 * 24 * 60 * 60 * 1000,
     idempotencyRetentionMs: 7 * 24 * 60 * 60 * 1000,
+    retiredTombstoneAgeMs: 0,
     logLevel: 'info',
   };
   
@@ -111,6 +113,7 @@ test('auth: reader tokens', () => {
     sweepIntervalMs: 60 * 60 * 1000,
     staleCandidateAgeMs: 30 * 24 * 60 * 60 * 1000,
     idempotencyRetentionMs: 7 * 24 * 60 * 60 * 1000,
+    retiredTombstoneAgeMs: 0,
     logLevel: 'info',
   };
   
@@ -143,6 +146,7 @@ test('auth: may access checks project permission', () => {
     sweepIntervalMs: 60 * 60 * 1000,
     staleCandidateAgeMs: 30 * 24 * 60 * 60 * 1000,
     idempotencyRetentionMs: 7 * 24 * 60 * 60 * 1000,
+    retiredTombstoneAgeMs: 0,
     logLevel: 'info',
   };
   

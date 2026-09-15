@@ -29,8 +29,20 @@ export type NoteKind = (typeof NOTE_KINDS)[number];
  */
 export const EVIDENCE_REQUIRED_KINDS: readonly NoteKind[] = ['decision', 'pitfall'];
 
-/** Section 12. Only promoted notes are served into Runs; everything else lands as candidate. */
-export const NOTE_TIERS = ['candidate', 'promoted', 'retired'] as const;
+/**
+ * Section 12. Only promoted notes are served into Runs; everything else lands as candidate.
+ *
+ * `deleted` is the tombstone tier of #590. It is terminal, it is reached only through `deleteNote()`,
+ * it always carries a fresh `seq`, and it is the last write a replica will ever see for that note.
+ * It exists because a bare DELETE produces no `seq` row, and a replica advances by cursor: a note
+ * destroyed with a DELETE would keep being served by every replica that had already received it, with
+ * nothing to reconcile against. A note in this tier has had its claim, detail and evidence emptied;
+ * what survives is the identity, the audit trail and the sequence number.
+ *
+ * It is NOT a live tier. The one-live-note-per-claim rule and the dedup query treat it exactly as they
+ * treat `retired`, so a claim deleted today can be re-earned tomorrow.
+ */
+export const NOTE_TIERS = ['candidate', 'promoted', 'retired', 'deleted'] as const;
 export type NoteTier = (typeof NOTE_TIERS)[number];
 
 /** Section 3, `Provenance`. Which of the three ingest tiers produced the note. */

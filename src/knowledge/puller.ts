@@ -36,6 +36,8 @@ export interface PullOutcome {
   pages: number;
   applied: number;
   retired: number;
+  /** Tombstones applied during this pull -- rows the feed told this replica to forget (#590). */
+  deleted: number;
   /** Retired rows removed from the replica during this pull tick. */
   sweptRetired: number;
   cursor: number;
@@ -79,7 +81,7 @@ export class KnowledgePuller {
   async pullOnce(): Promise<PullOutcome> {
     const { client, project, pageSize, log } = this.deps;
     const outcome: PullOutcome = {
-      bootstrapped: false, pages: 0, applied: 0, retired: 0, sweptRetired: 0,
+      bootstrapped: false, pages: 0, applied: 0, retired: 0, deleted: 0, sweptRetired: 0,
       cursor: this.replica.getCursor(project) ?? 0, failed: false, lastError: null,
     };
     if (this.running) return outcome;
@@ -95,6 +97,7 @@ export class KnowledgePuller {
         outcome.pages = 1;
         outcome.applied = applied.applied;
         outcome.retired = applied.retired;
+        outcome.deleted = applied.deleted;
         outcome.cursor = applied.cursor;
       } else {
         let since = cursor;
@@ -104,6 +107,7 @@ export class KnowledgePuller {
           outcome.pages += 1;
           outcome.applied += applied.applied;
           outcome.retired += applied.retired;
+          outcome.deleted += applied.deleted;
           outcome.cursor = applied.cursor;
           // A short page is the end. Paging on nextSeq alone would loop forever on a project whose
           // seq advances faster than this tier does, since promotions consume sequence numbers
@@ -120,7 +124,7 @@ export class KnowledgePuller {
       outcome.sweptRetired = this.replica.sweepRetired(this.deps.retiredRetentionMs, this.now);
       log.info({
         project, bootstrapped: outcome.bootstrapped, pages: outcome.pages,
-        applied: outcome.applied, retired: outcome.retired,
+        applied: outcome.applied, retired: outcome.retired, deleted: outcome.deleted,
         sweptRetired: outcome.sweptRetired, cursor: outcome.cursor,
       }, 'knowledge replica pulled');
       return outcome;

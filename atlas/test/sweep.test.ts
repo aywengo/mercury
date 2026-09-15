@@ -29,6 +29,7 @@ function harness() {
     sweepIntervalMs: 60_000,
     staleCandidateAgeMs: 1_000,
     idempotencyRetentionMs: 1_000,
+    retiredTombstoneAgeMs: 0,
   } as unknown as AtlasConfig;
   store.createProject({ id: 'p', name: 'p', repoIdentities: [IDENTITY], promotionPolicy: null });
   const contribute = (claim: string, host = 'host-a', key = 'k') => {
@@ -138,4 +139,32 @@ test('stop() clears the timer so the process is not held open by the sweep', () 
   sweep.stop();
   // A second stop must be harmless: close() can race with a shutdown path that already stopped it.
   assert.doesNotThrow(() => sweep.stop());
+});
+
+test('the sweep tombstones retired notes only when an operator asks for it (#590)', () => {
+  const h = harness();
+  const noteId = h.contribute('a note that will be retired and then deleted');
+  h.store.retire('p', noteId, 'admin', 'superseded by a decision record');
+  h.db.prepare("UPDATE notes SET updated_at = '2020-01-01T00:00:00.000Z' WHERE note_id = ?").run(noteId);
+
+  // Default first, because this is the one Atlas setting that removes knowledge. It must not fire
+  // because a default said so: the replication fix that makes deletion safe is settled, the retention
+  // policy of section 18 question 6 is not.
+  const off = startMaintenanceSweep({ store: h.store, config: h.config, log: h.log });
+  try {
+    assert.equal(off.runOnce().tombstoned, 0, 'retiredTombstoneAgeMs=0 must delete nothing');
+    assert.equal(h.store.getNote('p', noteId)!.note.tier, 'retired', 'the note must still be there');
+  } finally { off.stop(); }
+
+  const on = startMaintenanceSweep({
+    store: h.store, log: h.log,
+    config: { ...h.config, retiredTombstoneAgeMs: 1_000 } as never,
+  });
+  try {
+    assert.equal(on.runOnce().tombstoned, 1, 'once asked, the sweep deletes');
+    const after = h.store.getNote('p', noteId)!.note;
+    assert.equal(after.tier, 'deleted');
+    assert.equal(after.claim, '', 'and the body is gone, which was the whole point');
+  } finally { on.stop(); }
+  h.db.close();
 });
