@@ -3,12 +3,17 @@
 // Covers docs/agent-adapters.md Phase 2 and section 8 acceptance criteria 1-9.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ClaudeCodeAdapter } from '../src/adapters/claudeCodeAdapter.ts';
 import type { AgentExit, Run, RunContext, ResolvedSkill } from '../src/domain/types.ts';
 import { tempDir, tempFile } from './helpers.ts';
+import { CLAUDE_MD_FILE, NOTES_FILE } from '../src/knowledge/materialize.ts';
+
+/** The workspace context pointer, spelled out on purpose: this is the value the worker writes and the
+ *  prompt line must name, so pinning the literal here is the point rather than an accident. */
+const CONTEXT_FILE = '.mercury-context.json';
 
 const MOCK = join(import.meta.dirname, 'fixtures', 'mock-claude-code.mjs');
 
@@ -333,4 +338,65 @@ test('result.result IS emitted when no assistant text ever arrived', async () =>
   const { events } = await drain(await a.start(ctx));
   a.dispose(ctx.run.id);
   assert.equal(types(events).filter((t) => t === 'agent.message').length, 1);
+});
+
+
+// --- knowledge channel: CLAUDE.md (docs/knowledge-base.md §9.3) -------------------------------
+//
+// §10's status column claimed this channel existed before any of it was written: the adapter had no
+// knowledge code at all, so a Claude Run got a pack materialized into its workspace that nothing told
+// the model about. These tests are what makes that sentence true.
+
+function knowledgeContext(opts: { knowledge?: boolean } = {}): { context: RunContext; workspacePath: string } {
+  const context = makeContext();
+  const workspacePath = context.workspace.path;
+  mkdirSync(join(workspacePath, '.mercury', 'knowledge'), { recursive: true });
+  // The neutral files are present in BOTH cases, so the negative test proves the adapter stayed out
+  // because there was no pack, not because there was nothing to copy.
+  writeFileSync(join(workspacePath, NOTES_FILE), '# Project knowledge\npack testhash123 -- 1 note\n');
+  if (opts.knowledge) {
+    (context as { knowledge?: unknown }).knowledge = { packHash: 'testhash123', path: NOTES_FILE, count: 1 };
+  }
+  return { context, workspacePath };
+}
+
+test('knowledge channel: no tracked CLAUDE.md -> adapter writes CLAUDE.md from NOTES.md', async () => {
+  const { context, workspacePath } = knowledgeContext({ knowledge: true });
+  const a = adapter();
+  await drain(await a.start(context));
+  a.dispose(context.run.id);
+
+  const claudeMd = join(workspacePath, CLAUDE_MD_FILE);
+  assert.ok(existsSync(claudeMd), 'CLAUDE.md must be written when none was tracked');
+  assert.equal(readFileSync(claudeMd, 'utf8'), readFileSync(join(workspacePath, NOTES_FILE), 'utf8'),
+    'CLAUDE.md must be byte-identical to NOTES.md so Claude receives the same pack');
+});
+
+test('knowledge channel: tracked CLAUDE.md is left byte-identical and the prompt points at the pack', async () => {
+  const { context, workspacePath } = knowledgeContext({ knowledge: true });
+  const tracked = '# Project CLAUDE.md (tracked by repo)\nDo not overwrite me.\n';
+  const claudeMd = join(workspacePath, CLAUDE_MD_FILE);
+  writeFileSync(claudeMd, tracked);
+
+  const taskFile = join(tempDir('mercury-claude-task-'), 'task.json');
+  const a = adapter({ env: { MOCK_CLAUDE_ENV_FILE: taskFile } });
+  await drain(await a.start(context));
+  a.dispose(context.run.id);
+
+  assert.equal(readFileSync(claudeMd, 'utf8'), tracked,
+    'a tracked CLAUDE.md must survive byte-for-byte (§9.4 forbids Mercury editing a tracked file)');
+  const sent = JSON.parse(readFileSync(taskFile, 'utf8')).task as string;
+  assert.match(sent, /Fix the flaky test suite/, 'the task itself must still be sent');
+  assert.ok(sent.includes(CONTEXT_FILE),
+    `with no CLAUDE.md channel the prompt must point at the context file (§9.3 fallback): ${JSON.stringify(sent)}`);
+});
+
+test('knowledge channel: no knowledge context -> CLAUDE.md is not written', async () => {
+  const { context, workspacePath } = knowledgeContext({ knowledge: false });
+  const a = adapter();
+  await drain(await a.start(context));
+  a.dispose(context.run.id);
+
+  assert.ok(!existsSync(join(workspacePath, CLAUDE_MD_FILE)),
+    'the adapter must not touch the workspace when no pack was injected for this Run');
 });
