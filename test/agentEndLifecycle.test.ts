@@ -60,10 +60,13 @@ test('agent.end is consumed quietly instead of warning on every successful Run',
     [],
     'a routine lifecycle event must not raise the injection warning',
   );
-  assert.ok(
-    logs.some((l) => l.msg === 'adapter lifecycle event consumed, not persisted'),
-    'lifecycle consumption should still be visible at debug level',
-  );
+  // Level, not just message. Asserting only the message would let `log.debug` become `log.warn` and
+  // still pass -- which re-creates the every-Run operator-visible line this issue exists to remove.
+  // Found by review as the one mutation the first draft survived.
+  const lifecycle = logs.filter((l) => l.msg === 'adapter lifecycle event consumed, not persisted');
+  assert.equal(lifecycle.length, 1, 'lifecycle consumption should be recorded once');
+  assert.equal(lifecycle[0].level, 'debug',
+    'a routine lifecycle event must be debug, not warn -- warn is the bug being fixed');
 
   // Quiet is not the same as persisted: the Run's own terminal events already say what happened.
   assert.ok(!types.includes('agent.end'), 'agent.end must not be persisted as a Run event');
