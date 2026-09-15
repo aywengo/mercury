@@ -619,3 +619,31 @@ export const EVENT_TYPES = new Set([
 export function isEventType(t: string): boolean {
   return EVENT_TYPES.has(t);
 }
+
+/**
+ * Types an adapter emits for its OWN state machine, which are deliberately not Run events.
+ *
+ * These are not a suppression list. Each member is here because the adapter that produces it
+ * consumes it itself -- to settle an exit promise or finish a session -- and pushes it into the
+ * event stream only as a side effect of routing every harness event through one translation path.
+ * Nothing downstream reads them, and every fact they carry is already recorded elsewhere: the exit
+ * code reaches `settleExit`, which decides the Run's terminal status, and completion itself is
+ * `run.completed`.
+ *
+ * Keep this tiny and keep the reason attached to each member. Anything added here stops being
+ * visible to operators, so a new member must be a signal some adapter genuinely consumes -- not an
+ * event that merely annoys someone.
+ */
+export const LIFECYCLE_EVENT_TYPES = new Set([
+  // `agent_end` from the harness, translated at eventTranslation.ts. Consumed by primeAgentAdapter
+  // (two sites), rpcAgentAdapter and daemonAgentAdapter to settle exit / finish the session.
+  // Issue #592: it also reached the worker, which could not persist it and warned -- on every
+  // successful Run, which is how a warning meant for event-type injection (issue #50) stops
+  // meaning anything.
+  'agent.end',
+]);
+
+/** True for adapter-lifecycle signals that are consumed at the adapter and never persisted. */
+export function isLifecycleEventType(t: string): boolean {
+  return LIFECYCLE_EVENT_TYPES.has(t);
+}
