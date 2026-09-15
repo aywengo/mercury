@@ -235,10 +235,10 @@ test('generated paths land in info/exclude, resolved through git for a worktree'
   const work = join(dir, 'work');
   execFileSync('git', ['-C', seed, 'worktree', 'add', work, 'HEAD'], { timeout: 30_000 });
 
-  const notExcluded = materializeKnowledge(work, {
+  const exclude = materializeKnowledge(work, {
     projectId: 'mercury', packHash: 'abc', notes: [note({ noteId: 'n-a', seq: 1 })],
-  }).notExcluded;
-  assert.deepEqual(notExcluded, [], 'a git workspace must exclude the pack');
+  }).exclude;
+  assert.equal(exclude.status, 'excluded', 'a git workspace must exclude the pack');
 
   const excludePath = execFileSync('git', ['-C', work, 'rev-parse', '--git-path', 'info/exclude'], { encoding: 'utf8', timeout: 30_000 }).trim();
   const content = readFileSync(resolve(work, excludePath), 'utf8');
@@ -249,11 +249,17 @@ test('generated paths land in info/exclude, resolved through git for a worktree'
   assert.equal(staged.trim(), '', 'nothing generated is staged by git add -A');
 });
 
-test('a non-git workspace reports the paths it could not exclude instead of failing the Run', () => {
+test('a non-git workspace says exclusion does not apply, which is not the same as failing', () => {
+  // Issue #593. This assertion used to be `deepEqual(missing, ['.mercury/'])`, which was true and useless:
+  // it returned one shape for "no repository here" and "a repository whose ignore file we could not write",
+  // so the caller could not tell a benign copy-mode Run from a genuinely committable pack and warned about
+  // both.
   const dir = tempDir('mercury-nongit-');
-  const missing = excludeFromGit(dir, ['.mercury/']);
-  assert.deepEqual(missing, ['.mercury/'],
-    'copy-mode workspaces have no index to pollute, but the caller still needs to know nothing was excluded');
+  const res = excludeFromGit(dir, ['.mercury/']);
+  assert.equal(res.status, 'no-repository',
+    'a non-git workspace is a different fact from a failed write, and must not be reported as one');
+  assert.deepEqual(res.status === 'no-repository' ? res.paths : [], ['.mercury/'],
+    'the paths are still named, so the reason stays discoverable');
 });
 
 test('NOTES.md renders an empty pack without pretending there is knowledge', () => {
@@ -337,6 +343,54 @@ test('the knowledge block reaches RunService over HTTP', async () => {
     assert.ok(env.runService.getKnowledge(runId), 'the Run created over HTTP got a pack');
   } finally {
     await closeServer(server);
+    env.close();
+  }
+});
+
+/**
+ * Issue #593: copy mode strips `.git`, so there is no `info/exclude` to write. That used to be reported as
+ * a failure, which meant the warning meant to catch a committable pack fired on EVERY copy-mode Run -- an
+ * operator could not tell the benign case from the real one, so the guard was inert in exactly the mode it
+ * was supposed to watch.
+ *
+ * The benign case is benign by construction, not by luck: with no repository there is no index for
+ * `git add -A` to sweep and no commit to reach, and `recordCommits` runs `git log` in the workspace and gets
+ * nothing back. So the fix names the two cases differently rather than fabricating a `.git` -- a `.git`
+ * directory that is not a real repository would make every `git` command the agent runs fail.
+ */
+test('copy mode materializes the pack and stays quiet about exclusion (#593)', async () => {
+  const repo = repoFixture();
+  const logs: { level: string; msg: string }[] = [];
+  const env = makeEnv({
+    knowledge: selectionWith([note({ noteId: 'n-copy', seq: 1 })]),
+    knowledgeProject: 'mercury',
+    workspaceMode: 'copy',
+    repoDir: repo,
+    logCapture: (level: string, msg: string) => logs.push({ level, msg }),
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'fix the build', repository: { url: REPO_URL, localPath: repo, baseBranch: 'main' },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 30_000);
+    const done = env.runs.get(run.id)!;
+
+    // The path was genuinely exercised. Without this the test would pass on a Run that never received a
+    // pack, which is the shape of assertion that lets a mode stay broken for as long as this one did.
+    assert.ok(done.workspacePath && existsSync(join(done.workspacePath, NOTES_FILE)),
+      'the pack must actually have been materialized, or the assertions below prove nothing');
+    assert.equal(existsSync(join(done.workspacePath, '.git')), false,
+      'copy mode is expected to strip .git; if that changes, this test and the reasoning above both need revisiting');
+
+    const warns = logs.filter((l) => l.msg.includes('not excluded from git'));
+    assert.deepEqual(warns.map((l) => l.level), [],
+      'a workspace with no repository must not raise the committable-pack warning');
+    assert.ok(logs.some((l) => l.level === 'debug' && l.msg.includes('out of the diff by construction')),
+      'the benign reason is recorded, so an operator can still find out why nothing was excluded');
+
+    // And the property the whole mechanism exists for: nothing generated can end up in a commit.
+    assert.deepEqual(done.finalCommits ?? [], [], 'copy mode produces no commits, so nothing can carry the pack');
+  } finally {
     env.close();
   }
 });

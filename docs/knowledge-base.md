@@ -853,11 +853,19 @@ generated appearing in a project PR would be both embarrassing and, under K1, a 
 of knowledge that now lives in git.
 
 - Every generated path -- `.mercury/`, the synthetic skill directory, a generated
-  `CLAUDE.md` -- is appended to the worktree's `info/exclude` (resolved via
-  `git rev-parse --git-path info/exclude`, which handles the worktree layout that
-  [`src/workspace/workspaceManager.ts`](../src/workspace/workspaceManager.ts) creates) at
-  materialization. Excluded paths cannot be committed by `git add -A` or by an agent's
-  `git commit -a`.
+  `CLAUDE.md` -- is kept out of the agent's diff. How depends on the workspace mode, and the
+  two are not interchangeable (issue #593):
+  - **`git-worktree`** appends them to the worktree's `info/exclude` (resolved via
+    `git rev-parse --git-path info/exclude`, which handles the worktree layout that
+    [`src/workspace/workspaceManager.ts`](../src/workspace/workspaceManager.ts) creates) at
+    materialization. Excluded paths cannot be committed by `git add -A` or by an agent's
+    `git commit -a`.
+  - **`copy`** has no repository at all: the workspace manager strips `.git` when it copies,
+    so there is no index to sweep and no commit to reach, and `recordCommits` finds nothing.
+    The pack is out of the diff by construction rather than by exclusion. This is why copy
+    mode writes no `info/exclude` and is not an error: the mode has no satisfying assignment
+    for a mechanism that needs a git directory. A workspace whose ignore file exists but
+    cannot be written is a different case and still warns.
 - Mercury **never modifies a tracked file**. If the harness's canonical instruction file
   (`CLAUDE.md`, `AGENTS.md`) is tracked in the repository, the adapter falls back to the
   neutral pointer and the compatibility matrix (§10) marks that combination *degraded*. The

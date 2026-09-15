@@ -205,9 +205,28 @@ export interface MaterializedPack {
   skillSkipped: boolean;
   count: number;
   packHash: string;
-  /** Paths that could not be excluded from git, if any. */
-  notExcluded: string[];
+  /** Whether the pack is out of the agent's diff, and why not when it is not. */
+  exclude: ExcludeOutcome;
 }
+
+/**
+ * Result of keeping the generated pack out of the agent's diff (section 9.4).
+ *
+ * Three outcomes because there are two different reasons a path can end up unexcluded, and only one of
+ * them is a problem. Collapsing them is what made the copy-mode warning fire on every Run (issue #593).
+ */
+export type ExcludeOutcome =
+  /** Written to the repository's own ignore file, or already present in it. */
+  | { status: 'excluded' }
+  /**
+   * The workspace is not a git working tree, so there is nothing to exclude. Copy mode strips `.git`,
+   * so there is no index for `git add -A` to sweep and `recordCommits` finds no commits; the pack is out
+   * of the diff by construction rather than by exclusion. An agent could still `git init` a throwaway
+   * repository here, but that repository has no remote and is not the project's.
+   */
+  | { status: 'no-repository'; paths: string[] }
+  /** A real git workspace whose ignore file could not be written. The pack is genuinely committable. */
+  | { status: 'failed'; paths: string[] };
 
 /**
  * Write the neutral files and keep them out of the diff.
@@ -257,10 +276,10 @@ export function materializeKnowledge(
     writeFileSync(skillPath, renderSkillMd(opts.projectId, opts.packHash, opts.notes));
   }
 
-  const notExcluded = excludeFromGit(workspacePath, GENERATED_PATHS);
+  const exclude = excludeFromGit(workspacePath, GENERATED_PATHS);
   return {
     packPath, notesPath, notesFile: jsonlPath, skillPath, skillSkipped, count: opts.notes.length,
-    packHash: opts.packHash, notExcluded,
+    packHash: opts.packHash, exclude,
   };
 }
 
@@ -276,24 +295,37 @@ export function materializeKnowledge(
  * Excluded paths cannot be swept up by an agent's `git add -A` or `git commit -a`, which is the realistic
  * way a generated NOTES.md would otherwise reach a pull request.
  */
-export function excludeFromGit(workspacePath: string, paths: readonly string[]): string[] {
+export function excludeFromGit(workspacePath: string, paths: readonly string[]): ExcludeOutcome {
   let excludeFile: string;
   try {
     const rel = execFileSync('git', ['rev-parse', '--git-path', 'info/exclude'], {
-      cwd: workspacePath, encoding: 'utf8', timeout: 10_000,
+      cwd: workspacePath, encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
-    if (!rel) return [...paths];
+    if (!rel) return { status: 'no-repository', paths: [...paths] };
     excludeFile = resolve(workspacePath, rel);
   } catch {
-    // Not a git workspace (a copy-mode checkout), so there is no index for these files to pollute.
-    return [...paths];
+    // `git rev-parse --git-path` fails for exactly one reason worth naming: the directory is not a git
+    // working tree. Copy mode strips `.git` (workspaceManager.ts), so every copy-mode Run lands here.
+    // That is not a failure. With no repository there is no index for `git add -A` to sweep, and
+    // `recordCommits` runs `git log` and gets nothing back, so the pack cannot reach the project's
+    // history. It is not a sealed container: an agent that ran `git init` here would create a repository
+    // and Mercury would then record its commits -- but that repository has no remote and is not the
+    // project's, which is the boundary section 9.4 actually protects. Issue #593: this branch used to
+    // return the paths as a plain failure, so the warning fired on every copy-mode Run and an operator
+    // could not tell it apart from a pack that really was left committable.
+    return { status: 'no-repository', paths: [...paths] };
   }
-  const existing = existsSync(excludeFile) ? readFileSync(excludeFile, 'utf8') : '';
-  const missing = paths.filter((p) => !existing.split('\n').includes(p));
-  if (missing.length === 0) return [];
-  mkdirSync(dirname(excludeFile), { recursive: true });
-  const prefix = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
-  // A marker comment, so a person reading this file knows a machine wrote these lines and why.
-  appendFileSync(excludeFile, `${prefix}# mercury knowledge pack (generated; never commit)\n${missing.join('\n')}\n`);
-  return [];
+  try {
+    const existing = existsSync(excludeFile) ? readFileSync(excludeFile, 'utf8') : '';
+    const missing = paths.filter((p) => !existing.split('\n').includes(p));
+    if (missing.length === 0) return { status: 'excluded' };
+    mkdirSync(dirname(excludeFile), { recursive: true });
+    const prefix = existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
+    // A marker comment, so a person reading this file knows a machine wrote these lines and why.
+    appendFileSync(excludeFile, `${prefix}# mercury knowledge pack (generated; never commit)\n${missing.join('\n')}\n`);
+  } catch {
+    // A git workspace whose ignore file we could not write. This is the case the warning is for.
+    return { status: 'failed', paths: [...paths] };
+  }
+  return { status: 'excluded' };
 }
