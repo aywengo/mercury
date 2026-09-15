@@ -888,10 +888,10 @@ this design. "Unverified" means nobody has run the combination; it is not a euph
 
 | Backend | Tier 1 (`notes.jsonl`) | Tier 3 native file | Injection channel | Status |
 | --- | --- | --- | --- | --- |
-| `primeagent` | yes -- works in the workspace | `AGENTS.md` deltas | synthetic skill via `--skill` + context pointer | both channels are built for knowledge: `materializeKnowledge` writes the skill and `PrimeAgentAdapter` passes it on argv (#547) |
+| `primeagent` | yes -- works in the workspace | `AGENTS.md` deltas | synthetic skill via `--skill` + context pointer | both channels are built for knowledge: `materializeKnowledge` writes the skill and `PrimeAgentAdapter` passes it on argv (#547). **Observed on a real Run (#589), PrimeAgent 0.9.4, channel `--skill`.** Treated `run_933c68e4684a498d`: one promoted operator note named `npm run test:atlas`, a script no doc in the repository mentions; the Run's first command was that script and `npm test` appears zero times across its 47 events. Control `run_d0f4dc05a8f44a1d`: same task, same repo, note retired so the pack selected empty, and the Run ran no test command at all. The pair is the counterfactual -- the note is what changed the behaviour. |
 | `pi`, `omp` (`rpc-agents/`) | yes -- work in the workspace | unknown | context pointer + prompt line | whether they act on a prompt line pointing at a file is unverified; [`crew/harness-capabilities.md`](crew/harness-capabilities.md) §7 Q3 asks the same about persona |
 | `claude` | yes | `CLAUDE.md` deltas | generated `CLAUDE.md` when none is tracked; else context pointer -- *degraded* | the task-over-stdin path exists; whether a generated `CLAUDE.md` is honoured alongside a tracked one is unverified, hence the fallback |
-| `hermes` | yes | `SOUL.md` deltas | generated `AGENTS.md` when none is tracked; else neutral files only -- *degraded* | **measured, and narrower than "blocked"**. The skill-namespace failure in [`crew/teams.md`](crew/teams.md) §3 that this row cited was fixed in #520 and observed on a real binary (Run `run_f3a4e81644be4081`, Hermes v0.21.2, recorded in #507). What was then measured (#541, same binary, one Run each and a single question, so reported as observed once rather than as reproduced) is that Hermes reads `AGENTS.md` from the workspace unprompted and does **not** read `.mercury/knowledge/NOTES.md`. So the channel §9.3 considered is genuinely absent, and the channel it did not consider exists: usable where no `AGENTS.md` is tracked, degraded where one is, because §9.4 forbids writing over a tracked file. #541 owns the §9.3 row and the adapter work. Separately and independently of knowledge: a Hermes Run is **unobservable at tool level** (#594). Quiet mode is the only non-interactive programmatic path and `hermes chat` has no JSON, stream or event mode, so the adapter emits no `tool.*` events -- measured on `run_8d8cfc92f22b4fcf`, which read files, searched and ran a 117-test suite and produced 6 events with zero tool calls. The work was confirmed through Hermes's own session store, not the transcript. `capabilities.static.toolEvents` is `'none'` for this reason; treat an empty tool set there as "could not see", never as "did nothing". |
+| `hermes` | yes | `SOUL.md` deltas | generated `AGENTS.md` when none is tracked; else neutral files only -- *degraded* | **measured, and narrower than "blocked"**. The skill-namespace failure in [`crew/teams.md`](crew/teams.md) §3 that this row cited was fixed in #520 and observed on a real binary (Run `run_f3a4e81644be4081`, Hermes v0.21.2, recorded in #507). What was then measured (#541, same binary, one Run each and a single question, so reported as observed once rather than as reproduced) is that Hermes reads `AGENTS.md` from the workspace unprompted and does **not** read `.mercury/knowledge/NOTES.md`. So the channel §9.3 considered is genuinely absent, and the channel it did not consider exists: usable where no `AGENTS.md` is tracked, degraded where one is, because §9.4 forbids writing over a tracked file. #541 owns the §9.3 row and the adapter work. **Observed on a real Run (#589), Hermes Agent v0.21.2 (2026.9.11) upstream b7b35a84, channel generated `AGENTS.md`.** Treated `run_8d8cfc92f22b4fcf`: given a note naming `npm run test:atlas`, it ran that command and reported 117 pass / 0 fail, matching an independent run of the suite. **No control Run was executed for Hermes**, so this row shows Hermes acting on the note; it does not by itself show Hermes would have missed the command without it. Separately and independently of knowledge: a Hermes Run is **unobservable at tool level** (#594), and that is why the evidence above had to come from somewhere else. Quiet mode is the only non-interactive programmatic path and `hermes chat` has no JSON, stream or event mode, so the adapter emits no `tool.*` events -- the same Run read files, searched and ran a 117-test suite while producing 6 events with zero tool calls, and its command and output were read back from Hermes's own session store rather than from Mercury. `capabilities.static.toolEvents` is `'none'` for this reason; treat an empty tool set there as "could not see", never as "did nothing". |
 | `local-agents/` | yes, if the CLI works in cwd | depends on the CLI | neutral files; context pointer if declared | unverified per entry; `local-agents/` ships no example entry today |
 | `remote-agents/` | **no** -- no local workspace | no | opaque `knowledge` payload field, if declared | tier 2 only; the payload field is a protocol addition not yet designed |
 | `fake` | n/a | n/a | asserts and echoes | the test double for every host-side test in §16 |
@@ -1219,13 +1219,33 @@ later is worth building until the phase before it has been exercised by a real R
 2. **Replica and injection on PrimeAgent.** The puller, `knowledge_replica`, pack selection,
    `run_knowledge`, materialization of the neutral files, the `knowledge` block in
    `.mercury-context.json`, the synthetic skill for PrimeAgent, `info/exclude` handling,
-   `knowledge.selected`, `GET /api/runs/:id/knowledge` and the sibling field. **Proven by a
-   real Run whose output depends on a promoted note** -- a note that names a command the
-   agent would not otherwise have found, and a transcript showing it used. Everything before
-   this is plumbing; this is the phase that shows the plumbing carries water.
+   `knowledge.selected`, `GET /api/runs/:id/knowledge` and the sibling field. **Observed on real
+   Runs (#589), which is what this gate always asked for and what it previously lacked: the
+   sentence below used to promise a real Run and cited not one.** A promoted operator note
+   named `npm run test:atlas`, a script no document in the repository mentions. Treated
+   `run_933c68e4684a498d` (PrimeAgent 0.9.4) ran it as its first command and never ran `npm test`;
+   control `run_d0f4dc05a8f44a1d`, same task and repository with the note retired, ran no test
+   command at all. Hermes v0.21.2 also acted on the note (`run_8d8cfc92f22b4fcf`), though with no
+   control of its own and no tool events to show it -- see §10. Everything before this is plumbing;
+   this is the phase that shows the plumbing carries water, and it carries it on the **read** path.
+   The write path is Phase 3 and is not observed.
 3. **Tier 1.** `.mercury/notes.jsonl` harvest at finalize, validation, K2 checks, bounds,
-   host-side redaction, `knowledge.noted` and `knowledge.rejected`. Proven by a Run on host A
-   teaching a Run on host B, through Atlas, in the e2e suite.
+   host-side redaction, `knowledge.noted` and `knowledge.rejected`. Split by what has actually been
+   seen, because the two halves are not at the same place:
+
+   3a. **Host A teaching host B -- observed (#589).** Two Mercury hosts sharing one Atlas, no
+   shared filesystem. A note promoted on host A reached a Run on host B through the puller, and
+   `run_fe6fd8ecb24244ed` read it out of `NOTES.md` and ran the command it named. That is a real
+   model on a different host acting on knowledge it could only have received through Atlas. The
+   note was **operator-authored**, so this proves the transport, not the authoring.
+
+   3b. **A real agent writing a note -- not observed.** In the same pass, `run_e8fe5f095b38438b`
+   was given a task that told it to record a durable fact, read `NOTES.md`, used the command in it,
+   and finished having written nothing to `.mercury/notes.jsonl`. The harvest, validation, K2
+   checks and bounds are all built and tested against a scripted writer; no shipped harness has
+   been seen to produce a note. This is the finding that decides whether Phases 4 to 6 are worth
+   building in their current order: auto-promotion corroborates tier-1 notes, and if real agents
+   do not write them there is nothing for it to promote.
 4. **Auto-promotion.** The corroboration policy of §12. The mechanism is built -- `autoPromote()`
    in `atlas/notes.ts`, its policy and `atlas/test/promotion.test.ts`, and `ux_notes_live_claim`,
    the partial unique index from #566 that makes one-live-note-per-claim a database constraint

@@ -216,8 +216,17 @@ Live and covered by tests:
   the pusher's timer, and refuses with an explanation when no Atlas is configured;
 - retired-row retention on the host (`MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS`).
 
-The loop is closed end to end: a Run can write a note, and a later Run on a different host is told
-it. `test/knowledgeTeachE2E.test.ts` proves that path against a real Atlas process.
+The loop is closed end to end **in the direction that has been measured**: knowledge promoted on one
+host reaches a Run on another host, and a real model there acts on it. `test/knowledgeTeachE2E.test.ts`
+proves the transport against a real Atlas process, and #589 observed the read path on real harnesses
+(`run_933c68e4684a498d` with a control at `run_d0f4dc05a8f44a1d`, Hermes at `run_8d8cfc92f22b4fcf`).
+
+The other direction is built and tested but **has not been seen from a real agent**: the harvest accepts
+a note written to `.mercury/notes.jsonl`, and the test that closes the loop uses a scripted writer. In
+the same pass a PrimeAgent Run told explicitly to record a durable fact finished without writing one
+(`run_e8fe5f095b38438b`). So "a Run can write a note" is true of the pipe and unproven of the agent, and
+that distinction decides Phase 4 -- auto-promotion corroborates tier-1 notes, and with no real author
+there is nothing for it to promote.
 
 Rendering is still missing for every backend other than PrimeAgent and Hermes -- those get only the
 neutral files and the `.mercury-context.json` pointer. Remote agents get tier 2 only, because they
