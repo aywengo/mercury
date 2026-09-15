@@ -233,3 +233,73 @@ test('the section 16 guard can actually fail', () => {
     assert.doesNotMatch(s16, claim, 'the real document already trips this guard');
   });
 });
+
+
+/**
+ * Issue #589: section 16's Phase 2 gate read "Proven by a real Run whose output depends on a promoted
+ * note" and cited no Run. The sentence was true of the plumbing and unverifiable as written, and it sat
+ * there while the only evidence was two Node scripts registered through `LocalAgentRegistry`. Section 10
+ * had already set the standard -- it asks for a Run id per row and cites `run_f3a4e81644be4081` for Hermes
+ * -- so the gate now meets the same bar.
+ *
+ * Two guards, because they fail differently. The phrasing guard is vacuous when the phrase is absent, and
+ * that is correct: a guard that demanded the phrase would force the document to keep a sentence it had
+ * outgrown, which is how such guards get deleted. The load-bearing one is on the gate itself -- Phase 2
+ * must name a Run, in any wording, forever.
+ */
+const RUN_ID = /run_[0-9a-f]{8,}/;
+
+/** Section 16's Phase 2 entry, up to Phase 3. */
+function phase2Entry(text: string): string {
+  const from = text.indexOf('2. **Replica and injection on PrimeAgent.**');
+  assert.notEqual(from, -1, 'section 16 Phase 2 was renamed; the gate guard below no longer guards anything');
+  const to = text.indexOf('3. **Tier 1.**', from);
+  assert.notEqual(to, -1, 'Phase 3 heading not found; the Phase 2 slice would be unbounded');
+  return text.slice(from, to);
+}
+
+test('the Phase 2 gate names the Runs it is proven by', () => {
+  const p2 = phase2Entry(DOC);
+  assert.match(p2, RUN_ID,
+    'Phase 2 is the phase that shows the plumbing carries water, and for a while its gate asserted that a '
+    + 'real Run showed this while citing none. A gate nobody can check is a gate that gets skipped.');
+});
+
+test('a real-Run claim names the Run beside it', () => {
+  // Vacuous when the phrase is absent, which is fine -- see the note above.
+  const re = /(?:proven|observed|demonstrated)\s+by\s+a\s+real\s+Run/gi;
+  let m: RegExpExecArray | null;
+  let seen = 0;
+  while ((m = re.exec(DOC)) !== null) {
+    seen += 1;
+    // 500 chars is generous on purpose: the gate sentence names the note and the command before it reaches
+    // the id, and a tighter window would reject honest prose that does cite its evidence.
+    assert.match(DOC.slice(m.index, m.index + 500), RUN_ID,
+      `"${m[0]}" is an unsourced claim. Section 10's standard applies: name the Run or do not say a real `
+      + 'Run proved it.');
+  }
+  void seen;
+});
+
+test('both guards can actually fail', () => {
+  // Positive control 1: strip the Run ids from Phase 2 and require the gate guard to catch it.
+  const stripped = phase2Entry(DOC).replace(/run_[0-9a-f]{8,}/g, 'a Run');
+  assert.ok(stripped !== phase2Entry(DOC), 'Phase 2 cites no Run ids, so the control cannot be built');
+  assert.doesNotMatch(stripped, RUN_ID, 'the control did not remove every id');
+  assert.ok(!RUN_ID.test(stripped), 'the gate guard has nothing to catch');
+
+  // Positive control 2: reintroduce the exact pre-#589 sentence and require the phrasing guard to catch it.
+  const reintroduced = DOC.replace('2. **Replica and injection on PrimeAgent.**',
+    '2. **Replica and injection on PrimeAgent.** Proven by a real Run whose output depends on a promoted '
+    + 'note, a note that names a command the agent would not otherwise have found, and a transcript '
+    + 'showing it used. Everything before this is plumbing; this is the phase that shows the plumbing '
+    + 'carries water. The rest of this entry is filler added so the window below reaches a sentence '
+    + 'boundary rather than an id belonging to something else, which is the failure mode a too-wide '
+    + 'window has, and it goes on long enough that no Run id appears within five hundred characters '
+    + 'of the claim being tested here in this document by this control.');
+  assert.notEqual(reintroduced, DOC, 'the control did not match; update it before trusting this test');
+  const claimAt = reintroduced.indexOf('Proven by a real Run');
+  assert.ok(claimAt >= 0);
+  assert.ok(!RUN_ID.test(reintroduced.slice(claimAt, claimAt + 500)),
+    'the window let the reintroduced uncited claim pass, so the guard is too wide to be useful');
+});
