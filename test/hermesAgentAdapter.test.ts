@@ -539,3 +539,29 @@ test('knowledge channel: AGENTS.md as a dangling symlink is not written through'
     rmSync(outsideDir, { recursive: true, force: true });
   }
 });
+
+/**
+ * Issue #594. A Hermes Run that read files, searched and ran a 117-test suite produced 6 events and zero
+ * `tool.*` (`run_8d8cfc92f22b4fcf`, Hermes v0.21.2). The work was real -- it was confirmed through Hermes's
+ * own session store -- but Mercury cannot see it: quiet mode is the only non-interactive programmatic path,
+ * and `hermes chat` has no JSON, stream or event mode to parse.
+ *
+ * So this pins two things that must move together. The mapping emits no tool events, AND the adapter says
+ * so. If someone later gives the adapter a real event source, the second assertion fails and forces the
+ * declaration to be updated -- which is the whole point, because a transcript that silently lacks tool
+ * events reads as an agent that did nothing.
+ */
+test('a Hermes Run yields no tool events, and the adapter declares that it cannot', async () => {
+  const { context } = makeContext();
+  const a = adapter();
+  const { events, exit } = await collectAll(await a.start(context));
+  assert.equal(exit.reason, 'completed', 'the Run must succeed, or the empty tool set proves nothing');
+  assert.ok(events.some((e) => e.type === 'agent.message'), 'the Run produced its final message');
+
+  const toolEvents = events.filter((e) => e.type.startsWith('tool.'));
+  assert.deepEqual(toolEvents, [],
+    'if Hermes ever starts emitting tool events, update toolEvents in the adapter as well as this test');
+
+  assert.equal(a.capabilities.static?.toolEvents, 'none',
+    'the limitation must be declared where consumers read it, not only discoverable from an empty transcript');
+});

@@ -123,6 +123,13 @@ export class HermesAgentAdapter implements AgentAdapter {
       // store. This is the value #507 exists to make readable -- a Mercury skill id Hermes does not
       // have installed is a fatal exit, not a warning.
       skills: 'nativeNames',
+      // Measured on a real Run against a real repository: `run_8d8cfc92f22b4fcf` (Hermes v0.21.2)
+      // completed after reading files, searching and running a 117-test suite, and Mercury recorded
+      // 6 events with zero `tool.*`. This is structural, not a parsing gap -- see the header of this
+      // file and `hermes chat --help`, which offers only -Q/--quiet and -v/--verbose and no machine
+      // readable stream. Declared so a Hermes transcript is labelled "unobservable" rather than read
+      // as an agent that did nothing (issue #594).
+      toolEvents: 'none',
     },
   };
   private opts: HermesAgentAdapterOptions;

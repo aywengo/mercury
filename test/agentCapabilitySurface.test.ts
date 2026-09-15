@@ -272,3 +272,35 @@ test('a hand-written adapter declaring an empty static block is omitted from the
   assert.ok(!('static' in snap.weird),
     `snapshot leaked an empty static block: ${JSON.stringify(snap.weird)}`);
 });
+
+/**
+ * Issue #594: `toolEvents` says whether Mercury can observe a backend's tool calls at all.
+ *
+ * This reads the real adapter objects rather than a fixture, for the reason this file already records
+ * above: a test named after a shipped artifact that asserts on a synthetic stand-in stays green while the
+ * artifact says something else. Hermes is the case that matters -- a Run there produced 6 events and zero
+ * tool events while the agent ran a 117-test suite (`run_8d8cfc92f22b4fcf`), and nothing on the Run said
+ * observability was unavailable rather than unused.
+ */
+test('the shipped code adapters state whether their tool calls are observable', async () => {
+  const { HermesAgentAdapter } = await import('../src/adapters/hermesAgentAdapter.ts');
+  const { PrimeAgentAdapter } = await import('../src/adapters/primeAgentAdapter.ts');
+
+  // Measured, not assumed: Hermes quiet mode has no machine-readable output mode to parse, so the
+  // value is 'none' and a consumer must label the transcript instead of reading it as inaction.
+  assert.equal(new HermesAgentAdapter().capabilities.static?.toolEvents, 'none',
+    'Hermes tool events are structurally unavailable; saying so is the whole point of the field');
+  assert.equal(new PrimeAgentAdapter('prime-agent').capabilities.static?.toolEvents, 'structured',
+    'RPC mode carries tool callbacks, so an empty tool set there means something different');
+});
+
+test('an adapter that has not been measured leaves toolEvents absent, which is not none', async () => {
+  // The rule this file already applies to skill delivery: silence must not be rendered as a negative
+  // finding. Claude Code shares the translator with PrimeAgent but nobody has measured a real Run,
+  // so declaring 'structured' there would advertise a capability nobody observed.
+  const { ClaudeCodeAdapter } = await import('../src/adapters/claudeCodeAdapter.ts');
+  const stat = new ClaudeCodeAdapter({}).capabilities.static;
+  assert.ok(stat, 'claude code declares a static block');
+  assert.ok(!('toolEvents' in (stat as object)),
+    'unmeasured must stay absent; a guessed value is the failure mode #508 exists to prevent');
+});

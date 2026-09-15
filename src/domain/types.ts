@@ -428,6 +428,24 @@ export interface AgentStaticCapabilities {
   resume?: boolean;
   /** Can Mercury hand this backend a knowledge base? Unverified for every shipped backend. */
   knowledge?: boolean;
+  /**
+   * Whether Mercury can OBSERVE this backend's tool calls as events, or only its final answer.
+   *
+   * Declared only where it has been measured; absent means nobody has checked, which is a different
+   * claim from 'none' and must not be rendered as one.
+   *
+   * This exists because the absence of `tool.*` events is otherwise indistinguishable from an agent
+   * that did nothing. Hermes in quiet mode emits only its final response -- the CLI has no JSON,
+   * stream or event mode at all, so this is structural rather than a parsing gap -- and a real Run
+   * that read files, searched and ran a 117-test suite produced zero tool events
+   * (`run_8d8cfc92f22b4fcf`, 6 events total). The work was verified independently through Hermes's
+   * own session store. Issue #594.
+   *
+   * Consumers that count tool events (Tier 2 distillation over `tool.failed` and `test.completed`,
+   * §7.2; any transcript review) have no input on a 'none' backend, and should say so rather than
+   * report an empty result.
+   */
+  toolEvents?: 'structured' | 'none';
 }
 
 /** What Mercury can do with an adapter, independent of which version is installed. */
