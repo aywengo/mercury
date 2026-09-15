@@ -719,18 +719,25 @@ export class NoteStore {
    * indefinitely unless an operator asks otherwise. Making deletion the default would smuggle a data-loss
    * policy in behind a replication fix, and section 18 open question 6 has not been answered yet.
    */
-  tombstoneExpiredRetired(olderThanMs: number): string[] {
+  tombstoneExpiredRetired(olderThanMs: number): { tombstoned: string[]; failed: { noteId: string; error: string }[] } {
     const cutoff = new Date(Date.now() - olderThanMs).toISOString();
     const rows = this.db.prepare(`
       SELECT note_id, project_id FROM notes WHERE tier = 'retired' AND updated_at < ?`)
       .all(cutoff) as unknown as { note_id: string; project_id: string }[];
-    const done: string[] = [];
+    const tombstoned: string[] = [];
+    const failed: { noteId: string; error: string }[] = [];
     for (const row of rows) {
       try {
-        if (this.deleteNote(row.project_id, row.note_id, 'system:retention', 'expired')) done.push(row.note_id);
-      } catch { /* one failure must not stop the sweep */ }
+        if (this.deleteNote(row.project_id, row.note_id, 'system:retention', 'expired')) tombstoned.push(row.note_id);
+      } catch (err) {
+        // One bad note must not stop the sweep -- but it must not be SILENT either. Returning the count
+        // alone would let a sweep that failed on every single note report `tombstoned: 0`, which is
+        // indistinguishable from "nothing was eligible", and the operator would read a broken deletion
+        // as an idle cycle. The note id and the error go back to the caller so the log can say which.
+        failed.push({ noteId: row.note_id, error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) });
+      }
     }
-    return done;
+    return { tombstoned, failed };
   }
 
   /** Idempotency keys are swept too; they are a replay guard, not a record to keep forever. */

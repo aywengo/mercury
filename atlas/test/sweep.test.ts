@@ -168,3 +168,51 @@ test('the sweep tombstones retired notes only when an operator asks for it (#590
   } finally { on.stop(); }
   h.db.close();
 });
+
+test('a tombstone that fails is reported, not counted as "nothing to do" (#590)', () => {
+  const h = harness();
+  // Distinct idempotency keys. harness()'s contribute() defaults every call to key 'k', so two calls
+  // with the same key return the SAME cached note id and the test silently exercises one note.
+  const good = h.contribute('a retired note that deletes cleanly', 'host-a', 'k-good');
+  const bad = h.contribute('a retired note whose deletion throws', 'host-a', 'k-bad');
+  assert.notEqual(good, bad, 'fixture: these must be two different notes');
+  for (const id of [good, bad]) {
+    h.store.retire('p', id, 'admin', 'superseded');
+    h.db.prepare("UPDATE notes SET updated_at = '2020-01-01T00:00:00.000Z' WHERE note_id = ?").run(id);
+  }
+
+  // A subclass, not an Object.create() shim. The first draft of this test copied the prototype methods
+  // onto a derived object and bound them to the REAL store, so `this.deleteNote` inside the sweep
+  // resolved to the real method, the simulated throw never fired, and the test still "passed" its
+  // count assertion while proving nothing. A subclass runs the real constructor, so the private state
+  // is genuinely initialised and the override is the one the sweep actually calls.
+  let threw = false;
+  class ThrowingStore extends NoteStore {
+    deleteNote(projectId: string, noteId: string, actor: string, reason: string) {
+      if (noteId === bad) { threw = true; throw new Error('SQLITE_CONSTRAINT: simulated'); }
+      return super.deleteNote(projectId, noteId, actor, reason);
+    }
+  }
+  const store = new ThrowingStore(h.db, BOUNDS as never, createRedactor([]));
+
+  const sweep = startMaintenanceSweep({
+    store, log: h.log, config: { ...h.config, retiredTombstoneAgeMs: 1_000 } as never,
+  });
+  try {
+    const out = sweep.runOnce();
+    assert.ok(threw, 'the override must actually be reached, or this test proves nothing');
+    assert.equal(out.tombstoned, 1, 'the note that could be deleted still was');
+    assert.equal(h.store.getNote('p', good)!.note.tier, 'deleted');
+    assert.equal(h.store.getNote('p', bad)!.note.tier, 'retired', 'a failed deletion leaves the note intact');
+
+    const logged = h.logs.filter((l) => l.msg === 'atlas maintenance sweep');
+    assert.equal(logged.length, 1, 'the pass must log, since something happened');
+    const fields = logged[0]!.fields as Record<string, unknown>;
+    assert.equal(fields.tombstoned, 1);
+    assert.equal(fields.tombstoneFailures, 1,
+      'a sweep that failed must not report a bare tombstoned:0 -- that is indistinguishable from an idle cycle');
+    assert.match(String((fields.firstFailure as { error: string }).error), /simulated/);
+    assert.equal((fields.firstFailure as { noteId: string }).noteId, bad, 'and it must name the note');
+  } finally { sweep.stop(); }
+  h.db.close();
+});

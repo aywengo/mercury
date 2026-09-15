@@ -47,15 +47,21 @@ export function startMaintenanceSweep(deps: {
     // Zero means "never", and it is checked here rather than passed down: a store that tombstoned
     // everything older than epoch would erase the curated set on the first tick after a typo in the
     // environment file, and the operator would find out from a replica that had already caught up.
-    const tombstoned = config.retiredTombstoneAgeMs > 0
+    const tombstone = config.retiredTombstoneAgeMs > 0
       ? store.tombstoneExpiredRetired(config.retiredTombstoneAgeMs)
-      : [];
-    if (retired.length || tombstoned.length || idempotencyKeys) {
+      : { tombstoned: [], failed: [] };
+    if (retired.length || tombstone.tombstoned.length || tombstone.failed.length || idempotencyKeys) {
       log.info('atlas maintenance sweep', {
-        retired: retired.length, tombstoned: tombstoned.length, idempotencyKeys,
+        retired: retired.length, tombstoned: tombstone.tombstoned.length, idempotencyKeys,
+        // Logged alongside the count, not instead of it: `tombstoned: 0` on its own reads as "nothing
+        // was eligible", and a sweep that threw on every candidate would look identical to an idle
+        // cycle. The first failure names the note so an operator has somewhere to start.
+        ...(tombstone.failed.length
+          ? { tombstoneFailures: tombstone.failed.length, firstFailure: tombstone.failed[0] }
+          : {}),
       });
     }
-    return { retired: retired.length, tombstoned: tombstoned.length, idempotencyKeys };
+    return { retired: retired.length, tombstoned: tombstone.tombstoned.length, idempotencyKeys };
   };
 
   // Guarded inside the pass rather than around the timer callback, so every caller is protected and not
@@ -67,7 +73,10 @@ export function startMaintenanceSweep(deps: {
       return runPass();
     } catch (err) {
       log.error('atlas maintenance sweep failed', {
-        err: err instanceof Error ? err.message : String(err),
+        // The name survives because a bare message is not enough to tell an SQLITE_BUSY from an
+        // assertion failure once it is one JSON line among thousands. Matches src/api/routes.ts and
+        // atlas/server.ts.
+        err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
       });
       return { retired: 0, tombstoned: 0, idempotencyKeys: 0 };
     }
