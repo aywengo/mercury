@@ -112,6 +112,12 @@ export interface AgentStaticCapabilities {
   humanInput?: boolean;
   resume?: boolean;
   knowledge?: boolean;
+  /**
+   * Whether Mercury can observe this backend's tool calls. Mirrors `src/domain/types.ts`; absent means
+   * unverified, which is what makes rendering it `unknown` rather than `none` correct for an older server.
+   * Added with #601 -- #599 declared it server-side and nothing on the client could name it.
+   */
+  toolEvents?: 'structured' | 'none';
 }
 
 export interface AgentCapabilitySummary {
