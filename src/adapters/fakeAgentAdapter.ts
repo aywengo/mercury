@@ -30,6 +30,10 @@ export class FakeAgentAdapter implements AgentAdapter {
       skills: 'none',
       humanInput: true,
       resume: true,
+      // The double emits whatever a test scripts, including tool.* events, so 'structured' describes
+      // the mapping rather than a harness. Declared rather than left absent so a test that reads this
+      // field gets an answer instead of an absence it has to interpret.
+      toolEvents: 'structured',
     },
   };
   private cancelled = new Set<string>();

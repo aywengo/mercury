@@ -925,7 +925,7 @@ section is what someone implements from.
           "maxTurns":    { "supported": false, "reason": "unsupported", "detectedVersion": null, "detectedRaw": null }
         }
       },
-      "static": { "skills": "none", "humanInput": true, "resume": true }
+      "static": { "skills": "none", "humanInput": true, "resume": true, "toolEvents": "structured" }
     },
     "primeagent": {
       "version": "0.9.4",
