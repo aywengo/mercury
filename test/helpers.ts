@@ -222,7 +222,13 @@ export async function waitFor(
     if (await fn()) return;
     await new Promise((r) => setTimeout(r, intervalMs));
   }
-  throw new Error('waitFor timed out');
+  // The condition, not just the deadline. `waitFor timed out` after 20 s said nothing about which of
+  // the several waits in a Run had failed, so the knowledge tests that degrade under heavy concurrent
+  // load (issue #596) produced a failure that could not be attributed to workspace creation, the worker,
+  // or the assertion at all -- and the only way to find out was to reproduce a load the machine no
+  // longer reaches. The predicate source is the cheapest possible diagnosis, and it is free to keep.
+  throw new Error(`waitFor timed out after ${Date.now() - start}ms (limit ${timeoutMs}ms) `
+    + `waiting for: ${fn.toString().replace(/\s+/g, ' ').trim()}`);
 }
 
 export function sleep(ms: number): Promise<void> {
