@@ -304,3 +304,56 @@ test('an adapter that has not been measured leaves toolEvents absent, which is n
   assert.ok(!('toolEvents' in (stat as object)),
     'unmeasured must stay absent; a guessed value is the failure mode #508 exists to prevent');
 });
+
+/**
+ * Issue #601: #599 declared `toolEvents` and `/api/agents` served it, and nothing displayed it -- so the
+ * correct answer existed and was never in front of the person who needed it. The harm is specific: a Hermes
+ * Run that read files, searched and ran a 117-test suite shows one message and no tool events
+ * (`run_8d8cfc92f22b4fcf`), and an operator reading that transcript reasonably concludes the agent did
+ * nothing.
+ */
+test('mercuryctl agents says whether tool calls were recorded', () => {
+  const ctx = { json: false, noColor: true } as never;
+  const response = {
+    agents: ['primeagent', 'hermes', 'legacy'],
+    defaultAgent: 'primeagent',
+    capabilities: {
+      primeagent: { version: null, versionRaw: null, goals: { supported: false }, static: { skills: 'workspacePaths', toolEvents: 'structured' } },
+      hermes: { version: null, versionRaw: null, goals: { supported: false }, static: { skills: 'nativeNames', toolEvents: 'none' } },
+      legacy: { version: null, versionRaw: null, goals: { supported: false } },
+    },
+  } as unknown as AgentsResponse;
+  const out = renderAgents(response, ctx, false);
+  assert.match(out, /TOOLS/, 'the column must be labelled, not just add a cell');
+  const line = (name: string) => (out.split('\n').find((l) => l.startsWith(name)) ?? '');
+  assert.match(line('hermes'), /unobservable/,
+    'the whole point: a Hermes row must say Mercury cannot observe its tool calls. Not "not recorded" -- '
+    + 'Hermes recorded them in its own session store, and that wording sent operators looking for a log '
+    + 'file that exists (src/domain/types.ts, the toolEvents field comment).');
+  assert.match(line('primeagent'), /structured/, 'a harness that is observed says so');
+
+  // The rule the SKILLS column already enforces, applied here: silence is unknown, not 'none'. An older
+  // server that never heard of this field must not be rendered as a harness whose tool calls are invisible.
+  const legacy = line('legacy');
+  assert.match(legacy, /unknown/, 'an unreported value must render as unknown');
+  assert.ok(!/unobservable|none/.test(legacy), `silence must not render as absent: ${legacy}`);
+});
+
+test('the TOOLS column cannot be satisfied by a cell that never renders', () => {
+  // Positive control. A column added to the header but not to the row array would still print "TOOLS"
+  // and still pass a header-only assertion, while every row silently lost a field.
+  const ctx = { json: false, noColor: true } as never;
+  const withValue = {
+    agents: ['hermes'], defaultAgent: 'hermes',
+    capabilities: { hermes: { version: null, versionRaw: null, goals: { supported: false }, static: { toolEvents: 'none' } } },
+  } as unknown as AgentsResponse;
+  const out = renderAgents(withValue, ctx, false);
+  const row = out.split('\n').find((l) => l.startsWith('hermes')) ?? '';
+  assert.ok(row.includes('unobservable'), `the value must appear on the agent's own row: ${JSON.stringify(row)}`);
+  const withoutValue = {
+    agents: ['hermes'], defaultAgent: 'hermes',
+    capabilities: { hermes: { version: null, versionRaw: null, goals: { supported: false }, static: {} } },
+  } as unknown as AgentsResponse;
+  const row2 = renderAgents(withoutValue, ctx, false).split('\n').find((l) => l.startsWith('hermes')) ?? '';
+  assert.ok(row !== row2, 'the column must actually change the rendered row');
+});

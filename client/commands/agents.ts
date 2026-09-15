@@ -47,10 +47,29 @@ export function renderAgents(response: AgentsResponse, ctx: CommandContext, isTt
     if (!skills) return dim('unknown');
     return sanitizeForTerminal(skills);
   };
+  // Whether Mercury can see this backend's tool calls (#601). Rendered because its absence is the
+  // misreading: a Hermes Run that read files, searched and ran a 117-test suite shows one message and no
+  // tool events (`run_8d8cfc92f22b4fcf`), and an operator looking at that transcript reasonably concludes
+  // the agent did nothing. The capability was declared in #599 and served by /api/agents, and nothing
+  // displayed it -- so the correct answer existed and was never in front of anyone.
+  const toolsCell = (id: string): string => {
+    const toolEvents = response.capabilities?.[id]?.static?.toolEvents;
+    // Same rule as skillsCell, same reason: absent means the server did not say. Rendering an older
+    // server's silence as 'none' would tell an operator that tool calls are unobservable on a harness
+    // where they are perfectly visible.
+    if (!toolEvents) return dim('unknown');
+    // 'unobservable', not 'not recorded'. The server's own field comment says this measures whether
+    // MERCURY can observe the calls, and the Hermes Run that motivated #594 recorded its tool work in
+    // Hermes's own session store the whole time. "not recorded" would tell an operator the harness kept
+    // no record and sent them looking for a log file that exists; the true statement is that Mercury is
+    // the one that cannot see it.
+    return toolEvents === 'none' ? color('yellow', 'unobservable') : sanitizeForTerminal(toolEvents);
+  };
   const rows = response.agents.map((id) =>
-    [sanitizeForTerminal(id), goalsCell(id), skillsCell(id), id === response.defaultAgent ? 'default' : ''],
+    [sanitizeForTerminal(id), goalsCell(id), skillsCell(id), toolsCell(id),
+     id === response.defaultAgent ? 'default' : ''],
   );
-  const table = renderTable(['AGENT', 'GOALS', 'SKILLS', ''], rows,
+  const table = renderTable(['AGENT', 'GOALS', 'SKILLS', 'TOOLS', ''], rows,
     (text, column) => (column === 0 ? color('cyan', text) : color('dim', text)),
     (text) => dim(text),
   );

@@ -100,6 +100,34 @@ test('table columns stay aligned when a cell contains a stripped sequence', () =
   void colStart;
 });
 
+test('table columns stay aligned when a cell arrives already decorated', () => {
+  // The mirror of the test above. That one measures a STRIPPED untrusted escape; this one measures the
+  // client's OWN colour. A cell function that returns color('green', 'yes') hands renderTable eight
+  // characters nobody sees, and padding on .length spends eight columns of that cell's budget on them:
+  // the visible text lands short of its column and every column right of it shifts left with it.
+  // This is exactly how `mercuryctl agents list` rendered with colour on -- SKILLS began at visible
+  // column 58 in three rows and at 49 in the row whose GOALS cell was green -- and it is why the cell
+  // functions in commands/agents.ts are allowed to decorate: the table, not each caller, owns width.
+  const { color, dim } = makeColorizer({ noColor: false, isTty: true, json: false });
+  const rows = [
+    ['run_a', color('green', 'yes'), 'workspacePaths'],
+    ['run_b', 'unknown: version not detected (needs 0.30.0)', 'names'],
+    ['run_c', dim('unknown'), 'names'],
+  ];
+  const table = renderTable(['ID', 'GOALS', 'SKILLS'], rows);
+  const strip = (s: string): string => s.replace(/\u001b\[[0-9;]*m/g, '');
+  const lines = table.split('\n');
+  const skillsStart = lines.slice(1).map((l) => {
+    const plain = strip(l);
+    return plain.includes('workspacePaths') ? plain.indexOf('workspacePaths') : plain.indexOf('names');
+  });
+  assert.equal(new Set(skillsStart).size, 1, `SKILLS starts at a different column per row: ${JSON.stringify(skillsStart)}`);
+  // The exact offset also pins the OTHER half of the defect: the column must be as wide as the widest
+  // VISIBLE cell (44), not as wide as the widest decorated one. ID(5) + gap(2) + GOALS(44) + gap(2) = 53.
+  assert.equal(skillsStart[0], 53, `GOALS column was sized on decorated length: ${JSON.stringify(skillsStart)}`);
+  assert.equal(strip(lines[0]).indexOf('SKILLS'), skillsStart[0], 'the header does not line up with the body');
+});
+
 test('ellipsis never splits a surrogate pair', () => {
   // Cutting between the halves of an astral character yields U+FFFD, which then round-trips as a
   // different string than the server sent.

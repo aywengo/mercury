@@ -81,12 +81,48 @@ export function statusColor(status: string): keyof typeof ANSI {
 }
 
 /**
+ * How many columns a string occupies on screen: its characters, minus any SGR decoration.
+ *
+ * Only SGR (`CSI ... m`) is stripped. Every other escape sequence is already neutralised to a visible
+ * marker by sanitizeForTerminal(), so one surviving here would be a bug elsewhere, and this function
+ * hiding that bug would be worse than the misalignment it prevents.
+ */
+export function visibleWidth(text: string): number {
+  return text.replace(/\u001b\[[0-9;]*m/g, '').length;
+}
+
+/** Pad to a VISIBLE width, leaving decoration the cell already carries intact. */
+function padVisible(cell: string, width: number): string {
+  const visible = visibleWidth(cell);
+  return visible >= width ? cell : `${cell}${' '.repeat(width - visible)}`;
+}
+
+/**
  * Render a fixed-column table.
  *
  * Widths are computed from the SANITISED, DISPLAYED text, not the raw text: a cell containing a
  * stripped escape sequence is shorter than the input, and sizing on the input would misalign every
  * following column -- which is exactly how a crafted field makes a table look like it says something
  * it does not.
+ *
+ * The same rule applies to the caller's OWN decoration, which is why measurement uses visibleWidth()
+ * rather than `.length`. A cell function returning `color('green', 'yes')` hands renderTable eight
+ * characters nobody sees; padding on `.length` then spends eight columns of that cell's budget on them,
+ * the visible text lands eight columns short of its column, and every column to its right shifts left
+ * with it. Measured on `mercuryctl agents list` with colour on before this was fixed: the SKILLS column
+ * began at visible column 58 in three rows and at 49 in the row whose GOALS cell was green.
+ *
+ * Two contracts follow from measuring here rather than in each caller:
+ *
+ * - `decorate` and `decorateHeader` run AFTER padding, so they may add SGR but must not change a cell's
+ *   visible length. Truncating inside a decorator would re-introduce the misalignment this exists to
+ *   remove, and nothing would catch it. Truncation belongs in the row builder, which is where `runs list`
+ *   already does it with ellipsis().
+ * - Width is counted in UTF-16 code units, not display columns. A CJK ideograph or an emoji occupies two
+ *   columns and counts as one, so free-text columns over-align on those; a combining mark counts as one
+ *   and occupies none. This is unchanged from before, and it is why the fixed-width columns this matters
+ *   for (statuses, ids, capability names) are ASCII by construction. Full grapheme measurement is a
+ *   different change with a different cost, and it is not what ragged columns were caused by.
  */
 export function renderTable(
   headers: string[],
@@ -95,11 +131,11 @@ export function renderTable(
   decorateHeader: (text: string) => string = (t) => t,
 ): string {
   const widths = headers.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => (r[i] ?? '').length)),
+    Math.max(visibleWidth(h), ...rows.map((r) => visibleWidth(r[i] ?? ''))),
   );
   const line = (cells: string[], columnize: (text: string, i: number) => string): string =>
     cells
-      .map((cell, i) => columnize(cell.padEnd(widths[i] ?? cell.length), i))
+      .map((cell, i) => columnize(padVisible(cell, widths[i] ?? visibleWidth(cell)), i))
       .join('  ')
       .trimEnd();
 
