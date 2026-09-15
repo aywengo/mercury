@@ -40,6 +40,16 @@ export interface AtlasConfig {
   staleCandidateAgeMs: number;
   /** Idempotency keys older than this are dropped. They are a replay guard, not a record. */
   idempotencyRetentionMs: number;
+  /**
+   * How long a retired note survives before the sweep tombstones it (#590). `0`, the default, disables
+   * it entirely: Atlas retains retired notes indefinitely unless an operator asks otherwise.
+   *
+   * Opt-in because this is the only Atlas setting that removes knowledge. The replication question that
+   * made deletion impossible is answered by the `deleted` tier; the retention QUESTION -- how long a
+   * retired note is worth keeping -- is still open (section 18, question 6), and a non-zero default would
+   * answer it by deleting data nobody asked to delete.
+   */
+  retiredTombstoneAgeMs: number;
   /** Log level. */
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
@@ -126,6 +136,7 @@ export function loadAtlasConfig(env: Record<string, string | undefined> = proces
     sweepIntervalMs: num(env['ATLAS_SWEEP_INTERVAL_MS'], 60 * 60 * 1000),
     staleCandidateAgeMs: num(env['ATLAS_STALE_CANDIDATE_AGE_MS'], 30 * 24 * 60 * 60 * 1000),
     idempotencyRetentionMs: num(env['ATLAS_IDEMPOTENCY_RETENTION_MS'], 7 * 24 * 60 * 60 * 1000),
+    retiredTombstoneAgeMs: num(env['ATLAS_RETIRED_TOMBSTONE_AGE_MS'], 0),
     logLevel: level(env['ATLAS_LOG_LEVEL']),
   };
 

@@ -35,6 +35,7 @@ All settings are environment variables prefixed with `ATLAS_`:
 | `ATLAS_MAX_CLAIM_BYTES` | `1024` | Maximum size of a claim in bytes. |
 | `ATLAS_MAX_DETAIL_BYTES` | `4096` | Maximum size of a detail in bytes. |
 | `ATLAS_MAX_BATCH` | `500` | Maximum number of items in a batch request. |
+| `ATLAS_RETIRED_TOMBSTONE_AGE_MS` | unset — never | Age at which the maintenance sweep turns a retired note into a tombstone, emptying its claim, detail and evidence while keeping its identity, its audit trail and a `seq` row replicas can apply. **Unset means Atlas never deletes a note**, and that is the default on purpose: the mechanism is safe, the retention policy is not settled yet. |
 | `ATLAS_LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, or `error`. |
 
 **It refuses to start in an unsafe configuration**, rather than serving and leaving discovery to an audit:
