@@ -1221,7 +1221,7 @@ later is worth building until the phase before it has been exercised by a real R
    `.mercury-context.json`, the synthetic skill for PrimeAgent, `info/exclude` handling,
    `knowledge.selected`, `GET /api/runs/:id/knowledge` and the sibling field. **Observed on real
    Runs (#589), which is what this gate always asked for and what it previously lacked: the
-   sentence below used to promise a real Run and cited not one.** A promoted operator note
+   sentence this one replaces promised a real Run and cited not one.** A promoted operator note
    named `npm run test:atlas`, a script no document in the repository mentions. Treated
    `run_933c68e4684a498d` (PrimeAgent 0.9.4) ran it as its first command and never ran `npm test`;
    control `run_d0f4dc05a8f44a1d`, same task and repository with the note retired, ran no test
