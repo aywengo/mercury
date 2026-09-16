@@ -302,7 +302,12 @@ test('fleet knowledge --json emits the view unchanged', async () => {
   try {
     const r = await fleet(['knowledge', '--json'], withAtlas(dir, a.url));
     assert.equal(r.code, 0, r.out);
-    const view = JSON.parse(r.out);
+    // stdout ALONE, per the convention documented on the helper above. This test originally parsed
+    // `r.out`, which is stdout+stderr; Node 22 writes "ExperimentalWarning: SQLite / Type Stripping"
+    // to stderr after the JSON, so the parse died at position 502 while Node 24 -- which emits no such
+    // warning -- passed. A machine-readable surface has to be parseable from stdout by itself, or
+    // `fleet knowledge --json | jq` breaks on exactly the runtimes that warn.
+    const view = JSON.parse(r.stdout);
     assert.equal(view.state, 'ok');
     assert.equal(view.stale, false);
     assert.equal(view.summary.contestedPairs, 1);
