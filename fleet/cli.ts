@@ -168,11 +168,15 @@ function renderKnowledge(view: AtlasView): string {
     return keys.length ? keys.map((k) => `${k} ${m[k]}`).join('  ') : '(none)';
   };
   const lines = [
-    `project   ${view.project}`,
-    `tiers     ${counts(view.summary.byTier)}`,
-    `kinds     ${counts(view.summary.promotedByKind)}`,
-    `contested ${view.summary.contestedPairs} pair(s)`,
-    `last event  seq ${view.summary.latestSeq}`,
+    `project    ${view.project}`,
+    // Its own line, not a word inside the tier breakdown. Atlas omits a tier that has no notes rather
+    // than writing a zero, so `candidate` disappears from the tiers line exactly when nothing is
+    // waiting -- and a queue that is empty is a number an operator needs to see, not an absence.
+    `candidates ${view.summary.byTier.candidate ?? 0} awaiting promotion`,
+    `kinds      ${counts(view.summary.promotedByKind)}`,
+    `contested  ${view.summary.contestedPairs} pair(s)`,
+    `tiers      ${counts(view.summary.byTier)}`,
+    `last seq   ${view.summary.latestSeq}`,
     '',
   ];
   if (view.stale) {
@@ -261,8 +265,13 @@ export async function main(argv: string[]): Promise<number> {
     });
     const view = await reader.view();
     process.stdout.write((asJson ? JSON.stringify(view, null, 2) : renderKnowledge(view)) + '\n');
-    // 0 whenever there are numbers to read, including stale ones: the operator asked what the project
-    // looks like, and "the last thing we knew, 4m ago" is an answer. 1 only when there is nothing.
+    // 0 whenever there are numbers to read, 1 when there are none.
+    //
+    // The `view.stale` half of this condition cannot fire in practice: the reader's cache lives in the
+    // process that built it, and a CLI invocation is one read in a brand-new process, so a one-shot
+    // `fleet knowledge` never has anything to serve stale. It is kept because the exit rule should read
+    // "numbers are on screen, so this succeeded" rather than restating which branches are reachable --
+    // and because a future `--watch` would make the branch live with the wrong code already in place.
     return view.configured && (view.state === 'ok' || view.stale) ? 0 : 1;
   }
 

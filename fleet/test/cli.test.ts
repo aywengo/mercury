@@ -288,9 +288,9 @@ test('fleet knowledge renders the four numbers §14 asks for', async () => {
     const r = await fleet(['knowledge'], withAtlas(dir, a.url));
     assert.equal(r.code, 0, r.out);
     assert.match(r.out, /project\s+mercury/);
-    assert.match(r.out, /candidate 2.*promoted 3/, 'candidates awaiting promotion and tiers');
-    assert.match(r.out, /convention 2.*fact 1/, 'promoted note count by kind');
-    assert.match(r.out, /contested 1 pair/, 'contested pairs');
+    assert.match(r.out, /candidates 2 awaiting promotion/, 'candidates awaiting promotion, named');
+    assert.match(r.out, /kinds\s+convention 2 {2}fact 1/, 'promoted note count by kind');
+    assert.match(r.out, /contested\s+1 pair/, 'contested pairs');
     assert.match(r.out, /mac-studio\s+7/, 'per-contributor note count');
     assert.ok(!/reader-token/.test(r.out), 'the reader token must never reach stdout');
   } finally { await a.close(); }
@@ -330,5 +330,20 @@ test('a refused Atlas reports the status Atlas gave', async () => {
     assert.equal(r.code, 1);
     assert.match(r.out, /403/);
     assert.match(r.out, /may not read project/, "Atlas's own words are the diagnosis");
+  } finally { await a.close(); }
+});
+
+
+test('an empty promotion queue still prints a zero, not a silence', async () => {
+  // Atlas omits a tier with no notes rather than storing a zero, so a breakdown line is the wrong
+  // place to read "nothing is waiting": the number vanishes precisely when the news is good, and an
+  // operator cannot tell an empty queue from a rendering bug.
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-cli-atlas-'));
+  const empty = { ...GOOD_SUMMARY, byTier: { promoted: 3 } };
+  const a = await fakeAtlas((_req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(empty)); });
+  try {
+    const r = await fleet(['knowledge'], withAtlas(dir, a.url));
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /candidates 0 awaiting promotion/, 'a zero must be printed, not omitted');
   } finally { await a.close(); }
 });
