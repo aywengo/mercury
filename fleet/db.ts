@@ -149,6 +149,23 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE host_probe ADD COLUMN host_api INTEGER;
     `,
   },
+  {
+    version: 5,
+    sql: `
+      -- CACHE, same table and same rules as the rest of host_probe: one sweep rebuilds it.
+      --
+      -- How long ago this host last pulled its knowledge replica (docs/knowledge-base.md section 14).
+      -- Fleet uses it only to rank hosts, never to exclude one.
+      --
+      -- Both columns are NULL for three different situations that must stay distinct, because the whole
+      -- safety of a soft signal depends on not guessing: the host has no Atlas configured (enabled=0),
+      -- the host predates the route or Fleet's credential is not admin (the read was refused), and the
+      -- host genuinely answered with a pull time. Only the last one may move a ranking. NULL here means
+      -- "no opinion", and the scorer treats it as neutral rather than as stale.
+      ALTER TABLE host_probe ADD COLUMN knowledge_enabled INTEGER;
+      ALTER TABLE host_probe ADD COLUMN knowledge_pull_at TEXT;
+    `,
+  },
 ];
 
 export interface FleetDb {

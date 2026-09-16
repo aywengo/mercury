@@ -77,3 +77,49 @@ test('host_probe stays a cache: dropping it costs no host data', () => {
     opened.db.close();
   } finally { rmSync(join(path, '..'), { recursive: true, force: true }); }
 });
+
+
+test('v5 upgrades an existing database and leaves pre-existing probes with no knowledge opinion', () => {
+  // Same reason v4 has a test: an operator's fleet.db is at v4, and a failed ALTER aborts openFleetDb
+  // entirely. Fleet would refuse to start over a cache table it could rebuild in one sweep -- and it
+  // would refuse for a feature that is switched off by default.
+  const path = tempFile('fleet-mig5-');
+  try {
+    const first = openFleetDb(path);
+    const db = first.db;
+    db.exec(`INSERT INTO hosts (id, base_url, credential_ref, enabled, labels, local_paths, agents_cache, added_at)
+             VALUES ('old', 'http://h:1', 'ref', 1, '{}', '[]', '[]', '2026-01-01T00:00:00Z')`);
+    db.exec(`INSERT INTO host_probe (host_id, outcome, detail, probed_at)
+             VALUES ('old', 'ok', NULL, '2026-01-01T00:00:00Z')`);
+    db.exec('ALTER TABLE host_probe DROP COLUMN knowledge_enabled');
+    db.exec('ALTER TABLE host_probe DROP COLUMN knowledge_pull_at');
+    db.exec('DELETE FROM fleet_meta WHERE version = 5');
+    db.close();
+
+    const second = openFleetDb(path);
+    try {
+      assert.ok(second.appliedVersions.includes(5),
+        `v5 did not re-apply; applied ${JSON.stringify(second.appliedVersions)}`);
+      const row = second.db
+        .prepare('SELECT outcome, knowledge_enabled, knowledge_pull_at FROM host_probe WHERE host_id = ?')
+        .get('old') as { outcome: string; knowledge_enabled: number | null; knowledge_pull_at: string | null } | undefined;
+      assert.ok(row, 'the pre-existing probe row was lost by the upgrade');
+      assert.equal(row.outcome, 'ok');
+      // NULL, not 0. A zero here would mean "this host has no Atlas", which is a claim about a host
+      // that was never asked. The scorer reads NULL as no opinion and 0 as a known-off host.
+      assert.equal(row.knowledge_enabled, null, 'a row predating the column must be unknown, not disabled');
+      assert.equal(row.knowledge_pull_at, null);
+    } finally { second.db.close(); }
+  } finally { rmSync(path, { force: true }); }
+});
+
+test('v5 is idempotent across a restart', () => {
+  const path = tempFile('fleet-mig5b-');
+  try {
+    const a = openFleetDb(path);
+    a.db.close();
+    const b = openFleetDb(path);
+    assert.ok(!b.appliedVersions.includes(5), 'v5 re-applied on a database that already has it');
+    b.db.close();
+  } finally { rmSync(path, { force: true }); }
+});

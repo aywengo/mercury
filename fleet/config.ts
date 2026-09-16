@@ -30,6 +30,19 @@ export interface FleetConfig {
   /** Per-request timeout for a single probe call. A hung host must not stall the sweep. */
   probeTimeoutMs: number;
   /**
+   * How old a host's knowledge replica may get before Fleet ranks that host below a fresher one
+   * (docs/knowledge-base.md section 14). Zero, the default, disables the signal entirely.
+   *
+   * Off by default on purpose. This changes which machine a Run lands on, and an operator who has never
+   * heard of Atlas should not get a placement change from an upgrade. It is also the honest default while
+   * the route it reads is admin-only: most Fleets cannot read it yet, and a signal that silently never
+   * fires is worse than an absent one because it looks configured.
+   *
+   * It is a preference with a ceiling, never a filter. A fleet of one stale host still places on it --
+   * section 14: "refusing to place work because a note is two minutes old would be a Run lost to a cache".
+   */
+  knowledgeStaleMs: number;
+  /**
    * How often reconciliation re-reads every non-terminal Run (design section 7). Independent of the probe
    * interval on purpose: probing asks "is this machine up" for every host, reconciling asks "what is this Run
    * doing" for every Run, and a fleet with three hosts and two hundred Runs wants those on different clocks.
@@ -82,6 +95,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     credentialsFile: env['FLEET_CREDENTIALS_FILE'] ?? defaultCredentialsFile(),
     probeIntervalMs: num(env['FLEET_PROBE_INTERVAL_MS'], 15_000),
     probeTimeoutMs: num(env['FLEET_PROBE_TIMEOUT_MS'], 5_000),
+    knowledgeStaleMs: num(env['FLEET_KNOWLEDGE_STALE_MS'], 0),
     sweepIntervalMs: num(env['FLEET_SWEEP_INTERVAL_MS'], 10_000),
     streamPollMs: num(env['FLEET_STREAM_POLL_MS'], 1000),
     repoUrlsFile: env.FLEET_REPO_URLS_FILE ?? null,

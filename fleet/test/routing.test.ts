@@ -190,3 +190,110 @@ test('the rewrite also applies when the caller names a host', async () => {
   assert.equal(d.repository?.url, 'https://github.com/o/r.git');
   assert.equal(d.repository?.localPath, undefined);
 });
+
+
+// --- knowledge freshness as a SOFT signal only (docs/knowledge-base.md section 14) ---------------
+
+const NOW = Date.parse('2026-06-01T12:00:00.000Z');
+const HOUR = 3_600_000;
+const fresh = () => new Date(NOW - 60_000).toISOString();
+const stale = () => new Date(NOW - 6 * HOUR).toISOString();
+const opts = { knowledgeStaleMs: HOUR, now: () => NOW };
+
+test('a stale host is ranked below a fresh one, and the decision says so', () => {
+  // The ids are chosen so the ordinary tie-break picks the STALE host. Otherwise the fresh host would
+  // win with the signal switched off too, and the test would pass against a scorer that ignores
+  // knowledge entirely -- which is the same reason the "off" test below uses the same pair.
+  const hosts = [
+    host('a-stale', { probe: ok({ knowledgeEnabled: true, knowledgePullAt: stale() }) }),
+    host('z-fresh', { probe: ok({ knowledgeEnabled: true, knowledgePullAt: fresh() }) }),
+  ];
+  const d = routeRun(hosts, {}, opts);
+  assert.equal(d.hostId, 'z-fresh');
+  assert.ok(d.softRankNote, 'a placement the signal decided must explain itself (section 4)');
+  assert.match(d.softRankNote!, /a-stale/, 'the note must name the host it passed over');
+});
+
+test('ONE stale host still gets the work -- the signal never filters', async () => {
+  // Section 14: "refusing to place work because a note is two minutes old would be a Run lost to a
+  // cache". This is the invariant the whole feature hangs on, and it is the one a future
+  // "optimisation" is most likely to break by turning the penalty into an exclusion.
+  const hosts = [host('only-box', { probe: ok({ knowledgeEnabled: true, knowledgePullAt: stale() }) })];
+  const d = routeRun(hosts, {}, opts);
+  assert.equal(d.hostId, 'only-box');
+  // And a fleet of nothing but stale hosts places too, rather than throwing like a hard filter would.
+  const many = ['a', 'b'].map((id) => host(id, { probe: ok({ knowledgeEnabled: true, knowledgePullAt: stale() }) }));
+  assert.ok(['a', 'b'].includes(routeRun(many, {}, opts).hostId));
+});
+
+test('the signal is off unless an operator turns it on', () => {
+  // Default-off is load-bearing: this changes which machine a Run lands on, and nobody opts in by
+  // upgrading Fleet. Same hosts as the test above, opposite expectation, so the pair together proves
+  // the flag is what moves the decision and not something incidental in the fixture.
+  const hosts = [
+    host('a-stale', { probe: ok({ knowledgeEnabled: true, knowledgePullAt: stale() }) }),
+    host('z-fresh', { probe: ok({ knowledgeEnabled: true, knowledgePullAt: fresh() }) }),
+  ];
+  const off = routeRun(hosts, {}, { now: () => NOW });
+  assert.equal(off.hostId, 'a-stale', 'with the signal off, the tie breaks on id as it always did');
+  assert.equal(off.softRankNote, null);
+});
+
+test('a host Fleet knows nothing about is never penalised', () => {
+  // Four different kinds of ignorance, all of which must cost nothing. If any were read as stale,
+  // upgrading Fleet or adding a host without an admin credential would quietly demote healthy machines.
+  //
+  // A FAILED PROBE is deliberately not in this list. It scores 1_000 for a reason that predates this
+  // feature and has nothing to do with knowledge, so it belongs to the capacity rules and would only
+  // muddy what "no opinion about knowledge" means.
+  const unknowable: [string, Record<string, unknown>][] = [
+    ['a-no-atlas', { knowledgeEnabled: false }],
+    ['b-predates-route', { knowledgeEnabled: null, knowledgePullAt: null }],
+    ['c-not-admin', { knowledgeEnabled: null, knowledgePullAt: null }],
+    ['d-never-pulled', { knowledgeEnabled: true, knowledgePullAt: null }],
+  ];
+  for (const [id, over] of unknowable) {
+    const hosts = [
+      host(id, { probe: ok(over) }),
+      host('z-fresh', { probe: ok({ knowledgeEnabled: true, knowledgePullAt: fresh() }) }),
+    ];
+    const d = routeRun(hosts, {}, opts);
+    // Each id sorts before 'z-fresh', so the ignorant host wins on the ordinary tie-break unless a
+    // penalty was wrongly applied. This assertion fails against a scorer that treats unknown as stale.
+    assert.equal(d.hostId, id, `${id} was penalised for something Fleet could not have known`);
+    assert.equal(d.softRankNote, null);
+  }
+});
+
+test('a replica under the threshold is not stale', () => {
+  const hosts = [
+    host('a', { probe: ok({ knowledgeEnabled: true, knowledgePullAt: fresh() }) }),
+    host('b', { probe: ok({ knowledgeEnabled: true, knowledgePullAt: new Date(NOW - 20 * 60_000).toISOString() }) }),
+  ];
+  const d = routeRun(hosts, {}, { knowledgeStaleMs: HOUR, now: () => NOW });
+  assert.equal(d.hostId, 'a', 'both are fresh, so the tie-break must be the ordinary one');
+  assert.equal(d.softRankNote, null, 'a note that fires when nothing was decided is noise at 3am');
+});
+
+test('the note appears only when the signal changed the winner', () => {
+  // Both hosts stale: the signal is present and active but decides nothing, because it demotes both
+  // equally. Reporting it anyway would train an operator to ignore the field.
+  const hosts = [
+    host('a', { probe: ok({ knowledgeEnabled: true, knowledgePullAt: stale() }) }),
+    host('b', { probe: ok({ knowledgeEnabled: true, knowledgePullAt: stale() }) }),
+  ];
+  assert.equal(routeRun(hosts, {}, opts).softRankNote, null);
+});
+
+test('capacity still outranks freshness when the gap is real', () => {
+  // The signal is a tiebreaker between comparable machines, not a licence to pile work onto an idle
+  // box with old knowledge while a busy-but-fresh one sits there. It is one penalty, not a reordering.
+  const hosts = [
+    host('fresh-but-saturated', {
+      probe: ok({ knowledgeEnabled: true, knowledgePullAt: fresh(), activeRuns: 40, queueDepth: 20, workerCount: 2 }),
+    }),
+    host('stale-but-idle', { probe: ok({ knowledgeEnabled: true, knowledgePullAt: stale() }) }),
+  ];
+  const d = routeRun(hosts, {}, opts);
+  assert.equal(d.hostId, 'stale-but-idle');
+});

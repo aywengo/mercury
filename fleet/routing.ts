@@ -33,6 +33,17 @@ export interface Exclusion {
 export interface RouteDecision {
   hostId: string;
   score: number;
+  /**
+   * Why this host won the soft rank, when anything other than capacity decided it. Null when the
+   * knowledge signal did not change the outcome.
+   *
+   * Section 4 of crew/harness-capabilities.md requires placement to be explainable, and the reason it
+   * gives is operational: a scheduler that moves work to a machine nobody expected, with no stated
+   * reason, is not debuggable by an operator at 3am. This is null in the common case precisely so that
+   * a non-null value means something -- it appears only when the ranking would have chosen a different
+   * host without the knowledge signal, which is the one case worth reading.
+   */
+  softRankNote: string | null;
   /** True when a localPath was replaced by a clone URL, which is what removed the locality constraint. */
   rewroteLocalPath: boolean;
   /** The repository payload to send the child, after any rewrite. */
@@ -52,6 +63,14 @@ export class RoutingError extends Error {
 }
 
 export interface RouterOptions {
+  /**
+   * Age beyond which a host's knowledge replica counts against it in the soft rank. 0 or absent
+   * disables the signal, which is the default: this changes which machine a Run lands on, and nobody
+   * asked for that by upgrading Fleet.
+   */
+  knowledgeStaleMs?: number;
+  /** Injectable clock, so the staleness comparison is testable without waiting for time to pass. */
+  now?: () => number;
   /**
    * Resolve a declared local path to a host-independent clone URL. Returning null means "no known URL", and
    * then locality stays a hard constraint. Injected so the policy (a file, a label, a lookup) is separable
@@ -82,13 +101,40 @@ function declaresPath(host: HostView, localPath: string): boolean {
 }
 
 /**
+ * How much a stale knowledge replica costs in the soft rank. Large enough that a fresh host reliably
+ * beats a stale one, which is what section 14 asks for, and finite, which is what keeps it a preference.
+ * It sits below the 1_000 unprobed sentinel on purpose: a host we know nothing about is a worse bet than
+ * one we know is running slightly old knowledge, and the signal must not invert that.
+ */
+const KNOWLEDGE_STALE_PENALTY = 100;
+
+/**
+ * Age of a host's knowledge replica in ms, or null when Fleet has no opinion.
+ *
+ * Null is the important answer and it covers four different situations that must all be neutral: the
+ * signal is disabled, the host has Atlas switched off, the status route refused or does not exist yet,
+ * and the probe itself did not succeed. Treating any of those as stale would demote healthy hosts for
+ * reasons that have nothing to do with knowledge, which is exactly how a soft signal becomes an outage.
+ */
+function knowledgeAgeMs(host: HostView, staleMs: number, now: number): number | null {
+  if (staleMs <= 0) return null;
+  const p = host.probe;
+  if (!p || p.outcome !== 'ok') return null;
+  if (p.knowledgeEnabled !== true) return null;
+  if (!p.knowledgePullAt) return null;
+  const at = Date.parse(p.knowledgePullAt);
+  if (!Number.isFinite(at)) return null;
+  return Math.max(0, now - at);
+}
+
+/**
  * Score a host for preference. Lower is better.
  *
  * Only reached when several hosts survive the hard filters, and it can never override one: capacity is a
  * preference, locality is a constraint. A null capacity means the host has not been probed recently, which is
  * treated as neutral rather than free -- an unprobed host must not look like the emptiest machine in the fleet.
  */
-function score(host: HostView): number {
+function score(host: HostView, staleMs: number, now: number): number {
   const p = host.probe;
   if (!p || p.outcome !== 'ok') return 1_000;
   const active = p.activeRuns ?? 0;
@@ -96,7 +142,8 @@ function score(host: HostView): number {
   const workers = p.workerCount ?? 1;
   // One unit of headroom per worker keeps a big machine from being penalised for its capacity.
   const headroom = Math.max(0, active + queued - workers);
-  return active * 2 + queued + headroom;
+  const age = knowledgeAgeMs(host, staleMs, now);
+  return active * 2 + queued + headroom + (age !== null && age > staleMs ? KNOWLEDGE_STALE_PENALTY : 0);
 }
 
 function bad(field: string, value: unknown): never {
@@ -135,6 +182,9 @@ export function routeRun(
   // is a mistake in their own request.
   validateRequest(request);
 
+  const staleMs = opts.knowledgeStaleMs ?? 0;
+  const now = opts.now?.() ?? Date.now();
+
   const considered = hosts.map((h) => h.id);
   const exclusions: Exclusion[] = [];
 
@@ -163,6 +213,8 @@ export function routeRun(
     return {
       hostId: chosen.id,
       score: 0,
+      // Explicit placement is the operator overriding the rank, so there is no rank to explain.
+      softRankNote: null,
       rewroteLocalPath: explicitUrl !== null,
       repository: explicitUrl ? { ...request.repository, url: explicitUrl, localPath: undefined } : request.repository,
       considered,
@@ -214,7 +266,7 @@ export function routeRun(
       });
       continue;
     }
-    survivors.push({ host, score: score(host) });
+    survivors.push({ host, score: score(host, staleMs, now) });
   }
 
   if (survivors.length === 0) {
@@ -234,12 +286,30 @@ export function routeRun(
 
   survivors.sort((a, b) => a.score - b.score || a.host.id.localeCompare(b.host.id));
   const chosen = survivors[0];
+
+  // Explain the signal only when it actually changed the answer. Recomputing the ranking without it is
+  // cheap -- survivors is a handful of hosts -- and it is the only honest way to know: reporting the
+  // staleness of every candidate would bury the one case an operator needs, which is "this is why the
+  // Run went to the machine you did not expect".
+  let softRankNote: string | null = null;
+  if (staleMs > 0 && survivors.length > 1) {
+    const withoutSignal = [...survivors].sort(
+      (a, b) => score(a.host, 0, now) - score(b.host, 0, now) || a.host.id.localeCompare(b.host.id),
+    );
+    if (withoutSignal[0]!.host.id !== chosen.host.id) {
+      const age = knowledgeAgeMs(withoutSignal[0]!.host, staleMs, now);
+      softRankNote =
+        `knowledge staleness: preferred ${chosen.host.id} over ${withoutSignal[0]!.host.id}, ` +
+        `whose replica is ${Math.floor((age ?? 0) / 1000)}s old (threshold ${Math.floor(staleMs / 1000)}s)`;
+    }
+  }
   const repository: RouteRepository | undefined = rewritten
     ? { ...repo, url: rewritten, localPath: undefined }
     : repo;
   return {
     hostId: chosen.host.id,
     score: chosen.score,
+    softRankNote,
     rewroteLocalPath: rewritten !== null,
     repository,
     considered,
