@@ -1284,7 +1284,8 @@ later is worth building until the phase before it has been exercised by a real R
    The mechanism was already built -- `autoPromote()` in `atlas/notes.ts`, its policy and
    `atlas/test/promotion.test.ts`, and `ux_notes_live_claim`, the partial unique index from #566
    that makes one-live-note-per-claim a database constraint rather than a convention. This
-   observation closes the phase's gate. It no longer depends on Teams Phase -1: that landed as
+   observation closes the phase's gate: the gate was #589's real-harness observation, and the
+   four Runs above are that observation. It no longer depends on Teams Phase -1: that landed as
    #520, Hermes has completed a Run through Mercury (`run_f3a4e81644be4081`, v0.21.2), and Hermes
    has had a knowledge channel since #565.
 
