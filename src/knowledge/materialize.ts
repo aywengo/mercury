@@ -103,16 +103,23 @@ function evidenceLabel(e: EvidenceRef): string {
  * Built with `JSON.stringify` rather than written as a literal string so the example cannot drift into
  * being invalid JSON -- which matters because this line is the only part of the contribution
  * instructions an agent actually copies, and a rejected example teaches agents that writing notes does
- * not work. `test/knowledgeMaterialize.test.ts` feeds it through the real harvester and asserts it is
+ * not work. `test/knowledgeHarvest.test.ts` feeds it through the real harvester and asserts it is
  * accepted, so the schema and the example fail together rather than the example quietly going stale.
  *
- * Exported for that test. Not exported to be reused at runtime anywhere else.
+ * Exported for that test. Not exported for any runtime use.
+ *
+ * Scoped to `project` rather than `repo:<hash>` on purpose. A hash copied verbatim into every workspace
+ * would name a repository that does not exist: the note is accepted by both the host and Atlas, and is
+ * then scoped to something no Run ever matches, so it is silently never delivered -- the worst failure
+ * this path has, because nothing reports it. An agent cannot compute the real hash from anything it is
+ * given, so the example must not require one.
  */
 export const NOTE_EXAMPLE_LINE = JSON.stringify({
   kind: 'command',
-  scope: 'repo:3332f86c55748cdc',
+  scope: 'project',
   claim: 'Atlas tests run with `npm run test:atlas`; `npm test` runs all four suites.',
-  detail: 'AGENTS.md lists only `npm test`, and no doc in the repository mentions test:atlas.',
+  detail: 'The Commands block in AGENTS.md lists only `npm test`, which is four times slower '
+    + 'when the only thing that changed is under atlas/.',
   evidence: [{ type: 'repo-file', repo: 'mercury', path: 'package.json', sha: 'a08c528' }],
 });
 
@@ -170,8 +177,9 @@ export function renderNotesMd(projectId: string, packHash: string, notes: readon
   lines.push('```');
   lines.push('');
   lines.push('Each line takes the fields `kind`, `scope`, `claim`, and optionally `detail`, `evidence`,');
-  lines.push('`contradicts`. `kind` is one of `fact`, `convention`, `command`, `pitfall`, `decision`,');
-  lines.push('`preference`. `scope` is `project`, `repo:<16-hex>`, `repo:<16-hex>#<path>` or');
+  lines.push('`contradicts`. `kind` is one of `fact`, `convention`, `command`, `pitfall`,');
+  lines.push('`decision`, `artifact-pointer`. `scope` is `project`, `repo:<16-hex>`,');
+  lines.push('`repo:<16-hex>#<path>` or');
   lines.push('`agent:<id>`. `claim` is one sentence, `detail` is the why. Evidence entries take');
   lines.push('`{"type":"issue","url":...}`, `{"type":"pr","url":...}`,');
   lines.push('`{"type":"commit","repo":...,"sha":...}`,');

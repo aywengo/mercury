@@ -13,7 +13,7 @@ import { join } from 'node:path';
 
 import { harvestNotes, maxHarvestBytes } from '../src/knowledge/harvest.ts';
 import { validateDraft } from '../src/knowledge/validation.ts';
-import { EVIDENCE_TYPES } from '../src/knowledge/types.ts';
+import { EVIDENCE_TYPES, EVIDENCE_REQUIRED_KINDS, NOTE_KINDS } from '../src/knowledge/types.ts';
 import { DEFAULT_BOUNDS, type KnowledgeBounds } from '../src/knowledge/validation.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import { tempDir } from './helpers.ts';
@@ -230,4 +230,29 @@ test('the invitation is tied to finishing the task, not left as an open conditio
   // failure was an agent that read this section, used the note in it, and wrote nothing at all.
   assert.match(instructions(), /Before you report the task done/,
     'the contribution step needs a checkpoint, not only a condition');
+});
+
+test('every kind the instructions document is a kind the validator accepts', () => {
+  // The evidence shapes above have been pinned to the validator since this file existed, and the kind
+  // list sitting three lines above them was NOT pinned -- so the same class of defect survived the fix
+  // that fixed it. The instructions named `preference`, which the validator rejects as invalid-kind,
+  // and omitted `artifact-pointer`, which it accepts. An agent that wrote the documented kind got a
+  // rejection naming nothing that would have told it why.
+  const text = instructions();
+  const clause = text.match(/`kind` is one of ([^.]+)\./);
+  assert.ok(clause, 'the instructions must carry a kind list this test can read');
+  const documented = [...clause[1]!.matchAll(/`([a-z-]+)`/g)].map((m) => m[1]).sort();
+  assert.deepEqual(documented, [...NOTE_KINDS].sort(),
+    `instructions document ${JSON.stringify(documented)} but the vocabulary is ${JSON.stringify([...NOTE_KINDS].sort())}`);
+});
+
+test('the kinds that need evidence say so in the instructions', () => {
+  // A pitfall or decision written without evidence is refused with `missing-evidence`. Telling an agent
+  // the vocabulary but not which members of it need a citation guarantees rejections it cannot diagnose.
+  const text = instructions();
+  for (const kind of EVIDENCE_REQUIRED_KINDS) {
+    assert.ok(text.includes(kind), `the instructions never mention the kind ${kind}`);
+  }
+  assert.match(text, /refused\n?without at least one evidence entry|without at least one evidence entry/,
+    'the instructions must say which kinds require evidence');
 });
