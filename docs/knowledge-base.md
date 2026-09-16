@@ -973,7 +973,7 @@ handling in substance.
 | --- | --- |
 | `projects` | `id`, `name`, `repo_identities_json`, `promotion_policy_json`, `created_at` |
 | `contributors` | `token_hash`, `host_id`, `project_ids_json`, `created_at`, `last_seen_at`; the secret is never stored, only its hash |
-| `notes` | `note_id`, `project_id`, `current_revision`, `tier`, `kind`, `scope`, `claim_hash`, `seq`; indexed on `(project_id, seq)`, `(project_id, tier, scope)`, `(project_id, claim_hash)`, plus a partial UNIQUE on `(project_id, claim_hash) WHERE tier != 'retired'` (migration v2) |
+| `notes` | `note_id`, `project_id`, `current_revision`, `tier`, `kind`, `scope`, `claim_hash`, `seq`; indexed on `(project_id, seq)`, `(project_id, tier, scope)`, `(project_id, claim_hash)`, plus a partial UNIQUE on `(project_id, claim_hash) WHERE tier NOT IN ('retired', 'deleted')` (migration v2, widened by v3 so a tombstone does not hold its claim hostage forever) |
 | `note_revisions` | `note_id`, `revision`, `note_json`, `seq`, `created_at`; immutable rows |
 | `note_sources` | `note_id`, `host_id`, `run_id`, `agent`, `harness_version`, `source`, `recorded_at`; unique on `(note_id, host_id, run_id)`; this is what corroboration is counted from |
 | `promotions` | `note_id`, `from_tier`, `to_tier`, `actor`, `reason`, `seq`, `at` |
@@ -1104,7 +1104,12 @@ What replaced it is a **sequence-bearing tombstone**. `deleteNote()` writes a fi
 through `transition()` — so it takes a `seq`, lands in `note_revisions`, and appears in the
 promoted feed exactly as a retirement does — carrying the note id, the claim hash, the provenance
 and the audit trail, and nothing else: the claim, detail and evidence are emptied in the one place
-that writes revisions. The row survives; the knowledge does not. `POST
+that writes revisions. The row survives; the knowledge does not. The revisions written *before* the
+tombstone are immutable (§11.3) and still hold the text on disk, so `getNote()` blanks them at read
+time for a deleted note -- which is what makes the sentence above true of the service rather than only
+of the newest row. Stored bytes are never rewritten, so anyone with direct read access to the database
+file can still recover them; that is a disk-and-backup trust question this route cannot answer, and it
+is stated rather than glossed. `POST
 /v1/projects/:project/notes/:noteId/delete` is admin-only, for the same reason promotion is: a
 contributor able to delete could erase a note it disagrees with, and §12 settles disagreements by
 contest and retirement instead. The `deleted` tier is not a live tier, so the one-live-note-per-claim

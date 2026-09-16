@@ -458,3 +458,41 @@ test('deletion: requires a reason, and is idempotent', () => {
   assert.equal(store.getNote('other', 'nope'), null);
   db.close();
 });
+
+test('deletion: the note history served by getNote() carries no text either (#590)', () => {
+  // The tombstone revision is emptied by transition(), but the revisions BEFORE it are immutable and
+  // still hold the original text, and getNote() returns all of them to anyone who can read the project.
+  // Without the read-time scrub this assertion is the difference between "the knowledge does not
+  // survive" and "the knowledge is one GET away". Proven by mutation: removing the scrub fails here
+  // and nowhere else in the file.
+  const claim = 'the release branch is cut from the tag';
+  const { db, store, noteId } = tombstoneFixture(claim);
+  store.deleteNote('test-project', noteId, 'admin', 'secret in the claim');
+
+  const detail = store.getNote('test-project', noteId);
+  assert.ok(detail, 'a deleted note stays readable as a record that it existed');
+  assert.equal(detail.note.tier, 'deleted');
+  assert.ok(detail.revisions.length >= 2, 'the history must still be there, or this proves nothing');
+  for (const rev of detail.revisions) {
+    assert.equal(rev.note.claim, '', `revision ${rev.revision} still serves the claim text`);
+    assert.equal(rev.note.detail, undefined, `revision ${rev.revision} still serves the detail text`);
+  }
+  // Identity and audit trail survive; only the knowledge goes.
+  const tomb = detail.revisions.find((r) => r.note.tier === 'deleted')!;
+  assert.ok(tomb.note.noteId, 'a scrubbed revision must still identify itself');
+  assert.ok(tomb.createdAt, 'and still say when it happened');
+});
+
+test('retirement: the history stays readable, which is what separates it from deletion (#590)', () => {
+  // Section 12 draws the line here on purpose: a retired note keeps its text so a reader can find out
+  // what Mercury believed before the decision. If this test ever fails, the two tiers have collapsed
+  // into one and the distinction the spec spends words on is gone from the code.
+  const claim = 'the release branch is cut from the tag';
+  const { db, store, noteId } = tombstoneFixture(claim);
+  store.retire('test-project', noteId, 'admin', 'superseded by the new build guide');
+
+  const detail = store.getNote('test-project', noteId);
+  assert.equal(detail!.note.tier, 'retired');
+  assert.ok(detail!.revisions.some((r) => r.note.claim === claim),
+    'a retired note must still serve what it said');
+});

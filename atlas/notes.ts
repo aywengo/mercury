@@ -469,6 +469,14 @@ export class NoteStore {
    * an answer, and section 12 keeps that trail indefinitely. What IS removed is the part that can hurt:
    * the claim text and anything quoted inside it.
    *
+   * One caveat that is easy to miss and was missed once. The revisions written BEFORE the tombstone are
+   * immutable rows (section 11.3) and still hold the original text on disk. `getNote()` therefore blanks
+   * them at read time for a deleted note, which is what makes "the knowledge does not survive" true of
+   * the service rather than only of the newest row. Stored bytes are not rewritten: the immutability
+   * promise and the deletion promise are both kept, and the cost is that someone with direct read access
+   * to the database file can still recover the text. That is a backup-and-disk-trust question, not one
+   * this route can answer.
+   *
    * `reason` is required for the same reason a retirement requires one. A deletion with no recorded
    * reason is indistinguishable from a bug at 3am.
    */
@@ -628,7 +636,18 @@ export class NoteStore {
       .all(noteId) as unknown as { revision: number; note_json: string; created_at: string }[])
       // Redacted too. A caller that asks for one note gets its whole history, and a read-time pass that
       // covered only the current revision would leak the secret through an older one.
-      .map((r) => ({ revision: r.revision, note: this.project(JSON.parse(r.note_json) as Note), createdAt: r.created_at }));
+      .map((r) => ({ revision: r.revision, note: this.project(JSON.parse(r.note_json) as Note), createdAt: r.created_at }))
+      // And blanked, for a deleted note, for the same reason in a different direction. `transition()`
+      // empties the tombstone revision, but the revisions before it are immutable and still carry the
+      // text -- so without this pass a caller could delete a note for "secret in the claim" and then
+      // read the secret straight back out of the history on the same route. Scrubbing here rather than
+      // rewriting the rows keeps section 11.3's immutability promise: what is stored does not change,
+      // what is served does.
+      //
+      // Retired notes are deliberately NOT scrubbed. Section 12 distinguishes them precisely because a
+      // reader may want to know what Mercury believed before the decision; a deleted note is the case
+      // where the answer is no longer supposed to be available.
+      .map((r) => (note.tier === 'deleted' && r.note.tier !== 'deleted' ? { ...r, note: scrubbed(r.note) } : r));
     const sources = (this.db.prepare('SELECT * FROM note_sources WHERE note_id = ? ORDER BY recorded_at ASC').all(noteId) as unknown as SourceRow[])
       .map((s) => ({ hostId: s.host_id, runId: s.run_id || null, agent: s.agent, harnessVersion: s.harness_version, source: s.source, recordedAt: s.recorded_at }));
     return { note, revisions, sources };
@@ -758,6 +777,18 @@ export class NoteStore {
     return (this.db.prepare('SELECT host_id, last_seen_at FROM contributors ORDER BY host_id').all() as unknown as { host_id: string; last_seen_at: string | null }[])
       .map((r) => ({ hostId: r.host_id, lastSeenAt: r.last_seen_at }));
   }
+}
+
+/**
+ * A note with its knowledge removed and its identity left intact.
+ *
+ * Mirrors the tombstone shape that `transition()` writes, so "deleted" means the same thing on both
+ * the row and the read projection: the claim, detail and evidence go, the note id, tier, sequence
+ * number, timestamps and actor stay. Knowing that a note existed, when it was written and that it was
+ * deleted is audit information. Repeating what it said after being told to forget it is not.
+ */
+function scrubbed(note: Note): Note {
+  return { ...note, claim: '', detail: undefined, evidence: [], contested: false };
 }
 
 function buildNote(noteId: string, revision: number, projectId: string, tier: NoteTier, c: NoteContribution, corroboration: Corroboration, seq: number): Note {
