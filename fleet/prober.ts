@@ -16,6 +16,8 @@ export interface ProberOptions {
   resolveToken: (ref: string) => string;
   intervalMs: number;
   timeoutMs: number;
+  /** Passed to each probe; zero (the default) skips the knowledge status call entirely. */
+  knowledgeStaleMs?: number;
   fetchImpl?: typeof fetch;
   onError?: (hostId: string, err: Error) => void;
 }
@@ -57,7 +59,8 @@ export function createProber(opts: ProberOptions): Prober {
           }
           try {
             const rec = await probeAndRecord(
-              { hostId: host.id, baseUrl: host.baseUrl, token, timeoutMs: opts.timeoutMs },
+              { hostId: host.id, baseUrl: host.baseUrl, token, timeoutMs: opts.timeoutMs,
+                knowledgeStaleMs: opts.knowledgeStaleMs ?? 0 },
               opts.fetchImpl,
             );
             opts.registry.recordProbe(rec);

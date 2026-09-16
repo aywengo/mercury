@@ -82,6 +82,7 @@ time on the wrong machine.
 | `FLEET_PROBE_INTERVAL_MS` | `15000` | Sweep interval for `probe --watch`. |
 | `FLEET_PROBE_TIMEOUT_MS` | `5000` | Per-request timeout. A hung host must not stall the sweep. |
 | `FLEET_ALLOW_INSECURE_CREDENTIALS` | unset | `1` bypasses the mode check. For filesystems that cannot do `0600`. |
+| `FLEET_KNOWLEDGE_STALE_MS` | `0` (off) | Age past which a host's knowledge replica ranks it BELOW a fresher host. A preference only: it can never stop a host taking work, and a fleet of one stale host still places on it. Needs the host's `GET /api/knowledge/status`, which is admin-only, so with an ordinary caller credential Fleet reads nothing and ranks nothing. |
 
 > The default is laptop-shaped on purpose, for development. Fleet runs as a **service**
 > ([`docs/fleet-design.md` §15](../docs/fleet-design.md#15-fleet-as-a-service)), and a hardened unit sets

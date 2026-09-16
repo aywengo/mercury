@@ -49,6 +49,22 @@ export interface ProbeRecord {
    * Fleet was written against, so refusing it would take a healthy host out of rotation.
    */
   hostApi?: number | null;
+  /**
+   * Whether the host has Atlas configured, read from `GET /api/knowledge/status`.
+   *
+   * Null means Fleet has NO OPINION, and the three ways to get here must stay distinct from `false`:
+   * the host predates the route, the credential is not admin so the read was refused, or the request
+   * failed. Only a host that answered `enabled: false` is known to have no knowledge base. The scorer
+   * treats null as neutral, which is the whole reason the soft signal is safe to add.
+   */
+  knowledgeEnabled?: boolean | null;
+  /**
+   * When the host last pulled its knowledge replica. Null means "no timestamp was given", which covers
+   * both a host that has never pulled (enabled=1, lastPull.at=null) and a host Fleet was never told
+   * about (enabled=null). The two are told apart by `knowledgeEnabled`, not by this field: enabled=1
+   * with a null pull time is a real "never synced" answer, while enabled=null is no opinion at all.
+   */
+  knowledgePullAt?: string | null;
   detail: string | null;
   activeRuns: number | null;
   queueDepth: number | null;
@@ -144,6 +160,8 @@ interface ProbeRow {
   last_error: string | null;
   host_version: string | null;
   host_api: number | null;
+  knowledge_enabled: number | null;
+  knowledge_pull_at: string | null;
 }
 
 function rowToHost(row: HostRow): HostRecord {
@@ -174,6 +192,8 @@ function rowToProbe(row: ProbeRow): ProbeRecord {
     lastError: row.last_error,
     hostVersion: row.host_version,
     hostApi: row.host_api,
+    knowledgeEnabled: row.knowledge_enabled === null ? null : row.knowledge_enabled === 1,
+    knowledgePullAt: row.knowledge_pull_at,
   };
 }
 
@@ -300,14 +320,15 @@ export class HostRegistry {
       .prepare(
         `INSERT INTO host_probe
            (host_id, outcome, detail, active_runs, queue_depth, worker_count, worker_id, agents, probed_at, last_error,
-            host_version, host_api)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            host_version, host_api, knowledge_enabled, knowledge_pull_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(host_id) DO UPDATE SET
            outcome = excluded.outcome, detail = excluded.detail,
            active_runs = excluded.active_runs, queue_depth = excluded.queue_depth,
            worker_count = excluded.worker_count, worker_id = excluded.worker_id,
            agents = excluded.agents, probed_at = excluded.probed_at, last_error = excluded.last_error,
-           host_version = excluded.host_version, host_api = excluded.host_api`,
+           host_version = excluded.host_version, host_api = excluded.host_api,
+           knowledge_enabled = excluded.knowledge_enabled, knowledge_pull_at = excluded.knowledge_pull_at`,
       )
       .run(
         rec.hostId,
@@ -323,6 +344,8 @@ export class HostRegistry {
         // NULL, not 0, when the host reported no schema: see the ProbeRecord comment and migration v4.
         rec.hostVersion ?? null,
         rec.hostApi ?? null,
+        rec.knowledgeEnabled === null || rec.knowledgeEnabled === undefined ? null : (rec.knowledgeEnabled ? 1 : 0),
+        rec.knowledgePullAt ?? null,
       );
     if (rec.outcome === 'ok') {
       this.db

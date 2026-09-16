@@ -215,6 +215,13 @@ Live and covered by tests:
   elsewhere); and `flush` drains the outbox to Atlas in one synchronous pass rather than waiting for
   the pusher's timer, and refuses with an explanation when no Atlas is configured;
 - retired-row retention on the host (`MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS`).
+- a **soft** placement signal in Fleet (`FLEET_KNOWLEDGE_STALE_MS`, off by default): a host whose
+  knowledge replica is older than the threshold ranks below a fresher one, and the decision is
+  returned and logged when it changes the outcome. It never excludes a host. That is the whole
+  design — refusing to place work because a note is two minutes old would be a Run lost to a cache —
+  and it is why a fleet of one stale host still gets the work. Fleet reads the host's
+  `GET /api/knowledge/status`, which is admin-only, so an ordinary caller credential yields *no
+  opinion* rather than *stale*, and a host running an older Mercury is treated the same way.
 
 The loop is closed end to end **in the direction that has been measured**: knowledge promoted on one
 host reaches a Run on another host, and a real model there acts on it. `test/knowledgeTeachE2E.test.ts`

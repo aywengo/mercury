@@ -132,6 +132,7 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
     resolveToken: (ref) => deps.credentials.secret(ref),
     intervalMs: deps.config.probeIntervalMs,
     timeoutMs: deps.config.probeTimeoutMs,
+    knowledgeStaleMs: deps.config.knowledgeStaleMs,
   });
 
   // Built once so its cache survives across requests. Null when Atlas is not configured, which is a
@@ -270,6 +271,7 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
           hostId: id, baseUrl: host.baseUrl,
           token: deps.credentials.secret(host.credentialRef),
           timeoutMs: deps.config.probeTimeoutMs,
+          knowledgeStaleMs: deps.config.knowledgeStaleMs,
         });
         registry.recordProbe(rec);
         sendJson(res, 200, { probe: rec });
@@ -296,7 +298,7 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
             labels: b.labels as Record<string, string> | undefined,
             repository: b.repository as RouteRepository | undefined,
           },
-            { resolveCloneUrl },
+            { resolveCloneUrl, knowledgeStaleMs: deps.config.knowledgeStaleMs },
           );
         } catch (err) {
           // A routing failure names every host considered and why each was excluded. Swallowing that into a
@@ -307,6 +309,11 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
         if (!hostAllowed(ctx.caller, decision.hostId)) {
           // Unreachable given the scoping above, kept because a router change must not silently widen access.
           throw new HttpError(403, `caller ${ctx.caller.ownerId} may not submit work to host ${decision.hostId}`);
+        }
+        if (decision.softRankNote) {
+          // Logged as well as returned. The response reaches whoever submitted the Run; the log is how
+          // anyone looking later can explain where a Run went, which is the 3am case section 4 names.
+          deps.logger.info('placement', { hostId: decision.hostId, note: decision.softRankNote });
         }
         const requested: Record<string, unknown> = { ...b, ...(decision.repository ? { repository: decision.repository } : {}) };
         if (!decision.repository) delete requested.repository;
@@ -326,6 +333,10 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
           // Say so when the localPath was replaced: a caller who asked for a path and got a clone should be
           // able to see that the constraint was lifted, not discover it from a missing working tree.
           ...(decision.rewroteLocalPath ? { rewroteLocalPath: true } : {}),
+          // Only present when the knowledge signal actually changed which host won. Section 4 requires
+          // placement to be explainable, and a field that is almost always absent is explainable in a way
+          // that a field repeating the obvious every time is not.
+          ...(decision.softRankNote ? { softRankNote: decision.softRankNote } : {}),
           childRunId: outcome.binding.childRunId,
           pending: outcome.pending,
           reused: outcome.reused,

@@ -201,3 +201,36 @@ test('migrations apply once per database file, not once per open', () => {
     third.db.close();
   }
 });
+
+
+test('knowledge freshness survives a probe round-trip, and unknown stays unknown', () => {
+  // The three states have to stay distinguishable through SQLite, because the scorer's safety depends
+  // on reading them back differently: false is "this host has no Atlas", null is "we were never told",
+  // and a timestamp is the only thing allowed to move a ranking. A driver that coerced null to 0 or to
+  // an empty string here would silently demote every host Fleet has not asked yet.
+  const { registry } = fresh();
+  registry.add({ id: 'b', baseUrl: 'http://a:1', credentialRef: 'r' });
+  const base = { hostId: 'b', detail: null, activeRuns: null, queueDepth: null, workerCount: null,
+    workerId: null, agents: null, lastError: null, outcome: 'ok' as const, probedAt: '2026-01-01T00:00:00.000Z' };
+
+  registry.recordProbe({ ...base, knowledgeEnabled: true, knowledgePullAt: '2026-01-01T00:00:00.000Z' });
+  let p = registry.probeFor('b')!;
+  assert.equal(p.knowledgeEnabled, true);
+  assert.equal(p.knowledgePullAt, '2026-01-01T00:00:00.000Z');
+
+  registry.recordProbe({ ...base, knowledgeEnabled: false, knowledgePullAt: null });
+  p = registry.probeFor('b')!;
+  assert.equal(p.knowledgeEnabled, false, 'a known-off host must not read back as unknown');
+
+  registry.recordProbe({ ...base, knowledgeEnabled: null, knowledgePullAt: null });
+  p = registry.probeFor('b')!;
+  assert.equal(p.knowledgeEnabled, null, 'no opinion must survive as null, not false and not 0');
+  assert.equal(p.knowledgePullAt, null);
+
+  // And a probe that omits the fields entirely -- an older caller -- reads back as unknown rather than
+  // keeping whatever the previous probe recorded.
+  registry.recordProbe({ ...base, knowledgeEnabled: undefined, knowledgePullAt: undefined });
+  p = registry.probeFor('b')!;
+  assert.equal(p.knowledgeEnabled, null);
+  assert.equal(p.knowledgePullAt, null);
+});

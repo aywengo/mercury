@@ -8,6 +8,8 @@ interface Behavior {
   health?: { status?: number; body?: unknown; delayMs?: number };
   workers?: { status?: number; body?: unknown; delayMs?: number };
   agents?: { status?: number; body?: unknown; delayMs?: number };
+  /** GET /api/knowledge/status. Absent means the host has no such route, exactly like an older Mercury. */
+  knowledge?: { status?: number; body?: unknown; delayMs?: number };
   /** Record what the probe actually sent, so auth behaviour is observed rather than assumed. */
   seen?: Array<{ path: string; auth: string | undefined }>;
 }
@@ -18,6 +20,7 @@ async function startFakeMercury(behavior: Behavior): Promise<{ url: string; clos
     const cfg = req.url === '/healthz' ? behavior.health
       : req.url === '/healthz/workers' ? behavior.workers
       : req.url === '/api/agents' ? behavior.agents
+      : req.url === '/api/knowledge/status' ? behavior.knowledge
       : undefined;
     seen.push({ path: req.url ?? '', auth: req.headers.authorization as string | undefined });
     if (!cfg) {
@@ -287,4 +290,114 @@ test('a hostile host version string cannot smuggle terminal controls into the re
       'no control character may survive into a field the CLI prints');
     assert.ok(!r.hostVersion!.includes('\n'), 'a version must not be able to forge a second table row');
   } finally { await fake.close(); }
+});
+
+
+// --- knowledge freshness recorded by the probe (docs/knowledge-base.md section 14) ---------------
+
+const PULL = '2026-06-01T11:00:00.000Z';
+const HEALTHY = { health: { body: { version: '1.0.0', api: MIN_HOST_API } }, workers: { body: HEALTHY_WORKERS }, agents: { body: { agents: ['claude'] } } };
+
+async function probeWith(behavior: Behavior, target: Record<string, unknown> = {}) {
+  const m = await startFakeMercury({ ...HEALTHY, ...behavior } as Behavior);
+  try {
+    return await probeHost({ hostId: 'h', baseUrl: m.url, token: 'tok', timeoutMs: 1_500,
+      knowledgeStaleMs: 1, ...target } as never);
+  } finally { await m.close(); }
+}
+
+test('a host with Atlas configured reports its pull time', async () => {
+  const r = await probeWith({ knowledge: { body: { enabled: true, lastPull: { at: PULL } } } });
+  assert.equal(r.outcome, 'ok');
+  assert.equal(r.knowledgeEnabled, true);
+  assert.equal(r.knowledgePullAt, PULL);
+});
+
+test('a host with Atlas switched off says so, and is not stale', async () => {
+  const r = await probeWith({ knowledge: { body: { enabled: false, lastPull: { at: null } } } });
+  assert.equal(r.knowledgeEnabled, false);
+  assert.equal(r.knowledgePullAt, null);
+});
+
+test('a host that has never pulled reports null, not a fabricated time', async () => {
+  const r = await probeWith({ knowledge: { body: { enabled: true, lastPull: { at: null } } } });
+  assert.equal(r.knowledgeEnabled, true);
+  assert.equal(r.knowledgePullAt, null);
+});
+
+test('a 403 from the admin-only status route leaves Fleet with no opinion', async () => {
+  // The common case today: /api/knowledge/status is admin-only and Fleet's child credential usually is
+  // not. Recording this as stale would demote every healthy host in an ordinary deployment.
+  const r = await probeWith({ knowledge: { status: 403, body: { error: 'administrator token required' } } });
+  assert.equal(r.outcome, 'ok', 'a refused knowledge read must not make the host look unhealthy');
+  assert.equal(r.knowledgeEnabled, null);
+  assert.equal(r.knowledgePullAt, null);
+});
+
+test('an older Mercury with no such route is unknown, not stale', async () => {
+  const r = await probeWith({});
+  assert.equal(r.outcome, 'ok');
+  assert.equal(r.knowledgeEnabled, null);
+  assert.equal(r.knowledgePullAt, null);
+});
+
+test('a malformed status body is unknown rather than guessed at', async () => {
+  // Each case states BOTH expectations, because "reject the whole body" is not what the probe does: it
+  // takes each field only when that field is the right type. A body that is half trustworthy is read
+  // halfway, which is what keeps a partially-broken host from looking entirely unknown.
+  const cases: [unknown, boolean | null, string | null][] = [
+    [{}, null, null],
+    [null, null, null],
+    [[], null, null],
+    [{ enabled: 'yes' }, null, null],
+    [{ enabled: 1 }, null, null],
+    // enabled is genuinely a boolean here, so it is taken; only the malformed lastPull is dropped.
+    [{ enabled: true, lastPull: 'now' }, true, null],
+    [{ enabled: true, lastPull: { at: 1_717_000_000_000 } }, true, null],
+    [{ enabled: true, lastPull: { at: 'not a date' } }, true, 'not a date'],
+  ];
+  for (const [body, wantEnabled, wantPull] of cases) {
+    const r = await probeWith({ knowledge: { body } });
+    assert.equal(r.knowledgeEnabled, wantEnabled, `enabled for ${JSON.stringify(body)}`);
+    assert.equal(r.knowledgePullAt, wantPull, `pullAt for ${JSON.stringify(body)}`);
+  }
+});
+
+test('the knowledge read is skipped once the credential has been refused', async () => {
+  // The status route is admin-only, so a token that already failed /api/agents cannot read it. Asking
+  // anyway would add a round trip and a second 401 to every sweep of every misconfigured host.
+  const m = await startFakeMercury({
+    health: { body: { version: '1.0.0', api: MIN_HOST_API } },
+    workers: { body: HEALTHY_WORKERS },
+    agents: { status: 401, body: { error: 'no' } },
+    knowledge: { body: { enabled: true, lastPull: { at: PULL } } },
+  } as Behavior);
+  try {
+    const r = await probeHost({ hostId: 'h', baseUrl: m.url, token: 'tok', timeoutMs: 1_500 } as never);
+    assert.equal(r.outcome, 'unauthorized');
+    assert.equal(r.knowledgeEnabled, null);
+    assert.ok(!m.seen.some((s) => s.path === '/api/knowledge/status'),
+      'Fleet must not knock on an admin route it already knows it cannot open');
+  } finally { await m.close(); }
+});
+
+
+test('the knowledge route is not called while the signal is off', async () => {
+  // The default is off, and off must cost nothing: no extra round trip to every host on every sweep,
+  // most of which would refuse the admin-only route anyway. This is the test that would have caught
+  // the original design, which probed unconditionally.
+  const m = await startFakeMercury({
+    health: { body: { version: '1.0.0', api: MIN_HOST_API } },
+    workers: { body: HEALTHY_WORKERS },
+    agents: { body: { agents: ['claude'] } },
+    knowledge: { body: { enabled: true, lastPull: { at: PULL } } },
+  } as Behavior);
+  try {
+    const r = await probeHost({ hostId: 'h', baseUrl: m.url, token: 'tok', timeoutMs: 1_500,
+      knowledgeStaleMs: 0 } as never);
+    assert.equal(r.outcome, 'ok');
+    assert.equal(r.knowledgeEnabled, null, 'off means no opinion, not a cached opinion');
+    assert.ok(!m.seen.some((s) => s.path === '/api/knowledge/status'),
+      'the status route must not be touched while the signal is off');
+  } finally { await m.close(); }
 });

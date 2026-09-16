@@ -20,6 +20,12 @@ export interface ProbeTarget {
   /** The secret, resolved by the caller from the credential file. Never read from argv. */
   token: string;
   timeoutMs: number;
+  /**
+   * The placement-signal threshold (FLEET_KNOWLEDGE_STALE_MS). Zero or absent means the signal is off
+   * and the knowledge status route is NOT called at all: a feature that is off by default must not
+   * cost every sweep an extra round trip to every host, most of which will refuse it anyway.
+   */
+  knowledgeStaleMs?: number;
 }
 
 export interface ProbeResult {
@@ -38,6 +44,15 @@ export interface ProbeResult {
    * is a host predating the field rather than an incompatible one.
    */
   hostApi: number | null;
+  /**
+   * Knowledge freshness for the soft placement signal (docs/knowledge-base.md section 14).
+   *
+   * Null on both fields means Fleet has no opinion, and that is the correct answer for a host that
+   * predates the status route, a credential that was refused by it, and a host whose probe never got
+   * far enough to ask. The scorer treats null as neutral; see `knowledgeAgeMs` in routing.ts.
+   */
+  knowledgeEnabled: boolean | null;
+  knowledgePullAt: string | null;
 }
 
 interface FetchLike {
@@ -155,6 +170,10 @@ export async function probeHost(target: ProbeTarget, fetchImpl: FetchLike = fetc
     lastError: null,
     hostVersion: null,
     hostApi: null,
+    // No opinion, not "stale". Every early return below spreads this, so a host that never got as far as
+    // the status route is recorded as unknown rather than as out of date.
+    knowledgeEnabled: null,
+    knowledgePullAt: null,
   };
 
   // 1) Liveness. Nothing else is meaningful until we know something is listening.
@@ -281,22 +300,46 @@ export async function probeHost(target: ProbeTarget, fetchImpl: FetchLike = fetc
     agentsDetail = `HTTP ${agents.status} from /api/agents`;
   }
 
+  // 4) Knowledge freshness, for the soft placement signal (docs/knowledge-base.md section 14).
+  //
+  // Skipped when the signal is off (the default): a feature that changes nothing must not cost every
+  // sweep an extra round trip to every host, most of which will refuse it anyway. Skipped too when the
+  // credential was already refused: /api/knowledge/status is admin-only, so a token that failed
+  // /api/agents cannot read it either, and asking again would add a second 401 to every sweep for a
+  // host we already know we cannot use.
+  //
+  // EVERY non-2xx and every transport failure leaves both fields null. That is the load-bearing decision
+  // in this whole feature. A host running an older Mercury has no such route, and a Fleet holding an
+  // ordinary caller token gets 403 from one that does; if either were recorded as stale, upgrading Fleet
+  // or adding a host without an admin token would quietly push healthy machines down the ranking.
+  // Absence of data must cost a host nothing.
+  let knowledgeEnabled: boolean | null = null;
+  let knowledgePullAt: string | null = null;
+  if (!unauthorized && (target.knowledgeStaleMs ?? 0) > 0) {
+    const knowledge = await call(fetchImpl, `${base}/api/knowledge/status`, target.token, target.timeoutMs);
+    if (!knowledge.transportError && knowledge.status >= 200 && knowledge.status < 300) {
+      const body = (knowledge.json ?? {}) as { enabled?: unknown; lastPull?: { at?: unknown } };
+      if (typeof body.enabled === 'boolean') knowledgeEnabled = body.enabled;
+      if (typeof body.lastPull?.at === 'string') knowledgePullAt = body.lastPull.at;
+    }
+  }
+
   // Precedence: a host we cannot authenticate against is reported as unauthorized even though it is
   // healthy, because that is the condition blocking Fleet from using it.
   if (unauthorized) {
     return { ...empty, outcome: 'unauthorized', detail: agentsDetail, agents: null,
              activeRuns, queueDepth, workerCount, workerId, lastError: agentsDetail,
-             hostVersion, hostApi };
+             hostVersion, hostApi, knowledgeEnabled, knowledgePullAt };
   }
   if (notServingDetail) {
     return { ...empty, outcome: 'not_serving', detail: notServingDetail, agents: agentList,
              activeRuns, queueDepth, workerCount, workerId, lastError: notServingDetail,
-             hostVersion, hostApi };
+             hostVersion, hostApi, knowledgeEnabled, knowledgePullAt };
   }
   if (agentsDetail) {
     return { ...empty, outcome: 'http_error', detail: agentsDetail, agents: agentList,
              activeRuns, queueDepth, workerCount, workerId, lastError: agentsDetail,
-             hostVersion, hostApi };
+             hostVersion, hostApi, knowledgeEnabled, knowledgePullAt };
   }
   return {
     outcome: 'ok',
@@ -309,6 +352,8 @@ export async function probeHost(target: ProbeTarget, fetchImpl: FetchLike = fetc
     lastError: null,
     hostVersion,
     hostApi,
+    knowledgeEnabled,
+    knowledgePullAt,
   };
 }
 
@@ -329,6 +374,8 @@ export async function probeAndRecord(
     agents: r.agents,
     hostVersion: r.hostVersion,
     hostApi: r.hostApi,
+    knowledgeEnabled: r.knowledgeEnabled ?? null,
+    knowledgePullAt: r.knowledgePullAt ?? null,
     probedAt: new Date().toISOString(),
     lastError: r.lastError,
   };
