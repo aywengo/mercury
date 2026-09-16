@@ -121,3 +121,8 @@ priority order (security first within a tier).
   execution*. `timeout` is not available on macOS, so the command appears to hang instead of
   failing.
 - Staging with `git add -A`, which sweeps in untracked scratch files. Stage explicit paths.
+- Stashing with `git stash -u` in a worktree whose `node_modules` is an untracked symlink — the normal
+  way to avoid a second `npm ci`. `-u` stashes the symlink too, so the next run has no dependencies and
+  reports ~34 failures across `api.test.ts`, `auth.test.ts` and `fleetContract.test.ts`. That reads as a
+  catastrophic regression; the cause is an empty `node_modules`. Use a separate worktree to get a clean
+  tree instead (issue #596, where this cost a full invalid baseline).
