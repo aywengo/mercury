@@ -38,6 +38,7 @@ import { attachJsonlLineReader, serializeJsonLine } from './rpc/jsonl.ts';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
+import { CONTEXT_FILE } from '../knowledge/materialize.ts';
 import { EventTranslator, buildExtensionUiResponse, isRecord, type RpcEvent } from './eventTranslation.ts';
 import {
   buildCommandEnvelope, checkHello, checkSocketPath, helloForLogging, looksPrivateFramed,
@@ -68,7 +69,6 @@ export function sessionConfigFromArgs(args: string[]): { config: Record<string, 
   return { config, ignored };
 }
 
-const CONTEXT_FILE = '.mercury-context.json';
 const SESSION_DIR_NAME = '.mercury-sessions';
 
 /** Raised when the daemon is reachable but speaks something Mercury must not pretend to understand. */

@@ -22,11 +22,11 @@ import { RpcClient, type RpcEvent } from './rpc/rpcClient.ts';
 import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
 import type { LocalAgentEventMap } from './localAgentAdapter.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
+import { CONTEXT_FILE } from '../knowledge/materialize.ts';
 import { assertNoUnknownKeys, CAPABILITIES_SCHEMA, GOAL_SUPPORT_SCHEMA, assertCapabilities, leaf, object, openMap, type ExactKeys } from './configSchema.ts';
 
 const SESSION_DIR_NAME = '.mercury-sessions';
 const SESSION_PATH_FILE = '.mercury-session-path';
-const CONTEXT_FILE = '.mercury-context.json';
 const OUTPUT_LOG = 'agent-output.log';
 
 // --- config schema (docs/agent-adapters.md section 6.2) ---------------------

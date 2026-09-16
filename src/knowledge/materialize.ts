@@ -74,6 +74,12 @@ export const AGENTS_MD_FILE = 'AGENTS.md';
  */
 export const CLAUDE_MD_FILE = 'CLAUDE.md';
 /**
+ * The run-context file the adapters write and point their prompts at (section 9.2). One name, four
+ * writers: prime, rpc, daemon and claude. It is generated per Run, so it must be excluded from git
+ * exactly like the knowledge pack, or a Run's context lands in a user's pull request.
+ */
+export const CONTEXT_FILE = '.mercury-context.json';
+/**
  * Every path Mercury generates into a workspace.
  *
  * Both harness files are listed even though each is written by exactly one adapter, because the
@@ -82,7 +88,7 @@ export const CLAUDE_MD_FILE = 'CLAUDE.md';
  * pull request -- the outcome section 9.4 exists to prevent, and K1's reason for refusing a second
  * copy of knowledge in git.
  */
-export const GENERATED_PATHS = ['.mercury/', `${SKILL_DIR}/`, AGENTS_MD_FILE, CLAUDE_MD_FILE];
+export const GENERATED_PATHS = ['.mercury/', `${SKILL_DIR}/`, AGENTS_MD_FILE, CLAUDE_MD_FILE, CONTEXT_FILE];
 
 const SPECIFICITY: Record<string, number> = { path: 0, repo: 1, project: 2, agent: 3 };
 
