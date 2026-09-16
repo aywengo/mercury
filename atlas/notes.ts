@@ -56,6 +56,24 @@ export interface NoteDetail {
   sources: { hostId: string; runId: string | null; agent: string | null; harnessVersion: string | null; source: string; recordedAt: string }[];
 }
 
+/**
+ * A project's shape without its content. See `NoteStore.summary()`.
+ *
+ * Deliberately has no field that could hold a claim. Adding one later should require deleting this
+ * comment, not remembering to keep a route honest.
+ */
+export interface ProjectSummary {
+  projectId: string;
+  /** Notes per tier, e.g. `{ promoted: 12, candidate: 3 }`. Tiers with no notes are absent, not zero. */
+  byTier: Record<string, number>;
+  /** Kinds among promoted notes only -- the ones a Run is actually being told. */
+  promotedByKind: Record<string, number>;
+  contestedPairs: number;
+  /** Contributors that have taught this project something, most recent first. */
+  contributors: { hostId: string; notes: number; lastArrival: string }[];
+  latestSeq: number;
+}
+
 export interface FeedPage {
   notes: Note[];
   nextSeq: number;
@@ -771,6 +789,61 @@ export class NoteStore {
     return (this.db.prepare('SELECT project_id, tier, kind, COUNT(*) AS n FROM notes GROUP BY project_id, tier, kind')
       .all() as unknown as { project_id: string; tier: string; kind: string; n: number }[])
       .map((r) => ({ projectId: r.project_id, tier: r.tier, kind: r.kind, n: Number(r.n) }));
+  }
+
+  /**
+   * Per-project counts, for a reader that wants to know how a project is doing rather than what it says.
+   *
+   * Section 14 asks for exactly this as the Fleet dashboard's data source, and the deliberate omission is
+   * the interesting part: no claim text, no detail, no evidence. A dashboard that shows "4 promoted
+   * command notes and 2 contested pairs" needs nothing more, and a reader token that could fetch the
+   * claims is a different permission than the one section 12 gives a reader. Fleet is meant to answer
+   * "which hosts have gone quiet", not to become a second copy of the knowledge base.
+   *
+   * Aggregated in SQL rather than by paging the feed: a project with 40k notes would otherwise make the
+   * dashboard's load cost proportional to the thing it is measuring.
+   */
+  summary(projectId: string): ProjectSummary {
+    const tierCounts = (this.db.prepare(
+      "SELECT tier, COUNT(*) AS n FROM notes WHERE project_id = ? GROUP BY tier",
+    ).all(projectId) as unknown as { tier: string; n: number }[]);
+    const byTier: Record<string, number> = {};
+    for (const r of tierCounts) byTier[r.tier] = Number(r.n);
+
+    const kindCounts = (this.db.prepare(
+      "SELECT kind, COUNT(*) AS n FROM notes WHERE project_id = ? AND tier = 'promoted' GROUP BY kind ORDER BY kind",
+    ).all(projectId) as unknown as { kind: string; n: number }[]);
+    const promotedByKind: Record<string, number> = {};
+    for (const r of kindCounts) promotedByKind[r.kind] = Number(r.n);
+
+    // Counted through notes rather than read off the contests table, which has no project column and
+    // would otherwise count other projects' disputes.
+    const contested = this.db.prepare(
+      'SELECT COUNT(*) AS n FROM contests c JOIN notes n ON n.note_id = c.note_id WHERE n.project_id = ?',
+    ).get(projectId) as { n: number } | undefined;
+
+    // Last arrival per contributor, from note_sources rather than contributors.last_seen_at: the two
+    // differ, and the column the dashboard wants is "when did this host last teach us something", which
+    // is a contribution and not a request. A host that polls every minute and contributes nothing would
+    // look like a host that is learning.
+    const contributors = (this.db.prepare(
+      `SELECT s.host_id AS hostId, COUNT(*) AS notes, MAX(s.recorded_at) AS lastArrival
+         FROM note_sources s JOIN notes n ON n.note_id = s.note_id
+        WHERE n.project_id = ?
+        GROUP BY s.host_id
+        ORDER BY lastArrival DESC`,
+    ).all(projectId) as unknown as { hostId: string; notes: number; lastArrival: string }[]);
+
+    const seqRow = this.db.prepare('SELECT seq FROM project_seq WHERE project_id = ?').get(projectId) as { seq: number } | undefined;
+
+    return {
+      projectId,
+      byTier,
+      promotedByKind,
+      contestedPairs: Number(contested?.n ?? 0),
+      contributors: contributors.map((c) => ({ hostId: c.hostId, notes: Number(c.notes), lastArrival: c.lastArrival })),
+      latestSeq: Number(seqRow?.seq ?? 0),
+    };
   }
 
   lastContributionByHost(): { hostId: string; lastSeenAt: string | null }[] {

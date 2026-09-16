@@ -119,6 +119,18 @@ export function buildRoutes(services: AtlasServices): Route[] {
       },
     },
     {
+      // Reader-facing counts (section 14). Deliberately a separate route from the notes feed rather than
+      // a query parameter on it: the feed's job is to hand a host the notes it is missing, and bolting an
+      // aggregate onto it would put a dashboard's read path on the same query as replication. It is
+      // readOnly, so a reader token reaches it and a reader still cannot see a single claim.
+      method: 'GET', pattern: ['v1', 'projects', ':projectId', 'summary'], readOnly: true,
+      handle: (ctx, res) => {
+        const projectId = ctx.params[0]!;
+        requireProject(ctx.caller, projectId);
+        sendJson(res, 200, store.summary(projectId));
+      },
+    },
+    {
       method: 'GET', pattern: ['v1', 'projects', ':projectId', 'bootstrap'],
       handle: (ctx, res) => {
         const projectId = ctx.params[0]!;
