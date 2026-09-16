@@ -228,9 +228,13 @@ the same pass a PrimeAgent Run told explicitly to record a durable fact finished
 that distinction decides Phase 4 -- auto-promotion corroborates tier-1 notes, and with no real author
 there is nothing for it to promote.
 
-Rendering is still missing for every backend other than PrimeAgent and Hermes -- those get only the
-neutral files and the `.mercury-context.json` pointer. Remote agents get tier 2 only, because they
-execute on another machine with no workspace for the worker to read.
+Rendering is built for PrimeAgent (`--skill`), Hermes (generated `AGENTS.md`) and Claude Code
+(generated `CLAUDE.md`, falling back to a pointer line in the stdin task text when the repository tracks
+one). The RPC adapters get the `.mercury-context.json` pointer and a prompt line; everything else gets
+only the neutral files. **Only the PrimeAgent and Hermes channels have been seen on a real Run** -- the
+Claude Code channel is new and unobserved, and section 10 says so in its row rather than here. Remote
+agents get tier 2 only, because they execute on another machine with no workspace for the worker to
+read.
 
 What is **not** built, each re-checked against the tree rather than carried over from an earlier
 revision of this page:

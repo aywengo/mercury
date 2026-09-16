@@ -3,12 +3,14 @@
 // Covers docs/agent-adapters.md Phase 2 and section 8 acceptance criteria 1-9.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ClaudeCodeAdapter } from '../src/adapters/claudeCodeAdapter.ts';
 import type { AgentExit, Run, RunContext, ResolvedSkill } from '../src/domain/types.ts';
 import { tempDir, tempFile } from './helpers.ts';
+import { CLAUDE_MD_FILE, NOTES_FILE } from '../src/knowledge/materialize.ts';
+
 
 const MOCK = join(import.meta.dirname, 'fixtures', 'mock-claude-code.mjs');
 
@@ -333,4 +335,82 @@ test('result.result IS emitted when no assistant text ever arrived', async () =>
   const { events } = await drain(await a.start(ctx));
   a.dispose(ctx.run.id);
   assert.equal(types(events).filter((t) => t === 'agent.message').length, 1);
+});
+
+
+// --- knowledge channel: CLAUDE.md (docs/knowledge-base.md §9.3) -------------------------------
+//
+// §10's status column claimed this channel existed before any of it was written: the adapter had no
+// knowledge code at all, so a Claude Run got a pack materialized into its workspace that nothing told
+// the model about. These tests are what makes that sentence true.
+
+function knowledgeContext(opts: { knowledge?: boolean } = {}): { context: RunContext; workspacePath: string } {
+  const context = makeContext();
+  const workspacePath = context.workspace.path;
+  mkdirSync(join(workspacePath, '.mercury', 'knowledge'), { recursive: true });
+  // The neutral files are present in BOTH cases, so the negative test proves the adapter stayed out
+  // because there was no pack, not because there was nothing to copy.
+  writeFileSync(join(workspacePath, NOTES_FILE), '# Project knowledge\npack testhash123 -- 1 note\n');
+  if (opts.knowledge) {
+    (context as { knowledge?: unknown }).knowledge = { packHash: 'testhash123', path: NOTES_FILE, count: 1 };
+  }
+  return { context, workspacePath };
+}
+
+test('knowledge channel: no tracked CLAUDE.md -> adapter writes CLAUDE.md from NOTES.md', async () => {
+  const { context, workspacePath } = knowledgeContext({ knowledge: true });
+  const a = adapter();
+  await drain(await a.start(context));
+  a.dispose(context.run.id);
+
+  const claudeMd = join(workspacePath, CLAUDE_MD_FILE);
+  assert.ok(existsSync(claudeMd), 'CLAUDE.md must be written when none was tracked');
+  assert.equal(readFileSync(claudeMd, 'utf8'), readFileSync(join(workspacePath, NOTES_FILE), 'utf8'),
+    'CLAUDE.md must be byte-identical to NOTES.md so Claude receives the same pack');
+});
+
+test('knowledge channel: tracked CLAUDE.md is left byte-identical and the prompt points at the pack', async () => {
+  const { context, workspacePath } = knowledgeContext({ knowledge: true });
+  const tracked = '# Project CLAUDE.md (tracked by repo)\nDo not overwrite me.\n';
+  const claudeMd = join(workspacePath, CLAUDE_MD_FILE);
+  writeFileSync(claudeMd, tracked);
+
+  const taskFile = join(tempDir('mercury-claude-task-'), 'task.json');
+  const a = adapter({ env: { MOCK_CLAUDE_ENV_FILE: taskFile } });
+  await drain(await a.start(context));
+  a.dispose(context.run.id);
+
+  assert.equal(readFileSync(claudeMd, 'utf8'), tracked,
+    'a tracked CLAUDE.md must survive byte-for-byte (§9.4 forbids Mercury editing a tracked file)');
+  const sent = JSON.parse(readFileSync(taskFile, 'utf8')).task as string;
+  assert.match(sent, /Fix the flaky test suite/, 'the task itself must still be sent');
+  assert.ok(sent.includes(NOTES_FILE),
+    `with no CLAUDE.md channel the prompt must name the pack file (§9.3 fallback): ${JSON.stringify(sent)}`);
+  // Every path the prompt sends the model to must actually exist. Naming one that does not is the
+  // whole failure mode here: `.mercury-context.json` is written by the prime-agent, rpc and daemon
+  // adapters, never by the worker, so a Claude Run has no such file. Asserting only that NOTES.md is
+  // named does not catch it -- a pointer naming both files passes that, which is how the defect shipped
+  // once already.
+  //
+  // Scoped to `.mercury`-prefixed paths, which is narrower than "every path" and knows it. The pack
+  // lives under `.mercury` and the one file that was wrongly named lives there too, so this covers the
+  // realistic regressions; a future pointer to some path outside it, e.g. a bare `knowledge/NOTES.md`,
+  // would slip past. Widening it further means deciding where a sentence ends and a filename begins,
+  // which is a parser this test does not need until someone writes a pointer that needs it.
+  const named = [...sent.matchAll(/(?:\.mercury[-/][\w./-]*)/g)].map((m) => m[0]);
+  assert.ok(named.length > 0, 'the degraded prompt must name at least one path, or it points at nothing');
+  for (const path of named) {
+    assert.ok(existsSync(join(workspacePath, path)),
+      `the prompt sends the model to ${path}, which does not exist in a Claude workspace`);
+  }
+});
+
+test('knowledge channel: no knowledge context -> CLAUDE.md is not written', async () => {
+  const { context, workspacePath } = knowledgeContext({ knowledge: false });
+  const a = adapter();
+  await drain(await a.start(context));
+  a.dispose(context.run.id);
+
+  assert.ok(!existsSync(join(workspacePath, CLAUDE_MD_FILE)),
+    'the adapter must not touch the workspace when no pack was injected for this Run');
 });

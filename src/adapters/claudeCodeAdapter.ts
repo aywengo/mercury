@@ -36,8 +36,11 @@
 // #194 was filed for. HermesAgentAdapter sets the precedent for a documented throw.
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import { isRecord } from './eventTranslation.ts';
+import { CLAUDE_MD_FILE, NOTES_FILE, containedPath } from '../knowledge/materialize.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 
@@ -102,7 +105,52 @@ interface Session {
   drainTimer: ReturnType<typeof setTimeout> | null;
   /** set when the `result` event said is_error, which outranks subtype and the exit code. */
   resultIsError: boolean;
+  /**
+   * True when a pack exists but `CLAUDE.md` was already there, so the pack could not be written into
+   * the channel Claude Code reads and goes into the stdin task text instead (section 9.3).
+   */
+  knowledgeDegraded: boolean;
   context: RunContext;
+}
+
+/**
+ * True when something is AT the path, without following it.
+ *
+ * Mirrors the identical guard in HermesAgentAdapter, and for the same reason: `existsSync` reports a
+ * dangling symlink as absent, and `writeFileSync` then follows it. A repository that tracks `CLAUDE.md`
+ * as a symlink pointing outside the workspace would have Mercury's pack written to that target -- the
+ * escape `containedPath` already blocks for the neutral files, reachable here by a different route.
+ * Anything already at the path is left alone, symlink or not: section 9.4 forbids editing a tracked file.
+ */
+function lstatExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The text handed to `claude -p` on stdin.
+ *
+ * Normally the run task verbatim. When a pack exists but `CLAUDE.md` was tracked and so left alone, the
+ * prompt is the only remaining channel that reaches the model, so the pack is named there. Appended
+ * rather than prepended so the task still opens as its author wrote it.
+ *
+ * It names `NOTES_FILE` and nothing else. Section 9.3 says "the `.mercury-context.json` pointer" here,
+ * and that is wrong about this adapter rather than about the design: `.mercury-context.json` is written
+ * by the prime-agent, rpc and daemon adapters, not by the worker, so a Claude Run has no such file and
+ * pointing at it would send the model to read something that is not there. `NOTES_FILE` is written by
+ * the worker for every Run that has a pack, which makes it the only honest thing to name. Having Claude
+ * write the context file the way the other three adapters do would make the spec sentence true and give
+ * Claude the run context it also never receives; that is a larger change than a knowledge channel and is
+ * tracked separately.
+ */
+function taskText(session: Session): string {
+  const task = session.context.run.task;
+  if (!session.knowledgeDegraded) return `${task}\n`;
+  return `${task}\n\n(Project knowledge for this task is in ${NOTES_FILE} in the workspace.)\n`;
 }
 
 const DONE: AgentEvent = { type: '__done__', payload: {} };
@@ -168,6 +216,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       stdoutEnded: false,
       drainTimer: null,
       resultIsError: false,
+      knowledgeDegraded: false,
       context,
     };
   }
@@ -175,6 +224,29 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   async start(context: RunContext): Promise<AgentHandle> {
     const runId = context.run.id;
     const session = this.newSession(runId, context);
+
+    // The knowledge channel (docs/knowledge-base.md section 9.3).
+    //
+    // Claude Code reads CLAUDE.md from the working directory, so that is where the pack goes -- the
+    // same shape HermesAgentAdapter uses for AGENTS.md, including the two guards that make it safe:
+    // lstat rather than existsSync (a dangling symlink reports absent and writeFileSync then follows
+    // it), and containedPath for the write itself (lstat follows a symlinked workspace ROOT, which the
+    // first guard cannot see).
+    //
+    // When the repository already tracks CLAUDE.md, section 9.4 forbids touching it and the pack falls
+    // back to a line in the stdin task text. That fallback is recorded on the session rather than
+    // logged and forgotten, because it is the difference between the agent being told about the pack
+    // and not being told, which is the whole job.
+    if (context.knowledge) {
+      const notesPath = join(context.workspace.path, NOTES_FILE);
+      if (!lstatExists(join(context.workspace.path, CLAUDE_MD_FILE)) && existsSync(notesPath)) {
+        const claudeMdPath = containedPath(context.workspace.path, CLAUDE_MD_FILE);
+        writeFileSync(claudeMdPath, readFileSync(notesPath, 'utf8'));
+      } else {
+        session.knowledgeDegraded = true;
+      }
+    }
+
     this.sessions.set(runId, session);
     this.spawnProcess(session, this.buildArgv(null));
     return {
@@ -251,7 +323,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     });
 
     // Task via stdin, never argv (see header).
-    proc.stdin.write(ctx.run.task + '\n');
+    proc.stdin.write(taskText(session));
     proc.stdin.end();
   }
 

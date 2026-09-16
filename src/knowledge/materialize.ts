@@ -67,7 +67,22 @@ export const SKILL_FILE = `${SKILL_DIR}/SKILL.md`;
 
 /** Paths Mercury generates and no agent should ever commit (section 9.4). */
 export const AGENTS_MD_FILE = 'AGENTS.md';
-export const GENERATED_PATHS = ['.mercury/', `${SKILL_DIR}/`, AGENTS_MD_FILE];
+/**
+ * The Claude Code channel of section 9.3. Its own name rather than a shared `AGENTS.md`, because
+ * Claude Code reads `CLAUDE.md` and Hermes reads `AGENTS.md`; writing the wrong one is a silent
+ * no-op, which is the worst way for an injection channel to fail.
+ */
+export const CLAUDE_MD_FILE = 'CLAUDE.md';
+/**
+ * Every path Mercury generates into a workspace.
+ *
+ * Both harness files are listed even though each is written by exactly one adapter, because the
+ * exclusion runs once, before any adapter starts, and it cannot know which adapter will run. A
+ * generated `CLAUDE.md` missing from this list is a pack that an agent's `git add -A` puts into a
+ * pull request -- the outcome section 9.4 exists to prevent, and K1's reason for refusing a second
+ * copy of knowledge in git.
+ */
+export const GENERATED_PATHS = ['.mercury/', `${SKILL_DIR}/`, AGENTS_MD_FILE, CLAUDE_MD_FILE];
 
 const SPECIFICITY: Record<string, number> = { path: 0, repo: 1, project: 2, agent: 3 };
 
