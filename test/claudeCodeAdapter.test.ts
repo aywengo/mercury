@@ -11,9 +11,6 @@ import type { AgentExit, Run, RunContext, ResolvedSkill } from '../src/domain/ty
 import { tempDir, tempFile } from './helpers.ts';
 import { CLAUDE_MD_FILE, NOTES_FILE } from '../src/knowledge/materialize.ts';
 
-/** The workspace context pointer, spelled out on purpose: this is the value the worker writes and the
- *  prompt line must name, so pinning the literal here is the point rather than an accident. */
-const CONTEXT_FILE = '.mercury-context.json';
 
 const MOCK = join(import.meta.dirname, 'fixtures', 'mock-claude-code.mjs');
 
@@ -387,8 +384,19 @@ test('knowledge channel: tracked CLAUDE.md is left byte-identical and the prompt
     'a tracked CLAUDE.md must survive byte-for-byte (§9.4 forbids Mercury editing a tracked file)');
   const sent = JSON.parse(readFileSync(taskFile, 'utf8')).task as string;
   assert.match(sent, /Fix the flaky test suite/, 'the task itself must still be sent');
-  assert.ok(sent.includes(CONTEXT_FILE),
-    `with no CLAUDE.md channel the prompt must point at the context file (§9.3 fallback): ${JSON.stringify(sent)}`);
+  assert.ok(sent.includes(NOTES_FILE),
+    `with no CLAUDE.md channel the prompt must name the pack file (§9.3 fallback): ${JSON.stringify(sent)}`);
+  // Every path the prompt sends the model to must actually exist. Naming one that does not is the
+  // whole failure mode here: `.mercury-context.json` is written by the prime-agent, rpc and daemon
+  // adapters, never by the worker, so a Claude Run has no such file. Asserting only that NOTES.md is
+  // named does not catch it -- a pointer naming both files passes that, which is how the defect shipped
+  // once already. So: extract every path in the appended line and stat each one.
+  const named = [...sent.matchAll(/(?:\.mercury[-/][\w./-]*)/g)].map((m) => m[0]);
+  assert.ok(named.length > 0, 'the degraded prompt must name at least one path, or it points at nothing');
+  for (const path of named) {
+    assert.ok(existsSync(join(workspacePath, path)),
+      `the prompt sends the model to ${path}, which does not exist in a Claude workspace`);
+  }
 });
 
 test('knowledge channel: no knowledge context -> CLAUDE.md is not written', async () => {

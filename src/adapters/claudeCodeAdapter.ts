@@ -122,14 +122,6 @@ interface Session {
  * escape `containedPath` already blocks for the neutral files, reachable here by a different route.
  * Anything already at the path is left alone, symlink or not: section 9.4 forbids editing a tracked file.
  */
-/**
- * The workspace context pointer. Declared here as it already is in the prime-agent, rpc and daemon
- * adapters -- four copies of a filename is untidy, but consolidating it is a separate change from
- * adding a knowledge channel, and this constant is load-bearing in exactly one way: it must match what
- * the worker writes, or the pointer line names a file that does not exist.
- */
-const CONTEXT_FILE = '.mercury-context.json';
-
 function lstatExists(path: string): boolean {
   try {
     lstatSync(path);
@@ -142,15 +134,23 @@ function lstatExists(path: string): boolean {
 /**
  * The text handed to `claude -p` on stdin.
  *
- * Normally the run task verbatim. When a pack exists but CLAUDE.md was tracked and so left alone,
- * section 9.3 prescribes the fallback of pointing at the context file from the prompt, because the
- * prompt is the only remaining channel that reaches the model. Appended rather than prepended so the
- * task still opens as its author wrote it.
+ * Normally the run task verbatim. When a pack exists but `CLAUDE.md` was tracked and so left alone, the
+ * prompt is the only remaining channel that reaches the model, so the pack is named there. Appended
+ * rather than prepended so the task still opens as its author wrote it.
+ *
+ * It names `NOTES_FILE` and nothing else. Section 9.3 says "the `.mercury-context.json` pointer" here,
+ * and that is wrong about this adapter rather than about the design: `.mercury-context.json` is written
+ * by the prime-agent, rpc and daemon adapters, not by the worker, so a Claude Run has no such file and
+ * pointing at it would send the model to read something that is not there. `NOTES_FILE` is written by
+ * the worker for every Run that has a pack, which makes it the only honest thing to name. Having Claude
+ * write the context file the way the other three adapters do would make the spec sentence true and give
+ * Claude the run context it also never receives; that is a larger change than a knowledge channel and is
+ * tracked separately.
  */
 function taskText(session: Session): string {
   const task = session.context.run.task;
   if (!session.knowledgeDegraded) return `${task}\n`;
-  return `${task}\n\n(Project knowledge for this task is in ${CONTEXT_FILE} under "knowledge", and in ${NOTES_FILE}.)\n`;
+  return `${task}\n\n(Project knowledge for this task is in ${NOTES_FILE} in the workspace.)\n`;
 }
 
 const DONE: AgentEvent = { type: '__done__', payload: {} };
