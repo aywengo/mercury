@@ -22,16 +22,20 @@ import { tempDir } from './helpers.ts';
 
 import { ATLAS_VERSION } from '../atlas/version.ts';
 import type { ProjectSummary } from '../atlas/notes.ts';
-import type { AtlasProjectSummary } from '../fleet/atlas.ts';
+import { ATLAS_SUMMARY_KEYS, type AtlasProjectSummary } from '../fleet/atlas.ts';
 
 /**
  * The summary shape is asserted to be the SAME type on both sides, at compile time.
  *
  * `atlas/` and `fleet/` may not import each other, so the response record exists twice by design. The
  * runtime key assertion in the contract test catches drift when the suite runs; this catches it on
- * `npm run typecheck`, which is faster and fires even when the contract suite is filtered out. Both
- * directions are required: one-sided assignability would tolerate an extra optional field on one side,
- * which is exactly how a field gets quietly dropped from the dashboard.
+ * `npm run typecheck`, which is faster and fires even when the contract suite is filtered out.
+ *
+ * Mutual assignability is NOT sufficient on its own, and an earlier revision of this comment claimed it
+ * was. Two interfaces that are mutually assignable can still differ by a field that is optional on one
+ * side and absent on the other -- verified by mutation. That residual gap is closed by
+ * `ATLAS_SUMMARY_KEYS` in fleet/atlas.ts: the key set is declared there as a value, pinned to the
+ * Fleet interface at compile time, and compared against Atlas's actual response below.
  */
 type Exactly<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
 const _summaryShapesAgree: Exactly<AtlasProjectSummary, ProjectSummary> = true;
@@ -222,9 +226,10 @@ test('every enumerated route answers, and its shape has not drifted', async () =
     res = await req(handle, 'GET', `/v1/projects/${PROJECT}/summary`, READER);
     assert.equal(res.status, 200, `a reader token must be able to read the summary: ${res.status}`);
     const summary = await res.json() as Record<string, unknown>;
-    assert.deepEqual(Object.keys(summary).sort(), [
-      'byTier', 'contestedPairs', 'contributors', 'latestSeq', 'projectId', 'promotedByKind',
-    ]);
+    // Compared against the Fleet reader's own declared key set rather than a list typed out here. A
+    // hand-copied list in a test drifts the same way a hand-copied type does; this way the two sides are
+    // checked against each other and the test file is not a third copy of the truth.
+    assert.deepEqual(Object.keys(summary).sort(), [...ATLAS_SUMMARY_KEYS].sort());
     // The whole point of the route: counts, never content.
     assert.ok(!JSON.stringify(summary).includes('migrations are appended'),
       'the summary leaked note content to a reader token');

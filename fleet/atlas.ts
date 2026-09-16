@@ -22,6 +22,26 @@ export interface AtlasProjectSummary {
   latestSeq: number;
 }
 
+/**
+ * The same key set as a VALUE, so a test can compare it against bytes off the wire.
+ *
+ * The type alone cannot do this. Mutual assignability between two interfaces tolerates a field that is
+ * optional on one side and absent on the other -- a review proved that by mutation -- and an optional
+ * field is exactly how a dashboard ends up reading `undefined` and rendering an empty panel. So the key
+ * set is declared here as a const tuple, pinned to the interface at compile time below, and compared
+ * against Atlas's actual response at runtime. A field added to the interface without joining the tuple
+ * fails `tsc`; a tuple entry Atlas stops sending fails the contract test.
+ */
+export const ATLAS_SUMMARY_KEYS = [
+  'projectId', 'byTier', 'promotedByKind', 'contestedPairs', 'contributors', 'latestSeq',
+] as const satisfies readonly (keyof AtlasProjectSummary)[];
+
+/** Compile-time proof the tuple covers every key, not just some of them. */
+const _keysAreExhaustive: typeof ATLAS_SUMMARY_KEYS[number] | Exclude<keyof AtlasProjectSummary, typeof ATLAS_SUMMARY_KEYS[number]> extends never
+  ? never
+  : (Exclude<keyof AtlasProjectSummary, typeof ATLAS_SUMMARY_KEYS[number]> extends never ? true : never) = true;
+void _keysAreExhaustive;
+
 export interface AtlasReaderOptions {
   baseUrl: string;
   token: string;
@@ -72,6 +92,12 @@ export async function readProjectSummary(opts: AtlasReaderOptions): Promise<Atla
     return { kind: 'unreachable', reason: describeTransportError(err) };
   }
   if (res.status >= 500) return { kind: 'unreachable', reason: `HTTP ${res.status} from Atlas` };
+  // 408 and 429 are the two 4xx that are not a refusal. They mean "I received it and could not answer
+  // just now", so treating them like a bad token would tell an operator to go change a configuration
+  // that is fine, and would stop a retry that would have worked.
+  if (res.status === 408 || res.status === 429) {
+    return { kind: 'unreachable', reason: `HTTP ${res.status} from Atlas` };
+  }
   if (res.status >= 400) {
     let detail = '';
     try {
@@ -84,6 +110,8 @@ export async function readProjectSummary(opts: AtlasReaderOptions): Promise<Atla
   } catch (err) {
     // 200 with an unreadable body is neither: Atlas is up and its answer is unusable, which the operator
     // reads as "Atlas is misbehaving", so it is reported that way rather than as a transport failure.
-    return { kind: 'unreachable', reason: `Atlas response was not JSON: ${(err as Error).message}`.slice(0, 200) };
+    // Wording deliberately does not say "was not JSON". A stalled body stream lands here too, and the
+    // abort error would then be reported as a format problem.
+    return { kind: 'unreachable', reason: `Atlas response body was unreadable: ${(err as Error).message}`.slice(0, 200) };
   }
 }

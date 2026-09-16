@@ -115,7 +115,17 @@ test('a 200 whose body is not JSON is reported, not thrown', async () => {
   }));
   assert.equal(read.kind, 'unreachable');
   if (read.kind !== 'unreachable') return;
-  assert.match(read.reason, /not JSON/);
+  assert.match(read.reason, /unreadable/);
+});
+
+test('408 and 429 are "unreachable": a 4xx that means "not right now" is not a refusal', async () => {
+  // The 4xx rule is "Atlas answered and said no", but these two mean "I got it and could not answer".
+  // Classifying them as rejected tells an operator to go change a configuration that is fine, and stops
+  // a retry that would have worked.
+  for (const status of [408, 429]) {
+    const read = await readProjectSummary(opts({ fetchImpl: asFetch(async () => json(status, { error: 'slow down' })) }));
+    assert.equal(read.kind, 'unreachable', `HTTP ${status} must not be reported as a config problem`);
+  }
 });
 
 test('the read passes a timeout signal, so a hung Atlas cannot hold Fleet open', async () => {
