@@ -12,6 +12,8 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { harvestNotes, maxHarvestBytes } from '../src/knowledge/harvest.ts';
+import { validateDraft } from '../src/knowledge/validation.ts';
+import { EVIDENCE_TYPES } from '../src/knowledge/types.ts';
 import { DEFAULT_BOUNDS, type KnowledgeBounds } from '../src/knowledge/validation.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import { tempDir } from './helpers.ts';
@@ -169,4 +171,63 @@ test('a file the bounds can justify is read normally', () => {
   const r = harvest(`${GOOD}\n`);
   assert.equal(r.accepted.length, 1, 'the guard must not become a tax on ordinary harvests');
   assert.equal(r.rejected.length, 0);
+});
+
+// --- the contribution instructions are a contract with the validator ---------------------------
+//
+// #589 observed six real Runs in which not one agent wrote a note, and the write path turned out to be
+// correct: nothing was broken, nothing was written. The only invitation an agent gets is the prose below
+// the notes in its pack. Two things make prose like that fail quietly, and both were true here: the
+// evidence shapes it documented were not the shapes the validator accepts, and it described the schema
+// without ever showing a line an agent could copy. These tests pin the instructions to the code, so the
+// document cannot drift from the validator again without a failure.
+
+import { renderNotesMd, NOTE_EXAMPLE_LINE } from '../src/knowledge/materialize.ts';
+
+function instructions(): string {
+  return renderNotesMd('proj-1', 'a'.repeat(32), []);
+}
+
+test('the example note shown to agents is accepted by the harvester', () => {
+  // Read the example out of the rendered pack rather than importing the constant, so the test proves
+  // what an agent actually sees. A constant that validates while the renderer mangles it is not a fix.
+  const rendered = instructions();
+  // Non-greedy to the closing fence rather than [^`]+: a claim is allowed to contain inline code, and
+  // the example below does, so a backtick-terminated character class cannot span it.
+  const fence = rendered.match(/```json\n([\s\S]+?)\n```/);
+  assert.ok(fence, 'the instructions must show a complete example, not only a field list');
+  assert.equal(fence[1], NOTE_EXAMPLE_LINE, 'the rendered example must be the exported one');
+
+  const r = harvest(`${fence[1]}\n`);
+  assert.equal(r.rejected.length, 0, `the example agents are told to copy was refused: ${JSON.stringify(r.rejected)}`);
+  assert.equal(r.accepted.length, 1);
+});
+
+test('every evidence shape the instructions document is a shape the validator accepts', () => {
+  const documented = [...instructions().matchAll(/\{"type":"([a-z-]+)"((?:,"[a-zA-Z]+":\.\.\.)*)\}/g)];
+  const types = documented.map((m) => m[1]);
+  // Against the closed vocabulary, not against a list repeated here: a type documented nowhere, or a
+  // real type the instructions stopped mentioning, is the same class of defect as a wrong field.
+  assert.deepEqual([...types].sort(), [...EVIDENCE_TYPES].sort(),
+    `instructions document ${JSON.stringify(types)} but the vocabulary is ${JSON.stringify(EVIDENCE_TYPES)}`);
+
+  for (const m of documented) {
+    const [, type, rest] = m;
+    const keys = [...rest.matchAll(/"([a-zA-Z]+)":\.\.\./g)].map((k) => k[1]);
+    const ref: Record<string, unknown> = { type };
+    for (const k of keys) ref[k] = k === 'seq' ? 1 : k === 'url' ? 'https://example.com/x/1' : 'x';
+    const v = validateDraft({ kind: 'fact', scope: 'project', claim: 'a claim', evidence: [ref] });
+    // if/fail rather than assert.ok(v.ok, `...${v.reason}`): `reason` exists only on the rejected arm,
+    // and the message is the whole value of this test, so it has to be readable when it fires.
+    if (!v.ok) {
+      assert.fail(`documented evidence shape {"type":"${type}",${keys.join(',')}} is rejected: ${v.reason}`);
+    }
+  }
+});
+
+test('the invitation is tied to finishing the task, not left as an open conditional', () => {
+  // "If you learn something durable" is satisfied by a model that never pauses to ask. The observed
+  // failure was an agent that read this section, used the note in it, and wrote nothing at all.
+  assert.match(instructions(), /Before you report the task done/,
+    'the contribution step needs a checkpoint, not only a condition');
 });
