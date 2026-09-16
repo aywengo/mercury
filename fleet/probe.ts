@@ -20,6 +20,12 @@ export interface ProbeTarget {
   /** The secret, resolved by the caller from the credential file. Never read from argv. */
   token: string;
   timeoutMs: number;
+  /**
+   * The placement-signal threshold (FLEET_KNOWLEDGE_STALE_MS). Zero or absent means the signal is off
+   * and the knowledge status route is NOT called at all: a feature that is off by default must not
+   * cost every sweep an extra round trip to every host, most of which will refuse it anyway.
+   */
+  knowledgeStaleMs?: number;
 }
 
 export interface ProbeResult {
@@ -296,9 +302,11 @@ export async function probeHost(target: ProbeTarget, fetchImpl: FetchLike = fetc
 
   // 4) Knowledge freshness, for the soft placement signal (docs/knowledge-base.md section 14).
   //
-  // Skipped entirely when the credential was already refused: /api/knowledge/status is admin-only, so a
-  // token that failed /api/agents cannot read it either, and asking again would add a round trip and a
-  // second 401 to every sweep for a host we already know we cannot use.
+  // Skipped when the signal is off (the default): a feature that changes nothing must not cost every
+  // sweep an extra round trip to every host, most of which will refuse it anyway. Skipped too when the
+  // credential was already refused: /api/knowledge/status is admin-only, so a token that failed
+  // /api/agents cannot read it either, and asking again would add a second 401 to every sweep for a
+  // host we already know we cannot use.
   //
   // EVERY non-2xx and every transport failure leaves both fields null. That is the load-bearing decision
   // in this whole feature. A host running an older Mercury has no such route, and a Fleet holding an
@@ -307,7 +315,7 @@ export async function probeHost(target: ProbeTarget, fetchImpl: FetchLike = fetc
   // Absence of data must cost a host nothing.
   let knowledgeEnabled: boolean | null = null;
   let knowledgePullAt: string | null = null;
-  if (!unauthorized) {
+  if (!unauthorized && (target.knowledgeStaleMs ?? 0) > 0) {
     const knowledge = await call(fetchImpl, `${base}/api/knowledge/status`, target.token, target.timeoutMs);
     if (!knowledge.transportError && knowledge.status >= 200 && knowledge.status < 300) {
       const body = (knowledge.json ?? {}) as { enabled?: unknown; lastPull?: { at?: unknown } };

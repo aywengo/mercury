@@ -34,8 +34,8 @@ export interface RouteDecision {
   hostId: string;
   score: number;
   /**
-   * Why this host won the soft rank, when anything other than capacity decided it. Null when the
-   * knowledge signal did not change the outcome.
+   * Why this host won the soft rank, when the knowledge-freshness penalty decided it. Null when the
+   * signal did not change the outcome -- which is the common case, including when the signal is off.
    *
    * Section 4 of crew/harness-capabilities.md requires placement to be explainable, and the reason it
    * gives is operational: a scheduler that moves work to a machine nobody expected, with no stated

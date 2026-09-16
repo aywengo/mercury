@@ -298,10 +298,11 @@ test('a hostile host version string cannot smuggle terminal controls into the re
 const PULL = '2026-06-01T11:00:00.000Z';
 const HEALTHY = { health: { body: { version: '1.0.0', api: MIN_HOST_API } }, workers: { body: HEALTHY_WORKERS }, agents: { body: { agents: ['claude'] } } };
 
-async function probeWith(behavior: Behavior) {
+async function probeWith(behavior: Behavior, target: Record<string, unknown> = {}) {
   const m = await startFakeMercury({ ...HEALTHY, ...behavior } as Behavior);
   try {
-    return await probeHost({ hostId: 'h', baseUrl: m.url, token: 'tok', timeoutMs: 1_500 } as never);
+    return await probeHost({ hostId: 'h', baseUrl: m.url, token: 'tok', timeoutMs: 1_500,
+      knowledgeStaleMs: 1, ...target } as never);
   } finally { await m.close(); }
 }
 
@@ -377,5 +378,26 @@ test('the knowledge read is skipped once the credential has been refused', async
     assert.equal(r.knowledgeEnabled, null);
     assert.ok(!m.seen.some((s) => s.path === '/api/knowledge/status'),
       'Fleet must not knock on an admin route it already knows it cannot open');
+  } finally { await m.close(); }
+});
+
+
+test('the knowledge route is not called while the signal is off', async () => {
+  // The default is off, and off must cost nothing: no extra round trip to every host on every sweep,
+  // most of which would refuse the admin-only route anyway. This is the test that would have caught
+  // the original design, which probed unconditionally.
+  const m = await startFakeMercury({
+    health: { body: { version: '1.0.0', api: MIN_HOST_API } },
+    workers: { body: HEALTHY_WORKERS },
+    agents: { body: { agents: ['claude'] } },
+    knowledge: { body: { enabled: true, lastPull: { at: PULL } } },
+  } as Behavior);
+  try {
+    const r = await probeHost({ hostId: 'h', baseUrl: m.url, token: 'tok', timeoutMs: 1_500,
+      knowledgeStaleMs: 0 } as never);
+    assert.equal(r.outcome, 'ok');
+    assert.equal(r.knowledgeEnabled, null, 'off means no opinion, not a cached opinion');
+    assert.ok(!m.seen.some((s) => s.path === '/api/knowledge/status'),
+      'the status route must not be touched while the signal is off');
   } finally { await m.close(); }
 });

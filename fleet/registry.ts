@@ -59,10 +59,10 @@ export interface ProbeRecord {
    */
   knowledgeEnabled?: boolean | null;
   /**
-   * When the host last pulled its knowledge replica. Null means unknown, never "never pulled": a host
-   * that has genuinely never synced reports `lastPull.at: null` and is reported here as unknown too,
-   * because Fleet cannot tell that apart from a refused read without a third state, and guessing wrong
-   * would rank a healthy host below a stale one.
+   * When the host last pulled its knowledge replica. Null means "no timestamp was given", which covers
+   * both a host that has never pulled (enabled=1, lastPull.at=null) and a host Fleet was never told
+   * about (enabled=null). The two are told apart by `knowledgeEnabled`, not by this field: enabled=1
+   * with a null pull time is a real "never synced" answer, while enabled=null is no opinion at all.
    */
   knowledgePullAt?: string | null;
   detail: string | null;

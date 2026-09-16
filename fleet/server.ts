@@ -131,6 +131,7 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
     resolveToken: (ref) => deps.credentials.secret(ref),
     intervalMs: deps.config.probeIntervalMs,
     timeoutMs: deps.config.probeTimeoutMs,
+    knowledgeStaleMs: deps.config.knowledgeStaleMs,
   });
 
   const routes: Route[] = [
@@ -229,6 +230,7 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
           hostId: id, baseUrl: host.baseUrl,
           token: deps.credentials.secret(host.credentialRef),
           timeoutMs: deps.config.probeTimeoutMs,
+          knowledgeStaleMs: deps.config.knowledgeStaleMs,
         });
         registry.recordProbe(rec);
         sendJson(res, 200, { probe: rec });
