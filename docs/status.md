@@ -252,8 +252,11 @@ revision of this page:
   note is worth keeping is open question 6 of `docs/knowledge-base.md` §18, which is exactly why the
   default is off rather than 180 days.
 - **Atlas refuses to start on a database that already holds two live notes for one claim.** A
-  partial UNIQUE index enforces the one-live-note-per-claim rule (`atlas/db.ts`, migration v2), and
-  a precheck names the colliding note ids rather than surfacing a raw constraint error. It will not
+  partial UNIQUE index enforces the one-live-note-per-claim rule (`atlas/db.ts`; migration v2 added
+  it with `WHERE tier != 'retired'`, and migration v3 widened it to
+  `WHERE tier NOT IN ('retired', 'deleted')` so a tombstone does not hold its claim hostage
+  forever), and a precheck names the colliding note ids rather than surfacing a raw constraint
+  error. It will not
   resolve the collision for you: retiring one side is an operator decision, because Atlas does not
   pick a winner. Databases written before that migration can contain the collision, so an upgrade
   may need that manual step.
