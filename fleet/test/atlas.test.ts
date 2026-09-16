@@ -195,7 +195,7 @@ test('loadConfig strips a trailing slash so the URL never doubles one', () => {
 
 // --- the cached reader: what the dashboard actually sees ----------------------------------------
 
-import { createAtlasReader, type AtlasView } from '../atlas.ts';
+import { createAtlasReader, parseSummary, ATLAS_SUMMARY_KEYS, type AtlasView } from '../atlas.ts';
 
 function clock(start = 1_000_000) {
   let t = start;
@@ -280,4 +280,85 @@ test('the cache floor stops a dashboard poll from hammering Atlas', async () => 
   c.advance(16_000);
   await r.view();
   assert.equal(calls, 2, 'past the window the next read goes through');
+});
+
+
+// --- parseSummary: a 200 that is not a project summary ------------------------------------------
+
+test('the real summary shape passes', () => {
+  const r = parseSummary(SUMMARY);
+  assert.equal(r.ok, true);
+});
+
+test('a body that is not an object is rejected', () => {
+  for (const bad of [null, undefined, [], 'ok', 7, true]) {
+    const r = parseSummary(bad);
+    assert.equal(r.ok, false, `${JSON.stringify(bad)} must not parse as a summary`);
+  }
+});
+
+test('a missing field is rejected rather than read as a zero', () => {
+  // This is the whole point. A dashboard that reads `undefined` renders an empty panel, which looks
+  // exactly like a project that genuinely has no knowledge. A count we never received must not be
+  // able to impersonate a count of zero.
+  for (const key of ATLAS_SUMMARY_KEYS) {
+    const partial: Record<string, unknown> = { ...SUMMARY };
+    delete partial[key];
+    const r = parseSummary(partial);
+    assert.equal(r.ok, false, `missing ${key} must be rejected`);
+    if (r.ok) continue;
+    assert.ok(r.reason.includes(key), `the reason must name the missing field, got: ${r.reason}`);
+  }
+});
+
+test('a field of the wrong shape is rejected', () => {
+  const cases: [string, unknown][] = [
+    ['byTier', 'promoted'],
+    ['byTier', { promoted: 'many' }],
+    ['byTier', null],
+    ['promotedByKind', []],
+    ['contestedPairs', '0'],
+    ['contestedPairs', NaN],
+    ['latestSeq', null],
+    ['contributors', null],
+    ['contributors', [{ hostId: 'h', notes: 1 }]],
+    ['contributors', [{ hostId: 42, notes: 1, lastArrival: 'ts' }]],
+    ['contributors', [null]],
+  ];
+  for (const [key, value] of cases) {
+    const r = parseSummary({ ...SUMMARY, [key]: value });
+    assert.equal(r.ok, false, `${key} = ${JSON.stringify(value)} must be rejected`);
+  }
+});
+
+test('an extra field Atlas grows later does not break the read', () => {
+  // Rejecting unknown keys would make every Atlas addition a breaking change for a deployed Fleet.
+  const r = parseSummary({ ...SUMMARY, medianClaimAgeMs: 1234 });
+  assert.equal(r.ok, true);
+});
+
+test('a malformed 200 is reported as malformed, not as a transport failure', async () => {
+  // The distinction decides what the operator does next. "unreachable" means check the network;
+  // this means Atlas is up and its answer is garbage.
+  const { reader: r } = reader(async () => json(200, { projectId: 'mercury' }));
+  const view = await r.view();
+  assertConfigured(view);
+  assert.equal(view.state, 'malformed');
+  assert.equal('summary' in view, false);
+  if (view.state !== 'malformed') return;
+  assert.ok(view.reason.includes('byTier'), `the reason should name what was wrong: ${view.reason}`);
+});
+
+test('a malformed 200 after a good read keeps serving the last good numbers', async () => {
+  let healthy = true;
+  const { reader: r, clock: c } = reader(async () => (healthy ? json(200, SUMMARY) : json(200, {})));
+  const first = await r.view();
+  assertConfigured(first);
+  assert.equal(first.state, 'ok');
+  healthy = false;
+  c.advance(16_000);
+  const view = await r.view();
+  assertConfigured(view);
+  assert.equal(view.stale, true);
+  assert.equal(view.state, 'malformed');
 });

@@ -22,7 +22,7 @@ import { tempDir } from './helpers.ts';
 
 import { ATLAS_VERSION } from '../atlas/version.ts';
 import type { ProjectSummary } from '../atlas/notes.ts';
-import { ATLAS_SUMMARY_KEYS, type AtlasProjectSummary } from '../fleet/atlas.ts';
+import { ATLAS_SUMMARY_KEYS, parseSummary, type AtlasProjectSummary } from '../fleet/atlas.ts';
 
 /**
  * The summary shape is asserted to be the SAME type on both sides, at compile time.
@@ -230,6 +230,12 @@ test('every enumerated route answers, and its shape has not drifted', async () =
     // hand-copied list in a test drifts the same way a hand-copied type does; this way the two sides are
     // checked against each other and the test file is not a third copy of the truth.
     assert.deepEqual(Object.keys(summary).sort(), [...ATLAS_SUMMARY_KEYS].sort());
+    // Bytes off the wire, through the validator Fleet will actually run in production. The key
+    // comparison above only proves the two sides list the same names; this proves Fleet accepts what
+    // Atlas really sends, including the value SHAPES -- a field present but of the wrong type would
+    // pass the key check and then be rejected at runtime, blanking the dashboard.
+    const validated = parseSummary(summary);
+    assert.ok(validated.ok, `Fleet rejects a real Atlas summary: ${validated.ok ? '' : validated.reason}`);
     // The whole point of the route: counts, never content.
     assert.ok(!JSON.stringify(summary).includes('migrations are appended'),
       'the summary leaked note content to a reader token');

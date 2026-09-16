@@ -63,7 +63,9 @@ export interface AtlasReaderOptions {
 export type AtlasRead<T> =
   | { kind: 'ok'; value: T }
   | { kind: 'unreachable'; reason: string }
-  | { kind: 'rejected'; status: number; detail: string };
+  | { kind: 'rejected'; status: number; detail: string }
+  /** Atlas answered 200 with JSON that is not a project summary. See `parseSummary`. */
+  | { kind: 'malformed'; reason: string };
 
 function describeTransportError(err: unknown): string {
   const e = err as Error & { cause?: { code?: string; message?: string } };
@@ -78,6 +80,53 @@ function describeTransportError(err: unknown): string {
  * the slowest thing it decorates a response with: a dashboard section is worth less than the page it is
  * embedded in, so an Atlas that stops answering has to be able to cost a bounded number of milliseconds.
  */
+function isCountMap(v: unknown): v is Record<string, number> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+    && Object.values(v).every((n) => typeof n === 'number' && Number.isFinite(n));
+}
+
+/**
+ * Decide whether a parsed 200 body really is an `AtlasProjectSummary`.
+ *
+ * The `as` cast in the caller is compile-time only, so without this a version-skewed Atlas -- one
+ * that answers 200 with `{}` because the route changed under us -- would have its body handed
+ * straight to the dashboard, which would render `undefined` as an empty panel and look like a
+ * project with no knowledge in it. That is the worst possible failure here: it is indistinguishable
+ * from a true answer. A count of zero and a count we never received must not look the same.
+ *
+ * This checks the key set as a VALUE, which is what `ATLAS_SUMMARY_KEYS` was declared for. The
+ * comment on that tuple promises a runtime comparison against Atlas's actual response; until this
+ * function existed that comparison only happened in a test, which is true of the build and false of
+ * a deployment running two versions.
+ */
+export function parseSummary(body: unknown): { ok: true; value: AtlasProjectSummary } | { ok: false; reason: string } {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    return { ok: false, reason: 'expected a JSON object' };
+  }
+  const obj = body as Record<string, unknown>;
+  const missing = ATLAS_SUMMARY_KEYS.filter((k) => !(k in obj));
+  if (missing.length > 0) return { ok: false, reason: `missing ${missing.join(', ')}` };
+  const extra = Object.keys(obj).filter((k) => !ATLAS_SUMMARY_KEYS.includes(k as (typeof ATLAS_SUMMARY_KEYS)[number]));
+  if (obj.projectId !== undefined && typeof obj.projectId !== 'string') return { ok: false, reason: 'projectId is not a string' };
+  if (!isCountMap(obj.byTier)) return { ok: false, reason: 'byTier is not a count map' };
+  if (!isCountMap(obj.promotedByKind)) return { ok: false, reason: 'promotedByKind is not a count map' };
+  if (typeof obj.contestedPairs !== 'number' || !Number.isFinite(obj.contestedPairs)) return { ok: false, reason: 'contestedPairs is not a number' };
+  if (typeof obj.latestSeq !== 'number' || !Number.isFinite(obj.latestSeq)) return { ok: false, reason: 'latestSeq is not a number' };
+  if (!Array.isArray(obj.contributors)) return { ok: false, reason: 'contributors is not an array' };
+  for (const c of obj.contributors as unknown[]) {
+    if (typeof c !== 'object' || c === null) return { ok: false, reason: 'a contributor is not an object' };
+    const cc = c as Record<string, unknown>;
+    if (typeof cc.hostId !== 'string') return { ok: false, reason: 'contributor.hostId is not a string' };
+    if (typeof cc.notes !== 'number' || !Number.isFinite(cc.notes)) return { ok: false, reason: 'contributor.notes is not a number' };
+    if (typeof cc.lastArrival !== 'string') return { ok: false, reason: 'contributor.lastArrival is not a string' };
+  }
+  // Extra fields are tolerated rather than rejected: Atlas adding a count must not take a dashboard
+  // down, and the contract test is where a genuinely new field gets noticed. `extra` is computed so a
+  // future change can decide to surface it without re-deriving the comparison.
+  void extra;
+  return { ok: true, value: obj as unknown as AtlasProjectSummary };
+}
+
 export async function readProjectSummary(opts: AtlasReaderOptions): Promise<AtlasRead<AtlasProjectSummary>> {
   const doFetch = opts.fetchImpl ?? fetch;
   const url = `${opts.baseUrl}/v1/projects/${encodeURIComponent(opts.project)}/summary`;
@@ -106,7 +155,9 @@ export async function readProjectSummary(opts: AtlasReaderOptions): Promise<Atla
     return { kind: 'rejected', status: res.status, detail: detail.slice(0, 300) };
   }
   try {
-    return { kind: 'ok', value: await res.json() as AtlasProjectSummary };
+    const parsed = parseSummary(await res.json());
+    if (!parsed.ok) return { kind: 'malformed', reason: parsed.reason };
+    return { kind: 'ok', value: parsed.value };
   } catch (err) {
     // 200 with an unreadable body is neither: Atlas is up and its answer is unusable, which the operator
     // reads as "Atlas is misbehaving", so it is reported that way rather than as a transport failure.
@@ -128,10 +179,13 @@ export async function readProjectSummary(opts: AtlasReaderOptions): Promise<Atla
 export type AtlasView =
   | { configured: false }
   | { configured: true; state: 'ok'; project: string; summary: AtlasProjectSummary; fetchedAt: string; stale: false }
-  | { configured: true; state: 'unreachable'; project: string; reason: string; stale: false }
+  | { configured: true; state: Exclude<AtlasReadState, 'ok'>; project: string; reason: string; stale: false }
   | { configured: true; state: 'rejected'; project: string; status: number; detail: string; stale: false }
-  | { configured: true; state: 'unreachable' | 'rejected'; project: string; reason: string;
+  | { configured: true; state: Exclude<AtlasReadState, 'ok'>; project: string; reason: string;
       summary: AtlasProjectSummary; fetchedAt: string; stale: true };
+
+/** The four things that can be true about an Atlas read, shared by the reader and the view. */
+type AtlasReadState = 'ok' | 'unreachable' | 'rejected' | 'malformed';
 
 export interface AtlasReader {
   /** Reads through the cache policy below. Never throws: every failure becomes an AtlasView. */
@@ -179,7 +233,7 @@ export function createAtlasReader(
           summary: read.value, fetchedAt: new Date(cached.fetchedAt).toISOString(), stale: false,
         };
       }
-      const reason = read.kind === 'unreachable' ? read.reason : `HTTP ${read.status}: ${read.detail}`;
+      const reason = read.kind === 'rejected' ? `HTTP ${read.status}: ${read.detail}` : read.reason;
       if (cached) {
         // Serve the last good numbers, labelled stale. The failure is reported alongside them rather
         // than instead of them, so the panel cannot silently freeze at an old value.
@@ -191,7 +245,10 @@ export function createAtlasReader(
       if (read.kind === 'rejected') {
         return { configured: true, state: 'rejected', project: opts.project, status: read.status, detail: read.detail, stale: false };
       }
-      return { configured: true, state: 'unreachable', project: opts.project, reason, stale: false };
+      // `read.kind`, not a literal. Hardcoding 'unreachable' here would report a malformed body as a
+      // transport failure and send the operator to check a network that is fine, when the actual
+      // problem is that Atlas is answering 200 with something that is not a project summary.
+      return { configured: true, state: read.kind, project: opts.project, reason, stale: false };
     },
   };
 }
