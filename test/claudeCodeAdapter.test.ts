@@ -390,7 +390,13 @@ test('knowledge channel: tracked CLAUDE.md is left byte-identical and the prompt
   // whole failure mode here: `.mercury-context.json` is written by the prime-agent, rpc and daemon
   // adapters, never by the worker, so a Claude Run has no such file. Asserting only that NOTES.md is
   // named does not catch it -- a pointer naming both files passes that, which is how the defect shipped
-  // once already. So: extract every path in the appended line and stat each one.
+  // once already.
+  //
+  // Scoped to `.mercury`-prefixed paths, which is narrower than "every path" and knows it. The pack
+  // lives under `.mercury` and the one file that was wrongly named lives there too, so this covers the
+  // realistic regressions; a future pointer to some path outside it, e.g. a bare `knowledge/NOTES.md`,
+  // would slip past. Widening it further means deciding where a sentence ends and a filename begins,
+  // which is a parser this test does not need until someone writes a pointer that needs it.
   const named = [...sent.matchAll(/(?:\.mercury[-/][\w./-]*)/g)].map((m) => m[0]);
   assert.ok(named.length > 0, 'the degraded prompt must name at least one path, or it points at nothing');
   for (const path of named) {
