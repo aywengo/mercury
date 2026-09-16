@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { ClaudeCodeAdapter } from '../src/adapters/claudeCodeAdapter.ts';
 import type { AgentExit, Run, RunContext, ResolvedSkill } from '../src/domain/types.ts';
 import { tempDir, tempFile } from './helpers.ts';
-import { CLAUDE_MD_FILE, NOTES_FILE } from '../src/knowledge/materialize.ts';
+import { CLAUDE_MD_FILE, CONTEXT_FILE, GENERATED_PATHS, NOTES_FILE } from '../src/knowledge/materialize.ts';
 
 
 const MOCK = join(import.meta.dirname, 'fixtures', 'mock-claude-code.mjs');
@@ -179,7 +179,11 @@ test('the task goes to stdin and never into argv', async () => {
   const argv = spawns[0];
   const seen = JSON.parse(readFileSync(envFile, 'utf8')) as { task: string };
   assert.ok(!argv.some((x) => x.includes('RECONCILABLE-TASK-TEXT')), 'task must not be in argv');
-  assert.equal(seen.task, task, 'task must arrive complete on stdin');
+  // The task arrives first, followed by the run-context pointer (section 9.2). The pointer is the
+  // point of the change -- Claude Code's discovery of .mercury-context.json is unverified, so the
+  // task text is what tells it the file exists -- but the task itself must arrive verbatim.
+  assert.ok(seen.task.startsWith(task), 'task must arrive complete on stdin, before any pointer');
+  assert.ok(seen.task.includes('.mercury-context.json'), 'the task text must point at the context file');
 });
 
 test('trace env reaches the child', async () => {
@@ -413,4 +417,37 @@ test('knowledge channel: no knowledge context -> CLAUDE.md is not written', asyn
 
   assert.ok(!existsSync(join(workspacePath, CLAUDE_MD_FILE)),
     'the adapter must not touch the workspace when no pack was injected for this Run');
+});
+
+
+test('the run-context file is written for every Run, with or without knowledge', async () => {
+  // Section 9.2: the context file is the run context, not the knowledge channel. A Run without
+  // knowledge still gets one, identical in shape to what the prime/rpc/daemon adapters write, so a
+  // harness that reads it sees the same contract whichever adapter ran the Run.
+  for (const withKnowledge of [false, true]) {
+    const { context, workspacePath } = knowledgeContext({ knowledge: withKnowledge });
+    const a = adapter();
+    await drain(await a.start(context));
+    a.dispose(context.run.id);
+
+    const ctxFile = join(workspacePath, CONTEXT_FILE);
+    assert.ok(existsSync(ctxFile), `context file must exist (knowledge=${withKnowledge})`);
+    const parsed = JSON.parse(readFileSync(ctxFile, 'utf8')) as Record<string, unknown>;
+    assert.equal(parsed.runId, context.run.id);
+    assert.equal(parsed.task, context.run.task);
+    assert.equal(parsed.workspace, workspacePath);
+    assert.equal(parsed.branch, context.workspace.branch);
+    assert.equal(parsed.baseCommit, context.workspace.baseCommit);
+    assert.deepEqual(parsed.skills, []);
+    assert.deepEqual(parsed.repository, context.repository);
+    // The knowledge pointer is present only when there is a pack, matching the other adapters.
+    assert.equal('knowledge' in parsed, withKnowledge, `knowledge key present iff pack exists (${withKnowledge})`);
+  }
+});
+
+test('the context file is excluded from git like the rest of the generated pack', async () => {
+  // GENERATED_PATHS is what the workspace manager excludes from the git view. If the context file
+  // were missing from it, a Run's context -- including the task text -- would land in a user's pull
+  // request. This pins the membership so the exclusion cannot silently lose the new file.
+  assert.ok(GENERATED_PATHS.includes(CONTEXT_FILE), 'CONTEXT_FILE must be in GENERATED_PATHS');
 });

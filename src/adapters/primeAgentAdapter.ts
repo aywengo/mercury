@@ -28,11 +28,10 @@ import { RpcClient, type RpcEvent } from './rpc/rpcClient.ts';
 import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts';
-import { SKILL_ID as KNOWLEDGE_SKILL_ID } from '../knowledge/materialize.ts';
+import { SKILL_ID as KNOWLEDGE_SKILL_ID , CONTEXT_FILE } from '../knowledge/materialize.ts';
 
 const SESSION_DIR_NAME = '.mercury-sessions';
 const SESSION_PATH_FILE = '.mercury-session-path';
-const CONTEXT_FILE = '.mercury-context.json';
 const OUTPUT_LOG = 'agent-output.log';
 
 export interface PrimeAgentAdapterOptions {

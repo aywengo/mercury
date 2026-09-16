@@ -40,7 +40,7 @@ import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import { isRecord } from './eventTranslation.ts';
-import { CLAUDE_MD_FILE, NOTES_FILE, containedPath } from '../knowledge/materialize.ts';
+import { CLAUDE_MD_FILE, CONTEXT_FILE, NOTES_FILE, containedPath } from '../knowledge/materialize.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 
@@ -149,8 +149,13 @@ function lstatExists(path: string): boolean {
  */
 function taskText(session: Session): string {
   const task = session.context.run.task;
-  if (!session.knowledgeDegraded) return `${task}\n`;
-  return `${task}\n\n(Project knowledge for this task is in ${NOTES_FILE} in the workspace.)\n`;
+  // The context file is pointed at on every Run, not only when knowledge is degraded. Claude Code's
+  // discovery of .mercury-context.json is unverified (section 10 keeps measured and assumed apart),
+  // so the pointer is what makes the file worth writing -- the same reason the other adapters put the
+  // filename in their prompts rather than trusting the harness to find it.
+  const base = `${task}\n\n(Full run context: repository, branch, base commit, constraints and selected skills are in ${CONTEXT_FILE} in the workspace root.)\n`;
+  if (!session.knowledgeDegraded) return base;
+  return `${base}\n(Project knowledge for this task is in ${NOTES_FILE} in the workspace.)\n`;
 }
 
 const DONE: AgentEvent = { type: '__done__', payload: {} };
@@ -246,6 +251,26 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         session.knowledgeDegraded = true;
       }
     }
+
+    // The run-context file (docs/knowledge-base.md section 9.2), written for every Run exactly like
+    // the prime, rpc and daemon adapters write it. Claude Code's own discovery of this file is
+    // unverified -- CLAUDE.md is the documented channel -- so taskText() below also points at it, the
+    // same way the other adapters' prompts do.
+    writeFileSync(join(context.workspace.path, CONTEXT_FILE), JSON.stringify({
+      runId,
+      task: context.run.task,
+      repository: context.repository,
+      repositories: context.repositories,
+      workspace: context.workspace.path,
+      branch: context.workspace.branch,
+      baseCommit: context.workspace.baseCommit,
+      skills: context.skills.map((s) => ({ id: s.id, version: s.version, hash: s.hash })),
+      constraints: context.constraints,
+      // The pointer, not the notes, matching the other adapters: the pack is at NOTES_FILE and the
+      // task text says where. Omitted rather than null when there is no pack, so a Run without
+      // knowledge has a context file identical to the one the other adapters would have written.
+      ...(context.knowledge ? { knowledge: context.knowledge } : {}),
+    }, null, 2));
 
     this.sessions.set(runId, session);
     this.spawnProcess(session, this.buildArgv(null));
