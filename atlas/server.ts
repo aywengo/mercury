@@ -173,6 +173,23 @@ export function buildRoutes(services: AtlasServices): Route[] {
       },
     },
     {
+      // Deletion, and deliberately not a DELETE verb: this writes a sequence-bearing tombstone instead of
+      // removing the row, and that difference is the whole of #590. The response is the tombstone itself,
+      // so a caller can see with its own eyes that the claim is gone rather than taking it on trust.
+      //
+      // Admin-only, for the same reason promotion is. A contributor that could delete could erase a note
+      // it disagrees with and take the argument off the table; section 12 settles disagreements by contest
+      // and by retirement, both of which keep both notes readable.
+      method: 'POST', pattern: ['v1', 'projects', ':projectId', 'notes', ':noteId', 'delete'], admin: true,
+      handle: (ctx, res) => {
+        const projectId = ctx.params[0]!;
+        requireProject(ctx.caller, projectId);
+        const note = store.deleteNote(projectId, ctx.params[1]!, 'admin', reasonFrom(ctx.body));
+        if (!note) throw new HttpError(404, 'no such note');
+        sendJson(res, 200, { note });
+      },
+    },
+    {
       // A contributor may declare a conflict: an agent whose NOTES.md said one thing and whose code
       // said another is the best source of these. It still cannot promote, retire or delete.
       method: 'POST', pattern: ['v1', 'projects', ':projectId', 'notes', ':noteId', 'contest'],

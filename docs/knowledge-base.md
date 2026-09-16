@@ -692,10 +692,16 @@ the bootstrap path is simply one round trip instead of many.
 however: a retired row that is still present lets `applyBatch()`'s upsert guard
 (`WHERE excluded.seq >= knowledge_replica.seq`) reject a replayed older revision of that note.
 After `MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS` (default 7 days, 604 800 000 ms) the puller
-sweeps them on the same tick as a successful pull. This retention is host-local: Atlas's
-`deleteExpiredRetired()` (atlas/notes.ts) currently has no caller and performs no sweeps, so
-both sides accumulate retired rows until this sweep runs. Wiring Atlas's sweep is tracked in
-issue #562.
+sweeps them on the same tick as a successful pull. This retention is host-local: Atlas keeps
+retired notes until an operator opts in to removing them (§12), because Atlas is the record and
+the replica is a cache that can be rebuilt from `bootstrap()`.
+
+A replica also applies **tombstones** (#590). When the feed carries a note whose tier is
+`deleted`, `applyBatch()` removes that row rather than upserting it, and counts it separately
+from retirements — a pull that deleted rows is a pull where Atlas was asked to forget something,
+and that deserves its own number in the log. This is the only place a replica ever forgets a
+note, and it is safe for exactly one reason: the tombstone arrives through the same feed, in
+`seq` order, inside the same transaction that advances the cursor.
 
 ### 8.4 Configuration
 
@@ -943,7 +949,7 @@ endpoint that does.
 ### 11.2 Sequence and replication
 
 Every write to a project's notes -- a new note, a revision, a promotion, a retirement, a
-contest -- is assigned the next value of a **per-project monotonic `seq`** inside a
+deletion, a contest -- is assigned the next value of a **per-project monotonic `seq`** inside a
 `BEGIN IMMEDIATE` transaction, the way the host's `EventStore.append` assigns per-Run event
 sequences. A single writer per project is a constraint Atlas accepts deliberately: it is what
 makes a cursor a complete, gapless description of "everything that changed after I last
@@ -967,7 +973,7 @@ handling in substance.
 | --- | --- |
 | `projects` | `id`, `name`, `repo_identities_json`, `promotion_policy_json`, `created_at` |
 | `contributors` | `token_hash`, `host_id`, `project_ids_json`, `created_at`, `last_seen_at`; the secret is never stored, only its hash |
-| `notes` | `note_id`, `project_id`, `current_revision`, `tier`, `kind`, `scope`, `claim_hash`, `seq`; indexed on `(project_id, seq)`, `(project_id, tier, scope)`, `(project_id, claim_hash)`, plus a partial UNIQUE on `(project_id, claim_hash) WHERE tier != 'retired'` (migration v2) |
+| `notes` | `note_id`, `project_id`, `current_revision`, `tier`, `kind`, `scope`, `claim_hash`, `seq`; indexed on `(project_id, seq)`, `(project_id, tier, scope)`, `(project_id, claim_hash)`, plus a partial UNIQUE on `(project_id, claim_hash) WHERE tier NOT IN ('retired', 'deleted')` (migration v2, widened by v3 so a tombstone does not hold its claim hostage forever) |
 | `note_revisions` | `note_id`, `revision`, `note_json`, `seq`, `created_at`; immutable rows |
 | `note_sources` | `note_id`, `host_id`, `run_id`, `agent`, `harness_version`, `source`, `recorded_at`; unique on `(note_id, host_id, run_id)`; this is what corroboration is counted from |
 | `promotions` | `note_id`, `from_tier`, `to_tier`, `actor`, `reason`, `seq`, `at` |
@@ -1087,13 +1093,32 @@ Two rules about what Atlas does **not** do:
   retired note's revision history remains readable; a reader who wants to know what Mercury
   believed before the decision can find out.
 
-Retention applies to notes only (K1), and Atlas **retains retired notes indefinitely**
-(issue #562). Deleting a note produces no `seq` row, and a replica advances by cursor, so a
-replica would never learn the note was gone: it would keep serving a note Atlas had destroyed,
-with no event to reconcile against. That is the same divergence §8.6 was written about, and it
-is why the bare `DELETE` that used to sit in `deleteExpiredRetired()` was removed rather than
-scheduled. Deleting safely needs a tombstone that carries a sequence number, which is a change
-to the replication protocol rather than to a retention setting.
+Retention applies to notes only (K1), and Atlas **retains retired notes unless an operator asks
+otherwise** (#590). Deletion used to be impossible rather than merely unwired: a bare `DELETE`
+produces no `seq` row, and a replica advances by cursor, so a replica would never learn the note
+was gone and would keep serving a note Atlas had destroyed, with no event to reconcile against.
+That is the same divergence §8.6 was written about, and it is why the `DELETE` that used to sit
+in `deleteExpiredRetired()` was removed rather than scheduled.
+
+What replaced it is a **sequence-bearing tombstone**. `deleteNote()` writes a final revision
+through `transition()` — so it takes a `seq`, lands in `note_revisions`, and appears in the
+promoted feed exactly as a retirement does — carrying the note id, the claim hash, the provenance
+and the audit trail, and nothing else: the claim, detail and evidence are emptied in the one place
+that writes revisions. The row survives; the knowledge does not. The revisions written *before* the
+tombstone are immutable (§11.3) and still hold the text on disk, so `getNote()` blanks them at read
+time for a deleted note -- which is what makes the sentence above true of the service rather than only
+of the newest row. Stored bytes are never rewritten, so anyone with direct read access to the database
+file can still recover them; that is a disk-and-backup trust question this route cannot answer, and it
+is stated rather than glossed. `POST
+/v1/projects/:project/notes/:noteId/delete` is admin-only, for the same reason promotion is: a
+contributor able to delete could erase a note it disagrees with, and §12 settles disagreements by
+contest and retirement instead. The `deleted` tier is not a live tier, so the one-live-note-per-claim
+rule treats it as `retired` does and a deleted claim can be re-earned tomorrow (migration v3).
+
+Deletion is **off by default**. `ATLAS_RETIRED_TOMBSTONE_AGE_MS` is unset, and the sweep tombstones
+nothing until an operator sets it. The replication question that made deletion unsafe is settled;
+how long a retired note is worth keeping is open question 6 below, and a non-zero default would
+answer it by deleting data nobody asked to delete.
 
 What the maintenance sweep (`atlas/sweep.ts`, `ATLAS_SWEEP_INTERVAL_MS`, default hourly) does
 run is the half that is visible to replicas. `candidate` notes with no new source for

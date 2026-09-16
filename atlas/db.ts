@@ -197,6 +197,23 @@ const MIGRATIONS: Migration[] = [
         ON notes(project_id, claim_hash) WHERE tier != 'retired';
     `,
   },
+  {
+    version: 3,
+    // #590: `deleted` is a terminal, sequence-bearing tier, and it is not a live tier either. The
+    // live-claim index was built as `WHERE tier != 'retired'`, which would have made a tombstone hold
+    // its claim hostage forever: delete a note today and nothing could ever again carry that claim,
+    // because the tombstone would still count as the live holder. That is a worse failure than the one
+    // deletion exists to fix -- it makes deletion permanent in a direction nobody asked for.
+    //
+    // No precheck, unlike v2. The new predicate excludes a strict superset of rows, so any database
+    // that passed the v2 clash check satisfies this one; re-checking would only re-report clashes that
+    // this change resolves by construction.
+    sql: `
+      DROP INDEX IF EXISTS ux_notes_live_claim;
+      CREATE UNIQUE INDEX ux_notes_live_claim
+        ON notes(project_id, claim_hash) WHERE tier NOT IN ('retired', 'deleted');
+    `,
+  },
 ];
 
 export { MIGRATIONS };

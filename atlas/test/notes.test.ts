@@ -370,3 +370,129 @@ test('the same key from an admin and a host are different entries', () => {
 
   db.close();
 });
+
+// --- deletion tombstones (#590) ---------------------------------------------------------------
+//
+// A note used to be undeletable. A bare DELETE produces no `seq` row, and a replica advances by cursor,
+// so every host that had already received the note would have gone on serving text Atlas was asked to
+// destroy, permanently, with nothing to reconcile against. The `deleted` tier is the fix, and the
+// property that makes it a fix rather than a cosmetic change is narrow enough to be worth stating
+// before the tests: the deletion has to arrive in the SAME feed, in seq order, or it is not a deletion
+// a replica can see. Test 2 below is the one that would fail if the tier were added to the schema but
+// left out of the feed query, and it is the reason the others are allowed to be smaller.
+
+function tombstoneFixture(claim = 'npm run test:atlas is the focused suite') {
+  const db = openDatabase(':memory:');
+  const bounds = { maxClaimBytes: 1024, maxDetailBytes: 4096, maxEvidence: 8 };
+  const store = new NoteStore(db, bounds, createRedactor([]));
+  store.createProject({ id: 'test-project', name: 'Test Project', repoIdentities: ['github.com/test/repo'] });
+  // repo-record lands promoted, so one contribute() gives a note in the tier replicas actually hold.
+  store.contribute('test-project', 'host-1',
+    [makeContribution({ claim, detail: 'the why', evidence: [{ type: 'issue', url: 'https://x/1' }] ,
+      provenance: { ...makeContribution().provenance, source: 'repo-record' } })], undefined, 500);
+  const before = store.feed('test-project', 0, 'promoted', { limit: 100 });
+  return { db, store, noteId: before.notes[0]!.noteId, seqBefore: before.notes[0]!.seq, cursor: before.nextSeq };
+}
+
+test('deletion: writes a sequence-bearing tombstone and empties the note body', () => {
+  const { db, store, noteId, seqBefore } = tombstoneFixture();
+  const tomb = store.deleteNote('test-project', noteId, 'admin', 'secret in the claim');
+  assert.ok(tomb, 'the deletion must return the note it wrote');
+  assert.equal(tomb.tier, 'deleted');
+  // The sequence number is the entire mechanism. Without a fresh seq the tombstone is invisible to a
+  // replica that has already paged past the note, which is every replica that matters.
+  assert.ok(tomb.seq > seqBefore, `tombstone seq ${tomb.seq} must exceed the note's ${seqBefore}`);
+  assert.equal(tomb.claim, '', 'a tombstone must not carry the claim it was created to remove');
+  assert.equal(tomb.detail, undefined, 'nor the detail');
+  assert.deepEqual(tomb.evidence, [], 'nor the evidence');
+  // The audit trail survives: section 12 keeps promotions indefinitely, and "what did Mercury believe
+  // here in March" has to stay answerable after the body is gone.
+  const detail = store.getNote('test-project', noteId)!;
+  assert.equal(detail.note.tier, 'deleted');
+  const transitions = (db.prepare('SELECT from_tier, to_tier, reason FROM promotions WHERE note_id = ? ORDER BY seq')
+    .all(noteId) as unknown as { from_tier: string; to_tier: string; reason: string }[]);
+  // Spread into a plain object: node:sqlite returns rows with a null prototype, and deepStrictEqual
+  // compares prototypes, so a row that matches field for field still fails it.
+  assert.deepEqual({ ...transitions.at(-1)! }, { from_tier: 'promoted', to_tier: 'deleted', reason: 'secret in the claim' });
+  db.close();
+});
+
+test('deletion: the promoted feed carries the tombstone, so a replica learns to forget', () => {
+  const { db, store, noteId, cursor } = tombstoneFixture();
+  // A replica that has already caught up. Everything it will ever learn is past this cursor.
+  const beforeDelete = store.feed('test-project', cursor, 'promoted', { limit: 100 });
+  assert.equal(beforeDelete.notes.length, 0, 'fixture: the replica is caught up before the deletion');
+
+  store.deleteNote('test-project', noteId, 'admin', 'retired then deleted');
+
+  const after = store.feed('test-project', cursor, 'promoted', { limit: 100 });
+  assert.equal(after.notes.length, 1, 'the deletion must appear in the promoted feed');
+  assert.equal(after.notes[0]!.noteId, noteId);
+  assert.equal(after.notes[0]!.tier, 'deleted');
+  assert.ok(after.nextSeq > cursor, 'and it must advance the cursor, or a replica re-reads it forever');
+  db.close();
+});
+
+test('deletion: a deleted note does not hold its claim hostage', () => {
+  const { db, store, noteId } = tombstoneFixture('the release branch is cut from the tag');
+  store.deleteNote('test-project', noteId, 'admin', 'wrong in the first revision');
+  // The live-claim index is partial and excludes `deleted`. If it did not, this contribution would hit
+  // SQLITE_CONSTRAINT_UNIQUE and deletion would be permanent in the direction nobody asked for: one
+  // delete, and that claim could never be re-earned by anyone, ever again.
+  // hostId comes from the token binding and the body must agree with it (section 11.4), so a second
+  // host has to say so in its provenance too -- otherwise this fails on host-mismatch and proves nothing.
+  const again = store.contribute('test-project', 'host-2',
+    [makeContribution({ claim: 'the release branch is cut from the tag',
+      provenance: { ...makeContribution().provenance, hostId: 'host-2' } })], undefined, 500);
+  assert.ok(pick(again[0], 'accepted'), `a re-earned claim must be accepted, got ${JSON.stringify(again)}`);
+  db.close();
+});
+
+test('deletion: requires a reason, and is idempotent', () => {
+  const { db, store, noteId } = tombstoneFixture();
+  assert.throws(() => store.deleteNote('test-project', noteId, 'admin', '   '),
+    /reason/, 'a deletion with no reason is indistinguishable from a bug at 3am');
+  const first = store.deleteNote('test-project', noteId, 'admin', 'secret');
+  const second = store.deleteNote('test-project', noteId, 'admin', 'secret');
+  assert.equal(second?.seq, first?.seq, 'a second deletion must not burn another sequence number');
+  assert.equal(store.getNote('other', 'nope'), null);
+  db.close();
+});
+
+test('deletion: the note history served by getNote() carries no text either (#590)', () => {
+  // The tombstone revision is emptied by transition(), but the revisions BEFORE it are immutable and
+  // still hold the original text, and getNote() returns all of them to anyone who can read the project.
+  // Without the read-time scrub this assertion is the difference between "the knowledge does not
+  // survive" and "the knowledge is one GET away". Proven by mutation: removing the scrub fails here
+  // and nowhere else in the file.
+  const claim = 'the release branch is cut from the tag';
+  const { db, store, noteId } = tombstoneFixture(claim);
+  store.deleteNote('test-project', noteId, 'admin', 'secret in the claim');
+
+  const detail = store.getNote('test-project', noteId);
+  assert.ok(detail, 'a deleted note stays readable as a record that it existed');
+  assert.equal(detail.note.tier, 'deleted');
+  assert.ok(detail.revisions.length >= 2, 'the history must still be there, or this proves nothing');
+  for (const rev of detail.revisions) {
+    assert.equal(rev.note.claim, '', `revision ${rev.revision} still serves the claim text`);
+    assert.equal(rev.note.detail, undefined, `revision ${rev.revision} still serves the detail text`);
+  }
+  // Identity and audit trail survive; only the knowledge goes.
+  const tomb = detail.revisions.find((r) => r.note.tier === 'deleted')!;
+  assert.ok(tomb.note.noteId, 'a scrubbed revision must still identify itself');
+  assert.ok(tomb.createdAt, 'and still say when it happened');
+});
+
+test('retirement: the history stays readable, which is what separates it from deletion (#590)', () => {
+  // Section 12 draws the line here on purpose: a retired note keeps its text so a reader can find out
+  // what Mercury believed before the decision. If this test ever fails, the two tiers have collapsed
+  // into one and the distinction the spec spends words on is gone from the code.
+  const claim = 'the release branch is cut from the tag';
+  const { db, store, noteId } = tombstoneFixture(claim);
+  store.retire('test-project', noteId, 'admin', 'superseded by the new build guide');
+
+  const detail = store.getNote('test-project', noteId);
+  assert.equal(detail!.note.tier, 'retired');
+  assert.ok(detail!.revisions.some((r) => r.note.claim === claim),
+    'a retired note must still serve what it said');
+});

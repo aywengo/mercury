@@ -38,6 +38,13 @@ export interface ReplicaRow {
 export interface ApplyResult {
   applied: number;
   retired: number;
+  /**
+   * Tombstones applied (#590): rows this batch REMOVED from the replica. Counted apart from `retired`
+   * because the two mean different things to an operator -- a retirement leaves the row in place as a
+   * replay guard and stops serving it, a deletion takes the row out. A pull that deleted 40 rows is
+   * also the pull where Atlas was asked to forget something, and that deserves its own number.
+   */
+  deleted: number;
   /** Rows skipped because the replica already holds an equal or newer revision of them. */
   skipped: number;
   cursor: number;
@@ -88,7 +95,7 @@ export class ReplicaStore {
    * only one the code can produce.
    */
   applyBatch(projectId: string, notes: Note[], nextSeq: number, appliedAt: string): ApplyResult {
-    const result: ApplyResult = { applied: 0, retired: 0, skipped: 0, cursor: this.getCursor(projectId) ?? 0 };
+    const result: ApplyResult = { applied: 0, retired: 0, deleted: 0, skipped: 0, cursor: this.getCursor(projectId) ?? 0 };
     if (notes.length === 0) {
       // Still advance: a page can be empty because everything between the old cursor and nextSeq was
       // a transition this replica does not carry, and re-asking for it every tick would spin.
@@ -137,6 +144,19 @@ export class ReplicaStore {
         // A replayed page must not roll a note back to an older revision. The guard is in the UPDATE
         // too, so this is for the count rather than for correctness.
         if (before && Number(before.seq) > note.seq) { result.skipped += 1; continue; }
+        // A tombstone (#590) takes the row out instead of replacing it. This is the only place a replica
+        // ever forgets a note, and it is safe for exactly one reason: the tombstone arrived through the
+        // same feed, in seq order, in the same transaction that advances the cursor. A bare DELETE on
+        // Atlas would have put nothing in the feed at all, and this row would have been served forever by
+        // every host that had already received the note. The replay guard above keeps working afterwards
+        // for the same reason -- the cursor is monotonic, so the older revision that could resurrect this
+        // note is never re-sent.
+        if (note.tier === 'deleted') {
+          this.db.prepare('DELETE FROM knowledge_replica WHERE note_id = ?').run(note.noteId);
+          result.applied += 1;
+          result.deleted += 1;
+          continue;
+        }
         insert.run(
           row.note_id, row.project_id, row.kind, row.scope, row.claim, row.detail, row.tier, row.seq,
           row.revision, row.evidence_json, row.corr_runs, row.corr_harnesses, row.corr_hosts,

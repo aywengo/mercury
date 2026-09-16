@@ -235,14 +235,18 @@ execute on another machine with no workspace for the worker to read.
 What is **not** built, each re-checked against the tree rather than carried over from an earlier
 revision of this page:
 
-- **Atlas never deletes a note.** A maintenance sweep runs hourly (`ATLAS_SWEEP_INTERVAL_MS`): it
-  retires stale candidates and prunes replay-guard rows. It deliberately does not delete, because a
-  deletion produces no `seq` row and a replica advancing by cursor would never learn the note was
-  gone. Retired notes therefore accumulate in Atlas indefinitely; deleting them safely needs a
-  sequence-bearing tombstone, which is a replication-protocol change.
-  [#562](https://github.com/aywengo/mercury/issues/562) landed the sweep and left deletion out for exactly
-  this reason, so it is closed and the deletion path is **not currently tracked** — reopening #562 or
-  filing a new issue are both reasonable, but no open issue exists today.
+- **Atlas deletes nothing unless an operator asks it to.** A maintenance sweep runs hourly
+  (`ATLAS_SWEEP_INTERVAL_MS`): it retires stale candidates and prunes replay-guard rows. Deletion is
+  available — `POST /v1/projects/:project/notes/:noteId/delete`, and `ATLAS_RETIRED_TOMBSTONE_AGE_MS`
+  for the sweep — and it is off by default, so retired notes accumulate until an operator opts in.
+  Deletion is a **tombstone**, not a `DELETE`: it writes a final revision carrying a `seq`, so a
+  replica advancing by cursor learns the note is gone instead of serving destroyed text forever.
+  [#562](https://github.com/aywengo/mercury/issues/562) is closed: it landed the sweep and left
+  deletion out, because the protocol could not express a safe deletion at all.
+  [#590](https://github.com/aywengo/mercury/issues/590) is closed too — it specified the tombstone, and
+  this page describes it as shipped. What is still unbuilt is a retention **policy**: how long a retired
+  note is worth keeping is open question 6 of `docs/knowledge-base.md` §18, which is exactly why the
+  default is off rather than 180 days.
 - **Atlas refuses to start on a database that already holds two live notes for one claim.** A
   partial UNIQUE index enforces the one-live-note-per-claim rule (`atlas/db.ts`, migration v2), and
   a precheck names the colliding note ids rather than surfacing a raw constraint error. It will not

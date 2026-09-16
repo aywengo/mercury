@@ -279,3 +279,27 @@ test('puller calls sweepRetired after a successful pull', async () => {
   assert.equal(outcome.sweptRetired, 1, 'puller must have called sweepRetired after the pull');
   assert.equal(rep.count('mercury'), 0);
 });
+
+test('a tombstone takes the row out of the replica, and is counted apart from retirements (#590)', () => {
+  const db = openDatabase(':memory:');
+  const rep = new ReplicaStore(db);
+  rep.applyBatch('mercury', [note({ noteId: 'n1', seq: 1 }), note({ noteId: 'n2', seq: 2 })], 2, '2026-01-02T00:00:00.000Z');
+  assert.equal(rep.promoted('mercury').length, 2, 'fixture: two promoted notes');
+
+  // What Atlas sends for a deletion: the note id, the new seq, tier 'deleted', and no body.
+  const tombstone = note({ noteId: 'n1', seq: 3, tier: 'deleted', claim: '', evidence: [] });
+  const applied = rep.applyBatch('mercury', [tombstone], 3, '2026-01-03T00:00:00.000Z');
+
+  assert.equal(applied.deleted, 1, 'the deletion is counted as a deletion, not as a retirement');
+  assert.equal(applied.retired, 0, 'a tombstone is not a retirement; conflating them hides the one pull where Atlas was asked to forget something');
+  const remaining = rep.promoted('mercury');
+  assert.deepEqual(remaining.map((n) => n.noteId), ['n2'], 'the deleted note must not be served again');
+  assert.equal(rep.getCursor('mercury'), 3, 'and the cursor still advances past the tombstone');
+
+  // A tombstone for a note this replica never held is a no-op, not an error. A host that joined after
+  // the deletion bootstraps without the note and will still be handed the tombstone by a feed pull.
+  const again = rep.applyBatch('mercury', [note({ noteId: 'never-had', seq: 4, tier: 'deleted', claim: '' })], 4, '2026-01-04T00:00:00.000Z');
+  assert.equal(again.deleted, 1, 'applying a tombstone for an absent note still counts as applied');
+  assert.deepEqual(rep.promoted('mercury').map((n) => n.noteId), ['n2'], 'and nothing else moved');
+  db.close();
+});
