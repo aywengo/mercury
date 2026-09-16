@@ -818,16 +818,28 @@ export class NoteStore {
 
     // Counted through notes rather than read off the contests table, which has no project column and
     // would otherwise count other projects' disputes.
+    //
+    // `contest()` records a dispute in BOTH directions -- (A,B) and (B,A) -- so a plain COUNT reports
+    // every pair twice, and a dashboard would tell an operator there are twice as many disagreements as
+    // there are. The pair is collapsed to one key before counting rather than the total divided by two:
+    // dividing is only correct while every writer keeps storing both directions, and if that ever
+    // changes it silently starts reporting zero. Keying on the ordered pair is correct either way.
     const contested = this.db.prepare(
-      'SELECT COUNT(*) AS n FROM contests c JOIN notes n ON n.note_id = c.note_id WHERE n.project_id = ?',
+      `SELECT COUNT(DISTINCT MIN(c.note_id, c.contradicts_note_id) || '|' || MAX(c.note_id, c.contradicts_note_id)) AS n
+         FROM contests c JOIN notes n ON n.note_id = c.note_id
+        WHERE n.project_id = ?`,
     ).get(projectId) as { n: number } | undefined;
 
     // Last arrival per contributor, from note_sources rather than contributors.last_seen_at: the two
     // differ, and the column the dashboard wants is "when did this host last teach us something", which
     // is a contribution and not a request. A host that polls every minute and contributes nothing would
     // look like a host that is learning.
+    //
+    // DISTINCT on the note, not a row count. A host that repeats the same claim from a second Run is
+    // corroboration and writes a second source row for the SAME note; counting rows would report that
+    // host as having taught the project two things when it taught it one, twice.
     const contributors = (this.db.prepare(
-      `SELECT s.host_id AS hostId, COUNT(*) AS notes, MAX(s.recorded_at) AS lastArrival
+      `SELECT s.host_id AS hostId, COUNT(DISTINCT s.note_id) AS notes, MAX(s.recorded_at) AS lastArrival
          FROM note_sources s JOIN notes n ON n.note_id = s.note_id
         WHERE n.project_id = ?
         GROUP BY s.host_id

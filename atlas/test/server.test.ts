@@ -315,11 +315,11 @@ test('promoting a retired note whose claim is live is a 409 that names the block
  * helper at once: the host must match the token, the repo identity must belong to this project, and the
  * per-note `repoIdentity` is the one `contributeOne()` checks rather than the one on the request body.
  */
-function summaryContribution(claim: string): Record<string, unknown> {
+function summaryContribution(claim: string, runId = 'run-1'): Record<string, unknown> {
   return {
     kind: 'fact', scope: 'project', claim, evidence: [],
     provenance: {
-      source: 'agent-reported', hostId: 'host-b', runId: 'run-1', agent: 'primeagent',
+      source: 'agent-reported', hostId: 'host-b', runId, agent: 'primeagent',
       harnessVersion: '1.0.0', recordedAt: new Date().toISOString(),
     },
     repoIdentity: 'github.com/example/summary',
@@ -381,4 +381,50 @@ test('summary: a reader bound to another project cannot read it', async () => {
 test('summary: no token at all is refused', async () => {
   const res = await call('GET', '/v1/projects/summary-proj/summary', null);
   assert.equal(res.status, 401, res.text);
+});
+
+test('summary: one dispute is one contested pair, not two', async () => {
+  // contest() records a dispute in both directions, so (A,B) and (B,A) are two rows and a naive COUNT
+  // tells an operator there are twice as many disagreements as exist. The existing fixture asserted
+  // contestedPairs === 0, which is exactly the one value that cannot distinguish a correct query from a
+  // doubled one.
+  const notes = await call('GET', '/v1/projects/summary-proj/notes?since=0&tier=all', READER_B);
+  assert.equal(notes.status, 200, notes.text);
+  const ids = notes.json.notes.map((n: { noteId: string }) => n.noteId);
+  assert.equal(ids.length, 2, 'the fixture leaves exactly two notes to dispute');
+
+  const before = await call('GET', '/v1/projects/summary-proj/summary', READER_B);
+  assert.equal(before.json.contestedPairs, 0, 'nothing is contested yet');
+
+  const contested = await call('POST', `/v1/projects/summary-proj/notes/${ids[0]}/contest`, CONTRIBUTOR_B,
+    { contradicts: ids[1] });
+  assert.equal(contested.status, 200, contested.text);
+
+  const after = await call('GET', '/v1/projects/summary-proj/summary', READER_B);
+  assert.equal(after.json.contestedPairs, 1,
+    `one dispute between two notes must read as one pair, got ${after.json.contestedPairs}`);
+});
+
+test('summary: corroboration from the same host is not a second thing learned', async () => {
+  // A host repeating an existing claim writes a second note_sources row on the SAME note -- that is
+  // what corroboration is. Counting rows would report the host as having taught the project two things
+  // when it taught it one, twice, which is the metric the dashboard exists to get right.
+  const before = await call('GET', '/v1/projects/summary-proj/summary', READER_B);
+  const hostB = (before.json.contributors as { hostId: string; notes: number }[]).find((c) => c.hostId === 'host-b')!;
+  const learned = hostB.notes;
+
+  // A different runId, which is the whole point. note_sources is unique on
+  // (note_id, host_id, run_id) with DO NOTHING, so repeating the claim from the SAME run writes no row
+  // at all and the assertion below would pass against a query that counts rows. Corroboration only
+  // exists as a second row when it comes from a second Run.
+  const again = await call('POST', '/v1/projects/summary-proj/notes', CONTRIBUTOR_B,
+    { notes: [summaryContribution('npm run test:atlas runs only the atlas suite', 'run-2')] },
+    { 'idempotency-key': 'sum-corroborate' });
+  assert.equal(again.status, 200, again.text);
+  assert.ok('duplicate' in again.json.results[0], `expected a duplicate, got ${JSON.stringify(again.json.results)}`);
+
+  const after = await call('GET', '/v1/projects/summary-proj/summary', READER_B);
+  const hostBAfter = (after.json.contributors as { hostId: string; notes: number }[]).find((c) => c.hostId === 'host-b')!;
+  assert.equal(hostBAfter.notes, learned,
+    `repeating a claim must not raise the count of distinct notes learned (${learned} -> ${hostBAfter.notes})`);
 });
