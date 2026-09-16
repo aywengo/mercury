@@ -112,6 +112,32 @@ function evidenceLabel(e: EvidenceRef): string {
  * the bottom. The closing instruction is the whole tier-1 mechanism, and it travels through the same
  * channel as the knowledge so it needs no adapter support and no prompt change anywhere.
  */
+/**
+ * The example note an agent is shown, as one JSON line.
+ *
+ * Built with `JSON.stringify` rather than written as a literal string so the example cannot drift into
+ * being invalid JSON -- which matters because this line is the only part of the contribution
+ * instructions an agent actually copies, and a rejected example teaches agents that writing notes does
+ * not work. `test/knowledgeHarvest.test.ts` feeds it through the real harvester and asserts it is
+ * accepted, so the schema and the example fail together rather than the example quietly going stale.
+ *
+ * Exported for that test. Not exported for any runtime use.
+ *
+ * Scoped to `project` rather than `repo:<hash>` on purpose. A hash copied verbatim into every workspace
+ * would name a repository that does not exist: the note is accepted by both the host and Atlas, and is
+ * then scoped to something no Run ever matches, so it is silently never delivered -- the worst failure
+ * this path has, because nothing reports it. An agent cannot compute the real hash from anything it is
+ * given, so the example must not require one.
+ */
+export const NOTE_EXAMPLE_LINE = JSON.stringify({
+  kind: 'command',
+  scope: 'project',
+  claim: 'Atlas tests run with `npm run test:atlas`; `npm test` runs all four suites.',
+  detail: 'The Commands block in AGENTS.md lists only `npm test`, which is four times slower '
+    + 'when the only thing that changed is under atlas/.',
+  evidence: [{ type: 'repo-file', repo: 'mercury', path: 'package.json', sha: 'a08c528' }],
+});
+
 export function renderNotesMd(projectId: string, packHash: string, notes: readonly Note[]): string {
   const lines: string[] = [];
   lines.push(`# Project knowledge: ${projectId}`);
@@ -151,18 +177,30 @@ export function renderNotesMd(projectId: string, packHash: string, notes: readon
 
   lines.push('## Contributing what you learn');
   lines.push('');
-  lines.push(`If you learn something durable about this project, append ONE JSON object per line to \`${NOTES_JSONL}\`.`);
+  lines.push('Before you report the task done, ask whether you learned something durable about this');
+  lines.push('project that no README states. If you did, append ONE JSON object per line to');
+  lines.push(`\`${NOTES_JSONL}\`.`);
   lines.push('Write what you would want to know on your first day here: a convention that is not in any');
   lines.push('README, a command that is faster than the obvious one, a way this project has been broken');
   lines.push('before. Do not write anything specific to this task, anything about a person, or anything');
   lines.push('you would not want repeated to every future agent here.');
   lines.push('');
+  lines.push('Copy this line and change only the values. It is a complete, accepted note:');
+  lines.push('');
+  lines.push('```json');
+  lines.push(NOTE_EXAMPLE_LINE);
+  lines.push('```');
+  lines.push('');
   lines.push('Each line takes the fields `kind`, `scope`, `claim`, and optionally `detail`, `evidence`,');
-  lines.push('`contradicts`. `kind` is one of `fact`, `convention`, `command`, `pitfall`, `decision`,');
-  lines.push('`preference`. `scope` is `project`, `repo:<16-hex>`, `repo:<16-hex>#<path>` or');
+  lines.push('`contradicts`. `kind` is one of `fact`, `convention`, `command`, `pitfall`,');
+  lines.push('`decision`, `artifact-pointer`. `scope` is `project`, `repo:<16-hex>`,');
+  lines.push('`repo:<16-hex>#<path>` or');
   lines.push('`agent:<id>`. `claim` is one sentence, `detail` is the why. Evidence entries take');
-  lines.push('`{"type":"issue","url":...}`, `{"type":"commit","sha":...}`, `{"type":"pr","url":...}`,');
-  lines.push('`{"type":"run-event","runId":...}` or `{"type":"repo-file","repo":...,"path":...,"sha":...}`.');
+  lines.push('`{"type":"issue","url":...}`, `{"type":"pr","url":...}`,');
+  lines.push('`{"type":"commit","repo":...,"sha":...}`,');
+  lines.push('`{"type":"run-event","hostId":...,"runId":...,"seq":...}` or');
+  lines.push('`{"type":"repo-file","repo":...,"path":...,"sha":...}`. `pitfall` and `decision` are refused');
+  lines.push('without at least one evidence entry.');
   lines.push('');
   lines.push('You do not choose whether it is trusted. Mercury assigns the identity, provenance and');
   lines.push('corroboration, and a note becomes project-wide guidance only after it has been seen more');
