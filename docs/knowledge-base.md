@@ -1253,7 +1253,7 @@ later is worth building until the phase before it has been exercised by a real R
    command at all. Hermes v0.21.2 also acted on the note (`run_8d8cfc92f22b4fcf`), though with no
    control of its own and no tool events to show it -- see §10. Everything before this is plumbing;
    this is the phase that shows the plumbing carries water, and it carries it on the **read** path.
-   The write path is Phase 3 and is not observed.
+   The write path is Phase 3 and is observed below.
 3. **Tier 1.** `.mercury/notes.jsonl` harvest at finalize, validation, K2 checks, bounds,
    host-side redaction, `knowledge.noted` and `knowledge.rejected`. Split by what has actually been
    seen, because the two halves are not at the same place:
@@ -1264,19 +1264,28 @@ later is worth building until the phase before it has been exercised by a real R
    model on a different host acting on knowledge it could only have received through Atlas. The
    note was **operator-authored**, so this proves the transport, not the authoring.
 
-   3b. **A real agent writing a note -- not observed.** In the same pass, `run_e8fe5f095b38438b`
-   was given a task that told it to record a durable fact, read `NOTES.md`, used the command in it,
-   and finished having written nothing to `.mercury/notes.jsonl`. The harvest, validation, K2
-   checks and bounds are all built and tested against a scripted writer; no shipped harness has
-   been seen to produce a note. This is the finding that decides whether Phases 4 to 6 are worth
-   building in their current order: auto-promotion corroborates tier-1 notes, and if real agents
-   do not write them there is nothing for it to promote.
-4. **Auto-promotion.** The corroboration policy of §12. The mechanism is built -- `autoPromote()`
-   in `atlas/notes.ts`, its policy and `atlas/test/promotion.test.ts`, and `ux_notes_live_claim`,
-   the partial unique index from #566 that makes one-live-note-per-claim a database constraint
-   rather than a convention. What is missing is the observation this phase's gate names: a tier-1
-   candidate crossing to promoted on the second harness with no operator touching it. That depends
-   on #589, the real-harness observation. It no longer depends on Teams Phase -1: that landed as
+   3b. **A real agent writing a note -- observed.** Hermes Agent v0.21.2 wrote a note on a real
+   Run (`run_0826c0e5e4ee4f6c`, host `obs-host`): given a task that told it to record a durable
+   fact, it verified the claim against the live tree, appended one JSON line to
+   `.mercury/notes.jsonl`, and the worker harvested it (`accepted: 1`), pushed it to Atlas
+   (`accepted: 1`), and the note landed as `candidate` with provenance `{source:
+   agent-reported, hostId: obs-host, agent: hermes}`. The earlier negative result
+   (`run_e8fe5f095b38438b`) stands as the control: the same task shape produced no note when the
+   agent was not told to record one. The harvest, validation, K2 checks and bounds were already
+   built and tested against a scripted writer; this observation confirms a shipped harness
+   produces notes the same way.
+4. **Auto-promotion -- observed.** A tier-1 candidate crossed to promoted on the second host
+   with no operator touching it. Hermes v0.21.2 on host `obs-host` wrote a fact
+   (`run_4acabb39e38c4c7d`, claim hash `7552e426...`); the same task on host `obs-host-b`
+   (`run_c6c54c49d5b84d10`, `run_06f71fb51a864d4b`) and again on `obs-host`
+   (`run_a6dee42964e44ce7`) produced the same claim hash. Atlas auto-promoted it
+   (`system:corroboration`, reason `auto: 4 runs across 2 hosts or harnesses`) once the project's
+   promotion policy was set to the §12 default (`minRuns: 3`, `minDistinctHarnessesOrHosts: 2`).
+   The mechanism was already built -- `autoPromote()` in `atlas/notes.ts`, its policy and
+   `atlas/test/promotion.test.ts`, and `ux_notes_live_claim`, the partial unique index from #566
+   that makes one-live-note-per-claim a database constraint rather than a convention. This
+   observation closes the phase's gate: the gate was #589's real-harness observation, and the
+   four Runs above are that observation. It no longer depends on Teams Phase -1: that landed as
    #520, Hermes has completed a Run through Mercury (`run_f3a4e81644be4081`, v0.21.2), and Hermes
    has had a knowledge channel since #565.
 
