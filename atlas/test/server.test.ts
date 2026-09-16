@@ -27,6 +27,8 @@ import { ATLAS_VERSION } from '../version.ts';
 const ADMIN = 'server-test-admin-token-0001';
 const CONTRIBUTOR = 'server-test-contributor-token-01';
 const READER = 'server-test-reader-token-00001';
+const CONTRIBUTOR_B = 'server-test-contributor-token-b-01';
+const READER_B = 'server-test-reader-token-b-00002';
 const IDENTITY = 'github.com/aywengo/mercury';
 
 let dir: string;
@@ -38,6 +40,10 @@ before(async () => {
   const contributorsFile = join(dir, 'contributors.json');
   writeFileSync(contributorsFile, JSON.stringify({
     [CONTRIBUTOR]: { hostId: 'host-a', projects: ['mercury'] },
+    // A second host bound to the summary fixture's project. Contributor tokens are project-scoped, so
+    // without this the only way to write there would be the admin token -- and admin contributions carry
+    // no hostId, which is exactly the field the summary's per-contributor section is about.
+    [CONTRIBUTOR_B]: { hostId: 'host-b', projects: ['summary-proj'] },
   }), { mode: 0o600 });
 
   const config = loadAtlasConfig({
@@ -46,13 +52,13 @@ before(async () => {
     ATLAS_PORT: '0',
     ATLAS_ADMIN_TOKEN: ADMIN,
     ATLAS_CONTRIBUTORS_FILE: contributorsFile,
-    ATLAS_READER_TOKENS: `${READER}:dashboard:mercury`,
+    ATLAS_READER_TOKENS: `${READER}:dashboard:mercury,${READER_B}:summary-dashboard:summary-proj`,
     ATLAS_LOG_LEVEL: 'error',
   });
   const db = openDatabase(config.dbPath);
   // Seeding is a startup step the CLI performs, not something startAtlas does, so the fixture has to
   // do it too. A contributor file that never lands is otherwise indistinguishable from a typo in it.
-  assert.deepEqual(seedContributors(db, contributorsFile), [CONTRIBUTOR], 'the seeded token must be reported');
+  assert.deepEqual(seedContributors(db, contributorsFile), [CONTRIBUTOR, CONTRIBUTOR_B], 'the seeded tokens must be reported');
   const redactor = createRedactor(config.secrets);
   const store = new NoteStore(db, { maxClaimBytes: config.maxClaimBytes, maxDetailBytes: config.maxDetailBytes, maxEvidence: 8 }, redactor);
   const auth = new AuthIndex(db, config);
@@ -296,4 +302,129 @@ test('promoting a retired note whose claim is live is a 409 that names the block
     { reason: 'reinstate the original' });
   assert.equal(reinstated.status, 200, `reinstatement after clearing the claim should work: ${reinstated.text}`);
   assert.equal(reinstated.json.note.tier, 'promoted');
+});
+
+// --- project summary (section 14, the Fleet dashboard's data source) ---------------------------
+
+/**
+ * A contribution the summary fixture's project will actually accept.
+ *
+ * Written out rather than derived from `contribution()` with a spread, because that helper returns
+ * `Record<string, unknown>` and its `provenance` is therefore `unknown` -- spreading it typechecks as
+ * an error and runs fine, which is the worst combination. Three fields have to differ from the shared
+ * helper at once: the host must match the token, the repo identity must belong to this project, and the
+ * per-note `repoIdentity` is the one `contributeOne()` checks rather than the one on the request body.
+ */
+function summaryContribution(claim: string, runId = 'run-1'): Record<string, unknown> {
+  return {
+    kind: 'fact', scope: 'project', claim, evidence: [],
+    provenance: {
+      source: 'agent-reported', hostId: 'host-b', runId, agent: 'primeagent',
+      harnessVersion: '1.0.0', recordedAt: new Date().toISOString(),
+    },
+    repoIdentity: 'github.com/example/summary',
+  };
+}
+
+test('summary: a reader gets counts and not one claim', async () => {
+  // Its own project, because the fixture above is shared and every other test writes into it. Exact
+  // counts are only assertable against a project nobody else touches.
+  const created = await call('POST', '/v1/projects', ADMIN, {
+    id: 'summary-proj', name: 'Summary', repoIdentities: ['github.com/example/summary'],
+    promotionPolicy: { auto: null },
+  });
+  assert.equal(created.status, 201, created.text);
+
+  const promoted = await call('POST', '/v1/projects/summary-proj/notes', CONTRIBUTOR_B,
+    { notes: [summaryContribution('npm run test:atlas runs only the atlas suite')] },
+    { 'idempotency-key': 'sum-1' });
+  assert.equal(promoted.status, 200, promoted.text);
+  const noteId = promoted.json.results[0].accepted;
+  const promotedRes = await call('POST', `/v1/projects/summary-proj/notes/${noteId}/promote`, ADMIN,
+    { actor: 'admin', reason: 'operator note' });
+  assert.equal(promotedRes.status, 200, promotedRes.text);
+
+  await call('POST', '/v1/projects/summary-proj/notes', CONTRIBUTOR_B,
+    { notes: [summaryContribution('a candidate that nobody has promoted yet')] },
+    { 'idempotency-key': 'sum-2' });
+
+  const res = await call('GET', '/v1/projects/summary-proj/summary', READER_B);
+  assert.equal(res.status, 200, res.text);
+  assert.equal(res.json.byTier.promoted, 1, 'one promoted note was created');
+  assert.equal(res.json.byTier.candidate, 1, 'one note is awaiting promotion');
+  assert.deepEqual(res.json.promotedByKind, { fact: 1 }, 'promotedByKind covers promoted notes only');
+  assert.equal(res.json.contestedPairs, 0);
+  assert.ok(res.json.latestSeq > 0, 'the summary must expose the cursor a replica would be at');
+
+  // The load-bearing assertion. A dashboard reader that could pull claims would be a second copy of the
+  // knowledge base with a weaker token than the one section 12 hands out.
+  assert.ok(!res.text.includes('test:atlas'), `the summary leaked claim text: ${res.text}`);
+  assert.ok(!res.text.includes('nobody has promoted'), `the summary leaked claim text: ${res.text}`);
+
+  const contributors = res.json.contributors as { hostId: string; notes: number; lastArrival: string }[];
+  assert.deepEqual(contributors.map((c) => c.hostId), ['host-b']);
+  assert.equal(contributors[0]!.notes, 2, 'both contributions came from this host');
+  assert.ok(Date.parse(contributors[0]!.lastArrival) > 0, 'lastArrival must be a timestamp');
+});
+
+test('summary: a reader bound to another project cannot read it', async () => {
+  // The reader token in this fixture is scoped to `mercury`. Owner-scoping is a rule AGENTS.md states for
+  // the Run API and the same rule applies here: a dashboard token must not enumerate every project.
+  const res = await call('GET', '/v1/projects/summary-proj/summary', READER);
+  // 404 rather than 403, which is the rule AGENTS.md states for the Run API and which this route
+  // inherits from requireProject: a token bound to one project must not be able to confirm that another
+  // one exists. Asserted explicitly rather than accepted silently, because 403 here would be a real
+  // information leak and a future "clarification" to 403 would reintroduce it quietly.
+  assert.equal(res.status, 404, `expected 404 for a project the reader is not bound to, got ${res.status}`);
+});
+
+test('summary: no token at all is refused', async () => {
+  const res = await call('GET', '/v1/projects/summary-proj/summary', null);
+  assert.equal(res.status, 401, res.text);
+});
+
+test('summary: one dispute is one contested pair, not two', async () => {
+  // contest() records a dispute in both directions, so (A,B) and (B,A) are two rows and a naive COUNT
+  // tells an operator there are twice as many disagreements as exist. The existing fixture asserted
+  // contestedPairs === 0, which is exactly the one value that cannot distinguish a correct query from a
+  // doubled one.
+  const notes = await call('GET', '/v1/projects/summary-proj/notes?since=0&tier=all', READER_B);
+  assert.equal(notes.status, 200, notes.text);
+  const ids = notes.json.notes.map((n: { noteId: string }) => n.noteId);
+  assert.equal(ids.length, 2, 'the fixture leaves exactly two notes to dispute');
+
+  const before = await call('GET', '/v1/projects/summary-proj/summary', READER_B);
+  assert.equal(before.json.contestedPairs, 0, 'nothing is contested yet');
+
+  const contested = await call('POST', `/v1/projects/summary-proj/notes/${ids[0]}/contest`, CONTRIBUTOR_B,
+    { contradicts: ids[1] });
+  assert.equal(contested.status, 200, contested.text);
+
+  const after = await call('GET', '/v1/projects/summary-proj/summary', READER_B);
+  assert.equal(after.json.contestedPairs, 1,
+    `one dispute between two notes must read as one pair, got ${after.json.contestedPairs}`);
+});
+
+test('summary: corroboration from the same host is not a second thing learned', async () => {
+  // A host repeating an existing claim writes a second note_sources row on the SAME note -- that is
+  // what corroboration is. Counting rows would report the host as having taught the project two things
+  // when it taught it one, twice, which is the metric the dashboard exists to get right.
+  const before = await call('GET', '/v1/projects/summary-proj/summary', READER_B);
+  const hostB = (before.json.contributors as { hostId: string; notes: number }[]).find((c) => c.hostId === 'host-b')!;
+  const learned = hostB.notes;
+
+  // A different runId, which is the whole point. note_sources is unique on
+  // (note_id, host_id, run_id) with DO NOTHING, so repeating the claim from the SAME run writes no row
+  // at all and the assertion below would pass against a query that counts rows. Corroboration only
+  // exists as a second row when it comes from a second Run.
+  const again = await call('POST', '/v1/projects/summary-proj/notes', CONTRIBUTOR_B,
+    { notes: [summaryContribution('npm run test:atlas runs only the atlas suite', 'run-2')] },
+    { 'idempotency-key': 'sum-corroborate' });
+  assert.equal(again.status, 200, again.text);
+  assert.ok('duplicate' in again.json.results[0], `expected a duplicate, got ${JSON.stringify(again.json.results)}`);
+
+  const after = await call('GET', '/v1/projects/summary-proj/summary', READER_B);
+  const hostBAfter = (after.json.contributors as { hostId: string; notes: number }[]).find((c) => c.hostId === 'host-b')!;
+  assert.equal(hostBAfter.notes, learned,
+    `repeating a claim must not raise the count of distinct notes learned (${learned} -> ${hostBAfter.notes})`);
 });
