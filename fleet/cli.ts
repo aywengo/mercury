@@ -14,8 +14,9 @@
  *   fleet hosts rm <id>
  *   fleet hosts probe [<id>] [--json]
  *   fleet probe --watch            run the sweep on FLEET_PROBE_INTERVAL_MS until interrupted
-  fleet serve                    run the service; binds 127.0.0.1:3100 by default
+ *   fleet serve                    run the service; binds 127.0.0.1:3100 by default
  *   fleet credentials list         credential NAMES only; values are never printed
+ *   fleet knowledge [--json]       Atlas project health for the configured project (read only)
  *
  * No command accepts a child credential as an argument. argv is world-readable through ps, so the secret
  * lives in the credential file and only its name travels (design section 9).
@@ -26,6 +27,7 @@ import { openFleetDb } from './db.ts';
 import { HostRegistry, RegistryError, type HostView, type ProbeRecord } from './registry.ts';
 import { loadCredentials, CredentialError, type CredentialStore } from './credentials.ts';
 import { createProber } from './prober.ts';
+import { createAtlasReader, type AtlasView } from './atlas.ts';
 import { MIN_HOST_API, probeAndRecord, probeHost } from './probe.ts';
 import { createFleetServer } from './server.ts';
 import { assertServeable } from './config.ts';
@@ -43,6 +45,7 @@ const USAGE = `fleet -- manage multiple Mercury instances
   fleet hosts probe [<id>] [--json]
   fleet probe --watch
   fleet serve                      run the service (binds FLEET_BIND_HOST:FLEET_PORT)
+  fleet knowledge [--json]             Atlas project health for the configured project
   fleet credentials list
   fleet --version                  print mercury-fleet <version>
 `;
@@ -145,6 +148,47 @@ function renderTable(rows: HostView[]): string {
   return out.join('\n');
 }
 
+/**
+ * The Atlas project health panel (docs/knowledge-base.md §14).
+ *
+ * Fleet has no web UI -- its two surfaces are this CLI and `fleet serve` -- so this is what §14's
+ * "dashboard" means for Fleet in practice: the four numbers an operator reads to tell which hosts are
+ * learning and which have gone quiet. The per-contributor last-arrival column is the one worth the
+ * table; joined by eye against `fleet hosts` it shows a host that stopped contributing, which is the
+ * failure this whole feature is meant to make visible.
+ */
+function renderKnowledge(view: AtlasView): string {
+  if (!view.configured) return 'Atlas is not configured (set FLEET_ATLAS_URL, FLEET_ATLAS_TOKEN, FLEET_ATLAS_PROJECT).';
+  if (view.state !== 'ok' && !view.stale) {
+    const why = view.state === 'rejected' ? `HTTP ${view.status}: ${view.detail}` : view.reason;
+    return `Atlas ${view.state}: ${why}`;
+  }
+  const counts = (m: Record<string, number>) => {
+    const keys = Object.keys(m).sort();
+    return keys.length ? keys.map((k) => `${k} ${m[k]}`).join('  ') : '(none)';
+  };
+  const lines = [
+    `project   ${view.project}`,
+    `tiers     ${counts(view.summary.byTier)}`,
+    `kinds     ${counts(view.summary.promotedByKind)}`,
+    `contested ${view.summary.contestedPairs} pair(s)`,
+    `last event  seq ${view.summary.latestSeq}`,
+    '',
+  ];
+  if (view.stale) {
+    // First, not last. Numbers that are wrong and look current are worse than no numbers, so the
+    // caveat has to be the thing an operator reads before the counts rather than after them.
+    lines.splice(0, 0, `STALE -- last known state, fetched ${ago(view.fetchedAt)} ago; Atlas ${view.state}: ${view.reason}`, '');
+  }
+  const rows = view.summary.contributors.map((c) => [c.hostId, String(c.notes), ago(c.lastArrival)]);
+  if (!rows.length) { lines.push('(no contributions recorded yet)'); return lines.join('\n'); }
+  const header = ['CONTRIBUTOR', 'NOTES', 'LAST ARRIVAL'];
+  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)));
+  const line = (cells: string[]) => cells.map((c, i) => c.padEnd(widths[i]!)).join('  ').trimEnd();
+  lines.push(line(header), ...rows.map(line));
+  return lines.join('\n');
+}
+
 function parseLabels(pairs: string[]): Record<string, string> {
   const labels: Record<string, string> = {};
   for (const pair of pairs) {
@@ -196,6 +240,30 @@ export async function main(argv: string[]): Promise<number> {
         : names.length ? names.join('\n') + '\n' : `(no credentials in ${config.credentialsFile})\n`,
     );
     return 0;
+  }
+
+  if (group === 'knowledge') {
+    if (action !== 'show' && action !== undefined) {
+      process.stderr.write('usage: fleet knowledge [--json]\n');
+      return 2;
+    }
+    if (!config.atlasUrl || !config.atlasToken || !config.atlasProject) {
+      // Exit 2, not 0. Somebody asked a question this Fleet cannot answer, and a script that treats a
+      // successful exit as "the numbers are above" must not get one here.
+      process.stderr.write(
+        'Atlas is not configured. Set FLEET_ATLAS_URL, FLEET_ATLAS_TOKEN and FLEET_ATLAS_PROJECT.\n',
+      );
+      return 2;
+    }
+    const reader = createAtlasReader({
+      baseUrl: config.atlasUrl, token: config.atlasToken, project: config.atlasProject,
+      timeoutMs: config.atlasTimeoutMs,
+    });
+    const view = await reader.view();
+    process.stdout.write((asJson ? JSON.stringify(view, null, 2) : renderKnowledge(view)) + '\n');
+    // 0 whenever there are numbers to read, including stale ones: the operator asked what the project
+    // looks like, and "the last thing we knew, 4m ago" is an answer. 1 only when there is nothing.
+    return view.configured && (view.state === 'ok' || view.stale) ? 0 : 1;
   }
 
   if (group === 'serve') {

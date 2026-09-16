@@ -27,7 +27,7 @@ export interface AtlasProjectSummary {
  *
  * The type alone cannot do this. Mutual assignability between two interfaces tolerates a field that is
  * optional on one side and absent on the other -- a review proved that by mutation -- and an optional
- * field is exactly how a dashboard ends up reading `undefined` and rendering an empty panel. So the key
+ * field is exactly how a consumer ends up reading `undefined` and rendering an empty panel. So the key
  * set is declared here as a const tuple, pinned to the interface at compile time below, and compared
  * against Atlas's actual response at runtime. A field added to the interface without joining the tuple
  * fails `tsc`; a tuple entry Atlas stops sending fails the contract test.
@@ -56,7 +56,7 @@ export interface AtlasReaderOptions {
  *
  * Collapsing these into one "failed" boolean was the obvious simplification and it costs an operator an
  * afternoon. `unreachable` means Atlas did not answer -- it is restarting, or the network is -- and the
- * dashboard should keep showing the last good numbers. `rejected` means Atlas answered and said no, which
+ * reader should keep showing the last good numbers. `rejected` means Atlas answered and said no, which
  * is a misconfiguration here: a revoked token, a project this token is not bound to. Retrying that forever
  * is wrong, and "Atlas is down" is the wrong thing to tell someone whose typo caused it.
  */
@@ -77,7 +77,7 @@ function describeTransportError(err: unknown): string {
  * `GET /v1/projects/:project/summary` with a bearer reader token.
  *
  * The timeout is per request and aborts rather than queues. Fleet's own API must not become as slow as
- * the slowest thing it decorates a response with: a dashboard section is worth less than the page it is
+ * the slowest thing it decorates a response with: an optional section is worth less than the page it is
  * embedded in, so an Atlas that stops answering has to be able to cost a bounded number of milliseconds.
  */
 function isCountMap(v: unknown): v is Record<string, number> {
@@ -90,7 +90,7 @@ function isCountMap(v: unknown): v is Record<string, number> {
  *
  * The `as` cast in the caller is compile-time only, so without this a version-skewed Atlas -- one
  * that answers 200 with `{}` because the route changed under us -- would have its body handed
- * straight to the dashboard, which would render `undefined` as an empty panel and look like a
+ * straight to a consumer, which would render `undefined` as an empty panel and look like a
  * project with no knowledge in it. That is the worst possible failure here: it is indistinguishable
  * from a true answer. A count of zero and a count we never received must not look the same.
  *
@@ -120,7 +120,7 @@ export function parseSummary(body: unknown): { ok: true; value: AtlasProjectSumm
     if (typeof cc.notes !== 'number' || !Number.isFinite(cc.notes)) return { ok: false, reason: 'contributor.notes is not a number' };
     if (typeof cc.lastArrival !== 'string') return { ok: false, reason: 'contributor.lastArrival is not a string' };
   }
-  // Extra fields are tolerated rather than rejected: Atlas adding a count must not take a dashboard
+  // Extra fields are tolerated rather than rejected: Atlas adding a count must not break a reader
   // down, and the contract test is where a genuinely new field gets noticed. `extra` is computed so a
   // future change can decide to surface it without re-deriving the comparison.
   void extra;
@@ -169,7 +169,10 @@ export async function readProjectSummary(opts: AtlasReaderOptions): Promise<Atla
 
 
 /**
- * What Fleet's own API reports about Atlas, and the only shape the dashboard sees.
+ * What Fleet's own API reports about Atlas, and the only shape a consumer sees.
+ *
+ * Section 14 calls this data "the dashboard". Fleet has no web UI -- its surfaces are the CLI and
+ * `fleet serve` -- so in practice the consumers are `fleet knowledge` and this route.
  *
  * `configured: false` is not an error and not empty data. Section 14 makes an unconfigured Atlas a
  * fully supported steady state -- no knowledge section, placement unchanged -- and the UI needs to tell
@@ -179,9 +182,12 @@ export async function readProjectSummary(opts: AtlasReaderOptions): Promise<Atla
 export type AtlasView =
   | { configured: false }
   | { configured: true; state: 'ok'; project: string; summary: AtlasProjectSummary; fetchedAt: string; stale: false }
-  | { configured: true; state: Exclude<AtlasReadState, 'ok'>; project: string; reason: string; stale: false }
+  /** A transport or shape failure with nothing cached. There is no summary to show, so there is none. */
+  | { configured: true; state: 'unreachable' | 'malformed'; project: string; reason: string; stale: false }
+  /** Atlas refused. The status and its own message are the diagnosis; a reason we invented is not. */
   | { configured: true; state: 'rejected'; project: string; status: number; detail: string; stale: false }
-  | { configured: true; state: Exclude<AtlasReadState, 'ok'>; project: string; reason: string;
+  /** A failure AFTER a good read: the last good numbers, labelled. */
+  | { configured: true; state: 'unreachable' | 'rejected' | 'malformed'; project: string; reason: string;
       summary: AtlasProjectSummary; fetchedAt: string; stale: true };
 
 /** The four things that can be true about an Atlas read, shared by the reader and the view. */
@@ -195,11 +201,11 @@ export interface AtlasReader {
 /**
  * A reader that keeps the last good summary.
  *
- * The cache exists for two reasons, and only the second is obvious. A dashboard polls, and without a
+ * The cache exists for two reasons, and only the second is obvious. A UI polls, and without a
  * floor on the request rate a page refresh loop becomes a load generator pointed at Atlas. The first is
  * the reason it stores the VALUE rather than just a timestamp: section 14 says a stale replica is a
  * reason to prefer one host over another, and "the last numbers we have, from 4 minutes ago" is a
- * strictly more useful dashboard than a blank panel during an Atlas restart -- as long as it is
+ * strictly more useful than a blank panel during an Atlas restart -- as long as it is
  * labelled, which is what `stale` is for. An unlabelled stale number is worse than no number, because
  * it reads as current.
  */
@@ -216,9 +222,9 @@ export function createAtlasReader(
 
   return {
     async view(): Promise<AtlasView> {
-      // The rate floor the type comment above promises. Without it a dashboard on a 2-second refresh
+      // The rate floor the type comment above promises. Without it a UI on a 2-second refresh
       // turns every open browser tab into a load generator pointed at Atlas, and Atlas is a shared
-      // service while the dashboard is not.
+      // service while the reader is not.
       if (cached && now() - cached.fetchedAt < cacheMs) {
         return {
           configured: true, state: 'ok', project: opts.project,

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { mkdtempSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -238,4 +238,97 @@ test('hosts list --live shows the host version', async () => {
     assert.match(live.out, /HOST/, 'the table needs a column an operator can read');
     assert.match(live.out, /0\.1\.1/, 'hosts list --live must show the host version');
   } finally { await fake.close(); }
+});
+
+
+// --- fleet knowledge (Atlas project health, docs/knowledge-base.md §14) -------------------------
+
+const GOOD_SUMMARY = {
+  projectId: 'mercury',
+  byTier: { candidate: 2, promoted: 3 },
+  promotedByKind: { convention: 2, fact: 1 },
+  contestedPairs: 1,
+  contributors: [{ hostId: 'mac-studio', notes: 7, lastArrival: new Date().toISOString() }],
+  latestSeq: 42,
+};
+
+async function fakeAtlas(handler: (req: IncomingMessage, res: ServerResponse) => void) {
+  const server = createServer((req, res) => handler(req, res));
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address() as AddressInfo;
+  return { url: `http://127.0.0.1:${port}`, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
+
+function withAtlas(dir: string, url: string) {
+  return { ...env(dir, {}), FLEET_ATLAS_URL: url, FLEET_ATLAS_TOKEN: 'reader-token-0000000000000000',
+           FLEET_ATLAS_PROJECT: 'mercury', FLEET_ATLAS_TIMEOUT_MS: '2000' };
+}
+
+test('fleet knowledge refuses clearly when Atlas is not configured', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-cli-atlas-'));
+  const r = await fleet(['knowledge'], env(dir, {}));
+  assert.equal(r.code, 2, 'a question this Fleet cannot answer is not a successful answer');
+  // Names all three, because an operator who set one and forgot two needs to know which two.
+  for (const v of ['FLEET_ATLAS_URL', 'FLEET_ATLAS_TOKEN', 'FLEET_ATLAS_PROJECT']) {
+    assert.ok(r.out.includes(v), `the refusal must name ${v}: ${r.out}`);
+  }
+});
+
+test('fleet knowledge rejects a subcommand it does not have', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-cli-atlas-'));
+  const r = await fleet(['knowledge', 'promote'], withAtlas(dir, 'http://127.0.0.1:1'));
+  assert.equal(r.code, 2);
+  assert.match(r.out, /usage: fleet knowledge/);
+});
+
+test('fleet knowledge renders the four numbers §14 asks for', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-cli-atlas-'));
+  const a = await fakeAtlas((_req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(GOOD_SUMMARY)); });
+  try {
+    const r = await fleet(['knowledge'], withAtlas(dir, a.url));
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /project\s+mercury/);
+    assert.match(r.out, /candidate 2.*promoted 3/, 'candidates awaiting promotion and tiers');
+    assert.match(r.out, /convention 2.*fact 1/, 'promoted note count by kind');
+    assert.match(r.out, /contested 1 pair/, 'contested pairs');
+    assert.match(r.out, /mac-studio\s+7/, 'per-contributor note count');
+    assert.ok(!/reader-token/.test(r.out), 'the reader token must never reach stdout');
+  } finally { await a.close(); }
+});
+
+test('fleet knowledge --json emits the view unchanged', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-cli-atlas-'));
+  const a = await fakeAtlas((_req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(GOOD_SUMMARY)); });
+  try {
+    const r = await fleet(['knowledge', '--json'], withAtlas(dir, a.url));
+    assert.equal(r.code, 0, r.out);
+    const view = JSON.parse(r.out);
+    assert.equal(view.state, 'ok');
+    assert.equal(view.stale, false);
+    assert.equal(view.summary.contestedPairs, 1);
+  } finally { await a.close(); }
+});
+
+test('a malformed Atlas exits 1 and says malformed, not unreachable', async () => {
+  // The exit code and the word both matter: an operator scripting on this needs to distinguish
+  // "Atlas is down" from "Atlas is up and lying", and would otherwise restart a healthy service.
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-cli-atlas-'));
+  const a = await fakeAtlas((_req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"projectId":"mercury"}'); });
+  try {
+    const r = await fleet(['knowledge'], withAtlas(dir, a.url));
+    assert.equal(r.code, 1);
+    assert.match(r.out, /malformed/);
+    assert.ok(!/unreachable/.test(r.out), `must not blame the transport: ${r.out}`);
+  } finally { await a.close(); }
+});
+
+test('a refused Atlas reports the status Atlas gave', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-cli-atlas-'));
+  const a = await fakeAtlas((_req, res) => { res.writeHead(403, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'token may not read project mercury' })); });
+  try {
+    const r = await fleet(['knowledge'], withAtlas(dir, a.url));
+    assert.equal(r.code, 1);
+    assert.match(r.out, /403/);
+    assert.match(r.out, /may not read project/, "Atlas's own words are the diagnosis");
+  } finally { await a.close(); }
 });
