@@ -22,6 +22,7 @@ import { loadRepoUrlMap, routeRun, RoutingError, type RouteRepository } from './
 import { cancelRun, retryRun, sendInput, type InteractionDeps } from './interact.ts';
 import { mergeRollup, scrapeAll, type MetricsDeps } from './metrics.ts';
 import { createProber, type Prober } from './prober.ts';
+import { createAtlasReader, type AtlasView } from './atlas.ts';
 import { CredentialError, type CredentialStore } from './credentials.ts';
 import type { Caller } from './auth.ts';
 import { parseCallerTokens, hostAllowed } from './auth.ts';
@@ -133,6 +134,18 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
     timeoutMs: deps.config.probeTimeoutMs,
   });
 
+  // Built once so its cache survives across requests. Null when Atlas is not configured, which is a
+  // supported steady state rather than a degraded one -- the route answers `configured: false` and the
+  // dashboard renders no knowledge section at all.
+  const atlasReader = deps.config.atlasUrl && deps.config.atlasToken && deps.config.atlasProject
+    ? createAtlasReader({
+        baseUrl: deps.config.atlasUrl,
+        token: deps.config.atlasToken,
+        project: deps.config.atlasProject,
+        timeoutMs: deps.config.atlasTimeoutMs,
+      })
+    : null;
+
   const routes: Route[] = [
     {
       method: 'GET', pattern: ['healthz'], public: true,
@@ -171,6 +184,33 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
       // 403 elsewhere, never a silent substitution.
       method: 'GET', pattern: ['fleet', 'hosts'],
       handle: (ctx, res) => sendJson(res, 200, { hosts: visibleHosts(registry, ctx.caller) }),
+    },
+    {
+      // GET /fleet/knowledge -- Atlas project health, counts only (section 14).
+      //
+      // Always 200, even when Atlas is down. This is a dashboard decoration; a 5xx here would make
+      // Fleet's own API look broken because a service it optionally decorates with had a bad minute,
+      // and would push every consumer into writing the same error-shape handling. The body carries the
+      // distinction instead: `configured`, then `state`, then `stale`.
+      //
+      // No host scoping, because there is nothing to scope: the response is counts for one Atlas
+      // project and carries no per-host data and no note content.
+      method: 'GET', pattern: ['fleet', 'knowledge'],
+      handle: async (_ctx, res) => {
+        if (!atlasReader) {
+          sendJson(res, 200, { configured: false } satisfies AtlasView);
+          return;
+        }
+        const view = await atlasReader.view();
+        if (view.configured && view.stale) {
+          // Loud in the logs, quiet in the response. The dashboard already shows it; the log is how
+          // anyone who is NOT looking at the dashboard finds out the numbers have been frozen a while.
+          deps.logger.warn('atlas read failed; serving last known project health', {
+            project: view.project, reason: view.reason, fetchedAt: view.fetchedAt,
+          });
+        }
+        sendJson(res, 200, view);
+      },
     },
     {
       method: 'POST', pattern: ['fleet', 'hosts'], admin: true,

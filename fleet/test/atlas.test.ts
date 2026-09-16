@@ -191,3 +191,93 @@ test('loadConfig strips a trailing slash so the URL never doubles one', () => {
   });
   assert.equal(config.atlasUrl, 'https://atlas.internal');
 });
+
+
+// --- the cached reader: what the dashboard actually sees ----------------------------------------
+
+import { createAtlasReader, type AtlasView } from '../atlas.ts';
+
+function clock(start = 1_000_000) {
+  let t = start;
+  return { now: () => t, advance: (ms: number) => { t += ms; } };
+}
+
+function reader(fetchImpl: (url: string, init?: RequestInit) => Promise<Response>, over: { cacheMs?: number; now?: () => number } = {}) {
+  const c = clock();
+  return {
+    reader: createAtlasReader({
+      baseUrl: 'http://127.0.0.1:4599', token: 't', project: 'mercury', timeoutMs: 1_000,
+      fetchImpl: asFetch(fetchImpl), cacheMs: over.cacheMs ?? 15_000, now: over.now ?? c.now,
+    }),
+    clock: c,
+  };
+}
+
+/**
+ * Narrow the view union.
+ *
+ * `AtlasView` starts with a `{ configured: false }` arm, so every property below it has to be reached
+ * through the discriminant or `tsc` refuses the access. Asserting once here reads better than an
+ * `if (!view.configured) return` before each assertion, which would silently skip the assertions if
+ * the arm ever changed.
+ */
+function assertConfigured(view: AtlasView): asserts view is Extract<AtlasView, { configured: true }> {
+  if (!view.configured) throw new Error(`expected a configured Atlas view, got ${JSON.stringify(view)}`);
+}
+
+test('a healthy read is reported as ok and not stale', async () => {
+  const { reader: r } = reader(async () => json(200, SUMMARY));
+  const view = await r.view();
+  assert.equal(view.configured, true);
+  assertConfigured(view);
+  assert.equal(view.state, 'ok');
+  assert.equal(view.stale, false);
+  if (view.state !== 'ok') return;
+  assert.deepEqual(view.summary, SUMMARY);
+});
+
+test('a failure after a success keeps the last good numbers and says so', async () => {
+  // Section 14 wants a stale replica to be visible, not fatal. A blank panel during an Atlas restart
+  // tells an operator nothing; the last known numbers tell them the shape of the project -- but only
+  // if labelled, because an unlabelled old number reads as current.
+  let healthy = true;
+  const { reader: r, clock: c } = reader(async () => (healthy ? json(200, SUMMARY) : json(500, { error: 'boom' })));
+  const clockAdvance = () => c.advance(16_000);
+  const first = await r.view();
+  assertConfigured(first);
+  assert.equal(first.state, 'ok');
+
+  // Past the cache window, so this read actually reaches Atlas. Inside the window the floor above
+  // correctly answers from cache and never notices the service has started failing -- which is the
+  // right trade for a dashboard, and the reason the staleness assertion needs the clock moved.
+  healthy = false;
+  clockAdvance();
+  const second = await r.view();
+  assertConfigured(second);
+  assert.equal(second.stale, true, 'a served-after-failure summary must be labelled stale');
+  if (!second.stale) return;
+  assert.deepEqual(second.summary, SUMMARY, 'the last good numbers survive');
+  assert.equal(second.state, 'unreachable');
+  assert.ok(second.reason.includes('500'));
+});
+
+test('a failure with nothing cached reports the failure, not an empty summary', async () => {
+  const { reader: r } = reader(async () => json(401, { error: 'unauthorized' }));
+  const view = await r.view();
+  assert.equal(view.configured, true);
+  assert.equal(view.state, 'rejected');
+  assert.equal('summary' in view, false, 'no summary was ever fetched; the view must not invent one');
+});
+
+test('the cache floor stops a dashboard poll from hammering Atlas', async () => {
+  // Without a floor, every open dashboard tab becomes a load generator pointed at a shared service.
+  let calls = 0;
+  const { reader: r, clock: c } = reader(async () => { calls++; return json(200, SUMMARY); });
+  await r.view();
+  await r.view();
+  await r.view();
+  assert.equal(calls, 1, 'three reads inside the cache window must be one request');
+  c.advance(16_000);
+  await r.view();
+  assert.equal(calls, 2, 'past the window the next read goes through');
+});

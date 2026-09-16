@@ -115,3 +115,83 @@ export async function readProjectSummary(opts: AtlasReaderOptions): Promise<Atla
     return { kind: 'unreachable', reason: `Atlas response body was unreadable: ${(err as Error).message}`.slice(0, 200) };
   }
 }
+
+
+/**
+ * What Fleet's own API reports about Atlas, and the only shape the dashboard sees.
+ *
+ * `configured: false` is not an error and not empty data. Section 14 makes an unconfigured Atlas a
+ * fully supported steady state -- no knowledge section, placement unchanged -- and the UI needs to tell
+ * "this Fleet does not read Atlas" apart from "Atlas is down", because only one of them belongs on an
+ * operator's screen as a problem.
+ */
+export type AtlasView =
+  | { configured: false }
+  | { configured: true; state: 'ok'; project: string; summary: AtlasProjectSummary; fetchedAt: string; stale: false }
+  | { configured: true; state: 'unreachable'; project: string; reason: string; stale: false }
+  | { configured: true; state: 'rejected'; project: string; status: number; detail: string; stale: false }
+  | { configured: true; state: 'unreachable' | 'rejected'; project: string; reason: string;
+      summary: AtlasProjectSummary; fetchedAt: string; stale: true };
+
+export interface AtlasReader {
+  /** Reads through the cache policy below. Never throws: every failure becomes an AtlasView. */
+  view(): Promise<AtlasView>;
+}
+
+/**
+ * A reader that keeps the last good summary.
+ *
+ * The cache exists for two reasons, and only the second is obvious. A dashboard polls, and without a
+ * floor on the request rate a page refresh loop becomes a load generator pointed at Atlas. The first is
+ * the reason it stores the VALUE rather than just a timestamp: section 14 says a stale replica is a
+ * reason to prefer one host over another, and "the last numbers we have, from 4 minutes ago" is a
+ * strictly more useful dashboard than a blank panel during an Atlas restart -- as long as it is
+ * labelled, which is what `stale` is for. An unlabelled stale number is worse than no number, because
+ * it reads as current.
+ */
+export function createAtlasReader(
+  opts: AtlasReaderOptions & { cacheMs?: number; now?: () => number },
+): AtlasReader {
+  const cacheMs = opts.cacheMs ?? 15_000;
+  const now = opts.now ?? (() => Date.now());
+  let cached: { summary: AtlasProjectSummary; fetchedAt: number } | null = null;
+
+  async function fresh(): Promise<AtlasRead<AtlasProjectSummary>> {
+    return readProjectSummary(opts);
+  }
+
+  return {
+    async view(): Promise<AtlasView> {
+      // The rate floor the type comment above promises. Without it a dashboard on a 2-second refresh
+      // turns every open browser tab into a load generator pointed at Atlas, and Atlas is a shared
+      // service while the dashboard is not.
+      if (cached && now() - cached.fetchedAt < cacheMs) {
+        return {
+          configured: true, state: 'ok', project: opts.project,
+          summary: cached.summary, fetchedAt: new Date(cached.fetchedAt).toISOString(), stale: false,
+        };
+      }
+      const read = await fresh();
+      if (read.kind === 'ok') {
+        cached = { summary: read.value, fetchedAt: now() };
+        return {
+          configured: true, state: 'ok', project: opts.project,
+          summary: read.value, fetchedAt: new Date(cached.fetchedAt).toISOString(), stale: false,
+        };
+      }
+      const reason = read.kind === 'unreachable' ? read.reason : `HTTP ${read.status}: ${read.detail}`;
+      if (cached) {
+        // Serve the last good numbers, labelled stale. The failure is reported alongside them rather
+        // than instead of them, so the panel cannot silently freeze at an old value.
+        return {
+          configured: true, state: read.kind, project: opts.project, reason,
+          summary: cached.summary, fetchedAt: new Date(cached.fetchedAt).toISOString(), stale: true,
+        };
+      }
+      if (read.kind === 'rejected') {
+        return { configured: true, state: 'rejected', project: opts.project, status: read.status, detail: read.detail, stale: false };
+      }
+      return { configured: true, state: 'unreachable', project: opts.project, reason, stale: false };
+    },
+  };
+}
