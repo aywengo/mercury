@@ -54,6 +54,7 @@ box-lan-3  down       4m    -        -     -      -       http://box3.lan:3000
 | `fleet hosts rm <id>` | Forget a host and its cached probe. |
 | `fleet probe --watch` | Sweep every enabled host on `FLEET_PROBE_INTERVAL_MS` until interrupted. |
 | `fleet credentials list` | Credential **names** only. Values are never printed by any command. |
+| `fleet knowledge [--json]` | Atlas project health for the configured project: tiers, promoted kinds, contested pairs, and per-contributor last arrival. Read only. Exits 2 when Atlas is not configured, 1 when it cannot be read. |
 
 ## What each state means
 

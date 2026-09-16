@@ -21,6 +21,25 @@ import { join, resolve } from 'node:path';
 import { tempDir } from './helpers.ts';
 
 import { ATLAS_VERSION } from '../atlas/version.ts';
+import type { ProjectSummary } from '../atlas/notes.ts';
+import { ATLAS_SUMMARY_KEYS, parseSummary, type AtlasProjectSummary } from '../fleet/atlas.ts';
+
+/**
+ * The summary shape is asserted to be the SAME type on both sides, at compile time.
+ *
+ * `atlas/` and `fleet/` may not import each other, so the response record exists twice by design. The
+ * runtime key assertion in the contract test catches drift when the suite runs; this catches it on
+ * `npm run typecheck`, which is faster and fires even when the contract suite is filtered out.
+ *
+ * Mutual assignability is NOT sufficient on its own, and an earlier revision of this comment claimed it
+ * was. Two interfaces that are mutually assignable can still differ by a field that is optional on one
+ * side and absent on the other -- verified by mutation. That residual gap is closed by
+ * `ATLAS_SUMMARY_KEYS` in fleet/atlas.ts: the key set is declared there as a value, pinned to the
+ * Fleet interface at compile time, and compared against Atlas's actual response below.
+ */
+type Exactly<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+const _summaryShapesAgree: Exactly<AtlasProjectSummary, ProjectSummary> = true;
+void _summaryShapesAgree;
 
 const REPO = resolve(import.meta.dirname, '..');
 const ADMIN = 'contract-admin-token-0123456789';
@@ -197,6 +216,29 @@ test('every enumerated route answers, and its shape has not drifted', async () =
     // PATCH /v1/projects/:id.
     res = await req(handle, 'PATCH', `/v1/projects/${PROJECT}`, ADMIN, { name: 'Mercury renamed' });
     assert.equal((await res.json() as { name: string }).name, 'Mercury renamed');
+
+    // GET .../summary -- the counts-only read Fleet's dashboard is built on (section 14).
+    //
+    // Pinned to an exact key set, and pinned AGAIN at type level below, because this response is
+    // implemented twice: `ProjectSummary` in atlas/notes.ts and `AtlasProjectSummary` in fleet/atlas.ts.
+    // Neither product may import the other, so nothing else in the build compares them, and a field
+    // renamed on one side would otherwise surface as a dashboard showing zeros rather than as a failure.
+    res = await req(handle, 'GET', `/v1/projects/${PROJECT}/summary`, READER);
+    assert.equal(res.status, 200, `a reader token must be able to read the summary: ${res.status}`);
+    const summary = await res.json() as Record<string, unknown>;
+    // Compared against the Fleet reader's own declared key set rather than a list typed out here. A
+    // hand-copied list in a test drifts the same way a hand-copied type does; this way the two sides are
+    // checked against each other and the test file is not a third copy of the truth.
+    assert.deepEqual(Object.keys(summary).sort(), [...ATLAS_SUMMARY_KEYS].sort());
+    // Bytes off the wire, through the validator Fleet will actually run in production. The key
+    // comparison above only proves the two sides list the same names; this proves Fleet accepts what
+    // Atlas really sends, including the value SHAPES -- a field present but of the wrong type would
+    // pass the key check and then be rejected at runtime, blanking the dashboard.
+    const validated = parseSummary(summary);
+    assert.ok(validated.ok, `Fleet rejects a real Atlas summary: ${validated.ok ? '' : validated.reason}`);
+    // The whole point of the route: counts, never content.
+    assert.ok(!JSON.stringify(summary).includes('migrations are appended'),
+      'the summary leaked note content to a reader token');
 
     // /metrics.
     res = await req(handle, 'GET', '/metrics', ADMIN);

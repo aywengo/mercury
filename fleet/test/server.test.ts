@@ -32,7 +32,7 @@ async function fakeMercury(healthy = true): Promise<{ url: string; close: () => 
   return { url: `http://127.0.0.1:${port}`, close: () => new Promise<void>((r) => server.close(() => r())) };
 }
 
-async function startService(opts: { apiTokens?: string } = {}): Promise<{
+async function startService(opts: { apiTokens?: string; env?: Record<string, string> } = {}): Promise<{
   base: string; svc: FleetServer; db: DatabaseSync; call: (m: string, p: string, o?: { token?: string; body?: unknown }) => Promise<{ status: number; json: any }>;
   close: () => Promise<void>;
 }> {
@@ -46,6 +46,7 @@ async function startService(opts: { apiTokens?: string } = {}): Promise<{
     FLEET_BIND_HOST: '127.0.0.1', FLEET_PORT: '0',
     FLEET_API_TOKENS: opts.apiTokens ?? `${CALLER_TOKEN}:alice:box-1`,
     FLEET_ADMIN_TOKEN: ADMIN_TOKEN, FLEET_PROBE_TIMEOUT_MS: '1500',
+    ...opts.env,
   });
   const { db } = openFleetDb(config.dbPath);
   const logger = createLogger(createRedactor([]), 'error');
@@ -710,5 +711,51 @@ test('/metrics is served as Prometheus text, not JSON', async () => {
     const r = await fetch(s.base + '/metrics', { headers: { authorization: `Bearer ${CALLER_TOKEN}` } });
     assert.match(r.headers.get('content-type') ?? '', /text\/plain/);
     assert.match(r.headers.get('content-type') ?? '', /version=0\.0\.4/);
+  } finally { await s.close(); }
+});
+
+
+// --- GET /fleet/knowledge (Atlas project health, section 14) ------------------------------------
+
+test('/fleet/knowledge reports "not configured" as a normal state, not an error', async () => {
+  // Section 14 makes an unconfigured Atlas fully supported. A 404 or 501 here would make every
+  // consumer write the same "is this deployment wired to Atlas" branch, and would read as a fault.
+  const s = await startService();
+  try {
+    const r = await s.call('GET', '/fleet/knowledge', { token: CALLER_TOKEN });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json, { configured: false });
+  } finally { await s.close(); }
+});
+
+test('/fleet/knowledge needs a caller token', async () => {
+  const s = await startService();
+  try {
+    const r = await s.call('GET', '/fleet/knowledge');
+    assert.equal(r.status, 401);
+  } finally { await s.close(); }
+});
+
+test('an Atlas that will not answer degrades to 200 with state, never a 5xx', async () => {
+  // The whole point of the shape. Fleet's own API must not look broken because an optional
+  // decoration had a bad minute; the distinction belongs in the body, where the dashboard can show
+  // it, and not in the status code, where a client would have to special-case it.
+  // Port 1 is reserved and nothing listens there, so this is a real connect failure.
+  const s = await startService({
+    env: {
+      FLEET_ATLAS_URL: 'http://127.0.0.1:1',
+      FLEET_ATLAS_TOKEN: 'atlas-reader-token-00000001',
+      FLEET_ATLAS_PROJECT: 'mercury',
+      FLEET_ATLAS_TIMEOUT_MS: '1500',
+    },
+  });
+  try {
+    const r = await s.call('GET', '/fleet/knowledge', { token: CALLER_TOKEN });
+    assert.equal(r.status, 200, `degraded Atlas must not change Fleet's status code: ${r.status}`);
+    assert.equal(r.json.configured, true);
+    assert.equal(r.json.state, 'unreachable');
+    assert.equal(r.json.stale, false, 'nothing was ever fetched, so there is nothing stale to serve');
+    assert.equal('summary' in r.json, false, 'the response must not invent a summary');
+    assert.ok(typeof r.json.reason === 'string' && r.json.reason.length > 0, 'the reason must be shown');
   } finally { await s.close(); }
 });
