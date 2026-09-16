@@ -21,6 +21,21 @@ import { join, resolve } from 'node:path';
 import { tempDir } from './helpers.ts';
 
 import { ATLAS_VERSION } from '../atlas/version.ts';
+import type { ProjectSummary } from '../atlas/notes.ts';
+import type { AtlasProjectSummary } from '../fleet/atlas.ts';
+
+/**
+ * The summary shape is asserted to be the SAME type on both sides, at compile time.
+ *
+ * `atlas/` and `fleet/` may not import each other, so the response record exists twice by design. The
+ * runtime key assertion in the contract test catches drift when the suite runs; this catches it on
+ * `npm run typecheck`, which is faster and fires even when the contract suite is filtered out. Both
+ * directions are required: one-sided assignability would tolerate an extra optional field on one side,
+ * which is exactly how a field gets quietly dropped from the dashboard.
+ */
+type Exactly<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+const _summaryShapesAgree: Exactly<AtlasProjectSummary, ProjectSummary> = true;
+void _summaryShapesAgree;
 
 const REPO = resolve(import.meta.dirname, '..');
 const ADMIN = 'contract-admin-token-0123456789';
@@ -197,6 +212,22 @@ test('every enumerated route answers, and its shape has not drifted', async () =
     // PATCH /v1/projects/:id.
     res = await req(handle, 'PATCH', `/v1/projects/${PROJECT}`, ADMIN, { name: 'Mercury renamed' });
     assert.equal((await res.json() as { name: string }).name, 'Mercury renamed');
+
+    // GET .../summary -- the counts-only read Fleet's dashboard is built on (section 14).
+    //
+    // Pinned to an exact key set, and pinned AGAIN at type level below, because this response is
+    // implemented twice: `ProjectSummary` in atlas/notes.ts and `AtlasProjectSummary` in fleet/atlas.ts.
+    // Neither product may import the other, so nothing else in the build compares them, and a field
+    // renamed on one side would otherwise surface as a dashboard showing zeros rather than as a failure.
+    res = await req(handle, 'GET', `/v1/projects/${PROJECT}/summary`, READER);
+    assert.equal(res.status, 200, `a reader token must be able to read the summary: ${res.status}`);
+    const summary = await res.json() as Record<string, unknown>;
+    assert.deepEqual(Object.keys(summary).sort(), [
+      'byTier', 'contestedPairs', 'contributors', 'latestSeq', 'projectId', 'promotedByKind',
+    ]);
+    // The whole point of the route: counts, never content.
+    assert.ok(!JSON.stringify(summary).includes('migrations are appended'),
+      'the summary leaked note content to a reader token');
 
     // /metrics.
     res = await req(handle, 'GET', '/metrics', ADMIN);

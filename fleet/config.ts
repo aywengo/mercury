@@ -38,6 +38,30 @@ export interface FleetConfig {
   /** How often an open SSE stream looks for newly mirrored events. */
   streamPollMs: number;
   /**
+   * Atlas, read-only. All three of `atlasUrl`, `atlasToken` and `atlasProject` are set together or all
+   * are null -- see `validate` for why a partial configuration is refused rather than half-honoured.
+   *
+   * Unset is the normal case and is not a degraded state. Section 14 makes the independence symmetric:
+   * Atlas does not know Fleet exists, and Fleet with these unset shows no knowledge section and places
+   * Runs exactly as it did before. Nothing here imports Atlas code; the only coupling is an HTTP call
+   * and a response shape, and `test/atlasContract.test.ts` is what keeps that shape honest.
+   */
+  atlasUrl: string | null;
+  /**
+   * An Atlas READER token. Not a contributor token and not the admin token: a reader can count notes
+   * and cannot write, promote or delete, which is the exact authority a dashboard needs. Handing Fleet a
+   * contributor token would mean the component that only displays knowledge could also erase it.
+   */
+  atlasToken: string | null;
+  /**
+   * Which Atlas project to read. Required rather than discovered, because a reader token cannot list
+   * projects -- `GET /v1/projects` is admin-only by design, so there is no call Fleet could make to
+   * find out what it is allowed to see.
+   */
+  atlasProject: string | null;
+  /** Per-request timeout for the Atlas read. A slow Atlas must not slow Fleet's own API. */
+  atlasTimeoutMs: number;
+  /**
    * Optional JSON map of local path -> host-independent clone URL (design section 6's escape hatch). When a
    * submitted localPath is a key here, routing drops the locality constraint and sends the URL instead, which
    * turns the hardest routing rule into a non-issue for most work.
@@ -84,6 +108,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     probeTimeoutMs: num(env['FLEET_PROBE_TIMEOUT_MS'], 5_000),
     sweepIntervalMs: num(env['FLEET_SWEEP_INTERVAL_MS'], 10_000),
     streamPollMs: num(env['FLEET_STREAM_POLL_MS'], 1000),
+    atlasUrl: env.FLEET_ATLAS_URL?.replace(/\/+$/, '') || null,
+    atlasToken: env.FLEET_ATLAS_TOKEN || null,
+    atlasProject: env.FLEET_ATLAS_PROJECT || null,
+    atlasTimeoutMs: num(env['FLEET_ATLAS_TIMEOUT_MS'], 3_000),
     repoUrlsFile: env.FLEET_REPO_URLS_FILE ?? null,
     allowInsecureCredentials: env['FLEET_ALLOW_INSECURE_CREDENTIALS'] === '1',
     bindHost: env['FLEET_BIND_HOST'] ?? '127.0.0.1',
@@ -128,6 +156,53 @@ export function assertServeable(config: FleetConfig): void {
     throw new Error(
       'no caller tokens configured: set FLEET_API_TOKENS (token:owner[:hosts]) or FLEET_ADMIN_TOKEN, ' +
         'otherwise every request would be rejected and the service would look broken.',
+    );
+  }
+
+  assertAtlasConfigurable(config);
+}
+
+/**
+ * Refuse a half-configured Atlas reader.
+ *
+ * A URL with no token would produce a dashboard that shows "unreachable" forever and an operator with
+ * nothing to act on, because Atlas answers an unauthenticated read with 401 and the reason does not
+ * survive the hop into Fleet's response. A token with no URL is a token that is never used, which is
+ * worse than a missing one: it looks configured.
+ *
+ * The project is required for the same family of reason. A reader token cannot list projects -- that
+ * route is admin-only -- so there is no request Fleet could make to discover what it should read.
+ */
+export function assertAtlasConfigurable(config: FleetConfig): void {
+  const set = [config.atlasUrl, config.atlasToken, config.atlasProject].filter(Boolean).length;
+  if (set === 0) return;
+  if (set !== 3) {
+    const missing = [
+      ...(config.atlasUrl ? [] : ['FLEET_ATLAS_URL']),
+      ...(config.atlasToken ? [] : ['FLEET_ATLAS_TOKEN']),
+      ...(config.atlasProject ? [] : ['FLEET_ATLAS_PROJECT']),
+    ];
+    throw new Error(
+      `Atlas reading needs all three of FLEET_ATLAS_URL, FLEET_ATLAS_TOKEN and FLEET_ATLAS_PROJECT; ` +
+        `missing ${missing.join(' and ')}. Leave all three unset to turn the knowledge section off ` +
+        `entirely, which is a supported configuration and not a degraded one.`,
+    );
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(config.atlasUrl!);
+  } catch {
+    throw new Error(`FLEET_ATLAS_URL is not a valid URL: ${JSON.stringify(config.atlasUrl)}`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`FLEET_ATLAS_URL must be http(s); got ${parsed.protocol}`);
+  }
+  // The token rides as a bearer credential. Over plain HTTP it crosses the network in clear text, and
+  // although a reader token cannot write, it reads note counts for the whole project.
+  if (parsed.protocol === 'http:' && !LOOPBACK.has(parsed.hostname)) {
+    throw new Error(
+      `refusing to read Atlas over plaintext http at ${parsed.hostname}. A reader token would cross the ` +
+        `network unencrypted. Use https, or a loopback URL behind a reverse proxy.`,
     );
   }
 }
