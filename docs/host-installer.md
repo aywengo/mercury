@@ -1,6 +1,6 @@
 # Mercury Host installer
 
-Status: M0 (design), M1 (bootstrap skeleton) and M2 (harness probe) done; M3 (configuration wizard) next.
+Status: M0 (design), M1 (bootstrap skeleton), M2 (harness probe) and M3 (configuration wizard) done; M4 (service and verification) next.
 
 The Host installer is a bash wizard that takes a fresh macOS or Linux machine to a running Mercury host that reports to Fleet, with the locally installed harnesses detected, verified and enabled.
 
@@ -64,11 +64,20 @@ Gate: probe results agree with the adapters' own real-binary observations (the s
 - `fake` and declarative local agents are not host harnesses and never appear.
 - Tests: `test/hostProbe.test.ts` (11 tests) — missing binary → `missing`, downgraded → `too-old`, floor satisfied → `ok`, no floor → `unknown`, env cmd override, no-config host, unknown flag rejected (first and after `--json`).
 
-### M3 — Configuration wizard
+### M3 — Configuration wizard — ✅ done
 
 Prompts: host name, data dir, workspace dir, GC retention, Fleet URL, host token, Atlas on/off, per-harness enable. Each answer maps to a documented `MERCURY_*` variable. Writes `mercury.env` atomically (temp file, validate, rename, 0600), prints a redacted summary.
 
 Gate: an answers file fed to `--non-interactive` produces a byte-identical `mercury.env` to the interactive path with the same answers; an invalid answer, or a variable name not in `docs/configuration.md`, is rejected before anything is written.
+
+**As built** (`src/host/setup.ts`, wired as `mercury host setup` before `loadConfig()`):
+
+- Prompt → variable mapping: host name → `MERCURY_ATLAS_HOST_ID`, data dir → `MERCURY_DB` (`<dataDir>/mercury.db`), workspace dir → `MERCURY_WORKSPACE_BASE`, GC retention (days) → `MERCURY_WORKSPACE_RETENTION_MS`, Fleet URL → `MERCURY_FLEET_URL`, host token → `MERCURY_HOST_TOKEN`, Atlas on/off → `MERCURY_ATLAS_URL`/`MERCURY_ATLAS_TOKEN`/`MERCURY_ATLAS_PROJECT`, per-harness enable → `MERCURY_HARNESSES` + `MERCURY_DEFAULT_AGENT` (first enabled).
+- `MERCURY_FLEET_URL`, `MERCURY_HOST_TOKEN`, `MERCURY_HARNESSES` added to `docs/configuration.md` (design decision 10: every emitted name is documented; a test pins `WIZARD_VARIABLES` against the doc).
+- Interactive and `--non-interactive` share one code path: answers → validate → render → write. The M3 gate test feeds the same answers through both and asserts byte-identical `mercury.env`.
+- Atomic write: temp file in the target dir, rename, chmod 0600. Nothing is written until every answer validates (invalid answers exit 1 with the reasons).
+- Token never echoed: no-echo prompt / env / answers file; the redacted summary shows `MERCURY_HOST_TOKEN=<set, N chars>` only.
+- Tests: `test/hostSetup.test.ts` (14 tests) — flags, per-field validation, Atlas-requires trio, render mapping, doc-name pin, the byte-identical gate, 0600 mode, invalid-answer rejection, unknown flag, `--dry-run` touches nothing, redaction, harness filtering.
 
 ### M4 — Service and verification
 
