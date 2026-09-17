@@ -103,6 +103,16 @@ test('UI JS modules parse (syntax check)', async () => {
   assert.equal(typeof mod.sse, 'function');
 });
 
+test('run.js imports harnessLabel from app.js (issue #625)', () => {
+  // run.js called harnessLabel() in renderRun() but never imported it, so every page load
+  // threw a ReferenceError and the run detail page rendered blank. node --check validates
+  // only syntax, so the missing import passed CI. Pin the specific regression: the import
+  // list must name every app.js export that run.js calls.
+  const src = readFileSync(join(UI_DIR, 'run.js'), 'utf8');
+  const importBlock = src.slice(Math.max(0, src.indexOf("from './app.js'") - 400), src.indexOf("from './app.js'"));
+  assert.match(importBlock, /\bharnessLabel\b/, 'harnessLabel must be imported from app.js');
+});
+
 test('run.js pages event history from the returned cursor, not the run maximum (issue #54)', () => {
   // The dashboard has no DOM harness here (this file is smoke-only by convention), so this
   // pins the specific mistake rather than simulating the browser. The API contract that makes

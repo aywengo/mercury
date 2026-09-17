@@ -2,7 +2,7 @@
 
 import {
   api, logout, currentUser, esc, fmtTime, fmtDuration, statusClass, goalLabel, goalGatesHtml, goalContractHtml,
-  repoLabel, shortId, pretty, sse, safeUrl,
+  harnessLabel, repoLabel, shortId, pretty, sse, safeUrl,
 } from './app.js';
 
 const $ = (id) => document.getElementById(id);
