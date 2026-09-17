@@ -4,7 +4,8 @@
  * Reports, for each harness with a shipped adapter, the facts the configuration wizard
  * needs to render its enable checklist:
  *
- *   - binary path (the configured cmd, never a bare name resolved through PATH)
+ *   - binary path (the configured cmd; a bare name is resolved through PATH, which is
+ *     the same resolution the adapter's spawn uses)
  *   - detected version (bounded probe of the real binary)
  *   - the adapter's declared minimum version
  *   - whether the detected version satisfies the floor
@@ -87,7 +88,9 @@ export function harnessSpecs(env: NodeJS.ProcessEnv = process.env): HarnessSpec[
         const p = join(home, '.hermes', 'config.yaml');
         if (!existsSync(p)) return false;
         try {
-          return readFileSync(p, 'utf8').split('\n').some((l) => l.trim().startsWith('api_key'));
+          // The exact YAML key `api_key:` — NOT `api_key_file:`/`api_key_path:`, which
+          // would be a false positive for "logged in" (review #631).
+          return readFileSync(p, 'utf8').split('\n').some((l) => /^api_key\s*:/.test(l.trim()));
         } catch {
           return false;
         }
@@ -119,6 +122,10 @@ export async function probeHarness(spec: HarnessSpec): Promise<HarnessProbeResul
     auth: 'unknown',
   };
 
+  // Auth comes from config-file signals and is reportable even when the binary is
+  // missing or unparsable — the wizard wants "not logged in" next to "missing".
+  base.auth = spec.auth() ? 'logged-in' : 'not-logged-in';
+
   const info = await probeVersion({ cmd: spec.cmd });
   if (info.error) {
     base.error = info.error;
@@ -127,7 +134,6 @@ export async function probeHarness(spec: HarnessSpec): Promise<HarnessProbeResul
   }
   base.version = info.version;
   base.versionRaw = info.raw;
-  base.auth = spec.auth() ? 'logged-in' : 'not-logged-in';
 
   if (spec.minVersion === undefined) {
     base.status = 'unknown';
@@ -147,9 +153,11 @@ export async function runHostProbe(
     err: (s) => process.stderr.write(s),
   },
 ): Promise<number> {
-  if (args.length > 0 && args[0] !== '--json') {
-    io.err(`host probe: unknown flag '${args[0]}'. Expected --json.\n`);
-    return 1;
+  for (const a of args) {
+    if (a !== '--json') {
+      io.err(`host probe: unknown flag '${a}'. Expected --json.\n`);
+      return 1;
+    }
   }
   const results = await Promise.all(harnessSpecs().map(probeHarness));
   io.out(JSON.stringify({ harnesses: results }, null, 2) + '\n');

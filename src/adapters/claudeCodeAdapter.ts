@@ -179,8 +179,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     },
   };
   /** `claude --version` prints "2.1.260 (Claude Code)", so the default leading-dotted-number
-   *  parser extracts 2.1.260. Probes the configured cmd, never a bare `claude` resolved
-   *  through PATH (docs/goals.md 13.3). */
+   *  parser extracts 2.1.260. Probes the configured cmd, falling back to the bare `claude`
+   *  on PATH when none is configured — the same resolution the adapter's spawn uses
+   *  (docs/goals.md 13.3). */
   detectVersion(): Promise<AgentVersionInfo> {
     return probeVersion({ cmd: this.opts.cmd ?? 'claude' });
   }

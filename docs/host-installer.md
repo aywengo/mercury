@@ -60,7 +60,7 @@ Gate: probe results agree with the adapters' own real-binary observations (the s
 - Each shipped adapter declares `capabilities.minVersion` (the M0 remaining item): PrimeAgent `0.3.3` (the goals-matrix floor, docs/goals.md 13.2), Hermes `0.21.2` (the version the adapter was verified against), Claude Code `1.0.3` (the version the adapter was built against, docs/agent-adapters.md 8.2.1).
 - Hermes and Claude adapters gained `detectVersion()` (bounded probe of the configured cmd, same `probeVersion` the PrimeAgent adapter already used); the default leading-dotted-number parser extracts `0.21.2` from `Hermes Agent v0.21.2 (…)` and `2.1.260` from `2.1.260 (Claude Code)`.
 - Per-harness output: `binary`, `version`, `versionRaw`, `minVersion`, `status` (`ok`/`too-old`/`missing`/`unknown`), `configPath`, `configExists`, `auth` (`logged-in`/`not-logged-in`/`unknown`), `error`.
-- Auth is a best-effort file signal, never a secret read: PrimeAgent `~/.prime/agent/auth.json`, Hermes `~/.hermes/config.yaml` containing `api_key`, Claude `~/.claude.json`.
+- Auth is a best-effort file signal that never EMITS secrets (it reports logged-in/not-logged-in only): PrimeAgent `~/.prime/agent/auth.json`, Hermes `~/.hermes/config.yaml` containing the `api_key:` key, Claude `~/.claude.json`.
 - `fake` and declarative local agents are not host harnesses and never appear.
 - Tests: `test/hostProbe.test.ts` (10 tests) — missing binary → `missing`, downgraded → `too-old`, floor satisfied → `ok`, no floor → `unknown`, env cmd override, no-config host, unknown flag rejected.
 

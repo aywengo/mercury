@@ -134,6 +134,12 @@ test('host probe rejects an unknown flag', async () => {
   assert.ok(stderr.includes('unknown flag'));
 });
 
+test('host probe rejects an extra flag after --json', async () => {
+  const { code, stderr } = await cli(['host', 'probe', '--json', '--bogus']);
+  assert.equal(code, 1);
+  assert.ok(stderr.includes('unknown flag'));
+});
+
 test('host probe works without any config (no mercury.env, no database)', async () => {
   const dir = tempDir('probe-noconfig-');
   const { code, stdout } = await cli(['host', 'probe', '--json'], {

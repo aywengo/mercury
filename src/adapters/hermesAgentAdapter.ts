@@ -139,7 +139,8 @@ export class HermesAgentAdapter implements AgentAdapter {
   };
   /** `hermes --version` prints "Hermes Agent v0.21.2 (2026.9.11) · upstream …", so the
    *  default leading-dotted-number parser extracts 0.21.2. Probes the configured cmd,
-   *  never a bare `hermes` resolved through PATH (docs/goals.md 13.3). */
+   *  falling back to the bare `hermes` on PATH when none is configured — the same
+   *  resolution the adapter's spawn uses (docs/goals.md 13.3). */
   detectVersion(): Promise<AgentVersionInfo> {
     return probeVersion({ cmd: this.opts.cmd ?? 'hermes' });
   }
