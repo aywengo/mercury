@@ -20,7 +20,7 @@ import { RunQueue, LEASE_EXPIRED_ERROR } from '../queue/runQueue.ts';
 import type { RunService } from '../runs/runService.ts';
 import { RunStore } from '../runs/runStore.ts';
 import type { GoalStore } from '../runs/goalStore.ts';
-import { NOTES_FILE, materializeKnowledge } from '../knowledge/materialize.ts';
+import { GENERATED_PATHS, NOTES_FILE, excludeFromGit, materializeKnowledge } from '../knowledge/materialize.ts';
 import { harvestNotes } from '../knowledge/harvest.ts';
 import { claimHash } from '../knowledge/validation.ts';
 import { createRedactor } from '../domain/redact.ts';
@@ -346,6 +346,14 @@ export class Worker {
       // files, version and hash -- so nothing here needs the registry at all.
       const skills = this.deps.runService.getSkills(run.id);
       await writeSkills(workspace.path, skills);
+
+      // Exclude every generated path from the git view (section 9.4), for EVERY Run, not only pack
+      // Runs. The adapters write `.mercury-context.json` for every Run (prime, rpc, daemon, claude),
+      // and `materializeKnowledge` below only runs when a pack exists -- so a no-pack Run's context
+      // file would otherwise be left committable and swept into a pull request by `git add -A`.
+      // Idempotent: `excludeFromGit` appends only paths missing from info/exclude, so the call inside
+      // `materializeKnowledge` (pack Runs) is harmless duplication.
+      excludeFromGit(workspace.path, GENERATED_PATHS);
 
       // Knowledge materialization (section 9.2), after writeSkills and before the adapter starts, so the
       // files exist before anything can be told to read them.

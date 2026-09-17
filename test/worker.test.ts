@@ -47,6 +47,41 @@ test('happy path: create -> queue -> run -> events -> completed', async () => {
   }
 });
 
+test('issue #621: generated paths are excluded from git even on a no-pack Run', async () => {
+  // The adapters write `.mercury-context.json` for every Run, but `materializeKnowledge` (which is
+  // what used to call `excludeFromGit`) only runs when a knowledge pack exists. On a no-pack Run the
+  // context file was left committable and would be swept into a pull request by `git add -A`. The
+  // worker must exclude GENERATED_PATHS unconditionally, before the adapter starts.
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = makeEnv({
+    workspaceMode: 'git-worktree',
+    repoDir: repo,
+    fakeScript: [{ event: { type: 'agent.message', payload: { text: 'done' } } }],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'no knowledge here',
+      agent: 'fake',
+      repository: { localPath: repo, baseBranch: 'main' },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 10_000);
+    const final = env.runs.get(run.id)!;
+    assert.ok(final.workspacePath, 'run must have a workspace');
+    // Every generated path must be ignored by git in the run's workspace.
+    const { execFileSync } = await import('node:child_process');
+    const { GENERATED_PATHS } = await import('../src/knowledge/materialize.ts');
+    for (const p of GENERATED_PATHS) {
+      const out = execFileSync('git', ['check-ignore', p], {
+        cwd: final.workspacePath, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      assert.equal(out, p, `git must ignore ${p} in a no-pack Run's workspace`);
+    }
+  } finally {
+    env.close();
+  }
+});
+
 test('agent failure -> FAILED with error', async () => {
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
