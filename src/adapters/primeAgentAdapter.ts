@@ -89,6 +89,9 @@ export class PrimeAgentAdapter implements AgentAdapter {
    */
   readonly capabilities: AgentCapabilities = {
     goals: { set: '0.3.3', track: '0.3.3', tokenBudget: '0.3.3' },
+    // RPC mode + the goal argv Mercury needs both exist at the goals-matrix floor; the
+    // adapter has never been driven against anything older (docs/goals.md 13.2).
+    minVersion: '0.3.3',
     static: {
       // Measured: the worker writes skill files to <workspace>/.agents/skills and this adapter also
       // passes each skill's workspace path on argv, so PrimeAgent reads them from disk.

@@ -24,7 +24,8 @@ import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AGENTS_MD_FILE, NOTES_FILE, containedPath } from '../knowledge/materialize.ts';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
-import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities } from '../domain/types.ts';
+import { probeVersion } from './versionProbe.ts';
+import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities, AgentVersionInfo } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 
 export interface HermesAgentAdapterOptions {
@@ -118,6 +119,10 @@ export class HermesAgentAdapter implements AgentAdapter {
    * a goal as tracked when nothing was ever reported back (docs/goals.md 13.2, section 7).
    */
   readonly capabilities: AgentCapabilities = {
+    // `hermes chat -Q --query-file -` (the argv this adapter emits) was verified against
+    // v0.21.2 — the version named by the host-installer M2 gate. Older builds are not
+    // known to carry the quiet/query-file surface, so the floor is the verified version.
+    minVersion: '0.21.2',
     static: {
       // Measured: buildArgv() emits `-s <skill.id>`, so Hermes resolves the name in ITS OWN installed
       // store. This is the value #507 exists to make readable -- a Mercury skill id Hermes does not
@@ -132,6 +137,14 @@ export class HermesAgentAdapter implements AgentAdapter {
       toolEvents: 'none',
     },
   };
+  /** `hermes --version` prints "Hermes Agent v0.21.2 (2026.9.11) · upstream …", so the
+   *  default leading-dotted-number parser extracts 0.21.2. Probes the configured cmd,
+   *  falling back to the bare `hermes` on PATH when none is configured — the same
+   *  resolution the adapter's spawn uses (docs/goals.md 13.3). */
+  detectVersion(): Promise<AgentVersionInfo> {
+    return probeVersion({ cmd: this.opts.cmd ?? 'hermes' });
+  }
+
   private opts: HermesAgentAdapterOptions;
   private sessions = new Map<string, Session>();
 
