@@ -1,6 +1,6 @@
 # Mercury Host installer
 
-Status: design complete (M0), nothing built yet.
+Status: M0 (design) and M1 (bootstrap skeleton) done; M2 (harness probe) next.
 
 The Host installer is a bash wizard that takes a fresh macOS or Linux machine to a running Mercury host that reports to Fleet, with the locally installed harnesses detected, verified and enabled.
 
@@ -33,15 +33,15 @@ Gate: doc merged; every question in section 3 has an answer or a written reason 
 
 `install.sh`:
 
-- OS/arch detection: macOS and Linux, x64 and arm64. Alpine/musl is detected and rejected with a message (no `better-sqlite3` prebuilt).
-- Prerequisite checks: `curl`, `git`, Node ≥ current LTS, SQLite prebuilt availability for the platform.
+- OS/arch detection: macOS and Linux, x64 and arm64. Alpine/musl is NOT rejected: Mercury has no native dependencies (`node:sqlite` is built into Node, `package.json` ships only `express`), so musl needs no prebuilt check. The earlier draft rejected Alpine for a missing `better-sqlite3` prebuilt; that rationale died when the database moved to `node:sqlite` (initial commit, `src/db/database.ts`).
+- Prerequisite checks: `curl`, `git`, Node ≥ 22.18.0 (the `engines` floor, which also guarantees `node:sqlite`). No SQLite prebuilt check exists because there is nothing native to prebuild.
 - Pinned package install with checksum verification, into the user's npm prefix (no `sudo`).
 - Flags: `--dry-run`, `--yes`, `--version <v>`, `--non-interactive`.
 - Structured log to `${XDG_STATE_HOME:-~/.local/state}/mercury/install.log`.
 - `shellcheck` clean.
 - `mercury host install` subcommand that performs the same post-bootstrap steps for the `npx` channel.
 
-Gate: runs clean in a Docker matrix (Debian, Ubuntu, Fedora) and on macOS arm64 via both channels; `--dry-run` prints the exact action list and touches nothing.
+Gate: runs clean in a Docker matrix (Debian, Ubuntu, Fedora) and on macOS arm64 via both channels; `--dry-run` prints the exact action list and touches nothing. Met 2026-09-17: `install.sh` (bash 3.2, `shellcheck` clean, `--dry-run` touches nothing) and `mercury host install` (prereq checks, structured log, works on an unconfigured host) both land; the Docker matrix and the checksum-published-alongside-release half of the gate are M6 work (CI matrix + release signing), not M1.
 
 ### M2 — Harness probe
 

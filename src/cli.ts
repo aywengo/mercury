@@ -55,6 +55,7 @@ import { SandboxManager } from './sandbox/sandboxManager.ts';
 import { Worker } from './worker/worker.ts';
 import { startServer } from './api/server.ts';
 import { dataPath } from './paths.ts';
+import { runHostInstall } from './host/install.ts';
 import { HOST_VERSION } from './version.ts';
 
 const SKILLS_DIR = dataPath('.agents', 'skills');
@@ -78,6 +79,8 @@ function usageText(): string {
     '                               and print what happened (phase 1)',
     '                identity     print the repo:<hash> scope key for a repository URL or path',
     '                status       outbox depth, last push and pull, replica cursor',
+    '  host            install     bootstrap a Mercury host (prereq checks, pinned install,',
+    '                               structured log; --dry-run prints the action list)',
     '',
   ].join('\n');
 }
@@ -94,6 +97,15 @@ async function main(): Promise<void> {
     // because help has to work for someone whose config is exactly what they are trying to fix.
     // mercuryctl already behaves this way; the two commands in one package must not disagree.
     process.stdout.write(usageText());
+    return;
+  }
+  // `host install` runs BEFORE loadConfig() for the same reason `knowledge identity` runs before
+  // the database opens: the command exists to install a host that is not configured yet, and a
+  // host whose configuration is the thing being fixed must still be able to run it
+  // (docs/host-installer.md M1). loadConfig() never throws, but the redactor/logger setup below
+  // is host-shaped and this command is not.
+  if (cmd === 'host' && args[0] === 'install') {
+    process.exitCode = runHostInstall(args.slice(1));
     return;
   }
   const config = loadConfig();
