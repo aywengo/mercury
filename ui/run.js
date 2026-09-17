@@ -15,6 +15,8 @@ let pendingInput = null; // { requestId, method, title, message, options, placeh
 let stopSse = null;
 
 let user = null; // { ownerId, isAdmin } from /api/auth/me, or null -> bounce to login
+let agentCaps = null; // { [agentId]: { static: { toolEvents } } } from /api/agents, best-effort
+let toolNoteAdded = false; // one timeline note per page load, not one per renderRun() call
 
 $('logout-btn').addEventListener('click', logout);
 
@@ -27,7 +29,14 @@ function showError(msg) {
 async function loadRun() {
   const data = await api('/api/runs/' + encodeURIComponent(runId));
   run = data.run;
-  renderRun(data.run, data.skills || [], data.goal);
+  // The Run object does not carry the harness's static capabilities; they live on /api/agents
+  // (docs/goals.md 13.6). Fetch once and cache: the page re-renders on terminal events and the
+  // capability map does not change mid-Run. Best-effort -- a failed fetch renders 'unknown',
+  // which is the honest state for "the server did not say".
+  if (agentCaps === null) {
+    try { agentCaps = (await api('/api/agents')).capabilities || {}; } catch { agentCaps = {}; }
+  }
+  renderRun(data.run, data.skills || [], data.goal, agentCaps);
   // Page through history until caught up (issue #54).
   //
   // The endpoint returns at most 1000 events per call, and `lastSequence` is the run's TRUE
@@ -95,7 +104,7 @@ function renderGoal(goal) {
   }
 }
 
-function renderRun(r, skills, goal) {
+function renderRun(r, skills, goal, caps) {
   $('run-id').textContent = r.id;
   $('status-badge').innerHTML = `<span class="badge ${statusClass(r.status)}">${esc(r.status)}</span>`;
   renderGoal(goal);
@@ -106,6 +115,7 @@ function renderRun(r, skills, goal) {
   // was still broken, and nothing recorded which binary a Run had talked to. "unknown" is printed
   // rather than left blank -- a blank reads as "same as always" to someone skimming.
   $('f-harness').textContent = harnessLabel(r);
+  renderToolEvents(r, caps);
   $('f-attempt').textContent = r.attempt;
   // innerHTML, not textContent: this builds an anchor, and textContent renders the markup as
   // literal text (the link showed up as "<a href=\"/run.html?run=...\">"). Both interpolated
@@ -170,6 +180,57 @@ function renderRun(r, skills, goal) {
 
   // live indicator
   $('live-indicator').textContent = terminal ? '' : '● live';
+}
+
+/**
+ * Whether Mercury can see this harness's tool calls (#601, #606). Rendered because its absence
+ * is the misreading: a Hermes Run that read files, searched and ran a 117-test suite shows one
+ * message and no tool events, and an operator looking at that transcript reasonably concludes
+ * the agent did nothing. The capability is declared in #599, served by /api/agents, and the CLI
+ * already renders it (client/commands/agents.ts) -- the dashboard must mirror the CLI's three
+ * states rather than re-derive them.
+ *
+ * Absent stays 'unknown': rendering an older server's silence as 'unobservable' would tell an
+ * operator their harness is blind when nobody measured it.
+ */
+function renderToolEvents(r, caps) {
+  const el = $('f-tool-events');
+  if (!el) return;
+  const toolEvents = caps?.[r.agent]?.static?.toolEvents;
+  if (!toolEvents) {
+    el.textContent = 'unknown';
+    el.classList.add('muted');
+    return;
+  }
+  el.classList.remove('muted');
+  if (toolEvents === 'none') {
+    // 'unobservable', not 'not recorded': the server's field comment says this measures whether
+    // MERCURY can observe the calls, and the Hermes Run that motivated #594 recorded its tool
+    // work in Hermes's own session store the whole time.
+    el.innerHTML = '<span style="color:var(--yellow)">unobservable</span>';
+    appendToolEventsNote();
+  } else {
+    el.textContent = toolEvents;
+  }
+}
+
+/**
+ * One timeline line where the tool events would have been. This is the half of #601 that lands
+ * at the moment of the misreading: the operator is reading the transcript, not the detail grid.
+ * Inserted once per page load, before the events page in, so it is the first thing read.
+ */
+function appendToolEventsNote() {
+  if (toolNoteAdded) return;
+  toolNoteAdded = true;
+  const tl = $('timeline');
+  const row = document.createElement('div');
+  row.className = 'tl-row tool-events-none';
+  row.innerHTML = `
+    <span class="tl-seq"></span>
+    <span class="tl-type">tool events</span>
+    <span class="tl-time"></span>
+    <span class="tl-payload">tool calls not recorded for this harness</span>`;
+  tl.appendChild(row);
 }
 
 function appendEvent(e) {

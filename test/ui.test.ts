@@ -120,6 +120,27 @@ test('run.js renders the run page without a ReferenceError (issue #625)', () => 
   assert.match(renderRunBody, /harnessLabel\(r\)/, 'harnessLabel(r) must be called with the parameter');
 });
 
+test('run.js renders the harness tool-events state and the timeline note (issue #606)', () => {
+  // #601 asked the dashboard to label a Run whose harness declares toolEvents: 'none'. The CLI
+  // got its half in #603; this pins the dashboard half. The three states must mirror
+  // client/commands/agents.ts: 'structured' plain, 'none' -> 'unobservable', absent -> 'unknown'.
+  // The timeline must carry one line where the tool events would have been, because the operator
+  // reads the transcript, not the detail grid.
+  const src = readFileSync(join(UI_DIR, 'run.js'), 'utf8');
+  // The capability comes from /api/agents, not the Run object (docs/goals.md 13.6).
+  assert.match(src, /api\('\/api\/agents'\)/, 'run.js must fetch /api/agents for capabilities');
+  assert.match(src, /caps\?\.\[r\.agent\]\?\.static\?\.toolEvents/,
+    'toolEvents must be read from the agent capability map, not re-derived');
+  // Three states, mirroring the CLI (client/commands/agents.ts toolsCell).
+  assert.match(src, /toolEvents === 'none'/, 'the none state must be handled explicitly');
+  assert.match(src, /'unobservable'/, 'none must render as unobservable, not as a blank or a lie');
+  assert.match(src, /'unknown'/, 'absent must render as unknown, not as unobservable');
+  // The timeline note: one line where the tool events would have been.
+  assert.match(src, /tool calls not recorded for this harness/,
+    'the timeline must say tool calls are not recorded for this harness');
+  assert.match(src, /toolNoteAdded/, 'the note must be inserted once per page load, not per render');
+});
+
 test('run.js pages event history from the returned cursor, not the run maximum (issue #54)', () => {
   // The dashboard has no DOM harness here (this file is smoke-only by convention), so this
   // pins the specific mistake rather than simulating the browser. The API contract that makes
