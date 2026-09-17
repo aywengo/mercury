@@ -103,6 +103,23 @@ test('UI JS modules parse (syntax check)', async () => {
   assert.equal(typeof mod.sse, 'function');
 });
 
+test('run.js renders the run page without a ReferenceError (issue #625)', () => {
+  // The run detail page rendered blank because renderRun() referenced two names that are not
+  // in its scope: `data` (a local of loadRun()) and `harnessLabel` (never imported). The FIRST
+  // throw is `renderGoal(data.goal)` -- `data` is not defined -- so the page never even reached
+  // the missing import. node --check validates only syntax, so both defects passed CI.
+  // Pin both regressions: the import statement must name harnessLabel, and renderRun() must
+  // read from its own parameters (goal, r), not the out-of-scope `data`.
+  const src = readFileSync(join(UI_DIR, 'run.js'), 'utf8');
+  const importStatement = src.slice(src.indexOf('import {'), src.indexOf("from './app.js'") + "from './app.js'".length);
+  assert.match(importStatement, /\bharnessLabel\b/, 'harnessLabel must be imported from app.js');
+  const renderRunBody = src.slice(src.indexOf('function renderRun'), src.indexOf('function appendEvent'));
+  assert.ok(!/renderGoal\(data\./ .test(renderRunBody), 'renderGoal must take the goal parameter, not the out-of-scope data (the first ReferenceError)');
+  assert.ok(!/harnessLabel\(data\./ .test(renderRunBody), 'harnessLabel must take the r parameter, not the out-of-scope data');
+  assert.match(renderRunBody, /renderGoal\(goal\)/, 'renderGoal(goal) must be called with the parameter');
+  assert.match(renderRunBody, /harnessLabel\(r\)/, 'harnessLabel(r) must be called with the parameter');
+});
+
 test('run.js pages event history from the returned cursor, not the run maximum (issue #54)', () => {
   // The dashboard has no DOM harness here (this file is smoke-only by convention), so this
   // pins the specific mistake rather than simulating the browser. The API contract that makes
