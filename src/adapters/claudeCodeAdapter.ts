@@ -40,8 +40,9 @@ import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import { isRecord } from './eventTranslation.ts';
+import { probeVersion } from './versionProbe.ts';
 import { CLAUDE_MD_FILE, CONTEXT_FILE, NOTES_FILE, containedPath } from '../knowledge/materialize.ts';
-import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities } from '../domain/types.ts';
+import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities, AgentVersionInfo } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 
 export interface ClaudeCodeAdapterOptions {
@@ -166,6 +167,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   /** Claude Code exposes no goal surface: `claude --help` has no goal flag on either
    *  install measured (1.0.3 and 2.1.260), and the adapter emits no goal argv. */
   readonly capabilities: AgentCapabilities = {
+    // The adapter's argv (`-p --output-format stream-json --verbose`) was built and
+    // verified against 1.0.3 (docs/agent-adapters.md 8.2.1); 2.1.260 is also measured.
+    // The floor is the oldest verified build.
+    minVersion: '1.0.3',
     static: {
       // Measured: this adapter references no skill at all. Mercury still writes the workspace
       // snapshot, but nothing here tells Claude Code to read it, so 'none' is the honest value --
@@ -173,6 +178,13 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       skills: 'none',
     },
   };
+  /** `claude --version` prints "2.1.260 (Claude Code)", so the default leading-dotted-number
+   *  parser extracts 2.1.260. Probes the configured cmd, never a bare `claude` resolved
+   *  through PATH (docs/goals.md 13.3). */
+  detectVersion(): Promise<AgentVersionInfo> {
+    return probeVersion({ cmd: this.opts.cmd ?? 'claude' });
+  }
+
   private opts: ClaudeCodeAdapterOptions;
   private sessions = new Map<string, Session>();
 

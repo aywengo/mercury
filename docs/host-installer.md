@@ -1,6 +1,6 @@
 # Mercury Host installer
 
-Status: M0 (design) and M1 (bootstrap skeleton) done; M2 (harness probe) next.
+Status: M0 (design), M1 (bootstrap skeleton) and M2 (harness probe) done; M3 (configuration wizard) next.
 
 The Host installer is a bash wizard that takes a fresh macOS or Linux machine to a running Mercury host that reports to Fleet, with the locally installed harnesses detected, verified and enabled.
 
@@ -43,7 +43,7 @@ Gate: doc merged; every question in section 3 has an answer or a written reason 
 
 Gate: runs clean in a Docker matrix (Debian, Ubuntu, Fedora) and on macOS arm64 via both channels; `--dry-run` prints the exact action list and touches nothing. Met 2026-09-17: `install.sh` (bash 3.2, `shellcheck` clean, `--dry-run` touches nothing) and `mercury host install` (prereq checks, structured log, works on an unconfigured host) both land; the Docker matrix and the checksum-published-alongside-release half of the gate are M6 work (CI matrix + release signing), not M1.
 
-### M2 — Harness probe
+### M2 — Harness probe — ✅ done
 
 `mercury host probe --json` reports, for each harness with a shipped adapter: binary path, version, config path, auth/login state, and whether the version satisfies the adapter's declared minimum. The wizard renders a checklist:
 
@@ -54,6 +54,15 @@ Gate: runs clean in a Docker matrix (Debian, Ubuntu, Fedora) and on macOS arm64 
 The user toggles which detected harnesses to enable.
 
 Gate: probe results agree with the adapters' own real-binary observations (the standard used for the Hermes v0.21.2 check); a deliberately downgraded harness is flagged, not enabled; a harness without an adapter does not appear at all.
+
+**As built** (`src/host/probe.ts`, wired as `mercury host probe --json` before `loadConfig()`):
+
+- Each shipped adapter declares `capabilities.minVersion` (the M0 remaining item): PrimeAgent `0.3.3` (the goals-matrix floor, docs/goals.md 13.2), Hermes `0.21.2` (the version the adapter was verified against), Claude Code `1.0.3` (the version the adapter was built against, docs/agent-adapters.md 8.2.1).
+- Hermes and Claude adapters gained `detectVersion()` (bounded probe of the configured cmd, same `probeVersion` the PrimeAgent adapter already used); the default leading-dotted-number parser extracts `0.21.2` from `Hermes Agent v0.21.2 (…)` and `2.1.260` from `2.1.260 (Claude Code)`.
+- Per-harness output: `binary`, `version`, `versionRaw`, `minVersion`, `status` (`ok`/`too-old`/`missing`/`unknown`), `configPath`, `configExists`, `auth` (`logged-in`/`not-logged-in`/`unknown`), `error`.
+- Auth is a best-effort file signal, never a secret read: PrimeAgent `~/.prime/agent/auth.json`, Hermes `~/.hermes/config.yaml` containing `api_key`, Claude `~/.claude.json`.
+- `fake` and declarative local agents are not host harnesses and never appear.
+- Tests: `test/hostProbe.test.ts` (10 tests) — missing binary → `missing`, downgraded → `too-old`, floor satisfied → `ok`, no floor → `unknown`, env cmd override, no-config host, unknown flag rejected.
 
 ### M3 — Configuration wizard
 

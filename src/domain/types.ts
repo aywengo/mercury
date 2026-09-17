@@ -452,6 +452,14 @@ export interface AgentStaticCapabilities {
 export interface AgentCapabilities {
   goals?: AgentGoalSupport;
   /**
+   * Minimum harness version this adapter can drive, e.g. '0.3.3'. The host probe
+   * (docs/host-installer.md M2) compares the detected binary version against this and
+   * flags a too-old harness instead of enabling it. Absent means no floor is declared
+   * (remote agents, unverified adapters) — the probe reports that as 'unknown', never
+   * as 'ok'.
+   */
+  minVersion?: string;
+  /**
    * Static, non-version-gated capabilities (issue #508). Kept separate from `goals` rather than
    * flattened into it because `goals` is a version MATRIX -- each field is a minimum version string
    * resolved against the detected harness -- while these are plain declarations about the adapter.

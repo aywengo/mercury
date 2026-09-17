@@ -56,6 +56,7 @@ import { Worker } from './worker/worker.ts';
 import { startServer } from './api/server.ts';
 import { dataPath } from './paths.ts';
 import { runHostInstall } from './host/install.ts';
+import { runHostProbe } from './host/probe.ts';
 import { HOST_VERSION } from './version.ts';
 
 const SKILLS_DIR = dataPath('.agents', 'skills');
@@ -81,6 +82,8 @@ function usageText(): string {
     '                status       outbox depth, last push and pull, replica cursor',
     '  host            install     bootstrap a Mercury host (prereq checks, pinned install,',
     '                               structured log; --dry-run prints the action list)',
+    '                probe       report per-harness binary, version, config and auth state',
+    '                               as JSON (--json) for the M2 wizard checklist',
     '',
   ].join('\n');
 }
@@ -106,6 +109,11 @@ async function main(): Promise<void> {
   // is host-shaped and this command is not.
   if (cmd === 'host' && args[0] === 'install') {
     process.exitCode = runHostInstall(args.slice(1));
+    return;
+  }
+  // `host probe` also runs before loadConfig(): the M2 wizard probes an unconfigured host.
+  if (cmd === 'host' && args[0] === 'probe') {
+    void runHostProbe(args.slice(1)).then((code) => { process.exitCode = code; });
     return;
   }
   const config = loadConfig();
