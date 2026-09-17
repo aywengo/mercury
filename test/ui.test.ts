@@ -107,10 +107,11 @@ test('run.js imports harnessLabel from app.js (issue #625)', () => {
   // run.js called harnessLabel() in renderRun() but never imported it, so every page load
   // threw a ReferenceError and the run detail page rendered blank. node --check validates
   // only syntax, so the missing import passed CI. Pin the specific regression: the import
-  // list must name every app.js export that run.js calls.
+  // statement must name harnessLabel. Matching the whole statement (not a window around it)
+  // stops a comment mentioning the name from satisfying the guard.
   const src = readFileSync(join(UI_DIR, 'run.js'), 'utf8');
-  const importBlock = src.slice(Math.max(0, src.indexOf("from './app.js'") - 400), src.indexOf("from './app.js'"));
-  assert.match(importBlock, /\bharnessLabel\b/, 'harnessLabel must be imported from app.js');
+  const importStatement = src.slice(src.indexOf('import {'), src.indexOf("from './app.js'") + "from './app.js'".length);
+  assert.match(importStatement, /\bharnessLabel\b/, 'harnessLabel must be imported from app.js');
 });
 
 test('run.js pages event history from the returned cursor, not the run maximum (issue #54)', () => {
