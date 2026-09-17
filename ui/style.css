@@ -162,6 +162,11 @@ h2.section { font-size: 14px; text-transform: uppercase; letter-spacing: 0.6px; 
 .tl-row.agent-message .tl-payload { color: #c9d6e0; }
 .tl-row.tool-started .tl-payload, .tl-row.tool-completed .tl-payload, .tl-row.tool-failed .tl-payload { font-family: var(--mono); font-size: 11px; }
 .tl-row.input-required { background: #241d08; }
+/* The "tool calls not recorded" note is a statement about the harness, not an event: muted,
+   dashed, and visually distinct from the transcript rows so it cannot be read as one. */
+.tl-row.tool-events-none { border-bottom-style: dashed; }
+.tl-row.tool-events-none .tl-type { color: var(--yellow); }
+.tl-row.tool-events-none .tl-payload { color: var(--muted); font-style: italic; }
 .tl-row.error, .tl-row.run-failed { background: #2a1214; }
 .tl-row.run-completed { background: #0f2416; }
 
