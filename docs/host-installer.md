@@ -62,7 +62,7 @@ Gate: probe results agree with the adapters' own real-binary observations (the s
 - Per-harness output: `binary`, `version`, `versionRaw`, `minVersion`, `status` (`ok`/`too-old`/`missing`/`unknown`), `configPath`, `configExists`, `auth` (`logged-in`/`not-logged-in`/`unknown`), `error`.
 - Auth is a best-effort file signal that never EMITS secrets (it reports logged-in/not-logged-in only): PrimeAgent `~/.prime/agent/auth.json`, Hermes `~/.hermes/config.yaml` containing the `api_key:` key, Claude `~/.claude.json`.
 - `fake` and declarative local agents are not host harnesses and never appear.
-- Tests: `test/hostProbe.test.ts` (10 tests) — missing binary → `missing`, downgraded → `too-old`, floor satisfied → `ok`, no floor → `unknown`, env cmd override, no-config host, unknown flag rejected.
+- Tests: `test/hostProbe.test.ts` (11 tests) — missing binary → `missing`, downgraded → `too-old`, floor satisfied → `ok`, no floor → `unknown`, env cmd override, no-config host, unknown flag rejected (first and after `--json`).
 
 ### M3 — Configuration wizard
 
