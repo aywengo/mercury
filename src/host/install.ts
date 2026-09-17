@@ -118,15 +118,22 @@ export function checkPrereqs(): PrereqResult[] {
   ];
 }
 
-/** The exact actions the installer will take, in order. `--dry-run` prints these. */
+/**
+ * The exact actions the installer will take, in order. `--dry-run` prints these.
+ *
+ * This is the npx channel: the package is ALREADY installed (npx fetched it), so the
+ * list is prereq checks + verify the running package + log + handoff. The bash channel
+ * (install.sh) performs the actual pinned install and checksum verification before it
+ * reaches this command; claiming those steps here would make --dry-run lie about what
+ * `mercury host install` does (review #629).
+ */
 export function buildActionList(opts: HostInstallOptions, prereqs: PrereqResult[]): string[] {
   const actions: string[] = [];
   const version = opts.version ?? 'latest';
   for (const p of prereqs) {
     actions.push(p.ok ? `check ${p.name}: ok (${p.detail})` : `check ${p.name}: FAILED (${p.detail})`);
   }
-  actions.push(`install ${PACKAGE_NAME}@${version} into the user npm prefix (no sudo)`);
-  actions.push('verify the installed package checksum');
+  actions.push(`verify the running ${PACKAGE_NAME}@${version} satisfies the engines floor`);
   actions.push('write ${XDG_STATE_HOME:-~/.local/state}/mercury/install.log');
   actions.push('hand off to `mercury host setup` (M3: configuration wizard)');
   return actions;

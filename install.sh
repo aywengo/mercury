@@ -32,11 +32,27 @@ log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/mercury"
 log_file="$log_dir/install.log"
 
 json_escape() {
-  # JSON string escaping for the structured log: a --version or detail containing
-  # quotes, backslashes or control characters must not produce invalid JSON.
-  # bash 3.2 has no ${var//...} for backslash, so use sed for the two escapes that
-  # need it and printf for the rest.
-  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n\t\r' '   '
+  # JSON string escaping for the structured log: quotes, backslashes and EVERY control
+  # character must be escaped or the log line is not valid JSON. bash 3.2 has no
+  # ${var//...} for backslash, so the heavy lifting is awk's (POSIX, present on macOS
+  # and Linux): backslash and quote first, then any byte < 0x20 as \u00XX.
+  printf '%s' "$1" | awk '{
+    gsub(/\\/, "\\\\");
+    gsub(/"/, "\\\"");
+    ctrl = "\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037";
+    out = "";
+    n = length($0);
+    for (i = 1; i <= n; i++) {
+      c = substr($0, i, 1);
+      p = index(ctrl, c);
+      if (p > 0) {
+        out = out sprintf("\\u%04x", p);
+      } else {
+        out = out c;
+      }
+    }
+    print out;
+  }'
 }
 
 log_line() {

@@ -87,10 +87,12 @@ test('checkPrereqs: returns node, curl and git in that order', () => {
 test('buildActionList: dry-run lists every action including the pinned version', () => {
   const prereqs = checkPrereqs();
   const actions = buildActionList({ dryRun: true, yes: false, nonInteractive: false, version: '0.1.1' }, prereqs);
-  assert.ok(actions.some((a) => a.includes(`install ${PACKAGE_NAME}@0.1.1`)), 'pinned version appears in the action list');
-  assert.ok(actions.some((a) => a.includes('verify the installed package checksum')));
+  assert.ok(actions.some((a) => a.includes(`verify the running ${PACKAGE_NAME}@0.1.1`)), 'pinned version appears in the action list');
   assert.ok(actions.some((a) => a.includes('install.log')));
   assert.ok(actions.some((a) => a.includes('mercury host setup')));
+  // The npx channel must not claim install/checksum steps it does not perform (review #629).
+  assert.ok(!actions.some((a) => a.includes('install @aywengo')), 'the npx action list must not claim a package install');
+  assert.ok(!actions.some((a) => a.includes('verify the installed package checksum')), 'the npx action list must not claim a checksum step');
 });
 
 // ---------- CLI behaviour ----------
