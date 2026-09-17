@@ -89,15 +89,16 @@ test('table columns stay aligned when a cell contains a stripped sequence', () =
   const sanitised = rows.map((r) => r.map(sanitizeForTerminal));
   const table = renderTable(['ID', 'STATUS', 'TASK'], sanitised);
   const lines = table.split('\n');
-  const colStart = (line: string, index: number): number => {
-    let pos = 0;
-    for (let i = 0; i < index; i += 1) pos = line.indexOf(lines[0].split(/\s{2,}/)[i], pos) + 1;
-    return line.indexOf(sanitised[0][index] === '' ? 'STATUS' : sanitised[index === 0 ? 0 : 0][0], pos);
-  };
-  // Simpler and sufficient: the STATUS column must begin at the same offset on every body row.
-  const offsets = lines.slice(1).map((l) => l.indexOf('COMPLETED') >= 0 ? l.indexOf('COMPLETED') : l.indexOf('FAILED'));
-  assert.equal(offsets[0], offsets[1], `columns misaligned: ${JSON.stringify(lines)}`);
-  void colStart;
+  // The STATUS column must begin at the same offset on every body row. The header label is the
+  // only reliable anchor: body values differ (COMPLETED vs FAILED), so compare each row's offset
+  // of the column start against the header's.
+  const headerOffset = lines[0].indexOf('STATUS');
+  const bodyOffsets = lines.slice(1).map((l) => {
+    const i = l.indexOf('COMPLETED');
+    return i >= 0 ? i : l.indexOf('FAILED');
+  });
+  assert.ok(bodyOffsets.every((o) => o === headerOffset),
+    `STATUS column must start at the header's offset on every row: ${JSON.stringify(lines)}`);
 });
 
 test('table columns stay aligned when a cell arrives already decorated', () => {
