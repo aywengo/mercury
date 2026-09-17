@@ -135,7 +135,7 @@ export function renderTable(
   );
   const line = (cells: string[], columnize: (text: string, i: number) => string): string =>
     cells
-      .map((cell, i) => columnize(padVisible(cell, widths[i] ?? visibleWidth(cell)), i))
+      .map((cell, i) => padVisible(columnize(cell, i), widths[i] ?? visibleWidth(cell)))
       .join('  ')
       .trimEnd();
 
