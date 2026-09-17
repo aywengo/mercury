@@ -113,11 +113,15 @@ test('host install writes the structured install log', async () => {
   assert.equal(r.code, 0, r.stderr);
   const logPath = join(state, 'mercury', 'install.log');
   assert.equal(existsSync(logPath), true, 'a real run must write the install log');
-  const line = readFileSync(logPath, 'utf8').trim().split('\n').pop()!;
-  const entry = JSON.parse(line);
-  assert.equal(entry.event, 'host-install');
-  assert.equal(entry.dryRun, false);
-  assert.ok(Array.isArray(entry.prereqs));
+  const lines = readFileSync(logPath, 'utf8').trim().split('\n');
+  const first = JSON.parse(lines[0]!);
+  assert.equal(first.event, 'host-install');
+  assert.equal(first.dryRun, false);
+  // One line per action, per the module contract.
+  const actions = lines.filter((l) => JSON.parse(l).event === 'action');
+  assert.ok(actions.length >= 4, 'the log must record one line per action');
+  const last = JSON.parse(lines[lines.length - 1]!);
+  assert.equal(last.event, 'install-complete');
 });
 
 test('host install with an unknown flag exits 1 with a message', async () => {

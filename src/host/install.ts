@@ -168,19 +168,19 @@ export function runHostInstall(
     return failed.length > 0 ? 1 : 0;
   }
 
-  // Real run: log the plan, then report what was done. The actual npm install lives in
-  // install.sh (bash); this command verifies and hands off (M1 scope).
-  logInstall(process.env.XDG_STATE_HOME, {
-    event: 'host-install',
-    dryRun: false,
-    version: opts.version ?? 'latest',
-    prereqs: prereqs.map((p) => ({ name: p.name, ok: p.ok })),
-  });
-  for (const a of actions) io.out(`  ${a}\n`);
+  // Real run: log one line per action (the module contract), then report. The actual
+  // npm install lives in install.sh (bash); this command verifies and hands off (M1 scope).
+  logInstall(process.env.XDG_STATE_HOME, { event: 'host-install', dryRun: false, version: opts.version ?? 'latest' });
+  for (const a of actions) {
+    logInstall(process.env.XDG_STATE_HOME, { event: 'action', detail: a });
+    io.out(`  ${a}\n`);
+  }
   if (failed.length > 0) {
+    logInstall(process.env.XDG_STATE_HOME, { event: 'install-failed', detail: `${failed.length} prerequisite(s) failed` });
     io.err(`\n${failed.length} prerequisite(s) FAILED. Fix them and re-run.\n`);
     return 1;
   }
+  logInstall(process.env.XDG_STATE_HOME, { event: 'install-complete', detail: 'prerequisites met' });
   io.out('\nPrerequisites met. Run `mercury host setup` to configure this host (M3).\n');
   return 0;
 }

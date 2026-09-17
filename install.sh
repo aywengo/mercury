@@ -31,11 +31,21 @@ set -u
 log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/mercury"
 log_file="$log_dir/install.log"
 
+json_escape() {
+  # JSON string escaping for the structured log: a --version or detail containing
+  # quotes, backslashes or control characters must not produce invalid JSON.
+  # bash 3.2 has no ${var//...} for backslash, so use sed for the two escapes that
+  # need it and printf for the rest.
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n\t\r' '   '
+}
+
 log_line() {
   # One JSON line per event, so a failed install leaves a readable trail.
-  local ts
+  local ts ev dt
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)"
-  printf '{"ts":"%s","event":"%s","detail":"%s"}\n' "$ts" "$1" "$2" >>"$log_file"
+  ev="$(json_escape "$1")"
+  dt="$(json_escape "$2")"
+  printf '{"ts":"%s","event":"%s","detail":"%s"}\n' "$ts" "$ev" "$dt" >>"$log_file"
 }
 
 # ---------------------------------------------------------------------------
