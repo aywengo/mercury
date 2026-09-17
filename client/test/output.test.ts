@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizeForTerminal, renderTable, ellipsis, age, makeColorizer } from '../output/human.ts';
+import { sanitizeForTerminal, renderTable, ellipsis, age, makeColorizer, statusColor } from '../output/human.ts';
 import { renderAgents } from '../commands/agents.ts';
 import { renderRunList } from '../commands/list.ts';
 import { renderRunDetail } from '../commands/show.ts';
@@ -89,15 +89,16 @@ test('table columns stay aligned when a cell contains a stripped sequence', () =
   const sanitised = rows.map((r) => r.map(sanitizeForTerminal));
   const table = renderTable(['ID', 'STATUS', 'TASK'], sanitised);
   const lines = table.split('\n');
-  const colStart = (line: string, index: number): number => {
-    let pos = 0;
-    for (let i = 0; i < index; i += 1) pos = line.indexOf(lines[0].split(/\s{2,}/)[i], pos) + 1;
-    return line.indexOf(sanitised[0][index] === '' ? 'STATUS' : sanitised[index === 0 ? 0 : 0][0], pos);
-  };
-  // Simpler and sufficient: the STATUS column must begin at the same offset on every body row.
-  const offsets = lines.slice(1).map((l) => l.indexOf('COMPLETED') >= 0 ? l.indexOf('COMPLETED') : l.indexOf('FAILED'));
-  assert.equal(offsets[0], offsets[1], `columns misaligned: ${JSON.stringify(lines)}`);
-  void colStart;
+  // The STATUS column must begin at the same offset on every body row. The header label is the
+  // only reliable anchor: body values differ (COMPLETED vs FAILED), so compare each row's offset
+  // of the column start against the header's.
+  const headerOffset = lines[0].indexOf('STATUS');
+  const bodyOffsets = lines.slice(1).map((l) => {
+    const i = l.indexOf('COMPLETED');
+    return i >= 0 ? i : l.indexOf('FAILED');
+  });
+  assert.ok(bodyOffsets.every((o) => o === headerOffset),
+    `STATUS column must start at the header's offset on every row: ${JSON.stringify(lines)}`);
 });
 
 test('table columns stay aligned when a cell arrives already decorated', () => {
@@ -355,4 +356,37 @@ test('a hostile version string cannot inject terminal sequences into the goal co
   );
   assert.ok(!out.includes('\u001b]0;pwned'), 'escape payload survived the goal column');
   assert.ok(!out.includes('pwned\u0007'), 'OSC payload reached the terminal intact');
+});
+
+test('issue #604: a short status carries its own colour, not the dim default', () => {
+  // renderTable used to pad a cell and only then hand it to the caller's decorate callback, so
+  // `statusColor('RUNNING  ')` missed the key and fell through to the dim default. The colour must
+  // be looked up from the unpadded value; a SHORT status (RUNNING) must carry its own colour code
+  // while a longer status (COMPLETED) sets the column width.
+  const { color, dim } = makeColorizer({ noColor: false, isTty: true, json: false });
+  const rows = [
+    ['run_a', 'COMPLETED', '-', 'fake', '1m', 'task a'],
+    ['run_b', 'RUNNING', '-', 'fake', '1m', 'task b'],
+  ];
+  const table = renderTable(['ID', 'STATUS', 'GOAL', 'AGENT', 'AGE', 'TASK'], rows,
+    (text, column) => {
+      if (column === 1) return color(statusColor(text), text);
+      if (column === 2) return color('dim', text);
+      if (column === 0) return color('cyan', text);
+      return text;
+    },
+    (text) => dim(text),
+  );
+  const lines = table.split('\n');
+  const runningLine = lines.find((l) => l.includes('run_b'));
+  assert.ok(runningLine, 'RUNNING row must be present');
+  // RUNNING must carry its own colour (cyan), not the dim default. The GOAL cell on the same row is
+  // legitimately dim, so assert on the STATUS cell specifically: the cyan SGR must wrap RUNNING.
+  assert.ok(runningLine.includes('\u001b[36mRUNNING\u001b[0m'),
+    `RUNNING must render cyan, not dim (issue #604): ${JSON.stringify(runningLine)}`);
+  // And the column width must still be set by the widest cell (COMPLETED), so the rows align.
+  const strip = (s: string): string => s.replace(/\u001b\[[0-9;]*m/g, '');
+  const plain = lines.map(strip);
+  const statusCol = plain.map((l) => l.indexOf('STATUS')).filter((i) => i >= 0);
+  assert.equal(new Set(statusCol).size, 1, `STATUS column must start at the same column per row: ${JSON.stringify(statusCol)}`);
 });
