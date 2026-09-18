@@ -66,6 +66,7 @@ jobs:
     outputs:
       code: ${{ steps.gate.outputs.code }}
       contract_docs: ${{ steps.gate.outputs.contract_docs }}
+      host_installer: ${{ steps.gate.outputs.host_installer }}
     steps:
       - uses: actions/checkout@v4
 
@@ -307,8 +308,12 @@ jobs:
           fi
 
           if [ "$CODE" = "true" ]; then
-            if [ "$TEST" != "success" ] || [ "$UNINSTALL" != "success" ] || [ "$HOSTJOB" != "success" ]; then
-              echo "full CI failed (test=$TEST uninstall=$UNINSTALL host-installer=$HOSTJOB)" >&2
+            if [ "$TEST" != "success" ] || [ "$UNINSTALL" != "success" ]; then
+              echo "full CI failed (test=$TEST uninstall=$UNINSTALL)" >&2
+              exit 1
+            fi
+            if [ "$HOST" = "true" ] && [ "$HOSTJOB" != "success" ]; then
+              echo "full CI failed (host-installer=$HOSTJOB)" >&2
               exit 1
             fi
             echo "full CI passed"
@@ -316,8 +321,12 @@ jobs:
           fi
 
           if [ "$CONTRACT" = "true" ]; then
-            if [ "$DOCS" != "success" ] || [ "$HOSTJOB" != "success" ]; then
-              echo "docs-contract failed: $DOCS host-installer=$HOSTJOB" >&2
+            if [ "$DOCS" != "success" ]; then
+              echo "docs-contract failed: $DOCS" >&2
+              exit 1
+            fi
+            if [ "$HOST" = "true" ] && [ "$HOSTJOB" != "success" ]; then
+              echo "docs-contract failed (host-installer=$HOSTJOB)" >&2
               exit 1
             fi
             echo "docs-contract passed (full matrix skipped)"

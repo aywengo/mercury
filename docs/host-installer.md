@@ -28,8 +28,8 @@ curl -fsSL -o install.sh https://github.com/aywengo/mercury/releases/latest/down
 #    Compare against the "Installer checksum" section of the release notes:
 shasum -a 256 install.sh
 
-# 2. Read it. It is ~300 lines of plain bash; the action list it prints on a real
-#    run is the same list you see here.
+# 2. Read it. It is ~300 lines of plain bash; on a real run it prints the exact
+#    action list before doing anything.
 less install.sh
 
 # 3. Run it.
