@@ -25,6 +25,7 @@
  */
 
 import { createInterface } from 'node:readline';
+import { hostStatus, printStatus } from './lifecycle.ts';
 import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -71,21 +72,24 @@ export interface HostSetupOptions {
   answersFile?: string;
   /** Print what would be written and touch nothing. */
   dryRun: boolean;
+  /** Confirm overwriting an existing mercury.env (M5 re-run gate). */
+  yes: boolean;
 }
 
 export function parseHostSetupArgs(args: string[]): HostSetupOptions {
-  const opts: HostSetupOptions = { nonInteractive: false, dryRun: false };
+  const opts: HostSetupOptions = { nonInteractive: false, dryRun: false, yes: false };
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     if (a === '--non-interactive') opts.nonInteractive = true;
     else if (a === '--dry-run') opts.dryRun = true;
+    else if (a === '--yes' || a === '-y') opts.yes = true;
     else if (a === '--answers') {
       const v = args[i + 1];
       if (!v || v.startsWith('--')) throw new Error('host setup: --answers needs a file path');
       opts.answersFile = v;
       i += 1;
     } else {
-      throw new Error(`host setup: unknown flag '${a}'. Expected --non-interactive, --answers <file> or --dry-run`);
+      throw new Error(`host setup: unknown flag '${a}'. Expected --non-interactive, --answers <file>, --yes or --dry-run`);
     }
   }
   // --answers only makes sense with --non-interactive; silently ignoring the file and
@@ -355,11 +359,25 @@ export async function runHostSetup(
 
   const content = renderEnv(answers);
   const path = envFilePath(env);
+  const alreadyConfigured = existsSync(path);
   if (opts.dryRun) {
     io.out('mercury host setup --dry-run\n');
     io.out(redactedSummary(answers) + '\n');
-    io.out(`\nWould write ${path} (${content.split('\n').length} lines, mode 0600).\n`);
+    if (alreadyConfigured) {
+      io.out(`\n${path} already exists. --dry-run would OVERWRITE it.\n`);
+    } else {
+      io.out(`\nWould write ${path} (${content.split('\n').length} lines, mode 0600).\n`);
+    }
     return 0;
+  }
+
+  // Re-run on a configured host: show the diff and require confirmation (M5 gate:
+  // re-running changes nothing without confirmation; design decision 5).
+  if (alreadyConfigured && !opts.yes) {
+    io.out(`\n${path} already exists. Current state:\n`);
+    printStatus(hostStatus(process.platform, env), io);
+    io.out(`\nProposed changes would overwrite it. Pass --yes to confirm.\n`);
+    return 1;
   }
 
   writeEnvFile(path, content);

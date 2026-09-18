@@ -1,6 +1,6 @@
 # Mercury Host installer
 
-Status: M0–M4 done (design, bootstrap, probe, wizard, service+doctor); M5 (lifecycle) next.
+Status: M0–M5 done (design, bootstrap, probe, wizard, service+doctor, lifecycle); M6 (release hardening) next.
 
 The Host installer is a bash wizard that takes a fresh macOS or Linux machine to a running Mercury host that reports to Fleet, with the locally installed harnesses detected, verified and enabled.
 
@@ -92,13 +92,21 @@ Gate: fresh VM → running host reporting to Fleet with at least one harness Run
 - **Doctor**: reads `mercury.env` itself (works on a host whose service is the thing being diagnosed). healthz check against `http://127.0.0.1:${MERCURY_PORT:-3000}/healthz`; Fleet reachability with the pre-issued token (off when no URL, fails when URL without token); one smoke Run per enabled harness via `POST /api/runs` (needs `MERCURY_ADMIN_TOKEN` or `MERCURY_API_TOKENS`; without one the smoke section says so instead of crashing). Every check is bounded; `--json` emits the same facts as the human report.
 - Tests: `test/hostService.test.ts` (9) + `test/hostDoctor.test.ts` (11) — deterministic units, path resolution, dry-run writes nothing, no-env failure, unknown subcommand/flag, healthz/Fleet/smoke against a mock HTTP server, env-file parsing.
 
-### M5 — Lifecycle
+### M5 — Lifecycle — ✅ done
 
 - `--upgrade`: pin bump, `mercury.env` migration if a variable was renamed, service restart.
-- `--uninstall`: removes package, service and `mercury.env`; prompts to keep or remove the data dir.
+- `--uninstall`: removes package, service and `mercury.env`; keeps the data dir by default, `--remove-data` deletes it.
 - Re-run on a configured host reads `mercury.env`, shows current state and the diff of any proposed change.
 
 Gate: install vN → upgrade vN+1 → uninstall leaves nothing but the opted-in data dir; re-running on a configured host changes nothing without confirmation.
+
+**As built** (`src/host/lifecycle.ts`, wired as `mercury host status|upgrade|uninstall` before `loadConfig()`; `host setup` gained the re-run guard):
+
+- **`host status`** — read-only: configured?, env file, pinned version, harnesses, data dir, service presence. Never writes.
+- **`host upgrade --version <v> --yes`** — `npm install -g @aywengo/mercury@<v>`, records `MERCURY_PINNED_VERSION` in mercury.env (atomic write), restarts the service if present (launchctl kickstart / systemctl --user restart). Refuses without `--yes`; refuses on an unconfigured host.
+- **`host uninstall --yes [--keep-data|--remove-data]`** — removes the service (launchctl unload + plist/wrapper, or systemctl disable --now + unit), removes mercury.env, `npm uninstall -g` the package. Keeps the data dir by default; `--remove-data` deletes it. Refuses without `--yes`.
+- **Re-run guard** — `host setup` on a configured host (mercury.env exists) shows the current state and refuses to overwrite unless `--yes` is passed (interactive or `--non-interactive`). `--dry-run` on a configured host warns it would overwrite.
+- Tests: `test/hostLifecycle.test.ts` (16) + 2 new setup tests (re-run guard, --yes flag). Full suite 1227/1227 green.
 
 ### M6 — Release hardening
 
