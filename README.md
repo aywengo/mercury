@@ -89,6 +89,18 @@ Requires Node.js ≥ 22.18 (built-in `node:sqlite` and TypeScript type stripping
 What each channel ships and how it is built:
 [`docs/distribution.md`](docs/distribution.md).
 
+**On a fresh machine — the host installer.** The guided path for macOS/Linux:
+download, inspect, run. It installs the pinned package into your user npm prefix
+(no sudo) and hands off to `mercury host setup`:
+
+```bash
+curl -fsSL https://github.com/aywengo/mercury/releases/latest/download/install.sh | bash
+# or: npx @aywengo/mercury host install
+```
+
+Full walkthrough and the `curl | bash` safety note:
+[`docs/host-installer.md`](docs/host-installer.md).
+
 **From a checkout — works today.** This also installs both commands, `mercury` (the
 host) and `mercuryctl` (the operator client), because they ship in one package:
 

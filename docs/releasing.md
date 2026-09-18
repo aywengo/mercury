@@ -176,6 +176,15 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    version must therefore never be the release version, and `latest` must be checked after any publish
    that is not a normal tagged release.
 
+## Installer checksum
+
+Every host release publishes `install.sh` and its sha256 alongside the bundle:
+the release job appends an "Installer checksum" section to the release notes and
+attaches `install.sh` to the GitHub Release. The `curl | bash` one-liner in
+[`host-installer.md`](host-installer.md) points at that asset, so the checksum
+must stay in sync with the script at the tagged commit. The release job computes
+it from the tree at release time; nothing to do by hand.
+
 ## Publishing credential
 
 **There is none for the host, and that is the intended steady state.** Fleet's first publish is the one

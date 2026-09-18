@@ -16,6 +16,12 @@ historical reviews.
 - [`Current status and limitations`](status.md) — supported baseline, active
   gaps and recommended priorities.
 
+## Host installer
+
+- [`Host installer`](host-installer.md) — install a Mercury host on a fresh
+  macOS/Linux machine: `curl | bash` or `npx`, then `mercury host setup` and
+  `mercury host doctor`. Milestones M0–M6 are implemented.
+
 ## Releases
 
 Host and Fleet have independent versions. See [`releasing.md`](releasing.md).
@@ -148,7 +154,8 @@ Use the narrowest document for a change:
 - host release notes → `docs/releases/host/`;
 - Fleet release notes → `docs/releases/fleet/`;
 - how to cut a release → `docs/releasing.md`;
-- how an operator installs Mercury → `docs/distribution.md`.
+- how an operator installs Mercury → `docs/distribution.md`;
+- installing a Mercury host on a fresh machine → `docs/host-installer.md`.
 
 Avoid copying the same detailed table into several files. Link to the owning
 document and keep summaries short.
