@@ -12,13 +12,15 @@ Status header: npm, GitHub Release and Homebrew are all implemented in `release.
 | GitHub Release | download asset, or `git clone` | host + `mercuryctl` | implemented |
 | Git checkout | `git clone` + `npm ci` | host + `mercuryctl` | implemented (see #266) |
 | Homebrew | `brew tap aywengo/mercury https://github.com/aywengo/mercury` then `brew install mercury-ai` | host + `mercuryctl` | wired into the release job |
-| Host installer | `curl -fsSL https://github.com/aywengo/mercury/releases/latest/download/install.sh \| bash`, or `npx @aywengo/mercury host install` | host + `mercuryctl` | implemented (M6); see [`host-installer.md`](host-installer.md) |
+| Host installer | `curl -fsSL https://github.com/aywengo/mercury/releases/latest/download/install.sh \| bash`, or `npx @aywengo/mercury host install` | host + `mercuryctl` | implemented (M6); asset ships with the next host release — see [`host-installer.md`](host-installer.md) |
 
 The host installer is the guided path for a fresh machine: it detects OS/arch,
 checks Node/curl/git, installs the pinned package into the user npm prefix (no
 sudo), then hands off to `mercury host setup` (configuration wizard) and
 `mercury host doctor` (verification). Its `install.sh` and sha256 are published
-alongside each host release. See [`host-installer.md`](host-installer.md).
+alongside each host release; releases cut before the installer shipped (0.1.0,
+0.1.1) do not carry the asset, so the one-liner resolves from the next release
+on. See [`host-installer.md`](host-installer.md).
 
 Host and CLI are **one artifact**. There is no CLI-only channel and no separate CLI
 version: `package.json` `bin` carries both `mercury` and `mercuryctl`, so any install
