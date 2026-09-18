@@ -329,6 +329,19 @@ Requires `MERCURY_ATLAS_URL` to be set; omitting the URL disables the whole feat
 | `MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS` | `604800000` | How long non-promoted (retired) rows are kept in the host-side replica before being swept, in ms. Default is 7 days. Must be at least several multiples of `MERCURY_KNOWLEDGE_PULL_INTERVAL_MS` so the cursor has advanced past any in-flight page before a swept row could be replayed. See §8.3 of [knowledge-base.md](../docs/knowledge-base.md). |
 | `MERCURY_KNOWLEDGE_OUTBOX_ALERT_DEPTH` | `1000` | Outbox depth that triggers a `knowledge.outbox.alert` event. |
 
+## Host installer
+
+Variables written by `mercury host setup` (docs/host-installer.md M3). The wizard
+writes them to `${XDG_CONFIG_HOME:-~/.config}/mercury/mercury.env` (mode 0600) and the
+generated launchd/systemd user unit loads that file exactly as the system units load
+`/etc/mercury/mercury.env`.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MERCURY_FLEET_URL` | unset | Fleet base URL this host reports to. Unset disables Fleet reporting. |
+| `MERCURY_HOST_TOKEN` | unset | Pre-issued host token for Fleet. Never printed in output; the redacted summary shows only its presence and length. |
+| `MERCURY_HARNESSES` | unset | Comma-separated harness ids to enable (`primeagent`, `hermes`, `claude`). Unset enables every detected harness. |
+
 ## Production-style example
 
 Use one environment file for both API and worker. Set `MERCURY_DEFAULT_AGENT` to

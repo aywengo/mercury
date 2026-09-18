@@ -57,6 +57,7 @@ import { startServer } from './api/server.ts';
 import { dataPath } from './paths.ts';
 import { runHostInstall } from './host/install.ts';
 import { runHostProbe } from './host/probe.ts';
+import { runHostSetup } from './host/setup.ts';
 import { HOST_VERSION } from './version.ts';
 
 const SKILLS_DIR = dataPath('.agents', 'skills');
@@ -84,6 +85,8 @@ function usageText(): string {
     '                               structured log; --dry-run prints the action list)',
     '                probe       report per-harness binary, version, config and auth state',
     '                               as JSON (--json) for the M2 wizard checklist',
+    '                setup       write ${XDG_CONFIG_HOME:-~/.config}/mercury/mercury.env',
+    '                               (interactive wizard or --non-interactive --answers)',
     '',
   ].join('\n');
 }
@@ -114,6 +117,12 @@ async function main(): Promise<void> {
   // `host probe` also runs before loadConfig(): the M2 wizard probes an unconfigured host.
   if (cmd === 'host' && args[0] === 'probe') {
     void runHostProbe(args.slice(1)).then((code) => { process.exitCode = code; });
+    return;
+  }
+  // `host setup` runs before loadConfig(): it WRITES the config an unconfigured host
+  // does not have yet (docs/host-installer.md M3).
+  if (cmd === 'host' && args[0] === 'setup') {
+    void runHostSetup(args.slice(1)).then((code) => { process.exitCode = code; });
     return;
   }
   const config = loadConfig();
