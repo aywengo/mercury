@@ -58,6 +58,8 @@ import { dataPath } from './paths.ts';
 import { runHostInstall } from './host/install.ts';
 import { runHostProbe } from './host/probe.ts';
 import { runHostSetup } from './host/setup.ts';
+import { installService, serviceStatus, uninstallService, parseServiceArgs, type ServiceOptions } from './host/service.ts';
+import { runHostDoctor } from './host/doctor.ts';
 import { HOST_VERSION } from './version.ts';
 
 const SKILLS_DIR = dataPath('.agents', 'skills');
@@ -87,6 +89,10 @@ function usageText(): string {
     '                               as JSON (--json) for the M2 wizard checklist',
     '                setup       write ${XDG_CONFIG_HOME:-~/.config}/mercury/mercury.env',
     '                               (interactive wizard or --non-interactive --answers)',
+    '                service     install|status|uninstall the launchd/systemd unit',
+    '                               that runs the host (--dry-run prints the unit)',
+    '                doctor      healthz, Fleet reachability and one smoke Run per',
+    '                               enabled harness (--json for machine output)',
     '',
   ].join('\n');
 }
@@ -123,6 +129,39 @@ async function main(): Promise<void> {
   // does not have yet (docs/host-installer.md M3).
   if (cmd === 'host' && args[0] === 'setup') {
     void runHostSetup(args.slice(1)).then((code) => { process.exitCode = code; });
+    return;
+  }
+  // `host doctor` verifies the running host (docs/host-installer.md M4).
+  if (cmd === 'host' && args[0] === 'doctor') {
+    void runHostDoctor(args.slice(1)).then((code) => { process.exitCode = code; });
+    return;
+  }
+  // `host service` manages the launchd/systemd unit (docs/host-installer.md M4).
+  if (cmd === 'host' && args[0] === 'service') {
+    const sub = args[1];
+    const rest = args.slice(2);
+    if (sub === 'install') {
+      let opts: ServiceOptions;
+      try {
+        opts = parseServiceArgs(rest);
+      } catch (e) {
+        process.stderr.write((e as Error).message + '\n');
+        process.exitCode = 1;
+        return;
+      }
+      process.exitCode = installService(process.platform, { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) }, process.env, opts.dryRun);
+      return;
+    }
+    if (sub === 'status') {
+      process.exitCode = serviceStatus(process.platform, { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) });
+      return;
+    }
+    if (sub === 'uninstall') {
+      process.exitCode = uninstallService(process.platform, { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) });
+      return;
+    }
+    process.stderr.write(`host service: unknown subcommand '${sub ?? ''}'. Expected install, status or uninstall.\n`);
+    process.exitCode = 1;
     return;
   }
   const config = loadConfig();
