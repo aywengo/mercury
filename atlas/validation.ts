@@ -52,6 +52,7 @@ export const REJECT_REASONS = [
   'missing-evidence',
   'invalid-contradicts',
   'k2-violation',
+  'invalid-override',
   'secret-detected',
   'over-limit',
   'harvest-timeout',
@@ -172,14 +173,47 @@ function validEvidence(ref: unknown): ref is EvidenceRef {
 }
 
 /**
+ * Shape-check one operator override against the rule that actually fired.
+ *
+ * The mirror of the host's `checkK2Override` in `src/knowledge/validation.ts`; the coupling rule
+ * forbids importing it, and `test/atlasAgreement.test.ts` feeds both implementations the same notes.
+ * The refusals are the same four: nothing fired, wrong rule, missing reason, over-long reason.
+ */
+export function checkK2Override(
+  k2Override: { rule: string; reason: string } | undefined,
+  fired: { id: string; why: string } | null,
+  bounds: AtlasBounds,
+): { ok: true; override: { rule: string; reason: string } | undefined } | { ok: false; reason: RejectReason; detail?: string } {
+  if (k2Override === undefined) {
+    if (fired) return { ok: false, reason: 'k2-violation', detail: fired.id };
+    return { ok: true, override: undefined };
+  }
+  const rule = k2Override.rule;
+  const reason = k2Override.reason;
+  if (!fired) return { ok: false, reason: 'invalid-override', detail: 'no K2 rule fired, so there is nothing to override' };
+  if (typeof rule !== 'string' || rule === '') return { ok: false, reason: 'invalid-override', detail: 'override names no rule' };
+  if (rule !== fired.id) return { ok: false, reason: 'invalid-override', detail: `override names ${rule}, but ${fired.id} fired` };
+  if (typeof reason !== 'string' || reason.trim() === '') return { ok: false, reason: 'invalid-override', detail: 'a reason is required' };
+  if (Buffer.byteLength(reason, 'utf8') > bounds.maxClaimBytes) {
+    return { ok: false, reason: 'invalid-override', detail: `reason ${Buffer.byteLength(reason, 'utf8')} > ${bounds.maxClaimBytes}` };
+  }
+  return { ok: true, override: { rule, reason } };
+}
+
+/**
  * Validate one draft against the closed vocabularies and the bounds.
  *
  * Order matters for the reason that reaches the operator: vocabulary first, then bounds, then K2.
  * A note that is both malformed and contains a secret is reported as malformed, because fixing the
  * shape is the step the author has to take first, and because the secret check runs on the *body*
  * fields that only make sense once they exist.
+ *
+ * `opts.k2Override` mirrors the host: it skips ONLY the K2 scan, and only when the note actually
+ * trips a rule and the override names that rule with a non-empty bounded reason. Whether an override
+ * is ALLOWED at all is decided by the caller, which knows the provenance and the token class --
+ * `contributeOne` refuses one on any note whose source is not `operator` (section 7.5).
  */
-export function validateDraft(raw: unknown, bounds: AtlasBounds): Validation {
+export function validateDraft(raw: unknown, bounds: AtlasBounds, opts: { k2Override?: { rule: string; reason: string } } = {}): Validation {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return { ok: false, reason: 'malformed-json' };
   }
@@ -233,11 +267,17 @@ export function validateDraft(raw: unknown, bounds: AtlasBounds): Validation {
 
   // K2 last: it is the only rule whose reason needs the text to be otherwise well-formed.
   const k2 = findK2Violation(claim) ?? (typeof detail === 'string' ? findK2Violation(detail) : null);
-  if (k2) return { ok: false, reason: 'k2-violation', detail: k2.id };
+  let override: { rule: string; reason: string } | undefined;
+  if (opts.k2Override !== undefined || k2 !== null) {
+    const checked = checkK2Override(opts.k2Override, k2, bounds);
+    if (!checked.ok) return { ok: false, reason: checked.reason, detail: checked.detail };
+    override = checked.override;
+  }
 
   const draft: NoteDraft = { kind: kind as NoteKind, scope, claim };
   if (typeof detail === 'string') draft.detail = detail;
   if (evidence.length > 0) draft.evidence = evidence as EvidenceRef[];
   if (Array.isArray(contradicts)) draft.contradicts = contradicts as string[];
+  if (override) draft.operatorOverride = override;
   return { ok: true, draft };
 }

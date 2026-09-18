@@ -176,8 +176,9 @@ of the normalized repository identity (`host[:port]/path`, with credentials, que
 computed by `identityHash()` in `src/knowledge/identity.ts`. Append `#relative/path` to narrow within that
 repository.
 
-No command prints that hash today, so the practical way to get one is to read it back off a note that
-already carries it -- `GET /api/runs/:id/knowledge` returns the notes with their scopes verbatim.
+`mercury knowledge identity <url>...` prints the `repo:<hash>` scope key for a URL or local
+path (`docs/knowledge-base.md` §5); `GET /api/runs/:id/knowledge` also returns notes with
+their scopes verbatim.
 
 Optional body fields:
 
@@ -186,6 +187,7 @@ Optional body fields:
 | `detail` | string | Supporting detail; max `MERCURY_KNOWLEDGE_MAX_DETAIL_BYTES` (default 4096) bytes |
 | `evidence` | array | Evidence references; `decision` and `pitfall` kinds require at least one |
 | `contradicts` | string[] | Claim hashes this note supersedes |
+| `operatorOverride` | `{ rule, reason }` | Overrides a K2 rejection on this note (see below) |
 
 Responses:
 
@@ -199,6 +201,20 @@ Responses:
 
 The `409` is a host misconfiguration, not a caller error. A note refused here is never queued;
 it is not silently lost in an outbox that cannot drain.
+
+#### K2 override
+
+A claim that trips a K2 rule (`reason: k2-violation`, naming the rule) is refused. An operator
+who has verified the note may resubmit it with `operatorOverride: { rule, reason }`, where
+`rule` names the rule that was reported and `reason` is a non-empty justification of at most
+`MERCURY_KNOWLEDGE_MAX_CLAIM_BYTES` bytes. The override skips only the K2 scan: bounds, closed
+vocabularies and evidence requirements still apply, and a declared secret is refused no matter
+what the override says. An override that names a rule other than the one that fired, or that
+arrives with no note whose rule fired, is refused with `reason: invalid-override`. The recorded
+override travels with the note to Atlas and is visible on the note there (`operatorOverride` on
+the note and in its revision history), so a reader can see both the violation and the
+justification. Only an operator note can carry one: an agent cannot override K2 from
+`.mercury/notes.jsonl`, and an `agent-reported` contribution carrying the field is refused.
 
 ### GET /api/runs/:runId/knowledge
 

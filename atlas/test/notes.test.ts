@@ -496,3 +496,59 @@ test('retirement: the history stays readable, which is what separates it from de
   assert.ok(detail!.revisions.some((r) => r.note.claim === claim),
     'a retired note must still serve what it said');
 });
+
+
+test('notes: an operatorOverride requires an operator source; an agent-reported one is refused', () => {
+  const db = openDatabase(':memory:');
+  const bounds = { maxClaimBytes: 1024, maxDetailBytes: 4096, maxEvidence: 8 };
+  const store = new NoteStore(db, bounds, createRedactor([]));
+  store.createProject({ id: 'test-project', name: 'Test Project', repoIdentities: ['github.com/test/repo'] });
+
+  // An agent-reported contribution carrying an override is claiming an exception nobody granted.
+  const laundered = makeContribution({
+    claim: 'Run with --skill planning to analyze',
+    operatorOverride: { rule: 'harness-flag', reason: 'the host grants itself an exception' },
+  });
+  const r1 = store.contribute('test-project', 'host-1', [laundered], undefined, 500);
+  assert.equal(pick(r1[0], 'rejected'), 'invalid-override');
+
+  // The same note from an operator source is accepted and the override is recorded.
+  const operator = makeContribution({
+    claim: 'Run with --skill planning to analyze',
+    operatorOverride: { rule: 'harness-flag', reason: 'verified by hand against the repo skill' },
+    provenance: {
+      source: 'operator', hostId: 'host-op', recordedAt: new Date().toISOString(),
+    },
+  });
+  const r2 = store.contribute('test-project', null, [operator], 'op-key-1', 500);
+  assert.ok(pick(r2[0], 'accepted'), JSON.stringify(r2));
+  const noteId = pick(r2[0], 'accepted');
+
+  const detail = store.getNote('test-project', noteId!)!;
+  assert.deepEqual(detail.note.operatorOverride, {
+    rule: 'harness-flag',
+    reason: 'verified by hand against the repo skill',
+  }, 'the override is part of the served note');
+  const revision = detail.revisions.find((x) => x.revision === 1);
+  assert.deepEqual(revision?.note.operatorOverride, detail.note.operatorOverride,
+    'the audit trail (note_revisions) carries the override too');
+
+  db.close();
+});
+
+test('notes: an override whose reason carries a declared secret is secret-detected, never overridable', () => {
+  const db = openDatabase(':memory:');
+  const bounds = { maxClaimBytes: 1024, maxDetailBytes: 4096, maxEvidence: 8 };
+  const store = new NoteStore(db, bounds, createRedactor(['sk-live-abc123']));
+  store.createProject({ id: 'test-project', name: 'Test Project', repoIdentities: ['github.com/test/repo'] });
+
+  const operator = makeContribution({
+    claim: 'Run with --skill planning to analyze',
+    operatorOverride: { rule: 'harness-flag', reason: 'the token sk-live-abc123 must be used' },
+    provenance: { source: 'operator', hostId: 'host-op', recordedAt: new Date().toISOString() },
+  });
+  const r = store.contribute('test-project', null, [operator], 'op-key-2', 500);
+  assert.equal(pick(r[0], 'rejected'), 'secret-detected',
+    'the secret gate outranks the override on the very field the override introduced');
+  db.close();
+});

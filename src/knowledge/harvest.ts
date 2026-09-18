@@ -143,6 +143,14 @@ export function harvestNotes(input: HarvestInput): HarvestResult {
       continue;
     }
 
+    // An agent cannot grant itself a K2 exception (section 7.5). `operatorOverride` is produced only
+    // by the operator route, and an agent line carrying the field is refused visibly rather than
+    // silently stripped: a silent strip would make the timeline agree with a note that never existed.
+    if ((parsed as Record<string, unknown> | null)?.operatorOverride !== undefined) {
+      result.rejected.push({ line: lineNo, reason: 'invalid-override' });
+      continue;
+    }
+
     const validated = validateDraft(parsed, input.bounds);
     if (!validated.ok) {
       result.rejected.push({ line: lineNo, reason: validated.reason, ...(validated.detail ? { detail: validated.detail } : {}) });

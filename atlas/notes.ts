@@ -267,10 +267,24 @@ export class NoteStore {
    * that leaked, and agreeing with it is a way of repeating it.
    */
   private contributeOne(project: ProjectRecord, hostId: string | null, raw: unknown): ContributionResult {
-    const draft = validateDraft(raw, { ...this.bounds, maxEvidence: MAX_EVIDENCE });
+    const body = raw as Record<string, unknown>;
+    // A K2 override is legal only on an operator-authored note (section 7.5). An agent-reported or
+    // distilled contribution carrying the field is claiming an exception nobody granted, which is the
+    // same self-promotion the route-level admin check refuses for `source: operator`.
+    const provenanceEarly = (body.provenance ?? {}) as Record<string, unknown>;
+    const claimedSource = provenanceEarly.source;
+    if (body.operatorOverride !== undefined && claimedSource !== 'operator') {
+      return { rejected: 'invalid-override' };
+    }
+    const k2Override = body.operatorOverride !== undefined
+      ? {
+          rule: (body.operatorOverride as Record<string, unknown>).rule,
+          reason: (body.operatorOverride as Record<string, unknown>).reason,
+        } as { rule: string; reason: string }
+      : undefined;
+    const draft = validateDraft(raw, { ...this.bounds, maxEvidence: MAX_EVIDENCE }, k2Override ? { k2Override } : {});
     if (!draft.ok) return { rejected: draft.reason };
 
-    const body = raw as Record<string, unknown>;
     const claimedHost = typeof body.hostId === 'string' ? body.hostId : (body.provenance as { hostId?: string } | undefined)?.hostId;
     // A contributor is bound to one host by its token, and a body that names another is a visible
     // `host-mismatch` rather than something to correct silently: rewriting provenance to the binding
@@ -291,7 +305,14 @@ export class NoteStore {
 
     const claim = this.redactor.redact(draft.draft.claim);
     const detail = draft.draft.detail === undefined ? undefined : this.redactor.redact(draft.draft.detail);
-    if (claim !== draft.draft.claim || (detail !== undefined && detail !== draft.draft.detail)) {
+    // The override reason is operator free text and lands in the note's revision history, so it gets
+    // the same gate the claim gets: redaction changing it means a declared secret, and the secret
+    // check is the one thing an override can never override (section 7.5).
+    const override = draft.draft.operatorOverride;
+    const overrideReason = override === undefined ? undefined : this.redactor.redact(override.reason);
+    if (claim !== draft.draft.claim
+      || (detail !== undefined && detail !== draft.draft.detail)
+      || (overrideReason !== undefined && overrideReason !== override!.reason)) {
       return { rejected: 'secret-detected' };
     }
 
@@ -324,6 +345,7 @@ export class NoteStore {
       ...(detail !== undefined ? { detail } : {}),
       evidence: draft.draft.evidence ?? [],
       ...(draft.draft.contradicts ? { contradicts: draft.draft.contradicts } : {}),
+      ...(override !== undefined ? { operatorOverride: { rule: override.rule, reason: overrideReason! } } : {}),
       provenance: {
         source: provenanceSource(provenance.source),
         hostId: effectiveHost,
@@ -543,7 +565,8 @@ export class NoteStore {
     // than in each caller -- a caller that forgot would "delete" a note and leave its text in the
     // revision table, in the feed, and in every replica that had already pulled it.
     const next: Note = to === 'deleted'
-      ? { ...base, revision, tier: to, seq, claim: '', detail: undefined, evidence: [], contested: false }
+      // The override reason is text, so the tombstone blanks it with the rest (section 7.5).
+      ? { ...base, revision, tier: to, seq, claim: '', detail: undefined, evidence: [], contested: false, operatorOverride: undefined }
       : { ...base, revision, tier: to, seq, ...(supersededBy ? { supersededBy } : {}) };
     this.db.prepare('UPDATE notes SET tier = ?, current_revision = ?, seq = ?, updated_at = ? WHERE note_id = ?')
       .run(to, revision, seq, now, noteId);
@@ -706,7 +729,15 @@ export class NoteStore {
   private project(note: Note): Note {
     const claim = this.redactor.redact(note.claim);
     const detail = note.detail === undefined ? undefined : this.redactor.redact(note.detail);
-    return claim === note.claim && detail === note.detail ? note : { ...note, claim, detail };
+    // The override reason is free text too: a secret declared after the note was stored must not be
+    // readable back through it (section 11.5).
+    const override = note.operatorOverride === undefined
+      ? undefined
+      : { ...note.operatorOverride, reason: this.redactor.redact(note.operatorOverride.reason) };
+    const changed = claim !== note.claim
+      || detail !== note.detail
+      || (override !== undefined && override.reason !== note.operatorOverride!.reason);
+    return changed ? { ...note, claim, detail, ...(override !== undefined ? { operatorOverride: override } : {}) } : note;
   }
 
   private isContested(noteId: string): boolean {
@@ -873,7 +904,9 @@ export class NoteStore {
  * deleted is audit information. Repeating what it said after being told to forget it is not.
  */
 function scrubbed(note: Note): Note {
-  return { ...note, claim: '', detail: undefined, evidence: [], contested: false };
+  // The override reason is text too, so a tombstone blanks it alongside the claim: what survives a
+  // deletion is the identity, the audit trail and the sequence number (section 3, `deleted`).
+  return { ...note, claim: '', detail: undefined, evidence: [], contested: false, operatorOverride: undefined };
 }
 
 function buildNote(noteId: string, revision: number, projectId: string, tier: NoteTier, c: NoteContribution, corroboration: Corroboration, seq: number): Note {
@@ -884,6 +917,12 @@ function buildNote(noteId: string, revision: number, projectId: string, tier: No
     evidence: c.evidence,
     tier,
     ...(c.contradicts ? { contradicts: c.contradicts } : {}),
+    // The override rides the note JSON, so it lands in `note_revisions` -- the immutable audit trail
+    // that also holds every promotion and retirement. A reader of `GET .../notes/:noteId` can see not
+    // only that the note violates K2 but who recorded the exception and why. It is not carried into
+    // the host replica's expanded columns: like a promotion reason, it is curation metadata about the
+    // note, not part of the bounded claim a Run pays bytes for.
+    ...(c.operatorOverride ? { operatorOverride: c.operatorOverride } : {}),
     provenance: c.provenance,
     corroboration,
     seq,
