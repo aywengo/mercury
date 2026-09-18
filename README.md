@@ -98,9 +98,9 @@ curl -fsSL https://github.com/aywengo/mercury/releases/latest/download/install.s
 # or: npx @aywengo/mercury host install
 ```
 
-The `install.sh` asset is published with each host release; releases cut before
-the installer shipped (0.1.0, 0.1.1) do not carry it, so the one-liner resolves
-from the next release on. Full walkthrough and the `curl | bash` safety note:
+The `install.sh` asset ships with the next host release (0.1.0/0.1.1 predate
+the installer and carry no asset), so the one-liner resolves from then on. Full
+walkthrough and the `curl | bash` safety note:
 [`docs/host-installer.md`](docs/host-installer.md).
 
 **From a checkout — works today.** This also installs both commands, `mercury` (the
