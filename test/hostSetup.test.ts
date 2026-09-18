@@ -65,6 +65,10 @@ test('parseHostSetupArgs: unknown flag is an error', () => {
   assert.throws(() => parseHostSetupArgs(['--bogus']), /unknown flag/);
 });
 
+test('parseHostSetupArgs: --answers requires --non-interactive', () => {
+  assert.throws(() => parseHostSetupArgs(['--answers', 'a.json']), /--answers requires --non-interactive/);
+});
+
 // ---------- validation ----------
 
 test('validateAnswer: each field validates', () => {
@@ -75,7 +79,7 @@ test('validateAnswer: each field validates', () => {
   assert.equal(validateAnswer('fleetUrl', 'not-a-url'), 'Fleet URL must start with http:// or https://');
   assert.equal(validateAnswer('fleetUrl', 'https://fleet.example.com'), null);
   assert.equal(validateAnswer('fleetUrl', ''), null);
-  assert.equal(validateAnswer('hostToken', ''), 'host token must not be empty');
+  assert.equal(validateAnswer('hostToken', ''), null); // empty = Fleet off
   assert.ok(validateAnswer('harnesses', ['bogus'])!.includes('unknown harness'));
   assert.equal(validateAnswer('harnesses', ['primeagent']), null);
 });
@@ -87,6 +91,14 @@ test('validateAnswers: Atlas on requires URL, token and project', () => {
   assert.ok(errors.some((e) => e.includes('atlasToken: required')));
   assert.ok(errors.some((e) => e.includes('atlasProject: required')));
   const good = answers({ atlasEnabled: true, atlasUrl: 'https://atlas.example.com', atlasToken: 't', atlasProject: 'p' });
+  assert.deepEqual(validateAnswers(good), []);
+});
+
+test('validateAnswers: Fleet URL set requires a host token', () => {
+  const bad = answers({ fleetUrl: 'https://fleet.example.com', hostToken: '' });
+  const errors = validateAnswers(bad);
+  assert.ok(errors.some((e) => e.includes('hostToken: required when a Fleet URL is set')));
+  const good = answers({ fleetUrl: '', hostToken: '' });
   assert.deepEqual(validateAnswers(good), []);
 });
 
@@ -232,4 +244,25 @@ test('redactedSummary: token shows presence and length only', () => {
 test('defaultAnswers: harnesses filter to known ids', () => {
   const a = defaultAnswers({ MERCURY_HARNESSES: 'primeagent,bogus,claude' } as NodeJS.ProcessEnv);
   assert.deepEqual(a.harnesses, ['primeagent', 'claude']);
+});
+
+test('retentionDays 0 is rejected, not silently defaulted', async () => {
+  const dir = tempDir('setup-ret0-');
+  const answersFile = join(dir, 'answers.json');
+  writeFileSync(answersFile, JSON.stringify(answers({ retentionDays: 0 })));
+  const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--answers', answersFile], {
+    XDG_CONFIG_HOME: dir,
+  });
+  assert.equal(code, 1);
+  assert.ok(stderr.includes('retention must be a positive number of days'));
+  assert.ok(!existsSync(join(dir, 'mercury', 'mercury.env')));
+});
+
+test('a missing answers file exits cleanly with a message', async () => {
+  const dir = tempDir('setup-missing-');
+  const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--answers', join(dir, 'nope.json')], {
+    XDG_CONFIG_HOME: dir,
+  });
+  assert.equal(code, 1);
+  assert.ok(stderr.includes('cannot read answers file'));
 });

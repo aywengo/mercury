@@ -13,11 +13,15 @@
  *    answers file fed to `--non-interactive` produces a byte-identical `mercury.env`
  *    to the interactive path with the same answers. The wizard collects answers into
  *    one structure, then a single writer renders the file.
- * 2. **Nothing is written until every answer validates.** An invalid answer, or a
- *    variable name not in `docs/configuration.md`, is rejected before the temp file
- *    is even created.
- * 3. **The host token is never echoed.** It is read via a no-echo prompt, an env var,
- *    or an answers file, and the redacted summary shows only its presence and length.
+ * 2. **Nothing is written until every answer validates.** An invalid answer is rejected
+ *    before the temp file is even created. Variable-name coverage against
+ *    `docs/configuration.md` is CI-pinned by a test (WIZARD_VARIABLES), not enforced at
+ *    runtime — the wizard's own vocabulary is fixed and tested.
+ * 3. **The host token is never printed in output.** It is read from an env var or an
+ *    answers file (or an interactive prompt), and the redacted summary shows only its
+ *    presence and length. The interactive prompt echoes input like any readline prompt;
+ *    the token is protected by the 0600 env file and the redacted summary, not by a
+ *    hidden-input terminal mode.
  */
 
 import { createInterface } from 'node:readline';
@@ -84,6 +88,11 @@ export function parseHostSetupArgs(args: string[]): HostSetupOptions {
       throw new Error(`host setup: unknown flag '${a}'. Expected --non-interactive, --answers <file> or --dry-run`);
     }
   }
+  // --answers only makes sense with --non-interactive; silently ignoring the file and
+  // falling into interactive mode would surprise the caller (review #633).
+  if (opts.answersFile && !opts.nonInteractive) {
+    throw new Error('host setup: --answers requires --non-interactive');
+  }
   return opts;
 }
 
@@ -102,7 +111,9 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
       if (value.trim() === '') return null; // empty = Fleet reporting off
       return /^https?:\/\//.test(value.trim()) ? null : 'Fleet URL must start with http:// or https://';
     case 'hostToken':
-      return typeof value === 'string' && value.trim().length > 0 ? null : 'host token must not be empty';
+      // Optional: empty = Fleet reporting off. Required only when a Fleet URL is set
+      // (enforced in validateAnswers as a cross-field constraint).
+      return typeof value === 'string' ? null : 'host token must be a string';
     case 'atlasEnabled':
       return typeof value === 'boolean' ? null : 'atlasEnabled must be a boolean';
     case 'atlasUrl':
@@ -138,6 +149,11 @@ export function validateAnswers(a: HostSetupAnswers): string[] {
     if (!a.atlasUrl) errors.push('atlasUrl: required when Atlas is on');
     if (!a.atlasToken) errors.push('atlasToken: required when Atlas is on');
     if (!a.atlasProject) errors.push('atlasProject: required when Atlas is on');
+  }
+  // Fleet URL set requires a host token (review #633): a host that reports to Fleet
+  // must present a token, and an empty token with a URL would fail at doctor time.
+  if (a.fleetUrl.trim() && !a.hostToken.trim()) {
+    errors.push('hostToken: required when a Fleet URL is set');
   }
   return errors;
 }
@@ -257,7 +273,9 @@ export async function promptAnswers(io: {
     hostName,
     dataDir,
     workspaceDir,
-    retentionDays: Number.parseFloat(retention) || base.retentionDays,
+    // Keep the parsed number as-is (0/NaN included): validateAnswers rejects it, so an
+    // invalid input cannot silently fall back to the default and pass (review #633).
+    retentionDays: Number.parseFloat(retention),
     fleetUrl,
     hostToken,
     atlasEnabled,
@@ -288,12 +306,36 @@ export async function runHostSetup(
 
   let answers: HostSetupAnswers;
   if (opts.nonInteractive) {
-    answers = opts.answersFile ? readAnswersFile(opts.answersFile) : defaultAnswers();
-  } else if (io.question) {
-    answers = await promptAnswers({ question: io.question });
+    if (opts.answersFile) {
+      try {
+        answers = readAnswersFile(opts.answersFile);
+      } catch (e) {
+        io.err(`host setup: cannot read answers file: ${(e as Error).message}\n`);
+        return 1;
+      }
+    } else {
+      answers = defaultAnswers();
+    }
   } else {
-    io.err('host setup: interactive mode needs a TTY; pass --non-interactive\n');
-    return 1;
+    // Interactive: use the injected question fn (tests) or a real readline on stdin.
+    // readline's question() only works on a TTY; with piped stdin it delivers the
+    // first line to the first question and hangs on the rest, so for non-TTY stdin we
+    // read all lines upfront and answer questions from the buffer.
+    let question: (q: string) => Promise<string>;
+    if (io.question) {
+      question = io.question;
+      answers = await promptAnswers({ question });
+    } else if (process.stdin.isTTY) {
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      question = (q) => new Promise<string>((res) => rl.question(q, res));
+      answers = await promptAnswers({ question });
+      rl.close();
+    } else {
+      const lines = readFileSync(0, 'utf8').split('\n');
+      let i = 0;
+      question = async () => lines[i++] ?? '';
+      answers = await promptAnswers({ question });
+    }
   }
 
   const errors = validateAnswers(answers);

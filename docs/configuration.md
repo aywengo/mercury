@@ -339,7 +339,7 @@ generated launchd/systemd user unit loads that file exactly as the system units 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `MERCURY_FLEET_URL` | unset | Fleet base URL this host reports to. Unset disables Fleet reporting. |
-| `MERCURY_HOST_TOKEN` | unset | Pre-issued host token for Fleet. Never echoed; the redacted summary shows only its presence and length. |
+| `MERCURY_HOST_TOKEN` | unset | Pre-issued host token for Fleet. Never printed in output; the redacted summary shows only its presence and length. |
 | `MERCURY_HARNESSES` | unset | Comma-separated harness ids to enable (`primeagent`, `hermes`, `claude`). Unset enables every detected harness. |
 
 ## Production-style example

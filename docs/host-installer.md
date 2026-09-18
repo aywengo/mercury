@@ -68,7 +68,7 @@ Gate: probe results agree with the adapters' own real-binary observations (the s
 
 Prompts: host name, data dir, workspace dir, GC retention, Fleet URL, host token, Atlas on/off, per-harness enable. Each answer maps to a documented `MERCURY_*` variable. Writes `mercury.env` atomically (temp file, validate, rename, 0600), prints a redacted summary.
 
-Gate: an answers file fed to `--non-interactive` produces a byte-identical `mercury.env` to the interactive path with the same answers; an invalid answer, or a variable name not in `docs/configuration.md`, is rejected before anything is written.
+Gate: an answers file fed to `--non-interactive` produces a byte-identical `mercury.env` to the interactive path with the same answers; an invalid answer is rejected before anything is written. Variable-name coverage against `docs/configuration.md` is CI-pinned (a test asserts every `WIZARD_VARIABLES` name is documented), not enforced at runtime — the wizard's vocabulary is fixed and tested.
 
 **As built** (`src/host/setup.ts`, wired as `mercury host setup` before `loadConfig()`):
 
@@ -76,7 +76,7 @@ Gate: an answers file fed to `--non-interactive` produces a byte-identical `merc
 - `MERCURY_FLEET_URL`, `MERCURY_HOST_TOKEN`, `MERCURY_HARNESSES` added to `docs/configuration.md` (design decision 10: every emitted name is documented; a test pins `WIZARD_VARIABLES` against the doc).
 - Interactive and `--non-interactive` share one code path: answers → validate → render → write. The M3 gate test feeds the same answers through both and asserts byte-identical `mercury.env`.
 - Atomic write: temp file in the target dir, rename, chmod 0600. Nothing is written until every answer validates (invalid answers exit 1 with the reasons).
-- Token never echoed: no-echo prompt / env / answers file; the redacted summary shows `MERCURY_HOST_TOKEN=<set, N chars>` only.
+- Token never printed in output: env / answers file / interactive prompt; the redacted summary shows `MERCURY_HOST_TOKEN=<set, N chars>` only. The interactive prompt echoes like any readline prompt; the token is protected by the 0600 env file and the redacted summary, not by a hidden-input terminal mode.
 - Tests: `test/hostSetup.test.ts` (14 tests) — flags, per-field validation, Atlas-requires trio, render mapping, doc-name pin, the byte-identical gate, 0600 mode, invalid-answer rejection, unknown flag, `--dry-run` touches nothing, redaction, harness filtering.
 
 ### M4 — Service and verification
