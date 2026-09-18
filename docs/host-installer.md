@@ -104,7 +104,7 @@ Gate: install vN → upgrade vN+1 → uninstall leaves nothing but the opted-in 
 
 - **`host status`** — read-only: configured?, env file, pinned version, harnesses, data dir, service presence. Never writes.
 - **`host upgrade --version <v> --yes`** — `npm install -g @aywengo/mercury@<v>`, records `MERCURY_PINNED_VERSION` in mercury.env (atomic write), restarts the service if present (launchctl kickstart / systemctl --user restart). Refuses without `--yes`; refuses on an unconfigured host.
-- **`host uninstall --yes [--keep-data|--remove-data]`** — removes the service (launchctl unload + plist/wrapper, or systemctl disable --now + unit), removes mercury.env, `npm uninstall -g` the package, then keeps or removes the data dir per the flag. Refuses without `--yes`.
+- **`host uninstall --yes [--keep-data|--remove-data]`** — removes the service (launchctl unload + plist/wrapper, or systemctl disable --now + unit), removes mercury.env, `npm uninstall -g` the package. Keeps the data dir by default; `--remove-data` deletes it. Refuses without `--yes`.
 - **Re-run guard** — `host setup` on a configured host (mercury.env exists) shows the current state and refuses to overwrite unless `--yes` is passed (interactive or `--non-interactive`). `--dry-run` on a configured host warns it would overwrite.
 - Tests: `test/hostLifecycle.test.ts` (10) + 2 new setup tests (re-run guard, --yes flag). Full suite green.
 

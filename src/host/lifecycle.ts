@@ -4,15 +4,15 @@
  *
  *   - `status`: read mercury.env and report the current host state (installed version,
  *     service, harnesses, data dir) without changing anything.
- *   - `upgrade`: bump the pinned package version, migrate mercury.env if a variable was
- *     renamed, restart the service.
- *   - `uninstall`: remove the package, service and mercury.env; prompt to keep or
- *     remove the data dir.
+ *   - `upgrade`: bump the pinned package version (npm install -g @aywengo/mercury@<v>),
+ *     record MERCURY_PINNED_VERSION in mercury.env, restart the service.
+ *   - `uninstall`: remove the package, service and mercury.env; keep the data dir by
+ *     default, remove it only with `--remove-data`.
  *
  * Three rules this file exists to enforce:
  *
- * 1. **Nothing changes without confirmation.** `upgrade` and `uninstall` print what
- *    they will do and require `--yes` or an interactive confirm (design decision 5).
+ * 1. **Nothing changes without `--yes`.** `upgrade` and `uninstall` refuse to run
+ *    without explicit confirmation (design decision 5).
  * 2. **`status` is read-only.** It never writes, never restarts, never touches the
  *    package.
  * 3. **Uninstall leaves nothing but the opted-in data dir.** Package, service unit and
@@ -20,13 +20,13 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync as fsWriteFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync as fsWriteFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 
-import { loadEnvFile, envFilePath as doctorEnvPath } from './doctor.ts';
-import { resolveMercuryBin, systemdUnitPath, launchdPlistPath, launchdWrapperPath, SERVICE_NAME, LAUNCHD_LABEL } from './service.ts';
+import { loadEnvFile } from './doctor.ts';
+import { systemdUnitPath, launchdPlistPath, launchdWrapperPath, SERVICE_NAME, LAUNCHD_LABEL } from './service.ts';
 
 /** The env file path (same as the wizard and service use). */
 export function envFilePath(env: NodeJS.ProcessEnv = process.env): string {
@@ -36,7 +36,7 @@ export function envFilePath(env: NodeJS.ProcessEnv = process.env): string {
 
 /** The data dir: dirname of MERCURY_DB, or the default state dir. */
 export function dataDir(vars: Record<string, string>, env: NodeJS.ProcessEnv = process.env): string {
-  if (vars.MERCURY_DB) return vars.MERCURY_DB.replace(/\/mercury\.db$/, '');
+  if (vars.MERCURY_DB) return dirname(vars.MERCURY_DB);
   const base = env.XDG_STATE_HOME?.trim() || join(homedir(), '.local', 'state');
   return join(base, 'mercury');
 }
@@ -56,13 +56,15 @@ export function hostStatus(
   env: NodeJS.ProcessEnv = process.env,
 ): HostStatus {
   const file = envFilePath(env);
-  if (!existsSync(file)) {
-    return { configured: false, envFile: file, version: null, harnesses: [], dataDir: dataDir({}, env), service: 'absent' };
-  }
-  const vars = loadEnvFile(file);
+  // Service presence is independent of mercury.env: a partially uninstalled host can
+  // have the unit without the env file, and status must report that (review #637).
   const service = platform === 'darwin'
     ? (existsSync(launchdPlistPath(env)) ? 'present' : 'absent')
     : (existsSync(systemdUnitPath(env)) ? 'present' : 'absent');
+  if (!existsSync(file)) {
+    return { configured: false, envFile: file, version: null, harnesses: [], dataDir: dataDir({}, env), service };
+  }
+  const vars = loadEnvFile(file);
   return {
     configured: true,
     envFile: file,
@@ -116,14 +118,18 @@ export function upgradeHost(
     io.err(`host upgrade: not configured (no ${status.envFile}). Run \`mercury host setup\` first.\n`);
     return 1;
   }
-  const target = version ?? 'latest';
+  if (!version) {
+    io.err('host upgrade: --version <v> is required (a pin must name a version, not \'latest\').\n');
+    return 1;
+  }
+  const target = version;
   io.out(`Upgrading mercury to ${target}...\n`);
   if (!yes) {
     io.err('host upgrade: confirmation required. Pass --yes to proceed.\n');
     return 1;
   }
   try {
-    execFileSync('npm', ['install', '-g', '@aywengo/mercury@' + target], { timeout: 120000, stdio: 'inherit' });
+    execFileSync('npm', ['install', '-g', '@aywengo/mercury@' + target], { timeout: 120000, stdio: 'inherit', env: { ...process.env, ...env } });
   } catch (e) {
     io.err(`host upgrade: npm install failed: ${e instanceof Error ? e.message : String(e)}\n`);
     return 1;
@@ -138,9 +144,10 @@ export function upgradeHost(
   if (status.service === 'present') {
     try {
       if (platform === 'darwin') {
-        execFileSync('launchctl', ['kickstart', '-k', `gui/$(id -u)/${LAUNCHD_LABEL}`], { timeout: 10000 });
+        const uid = process.getuid?.() ?? Number(execFileSync('id', ['-u'], { encoding: 'utf8', env: { ...process.env, ...env } }).trim());
+        execFileSync('launchctl', ['kickstart', '-k', `gui/${uid}/${LAUNCHD_LABEL}`], { timeout: 10000, env: { ...process.env, ...env } });
       } else {
-        execFileSync('systemctl', ['--user', 'restart', `${SERVICE_NAME}.service`], { timeout: 10000 });
+        execFileSync('systemctl', ['--user', 'restart', `${SERVICE_NAME}.service`], { timeout: 10000, env: { ...process.env, ...env } });
       }
       io.out('Service restarted.\n');
     } catch (e) {
@@ -160,7 +167,9 @@ export function uninstallHost(
   env: NodeJS.ProcessEnv = process.env,
 ): number {
   let yes = false;
-  let keepData = false;
+  // Safe default: keep the data dir unless the operator explicitly asks to remove it
+  // (docs: "prompts to keep or remove the data dir"; non-interactive --yes keeps).
+  let keepData = true;
   for (const a of args) {
     if (a === '--yes' || a === '-y') yes = true;
     else if (a === '--keep-data') keepData = true;
@@ -175,22 +184,26 @@ export function uninstallHost(
     io.err('host uninstall: confirmation required. Pass --yes to proceed.\n');
     return 1;
   }
-  // Remove the service.
+  // Remove the service. Forgiving like M4's uninstallService: a unit that exists but
+  // is not loaded/enabled must not abort the uninstall (review #637 F2).
   if (status.service === 'present') {
-    try {
-      if (platform === 'darwin') {
-        execFileSync('launchctl', ['unload', launchdPlistPath(env)], { timeout: 10000 });
-        rmSync(launchdPlistPath(env), { force: true });
-        rmSync(launchdWrapperPath(env), { force: true });
-      } else {
-        execFileSync('systemctl', ['--user', 'disable', '--now', `${SERVICE_NAME}.service`], { timeout: 10000 });
-        rmSync(systemdUnitPath(env), { force: true });
+    if (platform === 'darwin') {
+      try {
+        execFileSync('launchctl', ['unload', launchdPlistPath(env)], { timeout: 10000, env: { ...process.env, ...env } });
+      } catch {
+        // not loaded is fine
       }
-      io.out('Service removed.\n');
-    } catch (e) {
-      io.err(`host uninstall: service removal failed: ${e instanceof Error ? e.message : String(e)}\n`);
-      return 1;
+      rmSync(launchdPlistPath(env), { force: true });
+      rmSync(launchdWrapperPath(env), { force: true });
+    } else {
+      try {
+        execFileSync('systemctl', ['--user', 'disable', '--now', `${SERVICE_NAME}.service`], { timeout: 10000, env: { ...process.env, ...env } });
+      } catch {
+        // not enabled is fine
+      }
+      rmSync(systemdUnitPath(env), { force: true });
     }
+    io.out('Service removed.\n');
   }
   // Remove mercury.env.
   if (existsSync(status.envFile)) {
@@ -199,7 +212,7 @@ export function uninstallHost(
   }
   // Remove the package.
   try {
-    execFileSync('npm', ['uninstall', '-g', '@aywengo/mercury'], { timeout: 60000, stdio: 'inherit' });
+    execFileSync('npm', ['uninstall', '-g', '@aywengo/mercury'], { timeout: 60000, stdio: 'inherit', env: { ...process.env, ...env } });
     io.out('Removed the @aywengo/mercury package.\n');
   } catch (e) {
     io.err(`host uninstall: npm uninstall failed: ${e instanceof Error ? e.message : String(e)}\n`);
@@ -218,12 +231,18 @@ export function uninstallHost(
   return 0;
 }
 
-/** Atomic write helper (temp + rename), same pattern as the wizard. */
+/** Atomic write helper (temp + fsync + rename), same durability as the wizard. */
 function writeFileAtomic(path: string, content: string): void {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true });
   const tmp = join(dir, `.mercury.env.tmp-${process.pid}`);
-  fsWriteFileSync(tmp, content, { mode: 0o600 });
+  const fd = openSync(tmp, 'w', 0o600);
+  try {
+    fsWriteFileSync(fd, content);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   renameSync(tmp, path);
   chmodSync(path, 0o600);
 }
