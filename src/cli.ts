@@ -60,6 +60,7 @@ import { runHostProbe } from './host/probe.ts';
 import { runHostSetup } from './host/setup.ts';
 import { installService, serviceStatus, uninstallService, parseServiceArgs, type ServiceOptions } from './host/service.ts';
 import { runHostDoctor } from './host/doctor.ts';
+import { hostStatus, printStatus, upgradeHost, uninstallHost } from './host/lifecycle.ts';
 import { HOST_VERSION } from './version.ts';
 
 const SKILLS_DIR = dataPath('.agents', 'skills');
@@ -93,6 +94,11 @@ function usageText(): string {
     '                               that runs the host (--dry-run prints the unit)',
     '                doctor      healthz, Fleet reachability and one smoke Run per',
     '                               enabled harness (--json for machine output)',
+    '                status      show the current host state (read-only)',
+    '                upgrade     bump the pinned package and restart the service',
+    '                               (--yes, --version <v>)',
+    '                uninstall   remove package, service and mercury.env',
+    '                               (--yes, --keep-data|--remove-data)',
     '',
   ].join('\n');
 }
@@ -134,6 +140,20 @@ async function main(): Promise<void> {
   // `host doctor` verifies the running host (docs/host-installer.md M4).
   if (cmd === 'host' && args[0] === 'doctor') {
     void runHostDoctor(args.slice(1)).then((code) => { process.exitCode = code; });
+    return;
+  }
+  // `host status|upgrade|uninstall` — the M5 lifecycle commands.
+  if (cmd === 'host' && args[0] === 'status') {
+    const s = hostStatus(process.platform);
+    printStatus(s, { out: (x) => process.stdout.write(x) });
+    return;
+  }
+  if (cmd === 'host' && args[0] === 'upgrade') {
+    process.exitCode = upgradeHost(process.platform, args.slice(1), { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) });
+    return;
+  }
+  if (cmd === 'host' && args[0] === 'uninstall') {
+    process.exitCode = uninstallHost(process.platform, args.slice(1), { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) });
     return;
   }
   // `host service` manages the launchd/systemd unit (docs/host-installer.md M4).

@@ -55,10 +55,12 @@ test('parseHostSetupArgs: defaults and flags', () => {
   assert.equal(o.nonInteractive, false);
   assert.equal(o.dryRun, false);
   assert.equal(o.answersFile, undefined);
-  const o2 = parseHostSetupArgs(['--non-interactive', '--dry-run', '--answers', 'a.json']);
+  assert.equal(o.yes, false);
+  const o2 = parseHostSetupArgs(['--non-interactive', '--dry-run', '--answers', 'a.json', '--yes']);
   assert.equal(o2.nonInteractive, true);
   assert.equal(o2.dryRun, true);
   assert.equal(o2.answersFile, 'a.json');
+  assert.equal(o2.yes, true);
 });
 
 test('parseHostSetupArgs: unknown flag is an error', () => {
@@ -160,7 +162,7 @@ test('M3 gate: interactive and answers-file produce byte-identical mercury.env',
 
   // Non-interactive path with the same answers.
   const niEnv = await new Promise<string>((res, rej) => {
-    void runHostSetup(['--non-interactive', '--answers', answersFile], {
+    void runHostSetup(['--non-interactive', '--yes', '--answers', answersFile], {
       out: () => {},
       err: () => {},
     }, { XDG_CONFIG_HOME: dir }).then((code) => {
@@ -265,4 +267,21 @@ test('a missing answers file exits cleanly with a message', async () => {
   });
   assert.equal(code, 1);
   assert.ok(stderr.includes('cannot read answers file'));
+});
+
+test('re-run on a configured host refuses to overwrite without --yes (M5 gate)', async () => {
+  const dir = tempDir('setup-rerun-');
+  const cfg = join(dir, 'cfg');
+  const { mkdirSync } = await import('node:fs');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), 'MERCURY_ATLAS_HOST_ID=old\n');
+  const { code, stdout } = await cli(['host', 'setup', '--non-interactive'], {
+    XDG_CONFIG_HOME: cfg,
+    HOME: join(dir, 'home'),
+  });
+  assert.equal(code, 1);
+  assert.ok(stdout.includes('already exists'));
+  // The file is untouched.
+  const content = readFileSync(join(cfg, 'mercury', 'mercury.env'), 'utf8');
+  assert.ok(content.includes('MERCURY_ATLAS_HOST_ID=old'));
 });
