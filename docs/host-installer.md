@@ -1,6 +1,6 @@
 # Mercury Host installer
 
-Status: M0–M5 done (design, bootstrap, probe, wizard, service+doctor, lifecycle); M6 (release hardening) in progress.
+Status: M0–M6 done (design, bootstrap, probe, wizard, service+doctor, lifecycle, release hardening).
 
 The Host installer is a bash wizard that takes a fresh macOS or Linux machine to a running Mercury host that reports to Fleet, with the locally installed harnesses detected, verified and enabled.
 
@@ -146,7 +146,7 @@ Gate: install vN → upgrade vN+1 → uninstall leaves nothing but the opted-in 
 - **Re-run guard** — `host setup` on a configured host (mercury.env exists) shows the current state and refuses to overwrite unless `--yes` is passed (interactive or `--non-interactive`). `--dry-run` on a configured host warns it would overwrite.
 - Tests: `test/hostLifecycle.test.ts` (16) + 2 new setup tests (re-run guard, --yes flag). Full suite 1227/1227 green.
 
-### M6 — Release hardening
+### M6 — Release hardening — ✅ done
 
 - `bats` test suite for `install.sh`.
 - CI matrix on every PR touching the installer or `mercury host` subcommands, including the `MERCURY_*`-name-vs-`docs/configuration.md` check.
@@ -154,6 +154,14 @@ Gate: install vN → upgrade vN+1 → uninstall leaves nothing but the opted-in 
 - Docs page with both one-liners and a `curl | bash` safety note (download, inspect, run).
 
 Gate: someone who has not worked on the installer follows the docs only and reaches the M4 state.
+
+**As built**:
+
+- **bats suite** (`test/install.bats`, 21 tests, `npm run test:install`): flag parsing, `--dry-run` touches nothing, platform gate (unsupported OS/arch via stubbed `uname`), prerequisite gate (missing/too-old node, missing curl/git via a hermetic PATH), confirmation prompt (decline aborts, `--yes`/`--non-interactive` skip), npm hand-off (pinned version, failure propagation), structured log (start/complete/failed lines, every line valid JSON), `json_escape` control-char escaping.
+- **json_escape newline fix**: awk splits input on newlines, so a newline in a log detail was emitted raw (invalid JSON). Now re-emitted as `\u000a` before every record after the first. Verified: `a\tb\n\x01` → `a\u0009b\u000a\u0001`; still parses under bash 3.2.57 and is shellcheck-clean.
+- **CI** (`.github/workflows/ci.yml`): `host_installer` path filter (install.sh, src/host/**, src/cli.ts, docs/host-installer.md, docs/configuration.md, test/host*.test.ts, test/install.bats) + `host-installer` job (bats suite + all host subcommand tests incl. the MERCURY_*-name-vs-configuration.md check in hostSetup.test.ts), wired into the `ci` aggregate. Runs on installer-touching PRs even when docs-only; the aggregate requires it only when the filter matched.
+- **Release** (`.github/workflows/release.yml`): the host release appends an "Installer checksum" section (install.sh sha256) to the release notes and attaches install.sh to the GitHub Release. Pinned by test/releaseWorkflow.test.ts (fixture install.sh in the tree).
+- **Docs**: the Install section above (both one-liners + the curl|bash safety note).
 
 ## 3. Decisions log
 
