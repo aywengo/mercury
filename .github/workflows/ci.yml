@@ -66,6 +66,7 @@ jobs:
     outputs:
       code: ${{ steps.gate.outputs.code }}
       contract_docs: ${{ steps.gate.outputs.contract_docs }}
+      host_installer: ${{ steps.gate.outputs.host_installer }}
     steps:
       - uses: actions/checkout@v4
 
@@ -121,6 +122,18 @@ jobs:
               # that renames a variable must run the job that guards it.
               - 'docs/configuration.md'
               - 'deploy/README.md'
+            # M6: the installer surface. Any PR touching install.sh, the `mercury host`
+            # subcommands, their tests, or the installer docs runs the bats suite and the
+            # host test files (including the MERCURY_*-name-vs-docs/configuration.md
+            # check in hostSetup.test.ts) even when the change is docs-only.
+            host_installer:
+              - 'install.sh'
+              - 'src/host/**'
+              - 'src/cli.ts'
+              - 'docs/host-installer.md'
+              - 'docs/configuration.md'
+              - 'test/host*.test.ts'
+              - 'test/install.bats'
 
       - name: Set path-filter outputs
         id: gate
@@ -128,13 +141,16 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           FILTER_CODE: ${{ steps.filter.outputs.code }}
           FILTER_CONTRACT: ${{ steps.filter.outputs.contract_docs }}
+          FILTER_HOST: ${{ steps.filter.outputs.host_installer }}
         run: |
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "code=true" >> "$GITHUB_OUTPUT"
             echo "contract_docs=false" >> "$GITHUB_OUTPUT"
+            echo "host_installer=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=${FILTER_CODE}" >> "$GITHUB_OUTPUT"
             echo "contract_docs=${FILTER_CONTRACT}" >> "$GITHUB_OUTPUT"
+            echo "host_installer=${FILTER_HOST}" >> "$GITHUB_OUTPUT"
           fi
 
   test:
@@ -241,10 +257,35 @@ jobs:
         # only when prose is untouched.
         run: node --test --test-timeout=180000 test/nodeFloor.test.ts test/deployDocs.test.ts test/releaseDocs.test.ts test/goalWireShape.test.ts test/releaseHygiene.test.ts test/backup.test.ts test/goalEventContract.test.ts test/adapterDocExamples.test.ts test/migrationDocs.test.ts test/crewDocsStatus.test.ts test/routeDocContract.test.ts test/knowledgeDocsClaims.test.ts test/goalSurface.test.ts test/architectureStatusClaims.test.ts test/testCountClaims.test.ts test/trackingCitations.test.ts test/hostSetup.test.ts client/test/cli.test.ts
 
+  # M6: bats suite for install.sh + the host subcommand tests, on every PR touching
+  # the installer surface (and on every push to main). Runs even for docs-only
+  # installer edits, which the code filter would otherwise skip.
+  host-installer:
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: needs.changes.outputs.host_installer == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Install bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+      - name: bats suite for install.sh
+        run: bats test/install.bats
+      - name: Host subcommand tests (incl. MERCURY_* vs configuration.md)
+        run: node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts
+
   # Always reports a single status so narrative-only PRs are not stuck waiting on skipped required jobs.
   ci:
     name: ci
-    needs: [changes, test, uninstalled-checkout-fails-clearly, docs-contract]
+    needs: [changes, test, uninstalled-checkout-fails-clearly, docs-contract, host-installer]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
@@ -253,10 +294,12 @@ jobs:
         env:
           CODE: ${{ needs.changes.outputs.code }}
           CONTRACT: ${{ needs.changes.outputs.contract_docs }}
+          HOST: ${{ needs.changes.outputs.host_installer }}
           CHANGES: ${{ needs.changes.result }}
           TEST: ${{ needs.test.result }}
           UNINSTALL: ${{ needs.uninstalled-checkout-fails-clearly.result }}
           DOCS: ${{ needs.docs-contract.result }}
+          HOSTJOB: ${{ needs.host-installer.result }}
         run: |
           set -e
           if [ "$CHANGES" != "success" ]; then
@@ -269,6 +312,10 @@ jobs:
               echo "full CI failed (test=$TEST uninstall=$UNINSTALL)" >&2
               exit 1
             fi
+            if [ "$HOST" = "true" ] && [ "$HOSTJOB" != "success" ]; then
+              echo "full CI failed (host-installer=$HOSTJOB)" >&2
+              exit 1
+            fi
             echo "full CI passed"
             exit 0
           fi
@@ -278,7 +325,20 @@ jobs:
               echo "docs-contract failed: $DOCS" >&2
               exit 1
             fi
+            if [ "$HOST" = "true" ] && [ "$HOSTJOB" != "success" ]; then
+              echo "docs-contract failed (host-installer=$HOSTJOB)" >&2
+              exit 1
+            fi
             echo "docs-contract passed (full matrix skipped)"
+            exit 0
+          fi
+
+          if [ "$HOST" = "true" ]; then
+            if [ "$HOSTJOB" != "success" ]; then
+              echo "host-installer failed: $HOSTJOB" >&2
+              exit 1
+            fi
+            echo "host-installer passed (code and docs-contract skipped)"
             exit 0
           fi
 

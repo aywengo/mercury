@@ -97,7 +97,7 @@ function runTag(
     bundleLie?: string;
     exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
     control2?: string; control2Exit?: number; rehearsalProduct?: string; fleetPkgVersion?: string; omitFleetManifest?: boolean;
-    pkgVersionHttp?: string } = {},
+    pkgVersionHttp?: string; installSh?: boolean } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -116,6 +116,12 @@ function runTag(
     // could not be exercised at all -- the only pre-existing fleet test asserted a version mismatch,
     // which exits before the cp, so the gap stayed invisible.
     writeFileSync(join(tmp, 'LICENSE'), 'MIT\n');
+    // M6: the release publishes install.sh and its sha256 alongside the host release.
+    // The checksum block only runs when install.sh exists, so the harness must be able
+    // to place one in the tree.
+    if (opts.installSh) {
+      writeFileSync(join(tmp, 'install.sh'), '#!/usr/bin/env bash\necho mercury host installer\n');
+    }
     for (const note of opts.notes ?? []) {
       mkdirSync(join(tmp, 'docs', 'releases', note.split('/')[0]), { recursive: true });
       writeFileSync(join(tmp, 'docs', 'releases', note), `# ${note}\n\nbody long enough to not be a stub.\n`);
@@ -843,6 +849,24 @@ test('a host release attaches the Homebrew bundle', () => {
     `the host release must attach the bundle so the formula has something to point at: ${created}`);
   assert.match(r.stdout, /bundle sha256=[0-9a-f]{64}/,
     'the host step must report the bundle sha256; that value is what the formula pins');
+});
+
+test('a host release publishes install.sh and its sha256 alongside the bundle', async () => {
+  const r = runTag(`host-v${V}`, { notes: [`host/${V}.md`], installSh: true });
+  assert.equal(r.status, 0, `release should succeed: ${r.stderr}`);
+  const created = r.stdout.split('\n').find((l) => l.startsWith('gh release create'));
+  assert.ok(created, 'no gh release create call');
+  assert.match(created, /install\.sh/,
+    `the host release must attach install.sh so the curl | bash one-liner is verifiable: ${created}`);
+  // The notes file must carry the checksum (published alongside the release).
+  assert.match(r.notesOut, /## Installer checksum/,
+    'the release notes must carry an Installer checksum section');
+  assert.match(r.notesOut, /sha256: `[0-9a-f]{64}`/,
+    'the release notes must carry the install.sh sha256');
+  // The checksum must be the real sha256 of the fixture bytes.
+  const { createHash } = await import('node:crypto');
+  const expect = createHash('sha256').update('#!/usr/bin/env bash\necho mercury host installer\n').digest('hex');
+  assert.ok(r.notesOut.includes(expect), 'the published sha256 must match the actual install.sh bytes');
 });
 
 test('a fleet release attaches no bundle, because Fleet has no formula', () => {

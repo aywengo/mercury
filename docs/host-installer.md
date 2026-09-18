@@ -1,8 +1,46 @@
 # Mercury Host installer
 
-Status: M0–M5 done (design, bootstrap, probe, wizard, service+doctor, lifecycle); M6 (release hardening) next.
+Status: M0–M5 done (design, bootstrap, probe, wizard, service+doctor, lifecycle); M6 (release hardening) in progress.
 
 The Host installer is a bash wizard that takes a fresh macOS or Linux machine to a running Mercury host that reports to Fleet, with the locally installed harnesses detected, verified and enabled.
+
+## Install
+
+Two equivalent one-liners. Both install the pinned `@aywengo/mercury` package into
+your user npm prefix (no sudo), then hand off to `mercury host setup`.
+
+```bash
+# curl | bash (downloads install.sh from the GitHub Release)
+curl -fsSL https://github.com/aywengo/mercury/releases/latest/download/install.sh | bash
+
+# npx (runs the same installer from the published package)
+npx @aywengo/mercury host install
+```
+
+### `curl | bash` safety note
+
+Piping a remote script into `bash` runs it with your user's permissions, so inspect
+it first. The recommended sequence is **download, inspect, run**:
+
+```bash
+# 1. Download and verify the checksum published on the release page.
+curl -fsSL -o install.sh https://github.com/aywengo/mercury/releases/latest/download/install.sh
+#    Compare against the "Installer checksum" section of the release notes:
+shasum -a 256 install.sh
+
+# 2. Read it. It is ~300 lines of plain bash; on a real run it prints the exact
+#    action list before doing anything.
+less install.sh
+
+# 3. Run it.
+bash install.sh
+```
+
+The script itself is deliberately thin (docs/host-installer.md M1): it detects
+OS/arch, checks Node/curl/git, installs the pinned package, and hands off to
+`mercury host setup`. It never runs anything as root and never touches files
+outside your user directories (`~/.local/state/mercury/install.log` is the only
+file it writes).
 
 Harness scope for v1 is whatever has a shipped adapter in `src/adapters/` at the time: today PrimeAgent (`primeAgentAdapter.ts`), Hermes (`hermesAgentAdapter.ts`) and Claude Code (`claudeCodeAdapter.ts`). Codex CLI and Pi join the probe when their adapters land, not before; the installer never advertises a harness Mercury cannot run.
 

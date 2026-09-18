@@ -644,10 +644,27 @@ jobs:
             } >> "$notes"
           fi
 
+          # M6: publish install.sh and its sha256 alongside the host release, so the
+          # curl | bash one-liner can be verified (docs/host-installer.md M6).
+          install_sha=""
+          if [ "$product" = "host" ] && [ -f install.sh ]; then
+            install_sha=$(node -e 'const fs=require("fs"),c=require("crypto");process.stdout.write(c.createHash("sha256").update(fs.readFileSync("install.sh")).digest("hex"))')
+            {
+              echo
+              echo "## Installer checksum"
+              echo
+              echo "\`install.sh\` sha256: \`${install_sha}\`"
+            } >> "$notes"
+          fi
+
           if [ "${DRY_RUN:-}" = "true" ]; then
             echo "DRY RUN: not creating the GitHub Release for ${tag}"
           elif [ "$product" = "host" ]; then
-            gh release create "$tag" --title "$title" --notes-file "$notes" "$bundle"
+            if [ -n "$install_sha" ]; then
+              gh release create "$tag" --title "$title" --notes-file "$notes" "$bundle" install.sh
+            else
+              gh release create "$tag" --title "$title" --notes-file "$notes" "$bundle"
+            fi
           else
             gh release create "$tag" --title "$title" --notes-file "$notes"
           fi
