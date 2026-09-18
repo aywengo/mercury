@@ -1,6 +1,6 @@
 # Mercury Host installer
 
-Status: M0 (design), M1 (bootstrap skeleton), M2 (harness probe) and M3 (configuration wizard) done; M4 (service and verification) next.
+Status: M0–M4 done (design, bootstrap, probe, wizard, service+doctor); M5 (lifecycle) next.
 
 The Host installer is a bash wizard that takes a fresh macOS or Linux machine to a running Mercury host that reports to Fleet, with the locally installed harnesses detected, verified and enabled.
 
@@ -79,12 +79,18 @@ Gate: an answers file fed to `--non-interactive` produces a byte-identical `merc
 - Token never printed in output: env / answers file / interactive prompt; the redacted summary shows `MERCURY_HOST_TOKEN=<set, N chars>` only. The interactive prompt echoes like any readline prompt; the token is protected by the 0600 env file and the redacted summary, not by a hidden-input terminal mode.
 - Tests: `test/hostSetup.test.ts` (14 tests) — flags, per-field validation, Atlas-requires trio, render mapping, doc-name pin, the byte-identical gate, 0600 mode, invalid-answer rejection, unknown flag, `--dry-run` touches nothing, redaction, harness filtering.
 
-### M4 — Service and verification
+### M4 — Service and verification — ✅ done
 
 - launchd agent (`~/Library/LaunchAgents`) on macOS, systemd user unit (`~/.config/systemd/user`, with a `loginctl enable-linger` hint) on Linux, generated and enabled, both loading `mercury.env` the same way the units in `deploy/` do.
 - `mercury host doctor`: healthz version check, Fleet reachability with the pre-issued token, one smoke Run per enabled harness using the real binary.
 
 Gate: fresh VM → running host reporting to Fleet with at least one harness Run completed, with no manual steps beyond obtaining the token and running the installer.
+
+**As built** (`src/host/service.ts` + `src/host/doctor.ts`, wired as `mercury host service install|status|uninstall` and `mercury host doctor [--json]` before `loadConfig()`):
+
+- **Service**: deterministic unit text (same inputs → same bytes, test-pinned). macOS launchd plist `com.mercury.host.plist` runs a wrapper script (`${XDG_STATE_HOME:-~/.local/state}/mercury/run-host.sh`) that sources `mercury.env` (launchd has no EnvironmentFile) and execs the resolved `mercury` binary with `MERCURY_EMBEDDED_WORKER=true`; logs to `${XDG_STATE_HOME:-~/.local/state}/mercury/host.log`. Linux systemd user unit `~/.config/systemd/user/mercury.service` with `EnvironmentFile=%h/.config/mercury/mercury.env`, `ExecStart=<resolved mercury> server`, enabled via `systemctl --user enable --now` plus a `loginctl enable-linger` hint. `--dry-run` prints the unit and writes nothing; install without `mercury.env` fails with a pointer to `host setup`.
+- **Doctor**: reads `mercury.env` itself (works on a host whose service is the thing being diagnosed). healthz check against `http://127.0.0.1:${MERCURY_PORT:-3000}/healthz`; Fleet reachability with the pre-issued token (off when no URL, fails when URL without token); one smoke Run per enabled harness via `POST /api/runs` (needs `MERCURY_ADMIN_TOKEN` or `MERCURY_API_TOKENS`; without one the smoke section says so instead of crashing). Every check is bounded; `--json` emits the same facts as the human report.
+- Tests: `test/hostService.test.ts` (9) + `test/hostDoctor.test.ts` (11) — deterministic units, path resolution, dry-run writes nothing, no-env failure, unknown subcommand/flag, healthz/Fleet/smoke against a mock HTTP server, env-file parsing.
 
 ### M5 — Lifecycle
 
