@@ -512,6 +512,18 @@ test('notes: an operatorOverride requires an operator source; an agent-reported 
   const r1 = store.contribute('test-project', 'host-1', [laundered], undefined, 500);
   assert.equal(pick(r1[0], 'rejected'), 'invalid-override');
 
+  // `null` is a legal JSON value: the shape gate must refuse it per item, not throw a 500.
+  for (const malformed of [null, 'a string', 7, []]) {
+    const bad = makeContribution({
+      claim: 'Run with --skill planning to analyze',
+      operatorOverride: malformed as never,
+      provenance: { source: 'operator', hostId: 'host-op', recordedAt: new Date().toISOString() },
+    });
+    const rBad = store.contribute('test-project', null, [bad], `bad-key-${String(malformed)}`, 500);
+    assert.equal(pick(rBad[0], 'rejected'), 'invalid-override',
+      `operatorOverride ${JSON.stringify(malformed)} must be a per-item rejection, not a throw`);
+  }
+
   // The same note from an operator source is accepted and the override is recorded.
   const operator = makeContribution({
     claim: 'Run with --skill planning to analyze',

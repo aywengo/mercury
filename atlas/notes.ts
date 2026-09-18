@@ -276,12 +276,21 @@ export class NoteStore {
     if (body.operatorOverride !== undefined && claimedSource !== 'operator') {
       return { rejected: 'invalid-override' };
     }
-    const k2Override = body.operatorOverride !== undefined
-      ? {
-          rule: (body.operatorOverride as Record<string, unknown>).rule,
-          reason: (body.operatorOverride as Record<string, unknown>).reason,
-        } as { rule: string; reason: string }
-      : undefined;
+    // `null` is a legal JSON value and reaches here as a present field, so the shape gate below is
+    // what stands between a malformed contribution and a thrown 500: reading `.rule` off null throws,
+    // and a bad note must be a per-item `invalid-override` rejection instead. Same guard, same order,
+    // as the host's operator route (the two paths answer identically by the agreement contract).
+    const claimed = body.operatorOverride as Record<string, unknown> | null | undefined;
+    let k2Override: { rule: string; reason: string } | undefined;
+    if (claimed !== undefined) {
+      if (typeof claimed !== 'object' || claimed === null || Array.isArray(claimed)) {
+        return { rejected: 'invalid-override' };
+      }
+      k2Override = {
+        rule: typeof claimed.rule === 'string' ? claimed.rule : '',
+        reason: typeof claimed.reason === 'string' ? claimed.reason : '',
+      };
+    }
     const draft = validateDraft(raw, { ...this.bounds, maxEvidence: MAX_EVIDENCE }, k2Override ? { k2Override } : {});
     if (!draft.ok) return { rejected: draft.reason };
 

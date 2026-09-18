@@ -73,10 +73,11 @@ export function submitOperatorNote(
     ...(Array.isArray(source.contradicts) ? { contradicts: source.contradicts as string[] } : {}),
   };
 
-  // The K2 override (section 7.5) comes from the REQUEST as { reason }, not as a pre-built record:
-  // the rule that fired is measured here, and an operator claiming to override a rule that did not
-  // fire is refused rather than recorded. This route is the only producer of the field; the harvest
-  // path never passes the option, so an agent cannot grant itself an exception.
+  // The K2 override (section 7.5) arrives as { rule, reason } from the request body. The rule an
+  // operator names is not trusted as the record of what happened: validateDraft re-runs the K2 scan
+  // and refuses the note unless the named rule is the one that actually fired (invalid-override
+  // otherwise). This route is the only producer of the field; the harvest path never passes the
+  // option, so an agent cannot grant itself an exception.
   let k2Override: { rule: string; reason: string } | undefined;
   if (source.operatorOverride !== undefined) {
     const claimed = source.operatorOverride as Record<string, unknown>;

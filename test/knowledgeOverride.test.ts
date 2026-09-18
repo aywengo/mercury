@@ -88,6 +88,7 @@ test('an override without a reason, with an empty reason, or over the claim boun
   const env = makeEnv();
   try {
     const cases: unknown[] = [
+      null,
       { rule: FIRED_RULE },
       { rule: FIRED_RULE, reason: '' },
       { rule: FIRED_RULE, reason: '   ' },
