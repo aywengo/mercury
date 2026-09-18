@@ -42,18 +42,19 @@ function mockServer(): Promise<{ server: Server; url: string; close: () => Promi
         req.on('end', () => {
           const parsed = JSON.parse(body) as { agent?: string };
           const id = `run-${Object.keys(runs).length + 1}`;
-          runs[id] = 'queued';
+          runs[id] = 'QUEUED';
           res.writeHead(201, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ runId: id, status: 'queued' }));
+          res.end(JSON.stringify({ runId: id, status: 'QUEUED' }));
           // Complete it shortly.
-          setTimeout(() => { runs[id] = 'completed'; }, 50);
+          setTimeout(() => { runs[id] = 'COMPLETED'; }, 50);
         });
         return;
       }
       const m = url.match(/^\/api\/runs\/(run-\d+)$/);
       if (m && req.method === 'GET') {
+        // Mirror the REAL API shape: { run: { status } } with UPPERCASE RunStatus.
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: runs[m[1]!] ?? 'unknown' }));
+        res.end(JSON.stringify({ run: { status: runs[m[1]!] ?? 'UNKNOWN' }, skills: [], goal: null, knowledge: [] }));
         return;
       }
       res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -141,6 +142,35 @@ test('smokeRun: creates a run and waits for completion', async () => {
   }
 });
 
+test('smokeRun: a FAILED run is a terminal failure, not a timeout', async () => {
+  // A server whose run goes FAILED immediately.
+  const server = createServer((req, res) => {
+    const url = req.url ?? '';
+    if (url === '/api/runs' && req.method === 'POST') {
+      res.writeHead(201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ runId: 'run-fail', status: 'QUEUED' }));
+      return;
+    }
+    const m = url.match(/^\/api\/runs\/(.+)$/);
+    if (m && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ run: { status: 'FAILED' }, skills: [], goal: null, knowledge: [] }));
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'not found' }));
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  const addr = server.address() as { port: number };
+  try {
+    const r = await smokeRun(`http://127.0.0.1:${addr.port}`, 'tok', 'primeagent', 5000);
+    assert.equal(r.ok, false);
+    assert.ok(r.detail.includes('FAILED'));
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
 // ---------- the CLI surface ----------
 
 function cli(args: string[], extraEnv: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
@@ -166,10 +196,12 @@ test('host doctor --json reports all three sections', async () => {
     HOME: join(dir, 'home'),
   });
   assert.equal(code, 1); // host not running -> healthz fails
-  const parsed = JSON.parse(stdout) as { healthz: { ok: boolean }; fleet: { ok: boolean }; smoke: Array<{ harness: string }> };
+  const parsed = JSON.parse(stdout) as { healthz: { ok: boolean }; fleet: { ok: boolean }; smoke: Array<{ harness: string; skipped?: boolean }> };
   assert.equal(parsed.healthz.ok, false);
   assert.equal(parsed.fleet.ok, true); // Fleet off
   assert.ok(parsed.smoke.length >= 3, 'one smoke entry per enabled harness');
+  // No API token -> smoke skipped, not failed.
+  assert.ok(parsed.smoke.every((s) => s.skipped === true));
 });
 
 test('host doctor rejects an unknown flag', async () => {

@@ -22,7 +22,8 @@
  *    the human report prints.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -43,10 +44,29 @@ export function envFilePath(env: NodeJS.ProcessEnv = process.env): string {
   return join(base, 'mercury', 'mercury.env');
 }
 
+/**
+ * A tiny throwaway git repo for smoke runs. Runs need a repository to get a workspace
+ * (copy mode requires localPath; git-worktree mode clones a URL), so the doctor keeps
+ * one in the state dir. Created once, reused.
+ */
+export function ensureSmokeRepo(env: NodeJS.ProcessEnv = process.env): string {
+  const base = env.XDG_STATE_HOME?.trim() || join(homedir(), '.local', 'state');
+  const dir = join(base, 'mercury', 'smoke-repo');
+  if (existsSync(join(dir, '.git'))) return dir;
+  mkdirSync(dir, { recursive: true });
+  execFileSync('git', ['init', '-q', '-b', 'main', dir], { timeout: 10000 });
+  execFileSync('git', ['-C', dir, 'config', 'user.email', 'mercury@localhost'], { timeout: 5000 });
+  execFileSync('git', ['-C', dir, 'config', 'user.name', 'Mercury Host'], { timeout: 5000 });
+  writeFileSync(join(dir, 'README.md'), '# mercury host smoke repo\n');
+  execFileSync('git', ['-C', dir, 'add', '.'], { timeout: 5000 });
+  execFileSync('git', ['-C', dir, 'commit', '-q', '-m', 'initial'], { timeout: 5000 });
+  return dir;
+}
+
 export interface DoctorResult {
   healthz: { ok: boolean; detail: string };
   fleet: { ok: boolean; detail: string };
-  smoke: Array<{ harness: string; ok: boolean; detail: string }>;
+  smoke: Array<{ harness: string; ok: boolean; detail: string; skipped?: boolean }>;
 }
 
 /** Bounded GET with a timeout. Returns { status, body } or an error detail. */
@@ -92,6 +112,7 @@ export async function smokeRun(
   token: string,
   harness: string,
   timeoutMs = 120000,
+  smokeRepo?: string,
 ): Promise<{ ok: boolean; detail: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10000);
@@ -99,7 +120,7 @@ export async function smokeRun(
     const res = await fetch(`${baseUrl}/api/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ task: 'mercury host doctor smoke run', agent: harness }),
+      body: JSON.stringify({ task: 'mercury host doctor smoke run', agent: harness, ...(smokeRepo ? { repository: { localPath: smokeRepo } } : {}) }),
       signal: controller.signal,
     });
     clearTimeout(timer);
@@ -108,15 +129,18 @@ export async function smokeRun(
       return { ok: false, detail: `create returned ${res.status}: ${body.slice(0, 200)}` };
     }
     const created = (await res.json()) as { runId: string };
-    // Poll the run until terminal or timeout.
+    // Poll the run until terminal or timeout. GET /api/runs/:runId returns
+    // { run: { status }, skills, goal, knowledge } with UPPERCASE RunStatus values
+    // (src/domain/types.ts) — the shape the mock in the tests mirrors (review #635).
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const poll = await getJson(`${baseUrl}/api/runs/${created.runId}`, token, 10000);
       if ('error' in poll) return { ok: false, detail: `poll failed: ${poll.error}` };
-      const run = poll.body as { status?: string };
-      if (run.status === 'completed') return { ok: true, detail: `${harness} smoke run ${created.runId} completed` };
-      if (run.status === 'failed' || run.status === 'cancelled') {
-        return { ok: false, detail: `${harness} smoke run ${created.runId} ${run.status}` };
+      const body = poll.body as { run?: { status?: string } } | null;
+      const status = body?.run?.status;
+      if (status === 'COMPLETED') return { ok: true, detail: `${harness} smoke run ${created.runId} completed` };
+      if (status === 'FAILED' || status === 'CANCELLED' || status === 'TIMED_OUT') {
+        return { ok: false, detail: `${harness} smoke run ${created.runId} ${status}` };
       }
       await new Promise((res) => setTimeout(res, 2000));
     }
@@ -156,12 +180,13 @@ export async function runHostDoctor(
   const fleet = await checkFleet(fleetUrl, hostToken);
   const smoke: DoctorResult['smoke'] = [];
   if (apiToken) {
+    const smokeRepo = ensureSmokeRepo(env);
     for (const h of harnesses) {
-      smoke.push({ harness: h, ...(await smokeRun(baseUrl, apiToken, h)) });
+      smoke.push({ harness: h, ...(await smokeRun(baseUrl, apiToken, h, 120000, smokeRepo)) });
     }
   } else {
     for (const h of harnesses) {
-      smoke.push({ harness: h, ok: false, detail: 'no API token configured (MERCURY_ADMIN_TOKEN or MERCURY_API_TOKENS); smoke run skipped' });
+      smoke.push({ harness: h, ok: false, skipped: true, detail: 'no API token configured (MERCURY_ADMIN_TOKEN or MERCURY_API_TOKENS); smoke run skipped' });
     }
   }
 
@@ -175,6 +200,8 @@ export async function runHostDoctor(
       io.out(`smoke ${s.harness}: ${s.ok ? 'PASS' : 'FAIL'} — ${s.detail}\n`);
     }
   }
-  const allOk = healthz.ok && fleet.ok && smoke.every((s) => s.ok);
+  // Skipped checks (no API token) do not fail the doctor: they report what could not
+  // be checked. Only actual failures count (review #635).
+  const allOk = healthz.ok && fleet.ok && smoke.every((s) => s.ok || s.skipped);
   return allOk ? 0 : 1;
 }
