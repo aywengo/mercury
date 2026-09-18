@@ -25,7 +25,7 @@
  */
 
 import { createInterface } from 'node:readline';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -183,12 +183,20 @@ export function envFilePath(env: NodeJS.ProcessEnv = process.env): string {
   return join(base, 'mercury', 'mercury.env');
 }
 
-/** Write mercury.env atomically: temp file in the same dir, validate, rename, 0600. */
+/** Write mercury.env atomically: temp file in the same dir, fsync, rename, 0600. */
 export function writeEnvFile(path: string, content: string): void {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true });
   const tmp = join(dir, `.mercury.env.tmp-${process.pid}`);
   writeFileSync(tmp, content, { mode: 0o600 });
+  // fsync before rename so a crash cannot leave a zero-length or partial mercury.env
+  // at the final path (review #633 minor).
+  const fd = openSync(tmp, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   renameSync(tmp, path);
   chmodSync(path, 0o600);
 }
