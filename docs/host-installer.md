@@ -95,7 +95,7 @@ Gate: fresh VM → running host reporting to Fleet with at least one harness Run
 ### M5 — Lifecycle — ✅ done
 
 - `--upgrade`: pin bump, `mercury.env` migration if a variable was renamed, service restart.
-- `--uninstall`: removes package, service and `mercury.env`; prompts to keep or remove the data dir.
+- `--uninstall`: removes package, service and `mercury.env`; keeps the data dir by default, `--remove-data` deletes it.
 - Re-run on a configured host reads `mercury.env`, shows current state and the diff of any proposed change.
 
 Gate: install vN → upgrade vN+1 → uninstall leaves nothing but the opted-in data dir; re-running on a configured host changes nothing without confirmation.
