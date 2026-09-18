@@ -21,6 +21,7 @@ import {
   launchdWrapperPath,
   envFilePath,
   parseServiceArgs,
+  resolveMercuryBin,
   SERVICE_NAME,
   LAUNCHD_LABEL,
 } from '../src/host/service.ts';
@@ -75,6 +76,12 @@ test('parseServiceArgs: --dry-run parses; unknown flag is an error', () => {
   assert.throws(() => parseServiceArgs(['--bogus']), /unknown flag/);
 });
 
+test('resolveMercuryBin returns an absolute path, never a bare name', () => {
+  const bin = resolveMercuryBin();
+  assert.ok(bin.includes('/'), `expected an absolute path, got '${bin}'`);
+  assert.notEqual(bin, 'mercury');
+});
+
 // ---------- the CLI surface ----------
 
 function cli(args: string[], extraEnv: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
@@ -122,6 +129,12 @@ test('host service rejects an unknown subcommand', async () => {
   const { code, stderr } = await cli(['host', 'service', 'bogus']);
   assert.equal(code, 1);
   assert.ok(stderr.includes('unknown subcommand'));
+});
+
+test('host service status rejects extra flags', async () => {
+  const { code, stderr } = await cli(['host', 'service', 'status', '--dry-run']);
+  assert.equal(code, 1);
+  assert.ok(stderr.includes('unknown flag'));
 });
 
 test('host service status reports absent when nothing is installed', async () => {

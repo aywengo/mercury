@@ -61,7 +61,7 @@ async function getJson(url: string, token: string | undefined, timeoutMs: number
     const body = await res.json().catch(() => null);
     return { status: res.status, body };
   } catch (e) {
-    return { error: (e as Error).message };
+    return { error: e instanceof Error ? e.message : String(e) };
   } finally {
     clearTimeout(timer);
   }
@@ -93,9 +93,6 @@ export async function smokeRun(
   harness: string,
   timeoutMs = 120000,
 ): Promise<{ ok: boolean; detail: string }> {
-  const create = await getJson(`${baseUrl}/api/runs`, token, 10000);
-  if ('error' in create) return { ok: false, detail: `create failed: ${create.error}` };
-  // getJson does GET; for POST we need a different helper. Reuse fetch directly here.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10000);
   try {
@@ -126,7 +123,7 @@ export async function smokeRun(
     return { ok: false, detail: `${harness} smoke run ${created.runId} did not finish in ${timeoutMs}ms` };
   } catch (e) {
     clearTimeout(timer);
-    return { ok: false, detail: `create failed: ${(e as Error).message}` };
+    return { ok: false, detail: `create failed: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 

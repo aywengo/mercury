@@ -153,10 +153,20 @@ async function main(): Promise<void> {
       return;
     }
     if (sub === 'status') {
+      if (rest.length > 0) {
+        process.stderr.write(`host service status: unknown flag '${rest[0]}'.\n`);
+        process.exitCode = 1;
+        return;
+      }
       process.exitCode = serviceStatus(process.platform, { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) });
       return;
     }
     if (sub === 'uninstall') {
+      if (rest.length > 0) {
+        process.stderr.write(`host service uninstall: unknown flag '${rest[0]}'.\n`);
+        process.exitCode = 1;
+        return;
+      }
       process.exitCode = uninstallService(process.platform, { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) });
       return;
     }

@@ -35,7 +35,11 @@ export const SERVICE_NAME = 'mercury';
 /** The launchd label (macOS). */
 export const LAUNCHD_LABEL = 'com.mercury.host';
 
-/** Resolve the installed mercury binary: `which mercury`, else the npm global bin. */
+/**
+ * Resolve the installed mercury binary: `which mercury`, else the npm global bin.
+ * NEVER returns a bare name: the generated unit must not depend on PATH resolution
+ * at runtime (review #635). Throws when the binary cannot be resolved.
+ */
 export function resolveMercuryBin(env: NodeJS.ProcessEnv = process.env): string {
   try {
     const which = execFileSync('which', ['mercury'], { encoding: 'utf8', timeout: 5000 }).trim();
@@ -47,9 +51,9 @@ export function resolveMercuryBin(env: NodeJS.ProcessEnv = process.env): string 
     const prefix = execFileSync('npm', ['prefix', '-g'], { encoding: 'utf8', timeout: 5000 }).trim();
     if (prefix) return join(prefix, 'bin', 'mercury');
   } catch {
-    // fall through to a PATH-relative default
+    // fall through to the throw below
   }
-  return 'mercury';
+  throw new Error('cannot resolve the mercury binary (which mercury and npm prefix -g both failed); install the package first');
 }
 
 /** The env file path the wizard writes (M3). */
@@ -158,7 +162,13 @@ export function installService(
   env: NodeJS.ProcessEnv = process.env,
   dryRun = false,
 ): number {
-  const bin = resolveMercuryBin(env);
+  let bin: string;
+  try {
+    bin = resolveMercuryBin(env);
+  } catch (e) {
+    io.err(`host service: ${(e as Error).message}\n`);
+    return 1;
+  }
   const envFile = envFilePath(env);
   if (platform === 'darwin') {
     const wrapper = launchdWrapperPath(env);
