@@ -51,7 +51,11 @@ json_escape() {
         out = out c;
       }
     }
-    print out;
+    # awk splits input on newlines, so a newline in the detail never reaches $0.
+    # Re-emit it as \u000a before every record after the first (empty ORS keeps
+    # the output free of awk separators).
+    if (NR > 1) printf "\\u000a";
+    printf "%s", out;
   }'
 }
 

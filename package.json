@@ -67,7 +67,8 @@
     "prepr": "node e2e/prepr.ts",
     "build:atlas": "tsc -p tsconfig.atlas.json",
     "test:atlas": "node --test --test-timeout=180000 'atlas/test/*.test.ts'",
-    "atlas": "node atlas/cli.ts"
+    "atlas": "node atlas/cli.ts",
+    "test:install": "bats test/install.bats"
   },
   "dependencies": {
     "express": "^4.21.2"
