@@ -115,7 +115,7 @@ Gate: an answers file fed to `--non-interactive` produces a byte-identical `merc
 - Interactive and `--non-interactive` share one code path: answers → validate → render → write. The M3 gate test feeds the same answers through both and asserts byte-identical `mercury.env`.
 - Atomic write: temp file in the target dir, rename, chmod 0600. Nothing is written until every answer validates (invalid answers exit 1 with the reasons).
 - Token never printed in output: env / answers file / interactive prompt; the redacted summary shows `MERCURY_HOST_TOKEN=<set, N chars>` only. The interactive prompt echoes like any readline prompt; the token is protected by the 0600 env file and the redacted summary, not by a hidden-input terminal mode.
-- Tests: `test/hostSetup.test.ts` — flags, per-field validation, Atlas-requires trio, render mapping, doc-name pin, the byte-identical gate, 0600 mode, invalid-answer rejection, unknown flag, `--dry-run` touches nothing, redaction, harness filtering. The count is not quoted here (the #580 policy: a count nobody runs is wrong within a few changes).
+- Tests: `test/hostSetup.test.ts` — flags, per-field validation, Atlas-requires trio, render mapping, doc-name pin, the byte-identical gate, 0600 mode, invalid-answer rejection, unknown flag, `--dry-run` touches nothing, redaction, harness filtering. The count is not quoted here — the #580 policy (a count nobody runs is wrong within a few changes), enforced for the documents it reads by `test/testCountClaims.test.ts`, which does not yet read this page.
 
 ### M4 — Service and verification — ✅ done
 
@@ -144,7 +144,7 @@ Gate: install vN → upgrade vN+1 → uninstall leaves nothing but the opted-in 
 - **`host upgrade --version <v> --yes`** — `npm install -g @aywengo/mercury@<v>`, records `MERCURY_PINNED_VERSION` in mercury.env (atomic write), restarts the service if present (launchctl kickstart / systemctl --user restart). Refuses without `--yes`; refuses on an unconfigured host.
 - **`host uninstall --yes [--keep-data|--remove-data]`** — removes the service (launchctl unload + plist/wrapper, or systemctl disable --now + unit), removes mercury.env, `npm uninstall -g` the package. Keeps the data dir by default; `--remove-data` deletes it. Refuses without `--yes`.
 - **Re-run guard** — `host setup` on a configured host (mercury.env exists) shows the current state and refuses to overwrite unless `--yes` is passed (interactive or `--non-interactive`). `--dry-run` on a configured host warns it would overwrite.
-- Tests: `test/hostLifecycle.test.ts` (16) + the new setup re-run-guard test. Full suite 1227/1227 green.
+- Tests: `test/hostLifecycle.test.ts` (16) + the new re-run-guard test in `test/hostSetup.test.ts`. Full suite 1227/1227 green.
 
 ### M6 — Release hardening — ✅ done
 
