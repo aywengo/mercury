@@ -1,6 +1,6 @@
 # Distribution
 
-How Mercury reaches an operator. Three channels, one release train.
+How Mercury reaches an operator. Five channels, one release train.
 
 Status header: npm, GitHub Release and Homebrew are all implemented in `release.yml`; the `mercury-ai` formula is generated and pushed to `main` by the release job. See the guard in `test/releaseHygiene.test.ts` — this line must agree with what `release.yml` actually builds.
 

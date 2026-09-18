@@ -282,7 +282,7 @@ Design and invariants: [`knowledge-base.md`](knowledge-base.md).
 
 ### Distribution
 
-Four channels, all built by the release workflow in `release.yml`; what each artifact
+Five channels, all built by the release workflow in `release.yml`; what each artifact
 contains and how it is produced is owned by
 [`distribution.md`](distribution.md):
 
