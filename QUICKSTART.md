@@ -29,6 +29,21 @@ first.
 
 ## 2. Install
 
+This walkthrough runs Mercury from a source checkout. For a production install on
+a fresh macOS/Linux machine (no clone, no build), use the host installer instead:
+
+```bash
+curl -fsSL https://github.com/aywengo/mercury/releases/latest/download/install.sh | bash
+# or: npx @aywengo/mercury host install
+```
+
+It installs the pinned package into your user npm prefix and hands off to
+`mercury host setup` — see [`docs/host-installer.md`](docs/host-installer.md).
+The `install.sh` asset ships with the next host release (0.1.0/0.1.1 predate
+the installer and carry no asset), so the one-liner resolves from then on.
+
+From a checkout:
+
 ```bash
 npm install
 ```

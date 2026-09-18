@@ -282,7 +282,7 @@ Design and invariants: [`knowledge-base.md`](knowledge-base.md).
 
 ### Distribution
 
-Four channels, all built by the release workflow in `release.yml`; what each artifact
+Five channels, all built by the release workflow in `release.yml`; what each artifact
 contains and how it is produced is owned by
 [`distribution.md`](distribution.md):
 
@@ -292,6 +292,7 @@ contains and how it is produced is owned by
 | npm | `npm install -g @aywengo/mercury` |
 | GitHub Release | bundle asset attached to the `host-v*` tag |
 | Homebrew | `brew tap aywengo/mercury https://github.com/aywengo/mercury` then `brew install mercury-ai` |
+| Host installer | `curl -fsSL https://github.com/aywengo/mercury/releases/latest/download/install.sh \| bash`, or `npx @aywengo/mercury host install`; guided setup + doctor, see [`host-installer.md`](host-installer.md); asset ships with the next host release (0.1.0/0.1.1 predate it) |
 
 `mercury-ai` is the formula name because homebrew-core already owns `mercury`: that is the
 Mercury language compiler, and installing it fetches roughly a gigabyte of a different
