@@ -204,9 +204,12 @@ export async function runHostDoctor(
     }
     if (noHarnesses) {
       io.out(
-        `no harnesses configured (MERCURY_HARNESSES is set but empty in ${file}); ` +
-        'nothing to smoke-verify, so this is a failure, not a pass. ' +
-        'Re-run `mercury host setup` or list harnesses in MERCURY_HARNESSES.\n',
+        allowNoHarnesses
+          ? `no harnesses configured (MERCURY_HARNESSES is set but empty in ${file}); ` +
+            'nothing smoke-verified (--allow-no-harnesses: accepted for a host that runs none).\n'
+          : `no harnesses configured (MERCURY_HARNESSES is set but empty in ${file}); ` +
+            'nothing to smoke-verify, so this is a failure, not a pass. ' +
+            'Re-run `mercury host setup`, list harnesses in MERCURY_HARNESSES, or pass --allow-no-harnesses.\n',
       );
     }
     if (anySkipped) {
