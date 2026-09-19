@@ -9,11 +9,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
-import { harnessSpecs, probeHarness, runHostProbe, type HarnessProbeResult, type HarnessSpec } from '../src/host/probe.ts';
+import { harnessSpecs, probeHarness, type HarnessProbeResult, type HarnessSpec } from '../src/host/probe.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
