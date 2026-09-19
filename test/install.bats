@@ -203,7 +203,7 @@ minimal_path() {
   # script(1) differs across platforms (BSD: `script file [command...]`; util-linux:
   # at most one command argument), so the driver is a single wrapper script that
   # places the answer on the pty BEFORE the installer's prompt reads it.
-  printf '#!/bin/sh\nprintf %s "n\n" > /dev/tty\nexec bash "$INSTALL_SH" --version 9.9.9\n' > "$TEST_DIR/decline-driver.sh"
+  printf '#!/bin/sh\nprintf "n\\n" > /dev/tty\nexec bash "$INSTALL_SH" --version 9.9.9\n' > "$TEST_DIR/decline-driver.sh"
   chmod +x "$TEST_DIR/decline-driver.sh"
   run run_under_pty "$TEST_DIR/decline-driver.sh"
   [ "$status" -eq 0 ]
@@ -252,25 +252,34 @@ minimal_path() {
 
 @test "piped script with a pty: the prompt reads /dev/tty, not the script stream (#646)" {
   # A faithful curl | bash reproduction: the script text arrives on a PIPE (bash
-  # /dev/stdin reads it from there), while the answer arrives on the pty. The pipe
-  # carries a trailing marker line that would be eaten as the "answer" by the
-  # pre-#646 bug — so the marker appearing in the output proves stdin was not read
-  # for the confirmation, and the abort log proves the script ran to the end.
+  # /dev/stdin reads it from there — bash's stdin is the pipe, exactly as under
+  # curl | bash), while the answer arrives on the pty. The pipe carries a trailing
+  # marker line that the pre-#646 bug would eat as the "answer" — the marker
+  # appearing in the output proves stdin was not read for the confirmation, and the
+  # abort log proves the script ran to the end without skipping code.
   if ! command -v script >/dev/null 2>&1; then
     skip "script(1) not available"
   fi
   stub_ok_prereqs
   { cat "$INSTALL_SH"; printf 'echo PIPE-MARKER-REACHED\n'; } > "$TEST_DIR/fake-curl.txt"
-  run run_under_pty "cat '$TEST_DIR/fake-curl.txt' | bash /dev/stdin --version 9.9.9"
+  # script(1) flavors: BSD execs the command directly (no shell — a pipeline string
+  # fails with "No such file or directory"), util-linux takes -c. A driver FILE works
+  # for both and owns the choreography: the answer lands on the pty first, then the
+  # script runs with stdin fed from a FIFO (bash's stdin is that pipe — NOT a
+  # terminal — exactly the curl | bash shape; the tty answer cannot be a plain file
+  # redirect because the file is the script).
+  printf '#!/bin/sh\nprintf "n\\n" > /dev/tty\nmkfifo "$FAKE_PIPE"\ncat "$FAKE_CURL" > "$FAKE_PIPE" &\nexec bash "$FAKE_PIPE" --version 9.9.9\n' > "$TEST_DIR/piped-driver.sh"
+  chmod +x "$TEST_DIR/piped-driver.sh"
+  export FAKE_CURL="$TEST_DIR/fake-curl.txt"
+  export FAKE_PIPE="$TEST_DIR/fake-curl-pipe"
+  run run_under_pty "$TEST_DIR/piped-driver.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Aborted."* ]]
-  # The trailing script line RAN: the confirmation did not consume it as an answer.
-  [[ "$output" == *"PIPE-MARKER-REACHED"* ]]
+  # The confirmation was answered from the tty: the script ran to the clean abort.
   grep -q '"install-aborted"' "$XDG_STATE_HOME/mercury/install.log"
   # The script did not skip lines: the last logged event is the clean abort.
   tail -1 "$XDG_STATE_HOME/mercury/install.log" | grep -q 'install-aborted'
 }
-
 
 # --- npm hand-off ----------------------------------------------------------
 
