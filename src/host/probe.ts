@@ -94,7 +94,9 @@ export function harnessSpecs(env: NodeJS.ProcessEnv = process.env): HarnessSpec[
           // would be a false positive for "logged in" (review #631).
           return readFileSync(p, 'utf8').split('\n').some((l) => /^api_key\s*:/.test(l.trim())) ? 'yes' : 'no';
         } catch {
-          return 'no';
+          // An unreadable file is not a known logged-out state (Copilot review on #657):
+          // the signal cannot be inspected, which is `unknown`, not a false negative.
+          return 'unknown';
         }
       },
     },
