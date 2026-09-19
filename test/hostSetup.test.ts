@@ -598,6 +598,22 @@ test('answers file: a near-miss key with no close match is rejected without a su
   assert.ok(!existsSync(join(cfg, 'mercury', 'mercury.env')));
 });
 
+test('answers file: non-object JSON (null, scalar, array) is rejected, nothing written (#649 §2)', async () => {
+  for (const content of ['null', 'true', '1', '"x"', '[]']) {
+    const dir = tempDir('setup-answers-nonobj-');
+    const cfg = join(dir, 'cfg');
+    mkdirSync(cfg, { recursive: true });
+    writeFileSync(join(dir, 'answers.json'), content);
+    const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+      ...probeStubEnv(),
+      XDG_CONFIG_HOME: cfg,
+    });
+    assert.equal(code, 1, `content ${content} must be rejected`);
+    assert.ok(stderr.includes('must be a JSON object'), `message for ${content}: ${stderr}`);
+    assert.ok(!existsSync(join(cfg, 'mercury', 'mercury.env')), `nothing written for ${content}`);
+  }
+});
+
 test('answers file: every known key is accepted (#649 §2)', async () => {
   const dir = tempDir('setup-answers-ok-');
   const cfg = join(dir, 'cfg');
