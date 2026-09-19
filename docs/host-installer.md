@@ -1,6 +1,8 @@
 # Mercury Host installer
 
-Status: M0–M6 done (design, bootstrap, probe, wizard, service+doctor, lifecycle, release hardening).
+Status: M0–M6 implemented (PRs #628–#638); review 2026-09-19 found the M1, M3, M4, M5 and M6 gates NOT met. Open: #645 (wizard variables the host never reads; Fleet is pull, not push), #646 (`curl | bash` prompt reads the script), #647 (wizard ignores the probe), #648 (doctor cannot run a smoke Run on a wizard-configured host), #649 (grouped gate gaps), #650 (minor). Fix order: #645 → #648/#647 → #646 → #649.
+
+Decision 6 and M3/M4 below still describe a push model (host → Fleet URL + token). That is wrong: Fleet calls the host with a Fleet-held token (`fleet/child.ts`). Rewrite lands with #645.
 
 The Host installer is a bash wizard that takes a fresh macOS or Linux machine to a running Mercury host that reports to Fleet, with the locally installed harnesses detected, verified and enabled.
 
@@ -67,7 +69,7 @@ This document. Done, apart from recording per-harness minimum versions from each
 
 Gate: doc merged; every question in section 3 has an answer or a written reason to defer. Met 2026-09-16.
 
-### M1 — Bootstrap skeleton
+### M1 — Bootstrap skeleton — ⚠️ implemented, gate open (#646, #649 §4–5)
 
 `install.sh`:
 
@@ -81,7 +83,7 @@ Gate: doc merged; every question in section 3 has an answer or a written reason 
 
 Gate: runs clean in a Docker matrix (Debian, Ubuntu, Fedora) and on macOS arm64 via both channels; `--dry-run` prints the exact action list and touches nothing. Met 2026-09-17: `install.sh` (bash 3.2, `shellcheck` clean, `--dry-run` touches nothing) and `mercury host install` (prereq checks, structured log, works on an unconfigured host) both land; the Docker matrix and the checksum-published-alongside-release half of the gate are M6 work (CI matrix + release signing), not M1.
 
-### M2 — Harness probe — ✅ done
+### M2 — Harness probe — ✅ done (probe itself; wizard integration open in #647)
 
 `mercury host probe --json` reports, for each harness with a shipped adapter: binary path, version, config path, auth/login state, and whether the version satisfies the adapter's declared minimum. The wizard renders a checklist:
 
@@ -102,7 +104,7 @@ Gate: probe results agree with the adapters' own real-binary observations (the s
 - `fake` and declarative local agents are not host harnesses and never appear.
 - Tests: `test/hostProbe.test.ts` (11 tests) — missing binary → `missing`, downgraded → `too-old`, floor satisfied → `ok`, no floor → `unknown`, env cmd override, no-config host, unknown flag rejected (first and after `--json`).
 
-### M3 — Configuration wizard — ✅ done
+### M3 — Configuration wizard — ⚠️ implemented, gate open (#645, #647, #649 §1–3, §6)
 
 Prompts: host name, data dir, workspace dir, GC retention, Fleet URL, host token, Atlas on/off, per-harness enable. Each answer maps to a documented `MERCURY_*` variable. Writes `mercury.env` atomically (temp file, validate, rename, 0600), prints a redacted summary.
 
@@ -117,7 +119,7 @@ Gate: an answers file fed to `--non-interactive` produces a byte-identical `merc
 - Token never printed in output: env / answers file / interactive prompt; the redacted summary shows `MERCURY_HOST_TOKEN=<set, N chars>` only. The interactive prompt echoes like any readline prompt; the token is protected by the 0600 env file and the redacted summary, not by a hidden-input terminal mode.
 - Tests: `test/hostSetup.test.ts` (14 tests) — flags, per-field validation, Atlas-requires trio, render mapping, doc-name pin, the byte-identical gate, 0600 mode, invalid-answer rejection, unknown flag, `--dry-run` touches nothing, redaction, harness filtering.
 
-### M4 — Service and verification — ✅ done
+### M4 — Service and verification — ⚠️ implemented, gate open (#645, #648)
 
 - launchd agent (`~/Library/LaunchAgents`) on macOS, systemd user unit (`~/.config/systemd/user`, with a `loginctl enable-linger` hint) on Linux, generated and enabled, both loading `mercury.env` the same way the units in `deploy/` do.
 - `mercury host doctor`: healthz version check, Fleet reachability with the pre-issued token, one smoke Run per enabled harness using the real binary.
@@ -130,7 +132,7 @@ Gate: fresh VM → running host reporting to Fleet with at least one harness Run
 - **Doctor**: reads `mercury.env` itself (works on a host whose service is the thing being diagnosed). healthz check against `http://127.0.0.1:${MERCURY_PORT:-3000}/healthz`; Fleet reachability with the pre-issued token (off when no URL, fails when URL without token); one smoke Run per enabled harness via `POST /api/runs` (needs `MERCURY_ADMIN_TOKEN` or `MERCURY_API_TOKENS`; without one the smoke section says so instead of crashing). Every check is bounded; `--json` emits the same facts as the human report.
 - Tests: `test/hostService.test.ts` (9) + `test/hostDoctor.test.ts` (11) — deterministic units, path resolution, dry-run writes nothing, no-env failure, unknown subcommand/flag, healthz/Fleet/smoke against a mock HTTP server, env-file parsing.
 
-### M5 — Lifecycle — ✅ done
+### M5 — Lifecycle — ⚠️ implemented, gate open (#649 §6, #650 launchctl idempotency)
 
 - `--upgrade`: pin bump, `mercury.env` migration if a variable was renamed, service restart.
 - `--uninstall`: removes package, service and `mercury.env`; keeps the data dir by default, `--remove-data` deletes it.
@@ -146,7 +148,7 @@ Gate: install vN → upgrade vN+1 → uninstall leaves nothing but the opted-in 
 - **Re-run guard** — `host setup` on a configured host (mercury.env exists) shows the current state and refuses to overwrite unless `--yes` is passed (interactive or `--non-interactive`). `--dry-run` on a configured host warns it would overwrite.
 - Tests: `test/hostLifecycle.test.ts` (16) + 2 new setup tests (re-run guard, --yes flag). Full suite 1227/1227 green.
 
-### M6 — Release hardening — ✅ done
+### M6 — Release hardening — ⚠️ implemented, gate open (#646, #649 §4–5)
 
 - `bats` test suite for `install.sh`.
 - CI matrix on every PR touching the installer or `mercury host` subcommands, including the `MERCURY_*`-name-vs-`docs/configuration.md` check.
