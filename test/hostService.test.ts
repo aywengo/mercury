@@ -179,20 +179,28 @@ esac
   try {
     // installService is called directly with platform='darwin' — the CLI dispatch passes
     // process.platform, so the in-process call is the unit boundary that owns the choreography.
-    // First install: nothing loaded -> no bootout, straight bootstrap.
+    // First install: nothing loaded -> no bootout, straight bootstrap. The EXACT call
+    // order is pinned (Copilot review on #657): print -> bootstrap, nothing else.
     let code = installService('darwin', io, env as NodeJS.ProcessEnv, false);
     assert.equal(code, 0, 'first install exits 0');
-    let log = readFileSync(join(dir, 'launchctl.log'), 'utf8');
-    assert.ok(log.includes('print gui/'), 'the loaded state is checked first');
-    assert.ok(!log.includes('bootout'), 'no bootout when not loaded');
-    assert.ok(log.includes('bootstrap gui/'), 'bootstrap loads the agent');
+    const firstCalls = readFileSync(join(dir, 'launchctl.log'), 'utf8').trim().split('\n');
+    assert.deepEqual(
+      firstCalls.map((l) => l.split(' ')[0]),
+      ['print', 'bootstrap'],
+      'first install: print (loaded state) then bootstrap, in that order, nothing else',
+    );
+    assert.ok(firstCalls[0]!.includes('print gui/'), 'print targets the gui domain label');
+    assert.ok(firstCalls[1]!.startsWith('bootstrap gui/'), 'bootstrap loads the agent');
     // Second install with the agent "loaded": print ok -> bootout -> bootstrap. Exit 0 (the #650 bug exited 1).
     process.env.LAUNCHCTL_LOADED = '1';
     code = installService('darwin', io, env as NodeJS.ProcessEnv, false);
     assert.equal(code, 0, `re-run must be idempotent (the #650 bug exited 1 here)`);
-    log = readFileSync(join(dir, 'launchctl.log'), 'utf8');
-    assert.ok(log.includes('bootout gui/'), 'bootout runs when the agent is loaded');
-    assert.ok(log.includes('bootstrap gui/'), 'bootstrap follows the bootout');
+    const secondCalls = readFileSync(join(dir, 'launchctl.log'), 'utf8').trim().split('\n').slice(firstCalls.length);
+    assert.deepEqual(
+      secondCalls.map((l) => l.split(' ')[0]),
+      ['print', 'bootout', 'bootstrap'],
+      're-run: print -> bootout -> bootstrap, in that order, nothing else',
+    );
     // And the plist was (re)written in the (temp) home.
     assert.ok(existsSync(join(home, 'Library', 'LaunchAgents', 'com.mercury.host.plist')));
   } finally {
