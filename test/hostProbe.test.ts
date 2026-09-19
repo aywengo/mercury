@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmodSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
@@ -32,7 +32,7 @@ function spec(over: Partial<HarnessSpec>): HarnessSpec {
     cmd: 'definitely-not-installed-xyz',
     minVersion: '1.0.0',
     configPath: '/nonexistent/config',
-    auth: () => false,
+    auth: () => 'no',
     ...over,
   };
 }
@@ -93,9 +93,9 @@ test('probeHarness: no declared floor means unknown, not ok', async () => {
 test('probeHarness: auth reflects the config signal', async () => {
   const dir = tempDir('probe-auth-');
   const bin = fakeBinary(dir, '1.2.3');
-  const r = await probeHarness(spec({ cmd: bin, auth: () => true }));
+  const r = await probeHarness(spec({ cmd: bin, auth: () => 'yes' }));
   assert.equal(r.auth, 'logged-in');
-  const r2 = await probeHarness(spec({ cmd: bin, auth: () => false }));
+  const r2 = await probeHarness(spec({ cmd: bin, auth: () => 'no' }));
   assert.equal(r2.auth, 'not-logged-in');
 });
 

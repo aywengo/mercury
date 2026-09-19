@@ -22,6 +22,9 @@
 #   --non-interactive  no prompts; answers come from env/flags
 
 set -u
+# A curl | bash failure inside a pipe must not read as success downstream (issue #650).
+# bash 3.0+ supports pipefail, so macOS's /bin/bash is covered.
+set -o pipefail
 
 # ---------------------------------------------------------------------------
 # Logging

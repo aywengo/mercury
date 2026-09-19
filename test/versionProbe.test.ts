@@ -52,6 +52,7 @@ test('a missing binary reports command-not-found and never throws', async () => 
   const info = await probeVersion({ cmd: join(dir, 'definitely-not-here') });
   assert.equal(info.version, null);
   assert.match(info.error ?? '', /command not found/);
+  assert.equal(info.code, 'ENOENT', 'machine-readable code, not just message wording (#650)');
 });
 
 test('a hanging probe is bounded and reports a timeout', async () => {
@@ -60,6 +61,7 @@ test('a hanging probe is bounded and reports a timeout', async () => {
   const elapsed = Date.now() - started;
   assert.equal(info.version, null);
   assert.match(info.error ?? '', /timed out/);
+  assert.equal(info.code, 'TIMEOUT', 'machine-readable code, not just message wording (#650)');
   // Generous: the point is that it returned at all rather than waiting for the 30s sleep.
   assert.ok(elapsed < 8000, `probe took ${elapsed}ms; the bound did not hold`);
 });
@@ -68,6 +70,7 @@ test('unparsable output keeps the raw string as evidence', async () => {
   const info = await probeVersion({ cmd: noVersion });
   assert.equal(info.version, null);
   assert.match(info.error ?? '', /unparsable/);
+  assert.equal(info.code, 'UNPARSABLE', 'machine-readable code, not just message wording (#650)');
   // When a version is reported wrong, the raw output is the only evidence of why.
   assert.match(info.raw ?? '', /usage: thing/);
 });

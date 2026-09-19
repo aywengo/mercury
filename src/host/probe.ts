@@ -44,8 +44,10 @@ export interface HarnessSpec {
   minVersion: string | undefined;
   /** Known config file/dir, for the wizard's "where is it configured" column. */
   configPath: string;
-  /** Best-effort auth signal: returns true when the harness appears logged in. */
-  auth: () => boolean;
+  /** Best-effort auth signal: 'yes' when a real credential file exists, 'no' when the
+   *  harness is known to be logged out, 'unknown' when the platform cannot tell
+   *  cheaply (issue #650: a false positive misreads as logged-in). */
+  auth: () => 'yes' | 'no' | 'unknown';
 }
 
 export interface HarnessProbeResult {
@@ -76,7 +78,7 @@ export function harnessSpecs(env: NodeJS.ProcessEnv = process.env): HarnessSpec[
       cmd: env.MERCURY_PRIMEAGENT_CMD ?? 'prime-agent',
       minVersion: new PrimeAgentAdapter('prime-agent').capabilities.minVersion,
       configPath: join(home, '.prime', 'agent'),
-      auth: () => existsSync(join(home, '.prime', 'agent', 'auth.json')),
+      auth: () => (existsSync(join(home, '.prime', 'agent', 'auth.json')) ? 'yes' : 'no'),
     },
     {
       id: 'hermes',
@@ -86,13 +88,13 @@ export function harnessSpecs(env: NodeJS.ProcessEnv = process.env): HarnessSpec[
       configPath: join(home, '.hermes', 'config.yaml'),
       auth: () => {
         const p = join(home, '.hermes', 'config.yaml');
-        if (!existsSync(p)) return false;
+        if (!existsSync(p)) return 'no';
         try {
           // The exact YAML key `api_key:` — NOT `api_key_file:`/`api_key_path:`, which
           // would be a false positive for "logged in" (review #631).
-          return readFileSync(p, 'utf8').split('\n').some((l) => /^api_key\s*:/.test(l.trim()));
+          return readFileSync(p, 'utf8').split('\n').some((l) => /^api_key\s*:/.test(l.trim())) ? 'yes' : 'no';
         } catch {
-          return false;
+          return 'no';
         }
       },
     },
@@ -102,7 +104,11 @@ export function harnessSpecs(env: NodeJS.ProcessEnv = process.env): HarnessSpec[
       cmd: env.MERCURY_CLAUDE_CMD ?? 'claude',
       minVersion: new ClaudeCodeAdapter().capabilities.minVersion,
       configPath: join(home, '.claude.json'),
-      auth: () => existsSync(join(home, '.claude.json')),
+      // ~/.claude.json is created on first launch whether or not the user is logged
+      // in (issue #650), so it is not an auth signal. The credential file exists only
+      // after a real login on Linux; the macOS copy lives in the Keychain, which is
+      // not cheaply checkable — honest `unknown` beats a false positive.
+      auth: () => (existsSync(join(home, '.claude', '.credentials.json')) ? 'yes' : 'unknown'),
     },
   ];
 }
@@ -124,12 +130,14 @@ export async function probeHarness(spec: HarnessSpec): Promise<HarnessProbeResul
 
   // Auth comes from config-file signals and is reportable even when the binary is
   // missing or unparsable — the wizard wants "not logged in" next to "missing".
-  base.auth = spec.auth() ? 'logged-in' : 'not-logged-in';
+  const authSignal = spec.auth();
+  base.auth = authSignal === 'yes' ? 'logged-in' : authSignal === 'no' ? 'not-logged-in' : 'unknown';
 
   const info = await probeVersion({ cmd: spec.cmd });
   if (info.error) {
     base.error = info.error;
-    base.status = info.error.includes('command not found') ? 'missing' : 'unknown';
+    // Branch on the machine-readable code, not the message wording (issue #650).
+    base.status = info.code === 'ENOENT' ? 'missing' : 'unknown';
     return base;
   }
   base.version = info.version;

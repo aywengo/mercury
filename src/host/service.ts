@@ -6,9 +6,10 @@
  *   - macOS: launchd agent at `~/Library/LaunchAgents/com.mercury.host.plist`, which
  *     runs a wrapper script that sources `mercury.env` (launchd has no EnvironmentFile)
  *     and execs `mercury server` with the embedded worker.
- *   - Linux: systemd user unit at `~/.config/systemd/user/mercury.service` with
- *     `EnvironmentFile=%h/.config/mercury/mercury.env`, enabled with
- *     `systemctl --user enable --now` (plus a `loginctl enable-linger` hint).
+ *   - Linux: systemd user unit at `~/.config/systemd/user/mercury.service` with an
+ *     ABSOLUTE `EnvironmentFile=` path (safer than `%h/...` given `XDG_CONFIG_HOME`
+ *     handling — the docstring and systemdUnit() must agree, issue #650), enabled
+ *     with `systemctl --user enable --now` (plus a `loginctl enable-linger` hint).
  *
  * Both load `mercury.env` the same way the production units in `deploy/` do
  * (EnvironmentFile), and both run the installed `mercury` binary, never a bare name
@@ -24,7 +25,7 @@
  *    stops + disables + removes. `status` reports what exists.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -191,10 +192,30 @@ export function installService(
     mkdirSync(join(homedir(), 'Library', 'LaunchAgents'), { recursive: true });
     writeFileSync(plist, launchdPlist(wrapper, stateDir), { mode: 0o644 });
     try {
-      execFileSync('launchctl', ['load', plist], { timeout: 10000 });
+      // Idempotent load (issue #650): `launchctl load` returns non-zero when the agent
+      // is already loaded, which made a plain re-run exit 1. The modern API
+      // (bootstrap/bootout, macOS 10.11+) is made idempotent by checking the loaded
+      // state first: bootout only when print shows the label, then bootstrap fresh.
+      const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+      if (uid === null) throw new Error('cannot determine uid for launchctl gui domain');
+      const target = `gui/${uid}/${LAUNCHD_LABEL}`;
+      let loaded = true;
+      try {
+        execFileSync('launchctl', ['print', target], { timeout: 10000, stdio: 'ignore' });
+      } catch {
+        loaded = false;
+      }
+      if (loaded) {
+        try {
+          execFileSync('launchctl', ['bootout', target], { timeout: 10000, stdio: 'ignore' });
+        } catch {
+          // bootout raced with an unload; bootstrap below decides success
+        }
+      }
+      execFileSync('launchctl', ['bootstrap', `gui/${uid}`, plist], { timeout: 10000 });
       io.out(`Installed and loaded ${LAUNCHD_LABEL} (${plist}).\n`);
     } catch (e) {
-      io.err(`host service: launchctl load failed: ${(e as Error).message}\n`);
+      io.err(`host service: launchctl bootstrap failed: ${(e as Error).message}\n`);
       return 1;
     }
     return 0;
@@ -273,16 +294,14 @@ export function uninstallService(
         // not loaded is fine
       }
       try {
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const _ = plist;
-        execFileSync('rm', [plist], { timeout: 5000 });
+        unlinkSync(plist);
       } catch {
         // ignore
       }
     }
     if (existsSync(wrapper)) {
       try {
-        execFileSync('rm', [wrapper], { timeout: 5000 });
+        unlinkSync(wrapper);
       } catch {
         // ignore
       }
@@ -298,7 +317,7 @@ export function uninstallService(
       // not enabled is fine
     }
     try {
-      execFileSync('rm', [unitPath], { timeout: 5000 });
+      unlinkSync(unitPath);
     } catch {
       // ignore
     }
