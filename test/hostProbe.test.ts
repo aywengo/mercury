@@ -9,11 +9,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmodSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
-import { harnessSpecs, probeHarness, runHostProbe, type HarnessSpec } from '../src/host/probe.ts';
+import { harnessSpecs, probeHarness, type HarnessSpec } from '../src/host/probe.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -32,7 +32,7 @@ function spec(over: Partial<HarnessSpec>): HarnessSpec {
     cmd: 'definitely-not-installed-xyz',
     minVersion: '1.0.0',
     configPath: '/nonexistent/config',
-    auth: () => false,
+    auth: () => 'no',
     ...over,
   };
 }
@@ -93,10 +93,63 @@ test('probeHarness: no declared floor means unknown, not ok', async () => {
 test('probeHarness: auth reflects the config signal', async () => {
   const dir = tempDir('probe-auth-');
   const bin = fakeBinary(dir, '1.2.3');
-  const r = await probeHarness(spec({ cmd: bin, auth: () => true }));
+  const r = await probeHarness(spec({ cmd: bin, auth: () => 'yes' }));
   assert.equal(r.auth, 'logged-in');
-  const r2 = await probeHarness(spec({ cmd: bin, auth: () => false }));
+  const r2 = await probeHarness(spec({ cmd: bin, auth: () => 'no' }));
   assert.equal(r2.auth, 'not-logged-in');
+  const r3 = await probeHarness(spec({ cmd: bin, auth: () => 'unknown' }));
+  assert.equal(r3.auth, 'unknown', 'the platform could not tell; unknown is honest (#650)');
+});
+
+test('claude auth: the REAL harnessSpecs signal — ~/.claude.json is NOT a login; the credential file is (#650)', async () => {
+  // os.homedir() honors $HOME, so a temp HOME scopes the production auth closure. The
+  // platform branch is exercised by stubbing process.platform around the real call.
+  const savedHome = process.env.HOME;
+  const savedPlatform = process.platform;
+  const home = tempDir('probe-claude-home-');
+  mkdirSync(join(home, '.claude'), { recursive: true });
+  writeFileSync(join(home, '.claude.json'), '{}');
+  const credsFile = join(home, '.claude', '.credentials.json');
+  const realAuth = (platform: NodeJS.Platform) => {
+    Object.defineProperty(process, 'platform', { value: platform });
+    process.env.HOME = home;
+    try {
+      return harnessSpecs({} as NodeJS.ProcessEnv).find((s) => s.id === 'claude')!.auth();
+    } finally {
+      Object.defineProperty(process, 'platform', { value: savedPlatform });
+      if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    }
+  };
+  // The raw signal vocabulary is 'yes'|'no'|'unknown'; probeHarness maps it to
+  // logged-in/not-logged-in/unknown. Both layers are asserted.
+  const mapped = async (platform: NodeJS.Platform) => {
+    Object.defineProperty(process, 'platform', { value: platform });
+    process.env.HOME = home;
+    try {
+      const spec = harnessSpecs({} as NodeJS.ProcessEnv).find((s) => s.id === 'claude')!;
+      return (await probeHarness(spec)).auth;
+    } finally {
+      Object.defineProperty(process, 'platform', { value: savedPlatform });
+      if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    }
+  };
+  try {
+    // Bare ~/.claude.json, no credentials: Linux reads logged-out, macOS stays unknown.
+    assert.equal(realAuth('linux'), 'no', 'the raw signal says no credentials on linux');
+    assert.equal(realAuth('darwin'), 'unknown', 'Keychain-backed: unknown when the file is absent');
+    const linuxMapped = await mapped('linux');
+    assert.equal(linuxMapped, 'not-logged-in', 'bare ~/.claude.json must not read as logged-in');
+    const macMapped = await mapped('darwin');
+    assert.equal(macMapped, 'unknown');
+    // The real credential file IS the signal on both platforms.
+    writeFileSync(credsFile, '{"claudeAiOauth":{"accessToken":"x"}}');
+    assert.equal(realAuth('linux'), 'yes');
+    assert.equal(realAuth('darwin'), 'yes');
+    assert.equal(await mapped('linux'), 'logged-in');
+    assert.equal(await mapped('darwin'), 'logged-in');
+  } finally {
+    rmSync(credsFile, { force: true });
+  }
 });
 
 // ---------- the CLI surface ----------

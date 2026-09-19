@@ -468,8 +468,13 @@ export interface AgentCapabilities {
   static?: AgentStaticCapabilities;
 }
 
+/** Machine-readable probe failure class (issue #650): callers branch on this instead of
+ *  string-matching the human `error` message. */
+export type VersionProbeCode = 'ENOENT' | 'TIMEOUT' | 'UNPARSABLE' | 'FAILED';
+
 /** Result of asking a harness binary which version it is. `raw` is kept because when
  *  a parse is wrong the raw string is the only evidence of why (docs/goals.md 13.3). */
+
 export interface AgentVersionInfo {
   version: string | null;
   raw: string | null;
@@ -477,6 +482,8 @@ export interface AgentVersionInfo {
    *  output). Reported to the operator as "cannot tell", which is deliberately not the
    *  same as "too old" -- one means upgrade, the other means fix the probe. */
   error?: string;
+  /** Why the probe produced nothing usable. Present whenever `error` is set. */
+  code?: VersionProbeCode;
 }
 
 /** Resolved goal support for one agent, after comparing the matrix against the

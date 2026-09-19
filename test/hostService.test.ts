@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
@@ -21,6 +21,7 @@ import {
   launchdWrapperPath,
   envFilePath,
   parseServiceArgs,
+  installService,
   resolveMercuryBin,
   SERVICE_NAME,
   LAUNCHD_LABEL,
@@ -135,6 +136,79 @@ test('host service status rejects extra flags', async () => {
   const { code, stderr } = await cli(['host', 'service', 'status', '--dry-run']);
   assert.equal(code, 1);
   assert.ok(stderr.includes('unknown flag'));
+});
+
+test('macOS load is idempotent: print -> bootout (if loaded) -> bootstrap, exit 0 on re-run (#650)', async () => {
+  const dir = tempDir('service-launchctl-');
+  // A fake launchctl that records its argv and mimics the real exit codes:
+  //   print  -> exit 0 when the agent is loaded (env says so), non-zero otherwise
+  //   bootout/bootstrap -> exit 0
+  const bin = join(dir, 'fakebin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'launchctl'), `#!/bin/sh
+printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
+case "$1" in
+  print) [ "$LAUNCHCTL_LOADED" = "1" ] && exit 0 || exit 1 ;;
+  bootout|bootstrap) exit 0 ;;
+  *) exit 0 ;;
+esac
+`);
+  chmodSync(join(bin, 'launchctl'), 0o755);
+  // A fake `which` so resolveMercuryBin succeeds without the real toolchain.
+  writeFileSync(join(bin, 'which'), '#!/bin/sh\necho /fake/mercury\n');
+  chmodSync(join(bin, 'which'), 0o755);
+  const home = join(dir, 'home');
+  mkdirSync(join(home, '.config', 'mercury'), { recursive: true });
+  writeFileSync(join(home, '.config', 'mercury', 'mercury.env'), 'MERCURY_PORT=3999\n');
+  const io = { out: () => {}, err: () => {} };
+  const env = {
+    XDG_CONFIG_HOME: join(home, '.config'),
+    XDG_STATE_HOME: join(dir, 'state'),
+    HOME: home,
+    PATH: `${bin}:${process.env.PATH ?? ''}`,
+    LAUNCHCTL_LOG: join(dir, 'launchctl.log'),
+  };
+  const savedPath = process.env.PATH;
+  process.env.PATH = env.PATH;
+  const savedLog = process.env.LAUNCHCTL_LOG;
+  process.env.LAUNCHCTL_LOG = env.LAUNCHCTL_LOG;
+  // launchdPlistPath() reads os.homedir() from the environment at call time — point it
+  // at the temp home so the test never writes the real ~/Library.
+  const savedHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    // installService is called directly with platform='darwin' — the CLI dispatch passes
+    // process.platform, so the in-process call is the unit boundary that owns the choreography.
+    // First install: nothing loaded -> no bootout, straight bootstrap. The EXACT call
+    // order is pinned (Copilot review on #657): print -> bootstrap, nothing else.
+    let code = installService('darwin', io, env as NodeJS.ProcessEnv, false);
+    assert.equal(code, 0, 'first install exits 0');
+    const firstCalls = readFileSync(join(dir, 'launchctl.log'), 'utf8').trim().split('\n');
+    assert.deepEqual(
+      firstCalls.map((l) => l.split(' ')[0]),
+      ['print', 'bootstrap'],
+      'first install: print (loaded state) then bootstrap, in that order, nothing else',
+    );
+    assert.ok(firstCalls[0]!.includes('print gui/'), 'print targets the gui domain label');
+    assert.ok(firstCalls[1]!.startsWith('bootstrap gui/'), 'bootstrap loads the agent');
+    // Second install with the agent "loaded": print ok -> bootout -> bootstrap. Exit 0 (the #650 bug exited 1).
+    process.env.LAUNCHCTL_LOADED = '1';
+    code = installService('darwin', io, env as NodeJS.ProcessEnv, false);
+    assert.equal(code, 0, `re-run must be idempotent (the #650 bug exited 1 here)`);
+    const secondCalls = readFileSync(join(dir, 'launchctl.log'), 'utf8').trim().split('\n').slice(firstCalls.length);
+    assert.deepEqual(
+      secondCalls.map((l) => l.split(' ')[0]),
+      ['print', 'bootout', 'bootstrap'],
+      're-run: print -> bootout -> bootstrap, in that order, nothing else',
+    );
+    // And the plist was (re)written in the (temp) home.
+    assert.ok(existsSync(join(home, 'Library', 'LaunchAgents', 'com.mercury.host.plist')));
+  } finally {
+    if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+    if (savedLog === undefined) delete process.env.LAUNCHCTL_LOG; else process.env.LAUNCHCTL_LOG = savedLog;
+    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    delete process.env.LAUNCHCTL_LOADED;
+  }
 });
 
 test('host service status reports absent when nothing is installed', async () => {

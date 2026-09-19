@@ -15,7 +15,7 @@
 
 import { execFile } from 'node:child_process';
 import { numericCore } from '../domain/goalSupport.ts';
-import type { AgentVersionInfo } from '../domain/types.ts';
+import type { AgentVersionInfo, VersionProbeCode } from '../domain/types.ts';
 
 export interface VersionProbe {
   /** Resolved command path, NOT a bare name on PATH. Two installs of the same harness
@@ -42,7 +42,7 @@ export function defaultVersionParse(raw: string): string | null {
 export async function probeVersion(p: VersionProbe): Promise<AgentVersionInfo> {
   const args = p.args ?? ['--version'];
   const timeoutMs = p.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const raw = await new Promise<{ out: string | null; error?: string }>((resolve) => {
+  const raw = await new Promise<{ out: string | null; code?: VersionProbeCode; error?: string }>((resolve) => {
     execFile(p.cmd, args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024 },
       (err, stdout, stderr) => {
         // A non-zero exit is not automatically a failure: several CLIs print their
@@ -59,12 +59,13 @@ export async function probeVersion(p: VersionProbe): Promise<AgentVersionInfo> {
         // version of this check failed its own test.
         const timedOut = failure !== null && (failure.killed === true || typeof failure.signal === 'string');
         if (timedOut) {
-          resolve({ out: null, error: `probe timed out after ${timeoutMs}ms: ${p.cmd} ${args.join(' ')}` });
+          resolve({ out: null, code: 'TIMEOUT', error: `probe timed out after ${timeoutMs}ms: ${p.cmd} ${args.join(' ')}` });
           return;
         }
         if (failure && combined === '') {
           resolve({
             out: null,
+            code: failure.code === 'ENOENT' ? 'ENOENT' : 'FAILED',
             error: failure.code === 'ENOENT' ? `command not found: ${p.cmd}` : `probe failed: ${failure.message}`,
           });
           return;
@@ -73,8 +74,8 @@ export async function probeVersion(p: VersionProbe): Promise<AgentVersionInfo> {
       });
   });
 
-  if (raw.out === null) return { version: null, raw: null, error: raw.error };
+  if (raw.out === null) return { version: null, raw: null, code: raw.code, error: raw.error };
   const version = (p.parse ?? defaultVersionParse)(raw.out);
-  if (!version) return { version: null, raw: raw.out, error: `unparsable version output from ${p.cmd}` };
+  if (!version) return { version: null, raw: raw.out, code: 'UNPARSABLE', error: `unparsable version output from ${p.cmd}` };
   return { version, raw: raw.out.split('\n')[0]?.slice(0, 200) ?? '' };
 }
