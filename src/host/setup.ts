@@ -40,6 +40,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readF
 import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
+import { suggestionFor } from '../adapters/configSchema.ts';
 import { loadEnvFile } from './doctor.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
 
@@ -295,7 +296,24 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
   };
 }
 
-/** Read answers from a JSON file. Unspecified fields fall back to env-derived defaults. */
+/** The keys an answers file may set (issue #649 §2, decision 10). */
+const ANSWERS_FILE_KEYS = [
+  'hostName',
+  'dataDir',
+  'workspaceDir',
+  'retentionDays',
+  'adminToken',
+  'atlasEnabled',
+  'atlasUrl',
+  'atlasToken',
+  'atlasProject',
+  'harnesses',
+] as const satisfies readonly (keyof HostSetupAnswers)[];
+
+/** Read answers from a JSON file. Unknown keys are REJECTED (issue #649 §2, decision 10):
+ *  a typo (`atlasUlr`, `harness`, `retention_days`) must not silently fall back to the
+ *  default — Atlas silently off or retention silently reset to 7 days is exactly the
+ *  failure this refuses to cause. */
 export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.env): HostSetupAnswers {
   const raw = readFileSync(path, 'utf8');
   let parsed: Partial<HostSetupAnswers>;
@@ -305,6 +323,26 @@ export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.e
     // JSON.parse's message quotes a snippet of the input, which can carry secret values
     // from the file (#648 review). Report the problem, never the content.
     throw new Error('answers file is not valid JSON');
+  }
+  // A non-object file must be rejected, not defaulted (Copilot #659): `null` would throw
+  // from Object.keys, and a scalar (`true`, `1`, `"x"`) has no keys, so it would be
+  // accepted and silently produce an all-defaults mercury.env. An array is likewise not
+  // an answers mapping.
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('answers file must be a JSON object with answers-file keys');
+  }
+  const unknown = Object.keys(parsed as Record<string, unknown>).filter(
+    (k) => !(ANSWERS_FILE_KEYS as readonly string[]).includes(k),
+  );
+  if (unknown.length > 0) {
+    const described = unknown.map((k) => {
+      const s = suggestionFor(k, ANSWERS_FILE_KEYS);
+      return s ? `${k} (did you mean '${s}'?)` : k;
+    });
+    throw new Error(
+      `answers file has unknown ${unknown.length === 1 ? 'key' : 'keys'}: ${described.join(', ')}. ` +
+        `Known keys: ${ANSWERS_FILE_KEYS.join(', ')}.`,
+    );
   }
   const base = defaultAnswers(env);
   return {

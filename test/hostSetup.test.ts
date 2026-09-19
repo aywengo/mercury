@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
@@ -565,6 +565,80 @@ test('a missing answers file exits cleanly with a message', async () => {
   });
   assert.equal(code, 1);
   assert.ok(stderr.includes('cannot read answers file'));
+});
+
+test('answers file: an unknown key is rejected with a suggestion, nothing written (#649 §2)', async () => {
+  const dir = tempDir('setup-answers-strict-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(cfg, { recursive: true });
+  // `harness` is the issue's own example typo (distance 1 from `harnesses`).
+  writeFileSync(join(dir, 'answers.json'), JSON.stringify({ harness: ['primeagent'], hostName: 'h' }));
+  const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(code, 1);
+  assert.ok(stderr.includes('unknown key'), stderr);
+  assert.ok(stderr.includes("harness (did you mean 'harnesses'?)"), `suggestion missing: ${stderr}`);
+  assert.ok(!existsSync(join(cfg, 'mercury', 'mercury.env')), 'nothing is written when the file has a typo');
+});
+
+test('answers file: a near-miss key with no close match is rejected without a suggestion (#649 §2)', async () => {
+  const dir = tempDir('setup-answers-strict2-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(cfg, { recursive: true });
+  writeFileSync(join(dir, 'answers.json'), JSON.stringify({ totallyUnrelatedKeyName: 'x' }));
+  const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(code, 1);
+  assert.ok(stderr.includes('totallyUnrelatedKeyName'), stderr);
+  assert.ok(!stderr.includes('did you mean'), 'no dishonest suggestion for a far-off key');
+  assert.ok(!existsSync(join(cfg, 'mercury', 'mercury.env')));
+});
+
+test('answers file: non-object JSON (null, scalar, array) is rejected, nothing written (#649 §2)', async () => {
+  for (const content of ['null', 'true', '1', '"x"', '[]']) {
+    const dir = tempDir('setup-answers-nonobj-');
+    const cfg = join(dir, 'cfg');
+    mkdirSync(cfg, { recursive: true });
+    writeFileSync(join(dir, 'answers.json'), content);
+    const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+      ...probeStubEnv(),
+      XDG_CONFIG_HOME: cfg,
+    });
+    assert.equal(code, 1, `content ${content} must be rejected`);
+    assert.ok(stderr.includes('must be a JSON object'), `message for ${content}: ${stderr}`);
+    assert.ok(!existsSync(join(cfg, 'mercury', 'mercury.env')), `nothing written for ${content}`);
+  }
+});
+
+test('answers file: every known key is accepted (#649 §2)', async () => {
+  const dir = tempDir('setup-answers-ok-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(cfg, { recursive: true });
+  const answers = {
+    hostName: 'host-answers',
+    dataDir: join(dir, 'data'),
+    workspaceDir: join(dir, 'ws'),
+    retentionDays: 3,
+    adminToken: 'a'.repeat(64),
+    atlasEnabled: false,
+    atlasUrl: '',
+    atlasToken: '',
+    atlasProject: '',
+    harnesses: ['primeagent'],
+  };
+  writeFileSync(join(dir, 'answers.json'), JSON.stringify(answers));
+  const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(code, 0, stderr);
+  const envFile = readFileSync(join(cfg, 'mercury', 'mercury.env'), 'utf8');
+  assert.ok(envFile.includes('MERCURY_ATLAS_HOST_ID=host-answers'));
+  assert.ok(envFile.includes('MERCURY_WORKSPACE_RETENTION_MS=259200000'), '3 days in ms');
 });
 
 test('re-run on a configured host refuses to overwrite without --yes (M5 gate)', async () => {

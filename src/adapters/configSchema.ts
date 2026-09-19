@@ -143,7 +143,9 @@ export interface UnknownKey {
 /** How different a key may be from a known one and still be called a likely typo. */
 const SUGGESTION_MAX_DISTANCE = 3;
 
-function suggestionFor(key: string, known: readonly string[]): string | undefined {
+/** Nearest known key for a likely typo, or undefined when nothing is close enough to
+ *  trust. Shared with the host answers-file checker (#649 §2): one policy, one wording. */
+export function suggestionFor(key: string, known: readonly string[]): string | undefined {
   let best: string | undefined;
   let bestDistance = Infinity;
   for (const candidate of known) {
