@@ -26,8 +26,11 @@
  * 3. **Secrets are never printed in output.** They are read from an env var or an
  *    answers file (or an interactive prompt), and the redacted summary shows only their
  *    presence and length. Since #649 §1 (decision 6) secret prompts (admin/API and Atlas
- *    tokens) use a muted-echo readline mode: the typed characters are not written to the
- *    terminal, and an existing token's default is shown as `<set, N chars>`, never echoed.
+ *    tokens) use a muted-echo readline mode: an existing token's default is shown as
+ *    `<set, N chars>` (never echoed), and typed characters are never written to the
+ *    terminal. The one exception is the generated admin/API token, which is printed
+ *    once in the "Register on the Fleet side" block so the operator can copy it — that
+ *    is an intentional hand-off, not prompt echo.
  */
 
 import { createInterface } from 'node:readline';
@@ -458,22 +461,28 @@ export async function runHostSetup(
     } else if (process.stdin.isTTY) {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       question = (q) => new Promise<string>((res) => rl.question(q, res));
-      // Muted echo for secrets (issue #649 §1, decision 6): while a secret question is
-      // pending, the readline output callback writes the prompt but suppresses the
-      // typed characters. Restored for normal questions.
-      const stdoutWrite = (rl as unknown as { _writeToOutput: (s: string) => void })._writeToOutput.bind(rl);
-      let mute = false;
-      (rl as unknown as { _writeToOutput: (s: string) => void })._writeToOutput = (s: string) => {
-        // While muted: print only the prompt itself (the string ending in '? ' or the
-        // question text), never the typed characters or the echoed newline.
-        if (mute && !s.startsWith(rl.getPrompt?.() ?? '')) return;
+      // Muted echo for secrets (issue #649 §1, decision 6). readline redraws the line as
+      // "<prompt><typed input>" on keypresses, so a startsWith(prompt) filter would leak
+      // the secret through those redraws. While a secret question is pending, the
+      // output callback writes ONLY the exact prompt string captured when the question
+      // started — every other chunk (typed characters, redraw suffixes, control
+      // sequences) is dropped. Normal questions restore the original callback.
+      const rlAny = rl as unknown as { _writeToOutput: (s: string) => void };
+      const stdoutWrite = rlAny._writeToOutput.bind(rl);
+      let mutedPrompt: string | null = null;
+      rlAny._writeToOutput = (s: string) => {
+        if (mutedPrompt !== null) {
+          // Muted: the ONLY thing allowed through is the exact prompt itself.
+          if (s === mutedPrompt) stdoutWrite(s);
+          return;
+        }
         stdoutWrite(s);
       };
       const secretQuestion = (sq: string) => {
-        mute = true;
+        mutedPrompt = sq;
         return new Promise<string>((res) =>
           rl.question(sq, (answer) => {
-            mute = false;
+            mutedPrompt = null;
             stdoutWrite('\n');
             res(answer);
           }),

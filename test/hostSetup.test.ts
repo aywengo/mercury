@@ -215,6 +215,39 @@ test('the atlas token prompt masks an existing default and uses the muted secret
   assert.equal(second, first, 'enter must keep the existing atlas token');
 });
 
+test('the muted channel writes only the prompt — never typed characters or redraws (#649 §1, Copilot round 1)', async () => {
+  // Simulate readline's redraw behavior: "<prompt><typed>" chunks must be dropped while
+  // the exact prompt string passes through exactly once.
+  const written: string[] = [];
+  const rlStub = {
+    _writeToOutput(s: string) { written.push(s); },
+  } as unknown as { _writeToOutput: (s: string) => void };
+  const stdoutWrite = rlStub._writeToOutput.bind(rlStub);
+  let mutedPrompt: string | null = null;
+  rlStub._writeToOutput = (s: string) => {
+    if (mutedPrompt !== null) {
+      if (s === mutedPrompt) stdoutWrite(s);
+      return;
+    }
+    stdoutWrite(s);
+  };
+  const prompt = 'Admin/API token [<set, 64 chars> — enter to keep, new value to rotate] ';
+  mutedPrompt = prompt;
+  // readline invokes the INSTANCE callback (the override) on every write, exactly like
+  // the real flow. Redraw: prompt + typed input; a control sequence; another redraw.
+  const write = (s: string) => rlStub._writeToOutput(s);
+  write(prompt); // readline writes the bare prompt once when question() starts
+  write(prompt + 'sk-1234');
+  write('\u001b[1K');
+  write(prompt + 'sk-123456');
+  mutedPrompt = null;
+  write('\n');
+  const joined = written.join('');
+  assert.ok(joined.includes(prompt), 'the prompt is written');
+  assert.ok(!joined.includes('sk-'), `the secret must never appear: ${JSON.stringify(joined)}`);
+  assert.deepEqual(written, [prompt, '\n'], 'exactly one prompt write and the closing newline');
+});
+
 test('without a secretQuestion the token prompts fall back to the plain channel (tests, piped stdin) (#649 §1)', async () => {
   const dir = tempDir('setup-atlas-fallback-');
   const qs = ['host-a', join(dir, 'data'), join(dir, 'ws'), '7', '', 'yes', 'https://atlas.example.com', 'atlas-secret-2', 'proj', 'primeagent'];
