@@ -266,7 +266,10 @@ main() {
     # (a bare `exec 3</dev/tty 2>/dev/null` would leave stderr silenced for the rest
     # of the script — Copilot review on #655).
     if [ -t 0 ] || (exec 3</dev/tty) 2>/dev/null; then
-      printf "Proceed with the install of @aywengo/mercury@%s? [y/N] " "$VERSION"
+      # The prompt goes to the terminal, not stdout: a caller may have redirected
+      # stdout (tee/pipe) while the controlling tty still answers the question, and
+      # a prompt lost in a pipe reads as a hang (Copilot review on #655).
+      printf "Proceed with the install of @aywengo/mercury@%s? [y/N] " "$VERSION" > /dev/tty
       if [ -t 0 ]; then
         read -r answer
       else
