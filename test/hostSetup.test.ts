@@ -285,15 +285,16 @@ test('enabling a missing harness is rejected the same way (#647)', async () => {
 
 test('an unknown probe status enables with a warning, not a rejection (#647)', async () => {
   const dir = tempDir('setup-unknown-');
-  const out: string[] = [];
+  const err: string[] = [];
   const answersFile = join(dir, 'answers.json');
   writeFileSync(answersFile, JSON.stringify(answers({ harnesses: ['primeagent'] })));
   const code = await runHostSetup(['--non-interactive', '--yes', '--answers', answersFile], {
-    out: (s) => out.push(s), err: () => {},
+    out: () => {}, err: (s) => err.push(s),
     probe: async () => probeOf(['primeagent', 'unknown', 'unparsable version output']),
   }, { XDG_CONFIG_HOME: dir });
   assert.equal(code, 0);
-  assert.ok(out.join('').includes('warning: primeagent probe status unknown'));
+  // Warnings go to stderr (review #653): stdout stays reserved for the wizard's output.
+  assert.ok(err.join('').includes('warning: primeagent probe status unknown'));
 });
 
 test('the interactive harness prompt renders the probe checklist (#647)', async () => {
@@ -321,7 +322,7 @@ test('a failed probe degrades to no gate with a warning, not a crash (#647)', as
     probe: async () => { throw new Error('probe exploded'); },
   }, { XDG_CONFIG_HOME: dir });
   assert.equal(code, 0, 'a broken probe must not block configuration');
-  assert.ok(err.join('').includes('probe failed (probe exploded)'));
+  assert.ok(err.join('').includes('probe failed (Error: probe exploded)'));
 });
 
 // ---------- the M3 gate: interactive and answers-file agree ----------
@@ -452,6 +453,12 @@ test('defaultAnswers: harnesses filter to known ids', () => {
   assert.deepEqual(a.harnesses, ['primeagent', 'claude']);
 });
 
+test('defaultAnswers: MERCURY_HARNESSES entries are trimmed (review #653)', () => {
+  const a = defaultAnswers({ MERCURY_HARNESSES: 'primeagent, claude' } as NodeJS.ProcessEnv);
+  // ' claude' with a leading space must survive like the config parser's parseHarnesses.
+  assert.deepEqual(a.harnesses, ['primeagent', 'claude']);
+});
+
 test('retentionDays 0 is rejected, not silently defaulted', async () => {
   const dir = tempDir('setup-ret0-');
   const answersFile = join(dir, 'answers.json');
@@ -468,6 +475,9 @@ test('retentionDays 0 is rejected, not silently defaulted', async () => {
 test('a missing answers file exits cleanly with a message', async () => {
   const dir = tempDir('setup-missing-');
   const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--answers', join(dir, 'nope.json')], {
+    // Hermetic: the probe runs before the answers file is read; stub it so the test
+    // never depends on the runner's installed harnesses (review #653).
+    ...probeStubEnv(),
     XDG_CONFIG_HOME: dir,
   });
   assert.equal(code, 1);

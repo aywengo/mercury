@@ -264,7 +264,12 @@ export function existingAdminToken(env: NodeJS.ProcessEnv = process.env): string
 
 /** Default answers from the environment (non-interactive without an answers file). */
 export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupAnswers {
-  const detected = (env.MERCURY_HARNESSES ?? 'primeagent,hermes,claude').split(',').filter(Boolean);
+  // Trim entries like parseHarnesses does (review #653): 'primeagent, claude' must not
+  // silently drop 'claude' from the wizard defaults.
+  const detected = (env.MERCURY_HARNESSES ?? 'primeagent,hermes,claude')
+    .split(',')
+    .map((h) => h.trim())
+    .filter(Boolean);
   return {
     hostName: env.MERCURY_ATLAS_HOST_ID?.trim() || hostname(),
     dataDir: env.MERCURY_DB ? dirname(env.MERCURY_DB) : join(homedir(), '.local', 'state', 'mercury'),
@@ -398,7 +403,8 @@ export async function runHostSetup(
   } catch (e) {
     // The probe must not block configuration: rule 2 of the probe. Degrade to no gate
     // and say so.
-    io.err(`host setup: probe failed (${(e as Error).message}); harness status checks skipped\n`);
+    const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    io.err(`host setup: probe failed (${detail}); harness status checks skipped\n`);
     probe = new Map();
   }
 
@@ -448,7 +454,7 @@ export async function runHostSetup(
   for (const h of answers.harnesses) {
     const p = probe.get(h);
     if (p && p.status === 'unknown') {
-      io.out(`warning: ${h} probe status unknown${p.error ? ` (${p.error})` : ''}; enabling anyway\n`);
+      io.err(`warning: ${h} probe status unknown${p.error ? ` (${p.error})` : ''}; enabling anyway\n`);
     }
   }
   const errors = validateAnswers(answers, probe, opts.force);
