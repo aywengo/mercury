@@ -40,6 +40,18 @@ stub() {
   chmod +x "$STUB_BIN/$name"
 }
 
+run_under_pty() {
+  # Drive a command under a pty with the answer pre-placed on the terminal, portable
+  # across script(1) flavors: util-linux takes `-c CMD FILE` (a trailing command after
+  # the file is an argument-count error), BSD takes `FILE CMD...` and has no -c.
+  local cmd="$1"
+  if script -q -c "true" /dev/null </dev/null >/dev/null 2>&1; then
+    script -q -c "$cmd" /dev/null </dev/null
+  else
+    script -q /dev/null "$cmd" </dev/null
+  fi
+}
+
 stub_ok_prereqs() {
   # Real node/curl/git/npm would work too, but stubs keep the test hermetic and
   # fast: node reports a floor-passing version, npm records its argv and succeeds.
@@ -182,7 +194,18 @@ minimal_path() {
 
 @test "declining the prompt aborts with exit 0" {
   stub_ok_prereqs
-  run bash -c "echo n | bash '$INSTALL_SH'"
+  # The confirmation reads /dev/tty since #646 (stdin may be the script stream under
+  # curl | bash), so the decline must be driven through a pty. Without script(1) this
+  # environment cannot answer the prompt; the no-tty test below covers the failure path.
+  if ! command -v script >/dev/null 2>&1; then
+    skip "script(1) not available"
+  fi
+  # script(1) differs across platforms (BSD: `script file [command...]`; util-linux:
+  # at most one command argument), so the driver is a single wrapper script that
+  # places the answer on the pty BEFORE the installer's prompt reads it.
+  printf '#!/bin/sh\nprintf n > /dev/tty\nexec bash "$INSTALL_SH" --version 9.9.9\n' > "$TEST_DIR/decline-driver.sh"
+  chmod +x "$TEST_DIR/decline-driver.sh"
+  run run_under_pty "$TEST_DIR/decline-driver.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Aborted."* ]]
   [ ! -f "$TEST_DIR/npm-calls.txt" ]
@@ -202,6 +225,53 @@ minimal_path() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"Mercury host installed"* ]]
 }
+# --- confirmation input source (#646) ---------------------------------------
+
+@test "piped script (curl | bash style): --dry-run runs untouched end to end" {
+  stub_ok_prereqs
+  run bash -c "cat '$INSTALL_SH' | bash -s -- --dry-run"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Nothing was touched."* ]]
+}
+
+@test "piped script without a terminal: fails loudly instead of eating script lines (#646)" {
+  # CI has no controlling tty; skip where one exists (the script would correctly
+  # prompt on /dev/tty there and the test cannot drive it).
+  if [ -r /dev/tty ]; then
+    skip "needs an environment without a controlling terminal (CI)"
+  fi
+  stub_ok_prereqs
+  run bash -c "cat '$INSTALL_SH' | bash -s --"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no terminal to confirm the install"* ]]
+  # The failure is logged, not a misread script line.
+  grep -q '"no tty for confirmation; --yes required"' "$XDG_STATE_HOME/mercury/install.log"
+}
+
+@test "piped script with a pty: the prompt reads /dev/tty, not the script stream (#646)" {
+  # script(1) allocates a pty; 'n' is placed on it before the script's read, so the
+  # prompt consumes 'n' from the TERMINAL — exactly the curl | bash interaction —
+  # while the script text flows through the pipe. Pre-fix, `read` ate the line after
+  # it and the script skipped or died mid-way; the last logged event proves the script
+  # executed to the clean abort (no skipped code).
+  if ! command -v script >/dev/null 2>&1; then
+    skip "script(1) not available"
+  fi
+  stub_ok_prereqs
+  # Deliver the script through a pipe (as curl does), then execute the received copy
+  # under a pty: bash's stdin inside `script` is the pty, so `bash /dev/stdin` cannot
+  # work — the temp file is what a real `curl | bash` session's bash holds in memory.
+  printf '#!/bin/sh\nprintf n > /dev/tty\nexec bash "$PIPED_INSTALL" --version 9.9.9\n' > "$TEST_DIR/piped-driver.sh"
+  chmod +x "$TEST_DIR/piped-driver.sh"
+  cat "$INSTALL_SH" > "$TEST_DIR/piped-install.sh"
+  PIPED_INSTALL="$TEST_DIR/piped-install.sh" run run_under_pty "$TEST_DIR/piped-driver.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Aborted."* ]]
+  grep -q '"install-aborted"' "$XDG_STATE_HOME/mercury/install.log"
+  # The script did not skip lines: the last logged event is the clean abort.
+  tail -1 "$XDG_STATE_HOME/mercury/install.log" | grep -q 'install-aborted'
+}
+
 
 # --- npm hand-off ----------------------------------------------------------
 

@@ -248,13 +248,33 @@ main() {
   fi
 
   # Confirmation (skipped with --yes or --non-interactive).
+  # Issue #646: under `curl | bash` the script itself IS stdin, so `read` without a
+  # redirect consumes the next unread script line as the "answer". Always ask the
+  # terminal, never the script stream:
+  #   - a controlling terminal (/dev/tty) exists -> prompt there;
+  #   - no tty (CI, provisioning) -> the operator cannot answer: require an explicit
+  #     --yes/--non-interactive and fail with a clear message instead of reading stdin.
   if [ "$YES" != "1" ] && [ "$NON_INTERACTIVE" != "1" ]; then
-    printf "Proceed with the install of @aywengo/mercury@%s? [y/N] " "$VERSION"
-    read -r answer
-    case "$answer" in
-      y|Y|yes|YES) ;;
-      *) echo "Aborted."; log_line "install-aborted" "operator declined"; exit 0 ;;
-    esac
+    # Ask the terminal, never the script stream. /dev/tty exists and is openable only
+    # when there is a controlling terminal (interactive curl | bash); stdin is the
+    # script itself under the pipe, so it must not be read for answers (#646).
+    if { [ -t 0 ] || [ -r /dev/tty ]; } 2>/dev/null; then
+      printf "Proceed with the install of @aywengo/mercury@%s? [y/N] " "$VERSION"
+      if [ -t 0 ]; then
+        read -r answer
+      else
+        read -r answer < /dev/tty
+      fi
+      case "$answer" in
+        y|Y|yes|YES) ;;
+        *) echo "Aborted."; log_line "install-aborted" "operator declined"; exit 0 ;;
+      esac
+    else
+      echo "install.sh: no terminal to confirm the install and neither --yes nor --non-interactive was passed." >&2
+      echo "install.sh: re-run with --yes to proceed without a prompt (see --dry-run first)." >&2
+      log_line "install-failed" "no tty for confirmation; --yes required"
+      exit 1
+    fi
   fi
 
   # Install the pinned package into the user's npm prefix (no sudo).

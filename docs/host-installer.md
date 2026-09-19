@@ -1,6 +1,6 @@
 # Mercury Host installer
 
-Status: M0–M6 implemented (PRs #628–#638); review 2026-09-19 found the M1, M3, M4, M5 and M6 gates NOT met. Open: #646 (`curl | bash` prompt reads the script), #649 (grouped gate gaps), #650 (minor). #645 closed the model gap: Fleet is pull, not push, and every wizard variable is now read by the host. #648's fixes are in: the wizard writes `MERCURY_ADMIN_TOKEN` (shown once), and the doctor treats an all-skipped smoke section as a failure; the fresh-VM run that meets the M4 gate is still pending. #647's fixes are in: the wizard probes before prompting, defaults to the healthy set, and refuses too-old/missing harnesses without `--force`. Fix order: #646 → #649.
+Status: M0–M6 implemented (PRs #628–#638); review 2026-09-19 found the M1, M3, M4, M5 and M6 gates NOT met. Open: #649 (grouped gate gaps), #650 (minor). #645 closed the model gap: Fleet is pull, not push, and every wizard variable is now read by the host. #648's fixes are in: the wizard writes `MERCURY_ADMIN_TOKEN` (shown once), and the doctor treats an all-skipped smoke section as a failure; the fresh-VM run that meets the M4 gate is still pending. #647's fixes are in: the wizard probes before prompting, defaults to the healthy set, and refuses too-old/missing harnesses without `--force`. #646's fix is in (PR #655): the confirmation prompt reads `/dev/tty`, never the script stream, and a terminal-less run fails loudly instead of consuming script lines. Fix order: #649.
 
 Fleet is pull, not push (issue #645): Fleet holds a per-host token and calls the host's API (`fleet/child.ts` sends `Authorization` on every request). A host never contacts Fleet, so there is no host-side Fleet URL or host token; the host side of Fleet enrollment is (a) an API token Fleet presents and (b) a bind/port reachable from Fleet.
 
@@ -69,7 +69,7 @@ This document. Done, apart from recording per-harness minimum versions from each
 
 Gate: doc merged; every question in section 3 has an answer or a written reason to defer. Met 2026-09-16.
 
-### M1 — Bootstrap skeleton — ⚠️ implemented, gate open (#646, #649 §4–5)
+### M1 — Bootstrap skeleton — ⚠️ implemented, gate open (#649 §4–5; #646's stdin fix is in)
 
 `install.sh`:
 
@@ -79,6 +79,7 @@ Gate: doc merged; every question in section 3 has an answer or a written reason 
 - Flags: `--dry-run`, `--yes`, `--version <v>`, `--non-interactive`.
 - Structured log to `${XDG_STATE_HOME:-~/.local/state}/mercury/install.log`.
 - `shellcheck` clean.
+- The confirmation prompt never reads stdin (#646): under `curl | bash` the script itself IS stdin, so `read` without a redirect consumed the next unread script line as the answer. The prompt reads `/dev/tty`; without a terminal it fails loudly and requires `--yes`/`--non-interactive`. bats drives the prompt through a pty (`script(1)`) and covers the no-tty path.
 - `mercury host install` subcommand that performs the same post-bootstrap steps for the `npx` channel.
 
 Gate: runs clean in a Docker matrix (Debian, Ubuntu, Fedora) and on macOS arm64 via both channels; `--dry-run` prints the exact action list and touches nothing. Met 2026-09-17: `install.sh` (bash 3.2, `shellcheck` clean, `--dry-run` touches nothing) and `mercury host install` (prereq checks, structured log, works on an unconfigured host) both land; the Docker matrix and the checksum-published-alongside-release half of the gate are M6 work (CI matrix + release signing), not M1.
