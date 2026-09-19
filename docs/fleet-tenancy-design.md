@@ -240,25 +240,142 @@ authorization property, and authorization that relies on callers cooperating is 
   one trust domain, that legitimately manages several products' hosts and wants them partitioned
   inside the tool they already run.
 
-## 10. Build plan
+## 10. Plan and implementation roadmap
 
-Each phase is independently useful and ships behind its own PR, per the repository's issue loop.
+Status markers follow the host-installer plan's convention: each milestone records
+`Not started → In review → Shipped (PR #, commit)` **in the shipping PR itself**, so this section is
+the live tracker, not a snapshot. Effort sizes (S/M) and `~test` counts are forward-looking estimates
+and stay approximate on purpose.
 
-**Phase T0 — model and surface, behaviour-inert (small).** The migration, the `projects` and
-`project_members` tables, the admin routes and CLI. Acceptance criterion: with zero projects and zero
-assignments, the entire existing suite passes **unmodified** — the inertness is a test, not a claim.
+### 10.1 Rules the rollout follows
 
-**Phase T1 — scoping engages (medium).** The visibility rule in `visibleHosts()`, `GET /fleet/runs`
-scoping, the startup warning, per-caller `GET /fleet/projects`. Tests must prove the negative
-directions: a routing exclusion list never names a host outside the caller's visibility; a run bound
-to an assigned host is `404` to an ungranted caller, not `403`; metric series for other projects are
-absent, not zero; the default pool behaves exactly as the pre-tenancy fleet for ungranted callers.
+1. **One issue → one PR** (the repository's issue loop). The milestones below decompose into the
+   issues listed in 10.3; nothing merges with a red or unrun suite; unrelated review findings become
+   new issues, never PR scope creep.
+2. **Every shipping PR updates this document in the same commit**: the milestone's status marker,
+   and — where behaviour changed — §2's inventory row. The releaseDocs guard exists because design
+   documents drifted from the tree; a tenancy doc that still said "not implemented" after T1 shipped
+   would be the same defect in the other direction.
+3. **No child changes, no new `FLEET_` environment variables** in T0–T2. T3 changes the Atlas
+   credential *shape* only after open question 3 is decided.
+4. **`main` stays releasable after every PR.** The migration (§6.1) is additive-only: new tables and
+   `ADD COLUMN` with a NULL default, which SQLite permits with a `REFERENCES` clause. Every existing
+   statement names its columns, so an older Fleet binary keeps running against a migrated database —
+   unknown tables are simply never referenced, added columns stay NULL. Rollback is "redeploy the
+   previous version"; assignments remain stored but inert until a tenancy-aware binary returns.
+5. **The inertness gate is a CI duty, not a claim.** T0's PR runs the *entire* existing suite
+   unmodified — with zero projects, the shipped Fleet must be indistinguishable from the previous one.
 
-**Phase T2 — guards and audit (small).** Reassignment and delete guards, the assign command's
-lost-visibility report, the `fleet_runs.project_id` snapshot surfaced in run views.
+### 10.2 Milestones
 
-**Phase T3 — per-project Atlas dashboards (future).** Blocked on a per-project reader-token story
-(open question 3). Until then the Atlas read stays single-project and unchanged.
+| ID | Milestone | Effort | Depends on | Status |
+| --- | --- | --- | --- | --- |
+| T0 | Model, store, admin surface — behaviour-inert | M | — | Not started |
+| T1 | Scoping engages — the one behaviour change | M | T0 | Not started |
+| T2 | Guards and audit | S | T1 | Not started |
+| T3 | Per-project Atlas dashboards | M | open question 3 | Not started (blocked) |
+
+**T0 — model and surface, behaviour-inert.**
+*Goal:* the §4 model exists, stores, and is administrable; nothing about visibility changes.
+*Ships:* migration v6 in `fleet/db.ts` (the §6.1 SQL); `fleet/projects.ts` — a `ProjectStore` with
+project CRUD, host assignment, and owner grants, modelled on `registry.ts`'s error discipline;
+routes from the §6.3 table in `fleet/server.ts`'s enumerated route array; the `projects` command
+group in `fleet/cli.ts` (`add|list|rm|assign|unassign|grant|revoke`), dispatched like the existing
+`credentials` group; `hosts add --project` (stored, unenforced); `fleet/test/projects.test.ts`.
+*Issues:* T0-1 schema + `ProjectStore` (~6 tests); T0-2 routes + CLI (~8 tests).
+*Acceptance:* full existing suite green **unmodified**; store guards read like `HostRegistry.remove`
+(counts, not codes); `fleet projects list` against a pre-tenancy database prints nothing and exits 0.
+
+**T1 — scoping engages.**
+*Goal:* the §4.4 visibility rule becomes — in one PR — the only behaviour change in the whole
+rollout.
+*Ships:* the composition inside `visibleHosts()` (`fleet/server.ts`), which routing, run lists, run
+reads, events and metrics already derive from (§5); hidden-host `404` semantics; the startup warning
+(assigned hosts exist + an owner with no grants → name the owner, reusing the
+`parseCallerTokens().unrestrictedOwners()` surface); per-caller `GET /fleet/projects` (ids and names
+only).
+*Issues:* T1-1 visibility rule + `404` semantics (~9 tests); T1-2 startup warning + per-caller
+project read (~4 tests); T1-3 metrics/events negative-direction proof (~4 tests).
+*Acceptance — the negative directions, each a named test:* a routing exclusion list never names a
+host outside the caller's visibility; a Run bound to an assigned host is `404` to an ungranted
+caller, never `403`; `/metrics` series for other projects are **absent, not zero**; the default pool
+behaves exactly as the pre-tenancy fleet for ungranted callers (property-test over the existing
+allowlist matrix); admins and granted `*` callers are unchanged.
+*Review requirement:* mutation spot-check at review time — bypass `hostAllowed()` and the project
+composition separately; each must fail the suite. Evidence the tests can fire, not confidence.
+
+**T2 — guards and audit.**
+*Goal:* the registry rules that make a partition survivable, and the audit trail (§6.1's snapshot).
+*Ships:* reassignment guard — refuse while the host has non-terminal bound Runs, `force` explicit
+and recorded, message shaped like `HostRegistry.remove`'s; project-delete guard (unassign and revoke
+first, or force); the assign command's lost-visibility report, computed from the
+`FLEET_API_TOKENS` allowlists × current grants, listing every owner who loses a host;
+`fleet_runs.project_id` written at bind time and shown in run views — display and audit only, never
+authorization.
+*Issues:* T2-1 guards + report (~6 tests); T2-2 snapshot in the bind path + run views (~3 tests).
+*Acceptance:* the report is empty exactly when nobody loses visibility; after a `force` reassignment,
+an admin's run view still names the project the Run was placed under while scoping follows the
+host's *current* project — one fact decides visibility (§6.1).
+
+**T3 — per-project Atlas dashboards (blocked).**
+*Goal:* one Atlas summary per project instead of one per Fleet process.
+*Blocked on open question 3* — the per-project reader-credential shape. Do not start until decided.
+*Ships when unblocked:* the credential-namespace decision, a multi-project reader in
+`fleet/atlas.ts`, `GET /fleet/knowledge/:project` scoped by the same grants. Nothing else in the
+surface moves.
+
+### 10.3 Issue and PR sequence
+
+Filed in this order; each PR lands before the next issue is started:
+
+| Order | Issue title | PR branch |
+| --- | --- | --- |
+| 1 | `fleet: projects + project_members schema and ProjectStore` | `feat/fleet-tenancy-store` |
+| 2 | `fleet: project admin routes and CLI (behaviour-inert)` | `feat/fleet-tenancy-surface` |
+| 3 | `fleet: tenancy visibility rule in visibleHosts` | `feat/fleet-tenancy-scope` |
+| 4 | `fleet: tenancy startup warning and per-caller project list` | `feat/fleet-tenancy-warning` |
+| 5 | `fleet: prove metrics and event scoping under tenancy` | `feat/fleet-tenancy-surface-proof` |
+| 6 | `fleet: project reassignment and delete guards` | `feat/fleet-tenancy-guards` |
+| 7 | `fleet: fleet_runs.project_id bind-time snapshot` | `feat/fleet-tenancy-audit` |
+| 8 | T3 issues — filed only after open question 3 is decided | — |
+
+### 10.4 Testing strategy
+
+- **Where:** `fleet/test/` — in-process server tests (`server.test.ts` style), `ProjectStore` unit
+  tests (`registry.test.ts` style), one CLI test per command group (`cli.test.ts` style). No network
+  beyond localhost, per the `test:fleet` contract; `fleet/test/coupling.test.ts` stays green
+  unchanged — tenancy adds no imports from outside `fleet/`.
+- **Inertness gate:** T0's PR runs the full suite; the acceptance is *no test edited*, not "tests
+  still pass after edits".
+- **Mutation spot-checks (T1):** the two authorization layers must each be killable independently
+  (§10.2, T1 review requirement).
+- **Docs-contract duty per shipping PR:** status markers here; §2's inventory row once scoping
+  ships; `fleet/README.md` command table; `docs/README.md` blurb moves from "Specification; not
+  implemented" to as-built; `fleet/CHANGELOG.md` `[Unreleased]` entry per Keep-a-Changelog — no
+  install offers, which the releaseDocs guard holds Fleet docs to.
+
+### 10.5 Rollout, adoption, rollback
+
+- **Adoption is §7's three operator steps.** No restarts, no token changes; each assignment is
+  announced by the lost-visibility report rather than discovered. That report ships in T2 — after
+  T1 but before T2, assignment works while remaining unannounced, so real partitioning should wait
+  for T2 or accept silent narrowing as the price of early adoption.
+- **Backup:** `projects` and `project_members` are truth (§6.1) and land in the existing Fleet
+  database backup — same SQLite file, nothing new to schedule.
+- **Rollback:** redeploy the previous binary (rule 4); assignments stay stored and inert; no
+  down-migration exists or is needed.
+- **Operator signals:** the startup warning says who was narrowed; `fleet hosts list`'s PROJECT
+  column shows the partition; `fleet projects list` shows who holds what.
+
+### 10.6 Definition of done
+
+- T0–T2 shipped; T3 either shipped or recorded here as blocked, with the decision owner for
+  open question 3 named.
+- §2's inventory reflects as-built behaviour; the *tenancy narrows; it never grants* rule is still
+  true in the shipped code, evidenced by the T1 mutation checks.
+- [`fleet-design.md`](fleet-design.md) open question 2 moves from "design draft exists" to "shipped";
+  this document's header status moves from **Specification** to as-built with the final milestone map.
+- No diff under any Mercury `src/` or `atlas/` path across the whole PR series.
 
 ## 11. Open questions
 
