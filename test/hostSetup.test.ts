@@ -126,6 +126,32 @@ test('runHostSetup generates MERCURY_ADMIN_TOKEN and prints it exactly once (#64
   assert.equal(occurrences, 1);
 });
 
+test('interactive re-run masks the existing token in the prompt (#648 review)', async () => {
+  const dir = tempDir('setup-mask-');
+  const qs = ['host-a', join(dir, 'data'), join(dir, 'ws'), '7', '', 'no', 'primeagent'];
+  let i = 0;
+  const code = await runHostSetup([], { out: () => {}, err: () => {}, question: async () => qs[i++] ?? '' }, { XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0);
+  const first = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8').match(/MERCURY_ADMIN_TOKEN=([0-9a-f]{64})/)?.[1];
+  assert.ok(first);
+  // Re-run interactively, answering everything by default (enter). Capture the questions.
+  const questions: string[] = [];
+  const out: string[] = [];
+  const code2 = await runHostSetup(['--yes'], {
+    out: (s) => out.push(s), err: () => {},
+    question: async (q) => { questions.push(q); return ''; },
+  }, { XDG_CONFIG_HOME: dir });
+  assert.equal(code2, 0);
+  const adminQ = questions.find((q) => q.startsWith('Admin/API token'));
+  assert.ok(adminQ, 'the admin token question must be asked');
+  assert.ok(!adminQ!.includes(first!), 'the prompt must not echo the live token');
+  assert.ok(adminQ!.includes('<set, 64 chars>'), adminQ);
+  const second = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8').match(/MERCURY_ADMIN_TOKEN=([0-9a-f]{64})/)?.[1];
+  assert.equal(second, first, 'enter must keep the existing token');
+  // And the token must not be re-printed in the output (it was shown only on first generation).
+  assert.ok(!out.join('').includes(first!), 'the token value must not be printed again on re-run');
+});
+
 test('re-run preserves the existing MERCURY_ADMIN_TOKEN (no silent rotation, #648)', async () => {
   const dir = tempDir('setup-rotate-');
   // Question order: hostName, dataDir, workspaceDir, retention, adminToken, Atlas?, harnesses.

@@ -240,9 +240,10 @@ test('host doctor --json reports both sections', async () => {
     HOME: join(dir, 'home'),
   });
   assert.equal(code, 1); // host not running -> healthz fails
-  const parsed = JSON.parse(stdout) as { healthz: { ok: boolean }; smoke: Array<{ harness: string; skipped?: boolean }> };
+  const parsed = JSON.parse(stdout) as { healthz: { ok: boolean }; allSmokeSkipped: boolean; smoke: Array<{ harness: string; skipped?: boolean }> };
   assert.equal(parsed.healthz.ok, false);
   assert.ok(!('fleet' in parsed), 'no Fleet section: the host never contacts Fleet (issue #645)');
+  assert.equal(parsed.allSmokeSkipped, true, 'all-skipped is a failure the JSON must expose (#648)');
   assert.ok(parsed.smoke.length >= 3, 'one smoke entry per enabled harness');
   // No API token -> smoke skipped, not failed.
   assert.ok(parsed.smoke.every((s) => s.skipped === true));

@@ -37,6 +37,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readF
 import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
+import { loadEnvFile } from './doctor.ts';
 
 /** The wizard's answers, before validation. Every field maps to a MERCURY_* variable. */
 export interface HostSetupAnswers {
@@ -260,7 +261,14 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
 /** Read answers from a JSON file. Unspecified fields fall back to env-derived defaults. */
 export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.env): HostSetupAnswers {
   const raw = readFileSync(path, 'utf8');
-  const parsed = JSON.parse(raw) as Partial<HostSetupAnswers>;
+  let parsed: Partial<HostSetupAnswers>;
+  try {
+    parsed = JSON.parse(raw) as Partial<HostSetupAnswers>;
+  } catch {
+    // JSON.parse's message quotes a snippet of the input, which can carry secret values
+    // from the file (#648 review). Report the problem, never the content.
+    throw new Error('answers file is not valid JSON');
+  }
   const base = defaultAnswers(env);
   return {
     hostName: parsed.hostName ?? base.hostName,
@@ -289,7 +297,14 @@ export async function promptAnswers(io: {
   const dataDir = await q('Data dir (mercury.db lives here)', base.dataDir);
   const workspaceDir = await q('Workspace dir', base.workspaceDir);
   const retention = await q('GC retention (days)', String(base.retentionDays));
-  const adminToken = await q('Admin/API token (empty = generate one)', base.adminToken);
+  // Mask an existing token default (#648 review): the prompt must never echo the live
+  // credential from the env file on an interactive re-run. Enter keeps it; a typed
+  // value replaces it; empty on a fresh host generates one later in runHostSetup.
+  const adminPrompt = base.adminToken
+    ? `Admin/API token [<set, ${base.adminToken.length} chars> — enter to keep, new value to rotate]`
+    : 'Admin/API token (empty = generate one)';
+  const adminRaw = (await io.question(`${adminPrompt} `)).trim();
+  const adminToken = base.adminToken && adminRaw === '' ? base.adminToken : adminRaw;
   const atlasOn = (await q('Enable Atlas? (yes/no)', base.atlasEnabled ? 'yes' : 'no')).toLowerCase();
   const atlasEnabled = atlasOn === 'yes' || atlasOn === 'y';
   const atlasUrl = atlasEnabled ? await q('Atlas URL', base.atlasUrl) : '';
@@ -408,7 +423,8 @@ export async function runHostSetup(
     // The one place the generated token is shown (#648, decision 6): Fleet presents it
     // as a Bearer token to the host API, so the operator registers exactly this value
     // on the Fleet side. It is in the 0600 file afterwards and never printed again.
-    const port = process.env.MERCURY_PORT ?? '3000';
+    // The port is the one the doctor will use — the env file's, not this shell's (#648 review).
+    const port = loadEnvFile(path).MERCURY_PORT ?? '3000';
     io.out('\nRegister on the Fleet side (shown once, not again):\n');
     io.out(`  host API base URL: http://<this-host>:${port}\n`);
     io.out(`  host API token:    ${answers.adminToken}\n`);
