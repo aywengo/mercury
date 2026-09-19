@@ -29,6 +29,7 @@ import {
   KNOWN_HARNESSES,
   type HostSetupAnswers,
 } from '../src/host/setup.ts';
+import type { HarnessProbeResult } from '../src/host/probe.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -134,7 +135,7 @@ test('runHostSetup generates MERCURY_ADMIN_TOKEN and prints it exactly once (#64
     out: (s) => out.push(s),
     err: () => {},
     question: async () => '',
-  }, { XDG_CONFIG_HOME: dir });
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
   assert.equal(code, 0);
   const text = out.join('');
   const tokens = text.match(/host API token:\s+([0-9a-f]{64})/) ?? [];
@@ -189,7 +190,7 @@ test('re-run preserves the existing MERCURY_ADMIN_TOKEN (no silent rotation, #64
   assert.equal(code, 0);
   const first = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8').match(/MERCURY_ADMIN_TOKEN=([0-9a-f]{64})/)?.[1];
   assert.ok(first, 'the first run must write a generated token');
-  const code2 = await runHostSetup(['--non-interactive', '--yes'], { out: () => {}, err: () => {} }, { XDG_CONFIG_HOME: dir });
+  const code2 = await runHostSetup(['--non-interactive', '--yes'], { out: () => {}, err: () => {} }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
   assert.equal(code2, 0);
   const second = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8').match(/MERCURY_ADMIN_TOKEN=([0-9a-f]{64})/)?.[1];
   assert.equal(second, first, 'a --yes re-run must preserve the existing token by default');
@@ -230,6 +231,100 @@ test('WIZARD_VARIABLES: every emitted name is documented AND read by the host (d
   }
 });
 
+// ---------- the M2 cross-field gate: probe-driven setup (#647) ----------
+
+function probeOf(...entries: Array<[string, HarnessProbeResult['status'], string?]>): HarnessProbeResult[] {
+  return entries.map(([id, status, detail]) => ({
+    id, label: id, binary: id, version: status === 'ok' ? '9.9.9' : null, versionRaw: null,
+    minVersion: status === 'too-old' ? '9.9.9' : null, status, configPath: '/nonexistent',
+    configExists: false, auth: 'unknown' as const, ...(detail ? { error: detail } : {}),
+  }));
+}
+
+test('default harnesses come from the probe, not a hard-coded list (#647)', async () => {
+  const dir = tempDir('setup-probe-def-');
+  const out: string[] = [];
+  const code = await runHostSetup([], {
+    out: (s) => out.push(s), err: () => {},
+    question: async () => '', // take every default
+    probe: async () => probeOf(['primeagent', 'ok'], ['hermes', 'missing', 'command not found'], ['claude', 'too-old']),
+  }, { XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0);
+  const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
+  assert.ok(file.includes('MERCURY_HARNESSES=primeagent'), `probe-ok harnesses only, got: ${file.split('\n').filter((l) => l.startsWith('MERCURY_HARNESSES'))}`);
+  assert.ok(!file.includes('hermes') && !file.includes('claude'), 'a missing or too-old harness must not be enabled by default');
+});
+
+test('enabling a too-old harness is rejected; --force overrides (#647)', async () => {
+  const dir = tempDir('setup-too-old-');
+  const answersFile = join(dir, 'answers.json');
+  writeFileSync(answersFile, JSON.stringify(answers({ harnesses: ['hermes'] })));
+  const probe = async () => probeOf(['primeagent', 'ok'], ['hermes', 'too-old']);
+  const code = await runHostSetup(['--non-interactive', '--answers', answersFile], {
+    out: () => {}, err: () => {}, probe,
+  }, { XDG_CONFIG_HOME: dir });
+  assert.equal(code, 1, 'too-old must be rejected without --force');
+  assert.ok(!existsSync(envFilePath({ XDG_CONFIG_HOME: dir })));
+  const code2 = await runHostSetup(['--non-interactive', '--answers', answersFile, '--force'], {
+    out: () => {}, err: () => {}, probe,
+  }, { XDG_CONFIG_HOME: dir });
+  assert.equal(code2, 0, '--force is the explicit operator override');
+});
+
+test('enabling a missing harness is rejected the same way (#647)', async () => {
+  const dir = tempDir('setup-missing-');
+  const answersFile = join(dir, 'answers.json');
+  writeFileSync(answersFile, JSON.stringify(answers({ harnesses: ['claude'] })));
+  const code = await runHostSetup(['--non-interactive', '--yes', '--answers', answersFile], {
+    out: () => {}, err: () => {},
+    probe: async () => probeOf(['primeagent', 'ok'], ['claude', 'missing', 'command not found']),
+  }, { XDG_CONFIG_HOME: dir });
+  assert.equal(code, 1);
+  assert.ok(!existsSync(envFilePath({ XDG_CONFIG_HOME: dir })));
+});
+
+test('an unknown probe status enables with a warning, not a rejection (#647)', async () => {
+  const dir = tempDir('setup-unknown-');
+  const err: string[] = [];
+  const answersFile = join(dir, 'answers.json');
+  writeFileSync(answersFile, JSON.stringify(answers({ harnesses: ['primeagent'] })));
+  const code = await runHostSetup(['--non-interactive', '--yes', '--answers', answersFile], {
+    out: () => {}, err: (s) => err.push(s),
+    probe: async () => probeOf(['primeagent', 'unknown', 'unparsable version output']),
+  }, { XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0);
+  // Warnings go to stderr (review #653): stdout stays reserved for the wizard's output.
+  assert.ok(err.join('').includes('warning: primeagent probe status unknown'));
+});
+
+test('the interactive harness prompt renders the probe checklist (#647)', async () => {
+  const dir = tempDir('setup-checklist-');
+  const questions: string[] = [];
+  const code = await runHostSetup([], {
+    out: () => {}, err: () => {},
+    question: async (q) => { questions.push(q); return ''; },
+    probe: async () => probeOf(['primeagent', 'ok'], ['hermes', 'missing', 'command not found'], ['claude', 'too-old']),
+  }, { XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0);
+  const harnessQ = questions.find((q) => q.startsWith('Harnesses to enable'));
+  assert.ok(harnessQ, 'the harness question must be asked');
+  assert.ok(harnessQ!.includes('primeagent=ok'), harnessQ);
+  assert.ok(harnessQ!.includes('hermes=missing'), harnessQ);
+  assert.ok(harnessQ!.includes('claude=too-old (needs 9.9.9)'), harnessQ);
+});
+
+test('a failed probe degrades to no gate with a warning, not a crash (#647)', async () => {
+  const dir = tempDir('setup-probe-fail-');
+  const err: string[] = [];
+  const code = await runHostSetup([], {
+    out: () => {}, err: (s) => err.push(s),
+    question: async () => '',
+    probe: async () => { throw new Error('probe exploded'); },
+  }, { XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0, 'a broken probe must not block configuration');
+  assert.ok(err.join('').includes('probe failed (Error: probe exploded)'));
+});
+
 // ---------- the M3 gate: interactive and answers-file agree ----------
 
 test('M3 gate: interactive and answers-file produce byte-identical mercury.env', async () => {
@@ -238,7 +333,11 @@ test('M3 gate: interactive and answers-file produce byte-identical mercury.env',
   const a = answers({ adminToken: 'tok-admin-gate-1', atlasToken: 'tok-gate-42', atlasEnabled: true, atlasUrl: 'https://atlas.example.com', atlasProject: 'proj' });
   writeFileSync(answersFile, JSON.stringify(a));
 
-  // Interactive path: inject the question function.
+  // Interactive path: inject the question function and a deterministic probe (#647).
+  const gateProbe: HarnessProbeResult[] = a.harnesses.map((id) => ({
+    id, label: id, binary: id, version: '9.9.9', versionRaw: '9.9.9', minVersion: null,
+    status: 'ok' as const, configPath: '/nonexistent', configExists: false, auth: 'unknown' as const,
+  }));
   const interactiveEnv = await new Promise<string>((res, rej) => {
     const qs = [
       a.hostName, a.dataDir, a.workspaceDir, String(a.retentionDays), a.adminToken,
@@ -251,17 +350,19 @@ test('M3 gate: interactive and answers-file produce byte-identical mercury.env',
       out: () => {},
       err: () => {},
       question: async () => qs[i++] ?? '',
+      probe: async () => gateProbe,
     }, { XDG_CONFIG_HOME: dir }).then((code) => {
       if (code !== 0) return rej(new Error(`interactive exit ${code}`));
       res(readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8'));
     });
   });
 
-  // Non-interactive path with the same answers.
+  // Non-interactive path with the same answers (same injected probe).
   const niEnv = await new Promise<string>((res, rej) => {
     void runHostSetup(['--non-interactive', '--yes', '--answers', answersFile], {
       out: () => {},
       err: () => {},
+      probe: async () => gateProbe,
     }, { XDG_CONFIG_HOME: dir }).then((code) => {
       if (code !== 0) return rej(new Error(`non-interactive exit ${code}`));
       res(readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8'));
@@ -272,6 +373,8 @@ test('M3 gate: interactive and answers-file produce byte-identical mercury.env',
 });
 
 // ---------- the CLI surface ----------
+
+// CLI-level tests use the same hermetic probe stubs as the unit tests (probeStubEnv).
 
 function cli(args: string[], extraEnv: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((res, rej) => {
@@ -292,6 +395,7 @@ function cli(args: string[], extraEnv: Record<string, string> = {}): Promise<{ c
 test('host setup --non-interactive writes mercury.env with mode 0600', async () => {
   const dir = tempDir('setup-cli-');
   const { code, stderr } = await cli(['host', 'setup', '--non-interactive'], {
+    ...probeStubEnv(),
     XDG_CONFIG_HOME: dir,
     MERCURY_ATLAS_URL: 'https://atlas.example.com',
     MERCURY_ATLAS_TOKEN: 'tok-cli-1',
@@ -313,6 +417,7 @@ test('host setup rejects an invalid answer before writing anything', async () =>
   const answersFile = join(dir, 'answers.json');
   writeFileSync(answersFile, JSON.stringify(answers({ harnesses: ['bogus'] })));
   const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--answers', answersFile], {
+    ...probeStubEnv(),
     XDG_CONFIG_HOME: dir,
   });
   assert.equal(code, 1);
@@ -329,6 +434,7 @@ test('host setup rejects an unknown flag', async () => {
 test('host setup --dry-run touches nothing', async () => {
   const dir = tempDir('setup-dryrun-');
   const { code, stdout } = await cli(['host', 'setup', '--non-interactive', '--dry-run'], {
+    ...probeStubEnv(),
     XDG_CONFIG_HOME: dir,
   });
   assert.equal(code, 0);
@@ -347,11 +453,18 @@ test('defaultAnswers: harnesses filter to known ids', () => {
   assert.deepEqual(a.harnesses, ['primeagent', 'claude']);
 });
 
+test('defaultAnswers: MERCURY_HARNESSES entries are trimmed (review #653)', () => {
+  const a = defaultAnswers({ MERCURY_HARNESSES: 'primeagent, claude' } as NodeJS.ProcessEnv);
+  // ' claude' with a leading space must survive like the config parser's parseHarnesses.
+  assert.deepEqual(a.harnesses, ['primeagent', 'claude']);
+});
+
 test('retentionDays 0 is rejected, not silently defaulted', async () => {
   const dir = tempDir('setup-ret0-');
   const answersFile = join(dir, 'answers.json');
   writeFileSync(answersFile, JSON.stringify(answers({ retentionDays: 0 })));
   const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--answers', answersFile], {
+    ...probeStubEnv(),
     XDG_CONFIG_HOME: dir,
   });
   assert.equal(code, 1);
@@ -362,6 +475,9 @@ test('retentionDays 0 is rejected, not silently defaulted', async () => {
 test('a missing answers file exits cleanly with a message', async () => {
   const dir = tempDir('setup-missing-');
   const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--answers', join(dir, 'nope.json')], {
+    // Hermetic: the probe runs before the answers file is read; stub it so the test
+    // never depends on the runner's installed harnesses (review #653).
+    ...probeStubEnv(),
     XDG_CONFIG_HOME: dir,
   });
   assert.equal(code, 1);
@@ -375,6 +491,7 @@ test('re-run on a configured host refuses to overwrite without --yes (M5 gate)',
   mkdirSync(join(cfg, 'mercury'), { recursive: true });
   writeFileSync(join(cfg, 'mercury', 'mercury.env'), 'MERCURY_ATLAS_HOST_ID=old\n');
   const { code, stdout } = await cli(['host', 'setup', '--non-interactive'], {
+    ...probeStubEnv(),
     XDG_CONFIG_HOME: cfg,
     HOME: join(dir, 'home'),
   });

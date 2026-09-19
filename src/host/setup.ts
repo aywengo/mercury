@@ -38,6 +38,7 @@ import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
 import { loadEnvFile } from './doctor.ts';
+import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
 
 /** The wizard's answers, before validation. Every field maps to a MERCURY_* variable. */
 export interface HostSetupAnswers {
@@ -88,22 +89,25 @@ export interface HostSetupOptions {
   dryRun: boolean;
   /** Confirm overwriting an existing mercury.env (M5 re-run gate). */
   yes: boolean;
+  /** Enable a harness the probe flagged too-old/missing anyway (explicit operator override). */
+  force: boolean;
 }
 
 export function parseHostSetupArgs(args: string[]): HostSetupOptions {
-  const opts: HostSetupOptions = { nonInteractive: false, dryRun: false, yes: false };
+  const opts: HostSetupOptions = { nonInteractive: false, dryRun: false, yes: false, force: false };
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     if (a === '--non-interactive') opts.nonInteractive = true;
     else if (a === '--dry-run') opts.dryRun = true;
     else if (a === '--yes' || a === '-y') opts.yes = true;
+    else if (a === '--force') opts.force = true;
     else if (a === '--answers') {
       const v = args[i + 1];
       if (!v || v.startsWith('--')) throw new Error('host setup: --answers needs a file path');
       opts.answersFile = v;
       i += 1;
     } else {
-      throw new Error(`host setup: unknown flag '${a}'. Expected --non-interactive, --answers <file>, --yes or --dry-run`);
+      throw new Error(`host setup: unknown flag '${a}'. Expected --non-interactive, --answers <file>, --yes, --force or --dry-run`);
     }
   }
   // --answers only makes sense with --non-interactive; silently ignoring the file and
@@ -147,8 +151,16 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
   }
 }
 
-/** Validate the whole answer set. Returns a list of errors (empty = valid). */
-export function validateAnswers(a: HostSetupAnswers): string[] {
+/** Validate the whole answer set. Returns a list of errors (empty = valid).
+ *
+ * `probe` is the M2 cross-field input (#647): a harness the probe flagged too-old or
+ * missing cannot be enabled unless `force`. An `unknown` probe (no floor declared or an
+ * unparsable version) enables with a warning — the operator may know better. */
+export function validateAnswers(
+  a: HostSetupAnswers,
+  probe?: Map<string, HarnessProbeResult>,
+  force = false,
+): string[] {
   const errors: string[] = [];
   for (const key of Object.keys(a) as (keyof HostSetupAnswers)[]) {
     const err = validateAnswer(key, a[key]);
@@ -159,6 +171,17 @@ export function validateAnswers(a: HostSetupAnswers): string[] {
     if (!a.atlasUrl) errors.push('atlasUrl: required when Atlas is on');
     if (!a.atlasToken) errors.push('atlasToken: required when Atlas is on');
     if (!a.atlasProject) errors.push('atlasProject: required when Atlas is on');
+  }
+  if (probe) {
+    for (const h of a.harnesses) {
+      const p = probe.get(h);
+      if (!p) continue;
+      if (p.status === 'too-old') {
+        if (!force) errors.push(`harnesses: '${h}' is too old (found ${p.version ?? 'unknown'}, needs ${p.minVersion ?? '?'}); upgrade it or pass --force`);
+      } else if (p.status === 'missing') {
+        if (!force) errors.push(`harnesses: '${h}' is not installed (probe found no binary); install it or pass --force`);
+      }
+    }
   }
   return errors;
 }
@@ -241,7 +264,12 @@ export function existingAdminToken(env: NodeJS.ProcessEnv = process.env): string
 
 /** Default answers from the environment (non-interactive without an answers file). */
 export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupAnswers {
-  const detected = (env.MERCURY_HARNESSES ?? 'primeagent,hermes,claude').split(',').filter(Boolean);
+  // Trim entries like parseHarnesses does (review #653): 'primeagent, claude' must not
+  // silently drop 'claude' from the wizard defaults.
+  const detected = (env.MERCURY_HARNESSES ?? 'primeagent,hermes,claude')
+    .split(',')
+    .map((h) => h.trim())
+    .filter(Boolean);
   return {
     hostName: env.MERCURY_ATLAS_HOST_ID?.trim() || hostname(),
     dataDir: env.MERCURY_DB ? dirname(env.MERCURY_DB) : join(homedir(), '.local', 'state', 'mercury'),
@@ -287,8 +315,14 @@ export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.e
 /** Interactive prompts. Returns the answers. */
 export async function promptAnswers(io: {
   question: (q: string) => Promise<string>;
-}, env: NodeJS.ProcessEnv = process.env): Promise<HostSetupAnswers> {
+}, env: NodeJS.ProcessEnv = process.env, probe?: Map<string, HarnessProbeResult>): Promise<HostSetupAnswers> {
   const base = defaultAnswers(env);
+  // Probe-driven checklist default (#647): what the probe found healthy, not a
+  // hard-coded list. Without a probe (degraded mode) keep the env/default list.
+  if (probe) {
+    const ok = [...probe.values()].filter((p) => p.status === 'ok').map((p) => p.id);
+    if (ok.length > 0 || probe.size > 0) base.harnesses = ok;
+  }
   const q = async (prompt: string, def: string): Promise<string> => {
     const line = await io.question(`${prompt} [${def}] `);
     return line.trim() === '' ? def : line.trim();
@@ -310,7 +344,12 @@ export async function promptAnswers(io: {
   const atlasUrl = atlasEnabled ? await q('Atlas URL', base.atlasUrl) : '';
   const atlasToken = atlasEnabled ? await q('Atlas token', base.atlasToken) : '';
   const atlasProject = atlasEnabled ? await q('Atlas project', base.atlasProject) : '';
-  const harnessesRaw = await q('Harnesses to enable (comma-separated)', base.harnesses.join(','));
+  const harnessPrompt = probe && probe.size > 0
+    ? `Harnesses to enable (comma-separated). Probe: ${
+        [...probe.values()].map((p) => `${p.id}=${p.status}${p.status === 'too-old' ? ` (needs ${p.minVersion}) ` : ''}`).join(', ')
+      }`
+    : 'Harnesses to enable (comma-separated)';
+  const harnessesRaw = await q(harnessPrompt, base.harnesses.join(','));
   const harnesses = harnessesRaw.split(',').map((s) => s.trim()).filter(Boolean);
   return {
     hostName,
@@ -328,6 +367,13 @@ export async function promptAnswers(io: {
   };
 }
 
+/** Run the M2 probe over the shipped harnesses (#647). Injectable for tests. */
+export type ProbeFn = () => Promise<HarnessProbeResult[]>;
+
+export async function runSetupProbe(env: NodeJS.ProcessEnv = process.env): Promise<HarnessProbeResult[]> {
+  return Promise.all(harnessSpecs(env).map(probeHarness));
+}
+
 /** Run the wizard. Returns the process exit code. */
 export async function runHostSetup(
   args: string[],
@@ -335,6 +381,8 @@ export async function runHostSetup(
     out: (s: string) => void;
     err: (s: string) => void;
     question?: (q: string) => Promise<string>;
+    /** Injected probe (tests). Default: probe the real binaries once, bounded. */
+    probe?: ProbeFn;
   } = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) },
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
@@ -344,6 +392,20 @@ export async function runHostSetup(
   } catch (e) {
     io.err((e as Error).message + '\n');
     return 1;
+  }
+
+  // M2 cross-field input (#647): probe before prompting. A hung binary cannot hang the
+  // wizard — probeVersion bounds each binary ask; see src/host/probe.ts rule 2.
+  const probeFn: ProbeFn = io.probe ?? (() => runSetupProbe(env));
+  let probe: Map<string, HarnessProbeResult>;
+  try {
+    probe = new Map((await probeFn()).map((p) => [p.id, p]));
+  } catch (e) {
+    // The probe must not block configuration: rule 2 of the probe. Degrade to no gate
+    // and say so.
+    const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    io.err(`host setup: probe failed (${detail}); harness status checks skipped\n`);
+    probe = new Map();
   }
 
   let answers: HostSetupAnswers;
@@ -357,6 +419,13 @@ export async function runHostSetup(
       }
     } else {
       answers = defaultAnswers(env);
+      // No explicit harness list: enable what the probe found healthy (#647), not a
+      // hard-coded triple. Empty probe result = nothing enabled by default; the
+      // validation below then asks the operator to enable something explicitly.
+      if (!env.MERCURY_HARNESSES?.trim()) {
+        const ok = [...probe.values()].filter((p) => p.status === 'ok').map((p) => p.id);
+        if (ok.length > 0) answers.harnesses = ok;
+      }
     }
   } else {
     // Interactive: use the injected question fn (tests) or a real readline on stdin.
@@ -366,21 +435,29 @@ export async function runHostSetup(
     let question: (q: string) => Promise<string>;
     if (io.question) {
       question = io.question;
-      answers = await promptAnswers({ question }, env);
+      answers = await promptAnswers({ question }, env, probe);
     } else if (process.stdin.isTTY) {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       question = (q) => new Promise<string>((res) => rl.question(q, res));
-      answers = await promptAnswers({ question }, env);
+      answers = await promptAnswers({ question }, env, probe);
       rl.close();
     } else {
       const lines = readFileSync(0, 'utf8').split('\n');
       let i = 0;
       question = async () => lines[i++] ?? '';
-      answers = await promptAnswers({ question }, env);
+      answers = await promptAnswers({ question }, env, probe);
     }
   }
 
-  const errors = validateAnswers(answers);
+  // Unknown-status harnesses enable with a warning (#647): no floor declared or an
+  // unparsable version is not proof of breakage, only of missing information.
+  for (const h of answers.harnesses) {
+    const p = probe.get(h);
+    if (p && p.status === 'unknown') {
+      io.err(`warning: ${h} probe status unknown${p.error ? ` (${p.error})` : ''}; enabling anyway\n`);
+    }
+  }
+  const errors = validateAnswers(answers, probe, opts.force);
   if (errors.length > 0) {
     for (const e of errors) io.err(`  invalid: ${e}\n`);
     io.err('\nNothing was written. Fix the answers and re-run.\n');
