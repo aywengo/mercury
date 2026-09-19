@@ -24,6 +24,7 @@ import {
   defaultAnswers,
   readAnswersFile,
   runHostSetup,
+  generateAdminToken,
   WIZARD_VARIABLES,
   KNOWN_HARNESSES,
   type HostSetupAnswers,
@@ -31,12 +32,33 @@ import {
 
 const ROOT = resolve(import.meta.dirname, '..');
 
+/** Healthy stub harness binaries: the wizard's probe spawns the real cmd when no probe
+ *  is injected, so tests that exercise the default path point MERCURY_*_CMD at stubs
+ *  that report a healthy version — the suite must not depend on the runner's
+ *  harness inventory (CI has none installed). */
+const stubDir = tempDir('setup-probe-stubs-');
+for (const [name, version] of [
+  ['prime-agent', '9.9.9'],
+  ['hermes', '9.9.9'],
+  ['claude', '9.9.9'],
+] as const) {
+  writeFileSync(join(stubDir, name), `#!/bin/sh\nprintf '%s\\n' '${version}'\n`, { mode: 0o755 });
+}
+function probeStubEnv(): NodeJS.ProcessEnv {
+  return {
+    MERCURY_PRIMEAGENT_CMD: join(stubDir, 'prime-agent'),
+    MERCURY_HERMES_CMD: join(stubDir, 'hermes'),
+    MERCURY_CLAUDE_CMD: join(stubDir, 'claude'),
+  };
+}
+
 function answers(over: Partial<HostSetupAnswers> = {}): HostSetupAnswers {
   return {
     hostName: 'host-a',
     dataDir: '/var/lib/mercury',
     workspaceDir: '/var/lib/mercury/workspaces',
     retentionDays: 7,
+    adminToken: '',
     atlasEnabled: false,
     atlasUrl: '',
     atlasToken: '',
@@ -92,12 +114,94 @@ test('validateAnswers: Atlas on requires URL, token and project', () => {
 
 // ---------- rendering ----------
 
+test('renderEnv: writes the resolved admin token and refuses an unresolved one (#648)', () => {
+  assert.throws(() => renderEnv(answers({ adminToken: '  ' })), /resolve before rendering/);
+  const env = renderEnv(answers({ adminToken: 'tok-admin-123' }));
+  assert.ok(env.includes('MERCURY_ADMIN_TOKEN=tok-admin-123'));
+});
+
+test('generateAdminToken: 64 hex chars, random across calls', () => {
+  const a = generateAdminToken();
+  const b = generateAdminToken();
+  assert.match(a, /^[0-9a-f]{64}$/);
+  assert.notEqual(a, b);
+});
+
+test('runHostSetup generates MERCURY_ADMIN_TOKEN and prints it exactly once (#648)', async () => {
+  const dir = tempDir('setup-token-');
+  const out: string[] = [];
+  const code = await runHostSetup([], {
+    out: (s) => out.push(s),
+    err: () => {},
+    question: async () => '',
+  }, { XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0);
+  const text = out.join('');
+  const tokens = text.match(/host API token:\s+([0-9a-f]{64})/) ?? [];
+  assert.ok(tokens[1], 'the generated token must be shown once in the output');
+  const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
+  assert.ok(file.includes(`MERCURY_ADMIN_TOKEN=${tokens[1]}`), 'the written file must carry the shown token');
+  // Shown once: the token value appears in exactly one output line (the marked block).
+  const occurrences = out.filter((l) => l.includes(tokens[1]!)).length;
+  assert.equal(occurrences, 1);
+});
+
+test('interactive re-run masks the existing token in the prompt (#648 review)', async () => {
+  const dir = tempDir('setup-mask-');
+  const qs = ['host-a', join(dir, 'data'), join(dir, 'ws'), '7', '', 'no', 'primeagent'];
+  let i = 0;
+  // Hermetic probe: on a machine without the harnesses the real probe would reject the
+  // answers, which is honest wizard behavior but not what this test is about (#648 review).
+  // The stub commands make the real probe report all-ok on any machine.
+  const code = await runHostSetup([], {
+    out: () => {}, err: () => {}, question: async () => qs[i++] ?? '',
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0);
+  const first = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8').match(/MERCURY_ADMIN_TOKEN=([0-9a-f]{64})/)?.[1];
+  assert.ok(first);
+  // Re-run interactively, answering everything by default (enter). Capture the questions.
+  const questions: string[] = [];
+  const out: string[] = [];
+  const code2 = await runHostSetup(['--yes'], {
+    out: (s) => out.push(s), err: () => {},
+    question: async (q) => { questions.push(q); return ''; },
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  assert.equal(code2, 0);
+  const adminQ = questions.find((q) => q.startsWith('Admin/API token'));
+  assert.ok(adminQ, 'the admin token question must be asked');
+  assert.ok(!adminQ!.includes(first!), 'the prompt must not echo the live token');
+  assert.ok(adminQ!.includes('<set, 64 chars>'), adminQ);
+  const second = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8').match(/MERCURY_ADMIN_TOKEN=([0-9a-f]{64})/)?.[1];
+  assert.equal(second, first, 'enter must keep the existing token');
+  // And the token must not be re-printed in the output (it was shown only on first generation).
+  assert.ok(!out.join('').includes(first!), 'the token value must not be printed again on re-run');
+});
+
+test('re-run preserves the existing MERCURY_ADMIN_TOKEN (no silent rotation, #648)', async () => {
+  const dir = tempDir('setup-rotate-');
+  // Question order: hostName, dataDir, workspaceDir, retention, adminToken, Atlas?, harnesses.
+  const qs = ['host-a', join(dir, 'data'), join(dir, 'ws'), '7', '', 'no', 'primeagent'];
+  let i = 0;
+  const code = await runHostSetup([], {
+    out: () => {}, err: () => {},
+    question: async () => qs[i++] ?? '',
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0);
+  const first = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8').match(/MERCURY_ADMIN_TOKEN=([0-9a-f]{64})/)?.[1];
+  assert.ok(first, 'the first run must write a generated token');
+  const code2 = await runHostSetup(['--non-interactive', '--yes'], { out: () => {}, err: () => {} }, { XDG_CONFIG_HOME: dir });
+  assert.equal(code2, 0);
+  const second = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8').match(/MERCURY_ADMIN_TOKEN=([0-9a-f]{64})/)?.[1];
+  assert.equal(second, first, 'a --yes re-run must preserve the existing token by default');
+});
+
 test('renderEnv: maps answers to documented MERCURY_* lines', () => {
-  const env = renderEnv(answers());
+  const env = renderEnv(answers({ adminToken: 'tok-admin-123' }));
   assert.ok(env.includes('MERCURY_ATLAS_HOST_ID=host-a'));
   assert.ok(env.includes('MERCURY_DB=/var/lib/mercury/mercury.db'));
   assert.ok(env.includes('MERCURY_WORKSPACE_BASE=/var/lib/mercury/workspaces'));
   assert.ok(env.includes('MERCURY_WORKSPACE_RETENTION_MS=604800000'));
+  assert.ok(env.includes('MERCURY_ADMIN_TOKEN=tok-admin-123'));
   assert.ok(env.includes('MERCURY_HARNESSES=primeagent,hermes'));
   // Fleet is pull, not push (issue #645): the wizard emits no Fleet URL and no host token.
   assert.ok(!env.includes('MERCURY_FLEET_URL'));
@@ -108,7 +212,7 @@ test('renderEnv: maps answers to documented MERCURY_* lines', () => {
 });
 
 test('renderEnv: Atlas on adds the Atlas lines', () => {
-  const env = renderEnv(answers({ atlasEnabled: true, atlasUrl: 'https://atlas.example.com', atlasToken: 'at', atlasProject: 'proj' }));
+  const env = renderEnv(answers({ adminToken: 'tok-admin-123', atlasEnabled: true, atlasUrl: 'https://atlas.example.com', atlasToken: 'at', atlasProject: 'proj' }));
   assert.ok(env.includes('MERCURY_ATLAS_URL=https://atlas.example.com'));
   assert.ok(env.includes('MERCURY_ATLAS_TOKEN=at'));
   assert.ok(env.includes('MERCURY_ATLAS_PROJECT=proj'));
@@ -131,13 +235,13 @@ test('WIZARD_VARIABLES: every emitted name is documented AND read by the host (d
 test('M3 gate: interactive and answers-file produce byte-identical mercury.env', async () => {
   const dir = tempDir('setup-gate-');
   const answersFile = join(dir, 'answers.json');
-  const a = answers({ atlasToken: 'tok-gate-42', atlasEnabled: true, atlasUrl: 'https://atlas.example.com', atlasProject: 'proj' });
+  const a = answers({ adminToken: 'tok-admin-gate-1', atlasToken: 'tok-gate-42', atlasEnabled: true, atlasUrl: 'https://atlas.example.com', atlasProject: 'proj' });
   writeFileSync(answersFile, JSON.stringify(a));
 
   // Interactive path: inject the question function.
   const interactiveEnv = await new Promise<string>((res, rej) => {
     const qs = [
-      a.hostName, a.dataDir, a.workspaceDir, String(a.retentionDays),
+      a.hostName, a.dataDir, a.workspaceDir, String(a.retentionDays), a.adminToken,
       'yes', // Atlas
       a.atlasUrl, a.atlasToken, a.atlasProject,
       a.harnesses.join(','),

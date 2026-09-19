@@ -338,6 +338,7 @@ generated launchd/systemd user unit loads that file exactly as the system units 
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `MERCURY_ADMIN_TOKEN` | unset | Admin/API token: full access to this host's API (admin session, smoke Runs). `mercury host setup` generates one and prints it exactly once; register the same value on the Fleet side as the Bearer token Fleet presents to this host (issue #648). |
 | `MERCURY_HARNESSES` | unset | Comma-separated allowlist of shipped host harnesses to register adapters for (`primeagent`, `hermes`, `claude`). Unset registers every shipped harness. `fake` and the declarative local/remote/rpc agents are not host harnesses and are never filtered (issue #645). Fleet is pull, not push: it calls the host's API with a Fleet-held token, so there is no host-side Fleet URL or host token. |
 
 ## Production-style example

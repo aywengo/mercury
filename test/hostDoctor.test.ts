@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
@@ -118,6 +118,42 @@ test('smokeRun: creates a run and waits for completion', async () => {
   }
 });
 
+test('smokeRun: sends the bounded smoke instruction (#648)', async () => {
+  let seenTask = '';
+  const runsBounded: Record<string, string> = {};
+  const server = createServer((req, res) => {
+    const url = req.url ?? '';
+    if (url === '/api/runs' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        seenTask = (JSON.parse(body) as { task?: string }).task ?? '';
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ runId: 'run-bounded', status: 'QUEUED' }));
+        setTimeout(() => { runsBounded['run-bounded'] = 'COMPLETED'; }, 30);
+      });
+      return;
+    }
+    const m = url.match(/^\/api\/runs\/(.+)$/);
+    if (m && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ run: { status: runsBounded[m[1]!] ?? 'QUEUED' }, skills: [], goal: null, knowledge: [] }));
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'not found' }));
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  const addr = server.address() as { port: number };
+  try {
+    const r = await smokeRun(`http://127.0.0.1:${addr.port}`, 'tok', 'primeagent', 5000);
+    assert.equal(r.ok, true);
+    assert.equal(seenTask, 'Reply with the single word DONE. Do not modify any files.');
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
 test('smokeRun: a FAILED run is a terminal failure, not a timeout', async () => {
   // A server whose run goes FAILED immediately.
   const server = createServer((req, res) => {
@@ -147,6 +183,38 @@ test('smokeRun: a FAILED run is a terminal failure, not a timeout', async () => 
   }
 });
 
+// ---------- the all-skipped rule (#648) ----------
+
+test('runHostDoctor: all smoke checks skipped is a failure, not a pass (#648)', async () => {
+  const m = await mockServer();
+  const dir = tempDir('doctor-allskipped-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=primeagent\n`);
+  try {
+    const out: string[] = [];
+    const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    assert.equal(code, 1, 'all-skipped smoke must exit 1');
+    assert.ok(out.join('').includes('every smoke check was skipped'), 'the human report must say why');
+  } finally {
+    await m.close();
+  }
+});
+
+test('runHostDoctor: a token turns skips into real smoke Runs (#648)', async () => {
+  const m = await mockServer();
+  const dir = tempDir('doctor-token-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=primeagent\nMERCURY_ADMIN_TOKEN=tok-doctor-1\n`);
+  try {
+    const code = await runHostDoctor([], { out: () => {}, err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    assert.equal(code, 0, 'healthz ok + a completed smoke run => exit 0');
+  } finally {
+    await m.close();
+  }
+});
+
 // ---------- the CLI surface ----------
 
 function cli(args: string[], extraEnv: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
@@ -172,9 +240,10 @@ test('host doctor --json reports both sections', async () => {
     HOME: join(dir, 'home'),
   });
   assert.equal(code, 1); // host not running -> healthz fails
-  const parsed = JSON.parse(stdout) as { healthz: { ok: boolean }; smoke: Array<{ harness: string; skipped?: boolean }> };
+  const parsed = JSON.parse(stdout) as { healthz: { ok: boolean }; allSmokeSkipped: boolean; smoke: Array<{ harness: string; skipped?: boolean }> };
   assert.equal(parsed.healthz.ok, false);
   assert.ok(!('fleet' in parsed), 'no Fleet section: the host never contacts Fleet (issue #645)');
+  assert.equal(parsed.allSmokeSkipped, true, 'all-skipped is a failure the JSON must expose (#648)');
   assert.ok(parsed.smoke.length >= 3, 'one smoke entry per enabled harness');
   // No API token -> smoke skipped, not failed.
   assert.ok(parsed.smoke.every((s) => s.skipped === true));
