@@ -258,12 +258,17 @@ main() {
     # Ask the terminal, never the script stream. /dev/tty exists and is openable only
     # when there is a controlling terminal (interactive curl | bash); stdin is the
     # script itself under the pipe, so it must not be read for answers (#646).
-    if { [ -t 0 ] || [ -r /dev/tty ]; } 2>/dev/null; then
+    # Detect a controlling terminal by OPENING /dev/tty, not stat-ing it: the device
+    # node is always permission-readable (mode 666) even with no controlling terminal,
+    # while a real open fails with ENXIO there (Copilot review on #655). `[ -t 0 ]`
+    # stays first: when stdin IS a terminal (plain interactive run), read it directly.
+    if [ -t 0 ] || exec 3</dev/tty 2>/dev/null; then
       printf "Proceed with the install of @aywengo/mercury@%s? [y/N] " "$VERSION"
       if [ -t 0 ]; then
         read -r answer
       else
-        read -r answer < /dev/tty
+        read -r answer <&3
+        exec 3<&-
       fi
       case "$answer" in
         y|Y|yes|YES) ;;

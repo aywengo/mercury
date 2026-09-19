@@ -203,7 +203,7 @@ minimal_path() {
   # script(1) differs across platforms (BSD: `script file [command...]`; util-linux:
   # at most one command argument), so the driver is a single wrapper script that
   # places the answer on the pty BEFORE the installer's prompt reads it.
-  printf '#!/bin/sh\nprintf n > /dev/tty\nexec bash "$INSTALL_SH" --version 9.9.9\n' > "$TEST_DIR/decline-driver.sh"
+  printf '#!/bin/sh\nprintf %s "n\n" > /dev/tty\nexec bash "$INSTALL_SH" --version 9.9.9\n' > "$TEST_DIR/decline-driver.sh"
   chmod +x "$TEST_DIR/decline-driver.sh"
   run run_under_pty "$TEST_DIR/decline-driver.sh"
   [ "$status" -eq 0 ]
@@ -236,8 +236,10 @@ minimal_path() {
 
 @test "piped script without a terminal: fails loudly instead of eating script lines (#646)" {
   # CI has no controlling tty; skip where one exists (the script would correctly
-  # prompt on /dev/tty there and the test cannot drive it).
-  if [ -r /dev/tty ]; then
+  # prompt on /dev/tty there and the test cannot drive it). OPEN /dev/tty rather than
+  # stat-ing it: the node is always permission-readable, even with no controlling
+  # terminal (Copilot review on #655).
+  if (exec 3</dev/tty) 2>/dev/null; then
     skip "needs an environment without a controlling terminal (CI)"
   fi
   stub_ok_prereqs
@@ -249,24 +251,21 @@ minimal_path() {
 }
 
 @test "piped script with a pty: the prompt reads /dev/tty, not the script stream (#646)" {
-  # script(1) allocates a pty; 'n' is placed on it before the script's read, so the
-  # prompt consumes 'n' from the TERMINAL — exactly the curl | bash interaction —
-  # while the script text flows through the pipe. Pre-fix, `read` ate the line after
-  # it and the script skipped or died mid-way; the last logged event proves the script
-  # executed to the clean abort (no skipped code).
+  # A faithful curl | bash reproduction: the script text arrives on a PIPE (bash
+  # /dev/stdin reads it from there), while the answer arrives on the pty. The pipe
+  # carries a trailing marker line that would be eaten as the "answer" by the
+  # pre-#646 bug — so the marker appearing in the output proves stdin was not read
+  # for the confirmation, and the abort log proves the script ran to the end.
   if ! command -v script >/dev/null 2>&1; then
     skip "script(1) not available"
   fi
   stub_ok_prereqs
-  # Deliver the script through a pipe (as curl does), then execute the received copy
-  # under a pty: bash's stdin inside `script` is the pty, so `bash /dev/stdin` cannot
-  # work — the temp file is what a real `curl | bash` session's bash holds in memory.
-  printf '#!/bin/sh\nprintf n > /dev/tty\nexec bash "$PIPED_INSTALL" --version 9.9.9\n' > "$TEST_DIR/piped-driver.sh"
-  chmod +x "$TEST_DIR/piped-driver.sh"
-  cat "$INSTALL_SH" > "$TEST_DIR/piped-install.sh"
-  PIPED_INSTALL="$TEST_DIR/piped-install.sh" run run_under_pty "$TEST_DIR/piped-driver.sh"
+  { cat "$INSTALL_SH"; printf 'echo PIPE-MARKER-REACHED\n'; } > "$TEST_DIR/fake-curl.txt"
+  run run_under_pty "cat '$TEST_DIR/fake-curl.txt' | bash /dev/stdin --version 9.9.9"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Aborted."* ]]
+  # The trailing script line RAN: the confirmation did not consume it as an answer.
+  [[ "$output" == *"PIPE-MARKER-REACHED"* ]]
   grep -q '"install-aborted"' "$XDG_STATE_HOME/mercury/install.log"
   # The script did not skip lines: the last logged event is the clean abort.
   tail -1 "$XDG_STATE_HOME/mercury/install.log" | grep -q 'install-aborted'
