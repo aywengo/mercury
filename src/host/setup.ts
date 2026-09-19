@@ -25,9 +25,12 @@
  *    runtime — the wizard's own vocabulary is fixed and tested.
  * 3. **Secrets are never printed in output.** They are read from an env var or an
  *    answers file (or an interactive prompt), and the redacted summary shows only their
- *    presence and length. The interactive prompt echoes input like any readline prompt;
- *    a secret is protected by the 0600 env file and the redacted summary, not by a
- *    hidden-input terminal mode.
+ *    presence and length. Since #649 §1 (decision 6) secret prompts (admin/API and Atlas
+ *    tokens) use a muted-echo readline mode: an existing token's default is shown as
+ *    `<set, N chars>` (never echoed), and typed characters are never written to the
+ *    terminal. The one exception is the generated admin/API token, which is printed
+ *    once in the "Register on the Fleet side" block so the operator can copy it — that
+ *    is an intentional hand-off, not prompt echo.
  */
 
 import { createInterface } from 'node:readline';
@@ -256,10 +259,16 @@ export function generateAdminToken(): string {
 
 /** Read MERCURY_ADMIN_TOKEN from an existing mercury.env, or ''. */
 export function existingAdminToken(env: NodeJS.ProcessEnv = process.env): string {
+  return existingVar('MERCURY_ADMIN_TOKEN', env);
+}
+
+/** Read a variable from an existing mercury.env, or '' (issue #649 §1: the atlas token
+ *  needs the same re-run continuity the admin token already had). */
+export function existingVar(name: string, env: NodeJS.ProcessEnv = process.env): string {
   const file = envFilePath(env);
   if (!existsSync(file)) return '';
-  const line = readFileSync(file, 'utf8').split('\n').find((l) => l.startsWith('MERCURY_ADMIN_TOKEN='));
-  return line ? line.slice('MERCURY_ADMIN_TOKEN='.length).trim() : '';
+  const line = readFileSync(file, 'utf8').split('\n').find((l) => l.startsWith(`${name}=`));
+  return line ? line.slice(name.length + 1).trim() : '';
 }
 
 /** Default answers from the environment (non-interactive without an answers file). */
@@ -280,7 +289,7 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     adminToken: env.MERCURY_ADMIN_TOKEN?.trim() || existingAdminToken(env),
     atlasEnabled: env.MERCURY_ATLAS_URL ? true : false,
     atlasUrl: env.MERCURY_ATLAS_URL?.trim() || '',
-    atlasToken: env.MERCURY_ATLAS_TOKEN?.trim() || '',
+    atlasToken: env.MERCURY_ATLAS_TOKEN?.trim() || existingVar('MERCURY_ATLAS_TOKEN', env),
     atlasProject: env.MERCURY_ATLAS_PROJECT?.trim() || '',
     harnesses: detected.filter((h) => (KNOWN_HARNESSES as readonly string[]).includes(h)),
   };
@@ -315,6 +324,9 @@ export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.e
 /** Interactive prompts. Returns the answers. */
 export async function promptAnswers(io: {
   question: (q: string) => Promise<string>;
+  /** Muted-echo question for secrets (issue #649 §1, decision 6). Falls back to
+   *  `question` when the terminal cannot mute (tests, piped stdin). */
+  secretQuestion?: (q: string) => Promise<string>;
 }, env: NodeJS.ProcessEnv = process.env, probe?: Map<string, HarnessProbeResult>): Promise<HostSetupAnswers> {
   const base = defaultAnswers(env);
   // Probe-driven checklist default (#647): what the probe found healthy, not a
@@ -334,15 +346,22 @@ export async function promptAnswers(io: {
   // Mask an existing token default (#648 review): the prompt must never echo the live
   // credential from the env file on an interactive re-run. Enter keeps it; a typed
   // value replaces it; empty on a fresh host generates one later in runHostSetup.
+  const secret = io.secretQuestion ?? io.question;
   const adminPrompt = base.adminToken
     ? `Admin/API token [<set, ${base.adminToken.length} chars> — enter to keep, new value to rotate]`
     : 'Admin/API token (empty = generate one)';
-  const adminRaw = (await io.question(`${adminPrompt} `)).trim();
+  const adminRaw = (await secret(`${adminPrompt} `)).trim();
   const adminToken = base.adminToken && adminRaw === '' ? base.adminToken : adminRaw;
   const atlasOn = (await q('Enable Atlas? (yes/no)', base.atlasEnabled ? 'yes' : 'no')).toLowerCase();
   const atlasEnabled = atlasOn === 'yes' || atlasOn === 'y';
   const atlasUrl = atlasEnabled ? await q('Atlas URL', base.atlasUrl) : '';
-  const atlasToken = atlasEnabled ? await q('Atlas token', base.atlasToken) : '';
+  // The Atlas token is a credential: masked default (never echoed from the env), muted
+  // input while typing (issue #649 §1, decision 6 — same treatment as the admin token).
+  const atlasPrompt = base.atlasToken
+    ? `Atlas token [<set, ${base.atlasToken.length} chars> — enter to keep, new value to rotate]`
+    : 'Atlas token';
+  const atlasRaw = atlasEnabled ? (await secret(`${atlasPrompt} `)).trim() : '';
+  const atlasToken = base.atlasToken && atlasRaw === '' ? base.atlasToken : atlasRaw;
   const atlasProject = atlasEnabled ? await q('Atlas project', base.atlasProject) : '';
   const harnessPrompt = probe && probe.size > 0
     ? `Harnesses to enable (comma-separated). Probe: ${
@@ -381,6 +400,9 @@ export async function runHostSetup(
     out: (s: string) => void;
     err: (s: string) => void;
     question?: (q: string) => Promise<string>;
+    /** Muted-echo question for secrets (issue #649 §1). Optional; when absent the
+     *  plain question channel is used (tests, piped stdin). */
+    secretQuestion?: (q: string) => Promise<string>;
     /** Injected probe (tests). Default: probe the real binaries once, bounded. */
     probe?: ProbeFn;
   } = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) },
@@ -435,11 +457,38 @@ export async function runHostSetup(
     let question: (q: string) => Promise<string>;
     if (io.question) {
       question = io.question;
-      answers = await promptAnswers({ question }, env, probe);
+      answers = await promptAnswers({ question, secretQuestion: io.secretQuestion }, env, probe);
     } else if (process.stdin.isTTY) {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       question = (q) => new Promise<string>((res) => rl.question(q, res));
-      answers = await promptAnswers({ question }, env, probe);
+      // Muted echo for secrets (issue #649 §1, decision 6). readline redraws the line as
+      // "<prompt><typed input>" on keypresses, so a startsWith(prompt) filter would leak
+      // the secret through those redraws. While a secret question is pending, the
+      // output callback writes ONLY the exact prompt string captured when the question
+      // started — every other chunk (typed characters, redraw suffixes, control
+      // sequences) is dropped. Normal questions restore the original callback.
+      const rlAny = rl as unknown as { _writeToOutput: (s: string) => void };
+      const stdoutWrite = rlAny._writeToOutput.bind(rl);
+      let mutedPrompt: string | null = null;
+      rlAny._writeToOutput = (s: string) => {
+        if (mutedPrompt !== null) {
+          // Muted: the ONLY thing allowed through is the exact prompt itself.
+          if (s === mutedPrompt) stdoutWrite(s);
+          return;
+        }
+        stdoutWrite(s);
+      };
+      const secretQuestion = (sq: string) => {
+        mutedPrompt = sq;
+        return new Promise<string>((res) =>
+          rl.question(sq, (answer) => {
+            mutedPrompt = null;
+            stdoutWrite('\n');
+            res(answer);
+          }),
+        );
+      };
+      answers = await promptAnswers({ question, secretQuestion }, env, probe);
       rl.close();
     } else {
       const lines = readFileSync(0, 'utf8').split('\n');

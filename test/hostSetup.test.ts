@@ -178,6 +178,89 @@ test('interactive re-run masks the existing token in the prompt (#648 review)', 
   assert.ok(!out.join('').includes(first!), 'the token value must not be printed again on re-run');
 });
 
+test('the atlas token prompt masks an existing default and uses the muted secret channel (#649 §1)', async () => {
+  const dir = tempDir('setup-atlas-mask-');
+  // First run: Atlas on, token typed once (goes through the muted channel when available).
+  const qs1 = ['host-a', join(dir, 'data'), join(dir, 'ws'), '7', '', 'yes', 'https://atlas.example.com', 'atlas-secret-1', 'proj', 'primeagent'];
+  let i = 0;
+  const secrets1: string[] = [];
+  const code1 = await runHostSetup([], {
+    out: () => {}, err: () => {},
+    question: async () => qs1[i++] ?? '',
+    secretQuestion: async (q: string) => { secrets1.push(q); return qs1[i++] ?? ''; },
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  assert.equal(code1, 0);
+  const first = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8').match(/MERCURY_ATLAS_TOKEN=(.+)/)?.[1];
+  assert.equal(first, 'atlas-secret-1');
+  // The atlas token question went through the SECRET channel, not the echoing one.
+  assert.equal(secrets1.length, 2, 'admin + atlas token questions both use the muted channel');
+  assert.ok(secrets1[1]!.startsWith('Atlas token'), secrets1[1]);
+  // Re-run: the atlas default is masked, never echoed.
+  const questions: string[] = [];
+  const secrets2: string[] = [];
+  const qs2 = ['host-a', join(dir, 'data'), join(dir, 'ws'), '7', '', 'yes', 'https://atlas.example.com', '', 'proj', 'primeagent'];
+  let j = 0;
+  const errs2: string[] = [];
+  const code2 = await runHostSetup(['--yes'], {
+    out: () => {}, err: (s) => errs2.push(s),
+    question: async (q) => { questions.push(q); return qs2[j++] ?? ''; },
+    secretQuestion: async (q: string) => { secrets2.push(q); return qs2[j++] ?? ''; },
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  assert.equal(code2, 0, `re-run failed: ${errs2.join('')}`);
+  const atlasQ = secrets2.find((q) => q.startsWith('Atlas token'));
+  assert.ok(atlasQ, 'the atlas token question must be asked');
+  assert.ok(!atlasQ!.includes('atlas-secret-1'), 'the prompt must not echo the live atlas token');
+  assert.ok(atlasQ!.includes('<set, 14 chars>'), atlasQ);
+  const second = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8').match(/MERCURY_ATLAS_TOKEN=(.+)/)?.[1];
+  assert.equal(second, first, 'enter must keep the existing atlas token');
+});
+
+test('the muted channel writes only the prompt — never typed characters or redraws (#649 §1, Copilot round 1)', async () => {
+  // Simulate readline's redraw behavior: "<prompt><typed>" chunks must be dropped while
+  // the exact prompt string passes through exactly once.
+  const written: string[] = [];
+  const rlStub = {
+    _writeToOutput(s: string) { written.push(s); },
+  } as unknown as { _writeToOutput: (s: string) => void };
+  const stdoutWrite = rlStub._writeToOutput.bind(rlStub);
+  let mutedPrompt: string | null = null;
+  rlStub._writeToOutput = (s: string) => {
+    if (mutedPrompt !== null) {
+      if (s === mutedPrompt) stdoutWrite(s);
+      return;
+    }
+    stdoutWrite(s);
+  };
+  const prompt = 'Admin/API token [<set, 64 chars> — enter to keep, new value to rotate] ';
+  mutedPrompt = prompt;
+  // readline invokes the INSTANCE callback (the override) on every write, exactly like
+  // the real flow. Redraw: prompt + typed input; a control sequence; another redraw.
+  const write = (s: string) => rlStub._writeToOutput(s);
+  write(prompt); // readline writes the bare prompt once when question() starts
+  write(prompt + 'sk-1234');
+  write('\u001b[1K');
+  write(prompt + 'sk-123456');
+  mutedPrompt = null;
+  write('\n');
+  const joined = written.join('');
+  assert.ok(joined.includes(prompt), 'the prompt is written');
+  assert.ok(!joined.includes('sk-'), `the secret must never appear: ${JSON.stringify(joined)}`);
+  assert.deepEqual(written, [prompt, '\n'], 'exactly one prompt write and the closing newline');
+});
+
+test('without a secretQuestion the token prompts fall back to the plain channel (tests, piped stdin) (#649 §1)', async () => {
+  const dir = tempDir('setup-atlas-fallback-');
+  const qs = ['host-a', join(dir, 'data'), join(dir, 'ws'), '7', '', 'yes', 'https://atlas.example.com', 'atlas-secret-2', 'proj', 'primeagent'];
+  let i = 0;
+  const code = await runHostSetup([], {
+    out: () => {}, err: () => {},
+    question: async () => qs[i++] ?? '',
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0);
+  const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
+  assert.ok(file.includes('MERCURY_ATLAS_TOKEN=atlas-secret-2'), 'the fallback still writes the token');
+});
+
 test('re-run preserves the existing MERCURY_ADMIN_TOKEN (no silent rotation, #648)', async () => {
   const dir = tempDir('setup-rotate-');
   // Question order: hostName, dataDir, workspaceDir, retention, adminToken, Atlas?, harnesses.
