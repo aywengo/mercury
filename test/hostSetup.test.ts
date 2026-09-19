@@ -32,6 +32,26 @@ import {
 
 const ROOT = resolve(import.meta.dirname, '..');
 
+/** Healthy stub harness binaries: the wizard's probe spawns the real cmd when no probe
+ *  is injected, so tests that exercise the default path point MERCURY_*_CMD at stubs
+ *  that report a healthy version — the suite must not depend on the runner's
+ *  harness inventory (CI has none installed). */
+const stubDir = tempDir('setup-probe-stubs-');
+for (const [name, version] of [
+  ['prime-agent', '9.9.9'],
+  ['hermes', '9.9.9'],
+  ['claude', '9.9.9'],
+] as const) {
+  writeFileSync(join(stubDir, name), `#!/bin/sh\nprintf '%s\\n' '${version}'\n`, { mode: 0o755 });
+}
+function probeStubEnv(): NodeJS.ProcessEnv {
+  return {
+    MERCURY_PRIMEAGENT_CMD: join(stubDir, 'prime-agent'),
+    MERCURY_HERMES_CMD: join(stubDir, 'hermes'),
+    MERCURY_CLAUDE_CMD: join(stubDir, 'claude'),
+  };
+}
+
 function answers(over: Partial<HostSetupAnswers> = {}): HostSetupAnswers {
   return {
     hostName: 'host-a',
@@ -130,7 +150,12 @@ test('interactive re-run masks the existing token in the prompt (#648 review)', 
   const dir = tempDir('setup-mask-');
   const qs = ['host-a', join(dir, 'data'), join(dir, 'ws'), '7', '', 'no', 'primeagent'];
   let i = 0;
-  const code = await runHostSetup([], { out: () => {}, err: () => {}, question: async () => qs[i++] ?? '' }, { XDG_CONFIG_HOME: dir });
+  // Hermetic probe: on a machine without the harnesses the real probe would reject the
+  // answers, which is honest wizard behavior but not what this test is about (#648 review).
+  // The stub commands make the real probe report all-ok on any machine.
+  const code = await runHostSetup([], {
+    out: () => {}, err: () => {}, question: async () => qs[i++] ?? '',
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
   assert.equal(code, 0);
   const first = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8').match(/MERCURY_ADMIN_TOKEN=([0-9a-f]{64})/)?.[1];
   assert.ok(first);
@@ -140,7 +165,7 @@ test('interactive re-run masks the existing token in the prompt (#648 review)', 
   const code2 = await runHostSetup(['--yes'], {
     out: (s) => out.push(s), err: () => {},
     question: async (q) => { questions.push(q); return ''; },
-  }, { XDG_CONFIG_HOME: dir });
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
   assert.equal(code2, 0);
   const adminQ = questions.find((q) => q.startsWith('Admin/API token'));
   assert.ok(adminQ, 'the admin token question must be asked');
@@ -157,7 +182,10 @@ test('re-run preserves the existing MERCURY_ADMIN_TOKEN (no silent rotation, #64
   // Question order: hostName, dataDir, workspaceDir, retention, adminToken, Atlas?, harnesses.
   const qs = ['host-a', join(dir, 'data'), join(dir, 'ws'), '7', '', 'no', 'primeagent'];
   let i = 0;
-  const code = await runHostSetup([], { out: () => {}, err: () => {}, question: async () => qs[i++] ?? '' }, { XDG_CONFIG_HOME: dir });
+  const code = await runHostSetup([], {
+    out: () => {}, err: () => {},
+    question: async () => qs[i++] ?? '',
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
   assert.equal(code, 0);
   const first = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8').match(/MERCURY_ADMIN_TOKEN=([0-9a-f]{64})/)?.[1];
   assert.ok(first, 'the first run must write a generated token');
