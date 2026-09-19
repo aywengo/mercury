@@ -21,6 +21,7 @@ import {
   launchdWrapperPath,
   envFilePath,
   parseServiceArgs,
+  installService,
   resolveMercuryBin,
   SERVICE_NAME,
   LAUNCHD_LABEL,
@@ -144,8 +145,7 @@ test('macOS load is idempotent: print -> bootout (if loaded) -> bootstrap, exit 
   //   bootout/bootstrap -> exit 0
   const bin = join(dir, 'fakebin');
   mkdirSync(bin, { recursive: true });
-  const launchctl = join(bin, 'launchctl');
-  writeFileSync(launchctl, `#!/bin/sh
+  writeFileSync(join(bin, 'launchctl'), `#!/bin/sh
 printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
 case "$1" in
   print) [ "$LAUNCHCTL_LOADED" = "1" ] && exit 0 || exit 1 ;;
@@ -153,13 +153,14 @@ case "$1" in
   *) exit 0 ;;
 esac
 `);
-  chmodSync(launchctl, 0o755);
+  chmodSync(join(bin, 'launchctl'), 0o755);
   // A fake `which` so resolveMercuryBin succeeds without the real toolchain.
   writeFileSync(join(bin, 'which'), '#!/bin/sh\necho /fake/mercury\n');
   chmodSync(join(bin, 'which'), 0o755);
   const home = join(dir, 'home');
   mkdirSync(join(home, '.config', 'mercury'), { recursive: true });
   writeFileSync(join(home, '.config', 'mercury', 'mercury.env'), 'MERCURY_PORT=3999\n');
+  const io = { out: () => {}, err: () => {} };
   const env = {
     XDG_CONFIG_HOME: join(home, '.config'),
     XDG_STATE_HOME: join(dir, 'state'),
@@ -167,38 +168,40 @@ esac
     PATH: `${bin}:${process.env.PATH ?? ''}`,
     LAUNCHCTL_LOG: join(dir, 'launchctl.log'),
   };
-  // First install: nothing loaded -> no bootout, straight bootstrap.
-  let r = await runInstall(env, '0');
-  assert.equal(r.code, 0, r.stderr);
-  let log = readFileSync(join(dir, 'launchctl.log'), 'utf8');
-  assert.ok(log.includes('print gui/'), 'the loaded state is checked first');
-  assert.ok(!log.includes('bootout'), 'no bootout when not loaded');
-  assert.ok(log.includes('bootstrap gui/'), 'bootstrap loads the agent');
-  // Second install with the agent "loaded": print succeeds -> bootout -> bootstrap. Exit 0 (the #650 bug exited 1).
-  r = await runInstall(env, '1');
-  assert.equal(r.code, 0, `re-run must be idempotent: ${r.stderr}`);
-  log = readFileSync(join(dir, 'launchctl.log'), 'utf8');
-  assert.ok(log.includes('bootout gui/'), 'bootout runs when the agent is loaded');
-  assert.ok(log.includes('bootstrap gui/'), 'bootstrap follows the bootout');
-  // And the plist was (re)written in the (temp) home.
-  assert.ok(existsSync(join(home, 'Library', 'LaunchAgents', 'com.mercury.host.plist')));
+  const savedPath = process.env.PATH;
+  process.env.PATH = env.PATH;
+  const savedLog = process.env.LAUNCHCTL_LOG;
+  process.env.LAUNCHCTL_LOG = env.LAUNCHCTL_LOG;
+  // launchdPlistPath() reads os.homedir() from the environment at call time — point it
+  // at the temp home so the test never writes the real ~/Library.
+  const savedHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    // installService is called directly with platform='darwin' — the CLI dispatch passes
+    // process.platform, so the in-process call is the unit boundary that owns the choreography.
+    // First install: nothing loaded -> no bootout, straight bootstrap.
+    let code = installService('darwin', io, env as NodeJS.ProcessEnv, false);
+    assert.equal(code, 0, 'first install exits 0');
+    let log = readFileSync(join(dir, 'launchctl.log'), 'utf8');
+    assert.ok(log.includes('print gui/'), 'the loaded state is checked first');
+    assert.ok(!log.includes('bootout'), 'no bootout when not loaded');
+    assert.ok(log.includes('bootstrap gui/'), 'bootstrap loads the agent');
+    // Second install with the agent "loaded": print ok -> bootout -> bootstrap. Exit 0 (the #650 bug exited 1).
+    process.env.LAUNCHCTL_LOADED = '1';
+    code = installService('darwin', io, env as NodeJS.ProcessEnv, false);
+    assert.equal(code, 0, `re-run must be idempotent (the #650 bug exited 1 here)`);
+    log = readFileSync(join(dir, 'launchctl.log'), 'utf8');
+    assert.ok(log.includes('bootout gui/'), 'bootout runs when the agent is loaded');
+    assert.ok(log.includes('bootstrap gui/'), 'bootstrap follows the bootout');
+    // And the plist was (re)written in the (temp) home.
+    assert.ok(existsSync(join(home, 'Library', 'LaunchAgents', 'com.mercury.host.plist')));
+  } finally {
+    if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+    if (savedLog === undefined) delete process.env.LAUNCHCTL_LOG; else process.env.LAUNCHCTL_LOG = savedLog;
+    if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    delete process.env.LAUNCHCTL_LOADED;
+  }
 });
-
-async function runInstall(env: NodeJS.ProcessEnv, loaded: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((res, rej) => {
-    const child = spawn(process.execPath, [join(ROOT, 'src', 'cli.ts'), 'host', 'service', 'install'], {
-      cwd: ROOT,
-      env: { ...env, LAUNCHCTL_LOADED: loaded },
-    });
-    let stdout = ''; let stderr = '';
-    const killer = setTimeout(() => child.kill('SIGKILL'), 20_000);
-    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (c: string) => { stdout += c; });
-    child.stderr.on('data', (c: string) => { stderr += c; });
-    child.on('error', rej);
-    child.on('close', (code) => { clearTimeout(killer); res({ code, stdout, stderr }); });
-  });
-}
 
 test('host service status reports absent when nothing is installed', async () => {
   const dir = tempDir('service-status-');
