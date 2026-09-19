@@ -1,6 +1,6 @@
 # Mercury Host installer
 
-Status: M0–M6 implemented (PRs #628–#638); review 2026-09-19 found the M1, M3, M4, M5 and M6 gates NOT met. Open: #646 (`curl | bash` prompt reads the script), #647 (wizard ignores the probe), #649 (grouped gate gaps), #650 (minor). #645 closed the model gap: Fleet is pull, not push, and every wizard variable is now read by the host. #648's fixes are in: the wizard writes `MERCURY_ADMIN_TOKEN` (shown once), and the doctor treats an all-skipped smoke section as a failure; the fresh-VM run that meets the M4 gate is still pending. Fix order: #647 → #646 → #649.
+Status: M0–M6 implemented (PRs #628–#638); review 2026-09-19 found the M1, M3, M4, M5 and M6 gates NOT met. Open: #646 (`curl | bash` prompt reads the script), #649 (grouped gate gaps), #650 (minor). #645 closed the model gap: Fleet is pull, not push, and every wizard variable is now read by the host. #648's fixes are in: the wizard writes `MERCURY_ADMIN_TOKEN` (shown once), and the doctor treats an all-skipped smoke section as a failure; the fresh-VM run that meets the M4 gate is still pending. #647's fixes are in: the wizard probes before prompting, defaults to the healthy set, and refuses too-old/missing harnesses without `--force`. Fix order: #646 → #649.
 
 Fleet is pull, not push (issue #645): Fleet holds a per-host token and calls the host's API (`fleet/child.ts` sends `Authorization` on every request). A host never contacts Fleet, so there is no host-side Fleet URL or host token; the host side of Fleet enrollment is (a) an API token Fleet presents and (b) a bind/port reachable from Fleet.
 
@@ -83,7 +83,7 @@ Gate: doc merged; every question in section 3 has an answer or a written reason 
 
 Gate: runs clean in a Docker matrix (Debian, Ubuntu, Fedora) and on macOS arm64 via both channels; `--dry-run` prints the exact action list and touches nothing. Met 2026-09-17: `install.sh` (bash 3.2, `shellcheck` clean, `--dry-run` touches nothing) and `mercury host install` (prereq checks, structured log, works on an unconfigured host) both land; the Docker matrix and the checksum-published-alongside-release half of the gate are M6 work (CI matrix + release signing), not M1.
 
-### M2 — Harness probe — ✅ done (probe itself; wizard integration open in #647)
+### M2 — Harness probe — ✅ done (probe + wizard integration, #647)
 
 `mercury host probe --json` reports, for each harness with a shipped adapter: binary path, version, config path, auth/login state, and whether the version satisfies the adapter's declared minimum. The wizard renders a checklist:
 
@@ -104,15 +104,16 @@ Gate: probe results agree with the adapters' own real-binary observations (the s
 - `fake` and declarative local agents are not host harnesses and never appear.
 - Tests: `test/hostProbe.test.ts` (11 tests) — missing binary → `missing`, downgraded → `too-old`, floor satisfied → `ok`, no floor → `unknown`, env cmd override, no-config host, unknown flag rejected (first and after `--json`).
 
-### M3 — Configuration wizard — ⚠️ implemented, gate open (#647, #649 §1–3, §6)
+### M3 — Configuration wizard — ⚠️ implemented, gate open (#649 §1–3, §6; #647's probe integration is in)
 
 Prompts: host name, data dir, workspace dir, GC retention, Atlas on/off, per-harness enable. Each answer maps to a documented `MERCURY_*` variable that the host's config loader reads. Writes `mercury.env` atomically (temp file, validate, rename, 0600), prints a redacted summary. There is no Fleet prompt: Fleet is pull, not push (issue #645, decision 6).
 
-Gate: an answers file fed to `--non-interactive` produces a byte-identical `mercury.env` to the interactive path with the same answers; an invalid answer is rejected before anything is written. Variable-name coverage is CI-pinned (a test asserts every `WIZARD_VARIABLES` name is documented in `docs/configuration.md` AND read in `src/config.ts`), not enforced at runtime — the wizard's vocabulary is fixed and tested.
+Gate: an answers file fed to `--non-interactive` produces a byte-identical `mercury.env` to the interactive path with the same answers; an invalid answer is rejected before anything is written. Variable-name coverage is CI-pinned (a test asserts every `WIZARD_VARIABLES` name is documented in `docs/configuration.md` AND read in `src/config.ts`), not enforced at runtime — the wizard's vocabulary is fixed and tested. The wizard probes before it prompts (#647): the default harness set is what the probe found healthy, a probe-flagged too-old or missing harness cannot be enabled without `--force`, and an `unknown` probe enables with a warning.
 
 **As built** (`src/host/setup.ts`, wired as `mercury host setup` before `loadConfig()`):
 
-- Prompt → variable mapping: host name → `MERCURY_ATLAS_HOST_ID`, data dir → `MERCURY_DB` (`<dataDir>/mercury.db`), workspace dir → `MERCURY_WORKSPACE_BASE`, GC retention (days) → `MERCURY_WORKSPACE_RETENTION_MS`, Atlas on/off → `MERCURY_ATLAS_URL`/`MERCURY_ATLAS_TOKEN`/`MERCURY_ATLAS_PROJECT`, per-harness enable → `MERCURY_HARNESSES` + `MERCURY_DEFAULT_AGENT` (first enabled). The Fleet URL / host token prompts from the first build are gone (issue #645: the host never dials Fleet).
+- Prompt → variable mapping: host name → `MERCURY_ATLAS_HOST_ID`, data dir → `MERCURY_DB` (`<dataDir>/mercury.db`), workspace dir → `MERCURY_WORKSPACE_BASE`, GC retention (days) → `MERCURY_WORKSPACE_RETENTION_MS`, admin/API token → `MERCURY_ADMIN_TOKEN` (#648), Atlas on/off → `MERCURY_ATLAS_URL`/`MERCURY_ATLAS_TOKEN`/`MERCURY_ATLAS_PROJECT`, per-harness enable → `MERCURY_HARNESSES` + `MERCURY_DEFAULT_AGENT` (first enabled). The Fleet URL / host token prompts from the first build are gone (issue #645: the host never dials Fleet).
+- The wizard probes before prompting (#647): `harnessSpecs().map(probeHarness)` runs once up front (a probe crash degrades to no gate with a warning, it never blocks configuration). The interactive harness prompt renders the probe states inline; the default answer is the `ok` set. Validation is cross-field: a `too-old` or `missing` harness in the answers file or the prompt is rejected before anything is written unless `--force` is passed; the answers-file path gets the same gate.
 - `MERCURY_HARNESSES` is read by the host: `src/config.ts` parses it and `src/cli.ts` registers adapters only for the shipped harnesses in the allowlist (`fake` and the declarative local/remote/rpc agents are never filtered), so a harness the operator leaves out cannot be selected (issue #645). Every emitted name is documented in `docs/configuration.md` and read in `src/config.ts`; a CI test pins both.
 - Interactive and `--non-interactive` share one code path: answers → validate → render → write. The M3 gate test feeds the same answers through both and asserts byte-identical `mercury.env`.
 - Atomic write: temp file in the target dir, rename, chmod 0600. Nothing is written until every answer validates (invalid answers exit 1 with the reasons).
