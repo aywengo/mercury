@@ -265,10 +265,10 @@ minimal_path() {
   # script(1) flavors: BSD execs the command directly (no shell — a pipeline string
   # fails with "No such file or directory"), util-linux takes -c. A driver FILE works
   # for both and owns the choreography: the answer lands on the pty first, then the
-  # script runs with stdin fed from a FIFO (bash's stdin is that pipe — NOT a
-  # terminal — exactly the curl | bash shape; the tty answer cannot be a plain file
-  # redirect because the file is the script).
-  printf '#!/bin/sh\nprintf "n\\n" > /dev/tty\nmkfifo "$FAKE_PIPE"\ncat "$FAKE_CURL" > "$FAKE_PIPE" &\nexec bash "$FAKE_PIPE" --version 9.9.9\n' > "$TEST_DIR/piped-driver.sh"
+  # installer runs as `bash -s` with its STDIN fed from the FIFO — fd 0 is that pipe,
+  # NOT a terminal, exactly the curl | bash shape (running the FIFO as a script file
+  # would leave stdin on the pty and miss the bug — Copilot review on #655).
+  printf '#!/bin/sh\nprintf "n\\n" > /dev/tty\nmkfifo "$FAKE_PIPE"\ncat "$FAKE_CURL" > "$FAKE_PIPE" &\nexec bash -s -- --version 9.9.9 < "$FAKE_PIPE"\n' > "$TEST_DIR/piped-driver.sh"
   chmod +x "$TEST_DIR/piped-driver.sh"
   export FAKE_CURL="$TEST_DIR/fake-curl.txt"
   export FAKE_PIPE="$TEST_DIR/fake-curl-pipe"

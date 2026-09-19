@@ -262,11 +262,16 @@ main() {
     # node is always permission-readable (mode 666) even with no controlling terminal,
     # while a real open fails with ENXIO there (Copilot review on #655). `[ -t 0 ]`
     # stays first: when stdin IS a terminal (plain interactive run), read it directly.
-    if [ -t 0 ] || exec 3</dev/tty 2>/dev/null; then
+    # The probe runs in a subshell so a failed open cannot touch this shell's fd 2
+    # (a bare `exec 3</dev/tty 2>/dev/null` would leave stderr silenced for the rest
+    # of the script — Copilot review on #655).
+    if [ -t 0 ] || (exec 3</dev/tty) 2>/dev/null; then
       printf "Proceed with the install of @aywengo/mercury@%s? [y/N] " "$VERSION"
       if [ -t 0 ]; then
         read -r answer
       else
+        # The subshell probe left no fd behind; open fresh here, read, close.
+        exec 3</dev/tty
         read -r answer <&3
         exec 3<&-
       fi
