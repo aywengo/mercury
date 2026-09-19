@@ -40,7 +40,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readF
 import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
-import { levenshtein } from '../adapters/configKeys.ts';
+import { suggestionFor } from '../adapters/configSchema.ts';
 import { loadEnvFile } from './doctor.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
 
@@ -310,27 +310,10 @@ const ANSWERS_FILE_KEYS = [
   'harnesses',
 ] as const;
 
-/** Nearest known key for a typo, or undefined when nothing is close (same policy as
- *  configSchema: one "did you mean" shortens the fix; distance caps keep it honest). */
-function suggestionFor(key: string, known: readonly string[]): string | undefined {
-  let best: string | undefined;
-  let bestDistance = Infinity;
-  for (const candidate of known) {
-    const d = levenshtein(key.toLowerCase(), candidate.toLowerCase());
-    if (d < bestDistance) {
-      bestDistance = d;
-      best = candidate;
-    }
-  }
-  if (best === undefined) return undefined;
-  if (bestDistance > 3) return undefined;
-  if (bestDistance > Math.max(1, Math.ceil(best.length / 4))) return undefined;
-  return best;
-}
-
 /** Read answers from a JSON file. Unknown keys are REJECTED (issue #649 §2, decision 10):
- *  a typo (`fleetURL`, `harness`) must not silently fall back to the default — Fleet
- *  silently off or retention silently 7 days is exactly the failure this refuses to cause. */
+ *  a typo (`atlasUlr`, `harness`, `retention_days`) must not silently fall back to the
+ *  default — Atlas silently off or retention silently reset to 7 days is exactly the
+ *  failure this refuses to cause. */
 export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.env): HostSetupAnswers {
   const raw = readFileSync(path, 'utf8');
   let parsed: Partial<HostSetupAnswers>;
