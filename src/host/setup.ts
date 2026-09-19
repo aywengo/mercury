@@ -308,7 +308,7 @@ const ANSWERS_FILE_KEYS = [
   'atlasToken',
   'atlasProject',
   'harnesses',
-] as const;
+] as const satisfies readonly (keyof HostSetupAnswers)[];
 
 /** Read answers from a JSON file. Unknown keys are REJECTED (issue #649 §2, decision 10):
  *  a typo (`atlasUlr`, `harness`, `retention_days`) must not silently fall back to the
