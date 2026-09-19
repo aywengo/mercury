@@ -248,13 +248,46 @@ main() {
   fi
 
   # Confirmation (skipped with --yes or --non-interactive).
+  # Issue #646: under `curl | bash` the script itself IS stdin, so `read` without a
+  # redirect consumes the next unread script line as the "answer". Always ask the
+  # terminal, never the script stream:
+  #   - a controlling terminal (/dev/tty) exists -> prompt there;
+  #   - no tty (CI, provisioning) -> the operator cannot answer: require an explicit
+  #     --yes/--non-interactive and fail with a clear message instead of reading stdin.
   if [ "$YES" != "1" ] && [ "$NON_INTERACTIVE" != "1" ]; then
-    printf "Proceed with the install of @aywengo/mercury@%s? [y/N] " "$VERSION"
-    read -r answer
-    case "$answer" in
-      y|Y|yes|YES) ;;
-      *) echo "Aborted."; log_line "install-aborted" "operator declined"; exit 0 ;;
-    esac
+    # Ask the terminal, never the script stream. /dev/tty exists and is openable only
+    # when there is a controlling terminal (interactive curl | bash); stdin is the
+    # script itself under the pipe, so it must not be read for answers (#646).
+    # Detect a controlling terminal by OPENING /dev/tty, not stat-ing it: the device
+    # node is always permission-readable (mode 666) even with no controlling terminal,
+    # while a real open fails with ENXIO there (Copilot review on #655). `[ -t 0 ]`
+    # stays first: when stdin IS a terminal (plain interactive run), read it directly.
+    # The probe runs in a subshell so a failed open cannot touch this shell's fd 2
+    # (a bare `exec 3</dev/tty 2>/dev/null` would leave stderr silenced for the rest
+    # of the script — Copilot review on #655).
+    if [ -t 0 ] || (exec 3</dev/tty) 2>/dev/null; then
+      # The prompt goes to the terminal, not stdout: a caller may have redirected
+      # stdout (tee/pipe) while the controlling tty still answers the question, and
+      # a prompt lost in a pipe reads as a hang (Copilot review on #655).
+      printf "Proceed with the install of @aywengo/mercury@%s? [y/N] " "$VERSION" > /dev/tty
+      if [ -t 0 ]; then
+        read -r answer
+      else
+        # The subshell probe left no fd behind; open fresh here, read, close.
+        exec 3</dev/tty
+        read -r answer <&3
+        exec 3<&-
+      fi
+      case "$answer" in
+        y|Y|yes|YES) ;;
+        *) echo "Aborted."; log_line "install-aborted" "operator declined"; exit 0 ;;
+      esac
+    else
+      echo "install.sh: no terminal to confirm the install and neither --yes nor --non-interactive was passed." >&2
+      echo "install.sh: re-run with --yes to proceed without a prompt (see --dry-run first)." >&2
+      log_line "install-failed" "no tty for confirmation; --yes required"
+      exit 1
+    fi
   fi
 
   # Install the pinned package into the user's npm prefix (no sudo).
