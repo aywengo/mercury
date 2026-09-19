@@ -215,6 +215,74 @@ test('runHostDoctor: a token turns skips into real smoke Runs (#648)', async () 
   }
 });
 
+// ---------- the empty-harness-list gate (#654) ----------
+
+test('runHostDoctor: an empty MERCURY_HARNESSES is a failure, not a vacuous pass (#654)', async () => {
+  const m = await mockServer();
+  const dir = tempDir('doctor-emptyharness-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=\n`);
+  try {
+    const out: string[] = [];
+    const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    assert.equal(code, 1, 'configured to verify nothing must exit 1');
+    assert.ok(out.join('').includes('no harnesses configured'), 'the human report must say why');
+    assert.ok(out.join('').includes('MERCURY_HARNESSES is set but empty'), 'the report names the variable and its state');
+  } finally {
+    await m.close();
+  }
+});
+
+test('runHostDoctor: --allow-no-harnesses is the explicit escape for hosts that run none (#654)', async () => {
+  const m = await mockServer();
+  const dir = tempDir('doctor-allowempty-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=\n`);
+  try {
+    const code = await runHostDoctor(['--allow-no-harnesses'], { out: () => {}, err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    assert.equal(code, 0, 'the explicit escape exits 0 when healthz passes');
+  } finally {
+    await m.close();
+  }
+});
+
+test('runHostDoctor: --json exposes noHarnesses for the empty list (#654)', async () => {
+  const dir = tempDir('doctor-emptyjson-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), 'MERCURY_HARNESSES=\n');
+  const out: string[] = [];
+  await runHostDoctor(['--json'], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+  const parsed = JSON.parse(out.join('')) as { noHarnesses: boolean; smoke: unknown[] };
+  assert.equal(parsed.noHarnesses, true, 'the JSON must expose the empty-configuration fact');
+  assert.equal(parsed.smoke.length, 0, 'an explicit empty list is not filled with the defaults');
+});
+
+test('runHostDoctor: an unset MERCURY_HARNESSES still gets the default list (#654 is about an explicit empty)', async () => {
+  const dir = tempDir('doctor-unsetjson-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), 'MERCURY_PORT=1\n');
+  const out: string[] = [];
+  await runHostDoctor(['--json'], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+  const parsed = JSON.parse(out.join('')) as { noHarnesses: boolean; smoke: Array<{ harness: string; skipped?: boolean }> };
+  assert.equal(parsed.noHarnesses, false);
+  assert.ok(parsed.smoke.length >= 3, 'unset keeps the documented default harness list');
+});
+
+test('runHostDoctor: a whitespace-only MERCURY_HARNESSES is also empty (#654)', async () => {
+  const dir = tempDir('doctor-wsjson-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), 'MERCURY_HARNESSES= , ,\n');
+  const out: string[] = [];
+  await runHostDoctor(['--json'], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+  const parsed = JSON.parse(out.join('')) as { noHarnesses: boolean };
+  assert.equal(parsed.noHarnesses, true, 'whitespace-only entries are not harnesses');
+});
+
 // ---------- the CLI surface ----------
 
 function cli(args: string[], extraEnv: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
@@ -253,6 +321,16 @@ test('host doctor rejects an unknown flag', async () => {
   const { code, stderr } = await cli(['host', 'doctor', '--bogus']);
   assert.equal(code, 1);
   assert.ok(stderr.includes('unknown flag'));
+});
+
+test('host doctor accepts --allow-no-harnesses (#654)', async () => {
+  const dir = tempDir('doctor-allowflag-');
+  const { code, stderr } = await cli(['host', 'doctor', '--allow-no-harnesses'], {
+    XDG_CONFIG_HOME: join(dir, 'cfg'),
+    HOME: join(dir, 'home'),
+  });
+  assert.notEqual(code, null);
+  assert.ok(!stderr.includes('unknown flag'), '--allow-no-harnesses must parse, not error');
 });
 
 test('host doctor reads mercury.env for port and harnesses', async () => {

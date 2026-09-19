@@ -69,6 +69,8 @@ export interface DoctorResult {
   smoke: Array<{ harness: string; ok: boolean; detail: string; skipped?: boolean }>;
   /** True when every smoke check was skipped (no API token): the exit code treats it as a failure (#648). */
   allSmokeSkipped: boolean;
+  /** True when MERCURY_HARNESSES is set but empty/blank: nothing was configured to verify (#654). */
+  noHarnesses: boolean;
 }
 
 /** Bounded GET with a timeout. Returns { status, body } or an error detail. */
@@ -158,9 +160,10 @@ export async function runHostDoctor(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
   const json = args.includes('--json');
+  const allowNoHarnesses = args.includes('--allow-no-harnesses');
   for (const a of args) {
-    if (a !== '--json') {
-      io.err(`host doctor: unknown flag '${a}'. Expected --json.\n`);
+    if (a !== '--json' && a !== '--allow-no-harnesses') {
+      io.err(`host doctor: unknown flag '${a}'. Expected --json, --allow-no-harnesses.\n`);
       return 1;
     }
   }
@@ -170,7 +173,11 @@ export async function runHostDoctor(
   const baseUrl = `http://127.0.0.1:${port}`;
   // Trim entries: 'primeagent, claude' (space) must not smoke-run a harness named ' claude'
   // (review of #651). Unknown ids surface as a failed smoke Run, not a crash.
-  const harnesses = (vars.MERCURY_HARNESSES ?? 'primeagent,hermes,claude').split(',').map((s) => s.trim()).filter(Boolean);
+  // MERCURY_HARNESSES set but empty (#654): the default list does NOT apply to an
+  // explicit empty value — that is "configured to verify nothing" and is reported.
+  const rawHarnesses = vars.MERCURY_HARNESSES;
+  const harnesses = (rawHarnesses ?? 'primeagent,hermes,claude').split(',').map((s) => s.trim()).filter(Boolean);
+  const noHarnesses = rawHarnesses !== undefined && harnesses.length === 0;
   const apiToken = vars.MERCURY_ADMIN_TOKEN ?? (vars.MERCURY_API_TOKENS ?? '').split(',')[0]?.split(':')[0] ?? '';
 
   const healthz = await checkHealthz(baseUrl);
@@ -187,13 +194,20 @@ export async function runHostDoctor(
   }
 
   const anySkipped = smoke.length > 0 && smoke.every((s) => s.skipped);
-  const result: DoctorResult = { healthz, smoke, allSmokeSkipped: anySkipped };
+  const result: DoctorResult = { healthz, smoke, allSmokeSkipped: anySkipped, noHarnesses };
   if (json) {
     io.out(JSON.stringify(result, null, 2) + '\n');
   } else {
     io.out(`healthz: ${healthz.ok ? 'PASS' : 'FAIL'} — ${healthz.detail}\n`);
     for (const s of smoke) {
       io.out(`smoke ${s.harness}: ${s.ok ? 'PASS' : 'FAIL'} — ${s.detail}\n`);
+    }
+    if (noHarnesses) {
+      io.out(
+        `no harnesses configured (MERCURY_HARNESSES is set but empty in ${file}); ` +
+        'nothing to smoke-verify, so this is a failure, not a pass. ' +
+        'Re-run `mercury host setup` or list harnesses in MERCURY_HARNESSES.\n',
+      );
     }
     if (anySkipped) {
       io.out(
@@ -206,6 +220,8 @@ export async function runHostDoctor(
   // but a fresh-install invocation where EVERY smoke check was skipped must not exit 0
   // either (#648): the M4 gate is "at least one harness Run completed", and "all
   // skipped" verifies nothing while reading as success. Partial skips still pass.
-  const allOk = healthz.ok && smoke.every((s) => s.ok || s.skipped) && !anySkipped;
+  // The same class for #654: an empty MERCURY_HARNESSES verifies nothing by
+  // configuration. It fails unless --allow-no-harnesses says the host runs none.
+  const allOk = healthz.ok && smoke.every((s) => s.ok || s.skipped) && !anySkipped && !(noHarnesses && !allowNoHarnesses);
   return allOk ? 0 : 1;
 }
