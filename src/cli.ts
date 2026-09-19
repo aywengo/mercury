@@ -13,7 +13,7 @@ function envInt(raw: string | undefined): number | undefined {
 
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { loadConfig } from './config.ts';
+import { applyHarnessGate, loadConfig } from './config.ts';
 import { openDatabase } from './db/database.ts';
 import { createRedactor } from './domain/redact.ts';
 import { createLogger } from './logger.ts';
@@ -411,6 +411,11 @@ async function main(): Promise<void> {
     ).load(),
   };
 
+  // MERCURY_HARNESSES allowlist (docs/host-installer.md M3, issue #645): a shipped host
+  // harness the operator disabled loses its adapter, so it cannot be selected. fake and
+  // the declarative registries are not host harnesses and pass through untouched.
+  const gatedAdapters = applyHarnessGate(adapters, config.harnesses);
+
   // Resolve what each registered agent can actually do. Probing is detached: boot does not
   // wait for `--version` to come back, so a missing or slow harness cannot delay or fail
   // startup, and goals read as `version-unknown` for the first moment instead of guessing
@@ -422,10 +427,10 @@ async function main(): Promise<void> {
   // unknown-command path must leave stdout empty so usage stays distinguishable from help;
   // logging adapter capabilities for either would put startup noise where a machine reads.
   if (cmd === 'server' || cmd === 'dev' || cmd === 'worker') {
-    logAdapterCapabilities(adapters, logger);
+    logAdapterCapabilities(gatedAdapters, logger);
   }
 
-  const agentCapabilities = new AgentCapabilityRegistry(adapters);
+  const agentCapabilities = new AgentCapabilityRegistry(gatedAdapters);
   agentCapabilities.start();
 
   // Selection reads the local replica, so RunService needs it whether or not this process also runs the
@@ -440,7 +445,7 @@ async function main(): Promise<void> {
     events,
     skills,
     selector,
-    knownAgents: Object.keys(adapters),
+    knownAgents: Object.keys(gatedAdapters),
     agentCapabilities: () => agentCapabilities.snapshot(),
     goals,
     knowledge: config.knowledge.atlas
@@ -540,7 +545,7 @@ async function main(): Promise<void> {
       queue,
       skills,
       workspace,
-      adapters,
+      adapters: gatedAdapters,
       runService,
       goals,
       // Cached probe answers, so the worker records the harness version on the Run without

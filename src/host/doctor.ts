@@ -4,17 +4,18 @@
  * Checks, in order:
  *
  *   1. **healthz** — the running host answers GET /healthz with ok:true and a version.
- *   2. **Fleet** — when MERCURY_FLEET_URL is set, the pre-issued host token reaches
- *      the Fleet endpoint.
- *   3. **Smoke Run** — one Run per enabled harness (MERCURY_HARNESSES) using the real
+ *   2. **Smoke Run** — one Run per enabled harness (MERCURY_HARNESSES) using the real
  *      binary, created through the API and waited to a terminal state.
+ *
+ * (There is no Fleet check: Fleet is pull, not push — issue #645. The host never
+ * contacts Fleet, so registration is verified from the Fleet side.)
  *
  * The doctor reads mercury.env itself (it must work on a host whose service is the
  * thing being diagnosed), so it runs before loadConfig() like the other host commands.
  *
  * Three rules this file exists to enforce:
  *
- * 1. **Every check is bounded.** A hung host, Fleet endpoint or smoke Run is a failure
+ * 1. **Every check is bounded.** A hung host or smoke Run is a failure
  *    with a readable message, not a hang.
  * 2. **A missing piece is reported, not crashed on.** No API token configured → the
  *    smoke-run section says so and the exit code reflects only what could be checked.
@@ -65,7 +66,6 @@ export function ensureSmokeRepo(env: NodeJS.ProcessEnv = process.env): string {
 
 export interface DoctorResult {
   healthz: { ok: boolean; detail: string };
-  fleet: { ok: boolean; detail: string };
   smoke: Array<{ harness: string; ok: boolean; detail: string; skipped?: boolean }>;
 }
 
@@ -96,17 +96,10 @@ export async function checkHealthz(baseUrl: string, timeoutMs = 5000): Promise<{
   return { ok: true, detail: `host ${body.version ?? 'unknown'} ok` };
 }
 
-/** Check 2: Fleet reachability with the pre-issued token. */
-export async function checkFleet(fleetUrl: string, token: string, timeoutMs = 5000): Promise<{ ok: boolean; detail: string }> {
-  if (!fleetUrl) return { ok: true, detail: 'Fleet reporting off (no MERCURY_FLEET_URL)' };
-  if (!token) return { ok: false, detail: 'MERCURY_FLEET_URL set but no MERCURY_HOST_TOKEN' };
-  const r = await getJson(`${fleetUrl.replace(/\/$/, '')}/healthz`, token, timeoutMs);
-  if ('error' in r) return { ok: false, detail: `Fleet unreachable: ${r.error}` };
-  if (r.status >= 200 && r.status < 300) return { ok: true, detail: `Fleet ${fleetUrl} ok (${r.status})` };
-  return { ok: false, detail: `Fleet returned ${r.status}` };
-}
-
-/** Check 3: one smoke Run per harness. */
+/** Check 2: one smoke Run per harness. */
+// (No Fleet check: Fleet is pull, not push — issue #645. The host never contacts Fleet,
+// so a host-side "Fleet reachability" probe could only verify that some URL answers
+// /healthz, not that this host is registered. Registration is verified from Fleet.)
 export async function smokeRun(
   baseUrl: string,
   token: string,
@@ -171,13 +164,10 @@ export async function runHostDoctor(
   const vars = loadEnvFile(file);
   const port = vars.MERCURY_PORT ?? '3000';
   const baseUrl = `http://127.0.0.1:${port}`;
-  const fleetUrl = vars.MERCURY_FLEET_URL ?? '';
-  const hostToken = vars.MERCURY_HOST_TOKEN ?? '';
   const harnesses = (vars.MERCURY_HARNESSES ?? 'primeagent,hermes,claude').split(',').filter(Boolean);
   const apiToken = vars.MERCURY_ADMIN_TOKEN ?? (vars.MERCURY_API_TOKENS ?? '').split(',')[0]?.split(':')[0] ?? '';
 
   const healthz = await checkHealthz(baseUrl);
-  const fleet = await checkFleet(fleetUrl, hostToken);
   const smoke: DoctorResult['smoke'] = [];
   if (apiToken) {
     const smokeRepo = ensureSmokeRepo(env);
@@ -190,18 +180,17 @@ export async function runHostDoctor(
     }
   }
 
-  const result: DoctorResult = { healthz, fleet, smoke };
+  const result: DoctorResult = { healthz, smoke };
   if (json) {
     io.out(JSON.stringify(result, null, 2) + '\n');
   } else {
     io.out(`healthz: ${healthz.ok ? 'PASS' : 'FAIL'} — ${healthz.detail}\n`);
-    io.out(`fleet:   ${fleet.ok ? 'PASS' : 'FAIL'} — ${fleet.detail}\n`);
     for (const s of smoke) {
       io.out(`smoke ${s.harness}: ${s.ok ? 'PASS' : 'FAIL'} — ${s.detail}\n`);
     }
   }
   // Skipped checks (no API token) do not fail the doctor: they report what could not
   // be checked. Only actual failures count (review #635).
-  const allOk = healthz.ok && fleet.ok && smoke.every((s) => s.ok || s.skipped);
+  const allOk = healthz.ok && smoke.every((s) => s.ok || s.skipped);
   return allOk ? 0 : 1;
 }

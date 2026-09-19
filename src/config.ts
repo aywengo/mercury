@@ -6,6 +6,13 @@ import { DEFAULT_BOUNDS, type KnowledgeBounds } from './knowledge/validation.ts'
 export interface Config {
   dbPath: string;
   port: number;
+  /**
+   * Host harness allowlist (MERCURY_HARNESSES, comma-separated). Gates which of the
+   * three shipped host harnesses (primeagent, hermes, claude) get an adapter registered;
+   * unset = every shipped harness. `fake` and the declarative local/remote/rpc agents are
+   * not host harnesses and are never filtered (docs/host-installer.md M3, issue #645).
+   */
+  harnesses: string[] | null;
   /** Bind address for the API server (MERCURY_BIND_HOST); secure default 127.0.0.1. */
   bindHost: string;
   /** TLS cert/key file paths (MERCURY_TLS_CERT + MERCURY_TLS_KEY); null = plain http. */
@@ -176,6 +183,45 @@ function num(value: string | undefined, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/**
+ * The harness ids that name a SHIPPED host harness (the adapters a host machine runs
+ * CLI binaries for, docs/host-installer.md). `fake` is a test/dev adapter and the
+ * declarative local/remote/rpc registries are fleet-defined agents; neither is a host
+ * harness, so the allowlist never filters them.
+ */
+export const HOST_HARNESSES = ['primeagent', 'hermes', 'claude'] as const;
+
+/** Parse MERCURY_HARNESSES: unset/empty = null (every shipped harness enabled). */
+export function parseHarnesses(raw: string | undefined): string[] | null {
+  if (raw === undefined || raw.trim() === '') return null;
+  const ids = raw.split(',').map((v) => v.trim()).filter(Boolean);
+  if (ids.length === 0) return null;
+  const unknown = ids.filter((id) => !(HOST_HARNESSES as readonly string[]).includes(id));
+  if (unknown.length > 0) {
+    throw new Error(`MERCURY_HARNESSES: unknown harness '${unknown[0]}'; known: ${HOST_HARNESSES.join(', ')}`);
+  }
+  return ids;
+}
+
+/**
+ * Apply the MERCURY_HARNESSES allowlist to an adapter registry (issue #645: the wizard
+ * wrote it, nothing read it). A shipped harness NOT in the list loses its adapter, so a
+ * disabled harness cannot run; everything else (fake, declarative agents) passes through.
+ * `null` list = no gate. Returns a new map; the input is not mutated.
+ */
+export function applyHarnessGate<T extends Record<string, unknown>>(
+  adapters: T,
+  harnesses: string[] | null,
+): T {
+  if (harnesses === null) return adapters;
+  const allowed = new Set(harnesses);
+  const out: Record<string, unknown> = {};
+  for (const [id, adapter] of Object.entries(adapters)) {
+    if (!(HOST_HARNESSES as readonly string[]).includes(id) || allowed.has(id)) out[id] = adapter;
+  }
+  return out as T;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const mode = env.MERCURY_WORKSPACE_MODE === 'copy' ? 'copy' : 'git-worktree';
   return {
@@ -215,6 +261,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     backlogCheckIntervalMs: num(env.MERCURY_BACKLOG_CHECK_INTERVAL_MS, 60_000),
     alertWebhookUrl: env.MERCURY_ALERT_WEBHOOK_URL ?? null,
     defaultAgent: env.MERCURY_DEFAULT_AGENT?.trim() || 'fake',
+    harnesses: parseHarnesses(env.MERCURY_HARNESSES),
     agentMode: env.MERCURY_AGENT_MODE === 'daemon' ? 'daemon' : 'rpc',
     sandboxRuntime: env.MERCURY_SANDBOX_RUNTIME ?? null,
     sandboxImage: env.MERCURY_SANDBOX_IMAGE ?? null,
