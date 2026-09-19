@@ -66,6 +66,17 @@ test('a hanging probe is bounded and reports a timeout', async () => {
   assert.ok(elapsed < 8000, `probe took ${elapsed}ms; the bound did not hold`);
 });
 
+test('a non-ENOENT failure with no output is classified FAILED (#650)', async () => {
+  // A binary that exists but dies without printing anything: execFileSync reports a
+  // non-zero exit with empty combined output -> neither ENOENT nor TIMEOUT nor a
+  // parse problem. The code keeps callers from string-matching the message.
+  const boom = script('v-boom', 'exit 3');
+  const info = await probeVersion({ cmd: boom });
+  assert.equal(info.version, null);
+  assert.equal(info.code, 'FAILED');
+  assert.match(info.error ?? '', /probe failed/);
+});
+
 test('unparsable output keeps the raw string as evidence', async () => {
   const info = await probeVersion({ cmd: noVersion });
   assert.equal(info.version, null);

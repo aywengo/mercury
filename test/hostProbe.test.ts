@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
@@ -101,28 +101,55 @@ test('probeHarness: auth reflects the config signal', async () => {
   assert.equal(r3.auth, 'unknown', 'the platform could not tell; unknown is honest (#650)');
 });
 
-test('claude auth: ~/.claude.json is NOT a login signal; the credential file is (#650)', async () => {
+test('claude auth: the REAL harnessSpecs signal — ~/.claude.json is NOT a login; the credential file is (#650)', async () => {
+  // os.homedir() honors $HOME, so a temp HOME scopes the production auth closure. The
+  // platform branch is exercised by stubbing process.platform around the real call.
+  const savedHome = process.env.HOME;
+  const savedPlatform = process.platform;
   const home = tempDir('probe-claude-home-');
   mkdirSync(join(home, '.claude'), { recursive: true });
   writeFileSync(join(home, '.claude.json'), '{}');
-  const specs = harnessSpecs({ MERCURY_CLAUDE_CMD: 'definitely-not-installed-xyz' } as NodeJS.ProcessEnv);
-  const claude = specs.find((s) => s.id === 'claude')!;
   const credsFile = join(home, '.claude', '.credentials.json');
-  // Signal implementation, parameterized by platform semantics (probe.ts decides per platform).
-  const signal = (platform: NodeJS.Platform) =>
-    existsSync(credsFile) ? 'yes' : platform === 'darwin' ? 'unknown' : 'no';
-  // Linux: the credential file IS the signal — absent must read not-logged-in, never logged-in.
-  const linuxNoCreds = await probeHarness({ ...claude, auth: () => signal('linux') });
-  assert.equal(linuxNoCreds.auth, 'not-logged-in', 'bare ~/.claude.json must not read as logged-in');
-  // macOS: Keychain-backed — honest unknown.
-  const macNoCreds = await probeHarness({ ...claude, auth: () => signal('darwin') });
-  assert.equal(macNoCreds.auth, 'unknown');
-  // The real credential file IS the signal on both.
-  writeFileSync(credsFile, '{"claudeAiOauth":{"accessToken":"x"}}');
-  const linuxCreds = await probeHarness({ ...claude, auth: () => signal('linux') });
-  assert.equal(linuxCreds.auth, 'logged-in');
-  const macCreds = await probeHarness({ ...claude, auth: () => signal('darwin') });
-  assert.equal(macCreds.auth, 'logged-in');
+  const realAuth = (platform: NodeJS.Platform) => {
+    Object.defineProperty(process, 'platform', { value: platform });
+    process.env.HOME = home;
+    try {
+      return harnessSpecs({} as NodeJS.ProcessEnv).find((s) => s.id === 'claude')!.auth();
+    } finally {
+      Object.defineProperty(process, 'platform', { value: savedPlatform });
+      if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    }
+  };
+  // The raw signal vocabulary is 'yes'|'no'|'unknown'; probeHarness maps it to
+  // logged-in/not-logged-in/unknown. Both layers are asserted.
+  const mapped = async (platform: NodeJS.Platform) => {
+    Object.defineProperty(process, 'platform', { value: platform });
+    process.env.HOME = home;
+    try {
+      const spec = harnessSpecs({} as NodeJS.ProcessEnv).find((s) => s.id === 'claude')!;
+      return (await probeHarness(spec)).auth;
+    } finally {
+      Object.defineProperty(process, 'platform', { value: savedPlatform });
+      if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+    }
+  };
+  try {
+    // Bare ~/.claude.json, no credentials: Linux reads logged-out, macOS stays unknown.
+    assert.equal(realAuth('linux'), 'no', 'the raw signal says no credentials on linux');
+    assert.equal(realAuth('darwin'), 'unknown', 'Keychain-backed: unknown when the file is absent');
+    const linuxMapped = await mapped('linux');
+    assert.equal(linuxMapped, 'not-logged-in', 'bare ~/.claude.json must not read as logged-in');
+    const macMapped = await mapped('darwin');
+    assert.equal(macMapped, 'unknown');
+    // The real credential file IS the signal on both platforms.
+    writeFileSync(credsFile, '{"claudeAiOauth":{"accessToken":"x"}}');
+    assert.equal(realAuth('linux'), 'yes');
+    assert.equal(realAuth('darwin'), 'yes');
+    assert.equal(await mapped('linux'), 'logged-in');
+    assert.equal(await mapped('darwin'), 'logged-in');
+  } finally {
+    rmSync(credsFile, { force: true });
+  }
 });
 
 // ---------- the CLI surface ----------
