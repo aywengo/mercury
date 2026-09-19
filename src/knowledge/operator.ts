@@ -73,22 +73,44 @@ export function submitOperatorNote(
     ...(Array.isArray(source.contradicts) ? { contradicts: source.contradicts as string[] } : {}),
   };
 
+  // The K2 override (section 7.5) arrives as { rule, reason } from the request body. The rule an
+  // operator names is not trusted as the record of what happened: validateDraft re-runs the K2 scan
+  // and refuses the note unless the named rule is the one that actually fired (invalid-override
+  // otherwise). This route is the only producer of the field; the harvest path never passes the
+  // option, so an agent cannot grant itself an exception.
+  let k2Override: { rule: string; reason: string } | undefined;
+  if (source.operatorOverride !== undefined) {
+    const claimed = source.operatorOverride as Record<string, unknown>;
+    if (typeof claimed !== 'object' || claimed === null || Array.isArray(claimed)) {
+      return { ok: false, status: 400, error: 'note refused: invalid-override', reason: 'invalid-override' };
+    }
+    k2Override = {
+      rule: typeof claimed.rule === 'string' ? claimed.rule : '',
+      reason: typeof claimed.reason === 'string' ? claimed.reason : '',
+    };
+  }
+
   // The same bounds and the same closed vocabularies as any other note. An operator route that skipped
   // validation would be a way to write an unbounded claim into a store that every Run reads, and the
-  // bounds exist to bound what a Run pays for a pack.
-  const validated = validateDraft(draft, config.bounds);
+  // bounds exist to bound what a Run pays for a pack. The override skips only the K2 scan, and only
+  // when it names the rule that actually fired with a non-empty bounded reason.
+  const validated = validateDraft(draft, config.bounds, k2Override ? { k2Override } : {});
   if (!validated.ok) {
     return { ok: false, status: 400, error: `note refused: ${validated.reason}`, reason: validated.reason };
   }
 
+  // The validated draft, not the raw one: the override is attached by validation, so reading the raw
+  // shape here would drop the field the whole feature exists to carry.
+  const vdraft = validated.draft;
   const contribution: NoteContribution = {
     projectId: config.atlas.project,
-    kind: draft.kind,
-    scope: draft.scope,
-    claim: draft.claim,
-    ...(draft.detail !== undefined ? { detail: draft.detail } : {}),
-    evidence: draft.evidence ?? [],
-    ...(draft.contradicts ? { contradicts: draft.contradicts } : {}),
+    kind: vdraft.kind,
+    scope: vdraft.scope,
+    claim: vdraft.claim,
+    ...(vdraft.detail !== undefined ? { detail: vdraft.detail } : {}),
+    evidence: vdraft.evidence ?? [],
+    ...(vdraft.contradicts ? { contradicts: vdraft.contradicts } : {}),
+    ...(vdraft.operatorOverride ? { operatorOverride: vdraft.operatorOverride } : {}),
     provenance: {
       source: 'operator',
       hostId: config.atlas.hostId,

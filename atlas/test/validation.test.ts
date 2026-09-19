@@ -119,6 +119,59 @@ test('validation: claim_hash equivalence', () => {
   assert.notEqual(hash1, hashDiffClaim);
 });
 
+test('validation: K2 override accepts an operator exception that names the fired rule', () => {
+  const bounds = { maxClaimBytes: 1024, maxDetailBytes: 4096, maxEvidence: 8 };
+  const claim = 'Run with --skill planning to analyze';
+
+  const refused = validateDraft({ kind: 'fact', scope: 'project', claim, evidence: [] }, bounds);
+  assert.ok(!refused.ok);
+  assert.equal(refused.reason, 'k2-violation');
+
+  const allowed = validateDraft(
+    { kind: 'fact', scope: 'project', claim, evidence: [] },
+    bounds,
+    { k2Override: { rule: 'harness-flag', reason: 'verified by hand against the repo skill' } },
+  );
+  assert.ok(allowed.ok, JSON.stringify(allowed));
+  assert.deepEqual((allowed as { draft: { operatorOverride?: unknown } }).draft.operatorOverride, {
+    rule: 'harness-flag',
+    reason: 'verified by hand against the repo skill',
+  });
+});
+
+test('validation: an override that names no fired rule, or fires nothing, is invalid-override', () => {
+  const bounds = { maxClaimBytes: 1024, maxDetailBytes: 4096, maxEvidence: 8 };
+  // Nothing fired, override present: an exception nobody granted is not recordable.
+  const nothing = validateDraft(
+    { kind: 'fact', scope: 'project', claim: 'migrations are appended, never edited', evidence: [] },
+    bounds,
+    { k2Override: { rule: 'harness-flag', reason: 'nothing fired' } },
+  );
+  assert.ok(!nothing.ok);
+  assert.equal(nothing.reason, 'invalid-override');
+
+  // Fired, but the override names a different rule than the one that fired.
+  const wrong = validateDraft(
+    { kind: 'fact', scope: 'project', claim: 'Check ~/.hermes/profiles/x for details', evidence: [] },
+    bounds,
+    { k2Override: { rule: 'harness-flag', reason: 'wrong rule' } },
+  );
+  assert.ok(!wrong.ok);
+  assert.equal(wrong.reason, 'invalid-override');
+  assert.match((wrong as { detail?: string }).detail ?? '', /harness-home/);
+
+  // Missing or empty or over-long reason.
+  for (const reason of [undefined, '', '   ', 'x'.repeat(bounds.maxClaimBytes + 1)]) {
+    const bad = validateDraft(
+      { kind: 'fact', scope: 'project', claim: 'Run with --skill planning to analyze', evidence: [] },
+      bounds,
+      { k2Override: { rule: 'harness-flag', reason: reason as string } },
+    );
+    assert.ok(!bad.ok, `reason ${JSON.stringify(reason)?.slice(0, 20)} must be refused`);
+    assert.equal(bad.reason, 'invalid-override');
+  }
+});
+
 test('validation: K2 scan rejects harness-specific content', () => {
   const bounds = { maxClaimBytes: 1024, maxDetailBytes: 4096, maxEvidence: 8 };
   

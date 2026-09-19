@@ -226,6 +226,10 @@ interface Note {
   tier: 'candidate' | 'promoted' | 'retired';
   supersededBy?: string;            // noteId
   contradicts?: string[];           // noteIds this note was declared to conflict with (§12)
+  operatorOverride?: {              // only on an operator note; see §7.5
+    rule: string;                   // the K2 rule id that actually fired
+    reason: string;                 // why the note is served anyway; required, bounded like a claim
+  };
   provenance: {
     source: 'agent-reported' | 'distilled' | 'repo-record' | 'operator';
     hostId: string;
@@ -265,7 +269,10 @@ that rule was written against -- Mercury handing skill ids into Hermes's namespa
 did not exist, so every Hermes Run failed in under a second -- is exactly what a note
 containing `--skill planning` or `~/.hermes/profiles/x` would reproduce. Validation rejects
 such notes at ingest; the adapter, and only the adapter, decides how a pack reaches its
-harness (§9.3).
+harness (§9.3). There is one deliberate exception, narrow enough to name here: an operator may
+override a K2 rejection on a note the operator authored, by naming the rule that fired and giving
+a required reason (§7.5). The override is an act of the same token class that promotes and
+retires, it is recorded in the note itself, and it cannot reach a note an agent wrote.
 
 **K3 -- Mercury does not invent quality.** No confidence score, no relevance score, no
 "trust" field that Mercury computed. The only signals on a note are ones Mercury *measured*:
@@ -612,6 +619,25 @@ redacted: a note is retained far longer than a workspace and replicated to every
 Atlas redacts again on write and on read (§11.5), because `MERCURY_SECRETS` can grow after a
 note is stored and a secret declared on Tuesday must not remain readable from a note written
 on Monday.
+
+**The K2 override.** A K2 rejection is final for everything a Run produces, and it is meant to
+be: the regex is a heuristic, but the burden of rewording a claim until it is neutral is cheap
+next to the failure K2 exists to prevent. The one escape is an act of curation, not of
+ingestion: an operator note (`POST /api/knowledge/notes`, admin token -- the class that promotes
+and retires) may carry `operatorOverride: { rule, reason }`, where `rule` must name the K2 rule
+that actually fired and `reason` must be a non-empty note, bounded like a claim. The override
+skips the K2 scan and nothing else -- bounds, closed vocabularies and evidence rules still bind,
+and the secret check is never overridable on either side of the wire. An override sent when no
+rule fired, or naming a different rule than the one that fired, is refused as
+`invalid-override` rather than recorded: an exception nobody granted is fabricated provenance.
+The recorded override travels on the note to Atlas, lands in `note_revisions` (§11.3), and is
+served back by `GET .../notes/:noteId`, so a reader can see both the violation and the
+justification. An agent cannot grant itself one: a line in `.mercury/notes.jsonl` carrying the
+field is refused at harvest, an `agent-reported` contribution carrying one is refused by Atlas,
+and the host's harvest path has no way to produce the field at all. Like a promotion reason
+(§12), the override documents why this note exists despite the rule it breaks; it is curation
+metadata about the note and is not part of the bounded claim a Run pays bytes for, so the host
+replica does not carry it into packs.
 
 ## 8. The host half: outbox out, replica in
 
@@ -1375,3 +1401,9 @@ Atlas is not:
 10. **The remote-agent payload.** §9.3 hands the pack to a remote agent as an opaque field
     "if the remote declares `knowledge.payload`". That capability and the field are not
     designed; the remote registry format would need both.
+11. **Selection recall is the known open cost of §9.1.** Path-prefix matching means a note
+    scoped to `repo:<hash>#src/queue` reaches only a Run whose task text names that path, so
+    the pitfall most likely to matter often arrives on the Runs that need it least. This is the
+    price of having no relevance model (K3, §9.1) and is accepted until a Run shows a note that
+    existed, was in scope, and still did not arrive; record that Run here rather than reaching
+    for embeddings.

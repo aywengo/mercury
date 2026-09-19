@@ -52,6 +52,7 @@ export const REJECT_REASONS = [
   'missing-evidence',
   'invalid-contradicts',
   'k2-violation',
+  'invalid-override',
   'secret-detected',
   'over-limit',
   'harvest-timeout',
@@ -169,14 +170,64 @@ function validEvidence(ref: unknown): ref is EvidenceRef {
 }
 
 /**
+ * Options for one validateDraft call.
+ *
+ * `k2Override` is how the OPERATOR path grants an exception to the K2 scan (section 7.5). It is an
+ * option to this function and never a field of the raw note on purpose: an agent writing
+ * `operatorOverride` into `.mercury/notes.jsonl` must not be able to grant itself an exception, so
+ * the harvest path never passes this option and the raw field is refused upstream of it. The shape
+ * and the rule-match are checked here so both implementations of the validator (host and Atlas, kept
+ * in agreement by test/atlasAgreement.test.ts) accept and refuse the same notes.
+ */
+export interface ValidateOptions {
+  /** The operator's recorded exception: the rule that fired and why the note is served anyway. */
+  k2Override?: { rule: string; reason: string };
+}
+
+/**
+ * Shape-check one operator override against the rule that actually fired.
+ *
+ * The caller passes the override from the request body (the operator path) or undefined; `fired` is
+ * what findK2Violation found, or null. Four refusals, each named for what an operator reading the
+ * response needs to fix: an override with nothing firing, a wrong rule, a missing reason, an
+ * over-long reason. The reason gets the claim bound -- operator prose is prose, and the note's own
+ * claim bound is the one the pack budget already prices.
+ */
+export function checkK2Override(
+  k2Override: { rule: string; reason: string } | undefined,
+  fired: { id: string; why: string } | null,
+  bounds: KnowledgeBounds,
+): { ok: true; override: { rule: string; reason: string } | undefined } | { ok: false; reason: RejectReason; detail?: string } {
+  if (k2Override === undefined) {
+    if (fired) return { ok: false, reason: 'k2-violation', detail: fired.id };
+    return { ok: true, override: undefined };
+  }
+  const rule = k2Override.rule;
+  const reason = k2Override.reason;
+  if (!fired) return { ok: false, reason: 'invalid-override', detail: 'no K2 rule fired, so there is nothing to override' };
+  if (typeof rule !== 'string' || rule === '') return { ok: false, reason: 'invalid-override', detail: 'override names no rule' };
+  if (rule !== fired.id) return { ok: false, reason: 'invalid-override', detail: `override names ${rule}, but ${fired.id} fired` };
+  if (typeof reason !== 'string' || reason.trim() === '') return { ok: false, reason: 'invalid-override', detail: 'a reason is required' };
+  if (Buffer.byteLength(reason, 'utf8') > bounds.maxClaimBytes) {
+    return { ok: false, reason: 'invalid-override', detail: `reason ${Buffer.byteLength(reason, 'utf8')} > ${bounds.maxClaimBytes}` };
+  }
+  return { ok: true, override: { rule, reason } };
+}
+
+/**
  * Validate one draft against the closed vocabularies and the bounds.
  *
  * Order matters for the reason that reaches the operator: vocabulary first, then bounds, then K2.
  * A note that is both malformed and contains a secret is reported as malformed, because fixing the
  * shape is the step the author has to take first, and because the secret check runs on the *body*
  * fields that only make sense once they exist.
+ *
+ * `opts.k2Override` skips ONLY the K2 scan, and only when the note actually trips a rule and the
+ * override names that rule with a non-empty bounded reason. The secret check is separate and is
+ * never overridable: it runs at harvest (the redactor) and again at Atlas (section 11.5), and
+ * "we stored the token but with stars in it" is not a property anyone should have to defend.
  */
-export function validateDraft(raw: unknown, bounds: KnowledgeBounds = DEFAULT_BOUNDS): Validation {
+export function validateDraft(raw: unknown, bounds: KnowledgeBounds = DEFAULT_BOUNDS, opts: ValidateOptions = {}): Validation {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     return { ok: false, reason: 'malformed-json' };
   }
@@ -230,11 +281,17 @@ export function validateDraft(raw: unknown, bounds: KnowledgeBounds = DEFAULT_BO
 
   // K2 last: it is the only rule whose reason needs the text to be otherwise well-formed.
   const k2 = findK2Violation(claim) ?? (typeof detail === 'string' ? findK2Violation(detail) : null);
-  if (k2) return { ok: false, reason: 'k2-violation', detail: k2.id };
+  let override: { rule: string; reason: string } | undefined;
+  if (opts.k2Override !== undefined || k2 !== null) {
+    const checked = checkK2Override(opts.k2Override, k2, bounds);
+    if (!checked.ok) return { ok: false, reason: checked.reason, detail: checked.detail };
+    override = checked.override;
+  }
 
   const draft: NoteDraft = { kind: kind as NoteKind, scope, claim };
   if (typeof detail === 'string') draft.detail = detail;
   if (evidence.length > 0) draft.evidence = evidence as EvidenceRef[];
   if (Array.isArray(contradicts)) draft.contradicts = contradicts as string[];
+  if (override) draft.operatorOverride = override;
   return { ok: true, draft };
 }

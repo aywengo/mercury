@@ -404,6 +404,42 @@ test('POST /api/knowledge/notes is wired through the app, not just through the f
   }
 });
 
+test('POST /api/knowledge/notes forwards an operatorOverride, and a bad one keeps its reason', async () => {
+  // The route passes the body through unresolved (same wiring lesson as #539), so the override must
+  // survive the HTTP boundary with its shape intact.
+  const env = makeEnv();
+  const stream = new EventStream(env.db, env.events, 10);
+  stream.start();
+  try {
+    const bodies: unknown[] = [];
+    const app = createApp({
+      runService: env.runService, events: env.events, stream, queue: env.queue, db: env.db,
+      apiTokens: new Map([['tok-alice', 'alice']]), adminToken: 'tok-admin',
+      knowledgeNotes: (body) => { bodies.push(body); return { ok: true, claimHash: 'b'.repeat(16), queued: true }; },
+    });
+    const server = await new Promise<Server>((resolve) => { const x = app.listen(0, '127.0.0.1', () => resolve(x)); });
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const res = await fetch(`${base}/api/knowledge/notes`, {
+        method: 'POST', headers: { authorization: 'Bearer tok-admin', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'fact', scope: 'project', claim: 'load the plan with --skill planning',
+          operatorOverride: { rule: 'harness-flag', reason: 'verified by hand' },
+        }),
+      });
+      assert.equal(res.status, 202);
+      assert.deepEqual((bodies[0] as { operatorOverride?: unknown }).operatorOverride, {
+        rule: 'harness-flag', reason: 'verified by hand',
+      }, 'the override reaches the enqueue path untouched');
+    } finally {
+      await closeServer(server);
+    }
+  } finally {
+    stream.stop();
+    env.close();
+  }
+});
+
 test('a refusal over HTTP keeps its reason, and an unconfigured host is refused rather than queued', async () => {
   const env = makeEnv();
   const stream = new EventStream(env.db, env.events, 10);

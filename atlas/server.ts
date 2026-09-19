@@ -88,8 +88,11 @@ export function buildRoutes(services: AtlasServices): Route[] {
         if (notes.length > config.maxBatch) throw new HttpError(413, `batch exceeds ATLAS_MAX_BATCH (${config.maxBatch})`);
         const idempotencyKey = header(ctx.headers, 'idempotency-key');
         if (!idempotencyKey) throw new HttpError(400, 'an Idempotency-Key header is required');
-        if (notes.some((n) => (n as { provenance?: { source?: string } })?.provenance?.source === 'operator')
-          && ctx.caller.class !== 'admin') {
+        const hasOperatorSource = (n: unknown): boolean =>
+          (n as { provenance?: { source?: string } })?.provenance?.source === 'operator';
+        const hasOverride = (n: unknown): boolean =>
+          (n as { operatorOverride?: unknown })?.operatorOverride !== undefined;
+        if (notes.some((n) => hasOperatorSource(n) || hasOverride(n)) && ctx.caller.class !== 'admin') {
           throw new HttpError(403, 'operator notes require an admin token');
         }
         // null, not 'admin': an admin is not bound to a host, and the note's own provenance is the only

@@ -88,6 +88,17 @@ export interface NoteProvenance {
   recordedAt: string;
 }
 
+/**
+ * A recorded K2 override (docs/knowledge-base.md section 7.5).
+ *
+ * Must agree byte for byte with the host's `K2Override` in `src/knowledge/types.ts`; the coupling
+ * rule forbids importing it, and test/atlasContract.test.ts holds the two copies together.
+ */
+export interface K2Override {
+  rule: string;
+  reason: string;
+}
+
 /** The full record, as it crosses the wire and as it sits in the replica. */
 export interface Note {
   noteId: string;
@@ -104,6 +115,8 @@ export interface Note {
   supersededBy?: string;
   /** Note ids this note was DECLARED to conflict with. Atlas never infers a conflict (section 12). */
   contradicts?: string[];
+  /** Present only on an operator-authored note whose K2 violation an operator overrode (section 7.5). */
+  operatorOverride?: K2Override;
   provenance: NoteProvenance;
   corroboration: Corroboration;
   /** Per-project monotonic, assigned by Atlas. A replica never assigns one itself. */
@@ -129,6 +142,8 @@ export interface NoteDraft {
   detail?: string;
   evidence?: EvidenceRef[];
   contradicts?: string[];
+  /** Set only through the operator path (section 7.5). */
+  operatorOverride?: K2Override;
 }
 
 /**
@@ -148,6 +163,8 @@ export interface NoteContribution {
   detail?: string;
   evidence: EvidenceRef[];
   contradicts?: string[];
+  /** The recorded K2 override; produced only through the operator path (section 7.5). */
+  operatorOverride?: K2Override;
   provenance: NoteProvenance;
   /**
    * Identity of `run.repository`, normalized per section 5. Atlas accepts the note only if this is

@@ -188,3 +188,59 @@ test('notes queued while Atlas is down survive it and drain when it returns', as
   }
 });
 
+
+
+test('an overridden K2 note travels to Atlas, lands promoted, and the reason is readable there', async () => {
+  const dir = tempDir('atlas-override-');
+  const env = makeEnv();
+  let atlas: Atlas | null = null;
+  try {
+    atlas = await startAtlas(dir);
+    await createProject(atlas.url);
+    const config = hostConfig(atlas.url);
+
+    // The operator note trips the harness-flag rule; the override names that rule with a reason.
+    const claim = 'load the plan with --skill planning before editing';
+    const r = submitOperatorNote(env.db, config, {
+      kind: 'fact', scope: 'project', claim,
+      operatorOverride: { rule: 'harness-flag', reason: 'our repo ships a planning skill under that name; verified' },
+    });
+    assert.ok(r.ok, `overridden note refused: ${JSON.stringify(r)}`);
+
+    // The pusher delivers it with the admin token an operator note requires.
+    const pushed = await pusherFor(env.db, atlas.url).pushOnce();
+    assert.equal(pushed.failed, false, `push failed: ${pushed.lastError ?? ''}`);
+    assert.equal(pushed.accepted, 1, 'the note reached Atlas');
+    assert.equal(new OutboxStore(env.db).depth(), 0);
+
+    // Atlas serves the note back with the recorded override, from the feed and from getNote.
+    const feed = await fetch(`${atlas.url}/v1/projects/${PROJECT}/notes?since=0&tier=promoted`, {
+      headers: { authorization: `Bearer ${ADMIN}` },
+    });
+    const feedBody = await feed.json() as { notes: { claim: string; operatorOverride?: { rule: string; reason: string } }[] };
+    assert.equal(feedBody.notes.length, 1);
+    assert.equal(feedBody.notes[0]!.claim, claim);
+    assert.deepEqual(feedBody.notes[0]!.operatorOverride, {
+      rule: 'harness-flag',
+      reason: 'our repo ships a planning skill under that name; verified',
+    }, 'the reason travels end to end and is served back');
+
+    const noteId = (await (await fetch(`${atlas.url}/v1/projects/${PROJECT}/notes?since=0&tier=promoted`, {
+      headers: { authorization: `Bearer ${ADMIN}` },
+    })).json() as { notes: { noteId: string }[] }).notes[0]!.noteId;
+    const detail = await fetch(`${atlas.url}/v1/projects/${PROJECT}/notes/${noteId}`, {
+      headers: { authorization: `Bearer ${ADMIN}` },
+    });
+    assert.equal(detail.status, 200);
+    const detailBody = await detail.json() as {
+      note: { operatorOverride?: { rule: string; reason: string } };
+      revisions: { note: { operatorOverride?: { rule: string; reason: string } } }[];
+    };
+    assert.deepEqual(detailBody.note.operatorOverride, feedBody.notes[0]!.operatorOverride);
+    assert.deepEqual(detailBody.revisions[0]!.note.operatorOverride, detailBody.note.operatorOverride,
+      'the audit trail carries the recorded reason');
+  } finally {
+    if (atlas) await atlas.stop();
+    env.close();
+  }
+});

@@ -91,6 +91,21 @@ export interface NoteProvenance {
   recordedAt: string;
 }
 
+/**
+ * A recorded K2 override (docs/knowledge-base.md section 7.5).
+ *
+ * `rule` is the K2 rule id that actually fired -- measured, not claimed -- and `reason` is the
+ * operator's justification for serving the note anyway. The pair is the only way a note that
+ * violates K2 can exist, it can only be produced by an operator-authored note (an admin act, the
+ * same token class that promotes and retires), and the secret check is never overridable.
+ */
+export interface K2Override {
+  /** The K2_RULES id that fired, e.g. `harness-flag`. Must name a rule that actually fired. */
+  rule: string;
+  /** Why the note is served despite the rule. Bounded like a claim; never carries a secret. */
+  reason: string;
+}
+
 /** The full record, as it crosses the wire and as it sits in the replica. */
 export interface Note {
   noteId: string;
@@ -107,6 +122,12 @@ export interface Note {
   supersededBy?: string;
   /** Note ids this note was DECLARED to conflict with. Atlas never infers a conflict (section 12). */
   contradicts?: string[];
+  /**
+   * Present only on an operator-authored note whose K2 violation an operator explicitly overrode
+   * (section 7.5). Never present on an agent-written or distilled note: an agent cannot grant
+   * itself an exception, for the same reason it cannot grant itself a tier.
+   */
+  operatorOverride?: K2Override;
   /**
    * Absent when the note reached a replica before migration v11, which stored no provenance.
    *
@@ -143,6 +164,8 @@ export interface NoteDraft {
   detail?: string;
   evidence?: EvidenceRef[];
   contradicts?: string[];
+  /** Set only by the operator path, never by a field an agent wrote (section 7.5). */
+  operatorOverride?: K2Override;
 }
 
 /**
@@ -162,6 +185,8 @@ export interface NoteContribution {
   detail?: string;
   evidence: EvidenceRef[];
   contradicts?: string[];
+  /** The recorded K2 override; the operator route is the only producer (section 7.5). */
+  operatorOverride?: K2Override;
   provenance: NoteProvenance;
   /**
    * Identity of `run.repository`, normalized per section 5. Atlas accepts the note only if this is

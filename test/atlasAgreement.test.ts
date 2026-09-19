@@ -117,3 +117,36 @@ test('the host and Atlas accept and refuse the same notes, for the same reasons'
     }
   }
 });
+
+test('the host and Atlas grant a K2 override identically, or refuse it identically', () => {
+  const withOverride = (claim: string, operatorOverride: unknown, extra: Record<string, unknown> = {}) => ({
+    kind: 'fact', scope: 'project', claim, evidence: [], operatorOverride, ...extra,
+  });
+  const cases: [string, string, unknown, boolean, string?][] = [
+    ['a valid override on a K2-violating claim', 'load it with --skill planning', { rule: 'harness-flag', reason: 'verified by hand' }, true],
+    ['an override on a claim that fires nothing', 'migrations are appended, never edited', { rule: 'harness-flag', reason: 'r' }, false, 'invalid-override'],
+    ['an override naming a rule that did not fire', 'Check ~/.hermes/profiles/x', { rule: 'harness-flag', reason: 'r' }, false, 'invalid-override'],
+    ['an override without a reason', 'load it with --skill planning', { rule: 'harness-flag' }, false, 'invalid-override'],
+  ];
+  for (const [what, claim, operatorOverride, ok, reason] of cases) {
+    const raw = withOverride(claim, operatorOverride);
+    // The host grants the exception only through the operator option, which carries the same shape the
+    // request body holds; Atlas reads it from the body. Same inputs, same answers.
+    const h = hostValidate(raw as never, DEFAULT_BOUNDS, { k2Override: operatorOverride as { rule: string; reason: string } });
+    const a = atlasValidate(raw as never, { maxClaimBytes: DEFAULT_BOUNDS.maxClaimBytes, maxDetailBytes: DEFAULT_BOUNDS.maxDetailBytes, maxEvidence: MAX_EVIDENCE }, { k2Override: operatorOverride as { rule: string; reason: string } });
+    assert.equal(h.ok, ok, `the host disagrees about ${what}`);
+    assert.equal(a.ok, ok, `Atlas disagrees about ${what}`);
+    if (!ok && reason) {
+      assert.equal((h as { ok: false; reason: string }).reason, reason, `host gives the wrong reason for ${what}`);
+      assert.equal((a as { ok: false; reason: string }).reason, reason, `Atlas gives the wrong reason for ${what}`);
+    }
+    if (ok) {
+      const hd = (h as { ok: true; draft: { operatorOverride?: unknown } }).draft.operatorOverride;
+      const ad = (a as { ok: true; draft: { operatorOverride?: unknown } }).draft.operatorOverride;
+      assert.deepEqual(hd, { rule: 'harness-flag', reason: 'verified by hand' });
+      assert.deepEqual(hd, ad, 'the recorded override must be identical on both sides');
+    }
+  }
+  // An agent-reported source cannot carry an override at any layer: the validator takes the option,
+  // the ROUTE takes the provenance. That half is proved in the contract test, not here.
+});
