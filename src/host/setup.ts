@@ -31,10 +31,12 @@
  */
 
 import { createInterface } from 'node:readline';
+import { randomBytes } from 'node:crypto';
 import { hostStatus, printStatus } from './lifecycle.ts';
 import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { HOST_HARNESSES } from '../config.ts';
 
 /** The wizard's answers, before validation. Every field maps to a MERCURY_* variable. */
 export interface HostSetupAnswers {
@@ -43,6 +45,13 @@ export interface HostSetupAnswers {
   workspaceDir: string;
   /** GC retention in DAYS (the prompt unit); written as MERCURY_WORKSPACE_RETENTION_MS. */
   retentionDays: number;
+  /**
+   * Admin/API token written as MERCURY_ADMIN_TOKEN (issue #648). Empty = the wizard
+   * generates one (32 random bytes, hex). On a re-run the existing file's token is
+   * preserved by default so a --yes re-run never rotates the credential Fleet holds
+   * without the operator asking for it.
+   */
+  adminToken: string;
   atlasEnabled: boolean;
   atlasUrl: string;
   atlasToken: string;
@@ -58,6 +67,7 @@ export const WIZARD_VARIABLES = [
   'MERCURY_DB',
   'MERCURY_WORKSPACE_BASE',
   'MERCURY_WORKSPACE_RETENTION_MS',
+  'MERCURY_ADMIN_TOKEN',
   'MERCURY_ATLAS_URL',
   'MERCURY_ATLAS_TOKEN',
   'MERCURY_ATLAS_PROJECT',
@@ -65,8 +75,9 @@ export const WIZARD_VARIABLES = [
   'MERCURY_DEFAULT_AGENT',
 ] as const;
 
-/** Known harness ids the wizard can enable (the shipped adapters, minus fake). */
-export const KNOWN_HARNESSES = ['primeagent', 'hermes', 'claude'] as const;
+/** Known harness ids the wizard can enable: the shipped host harnesses (single source:
+ *  HOST_HARNESSES in src/config.ts, which also enforces MERCURY_HARNESSES at load). */
+export const KNOWN_HARNESSES = HOST_HARNESSES;
 
 export interface HostSetupOptions {
   nonInteractive: boolean;
@@ -153,11 +164,13 @@ export function validateAnswers(a: HostSetupAnswers): string[] {
 
 /** Render the validated answers as mercury.env lines (sorted, one per variable). */
 export function renderEnv(a: HostSetupAnswers): string {
+  if (!a.adminToken.trim()) throw new Error('adminToken: resolve before rendering (generateAdminToken)');
   const lines: string[] = [];
   lines.push(`MERCURY_ATLAS_HOST_ID=${a.hostName.trim()}`);
   lines.push(`MERCURY_DB=${join(a.dataDir.trim(), 'mercury.db')}`);
   lines.push(`MERCURY_WORKSPACE_BASE=${a.workspaceDir.trim()}`);
   lines.push(`MERCURY_WORKSPACE_RETENTION_MS=${Math.round(a.retentionDays * 24 * 60 * 60 * 1000)}`);
+  lines.push(`MERCURY_ADMIN_TOKEN=${a.adminToken.trim()}`);
   if (a.atlasEnabled) {
     lines.push(`MERCURY_ATLAS_URL=${a.atlasUrl.trim()}`);
     lines.push(`MERCURY_ATLAS_TOKEN=${a.atlasToken.trim()}`);
@@ -200,14 +213,29 @@ export function redactedSummary(a: HostSetupAnswers): string {
         token ? `<set, ${token.length} chars>` : '<unset>'
       }`
     : 'off';
+  const admin = a.adminToken.trim();
   return [
     `host name: ${a.hostName.trim()}`,
     `data dir: ${a.dataDir.trim()}`,
     `workspace dir: ${a.workspaceDir.trim()}`,
     `GC retention: ${a.retentionDays} day(s)`,
+    `admin token: ${admin ? `<set, ${admin.length} chars>` : '<unset — will be generated>'}`,
     `Atlas: ${atlasLine}`,
     `harnesses: ${a.harnesses.join(', ')}`,
   ].join('\n');
+}
+
+/** Generate a fresh admin/API token: 32 random bytes, hex (64 chars). */
+export function generateAdminToken(): string {
+  return randomBytes(32).toString('hex');
+}
+
+/** Read MERCURY_ADMIN_TOKEN from an existing mercury.env, or ''. */
+export function existingAdminToken(env: NodeJS.ProcessEnv = process.env): string {
+  const file = envFilePath(env);
+  if (!existsSync(file)) return '';
+  const line = readFileSync(file, 'utf8').split('\n').find((l) => l.startsWith('MERCURY_ADMIN_TOKEN='));
+  return line ? line.slice('MERCURY_ADMIN_TOKEN='.length).trim() : '';
 }
 
 /** Default answers from the environment (non-interactive without an answers file). */
@@ -218,6 +246,9 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     dataDir: env.MERCURY_DB ? dirname(env.MERCURY_DB) : join(homedir(), '.local', 'state', 'mercury'),
     workspaceDir: env.MERCURY_WORKSPACE_BASE?.trim() || join(homedir(), 'mercury-workspaces'),
     retentionDays: 7,
+    // Re-run safety (#648): keep the token the host already runs with unless the caller
+    // supplies a new one. Generation happens in renderEnv so the default stays pure.
+    adminToken: env.MERCURY_ADMIN_TOKEN?.trim() || existingAdminToken(env),
     atlasEnabled: env.MERCURY_ATLAS_URL ? true : false,
     atlasUrl: env.MERCURY_ATLAS_URL?.trim() || '',
     atlasToken: env.MERCURY_ATLAS_TOKEN?.trim() || '',
@@ -226,16 +257,17 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
   };
 }
 
-/** Read answers from a JSON file. */
-export function readAnswersFile(path: string): HostSetupAnswers {
+/** Read answers from a JSON file. Unspecified fields fall back to env-derived defaults. */
+export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.env): HostSetupAnswers {
   const raw = readFileSync(path, 'utf8');
   const parsed = JSON.parse(raw) as Partial<HostSetupAnswers>;
-  const base = defaultAnswers();
+  const base = defaultAnswers(env);
   return {
     hostName: parsed.hostName ?? base.hostName,
     dataDir: parsed.dataDir ?? base.dataDir,
     workspaceDir: parsed.workspaceDir ?? base.workspaceDir,
     retentionDays: parsed.retentionDays ?? base.retentionDays,
+    adminToken: parsed.adminToken ?? base.adminToken,
     atlasEnabled: parsed.atlasEnabled ?? base.atlasEnabled,
     atlasUrl: parsed.atlasUrl ?? base.atlasUrl,
     atlasToken: parsed.atlasToken ?? base.atlasToken,
@@ -247,8 +279,8 @@ export function readAnswersFile(path: string): HostSetupAnswers {
 /** Interactive prompts. Returns the answers. */
 export async function promptAnswers(io: {
   question: (q: string) => Promise<string>;
-}): Promise<HostSetupAnswers> {
-  const base = defaultAnswers();
+}, env: NodeJS.ProcessEnv = process.env): Promise<HostSetupAnswers> {
+  const base = defaultAnswers(env);
   const q = async (prompt: string, def: string): Promise<string> => {
     const line = await io.question(`${prompt} [${def}] `);
     return line.trim() === '' ? def : line.trim();
@@ -257,6 +289,7 @@ export async function promptAnswers(io: {
   const dataDir = await q('Data dir (mercury.db lives here)', base.dataDir);
   const workspaceDir = await q('Workspace dir', base.workspaceDir);
   const retention = await q('GC retention (days)', String(base.retentionDays));
+  const adminToken = await q('Admin/API token (empty = generate one)', base.adminToken);
   const atlasOn = (await q('Enable Atlas? (yes/no)', base.atlasEnabled ? 'yes' : 'no')).toLowerCase();
   const atlasEnabled = atlasOn === 'yes' || atlasOn === 'y';
   const atlasUrl = atlasEnabled ? await q('Atlas URL', base.atlasUrl) : '';
@@ -271,6 +304,7 @@ export async function promptAnswers(io: {
     // Keep the parsed number as-is (0/NaN included): validateAnswers rejects it, so an
     // invalid input cannot silently fall back to the default and pass (review #633).
     retentionDays: Number.parseFloat(retention),
+    adminToken,
     atlasEnabled,
     atlasUrl,
     atlasToken,
@@ -301,13 +335,13 @@ export async function runHostSetup(
   if (opts.nonInteractive) {
     if (opts.answersFile) {
       try {
-        answers = readAnswersFile(opts.answersFile);
+        answers = readAnswersFile(opts.answersFile, env);
       } catch (e) {
         io.err(`host setup: cannot read answers file: ${(e as Error).message}\n`);
         return 1;
       }
     } else {
-      answers = defaultAnswers();
+      answers = defaultAnswers(env);
     }
   } else {
     // Interactive: use the injected question fn (tests) or a real readline on stdin.
@@ -317,17 +351,17 @@ export async function runHostSetup(
     let question: (q: string) => Promise<string>;
     if (io.question) {
       question = io.question;
-      answers = await promptAnswers({ question });
+      answers = await promptAnswers({ question }, env);
     } else if (process.stdin.isTTY) {
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       question = (q) => new Promise<string>((res) => rl.question(q, res));
-      answers = await promptAnswers({ question });
+      answers = await promptAnswers({ question }, env);
       rl.close();
     } else {
       const lines = readFileSync(0, 'utf8').split('\n');
       let i = 0;
       question = async () => lines[i++] ?? '';
-      answers = await promptAnswers({ question });
+      answers = await promptAnswers({ question }, env);
     }
   }
 
@@ -337,6 +371,11 @@ export async function runHostSetup(
     io.err('\nNothing was written. Fix the answers and re-run.\n');
     return 1;
   }
+
+  // Resolve the admin token AFTER validation and BEFORE rendering so both entry paths
+  // (interactive / answers file) and --dry-run see the same value (#648).
+  const generatedToken = !answers.adminToken.trim();
+  if (generatedToken) answers.adminToken = generateAdminToken();
 
   const content = renderEnv(answers);
   const path = envFilePath(env);
@@ -365,5 +404,14 @@ export async function runHostSetup(
   io.out('mercury host setup\n');
   io.out(redactedSummary(answers) + '\n');
   io.out(`\nWrote ${path} (mode 0600). Start the host with \`mercury host doctor\` (M4).\n`);
+  if (generatedToken) {
+    // The one place the generated token is shown (#648, decision 6): Fleet presents it
+    // as a Bearer token to the host API, so the operator registers exactly this value
+    // on the Fleet side. It is in the 0600 file afterwards and never printed again.
+    const port = process.env.MERCURY_PORT ?? '3000';
+    io.out('\nRegister on the Fleet side (shown once, not again):\n');
+    io.out(`  host API base URL: http://<this-host>:${port}\n`);
+    io.out(`  host API token:    ${answers.adminToken}\n`);
+  }
   return 0;
 }

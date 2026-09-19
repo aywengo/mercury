@@ -67,6 +67,8 @@ export function ensureSmokeRepo(env: NodeJS.ProcessEnv = process.env): string {
 export interface DoctorResult {
   healthz: { ok: boolean; detail: string };
   smoke: Array<{ harness: string; ok: boolean; detail: string; skipped?: boolean }>;
+  /** True when every smoke check was skipped (no API token): the exit code treats it as a failure (#648). */
+  allSmokeSkipped: boolean;
 }
 
 /** Bounded GET with a timeout. Returns { status, body } or an error detail. */
@@ -113,7 +115,9 @@ export async function smokeRun(
     const res = await fetch(`${baseUrl}/api/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ task: 'mercury host doctor smoke run', agent: harness, ...(smokeRepo ? { repository: { localPath: smokeRepo } } : {}) }),
+      // Bounded instruction (#648): an open-ended task lets a real harness wander in the
+      // workspace; the smoke check only proves the pipeline runs end to end.
+      body: JSON.stringify({ task: 'Reply with the single word DONE. Do not modify any files.', agent: harness, ...(smokeRepo ? { repository: { localPath: smokeRepo } } : {}) }),
       signal: controller.signal,
     });
     clearTimeout(timer);
@@ -164,7 +168,9 @@ export async function runHostDoctor(
   const vars = loadEnvFile(file);
   const port = vars.MERCURY_PORT ?? '3000';
   const baseUrl = `http://127.0.0.1:${port}`;
-  const harnesses = (vars.MERCURY_HARNESSES ?? 'primeagent,hermes,claude').split(',').filter(Boolean);
+  // Trim entries: 'primeagent, claude' (space) must not smoke-run a harness named ' claude'
+  // (review of #651). Unknown ids surface as a failed smoke Run, not a crash.
+  const harnesses = (vars.MERCURY_HARNESSES ?? 'primeagent,hermes,claude').split(',').map((s) => s.trim()).filter(Boolean);
   const apiToken = vars.MERCURY_ADMIN_TOKEN ?? (vars.MERCURY_API_TOKENS ?? '').split(',')[0]?.split(':')[0] ?? '';
 
   const healthz = await checkHealthz(baseUrl);
@@ -180,7 +186,8 @@ export async function runHostDoctor(
     }
   }
 
-  const result: DoctorResult = { healthz, smoke };
+  const anySkipped = smoke.length > 0 && smoke.every((s) => s.skipped);
+  const result: DoctorResult = { healthz, smoke, allSmokeSkipped: anySkipped };
   if (json) {
     io.out(JSON.stringify(result, null, 2) + '\n');
   } else {
@@ -188,9 +195,17 @@ export async function runHostDoctor(
     for (const s of smoke) {
       io.out(`smoke ${s.harness}: ${s.ok ? 'PASS' : 'FAIL'} — ${s.detail}\n`);
     }
+    if (anySkipped) {
+      io.out(
+        `every smoke check was skipped (no MERCURY_ADMIN_TOKEN or MERCURY_API_TOKENS in ${file}); ` +
+        'nothing was verified, so this is a failure, not a pass. Run `mercury host setup` to write a token.\n',
+      );
+    }
   }
-  // Skipped checks (no API token) do not fail the doctor: they report what could not
-  // be checked. Only actual failures count (review #635).
-  const allOk = healthz.ok && smoke.every((s) => s.ok || s.skipped);
+  // Skipped checks (no API token) do not fail the doctor as failures (review #635),
+  // but a fresh-install invocation where EVERY smoke check was skipped must not exit 0
+  // either (#648): the M4 gate is "at least one harness Run completed", and "all
+  // skipped" verifies nothing while reading as success. Partial skips still pass.
+  const allOk = healthz.ok && smoke.every((s) => s.ok || s.skipped) && !anySkipped;
   return allOk ? 0 : 1;
 }
