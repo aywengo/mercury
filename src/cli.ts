@@ -120,8 +120,9 @@ async function main(): Promise<void> {
   // `host install` runs BEFORE loadConfig() for the same reason `knowledge identity` runs before
   // the database opens: the command exists to install a host that is not configured yet, and a
   // host whose configuration is the thing being fixed must still be able to run it
-  // (docs/host-installer.md M1). loadConfig() never throws, but the redactor/logger setup below
-  // is host-shaped and this command is not.
+  // (docs/host-installer.md M1). loadConfig() CAN throw on a bad value (unknown MERCURY_HARNESSES
+  // id, unreadable declarative config), which is exactly why the fix tools run before it — but the
+  // redactor/logger setup below is host-shaped and this command is not.
   if (cmd === 'host' && args[0] === 'install') {
     process.exitCode = runHostInstall(args.slice(1));
     return;

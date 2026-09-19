@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-import { applyHarnessGate, parseHarnesses, HOST_HARNESSES } from '../src/config.ts';
+import { applyHarnessGate, loadConfig, parseHarnesses, HOST_HARNESSES } from '../src/config.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -32,6 +32,15 @@ test('parseHarnesses: unknown id fails loud (silent typo = harness silently off)
 
 test('parseHarnesses: only whitespace entries means unset', () => {
   assert.equal(parseHarnesses(' , , '), null);
+});
+
+test('loadConfig throws a readable error on an unknown MERCURY_HARNESSES id', () => {
+  // A silent typo would disable nothing visibly; load-time loudness puts the fix in the
+  // boot log (the host subcommands run before loadConfig, so the operator can still fix it).
+  assert.throws(() => loadConfig({ MERCURY_HARNESSES: 'primagent' } as NodeJS.ProcessEnv),
+    /MERCURY_HARNESSES: unknown harness 'primagent'/);
+  const cfg = loadConfig({ MERCURY_HARNESSES: 'primeagent,claude' } as NodeJS.ProcessEnv);
+  assert.deepEqual(cfg.harnesses, ['primeagent', 'claude']);
 });
 
 const adapters = { primeagent: 'PA', hermes: 'HE', claude: 'CL', fake: 'FA', myagent: 'LO' };
