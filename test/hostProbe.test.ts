@@ -97,6 +97,32 @@ test('probeHarness: auth reflects the config signal', async () => {
   assert.equal(r.auth, 'logged-in');
   const r2 = await probeHarness(spec({ cmd: bin, auth: () => 'no' }));
   assert.equal(r2.auth, 'not-logged-in');
+  const r3 = await probeHarness(spec({ cmd: bin, auth: () => 'unknown' }));
+  assert.equal(r3.auth, 'unknown', 'the platform could not tell; unknown is honest (#650)');
+});
+
+test('claude auth: ~/.claude.json is NOT a login signal; the credential file is (#650)', async () => {
+  const home = tempDir('probe-claude-home-');
+  mkdirSync(join(home, '.claude'), { recursive: true });
+  writeFileSync(join(home, '.claude.json'), '{}');
+  const specs = harnessSpecs({ MERCURY_CLAUDE_CMD: 'definitely-not-installed-xyz' } as NodeJS.ProcessEnv);
+  const claude = specs.find((s) => s.id === 'claude')!;
+  const credsFile = join(home, '.claude', '.credentials.json');
+  // Signal implementation, parameterized by platform semantics (probe.ts decides per platform).
+  const signal = (platform: NodeJS.Platform) =>
+    existsSync(credsFile) ? 'yes' : platform === 'darwin' ? 'unknown' : 'no';
+  // Linux: the credential file IS the signal — absent must read not-logged-in, never logged-in.
+  const linuxNoCreds = await probeHarness({ ...claude, auth: () => signal('linux') });
+  assert.equal(linuxNoCreds.auth, 'not-logged-in', 'bare ~/.claude.json must not read as logged-in');
+  // macOS: Keychain-backed — honest unknown.
+  const macNoCreds = await probeHarness({ ...claude, auth: () => signal('darwin') });
+  assert.equal(macNoCreds.auth, 'unknown');
+  // The real credential file IS the signal on both.
+  writeFileSync(credsFile, '{"claudeAiOauth":{"accessToken":"x"}}');
+  const linuxCreds = await probeHarness({ ...claude, auth: () => signal('linux') });
+  assert.equal(linuxCreds.auth, 'logged-in');
+  const macCreds = await probeHarness({ ...claude, auth: () => signal('darwin') });
+  assert.equal(macCreds.auth, 'logged-in');
 });
 
 // ---------- the CLI surface ----------

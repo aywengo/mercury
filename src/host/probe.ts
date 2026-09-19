@@ -106,9 +106,13 @@ export function harnessSpecs(env: NodeJS.ProcessEnv = process.env): HarnessSpec[
       configPath: join(home, '.claude.json'),
       // ~/.claude.json is created on first launch whether or not the user is logged
       // in (issue #650), so it is not an auth signal. The credential file exists only
-      // after a real login on Linux; the macOS copy lives in the Keychain, which is
-      // not cheaply checkable — honest `unknown` beats a false positive.
-      auth: () => (existsSync(join(home, '.claude', '.credentials.json')) ? 'yes' : 'unknown'),
+      // after a real login on Linux — absent reads `not-logged-in` there. On macOS
+      // the copy lives in the Keychain, which is not cheaply checkable: honest
+      // `unknown` beats both a false positive and a false negative.
+      auth: () => {
+        if (existsSync(join(home, '.claude', '.credentials.json'))) return 'yes';
+        return process.platform === 'darwin' ? 'unknown' : 'no';
+      },
     },
   ];
 }

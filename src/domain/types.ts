@@ -468,11 +468,12 @@ export interface AgentCapabilities {
   static?: AgentStaticCapabilities;
 }
 
-/** Result of asking a harness binary which version it is. `raw` is kept because when
- *  a parse is wrong the raw string is the only evidence of why (docs/goals.md 13.3). */
 /** Machine-readable probe failure class (issue #650): callers branch on this instead of
  *  string-matching the human `error` message. */
 export type VersionProbeCode = 'ENOENT' | 'TIMEOUT' | 'UNPARSABLE' | 'FAILED';
+
+/** Result of asking a harness binary which version it is. `raw` is kept because when
+ *  a parse is wrong the raw string is the only evidence of why (docs/goals.md 13.3). */
 
 export interface AgentVersionInfo {
   version: string | null;
