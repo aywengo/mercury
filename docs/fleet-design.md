@@ -329,7 +329,8 @@ Fleet does not need these, but each removes a workaround. They belong in Mercury
    dispatch code existed. It was deferred long enough that Phase 0 shipped a laptop-shaped default
    credential path, which section 15 corrects.
 2. **Multi-user?** Fleet inherits per-caller host allowlists but no tenancy model. If two people with
-   different access levels share it, the allowlist needs to be real authorisation.
+   different access levels share it, the allowlist needs to be real authorisation. A design draft now
+   exists: [`docs/fleet-tenancy-design.md`](fleet-tenancy-design.md).
 3. **How much history?** Metadata-only mirroring keeps Fleet small and is the default here, but it means
    Fleet cannot show a historical timeline for a host that has since garbage-collected its events.
 4. **Does a Run ever move?** Deliberately assumed no: one Run, one host, for life. Moving a Run would mean
