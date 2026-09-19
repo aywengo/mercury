@@ -1,9 +1,9 @@
 /**
  * `mercury host doctor` (docs/host-installer.md M4) — the verification command.
  *
- * The M4 doctor contract: healthz version check, Fleet reachability with the pre-issued
- * token, one smoke Run per enabled harness. Every check is bounded and a missing piece
- * is reported, not crashed on.
+ * The M4 doctor contract: healthz version check, one smoke Run per enabled harness.
+ * Every check is bounded and a missing piece is reported, not crashed on. There is no
+ * Fleet check: Fleet is pull, not push (issue #645) — the host never contacts Fleet.
  */
 
 import { test } from 'node:test';
@@ -18,14 +18,13 @@ import {
   loadEnvFile,
   envFilePath,
   checkHealthz,
-  checkFleet,
   smokeRun,
   runHostDoctor,
 } from '../src/host/doctor.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
-/** A tiny mock server: /healthz ok, /api/runs creates + completes, Fleet /healthz ok. */
+/** A tiny mock server: /healthz ok, /api/runs creates + completes. */
 function mockServer(): Promise<{ server: Server; url: string; close: () => Promise<void> }> {
   return new Promise((res) => {
     const runs: Record<string, string> = {};
@@ -77,11 +76,10 @@ function mockServer(): Promise<{ server: Server; url: string; close: () => Promi
 test('loadEnvFile: parses KEY=VALUE lines', () => {
   const dir = tempDir('doctor-env-');
   const p = join(dir, 'mercury.env');
-  writeFileSync(p, 'MERCURY_PORT=4000\nMERCURY_FLEET_URL=https://fleet.example.com\nMERCURY_HOST_TOKEN=tok\n');
+  writeFileSync(p, 'MERCURY_PORT=4000\nMERCURY_HARNESSES=primeagent,hermes\n');
   const vars = loadEnvFile(p);
   assert.equal(vars.MERCURY_PORT, '4000');
-  assert.equal(vars.MERCURY_FLEET_URL, 'https://fleet.example.com');
-  assert.equal(vars.MERCURY_HOST_TOKEN, 'tok');
+  assert.equal(vars.MERCURY_HARNESSES, 'primeagent,hermes');
 });
 
 test('loadEnvFile: missing file returns empty', () => {
@@ -105,28 +103,6 @@ test('checkHealthz: fails cleanly when unreachable', async () => {
   const r = await checkHealthz('http://127.0.0.1:1', 1000);
   assert.equal(r.ok, false);
   assert.ok(r.detail.includes('unreachable'));
-});
-
-test('checkFleet: off when no URL', async () => {
-  const r = await checkFleet('', 'tok');
-  assert.equal(r.ok, true);
-  assert.ok(r.detail.includes('off'));
-});
-
-test('checkFleet: URL without token fails', async () => {
-  const r = await checkFleet('https://fleet.example.com', '');
-  assert.equal(r.ok, false);
-  assert.ok(r.detail.includes('no MERCURY_HOST_TOKEN'));
-});
-
-test('checkFleet: ok when Fleet answers', async () => {
-  const m = await mockServer();
-  try {
-    const r = await checkFleet(m.url, 'tok');
-    assert.equal(r.ok, true);
-  } finally {
-    await m.close();
-  }
 });
 
 // ---------- smoke run ----------
@@ -189,16 +165,16 @@ function cli(args: string[], extraEnv: Record<string, string> = {}): Promise<{ c
   });
 }
 
-test('host doctor --json reports all three sections', async () => {
+test('host doctor --json reports both sections', async () => {
   const dir = tempDir('doctor-cli-');
   const { code, stdout } = await cli(['host', 'doctor', '--json'], {
     XDG_CONFIG_HOME: join(dir, 'cfg'),
     HOME: join(dir, 'home'),
   });
   assert.equal(code, 1); // host not running -> healthz fails
-  const parsed = JSON.parse(stdout) as { healthz: { ok: boolean }; fleet: { ok: boolean }; smoke: Array<{ harness: string; skipped?: boolean }> };
+  const parsed = JSON.parse(stdout) as { healthz: { ok: boolean }; smoke: Array<{ harness: string; skipped?: boolean }> };
   assert.equal(parsed.healthz.ok, false);
-  assert.equal(parsed.fleet.ok, true); // Fleet off
+  assert.ok(!('fleet' in parsed), 'no Fleet section: the host never contacts Fleet (issue #645)');
   assert.ok(parsed.smoke.length >= 3, 'one smoke entry per enabled harness');
   // No API token -> smoke skipped, not failed.
   assert.ok(parsed.smoke.every((s) => s.skipped === true));

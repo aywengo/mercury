@@ -37,8 +37,6 @@ function answers(over: Partial<HostSetupAnswers> = {}): HostSetupAnswers {
     dataDir: '/var/lib/mercury',
     workspaceDir: '/var/lib/mercury/workspaces',
     retentionDays: 7,
-    fleetUrl: 'https://fleet.example.com',
-    hostToken: 'tok-secret-123',
     atlasEnabled: false,
     atlasUrl: '',
     atlasToken: '',
@@ -78,10 +76,6 @@ test('validateAnswer: each field validates', () => {
   assert.equal(validateAnswer('hostName', 'host-a'), null);
   assert.equal(validateAnswer('retentionDays', 0), 'retention must be a positive number of days');
   assert.equal(validateAnswer('retentionDays', 7), null);
-  assert.equal(validateAnswer('fleetUrl', 'not-a-url'), 'Fleet URL must start with http:// or https://');
-  assert.equal(validateAnswer('fleetUrl', 'https://fleet.example.com'), null);
-  assert.equal(validateAnswer('fleetUrl', ''), null);
-  assert.equal(validateAnswer('hostToken', ''), null); // empty = Fleet off
   assert.ok(validateAnswer('harnesses', ['bogus'])!.includes('unknown harness'));
   assert.equal(validateAnswer('harnesses', ['primeagent']), null);
 });
@@ -96,14 +90,6 @@ test('validateAnswers: Atlas on requires URL, token and project', () => {
   assert.deepEqual(validateAnswers(good), []);
 });
 
-test('validateAnswers: Fleet URL set requires a host token', () => {
-  const bad = answers({ fleetUrl: 'https://fleet.example.com', hostToken: '' });
-  const errors = validateAnswers(bad);
-  assert.ok(errors.some((e) => e.includes('hostToken: required when a Fleet URL is set')));
-  const good = answers({ fleetUrl: '', hostToken: '' });
-  assert.deepEqual(validateAnswers(good), []);
-});
-
 // ---------- rendering ----------
 
 test('renderEnv: maps answers to documented MERCURY_* lines', () => {
@@ -112,9 +98,10 @@ test('renderEnv: maps answers to documented MERCURY_* lines', () => {
   assert.ok(env.includes('MERCURY_DB=/var/lib/mercury/mercury.db'));
   assert.ok(env.includes('MERCURY_WORKSPACE_BASE=/var/lib/mercury/workspaces'));
   assert.ok(env.includes('MERCURY_WORKSPACE_RETENTION_MS=604800000'));
-  assert.ok(env.includes('MERCURY_FLEET_URL=https://fleet.example.com'));
-  assert.ok(env.includes('MERCURY_HOST_TOKEN=tok-secret-123'));
   assert.ok(env.includes('MERCURY_HARNESSES=primeagent,hermes'));
+  // Fleet is pull, not push (issue #645): the wizard emits no Fleet URL and no host token.
+  assert.ok(!env.includes('MERCURY_FLEET_URL'));
+  assert.ok(!env.includes('MERCURY_HOST_TOKEN'));
   assert.ok(env.includes('MERCURY_DEFAULT_AGENT=primeagent'));
   // Atlas off: no Atlas lines.
   assert.ok(!env.includes('MERCURY_ATLAS_URL'));
@@ -127,10 +114,15 @@ test('renderEnv: Atlas on adds the Atlas lines', () => {
   assert.ok(env.includes('MERCURY_ATLAS_PROJECT=proj'));
 });
 
-test('WIZARD_VARIABLES: every emitted name exists in docs/configuration.md (design decision 10)', () => {
+test('WIZARD_VARIABLES: every emitted name is documented AND read by the host (design decision 10, issue #645)', () => {
   const doc = readFileSync(join(ROOT, 'docs', 'configuration.md'), 'utf8');
+  const configSrc = readFileSync(join(ROOT, 'src', 'config.ts'), 'utf8');
   for (const name of WIZARD_VARIABLES) {
     assert.ok(doc.includes(name), `${name} must be documented in docs/configuration.md`);
+    // The first build documented names the host never read (issue #645). A name the
+    // wizard emits must appear in src/config.ts (parsed or defaulted there), so the
+    // wizard cannot produce a config the host silently ignores.
+    assert.ok(configSrc.includes(`env.${name}`), `${name} must be read in src/config.ts`);
   }
 });
 
@@ -139,14 +131,15 @@ test('WIZARD_VARIABLES: every emitted name exists in docs/configuration.md (desi
 test('M3 gate: interactive and answers-file produce byte-identical mercury.env', async () => {
   const dir = tempDir('setup-gate-');
   const answersFile = join(dir, 'answers.json');
-  const a = answers({ hostToken: 'tok-gate-42' });
+  const a = answers({ atlasToken: 'tok-gate-42', atlasEnabled: true, atlasUrl: 'https://atlas.example.com', atlasProject: 'proj' });
   writeFileSync(answersFile, JSON.stringify(a));
 
   // Interactive path: inject the question function.
   const interactiveEnv = await new Promise<string>((res, rej) => {
     const qs = [
-      a.hostName, a.dataDir, a.workspaceDir, String(a.retentionDays), a.fleetUrl, a.hostToken,
-      'no', // Atlas
+      a.hostName, a.dataDir, a.workspaceDir, String(a.retentionDays),
+      'yes', // Atlas
+      a.atlasUrl, a.atlasToken, a.atlasProject,
       a.harnesses.join(','),
     ];
     let i = 0;
@@ -196,8 +189,9 @@ test('host setup --non-interactive writes mercury.env with mode 0600', async () 
   const dir = tempDir('setup-cli-');
   const { code, stderr } = await cli(['host', 'setup', '--non-interactive'], {
     XDG_CONFIG_HOME: dir,
-    MERCURY_HOST_TOKEN: 'tok-cli-1',
-    MERCURY_FLEET_URL: 'https://fleet.example.com',
+    MERCURY_ATLAS_URL: 'https://atlas.example.com',
+    MERCURY_ATLAS_TOKEN: 'tok-cli-1',
+    MERCURY_ATLAS_PROJECT: 'proj',
   });
   assert.equal(code, 0, stderr);
   const path = join(dir, 'mercury', 'mercury.env');
@@ -205,7 +199,9 @@ test('host setup --non-interactive writes mercury.env with mode 0600', async () 
   const mode = statSync(path).mode & 0o777;
   assert.equal(mode, 0o600, `mercury.env must be 0600, got ${mode.toString(8)}`);
   const content = readFileSync(path, 'utf8');
-  assert.ok(content.includes('MERCURY_HOST_TOKEN=tok-cli-1'));
+  assert.ok(content.includes('MERCURY_ATLAS_TOKEN=tok-cli-1'));
+  assert.ok(!content.includes('MERCURY_HOST_TOKEN'), 'the wizard emits no host token (issue #645)');
+  assert.ok(!content.includes('MERCURY_FLEET_URL'), 'the wizard emits no Fleet URL (issue #645)');
 });
 
 test('host setup rejects an invalid answer before writing anything', async () => {
@@ -230,16 +226,15 @@ test('host setup --dry-run touches nothing', async () => {
   const dir = tempDir('setup-dryrun-');
   const { code, stdout } = await cli(['host', 'setup', '--non-interactive', '--dry-run'], {
     XDG_CONFIG_HOME: dir,
-    MERCURY_HOST_TOKEN: 'tok-dry-1',
   });
   assert.equal(code, 0);
   assert.ok(stdout.includes('Would write'));
   assert.ok(!existsSync(join(dir, 'mercury', 'mercury.env')), '--dry-run must not write');
 });
 
-test('redactedSummary: token shows presence and length only', () => {
-  const s = redactedSummary(answers({ hostToken: 'tok-secret-123' }));
-  assert.ok(s.includes('MERCURY_HOST_TOKEN=<set, 14 chars>'));
+test('redactedSummary: secrets show presence and length only', () => {
+  const s = redactedSummary(answers({ atlasEnabled: true, atlasUrl: 'https://atlas.example.com', atlasProject: 'proj', atlasToken: 'tok-secret-123' }));
+  assert.ok(s.includes('MERCURY_ATLAS_TOKEN=<set, 14 chars>'));
   assert.ok(!s.includes('tok-secret-123'), 'the token value must never appear');
 });
 

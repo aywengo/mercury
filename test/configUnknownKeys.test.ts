@@ -286,13 +286,16 @@ test('the capability log line is actually wired into the composition root', () =
   // cli.ts leaves every other test in this file passing, which is precisely how a log line
   // that "should" be there stops being there.
   const cli = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
-  assert.match(cli, /logAdapterCapabilities\(adapters,\s*logger\)/,
-    'cli.ts must emit the resolved capability set for every adapter at load');
+  // Since issue #645 the capability log reads the GATED adapter map, so a disabled harness
+  // is visibly absent from the boot log rather than logged but unusable.
+  assert.match(cli, /logAdapterCapabilities\(gatedAdapters,\s*logger\)/,
+    'cli.ts must emit the resolved capability set for every registered adapter at load');
   // ... and only where stdout is not reserved. gc prints a JSON report and the unknown-command
   // path must leave stdout empty, so an unguarded call breaks both.
-  const call = cli.slice(cli.indexOf('logAdapterCapabilities(adapters'), 0);
-  const guard = cli.slice(Math.max(0, cli.indexOf('logAdapterCapabilities(adapters') - 400),
-    cli.indexOf('logAdapterCapabilities(adapters'));
+  const call = cli.slice(cli.indexOf('logAdapterCapabilities(gatedAdapters'), 0);
+  const guard = cli.slice(
+    Math.max(0, cli.indexOf('logAdapterCapabilities(gatedAdapters') - 400),
+    cli.indexOf('logAdapterCapabilities(gatedAdapters'));
   for (const serving of ["'server'", "'dev'", "'worker'"]) {
     assert.ok(guard.includes(serving), `capability log is not guarded to serving commands: missing ${serving}`);
   }

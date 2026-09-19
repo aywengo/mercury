@@ -1,11 +1,17 @@
 /**
  * `mercury host setup` — the M3 configuration wizard (docs/host-installer.md M3).
  *
- * Prompts: host name, data dir, workspace dir, GC retention, Fleet URL, host token,
- * Atlas on/off, per-harness enable. Each answer maps to a documented `MERCURY_*`
- * variable (docs/configuration.md — a CI test pins that every name the wizard emits
- * exists there). Writes `${XDG_CONFIG_HOME:-~/.config}/mercury/mercury.env` atomically
+ * Prompts: host name, data dir, workspace dir, GC retention, Atlas on/off, per-harness
+ * enable. Each answer maps to a documented `MERCURY_*` variable (docs/configuration.md —
+ * a CI test pins that every name the wizard emits exists there AND is read by the host's
+ * config loader). Writes `${XDG_CONFIG_HOME:-~/.config}/mercury/mercury.env` atomically
  * (temp file, validate, rename, 0600) and prints a redacted summary.
+ *
+ * Fleet is pull, not push (issue #645): Fleet holds a per-host token and calls the host's
+ * API — there is no host-initiated enrollment, so the wizard asks for no Fleet URL and no
+ * host token. The host side of Fleet enrollment is an API token Fleet presents (written
+ * as MERCURY_ADMIN_TOKEN by `host setup` since #648) plus a bind/port reachable from
+ * Fleet.
  *
  * Three rules this file exists to enforce:
  *
@@ -17,10 +23,10 @@
  *    before the temp file is even created. Variable-name coverage against
  *    `docs/configuration.md` is CI-pinned by a test (WIZARD_VARIABLES), not enforced at
  *    runtime — the wizard's own vocabulary is fixed and tested.
- * 3. **The host token is never printed in output.** It is read from an env var or an
- *    answers file (or an interactive prompt), and the redacted summary shows only its
+ * 3. **Secrets are never printed in output.** They are read from an env var or an
+ *    answers file (or an interactive prompt), and the redacted summary shows only their
  *    presence and length. The interactive prompt echoes input like any readline prompt;
- *    the token is protected by the 0600 env file and the redacted summary, not by a
+ *    a secret is protected by the 0600 env file and the redacted summary, not by a
  *    hidden-input terminal mode.
  */
 
@@ -37,8 +43,6 @@ export interface HostSetupAnswers {
   workspaceDir: string;
   /** GC retention in DAYS (the prompt unit); written as MERCURY_WORKSPACE_RETENTION_MS. */
   retentionDays: number;
-  fleetUrl: string;
-  hostToken: string;
   atlasEnabled: boolean;
   atlasUrl: string;
   atlasToken: string;
@@ -54,8 +58,6 @@ export const WIZARD_VARIABLES = [
   'MERCURY_DB',
   'MERCURY_WORKSPACE_BASE',
   'MERCURY_WORKSPACE_RETENTION_MS',
-  'MERCURY_FLEET_URL',
-  'MERCURY_HOST_TOKEN',
   'MERCURY_ATLAS_URL',
   'MERCURY_ATLAS_TOKEN',
   'MERCURY_ATLAS_PROJECT',
@@ -110,14 +112,6 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
       return typeof value === 'string' && value.trim().length > 0 ? null : 'path must not be empty';
     case 'retentionDays':
       return typeof value === 'number' && Number.isFinite(value) && value > 0 ? null : 'retention must be a positive number of days';
-    case 'fleetUrl':
-      if (typeof value !== 'string') return 'Fleet URL must be a string';
-      if (value.trim() === '') return null; // empty = Fleet reporting off
-      return /^https?:\/\//.test(value.trim()) ? null : 'Fleet URL must start with http:// or https://';
-    case 'hostToken':
-      // Optional: empty = Fleet reporting off. Required only when a Fleet URL is set
-      // (enforced in validateAnswers as a cross-field constraint).
-      return typeof value === 'string' ? null : 'host token must be a string';
     case 'atlasEnabled':
       return typeof value === 'boolean' ? null : 'atlasEnabled must be a boolean';
     case 'atlasUrl':
@@ -154,11 +148,6 @@ export function validateAnswers(a: HostSetupAnswers): string[] {
     if (!a.atlasToken) errors.push('atlasToken: required when Atlas is on');
     if (!a.atlasProject) errors.push('atlasProject: required when Atlas is on');
   }
-  // Fleet URL set requires a host token (review #633): a host that reports to Fleet
-  // must present a token, and an empty token with a URL would fail at doctor time.
-  if (a.fleetUrl.trim() && !a.hostToken.trim()) {
-    errors.push('hostToken: required when a Fleet URL is set');
-  }
   return errors;
 }
 
@@ -169,8 +158,6 @@ export function renderEnv(a: HostSetupAnswers): string {
   lines.push(`MERCURY_DB=${join(a.dataDir.trim(), 'mercury.db')}`);
   lines.push(`MERCURY_WORKSPACE_BASE=${a.workspaceDir.trim()}`);
   lines.push(`MERCURY_WORKSPACE_RETENTION_MS=${Math.round(a.retentionDays * 24 * 60 * 60 * 1000)}`);
-  if (a.fleetUrl.trim()) lines.push(`MERCURY_FLEET_URL=${a.fleetUrl.trim()}`);
-  if (a.hostToken.trim()) lines.push(`MERCURY_HOST_TOKEN=${a.hostToken.trim()}`);
   if (a.atlasEnabled) {
     lines.push(`MERCURY_ATLAS_URL=${a.atlasUrl.trim()}`);
     lines.push(`MERCURY_ATLAS_TOKEN=${a.atlasToken.trim()}`);
@@ -205,18 +192,20 @@ export function writeEnvFile(path: string, content: string): void {
   chmodSync(path, 0o600);
 }
 
-/** Redact the token: show presence and length only (design decision 6). */
+/** Redact secrets: show presence and length only (design decision 6). */
 export function redactedSummary(a: HostSetupAnswers): string {
-  const token = a.hostToken.trim();
-  const tokenLine = token ? `MERCURY_HOST_TOKEN=<set, ${token.length} chars>` : 'MERCURY_HOST_TOKEN=<unset>';
+  const token = a.atlasToken.trim();
+  const atlasLine = a.atlasEnabled
+    ? `${a.atlasUrl.trim()} (project ${a.atlasProject.trim()}), MERCURY_ATLAS_TOKEN=${
+        token ? `<set, ${token.length} chars>` : '<unset>'
+      }`
+    : 'off';
   return [
     `host name: ${a.hostName.trim()}`,
     `data dir: ${a.dataDir.trim()}`,
     `workspace dir: ${a.workspaceDir.trim()}`,
     `GC retention: ${a.retentionDays} day(s)`,
-    `Fleet URL: ${a.fleetUrl.trim() || '(off)'}`,
-    tokenLine,
-    `Atlas: ${a.atlasEnabled ? `${a.atlasUrl.trim()} (project ${a.atlasProject.trim()})` : 'off'}`,
+    `Atlas: ${atlasLine}`,
     `harnesses: ${a.harnesses.join(', ')}`,
   ].join('\n');
 }
@@ -229,8 +218,6 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     dataDir: env.MERCURY_DB ? dirname(env.MERCURY_DB) : join(homedir(), '.local', 'state', 'mercury'),
     workspaceDir: env.MERCURY_WORKSPACE_BASE?.trim() || join(homedir(), 'mercury-workspaces'),
     retentionDays: 7,
-    fleetUrl: env.MERCURY_FLEET_URL?.trim() || '',
-    hostToken: env.MERCURY_HOST_TOKEN?.trim() || '',
     atlasEnabled: env.MERCURY_ATLAS_URL ? true : false,
     atlasUrl: env.MERCURY_ATLAS_URL?.trim() || '',
     atlasToken: env.MERCURY_ATLAS_TOKEN?.trim() || '',
@@ -249,8 +236,6 @@ export function readAnswersFile(path: string): HostSetupAnswers {
     dataDir: parsed.dataDir ?? base.dataDir,
     workspaceDir: parsed.workspaceDir ?? base.workspaceDir,
     retentionDays: parsed.retentionDays ?? base.retentionDays,
-    fleetUrl: parsed.fleetUrl ?? base.fleetUrl,
-    hostToken: parsed.hostToken ?? base.hostToken,
     atlasEnabled: parsed.atlasEnabled ?? base.atlasEnabled,
     atlasUrl: parsed.atlasUrl ?? base.atlasUrl,
     atlasToken: parsed.atlasToken ?? base.atlasToken,
@@ -272,8 +257,6 @@ export async function promptAnswers(io: {
   const dataDir = await q('Data dir (mercury.db lives here)', base.dataDir);
   const workspaceDir = await q('Workspace dir', base.workspaceDir);
   const retention = await q('GC retention (days)', String(base.retentionDays));
-  const fleetUrl = await q('Fleet URL (empty = off)', base.fleetUrl);
-  const hostToken = await q('Host token (empty = off)', base.hostToken);
   const atlasOn = (await q('Enable Atlas? (yes/no)', base.atlasEnabled ? 'yes' : 'no')).toLowerCase();
   const atlasEnabled = atlasOn === 'yes' || atlasOn === 'y';
   const atlasUrl = atlasEnabled ? await q('Atlas URL', base.atlasUrl) : '';
@@ -288,8 +271,6 @@ export async function promptAnswers(io: {
     // Keep the parsed number as-is (0/NaN included): validateAnswers rejects it, so an
     // invalid input cannot silently fall back to the default and pass (review #633).
     retentionDays: Number.parseFloat(retention),
-    fleetUrl,
-    hostToken,
     atlasEnabled,
     atlasUrl,
     atlasToken,
