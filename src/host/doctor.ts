@@ -211,7 +211,6 @@ export async function runHostDoctor(
   // Issue #665: when the wizard exposed the API on a non-loopback bind address, the
   // loopback check above can pass while the address Fleet will actually use does not
   // answer (wrong interface, firewall). Verify BOTH and report both.
-  const bindAddress = vars.MERCURY_BIND_HOST?.trim() ?? '';
   const bindTarget = bindHealthzTarget(vars, port, scheme);
   const bindHealthz = bindTarget
     ? { address: bindTarget.address, ...(await checkHealthz(bindTarget.url)) }

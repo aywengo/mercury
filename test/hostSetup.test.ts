@@ -341,6 +341,21 @@ test('hand-off block: loopback says Fleet cannot reach it; exposed prints the re
   assert.ok(!readFileSync(envFilePath({ XDG_CONFIG_HOME: dirLoop }), 'utf8').includes('MERCURY_BIND_HOST'), 'the secure default stays in src/config.ts');
 });
 
+test('re-run: a preserved TLS value outside the safe charset fails the rewrite (#668 round 9)', async () => {
+  const dir = tempDir('setup-tls-unsafe-');
+  const cfg = join(dir, 'cfg');
+  const mercuryDir = join(cfg, 'mercury');
+  mkdirSync(mercuryDir, { recursive: true });
+  writeFileSync(join(mercuryDir, 'mercury.env'), 'MERCURY_TLS_CERT=/tmp/$(rm -rf x).pem\nMERCURY_TLS_KEY=/tmp/k.pem\n');
+  const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--yes'], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(code, 1);
+  assert.ok(stderr.includes('MERCURY_TLS_CERT'), stderr);
+  assert.ok(!readFileSync(join(mercuryDir, 'mercury.env'), 'utf8').includes('MERCURY_ADMIN_TOKEN'), 'the file is not rewritten');
+});
+
 test('hand-off block: with MERCURY_TLS_CERT/KEY written the base URL is https and no plain-http warning appears (#668 round 6)', async () => {
   const dir = tempDir('setup-bind-tls-');
   const cfg = join(dir, 'cfg');

@@ -699,11 +699,16 @@ export async function runHostSetup(
   // wizard) must survive a rewrite (#668 round 6 review) — otherwise a re-run would
   // silently downgrade a TLS host to plain http AND print the wrong hand-off scheme.
   const existingVars = existsSync(envFilePath(env)) ? loadEnvFile(envFilePath(env)) : {};
-  const preserved = Object.fromEntries(
-    (['MERCURY_TLS_CERT', 'MERCURY_TLS_KEY'] as const)
-      .map((k) => [k, existingVars[k]])
-      .filter((pair): pair is [string, string] => Boolean(pair[1])),
-  );
+  const preservedEntries = (['MERCURY_TLS_CERT', 'MERCURY_TLS_KEY'] as const)
+    .map((k) => [k, existingVars[k]] as const)
+    .filter((pair): pair is [typeof pair[0], string] => Boolean(pair[1]));
+  // The file feeds systemd EnvironmentFile, bash source, and the doctor parser (#649 §3):
+  // a preserved value outside the safe charset must fail the re-run, not sneak back in.
+  for (const [k, v] of preservedEntries) {
+    const err = unsafeValueError(k, v);
+    if (err) throw new Error(`${k}: ${err}`);
+  }
+  const preserved = Object.fromEntries(preservedEntries);
   const content = renderEnv(answers, preserved);
   const path = envFilePath(env);
   const alreadyConfigured = existsSync(path);
