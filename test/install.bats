@@ -307,6 +307,12 @@ minimal_path() {
 }
 
 @test "piped interactive run refuses the hand-off instead of silently defaulting every answer (#671)" {
+  # The refusal is only correct when no controlling terminal exists. From a real terminal
+  # (an interactive bats session) /dev/tty opens and the installer correctly redirects the
+  # hand-off to it instead — skip rather than assert the wrong behavior (Copilot round 1).
+  if (exec 3</dev/tty) 2>/dev/null; then
+    skip "/dev/tty available: the hand-off would correctly use the terminal, not refuse"
+  fi
   stub_ok_prereqs
   # curl | bash with no --yes/--non-interactive and NO terminal: the confirmation gate would
   # refuse before the install; --yes passes the gate but the HAND-OFF must then refuse too

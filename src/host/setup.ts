@@ -685,10 +685,15 @@ export async function runHostSetup(
           }),
         );
       };
-      answers = await promptAnswers({ question, secretQuestion }, env, probe);
-      rl.close();
-      // The /dev/tty stream (when we opened it) is ours to close; stdin belongs to the process.
-      if (ttyInput) ttyInput.close();
+      try {
+        answers = await promptAnswers({ question, secretQuestion }, env, probe);
+      } finally {
+        // The /dev/tty stream (when we opened it) must be released even when prompting
+        // throws — a leaked fd keeps the tty open after the process should be done
+        // (Copilot review on #675).
+        rl.close();
+        if (ttyInput) ttyInput.close();
+      }
     } else {
       // Last resort: genuinely scripted/test input via piped stdin. Reached only when
       // stdin is not a TTY AND no controlling terminal exists (#671), so the
