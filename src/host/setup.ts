@@ -732,7 +732,7 @@ export async function runHostSetup(
     // The port is the one the doctor will use — the env file's, not this shell's (#648 review).
     const port = loadEnvFile(path).MERCURY_PORT ?? '3000';
     const written = loadEnvFile(path);
-    const vars_tls_set = Boolean(written.MERCURY_TLS_CERT && written.MERCURY_TLS_KEY);
+    const varsTlsSet = Boolean(written.MERCURY_TLS_CERT && written.MERCURY_TLS_KEY);
     io.out('\nRegister on the Fleet side (shown once, not again):\n');
     io.out(`  host API token:    ${answers.adminToken}\n`);
     // Fleet reachability (issue #665): with the secure default the API answers only from
@@ -746,7 +746,7 @@ export async function runHostSetup(
     if (!loopbackLike) {
       const shown = bindShown === '0.0.0.0' ? '<this-host>' : bindShown;
       io.out(`  host API base URL: http://${shown}:${port}\n`);
-      if (!vars_tls_set) {
+      if (!varsTlsSet) {
         io.out('  NOTE: the API is exposed over plain http with an admin token (MERCURY_TLS_CERT/MERCURY_TLS_KEY are unset).\n');
         io.out('  Put the host behind a TLS-terminating reverse proxy or set MERCURY_TLS_CERT and MERCURY_TLS_KEY.\n');
       }
