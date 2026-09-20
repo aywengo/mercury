@@ -41,7 +41,7 @@ import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
 import { suggestionFor } from '../adapters/configSchema.ts';
-import { loadEnvFile } from './doctor.ts';
+import { loadEnvFile, schemeFor } from './doctor.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
 
 /** The wizard's answers, before validation. Every field maps to a MERCURY_* variable. */
@@ -248,8 +248,11 @@ export function validateAnswers(
   return errors;
 }
 
-/** Render the validated answers as mercury.env lines (sorted, one per variable). */
-export function renderEnv(a: HostSetupAnswers): string {
+/** Render the validated answers as mercury.env lines (sorted, one per variable).
+ *  `preserve` carries operator-managed variables (e.g. MERCURY_TLS_CERT/KEY read from
+ *  the current file) verbatim through a rewrite — they are not wizard answers and are
+ *  not re-validated (issue #668 round 6: a re-run must not downgrade a TLS host). */
+export function renderEnv(a: HostSetupAnswers, preserve: Record<string, string> = {}): string {
   if (!a.adminToken.trim()) throw new Error('adminToken: resolve before rendering (generateAdminToken)');
   // Defense in depth (#649 §3): validateAnswers already enforced the safe charset; a
   // direct renderEnv caller must not bypass it, or one of the three parsers breaks.
@@ -288,6 +291,7 @@ export function renderEnv(a: HostSetupAnswers): string {
   }
   lines.push(`MERCURY_HARNESSES=${a.harnesses.join(',')}`);
   lines.push(`MERCURY_DEFAULT_AGENT=${a.harnesses[0]}`);
+  for (const [k, v] of Object.entries(preserve)) lines.push(`${k}=${v}`);
   return lines.sort().join('\n') + '\n';
 }
 
@@ -691,7 +695,16 @@ export async function runHostSetup(
   const generatedToken = !answers.adminToken.trim();
   if (generatedToken) answers.adminToken = generateAdminToken();
 
-  const content = renderEnv(answers);
+  // Operator-managed variables (MERCURY_TLS_CERT/KEY are set by hand, not by the
+  // wizard) must survive a rewrite (#668 round 6 review) — otherwise a re-run would
+  // silently downgrade a TLS host to plain http AND print the wrong hand-off scheme.
+  const existingVars = existsSync(envFilePath(env)) ? loadEnvFile(envFilePath(env)) : {};
+  const preserved = Object.fromEntries(
+    (['MERCURY_TLS_CERT', 'MERCURY_TLS_KEY'] as const)
+      .map((k) => [k, existingVars[k]])
+      .filter((pair): pair is [string, string] => Boolean(pair[1])),
+  );
+  const content = renderEnv(answers, preserved);
   const path = envFilePath(env);
   const alreadyConfigured = existsSync(path);
   if (opts.dryRun) {
@@ -736,7 +749,7 @@ export async function runHostSetup(
     // The port is the one the doctor will use — the env file's, not this shell's (#648 review).
     const port = loadEnvFile(path).MERCURY_PORT ?? '3000';
     const written = loadEnvFile(path);
-    const varsTlsSet = Boolean(written.MERCURY_TLS_CERT && written.MERCURY_TLS_KEY);
+    const scheme = schemeFor(written);
     io.out('\nRegister on the Fleet side (shown once, not again):\n');
     io.out(`  host API token:    ${answers.adminToken}\n`);
     // Fleet reachability (issue #665): with the secure default the API answers only from
@@ -749,8 +762,10 @@ export async function runHostSetup(
     const loopbackLike = !bindShown || bindShown === 'loopback' || bindShown === '127.0.0.1' || bindShown === 'localhost';
     if (!loopbackLike) {
       const shown = bindShown === '0.0.0.0' ? '<this-host>' : bindShown;
-      io.out(`  host API base URL: http://${shown}:${port}\n`);
-      if (!varsTlsSet) {
+      // Scheme must match what the API serves: https when MERCURY_TLS_CERT/KEY are
+      // written, plain http otherwise (#668 round 6 review).
+      io.out(`  host API base URL: ${scheme}://${shown}:${port}\n`);
+      if (scheme === 'http') {
         io.out('  NOTE: the API is exposed over plain http with an admin token (MERCURY_TLS_CERT/MERCURY_TLS_KEY are unset).\n');
         io.out('  Put the host behind a TLS-terminating reverse proxy or set MERCURY_TLS_CERT and MERCURY_TLS_KEY.\n');
       }

@@ -341,6 +341,31 @@ test('hand-off block: loopback says Fleet cannot reach it; exposed prints the re
   assert.ok(!readFileSync(envFilePath({ XDG_CONFIG_HOME: dirLoop }), 'utf8').includes('MERCURY_BIND_HOST'), 'the secure default stays in src/config.ts');
 });
 
+test('hand-off block: with MERCURY_TLS_CERT/KEY written the base URL is https and no plain-http warning appears (#668 round 6)', async () => {
+  const dir = tempDir('setup-bind-tls-');
+  const cfg = join(dir, 'cfg');
+  const mercuryDir = join(cfg, 'mercury');
+  mkdirSync(mercuryDir, { recursive: true });
+  // Pre-existing file with TLS configured; the wizard re-runs over it (--answers keeps TLS vars? No —
+  // the wizard writes a fresh file). Simplest honest drive: an existing env file + full prompts.
+  writeFileSync(join(mercuryDir, 'mercury.env'), 'MERCURY_TLS_CERT=/tmp/c.pem\nMERCURY_TLS_KEY=/tmp/k.pem\n');
+  const out: string[] = [];
+  const qs = ['', '', '', '7', '', 'no', 'primeagent', '192.168.1.5'];
+  let i = 0;
+  const code = await runHostSetup(['--yes'], {
+    out: (s) => out.push(s), err: () => {},
+    question: async () => qs[i++] ?? '',
+    probe: async () => probeOf(['primeagent', 'ok']),
+  }, { XDG_CONFIG_HOME: cfg });
+  assert.equal(code, 0);
+  const text = out.join('');
+  assert.ok(text.includes('host API base URL: https://192.168.1.5:'), text);
+  assert.ok(!text.includes('plain http'), 'no plain-http warning when TLS is configured');
+  const envFile = readFileSync(join(mercuryDir, 'mercury.env'), 'utf8');
+  assert.ok(envFile.includes('MERCURY_TLS_CERT=/tmp/c.pem'), 'operator TLS vars survive the rewrite');
+  assert.ok(envFile.includes('MERCURY_TLS_KEY=/tmp/k.pem'), envFile);
+});
+
 test('hand-off block: an explicit 127.0.0.1/localhost bind is still unreachable from Fleet (#668 round 2)', async () => {
   for (const bind of ['127.0.0.1', 'localhost']) {
     const dir = tempDir('setup-bind-impl-');

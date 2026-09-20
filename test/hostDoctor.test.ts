@@ -20,6 +20,7 @@ import {
   checkHealthz,
   smokeRun,
   runHostDoctor,
+  schemeFor,
 } from '../src/host/doctor.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -216,6 +217,13 @@ test('runHostDoctor: a token turns skips into real smoke Runs (#648)', async () 
 });
 
 // ---------- the empty-harness-list gate (#654) ----------
+
+test('schemeFor: https only when both TLS variables are set (#668 round 6)', () => {
+  assert.equal(schemeFor({}), 'http');
+  assert.equal(schemeFor({ MERCURY_TLS_CERT: '/c.pem' }), 'http');
+  assert.equal(schemeFor({ MERCURY_TLS_KEY: '/k.pem' }), 'http');
+  assert.equal(schemeFor({ MERCURY_TLS_CERT: '/c.pem', MERCURY_TLS_KEY: '/k.pem' }), 'https');
+});
 
 test('runHostDoctor: a non-loopback MERCURY_BIND_HOST gets its own healthz check (#665)', async () => {
   const m = await mockServer();

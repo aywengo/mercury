@@ -153,6 +153,13 @@ export async function smokeRun(
   }
 }
 
+/** The scheme the API actually serves (#668 round 6): with MERCURY_TLS_CERT +
+ *  MERCURY_TLS_KEY the server is https (src/api/server.ts); a hardcoded http://
+ *  would produce false failures and wrong registration URLs. */
+export function schemeFor(vars: Record<string, string | undefined>): 'https' | 'http' {
+  return vars.MERCURY_TLS_CERT && vars.MERCURY_TLS_KEY ? 'https' : 'http';
+}
+
 /** Run the doctor. Returns the process exit code. */
 export async function runHostDoctor(
   args: string[],
@@ -173,7 +180,8 @@ export async function runHostDoctor(
   const file = envFilePath(env);
   const vars = loadEnvFile(file);
   const port = vars.MERCURY_PORT ?? '3000';
-  const baseUrl = `http://127.0.0.1:${port}`;
+  const scheme = schemeFor(vars);
+  const baseUrl = `${scheme}://127.0.0.1:${port}`;
   // Trim entries: 'primeagent, claude' (space) must not smoke-run a harness named ' claude'
   // (review of #651). Unknown ids surface as a failed smoke Run, not a crash.
   // MERCURY_HARNESSES set but empty (#654): the default list does NOT apply to an
@@ -195,7 +203,7 @@ export async function runHostDoctor(
   // report a false failure even when the server is fine (Copilot review on #668).
   const bindSkipped = ['127.0.0.1', '0.0.0.0', 'loopback'].includes(bindAddress.toLowerCase());
   const bindHealthz = bindAddress && !bindSkipped
-    ? { address: bindAddress, ...(await checkHealthz(`http://${bindAddress}:${port}`)) }
+    ? { address: bindAddress, ...(await checkHealthz(`${scheme}://${bindAddress}:${port}`)) }
     : undefined;
   const smoke: DoctorResult['smoke'] = [];
   if (apiToken) {
