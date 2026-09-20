@@ -69,7 +69,7 @@ This document. Done, apart from recording per-harness minimum versions from each
 
 Gate: doc merged; every question in section 3 has an answer or a written reason to defer. Met 2026-09-16.
 
-### M1 — Bootstrap skeleton — ⚠️ implemented, gate open (#649 §5; #646's stdin fix and #649 §4's honest dry-run are in)
+### M1 — Bootstrap skeleton — ⚠️ implemented, gate open (Docker matrix runs in CI since #649 §5; the fresh-VM/macOS-arm64 run and checksum publishing remain M6)
 
 `install.sh`:
 
@@ -150,10 +150,10 @@ Gate: install vN → upgrade vN+1 → uninstall leaves nothing but the opted-in 
 - **Re-run guard** — `host setup` on a configured host (mercury.env exists) shows the current state and refuses to overwrite unless `--yes` is passed (interactive or `--non-interactive`). `--dry-run` on a configured host warns it would overwrite.
 - Tests: `test/hostLifecycle.test.ts` (16) + the new re-run-guard test in `test/hostSetup.test.ts`. Full suite 1227/1227 green.
 
-### M6 — Release hardening — ⚠️ implemented, gate open (#646, #649 §4–5)
+### M6 — Release hardening — ⚠️ implemented, gate open (checksum/signing + fresh-VM run pending; #649 §4's honest dry-run and §5's CI matrix are in)
 
 - `bats` test suite for `install.sh`.
-- CI matrix on every PR touching the installer or `mercury host` subcommands, including the `MERCURY_*`-name-vs-`docs/configuration.md` check.
+- CI matrix on every PR touching the installer or `mercury host` subcommands, including the `MERCURY_*`-name-vs-`docs/configuration.md` check. Since #649 §5 the matrix runs the bats suite and the host subcommand tests on Ubuntu, Debian (container), Fedora (container) and macOS, plus `mercury host service install --dry-run` on the macOS runner (launchd; nothing written).
 - Script checksum (and signature, if a signing key exists by then) published alongside each release.
 - Docs page with both one-liners and a `curl | bash` safety note (download, inspect, run).
 

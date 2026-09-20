@@ -260,11 +260,35 @@ jobs:
   # M6: bats suite for install.sh + the host subcommand tests, on every PR touching
   # the installer surface (and on every push to main). Runs even for docs-only
   # installer edits, which the code filter would otherwise skip.
+  # M6 (matrix per #649 §5): the installer surface must pass on Debian and Fedora (the
+  # bash-3.2 discipline in install.sh is macOS-specific, so macOS runs the bats suite
+  # too) and the service dry-run must work on macOS (launchd) — not only on Ubuntu.
   host-installer:
     needs: changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     if: needs.changes.outputs.host_installer == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu
+            runs-on: ubuntu-latest
+            container: ''
+            bats-pkg: apt
+          - name: debian
+            runs-on: ubuntu-latest
+            container: debian:stable
+            bats-pkg: apt
+          - name: fedora
+            runs-on: ubuntu-latest
+            container: fedora:latest
+            bats-pkg: dnf
+          - name: macos
+            runs-on: macos-latest
+            container: ''
+            bats-pkg: brew
+    runs-on: ${{ matrix.runs-on }}
+    name: host-installer (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -273,14 +297,27 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
-      - name: Install bats
+      - name: Install bats (apt)
+        if: matrix.bats-pkg == 'apt'
         run: |
           sudo apt-get update
           sudo apt-get install -y bats
+      - name: Install bats (dnf)
+        if: matrix.bats-pkg == 'dnf'
+        run: dnf install -y bats
+      - name: Install bats (brew)
+        if: matrix.bats-pkg == 'brew'
+        run: brew install bats-core
       - name: bats suite for install.sh
         run: bats test/install.bats
       - name: Host subcommand tests (incl. MERCURY_* vs configuration.md)
         run: node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts
+      - name: macOS service dry-run (launchd unit prints, nothing written)
+        if: matrix.name == 'macos'
+        run: |
+          node src/cli.ts host service install --dry-run
+          test ! -e "$HOME/Library/LaunchAgents/com.mercury.host.plist" || {
+            echo "dry-run must not write the plist" >&2; exit 1; }
 
   # Always reports a single status so narrative-only PRs are not stuck waiting on skipped required jobs.
   ci:
