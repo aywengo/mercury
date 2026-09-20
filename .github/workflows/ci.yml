@@ -282,7 +282,6 @@ jobs:
           - name: fedora
             container: fedora:latest
     container: ${{ matrix.container || null }}
-    options: --user 0:0
     name: host-installer (${{ matrix.name }})
     env:
       # Container jobs default to root; install.sh correctly refuses root (decision 7,
