@@ -18,6 +18,7 @@ import { renderAgents } from './commands/agents.ts';
 import { renderRunList } from './commands/list.ts';
 import { renderRunDetail } from './commands/show.ts';
 import { renderInputAck, renderRetry, renderRunAction } from './commands/control.ts';
+import { renderGoalCancel, renderGoalDetail } from './commands/goal.ts';
 import { buildCreateRequest, buildInputValue } from './commands/request.ts';
 import { createKeyDiagnostic, createRunIdempotent, CreateUncertainError, renderCreate } from './commands/create.ts';
 import { confirm, DeclinedError } from './confirm.ts';
@@ -236,6 +237,8 @@ export const IMPLEMENTED = new Set<string>([
   'runs input',
   'runs cancel',
   'runs retry',
+  'runs goal',
+  'runs goal-cancel',
   'runs events',
   'runs watch',
   'config profiles',
@@ -260,6 +263,8 @@ export const COMMAND_SUMMARIES: [string, string][] = [
   ['runs input', 'answer a Run waiting for input'],
   ['runs cancel', 'request cancellation'],
   ['runs retry', 'create a new Run from a terminal one'],
+  ['runs goal', 'show the goal a Run carries'],
+  ['runs goal-cancel', 'cancel the goal without touching the Run'],
   ['completion', 'print a shell completion script'],
   ['config profiles', 'list configured profiles'],
   ['config current', 'show the resolved profile'],
@@ -274,6 +279,8 @@ const COMMAND_ARGS: Record<string, string> = {
   'runs input': ' <run-id>',
   'runs cancel': ' <run-id>',
   'runs retry': ' <run-id>',
+  'runs goal': ' <run-id>',
+  'runs goal-cancel': ' <run-id>',
 };
 
 function renderCommandHelp(): string[] {
@@ -479,6 +486,7 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
           repo: flagString(parsed.flags, '--repo'),
           agent: flagString(parsed.flags, '--agent'),
           skills: flagString(parsed.flags, '--skills'),
+          goal: flagString(parsed.flags, '--goal'),
         },
         { stdinIsTty: io.stdinIsTty, readStdin: io.readStdin },
       );
@@ -524,6 +532,29 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
         io.stdout(`${renderRunAction('cancelled', await ctx.client.cancelRun(runId), ctx, io.isTty)}\n`);
       } else {
         io.stdout(`${renderRetry(await ctx.client.retryRun(runId), ctx, io.isTty)}\n`);
+      }
+      return EXIT.OK;
+    }
+
+    if (command === 'runs goal' || command === 'runs goal-cancel') {
+      const runId = requireRunId(parsed, command);
+      if (command === 'runs goal') {
+        io.stdout(`${renderGoalDetail(runId, await ctx.client.getGoal(runId), ctx, io.isTty)}\n`);
+      } else {
+        // Same rule as runs cancel: confirmation BEFORE the request, so a declined command
+        // sends nothing.
+        await confirm(
+          {
+            yes: parsed.globals.yes,
+            json: parsed.globals.json,
+            stdinIsTty: io.stdinIsTty,
+            write: io.stderr,
+            readLine: io.readLine,
+          },
+          command,
+          runId,
+        );
+        io.stdout(`${renderGoalCancel(runId, await ctx.client.cancelGoal(runId), ctx, io.isTty)}\n`);
       }
       return EXIT.OK;
     }
@@ -633,10 +664,12 @@ export const COMMAND_FLAGS: Record<string, string[]> = {
   'agents list': [],
   'runs list': ['--limit', '--status', '--cursor'],
   'runs show': [],
-  'runs create': ['--file', '--task', '--repo', '--agent', '--skills', '--idempotency-key'],
+  'runs create': ['--file', '--task', '--repo', '--agent', '--skills', '--goal', '--idempotency-key'],
   'runs input': ['--file', '--value'],
   'runs cancel': [],
   'runs retry': [],
+  'runs goal': [],
+  'runs goal-cancel': [],
   'runs events': ['--after', '--limit', '--follow'],
   // `runs watch` always follows, so --follow is accepted as a no-op rather than rejected: refusing it
   // would tell an operator that a flag which describes exactly what the command does is invalid.

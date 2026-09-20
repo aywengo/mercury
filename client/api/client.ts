@@ -21,11 +21,11 @@ import {
   AuthError, MercuryClientError, TransportError, errorFromStatus,
 } from './errors.ts';
 import {
-  ProtocolError, parseAgentsResponse, parseCreateRunResponse, parseEventPage, parseOkResponse,
+  ProtocolError, parseAgentsResponse, parseCreateRunResponse, parseEventPage, parseGoal, parseOkResponse,
   parseRetryRunResponse, parseRunActionResponse, parseRunDetailResponse, parseRunListResponse,
 } from './protocol.ts';
 import type {
-  AgentsResponse, CreateRunRequest, CreateRunResponse, EventPage, EventQuery, OkResponse,
+  AgentsResponse, CreateRunRequest, CreateRunResponse, EventPage, EventQuery, GoalState, OkResponse,
   RetryRunResponse, RunActionResponse, RunDetailResponse, RunListQuery, RunListResponse,
 } from './protocol.ts';
 
@@ -262,6 +262,15 @@ export class MercuryClient {
 
   retryRun(runId: string): Promise<RetryRunResponse> {
     return this.call('POST', `/api/runs/${encodeURIComponent(runId)}/retry`, parseRetryRunResponse, { body: {} });
+  }
+
+  /** The Run's goal state. The server answers 404 when the Run has none (docs/goals.md §8). */
+  getGoal(runId: string): Promise<GoalState> {
+    return this.call('GET', `/api/runs/${encodeURIComponent(runId)}/goal`, parseGoal);
+  }
+
+  cancelGoal(runId: string): Promise<GoalState> {
+    return this.call('POST', `/api/runs/${encodeURIComponent(runId)}/goal/cancel`, parseGoal, { body: {} });
   }
 
   /**

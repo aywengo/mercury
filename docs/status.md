@@ -144,24 +144,21 @@ The dashboard is a small vanilla-JavaScript application with no build step.
 This keeps deployment simple but limits component reuse and richer client-side
 state management.
 
-### Goal setting has no client surface
+### Goal setting has no dashboard surface
 
-Goals are a server feature with no way to turn it on from a supported client. `POST /api/runs`
-accepts `goal` and forwards it (`src/api/routes.ts`), the run detail page renders goal state, the run
-list carries a Goal column, and `/api/agents` advertises per-agent goal support -- but neither
-first-party client can set one:
+The CLI half of the goal client surface is built: `mercuryctl runs create --goal '<json>'` sets a goal
+(the same object `--file` carries; the JSON form is canonical per `docs/cli-tui-design.md` §6.2),
+`runs goal <run-id>` reads one, and `runs goal-cancel <run-id>` cancels one — cancel remains the only
+goal mutation by design (`docs/goals.md` §12). What the CLI can still not do is compose a goal
+interactively: there are no `--objective`/`--gates` flag grammars, only the JSON form.
 
-- the dashboard's create form is `task`, `repo`, `branch`, `agent`. There is no goal field, so the
-  Goal column can only ever display a goal that something else created;
-- `mercuryctl runs create` accepts `--file`, `--task`, `--repo`, `--agent`, `--skills` and
-  `--idempotency-key`. There is no `--goal` flag, and `client/` reads goal state for rendering only.
-
-So a goal can currently be created only by hand-writing an HTTP request. `docs/goals.md` section 13.6
-separates what ships from what does not: the `capabilities` field and `mercuryctl agents list`'s goal
-column exist, the dashboard has no goal field and never reads `capabilities`. The unbuilt half was tracked in
-[#575](https://github.com/aywengo/mercury/issues/575), which is closed, so nothing currently tracks it;
-whether to build the client surface or record goal-setting as deliberately out of scope for first-party
-clients is still not decided anywhere a contributor can read.
+The dashboard half remains unbuilt: the create form is `task`, `repo`, `branch`, `agent`. There is no
+goal field, so the Goal column can only ever display a goal that the CLI or an HTTP caller created.
+`docs/goals.md` section 13.6 separates what ships from what does not: the `capabilities` field exists
+and `mercuryctl agents list` renders the goal column. The dashboard gap was recorded when
+[#575](https://github.com/aywengo/mercury/issues/575) closed; whether to build it or record
+dashboard goal-setting as deliberately out of scope is still not decided anywhere a contributor
+can read.
 
 ### Redaction is mitigation
 

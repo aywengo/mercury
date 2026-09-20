@@ -238,6 +238,72 @@ test('an unknown Run id exits 4', async () => {
   assert.equal(r.code, 4);
 });
 
+// Goal client surface (docs/status.md "Goal setting has no dashboard surface" records the split;
+// the CLI half is these commands). The contract server runs the fake agent, which declares no
+// goal capability -- so create-with-goal is refused honestly, and the read/cancel routes are
+// exercised against goal-less Runs, which is the 404/exit-4 path an operator hits first.
+test('runs goal on a goal-less Run exits 4 with the server message', async () => {
+  const runId = await createRun('contract: no goal here');
+  const r = cli(['runs', 'goal', runId]);
+  assert.equal(r.code, 4, r.stderr);
+  assert.match(r.stderr, /run has no goal/);
+});
+
+test('runs goal --json on a missing Run is one JSON-free exit 4', async () => {
+  const r = cli(['runs', 'goal', '--json', 'run_does_not_exist']);
+  assert.equal(r.code, 4);
+  assert.equal(r.stdout.trim(), '', 'a failed read prints no JSON value');
+});
+
+test('runs goal-cancel on a goal-less Run exits 4 after confirmation', async () => {
+  const runId = await createRun('contract: cancel nothing');
+  // stdin is not a tty in a spawned subprocess, so --yes is required -- the same rule as cancel.
+  const r = cli(['runs', 'goal-cancel', runId, '--yes']);
+  assert.equal(r.code, 4, r.stderr);
+  assert.match(r.stderr, /run has no goal/);
+});
+
+test('runs goal-cancel without --yes and without a terminal exits 2 and sends nothing', () => {
+  const r = cli(['runs', 'goal-cancel', 'run_does_not_exist']);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /--yes/);
+});
+
+test('runs create --goal is refused by the server when the agent cannot carry a goal', async () => {
+  const r = cli(['runs', 'create', '--task', 'contract: goal on an incapable agent',
+                 '--repo', 'https://example.invalid/r.git',
+                 '--goal', '{"objective": "test passes"}']);
+  // The fake adapter declares no goal capability, so the server answers 400 -> usage exit 2,
+  // and the message names the agent. This pins the wire behavior end to end.
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /goal/i);
+});
+
+test('runs create --goal that is not an object is rejected locally, before the wire', () => {
+  const r = cli(['runs', 'create', '--task', 'contract: bad goal shape',
+                 '--repo', 'https://example.invalid/r.git',
+                 '--goal', '"just a string"']);
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /--goal must be a JSON object/);
+  // The local rejection is distinguishable from a server 400 by the absence of a create
+  // attempt: the message is the client's, not the server's.
+  assert.ok(!r.stderr.includes('agent'), r.stderr);
+});
+
+test('runs create --goal with an unknown spec field is rejected by the server vocabulary', async () => {
+  const r = cli(['runs', 'create', '--task', 'contract: unknown goal field',
+                 '--repo', 'https://example.invalid/r.git',
+                 '--goal', '{"objective": "x", "objektive": "typo"}']);
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /objektive/);
+});
+
+test('--goal cannot be combined with --file', () => {
+  const r = cli(['runs', 'create', '--file', '-', '--goal', '{"objective": "x"}']);
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /--file cannot be combined/);
+});
+
 test('a dead endpoint exits 7 with a transport message, not a stack trace', () => {
   const port = 1; // nothing listens here
   const r = cli(['runs', 'list'], { MERCURY_CLIENT_URL: `http://127.0.0.1:${port}` });

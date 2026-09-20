@@ -18,7 +18,8 @@ import { UsageError } from './api/errors.ts';
  * Which operations need confirmation, and why.
  *
  * `cancel` is destructive and `retry` is spend-bearing (it starts a new Run, which costs tokens), so
- * both are confirmed. `create` is NOT confirmed: creating a Run is the command's whole purpose, it is
+ * both are confirmed. `goal-cancel` changes operator-visible state without touching the Run, but it
+ * is still an operator decision with no undo, so it confirms too. `create` is NOT confirmed: creating a Run is the command's whole purpose, it is
  * idempotency-keyed so a mistaken invocation is recoverable, and prompting on it would train operators
  * to type `--yes` reflexively -- which is exactly how a confirmation stops protecting anything.
  * `input` is not confirmed either: answering a Run that asked a question is a response, not a decision
@@ -27,6 +28,7 @@ import { UsageError } from './api/errors.ts';
 const CONFIRMED_COMMANDS: Record<string, string> = {
   'runs cancel': 'cancel this Run',
   'runs retry': 'retry this Run, which starts a new Run and spends budget',
+  'runs goal-cancel': 'cancel this Run\'s goal (the Run itself is not touched)',
 };
 
 export function requiresConfirmation(command: string): boolean {

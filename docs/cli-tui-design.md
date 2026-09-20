@@ -179,6 +179,8 @@ mercuryctl runs watch <run-id>
 mercuryctl runs input <run-id>
 mercuryctl runs cancel <run-id>
 mercuryctl runs retry <run-id>
+mercuryctl runs goal <run-id>
+mercuryctl runs goal-cancel <run-id>
 
 mercuryctl config profiles
 mercuryctl config current
@@ -222,13 +224,20 @@ unrecognised value and the client would have returned an unfiltered list rather
 than an error -- a shape this design treats as a bug precisely because it is
 indistinguishable from success.
 
-Two entries were added during delivery rather than designed up front, and are
+Four entries were added during delivery rather than designed up front, and are
 recorded here so this section stays the surface an operator can read as
 complete. `completion` came from Milestone 4 (§16.3): the command list already
 existed in one place, so the scripts are generated from it and a hand-written
 file would have been a third copy that drifts. `--version` came from §16.1,
 where the reason for it turned out to be that the version had already been
 written twice and silently disagreed with itself. `-V` is the short form.
+`runs goal` and `runs goal-cancel` closed the goal client-surface gap recorded
+in `docs/status.md`: the server routes existed and the CLI rendered goal state
+it saw, but no command could read or cancel a goal directly. The create side is
+`--goal '<json>'` on `runs create`, parsed client-side into the same request
+model `--file` carries; there is deliberately no `--objective/--gates` flag
+grammar, because §6.2 makes the JSON form canonical and an ever-growing flag
+list is what it exists to avoid.
 
 ### 6.1 Read commands
 
