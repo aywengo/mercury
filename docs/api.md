@@ -112,7 +112,7 @@ Responses:
 | `GET` | `/api/runs/:runId/events` | Page through durable event history |
 | `GET` | `/api/runs/:runId/stream` | Stream backlog and new events over SSE |
 | `GET` | `/api/runs/:runId/goal` | Return the Run's goal state |
-| `POST` | `/api/runs/:runId/goal/cancel` | Cancel the Run's goal (operator override) |
+| `POST` | `/api/runs/:runId/goal/cancel` | Cancel the Run's goal (operator drop) |
 
 All endpoints in this table require authentication. Goal state is documented in
 [goals.md](goals.md); the HTTP contract for the two goal routes is in
