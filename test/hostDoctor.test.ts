@@ -11,7 +11,6 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { networkInterfaces } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
@@ -20,15 +19,15 @@ import {
   envFilePath,
   checkHealthz,
   smokeRun,
+  bindHealthzTarget,
   runHostDoctor,
   schemeFor,
 } from '../src/host/doctor.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
-/** A tiny mock server: /healthz ok, /api/runs creates + completes. Listens on all
- *  interfaces (listen(0) without a host — the LAN-bind doctor test dials the machine's
- *  LAN address; every other test dials 127.0.0.1, which a wildcard bind also serves). */
+/** A tiny mock server: /healthz ok, /api/runs creates + completes. Binds 127.0.0.1
+ *  explicitly (issue #185); the loopback-equivalent bind doctor tests need nothing else. */
 function mockServer(): Promise<{ server: Server; url: string; close: () => Promise<void> }> {
   return new Promise((res) => {
     const runs: Record<string, string> = {};
@@ -63,7 +62,7 @@ function mockServer(): Promise<{ server: Server; url: string; close: () => Promi
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'not found' }));
     });
-    server.listen(0, () => {
+    server.listen(0, '127.0.0.1', () => {
       const addr = server.address() as { port: number };
       const url = `http://127.0.0.1:${addr.port}`;
       res({
@@ -228,34 +227,18 @@ test('schemeFor: https only when both TLS variables are set (#668 round 6)', () 
   assert.equal(schemeFor({ MERCURY_TLS_CERT: '/c.pem', MERCURY_TLS_KEY: '/k.pem' }), 'https');
 });
 
-test('runHostDoctor: a non-loopback MERCURY_BIND_HOST gets its own healthz check (#665)', async () => {
-  // The mock server here listens on all interfaces, so the machine's LAN address reaches
-  // it — the same address Fleet would dial (round 7 on #668: localhost is loopback-
-  // equivalent and skipped, so the test needs a real routable address).
-  const lan = Object.values(networkInterfaces()).flat()
-    .map((i) => (i && !i.internal && i.family === 'IPv4' ? i.address : ''))
-    .filter((a) => a.includes('.'))[0];
-  if (!lan) return; // no routable IPv4 on this runner: nothing meaningful to probe
-  const m = await mockServer();
-  const dir = tempDir('doctor-bind-');
-  const cfg = join(dir, 'cfg');
-  mkdirSync(join(cfg, 'mercury'), { recursive: true });
-  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=primeagent\nMERCURY_ADMIN_TOKEN=tok-doctor-1\nMERCURY_BIND_HOST=${lan}\n`);
-  try {
-    const out: string[] = [];
-    const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
-    assert.equal(code, 0, `doctor output: ${out.join('')}`);
-    const text = out.join('');
-    assert.ok(text.includes(`healthz (bind ${lan})`), `the second check must be reported: ${text}`);
-    // The JSON shape carries it too.
-    const outJson: string[] = [];
-    await runHostDoctor(['--json'], { out: (s) => outJson.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
-    const parsed = JSON.parse(outJson.join('')) as { bindHealthz?: { address: string; ok: boolean } };
-    assert.equal(parsed.bindHealthz?.address, lan);
-    assert.equal(parsed.bindHealthz?.ok, true);
-  } finally {
-    await m.close();
+test('bindHealthzTarget: a routable bind address gets a healthz URL (issue #665)', () => {
+  const t = bindHealthzTarget({ MERCURY_BIND_HOST: '192.168.1.10' }, '3000');
+  assert.deepEqual(t, { address: '192.168.1.10', url: 'http://192.168.1.10:3000' });
+  const tHttps = bindHealthzTarget({ MERCURY_BIND_HOST: 'mercury.example.com' }, '8443', 'https');
+  assert.deepEqual(tHttps, { address: 'mercury.example.com', url: 'https://mercury.example.com:8443' });
+});
+
+test('bindHealthzTarget: loopback-equivalent and wildcard binds are skipped (#668 rounds 1+7)', () => {
+  for (const bind of ['127.0.0.1', '0.0.0.0', 'loopback', 'localhost', '::1', 'Loopback', '  LOOPBACK  ']) {
+    assert.equal(bindHealthzTarget({ MERCURY_BIND_HOST: bind }, '3000'), undefined, bind);
   }
+  assert.equal(bindHealthzTarget({}, '3000'), undefined, 'unset');
 });
 
 test('runHostDoctor: no bind check for loopback-equivalent or wildcard MERCURY_BIND_HOST (#665, #668 round 7)', async () => {

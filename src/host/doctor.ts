@@ -160,6 +160,22 @@ export function schemeFor(vars: Record<string, string | undefined>): 'https' | '
   return vars.MERCURY_TLS_CERT && vars.MERCURY_TLS_KEY ? 'https' : 'http';
 }
 
+/** The second healthz target (issue #665): the address Fleet will dial, or undefined when
+ *  the check does not apply. Loopback-equivalent addresses (127.0.0.1, ::1, localhost,
+ *  loopback — case-insensitive; rounds 3+7 on #668) are already verified by the main
+ *  healthz and are unreachable from Fleet by definition; 0.0.0.0 is a bind wildcard, not a
+ *  connectable destination (round 1). The original spelling is kept for the report. */
+export function bindHealthzTarget(
+  vars: Record<string, string | undefined>,
+  port: string,
+  scheme: 'https' | 'http' = 'http',
+): { address: string; url: string } | undefined {
+  const address = vars.MERCURY_BIND_HOST?.trim() ?? '';
+  if (!address) return undefined;
+  if (['127.0.0.1', '0.0.0.0', 'loopback', 'localhost', '::1'].includes(address.toLowerCase())) return undefined;
+  return { address, url: `${scheme}://${address}:${port}` };
+}
+
 /** Run the doctor. Returns the process exit code. */
 export async function runHostDoctor(
   args: string[],
@@ -196,17 +212,9 @@ export async function runHostDoctor(
   // loopback check above can pass while the address Fleet will actually use does not
   // answer (wrong interface, firewall). Verify BOTH and report both.
   const bindAddress = vars.MERCURY_BIND_HOST?.trim() ?? '';
-  // The skip comparison is case-insensitive (`Loopback` in the file must not trigger a
-  // bogus http://Loopback:<port> request — Copilot round 3 on #668); the original
-  // spelling is kept for the report and the URL.
-  // This check exists to verify the address FLEET will dial (issue #665). Loopback-
-  // equivalent addresses (127.0.0.1, ::1, localhost, loopback) are already verified by
-  // the main healthz above and are unreachable from Fleet by definition — setup.ts's
-  // hand-off tells the operator exactly that (round 7 on #668). 0.0.0.0 is a bind
-  // wildcard, not a connectable destination (Copilot round 1 on #668).
-  const bindSkipped = ['127.0.0.1', '0.0.0.0', 'loopback', 'localhost', '::1'].includes(bindAddress.toLowerCase());
-  const bindHealthz = bindAddress && !bindSkipped
-    ? { address: bindAddress, ...(await checkHealthz(`${scheme}://${bindAddress}:${port}`)) }
+  const bindTarget = bindHealthzTarget(vars, port, scheme);
+  const bindHealthz = bindTarget
+    ? { address: bindTarget.address, ...(await checkHealthz(bindTarget.url)) }
     : undefined;
   const smoke: DoctorResult['smoke'] = [];
   if (apiToken) {
