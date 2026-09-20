@@ -25,7 +25,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
 import { join } from 'node:path';
 
 /** Load mercury.env into a record (simple KEY=VALUE parser, no shell semantics). */
@@ -67,8 +67,10 @@ export function ensureSmokeRepo(env: NodeJS.ProcessEnv = process.env): string {
 export interface DoctorResult {
   healthz: { ok: boolean; detail: string };
   /** Second healthz check against the non-loopback bind address (#665). Undefined when
-   *  MERCURY_BIND_HOST is unset or loopback — there is nothing extra to verify. */
-  bindHealthz?: { address: string; ok: boolean; detail: string };
+   *  MERCURY_BIND_HOST is unset or loopback — there is nothing extra to verify. A 0.0.0.0
+   *  bind dials the host's own LAN IPv4 (#674): dialed names the concrete address tried.
+   *  skipped marks the loopback-only-host case where there is nothing to dial. */
+  bindHealthz?: { address: string; dialed?: string; skipped?: boolean; ok: boolean; detail: string };
   smoke: Array<{ harness: string; ok: boolean; detail: string; skipped?: boolean }>;
   /** True when every smoke check was skipped (no API token): the exit code treats it as a failure (#648). */
   allSmokeSkipped: boolean;
@@ -160,23 +162,67 @@ export function schemeFor(vars: Record<string, string | undefined>): 'https' | '
   return vars.MERCURY_TLS_CERT && vars.MERCURY_TLS_KEY ? 'https' : 'http';
 }
 
+/** The host's own non-internal IPv4 addresses, interface order preserved (#674). These are
+ *  the addresses a Fleet peer would dial when the wizard bound 0.0.0.0. Injectable so tests
+ *  never touch the real interface list. */
+export function lanAddresses(
+  interfaces: NodeJS.Dict<NetworkInterfaceInfo[]> = networkInterfaces(),
+): string[] {
+  const out: string[] = [];
+  for (const list of Object.values(interfaces)) {
+    for (const ni of list ?? []) {
+      if (ni.family === 'IPv4' && !ni.internal) out.push(ni.address);
+    }
+  }
+  return out;
+}
+
 /** The second healthz target (issue #665): the address Fleet will dial, or undefined when
  *  the check does not apply. Loopback-equivalent addresses (127.0.0.1, ::1, localhost,
  *  loopback — case-insensitive; rounds 3+7 on #668) are already verified by the main
- *  healthz and are unreachable from Fleet by definition; 0.0.0.0 is a bind wildcard, not a
- *  connectable destination (round 1). The original spelling is kept for the report. */
+ *  healthz and are unreachable from Fleet by definition. The original spelling is kept
+ *  for the report.
+ *
+ *  0.0.0.0 is a bind wildcard, not a connectable destination — but it is the most common
+ *  answer to the wizard's expose prompt (#674), so it is not skipped: the host's own first
+ *  non-internal IPv4 (the address a Fleet peer would actually dial) is resolved and dialed
+ *  instead, reported as "bind 0.0.0.0, dialed <ip>". A loopback-only host (some containers)
+ *  has nothing to dial: an explicit SKIP note, not silence. */
+export interface BindHealthzTarget {
+  /** The MERCURY_BIND_HOST spelling, for the report. */
+  address: string;
+  /** The concrete URL to dial. Empty exactly when skip is set. */
+  url: string;
+  /** The LAN IPv4 actually dialed when the bind was 0.0.0.0 (#674). */
+  dialed?: string;
+  /** Set when there is nothing to dial (loopback-only host): the SKIP note text. */
+  skip?: string;
+}
+
 export function bindHealthzTarget(
   vars: Record<string, string | undefined>,
   port: string,
   scheme: 'https' | 'http' = 'http',
-): { address: string; url: string } | undefined {
+  interfaces: NodeJS.Dict<NetworkInterfaceInfo[]> = networkInterfaces(),
+): BindHealthzTarget | undefined {
   const address = vars.MERCURY_BIND_HOST?.trim() ?? '';
   if (!address) return undefined;
-  if (['127.0.0.1', '0.0.0.0', 'loopback', 'localhost', '::1'].includes(address.toLowerCase())) return undefined;
+  const lower = address.toLowerCase();
+  if (['127.0.0.1', 'loopback', 'localhost', '::1'].includes(lower)) return undefined;
+  if (lower === '0.0.0.0') {
+    const lan = lanAddresses(interfaces);
+    if (lan.length === 0) {
+      return { address, url: '', skip: 'no non-internal IPv4 address on this host to dial (loopback-only host?)' };
+    }
+    const dialed = lan[0]!;
+    return { address, dialed, url: `${scheme}://${dialed}:${port}` };
+  }
   return { address, url: `${scheme}://${address}:${port}` };
 }
 
-/** Run the doctor. Returns the process exit code. */
+/** Run the doctor. Returns the process exit code. `opts.interfaces` injects an
+ *  os.networkInterfaces() snapshot (tests only) so the 0.0.0.0 dial target is deterministic
+ *  without binding or probing a real LAN socket (#674). */
 export async function runHostDoctor(
   args: string[],
   io: { out: (s: string) => void; err: (s: string) => void } = {
@@ -184,6 +230,7 @@ export async function runHostDoctor(
     err: (s) => process.stderr.write(s),
   },
   env: NodeJS.ProcessEnv = process.env,
+  opts: { interfaces?: NodeJS.Dict<NetworkInterfaceInfo[]> } = {},
 ): Promise<number> {
   const json = args.includes('--json');
   const allowNoHarnesses = args.includes('--allow-no-harnesses');
@@ -211,10 +258,12 @@ export async function runHostDoctor(
   // Issue #665: when the wizard exposed the API on a non-loopback bind address, the
   // loopback check above can pass while the address Fleet will actually use does not
   // answer (wrong interface, firewall). Verify BOTH and report both.
-  const bindTarget = bindHealthzTarget(vars, port, scheme);
-  const bindHealthz = bindTarget
-    ? { address: bindTarget.address, ...(await checkHealthz(bindTarget.url)) }
-    : undefined;
+  const bindTarget = bindHealthzTarget(vars, port, scheme, opts.interfaces);
+  const bindHealthz: DoctorResult['bindHealthz'] = !bindTarget
+    ? undefined
+    : bindTarget.skip
+      ? { address: bindTarget.address, skipped: true, ok: true, detail: bindTarget.skip }
+      : { address: bindTarget.address, dialed: bindTarget.dialed, ...(await checkHealthz(bindTarget.url)) };
   const smoke: DoctorResult['smoke'] = [];
   if (apiToken) {
     const smokeRepo = ensureSmokeRepo(env);
@@ -234,7 +283,9 @@ export async function runHostDoctor(
   } else {
     io.out(`healthz: ${healthz.ok ? 'PASS' : 'FAIL'} — ${healthz.detail}\n`);
     if (bindHealthz) {
-      io.out(`healthz (bind ${bindHealthz.address}): ${bindHealthz.ok ? 'PASS' : 'FAIL'} — ${bindHealthz.detail}\n`);
+      const dialedPart = bindHealthz.dialed ? `, dialed ${bindHealthz.dialed}` : '';
+      const verdict = bindHealthz.skipped ? 'SKIP' : bindHealthz.ok ? 'PASS' : 'FAIL';
+      io.out(`healthz (bind ${bindHealthz.address}${dialedPart}): ${verdict} — ${bindHealthz.detail}\n`);
     }
     for (const s of smoke) {
       io.out(`smoke ${s.harness}: ${s.ok ? 'PASS' : 'FAIL'} — ${s.detail}\n`);

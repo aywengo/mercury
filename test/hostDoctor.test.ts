@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
@@ -20,9 +20,11 @@ import {
   checkHealthz,
   smokeRun,
   bindHealthzTarget,
+  lanAddresses,
   runHostDoctor,
   schemeFor,
 } from '../src/host/doctor.ts';
+import type { NetworkInterfaceInfo } from 'node:os';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -234,15 +236,49 @@ test('bindHealthzTarget: a routable bind address gets a healthz URL (issue #665)
   assert.deepEqual(tHttps, { address: 'mercury.example.com', url: 'https://mercury.example.com:8443' });
 });
 
-test('bindHealthzTarget: loopback-equivalent and wildcard binds are skipped (#668 rounds 1+7)', () => {
-  for (const bind of ['127.0.0.1', '0.0.0.0', 'loopback', 'localhost', '::1', 'Loopback', '  LOOPBACK  ']) {
+test('bindHealthzTarget: loopback-equivalent binds are skipped (#668 rounds 1+7)', () => {
+  for (const bind of ['127.0.0.1', 'loopback', 'localhost', '::1', 'Loopback', '  LOOPBACK  ']) {
     assert.equal(bindHealthzTarget({ MERCURY_BIND_HOST: bind }, '3000'), undefined, bind);
   }
   assert.equal(bindHealthzTarget({}, '3000'), undefined, 'unset');
 });
 
-test('runHostDoctor: no bind check for loopback-equivalent or wildcard MERCURY_BIND_HOST (#665, #668 round 7)', async () => {
-  for (const bind of ['', '127.0.0.1', 'localhost', '0.0.0.0', 'Loopback']) {
+const FAKE_LAN: NodeJS.Dict<NetworkInterfaceInfo[]> = {
+  lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true } as NetworkInterfaceInfo],
+  en0: [
+    { address: 'fe80::1', family: 'IPv6', internal: false } as NetworkInterfaceInfo,
+    { address: '192.0.2.7', family: 'IPv4', internal: false } as NetworkInterfaceInfo,
+  ],
+  en1: [{ address: '10.1.2.3', family: 'IPv4', internal: false } as NetworkInterfaceInfo],
+};
+
+test('lanAddresses keeps non-internal IPv4 in interface order (#674)', () => {
+  assert.deepEqual(lanAddresses(FAKE_LAN), ['192.0.2.7', '10.1.2.3']);
+  assert.deepEqual(lanAddresses({}), []);
+  // IPv6-only machine (beyond link-local): nothing to dial.
+  assert.deepEqual(lanAddresses({ en0: [{ address: 'fd00::1', family: 'IPv6', internal: false } as NetworkInterfaceInfo] }), []);
+});
+
+test('bindHealthzTarget: 0.0.0.0 dials the first LAN IPv4 and reports it (#674)', () => {
+  const t = bindHealthzTarget({ MERCURY_BIND_HOST: '0.0.0.0' }, '3000', 'http', FAKE_LAN);
+  assert.deepEqual(t, { address: '0.0.0.0', dialed: '192.0.2.7', url: 'http://192.0.2.7:3000' });
+  const tHttps = bindHealthzTarget({ MERCURY_BIND_HOST: '0.0.0.0' }, '8443', 'https', FAKE_LAN);
+  assert.deepEqual(tHttps, { address: '0.0.0.0', dialed: '192.0.2.7', url: 'https://192.0.2.7:8443' });
+});
+
+test('bindHealthzTarget: 0.0.0.0 on a loopback-only host is an explicit SKIP (#674)', () => {
+  const t = bindHealthzTarget({ MERCURY_BIND_HOST: '0.0.0.0' }, '3000', 'http', {
+    lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true } as NetworkInterfaceInfo],
+  });
+  assert.deepEqual(t, {
+    address: '0.0.0.0',
+    url: '',
+    skip: 'no non-internal IPv4 address on this host to dial (loopback-only host?)',
+  });
+});
+
+test('runHostDoctor: no bind check for loopback-equivalent MERCURY_BIND_HOST (#665, #668 round 7)', async () => {
+  for (const bind of ['', '127.0.0.1', 'localhost', 'Loopback']) {
     const m = await mockServer();
     const dir = tempDir('doctor-bind-skip-');
     const cfg = join(dir, 'cfg');
@@ -259,7 +295,82 @@ ${bind ? `MERCURY_BIND_HOST=${bind}
       assert.ok(!out.join('').includes('healthz (bind'), `${bind || '(unset)'}: no second check`);
     } finally {
       await m.close();
+      rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+test('runHostDoctor: 0.0.0.0 dials the resolved LAN address and reports it (#674)', async () => {
+  // The injected "LAN" address is 127.0.0.1 marked non-internal — a test construct that
+  // makes the dial deterministic against the loopback-bound mock (#185: explicit literal
+  // host) without binding or probing a real LAN interface.
+  const fakeLan: NodeJS.Dict<NetworkInterfaceInfo[]> = {
+    en9: [{ address: '127.0.0.1', family: 'IPv4', internal: false } as NetworkInterfaceInfo],
+  };
+  const m = await mockServer();
+  const dir = tempDir('doctor-bind-lan-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}
+MERCURY_HARNESSES=primeagent
+MERCURY_ADMIN_TOKEN=tok-doctor-1
+MERCURY_BIND_HOST=0.0.0.0
+`);
+  try {
+    const out: string[] = [];
+    const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv, { interfaces: fakeLan });
+    assert.equal(code, 0);
+    assert.ok(out.join('').includes(`healthz (bind 0.0.0.0, dialed 127.0.0.1): PASS — host`), out.join(''));
+  } finally {
+    await m.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runHostDoctor: 0.0.0.0 with a dead LAN target FAILS, exit 1 (#674)', async () => {
+  // TEST-NET-3 is unroutable: the dial must fail (bounded), and the report must name the
+  // dialed address so the operator can tell firewall from bind problems.
+  const fakeLan: NodeJS.Dict<NetworkInterfaceInfo[]> = {
+    en9: [{ address: '203.0.113.7', family: 'IPv4', internal: false } as NetworkInterfaceInfo],
+  };
+  const m = await mockServer();
+  const dir = tempDir('doctor-bind-lan-fail-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}
+MERCURY_HARNESSES=primeagent
+MERCURY_ADMIN_TOKEN=tok-doctor-1
+MERCURY_BIND_HOST=0.0.0.0
+`);
+  try {
+    const out: string[] = [];
+    const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv, { interfaces: fakeLan });
+    assert.equal(code, 1);
+    assert.ok(out.join('').match(/healthz \(bind 0\.0\.0\.0, dialed 203\.0\.113\.7\): FAIL — healthz unreachable/), out.join(''));
+  } finally {
+    await m.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runHostDoctor: 0.0.0.0 on a loopback-only host prints an explicit SKIP (#674)', async () => {
+  const m = await mockServer();
+  const dir = tempDir('doctor-bind-lan-skip-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}
+MERCURY_HARNESSES=primeagent
+MERCURY_ADMIN_TOKEN=tok-doctor-1
+MERCURY_BIND_HOST=0.0.0.0
+`);
+  try {
+    const out: string[] = [];
+    const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv, { interfaces: {} });
+    assert.equal(code, 0);
+    assert.ok(out.join('').includes('healthz (bind 0.0.0.0): SKIP — no non-internal IPv4 address on this host to dial'), out.join(''));
+  } finally {
+    await m.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
