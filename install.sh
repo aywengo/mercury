@@ -170,6 +170,35 @@ add_action() {
   $1"
 }
 
+# Decide where npm installs. Decision 7: user-scoped only. If npm's global prefix is
+# not writable by this user (root-owned /usr, common on Linux distros), fall back to
+# `$HOME/.local` and tell the operator to add its bin to PATH. Sets:
+#   NPM_PREFIX_PATH     the prefix directory ("" = npm's own global prefix)
+#   NPM_PREFIX_FALLBACK 1 when the $HOME/.local fallback is used, else 0
+#   NPM_PREFIX_DESC     the human-readable description for logs and the action list
+# Execution quotes the values; nothing is word-split (#649 §4, Copilot on #661).
+decide_npm_prefix() {
+  local prefix
+  if ! command_exists npm; then
+    NPM_PREFIX_PATH=""
+    NPM_PREFIX_FALLBACK=0
+    NPM_PREFIX_DESC="npm's global prefix (npm not found: the install step fails if this run reaches it)"
+    return
+  fi
+  prefix="$(npm prefix -g 2>/dev/null || echo unknown)"
+  # -d (is a dir), -w (writable) and -x (searchable, so npm can create bin/ lib/)
+  # must ALL hold; write-without-execute or ACL-only grants would fail at install time.
+  if [ "$prefix" != "unknown" ] && [ -d "$prefix" ] && [ -w "$prefix" ] && [ -x "$prefix" ]; then
+    NPM_PREFIX_PATH=""
+    NPM_PREFIX_FALLBACK=0
+    NPM_PREFIX_DESC="npm's global prefix ($prefix)"
+  else
+    NPM_PREFIX_PATH="$HOME/.local"
+    NPM_PREFIX_FALLBACK=1
+    NPM_PREFIX_DESC="$HOME/.local (npm's global prefix ${prefix:-lookup failed} is not a writable, searchable directory; add $HOME/.local/bin to PATH)"
+  fi
+}
+
 build_actions() {
   local os arch
   os="$(detect_os)"
@@ -194,10 +223,17 @@ build_actions() {
   else
     add_action "check git: FAILED (missing)"
   fi
-  add_action "install @aywengo/mercury@$VERSION into the user npm prefix (no sudo)"
-  add_action "verify the installed package checksum"
+  # The list must name only what the real run does (#649 §4): the M1 gate is
+  # "--dry-run prints the exact action list". The description embeds the same prefix
+  # value the real run quotes, so dry-run and execution cannot diverge. The decision is
+  # computed ONCE in main (before build_actions) so the plan and the execution share it.
+  if [ "$NPM_PREFIX_FALLBACK" = "1" ]; then
+    add_action "install @aywengo/mercury@$VERSION with npm install -g --prefix \"$NPM_PREFIX_PATH\" into $NPM_PREFIX_DESC (integrity = npm's registry sha512 check, no separate checksum step)"
+  else
+    add_action "install @aywengo/mercury@$VERSION with npm install -g into $NPM_PREFIX_DESC (integrity = npm's registry sha512 check, no separate checksum step)"
+  fi
   add_action "write $log_file"
-  add_action "hand off to \`mercury host setup\` (M3: configuration wizard)"
+  add_action "print the next step: run \`mercury host setup\` (the script exits; it does not run the wizard)"
 }
 
 # ---------------------------------------------------------------------------
@@ -215,6 +251,35 @@ main() {
     exit 1
   fi
 
+  # Decision 7 (user-scoped only, no sudo): refuse to run as root. Root's prefix is
+  # always "writable", so without this gate the installer would happily do a
+  # system-wide install — the exact outcome decision 7 forbids (#649 §4). Fail CLOSED:
+  # if `id` is missing we cannot prove this is not root, so refuse (a minimal env that
+  # lacks `id` also lacks npm; the operator can re-run in a normal shell).
+  uid="$(id -u 2>/dev/null)" || uid=""
+  if [ "$uid" = "0" ]; then
+    echo "install.sh: refusing to run as root — Mercury's installer is user-scoped only (decision 7; no sudo, no system prefix)." >&2
+    echo "install.sh: run it as your normal user; everything lands under \$HOME." >&2
+    # The structured log keeps a trail even for the refusals (Copilot round 8 on #661);
+    # only --dry-run skips it, as it always has.
+    if [ "$DRY_RUN" != "1" ]; then
+      mkdir -p "$log_dir"
+      log_line "install-failed" "refused: running as root (decision 7)"
+    fi
+    exit 1
+  fi
+  if [ -z "$uid" ]; then
+    echo "install.sh: cannot determine the user id (id -u failed or produced no output) — refusing to install; decision 7 requires a non-root, user-scoped run." >&2
+    if [ "$DRY_RUN" != "1" ]; then
+      mkdir -p "$log_dir"
+      log_line "install-failed" "refused: user id could not be determined"
+    fi
+    exit 1
+  fi
+
+  # The prefix decision is made once, before the plan is printed, so dry-run, the
+  # printed plan, and the real install step all share one computation (#649 §4).
+  decide_npm_prefix
   build_actions
 
   if [ "$DRY_RUN" = "1" ]; then
@@ -294,15 +359,24 @@ main() {
   fi
 
   # Install the pinned package into the user's npm prefix (no sudo).
-  # M1 scope: the actual npm install + checksum verification. The checksum is
-  # published alongside each release (M6); for now npm's own integrity is the
-  # verification (npm verifies the registry tarball sha512).
+  # M1 scope: the actual npm install. Integrity = npm's own registry sha512
+  # verification; the checksum-published-alongside-release step is M6 work.
+  # Decision 7 (#649 §4): the prefix decision is made once by decide_npm_prefix —
+  # an unwritable global prefix falls back to $HOME/.local (user-scoped, no sudo).
   if command_exists npm; then
-    echo "Installing @aywengo/mercury@$VERSION ..."
-    if [ "$VERSION" = "latest" ]; then
-      npm install -g "@aywengo/mercury@latest"
+    echo "Installing @aywengo/mercury@$VERSION into $NPM_PREFIX_DESC ..."
+    if [ "$NPM_PREFIX_FALLBACK" = "1" ]; then
+      if [ "$VERSION" = "latest" ]; then
+        npm install -g --prefix "$NPM_PREFIX_PATH" "@aywengo/mercury@latest"
+      else
+        npm install -g --prefix "$NPM_PREFIX_PATH" "@aywengo/mercury@$VERSION"
+      fi
     else
-      npm install -g "@aywengo/mercury@$VERSION"
+      if [ "$VERSION" = "latest" ]; then
+        npm install -g "@aywengo/mercury@latest"
+      else
+        npm install -g "@aywengo/mercury@$VERSION"
+      fi
     fi
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -316,12 +390,20 @@ main() {
     exit 1
   fi
 
-  log_line "install-complete" "version=$VERSION"
+  log_line "install-complete" "version=$VERSION prefix=$NPM_PREFIX_DESC"
 
   echo
   echo "Mercury host installed. Next step:"
   echo "  mercury host setup"
-  echo "(M3: configuration wizard — Fleet URL, host token, harnesses.)"
+  echo "(M3: configuration wizard — admin/API token, Atlas, harnesses.)"
+  # Decision 7 fallback: tell the operator how to reach the fallback binary (#649 §4).
+  if [ "$NPM_PREFIX_FALLBACK" = "1" ]; then
+    echo
+    echo "NOTE: the package went to $HOME/.local — make sure $HOME/.local/bin is on PATH:"
+    # The hint shows the literal $HOME expression; SC2016 is intended here.
+    # shellcheck disable=SC2016
+    echo '  export PATH="$HOME/.local/bin:$PATH"'
+  fi
 }
 
 main "$@"

@@ -67,7 +67,7 @@ stub_ok_prereqs() {
 # so "missing" tests are honest: the tool is genuinely absent from PATH.
 minimal_path() {
   local tool src
-  for tool in uname date mkdir awk printf sh bash chmod rm ln mktemp grep; do
+  for tool in uname date mkdir awk printf sh bash chmod rm ln mktemp grep id; do
     if [ ! -e "$STUB_BIN/$tool" ]; then
       if [ -e "/bin/$tool" ]; then src="/bin/$tool"; else src="/usr/bin/$tool"; fi
       # A wrapper script rather than a symlink: macOS sandboxing refuses symlinks
@@ -108,9 +108,12 @@ minimal_path() {
   [[ "$output" == *"Nothing was touched."* ]]
   [[ "$output" == *"detect OS/arch"* ]]
   [[ "$output" == *"install @aywengo/mercury@latest"* ]]
-  # No log file, no npm call.
+  # No log file, no npm INSTALL call. `npm prefix -g` (the writable-prefix check,
+  # #649 §4) is a query, not an install; the recorded calls must not contain one.
   [ ! -f "$XDG_STATE_HOME/mercury/install.log" ]
-  [ ! -f "$TEST_DIR/npm-calls.txt" ]
+  if [ -f "$TEST_DIR/npm-calls.txt" ]; then
+    ! grep -q " install " "$TEST_DIR/npm-calls.txt"
+  fi
 }
 
 @test "--dry-run --version 0.1.1 pins the version in the action list" {
@@ -121,6 +124,39 @@ minimal_path() {
 }
 
 # --- platform gate ---------------------------------------------------------
+
+@test "running as root is refused (decision 7, #649 §4)" {
+  stub_ok_prereqs
+  # Shadow `id` so `id -u` reports 0; the suite cannot actually become root in CI.
+  stub id 'echo 0'
+  run bash "$INSTALL_SH" --dry-run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"refusing to run as root"* ]]
+  [[ "$output" == *"decision 7"* ]]
+  # A refused REAL run leaves a trail in the structured log; --dry-run touches nothing.
+  run bash "$INSTALL_SH" --yes
+  [ "$status" -eq 1 ]
+  grep -q '"event":"install-failed"' "$XDG_STATE_HOME/mercury/install.log"
+  grep -q 'refused: running as root' "$XDG_STATE_HOME/mercury/install.log"
+}
+
+@test "a missing id fails closed (decision 7, #649 §4)" {
+  stub_ok_prereqs
+  # `id` is stubbed to exit 127 (command-not-found behavior): `id -u` fails, `uid` ends
+  # up empty, and the gate must refuse rather than assume this is not root.
+  stub id 'exit 127'
+  run bash "$INSTALL_SH" --dry-run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cannot determine the user id"* ]]
+}
+
+@test "a non-root uid passes the root gate (decision 7, #649 §4)" {
+  stub_ok_prereqs
+  stub id 'echo 501'
+  run bash "$INSTALL_SH" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Nothing was touched."* ]]
+}
 
 @test "unsupported OS exits 1" {
   stub uname 'echo FreeBSD'
@@ -208,7 +244,10 @@ minimal_path() {
   run run_under_pty "$TEST_DIR/decline-driver.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Aborted."* ]]
-  [ ! -f "$TEST_DIR/npm-calls.txt" ]
+  # No npm INSTALL call before the abort (the prefix query is not an install, #649 §4).
+  if [ -f "$TEST_DIR/npm-calls.txt" ]; then
+    ! grep -q " install " "$TEST_DIR/npm-calls.txt"
+  fi
 }
 
 @test "--yes skips the prompt and installs" {
@@ -312,6 +351,43 @@ minimal_path() {
   run bash "$INSTALL_SH" --yes
   [ "$status" -eq 42 ]
   [[ "$output" == *"npm install failed"* ]]
+}
+
+@test "an unwritable npm global prefix falls back to $HOME/.local (decision 7, #649 §4)" {
+  stub node 'echo v24.0.0'
+  stub curl 'exit 0'
+  stub git 'exit 0'
+  stub date 'echo 2026-09-18T00:00:00Z'
+  # npm reports a prefix that is DETERMINISTICALLY not writable for this user: a
+  # directory inside TEST_DIR with mode 555 (never depend on host paths like /usr/local —
+  # Copilot round 2 on #661).
+  stub npm 'case "$1" in prefix) echo "$TEST_DIR/readonly-prefix" ;; *) echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; exit 0 ;; esac'
+  mkdir -p "$TEST_DIR/readonly-prefix" "$TEST_DIR/state/mercury"
+  chmod 555 "$TEST_DIR/readonly-prefix"
+  run bash "$INSTALL_SH" --yes --version 0.1.1
+  [ "$status" -eq 0 ]
+  grep -q -- "--prefix" "$TEST_DIR/npm-calls.txt"
+  grep -q "$HOME/.local" "$TEST_DIR/npm-calls.txt"
+  [[ "$output" == *".local/bin"* ]]  # the PATH hint is printed
+}
+
+@test "a writable npm global prefix needs no --prefix (decision 7, #649 §4)" {
+  stub_ok_prereqs
+  # npm reports a prefix inside TEST_DIR, which the stub setup made writable.
+  stub npm 'case "$1" in prefix) echo "$TEST_DIR/writable-prefix" ;; *) echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; exit 0 ;; esac'
+  mkdir -p "$TEST_DIR/writable-prefix"
+  run bash "$INSTALL_SH" --yes --version 0.1.1
+  [ "$status" -eq 0 ]
+  ! grep -q -- "--prefix" "$TEST_DIR/npm-calls.txt"
+}
+
+@test "--dry-run names the honest actions (#649 §4): no checksum step, hint not hand-off" {
+  stub_ok_prereqs
+  run bash "$INSTALL_SH" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"verify the installed package checksum"* ]]
+  [[ "$output" == *"no separate checksum step"* ]]
+  [[ "$output" == *"it does not run the wizard"* ]]
 }
 
 @test "npm receives the pinned version" {
