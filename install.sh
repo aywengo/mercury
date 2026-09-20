@@ -186,7 +186,9 @@ decide_npm_prefix() {
     return
   fi
   prefix="$(npm prefix -g 2>/dev/null || echo unknown)"
-  if [ "$prefix" != "unknown" ] && [ -w "$prefix" ]; then
+  # -d (is a dir), -w (writable) and -x (searchable, so npm can create bin/ lib/)
+  # must ALL hold; write-without-execute or ACL-only grants would fail at install time.
+  if [ "$prefix" != "unknown" ] && [ -d "$prefix" ] && [ -w "$prefix" ] && [ -x "$prefix" ]; then
     NPM_PREFIX_PATH=""
     NPM_PREFIX_FALLBACK=0
     NPM_PREFIX_DESC="npm's global prefix ($prefix)"
