@@ -260,10 +260,18 @@ jobs:
   # M6: bats suite for install.sh + the host subcommand tests, on every PR touching
   # the installer surface (and on every push to main). Runs even for docs-only
   # installer edits, which the code filter would otherwise skip.
+  # M6 (matrix per #649 §5): the installer surface must pass on Debian and Fedora, and
+  # on macOS — the platform that actually has bash 3.2, which install.sh targets. Two
+  # jobs because containers and `setup-node` caching do not mix cleanly with a shared
+  # matrix: host-installer fans out over Linux (bare ubuntu + debian/fedora containers),
+  # host-installer-macos runs the same suites natively on macOS and adds the launchd
+  # service dry-run.
+  # Ubuntu stays a plain job (no container); debian/fedora run in their own matrix job
+  # so no matrix leg ever needs a "no container" representation (Copilot round 5 on #662).
   host-installer:
     needs: changes
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     if: needs.changes.outputs.host_installer == 'true'
     steps:
       - uses: actions/checkout@v4
@@ -282,10 +290,92 @@ jobs:
       - name: Host subcommand tests (incl. MERCURY_* vs configuration.md)
         run: node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts
 
+  host-installer-containers:
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: needs.changes.outputs.host_installer == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        container: [debian:stable, fedora:latest]
+    container: ${{ matrix.container }}
+    name: host-installer (container ${{ matrix.container }})
+    steps:
+      # Container prereqs come FIRST (Copilot round 3 on #662): checkout/setup-node/npm
+      # rely on git, curl and TLS trust being present, so a container that starts without
+      # them must be provisioned before anything else runs. Containers run as root, and
+      # install.sh refuses root (decision 7, #649 §4), so tests run as a dedicated user.
+      - name: Create the non-root test user
+        run: |
+          useradd -m -s /bin/bash ci || useradd -m -s /bin/bash -u 1001 ci
+      - name: Install test prerequisites (debian)
+        if: matrix.container == 'debian:stable'
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bats curl git ca-certificates
+      - name: Install test prerequisites (fedora)
+        if: matrix.container == 'fedora:latest'
+        run: |
+          dnf install -y bats curl git which ca-certificates
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Hand the workspace to the ci user
+        run: chown -R ci:ci "$GITHUB_WORKSPACE"
+      - name: bats suite for install.sh (as non-root ci user)
+        # Prefer `runuser` (shadow-utils): it PRESERVES the step environment, so PATH
+        # keeps the setup-node location. `su` would drop PATH and lose node; with su,
+        # use -p and re-export PATH explicitly (Copilot round 3 on #662).
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          if command -v runuser >/dev/null 2>&1; then
+            runuser -u ci -- bats test/install.bats
+          else
+            su -p ci -c 'export PATH="$PATH"; bats test/install.bats'
+          fi
+      - name: Host subcommand tests (as non-root ci user)
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          if command -v runuser >/dev/null 2>&1; then
+            runuser -u ci -- node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts
+          else
+            su -p ci -c 'export PATH="$PATH"; node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts'
+          fi
+
+  host-installer-macos:
+    needs: changes
+    runs-on: macos-latest
+    timeout-minutes: 20
+    if: needs.changes.outputs.host_installer == 'true'
+    name: host-installer (macos)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Install bats
+        run: brew install bats-core
+      - name: bats suite for install.sh (bash 3.2 platform)
+        run: bats test/install.bats
+      - name: Host subcommand tests (incl. MERCURY_* vs configuration.md)
+        run: node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts
+      - name: macOS service dry-run (launchd unit prints, nothing written)
+        run: |
+          node src/cli.ts host service install --dry-run
+          test ! -e "$HOME/Library/LaunchAgents/com.mercury.host.plist" || {
+            echo "dry-run must not write the plist" >&2; exit 1; }
+
   # Always reports a single status so narrative-only PRs are not stuck waiting on skipped required jobs.
   ci:
     name: ci
-    needs: [changes, test, uninstalled-checkout-fails-clearly, docs-contract, host-installer]
+    needs: [changes, test, uninstalled-checkout-fails-clearly, docs-contract, host-installer, host-installer-macos, host-installer-containers]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
@@ -300,6 +390,8 @@ jobs:
           UNINSTALL: ${{ needs.uninstalled-checkout-fails-clearly.result }}
           DOCS: ${{ needs.docs-contract.result }}
           HOSTJOB: ${{ needs.host-installer.result }}
+          HOSTMACOS: ${{ needs.host-installer-macos.result }}
+          HOSTCONT: ${{ needs.host-installer-containers.result }}
         run: |
           set -e
           if [ "$CHANGES" != "success" ]; then
@@ -312,8 +404,8 @@ jobs:
               echo "full CI failed (test=$TEST uninstall=$UNINSTALL)" >&2
               exit 1
             fi
-            if [ "$HOST" = "true" ] && [ "$HOSTJOB" != "success" ]; then
-              echo "full CI failed (host-installer=$HOSTJOB)" >&2
+            if [ "$HOST" = "true" ] && { [ "$HOSTJOB" != "success" ] || [ "$HOSTMACOS" != "success" ] || [ "$HOSTCONT" != "success" ]; }; then
+              echo "full CI failed (host-installer=$HOSTJOB host-installer-macos=$HOSTMACOS host-installer-containers=$HOSTCONT)" >&2
               exit 1
             fi
             echo "full CI passed"
@@ -325,8 +417,8 @@ jobs:
               echo "docs-contract failed: $DOCS" >&2
               exit 1
             fi
-            if [ "$HOST" = "true" ] && [ "$HOSTJOB" != "success" ]; then
-              echo "docs-contract failed (host-installer=$HOSTJOB)" >&2
+            if [ "$HOST" = "true" ] && { [ "$HOSTJOB" != "success" ] || [ "$HOSTMACOS" != "success" ] || [ "$HOSTCONT" != "success" ]; }; then
+              echo "docs-contract failed (host-installer=$HOSTJOB host-installer-macos=$HOSTMACOS host-installer-containers=$HOSTCONT)" >&2
               exit 1
             fi
             echo "docs-contract passed (full matrix skipped)"
@@ -334,8 +426,8 @@ jobs:
           fi
 
           if [ "$HOST" = "true" ]; then
-            if [ "$HOSTJOB" != "success" ]; then
-              echo "host-installer failed: $HOSTJOB" >&2
+            if [ "$HOSTJOB" != "success" ] || [ "$HOSTMACOS" != "success" ] || [ "$HOSTCONT" != "success" ]; then
+              echo "host-installer failed: linux=$HOSTJOB macos=$HOSTMACOS containers=$HOSTCONT" >&2
               exit 1
             fi
             echo "host-installer passed (code and docs-contract skipped)"
