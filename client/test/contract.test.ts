@@ -279,6 +279,9 @@ test('runs goal-cancel without --yes and without a terminal exits 2 and sends no
  * without pretending the fake can carry goals. */
 function seedGoal(runId: string, status = 'active'): void {
   const db = new DatabaseSync(join(serverDir, 'contract.db'));
+  // Same lock-wait behaviour as the server (src/db/database.ts BUSY_TIMEOUT_MS): the server may be
+  // mid-write when this helper runs, and a plain open fails fast with SQLITE_BUSY instead of waiting.
+  db.exec(`PRAGMA busy_timeout = 5000`);
   try {
     db.prepare(
       `INSERT INTO run_goals (run_id, objective, contract_json, gates_json, token_budget, status,
