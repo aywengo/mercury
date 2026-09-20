@@ -129,6 +129,9 @@ from git history and is not an implementation guide.
 - [`Goals: objectives and completion tracking`](goals.md) — design for setting a
   goal on a Run and reporting whether the harness met it; includes the verified
   PrimeAgent/Hermes goal capabilities and the Hermes gap.
+- [`Dispatcher bots`](dispatcher-bot-design.md) — optional host-resident bots with
+  an alias, cron-scheduled Run dispatch, declarative event triggers and an optional
+  redacted LLM connection for coordination. Design; not implemented.
 
 ## Reviews
 
