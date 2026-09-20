@@ -111,8 +111,12 @@ Responses:
 | `POST` | `/api/runs/:runId/retry` | Create a new retry Run |
 | `GET` | `/api/runs/:runId/events` | Page through durable event history |
 | `GET` | `/api/runs/:runId/stream` | Stream backlog and new events over SSE |
+| `GET` | `/api/runs/:runId/goal` | Return the Run's goal state |
+| `POST` | `/api/runs/:runId/goal/cancel` | Cancel the Run's goal (operator drop) |
 
-All endpoints in this table require authentication.
+All endpoints in this table require authentication. Goal state is documented in
+[goals.md](goals.md); the HTTP contract for the two goal routes is in
+[Goal endpoints](#goal-endpoints) below.
 
 ## Knowledge endpoints
 
@@ -338,8 +342,10 @@ curl http://127.0.0.1:3000/api/runs/run_123 \
   -H "Authorization: Bearer tok-alice"
 ```
 
-The response contains `{ run, skills }`, including workspace, constraints,
-terminal artifacts and serialized skill records.
+The response contains `{ run, skills, goal, knowledge }` — workspace, constraints,
+terminal artifacts and serialized skill records, plus the goal state as a sibling of `run`
+(`null` when the Run has no goal) and the knowledge pack snapshot (`null` when created
+without one).
 
 ## Event history
 
@@ -409,6 +415,58 @@ curl -X POST http://127.0.0.1:3000/api/runs/run_123/retry \
 
 Retry creates a new Run id and returns `retryOf`. Completed Runs cannot be
 retried.
+
+## Goal endpoints
+
+A Run may carry a goal: the objective it was created with, tracked as a **sibling** of the
+Run status (never a field on the Run). Semantics, status vocabulary and the validation rules
+for `goal` on Run creation are specified in [goals.md](goals.md) §4 and §8; this section is
+the HTTP contract.
+
+**Authentication:** both routes require authentication and are owner-scoped by the same
+access check as every other Run read. An admin caller can act on any visible Run.
+
+### GET /api/runs/:runId/goal
+
+```bash
+curl http://127.0.0.1:3000/api/runs/run_123/goal \
+  -H "Authorization: Bearer tok-alice"
+```
+
+Responses:
+
+| Status | Meaning |
+| --- | --- |
+| `200` | `{ goal }` — the current `GoalState` (status, objective, contract, gates, budget usage) |
+| `404` | Run not found (or belongs to another owner), or the Run has no goal |
+
+`GET /api/runs/:runId` also returns the goal as a sibling of `run`, and `GET /api/runs`
+returns a parallel `goals` map keyed by run id — those are the reads a renderer should use,
+because they can show a Run status next to a goal status. The dedicated route exists for
+callers that need only the goal.
+
+### POST /api/runs/:runId/goal/cancel
+
+Operator drop: cancels the goal without touching the Run. Cancel is the only goal mutation
+and the only writer of the `cancelled` status; there is deliberately no route that can set a
+goal status, an objective, or a `complete` verdict (goals.md §12).
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/runs/run_123/goal/cancel \
+  -H "Authorization: Bearer tok-alice"
+```
+
+Responses:
+
+| Status | Meaning |
+| --- | --- |
+| `200` | `{ goal }` — the updated `GoalState` with status `cancelled` |
+| `404` | Run not found (or belongs to another owner), or the Run has no goal |
+| `409` | The goal already carries a terminal verdict (`complete`, `cancelled` or `unmet`); a verdict is never overwritten by a no-op |
+| `400` | Goals are not enabled on this server |
+
+A `409` matters because `complete` and `unmet` are verdicts: cancelling a goal that already
+completed would erase the record the feature exists to keep.
 
 ## Health and metrics
 
