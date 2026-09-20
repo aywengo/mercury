@@ -735,9 +735,12 @@ export async function runHostSetup(
   // the host on the default port and make the hand-off print the wrong URL.
   const existingVars = existsSync(envFilePath(env)) ? loadEnvFile(envFilePath(env)) : {};
   const wizardOwned = WIZARD_VARIABLES as readonly string[];
+  // Empty-string values are preserved too: an operator may set a variable empty ON
+  // PURPOSE to hold the host at a non-default (dropping it would silently re-enable the
+  // default — Copilot review on #677).
   const preservedEntries = Object.entries(existingVars)
     .filter(([k]) => !wizardOwned.includes(k))
-    .filter((pair): pair is [string, string] => typeof pair[1] === 'string' && pair[1] !== '');
+    .filter((pair): pair is [string, string] => typeof pair[1] === 'string');
   // The file feeds systemd EnvironmentFile, bash source, and the doctor parser (#649 §3):
   // a preserved value outside the safe charset must fail the re-run, not sneak back in.
   for (const [k, v] of preservedEntries) {
