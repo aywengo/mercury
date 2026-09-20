@@ -283,7 +283,14 @@ minimal_path() {
 }
 
 @test "a writable custom prefix off PATH still hands off via npm prefix -g (#666 round 1)" {
-  stub_ok_prereqs
+  # Hermetic PATH (minimal_path, like the missing-prereq tests): a host that happens to have
+  # a real `mercury` on PATH would satisfy `command -v mercury` and skip the branch under
+  # test — the premise is that `mercury` is NOT on PATH (Copilot round 2 on #669).
+  minimal_path
+  stub node 'echo v24.0.0'
+  stub curl 'exit 0'
+  stub git 'exit 0'
+  stub date 'echo 2026-09-18T00:00:00Z'
   # npm reports a WRITABLE custom prefix (mode 755, inside TEST_DIR), the install puts the
   # binary there, and `mercury` is NOT on PATH: `command -v mercury` fails, so the script
   # must resolve through `npm prefix -g` instead of failing the successful install.

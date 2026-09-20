@@ -69,7 +69,7 @@ export function parseHostInstallArgs(args: string[]): HostInstallOptions {
       opts.version = v;
       i += 1;
     } else {
-      throw new Error(`host install: unknown flag '${a}'. Expected --dry-run, --yes, --version <v>, --non-interactive or --force.`);
+      throw new Error(`host install: unknown flag '${a}'. Expected --dry-run, --yes|-y, --version <v>, --non-interactive or --force.`);
     }
   }
   return opts;
