@@ -792,8 +792,13 @@ export async function runHostSetup(
       // as a Bearer token to the host API, so the operator registers exactly this value
       // on the Fleet side. It is in the 0600 file afterwards and never printed again.
       io.out(`  host API token:    ${answers.adminToken}\n`);
-    } else {
+    } else if (existingVars.MERCURY_ADMIN_TOKEN === answers.adminToken) {
       io.out('  host API token:    unchanged (already registered on the Fleet side)\n');
+    } else {
+      // Rotated interactively (a new value was typed) or supplied for the first time:
+      // never display it (#648 decision 6), but do not claim it is unchanged
+      // (Copilot review on #676).
+      io.out('  host API token:    updated (not shown; register the new value on the Fleet side)\n');
     }
     // Fleet reachability (issue #665): with the secure default the API answers only from
     // the host itself, so a URL would register a host that never comes up. Say so, and
