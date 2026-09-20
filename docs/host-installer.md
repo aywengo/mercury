@@ -69,7 +69,7 @@ This document. Done, apart from recording per-harness minimum versions from each
 
 Gate: doc merged; every question in section 3 has an answer or a written reason to defer. Met 2026-09-16.
 
-### M1 — Bootstrap skeleton — ⚠️ implemented, gate open (Docker matrix runs in CI since #649 §5, and #666's `mercury host setup` hand-off is in; the fresh-VM/macOS-arm64 run and checksum publishing remain M6)
+### M1 — Bootstrap skeleton — ⚠️ implemented, gate open (Docker matrix runs in CI since #649 §5, and #666's `mercury host setup` hand-off is in; gate verification = the same fresh-VM run as M4, plus M6's checksum publishing)
 
 `install.sh`:
 
@@ -105,7 +105,7 @@ Gate: probe results agree with the adapters' own real-binary observations (the s
 - `fake` and declarative local agents are not host harnesses and never appear.
 - Tests: `test/hostProbe.test.ts` (11 tests) — missing binary → `missing`, downgraded → `too-old`, floor satisfied → `ok`, no floor → `unknown`, env cmd override, no-config host, unknown flag rejected (first and after `--json`).
 
-### M3 — Configuration wizard — ✅ done (#649 §1–3, §6 via #658–#663; #647's probe integration and #665's bind-address prompt are in; gate verification itself is the M4 fresh-VM run)
+### M3 — Configuration wizard — ✅ done (#649 §1–3, §6 via #658–#663; #647's probe integration and #665's bind-address prompt are in; the gate is verified by M4's fresh-VM run)
 
 Prompts: host name, data dir, workspace dir, GC retention, Atlas on/off, per-harness enable. Each answer maps to a documented `MERCURY_*` variable that the host's config loader reads. Writes `mercury.env` atomically (temp file, validate, rename, 0600), prints a redacted summary. There is no Fleet prompt: Fleet is pull, not push (issue #645, decision 6).
 
@@ -150,7 +150,7 @@ Gate: install vN → upgrade vN+1 → uninstall leaves nothing but the opted-in 
 - **Re-run guard** — `host setup` on a configured host (mercury.env exists) shows the current state and refuses to overwrite unless `--yes` is passed (interactive or `--non-interactive`). `--dry-run` on a configured host warns it would overwrite.
 - Tests: `test/hostLifecycle.test.ts` (16) + the new re-run-guard test in `test/hostSetup.test.ts`. Full suite 1227/1227 green.
 
-### M6 — Release hardening — ⚠️ implemented, gate open (checksum/signing + fresh-VM run pending; #649 §4's honest dry-run and §5's CI matrix are in)
+### M6 — Release hardening — ⚠️ implemented, gate open (checksum/signing pending, plus the M4 fresh-VM run that exercises the release artifacts; #649 §4's honest dry-run and §5's CI matrix are in)
 
 - `bats` test suite for `install.sh`.
 - CI matrix on every PR touching the installer or `mercury host` subcommands, including the `MERCURY_*`-name-vs-`docs/configuration.md` check. Since #649 §5 the matrix runs the bats suite and the host subcommand tests on Ubuntu, Debian (container), Fedora (container) and macOS, plus `mercury host service install --dry-run` on the macOS runner (launchd; nothing written).
