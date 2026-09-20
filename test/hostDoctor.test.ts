@@ -372,7 +372,9 @@ MERCURY_BIND_HOST=0.0.0.0
     await m.close();
     rmSync(dir, { recursive: true, force: true });
   }
-});test('runHostDoctor: an empty MERCURY_HARNESSES is a failure, not a vacuous pass (#654)', async () => {
+});
+
+test('runHostDoctor: an empty MERCURY_HARNESSES is a failure, not a vacuous pass (#654)', async () => {
   const m = await mockServer();
   const dir = tempDir('doctor-emptyharness-');
   const cfg = join(dir, 'cfg');
