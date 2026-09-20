@@ -438,11 +438,12 @@ minimal_path() {
   stub_ok_prereqs
   run bash "$INSTALL_SH" --yes
   [ "$status" -eq 0 ]
-  # Every line must parse as JSON (python3 is present on both CI and macOS).
-  python3 -c '
-import json, sys
-with open(sys.argv[1]) as f:
-    for line in f:
-        json.loads(line)
+  # Every line must parse as JSON. Node is the suite's baseline runtime (CI installs it
+  # on every matrix entry, including containers that ship no python3, #649 §5).
+  node -e '
+const fs = require("node:fs");
+const lines = fs.readFileSync(process.argv[1], "utf8").split("\n").filter(Boolean);
+for (const line of lines) JSON.parse(line);
+console.error(lines.length + " log lines, all valid JSON");
 ' "$XDG_STATE_HOME/mercury/install.log"
 }

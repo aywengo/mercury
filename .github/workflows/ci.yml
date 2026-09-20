@@ -299,13 +299,16 @@ jobs:
           node-version: '24.x'
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
-      - name: Install bats (apt — ubuntu and debian)
-        if: matrix.name != 'fedora'
+      - name: Install bats (apt — debian container, root)
+        if: matrix.name == 'debian'
         run: |
-          if command -v apt-get >/dev/null 2>&1; then
-            apt-get update -y || true
-            apt-get install -y bats
-          fi
+          apt-get update -y
+          apt-get install -y bats
+      - name: Install bats (apt — ubuntu runner, passwordless sudo)
+        if: matrix.name == 'ubuntu'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y bats
       - name: Install bats (dnf — fedora)
         if: matrix.name == 'fedora'
         run: dnf install -y bats
@@ -314,10 +317,24 @@ jobs:
         run: bats test/install.bats
       - name: bats suite for install.sh (as non-root ci user, container)
         if: matrix.name != 'ubuntu'
-        run: su ci -c 'cd "$GITHUB_WORKSPACE" && bats test/install.bats'
+        # debian has `su` (util-linux); minimal fedora images lack it in PATH, but
+        # `runuser` (shadow-utils) is there because useradd ran in the user step.
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          if command -v su >/dev/null 2>&1; then
+            su ci -c 'bats test/install.bats'
+          else
+            runuser -u ci -- bats test/install.bats
+          fi
       - name: Host subcommand tests (as non-root ci user, container)
         if: matrix.name != 'ubuntu'
-        run: su ci -c 'cd "$GITHUB_WORKSPACE" && node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts'
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          if command -v su >/dev/null 2>&1; then
+            su ci -c 'node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts'
+          else
+            runuser -u ci -- node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts
+          fi
       - name: Host subcommand tests (incl. MERCURY_* vs configuration.md)
         if: matrix.name == 'ubuntu'
         run: node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts
