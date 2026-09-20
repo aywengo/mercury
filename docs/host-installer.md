@@ -105,7 +105,7 @@ Gate: probe results agree with the adapters' own real-binary observations (the s
 - `fake` and declarative local agents are not host harnesses and never appear.
 - Tests: `test/hostProbe.test.ts` (11 tests) — missing binary → `missing`, downgraded → `too-old`, floor satisfied → `ok`, no floor → `unknown`, env cmd override, no-config host, unknown flag rejected (first and after `--json`).
 
-### M3 — Configuration wizard — ✅ done (#649 §1–3, §6 via #658–#663; #647's probe integration and #665's bind-address prompt are in; the gate is verified by M4's fresh-VM run)
+### M3 — Configuration wizard — ⚠️ implemented, gate open (all code is in: #649 §1–3, §6 via #658–#663, #647's probe integration, #665's bind-address prompt; the gate is verified by M4's fresh-VM run)
 
 Prompts: host name, data dir, workspace dir, GC retention, Atlas on/off, per-harness enable. Each answer maps to a documented `MERCURY_*` variable that the host's config loader reads. Writes `mercury.env` atomically (temp file, validate, rename, 0600), prints a redacted summary. There is no Fleet prompt: Fleet is pull, not push (issue #645, decision 6).
 
