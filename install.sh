@@ -170,6 +170,27 @@ add_action() {
   $1"
 }
 
+# Decide where npm installs. Decision 7: user-scoped only. If npm's global prefix is
+# not writable by this user (root-owned /usr, common on Linux distros), fall back to
+# `$HOME/.local` and tell the operator to add its bin to PATH. Sets NPM_PREFIX_ARGS and
+# NPM_PREFIX_DESC (empty desc = npm's own prefix).
+decide_npm_prefix() {
+  local prefix
+  if ! command_exists npm; then
+    NPM_PREFIX_ARGS=""
+    NPM_PREFIX_DESC="npm's global prefix (npm not found yet; prerequisite gate will stop first)"
+    return
+  fi
+  prefix="$(npm prefix -g 2>/dev/null || echo unknown)"
+  if [ "$prefix" != "unknown" ] && [ -w "$prefix" ]; then
+    NPM_PREFIX_ARGS=""
+    NPM_PREFIX_DESC="npm's global prefix ($prefix)"
+  else
+    NPM_PREFIX_ARGS="--prefix $HOME/.local"
+    NPM_PREFIX_DESC="$HOME/.local (npm's global prefix $prefix is not writable; add $HOME/.local/bin to PATH)"
+  fi
+}
+
 build_actions() {
   local os arch
   os="$(detect_os)"
@@ -194,10 +215,12 @@ build_actions() {
   else
     add_action "check git: FAILED (missing)"
   fi
-  add_action "install @aywengo/mercury@$VERSION into the user npm prefix (no sudo)"
-  add_action "verify the installed package checksum"
+  # The list must name only what the real run does (#649 §4): the M1 gate is
+  # "--dry-run prints the exact action list".
+  decide_npm_prefix
+  add_action "install @aywengo/mercury@$VERSION with npm install -g $NPM_PREFIX_ARGS into $NPM_PREFIX_DESC (integrity = npm's registry sha512 check, no separate checksum step)"
   add_action "write $log_file"
-  add_action "hand off to \`mercury host setup\` (M3: configuration wizard)"
+  add_action "print the next step: run \`mercury host setup\` (the script exits; it does not run the wizard)"
 }
 
 # ---------------------------------------------------------------------------
@@ -294,15 +317,19 @@ main() {
   fi
 
   # Install the pinned package into the user's npm prefix (no sudo).
-  # M1 scope: the actual npm install + checksum verification. The checksum is
-  # published alongside each release (M6); for now npm's own integrity is the
-  # verification (npm verifies the registry tarball sha512).
+  # M1 scope: the actual npm install. Integrity = npm's own registry sha512
+  # verification; the checksum-published-alongside-release step is M6 work.
+  # Decision 7 (#649 §4): the prefix decision is made once by decide_npm_prefix —
+  # an unwritable global prefix falls back to $HOME/.local (user-scoped, no sudo).
   if command_exists npm; then
-    echo "Installing @aywengo/mercury@$VERSION ..."
+    decide_npm_prefix
+    echo "Installing @aywengo/mercury@$VERSION into $NPM_PREFIX_DESC ..."
     if [ "$VERSION" = "latest" ]; then
-      npm install -g "@aywengo/mercury@latest"
+      # shellcheck disable=SC2086 # NPM_PREFIX_ARGS is intentionally word-split
+      npm install -g $NPM_PREFIX_ARGS "@aywengo/mercury@latest"
     else
-      npm install -g "@aywengo/mercury@$VERSION"
+      # shellcheck disable=SC2086 # NPM_PREFIX_ARGS is intentionally word-split
+      npm install -g $NPM_PREFIX_ARGS "@aywengo/mercury@$VERSION"
     fi
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -316,12 +343,22 @@ main() {
     exit 1
   fi
 
-  log_line "install-complete" "version=$VERSION"
+  log_line "install-complete" "version=$VERSION prefix=$NPM_PREFIX_DESC"
 
   echo
   echo "Mercury host installed. Next step:"
   echo "  mercury host setup"
-  echo "(M3: configuration wizard — Fleet URL, host token, harnesses.)"
+  echo "(M3: configuration wizard — admin/API token, Atlas, harnesses.)"
+  # Decision 7 fallback: tell the operator how to reach the fallback binary (#649 §4).
+  case "$NPM_PREFIX_DESC" in
+    "$HOME/.local"* )
+      echo
+      echo "NOTE: the package went to $HOME/.local — make sure $HOME/.local/bin is on PATH:"
+      # The hint shows the literal $HOME expression; SC2016 is intended here.
+      # shellcheck disable=SC2016
+      echo '  export PATH="$HOME/.local/bin:$PATH"'
+      ;;
+  esac
 }
 
 main "$@"

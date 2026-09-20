@@ -69,13 +69,13 @@ This document. Done, apart from recording per-harness minimum versions from each
 
 Gate: doc merged; every question in section 3 has an answer or a written reason to defer. Met 2026-09-16.
 
-### M1 — Bootstrap skeleton — ⚠️ implemented, gate open (#649 §4–5; #646's stdin fix is in)
+### M1 — Bootstrap skeleton — ⚠️ implemented, gate open (#649 §5; #646's stdin fix and #649 §4's honest dry-run are in)
 
 `install.sh`:
 
 - OS/arch detection: macOS and Linux, x64 and arm64. Alpine/musl is NOT rejected: Mercury has no native dependencies (`node:sqlite` is built into Node, `package.json` ships only `express`), so musl needs no prebuilt check. The earlier draft rejected Alpine for a missing `better-sqlite3` prebuilt; that rationale died when the database moved to `node:sqlite` (initial commit, `src/db/database.ts`).
 - Prerequisite checks: `curl`, `git`, Node ≥ 22.18.0 (the `engines` floor, which also guarantees `node:sqlite`). No SQLite prebuilt check exists because there is nothing native to prebuild.
-- Pinned package install with checksum verification, into the user's npm prefix (no `sudo`).
+- Pinned package install with checksum verification, into the user's npm prefix (no `sudo`). #649 §4: the dry-run list names only what the real run does (npm's own registry sha512 is the integrity check; no separate checksum step exists), and an unwritable npm global prefix falls back to `$HOME/.local` with a printed PATH hint (decision 7).
 - Flags: `--dry-run`, `--yes`, `--version <v>`, `--non-interactive`.
 - Structured log to `${XDG_STATE_HOME:-~/.local/state}/mercury/install.log`.
 - `shellcheck` clean.
