@@ -77,6 +77,7 @@ Gate: doc merged; every question in section 3 has an answer or a written reason 
 - Prerequisite checks: `curl`, `git`, Node ≥ 22.18.0 (the `engines` floor, which also guarantees `node:sqlite`). No SQLite prebuilt check exists because there is nothing native to prebuild.
 - Pinned package install, into the user's npm prefix (no `sudo`); integrity is npm's own registry sha512 check (the checksum-published-alongside-release step is M6, not an installer action). #649 §4: the dry-run list names only what the real run does, and an npm global prefix this user cannot use (`-d`/`-w`/`-x`) falls back to `$HOME/.local` with a printed PATH hint (decision 7).
 - Flags: `--dry-run`, `--yes`, `--version <v>`, `--non-interactive`.
+- The `mercury host setup` hand-off never reads the script stream (#671, the #646 rule one command later): interactive runs redirect the wizard's stdin from `/dev/tty`; a piped run with no controlling terminal and no `--non-interactive` refuses loudly (logged `install-failed`) instead of silently accepting the wizard's defaults.
 - Structured log to `${XDG_STATE_HOME:-~/.local/state}/mercury/install.log`.
 - `shellcheck` clean.
 - The confirmation prompt never reads stdin (#646): under `curl | bash` the script itself IS stdin, so `read` without a redirect consumed the next unread script line as the answer. The prompt reads `/dev/tty`; without a terminal it fails loudly and requires `--yes`/`--non-interactive`. bats drives the prompt through a pty (`script(1)`) and covers the no-tty path.
