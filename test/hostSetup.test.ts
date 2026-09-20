@@ -809,6 +809,23 @@ test('answers file: an unknown key is rejected with a suggestion, nothing writte
   assert.ok(!existsSync(join(cfg, 'mercury', 'mercury.env')), 'nothing is written when the file has a typo');
 });
 
+test('answers file: bindHost normalizes any case/spacing of the loopback spelling (#668 round 4)', async () => {
+  for (const [raw, expect] of [['Loopback', ''], ['  LOOPBACK  ', ''], ['0.0.0.0', '0.0.0.0']] as const) {
+    const dir = tempDir('setup-answers-bind-case-');
+    const cfg = join(dir, 'cfg');
+    mkdirSync(cfg, { recursive: true });
+    writeFileSync(join(dir, 'answers.json'), JSON.stringify({ bindHost: raw, hostName: 'h' }));
+    const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+      ...probeStubEnv(),
+      XDG_CONFIG_HOME: cfg,
+    });
+    assert.equal(code, 0, stderr);
+    const envFile = readFileSync(join(cfg, 'mercury', 'mercury.env'), 'utf8');
+    assert.equal(envFile.includes('MERCURY_BIND_HOST'), expect !== '', `${raw}: ${envFile}`);
+    if (expect) assert.ok(envFile.includes(`MERCURY_BIND_HOST=${expect}`), envFile);
+  }
+});
+
 test('answers file: a near-miss key with no close match is rejected without a suggestion (#649 §2)', async () => {
   const dir = tempDir('setup-answers-strict2-');
   const cfg = join(dir, 'cfg');

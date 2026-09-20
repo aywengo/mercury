@@ -470,8 +470,11 @@ export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.e
     hostName: parsed.hostName ?? base.hostName,
     dataDir: parsed.dataDir ?? base.dataDir,
     workspaceDir: parsed.workspaceDir ?? base.workspaceDir,
-    // 'loopback' is a prompt spelling, never a file value (#665 review).
-    bindHost: parsed.bindHost === 'loopback' ? '' : parsed.bindHost ?? base.bindHost,
+    // 'loopback' is a prompt spelling, never a file value (#665 review) — normalized
+    // case/whitespace-insensitively so `Loopback`/` LOOPBACK ` cannot become a hostname.
+    bindHost: parsed.bindHost !== undefined && parsed.bindHost.trim().toLowerCase() === 'loopback'
+      ? ''
+      : parsed.bindHost ?? base.bindHost,
     retentionDays: parsed.retentionDays ?? base.retentionDays,
     adminToken: parsed.adminToken ?? base.adminToken,
     atlasEnabled: parsed.atlasEnabled ?? base.atlasEnabled,
