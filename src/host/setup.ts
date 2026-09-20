@@ -472,7 +472,8 @@ export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.e
     workspaceDir: parsed.workspaceDir ?? base.workspaceDir,
     // 'loopback' is a prompt spelling, never a file value (#665 review) — normalized
     // case/whitespace-insensitively so `Loopback`/` LOOPBACK ` cannot become a hostname.
-    bindHost: parsed.bindHost !== undefined && parsed.bindHost.trim().toLowerCase() === 'loopback'
+    // Non-strings pass through untouched so validateAnswers reports the friendly error.
+    bindHost: typeof parsed.bindHost === 'string' && parsed.bindHost.trim().toLowerCase() === 'loopback'
       ? ''
       : parsed.bindHost ?? base.bindHost,
     retentionDays: parsed.retentionDays ?? base.retentionDays,

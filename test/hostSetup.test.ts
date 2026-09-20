@@ -809,6 +809,20 @@ test('answers file: an unknown key is rejected with a suggestion, nothing writte
   assert.ok(!existsSync(join(cfg, 'mercury', 'mercury.env')), 'nothing is written when the file has a typo');
 });
 
+test('answers file: a non-string bindHost is rejected with the friendly error, not a crash (#668 round 5)', async () => {
+  const dir = tempDir('setup-answers-bind-type-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(cfg, { recursive: true });
+  writeFileSync(join(dir, 'answers.json'), JSON.stringify({ bindHost: 7, hostName: 'h' }));
+  const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(code, 1);
+  assert.ok(stderr.includes('bind host must be a string'), stderr);
+  assert.ok(!existsSync(join(cfg, 'mercury', 'mercury.env')));
+});
+
 test('answers file: bindHost normalizes any case/spacing of the loopback spelling (#668 round 4)', async () => {
   for (const [raw, expect] of [['Loopback', ''], ['  LOOPBACK  ', ''], ['0.0.0.0', '0.0.0.0']] as const) {
     const dir = tempDir('setup-answers-bind-case-');
