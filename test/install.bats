@@ -67,7 +67,7 @@ stub_ok_prereqs() {
 # so "missing" tests are honest: the tool is genuinely absent from PATH.
 minimal_path() {
   local tool src
-  for tool in uname date mkdir awk printf sh bash chmod rm ln mktemp grep; do
+  for tool in uname date mkdir awk printf sh bash chmod rm ln mktemp grep id; do
     if [ ! -e "$STUB_BIN/$tool" ]; then
       if [ -e "/bin/$tool" ]; then src="/bin/$tool"; else src="/usr/bin/$tool"; fi
       # A wrapper script rather than a symlink: macOS sandboxing refuses symlinks
@@ -133,6 +133,18 @@ minimal_path() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"refusing to run as root"* ]]
   [[ "$output" == *"decision 7"* ]]
+}
+
+@test "a missing id fails closed (decision 7, #649 §4)" {
+  stub_ok_prereqs
+  # minimal_path already restricts PATH; remove any real id by shadowing with a stub that
+  # behaves like a missing binary: the PATH lookup fails when the file does not exist, so
+  # point STUB_BIN/id away by overriding PATH without the dir that has id... simplest:
+  # create an id stub that exits 127 for every call (mimics command-not-found).
+  stub id 'exit 127'
+  run bash "$INSTALL_SH" --dry-run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cannot determine the user id"* ]]
 }
 
 @test "a non-root uid passes the root gate (decision 7, #649 §4)" {
