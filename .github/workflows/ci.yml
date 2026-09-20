@@ -302,7 +302,7 @@ jobs:
       - name: Install test prerequisites (debian container, root)
         if: matrix.name == 'debian'
         run: |
-          apt-get update -y
+          apt-get update
           apt-get install -y --no-install-recommends bats curl git ca-certificates
       - name: Install test prerequisites (fedora container, root)
         if: matrix.name == 'fedora'
@@ -311,7 +311,7 @@ jobs:
       - name: Install bats (apt — ubuntu runner, passwordless sudo)
         if: matrix.name == 'ubuntu'
         run: |
-          sudo apt-get update -y
+          sudo apt-get update
           sudo apt-get install -y bats
       - name: bats suite for install.sh (as non-root ci user)
         if: matrix.name == 'ubuntu'
@@ -410,8 +410,8 @@ jobs:
               echo "docs-contract failed: $DOCS" >&2
               exit 1
             fi
-            if [ "$HOST" = "true" ] && [ "$HOSTJOB" != "success" ]; then
-              echo "docs-contract failed (host-installer=$HOSTJOB)" >&2
+            if [ "$HOST" = "true" ] && { [ "$HOSTJOB" != "success" ] || [ "$HOSTMACOS" != "success" ]; }; then
+              echo "docs-contract failed (host-installer=$HOSTJOB host-installer-macos=$HOSTMACOS)" >&2
               exit 1
             fi
             echo "docs-contract passed (full matrix skipped)"
