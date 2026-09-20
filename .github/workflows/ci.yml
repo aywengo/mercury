@@ -281,7 +281,9 @@ jobs:
             container: debian:stable
           - name: fedora
             container: fedora:latest
-    container: ${{ matrix.container || null }}
+    # An empty string means "no container" for the ubuntu leg; GH Actions skips the
+    # container for '' (the documented pattern) — no `|| null` expression needed.
+    container: ${{ matrix.container }}
     name: host-installer (${{ matrix.name }})
     env:
       # Container jobs default to root; install.sh correctly refuses root (decision 7,
