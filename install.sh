@@ -195,7 +195,7 @@ decide_npm_prefix() {
   else
     NPM_PREFIX_PATH="$HOME/.local"
     NPM_PREFIX_FALLBACK=1
-    NPM_PREFIX_DESC="$HOME/.local (npm's global prefix $prefix is not writable; add $HOME/.local/bin to PATH)"
+    NPM_PREFIX_DESC="$HOME/.local (npm's global prefix ${prefix:-lookup failed} is not a writable, searchable directory; add $HOME/.local/bin to PATH)"
   fi
 }
 
