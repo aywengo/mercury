@@ -15,6 +15,7 @@ import { join, resolve } from 'node:path';
 import { tempDir } from './helpers.ts';
 import {
   parseHostSetupArgs,
+  envDiff,
   validateAnswer,
   validateAnswers,
   renderEnv,
@@ -506,6 +507,95 @@ test('validateAnswer: values outside the safe charset are rejected (#649 §3)', 
   assert.equal(validateAnswer('atlasToken', 'AbCd1234-_+/='), null);
   assert.equal(validateAnswer('hostName', 'host-01'), null);
   assert.equal(validateAnswer('workspaceDir', '/srv/mercury.workspaces'), null);
+});
+
+test('envDiff: redacts credentials, marks changes, and returns empty for identical content (#649 §6)', () => {
+  const cur = 'MERCURY_ADMIN_TOKEN=aaaa\nMERCURY_HARNESSES=primeagent\nMERCURY_ATLAS_HOST_ID=h1\n';
+  const prop = 'MERCURY_ADMIN_TOKEN=bbbb\nMERCURY_HARNESSES=primeagent\nMERCURY_ATLAS_HOST_ID=h2\nMERCURY_WORKSPACE_RETENTION_MS=604800000\n';
+  const d = envDiff(cur, prop);
+  assert.ok(d.includes('- MERCURY_ADMIN_TOKEN=<redacted, 4 chars>'), d);
+  assert.ok(d.includes('+ MERCURY_ADMIN_TOKEN=<redacted, 4 chars>'), d);
+  assert.ok(d.includes('- MERCURY_ATLAS_HOST_ID=h1'), d);
+  assert.ok(d.includes('+ MERCURY_ATLAS_HOST_ID=h2'), d);
+  assert.ok(d.includes('+ MERCURY_WORKSPACE_RETENTION_MS=604800000'), d);
+  assert.ok(!d.includes('MERCURY_HARNESSES'), 'unchanged lines are omitted');
+  assert.equal(envDiff(cur, cur), '', 'identical content has no diff');
+  // The atlas token is a credential too, and a removed key shows only the '-' line.
+  const d2 = envDiff('MERCURY_ATLAS_TOKEN=xyz\nMERCURY_ATLAS_PROJECT=p\n', 'MERCURY_ATLAS_PROJECT=p\n');
+  assert.ok(d2.includes('- MERCURY_ATLAS_TOKEN=<redacted, 3 chars>'), d2);
+  assert.ok(!d2.includes('+ MERCURY_ATLAS_TOKEN'), 'removed keys have no + line');
+  assert.ok(!d2.includes('xyz'), 'the atlas token value never appears');
+});
+
+test('re-run with changed answers shows a redacted diff and exits 1 without --yes (#649 §6)', async () => {
+  const dir = tempDir('setup-rerun-diff-');
+  const cfg = join(dir, 'cfg');
+  const mk = (retention: number) => {
+    mkdirSync(cfg, { recursive: true });
+    writeFileSync(join(dir, 'answers.json'), JSON.stringify({
+      hostName: 'host-diff',
+      dataDir: join(dir, 'data'),
+      workspaceDir: join(dir, 'ws'),
+      retentionDays: retention,
+      adminToken: 'a'.repeat(64),
+      atlasEnabled: false,
+      harnesses: ['primeagent'],
+    }));
+  };
+  mk(7);
+  const first = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(first.code, 0, first.stderr);
+  // Same answers, different retention: the guard must show the proposed diff.
+  mk(3);
+  const second = await cli(['host', 'setup', '--non-interactive', '--answers', join(dir, 'answers.json')], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(second.code, 1);
+  assert.ok(second.stdout.includes('Proposed changes'), second.stdout);
+  assert.ok(second.stdout.includes('- MERCURY_WORKSPACE_RETENTION_MS=604800000'), second.stdout);
+  assert.ok(second.stdout.includes('+ MERCURY_WORKSPACE_RETENTION_MS=259200000'), second.stdout);
+  // The token must never appear in the diff.
+  assert.ok(!second.stdout.includes('a'.repeat(64)), 'admin token redacted');
+  // --yes then applies it.
+  const third = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(third.code, 0, third.stderr);
+  const envFile = readFileSync(join(cfg, 'mercury', 'mercury.env'), 'utf8');
+  assert.ok(envFile.includes('MERCURY_WORKSPACE_RETENTION_MS=259200000'));
+});
+
+test('re-run with identical answers is a no-op that exits 0 (#649 §6)', async () => {
+  const dir = tempDir('setup-rerun-same-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(cfg, { recursive: true });
+  writeFileSync(join(dir, 'answers.json'), JSON.stringify({
+    hostName: 'host-same',
+    dataDir: join(dir, 'data'),
+    workspaceDir: join(dir, 'ws'),
+    retentionDays: 7,
+    adminToken: 'a'.repeat(64),
+    atlasEnabled: false,
+    harnesses: ['primeagent'],
+  }));
+  const first = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(first.code, 0, first.stderr);
+  const before = readFileSync(join(cfg, 'mercury', 'mercury.env'), 'utf8');
+  const second = await cli(['host', 'setup', '--non-interactive', '--answers', join(dir, 'answers.json')], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(second.code, 0, `identical re-run must succeed: ${second.stderr}`);
+  assert.ok(second.stdout.includes('identical'), second.stdout);
+  assert.equal(readFileSync(join(cfg, 'mercury', 'mercury.env'), 'utf8'), before, 'untouched');
 });
 
 test('a host name with an embedded newline is rejected before anything is written (#649 §3)', async () => {

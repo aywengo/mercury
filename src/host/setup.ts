@@ -267,6 +267,40 @@ export function renderEnv(a: HostSetupAnswers): string {
   return lines.sort().join('\n') + '\n';
 }
 
+/** Lines whose VALUE is a credential — shown redacted in diffs. */
+const REDACTED_KEYS = new Set(['MERCURY_ADMIN_TOKEN', 'MERCURY_ATLAS_TOKEN']);
+
+/**
+ * A compact line-level diff between the current and proposed mercury.env content, with
+ * credential values redacted (issue #649 §6, M5 gate). Lines present in both files with
+ * the same value are omitted; `- old` / `+ new` for changed or added keys, `- old` alone
+ * for removed ones. Returns '' when the contents are identical.
+ */
+export function envDiff(current: string, proposed: string): string {
+  const parse = (s: string): Map<string, string> => {
+    const m = new Map<string, string>();
+    for (const line of s.split('\n')) {
+      const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+      if (match) m.set(match[1]!, match[2]!);
+    }
+    return m;
+  };
+  const cur = parse(current);
+  const prop = parse(proposed);
+  const keys = [...new Set([...cur.keys(), ...prop.keys()])].sort();
+  const show = (key: string, value: string): string =>
+    REDACTED_KEYS.has(key) ? `${key}=<redacted, ${value.length} chars>` : `${key}=${value}`;
+  const out: string[] = [];
+  for (const key of keys) {
+    const a = cur.get(key);
+    const b = prop.get(key);
+    if (a === b) continue;
+    if (a !== undefined) out.push(`- ${show(key, a)}`);
+    if (b !== undefined) out.push(`+ ${show(key, b)}`);
+  }
+  return out.length > 0 ? out.join('\n') + '\n' : '';
+}
+
 /** The env file path: ${XDG_CONFIG_HOME:-~/.config}/mercury/mercury.env. */
 export function envFilePath(env: NodeJS.ProcessEnv = process.env): string {
   const base = env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config');
@@ -621,19 +655,30 @@ export async function runHostSetup(
     io.out('mercury host setup --dry-run\n');
     io.out(redactedSummary(answers) + '\n');
     if (alreadyConfigured) {
-      io.out(`\n${path} already exists. --dry-run would OVERWRITE it.\n`);
+      const diff = envDiff(readFileSync(path, 'utf8'), content);
+      if (diff) io.out(`\n--dry-run would OVERWRITE ${path}. Proposed diff (secrets redacted):\n${diff}`);
+      else io.out(`\n${path} already exists and the proposed answers are IDENTICAL — --dry-run would rewrite the same content.`);
     } else {
       io.out(`\nWould write ${path} (${content.split('\n').length} lines, mode 0600).\n`);
     }
     return 0;
   }
 
-  // Re-run on a configured host: show the diff and require confirmation (M5 gate:
-  // re-running changes nothing without confirmation; design decision 5).
+  // Re-run on a configured host: show the diff of proposed changes and require
+  // confirmation (M5 gate: "re-running on a configured host shows the diff of any
+  // proposed change"; design decision 5). Identical answers are a no-op that exits 0.
   if (alreadyConfigured && !opts.yes) {
+    const current = readFileSync(path, 'utf8');
+    const diff = envDiff(current, content);
+    if (!diff) {
+      io.out(`\n${path} already exists and the proposed answers are identical — nothing to change.\n`);
+      return 0;
+    }
     io.out(`\n${path} already exists. Current state:\n`);
     printStatus(hostStatus(process.platform, env), io);
-    io.out(`\nProposed changes would overwrite it. Pass --yes to confirm.\n`);
+    io.out(`\nProposed changes (secrets redacted):\n`);
+    io.out(diff);
+    io.out('\nPass --yes to confirm.\n');
     return 1;
   }
 
