@@ -41,7 +41,7 @@ import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
 import { suggestionFor } from '../adapters/configSchema.ts';
-import { loadEnvFile } from './doctor.ts';
+import { loadEnvFile, schemeFor } from './doctor.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
 
 /** The wizard's answers, before validation. Every field maps to a MERCURY_* variable. */
@@ -49,6 +49,12 @@ export interface HostSetupAnswers {
   hostName: string;
   dataDir: string;
   workspaceDir: string;
+  /**
+   * API bind address written as MERCURY_BIND_HOST (issue #665). '' = leave the host's
+   * secure default (127.0.0.1, loopback only) in place — the file then does not carry
+   * the variable at all, so the default cannot drift from src/config.ts.
+   */
+  bindHost: string;
   /** GC retention in DAYS (the prompt unit); written as MERCURY_WORKSPACE_RETENTION_MS. */
   retentionDays: number;
   /**
@@ -70,6 +76,7 @@ export interface HostSetupAnswers {
  *  exists in docs/configuration.md (design decision 10). */
 export const WIZARD_VARIABLES = [
   'MERCURY_ATLAS_HOST_ID',
+  'MERCURY_BIND_HOST',
   'MERCURY_DB',
   'MERCURY_WORKSPACE_BASE',
   'MERCURY_WORKSPACE_RETENTION_MS',
@@ -180,6 +187,19 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
       if (value.trim().length === 0) return null;
       return charsetErr('atlasProject', value.trim());
     }
+    case 'bindHost': {
+      // '' = keep the host's secure loopback default (the file omits the variable).
+      if (typeof value !== 'string') return 'bind host must be a string';
+      const v = value.trim();
+      if (v === '') return null;
+      if (v === 'loopback') return null;
+      // No ':' — a port or an IPv6 literal would break the `http://<bind>:<port>` URL
+      // interpolation (Copilot review on #668); a host name or IPv4 address only.
+      if (!/^(0\.0\.0\.0|[A-Za-z0-9._-]+)$/.test(v)) {
+        return "bind host must be 'loopback', '0.0.0.0', or a host name / IPv4 address (no port, no IPv6)";
+      }
+      return charsetErr('bindHost', v);
+    }
     case 'harnesses':
       if (!Array.isArray(value) || value.length === 0) return 'at least one harness must be enabled';
       for (const h of value) {
@@ -228,8 +248,11 @@ export function validateAnswers(
   return errors;
 }
 
-/** Render the validated answers as mercury.env lines (sorted, one per variable). */
-export function renderEnv(a: HostSetupAnswers): string {
+/** Render the validated answers as mercury.env lines (sorted, one per variable).
+ *  `preserve` carries operator-managed variables (e.g. MERCURY_TLS_CERT/KEY read from
+ *  the current file) verbatim through a rewrite — they are not wizard answers and are
+ *  not re-validated (issue #668 round 6: a re-run must not downgrade a TLS host). */
+export function renderEnv(a: HostSetupAnswers, preserve: Record<string, string> = {}): string {
   if (!a.adminToken.trim()) throw new Error('adminToken: resolve before rendering (generateAdminToken)');
   // Defense in depth (#649 §3): validateAnswers already enforced the safe charset; a
   // direct renderEnv caller must not bypass it, or one of the three parsers breaks.
@@ -238,6 +261,7 @@ export function renderEnv(a: HostSetupAnswers): string {
     ['dataDir', a.dataDir.trim()],
     ['workspaceDir', a.workspaceDir.trim()],
     ['adminToken', a.adminToken.trim()],
+    ...(a.bindHost.trim() ? ([['bindHost', a.bindHost.trim()]] as [string, string][]) : []),
     ...a.harnesses.flatMap((h): [string, string][] => [['harnesses', h]]),
     ...(a.atlasEnabled
       ? ([
@@ -257,6 +281,9 @@ export function renderEnv(a: HostSetupAnswers): string {
   lines.push(`MERCURY_WORKSPACE_BASE=${a.workspaceDir.trim()}`);
   lines.push(`MERCURY_WORKSPACE_RETENTION_MS=${Math.round(a.retentionDays * 24 * 60 * 60 * 1000)}`);
   lines.push(`MERCURY_ADMIN_TOKEN=${a.adminToken.trim()}`);
+  // '' = secure loopback default from src/config.ts; emitting nothing keeps that single
+  // source of truth (issue #665).
+  if (a.bindHost.trim()) lines.push(`MERCURY_BIND_HOST=${a.bindHost.trim()}`);
   if (a.atlasEnabled) {
     lines.push(`MERCURY_ATLAS_URL=${a.atlasUrl.trim()}`);
     lines.push(`MERCURY_ATLAS_TOKEN=${a.atlasToken.trim()}`);
@@ -264,6 +291,7 @@ export function renderEnv(a: HostSetupAnswers): string {
   }
   lines.push(`MERCURY_HARNESSES=${a.harnesses.join(',')}`);
   lines.push(`MERCURY_DEFAULT_AGENT=${a.harnesses[0]}`);
+  for (const [k, v] of Object.entries(preserve)) lines.push(`${k}=${v}`);
   return lines.sort().join('\n') + '\n';
 }
 
@@ -384,6 +412,10 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     atlasUrl: env.MERCURY_ATLAS_URL?.trim() || '',
     atlasToken: env.MERCURY_ATLAS_TOKEN?.trim() || existingVar('MERCURY_ATLAS_TOKEN', env),
     atlasProject: env.MERCURY_ATLAS_PROJECT?.trim() || '',
+    // Re-run continuity (#665): keep the bind address the host already uses (env var or
+    // the written file) unless the operator supplies a new one — an enter-press on the
+    // prompt must not silently un-expose the API.
+    bindHost: env.MERCURY_BIND_HOST?.trim() || existingVar('MERCURY_BIND_HOST', env),
     harnesses: detected.filter((h) => (KNOWN_HARNESSES as readonly string[]).includes(h)),
   };
 }
@@ -393,6 +425,7 @@ const ANSWERS_FILE_KEYS = [
   'hostName',
   'dataDir',
   'workspaceDir',
+  'bindHost',
   'retentionDays',
   'adminToken',
   'atlasEnabled',
@@ -441,6 +474,12 @@ export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.e
     hostName: parsed.hostName ?? base.hostName,
     dataDir: parsed.dataDir ?? base.dataDir,
     workspaceDir: parsed.workspaceDir ?? base.workspaceDir,
+    // 'loopback' is a prompt spelling, never a file value (#665 review) — normalized
+    // case/whitespace-insensitively so `Loopback`/` LOOPBACK ` cannot become a hostname.
+    // Non-strings pass through untouched so validateAnswers reports the friendly error.
+    bindHost: typeof parsed.bindHost === 'string' && parsed.bindHost.trim().toLowerCase() === 'loopback'
+      ? ''
+      : parsed.bindHost ?? base.bindHost,
     retentionDays: parsed.retentionDays ?? base.retentionDays,
     adminToken: parsed.adminToken ?? base.adminToken,
     atlasEnabled: parsed.atlasEnabled ?? base.atlasEnabled,
@@ -500,10 +539,18 @@ export async function promptAnswers(io: {
     : 'Harnesses to enable (comma-separated)';
   const harnessesRaw = await q(harnessPrompt, base.harnesses.join(','));
   const harnesses = harnessesRaw.split(',').map((s) => s.trim()).filter(Boolean);
+  // Fleet reachability (issue #665): the enrollment doc names "(b) a bind/port reachable
+  // from Fleet" and nothing implemented it — the host answered only from loopback. The
+  // default stays the secure loopback; answering here is what makes the hand-off URL real.
+  const bindRaw = (await q('Expose the API to Fleet? (loopback / 0.0.0.0 / an address)', base.bindHost || 'loopback')).toLowerCase();
+  // 'loopback' is a prompt spelling, never a file value: normalized to '' so the written
+  // env omits MERCURY_BIND_HOST and src/config.ts keeps the secure default (#665 review).
+  const bindHost = bindRaw === 'loopback' || bindRaw === '' ? '' : bindRaw;
   return {
     hostName,
     dataDir,
     workspaceDir,
+    bindHost,
     // Keep the parsed number as-is (0/NaN included): validateAnswers rejects it, so an
     // invalid input cannot silently fall back to the default and pass (review #633).
     retentionDays: Number.parseFloat(retention),
@@ -648,7 +695,21 @@ export async function runHostSetup(
   const generatedToken = !answers.adminToken.trim();
   if (generatedToken) answers.adminToken = generateAdminToken();
 
-  const content = renderEnv(answers);
+  // Operator-managed variables (MERCURY_TLS_CERT/KEY are set by hand, not by the
+  // wizard) must survive a rewrite (#668 round 6 review) — otherwise a re-run would
+  // silently downgrade a TLS host to plain http AND print the wrong hand-off scheme.
+  const existingVars = existsSync(envFilePath(env)) ? loadEnvFile(envFilePath(env)) : {};
+  const preservedEntries = (['MERCURY_TLS_CERT', 'MERCURY_TLS_KEY'] as const)
+    .map((k) => [k, existingVars[k]] as const)
+    .filter((pair): pair is [typeof pair[0], string] => Boolean(pair[1]));
+  // The file feeds systemd EnvironmentFile, bash source, and the doctor parser (#649 §3):
+  // a preserved value outside the safe charset must fail the re-run, not sneak back in.
+  for (const [k, v] of preservedEntries) {
+    const err = unsafeValueError(k, v);
+    if (err) throw new Error(`${k}: ${err}`);
+  }
+  const preserved = Object.fromEntries(preservedEntries);
+  const content = renderEnv(answers, preserved);
   const path = envFilePath(env);
   const alreadyConfigured = existsSync(path);
   if (opts.dryRun) {
@@ -692,9 +753,32 @@ export async function runHostSetup(
     // on the Fleet side. It is in the 0600 file afterwards and never printed again.
     // The port is the one the doctor will use — the env file's, not this shell's (#648 review).
     const port = loadEnvFile(path).MERCURY_PORT ?? '3000';
+    const written = loadEnvFile(path);
+    const scheme = schemeFor(written);
     io.out('\nRegister on the Fleet side (shown once, not again):\n');
-    io.out(`  host API base URL: http://<this-host>:${port}\n`);
     io.out(`  host API token:    ${answers.adminToken}\n`);
+    // Fleet reachability (issue #665): with the secure default the API answers only from
+    // the host itself, so a URL would register a host that never comes up. Say so, and
+    // name the TLS variables — this exposes an admin-token API over plain http.
+    const bindShown = answers.bindHost.trim().toLowerCase();
+    // Loopback-equivalent values (explicit 127.0.0.1 / localhost, or the empty default)
+    // are unreachable from Fleet — the whole point of this block (issue #649 review on
+    // #668): never print a URL Fleet cannot use.
+    const loopbackLike = !bindShown || bindShown === 'loopback' || bindShown === '127.0.0.1' || bindShown === 'localhost';
+    if (!loopbackLike) {
+      const shown = bindShown === '0.0.0.0' ? '<this-host>' : bindShown;
+      // Scheme must match what the API serves: https when MERCURY_TLS_CERT/KEY are
+      // written, plain http otherwise (#668 round 6 review).
+      io.out(`  host API base URL: ${scheme}://${shown}:${port}\n`);
+      if (scheme === 'http') {
+        io.out('  NOTE: the API is exposed over plain http with an admin token (MERCURY_TLS_CERT/MERCURY_TLS_KEY are unset).\n');
+        io.out('  Put the host behind a TLS-terminating reverse proxy or set MERCURY_TLS_CERT and MERCURY_TLS_KEY.\n');
+      }
+    } else {
+      io.out(`  API bind: loopback (secure default). Fleet cannot reach it from here.\n`);
+      io.out('  Re-run `mercury host setup --yes` and answer the bind question with 0.0.0.0 or an address,\n');
+      io.out('  or tunnel the port. The token above stays valid either way.\n');
+    }
   }
   return 0;
 }

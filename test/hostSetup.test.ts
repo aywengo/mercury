@@ -65,6 +65,7 @@ function answers(over: Partial<HostSetupAnswers> = {}): HostSetupAnswers {
     atlasUrl: '',
     atlasToken: '',
     atlasProject: '',
+    bindHost: '',
     harnesses: ['primeagent', 'hermes'],
     ...over,
   };
@@ -301,6 +302,124 @@ test('renderEnv: Atlas on adds the Atlas lines', () => {
   assert.ok(env.includes('MERCURY_ATLAS_URL=https://atlas.example.com'));
   assert.ok(env.includes('MERCURY_ATLAS_TOKEN=at'));
   assert.ok(env.includes('MERCURY_ATLAS_PROJECT=proj'));
+});
+
+test('renderEnv: MERCURY_BIND_HOST emitted only when the operator exposes the API (#665)', () => {
+  const loopback = renderEnv(answers({ adminToken: 'a'.repeat(64), bindHost: '' }));
+  assert.ok(!loopback.includes('MERCURY_BIND_HOST'), 'the secure default must stay in src/config.ts, not the file');
+  const exposed = renderEnv(answers({ adminToken: 'a'.repeat(64), bindHost: '0.0.0.0' }));
+  assert.ok(exposed.includes('MERCURY_BIND_HOST=0.0.0.0'), exposed);
+  const addr = renderEnv(answers({ adminToken: 'a'.repeat(64), bindHost: '192.168.1.10' }));
+  assert.ok(addr.includes('MERCURY_BIND_HOST=192.168.1.10'), addr);
+});
+
+test('validateAnswer: bindHost accepts loopback/0.0.0.0/addresses, rejects junk (#665)', () => {
+  assert.equal(validateAnswer('bindHost', ''), null);
+  assert.equal(validateAnswer('bindHost', 'loopback'), null);
+  assert.equal(validateAnswer('bindHost', '0.0.0.0'), null);
+  assert.equal(validateAnswer('bindHost', 'mercury.example.com'), null);
+  assert.ok(validateAnswer('bindHost', '0.0.0.0; rm -rf')!.includes('bind host'), 'shell metacharacters rejected');
+  assert.ok(validateAnswer('bindHost', '0 0 0 0')!.includes('bind host'), 'spaces rejected');
+});
+
+test('hand-off block: loopback says Fleet cannot reach it; exposed prints the real URL + TLS warning (#665)', async () => {
+  // LOOPBACK path: answer the bind question with 'loopback' explicitly.
+  const dirLoop = tempDir('setup-bind-loop-');
+  const outLoop: string[] = [];
+  const qsLoop = ['', '', '', '7', '', 'no', 'primeagent', 'loopback'];
+  let iLoop = 0;
+  const codeLoop = await runHostSetup([], {
+    out: (s) => outLoop.push(s), err: () => {},
+    question: async () => qsLoop[iLoop++] ?? '',
+    probe: async () => probeOf(['primeagent', 'ok']),
+  }, { XDG_CONFIG_HOME: dirLoop });
+  assert.equal(codeLoop, 0);
+  const textLoop = outLoop.join('');
+  assert.ok(textLoop.includes('Fleet cannot reach it'), textLoop);
+  assert.ok(!textLoop.includes('host API base URL'), 'no unreachable URL may be printed');
+  assert.ok(!textLoop.includes('MERCURY_TLS_CERT'), 'no TLS warning when bound to loopback');
+  assert.ok(!readFileSync(envFilePath({ XDG_CONFIG_HOME: dirLoop }), 'utf8').includes('MERCURY_BIND_HOST'), 'the secure default stays in src/config.ts');
+});
+
+test('re-run: a preserved TLS value outside the safe charset fails the rewrite (#668 round 9)', async () => {
+  const dir = tempDir('setup-tls-unsafe-');
+  const cfg = join(dir, 'cfg');
+  const mercuryDir = join(cfg, 'mercury');
+  mkdirSync(mercuryDir, { recursive: true });
+  writeFileSync(join(mercuryDir, 'mercury.env'), 'MERCURY_TLS_CERT=/tmp/$(rm -rf x).pem\nMERCURY_TLS_KEY=/tmp/k.pem\n');
+  const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--yes'], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(code, 1);
+  assert.ok(stderr.includes('MERCURY_TLS_CERT'), stderr);
+  assert.ok(!readFileSync(join(mercuryDir, 'mercury.env'), 'utf8').includes('MERCURY_ADMIN_TOKEN'), 'the file is not rewritten');
+});
+
+test('hand-off block: with MERCURY_TLS_CERT/KEY written the base URL is https and no plain-http warning appears (#668 round 6)', async () => {
+  const dir = tempDir('setup-bind-tls-');
+  const cfg = join(dir, 'cfg');
+  const mercuryDir = join(cfg, 'mercury');
+  mkdirSync(mercuryDir, { recursive: true });
+  // Pre-existing file with TLS configured; the wizard re-runs over it (--answers keeps TLS vars? No —
+  // the wizard writes a fresh file). Simplest honest drive: an existing env file + full prompts.
+  writeFileSync(join(mercuryDir, 'mercury.env'), 'MERCURY_TLS_CERT=/tmp/c.pem\nMERCURY_TLS_KEY=/tmp/k.pem\n');
+  const out: string[] = [];
+  const qs = ['', '', '', '7', '', 'no', 'primeagent', '192.168.1.5'];
+  let i = 0;
+  const code = await runHostSetup(['--yes'], {
+    out: (s) => out.push(s), err: () => {},
+    question: async () => qs[i++] ?? '',
+    probe: async () => probeOf(['primeagent', 'ok']),
+  }, { XDG_CONFIG_HOME: cfg });
+  assert.equal(code, 0);
+  const text = out.join('');
+  assert.ok(text.includes('host API base URL: https://192.168.1.5:'), text);
+  assert.ok(!text.includes('plain http'), 'no plain-http warning when TLS is configured');
+  const envFile = readFileSync(join(mercuryDir, 'mercury.env'), 'utf8');
+  assert.ok(envFile.includes('MERCURY_TLS_CERT=/tmp/c.pem'), 'operator TLS vars survive the rewrite');
+  assert.ok(envFile.includes('MERCURY_TLS_KEY=/tmp/k.pem'), envFile);
+});
+
+test('hand-off block: an explicit 127.0.0.1/localhost bind is still unreachable from Fleet (#668 round 2)', async () => {
+  for (const bind of ['127.0.0.1', 'localhost']) {
+    const dir = tempDir('setup-bind-impl-');
+    const out: string[] = [];
+    const qs = ['', '', '', '7', '', 'no', 'primeagent', bind];
+    let i = 0;
+    const code = await runHostSetup([], {
+      out: (s) => out.push(s), err: () => {},
+      question: async () => qs[i++] ?? '',
+      probe: async () => probeOf(['primeagent', 'ok']),
+    }, { XDG_CONFIG_HOME: dir });
+    assert.equal(code, 0);
+    const text = out.join('');
+    assert.ok(text.includes('Fleet cannot reach it'), `${bind}: ${text}`);
+    assert.ok(!text.includes('host API base URL'), `${bind}: no URL Fleet cannot use`);
+  }
+});
+
+test('hand-off block: an exposed bind prints the address and the plain-http/TLS warning (#665, Copilot round 1)', async () => {
+  // EXPOSED path: answer the bind question with 0.0.0.0.
+  const dir = tempDir('setup-bind-exposed-');
+  const out: string[] = [];
+  const qs = ['', '', '', '7', '', 'no', 'primeagent', '0.0.0.0'];
+  let i = 0;
+  const code = await runHostSetup([], {
+    out: (s) => out.push(s), err: () => {},
+    question: async () => qs[i++] ?? '',
+    probe: async () => probeOf(['primeagent', 'ok']),
+  }, { XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0);
+  const text = out.join('');
+  assert.ok(text.includes('host API base URL: http://<this-host>:'), text);
+  assert.ok(text.includes('MERCURY_TLS_CERT'), 'the plain-http warning names the TLS variables');
+  const tokens = text.match(/host API token:\s+([0-9a-f]{64})/) ?? [];
+  assert.ok(tokens[1], 'token shown');
+  const occurrences = out.filter((l) => l.includes(tokens[1]!)).length;
+  assert.equal(occurrences, 1, 'token still shown exactly once');
+  const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
+  assert.ok(file.includes('MERCURY_BIND_HOST=0.0.0.0'), file);
 });
 
 test('WIZARD_VARIABLES: every emitted name is documented AND read by the host (design decision 10, issue #645)', () => {
@@ -728,6 +847,37 @@ test('answers file: an unknown key is rejected with a suggestion, nothing writte
   assert.ok(stderr.includes('unknown key'), stderr);
   assert.ok(stderr.includes("harness (did you mean 'harnesses'?)"), `suggestion missing: ${stderr}`);
   assert.ok(!existsSync(join(cfg, 'mercury', 'mercury.env')), 'nothing is written when the file has a typo');
+});
+
+test('answers file: a non-string bindHost is rejected with the friendly error, not a crash (#668 round 5)', async () => {
+  const dir = tempDir('setup-answers-bind-type-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(cfg, { recursive: true });
+  writeFileSync(join(dir, 'answers.json'), JSON.stringify({ bindHost: 7, hostName: 'h' }));
+  const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(code, 1);
+  assert.ok(stderr.includes('bind host must be a string'), stderr);
+  assert.ok(!existsSync(join(cfg, 'mercury', 'mercury.env')));
+});
+
+test('answers file: bindHost normalizes any case/spacing of the loopback spelling (#668 round 4)', async () => {
+  for (const [raw, expect] of [['Loopback', ''], ['  LOOPBACK  ', ''], ['0.0.0.0', '0.0.0.0']] as const) {
+    const dir = tempDir('setup-answers-bind-case-');
+    const cfg = join(dir, 'cfg');
+    mkdirSync(cfg, { recursive: true });
+    writeFileSync(join(dir, 'answers.json'), JSON.stringify({ bindHost: raw, hostName: 'h' }));
+    const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+      ...probeStubEnv(),
+      XDG_CONFIG_HOME: cfg,
+    });
+    assert.equal(code, 0, stderr);
+    const envFile = readFileSync(join(cfg, 'mercury', 'mercury.env'), 'utf8');
+    assert.equal(envFile.includes('MERCURY_BIND_HOST'), expect !== '', `${raw}: ${envFile}`);
+    if (expect) assert.ok(envFile.includes(`MERCURY_BIND_HOST=${expect}`), envFile);
+  }
 });
 
 test('answers file: a near-miss key with no close match is rejected without a suggestion (#649 §2)', async () => {

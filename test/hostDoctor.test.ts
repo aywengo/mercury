@@ -19,12 +19,15 @@ import {
   envFilePath,
   checkHealthz,
   smokeRun,
+  bindHealthzTarget,
   runHostDoctor,
+  schemeFor,
 } from '../src/host/doctor.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
-/** A tiny mock server: /healthz ok, /api/runs creates + completes. */
+/** A tiny mock server: /healthz ok, /api/runs creates + completes. Binds 127.0.0.1
+ *  explicitly (issue #185); the loopback-equivalent bind doctor tests need nothing else. */
 function mockServer(): Promise<{ server: Server; url: string; close: () => Promise<void> }> {
   return new Promise((res) => {
     const runs: Record<string, string> = {};
@@ -216,6 +219,49 @@ test('runHostDoctor: a token turns skips into real smoke Runs (#648)', async () 
 });
 
 // ---------- the empty-harness-list gate (#654) ----------
+
+test('schemeFor: https only when both TLS variables are set (#668 round 6)', () => {
+  assert.equal(schemeFor({}), 'http');
+  assert.equal(schemeFor({ MERCURY_TLS_CERT: '/c.pem' }), 'http');
+  assert.equal(schemeFor({ MERCURY_TLS_KEY: '/k.pem' }), 'http');
+  assert.equal(schemeFor({ MERCURY_TLS_CERT: '/c.pem', MERCURY_TLS_KEY: '/k.pem' }), 'https');
+});
+
+test('bindHealthzTarget: a routable bind address gets a healthz URL (issue #665)', () => {
+  const t = bindHealthzTarget({ MERCURY_BIND_HOST: '192.168.1.10' }, '3000');
+  assert.deepEqual(t, { address: '192.168.1.10', url: 'http://192.168.1.10:3000' });
+  const tHttps = bindHealthzTarget({ MERCURY_BIND_HOST: 'mercury.example.com' }, '8443', 'https');
+  assert.deepEqual(tHttps, { address: 'mercury.example.com', url: 'https://mercury.example.com:8443' });
+});
+
+test('bindHealthzTarget: loopback-equivalent and wildcard binds are skipped (#668 rounds 1+7)', () => {
+  for (const bind of ['127.0.0.1', '0.0.0.0', 'loopback', 'localhost', '::1', 'Loopback', '  LOOPBACK  ']) {
+    assert.equal(bindHealthzTarget({ MERCURY_BIND_HOST: bind }, '3000'), undefined, bind);
+  }
+  assert.equal(bindHealthzTarget({}, '3000'), undefined, 'unset');
+});
+
+test('runHostDoctor: no bind check for loopback-equivalent or wildcard MERCURY_BIND_HOST (#665, #668 round 7)', async () => {
+  for (const bind of ['', '127.0.0.1', 'localhost', '0.0.0.0', 'Loopback']) {
+    const m = await mockServer();
+    const dir = tempDir('doctor-bind-skip-');
+    const cfg = join(dir, 'cfg');
+    mkdirSync(join(cfg, 'mercury'), { recursive: true });
+    writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}
+MERCURY_HARNESSES=primeagent
+MERCURY_ADMIN_TOKEN=tok-doctor-1
+${bind ? `MERCURY_BIND_HOST=${bind}
+` : ''}`);
+    try {
+      const out: string[] = [];
+      const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+      assert.equal(code, 0, bind || '(unset)');
+      assert.ok(!out.join('').includes('healthz (bind'), `${bind || '(unset)'}: no second check`);
+    } finally {
+      await m.close();
+    }
+  }
+});
 
 test('runHostDoctor: an empty MERCURY_HARNESSES is a failure, not a vacuous pass (#654)', async () => {
   const m = await mockServer();
