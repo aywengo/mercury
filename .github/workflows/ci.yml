@@ -266,7 +266,31 @@ jobs:
   # matrix: host-installer fans out over Linux (bare ubuntu + debian/fedora containers),
   # host-installer-macos runs the same suites natively on macOS and adds the launchd
   # service dry-run.
+  # Ubuntu stays a plain job (no container); debian/fedora run in their own matrix job
+  # so no matrix leg ever needs a "no container" representation (Copilot round 5 on #662).
   host-installer:
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: needs.changes.outputs.host_installer == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Install bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+      - name: bats suite for install.sh
+        run: bats test/install.bats
+      - name: Host subcommand tests (incl. MERCURY_* vs configuration.md)
+        run: node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts
+
+  host-installer-containers:
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -274,36 +298,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: ubuntu
-            container: ''
-          - name: debian
-            container: debian:stable
-          - name: fedora
-            container: fedora:latest
-    # An empty string means "no container" for the ubuntu leg; GH Actions skips the
-    # container for '' (the documented pattern) — no `|| null` expression needed.
+        container: [debian:stable, fedora:latest]
     container: ${{ matrix.container }}
-    name: host-installer (${{ matrix.name }})
-    env:
-      # Container jobs default to root; install.sh correctly refuses root (decision 7,
-      # #649 §4) and the bats suite assumes a normal user. Run everything as `ci`.
-      CI_USER: ci
+    name: host-installer (container ${{ matrix.container }})
     steps:
       # Container prereqs come FIRST (Copilot round 3 on #662): checkout/setup-node/npm
       # rely on git, curl and TLS trust being present, so a container that starts without
-      # them must be provisioned before anything else runs.
-      - name: Create the non-root test user (containers run as root; decision 7 refuses root)
-        if: matrix.name != 'ubuntu'
+      # them must be provisioned before anything else runs. Containers run as root, and
+      # install.sh refuses root (decision 7, #649 §4), so tests run as a dedicated user.
+      - name: Create the non-root test user
         run: |
           useradd -m -s /bin/bash ci || useradd -m -s /bin/bash -u 1001 ci
-      - name: Install test prerequisites (debian container, root)
-        if: matrix.name == 'debian'
+      - name: Install test prerequisites (debian)
+        if: matrix.container == 'debian:stable'
         run: |
           apt-get update
           apt-get install -y --no-install-recommends bats curl git ca-certificates
-      - name: Install test prerequisites (fedora container, root)
-        if: matrix.name == 'fedora'
+      - name: Install test prerequisites (fedora)
+        if: matrix.container == 'fedora:latest'
         run: |
           dnf install -y bats curl git which
       - uses: actions/checkout@v4
@@ -312,19 +324,9 @@ jobs:
           node-version: '24.x'
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
-      - name: Hand the workspace to the ci user (containers)
-        if: matrix.name != 'ubuntu'
+      - name: Hand the workspace to the ci user
         run: chown -R ci:ci "$GITHUB_WORKSPACE"
-      - name: Install bats (apt — ubuntu runner, passwordless sudo)
-        if: matrix.name == 'ubuntu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bats
       - name: bats suite for install.sh (as non-root ci user)
-        if: matrix.name == 'ubuntu'
-        run: bats test/install.bats
-      - name: bats suite for install.sh (as non-root ci user, container)
-        if: matrix.name != 'ubuntu'
         # Prefer `runuser` (shadow-utils): it PRESERVES the step environment, so PATH
         # keeps the setup-node location. `su` would drop PATH and lose node; with su,
         # use -p and re-export PATH explicitly (Copilot round 3 on #662).
@@ -335,8 +337,7 @@ jobs:
           else
             su -p ci -c 'export PATH="$PATH"; bats test/install.bats'
           fi
-      - name: Host subcommand tests (as non-root ci user, container)
-        if: matrix.name != 'ubuntu'
+      - name: Host subcommand tests (as non-root ci user)
         run: |
           cd "$GITHUB_WORKSPACE"
           if command -v runuser >/dev/null 2>&1; then
@@ -344,9 +345,6 @@ jobs:
           else
             su -p ci -c 'export PATH="$PATH"; node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts'
           fi
-      - name: Host subcommand tests (incl. MERCURY_* vs configuration.md)
-        if: matrix.name == 'ubuntu'
-        run: node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts
 
   host-installer-macos:
     needs: changes
@@ -377,7 +375,7 @@ jobs:
   # Always reports a single status so narrative-only PRs are not stuck waiting on skipped required jobs.
   ci:
     name: ci
-    needs: [changes, test, uninstalled-checkout-fails-clearly, docs-contract, host-installer, host-installer-macos]
+    needs: [changes, test, uninstalled-checkout-fails-clearly, docs-contract, host-installer, host-installer-macos, host-installer-containers]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
@@ -393,6 +391,7 @@ jobs:
           DOCS: ${{ needs.docs-contract.result }}
           HOSTJOB: ${{ needs.host-installer.result }}
           HOSTMACOS: ${{ needs.host-installer-macos.result }}
+          HOSTCONT: ${{ needs.host-installer-containers.result }}
         run: |
           set -e
           if [ "$CHANGES" != "success" ]; then
@@ -405,8 +404,8 @@ jobs:
               echo "full CI failed (test=$TEST uninstall=$UNINSTALL)" >&2
               exit 1
             fi
-            if [ "$HOST" = "true" ] && { [ "$HOSTJOB" != "success" ] || [ "$HOSTMACOS" != "success" ]; }; then
-              echo "full CI failed (host-installer=$HOSTJOB host-installer-macos=$HOSTMACOS)" >&2
+            if [ "$HOST" = "true" ] && { [ "$HOSTJOB" != "success" ] || [ "$HOSTMACOS" != "success" ] || [ "$HOSTCONT" != "success" ]; }; then
+              echo "full CI failed (host-installer=$HOSTJOB host-installer-macos=$HOSTMACOS host-installer-containers=$HOSTCONT)" >&2
               exit 1
             fi
             echo "full CI passed"
@@ -418,8 +417,8 @@ jobs:
               echo "docs-contract failed: $DOCS" >&2
               exit 1
             fi
-            if [ "$HOST" = "true" ] && { [ "$HOSTJOB" != "success" ] || [ "$HOSTMACOS" != "success" ]; }; then
-              echo "docs-contract failed (host-installer=$HOSTJOB host-installer-macos=$HOSTMACOS)" >&2
+            if [ "$HOST" = "true" ] && { [ "$HOSTJOB" != "success" ] || [ "$HOSTMACOS" != "success" ] || [ "$HOSTCONT" != "success" ]; }; then
+              echo "docs-contract failed (host-installer=$HOSTJOB host-installer-macos=$HOSTMACOS host-installer-containers=$HOSTCONT)" >&2
               exit 1
             fi
             echo "docs-contract passed (full matrix skipped)"
@@ -427,8 +426,8 @@ jobs:
           fi
 
           if [ "$HOST" = "true" ]; then
-            if [ "$HOSTJOB" != "success" ] || [ "$HOSTMACOS" != "success" ]; then
-              echo "host-installer failed: linux=$HOSTJOB macos=$HOSTMACOS" >&2
+            if [ "$HOSTJOB" != "success" ] || [ "$HOSTMACOS" != "success" ] || [ "$HOSTCONT" != "success" ]; then
+              echo "host-installer failed: linux=$HOSTJOB macos=$HOSTMACOS containers=$HOSTCONT" >&2
               exit 1
             fi
             echo "host-installer passed (code and docs-contract skipped)"
