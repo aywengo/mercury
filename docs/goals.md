@@ -900,8 +900,8 @@ responses: *too old* means upgrade, *cannot tell* means fix the probe.
 
 ### 13.6 Surfacing it
 
-Two of the three surfaces here are shipped. The third is not, and the distinction matters because this
-section is what someone implements from.
+Two and a half of the three surfaces here are shipped. The dashboard is not, and the distinction
+matters because this section is what someone implements from.
 
 **Shipped — the capability field.** `GET /api/agents` returns `agents`, `defaultAgent` **and**
 `capabilities`, one `AgentCapabilitySummary` per agent id:
@@ -973,6 +973,13 @@ states, because they want different actions from an operator: "too old" means up
 means fix the probe, "no" means pick a different agent. An absent capability block renders `unknown`, not `no`
 — an older server sends no capabilities block at all, and showing that as "no" would tell the operator a
 capability is absent when the client simply was not told.
+
+**Shipped — the `mercuryctl` goal commands.** `runs create --goal '<json>'` sets a goal (the same object a
+`--file` request carries; the JSON form is canonical by design, §6.2 of `docs/cli-tui-design.md`), `runs goal`
+prints the full goal block for a Run, and `runs goal-cancel` cancels one — cancel remains the only mutation
+this API exposes, by the §12 rule that it asserts nothing about whether the work was done. There is
+deliberately no `--objective`/`--gates` flag grammar: the server's `resolveGoalSpec` owns the spec vocabulary
+and its error messages, and a client-side copy would drift.
 
 **Not built — the dashboard.** `ui/index.js` reads `agents` and `defaultAgent` and never reads
 `capabilities`; the create form has no goal field of any kind. So the two properties this section asks for —

@@ -130,6 +130,11 @@ mercuryctl runs create --file run.json
 
 # read the request from stdin
 cat run.json | mercuryctl runs create --file -
+
+# attach a goal (docs/goals.md); the JSON object is the same shape --file carries
+mercuryctl runs create --task "fix the flaky test" \
+                       --repo https://github.com/acme/widgets.git \
+                       --goal '{"objective":"test/queue.test.ts passes 10 consecutive runs"}'
 ```
 
 `--repo` accepts a git URL or a path. A path names a directory on the **worker**, never on your machine; a
@@ -197,6 +202,21 @@ mercuryctl runs cancel "$ID" --json   # machine-readable mode never prompts
 
 Add `--yes` in both cases. The check happens **before** any read, which is what makes "this tool never
 blocks on a prompt" true rather than usually true.
+
+### Goal state
+
+```bash
+mercuryctl runs goal <run-id>          # the objective, contract, gates and budget usage
+mercuryctl runs goal-cancel <run-id>   # asks first; cancels the goal, never the Run
+```
+
+Goal status is a **sibling** of Run status, not part of it: `runs show` COMPLETED with goal `unmet`
+means the work finished and the objective did not. `runs goal` prints the same goal block `runs show`
+does; `--json` prints `{ "runId": ..., "goal": ... }`.
+
+Cancelling a goal that already reached a verdict — `complete`, `unmet` or an earlier cancel — is a
+conflict (exit `5`), because a verdict is a record, and no command erases one. Cancelling a goal whose
+Run is still running is the normal case: the Run keeps going, the goal just stops being tracked.
 
 ## Scripting
 

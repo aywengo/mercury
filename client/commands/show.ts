@@ -6,6 +6,7 @@
 
 import type { GoalState, RunDetailResponse } from '../api/protocol.ts';
 import { makeColorizer, sanitizeForTerminal, statusColor, type ColorName } from '../output/human.ts';
+import { goalDetailLines } from './goal.ts';
 import type { CommandContext } from './context.ts';
 
 
@@ -32,45 +33,7 @@ function goalLines(response: RunDetailResponse, color: (c: ColorName, s: string)
   if (goal === null) {
     return [field('goal', color('dim', 'none'))];
   }
-  const lines = [field('goal', color(goalColor(goal.status), sanitizeForTerminal(goal.status)))];
-  lines.push(field('objective', sanitizeForTerminal(goal.objective)));
-  // The contract sits with the objective, not with the gates: it is the part that says what
-  // "met" was supposed to mean. Section 4 argues a COMPLETED Run must not be read as "done",
-  // and the thing that defines done is this -- showing `unmet` while hiding the contract
-  // reproduces the readability failure one level down.
-  for (const line of goalContractLines(goal.contract, field, color)) {
-    lines.push(line);
-  }
-  if (goal.tokenBudget !== undefined) {
-    const used = goal.tokensUsed ?? 0;
-    lines.push(field('goal tokens', `${used} / ${goal.tokenBudget}`));
-  } else if (goal.tokensUsed !== undefined) {
-    lines.push(field('goal tokens', String(goal.tokensUsed)));
-  }
-  if (goal.turnsUsed !== undefined) lines.push(field('goal turns', String(goal.turnsUsed)));
-  for (const line of goalGateLines(goal.gates, field, color)) {
-    lines.push(line);
-  }
-  // `unmet` alone does not say whether the harness ever held the objective, and the two cases want
-  // opposite reactions: one is "the agent finished and never claimed success", the other is
-  // "nothing ran at all" (issue #489). Said only when it is false, so the common reading stays
-  // quiet and the surprising case is the one that takes up a line.
-  if (goal.status === 'unmet' && goal.attempted === false) {
-    lines.push(field('goal started', color('yellow', 'never -- the harness never received the objective')));
-  }
-  if (goal.pausedReason) lines.push(field('goal paused', sanitizeForTerminal(goal.pausedReason)));
-  if (goal.lastError) lines.push(field('goal error', color('red', sanitizeForTerminal(goal.lastError))));
-  if (goal.lastReason && !goal.pausedReason) lines.push(field('goal reason', sanitizeForTerminal(goal.lastReason)));
-  return lines;
-}
-
-/** `unmet` is the one status Mercury originates and the one an operator most needs to see. */
-function goalColor(status: string): ColorName {
-  if (status === 'complete') return 'green';
-  if (status === 'unmet' || status === 'error') return 'red';
-  if (status === 'paused' || status === 'budget_limited') return 'yellow';
-  if (status === 'cancelled') return 'dim';
-  return 'cyan';
+  return goalDetailLines(goal, color);
 }
 
 export function renderRunDetail(response: RunDetailResponse, ctx: CommandContext, isTty: boolean): string {
@@ -133,56 +96,6 @@ export function renderRunDetail(response: RunDetailResponse, ctx: CommandContext
  *
  * Free text from whoever created the Run, so it goes through sanitizeForTerminal.
  */
-function goalContractLines(
-  contract: GoalState['contract'],
-  field: (label: string, value: string) => string,
-  color: (c: ColorName, s: string) => string,
-): string[] {
-  if (!contract) return [];
-  const labels: [keyof NonNullable<GoalState['contract']>, string][] = [
-    ['outcome', 'must achieve'],
-    ['verification', 'verified by'],
-    ['constraints', 'constraints'],
-    ['boundaries', 'out of scope'],
-    ['stopWhen', 'stop when'],
-  ];
-  const lines: string[] = [];
-  for (const [key, label] of labels) {
-    const value = contract[key];
-    if (value === undefined || value.length === 0) continue;
-    lines.push(field(label, color('dim', sanitizeForTerminal(value))));
-  }
-  return lines;
-}
-
-/**
- * One line per declared gate.
- *
- * Rendered as what was ASKED FOR, never as an outcome: Mercury records the spec and does not
- * execute gates (docs/goals.md 5), so a gate list next to a COMPLETED Run must not read as a
- * passing test report. The label says "gate" and nothing else -- no tick, no colour implying
- * success -- because the nearest thing to that misreading this repo already has a number
- * (`test.*` events cover real results).
- *
- * The command is attacker-influenced text that came from the caller and came back around, so it
- * goes through sanitizeForTerminal like every other free-text field here.
- */
-function goalGateLines(
-  gates: GoalState['gates'],
-  field: (label: string, value: string) => string,
-  color: (c: ColorName, s: string) => string,
-): string[] {
-  if (!gates || gates.length === 0) return [];
-  return gates.map((g, i) => {
-    const seconds = g.timeoutMs / 1000;
-    const timeout = Number.isInteger(seconds) && seconds >= 1
-      ? `${seconds}s`
-      : `${g.timeoutMs}ms`;
-    const retries = g.maxRetries > 0 ? `, ${g.maxRetries} ${g.maxRetries === 1 ? 'retry' : 'retries'}` : '';
-    const meta = color('dim', ` (timeout ${timeout}${retries})`);
-    return field(`gate ${i + 1}`, `${sanitizeForTerminal(g.command)}${meta}`);
-  });
-}
 /**
  * Which harness actually executed the Run (docs/goals.md 13.1).
  *

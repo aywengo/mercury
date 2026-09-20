@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -236,6 +237,133 @@ test('a bad token exits 3 and does not print the token', () => {
 test('an unknown Run id exits 4', async () => {
   const r = cli(['runs', 'show', 'run_does_not_exist']);
   assert.equal(r.code, 4);
+});
+
+// Goal client surface (docs/status.md "Goal setting has no dashboard surface" records the split;
+// the CLI half is these commands). The contract server runs the fake agent, which declares no
+// goal capability -- so create-with-goal is refused honestly, and the read/cancel routes are
+// exercised against goal-less Runs, which is the 404/exit-4 path an operator hits first.
+test('runs goal on a goal-less Run exits 4 with the server message', async () => {
+  const runId = await createRun('contract: no goal here');
+  const r = cli(['runs', 'goal', runId]);
+  assert.equal(r.code, 4, r.stderr);
+  assert.match(r.stderr, /run has no goal/);
+});
+
+test('runs goal --json on a missing Run is one JSON-free exit 4', async () => {
+  const r = cli(['runs', 'goal', '--json', 'run_does_not_exist']);
+  assert.equal(r.code, 4);
+  assert.equal(r.stdout.trim(), '', 'a failed read prints no JSON value');
+});
+
+test('runs goal-cancel on a goal-less Run exits 4 after confirmation', async () => {
+  const runId = await createRun('contract: cancel nothing');
+  // stdin is not a tty in a spawned subprocess, so --yes is required -- the same rule as cancel.
+  const r = cli(['runs', 'goal-cancel', runId, '--yes']);
+  assert.equal(r.code, 4, r.stderr);
+  assert.match(r.stderr, /run has no goal/);
+});
+
+test('runs goal-cancel without --yes and without a terminal exits 2 and sends nothing', () => {
+  const r = cli(['runs', 'goal-cancel', 'run_does_not_exist']);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /--yes/);
+});
+
+/** Seed a goal row for a Run directly in the contract server's SQLite file.
+ *
+ * The fake adapter declares no goal capability, so no code path in the running server can create
+ * one -- but the 200 path is exactly what the reviewer caught the first draft missing: the route
+ * wraps the state in `{ goal }`, and a parser fed the wrapper instead of the state throws
+ * ProtocolError on every success. Seeding exercises the wrapper, the read, and the cancel 200
+ * without pretending the fake can carry goals. */
+function seedGoal(runId: string, status = 'active'): void {
+  const db = new DatabaseSync(join(serverDir, 'contract.db'));
+  // Same lock-wait behaviour as the server (src/db/database.ts BUSY_TIMEOUT_MS): the server may be
+  // mid-write when this helper runs, and a plain open fails fast with SQLITE_BUSY instead of waiting.
+  db.exec(`PRAGMA busy_timeout = 5000`);
+  try {
+    db.prepare(
+      `INSERT INTO run_goals (run_id, objective, contract_json, gates_json, token_budget, status,
+         tokens_used, time_used_seconds, turns_used, last_verdict, last_reason, last_error,
+         paused_reason, source, attempted, updated_at)
+       VALUES (?, ?, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'operator', 0, ?)`,
+    ).run(runId, 'contract: seeded objective', status, new Date().toISOString());
+  } finally {
+    db.close();
+  }
+}
+
+test('runs goal reads a seeded goal and renders the wrapper correctly (#680 round 2)', async () => {
+  const runId = await createRun('contract: goal to read');
+  seedGoal(runId);
+  const r = cli(['runs', 'goal', runId]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /goal\s+active/);
+  assert.match(r.stdout, /contract: seeded objective/);
+});
+
+test('runs goal --json returns the wrapped state as { runId, goal }', async () => {
+  const runId = await createRun('contract: goal json');
+  seedGoal(runId);
+  const r = cli(['runs', 'goal', '--json', runId]);
+  assert.equal(r.code, 0, r.stderr);
+  const parsed = JSON.parse(r.stdout);
+  assert.equal(parsed.runId, runId);
+  assert.equal(parsed.goal.status, 'active');
+  assert.equal(parsed.goal.objective, 'contract: seeded objective');
+});
+
+test('runs goal-cancel --yes cancels an active goal and renders the new state', async () => {
+  const runId = await createRun('contract: goal to cancel');
+  seedGoal(runId);
+  const r = cli(['runs', 'goal-cancel', runId, '--yes']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /goal cancelled/);
+  assert.match(r.stdout, /goal\s+cancelled/);
+});
+
+test('runs goal-cancel on an already-terminal goal is a conflict, exit 5', async () => {
+  const runId = await createRun('contract: goal already unmet');
+  seedGoal(runId, 'unmet');
+  const r = cli(['runs', 'goal-cancel', runId, '--yes']);
+  assert.equal(r.code, 5, r.stderr);
+  assert.match(r.stderr, /unmet/);
+});
+
+test('runs create --goal is refused by the server when the agent cannot carry a goal', async () => {
+  const r = cli(['runs', 'create', '--task', 'contract: goal on an incapable agent',
+                 '--repo', 'https://example.invalid/r.git',
+                 '--goal', '{"objective": "test passes"}']);
+  // The fake adapter declares no goal capability, so the server answers 400 -> usage exit 2,
+  // and the message names the agent. This pins the wire behavior end to end.
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /goal/i);
+});
+
+test('runs create --goal that is not an object is rejected locally, before the wire', () => {
+  const r = cli(['runs', 'create', '--task', 'contract: bad goal shape',
+                 '--repo', 'https://example.invalid/r.git',
+                 '--goal', '"just a string"']);
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /--goal must be a JSON object/);
+  // The local rejection is distinguishable from a server 400 by the absence of a create
+  // attempt: the message is the client's, not the server's.
+  assert.ok(!r.stderr.includes('agent'), r.stderr);
+});
+
+test('runs create --goal with an unknown spec field is rejected by the server vocabulary', async () => {
+  const r = cli(['runs', 'create', '--task', 'contract: unknown goal field',
+                 '--repo', 'https://example.invalid/r.git',
+                 '--goal', '{"objective": "x", "objektive": "typo"}']);
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /objektive/);
+});
+
+test('--goal cannot be combined with --file', () => {
+  const r = cli(['runs', 'create', '--file', '-', '--goal', '{"objective": "x"}']);
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /--file cannot be combined/);
 });
 
 test('a dead endpoint exits 7 with a transport message, not a stack trace', () => {

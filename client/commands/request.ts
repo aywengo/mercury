@@ -20,10 +20,12 @@ export interface CreateFlags {
   repo?: string;
   agent?: string;
   skills?: string;
+  /** JSON goal spec (docs/goals.md §3); parsed here so a typo fails locally, not on the wire. */
+  goal?: string;
 }
 
 /** Flags that describe request content, and therefore cannot accompany --file. */
-const REQUEST_FLAGS = ['--task', '--repo', '--agent', '--skills'] as const;
+const REQUEST_FLAGS = ['--task', '--repo', '--agent', '--skills', '--goal'] as const;
 
 export interface ReadContext {
   stdinIsTty: boolean;
@@ -75,6 +77,22 @@ export function buildCreateRequest(flags: CreateFlags, read: ReadContext): Creat
   if (flags.skills !== undefined) {
     request.skills = flags.skills.split(',').map((s) => s.trim()).filter((s) => s !== '');
     if (request.skills.length === 0) throw new UsageError('--skills got no names; expected a comma-separated list');
+  }
+  if (flags.goal !== undefined) {
+    try {
+      const parsed = JSON.parse(flags.goal);
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('must be a JSON object');
+      }
+      request.goal = parsed;
+    } catch (err) {
+      // JSON.parse throws SyntaxError today, but the cast-free format keeps a thrown non-Error
+      // from becoming "undefined" in the operator's face.
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new UsageError(
+        `--goal must be a JSON object (e.g. --goal '{"objective": "ship it"}'): ${detail}`,
+      );
+    }
   }
   return validateCreateRunRequest(request);
 }

@@ -11,6 +11,7 @@ import { sanitizeForTerminal, renderTable, ellipsis, age, makeColorizer, statusC
 import { renderAgents } from '../commands/agents.ts';
 import { renderRunList } from '../commands/list.ts';
 import { renderRunDetail } from '../commands/show.ts';
+import { renderGoalCancel, renderGoalDetail } from '../commands/goal.ts';
 import { renderEventLine } from '../commands/events.ts';
 import { writeJson, eventLine } from '../output/json.ts';
 
@@ -389,4 +390,40 @@ test('issue #604: a short status carries its own colour, not the dim default', (
   const plain = lines.map(strip);
   const statusCol = plain.map((l) => l.indexOf('STATUS')).filter((i) => i >= 0);
   assert.equal(new Set(statusCol).size, 1, `STATUS column must start at the same column per row: ${JSON.stringify(statusCol)}`);
+});
+
+test('runs goal renders the full goal block, sanitising every free-text field', () => {
+  const goal = {
+    runId: 'run-1', status: 'unmet', objective: HOSTILE,
+    updatedAt: '2026-09-20T00:00:00.000Z',
+    contract: { outcome: HOSTILE },
+    gates: [{ command: HOSTILE, timeoutMs: 30000, maxRetries: 1 }],
+    tokenBudget: 100, tokensUsed: 40, attempted: false,
+    lastError: HOSTILE,
+  } as never;
+  const out = renderGoalDetail('run-1', goal, OFF, false);
+  assertNoEscape('runs goal', out);
+  // The legibility contract: markers visible, data present, no success colour on a gate line.
+  assert.match(out, /goal\s+unmet/);
+  assert.match(out, /objective/);
+  assert.match(out, /goal started/);
+  // attempted:false with unmet is the surprising case and takes its line (issue #489).
+  assert.match(out, /never -- the harness never received the objective/);
+});
+
+test('runs goal --json prints exactly one JSON value with runId and goal', () => {
+  const goal = { runId: 'run-1', status: 'active', objective: 'obj', updatedAt: 't' } as never;
+  const out = renderGoalDetail('run-1', goal, { json: true, noColor: true, isTty: false } as never, false);
+  const parsed = JSON.parse(out); // exactly one value: JSON.parse throws on trailing data
+  assert.equal(parsed.runId, 'run-1');
+  assert.equal(parsed.goal.status, 'active');
+});
+
+test('runs goal-cancel renders the cancelled state; --json carries the new goal', () => {
+  const goal = { runId: 'run-1', status: 'cancelled', objective: 'obj', updatedAt: 't' } as never;
+  const human = renderGoalCancel('run-1', goal, OFF, false);
+  assert.match(human, /goal cancelled/);
+  assert.match(human, /run-1/);
+  const parsed = JSON.parse(renderGoalCancel('run-1', goal, { json: true, noColor: true, isTty: false } as never, false));
+  assert.equal(parsed.goal.status, 'cancelled');
 });

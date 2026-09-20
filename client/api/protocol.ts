@@ -274,6 +274,14 @@ export interface RetryRunResponse { runId: string; status: RunStatus; retryOf: s
 
 export interface CreateRunRequest {
   task: string;
+  /**
+   * Optional goal spec, forwarded verbatim for the server's resolveGoalSpec to validate
+   * (docs/goals.md §3). The client does not pre-validate the spec's internals: the server owns
+   * the vocabulary (objective/contract/gates/tokenBudget/maxTurns) and its error messages name
+   * the field that failed. A client-side copy of those rules would drift exactly like a second
+   * command list would.
+   */
+  goal?: unknown;
   // An OBJECT, not a URL string. The server does not validate this shape: POST /api/runs stores
   // whatever it is given, so sending the convenient `"repository": "https://..."` returns 201 and
   // stores a string where Run.repository is typed as an object. The Run then has no `repository.url`,
@@ -486,7 +494,7 @@ export function parseRunDetailResponse(value: unknown): RunDetailResponse {
 
 const GOAL_STATUSES = new Set(['absent', 'active', 'paused', 'budget_limited', 'error', 'complete', 'cancelled', 'unmet']);
 
-function parseGoal(value: unknown): GoalState {
+export function parseGoal(value: unknown): GoalState {
   const o = asObject(value, 'goal');
   const status = reqString(o.status, 'goal.status', 'goal');
   if (!GOAL_STATUSES.has(status)) {
@@ -513,6 +521,17 @@ function parseGoal(value: unknown): GoalState {
     ...(typeof o.attempted === 'boolean' ? { attempted: o.attempted } : {}),
     ...(o.source === 'harness' || o.source === 'operator' ? { source: o.source } : {}),
   };
+}
+
+
+/** The `{ goal }` wrapper both goal routes return on success (docs/api.md "Goal endpoints");
+ *  the state itself is validated by parseGoal, so an unknown status still fails loudly. */
+export function parseGoalResponse(value: unknown): GoalState {
+  const o = asObject(value, 'goal response');
+  if (!('goal' in o)) {
+    throw new ProtocolError('goal response must carry a goal object');
+  }
+  return parseGoal(o.goal);
 }
 
 /**
@@ -608,7 +627,7 @@ export function validateCreateRunRequest(value: unknown): CreateRunRequest {
   const task = reqString(o.task, 'task', 'create request');
   if (task.trim() === '') throw new UsageError('create request: task must not be blank');
 
-  const known = new Set(['task', 'repository', 'repositories', 'agent', 'skills', 'constraints']);
+  const known = new Set(['task', 'repository', 'repositories', 'agent', 'skills', 'constraints', 'goal']);
   const unknown = Object.keys(o).filter((k) => !known.has(k));
   if (unknown.length > 0) {
     throw new UsageError(
@@ -630,6 +649,17 @@ export function validateCreateRunRequest(value: unknown): CreateRunRequest {
       .map((s, i) => reqString(s, `skills[${i}]`, 'create request'));
   }
   if (o.constraints !== undefined) request.constraints = validateConstraints(o.constraints);
+  if (o.goal !== undefined) {
+    // An object check, not a deep validation: the server's resolveGoalSpec owns the spec
+    // vocabulary and rejects unknown fields with a message that names them (docs/goals.md §3).
+    // The client rejects only the shapes the server would answer 400 for in a confusing way --
+    // a string or array -- so `--goal '"done"'` fails here with a fixable message instead of a
+    // round trip.
+    if (o.goal === null || typeof o.goal !== 'object' || Array.isArray(o.goal)) {
+      throw new UsageError('create request: goal must be an object like {"objective": "..."}');
+    }
+    request.goal = o.goal;
+  }
   return request;
 }
 
