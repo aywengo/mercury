@@ -182,7 +182,7 @@ decide_npm_prefix() {
   if ! command_exists npm; then
     NPM_PREFIX_PATH=""
     NPM_PREFIX_FALLBACK=0
-    NPM_PREFIX_DESC="npm's global prefix (npm not found yet; the prerequisite gate stops first)"
+    NPM_PREFIX_DESC="npm's global prefix (npm not found: the install step fails if this run reaches it)"
     return
   fi
   prefix="$(npm prefix -g 2>/dev/null || echo unknown)"
@@ -223,8 +223,8 @@ build_actions() {
   fi
   # The list must name only what the real run does (#649 §4): the M1 gate is
   # "--dry-run prints the exact action list". The description embeds the same prefix
-  # value the real run quotes, so dry-run and execution cannot diverge.
-  decide_npm_prefix
+  # value the real run quotes, so dry-run and execution cannot diverge. The decision is
+  # computed ONCE in main (before build_actions) so the plan and the execution share it.
   if [ "$NPM_PREFIX_FALLBACK" = "1" ]; then
     add_action "install @aywengo/mercury@$VERSION with npm install -g --prefix \"$NPM_PREFIX_PATH\" into $NPM_PREFIX_DESC (integrity = npm's registry sha512 check, no separate checksum step)"
   else
@@ -249,6 +249,9 @@ main() {
     exit 1
   fi
 
+  # The prefix decision is made once, before the plan is printed, so dry-run, the
+  # printed plan, and the real install step all share one computation (#649 §4).
+  decide_npm_prefix
   build_actions
 
   if [ "$DRY_RUN" = "1" ]; then
@@ -333,7 +336,6 @@ main() {
   # Decision 7 (#649 §4): the prefix decision is made once by decide_npm_prefix —
   # an unwritable global prefix falls back to $HOME/.local (user-scoped, no sudo).
   if command_exists npm; then
-    decide_npm_prefix
     echo "Installing @aywengo/mercury@$VERSION into $NPM_PREFIX_DESC ..."
     if [ "$NPM_PREFIX_FALLBACK" = "1" ]; then
       if [ "$VERSION" = "latest" ]; then
