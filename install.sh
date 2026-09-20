@@ -260,10 +260,20 @@ main() {
   if [ "$uid" = "0" ]; then
     echo "install.sh: refusing to run as root — Mercury's installer is user-scoped only (decision 7; no sudo, no system prefix)." >&2
     echo "install.sh: run it as your normal user; everything lands under \$HOME." >&2
+    # The structured log keeps a trail even for the refusals (Copilot round 8 on #661);
+    # only --dry-run skips it, as it always has.
+    if [ "$DRY_RUN" != "1" ]; then
+      mkdir -p "$log_dir"
+      log_line "install-failed" "refused: running as root (decision 7)"
+    fi
     exit 1
   fi
   if [ -z "$uid" ]; then
     echo "install.sh: cannot determine the user id (id -u failed or produced no output) — refusing to install; decision 7 requires a non-root, user-scoped run." >&2
+    if [ "$DRY_RUN" != "1" ]; then
+      mkdir -p "$log_dir"
+      log_line "install-failed" "refused: user id could not be determined"
+    fi
     exit 1
   fi
 

@@ -133,6 +133,11 @@ minimal_path() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"refusing to run as root"* ]]
   [[ "$output" == *"decision 7"* ]]
+  # A refused REAL run leaves a trail in the structured log; --dry-run touches nothing.
+  run bash "$INSTALL_SH" --yes
+  [ "$status" -eq 1 ]
+  grep -q '"event":"install-failed"' "$XDG_STATE_HOME/mercury/install.log"
+  grep -q 'refused: running as root' "$XDG_STATE_HOME/mercury/install.log"
 }
 
 @test "a missing id fails closed (decision 7, #649 §4)" {
