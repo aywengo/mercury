@@ -125,6 +125,24 @@ minimal_path() {
 
 # --- platform gate ---------------------------------------------------------
 
+@test "running as root is refused (decision 7, #649 §4)" {
+  stub_ok_prereqs
+  # Shadow `id` so `id -u` reports 0; the suite cannot actually become root in CI.
+  stub id 'echo 0'
+  run bash "$INSTALL_SH" --dry-run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"refusing to run as root"* ]]
+  [[ "$output" == *"decision 7"* ]]
+}
+
+@test "a non-root uid passes the root gate (decision 7, #649 §4)" {
+  stub_ok_prereqs
+  stub id 'echo 501'
+  run bash "$INSTALL_SH" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Nothing was touched."* ]]
+}
+
 @test "unsupported OS exits 1" {
   stub uname 'echo FreeBSD'
   run bash "$INSTALL_SH" --dry-run

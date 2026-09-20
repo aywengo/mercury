@@ -251,6 +251,15 @@ main() {
     exit 1
   fi
 
+  # Decision 7 (user-scoped only, no sudo): refuse to run as root. Root's prefix is
+  # always "writable", so without this gate the installer would happily do a
+  # system-wide install — the exact outcome decision 7 forbids (#649 §4).
+  if [ "$(id -u)" = "0" ]; then
+    echo "install.sh: refusing to run as root — Mercury's installer is user-scoped only (decision 7; no sudo, no system prefix)." >&2
+    echo "install.sh: run it as your normal user; everything lands under \$HOME." >&2
+    exit 1
+  fi
+
   # The prefix decision is made once, before the plan is printed, so dry-run, the
   # printed plan, and the real install step all share one computation (#649 §4).
   decide_npm_prefix
