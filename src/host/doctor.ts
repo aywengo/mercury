@@ -199,9 +199,12 @@ export async function runHostDoctor(
   // The skip comparison is case-insensitive (`Loopback` in the file must not trigger a
   // bogus http://Loopback:<port> request — Copilot round 3 on #668); the original
   // spelling is kept for the report and the URL.
-  // 0.0.0.0 is a bind wildcard, not a connectable destination — the check there would
-  // report a false failure even when the server is fine (Copilot review on #668).
-  const bindSkipped = ['127.0.0.1', '0.0.0.0', 'loopback'].includes(bindAddress.toLowerCase());
+  // This check exists to verify the address FLEET will dial (issue #665). Loopback-
+  // equivalent addresses (127.0.0.1, ::1, localhost, loopback) are already verified by
+  // the main healthz above and are unreachable from Fleet by definition — setup.ts's
+  // hand-off tells the operator exactly that (round 7 on #668). 0.0.0.0 is a bind
+  // wildcard, not a connectable destination (Copilot round 1 on #668).
+  const bindSkipped = ['127.0.0.1', '0.0.0.0', 'loopback', 'localhost', '::1'].includes(bindAddress.toLowerCase());
   const bindHealthz = bindAddress && !bindSkipped
     ? { address: bindAddress, ...(await checkHealthz(`${scheme}://${bindAddress}:${port}`)) }
     : undefined;

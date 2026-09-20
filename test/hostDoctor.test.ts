@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { networkInterfaces } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
@@ -25,7 +26,9 @@ import {
 
 const ROOT = resolve(import.meta.dirname, '..');
 
-/** A tiny mock server: /healthz ok, /api/runs creates + completes. */
+/** A tiny mock server: /healthz ok, /api/runs creates + completes. Listens on all
+ *  interfaces (listen(0) without a host — the LAN-bind doctor test dials the machine's
+ *  LAN address; every other test dials 127.0.0.1, which a wildcard bind also serves). */
 function mockServer(): Promise<{ server: Server; url: string; close: () => Promise<void> }> {
   return new Promise((res) => {
     const runs: Record<string, string> = {};
@@ -60,7 +63,7 @@ function mockServer(): Promise<{ server: Server; url: string; close: () => Promi
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'not found' }));
     });
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(0, () => {
       const addr = server.address() as { port: number };
       const url = `http://127.0.0.1:${addr.port}`;
       res({
@@ -226,43 +229,54 @@ test('schemeFor: https only when both TLS variables are set (#668 round 6)', () 
 });
 
 test('runHostDoctor: a non-loopback MERCURY_BIND_HOST gets its own healthz check (#665)', async () => {
+  // The mock server here listens on all interfaces, so the machine's LAN address reaches
+  // it — the same address Fleet would dial (round 7 on #668: localhost is loopback-
+  // equivalent and skipped, so the test needs a real routable address).
+  const lan = Object.values(networkInterfaces()).flat()
+    .map((i) => (i && !i.internal && i.family === 'IPv4' ? i.address : ''))
+    .filter((a) => a.includes('.'))[0];
+  if (!lan) return; // no routable IPv4 on this runner: nothing meaningful to probe
   const m = await mockServer();
   const dir = tempDir('doctor-bind-');
   const cfg = join(dir, 'cfg');
   mkdirSync(join(cfg, 'mercury'), { recursive: true });
-  // 'localhost' is not in the loopback skip list: it is exactly the kind of address an
-  // operator might set (it answers here, but Fleet on another machine cannot use it).
-  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=primeagent\nMERCURY_ADMIN_TOKEN=tok-doctor-1\nMERCURY_BIND_HOST=localhost\n`);
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=primeagent\nMERCURY_ADMIN_TOKEN=tok-doctor-1\nMERCURY_BIND_HOST=${lan}\n`);
   try {
     const out: string[] = [];
     const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
-    assert.equal(code, 0, 'localhost resolves to the same mock server, so both checks pass');
+    assert.equal(code, 0, `doctor output: ${out.join('')}`);
     const text = out.join('');
-    assert.ok(text.includes('healthz (bind localhost)'), `the second check must be reported: ${text}`);
+    assert.ok(text.includes(`healthz (bind ${lan})`), `the second check must be reported: ${text}`);
     // The JSON shape carries it too.
     const outJson: string[] = [];
     await runHostDoctor(['--json'], { out: (s) => outJson.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
     const parsed = JSON.parse(outJson.join('')) as { bindHealthz?: { address: string; ok: boolean } };
-    assert.equal(parsed.bindHealthz?.address, 'localhost');
+    assert.equal(parsed.bindHealthz?.address, lan);
     assert.equal(parsed.bindHealthz?.ok, true);
   } finally {
     await m.close();
   }
 });
 
-test('runHostDoctor: no bind check when MERCURY_BIND_HOST is unset or loopback (#665)', async () => {
-  const m = await mockServer();
-  const dir = tempDir('doctor-bind-skip-');
-  const cfg = join(dir, 'cfg');
-  mkdirSync(join(cfg, 'mercury'), { recursive: true });
-  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=primeagent\nMERCURY_ADMIN_TOKEN=tok-doctor-1\n`);
-  try {
-    const out: string[] = [];
-    const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
-    assert.equal(code, 0);
-    assert.ok(!out.join('').includes('healthz (bind'), 'no second check without a bind address');
-  } finally {
-    await m.close();
+test('runHostDoctor: no bind check for loopback-equivalent or wildcard MERCURY_BIND_HOST (#665, #668 round 7)', async () => {
+  for (const bind of ['', '127.0.0.1', 'localhost', '0.0.0.0', 'Loopback']) {
+    const m = await mockServer();
+    const dir = tempDir('doctor-bind-skip-');
+    const cfg = join(dir, 'cfg');
+    mkdirSync(join(cfg, 'mercury'), { recursive: true });
+    writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}
+MERCURY_HARNESSES=primeagent
+MERCURY_ADMIN_TOKEN=tok-doctor-1
+${bind ? `MERCURY_BIND_HOST=${bind}
+` : ''}`);
+    try {
+      const out: string[] = [];
+      const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+      assert.equal(code, 0, bind || '(unset)');
+      assert.ok(!out.join('').includes('healthz (bind'), `${bind || '(unset)'}: no second check`);
+    } finally {
+      await m.close();
+    }
   }
 });
 
