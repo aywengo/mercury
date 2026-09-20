@@ -410,6 +410,14 @@ main() {
     mercury_bin="$NPM_PREFIX_PATH/bin/mercury"
   else
     mercury_bin="$(command -v mercury 2>/dev/null || true)"
+    if [ -z "$mercury_bin" ]; then
+      # A writable custom prefix that is not on PATH: resolve via npm itself
+      # (Copilot round 1 on #669) — the install succeeded; PATH must not fail it.
+      npm_global_prefix="$(npm prefix -g 2>/dev/null || true)"
+      if [ -n "$npm_global_prefix" ] && [ -x "$npm_global_prefix/bin/mercury" ]; then
+        mercury_bin="$npm_global_prefix/bin/mercury"
+      fi
+    fi
   fi
   if [ -z "$mercury_bin" ] || [ ! -x "$mercury_bin" ]; then
     echo "install.sh: the package installed but the mercury binary cannot be found; cannot hand off to \`mercury host setup\`." >&2

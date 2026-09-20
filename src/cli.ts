@@ -134,7 +134,14 @@ async function main(): Promise<void> {
       const setupArgs = installArgs
         .filter((a) => a === '--non-interactive' || a === '--yes' || a === '-y' || a === '--force')
         .map((a) => (a === '-y' ? '--yes' : a));
-      void runHostSetup(setupArgs).then((setupCode) => { process.exitCode = setupCode; });
+      runHostSetup(setupArgs)
+        .then((setupCode) => { process.exitCode = setupCode; })
+        .catch((err) => {
+          // The hand-off must fail like a normal CLI command, not as an unhandled
+          // rejection (Copilot round 1 on #669) — mirror main().catch.
+          console.error(err);
+          process.exit(1);
+        });
       return;
     }
     process.exitCode = code;

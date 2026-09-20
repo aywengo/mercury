@@ -282,6 +282,23 @@ minimal_path() {
   grep -q "mercury host setup --non-interactive --yes" "$TEST_DIR/mercury-calls.txt"
 }
 
+@test "a writable custom prefix off PATH still hands off via npm prefix -g (#666 round 1)" {
+  stub_ok_prereqs
+  # npm reports a WRITABLE custom prefix (mode 755, inside TEST_DIR), the install puts the
+  # binary there, and `mercury` is NOT on PATH: `command -v mercury` fails, so the script
+  # must resolve through `npm prefix -g` instead of failing the successful install.
+  stub npm 'case "$1 $2" in "prefix -g") echo "$TEST_DIR/custom-prefix" ;; *)
+    mkdir -p "$TEST_DIR/custom-prefix/bin"
+    printf "#!/bin/sh\necho \"mercury \$@\" >>\"$TEST_DIR/mercury-calls.txt\"; exit 0\n" >"$TEST_DIR/custom-prefix/bin/mercury"
+    chmod +x "$TEST_DIR/custom-prefix/bin/mercury"
+    echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; exit 0 ;; esac'
+  mkdir -p "$TEST_DIR/custom-prefix"
+  run bash "$INSTALL_SH" --yes
+  [ "$status" -eq 0 ]
+  grep -q "mercury host setup --yes" "$TEST_DIR/mercury-calls.txt"
+  [[ "$output" == *"Handing off"* ]]
+}
+
 @test "the wizard's exit code becomes the script's exit code (#666)" {
   stub_ok_prereqs
   # In the fallback-prefix sandbox the hand-off resolves $HOME/.local/bin/mercury (the file
