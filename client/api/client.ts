@@ -21,7 +21,7 @@ import {
   AuthError, MercuryClientError, TransportError, errorFromStatus,
 } from './errors.ts';
 import {
-  ProtocolError, parseAgentsResponse, parseCreateRunResponse, parseEventPage, parseGoal, parseOkResponse,
+  ProtocolError, parseAgentsResponse, parseCreateRunResponse, parseEventPage, parseGoalResponse, parseOkResponse,
   parseRetryRunResponse, parseRunActionResponse, parseRunDetailResponse, parseRunListResponse,
 } from './protocol.ts';
 import type {
@@ -264,13 +264,17 @@ export class MercuryClient {
     return this.call('POST', `/api/runs/${encodeURIComponent(runId)}/retry`, parseRetryRunResponse, { body: {} });
   }
 
-  /** The Run's goal state. The server answers 404 when the Run has none (docs/goals.md §8). */
+  /**
+   * The Run's goal state. The server answers 404 when the Run has none (docs/goals.md §8) and
+   * wraps the state on success: `{ goal }` — the parser takes the wrapper apart (Copilot review
+   * on #680 round 1 caught the first version feeding the wrapper straight to parseGoal).
+   */
   getGoal(runId: string): Promise<GoalState> {
-    return this.call('GET', `/api/runs/${encodeURIComponent(runId)}/goal`, parseGoal);
+    return this.call('GET', `/api/runs/${encodeURIComponent(runId)}/goal`, parseGoalResponse);
   }
 
   cancelGoal(runId: string): Promise<GoalState> {
-    return this.call('POST', `/api/runs/${encodeURIComponent(runId)}/goal/cancel`, parseGoal, { body: {} });
+    return this.call('POST', `/api/runs/${encodeURIComponent(runId)}/goal/cancel`, parseGoalResponse, { body: {} });
   }
 
   /**

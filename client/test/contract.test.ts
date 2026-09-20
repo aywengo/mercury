@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -267,6 +268,64 @@ test('runs goal-cancel without --yes and without a terminal exits 2 and sends no
   const r = cli(['runs', 'goal-cancel', 'run_does_not_exist']);
   assert.equal(r.code, 2);
   assert.match(r.stderr, /--yes/);
+});
+
+/** Seed a goal row for a Run directly in the contract server's SQLite file.
+ *
+ * The fake adapter declares no goal capability, so no code path in the running server can create
+ * one -- but the 200 path is exactly what the reviewer caught the first draft missing: the route
+ * wraps the state in `{ goal }`, and a parser fed the wrapper instead of the state throws
+ * ProtocolError on every success. Seeding exercises the wrapper, the read, and the cancel 200
+ * without pretending the fake can carry goals. */
+function seedGoal(runId: string, status = 'active'): void {
+  const db = new DatabaseSync(join(serverDir, 'contract.db'));
+  try {
+    db.prepare(
+      `INSERT INTO run_goals (run_id, objective, contract_json, gates_json, token_budget, status,
+         tokens_used, time_used_seconds, turns_used, last_verdict, last_reason, last_error,
+         paused_reason, source, attempted, updated_at)
+       VALUES (?, ?, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'operator', 0, ?)`,
+    ).run(runId, 'contract: seeded objective', status, new Date().toISOString());
+  } finally {
+    db.close();
+  }
+}
+
+test('runs goal reads a seeded goal and renders the wrapper correctly (#680 round 2)', async () => {
+  const runId = await createRun('contract: goal to read');
+  seedGoal(runId);
+  const r = cli(['runs', 'goal', runId]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /goal\s+active/);
+  assert.match(r.stdout, /contract: seeded objective/);
+});
+
+test('runs goal --json returns the wrapped state as { runId, goal }', async () => {
+  const runId = await createRun('contract: goal json');
+  seedGoal(runId);
+  const r = cli(['runs', 'goal', '--json', runId]);
+  assert.equal(r.code, 0, r.stderr);
+  const parsed = JSON.parse(r.stdout);
+  assert.equal(parsed.runId, runId);
+  assert.equal(parsed.goal.status, 'active');
+  assert.equal(parsed.goal.objective, 'contract: seeded objective');
+});
+
+test('runs goal-cancel --yes cancels an active goal and renders the new state', async () => {
+  const runId = await createRun('contract: goal to cancel');
+  seedGoal(runId);
+  const r = cli(['runs', 'goal-cancel', runId, '--yes']);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /goal cancelled/);
+  assert.match(r.stdout, /goal\s+cancelled/);
+});
+
+test('runs goal-cancel on an already-terminal goal is a conflict, exit 5', async () => {
+  const runId = await createRun('contract: goal already unmet');
+  seedGoal(runId, 'unmet');
+  const r = cli(['runs', 'goal-cancel', runId, '--yes']);
+  assert.equal(r.code, 5, r.stderr);
+  assert.match(r.stderr, /unmet/);
 });
 
 test('runs create --goal is refused by the server when the agent cannot carry a goal', async () => {

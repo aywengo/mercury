@@ -523,6 +523,17 @@ export function parseGoal(value: unknown): GoalState {
   };
 }
 
+
+/** The `{ goal }` wrapper both goal routes return on success (docs/api.md "Goal endpoints");
+ *  the state itself is validated by parseGoal, so an unknown status still fails loudly. */
+export function parseGoalResponse(value: unknown): GoalState {
+  const o = asObject(value, 'goal response');
+  if (!('goal' in o)) {
+    throw new ProtocolError('goal response must carry a goal object');
+  }
+  return parseGoal(o.goal);
+}
+
 /**
  * Gate specs are caller-supplied text that comes back around, so they are parsed rather than
  * passed through: a `command` that is not a string would otherwise reach a terminal or an
