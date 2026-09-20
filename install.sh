@@ -172,21 +172,27 @@ add_action() {
 
 # Decide where npm installs. Decision 7: user-scoped only. If npm's global prefix is
 # not writable by this user (root-owned /usr, common on Linux distros), fall back to
-# `$HOME/.local` and tell the operator to add its bin to PATH. Sets NPM_PREFIX_ARGS and
-# NPM_PREFIX_DESC (empty desc = npm's own prefix).
+# `$HOME/.local` and tell the operator to add its bin to PATH. Sets:
+#   NPM_PREFIX_PATH     the prefix directory ("" = npm's own global prefix)
+#   NPM_PREFIX_FALLBACK 1 when the $HOME/.local fallback is used, else 0
+#   NPM_PREFIX_DESC     the human-readable description for logs and the action list
+# Execution quotes the values; nothing is word-split (#649 §4, Copilot on #661).
 decide_npm_prefix() {
   local prefix
   if ! command_exists npm; then
-    NPM_PREFIX_ARGS=""
-    NPM_PREFIX_DESC="npm's global prefix (npm not found yet; prerequisite gate will stop first)"
+    NPM_PREFIX_PATH=""
+    NPM_PREFIX_FALLBACK=0
+    NPM_PREFIX_DESC="npm's global prefix (npm not found yet; the prerequisite gate stops first)"
     return
   fi
   prefix="$(npm prefix -g 2>/dev/null || echo unknown)"
   if [ "$prefix" != "unknown" ] && [ -w "$prefix" ]; then
-    NPM_PREFIX_ARGS=""
+    NPM_PREFIX_PATH=""
+    NPM_PREFIX_FALLBACK=0
     NPM_PREFIX_DESC="npm's global prefix ($prefix)"
   else
-    NPM_PREFIX_ARGS="--prefix $HOME/.local"
+    NPM_PREFIX_PATH="$HOME/.local"
+    NPM_PREFIX_FALLBACK=1
     NPM_PREFIX_DESC="$HOME/.local (npm's global prefix $prefix is not writable; add $HOME/.local/bin to PATH)"
   fi
 }
@@ -216,9 +222,14 @@ build_actions() {
     add_action "check git: FAILED (missing)"
   fi
   # The list must name only what the real run does (#649 §4): the M1 gate is
-  # "--dry-run prints the exact action list".
+  # "--dry-run prints the exact action list". The description embeds the same prefix
+  # value the real run quotes, so dry-run and execution cannot diverge.
   decide_npm_prefix
-  add_action "install @aywengo/mercury@$VERSION with npm install -g $NPM_PREFIX_ARGS into $NPM_PREFIX_DESC (integrity = npm's registry sha512 check, no separate checksum step)"
+  if [ "$NPM_PREFIX_FALLBACK" = "1" ]; then
+    add_action "install @aywengo/mercury@$VERSION with npm install -g --prefix \"$NPM_PREFIX_PATH\" into $NPM_PREFIX_DESC (integrity = npm's registry sha512 check, no separate checksum step)"
+  else
+    add_action "install @aywengo/mercury@$VERSION with npm install -g into $NPM_PREFIX_DESC (integrity = npm's registry sha512 check, no separate checksum step)"
+  fi
   add_action "write $log_file"
   add_action "print the next step: run \`mercury host setup\` (the script exits; it does not run the wizard)"
 }
@@ -324,12 +335,18 @@ main() {
   if command_exists npm; then
     decide_npm_prefix
     echo "Installing @aywengo/mercury@$VERSION into $NPM_PREFIX_DESC ..."
-    if [ "$VERSION" = "latest" ]; then
-      # shellcheck disable=SC2086 # NPM_PREFIX_ARGS is intentionally word-split
-      npm install -g $NPM_PREFIX_ARGS "@aywengo/mercury@latest"
+    if [ "$NPM_PREFIX_FALLBACK" = "1" ]; then
+      if [ "$VERSION" = "latest" ]; then
+        npm install -g --prefix "$NPM_PREFIX_PATH" "@aywengo/mercury@latest"
+      else
+        npm install -g --prefix "$NPM_PREFIX_PATH" "@aywengo/mercury@$VERSION"
+      fi
     else
-      # shellcheck disable=SC2086 # NPM_PREFIX_ARGS is intentionally word-split
-      npm install -g $NPM_PREFIX_ARGS "@aywengo/mercury@$VERSION"
+      if [ "$VERSION" = "latest" ]; then
+        npm install -g "@aywengo/mercury@latest"
+      else
+        npm install -g "@aywengo/mercury@$VERSION"
+      fi
     fi
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -350,15 +367,13 @@ main() {
   echo "  mercury host setup"
   echo "(M3: configuration wizard — admin/API token, Atlas, harnesses.)"
   # Decision 7 fallback: tell the operator how to reach the fallback binary (#649 §4).
-  case "$NPM_PREFIX_DESC" in
-    "$HOME/.local"* )
-      echo
-      echo "NOTE: the package went to $HOME/.local — make sure $HOME/.local/bin is on PATH:"
-      # The hint shows the literal $HOME expression; SC2016 is intended here.
-      # shellcheck disable=SC2016
-      echo '  export PATH="$HOME/.local/bin:$PATH"'
-      ;;
-  esac
+  if [ "$NPM_PREFIX_FALLBACK" = "1" ]; then
+    echo
+    echo "NOTE: the package went to $HOME/.local — make sure $HOME/.local/bin is on PATH:"
+    # The hint shows the literal $HOME expression; SC2016 is intended here.
+    # shellcheck disable=SC2016
+    echo '  export PATH="$HOME/.local/bin:$PATH"'
+  fi
 }
 
 main "$@"
