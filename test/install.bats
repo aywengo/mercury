@@ -325,9 +325,12 @@ minimal_path() {
   stub curl 'exit 0'
   stub git 'exit 0'
   stub date 'echo 2026-09-18T00:00:00Z'
-  # npm reports a root-owned prefix; a real [ -w ] on it fails for this user.
-  stub npm 'case "$1" in prefix) echo /usr/local ;; *) echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; exit 0 ;; esac'
-  mkdir -p "$TEST_DIR/state/mercury"  # log dir; the [ -w ] check needs nothing else
+  # npm reports a prefix that is DETERMINISTICALLY not writable for this user: a
+  # directory inside TEST_DIR with mode 555 (never depend on host paths like /usr/local —
+  # Copilot round 2 on #661).
+  stub npm 'case "$1" in prefix) echo "$TEST_DIR/readonly-prefix" ;; *) echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; exit 0 ;; esac'
+  mkdir -p "$TEST_DIR/readonly-prefix" "$TEST_DIR/state/mercury"
+  chmod 555 "$TEST_DIR/readonly-prefix"
   run bash "$INSTALL_SH" --yes --version 0.1.1
   [ "$status" -eq 0 ]
   grep -q -- "--prefix" "$TEST_DIR/npm-calls.txt"
