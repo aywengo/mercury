@@ -299,19 +299,20 @@ jobs:
           node-version: '24.x'
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
-      - name: Install bats (apt — debian container, root)
+      - name: Install test prerequisites (debian container, root)
         if: matrix.name == 'debian'
         run: |
           apt-get update -y
-          apt-get install -y bats
+          apt-get install -y --no-install-recommends bats curl git ca-certificates
+      - name: Install test prerequisites (fedora container, root)
+        if: matrix.name == 'fedora'
+        run: |
+          dnf install -y bats curl git which
       - name: Install bats (apt — ubuntu runner, passwordless sudo)
         if: matrix.name == 'ubuntu'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y bats
-      - name: Install bats (dnf — fedora)
-        if: matrix.name == 'fedora'
-        run: dnf install -y bats
       - name: bats suite for install.sh (as non-root ci user)
         if: matrix.name == 'ubuntu'
         run: bats test/install.bats
