@@ -122,26 +122,64 @@ export function parseHostSetupArgs(args: string[]): HostSetupOptions {
   return opts;
 }
 
+/**
+ * The safe charset for any value written unquoted into mercury.env (issue #649 §3):
+ * `[A-Za-z0-9._:/@+=,-]`. The comma is safe because `MERCURY_HARNESSES` is a
+ * comma-separated list, not a delimiter inside a value. The file is consumed by three
+ * parsers with different semantics — systemd `EnvironmentFile=`, a bash `source`
+ * wrapper, and the doctor's line regex — and only an inert charset makes them agree:
+ * no whitespace (a space breaks `source`, a newline injects a second variable), no
+ * quotes (different quote handling per parser), no `$` (bash expands it, systemd does
+ * not), no `#` (bash comment), no backslash.
+ */
+export const SAFE_VALUE_RE = /^[A-Za-z0-9._:/@+=,-]*$/;
+
+/** The safe-charset error message for one value (no key prefix — the caller adds
+ *  `<key>:` exactly once), or null when the value is safe. */
+export function unsafeValueError(_key: string, value: string): string | null {
+  if (SAFE_VALUE_RE.test(value)) return null;
+  return 'value contains characters outside the safe charset [A-Za-z0-9._:/@+=,-] — mercury.env is read by three parsers (systemd EnvironmentFile, bash source, the doctor) and only an inert charset keeps them in agreement';
+}
+
 /** Validate one answer. Returns an error message or null. */
 export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): string | null {
+  const charsetErr = (k: string, s: string): string | null => unsafeValueError(k, s);
   switch (key) {
-    case 'hostName':
-      return typeof value === 'string' && value.trim().length > 0 ? null : 'host name must not be empty';
+    case 'hostName': {
+      if (typeof value !== 'string' || value.trim().length === 0) return 'host name must not be empty';
+      return charsetErr('hostName', value.trim());
+    }
     case 'dataDir':
-    case 'workspaceDir':
-      return typeof value === 'string' && value.trim().length > 0 ? null : 'path must not be empty';
+    case 'workspaceDir': {
+      if (typeof value !== 'string' || value.trim().length === 0) return 'path must not be empty';
+      return charsetErr(key, value.trim());
+    }
     case 'retentionDays':
       return typeof value === 'number' && Number.isFinite(value) && value > 0 ? null : 'retention must be a positive number of days';
     case 'atlasEnabled':
       return typeof value === 'boolean' ? null : 'atlasEnabled must be a boolean';
-    case 'atlasUrl':
+    case 'atlasUrl': {
       if (typeof value !== 'string') return 'Atlas URL must be a string';
       if (value.trim() === '') return null;
-      return /^https?:\/\//.test(value.trim()) ? null : 'Atlas URL must start with http:// or https://';
-    case 'atlasToken':
-      return typeof value === 'string' ? null : 'Atlas token must be a string';
-    case 'atlasProject':
-      return typeof value === 'string' ? null : 'Atlas project must be a string';
+      if (!/^https?:\/\//.test(value.trim())) return 'Atlas URL must start with http:// or https://';
+      return charsetErr('atlasUrl', value.trim());
+    }
+    case 'adminToken': {
+      // The generated token is hex; a supplied token still must be inert in the file.
+      if (typeof value !== 'string') return 'admin token must be a string';
+      if (value.trim().length === 0) return null;
+      return charsetErr('adminToken', value.trim());
+    }
+    case 'atlasToken': {
+      if (typeof value !== 'string') return 'Atlas token must be a string';
+      if (value.trim().length === 0) return null;
+      return charsetErr('atlasToken', value.trim());
+    }
+    case 'atlasProject': {
+      if (typeof value !== 'string') return 'Atlas project must be a string';
+      if (value.trim().length === 0) return null;
+      return charsetErr('atlasProject', value.trim());
+    }
     case 'harnesses':
       if (!Array.isArray(value) || value.length === 0) return 'at least one harness must be enabled';
       for (const h of value) {
@@ -193,6 +231,26 @@ export function validateAnswers(
 /** Render the validated answers as mercury.env lines (sorted, one per variable). */
 export function renderEnv(a: HostSetupAnswers): string {
   if (!a.adminToken.trim()) throw new Error('adminToken: resolve before rendering (generateAdminToken)');
+  // Defense in depth (#649 §3): validateAnswers already enforced the safe charset; a
+  // direct renderEnv caller must not bypass it, or one of the three parsers breaks.
+  const checked: [string, string][] = [
+    ['hostName', a.hostName.trim()],
+    ['dataDir', a.dataDir.trim()],
+    ['workspaceDir', a.workspaceDir.trim()],
+    ['adminToken', a.adminToken.trim()],
+    ...a.harnesses.flatMap((h): [string, string][] => [['harnesses', h]]),
+    ...(a.atlasEnabled
+      ? ([
+          ['atlasUrl', a.atlasUrl.trim()],
+          ['atlasToken', a.atlasToken.trim()],
+          ['atlasProject', a.atlasProject.trim()],
+        ] as [string, string][])
+      : []),
+  ];
+  for (const [k, v] of checked) {
+    const err = unsafeValueError(k, v);
+    if (err) throw new Error(`${k}: ${err}`);
+  }
   const lines: string[] = [];
   lines.push(`MERCURY_ATLAS_HOST_ID=${a.hostName.trim()}`);
   lines.push(`MERCURY_DB=${join(a.dataDir.trim(), 'mercury.db')}`);

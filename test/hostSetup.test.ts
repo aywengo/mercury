@@ -495,6 +495,63 @@ test('host setup --non-interactive writes mercury.env with mode 0600', async () 
   assert.ok(!content.includes('MERCURY_FLEET_URL'), 'the wizard emits no Fleet URL (issue #645)');
 });
 
+test('validateAnswer: values outside the safe charset are rejected (#649 §3)', () => {
+  assert.ok(validateAnswer('hostName', 'a\nMERCURY_ADMIN_TOKEN=x')!.includes('safe charset'));
+  assert.ok(validateAnswer('adminToken', 'tok$with-dollar')!.includes('safe charset'));
+  assert.ok(validateAnswer('dataDir', '/srv/data dir')!.includes('safe charset'));
+  assert.ok(validateAnswer('atlasToken', "tok'quote")!.includes('safe charset'));
+  assert.ok(validateAnswer('atlasProject', 'p#comment')!.includes('safe charset'));
+  // Legitimate values pass: hex admin token, base64-ish atlas token, urls, paths.
+  assert.equal(validateAnswer('adminToken', 'a'.repeat(64)), null);
+  assert.equal(validateAnswer('atlasToken', 'AbCd1234-_+/='), null);
+  assert.equal(validateAnswer('hostName', 'host-01'), null);
+  assert.equal(validateAnswer('workspaceDir', '/srv/mercury.workspaces'), null);
+});
+
+test('a host name with an embedded newline is rejected before anything is written (#649 §3)', async () => {
+  const dir = tempDir('setup-inject-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(cfg, { recursive: true });
+  writeFileSync(join(dir, 'answers.json'), JSON.stringify({
+    hostName: 'a\nMERCURY_ADMIN_TOKEN=x',
+    dataDir: join(dir, 'data'),
+    workspaceDir: join(dir, 'ws'),
+    retentionDays: 7,
+    adminToken: 'b'.repeat(64),
+    atlasEnabled: false,
+    harnesses: ['primeagent'],
+  }));
+  const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(code, 1);
+  assert.ok(stderr.includes('safe charset'), stderr);
+  assert.ok(!existsSync(join(cfg, 'mercury', 'mercury.env')), 'no injected second variable');
+});
+
+test('a token containing $ is rejected — bash source would expand it, systemd would not (#649 §3)', async () => {
+  const dir = tempDir('setup-dollar-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(cfg, { recursive: true });
+  writeFileSync(join(dir, 'answers.json'), JSON.stringify({
+    hostName: 'host-x',
+    dataDir: join(dir, 'data'),
+    workspaceDir: join(dir, 'ws'),
+    retentionDays: 7,
+    adminToken: 'b'.repeat(63) + '$',
+    atlasEnabled: false,
+    harnesses: ['primeagent'],
+  }));
+  const { code, stderr } = await cli(['host', 'setup', '--non-interactive', '--yes', '--answers', join(dir, 'answers.json')], {
+    ...probeStubEnv(),
+    XDG_CONFIG_HOME: cfg,
+  });
+  assert.equal(code, 1);
+  assert.ok(stderr.includes('adminToken'), stderr);
+  assert.ok(!existsSync(join(cfg, 'mercury', 'mercury.env')));
+});
+
 test('host setup rejects an invalid answer before writing anything', async () => {
   const dir = tempDir('setup-invalid-');
   const answersFile = join(dir, 'answers.json');
