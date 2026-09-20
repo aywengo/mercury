@@ -323,33 +323,45 @@ test('validateAnswer: bindHost accepts loopback/0.0.0.0/addresses, rejects junk 
 });
 
 test('hand-off block: loopback says Fleet cannot reach it; exposed prints the real URL + TLS warning (#665)', async () => {
-  // Loopback case: the wizard generates a token but must NOT print a URL Fleet cannot use.
+  // LOOPBACK path: answer the bind question with 'loopback' explicitly.
   const dirLoop = tempDir('setup-bind-loop-');
   const outLoop: string[] = [];
+  const qsLoop = ['', '', '', '7', '', 'no', 'primeagent', 'loopback'];
+  let iLoop = 0;
   const codeLoop = await runHostSetup([], {
     out: (s) => outLoop.push(s), err: () => {},
-    question: async () => '', probe: async () => probeOf(['primeagent', 'ok']),
+    question: async () => qsLoop[iLoop++] ?? '',
+    probe: async () => probeOf(['primeagent', 'ok']),
   }, { XDG_CONFIG_HOME: dirLoop });
   assert.equal(codeLoop, 0);
   const textLoop = outLoop.join('');
   assert.ok(textLoop.includes('Fleet cannot reach it'), textLoop);
   assert.ok(!textLoop.includes('host API base URL'), 'no unreachable URL may be printed');
-  assert.ok(textLoop.includes('MERCURY_TLS_CERT') === false, 'no TLS warning when bound to loopback');
+  assert.ok(!textLoop.includes('MERCURY_TLS_CERT'), 'no TLS warning when bound to loopback');
+  assert.ok(!readFileSync(envFilePath({ XDG_CONFIG_HOME: dirLoop }), 'utf8').includes('MERCURY_BIND_HOST'), 'the secure default stays in src/config.ts');
 });
 
-test('a generated token still appears once when the API is exposed (#665)', async () => {
+test('hand-off block: an exposed bind prints the address and the plain-http/TLS warning (#665, Copilot round 1)', async () => {
+  // EXPOSED path: answer the bind question with 0.0.0.0.
   const dir = tempDir('setup-bind-exposed-');
   const out: string[] = [];
+  const qs = ['', '', '', '7', '', 'no', 'primeagent', '0.0.0.0'];
+  let i = 0;
   const code = await runHostSetup([], {
     out: (s) => out.push(s), err: () => {},
-    question: async () => '', probe: async () => probeOf(['primeagent', 'ok']),
+    question: async () => qs[i++] ?? '',
+    probe: async () => probeOf(['primeagent', 'ok']),
   }, { XDG_CONFIG_HOME: dir });
   assert.equal(code, 0);
   const text = out.join('');
+  assert.ok(text.includes('host API base URL: http://<this-host>:'), text);
+  assert.ok(text.includes('MERCURY_TLS_CERT'), 'the plain-http warning names the TLS variables');
   const tokens = text.match(/host API token:\s+([0-9a-f]{64})/) ?? [];
   assert.ok(tokens[1], 'token shown');
   const occurrences = out.filter((l) => l.includes(tokens[1]!)).length;
-  assert.equal(occurrences, 1);
+  assert.equal(occurrences, 1, 'token still shown exactly once');
+  const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
+  assert.ok(file.includes('MERCURY_BIND_HOST=0.0.0.0'), file);
 });
 
 test('WIZARD_VARIABLES: every emitted name is documented AND read by the host (design decision 10, issue #645)', () => {

@@ -193,8 +193,10 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
       const v = value.trim();
       if (v === '') return null;
       if (v === 'loopback') return null;
-      if (!/^(0\.0\.0\.0|[A-Za-z0-9._:-]+)$/.test(v)) {
-        return "bind host must be 'loopback', '0.0.0.0', or an address (host name or IP)";
+      // No ':' — a port or an IPv6 literal would break the `http://<bind>:<port>` URL
+      // interpolation (Copilot review on #668); a host name or IPv4 address only.
+      if (!/^(0\.0\.0\.0|[A-Za-z0-9._-]+)$/.test(v)) {
+        return "bind host must be 'loopback', '0.0.0.0', or a host name / IPv4 address (no port, no IPv6)";
       }
       return charsetErr('bindHost', v);
     }
@@ -406,8 +408,10 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     atlasUrl: env.MERCURY_ATLAS_URL?.trim() || '',
     atlasToken: env.MERCURY_ATLAS_TOKEN?.trim() || existingVar('MERCURY_ATLAS_TOKEN', env),
     atlasProject: env.MERCURY_ATLAS_PROJECT?.trim() || '',
-    // Re-run continuity (#665): keep the file's bind address unless a new one is given.
-    bindHost: env.MERCURY_BIND_HOST?.trim() || '',
+    // Re-run continuity (#665): keep the bind address the host already uses (env var or
+    // the written file) unless the operator supplies a new one — an enter-press on the
+    // prompt must not silently un-expose the API.
+    bindHost: env.MERCURY_BIND_HOST?.trim() || existingVar('MERCURY_BIND_HOST', env),
     harnesses: detected.filter((h) => (KNOWN_HARNESSES as readonly string[]).includes(h)),
   };
 }
@@ -466,7 +470,8 @@ export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.e
     hostName: parsed.hostName ?? base.hostName,
     dataDir: parsed.dataDir ?? base.dataDir,
     workspaceDir: parsed.workspaceDir ?? base.workspaceDir,
-    bindHost: parsed.bindHost ?? base.bindHost,
+    // 'loopback' is a prompt spelling, never a file value (#665 review).
+    bindHost: parsed.bindHost === 'loopback' ? '' : parsed.bindHost ?? base.bindHost,
     retentionDays: parsed.retentionDays ?? base.retentionDays,
     adminToken: parsed.adminToken ?? base.adminToken,
     atlasEnabled: parsed.atlasEnabled ?? base.atlasEnabled,
@@ -530,6 +535,8 @@ export async function promptAnswers(io: {
   // from Fleet" and nothing implemented it — the host answered only from loopback. The
   // default stays the secure loopback; answering here is what makes the hand-off URL real.
   const bindRaw = (await q('Expose the API to Fleet? (loopback / 0.0.0.0 / an address)', base.bindHost || 'loopback')).toLowerCase();
+  // 'loopback' is a prompt spelling, never a file value: normalized to '' so the written
+  // env omits MERCURY_BIND_HOST and src/config.ts keeps the secure default (#665 review).
   const bindHost = bindRaw === 'loopback' || bindRaw === '' ? '' : bindRaw;
   return {
     hostName,
@@ -731,8 +738,9 @@ export async function runHostSetup(
     // Fleet reachability (issue #665): with the secure default the API answers only from
     // the host itself, so a URL would register a host that never comes up. Say so, and
     // name the TLS variables — this exposes an admin-token API over plain http.
-    if (answers.bindHost.trim()) {
-      const shown = answers.bindHost.trim() === '0.0.0.0' ? '<this-host>' : answers.bindHost.trim();
+    const bindShown = answers.bindHost.trim();
+    if (bindShown && bindShown !== 'loopback') {
+      const shown = bindShown === '0.0.0.0' ? '<this-host>' : bindShown;
       io.out(`  host API base URL: http://${shown}:${port}\n`);
       if (!vars_tls_set) {
         io.out('  NOTE: the API is exposed over plain http with an admin token (MERCURY_TLS_CERT/MERCURY_TLS_KEY are unset).\n');

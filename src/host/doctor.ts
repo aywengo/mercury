@@ -188,7 +188,9 @@ export async function runHostDoctor(
   // loopback check above can pass while the address Fleet will actually use does not
   // answer (wrong interface, firewall). Verify BOTH and report both.
   const bindAddress = vars.MERCURY_BIND_HOST?.trim() ?? '';
-  const bindHealthz = bindAddress && bindAddress !== '127.0.0.1' && bindAddress !== 'loopback'
+  // 0.0.0.0 is a bind wildcard, not a connectable destination — the check there would
+  // report a false failure even when the server is fine (Copilot review on #668).
+  const bindHealthz = bindAddress && !['127.0.0.1', '0.0.0.0', 'loopback'].includes(bindAddress)
     ? { address: bindAddress, ...(await checkHealthz(`http://${bindAddress}:${port}`)) }
     : undefined;
   const smoke: DoctorResult['smoke'] = [];
