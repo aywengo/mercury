@@ -288,17 +288,13 @@ jobs:
       # #649 §4) and the bats suite assumes a normal user. Run everything as `ci`.
       CI_USER: ci
     steps:
+      # Container prereqs come FIRST (Copilot round 3 on #662): checkout/setup-node/npm
+      # rely on git, curl and TLS trust being present, so a container that starts without
+      # them must be provisioned before anything else runs.
       - name: Create the non-root test user (containers run as root; decision 7 refuses root)
         if: matrix.name != 'ubuntu'
         run: |
           useradd -m -s /bin/bash ci || useradd -m -s /bin/bash -u 1001 ci
-          chown -R ci:ci "$GITHUB_WORKSPACE" /github/home 2>/dev/null || chown -R ci:ci "$GITHUB_WORKSPACE"
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24.x'
-      - name: Install dependencies
-        run: npm ci --no-audit --no-fund
       - name: Install test prerequisites (debian container, root)
         if: matrix.name == 'debian'
         run: |
@@ -308,6 +304,15 @@ jobs:
         if: matrix.name == 'fedora'
         run: |
           dnf install -y bats curl git which
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Hand the workspace to the ci user (containers)
+        if: matrix.name != 'ubuntu'
+        run: chown -R ci:ci "$GITHUB_WORKSPACE"
       - name: Install bats (apt — ubuntu runner, passwordless sudo)
         if: matrix.name == 'ubuntu'
         run: |
@@ -318,23 +323,24 @@ jobs:
         run: bats test/install.bats
       - name: bats suite for install.sh (as non-root ci user, container)
         if: matrix.name != 'ubuntu'
-        # debian has `su` (util-linux); minimal fedora images lack it in PATH, but
-        # `runuser` (shadow-utils) is there because useradd ran in the user step.
+        # Prefer `runuser` (shadow-utils): it PRESERVES the step environment, so PATH
+        # keeps the setup-node location. `su` would drop PATH and lose node; with su,
+        # use -p and re-export PATH explicitly (Copilot round 3 on #662).
         run: |
           cd "$GITHUB_WORKSPACE"
-          if command -v su >/dev/null 2>&1; then
-            su ci -c 'bats test/install.bats'
-          else
+          if command -v runuser >/dev/null 2>&1; then
             runuser -u ci -- bats test/install.bats
+          else
+            su -p ci -c 'export PATH="$PATH"; bats test/install.bats'
           fi
       - name: Host subcommand tests (as non-root ci user, container)
         if: matrix.name != 'ubuntu'
         run: |
           cd "$GITHUB_WORKSPACE"
-          if command -v su >/dev/null 2>&1; then
-            su ci -c 'node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts'
-          else
+          if command -v runuser >/dev/null 2>&1; then
             runuser -u ci -- node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts
+          else
+            su -p ci -c 'export PATH="$PATH"; node --test --test-timeout=180000 test/hostInstall.test.ts test/hostProbe.test.ts test/hostSetup.test.ts test/hostService.test.ts test/hostDoctor.test.ts test/hostLifecycle.test.ts test/hostDoctorSmokeE2E.test.ts'
           fi
       - name: Host subcommand tests (incl. MERCURY_* vs configuration.md)
         if: matrix.name == 'ubuntu'
