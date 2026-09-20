@@ -157,7 +157,7 @@ test('re-run preserves every hand-set variable the wizard does not own (#673)', 
   }, { ...probeStubEnv(), XDG_CONFIG_HOME: cfg, MERCURY_HARNESSES: 'primeagent' });
   assert.equal(first, 0);
   const envPath = envFilePath({ XDG_CONFIG_HOME: cfg });
-  // An operator hand-sets three variables the wizard never asks about.
+  // An operator hand-sets four variables the wizard never asks about (one explicitly empty).
   const withHandSet = readFileSync(envPath, 'utf8')
     + 'MERCURY_PORT=8080\nMERCURY_LOG_LEVEL=debug\nMERCURY_TLS_CERT=/tmp/c.pem\nMERCURY_PRIMEAGENT_ARGS=\n';
   writeFileSync(envPath, withHandSet);
