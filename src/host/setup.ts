@@ -738,8 +738,12 @@ export async function runHostSetup(
     // Fleet reachability (issue #665): with the secure default the API answers only from
     // the host itself, so a URL would register a host that never comes up. Say so, and
     // name the TLS variables — this exposes an admin-token API over plain http.
-    const bindShown = answers.bindHost.trim();
-    if (bindShown && bindShown !== 'loopback') {
+    const bindShown = answers.bindHost.trim().toLowerCase();
+    // Loopback-equivalent values (explicit 127.0.0.1 / localhost, or the empty default)
+    // are unreachable from Fleet — the whole point of this block (issue #649 review on
+    // #668): never print a URL Fleet cannot use.
+    const loopbackLike = !bindShown || bindShown === 'loopback' || bindShown === '127.0.0.1' || bindShown === 'localhost';
+    if (!loopbackLike) {
       const shown = bindShown === '0.0.0.0' ? '<this-host>' : bindShown;
       io.out(`  host API base URL: http://${shown}:${port}\n`);
       if (!vars_tls_set) {

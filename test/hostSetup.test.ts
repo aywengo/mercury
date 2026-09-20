@@ -341,6 +341,24 @@ test('hand-off block: loopback says Fleet cannot reach it; exposed prints the re
   assert.ok(!readFileSync(envFilePath({ XDG_CONFIG_HOME: dirLoop }), 'utf8').includes('MERCURY_BIND_HOST'), 'the secure default stays in src/config.ts');
 });
 
+test('hand-off block: an explicit 127.0.0.1/localhost bind is still unreachable from Fleet (#668 round 2)', async () => {
+  for (const bind of ['127.0.0.1', 'localhost']) {
+    const dir = tempDir('setup-bind-impl-');
+    const out: string[] = [];
+    const qs = ['', '', '', '7', '', 'no', 'primeagent', bind];
+    let i = 0;
+    const code = await runHostSetup([], {
+      out: (s) => out.push(s), err: () => {},
+      question: async () => qs[i++] ?? '',
+      probe: async () => probeOf(['primeagent', 'ok']),
+    }, { XDG_CONFIG_HOME: dir });
+    assert.equal(code, 0);
+    const text = out.join('');
+    assert.ok(text.includes('Fleet cannot reach it'), `${bind}: ${text}`);
+    assert.ok(!text.includes('host API base URL'), `${bind}: no URL Fleet cannot use`);
+  }
+});
+
 test('hand-off block: an exposed bind prints the address and the plain-http/TLS warning (#665, Copilot round 1)', async () => {
   // EXPOSED path: answer the bind question with 0.0.0.0.
   const dir = tempDir('setup-bind-exposed-');
