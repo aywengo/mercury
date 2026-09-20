@@ -86,8 +86,11 @@ export function buildCreateRequest(flags: CreateFlags, read: ReadContext): Creat
       }
       request.goal = parsed;
     } catch (err) {
+      // JSON.parse throws SyntaxError today, but the cast-free format keeps a thrown non-Error
+      // from becoming "undefined" in the operator's face.
+      const detail = err instanceof Error ? err.message : String(err);
       throw new UsageError(
-        `--goal must be a JSON object (e.g. --goal '{"objective": "ship it"}'): ${(err as Error).message}`,
+        `--goal must be a JSON object (e.g. --goal '{"objective": "ship it"}'): ${detail}`,
       );
     }
   }

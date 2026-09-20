@@ -1,8 +1,9 @@
 // Goal commands: `runs goal` and `runs goal-cancel` (docs/goals.md §8, §13.6).
 //
-// The client-surface gap recorded in docs/status.md ("Goal setting has no client surface"): the
-// server has served these two routes since the goal feature shipped, and the dashboard and CLI
-// read goal state, but nothing in `mercuryctl` could call them. `runs goal` closes the read;
+// The CLI half of the goal client surface: the server has served these two routes since the goal
+// feature shipped, and `runs show`/`runs list` render goal state, but until this module nothing in
+// `mercuryctl` could call them. The dashboard half is still open — docs/status.md records that
+// split under "Goal setting has no dashboard surface". `runs goal` closes the read;
 // `runs goal-cancel` closes the one mutation the API exposes -- cancel is deliberately the ONLY
 // goal mutation, because it asserts nothing about whether the work was done (goals.md §12).
 //

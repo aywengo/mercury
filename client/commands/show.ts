@@ -6,7 +6,7 @@
 
 import type { GoalState, RunDetailResponse } from '../api/protocol.ts';
 import { makeColorizer, sanitizeForTerminal, statusColor, type ColorName } from '../output/human.ts';
-import { goalColor, goalDetailLines } from './goal.ts';
+import { goalDetailLines } from './goal.ts';
 import type { CommandContext } from './context.ts';
 
 
@@ -96,56 +96,6 @@ export function renderRunDetail(response: RunDetailResponse, ctx: CommandContext
  *
  * Free text from whoever created the Run, so it goes through sanitizeForTerminal.
  */
-function goalContractLines(
-  contract: GoalState['contract'],
-  field: (label: string, value: string) => string,
-  color: (c: ColorName, s: string) => string,
-): string[] {
-  if (!contract) return [];
-  const labels: [keyof NonNullable<GoalState['contract']>, string][] = [
-    ['outcome', 'must achieve'],
-    ['verification', 'verified by'],
-    ['constraints', 'constraints'],
-    ['boundaries', 'out of scope'],
-    ['stopWhen', 'stop when'],
-  ];
-  const lines: string[] = [];
-  for (const [key, label] of labels) {
-    const value = contract[key];
-    if (value === undefined || value.length === 0) continue;
-    lines.push(field(label, color('dim', sanitizeForTerminal(value))));
-  }
-  return lines;
-}
-
-/**
- * One line per declared gate.
- *
- * Rendered as what was ASKED FOR, never as an outcome: Mercury records the spec and does not
- * execute gates (docs/goals.md 5), so a gate list next to a COMPLETED Run must not read as a
- * passing test report. The label says "gate" and nothing else -- no tick, no colour implying
- * success -- because the nearest thing to that misreading this repo already has a number
- * (`test.*` events cover real results).
- *
- * The command is attacker-influenced text that came from the caller and came back around, so it
- * goes through sanitizeForTerminal like every other free-text field here.
- */
-function goalGateLines(
-  gates: GoalState['gates'],
-  field: (label: string, value: string) => string,
-  color: (c: ColorName, s: string) => string,
-): string[] {
-  if (!gates || gates.length === 0) return [];
-  return gates.map((g, i) => {
-    const seconds = g.timeoutMs / 1000;
-    const timeout = Number.isInteger(seconds) && seconds >= 1
-      ? `${seconds}s`
-      : `${g.timeoutMs}ms`;
-    const retries = g.maxRetries > 0 ? `, ${g.maxRetries} ${g.maxRetries === 1 ? 'retry' : 'retries'}` : '';
-    const meta = color('dim', ` (timeout ${timeout}${retries})`);
-    return field(`gate ${i + 1}`, `${sanitizeForTerminal(g.command)}${meta}`);
-  });
-}
 /**
  * Which harness actually executed the Run (docs/goals.md 13.1).
  *

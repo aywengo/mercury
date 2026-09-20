@@ -250,7 +250,7 @@ test('the goals map is scoped to the runs the caller may already see', async () 
 });
 
 
-// --- the limitation docs/status.md records: no client can SET a goal -------------------------------
+// --- the split docs/status.md records: the CLI drives goals, the dashboard cannot set one ---------
 //
 // Goals are wired end to end on the server -- `POST /api/runs` forwards `goal`, the detail page renders
 // it, the list carries it, `/api/agents` advertises support for it -- and the CLI can drive all of it:
