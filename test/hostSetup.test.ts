@@ -149,6 +149,34 @@ test('runHostSetup generates MERCURY_ADMIN_TOKEN and prints it exactly once (#64
   assert.equal(occurrences, 1);
 });
 
+test('re-run preserves every hand-set variable the wizard does not own (#673)', async () => {
+  const dir = tempDir('setup-preserve-all-');
+  const cfg = join(dir, 'cfg');
+  const first = await runHostSetup(['--non-interactive', '--yes'], {
+    out: () => {}, err: () => {},
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: cfg, MERCURY_HARNESSES: 'primeagent' });
+  assert.equal(first, 0);
+  const envPath = envFilePath({ XDG_CONFIG_HOME: cfg });
+  // An operator hand-sets four variables the wizard never asks about (one explicitly empty).
+  const withHandSet = readFileSync(envPath, 'utf8')
+    + 'MERCURY_PORT=8080\nMERCURY_LOG_LEVEL=debug\nMERCURY_TLS_CERT=/tmp/c.pem\nMERCURY_PRIMEAGENT_ARGS=\n';
+  writeFileSync(envPath, withHandSet);
+
+  const out: string[] = [];
+  const second = await runHostSetup(['--non-interactive', '--yes'], {
+    out: (s) => out.push(s), err: () => {},
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: cfg, MERCURY_HARNESSES: 'primeagent' });
+  assert.equal(second, 0);
+  const file = readFileSync(envPath, 'utf8');
+  for (const line of ['MERCURY_PORT=8080', 'MERCURY_LOG_LEVEL=debug', 'MERCURY_TLS_CERT=/tmp/c.pem', 'MERCURY_PRIMEAGENT_ARGS=']) {
+    assert.ok(file.includes(line), `${line} must survive the rewrite (empty values included): ${file}`);
+  }
+  // The summary names what is carried forward — names only, never values.
+  const text = out.join('');
+  assert.ok(text.includes('preserved (hand-set): MERCURY_LOG_LEVEL, MERCURY_PORT, MERCURY_PRIMEAGENT_ARGS, MERCURY_TLS_CERT'), text);
+  assert.ok(!text.includes(':8080') && !text.includes('c.pem'), 'preserved values must not print');
+});
+
 test('re-run with a rotated token prints updated-not-shown, never the value (#676 round 1)', async () => {
   const dir = tempDir('setup-rerun-rotate-');
   const cfg = join(dir, 'cfg');

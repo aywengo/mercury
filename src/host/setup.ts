@@ -354,7 +354,7 @@ export function writeEnvFile(path: string, content: string): void {
 }
 
 /** Redact secrets: show presence and length only (design decision 6). */
-export function redactedSummary(a: HostSetupAnswers): string {
+export function redactedSummary(a: HostSetupAnswers, preservedVarNames: string[] = []): string {
   const token = a.atlasToken.trim();
   const atlasLine = a.atlasEnabled
     ? `${a.atlasUrl.trim()} (project ${a.atlasProject.trim()}), MERCURY_ATLAS_TOKEN=${
@@ -370,6 +370,9 @@ export function redactedSummary(a: HostSetupAnswers): string {
     `admin token: ${admin ? `<set, ${admin.length} chars>` : '<unset — will be generated>'}`,
     `Atlas: ${atlasLine}`,
     `harnesses: ${a.harnesses.join(', ')}`,
+    ...(preservedVarNames.length > 0
+      ? [`preserved (hand-set): ${preservedVarNames.join(', ')}`]
+      : []),
   ].join('\n');
 }
 
@@ -725,13 +728,19 @@ export async function runHostSetup(
   const generatedToken = !answers.adminToken.trim();
   if (generatedToken) answers.adminToken = generateAdminToken();
 
-  // Operator-managed variables (MERCURY_TLS_CERT/KEY are set by hand, not by the
-  // wizard) must survive a rewrite (#668 round 6 review) — otherwise a re-run would
-  // silently downgrade a TLS host to plain http AND print the wrong hand-off scheme.
+  // Operator-managed variables must survive a rewrite (#673, generalizing #668 round 6):
+  // every existing key the wizard does not own (MERCURY_PORT, MERCURY_LOG_LEVEL, TLS vars,
+  // sandbox/runtime settings — anything the host reads that the wizard never asks about)
+  // is carried forward verbatim. A re-run that silently dropped MERCURY_PORT would restart
+  // the host on the default port and make the hand-off print the wrong URL.
   const existingVars = existsSync(envFilePath(env)) ? loadEnvFile(envFilePath(env)) : {};
-  const preservedEntries = (['MERCURY_TLS_CERT', 'MERCURY_TLS_KEY'] as const)
-    .map((k) => [k, existingVars[k]] as const)
-    .filter((pair): pair is [typeof pair[0], string] => Boolean(pair[1]));
+  const wizardOwned = WIZARD_VARIABLES as readonly string[];
+  // Empty-string values are preserved too: an operator may set a variable empty ON
+  // PURPOSE to hold the host at a non-default (dropping it would silently re-enable the
+  // default — Copilot review on #677).
+  const preservedEntries = Object.entries(existingVars)
+    .filter(([k]) => !wizardOwned.includes(k))
+    .filter((pair): pair is [string, string] => typeof pair[1] === 'string');
   // The file feeds systemd EnvironmentFile, bash source, and the doctor parser (#649 §3):
   // a preserved value outside the safe charset must fail the re-run, not sneak back in.
   for (const [k, v] of preservedEntries) {
@@ -739,12 +748,14 @@ export async function runHostSetup(
     if (err) throw new Error(`${k}: ${err}`);
   }
   const preserved = Object.fromEntries(preservedEntries);
+  // Names only in the summary — some preserved values may be credentials (#673).
+  const preservedNames = preservedEntries.map(([k]) => k).sort();
   const content = renderEnv(answers, preserved);
   const path = envFilePath(env);
   const alreadyConfigured = existsSync(path);
   if (opts.dryRun) {
     io.out('mercury host setup --dry-run\n');
-    io.out(redactedSummary(answers) + '\n');
+    io.out(redactedSummary(answers, preservedNames) + '\n');
     if (alreadyConfigured) {
       const diff = envDiff(readFileSync(path, 'utf8'), content);
       if (diff) io.out(`\n--dry-run would OVERWRITE ${path}. Proposed diff (secrets redacted):\n${diff}`);
@@ -775,7 +786,7 @@ export async function runHostSetup(
 
   writeEnvFile(path, content);
   io.out('mercury host setup\n');
-  io.out(redactedSummary(answers) + '\n');
+  io.out(redactedSummary(answers, preservedNames) + '\n');
   io.out(`\nWrote ${path} (mode 0600). Start the host with \`mercury host doctor\` (M4).\n`);
   // The Fleet hand-off is the wizard's output contract on EVERY successful write, not
   // only when a token is generated (#672): the loopback branch advises re-running with a
