@@ -124,23 +124,25 @@ export function parseHostSetupArgs(args: string[]): HostSetupOptions {
 
 /**
  * The safe charset for any value written unquoted into mercury.env (issue #649 §3):
- * `[A-Za-z0-9._:/@+=-]`. The file is consumed by three parsers with different semantics —
- * systemd `EnvironmentFile=`, a bash `source` wrapper, and the doctor's line regex — and
- * only an inert charset makes them agree: no whitespace (a space breaks `source`, a
- * newline injects a second variable), no quotes (different quote handling per parser),
- * no `$` (bash expands it, systemd does not), no `#` (bash comment), no backslash.
+ * `[A-Za-z0-9._:/@+=,-]`. The comma is safe because `MERCURY_HARNESSES` is a
+ * comma-separated list, not a delimiter inside a value. The file is consumed by three
+ * parsers with different semantics — systemd `EnvironmentFile=`, a bash `source`
+ * wrapper, and the doctor's line regex — and only an inert charset makes them agree:
+ * no whitespace (a space breaks `source`, a newline injects a second variable), no
+ * quotes (different quote handling per parser), no `$` (bash expands it, systemd does
+ * not), no `#` (bash comment), no backslash.
  */
-export const SAFE_VALUE_RE = /^[A-Za-z0-9._:/@+=-]*$/;
+export const SAFE_VALUE_RE = /^[A-Za-z0-9._:/@+=,-]*$/;
 
-/** The safe-charset error for one value, or null when it is safe (or empty). */
-export function unsafeValueError(key: string, value: string): string | null {
+/** The safe-charset error message for one value (no key prefix — the caller adds
+ *  `<key>:` exactly once), or null when the value is safe. */
+export function unsafeValueError(_key: string, value: string): string | null {
   if (SAFE_VALUE_RE.test(value)) return null;
-  return `${key}: value contains characters outside the safe charset [A-Za-z0-9._:/@+=-] — mercury.env is read by three parsers (systemd EnvironmentFile, bash source, the doctor) and only an inert charset keeps them in agreement`;
+  return 'value contains characters outside the safe charset [A-Za-z0-9._:/@+=,-] — mercury.env is read by three parsers (systemd EnvironmentFile, bash source, the doctor) and only an inert charset keeps them in agreement';
 }
 
 /** Validate one answer. Returns an error message or null. */
 export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): string | null {
-  const asStr = typeof value === 'string' ? value : null;
   const charsetErr = (k: string, s: string): string | null => unsafeValueError(k, s);
   switch (key) {
     case 'hostName': {
@@ -246,7 +248,7 @@ export function renderEnv(a: HostSetupAnswers): string {
   ];
   for (const [k, v] of checked) {
     const err = unsafeValueError(k, v);
-    if (err) throw new Error(err);
+    if (err) throw new Error(`${k}: ${err}`);
   }
   const lines: string[] = [];
   lines.push(`MERCURY_ATLAS_HOST_ID=${a.hostName.trim()}`);
