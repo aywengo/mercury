@@ -58,7 +58,13 @@ stub_ok_prereqs() {
   stub node 'echo v24.0.0'
   stub curl 'exit 0'
   stub git 'exit 0'
-  stub npm 'echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; exit 0'
+  # install.sh execs `mercury host setup` after a successful install (#666): the stub
+  # records its argv and exits 0 so the script's exit code stays 0.
+  stub mercury 'echo "mercury $@" >>"$TEST_DIR/mercury-calls.txt"; exit 0'
+  # The stub npm implements no `prefix -g`, so decide_npm_prefix takes the $HOME/.local
+  # fallback — a real `npm install -g --prefix` would put the binary at <prefix>/bin/mercury,
+  # and the hand-off resolves exactly that path (#666).
+  stub npm 'echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; mkdir -p "$HOME/.local/bin"; printf "#!/bin/sh\necho \"mercury \$@\" >>\"$TEST_DIR/mercury-calls.txt\"; exit 0\n" >"$HOME/.local/bin/mercury"; chmod +x "$HOME/.local/bin/mercury"; exit 0'
   stub date 'echo 2026-09-18T00:00:00Z'
 }
 
@@ -202,7 +208,8 @@ minimal_path() {
   stub node 'echo v22.18.0'
   stub curl 'exit 0'
   stub git 'exit 0'
-  stub npm 'exit 0'
+  stub npm 'mkdir -p "$HOME/.local/bin"; printf "#!/bin/sh\necho \"mercury \$@\" >>\"$TEST_DIR/mercury-calls.txt\"; exit 0\n" >"$HOME/.local/bin/mercury"; chmod +x "$HOME/.local/bin/mercury"; exit 0'
+  stub mercury 'exit 0'
   stub date 'echo 2026-09-18T00:00:00Z'
   run bash "$INSTALL_SH" --yes
   [ "$status" -eq 0 ]
@@ -250,19 +257,62 @@ minimal_path() {
   fi
 }
 
-@test "--yes skips the prompt and installs" {
+@test "--yes skips the prompt, installs, and hands off with the flag propagated (#666)" {
   stub_ok_prereqs
   run bash "$INSTALL_SH" --yes
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Mercury host installed"* ]]
+  [[ "$output" == *"Mercury host installed. Handing off"* ]]
   [ -f "$TEST_DIR/npm-calls.txt" ]
+  [ -f "$TEST_DIR/mercury-calls.txt" ]
+  grep -q "mercury host setup --yes" "$TEST_DIR/mercury-calls.txt"
 }
 
-@test "--non-interactive skips the prompt" {
+@test "--non-interactive skips the prompt and propagates to the wizard (#666)" {
   stub_ok_prereqs
   run bash "$INSTALL_SH" --non-interactive
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Mercury host installed"* ]]
+  [[ "$output" == *"Mercury host installed. Handing off"* ]]
+  grep -q "mercury host setup --non-interactive" "$TEST_DIR/mercury-calls.txt"
+}
+
+@test "the hand-off propagates both flags together (#666)" {
+  stub_ok_prereqs
+  run bash "$INSTALL_SH" --non-interactive --yes
+  [ "$status" -eq 0 ]
+  grep -q "mercury host setup --non-interactive --yes" "$TEST_DIR/mercury-calls.txt"
+}
+
+@test "a writable custom prefix off PATH still hands off via npm prefix -g (#666 round 1)" {
+  # Hermetic PATH (minimal_path, like the missing-prereq tests): a host that happens to have
+  # a real `mercury` on PATH would satisfy `command -v mercury` and skip the branch under
+  # test — the premise is that `mercury` is NOT on PATH (Copilot round 2 on #669).
+  minimal_path
+  stub node 'echo v24.0.0'
+  stub curl 'exit 0'
+  stub git 'exit 0'
+  stub date 'echo 2026-09-18T00:00:00Z'
+  # npm reports a WRITABLE custom prefix (mode 755, inside TEST_DIR), the install puts the
+  # binary there, and `mercury` is NOT on PATH: `command -v mercury` fails, so the script
+  # must resolve through `npm prefix -g` instead of failing the successful install.
+  stub npm 'case "$1 $2" in "prefix -g") echo "$TEST_DIR/custom-prefix" ;; *)
+    mkdir -p "$TEST_DIR/custom-prefix/bin"
+    printf "#!/bin/sh\necho \"mercury \$@\" >>\"$TEST_DIR/mercury-calls.txt\"; exit 0\n" >"$TEST_DIR/custom-prefix/bin/mercury"
+    chmod +x "$TEST_DIR/custom-prefix/bin/mercury"
+    echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; exit 0 ;; esac'
+  mkdir -p "$TEST_DIR/custom-prefix"
+  run bash "$INSTALL_SH" --yes
+  [ "$status" -eq 0 ]
+  grep -q "mercury host setup --yes" "$TEST_DIR/mercury-calls.txt"
+  [[ "$output" == *"Handing off"* ]]
+}
+
+@test "the wizard's exit code becomes the script's exit code (#666)" {
+  stub_ok_prereqs
+  # In the fallback-prefix sandbox the hand-off resolves $HOME/.local/bin/mercury (the file
+  # the npm stub "installed"), not the PATH stub — override THAT file's behavior.
+  stub npm 'echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; mkdir -p "$HOME/.local/bin"; printf "#!/bin/sh\nexit 7\n" >"$HOME/.local/bin/mercury"; chmod +x "$HOME/.local/bin/mercury"; exit 0'
+  run bash "$INSTALL_SH" --yes
+  [ "$status" -eq 7 ]
 }
 # --- confirmation input source (#646) ---------------------------------------
 
@@ -361,7 +411,11 @@ minimal_path() {
   # npm reports a prefix that is DETERMINISTICALLY not writable for this user: a
   # directory inside TEST_DIR with mode 555 (never depend on host paths like /usr/local —
   # Copilot round 2 on #661).
-  stub npm 'case "$1" in prefix) echo "$TEST_DIR/readonly-prefix" ;; *) echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; exit 0 ;; esac'
+  stub npm 'case "$1" in prefix) echo "$TEST_DIR/readonly-prefix" ;; *)
+    mkdir -p "$HOME/.local/bin"
+    printf "#!/bin/sh\nexit 0\n" >"$HOME/.local/bin/mercury"
+    chmod +x "$HOME/.local/bin/mercury"
+    echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; exit 0 ;; esac'
   mkdir -p "$TEST_DIR/readonly-prefix" "$TEST_DIR/state/mercury"
   chmod 555 "$TEST_DIR/readonly-prefix"
   run bash "$INSTALL_SH" --yes --version 0.1.1
@@ -369,6 +423,8 @@ minimal_path() {
   grep -q -- "--prefix" "$TEST_DIR/npm-calls.txt"
   grep -q "$HOME/.local" "$TEST_DIR/npm-calls.txt"
   [[ "$output" == *".local/bin"* ]]  # the PATH hint is printed
+  # The hand-off resolves the binary from the fallback prefix (#666).
+  [[ "$output" == *"Handing off"* ]]
 }
 
 @test "a writable npm global prefix needs no --prefix (decision 7, #649 §4)" {
@@ -381,13 +437,13 @@ minimal_path() {
   ! grep -q -- "--prefix" "$TEST_DIR/npm-calls.txt"
 }
 
-@test "--dry-run names the honest actions (#649 §4): no checksum step, hint not hand-off" {
+@test "--dry-run names the honest actions (#649 §4, #666): the list ends in the wizard hand-off" {
   stub_ok_prereqs
   run bash "$INSTALL_SH" --dry-run
   [ "$status" -eq 0 ]
   [[ "$output" != *"verify the installed package checksum"* ]]
   [[ "$output" == *"no separate checksum step"* ]]
-  [[ "$output" == *"it does not run the wizard"* ]]
+  [[ "$output" == *"hand off to \`mercury host setup\`"* ]]
 }
 
 @test "npm receives the pinned version" {

@@ -233,7 +233,7 @@ build_actions() {
     add_action "install @aywengo/mercury@$VERSION with npm install -g into $NPM_PREFIX_DESC (integrity = npm's registry sha512 check, no separate checksum step)"
   fi
   add_action "write $log_file"
-  add_action "print the next step: run \`mercury host setup\` (the script exits; it does not run the wizard)"
+  add_action "hand off to \`mercury host setup\` (M3: configuration wizard; --non-interactive/--yes propagate)"
 }
 
 # ---------------------------------------------------------------------------
@@ -392,18 +392,54 @@ main() {
 
   log_line "install-complete" "version=$VERSION prefix=$NPM_PREFIX_DESC"
 
+  # Hand off to the wizard (issue #666): the docs (three places) promise the hand-off,
+  # and `--non-interactive` on install.sh is meant for Fleet provisioning where a
+  # two-step install is exactly the friction the installer exists to remove.
+  # Propagate the flags `mercury host setup` understands; --version is install-only.
+  handoff_flags=""
+  if [ "$NON_INTERACTIVE" = "1" ]; then
+    handoff_flags="--non-interactive"
+  fi
+  if [ "$YES" = "1" ]; then
+    handoff_flags="$handoff_flags --yes"
+  fi
+  # Resolve the binary from the prefix the install just used: the fallback prefix
+  # ($HOME/.local) is not on PATH yet (decision 7, #649 §4); the normal npm global
+  # prefix bin should already be.
+  if [ "$NPM_PREFIX_FALLBACK" = "1" ]; then
+    mercury_bin="$NPM_PREFIX_PATH/bin/mercury"
+  else
+    mercury_bin="$(command -v mercury 2>/dev/null || true)"
+    if [ -z "$mercury_bin" ]; then
+      # A writable custom prefix that is not on PATH: resolve via npm itself
+      # (Copilot round 1 on #669) — the install succeeded; PATH must not fail it.
+      npm_global_prefix="$(npm prefix -g 2>/dev/null || true)"
+      if [ -n "$npm_global_prefix" ] && [ -x "$npm_global_prefix/bin/mercury" ]; then
+        mercury_bin="$npm_global_prefix/bin/mercury"
+      fi
+    fi
+  fi
+  if [ -z "$mercury_bin" ] || [ ! -x "$mercury_bin" ]; then
+    echo "install.sh: the package installed but the mercury binary cannot be found; cannot hand off to \`mercury host setup\`." >&2
+    [ "$NPM_PREFIX_FALLBACK" = "1" ] && echo "install.sh: expected it at $mercury_bin (the fallback prefix is not on PATH)." >&2
+    log_line "install-failed" "mercury binary not found after install"
+    exit 1
+  fi
   echo
-  echo "Mercury host installed. Next step:"
-  echo "  mercury host setup"
+  echo "Mercury host installed. Handing off to \`mercury host setup\` ..."
   echo "(M3: configuration wizard — admin/API token, Atlas, harnesses.)"
   # Decision 7 fallback: tell the operator how to reach the fallback binary (#649 §4).
   if [ "$NPM_PREFIX_FALLBACK" = "1" ]; then
     echo
-    echo "NOTE: the package went to $HOME/.local — make sure $HOME/.local/bin is on PATH:"
+    echo "NOTE: the package went to $HOME/.local — make sure $HOME/.local/bin is on PATH for later shells:"
     # The hint shows the literal $HOME expression; SC2016 is intended here.
     # shellcheck disable=SC2016
     echo '  export PATH="$HOME/.local/bin:$PATH"'
   fi
+  # exec, not spawn: the script's job is done and the wizard's exit code must be the
+  # script's exit code (the piped-`curl | bash` exit contract, issue #650).
+  # shellcheck disable=SC2086  # handoff_flags is intentionally word-split
+  exec "$mercury_bin" host setup $handoff_flags
 }
 
 main "$@"

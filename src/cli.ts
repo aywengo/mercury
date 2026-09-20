@@ -124,7 +124,27 @@ async function main(): Promise<void> {
   // id, unreadable declarative config), which is exactly why the fix tools run before it — but the
   // redactor/logger setup below is host-shaped and this command is not.
   if (cmd === 'host' && args[0] === 'install') {
-    process.exitCode = runHostInstall(args.slice(1));
+    const installArgs = args.slice(1);
+    const code = runHostInstall(installArgs);
+    // Hand-off (issue #666): after a successful real install, exec the setup wizard
+    // in-process with the flags the operator passed (the same contract install.sh has).
+    // --version is install-only; --dry-run never reaches here (runHostInstall returned
+    // before the hand-off log line, and the gate below guards direct callers anyway).
+    if (code === 0 && !installArgs.includes('--dry-run')) {
+      const setupArgs = installArgs
+        .filter((a) => a === '--non-interactive' || a === '--yes' || a === '-y' || a === '--force')
+        .map((a) => (a === '-y' ? '--yes' : a));
+      runHostSetup(setupArgs)
+        .then((setupCode) => { process.exitCode = setupCode; })
+        .catch((err) => {
+          // The hand-off must fail like a normal CLI command, not as an unhandled
+          // rejection (Copilot round 1 on #669) — mirror main().catch.
+          console.error(err);
+          process.exit(1);
+        });
+      return;
+    }
+    process.exitCode = code;
     return;
   }
   // `host probe` also runs before loadConfig(): the M2 wizard probes an unconfigured host.

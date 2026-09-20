@@ -43,6 +43,9 @@ export interface HostInstallOptions {
   version?: string;
   /** No interactive prompts; answers come from env/flags. */
   nonInteractive: boolean;
+  /** Forwarded to the `mercury host setup` hand-off (#666): skip the harness-binary
+   *  probe validation for machines that will install the harnesses later. */
+  force: boolean;
 }
 
 export interface PrereqResult {
@@ -53,19 +56,20 @@ export interface PrereqResult {
 
 /** Parse `host install` argv into options. Unknown flags are an error. */
 export function parseHostInstallArgs(args: string[]): HostInstallOptions {
-  const opts: HostInstallOptions = { dryRun: false, yes: false, nonInteractive: false };
+  const opts: HostInstallOptions = { dryRun: false, yes: false, nonInteractive: false, force: false };
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     if (a === '--dry-run') opts.dryRun = true;
     else if (a === '--yes' || a === '-y') opts.yes = true;
     else if (a === '--non-interactive') opts.nonInteractive = true;
+    else if (a === '--force') opts.force = true;
     else if (a === '--version') {
       const v = args[i + 1];
       if (!v || v.startsWith('--')) throw new Error('host install: --version needs a value, e.g. --version 0.1.1');
       opts.version = v;
       i += 1;
     } else {
-      throw new Error(`host install: unknown flag '${a}'. Expected --dry-run, --yes, --version <v> or --non-interactive.`);
+      throw new Error(`host install: unknown flag '${a}'. Expected --dry-run, --yes|-y, --version <v>, --non-interactive or --force.`);
     }
   }
   return opts;
@@ -188,6 +192,11 @@ export function runHostInstall(
     return 1;
   }
   logInstall(process.env.XDG_STATE_HOME, { event: 'install-complete', detail: 'prerequisites met' });
-  io.out('\nPrerequisites met. Run `mercury host setup` to configure this host (M3).\n');
+  // Hand-off (issue #666): the docs promise both channels end in `mercury host setup`.
+  // The CLI dispatcher (src/cli.ts) execs the wizard in-process with the propagated
+  // flags right after this returns 0; record that in the log so the trail is complete.
+  const handoffFlags = [opts.nonInteractive ? '--non-interactive' : '', opts.yes ? '--yes' : '', opts.force ? '--force' : ''].filter(Boolean).join(' ');
+  logInstall(process.env.XDG_STATE_HOME, { event: 'hand-off', detail: `mercury host setup ${handoffFlags}`.trimEnd() });
+  io.out('\nPrerequisites met. Handing off to `mercury host setup` (M3: configuration wizard).\n');
   return 0;
 }
