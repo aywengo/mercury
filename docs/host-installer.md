@@ -1,6 +1,6 @@
 # Mercury Host installer
 
-Status: M0–M6 implemented (PRs #628–#638); review 2026-09-19 found the M1, M3, M4, M5 and M6 gates NOT met. #649's fixes are all in (PRs #658–#663: muted-echo token prompts, answers-file key rejection, safe-charset values, honest dry-run + user-scoped prefix + root gate, CI matrix, re-run diff guard). #654's fix is in: the doctor fails on an explicit empty MERCURY_HARNESSES (nothing to smoke-verify) unless `--allow-no-harnesses` is passed. #645 closed the model gap: Fleet is pull, not push, and every wizard variable is now read by the host. #648's fixes are in: the wizard writes `MERCURY_ADMIN_TOKEN` (shown once), and the doctor treats an all-skipped smoke section as a failure; the fresh-VM run that meets the M4 gate is still pending. #647's fixes are in: the wizard probes before prompting, defaults to the healthy set, and refuses too-old/missing harnesses without `--force`. #646's fix is in (PR #655): the confirmation prompt reads `/dev/tty`, never the script stream, and a terminal-less run fails loudly instead of consuming script lines. Every issue from the 2026-09-19 review is closed; the outstanding work is gate verification itself (the fresh-VM run for M4, checksum publishing for M6), tracked in the milestone bullets below.
+Status: M0–M6 implemented; every issue from the 2026-09-19 review plus #645–#650, #654, #665 and #666 is closed (per-issue detail lives in the milestone notes below). Open work is gate verification itself: the fresh-VM run for M4 and checksum publishing for M6.
 
 Fleet is pull, not push (issue #645): Fleet holds a per-host token and calls the host's API (`fleet/child.ts` sends `Authorization` on every request). A host never contacts Fleet, so there is no host-side Fleet URL or host token; the host side of Fleet enrollment is (a) an API token Fleet presents and (b) a bind/port reachable from Fleet.
 
@@ -69,7 +69,7 @@ This document. Done, apart from recording per-harness minimum versions from each
 
 Gate: doc merged; every question in section 3 has an answer or a written reason to defer. Met 2026-09-16.
 
-### M1 — Bootstrap skeleton — ⚠️ implemented, gate open (Docker matrix runs in CI since #649 §5; the fresh-VM/macOS-arm64 run and checksum publishing remain M6)
+### M1 — Bootstrap skeleton — ⚠️ implemented, gate open (Docker matrix runs in CI since #649 §5, and #666's `mercury host setup` hand-off is in; the fresh-VM/macOS-arm64 run and checksum publishing remain M6)
 
 `install.sh`:
 
@@ -105,7 +105,7 @@ Gate: probe results agree with the adapters' own real-binary observations (the s
 - `fake` and declarative local agents are not host harnesses and never appear.
 - Tests: `test/hostProbe.test.ts` (11 tests) — missing binary → `missing`, downgraded → `too-old`, floor satisfied → `ok`, no floor → `unknown`, env cmd override, no-config host, unknown flag rejected (first and after `--json`).
 
-### M3 — Configuration wizard — ⚠️ implemented, gate open (#649 §1–3, §6; #647's probe integration is in)
+### M3 — Configuration wizard — ✅ done (#649 §1–3, §6 via #658–#663; #647's probe integration and #665's bind-address prompt are in; gate verification itself is the M4 fresh-VM run)
 
 Prompts: host name, data dir, workspace dir, GC retention, Atlas on/off, per-harness enable. Each answer maps to a documented `MERCURY_*` variable that the host's config loader reads. Writes `mercury.env` atomically (temp file, validate, rename, 0600), prints a redacted summary. There is no Fleet prompt: Fleet is pull, not push (issue #645, decision 6).
 
