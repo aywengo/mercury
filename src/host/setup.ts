@@ -674,10 +674,11 @@ export async function runHostSetup(
       io.out(`\n${path} already exists and the proposed answers are identical — nothing to change.\n`);
       return 0;
     }
-    io.out(`\n${path} already exists. Proposed changes (secrets redacted):\n`);
+    io.out(`\n${path} already exists. Current state:\n`);
+    printStatus(hostStatus(process.platform, env), io);
+    io.out(`\nProposed changes (secrets redacted):\n`);
     io.out(diff);
-    io.out(`\nPass --yes to confirm.
-`);
+    io.out('\nPass --yes to confirm.\n');
     return 1;
   }
 

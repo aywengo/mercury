@@ -520,6 +520,11 @@ test('envDiff: redacts credentials, marks changes, and returns empty for identic
   assert.ok(d.includes('+ MERCURY_WORKSPACE_RETENTION_MS=604800000'), d);
   assert.ok(!d.includes('MERCURY_HARNESSES'), 'unchanged lines are omitted');
   assert.equal(envDiff(cur, cur), '', 'identical content has no diff');
+  // The atlas token is a credential too, and a removed key shows only the '-' line.
+  const d2 = envDiff('MERCURY_ATLAS_TOKEN=xyz\nMERCURY_ATLAS_PROJECT=p\n', 'MERCURY_ATLAS_PROJECT=p\n');
+  assert.ok(d2.includes('- MERCURY_ATLAS_TOKEN=<redacted, 3 chars>'), d2);
+  assert.ok(!d2.includes('+ MERCURY_ATLAS_TOKEN'), 'removed keys have no + line');
+  assert.ok(!d2.includes('xyz'), 'the atlas token value never appears');
 });
 
 test('re-run with changed answers shows a redacted diff and exits 1 without --yes (#649 §6)', async () => {
