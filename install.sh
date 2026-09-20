@@ -263,7 +263,7 @@ main() {
     exit 1
   fi
   if [ -z "$uid" ]; then
-    echo "install.sh: cannot determine the user id (id not found) — refusing to install; decision 7 requires a non-root, user-scoped run." >&2
+    echo "install.sh: cannot determine the user id (id -u failed or produced no output) — refusing to install; decision 7 requires a non-root, user-scoped run." >&2
     exit 1
   fi
 

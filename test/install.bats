@@ -137,10 +137,8 @@ minimal_path() {
 
 @test "a missing id fails closed (decision 7, #649 §4)" {
   stub_ok_prereqs
-  # minimal_path already restricts PATH; remove any real id by shadowing with a stub that
-  # behaves like a missing binary: the PATH lookup fails when the file does not exist, so
-  # point STUB_BIN/id away by overriding PATH without the dir that has id... simplest:
-  # create an id stub that exits 127 for every call (mimics command-not-found).
+  # `id` is stubbed to exit 127 (command-not-found behavior): `id -u` fails, `uid` ends
+  # up empty, and the gate must refuse rather than assume this is not root.
   stub id 'exit 127'
   run bash "$INSTALL_SH" --dry-run
   [ "$status" -eq 1 ]
