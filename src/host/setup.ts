@@ -238,6 +238,7 @@ export function renderEnv(a: HostSetupAnswers): string {
     ['dataDir', a.dataDir.trim()],
     ['workspaceDir', a.workspaceDir.trim()],
     ['adminToken', a.adminToken.trim()],
+    ...a.harnesses.flatMap((h): [string, string][] => [['harnesses', h]]),
     ...(a.atlasEnabled
       ? ([
           ['atlasUrl', a.atlasUrl.trim()],
