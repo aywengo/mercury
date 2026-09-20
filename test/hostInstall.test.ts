@@ -86,7 +86,7 @@ test('checkPrereqs: returns node, curl and git in that order', () => {
 
 test('buildActionList: dry-run lists every action including the pinned version', () => {
   const prereqs = checkPrereqs();
-  const actions = buildActionList({ dryRun: true, yes: false, nonInteractive: false, version: '0.1.1' }, prereqs);
+  const actions = buildActionList({ dryRun: true, yes: false, nonInteractive: false, force: false, version: '0.1.1' }, prereqs);
   assert.ok(actions.some((a) => a.includes(`verify the running ${PACKAGE_NAME}@0.1.1`)), 'pinned version appears in the action list');
   assert.ok(actions.some((a) => a.includes('install.log')));
   assert.ok(actions.some((a) => a.includes('mercury host setup')));
@@ -112,9 +112,10 @@ test('host install --dry-run prints the action list and touches nothing', async 
 test('host install writes the structured install log, then hands off to the wizard (#666)', async () => {
   const state = tempDir('mercury-install-test-');
   const cfg = tempDir('mercury-install-cfg-');
-  // --non-interactive --yes propagate to the in-process `mercury host setup` hand-off;
-  // MERCURY_HARNESSES gives the wizard a valid non-empty harness answer without a probe.
-  const r = await cli(['host', 'install', '--non-interactive', '--yes'], {
+  // --non-interactive --yes --force propagate to the in-process `mercury host setup`
+  // hand-off; MERCURY_HARNESSES gives the wizard a non-empty harness answer without a
+  // probe, and --force keeps CI containers (no primeagent binary) from failing validation.
+  const r = await cli(['host', 'install', '--non-interactive', '--yes', '--force'], {
     XDG_STATE_HOME: state,
     XDG_CONFIG_HOME: cfg,
     MERCURY_HARNESSES: 'primeagent',

@@ -132,7 +132,7 @@ async function main(): Promise<void> {
     // before the hand-off log line, and the gate below guards direct callers anyway).
     if (code === 0 && !installArgs.includes('--dry-run')) {
       const setupArgs = installArgs
-        .filter((a) => a === '--non-interactive' || a === '--yes' || a === '-y')
+        .filter((a) => a === '--non-interactive' || a === '--yes' || a === '-y' || a === '--force')
         .map((a) => (a === '-y' ? '--yes' : a));
       void runHostSetup(setupArgs).then((setupCode) => { process.exitCode = setupCode; });
       return;
