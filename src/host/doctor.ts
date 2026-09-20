@@ -66,6 +66,9 @@ export function ensureSmokeRepo(env: NodeJS.ProcessEnv = process.env): string {
 
 export interface DoctorResult {
   healthz: { ok: boolean; detail: string };
+  /** Second healthz check against the non-loopback bind address (#665). Undefined when
+   *  MERCURY_BIND_HOST is unset or loopback — there is nothing extra to verify. */
+  bindHealthz?: { address: string; ok: boolean; detail: string };
   smoke: Array<{ harness: string; ok: boolean; detail: string; skipped?: boolean }>;
   /** True when every smoke check was skipped (no API token): the exit code treats it as a failure (#648). */
   allSmokeSkipped: boolean;
@@ -181,6 +184,13 @@ export async function runHostDoctor(
   const apiToken = vars.MERCURY_ADMIN_TOKEN ?? (vars.MERCURY_API_TOKENS ?? '').split(',')[0]?.split(':')[0] ?? '';
 
   const healthz = await checkHealthz(baseUrl);
+  // Issue #665: when the wizard exposed the API on a non-loopback bind address, the
+  // loopback check above can pass while the address Fleet will actually use does not
+  // answer (wrong interface, firewall). Verify BOTH and report both.
+  const bindAddress = vars.MERCURY_BIND_HOST?.trim() ?? '';
+  const bindHealthz = bindAddress && bindAddress !== '127.0.0.1' && bindAddress !== 'loopback'
+    ? { address: bindAddress, ...(await checkHealthz(`http://${bindAddress}:${port}`)) }
+    : undefined;
   const smoke: DoctorResult['smoke'] = [];
   if (apiToken) {
     const smokeRepo = ensureSmokeRepo(env);
@@ -194,11 +204,14 @@ export async function runHostDoctor(
   }
 
   const anySkipped = smoke.length > 0 && smoke.every((s) => s.skipped);
-  const result: DoctorResult = { healthz, smoke, allSmokeSkipped: anySkipped, noHarnesses };
+  const result: DoctorResult = { healthz, bindHealthz, smoke, allSmokeSkipped: anySkipped, noHarnesses };
   if (json) {
     io.out(JSON.stringify(result, null, 2) + '\n');
   } else {
     io.out(`healthz: ${healthz.ok ? 'PASS' : 'FAIL'} — ${healthz.detail}\n`);
+    if (bindHealthz) {
+      io.out(`healthz (bind ${bindHealthz.address}): ${bindHealthz.ok ? 'PASS' : 'FAIL'} — ${bindHealthz.detail}\n`);
+    }
     for (const s of smoke) {
       io.out(`smoke ${s.harness}: ${s.ok ? 'PASS' : 'FAIL'} — ${s.detail}\n`);
     }
@@ -225,6 +238,6 @@ export async function runHostDoctor(
   // skipped" verifies nothing while reading as success. Partial skips still pass.
   // The same class for #654: an empty MERCURY_HARNESSES verifies nothing by
   // configuration. It fails unless --allow-no-harnesses says the host runs none.
-  const allOk = healthz.ok && smoke.every((s) => s.ok || s.skipped) && !anySkipped && !(noHarnesses && !allowNoHarnesses);
+  const allOk = healthz.ok && (bindHealthz ? bindHealthz.ok : true) && smoke.every((s) => s.ok || s.skipped) && !anySkipped && !(noHarnesses && !allowNoHarnesses);
   return allOk ? 0 : 1;
 }

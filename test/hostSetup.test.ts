@@ -65,6 +65,7 @@ function answers(over: Partial<HostSetupAnswers> = {}): HostSetupAnswers {
     atlasUrl: '',
     atlasToken: '',
     atlasProject: '',
+    bindHost: '',
     harnesses: ['primeagent', 'hermes'],
     ...over,
   };
@@ -301,6 +302,54 @@ test('renderEnv: Atlas on adds the Atlas lines', () => {
   assert.ok(env.includes('MERCURY_ATLAS_URL=https://atlas.example.com'));
   assert.ok(env.includes('MERCURY_ATLAS_TOKEN=at'));
   assert.ok(env.includes('MERCURY_ATLAS_PROJECT=proj'));
+});
+
+test('renderEnv: MERCURY_BIND_HOST emitted only when the operator exposes the API (#665)', () => {
+  const loopback = renderEnv(answers({ adminToken: 'a'.repeat(64), bindHost: '' }));
+  assert.ok(!loopback.includes('MERCURY_BIND_HOST'), 'the secure default must stay in src/config.ts, not the file');
+  const exposed = renderEnv(answers({ adminToken: 'a'.repeat(64), bindHost: '0.0.0.0' }));
+  assert.ok(exposed.includes('MERCURY_BIND_HOST=0.0.0.0'), exposed);
+  const addr = renderEnv(answers({ adminToken: 'a'.repeat(64), bindHost: '192.168.1.10' }));
+  assert.ok(addr.includes('MERCURY_BIND_HOST=192.168.1.10'), addr);
+});
+
+test('validateAnswer: bindHost accepts loopback/0.0.0.0/addresses, rejects junk (#665)', () => {
+  assert.equal(validateAnswer('bindHost', ''), null);
+  assert.equal(validateAnswer('bindHost', 'loopback'), null);
+  assert.equal(validateAnswer('bindHost', '0.0.0.0'), null);
+  assert.equal(validateAnswer('bindHost', 'mercury.example.com'), null);
+  assert.ok(validateAnswer('bindHost', '0.0.0.0; rm -rf')!.includes('bind host'), 'shell metacharacters rejected');
+  assert.ok(validateAnswer('bindHost', '0 0 0 0')!.includes('bind host'), 'spaces rejected');
+});
+
+test('hand-off block: loopback says Fleet cannot reach it; exposed prints the real URL + TLS warning (#665)', async () => {
+  // Loopback case: the wizard generates a token but must NOT print a URL Fleet cannot use.
+  const dirLoop = tempDir('setup-bind-loop-');
+  const outLoop: string[] = [];
+  const codeLoop = await runHostSetup([], {
+    out: (s) => outLoop.push(s), err: () => {},
+    question: async () => '', probe: async () => probeOf(['primeagent', 'ok']),
+  }, { XDG_CONFIG_HOME: dirLoop });
+  assert.equal(codeLoop, 0);
+  const textLoop = outLoop.join('');
+  assert.ok(textLoop.includes('Fleet cannot reach it'), textLoop);
+  assert.ok(!textLoop.includes('host API base URL'), 'no unreachable URL may be printed');
+  assert.ok(textLoop.includes('MERCURY_TLS_CERT') === false, 'no TLS warning when bound to loopback');
+});
+
+test('a generated token still appears once when the API is exposed (#665)', async () => {
+  const dir = tempDir('setup-bind-exposed-');
+  const out: string[] = [];
+  const code = await runHostSetup([], {
+    out: (s) => out.push(s), err: () => {},
+    question: async () => '', probe: async () => probeOf(['primeagent', 'ok']),
+  }, { XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0);
+  const text = out.join('');
+  const tokens = text.match(/host API token:\s+([0-9a-f]{64})/) ?? [];
+  assert.ok(tokens[1], 'token shown');
+  const occurrences = out.filter((l) => l.includes(tokens[1]!)).length;
+  assert.equal(occurrences, 1);
 });
 
 test('WIZARD_VARIABLES: every emitted name is documented AND read by the host (design decision 10, issue #645)', () => {

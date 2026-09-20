@@ -217,6 +217,47 @@ test('runHostDoctor: a token turns skips into real smoke Runs (#648)', async () 
 
 // ---------- the empty-harness-list gate (#654) ----------
 
+test('runHostDoctor: a non-loopback MERCURY_BIND_HOST gets its own healthz check (#665)', async () => {
+  const m = await mockServer();
+  const dir = tempDir('doctor-bind-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  // 'localhost' is not in the loopback skip list: it is exactly the kind of address an
+  // operator might set (it answers here, but Fleet on another machine cannot use it).
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=primeagent\nMERCURY_ADMIN_TOKEN=tok-doctor-1\nMERCURY_BIND_HOST=localhost\n`);
+  try {
+    const out: string[] = [];
+    const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    assert.equal(code, 0, 'localhost resolves to the same mock server, so both checks pass');
+    const text = out.join('');
+    assert.ok(text.includes('healthz (bind localhost)'), `the second check must be reported: ${text}`);
+    // The JSON shape carries it too.
+    const outJson: string[] = [];
+    await runHostDoctor(['--json'], { out: (s) => outJson.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    const parsed = JSON.parse(outJson.join('')) as { bindHealthz?: { address: string; ok: boolean } };
+    assert.equal(parsed.bindHealthz?.address, 'localhost');
+    assert.equal(parsed.bindHealthz?.ok, true);
+  } finally {
+    await m.close();
+  }
+});
+
+test('runHostDoctor: no bind check when MERCURY_BIND_HOST is unset or loopback (#665)', async () => {
+  const m = await mockServer();
+  const dir = tempDir('doctor-bind-skip-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=primeagent\nMERCURY_ADMIN_TOKEN=tok-doctor-1\n`);
+  try {
+    const out: string[] = [];
+    const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    assert.equal(code, 0);
+    assert.ok(!out.join('').includes('healthz (bind'), 'no second check without a bind address');
+  } finally {
+    await m.close();
+  }
+});
+
 test('runHostDoctor: an empty MERCURY_HARNESSES is a failure, not a vacuous pass (#654)', async () => {
   const m = await mockServer();
   const dir = tempDir('doctor-emptyharness-');
