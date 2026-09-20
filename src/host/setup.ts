@@ -36,7 +36,7 @@
 import { createInterface } from 'node:readline';
 import { randomBytes } from 'node:crypto';
 import { hostStatus, printStatus } from './lifecycle.ts';
-import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
@@ -570,6 +570,19 @@ export async function runSetupProbe(env: NodeJS.ProcessEnv = process.env): Promi
   return Promise.all(harnessSpecs(env).map(probeHarness));
 }
 
+/** True when a controlling terminal can be opened, even if stdin is a pipe (`curl | bash`,
+ *  issue #671). The install.sh hand-off normally redirects stdin from /dev/tty itself; this
+ *  covers direct `mercury host setup` invocations from a piped/odd stdin. */
+function ttyAvailable(): boolean {
+  try {
+    const fd = openSync('/dev/tty', 'r');
+    closeSync(fd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Run the wizard. Returns the process exit code. */
 export async function runHostSetup(
   args: string[],
@@ -635,8 +648,15 @@ export async function runHostSetup(
     if (io.question) {
       question = io.question;
       answers = await promptAnswers({ question, secretQuestion: io.secretQuestion }, env, probe);
-    } else if (process.stdin.isTTY) {
-      const rl = createInterface({ input: process.stdin, output: process.stdout });
+    } else if (process.stdin.isTTY || ttyAvailable()) {
+      // TTY stdin, or a controlling terminal behind a pipe (`curl | bash`, #671): the
+      // prompts must reach the operator, not the exhausted script stream. /dev/tty is
+      // opened for INPUT; output still goes to stdout.
+      // A controlling terminal can exist behind a pipe (`curl | bash`, #671): prompts
+      // read /dev/tty, never the exhausted script stream.
+      const ttyInput = process.stdin.isTTY ? null : createReadStream('', { fd: openSync('/dev/tty', 'r') });
+      const input = ttyInput ?? process.stdin;
+      const rl = createInterface({ input, output: process.stdout });
       question = (q) => new Promise<string>((res) => rl.question(q, res));
       // Muted echo for secrets (issue #649 §1, decision 6). readline redraws the line as
       // "<prompt><typed input>" on keypresses, so a startsWith(prompt) filter would leak
@@ -665,9 +685,19 @@ export async function runHostSetup(
           }),
         );
       };
-      answers = await promptAnswers({ question, secretQuestion }, env, probe);
-      rl.close();
+      try {
+        answers = await promptAnswers({ question, secretQuestion }, env, probe);
+      } finally {
+        // The /dev/tty stream (when we opened it) must be released even when prompting
+        // throws — a leaked fd keeps the tty open after the process should be done
+        // (Copilot review on #675).
+        rl.close();
+        if (ttyInput) ttyInput.close();
+      }
     } else {
+      // Last resort: genuinely scripted/test input via piped stdin. Reached only when
+      // stdin is not a TTY AND no controlling terminal exists (#671), so the
+      // empty-buffer-makes-everything-default hazard cannot hit a real install.
       const lines = readFileSync(0, 'utf8').split('\n');
       let i = 0;
       question = async () => lines[i++] ?? '';

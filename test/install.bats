@@ -211,7 +211,7 @@ minimal_path() {
   stub npm 'mkdir -p "$HOME/.local/bin"; printf "#!/bin/sh\necho \"mercury \$@\" >>\"$TEST_DIR/mercury-calls.txt\"; exit 0\n" >"$HOME/.local/bin/mercury"; chmod +x "$HOME/.local/bin/mercury"; exit 0'
   stub mercury 'exit 0'
   stub date 'echo 2026-09-18T00:00:00Z'
-  run bash "$INSTALL_SH" --yes
+  run bash "$INSTALL_SH" --non-interactive --yes
   [ "$status" -eq 0 ]
 }
 
@@ -259,12 +259,12 @@ minimal_path() {
 
 @test "--yes skips the prompt, installs, and hands off with the flag propagated (#666)" {
   stub_ok_prereqs
-  run bash "$INSTALL_SH" --yes
+  run bash "$INSTALL_SH" --non-interactive --yes
   [ "$status" -eq 0 ]
   [[ "$output" == *"Mercury host installed. Handing off"* ]]
   [ -f "$TEST_DIR/npm-calls.txt" ]
   [ -f "$TEST_DIR/mercury-calls.txt" ]
-  grep -q "mercury host setup --yes" "$TEST_DIR/mercury-calls.txt"
+  grep -q "mercury host setup --non-interactive --yes" "$TEST_DIR/mercury-calls.txt"
 }
 
 @test "--non-interactive skips the prompt and propagates to the wizard (#666)" {
@@ -300,10 +300,58 @@ minimal_path() {
     chmod +x "$TEST_DIR/custom-prefix/bin/mercury"
     echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; exit 0 ;; esac'
   mkdir -p "$TEST_DIR/custom-prefix"
-  run bash "$INSTALL_SH" --yes
+  run bash "$INSTALL_SH" --non-interactive --yes
   [ "$status" -eq 0 ]
-  grep -q "mercury host setup --yes" "$TEST_DIR/mercury-calls.txt"
+  grep -q "mercury host setup --non-interactive --yes" "$TEST_DIR/mercury-calls.txt"
   [[ "$output" == *"Handing off"* ]]
+}
+
+@test "piped interactive run refuses the hand-off instead of silently defaulting every answer (#671)" {
+  # The refusal is only correct when no controlling terminal exists. From a real terminal
+  # (an interactive bats session) /dev/tty opens and the installer correctly redirects the
+  # hand-off to it instead — skip rather than assert the wrong behavior (Copilot round 1).
+  if (exec 3</dev/tty) 2>/dev/null; then
+    skip "/dev/tty available: the hand-off would correctly use the terminal, not refuse"
+  fi
+  stub_ok_prereqs
+  # curl | bash with no --yes/--non-interactive and NO terminal: the confirmation gate would
+  # refuse before the install; --yes passes the gate but the HAND-OFF must then refuse too
+  # (stdin is the exhausted pipe; the wizard would default every answer silently).
+  stub mercury 'echo "mercury MUST-NOT-RUN $@" >>"$TEST_DIR/mercury-calls.txt"; exit 0'
+  run bash -c "cat '$INSTALL_SH' | bash -s -- --yes"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no terminal to run"* ]]
+  [[ "$output" == *"--non-interactive"* ]]
+  [ ! -f "$TEST_DIR/mercury-calls.txt" ]
+  grep -q '"event":"install-failed"' "$XDG_STATE_HOME/mercury/install.log"
+}
+
+@test "piped --non-interactive run still hands off — answers are stdin-independent (#671)" {
+  stub_ok_prereqs
+  run bash -c "cat '$INSTALL_SH' | bash -s -- --non-interactive --yes"
+  [ "$status" -eq 0 ]
+  grep -q "mercury host setup --non-interactive --yes" "$TEST_DIR/mercury-calls.txt"
+}
+
+@test "a pty hand-off gives the wizard /dev/tty on stdin, not the script stream (#671)" {
+  if ! command -v script >/dev/null 2>&1; then
+    skip "script(1) not available"
+  fi
+  stub_ok_prereqs
+  # The binary the hand-off resolves ($HOME/.local/bin/mercury in this sandbox) records
+  # whether fd 0 is a TTY when invoked: the script must redirect the wizard's stdin from
+  # /dev/tty in the interactive case (the piped script is exhausted).
+  stub npm 'echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; mkdir -p "$HOME/.local/bin"; printf "#!/bin/sh\nif [ -t 0 ]; then echo TTY >>\"$TEST_DIR/mercury-calls.txt\"; else echo NOTTY >>\"$TEST_DIR/mercury-calls.txt\"; fi\nexit 0\n" >"$HOME/.local/bin/mercury"; chmod +x "$HOME/.local/bin/mercury"; exit 0'
+  # Faithful curl | bash shape (#646 harness): stdin is a FIFO carrying the script text,
+  # so fd 0 is a pipe, not a terminal; the pty carries the confirmation answer.
+  cat "$INSTALL_SH" > "$TEST_DIR/fake-curl.txt"
+  printf '#!/bin/sh\nprintf "y\\n" > /dev/tty\nmkfifo "$FAKE_PIPE"\ncat "$FAKE_CURL" > "$FAKE_PIPE" &\nexec bash -s -- --yes < "$FAKE_PIPE"\n' > "$TEST_DIR/piped-driver.sh"
+  chmod +x "$TEST_DIR/piped-driver.sh"
+  export FAKE_CURL="$TEST_DIR/fake-curl.txt"
+  export FAKE_PIPE="$TEST_DIR/fake-curl-pipe"
+  run run_under_pty "$TEST_DIR/piped-driver.sh"
+  [ "$status" -eq 0 ]
+  grep -q "TTY" "$TEST_DIR/mercury-calls.txt"
 }
 
 @test "the wizard's exit code becomes the script's exit code (#666)" {
@@ -311,7 +359,7 @@ minimal_path() {
   # In the fallback-prefix sandbox the hand-off resolves $HOME/.local/bin/mercury (the file
   # the npm stub "installed"), not the PATH stub — override THAT file's behavior.
   stub npm 'echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; mkdir -p "$HOME/.local/bin"; printf "#!/bin/sh\nexit 7\n" >"$HOME/.local/bin/mercury"; chmod +x "$HOME/.local/bin/mercury"; exit 0'
-  run bash "$INSTALL_SH" --yes
+  run bash "$INSTALL_SH" --non-interactive --yes
   [ "$status" -eq 7 ]
 }
 # --- confirmation input source (#646) ---------------------------------------
@@ -418,7 +466,7 @@ minimal_path() {
     echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; exit 0 ;; esac'
   mkdir -p "$TEST_DIR/readonly-prefix" "$TEST_DIR/state/mercury"
   chmod 555 "$TEST_DIR/readonly-prefix"
-  run bash "$INSTALL_SH" --yes --version 0.1.1
+  run bash "$INSTALL_SH" --non-interactive --yes --version 0.1.1
   [ "$status" -eq 0 ]
   grep -q -- "--prefix" "$TEST_DIR/npm-calls.txt"
   grep -q "$HOME/.local" "$TEST_DIR/npm-calls.txt"
@@ -432,7 +480,7 @@ minimal_path() {
   # npm reports a prefix inside TEST_DIR, which the stub setup made writable.
   stub npm 'case "$1" in prefix) echo "$TEST_DIR/writable-prefix" ;; *) echo "npm $@" >>"$TEST_DIR/npm-calls.txt"; exit 0 ;; esac'
   mkdir -p "$TEST_DIR/writable-prefix"
-  run bash "$INSTALL_SH" --yes --version 0.1.1
+  run bash "$INSTALL_SH" --non-interactive --yes --version 0.1.1
   [ "$status" -eq 0 ]
   ! grep -q -- "--prefix" "$TEST_DIR/npm-calls.txt"
 }
@@ -448,7 +496,7 @@ minimal_path() {
 
 @test "npm receives the pinned version" {
   stub_ok_prereqs
-  run bash "$INSTALL_SH" --yes --version 0.1.1
+  run bash "$INSTALL_SH" --non-interactive --yes --version 0.1.1
   [ "$status" -eq 0 ]
   grep -q "@aywengo/mercury@0.1.1" "$TEST_DIR/npm-calls.txt"
 }
@@ -457,7 +505,7 @@ minimal_path() {
 
 @test "a successful install writes start and complete log lines" {
   stub_ok_prereqs
-  run bash "$INSTALL_SH" --yes
+  run bash "$INSTALL_SH" --non-interactive --yes
   [ "$status" -eq 0 ]
   [ -f "$XDG_STATE_HOME/mercury/install.log" ]
   grep -q '"event":"install-start"' "$XDG_STATE_HOME/mercury/install.log"
@@ -492,7 +540,7 @@ minimal_path() {
 
 @test "log lines are valid JSON" {
   stub_ok_prereqs
-  run bash "$INSTALL_SH" --yes
+  run bash "$INSTALL_SH" --non-interactive --yes
   [ "$status" -eq 0 ]
   # Every line must parse as JSON. Node is the suite's baseline runtime (CI installs it
   # on every matrix entry, including containers that ship no python3, #649 §5).

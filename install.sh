@@ -425,6 +425,18 @@ main() {
     log_line "install-failed" "mercury binary not found after install"
     exit 1
   fi
+  # The hand-off must never run the wizard against the piped script (#671): in the
+  # `curl | bash` channel stdin IS the (by now exhausted) script, and the wizard's non-TTY
+  # path would answer every prompt with '' — a config nobody chose. Non-interactive mode
+  # (env/answers-file) is stdin-independent; interactive mode needs a real terminal.
+  if [ "$NON_INTERACTIVE" != "1" ]; then
+    if ! [ -t 0 ] && ! (exec 3</dev/tty) 2>/dev/null; then
+      echo "install.sh: no terminal to run \`mercury host setup\` interactively and --non-interactive was not passed." >&2
+      echo "install.sh: re-run with --non-interactive (answers from env/flags) or from a terminal; the install itself succeeded." >&2
+      log_line "install-failed" "no tty for the setup hand-off; --non-interactive required"
+      exit 1
+    fi
+  fi
   echo
   echo "Mercury host installed. Handing off to \`mercury host setup\` ..."
   echo "(M3: configuration wizard — admin/API token, Atlas, harnesses.)"
@@ -438,8 +450,14 @@ main() {
   fi
   # exec, not spawn: the script's job is done and the wizard's exit code must be the
   # script's exit code (the piped-`curl | bash` exit contract, issue #650).
+  # stdin: interactive prompts read /dev/tty, never the piped script (#671 — the same rule
+  # the confirmation prompt follows, #646). Non-interactive runs do not read stdin at all.
   # shellcheck disable=SC2086  # handoff_flags is intentionally word-split
-  exec "$mercury_bin" host setup $handoff_flags
+  if [ "$NON_INTERACTIVE" = "1" ]; then
+    exec "$mercury_bin" host setup $handoff_flags
+  else
+    exec "$mercury_bin" host setup $handoff_flags </dev/tty
+  fi
 }
 
 main "$@"
