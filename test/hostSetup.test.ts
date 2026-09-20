@@ -149,6 +149,59 @@ test('runHostSetup generates MERCURY_ADMIN_TOKEN and prints it exactly once (#64
   assert.equal(occurrences, 1);
 });
 
+test('re-run with a rotated token prints updated-not-shown, never the value (#676 round 1)', async () => {
+  const dir = tempDir('setup-rerun-rotate-');
+  const cfg = join(dir, 'cfg');
+  const first = await runHostSetup(['--non-interactive', '--yes'], {
+    out: () => {}, err: () => {},
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: cfg, MERCURY_HARNESSES: 'primeagent' });
+  assert.equal(first, 0);
+  const oldToken = readFileSync(envFilePath({ XDG_CONFIG_HOME: cfg }), 'utf8').match(/MERCURY_ADMIN_TOKEN=([0-9a-f]{64})/)![1];
+
+  const out: string[] = [];
+  const newToken = 'b'.repeat(64);
+  const qs = ['host-a', join(dir, 'data'), join(dir, 'ws'), '7', newToken, 'no', 'primeagent'];
+  let i = 0;
+  const second = await runHostSetup(['--yes'], {
+    out: (s) => out.push(s), err: () => {},
+    question: async () => qs[i++] ?? '',
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: cfg });
+  assert.equal(second, 0);
+  const text = out.join('');
+  assert.ok(text.includes('host API token:    updated (not shown'), text);
+  assert.ok(!text.includes(oldToken) && !text.includes(newToken), 'neither token value may print');
+  assert.ok(readFileSync(envFilePath({ XDG_CONFIG_HOME: cfg }), 'utf8').includes(`MERCURY_ADMIN_TOKEN=${newToken}`));
+});
+
+test('re-run with an existing token and a newly-set bind still prints the Fleet URL (#672)', async () => {
+  // First run: loopback default (the block advises re-running with a bind address).
+  const dir = tempDir('setup-rerun-bind-');
+  const cfg = join(dir, 'cfg');
+  const first = await runHostSetup(['--non-interactive', '--yes'], {
+    out: () => {}, err: () => {},
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: cfg, MERCURY_HARNESSES: 'primeagent' });
+  assert.equal(first, 0);
+  const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: cfg }), 'utf8');
+  const existingToken = file.match(/MERCURY_ADMIN_TOKEN=([0-9a-f]{64})/)![1];
+
+  // Re-run with --yes and a newly-set non-loopback bind: the token is preserved, so the
+  // old generatedToken gate would have skipped the URL entirely (#672). The wizard must
+  // still print the registration URL, and must NOT print a fresh token.
+  const out: string[] = [];
+  const qs = ['host-a', join(dir, 'data'), join(dir, 'ws'), '7', '', 'no', 'primeagent', '0.0.0.0'];
+  let i = 0;
+  const second = await runHostSetup(['--yes'], {
+    out: (s) => out.push(s), err: () => {},
+    question: async () => qs[i++] ?? '',
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: cfg });
+  assert.equal(second, 0);
+  const text = out.join('');
+  assert.ok(text.includes('host API base URL: http://<this-host>:'), `the URL must print on a re-run: ${text}`);
+  assert.ok(text.includes('host API token:    unchanged'), `the token line must say unchanged: ${text}`);
+  assert.ok(!text.includes(existingToken), 'the stored token must not be re-printed');
+  assert.ok(readFileSync(envFilePath({ XDG_CONFIG_HOME: cfg }), 'utf8').includes('MERCURY_BIND_HOST=0.0.0.0'));
+});
+
 test('interactive re-run masks the existing token in the prompt (#648 review)', async () => {
   const dir = tempDir('setup-mask-');
   const qs = ['host-a', join(dir, 'data'), join(dir, 'ws'), '7', '', 'no', 'primeagent'];

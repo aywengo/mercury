@@ -777,16 +777,29 @@ export async function runHostSetup(
   io.out('mercury host setup\n');
   io.out(redactedSummary(answers) + '\n');
   io.out(`\nWrote ${path} (mode 0600). Start the host with \`mercury host doctor\` (M4).\n`);
-  if (generatedToken) {
-    // The one place the generated token is shown (#648, decision 6): Fleet presents it
-    // as a Bearer token to the host API, so the operator registers exactly this value
-    // on the Fleet side. It is in the 0600 file afterwards and never printed again.
+  // The Fleet hand-off is the wizard's output contract on EVERY successful write, not
+  // only when a token is generated (#672): the loopback branch advises re-running with a
+  // bind address, and that re-run (token preserved since #648) must still print the URL
+  // the operator came for.
+  {
     // The port is the one the doctor will use — the env file's, not this shell's (#648 review).
     const port = loadEnvFile(path).MERCURY_PORT ?? '3000';
     const written = loadEnvFile(path);
     const scheme = schemeFor(written);
-    io.out('\nRegister on the Fleet side (shown once, not again):\n');
-    io.out(`  host API token:    ${answers.adminToken}\n`);
+    io.out('\nRegister on the Fleet side:\n');
+    if (generatedToken) {
+      // The one place the generated token is shown (#648, decision 6): Fleet presents it
+      // as a Bearer token to the host API, so the operator registers exactly this value
+      // on the Fleet side. It is in the 0600 file afterwards and never printed again.
+      io.out(`  host API token:    ${answers.adminToken}\n`);
+    } else if (existingVars.MERCURY_ADMIN_TOKEN === answers.adminToken) {
+      io.out('  host API token:    unchanged (already registered on the Fleet side)\n');
+    } else {
+      // Rotated interactively (a new value was typed) or supplied for the first time:
+      // never display it (#648 decision 6), but do not claim it is unchanged
+      // (Copilot review on #676).
+      io.out('  host API token:    updated (not shown; register the new value on the Fleet side)\n');
+    }
     // Fleet reachability (issue #665): with the secure default the API answers only from
     // the host itself, so a URL would register a host that never comes up. Say so, and
     // name the TLS variables — this exposes an admin-token API over plain http.
