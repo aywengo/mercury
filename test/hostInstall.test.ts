@@ -109,10 +109,17 @@ test('host install --dry-run prints the action list and touches nothing', async 
     '--dry-run must not write the install log');
 });
 
-test('host install writes the structured install log', async () => {
+test('host install writes the structured install log, then hands off to the wizard (#666)', async () => {
   const state = tempDir('mercury-install-test-');
-  const r = await cli(['host', 'install'], { XDG_STATE_HOME: state });
-  assert.equal(r.code, 0, r.stderr);
+  const cfg = tempDir('mercury-install-cfg-');
+  // --non-interactive --yes propagate to the in-process `mercury host setup` hand-off;
+  // MERCURY_HARNESSES gives the wizard a valid non-empty harness answer without a probe.
+  const r = await cli(['host', 'install', '--non-interactive', '--yes'], {
+    XDG_STATE_HOME: state,
+    XDG_CONFIG_HOME: cfg,
+    MERCURY_HARNESSES: 'primeagent',
+  });
+  assert.equal(r.code, 0, r.stderr + r.stdout);
   const logPath = join(state, 'mercury', 'install.log');
   assert.equal(existsSync(logPath), true, 'a real run must write the install log');
   const lines = readFileSync(logPath, 'utf8').trim().split('\n');
@@ -122,8 +129,9 @@ test('host install writes the structured install log', async () => {
   // One line per action, per the module contract.
   const actions = lines.filter((l) => JSON.parse(l).event === 'action');
   assert.ok(actions.length >= 4, 'the log must record one line per action');
-  const last = JSON.parse(lines[lines.length - 1]!);
-  assert.equal(last.event, 'install-complete');
+  // The hand-off is logged and the wizard actually ran: the config exists afterwards.
+  assert.ok(lines.some((l) => JSON.parse(l).event === 'hand-off'), 'the hand-off must be logged');
+  assert.equal(existsSync(join(cfg, 'mercury', 'mercury.env')), true, 'the wizard wrote the host config');
 });
 
 test('host install with an unknown flag exits 1 with a message', async () => {

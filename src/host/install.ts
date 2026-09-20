@@ -188,6 +188,11 @@ export function runHostInstall(
     return 1;
   }
   logInstall(process.env.XDG_STATE_HOME, { event: 'install-complete', detail: 'prerequisites met' });
-  io.out('\nPrerequisites met. Run `mercury host setup` to configure this host (M3).\n');
+  // Hand-off (issue #666): the docs promise both channels end in `mercury host setup`.
+  // The CLI dispatcher (src/cli.ts) execs the wizard in-process with the propagated
+  // flags right after this returns 0; record that in the log so the trail is complete.
+  const handoffFlags = [opts.nonInteractive ? '--non-interactive' : '', opts.yes ? '--yes' : ''].filter(Boolean).join(' ');
+  logInstall(process.env.XDG_STATE_HOME, { event: 'hand-off', detail: `mercury host setup ${handoffFlags}`.trimEnd() });
+  io.out('\nPrerequisites met. Handing off to `mercury host setup` (M3: configuration wizard).\n');
   return 0;
 }
