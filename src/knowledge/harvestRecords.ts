@@ -23,9 +23,9 @@ import type { NoteContribution } from './types.ts';
 
 export interface HarvestRecordsInput {
   workspacePath: string;
-  /** The base commit the workspace branched from. Undefined in copy mode: no git, no delta, and
-   *  that is a skip rather than an error (§9.4). `setWorkspace` pins it only in git-worktree mode,
-   *  so its absence is the mode signal. */
+  /** The base commit the workspace branched from. Copy mode is a skip, signalled either by
+   *  `undefined` or by the workspace layer's `'copy'` sentinel (`createCopy` pins it) — both mean
+   *  no git, no delta, and a skip rather than an error (§9.4). */
   baseCommit: string | undefined;
   bounds: KnowledgeBounds;
   /** How many notes tier 1 already accepted; records share the same per-Run cap. */
@@ -104,16 +104,20 @@ export async function harvestRecords(input: HarvestRecordsInput): Promise<Harves
     const path = m[2]!.trim();
     result.recordsSeen += 1;
 
+    // Both step-level conditions collapse into ONE summary rejection and stop the scan, the way
+    // `harvestNotes` collapses its over-cap remainder: the worker emits one `knowledge.rejected`
+    // per rejection, and a large diff hitting the deadline would otherwise bury the real signal
+    // under identical events.
     if (now() - startedAt > input.bounds.harvestTimeoutMs) {
       result.failed = true;
-      result.rejected.push({ path, reason: 'harvest-timeout' });
-      continue;
+      result.rejected.push({ path: '', reason: 'harvest-timeout', detail: `deadline reached with ${result.recordsSeen} record(s) scanned` });
+      break;
     }
 
     const budget = input.bounds.maxNotesPerRun - input.notesAccepted - result.accepted.length;
     if (budget <= 0) {
-      result.rejected.push({ path, reason: 'over-limit', detail: `per-Run cap ${input.bounds.maxNotesPerRun} reached` });
-      continue;
+      result.rejected.push({ path: '', reason: 'over-limit', detail: `per-Run cap ${input.bounds.maxNotesPerRun} reached; remaining records dropped` });
+      break;
     }
 
     let text: string;
