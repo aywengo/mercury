@@ -536,7 +536,7 @@ function sessionContext(session: Session): RunContext {
  * without one it is byte-identical to what it has always said. Exported for the snapshot test.
  */
 export function buildResumePrompt(context: RunContext): string {
-  const base = 'Continue the task from where you left off. Read .mercury-context.json for the original task and constraints.';
+  const base = `Continue the task from where you left off. Read ${CONTEXT_FILE} for the original task and constraints.`;
   return context.knowledge ? `${base} ${knowledgeLine()}` : base;
 }
 
