@@ -329,7 +329,9 @@ function highestObservedPhase(text: string): number {
   const s16 = text.slice(from, to);
   // Phase entries look like "4. **Auto-promotion -- observed.**" or "3b. ... -- observed."
   let highest = -1;
-  for (const m of s16.matchAll(/^\d+b?\. \*\*[^*]*?(?:--|—)\s*(?:observed|proven)\b/gm)) {
+  // Optional leading whitespace: sub-phase entries (3b.) and any future reformatted entry may be
+  // indented inside the numbered list; anchoring at column 0 would silently miss them.
+  for (const m of s16.matchAll(/^\s*\d+b?\. \*\*[^*]*?(?:--|—)\s*(?:observed|proven)\b/gm)) {
     const n = parseInt(m[0], 10);
     if (n > highest) highest = n;
   }
