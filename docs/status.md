@@ -212,6 +212,13 @@ Live and covered by tests:
   elsewhere); and `flush` drains the outbox to Atlas in one synchronous pass rather than waiting for
   the pusher's timer, and refuses with an explanation when no Atlas is configured;
 - retired-row retention on the host (`MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS`).
+- the **Fleet reader** (#615): `GET /fleet/knowledge` and the `fleet knowledge` CLI, counts
+  only — Fleet can see per-project knowledge health without ever receiving note bodies. Two
+  tokens are involved and they are different: the endpoint answers any authenticated Fleet
+  caller (`401` without a caller token — it is not public), and Fleet itself queries Atlas with
+  an Atlas **reader** token (`FLEET_ATLAS_TOKEN`), which can count notes but can never read one.
+  When Atlas is down the endpoint still answers an authenticated caller, `200` with a body that
+  says so, because decoration failing must not look like Fleet failing;
 - a **soft** placement signal in Fleet (`FLEET_KNOWLEDGE_STALE_MS`, off by default): a host whose
   knowledge replica is older than the threshold ranks below a fresher one, and the decision is
   returned and logged when it changes the outcome. It never excludes a host. That is the whole
@@ -225,17 +232,24 @@ host reaches a Run on another host, and a real model there acts on it. `test/kno
 proves the transport against a real Atlas process, and #589 observed the read path on real harnesses
 (`run_933c68e4684a498d` with a control at `run_d0f4dc05a8f44a1d`, Hermes at `run_8d8cfc92f22b4fcf`).
 
-The other direction is built and tested but **has not been seen from a real agent**: the harvest accepts
-a note written to `.mercury/notes.jsonl`, and the test that closes the loop uses a scripted writer. In
-the same pass a PrimeAgent Run told explicitly to record a durable fact finished without writing one
-(`run_e8fe5f095b38438b`). So "a Run can write a note" is true of the pipe and unproven of the agent, and
-that distinction decides Phase 4 -- auto-promotion corroborates tier-1 notes, and with no real author
-there is nothing for it to promote.
+The other direction was built and tested but unproven of a real agent; that is now observed. (Was
+"has not been seen from a real agent", citing `run_e8fe5f095b38438b` — a PrimeAgent Run told to
+record a durable fact that finished without writing one. Hermes Agent v0.21.2 then wrote a note on
+a real Run (`run_0826c0e5e4ee4f6c`, host `obs-host`): it verified the claim against the live tree,
+appended one JSON line to `.mercury/notes.jsonl`, and the worker harvested and pushed it
+(`accepted: 1` both hops). The earlier negative result stands as the control — the same task shape
+produced no note when the agent was not told to record one — and Phase 4 went further: tier-1
+candidates written by real agents were auto-promoted across `obs-host`/`obs-host-b`
+(`run_4acabb39e38c4c7d` and three corroborating Runs).)
 
 Rendering is built for PrimeAgent (`--skill`), Hermes (generated `AGENTS.md`) and Claude Code
 (generated `CLAUDE.md`, falling back to a pointer line in the stdin task text when the repository tracks
-one). The RPC adapters get the `.mercury-context.json` pointer and a prompt line; everything else gets
-only the neutral files. **Only the PrimeAgent and Hermes channels have been seen on a real Run** -- the
+one). The RPC adapters get the `.mercury-context.json` pointer plus prompt lines telling the agent to
+read the context file and `.agents/skills/`; everything else gets only the neutral files.
+(Pending #687: the *knowledge* line specifically — `buildPrompt()` in
+`src/adapters/rpcAgentAdapter.ts` names the context file and the skills directory but does not
+yet tell the agent to follow the `knowledge` block the context file carries to the pack file.
+#687 adds that one line, to both the initial and the resume prompt.) **Only the PrimeAgent and Hermes channels have been seen on a real Run** -- the
 Claude Code channel is new and unobserved, and section 10 says so in its row rather than here. Remote
 agents get tier 2 only, because they execute on another machine with no workspace for the worker to
 read.

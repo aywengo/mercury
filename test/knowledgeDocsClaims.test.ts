@@ -312,3 +312,74 @@ test('both guards can actually fail', () => {
   assert.ok(!RUN_ID.test(reintroduced.slice(claimAt, claimAt + 500)),
     'the window let the reintroduced uncited claim pass, so the guard is too wide to be useful');
 });
+
+// --- A-0: the phase status header and section 16 must agree about what is implemented ----------
+//
+// The header said "phases 0 to 3 implemented" for weeks after section 16 recorded Phase 4 as
+// observed with named Runs. Neither sentence was wrong alone; together they were, and the stale
+// one was the first thing a reader saw. The same failure shape as the Hermes row above: one
+// subsystem, two answers, the stale one upstream.
+
+/** The highest phase number section 16 marks as observed or proven. */
+function highestObservedPhase(text: string): number {
+  const from = text.indexOf('## 16. Phase order');
+  const to = text.indexOf('## 17.', from);
+  assert.notEqual(from, -1, 'section 16 disappeared; the header guard has nothing to compare against');
+  assert.notEqual(to, -1, 'section 17 heading not found; the slice would be unbounded');
+  const s16 = text.slice(from, to);
+  // Phase entries look like "4. **Auto-promotion -- observed.**" or "3b. ... -- observed."
+  let highest = -1;
+  // Optional leading whitespace: sub-phase entries (3b.) and any future reformatted entry may be
+  // indented inside the numbered list; anchoring at column 0 would silently miss them.
+  for (const m of s16.matchAll(/^\s*\d+b?\. \*\*[^*]*?(?:--|—)\s*(?:observed|proven)\b/gm)) {
+    const n = parseInt(m[0], 10);
+    if (n > highest) highest = n;
+  }
+  return highest;
+}
+
+/** The phase count the status header claims, e.g. "phases 0 to 4 implemented" -> 4. */
+function headerTopPhase(text: string): number {
+  const m = text.match(/Status: \*\*phases 0 to (\d+) implemented/);
+  assert.ok(m, 'the status header no longer states an implemented-phase range in the expected form');
+  return parseInt(m[1], 10);
+}
+
+test('the status header\'s highest phase agrees with the highest phase section 16 marks observed', () => {
+  const observed = highestObservedPhase(DOC);
+  assert.ok(observed >= 0, 'section 16 marks no phase observed; reconcile the header guard');
+  const claimed = headerTopPhase(DOC);
+  assert.equal(claimed, observed,
+    `the status header claims phases 0 to ${claimed} implemented, but the highest phase `
+    + `section 16 marks observed is ${observed}. One of them is stale; fix the prose, not the guard.`);
+});
+
+// --- A-0: section 16 must not call Fleet knowledge work unbuilt while the tree reads it ---------
+//
+// Phase 6 listed FLEET_ATLAS_URL, the dashboard section and the soft placement signal as future
+// work after #615 shipped the reader and fleet/config.ts already read the variable. A reader
+// planning from section 16 alone would rebuild the reader.
+
+test('section 16 does not describe FLEET_ATLAS_URL as unbuilt while fleet/config.ts reads it', () => {
+  const s16 = section16();
+  const fleetConfig = readFileSync(join(import.meta.dirname, '../fleet/config.ts'), 'utf8');
+  const readsIt = /FLEET_ATLAS_URL/.test(fleetConfig);
+  if (!readsIt) return; // variable removed: the guard's premise is gone, nothing to hold
+  // The phase 6 entry may say the reader shipped; it may not list the variable as pending work.
+  const pending = s16.match(/\bFLEET_ATLAS_URL\b[^.]*\./g) ?? [];
+  for (const sentence of pending) {
+    assert.doesNotMatch(sentence, /future|pending|not built|not yet|first lands|is built then/i,
+      `section 16 still lists FLEET_ATLAS_URL as work to do ("${sentence.trim()}") while `
+      + 'fleet/config.ts reads it. Update the prose, not the guard.');
+  }
+});
+
+// The corrected phase 6 must keep naming the evidence for what shipped (the guard above is a
+// does-not-match; this one keeps the correction from decaying into silence).
+test('the section 16 phase 6 correction survives', () => {
+  const s16 = section16();
+  assert.match(s16, /#615/,
+    'phase 6 mentions the Fleet reader without the issue that shipped it');
+  assert.match(s16, /FLEET_KNOWLEDGE_STALE_MS/,
+    'phase 6 mentions the soft placement signal without the variable that turns it on');
+});

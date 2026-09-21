@@ -1,4 +1,4 @@
-Status: **phases 0 to 3 implemented.** Atlas (sections 11 and 15) exists and is tested: `atlas/`, its
+Status: **phases 0 to 4 implemented.** Atlas (sections 11 and 15) exists and is tested: `atlas/`, its
 nine knowledge tables, its `/v1` routes, its `ATLAS_*` environment variables and its CLI. The host side
 now exists too: `knowledge_outbox`, the pusher, the puller, the `knowledge_replica` replica with its
 cursor, deterministic pack selection at Run creation, `run_knowledge`, the materialized workspace files,
@@ -586,6 +586,13 @@ Ingest is gated by a `knowledge` block in the capability descriptor that
 - `knowledge.contextFile` -- the harness is told to read `.mercury-context.json`. §9.2's
   `knowledge` block reaches it.
 
+What ships today is one boolean: `knowledge?: boolean` in `src/domain/types.ts`, validated as a
+leaf in `src/adapters/configSchema.ts` ("Unverified for every shipped backend", as its comment
+says). The three-field object above was the design shape; record it as the shape to add when a
+consumer needs one of its fields. Nothing shipped needs the split yet — tier 3's harness-native
+delta read is of git, not of the harness, and deliberately does not wait on
+`knowledge.workspaceFile`.
+
 Ingest **fails open**: a harness with none of these still contributes tier 2, and a harness
 whose capability is unknown because its version probe has not landed (the `version-unknown`
 state `capabilities.ts` already models) is treated as having none until it lands. Nothing
@@ -745,8 +752,10 @@ note, and it is safe for exactly one reason: the tombstone arrives through the s
 | `MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS` | `604800000` (7 days) | How long non-promoted rows are kept in the host replica before being swept. Host-local; §8.3. |
 | `MERCURY_KNOWLEDGE_OUTBOX_ALERT_DEPTH` | `1000` | §8.2 |
 
-Plus the bounds in §7.5. All of it lands in [`src/config.ts`](../src/config.ts) and
-[`configuration.md`](configuration.md) when implemented; none of it exists now.
+Plus the bounds in §7.5. All of it is live in [`src/config.ts`](../src/config.ts) and
+[`configuration.md`](configuration.md). (Was "none of it exists now"; the `MERCURY_KNOWLEDGE_*`
+and `MERCURY_ATLAS_*` variables shipped with the host outbox, pusher and puller, and
+`src/config.ts` reads every row of this table.)
 
 ### 8.5 Host API and events
 
@@ -1262,7 +1271,9 @@ later is worth building until the phase before it has been exercised by a real R
    classes, redaction, `/healthz` and `/metrics`, `atlas/test/`, and the coupling test.
    No host changes. Proven by `test/atlasContract.test.ts` driving it over HTTP with a script
    standing in for a host.
-1. **Host outbox and pusher, operator notes.** Migration v8, the outbox, the pusher on its own
+1. **Host outbox and pusher, operator notes.** Migration v9 (the outbox; v10 added the replica and
+   the per-Run snapshot — was "Migration v8", but §8.6 had already watched v8 go to
+   `run_goals.attempted` and said not to pre-reserve a number), the outbox, the pusher on its own
    timer, `node src/cli.ts knowledge flush`, `GET /api/knowledge/status`, and the metrics.
    Operator-authored notes through the admin route are already useful here: a project's
    conventions can be written down and will be waiting when injection arrives. Proven by the
@@ -1334,8 +1345,13 @@ later is worth building until the phase before it has been exercised by a real R
 
        The `ClaudeCodeAdapter` row of §9.3 has since been built (generated `CLAUDE.md`, with the
        stdin pointer fallback when one is tracked); it is built, not observed, and §10 says so.
-6. **Fleet reader and hardening.** `FLEET_ATLAS_URL`, the dashboard section, the soft
-   placement signal, and the retention sweeps of §12. First Atlas release; `distribution.md`
+6. **Fleet reader and hardening.** The retention sweeps of §12. Was "`FLEET_ATLAS_URL`, the
+   dashboard section, the soft placement signal", but all three are built: the Fleet reader
+   shipped as `GET /fleet/knowledge` and the `fleet knowledge` CLI (#615 — counts only, always
+   200; Fleet has no web UI, so what §14 called the dashboard is these two surfaces), the soft
+   placement signal is live off by default (`FLEET_KNOWLEDGE_STALE_MS=0`,
+   `fleet/config.ts` + `fleet/routing.ts`).
+   What remains of this phase is hardening plus the first Atlas release; `distribution.md`
    and `releasing.md` are updated then, with the tests that hold them to it.
 
 ## 17. Non-goals
@@ -1383,7 +1399,11 @@ Atlas is not:
    runs one harness of auto-promotion entirely? A per-project policy lets operators answer
    locally, but the defaults should be set from observed candidate volumes, not from this
    document.
-6. **Retention of retired notes.** 180 days is a guess. The audit trail (`promotions`,
+6. **Retention of retired notes.** (Was "180 days is a guess"; the question as written
+   presupposed a retention age that does not exist. Deletion is off by default —
+   `ATLAS_RETIRED_TOMBSTONE_AGE_MS` is unset and the sweep tombstones nothing until an operator
+   sets it, §12 — so the open question is what default age to choose, if any, and the answer
+   waits for candidate and retirement volumes from a real project.) The audit trail (`promotions`,
    `contests`) is kept indefinitely; is the retired note body worth keeping longer, given its
    evidence is in git anyway?
 7. **Owner scoping.** Notes are project-scoped, not owner-scoped, and every Run on a project
