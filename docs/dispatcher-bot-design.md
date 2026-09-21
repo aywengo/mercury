@@ -778,7 +778,27 @@ agent adapter and the mock PrimeAgent RPC fixture.
 
 ## 16. Open decisions
 
-Deferred on purpose, with the criteria that would decide them:
+Decided decisions stay listed with their outcome, because a deferred decision
+that was silently made is indistinguishable from one still open.
+
+**Decided — hand-rolled cron parser.** A 5-field parser with no timezone
+database and offset-only `tz`, following the precedent of the CLI's hand-written
+command parser (`cli-tui-design.md` §19): the vocabulary is small, the tests are
+cheap, and a dependency adds supply-chain surface to a feature whose scheduling
+layer must stay deterministic. Escape criterion stays recorded: if DST
+correctness under `tz: "local"` forces more than ~150 tested lines, reconsider.
+The UTC default (§5.1) shrinks the problem further.
+
+**Decided — the observer scope ships in Milestone B2**, with the triggers that
+need it, not deferred to a later milestone or a demonstrated-need gate (operator
+decision, 2026-09-20). What the scope *is* is sized honestly in §9 and §18 B2:
+a third posture in `AuthContext` plus an audit of every `isAdmin` branch — the
+phasing is committed; the sizing is unchanged.
+
+**Open — named timezone support**: needs a tz database; wait for an operator to
+need it, then reconsider with the cron decision.
+
+Still open, with the criteria that would decide them:
 
 - **One copy of the bot token**: a server-side bot token file the server reads
   directly, so `mercury.env` never carries bot tokens and §4.2's two copies
@@ -797,13 +817,6 @@ Deferred on purpose, with the criteria that would decide them:
 - **Server-stamped origin field**: whether Runs need a machine-origin marker
   beyond the bot's owner id. Criterion: an operator or dashboard view that
   cannot answer "who created this" from the owner column alone.
-- **Cron dependency**: hand-rolled 5-field parser (no tz DB, offset-only `tz`)
-  vs a library. Criterion: if DST correctness under `tz: "local"` forces more
-  than ~150 tested lines, reconsider. The repo has resisted dependencies when a
-  tested hand-rolled version stayed small (`cli-tui-design.md` §19, parser
-  decision). Note that the UTC default (§5.1) shrinks this problem.
-- **Named timezone support**: needs a tz database; wait for an operator to
-  need it, then reconsider with the cron decision.
 - **One process per bot vs a supervisor**: per-bot chosen for v1 (crash
   isolation, obvious failure story). Revisit if a host routinely runs >5 bots.
 - **Host-level `bot.note` event** (§7): needed only if operators want
@@ -904,6 +917,10 @@ again. The `workspace-audit` skill now runs nightly, unattended.
   the shape every read route branches on plus an audit of each `isAdmin` site,
   routed through the single `resolveCredential` — not a field addition. Size the
   milestone for that.
+- Phase commitment: the observer scope lands in this milestone with the triggers
+  that need it, not deferred (operator decision, 2026-09-20).
+
+
 
 *Acceptance*: §17 item 3 for triggered Runs; an observer token reads across
 owners and every write verb on a Run it does not own answers 404, `POST input`
@@ -938,6 +955,13 @@ maintenance bot without hand-editing JSON; every security claim in §14 has a
 test that fails without it.
 
 ## 19. Revision history
+
+### 2026-09-20 (c) — two operator decisions recorded
+
+| Area | Was | Now | Why |
+| --- | --- | --- | --- |
+| §16 | cron dependency open with an escape criterion | **decided**: hand-rolled parser | operator decision; the CLI parser precedent holds, escape criterion kept |
+| §18 B2, §16 | observer-scope phasing left to the milestone | **decided**: the scope ships in B2 with the triggers that need it | operator decision; the scope's honest sizing from (b) is unchanged — only its phasing is committed |
 
 ### 2026-09-20 (b) — second review pass: scope answers and a code check
 
