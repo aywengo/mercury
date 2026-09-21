@@ -95,11 +95,14 @@ export function parseFrontmatter(text: string): ParsedFrontmatter | null {
   return { scalars, evidence };
 }
 
-/** One evidence entry, restricted to what §6.1 allows: a URL or `commit: <sha>`. */
-function parseEvidenceEntry(entry: string): EvidenceRef | null {
+/** One evidence entry, restricted to what §6.1 allows: a URL or `commit: <sha>`. A commit entry
+ *  names no repository in the record file (§6.1's example is bare), so it is attributed to the
+ *  record's own repository — the same repository the record's scope names. */
+function parseEvidenceEntry(entry: string, repoIdentity: string): EvidenceRef | null {
   if (/^commit:\s*[0-9a-f]{7,40}$/i.test(entry)) {
     const sha = entry.slice(entry.indexOf(':') + 1).trim();
-    return { type: 'commit', repo: '', sha };
+    const id = repoIdentityOf(repoIdentity);
+    return { type: 'commit', repo: id ? id.identity : repoIdentity, sha };
   }
   if (/^https?:\/\//i.test(entry)) {
     // A PR or an issue URL; the two shapes Atlas's own evidence vocabulary carries for links.
@@ -160,7 +163,7 @@ export function parseDecisionRecord(text: string, input: DecisionRecordInput): D
 
   const evidence: EvidenceRef[] = [];
   for (const entry of fm.evidence) {
-    const ref = parseEvidenceEntry(entry);
+    const ref = parseEvidenceEntry(entry, input.repoIdentity);
     if (!ref) {
       return { ok: false, reason: 'decision-malformed', detail: `evidence entry is neither a URL nor "commit: <sha>": ${entry.slice(0, 80)}` };
     }
