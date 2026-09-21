@@ -103,6 +103,8 @@ test('malformed records say what is wrong', () => {
     ['0013-missing-title.md', /missing required key\(s\): title/],
     ['0015-bad-evidence.md', /neither a URL nor "commit: <sha>"/],
     ['0016-flow-evidence.md', /outside the supported subset|flow/i],
+    ['0018-other-url.md', /neither a URL nor "commit: <sha>"/],
+    ['0019-deep-list.md', /outside the supported subset|stray|nesting|flow/i],
   ];
   for (const [name, pattern] of cases) {
     const result = parseDecisionRecord(fixture(name), INPUT);
@@ -120,10 +122,25 @@ test('a claim over the bound is rejected by the bounds check, not truncated', ()
   assert.equal(result.reason, 'claim-too-long');
 });
 
-test('every fixture directory entry is exercised by a case above', () => {
-  // A fixture nobody loads is a rule nobody tests. Keep the two lists in step.
-  const files = readdirSync(FIXTURES).filter((f) => f.endsWith('.md'));
-  assert.ok(files.length >= 10, `expected the full fixture set, found ${files.length}`);
+test('the fixture directory holds exactly the fixtures the cases above load', () => {
+  // A fixture nobody loads is a rule nobody tests, and a case pointing at a deleted fixture is a
+  // test of nothing. Pin both directions so the two lists cannot drift apart silently.
+  const files = readdirSync(FIXTURES).filter((f) => f.endsWith('.md')).sort();
+  assert.deepEqual(files, [
+    '0007-valid.md',
+    '0008-proposed.md',
+    '0009-rejected.md',
+    '0010-no-evidence.md',
+    '0011-k2-violation.md',
+    '0012-no-decision.md',
+    '0013-missing-title.md',
+    '0014-superseded.md',
+    '0015-bad-evidence.md',
+    '0016-flow-evidence.md',
+    '0017-claim-too-long.md',
+    '0018-other-url.md',
+    '0019-deep-list.md',
+  ]);
 });
 
 // --- unit-level: the frontmatter subset and the paragraph extraction ---------------------------

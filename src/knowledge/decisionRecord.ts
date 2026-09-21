@@ -69,23 +69,30 @@ export function parseFrontmatter(text: string): ParsedFrontmatter | null {
   const scalars = new Map<string, string>();
   const evidence: string[] = [];
   let inEvidence = false;
+  let evidenceSeen = false;
   for (const raw of lines) {
     const line = raw.trim();
     if (line === '') { inEvidence = false; continue; }
-    if (line.startsWith('- ')) {
+    // List entries are exactly the §6.1 shape: two-space indent, `- `, value. A deeper or absent
+    // indent would be read differently by a real YAML parser (a nested list), and a record this
+    // parser reads differently than `yaml` would is a record this parser must refuse.
+    if (/^ {2}- .+$/.test(raw)) {
       if (!inEvidence) return null; // a list under a key we do not define
-      const entry = stripComment(line.slice(2));
+      const entry = stripComment(raw.trim().slice(2));
       if (entry === '') return null;
       evidence.push(entry);
       continue;
     }
+    if (raw.startsWith('- ') || /^ {2,}[^ ]/.test(raw)) return null; // stray list or deeper nesting
     const kv = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s?(.*)$/);
     if (!kv) return null; // block scalar, anchored value, anything else: outside the subset
     const key = kv[1]!;
-    if (scalars.has(key) || (key === 'evidence' && inEvidence)) return null; // duplicate key
+    if (scalars.has(key)) return null; // duplicate key
     if (key === 'evidence') {
+      if (evidenceSeen) return null; // duplicate `evidence:` key
       const inline = stripComment(kv[2]!);
       if (inline !== '') return null; // `evidence: [...]` flow style is not in the subset
+      evidenceSeen = true;
       inEvidence = true;
       continue;
     }
@@ -105,8 +112,12 @@ function parseEvidenceEntry(entry: string, repoIdentity: string): EvidenceRef | 
     return { type: 'commit', repo: id ? id.identity : repoIdentity, sha };
   }
   if (/^https?:\/\//i.test(entry)) {
-    // A PR or an issue URL; the two shapes Atlas's own evidence vocabulary carries for links.
-    return /\/pull\/\d+/.test(entry) ? { type: 'pr', url: entry } : { type: 'issue', url: entry };
+    // Only the two link shapes §6.1 shows: a pull request URL or an issue URL. Any other URL
+    // (a discussion, a host root, a pastebin) is outside the subset — a link whose type the
+    // parser guessed at is evidence that says less than it appears to.
+    if (/\/pull\/\d+/.test(entry)) return { type: 'pr', url: entry };
+    if (/\/issues\/\d+/.test(entry)) return { type: 'issue', url: entry };
+    return null;
   }
   return null;
 }
@@ -114,7 +125,7 @@ function parseEvidenceEntry(entry: string, repoIdentity: string): EvidenceRef | 
 /** The first paragraph under a `## Decision` heading, as the raw lines between it and the next
  *  blank line or heading. Returned verbatim — the claim is the author's bytes, not a reflow. */
 export function decisionParagraph(text: string): string | null {
-  const body = text.replace(/^---[\s\S]*?\n---(?:\n|$)/, '');
+  const body = text.replace(/^---[\s\S]*?\r?\n---(?:\r?\n|$)/, '');
   const lines = body.split(/\r?\n/);
   let inDecision = false;
   const para: string[] = [];
@@ -137,6 +148,13 @@ export function decisionParagraph(text: string): string | null {
  * hands the text in, so the same function serves the finalize harvester and the operator index.
  */
 export function parseDecisionRecord(text: string, input: DecisionRecordInput): DecisionRecordResult {
+  // Resolve the identity first: an unparseable repository identity must be a rejection with a
+  // reason, never a thrown error from a non-null assertion — the caller harvests in the worker's
+  // finalize path, and "the parser threw" is not a harvest outcome.
+  const identity = repoIdentityOf(input.repoIdentity);
+  if (!identity) {
+    return { ok: false, reason: 'decision-malformed', detail: `repository identity does not parse: ${input.repoIdentity.slice(0, 80)}` };
+  }
   const fm = parseFrontmatter(text);
   if (!fm) {
     return { ok: false, reason: 'decision-malformed', detail: 'frontmatter is missing or outside the supported subset' };
@@ -177,7 +195,7 @@ export function parseDecisionRecord(text: string, input: DecisionRecordInput): D
 
   const draft: NoteDraft = {
     kind: 'decision',
-    scope: `repo:${identityHash(repoIdentityOf(input.repoIdentity)!.identity)}`,
+    scope: `repo:${identityHash(identity.identity)}`,
     claim,
     ...(scalars.get('title') ? { detail: scalars.get('title')! } : {}),
     evidence,
