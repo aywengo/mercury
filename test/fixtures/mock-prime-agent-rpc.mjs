@@ -34,6 +34,9 @@ const argvFile = process.env.MOCK_RPC_ARGV_FILE;
 // still alive reading stdin, so "the run completed" says nothing about the process.
 const pidFile = process.env.MOCK_RPC_PID_FILE;
 if (pidFile) writeFileSync(pidFile, String(process.pid));
+// Lets a test assert on the prompt TEXT the adapter sent (issue #687): every prompt message is
+// appended as one line, in order, so a test can count occurrences of a line in a multi-prompt run.
+const promptFile = process.env.MOCK_RPC_PROMPT_FILE;
 const logFile = process.env.MOCK_RPC_LOG;
 function log(msg) {
   if (!logFile) return;
@@ -143,6 +146,9 @@ function handleCommand(cmd) {
       });
       break;
     case 'prompt':
+      if (promptFile) {
+        try { appendFileSync(promptFile, JSON.stringify(cmd.message ?? '') + '\n'); } catch {}
+      }
       respond(cmd.id, 'prompt', undefined);
       runPromptScript();
       break;

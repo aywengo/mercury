@@ -22,7 +22,8 @@ import { RpcClient, type RpcEvent } from './rpc/rpcClient.ts';
 import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
 import type { LocalAgentEventMap } from './localAgentAdapter.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
-import { CONTEXT_FILE } from '../knowledge/materialize.ts';
+import { CONTEXT_FILE, NOTES_FILE } from '../knowledge/materialize.ts';
+import type { ContextKnowledgeBlock } from '../knowledge/types.ts';
 import { assertNoUnknownKeys, CAPABILITIES_SCHEMA, GOAL_SUPPORT_SCHEMA, assertCapabilities, leaf, object, openMap, type ExactKeys } from './configSchema.ts';
 
 const SESSION_DIR_NAME = '.mercury-sessions';
@@ -160,6 +161,10 @@ interface Session {
   runId: string;
   run: Run;
   constraints: RunConstraints;
+  /** The knowledge pointer from the Run's context, kept so the resume prompt can name the pack
+   *  file the same way the first prompt did (issue #687). The notes stay on disk; this is the
+   *  pointer only, exactly as RunContext.knowledge is documented. */
+  knowledge?: ContextKnowledgeBlock;
   client: RpcClient | null;
   workspacePath: string;
   sessionFile: string | null;
@@ -302,6 +307,7 @@ export class RpcAgentAdapter implements AgentAdapter {
       runId,
       run: context.run,
       constraints: context.constraints,
+      ...(context.knowledge ? { knowledge: context.knowledge } : {}),
       client: null,
       workspacePath,
       sessionFile: null,
@@ -474,7 +480,7 @@ export class RpcAgentAdapter implements AgentAdapter {
     session.terminated = false;
 
     await client.start();
-    await client.prompt('Continue the task from where you left off. Read .mercury-context.json for the original task and constraints.');
+    await client.prompt(buildResumePrompt(sessionContext(session)));
 
     return { runId, events: eventsGenerator(session), exit: session.exitPromise, terminate: async () => this.terminate(runId) };
   }
@@ -484,7 +490,18 @@ export class RpcAgentAdapter implements AgentAdapter {
   }
 }
 
-function buildPrompt(context: RunContext): string {
+/**
+ * The one knowledge line of docs/knowledge-base.md 9.3 (issue #687): name the materialized pack
+ * file and say what it is, so the pointer in `.mercury-context.json` is one the harness is actually
+ * told to follow. Omitted when the Run has no pack, so a Run without knowledge gets exactly the
+ * prompt it got before this line existed — byte for byte.
+ */
+function knowledgeLine(): string {
+  return `Project knowledge the host curated for this Run is in ${NOTES_FILE} — read it before you start; it names conventions and commands this repository does not document anywhere else.`;
+}
+
+/** The initial prompt. Exported for the prompt-snapshot test; the adapter calls it in start(). */
+export function buildPrompt(context: RunContext): string {
   const { run, workspace } = context;
   return [
     'You are Mercury, an autonomous coding agent. Execute the task below inside this workspace.',
@@ -493,10 +510,34 @@ function buildPrompt(context: RunContext): string {
     '',
     `Read ${CONTEXT_FILE} in the workspace root for the full run context (repository, branch, base commit, constraints, selected skills).`,
     'The selected skills are available under .agents/skills/ — read the relevant SKILL.md files and follow their guidance.',
+    ...(context.knowledge ? [knowledgeLine()] : []),
     '',
     `Work in this workspace (${workspace.path}). Make focused commits with clear messages as you make progress.`,
     'When the task is complete, reply with a concise summary of what you changed and why.',
   ].join('\n');
+}
+
+/** A minimal RunContext reconstructed from a Session, carrying exactly what buildResumePrompt
+ *  reads: `knowledge`. The other fields are filled to satisfy the type; no prompt code path reads
+ *  them (verified by the snapshot test, which passes the same shape). */
+function sessionContext(session: Session): RunContext {
+  return {
+    run: session.run,
+    repository: session.run.repository,
+    workspace: { path: session.workspacePath, branch: '', baseCommit: '', mode: 'copy' },
+    skills: [],
+    constraints: session.constraints,
+    ...(session.knowledge ? { knowledge: session.knowledge } : {}),
+  };
+}
+
+/**
+ * The resume prompt, same rule as buildPrompt (issue #687): with a pack it names the pack file,
+ * without one it is byte-identical to what it has always said. Exported for the snapshot test.
+ */
+export function buildResumePrompt(context: RunContext): string {
+  const base = 'Continue the task from where you left off. Read .mercury-context.json for the original task and constraints.';
+  return context.knowledge ? `${base} ${knowledgeLine()}` : base;
 }
 
 function eventsGenerator(session: Session): AsyncGenerator<AgentEvent> {
