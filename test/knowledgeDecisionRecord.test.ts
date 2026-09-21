@@ -35,7 +35,9 @@ test('a valid record produces a draft whose claim is the Decision paragraph byte
   const result = parseDecisionRecord(text, INPUT);
   assert.ok(result.ok, `expected ok, got ${(result as { reason?: string }).reason}`);
   if (!result.ok) return;
-  const para = text.split('## Decision\n')[1]!.split('\n\n')[0]!.trim();
+  // Byte-for-byte: the claim is the paragraph's own characters. Only line endings are normalized
+  // (a CRLF checkout must hash the same as an LF one), so reconstruct that exact block here.
+  const para = text.split('## Decision\n\n')[1]!.split('\n\n')[0]!.replace(/\r$/, '');
   assert.equal(result.draft.claim, para);
   assert.equal(result.draft.kind, 'decision');
   assert.match(result.draft.scope, /^repo:[0-9a-f]{16}$/);
@@ -66,7 +68,7 @@ test('a rejected record has its claim prefixed with Rejected:', () => {
   const result = parseDecisionRecord(fixture('0009-rejected.md'), INPUT);
   assert.ok(result.ok);
   if (!result.ok) return;
-  const para = fixture('0009-rejected.md').split('## Decision\n')[1]!.split('\n\n')[0]!.trim();
+  const para = fixture('0009-rejected.md').split('## Decision\n\n')[1]!.split('\n\n')[0]!.replace(/\r$/, '');
   assert.equal(result.draft.claim, `Rejected: ${para}`);
 });
 

@@ -126,16 +126,20 @@ function parseEvidenceEntry(entry: string, repoIdentity: string): EvidenceRef | 
  *  blank line or heading. Returned verbatim — the claim is the author's bytes, not a reflow. */
 export function decisionParagraph(text: string): string | null {
   const body = text.replace(/^---[\s\S]*?\r?\n---(?:\r?\n|$)/, '');
-  const lines = body.split(/\r?\n/);
+  // Line endings are the ONE normalization (documented): a CRLF checkout and an LF checkout of the
+  // same record must produce the same claim, because claim_hash is computed over the claim and two
+  // hashes for one sentence would split corroboration across hosts. Nothing else is altered — no
+  // reflow, no reindent, no trailing-whitespace trim — so the claim is the author's characters.
+  const lines = body.split(/\r\n|\r|\n/).map((l) => l.replace(/\r$/, ''));
   let inDecision = false;
   const para: string[] = [];
   for (const raw of lines) {
-    const line = raw.trim();
-    if (/^##\s+Decision\s*$/i.test(line)) { inDecision = true; continue; }
+    const probe = raw.trim();
+    if (/^##\s+Decision\s*$/i.test(probe)) { inDecision = true; continue; }
     if (!inDecision) continue;
-    if (line === '' && para.length === 0) continue; // blank lines before the paragraph start
-    if (line === '' || line.startsWith('#')) break; // paragraph ends at a blank line or heading
-    para.push(raw.trimEnd());
+    if (probe === '' && para.length === 0) continue; // blank lines before the paragraph start
+    if (probe === '' || probe.startsWith('#')) break; // paragraph ends at a blank line or heading
+    para.push(raw);
   }
   if (!inDecision || para.length === 0) return null;
   return para.join('\n');
