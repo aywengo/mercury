@@ -30,15 +30,33 @@ function fixture(name: string): string {
 
 const INPUT = { path: 'docs/decisions/0007-valid.md', repoIdentity: REPO, headSha: HEAD, bounds: DEFAULT_BOUNDS };
 
+/**
+ * The expected claim, computed independently of the function under test: normalize line endings
+ * (the contract's one normalization), then take the block between the `## Decision` heading and
+ * the next blank line. Written against CRLF on purpose — a git autocrlf checkout must pass these
+ * tests rather than crash on a non-null assertion.
+ */
+function expectedParagraph(text: string): string {
+  const lines = text.split(/\r\n|\r|\n/);
+  const start = lines.findIndex((l) => /^##\s+Decision\s*$/i.test(l.trim()));
+  assert.ok(start >= 0, 'fixture has no Decision heading; fix the fixture');
+  const para: string[] = [];
+  for (const raw of lines.slice(start + 1)) {
+    const probe = raw.trim();
+    if (probe === '' && para.length === 0) continue;
+    if (probe === '' || probe.startsWith('#')) break;
+    para.push(raw);
+  }
+  return para.join('\n');
+}
+
 test('a valid record produces a draft whose claim is the Decision paragraph byte for byte', () => {
   const text = fixture('0007-valid.md');
   const result = parseDecisionRecord(text, INPUT);
   assert.ok(result.ok, `expected ok, got ${(result as { reason?: string }).reason}`);
   if (!result.ok) return;
-  // Byte-for-byte: the claim is the paragraph's own characters. Only line endings are normalized
-  // (a CRLF checkout must hash the same as an LF one), so reconstruct that exact block here.
-  const para = text.split('## Decision\n\n')[1]!.split('\n\n')[0]!.replace(/\r$/, '');
-  assert.equal(result.draft.claim, para);
+  // Byte-for-byte: the claim is the paragraph's own characters, line endings normalized.
+  assert.equal(result.draft.claim, expectedParagraph(text));
   assert.equal(result.draft.kind, 'decision');
   assert.match(result.draft.scope, /^repo:[0-9a-f]{16}$/);
 });
@@ -68,8 +86,7 @@ test('a rejected record has its claim prefixed with Rejected:', () => {
   const result = parseDecisionRecord(fixture('0009-rejected.md'), INPUT);
   assert.ok(result.ok);
   if (!result.ok) return;
-  const para = fixture('0009-rejected.md').split('## Decision\n\n')[1]!.split('\n\n')[0]!.replace(/\r$/, '');
-  assert.equal(result.draft.claim, `Rejected: ${para}`);
+  assert.equal(result.draft.claim, `Rejected: ${expectedParagraph(fixture('0009-rejected.md'))}`);
 });
 
 test('a superseded record parses like an accepted one (no host-side supersededBy)', () => {
@@ -165,8 +182,8 @@ test('the frontmatter subset accepts what §6.1 shows and refuses what it does n
 
 test('the Decision paragraph is verbatim, including its internal line breaks', () => {
   const para = decisionParagraph(fixture('0007-valid.md'));
-  assert.ok(para);
-  assert.match(para!, /pointers and never copies[\s\n]+of the evidence/);
+  assert.equal(para, expectedParagraph(fixture('0007-valid.md')),
+    'the parser and the independent extraction must agree byte for byte');
   // It stops at the next heading even when no blank line separates them.
   const tight = fixture('0007-valid.md').replace('\n\n## Context', '\n## Context');
   const tightPara = decisionParagraph(tight);
