@@ -1347,9 +1347,10 @@ later is worth building until the phase before it has been exercised by a real R
        stdin pointer fallback when one is tracked); it is built, not observed, and §10 says so.
 6. **Fleet reader and hardening.** The retention sweeps of §12. Was "`FLEET_ATLAS_URL`, the
    dashboard section, the soft placement signal", but all three are built: the Fleet reader
-   shipped as `GET /fleet/knowledge` and `fleet knowledge` (#615, reader token, counts only,
-   always 200), the soft placement signal is live off by default (`FLEET_KNOWLEDGE_STALE_MS=0`,
-   `fleet/config.ts` + `fleet/routing.ts`), and the dashboard section shipped with the reader.
+   shipped as `GET /fleet/knowledge` and the `fleet knowledge` CLI (#615 — counts only, always
+   200; Fleet has no web UI, so what §14 called the dashboard is these two surfaces), the soft
+   placement signal is live off by default (`FLEET_KNOWLEDGE_STALE_MS=0`,
+   `fleet/config.ts` + `fleet/routing.ts`).
    What remains of this phase is hardening plus the first Atlas release; `distribution.md`
    and `releasing.md` are updated then, with the tests that hold them to it.
 

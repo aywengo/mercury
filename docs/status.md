@@ -212,9 +212,12 @@ Live and covered by tests:
   elsewhere); and `flush` drains the outbox to Atlas in one synchronous pass rather than waiting for
   the pusher's timer, and refuses with an explanation when no Atlas is configured;
 - retired-row retention on the host (`MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS`).
-- the **Fleet reader** (#615): `GET /fleet/knowledge` and the `fleet knowledge` CLI, reader
-  token only, counts only, always 200 — Fleet can see per-project knowledge health without ever
-  receiving note bodies;
+- the **Fleet reader** (#615): `GET /fleet/knowledge` and the `fleet knowledge` CLI, counts
+  only, always 200 — Fleet can see per-project knowledge health without ever receiving note
+  bodies. Two tokens are involved and they are different: the endpoint answers any authenticated
+  Fleet caller (it is not public; no caller token, no answer), and Fleet itself queries Atlas
+  with an Atlas **reader** token (`FLEET_ATLAS_TOKEN`), which can count notes but can never
+  read one;
 - a **soft** placement signal in Fleet (`FLEET_KNOWLEDGE_STALE_MS`, off by default): a host whose
   knowledge replica is older than the threshold ranks below a fresher one, and the decision is
   returned and logged when it changes the outcome. It never excludes a host. That is the whole
@@ -240,11 +243,12 @@ candidates written by real agents were auto-promoted across `obs-host`/`obs-host
 
 Rendering is built for PrimeAgent (`--skill`), Hermes (generated `AGENTS.md`) and Claude Code
 (generated `CLAUDE.md`, falling back to a pointer line in the stdin task text when the repository tracks
-one). The RPC adapters get the `.mercury-context.json` pointer and a prompt line; everything else gets
-only the neutral files. (Pending #687: `buildPrompt()` in `src/adapters/rpcAgentAdapter.ts` has
-the context-file and skills lines but no knowledge line yet — the context file carries the
-`knowledge` block, and #687 adds the prompt line that tells the agent to follow it. The claim was
-ahead of the code; it becomes true when #687 merges.) **Only the PrimeAgent and Hermes channels have been seen on a real Run** -- the
+one). The RPC adapters get the `.mercury-context.json` pointer plus prompt lines telling the agent to
+read the context file and `.agents/skills/`; everything else gets only the neutral files.
+(Pending #687: the *knowledge* line specifically — `buildPrompt()` in
+`src/adapters/rpcAgentAdapter.ts` names the context file and the skills directory but does not
+yet tell the agent to follow the `knowledge` block the context file carries to the pack file.
+#687 adds that one line, to both the initial and the resume prompt.) **Only the PrimeAgent and Hermes channels have been seen on a real Run** -- the
 Claude Code channel is new and unobserved, and section 10 says so in its row rather than here. Remote
 agents get tier 2 only, because they execute on another machine with no workspace for the worker to
 read.
