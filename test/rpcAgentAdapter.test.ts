@@ -11,9 +11,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   RpcAgentAdapter,
+  buildPrompt,
+  buildResumePrompt,
   validateRpcAgentConfig,
   type RpcAgentConfig,
 } from '../src/adapters/rpcAgentAdapter.ts';
+import { NOTES_FILE } from '../src/knowledge/materialize.ts';
 import { RpcAgentRegistry } from '../src/adapters/rpcAgentRegistry.ts';
 import type { AgentExit, Run, RunContext, ResolvedSkill } from '../src/domain/types.ts';
 import { tempDir } from './helpers.ts';
@@ -396,4 +399,98 @@ test('registry: invalid config file -> throws with file path', () => {
   writeFileSync(join(dir, 'bad.json'), JSON.stringify({ id: 'bad' }));
   const registry = new RpcAgentRegistry(dir);
   assert.throws(() => registry.load(), /bad.json/);
+});
+
+// --- knowledge prompt line (issue #687, docs/knowledge-base.md section 9.3) --------------------
+//
+// buildPrompt() told the agent to read .mercury-context.json, and the context file carried the
+// `knowledge` block, but nothing told the agent to follow the pointer to the pack file. The 9.3
+// row asks for one added line, present only when a pack exists: a Run without knowledge must get
+// the exact prompt it got before, byte for byte, which is why the guards below compare against
+// the base string rather than checking for an absence.
+
+const KNOWLEDGE = {
+  packHash: '584f8eaef4261d769be580927693d5e9',
+  path: NOTES_FILE,
+  count: 1,
+};
+
+function countOccurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+test('prompt snapshot with a pack names the pack file exactly once', () => {
+  const { context } = makeContext();
+  const withPack = buildPrompt({ ...context, knowledge: KNOWLEDGE });
+  assert.equal(countOccurrences(withPack, NOTES_FILE), 1,
+    'the pack file must be named exactly once; a repeated pointer is noise the harness reads past');
+  // The line says what the file is, not just where it is: a bare path in a prompt is indistinguishable
+  // from any other file the prompt happens to mention.
+  assert.match(withPack, /knowledge/i);
+  // The pre-existing lines survive unchanged.
+  assert.match(withPack, /Read \.mercury-context\.json/);
+  assert.match(withPack, /\.agents\/skills\//);
+});
+
+test('prompt snapshot without a pack is unchanged from base', () => {
+  const { context } = makeContext();
+  const withoutPack = buildPrompt(context);
+  // The base prompt, reconstructed from the pre-#687 builder. If buildPrompt's base wording ever
+  // changes, this test fails and the wording should be updated HERE, deliberately.
+  const base = [
+    'You are Mercury, an autonomous coding agent. Execute the task below inside this workspace.',
+    '',
+    `TASK: ${context.run.task}`,
+    '',
+    'Read .mercury-context.json in the workspace root for the full run context (repository, branch, base commit, constraints, selected skills).',
+    'The selected skills are available under .agents/skills/ — read the relevant SKILL.md files and follow their guidance.',
+    '',
+    `Work in this workspace (${context.workspace.path}). Make focused commits with clear messages as you make progress.`,
+    'When the task is complete, reply with a concise summary of what you changed and why.',
+  ].join('\n');
+  assert.equal(withoutPack, base,
+    'a Run without a knowledge pack must get the exact prompt it got before #687');
+});
+
+test('resume prompt carries the same conditional line', () => {
+  const { context } = makeContext();
+  const withoutPack = buildResumePrompt(context);
+  const withPack = buildResumePrompt({ ...context, knowledge: KNOWLEDGE });
+  assert.doesNotMatch(withoutPack, new RegExp(NOTES_FILE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    'the no-pack resume prompt must not name the pack file');
+  assert.equal(countOccurrences(withPack, NOTES_FILE), 1);
+  // With a pack the resume prompt is the base sentence plus the line, so the base is recoverable.
+  assert.ok(withPack.startsWith(withoutPack),
+    'the resume line appends to the same base sentence rather than replacing it');
+});
+
+test('the started adapter actually sends the knowledge line (mock captures the prompt)', async () => {
+  const { context, workspacePath } = makeContext();
+  const promptFile = join(workspacePath, 'prompts.jsonl');
+  const adapter = new RpcAgentAdapter(piConfig({ env: { MOCK_RPC_PROMPT_FILE: promptFile } }));
+  try {
+    const handle = await adapter.start({ ...context, knowledge: KNOWLEDGE });
+    await collectAll(handle);
+    const prompts = readFileSync(promptFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as string);
+    assert.ok(prompts.length >= 1);
+    assert.equal(countOccurrences(prompts[0]!, NOTES_FILE), 1,
+      'the first prompt the agent process receives must name the pack file exactly once');
+  } finally {
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});
+
+test('the started adapter without a pack sends the base prompt (mock captures the prompt)', async () => {
+  const { context, workspacePath } = makeContext();
+  const promptFile = join(workspacePath, 'prompts.jsonl');
+  const adapter = new RpcAgentAdapter(piConfig({ env: { MOCK_RPC_PROMPT_FILE: promptFile } }));
+  try {
+    const handle = await adapter.start(context);
+    await collectAll(handle);
+    const prompts = readFileSync(promptFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as string);
+    assert.equal(prompts[0]!.includes(NOTES_FILE), false,
+      'a Run with no pack must not name a pack file that does not exist');
+  } finally {
+    adapter.cancel(context.run.id).catch(() => {});
+  }
 });
