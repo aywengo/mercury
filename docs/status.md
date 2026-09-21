@@ -213,11 +213,12 @@ Live and covered by tests:
   the pusher's timer, and refuses with an explanation when no Atlas is configured;
 - retired-row retention on the host (`MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS`).
 - the **Fleet reader** (#615): `GET /fleet/knowledge` and the `fleet knowledge` CLI, counts
-  only, always 200 — Fleet can see per-project knowledge health without ever receiving note
-  bodies. Two tokens are involved and they are different: the endpoint answers any authenticated
-  Fleet caller (it is not public; no caller token, no answer), and Fleet itself queries Atlas
-  with an Atlas **reader** token (`FLEET_ATLAS_TOKEN`), which can count notes but can never
-  read one;
+  only — Fleet can see per-project knowledge health without ever receiving note bodies. Two
+  tokens are involved and they are different: the endpoint answers any authenticated Fleet
+  caller (`401` without a caller token — it is not public), and Fleet itself queries Atlas with
+  an Atlas **reader** token (`FLEET_ATLAS_TOKEN`), which can count notes but can never read one.
+  When Atlas is down the endpoint still answers an authenticated caller, `200` with a body that
+  says so, because decoration failing must not look like Fleet failing;
 - a **soft** placement signal in Fleet (`FLEET_KNOWLEDGE_STALE_MS`, off by default): a host whose
   knowledge replica is older than the threshold ranks below a fresher one, and the decision is
   returned and logged when it changes the outcome. It never excludes a host. That is the whole
