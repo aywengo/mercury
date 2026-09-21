@@ -22,6 +22,7 @@ import { RunStore } from '../runs/runStore.ts';
 import type { GoalStore } from '../runs/goalStore.ts';
 import { GENERATED_PATHS, NOTES_FILE, excludeFromGit, materializeKnowledge } from '../knowledge/materialize.ts';
 import { harvestNotes } from '../knowledge/harvest.ts';
+import { harvestRecords } from '../knowledge/harvestRecords.ts';
 import { claimHash } from '../knowledge/validation.ts';
 import { createRedactor } from '../domain/redact.ts';
 import type { OutboxStore } from '../knowledge/outbox.ts';
@@ -1011,6 +1012,30 @@ export class Worker {
           })
         : null;
 
+      // Tier-3 half one: decision records under docs/decisions/ (section 6.3, issue #684). Same
+      // pre-transaction read, same per-Run cap and deadline as tier 1 — the two results are merged
+      // below so the transaction carries one harvest, not two. Copy mode skips without an error;
+      // a git hang times out and the Run still completes (K4).
+      const records = current.workspacePath && this.deps.knowledgeHarvest
+        ? await harvestRecords({
+            workspacePath: current.workspacePath,
+            // `run` was claimed before the workspace pinned the base commit; `current` is fresh.
+            baseCommit: current.repository.baseCommit,
+            bounds: this.deps.knowledgeHarvest.bounds,
+            notesAccepted: harvest?.accepted.length ?? 0,
+            repoIdentity: run.repository.url ?? run.repository.localPath ?? '',
+            hostId: this.deps.knowledgeHarvest.hostId,
+            runId: run.id,
+            agent: current.agent,
+            recordedAt: now,
+          })
+        : null;
+
+      // Merge the two harvests: one accepted list into one insertInTx, one event stream. A rejected
+      // record and a rejected note carry the same event type with their own reason.
+      const mergedAccepted = [...(harvest?.accepted ?? []), ...(records?.accepted ?? [])];
+      const mergedRejected = [...(harvest?.rejected ?? []), ...(records?.rejected ?? [])];
+
       // One transaction for the terminal state AND the harvested notes (section 8.1). The property is
       // that there is no window in which a Run is complete and its notes are only in memory: if this
       // commits, both are durable; if it does not, neither is, and the Run gets finalized again.
@@ -1023,29 +1048,31 @@ export class Worker {
         for (const skill of skills) {
           this.deps.events.append(run.id, 'skill.completed', { skill: skill.id, version: skill.version });
         }
-        if (harvest) {
-          const project = this.deps.knowledgeHarvest!.project;
-          if (harvest.accepted.length > 0) {
+        if (this.deps.knowledgeHarvest) {
+          const project = this.deps.knowledgeHarvest.project;
+          if (mergedAccepted.length > 0) {
             // insertInTx, not insert(): these rows must commit with the terminal state above or not at
             // all. insert() would also work -- tx() joins an open transaction rather than issuing a second
             // BEGIN -- but it would make that coupling an accident of the helper instead of a fact visible
             // at the call site.
-            this.deps.knowledgeOutbox!.insertInTx(harvest.accepted.map((c) => ({
+            this.deps.knowledgeOutbox!.insertInTx(mergedAccepted.map((c) => ({
               runId: run.id,
               contribution: { ...c, projectId: project },
             })));
           }
-          for (const note of harvest.accepted) {
+          for (const note of mergedAccepted) {
             this.deps.events.append(run.id, 'knowledge.noted', {
               claimHash: claimHash(note.kind, note.scope, note.claim),
               kind: note.kind,
               scope: note.scope,
             });
           }
-          for (const rej of harvest.rejected) {
+          for (const rej of mergedRejected) {
             this.deps.events.append(run.id, 'knowledge.rejected', {
               reason: rej.reason,
-              ...(rej.line > 0 ? { line: rej.line } : {}),
+              // Tier-1 rejections carry a 1-based line; record rejections carry the path instead.
+              ...('line' in rej && rej.line > 0 ? { line: rej.line } : {}),
+              ...('path' in rej && rej.path ? { path: rej.path } : {}),
               ...(rej.detail ? { detail: rej.detail } : {}),
             });
           }
@@ -1063,6 +1090,12 @@ export class Worker {
           accepted: harvest.accepted.length, rejected: harvest.rejected.length,
           lines: harvest.linesSeen, timedOut: harvest.timedOut, overLimit: harvest.overLimit,
         }, 'knowledge harvested from workspace');
+      }
+      if (records && (records.accepted.length > 0 || records.rejected.length > 0)) {
+        log.info({
+          accepted: records.accepted.length, rejected: records.rejected.length,
+          records: records.recordsSeen, skipped: records.skipped, timedOut: records.timedOut,
+        }, 'decision records harvested from workspace');
       }
       log.info({ commits: commits.length, ...durations }, 'run completed');
       return;
