@@ -124,6 +124,7 @@ test('malformed records say what is wrong', () => {
     ['0016-flow-evidence.md', /outside the supported subset|flow/i],
     ['0018-other-url.md', /neither a URL nor "commit: <sha>"/],
     ['0019-deep-list.md', /outside the supported subset|stray|nesting|flow/i],
+    ['0020-nested-mapping.md', /outside the supported subset|nesting|stray/i],
   ];
   for (const [name, pattern] of cases) {
     const result = parseDecisionRecord(fixture(name), INPUT);
@@ -159,6 +160,7 @@ test('the fixture directory holds exactly the fixtures the cases above load', ()
     '0017-claim-too-long.md',
     '0018-other-url.md',
     '0019-deep-list.md',
+    '0020-nested-mapping.md',
   ]);
 });
 

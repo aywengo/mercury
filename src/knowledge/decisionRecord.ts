@@ -84,6 +84,9 @@ export function parseFrontmatter(text: string): ParsedFrontmatter | null {
       continue;
     }
     if (raw.startsWith('- ') || /^ {2,}[^ ]/.test(raw)) return null; // stray list or deeper nesting
+    // Top-level keys start at column 0. An indented `key: value` line is a nested mapping to a
+    // real YAML parser, which is exactly what the subset refuses to guess about.
+    if (/^[\t ]/.test(raw)) return null;
     const kv = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s?(.*)$/);
     if (!kv) return null; // block scalar, anchored value, anything else: outside the subset
     const key = kv[1]!;
