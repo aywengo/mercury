@@ -427,9 +427,17 @@ harvester says why.
 
 The note's `evidence` is the record's `evidence` list plus one `repo-file` reference to the
 record itself at the commit the workspace was on, so the note always points back at its own
-source. `status: superseded` produces a note whose `supersededBy` resolves to the note of the
-superseding record; `status: rejected` produces a note whose claim is prefixed by the harvester
-with `Rejected:` so a Run learns what *not* to do, which is often the more valuable half.
+source. `status: rejected` produces a note whose claim is prefixed by the harvester with
+`Rejected:` so a Run learns what *not* to do, which is often the more valuable half.
+
+A `superseded` record produces an ordinary note and nothing more. (Was: "whose `supersededBy`
+resolves to the note of the superseding record". The host cannot know that id — Atlas assigns
+it — and resolving `supersedes` by record id would need a new Atlas index and a wire field the
+contract test would have to pin, which is a feature of its own and not a prerequisite for
+harvesting decisions at all. Until that exists, supersession is an operator retire, which is
+the same posture every other ingest tier takes: the host publishes claims, an operator curates
+trust. Reopen this when a project shows supersession volume that makes an operator retire per
+record a real cost.)
 
 ### 6.3 How records become notes
 

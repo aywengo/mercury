@@ -54,6 +54,11 @@ export const REJECT_REASONS = [
   'k2-violation',
   'invalid-override',
   'secret-detected',
+  // Decision-record rejections (§6.2, issue #683). `decision-proposed` is a skip, not a refusal:
+  // the record is not wrong, only early, and callers check `skipped` to report it that way.
+  'decision-without-evidence',
+  'decision-malformed',
+  'decision-proposed',
   'over-limit',
   'harvest-timeout',
   'repo-not-in-project',

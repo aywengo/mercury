@@ -1,0 +1,16 @@
+---
+id: 0017
+title: Claim exceeds the bound
+status: accepted
+date: 2026-09-12
+evidence:
+  - commit: 7a546bc
+---
+
+## Decision
+
+This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. This decision paragraph is deliberately far longer than any sane claim bound. 
+
+## Context
+
+Over the line.
