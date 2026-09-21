@@ -197,13 +197,21 @@ const RECORD = [
   '',
 ].join('\n');
 
-/** Commit a record inside the Run's worktree, as a real agent would. */
+/** Commit a record inside the Run's worktree, as a real agent would. Identity is explicit because
+ *  a CI runner has none -- the worktree inherits the source repo's config, and the fixture repo does
+ *  not carry one (only makeGitRepo's initial commit does, via -c flags). */
+const GIT_IDENTITY = ['-c', 'user.name=agent', '-c', 'user.email=agent@example.com'];
+
+function gitIn(workspacePath: string, ...args: string[]): void {
+  execFileSync('git', ['-C', workspacePath, ...GIT_IDENTITY, ...args]);
+}
+
 function plantRecord(workspacePath: string, text: string, name = '0007-commits.md'): void {
   const dir = join(workspacePath, 'docs/decisions');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, name), text);
-  execFileSync('git', ['-C', workspacePath, 'add', 'docs/decisions']);
-  execFileSync('git', ['-C', workspacePath, 'commit', '-q', '-m', `record: ${name}`]);
+  gitIn(workspacePath, 'add', 'docs/decisions');
+  gitIn(workspacePath, 'commit', '-q', '-m', `record: ${name}`);
 }
 
 test('a Run that commits a valid record queues it with repo-record provenance', async () => {
@@ -316,10 +324,10 @@ test('a deleted record is ignored, not guessed at', async () => {
     const ws = env.runs.get(run.id)!.workspacePath!;
     mkdirSync(join(ws, 'docs/decisions'), { recursive: true });
     writeFileSync(join(ws, 'docs/decisions/0001-old.md'), RECORD);
-    execFileSync('git', ['-C', ws, 'add', 'docs/decisions']);
-    execFileSync('git', ['-C', ws, 'commit', '-q', '-m', 'add old record']);
-    execFileSync('git', ['-C', ws, 'rm', '-q', 'docs/decisions/0001-old.md']);
-    execFileSync('git', ['-C', ws, 'commit', '-q', '-m', 'remove old record']);
+    gitIn(ws, 'add', 'docs/decisions');
+    gitIn(ws, 'commit', '-q', '-m', 'add old record');
+    gitIn(ws, 'rm', '-q', 'docs/decisions/0001-old.md');
+    gitIn(ws, 'commit', '-q', '-m', 'remove old record');
     await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 20_000);
     assert.equal(outbox.depth(), 0, 'a deletion is a supersession someone forgot to write');
   } finally {
