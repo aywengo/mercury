@@ -1091,10 +1091,14 @@ export class Worker {
           lines: harvest.linesSeen, timedOut: harvest.timedOut, overLimit: harvest.overLimit,
         }, 'knowledge harvested from workspace');
       }
-      if (records && (records.accepted.length > 0 || records.rejected.length > 0)) {
+      if (records?.skipped) {
+        // The issue asks the copy-mode skip to be visible: it is the normal case for copy hosts, so
+        // debug level -- findable when someone is asking why no record was harvested, silent otherwise.
+        log.debug({ mode: 'copy' }, 'decision record harvest skipped: copy-mode workspace has no git delta');
+      } else if (records && (records.accepted.length > 0 || records.rejected.length > 0)) {
         log.info({
           accepted: records.accepted.length, rejected: records.rejected.length,
-          records: records.recordsSeen, skipped: records.skipped, failed: records.failed,
+          records: records.recordsSeen, failed: records.failed,
         }, 'decision records harvested from workspace');
       }
       log.info({ commits: commits.length, ...durations }, 'run completed');
