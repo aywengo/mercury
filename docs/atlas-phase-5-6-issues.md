@@ -2,8 +2,11 @@
 
 Drafted 2026-09-21 against `main` at `c4f3e8d`. It follows the `issue-fix-loop` contract, the same way
 [`phase-0-issues.md`](phase-0-issues.md) does: each issue gives the mechanism, the choke point, a regression
-test proven to fail on base, and one PR. The numbers are placeholders (`A-0`, `A5-n`, `A6-n`). When the
-issues are filed, replace them with GitHub numbers and turn the `Blocked by` lines into real
+test proven to fail on base, and one PR.
+
+**Filed 2026-09-21.** The placeholders map to GitHub issues: A-0 = #681, A5-1 = #683, A5-2 = #684,
+A5-3 = #685, A5-4 = #686, A5-5 = #687, A5-6 = #688, A6-1 = #689, A6-2 = #690, A6-3 = #691,
+A6-4 = #692. The `Blocked by` lines below name those numbers; the issues carry matching
 cross-references.
 
 Design lives in [`knowledge-base.md`](knowledge-base.md): §6 (decision records), §7.3 (tier 3), §9.3 and
