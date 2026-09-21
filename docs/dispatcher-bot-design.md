@@ -559,7 +559,7 @@ to their own owners. Three postures, in increasing capability:
 
 1. **Own-runs (default)**: the bot sees only its own Runs. Scheduling and
    self-coordination work with no new auth concept.
-2. **Observer scope (new, small, and strictly read-only)**: an observer token
+2. **Observer scope (new, and strictly read-only)**: an observer token
    gets `GET` (list/show/events/stream) across owners. **Every write stays
    impossible**, answering 404 the way any non-owner write does today — writes
    are not 403'd into a disclosure. There is no exception: a bot that wants
@@ -919,8 +919,6 @@ again. The `workspace-audit` skill now runs nightly, unattended.
   milestone for that.
 - Phase commitment: the observer scope lands in this milestone with the triggers
   that need it, not deferred (operator decision, 2026-09-20).
-
-
 
 *Acceptance*: §17 item 3 for triggered Runs; an observer token reads across
 owners and every write verb on a Run it does not own answers 404, `POST input`
