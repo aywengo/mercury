@@ -378,9 +378,31 @@ test('a git failure inside the harvest becomes a timed-out result, never a throw
     runId: 'run_fail',
     recordedAt: new Date().toISOString(),
   });
-  assert.equal(result.timedOut, true);
+  assert.equal(result.failed, true);
   assert.equal(result.accepted.length, 0);
   assert.equal(result.rejected[0]!.reason, 'harvest-timeout');
+});
+
+test('copy mode skips the delta: the sentinel baseCommit never reaches git', async () => {
+  // The workspace layer pins baseCommit 'copy' in copy mode (workspaceManager.createCopy). A call
+  // with that sentinel must be a skip — no git invocation, no rejection — not a diff against the
+  // literal string 'copy'.
+  const repo = makeGitRepo(tempDir('mercury-harvest-repo-'));
+  const result = await harvestRecords({
+    workspacePath: repo,
+    baseCommit: 'copy',
+    bounds: { ...DEFAULT_BOUNDS },
+    notesAccepted: 0,
+    repoIdentity: REPO_URL,
+    hostId: 'host-a',
+    runId: 'run_copy',
+    recordedAt: new Date().toISOString(),
+  });
+  assert.equal(result.skipped, true);
+  assert.equal(result.failed, false);
+  assert.equal(result.accepted.length, 0);
+  assert.equal(result.rejected.length, 0);
+  assert.equal(result.recordsSeen, 0);
 });
 
 test('a workspace whose git fails fast still completes the Run with the failure recorded (K4)', async () => {

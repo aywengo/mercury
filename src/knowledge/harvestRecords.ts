@@ -50,8 +50,9 @@ export interface HarvestRecordsResult {
   rejected: RejectedRecord[];
   /** Copy mode, or no base commit: no delta was attempted, which is the normal case for copy. */
   skipped: boolean;
-  /** The git deadline expired (P0-4 hanging fixture); the Run still completes. */
-  timedOut: boolean;
+  /** The git step did not complete: the deadline expired (P0-4 hang) or git failed outright.
+   *  Either way the result is a rejection with `harvest-timeout` and the Run still completes. */
+  failed: boolean;
   recordsSeen: number;
 }
 
@@ -60,10 +61,12 @@ const DECISIONS_DIR = 'docs/decisions/';
 export async function harvestRecords(input: HarvestRecordsInput): Promise<HarvestRecordsResult> {
   const now = input.now ?? (() => Date.now());
   const startedAt = now();
-  const result: HarvestRecordsResult = { accepted: [], rejected: [], skipped: false, timedOut: false, recordsSeen: 0 };
+  const result: HarvestRecordsResult = { accepted: [], rejected: [], skipped: false, failed: false, recordsSeen: 0 };
 
-  if (!input.baseCommit) {
-    // Copy mode has no git and no base commit (§9.4): skip without an error event.
+  if (!input.baseCommit || input.baseCommit === 'copy') {
+    // Copy mode has no git (§9.4). `setWorkspace` pins the sentinel `baseCommit: 'copy'` there, so
+    // both the undefined and the sentinel mean the same thing: no delta is possible. Skip without
+    // an error event; a diff against the literal 'copy' would be a nonsense invocation.
     result.skipped = true;
     return result;
   }
@@ -83,7 +86,7 @@ export async function harvestRecords(input: HarvestRecordsInput): Promise<Harves
   } catch (err) {
     // runGit turns a hang into a throw naming the deadline; either way the Run completes (K4) and
     // the harvest failure is visible in the returned result and the log line.
-    result.timedOut = true;
+    result.failed = true;
     result.rejected.push({
       path: '',
       reason: 'harvest-timeout',
@@ -102,7 +105,7 @@ export async function harvestRecords(input: HarvestRecordsInput): Promise<Harves
     result.recordsSeen += 1;
 
     if (now() - startedAt > input.bounds.harvestTimeoutMs) {
-      result.timedOut = true;
+      result.failed = true;
       result.rejected.push({ path, reason: 'harvest-timeout' });
       continue;
     }
@@ -118,6 +121,7 @@ export async function harvestRecords(input: HarvestRecordsInput): Promise<Harves
       const shown = await runGit(['show', `HEAD:${path}`], { cwd: input.workspacePath, timeoutMs: input.bounds.harvestTimeoutMs });
       text = shown.stdout;
     } catch (err) {
+      result.failed = true;
       result.rejected.push({ path, reason: 'harvest-timeout', detail: `git show failed: ${(err as Error).message.slice(0, 160)}` });
       continue;
     }

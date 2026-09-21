@@ -1094,7 +1094,7 @@ export class Worker {
       if (records && (records.accepted.length > 0 || records.rejected.length > 0)) {
         log.info({
           accepted: records.accepted.length, rejected: records.rejected.length,
-          records: records.recordsSeen, skipped: records.skipped, timedOut: records.timedOut,
+          records: records.recordsSeen, skipped: records.skipped, failed: records.failed,
         }, 'decision records harvested from workspace');
       }
       log.info({ commits: commits.length, ...durations }, 'run completed');
