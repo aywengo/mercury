@@ -346,8 +346,9 @@ function headerTopPhase(text: string): number {
 test('the status header\'s highest phase agrees with the highest phase section 16 marks observed', () => {
   const observed = highestObservedPhase(DOC);
   assert.ok(observed >= 0, 'section 16 marks no phase observed; reconcile the header guard');
-  assert.equal(headerTopPhase(DOC), observed,
-    `the status header claims phases 0 to ${headerTopPhase(DOC)} implemented, but the highest phase `
+  const claimed = headerTopPhase(DOC);
+  assert.equal(claimed, observed,
+    `the status header claims phases 0 to ${claimed} implemented, but the highest phase `
     + `section 16 marks observed is ${observed}. One of them is stale; fix the prose, not the guard.`);
 });
 
