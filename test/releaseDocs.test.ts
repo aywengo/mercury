@@ -832,8 +832,9 @@ test('the Atlas changelog keeps its unpublished warning while 0.1.0 is not on th
   // Fleet's shape: a version recorded in the changelog that the registry never served can never be
   // re-checked live, so the warning is pinned textually per version. For Atlas the 0.1.0 entry is
   // LIVE until the bootstrap publish happens, so the warning is checked against the registry when it
-  // can answer, and pinned textually otherwise -- the entry must always carry the warning or the
-  // published status, never silence.
+  // can answer. When the registry is unreachable (published === null) the test asserts only the
+  // structural facts (entry exists, carries a date); the warning's presence is checked on the next
+  // run where the registry answers.
   const log = read('atlas/CHANGELOG.md');
   const at = log.indexOf('## [0.1.0]');
   assert.ok(at >= 0, 'atlas/CHANGELOG.md must keep its 0.1.0 entry');
