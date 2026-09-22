@@ -244,7 +244,10 @@ test('a Run that commits a valid record queues it with repo-record provenance', 
     const head = execFileSync('git', ['-C', env.runs.get(run.id)!.workspacePath!, 'rev-parse', 'HEAD']).toString().trim();
     assert.equal((selfRef as { sha: string }).sha, head);
     const events = env.events.list(run.id, 0, 200);
-    assert.ok(events.some((e) => e.type === 'knowledge.noted'), 'the accepted record is on the timeline');
+    const noted = events.find((e) => e.type === 'knowledge.noted');
+    assert.ok(noted, 'the accepted record is on the timeline');
+    assert.equal((noted!.payload as { source?: string }).source, 'repo-record',
+      'the §8.5 payload contract carries the ingest source on the timeline');
   } finally {
     env.close();
   }
@@ -298,9 +301,10 @@ test('a rejected record names its path and reason on the timeline', async () => 
     assert.equal(outbox.depth(), 0);
     const rejected = env.events.list(run.id, 0, 200).filter((e) => e.type === 'knowledge.rejected');
     assert.equal(rejected.length, 1);
-    const payload = rejected[0]!.payload as { reason: string; path?: string };
+    const payload = rejected[0]!.payload as { reason: string; path?: string; source?: string };
     assert.equal(payload.reason, 'decision-without-evidence');
     assert.equal(payload.path, 'docs/decisions/0009-no-evidence.md');
+    assert.equal(payload.source, 'repo-record', 'the rejection names its ingest source');
   } finally {
     env.close();
   }

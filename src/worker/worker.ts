@@ -1065,11 +1065,17 @@ export class Worker {
               claimHash: claimHash(note.kind, note.scope, note.claim),
               kind: note.kind,
               scope: note.scope,
+              // §8.5's payload contract: the timeline must be able to tell a tier-1 note from a
+              // tier-3 record without reading the outbox.
+              source: note.provenance.source,
             });
           }
           for (const rej of mergedRejected) {
             this.deps.events.append(run.id, 'knowledge.rejected', {
               reason: rej.reason,
+              // §8.5: the ingest source rides every rejection, so a merged timeline stays
+              // attributable.
+              source: 'source' in rej ? rej.source : 'agent-reported',
               // Tier-1 rejections carry a 1-based line; record rejections carry the path instead.
               ...('line' in rej && rej.line > 0 ? { line: rej.line } : {}),
               ...('path' in rej && rej.path ? { path: rej.path } : {}),

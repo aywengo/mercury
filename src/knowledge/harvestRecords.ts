@@ -43,6 +43,9 @@ export interface RejectedRecord {
   path: string;
   reason: string;
   detail?: string;
+  /** Always `repo-record`: the event payload contract (§8.5) carries the ingest source, and the
+   *  worker merges tier-1 and tier-3 rejections into one event stream. */
+  source: 'repo-record';
 }
 
 export interface HarvestRecordsResult {
@@ -90,6 +93,7 @@ export async function harvestRecords(input: HarvestRecordsInput): Promise<Harves
     result.rejected.push({
       path: '',
       reason: 'harvest-timeout',
+      source: 'repo-record',
       detail: `git over ${DECISIONS_DIR} failed: ${(err as Error).message.slice(0, 200)}`,
     });
     return result;
@@ -110,13 +114,14 @@ export async function harvestRecords(input: HarvestRecordsInput): Promise<Harves
     // under identical events.
     if (now() - startedAt > input.bounds.harvestTimeoutMs) {
       result.failed = true;
-      result.rejected.push({ path: '', reason: 'harvest-timeout', detail: `deadline reached with ${result.recordsSeen} record(s) scanned` });
+      result.rejected.push({ path: '', reason: 'harvest-timeout',
+      source: 'repo-record', detail: `deadline reached with ${result.recordsSeen} record(s) scanned` });
       break;
     }
 
     const budget = input.bounds.maxNotesPerRun - input.notesAccepted - result.accepted.length;
     if (budget <= 0) {
-      result.rejected.push({ path: '', reason: 'over-limit', detail: `per-Run cap ${input.bounds.maxNotesPerRun} reached; remaining records dropped` });
+      result.rejected.push({ path: '', reason: 'over-limit', source: 'repo-record', detail: `per-Run cap ${input.bounds.maxNotesPerRun} reached; remaining records dropped` });
       break;
     }
 
@@ -126,7 +131,8 @@ export async function harvestRecords(input: HarvestRecordsInput): Promise<Harves
       text = shown.stdout;
     } catch (err) {
       result.failed = true;
-      result.rejected.push({ path, reason: 'harvest-timeout', detail: `git show failed: ${(err as Error).message.slice(0, 160)}` });
+      result.rejected.push({ path, reason: 'harvest-timeout',
+      source: 'repo-record', detail: `git show failed: ${(err as Error).message.slice(0, 160)}` });
       continue;
     }
 
@@ -140,6 +146,7 @@ export async function harvestRecords(input: HarvestRecordsInput): Promise<Harves
       result.rejected.push({
         path,
         reason: parsed.reason,
+        source: 'repo-record',
         ...(parsed.detail ? { detail: parsed.detail } : {}),
       });
       continue;
