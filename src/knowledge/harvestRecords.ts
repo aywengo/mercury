@@ -65,6 +65,11 @@ export async function harvestRecords(input: HarvestRecordsInput): Promise<Harves
   const now = input.now ?? (() => Date.now());
   const startedAt = now();
   const result: HarvestRecordsResult = { accepted: [], rejected: [], skipped: false, failed: false, recordsSeen: 0 };
+  /** Remaining wall-clock budget for the next git call. Each call gets the time LEFT, not the full
+   *  bound: N records times the full timeout would multiply the step's worst case by N, and the
+   *  worker loop serving every Run on the host waits on this step. A floor of 1 ms keeps a call
+   *  bounded (runGit rejects zero/negative timeouts) while guaranteeing the check below fires. */
+  const remaining = () => Math.max(1, input.bounds.harvestTimeoutMs - (now() - startedAt));
 
   if (!input.baseCommit || input.baseCommit === 'copy') {
     // Copy mode has no git (§9.4). `setWorkspace` pins the sentinel `baseCommit: 'copy'` there, so
@@ -79,13 +84,13 @@ export async function harvestRecords(input: HarvestRecordsInput): Promise<Harves
   try {
     const diff = await runGit(
       ['diff', '--name-status', `${input.baseCommit}..HEAD`, '--', DECISIONS_DIR],
-      { cwd: input.workspacePath, timeoutMs: input.bounds.harvestTimeoutMs },
+      { cwd: input.workspacePath, timeoutMs: remaining() },
     );
     nameStatus = diff.stdout;
     // Resolve HEAD once: the worker owns the workspace at finalize, so HEAD cannot move under us.
     // The self-referencing evidence entry (§6.2) needs the real sha; `HEAD` as a literal would be
     // a pointer that names nothing.
-    headSha = (await runGit(['rev-parse', 'HEAD'], { cwd: input.workspacePath, timeoutMs: input.bounds.harvestTimeoutMs })).stdout.trim();
+    headSha = (await runGit(['rev-parse', 'HEAD'], { cwd: input.workspacePath, timeoutMs: remaining() })).stdout.trim();
   } catch (err) {
     // runGit turns a hang into a throw naming the deadline; either way the Run completes (K4) and
     // the harvest failure is visible in the returned result and the log line.
@@ -127,7 +132,7 @@ export async function harvestRecords(input: HarvestRecordsInput): Promise<Harves
 
     let text: string;
     try {
-      const shown = await runGit(['show', `HEAD:${path}`], { cwd: input.workspacePath, timeoutMs: input.bounds.harvestTimeoutMs });
+      const shown = await runGit(['show', `HEAD:${path}`], { cwd: input.workspacePath, timeoutMs: remaining() });
       text = shown.stdout;
     } catch (err) {
       result.failed = true;
