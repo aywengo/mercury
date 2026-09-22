@@ -340,8 +340,9 @@ export function loadKnowledgeConfig(env: NodeJS.ProcessEnv): KnowledgeConfig {
       hostId: env.MERCURY_ATLAS_HOST_ID?.trim() || hostname(),
       // `|| null` rather than `??`: compose interpolation and dotenv both produce an EMPTY
       // string for a variable that is set-but-blank, and readFileSync('') is a confusing
-      // error. Blank means unset, exactly as it does for MERCURY_ATLAS_URL above.
-      caFile: env.MERCURY_ATLAS_CA_FILE || null,
+      // error. Trimmed first, so a whitespace-only value is blank the same way a blank
+      // MERCURY_ATLAS_URL is: blank means unset, exactly as for the URL above.
+      caFile: env.MERCURY_ATLAS_CA_FILE?.trim() || null,
       // Deliberately NOT in the `missing` check above. Every Run-side feature works without it; only
       // operator notes need it, and refusing to start over an optional token would disable a working
       // host. What refuses instead is the operator-note route, with a message naming this variable.
