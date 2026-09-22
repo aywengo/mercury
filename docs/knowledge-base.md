@@ -1275,14 +1275,16 @@ Atlas ships the way Fleet ships, because Fleet already paid for the lessons:
 | Release | its own tag namespace and `docs/releases/atlas/`, documented in [`releasing.md`](releasing.md) when the first release is cut | `docs/releases/fleet/` |
 | Deploy | a systemd unit and environment file under `deploy/`, alongside the host's | `deploy/` |
 
-Two things this document deliberately does not do. It does not add an `atlas` row to
-[`distribution.md`](distribution.md) or a section to [`releasing.md`](releasing.md): those
-documents describe what exists, and the tests in `test/releaseDocs.test.ts` hold them to it.
-And it offers **no `npm install` command** for a package that does not exist. This repository
-has a scarred history of documents advertising installs that were not there -- #446, #447 and
-#453 are the record -- and the test that now checks the Fleet package's claims against the
-registry exists because of it. When Atlas has a first release, its release notes will say how
-to install it, and not before.
+[`distribution.md`](distribution.md) and [`releasing.md`](releasing.md) now describe the Atlas
+release path: the npm channel carries `@aywengo/mercury-atlas` on its own version stream and tag
+(`atlas-vX.Y.Z`), npm being Atlas's only installable artifact — no bundle, no Homebrew formula —
+and the tests in `test/releaseDocs.test.ts` hold them to that. This document still offers **no
+`npm install` command** for a version the registry does not serve. This repository has a scarred
+history of documents advertising installs that were not there -- #446, #447 and #453 are the
+record -- and the test that checks the Fleet package's claims against the registry now checks
+Atlas's too: while `0.1.0` is unpublished, the release notes warn instead of offering an install;
+once it is on the registry, they must offer the install for their own version. The install
+command appears in the release notes when the version exists, and not before.
 
 ## 16. Phase order
 
@@ -1374,8 +1376,12 @@ later is worth building until the phase before it has been exercised by a real R
    200; Fleet has no web UI, so what §14 called the dashboard is these two surfaces), the soft
    placement signal is live off by default (`FLEET_KNOWLEDGE_STALE_MS=0`,
    `fleet/config.ts` + `fleet/routing.ts`).
-   What remains of this phase is hardening plus the first Atlas release; `distribution.md`
-   and `releasing.md` are updated then, with the tests that hold them to it.
+   What remains of this phase is the first Atlas release. The release plumbing (tag path, tarball
+   smoke, three-product docs and tests) shipped as A6-1/#699, the deploy unit as A6-2/#700, the
+   containerized two-host scenario as A6-3/#701, and the release cut itself — `docs/releases/atlas/0.1.0.md`,
+   the changelog move, the `distribution.md`/`releasing.md`/§15 updates and the registry comparison
+   extended to Atlas — as A6-4/#692. The first publish needs the one-time npm bootstrap a credential
+   and 2FA are required for, after which the tag path needs no secret.
 
 ## 17. Non-goals
 

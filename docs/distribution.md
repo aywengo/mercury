@@ -14,6 +14,11 @@ Status header: npm, GitHub Release and Homebrew are all implemented in `release.
 | Homebrew | `brew tap aywengo/mercury https://github.com/aywengo/mercury` then `brew install mercury-ai` | host + `mercuryctl` | wired into the release job |
 | Host installer | `curl -fsSL https://github.com/aywengo/mercury/releases/latest/download/install.sh \| bash`, or `npx @aywengo/mercury host install` | host + `mercuryctl` | implemented (M6); asset ships with the next host release — see [`host-installer.md`](host-installer.md) |
 
+Atlas is packaged separately, not as a sixth channel: `@aywengo/mercury-atlas` ships through the
+npm channel only, with its own version stream and tag (`atlas-v<version>`). The other four
+channels (GitHub Release asset, checkout, Homebrew, host installer) carry the host and its CLI,
+never Atlas.
+
 The host installer is the guided path for a fresh machine: it detects OS/arch,
 checks Node/curl/git, installs the pinned package into the user npm prefix (no
 sudo), then hands off to `mercury host setup` (configuration wizard) and
@@ -259,6 +264,12 @@ configuration the variable does not skip an approval, it turns a would-be staged
 one.
 
 `fleet-v<version>` publishes Fleet to npm only; Fleet has no Homebrew formula.
+
+`atlas-v<version>` publishes Atlas to npm only, under the same rules. Like Fleet, Atlas attaches
+no bundle and has no Homebrew formula — npm is its only installable artifact — and its first
+publish needs the same one-time bootstrap, because trusted publishing cannot be configured on a
+package page that does not exist yet. Until the bootstrap happens, `@aywengo/mercury-atlas`
+returns 404 on the registry, and the Atlas release notes say so rather than offering an install.
 
 ## Verification status
 

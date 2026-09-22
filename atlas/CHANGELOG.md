@@ -5,10 +5,16 @@ All notable changes to **Mercury Atlas** are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/).
 
-## [0.1.0]
+## [0.1.0] - 2026-09-22
 
 First working release: the knowledge service described in
 [`docs/knowledge-base.md`](../docs/knowledge-base.md) sections 11 and 15.
+
+**Not published yet at the time this entry was written**: this entry moves the release into
+place (the notes file, the docs and the tests that hold them to the registry). `0.1.0` is not
+on the npm registry. The registry comparison in `test/releaseDocs.test.ts` keeps this honest:
+once `0.1.0` is on the registry this warning must come off and the release notes must offer
+the install — and not before.
 
 ### Added
 
@@ -30,6 +36,10 @@ First working release: the knowledge service described in
 
 ### Not in this release
 
-Nothing on the Mercury host side talks to Atlas yet. There is no outbox, pusher, replica, workspace
-injection, or tier-1 harvest; those are the following phases of the same design. Atlas runs today with
-no contributors.
+The Mercury host side is a different product with its own release train
+([`@aywengo/mercury`](https://www.npmjs.com/package/@aywengo/mercury)). The host-side transport
+described in [`docs/knowledge-base.md`](../docs/knowledge-base.md) sections 12-14 lives there,
+and has shipped on the host's schedule (host phases 1-5 of the same design); nothing in this
+package imports it, by the coupling rule of section 11.6. Atlas itself runs with no contributors
+until an operator seeds them — `atlas contributor add` or the `ATLAS_CONTRIBUTORS_FILE`, both
+documented in [`atlas/README.md`](README.md).
