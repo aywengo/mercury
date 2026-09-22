@@ -161,6 +161,14 @@ The default Compose topology needs four services:
 - `api`: `node src/cli.ts server`;
 - `worker`: `node src/cli.ts worker`.
 
+A second topology rides behind the Compose `knowledge` profile: one `atlas` service (with a one-shot
+`init-atlas` for the TLS pair, contributor seeds and migrations) and a full second host --
+`fixture-b`/`api-b`/`worker-b` on its own named volume. Host A is the `api`/`worker` pair above,
+its Atlas environment interpolated from `MERCURY_E2E_*` variables that default to empty, the one
+disabled state. Profiled services are omitted from `docker compose config` unless the profile is
+enabled, so the default model -- and everything that pins it -- stays exactly four services
+(`e2e/knowledge.test.ts` enables the profile for its own stack).
+
 The full pre-PR entry point first starts `verify` alone in a short-lived Compose
 environment and tears it down. It then starts the system environment. Within that
 environment, Compose completion dependencies ensure `fixture` exits successfully

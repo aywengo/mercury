@@ -16,6 +16,8 @@ implementation; the design document stays authoritative for intent and trade-off
 | `prepr.ts` | The one-command pre-PR gate: build, verify, e2e -- each under its own deadline. |
 | `prepr.test.ts` | Guards on the gate itself: bounded stages, propagated status, image layer order, and staying out of CI. |
 | `mock-rpc.test.ts` | The human-input journey: a `primeagent` Run parked on `NEEDS_INPUT`, answered through the public API, against the repository's mock RPC fixture. |
+| `knowledge.test.ts` | The knowledge journey (A6-3): two hosts, one Atlas, one project; a note learned on host A materialized on host B, and the Atlas-down resilience leg. Needs the `knowledge` profile. |
+| `local-agents/` | Declarative local-agent configs for the journeys; `note-writer.json` turns a Run's task text into a tier-1 note (knowledge-base.md section 7.1). |
 
 ## Commands
 
@@ -49,6 +51,31 @@ a Docker daemon CI does not provide here.
 
 `npm test` deliberately does **not** run these. It stays Docker-free and fast; CI never runs this
 suite.
+
+## The `knowledge` profile
+
+`compose.yml` carries a second topology under `profiles: [knowledge]`: Atlas (`atlas`, preceded by
+the one-shot `init-atlas` that mints the TLS pair, seeds contributor tokens and migrates), host B as
+a full `fixture-b`/`api-b`/`worker-b` stack on its own named volume, and the Atlas environment for
+host A. Host A is the ordinary `api`/`worker` pair: its knowledge env comes from `MERCURY_E2E_*`
+interpolation, which defaults to empty -- the one disabled state -- so every other stack resolves
+exactly the four services it always had.
+
+The profile is enabled for you by `knowledge.test.ts` (Testcontainers `withProfiles`). To run the
+topology by hand:
+
+```bash
+MERCURY_E2E_ATLAS_URL=https://atlas:4100 \
+MERCURY_E2E_ATLAS_PROJECT=e2e-bridge \
+MERCURY_E2E_TOKEN_A=e2e-contrib-a-0123456789ab \
+MERCURY_E2E_TOKEN_B=e2e-contrib-b-0123456789ab \
+COMPOSE_PROFILES=knowledge docker compose -f e2e/compose.yml up --build
+```
+
+Atlas refuses a non-loopback bind without TLS, and that refusal stands here: `init-atlas` generates
+a self-signed pair with SAN `DNS:atlas`, every container trusts it through `/atlas-state/ca.pem`,
+and the Mercury hosts validate it through `MERCURY_ATLAS_CA_FILE` -- the verified-TLS path of a real
+deployment, not a disabled-verification shortcut.
 
 ## Requirements
 

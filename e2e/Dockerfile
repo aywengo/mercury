@@ -5,9 +5,10 @@
 # usage that quietly requires a newer engine. CI owns the newer matrix entry.
 FROM node:22.18.0-bookworm-slim
 
-# The slim base ships no git, and Mercury's default `git-worktree` workspace mode
-# cannot run without it. Nothing else is installed.
-RUN apt-get update  && apt-get install -y --no-install-recommends git ca-certificates  && rm -rf /var/lib/apt/lists/*
+# The slim base ships no git, and Mercury's default `git-worktree` workspace mode cannot run
+# without it. openssl exists for exactly one consumer: the knowledge scenario's init-atlas one-shot,
+# which mints the self-signed pair the Atlas container serves. Nothing else is installed.
+RUN apt-get update  && apt-get install -y --no-install-recommends git ca-certificates openssl  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -35,7 +36,7 @@ RUN npm run prepare
 # mounted at this exact path in every service container, so a workspace path written
 # by one process resolves identically in all of them.
 USER root
-RUN mkdir -p /state && chown node:node /state
+RUN mkdir -p /state /atlas-state && chown node:node /state /atlas-state
 USER node
 
 EXPOSE 3000
