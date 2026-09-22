@@ -604,7 +604,7 @@ test('direct: generated paths never import, subdir files scope to the directory,
   const claims = res.accepted.map((a) => a.claim).sort();
   assert.deepEqual(claims,
     ['Every change ships with a regression test.', 'Validate input at the boundary.'],
-    'the generated skill note imports nothing; the .cursor rule and the subdir AGENTS.md paragraph do');
+    'the generated skill note imports nothing; the .cursor rule and the subdir skill paragraph do');
   const subdir = res.accepted.find((a) => a.claim === 'Validate input at the boundary.')!;
   assert.equal(subdir.scope, `repo:${(await import('../src/knowledge/identity.ts')).identityHash('github.com/aywengo/mercury')}#.agents/skills/api-helper`,
     '§7.3: a file in a subdirectory scopes to the directory');

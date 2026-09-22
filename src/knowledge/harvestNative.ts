@@ -35,9 +35,9 @@
  */
 
 import { runGit } from '../workspace/workspaceManager.ts';
-import { validateDraft, findK2Violation, type KnowledgeBounds } from './validation.ts';
+import { validateDraft, type KnowledgeBounds } from './validation.ts';
 import { repoIdentity } from './identity.ts';
-import { GENERATED_PATHS, AGENTS_MD_FILE, CLAUDE_MD_FILE, CONTEXT_FILE, SKILL_DIR } from './materialize.ts';
+import { AGENTS_MD_FILE, CLAUDE_MD_FILE, CONTEXT_FILE, SKILL_DIR } from './materialize.ts';
 import type { NoteContribution } from './types.ts';
 
 export interface HarvestNativeInput {
@@ -189,7 +189,9 @@ export async function harvestNative(input: HarvestNativeInput): Promise<HarvestN
       headText = (await runGit(['show', `HEAD:${path}`], { cwd: input.workspacePath, timeoutMs: remaining() })).stdout;
     } catch (err) {
       // HEAD:path cannot legitimately fail here — the diff just named the path at HEAD and the
-      // worker owns HEAD at finalize. A failure is a git problem or a deadline: report and move on.
+      // worker owns HEAD at finalize. A failure is a git problem or a deadline: mark the step
+      // failed (K4 keeps the Run completing) and move on.
+      result.failed = true;
       result.rejected.push({ path, reason: 'harvest-timeout', source: 'distilled',
         detail: `git show HEAD failed: ${(err as Error).message.slice(0, 160)}` });
       continue;
