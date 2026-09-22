@@ -301,6 +301,56 @@ test('a replayed batch after a restart returns the original answers without corr
   }
 });
 
+test('a runless repo-record contribution replays as duplicate without inflating corroboration', async () => {
+  // `knowledge index` contributes with no Run (acceptance 2 of #685). Atlas stores the source with
+  // an empty run id, so the (note_id, host_id, run_id) unique key deduplicates a re-run on the same
+  // host: the answer is `duplicate` and corroboration does not move. A DIFFERENT host contributing
+  // the same claim is a second independent index and SHOULD corroborate — the second half pins that
+  // the dedup is per-host, not global.
+  const dir = tempDir('atlas-index-');
+  let handle: AtlasHandle | null = null;
+  try {
+    handle = await startAtlas(dir);
+    await req(handle, 'POST', '/v1/projects', ADMIN, { id: PROJECT, name: 'Mercury', repoIdentities: ['github.com/aywengo/mercury'] });
+    const record = contribution(
+      'a decision record indexed by an operator at the checkout HEAD',
+      'host-a', null as unknown as string, null as unknown as string,
+      { provenance: { source: 'repo-record', hostId: 'host-a', runId: null, agent: null, harnessVersion: null, recordedAt: new Date().toISOString() } },
+    );
+    const first = await req(handle, 'POST', `/v1/projects/${PROJECT}/notes`, CONTRIBUTOR, { notes: [record] }, { 'idempotency-key': 'index:abc' });
+    const firstResults = (await first.json() as { results: Record<string, string>[] }).results;
+    assert.ok(firstResults[0]!.accepted, 'the first index lands accepted');
+    const noteId = firstResults[0]!.accepted!;
+
+    const detail = await req(handle, 'GET', `/v1/projects/${PROJECT}/notes/${noteId}`, CONTRIBUTOR);
+    const body = await detail.json() as { note: { tier: string; corroboration: { runs: number } }; sources: unknown[] };
+    // repo-record notes land promoted (§6.3: git review is the curation step).
+    assert.equal(body.note.tier, 'promoted');
+    assert.equal(body.note.corroboration.runs, 1);
+
+    // Path 1 -- the lost-ack replay: the same idempotency key returns the ORIGINAL answer.
+    const replay = await req(handle, 'POST', `/v1/projects/${PROJECT}/notes`, CONTRIBUTOR, { notes: [record] }, { 'idempotency-key': 'index:abc' });
+    const replayResults = (await replay.json() as { results: Record<string, string>[] }).results;
+    assert.equal(replayResults[0]!.accepted, noteId, 'a lost-ack replay returns the original answer');
+
+    // Path 2 -- a genuine re-run: a fresh idempotency key, same claim. The claim-hash lookup answers
+    // duplicate, and the runless source (stored with an empty run id) deduplicates on
+    // (note_id, host_id, run_id), so corroboration does not move.
+    const rerun = await req(handle, 'POST', `/v1/projects/${PROJECT}/notes`, CONTRIBUTOR, { notes: [record] }, { 'idempotency-key': 'index:rerun-after-cache' });
+    const rerunResults = (await rerun.json() as { results: Record<string, string>[] }).results;
+    assert.equal(rerunResults[0]!.duplicate, noteId, 'a re-run on the same host answers duplicate');
+
+    const after = await req(handle, 'GET', `/v1/projects/${PROJECT}/notes/${noteId}`, CONTRIBUTOR);
+    const afterBody = await after.json() as { note: { corroboration: { runs: number } }; sources: unknown[] };
+    assert.equal(afterBody.note.corroboration.runs, 1, 'neither path inflates corroboration');
+    assert.equal(afterBody.sources.length, 1);
+
+    void noteId;
+  } finally {
+    if (handle) await handle.stop();
+  }
+});
+
 test('Atlas refuses to bind beyond loopback without TLS', async () => {
   const dir = tempDir('atlas-tls-');
   try {

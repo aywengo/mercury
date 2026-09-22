@@ -66,9 +66,15 @@ interface OutboxDbRow {
  * the one number section 12 promotes notes on.
  */
 export function idempotencyKey(runId: string | null, c: NoteContribution): string {
-  // 'operator' rather than an empty string: the key is also Atlas's per-contributor dedup key, and
-  // a key that starts with ':' reads as a bug in a log line.
-  return `${runId ?? 'operator'}:${claimHash(c.kind, c.scope, c.claim)}`;
+  // A Run-scoped row keys on the Run. A runless row keys on its ingest source: `operator:` for an
+  // operator note and `index:` for a runless `repo-record` row (the `knowledge index` command).
+  // Collapsing both to one prefix would make an indexed record and an operator note with the same
+  // claim deduplicate against each other in the outbox — they are different acts (a git-reviewed
+  // decision and a human assertion), and silently dropping the second is the exact failure the key
+  // exists to prevent. The key is also Atlas's per-contributor dedup key, so the prefix must be
+  // readable rather than empty.
+  const prefix = runId ?? (c.provenance.source === 'repo-record' ? 'index' : 'operator');
+  return `${prefix}:${claimHash(c.kind, c.scope, c.claim)}`;
 }
 
 export class OutboxStore {
