@@ -501,7 +501,7 @@ test('the Fleet notes preamble matches whether that version is actually publishe
     const own = notesFile.replace(/\.md$/, '');
     const notes = read(join('docs', 'releases', 'fleet', notesFile));
     const preamble = notes.split(/^##\s/m)[0];
-    const saysUnpublished = /never (?:been )?published|not (?:yet )?published|not published yet/i.test(preamble);
+    const saysUnpublished = /never (?:been )?published|not (?:yet )?published|not published yet|not on the npm registry/i.test(preamble);
     const offersOwnInstall = new RegExp(
       `npm (?:install|i)\\b[^\\n]*mercury-fleet@${own.replace(/\./g, '\\.')}`).test(notes);
     if (published.includes(own)) {
@@ -807,7 +807,7 @@ test('the Atlas notes preamble matches whether that version is actually publishe
   let warned = 0, offered = 0;
   for (const { file, own, text } of files) {
     const preamble = text.split(/^##\s/m)[0];
-    const saysUnpublished = /never (?:been )?published|not (?:yet )?published|not published yet/i.test(preamble);
+    const saysUnpublished = /never (?:been )?published|not (?:yet )?published|not published yet|not on the npm registry/i.test(preamble);
     const offersOwnInstall = new RegExp(
       `npm (?:install|i)\\b[^\\n]*mercury-atlas@${own.replace(/\./g, '\\.')}`).test(text);
     if (published.includes(own)) {
