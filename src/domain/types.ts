@@ -420,6 +420,18 @@ export interface AgentStaticCapabilities {
   skills?: AgentSkillDelivery;
   /** Can Mercury append text to the agent's persona/system prompt? */
   personaAppend?: boolean;
+  /**
+   * How this adapter applies a Role Preset's role instruction (docs/crew/role-presets.md §8).
+   * Absent means 'none': the adapter cannot carry one, and a preset that demands instruction
+   * behavior fails closed instead of silently dropping the role.
+   */
+  roleInstruction?: 'system' | 'prompt-reference' | 'none';
+  /** The adapter accepts a structured per-Run model override (never argv). */
+  perRunModel?: boolean;
+  /** The adapter can execute this Run inside the sandbox manager's container. */
+  sandbox?: boolean;
+  /** Per-run MCP server support. 'none' until an adapter implements it (Phase 4+). */
+  mcp?: 'none' | 'per-run';
   /** Workspace-relative files the backend reads as persona/context, if any. */
   personaFiles?: string[];
   /** The backend accepts mid-Run human input. Derived from the adapter's input support. */

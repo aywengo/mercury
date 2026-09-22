@@ -115,6 +115,10 @@ export class PresetRegistry {
     const dir = resolve(this.rootDir, id);
     const manifestPath = join(dir, 'preset.json');
     if (!exists(manifestPath)) {
+      // A directory without preset.json is a STRAY directory, not a preset: listing skips it
+      // (throwOnError=false returns null) and get() reports not-found. One stray directory must
+      // not take the whole listing down -- same lesson as the skill registry's odd-directory skip.
+      if (!opts.throwOnError) return null;
       throw new NotFoundError(`Preset not found: ${JSON.stringify(id)}`);
     }
     let manifest: unknown;
@@ -122,7 +126,7 @@ export class PresetRegistry {
       manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
     } catch (err) {
       const finding: PresetFinding = {
-        code: 'PRESET_MANIFEST_ENCODING', field: 'preset.json',
+        code: 'PRESET_MANIFEST_PARSE', field: 'preset.json',
         message: `preset.json is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
       };
       if (opts.throwOnError) throw new PresetValidationFailure(id, [finding]);

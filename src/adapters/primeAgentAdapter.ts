@@ -98,6 +98,13 @@ export class PrimeAgentAdapter implements AgentAdapter {
       skills: 'workspacePaths',
       humanInput: true,
       resume: true,
+      // Role Presets (docs/crew/role-presets.md §8): the prompt already names workspace files the
+      // agent should read (.mercury-context.json), so the materialized instruction reaches the
+      // agent the same way -- prompt-reference. No per-run model argv exists; a preset that sets
+      // one fails closed instead of silently ignored.
+      roleInstruction: 'prompt-reference',
+      sandbox: true,
+      mcp: 'none',
       // RPC mode carries tool callbacks, and the shared translator maps them to tool.started /
       // tool.completed / tool.failed (eventTranslation.ts). Observed on real Runs, not inferred:
       // `run_933c68e4684a498d` recorded 47 events including tool calls. The contrast with Hermes

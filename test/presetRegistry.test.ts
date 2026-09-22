@@ -102,6 +102,18 @@ test('a manifest cannot set trust or any other unknown key', () => {
   assert.ok(all.invalid[0].validation.some((f) => f.code === 'PRESET_UNKNOWN_KEYS' && f.field === 'trust'));
 });
 
+test('a stray safe-named directory without preset.json does not break listing', () => {
+  const root = tempDir('mercury-presets-');
+  makePreset(root, 'real', validManifest('real'));
+  const stray = join(root, 'stray-dir');
+  mkdirSync(stray);
+  const reg = new PresetRegistry(root);
+  assert.deepEqual(reg.list().map((p) => p.id), ['real']);
+  assert.deepEqual(reg.listAll().presets.map((p) => p.id), ['real']);
+  // get() still reports it as not-found rather than half-loading it.
+  assert.throws(() => reg.get('stray-dir'), NotFoundError);
+});
+
 test('disabled presets are excluded from list() but still loadable and listed with includeDisabled', () => {
   const root = tempDir('mercury-presets-');
   makePreset(root, 'live', validManifest('live'));
