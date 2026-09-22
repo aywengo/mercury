@@ -101,7 +101,11 @@ export function resolveContained(root: string, rel: string): string {
  * component and everything below it must not be symlinks, while symlinks in the root's
  * ANCESTRY stay allowed -- /tmp is a symlink on macOS and must keep working.
  */
-function assertNoSymlinkBelow(root: string, abs: string): void {
+/**
+ * Exported for the preset registry, which applies the same rule to `presets/<id>/`:
+ * a repo checkout that symlinks a manifest turns a joined path into a host read.
+ */
+export function assertNoSymlinkBelow(root: string, abs: string): void {
   const rel = relative(root, abs);
   const parts = rel === '' ? [] : rel.split(sep);
   // Walk by RELATIVE component and resolve to an absolute path only for the syscall. Keeping the

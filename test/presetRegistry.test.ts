@@ -177,6 +177,45 @@ test('a preset whose instruction crosses a symlink is rejected by the registry',
   assert.ok(all.invalid[0].validation.some((f) => f.code === 'PRESET_INSTRUCTION_PATH'));
 });
 
+test('a symlinked preset.json or file inside the preset dir is refused before reading', () => {
+  const root = tempDir('mercury-presets-');
+  const outside = tempDir('mercury-presets-outside-');
+  writeFileSync(join(outside, 'host-file.txt'), 'host bytes');
+  // Case 1: preset.json itself is a symlink to an arbitrary host file.
+  const dirA = join(root, 'linked-manifest');
+  mkdirSync(dirA);
+  symlinkSync(join(outside, 'host-file.txt'), join(dirA, 'preset.json'));
+  const regA = new PresetRegistry(root);
+  assert.deepEqual(regA.list().map((p) => p.id), []);
+  const allA = regA.listAll();
+  assert.ok(allA.invalid.some((i) => i.id === 'linked-manifest'
+    && i.validation.some((f) => f.code === 'PRESET_LOAD_FAILED'
+      && /symlink/i.test(f.message))), JSON.stringify(allA.invalid));
+
+  // Case 2: an extra file inside the preset dir is a symlink -- refused, not folded into the hash.
+  const dirB = join(root, 'linked-file');
+  mkdirSync(dirB);
+  writeFileSync(join(dirB, 'preset.json'), JSON.stringify(validManifest('linked-file')));
+  writeFileSync(join(dirB, 'INSTRUCTION.md'), 'x');
+  symlinkSync(join(outside, 'host-file.txt'), join(dirB, 'extra.md'));
+  const regB = new PresetRegistry(root);
+  assert.deepEqual(regB.list().map((p) => p.id), []);
+  const allB = regB.listAll();
+  assert.ok(allB.invalid.some((i) => i.id === 'linked-file'
+    && i.validation.some((f) => /symlink/i.test(f.message))), JSON.stringify(allB.invalid));
+});
+
+test('listAll() skips stray directories the way list() does', () => {
+  const root = tempDir('mercury-presets-');
+  makePreset(root, 'real', validManifest('real'));
+  mkdirSync(join(root, 'stray-dir'));
+  const reg = new PresetRegistry(root);
+  const all = reg.listAll();
+  assert.deepEqual(all.presets.map((p) => p.id), ['real']);
+  assert.deepEqual(all.invalid.map((i) => i.id), [],
+    'a stray directory is neither valid nor invalid');
+});
+
 test('registry without a skills dep treats every referenced skill as missing', () => {
   const root = tempDir('mercury-presets-');
   makePreset(root, 'needs-skills', {

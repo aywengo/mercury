@@ -11,7 +11,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { dataPath } from '../paths.ts';
 import { NotFoundError, ValidationError } from '../domain/errors.ts';
-import { compareSkillIds } from '../skills/skillRegistry.ts';
+import { assertNoSymlinkBelow, compareSkillIds, resolveContained } from '../skills/skillRegistry.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import { findingsToError, validatePreset, type ValidatePresetDeps } from './validatePreset.ts';
 import type { InvalidPreset, LoadedPreset, PresetFinding } from './types.ts';
@@ -64,6 +64,9 @@ export class PresetRegistry {
         const loaded = this.loadOne(id, { throwOnError: true });
         if (loaded !== null) presets.push(loaded);
       } catch (err) {
+        // A directory without preset.json is a STRAY, not an invalid preset: list() skips it
+        // and listAll() must not surface it as a diagnostic failure either.
+        if (err instanceof NotFoundError) continue;
         invalid.push({ id, validation: err instanceof PresetValidationFailure ? err.findings : [{
           code: 'PRESET_LOAD_FAILED', field: '', message: String(err instanceof Error ? err.message : err),
         }] });
@@ -112,13 +115,30 @@ export class PresetRegistry {
     if (!/^[a-z0-9][a-z0-9._-]*$/.test(id)) {
       throw new ValidationError(`Unsafe preset id: ${JSON.stringify(id)}`);
     }
-    const dir = resolve(this.rootDir, id);
+    // Contained + symlink-free, not merely joined (issue #58's rule, write and read side).
+    // A repo checkout the operator does not trust ships presets/ too; a symlinked manifest
+    // would otherwise turn this read into an arbitrary host-file read. On a non-throwing
+    // load (listings) the refusal degrades to "skip this one"; get() rethrows it verbatim.
+    try {
+      return this.loadOneChecked(id, opts);
+    } catch (err) {
+      if (!opts.throwOnError) return null;
+      throw err;
+    }
+  }
+
+  private loadOneChecked(
+    id: string,
+    opts: { throwOnError: boolean },
+  ): LoadedPreset | null {
+    const dir = resolveContained(this.rootDir, id);
+    assertNoSymlinkBelow(this.rootDir, dir);
     const manifestPath = join(dir, 'preset.json');
+    assertNoSymlinkBelow(this.rootDir, manifestPath);
     if (!exists(manifestPath)) {
       // A directory without preset.json is a STRAY directory, not a preset: listing skips it
       // (throwOnError=false returns null) and get() reports not-found. One stray directory must
       // not take the whole listing down -- same lesson as the skill registry's odd-directory skip.
-      if (!opts.throwOnError) return null;
       throw new NotFoundError(`Preset not found: ${JSON.stringify(id)}`);
     }
     let manifest: unknown;
@@ -129,8 +149,7 @@ export class PresetRegistry {
         code: 'PRESET_MANIFEST_PARSE', field: 'preset.json',
         message: `preset.json is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
       };
-      if (opts.throwOnError) throw new PresetValidationFailure(id, [finding]);
-      return null;
+      throw new PresetValidationFailure(id, [finding]);
     }
 
     // One registry read per preset load, not one per referenced skill: validation asks
@@ -213,6 +232,14 @@ export class PresetValidationFailure extends ValidationError {
 function collectFiles(dir: string, base: string, out: Record<string, string>): void {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
+    if (entry.isSymbolicLink()) {
+      // A symlink inside a preset directory would be followed by readFileSync and fold
+      // arbitrary host bytes into the snapshot hash -- and then into workspaces. The preset
+      // dir comes from a checkout, so this is refused, not skipped.
+      throw new ValidationError(
+        `Preset file component is a symlink, refusing to follow it: ${JSON.stringify(relative(base, full))}`,
+      );
+    }
     if (entry.isDirectory()) {
       collectFiles(full, base, out);
     } else if (entry.isFile()) {
