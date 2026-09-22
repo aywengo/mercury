@@ -10,11 +10,9 @@ and this project uses [Semantic Versioning](https://semver.org/).
 First working release: the knowledge service described in
 [`docs/knowledge-base.md`](../docs/knowledge-base.md) sections 11 and 15.
 
-**Not published yet at the time this entry was written**: this entry moves the release into
-place (the notes file, the docs and the tests that hold them to the registry). `0.1.0` is not
-on the npm registry. The registry comparison in `test/releaseDocs.test.ts` keeps this honest:
-once `0.1.0` is on the registry this warning must come off and the release notes must offer
-the install — and not before.
+**Published 2026-09-22** — `0.1.0` is on the npm registry (`latest`), installable with
+`npm install -g @aywengo/mercury-atlas@0.1.0`; the staged publish was approved the same day.
+The registry comparison in `test/releaseDocs.test.ts` keeps these notes honest.
 
 ### Added
 

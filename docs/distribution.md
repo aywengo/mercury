@@ -15,9 +15,9 @@ Status header: npm, GitHub Release and Homebrew are all implemented in `release.
 | Host installer | `curl -fsSL https://github.com/aywengo/mercury/releases/latest/download/install.sh \| bash`, or `npx @aywengo/mercury host install` | host + `mercuryctl` | implemented (M6); asset ships with the next host release — see [`host-installer.md`](host-installer.md) |
 
 Atlas is packaged separately, not as a sixth channel: `@aywengo/mercury-atlas` ships through the
-npm channel only, with its own version stream and tag (`atlas-v<version>`). The other four
-channels (GitHub Release asset, checkout, Homebrew, host installer) carry the host and its CLI,
-never Atlas.
+npm channel only, with its own version stream and tag (`atlas-v<version>`): `npm install -g
+@aywengo/mercury-atlas` (live since 0.1.0; stable on `latest`). The other four channels (GitHub
+Release asset, checkout, Homebrew, host installer) carry the host and its CLI, never Atlas.
 
 The host installer is the guided path for a fresh machine: it detects OS/arch,
 checks Node/curl/git, installs the pinned package into the user npm prefix (no
@@ -187,7 +187,9 @@ failed publish cannot leave a public release advertising an uninstallable versio
 ## Release procedure
 ## First release only
 
-The package does not exist on npm yet, and creating the first version is an interactive action.
+The package page exists (`@aywengo/mercury-atlas` published its `0.0.1-bootstrap` on
+2026-09-22); versions after that were submitted through the workflow and only need a
+maintainer's staged-publish approval.
 
 **The precondition, stated up front because the error messages do not:** npm requires **one of**
 
@@ -267,9 +269,11 @@ one.
 
 `atlas-v<version>` publishes Atlas to npm only, under the same rules. Like Fleet, Atlas attaches
 no bundle and has no Homebrew formula — npm is its only installable artifact — and its first
-publish needs the same one-time bootstrap, because trusted publishing cannot be configured on a
-package page that does not exist yet. Until the bootstrap happens, `@aywengo/mercury-atlas`
-returns 404 on the registry, and the Atlas release notes say so rather than offering an install.
+publish needed the same one-time bootstrap, because trusted publishing cannot be configured
+before a package page exists. The bootstrap ran on 2026-09-22 (`0.0.1-bootstrap` created the
+page, `npm trust github` followed); from then on the tag path publishes without a secret. The
+registry comparison in `test/releaseDocs.test.ts` still holds the notes to which versions are
+actually installable.
 
 ## Verification status
 

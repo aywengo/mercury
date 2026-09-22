@@ -15,13 +15,15 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
 | Fleet | `fleet/package.json` + `fleet/version.ts` (`FLEET_VERSION`) | `fleet-vX.Y.Z` | `@aywengo/mercury-fleet` | `docs/releases/fleet/X.Y.Z.md` |
 | Atlas | `atlas/package.json` + `atlas/version.ts` (`ATLAS_VERSION`) | `atlas-vX.Y.Z` | `@aywengo/mercury-atlas` | `docs/releases/atlas/X.Y.Z.md` |
 
-The Atlas row describes the release path the workflow now handles. `@aywengo/mercury-atlas` has
-**no published version yet**: the release notes for `0.1.0` exist
-([`docs/releases/atlas/0.1.0.md`](releases/atlas/0.1.0.md)), and the registry comparison in
-`test/releaseDocs.test.ts` holds them to that fact — they warn instead of offering an install.
-An `atlas-v0.1.0` tag pushed before the first publish reaches the npm step and fails there: the
-package page does not exist, and no rehearsal can create it. Like Fleet, Atlas attaches no bundle
-and has no Homebrew formula — npm is its only installable artifact.
+The Atlas row describes the release path the workflow now handles. `@aywengo/mercury-atlas` is
+**published**: `0.1.0` shipped on 2026-09-22 through the tag path — the OIDC exchange, the signed
+provenance, and the maintainer-approved staged publish — with the release notes at
+[`docs/releases/atlas/0.1.0.md`](releases/atlas/0.1.0.md), held to the registry by the comparison
+in `test/releaseDocs.test.ts`. The one-time bootstrap ran the same day (`0.0.1-bootstrap` created
+the package page; `npm trust github` configured the trusted publisher), so from the `atlas-v0.1.0`
+tag on the path needs no secret. An `atlas-vX.Y.Z` tag pushed before a product's bootstrap still
+fails at the npm step: no rehearsal can create the package page. Like Fleet, Atlas attaches no
+bundle and has no Homebrew formula — npm is its only installable artifact.
 
 **Atlas's first release needs the same one-time bootstrap as Fleet's**: create the package on
 npm, then configure trusted publishing for the `atlas` job (the Fleet-specific exception in the
