@@ -20,6 +20,24 @@ x-mercury-env: &mercury-env
   MERCURY_API_TOKENS: tok-alice:alice,tok-bob:bob
   MERCURY_POLL_MS: "50"
   MERCURY_LOG_LEVEL: info
+  # Declarative local agents (docs/agent-adapters.md section 4). Checked into e2e/local-agents/,
+  # so the note-writer agent exists in every stack; the default stacks never select it.
+  MERCURY_LOCAL_AGENTS_DIR: /app/e2e/local-agents
+  # The knowledge transport is OFF in the default stacks: an empty MERCURY_ATLAS_URL is the one
+  # disabled state (src/config.ts), so the empty interpolation default below changes nothing for
+  # `npm run test:e2e` as it ran before A6-3. The knowledge scenario (e2e/knowledge.test.ts) sets
+  # these through Testcontainers' withEnvironment, which is exactly the mechanism compose.yml already
+  # uses for MERCURY_E2E_MOCK_RPC_MODE -- pinned per stack, never read from the ambient shell.
+  MERCURY_ATLAS_URL: ${MERCURY_E2E_ATLAS_URL:-}
+  MERCURY_ATLAS_PROJECT: ${MERCURY_E2E_ATLAS_PROJECT:-}
+  MERCURY_ATLAS_TOKEN: ${MERCURY_E2E_TOKEN_A:-}
+  MERCURY_ATLAS_HOST_ID: ${MERCURY_E2E_HOST_A:-host-a}
+  MERCURY_ATLAS_CA_FILE: /atlas-state/ca.pem
+  # Sub-second intervals so the scenario does not spend its wall clock waiting for a timer that
+  # production runs at 30s/60s. The intervals are config, not behaviour: the pusher/puller are
+  # interval-driven retries of the same HTTP calls.
+  MERCURY_KNOWLEDGE_PUSH_INTERVAL_MS: ${MERCURY_E2E_KNOWLEDGE_PUSH_MS:-30000}
+  MERCURY_KNOWLEDGE_PULL_INTERVAL_MS: ${MERCURY_E2E_KNOWLEDGE_PULL_MS:-60000}
   # The default gate performs no LLM call. The PrimeAgent adapter is wired to the repository's own
   # mock RPC fixture, which speaks the real JSONL protocol.
   #
@@ -87,7 +105,12 @@ services:
     restart: "no"
     command: ["node", "src/cli.ts", "server"]
     environment: *mercury-env
-    volumes: *state-volume
+    volumes:
+      # Explicit rather than the *state-volume alias: this service mounts the Atlas CA volume too,
+      # read-only. In the default stacks the CA file is simply absent and no knowledge client is
+      # built (MERCURY_ATLAS_URL is empty), so the mount is inert.
+      - mercury-e2e-state:/state
+      - mercury-e2e-atlas:/atlas-state:ro
     # Random host port, loopback only. The harness reads the real mapping from
     # Testcontainers and never assumes 3000 on the host.
     ports:
@@ -121,11 +144,193 @@ services:
       # mock-RPC journey asserts the subprocess actually died instead of trusting the adapter.
       MOCK_RPC_PID_FILE: /state/mock.pid
       MOCK_RPC_ENV_FILE: /state/mock-env.json
-    volumes: *state-volume
+    volumes:
+      # Same read-only Atlas CA mount as `api` (see there).
+      - mercury-e2e-state:/state
+      - mercury-e2e-atlas:/atlas-state:ro
     depends_on:
       fixture:
         condition: service_completed_successfully
     stop_grace_period: 15s
 
+  # --- A6-3: the knowledge topology (profile `knowledge`) -------------------------------------
+  #
+  # Two hosts, one Atlas, one project: docs/knowledge-base.md section 11.6's containerized scenario.
+  # Every service below carries `profiles: [knowledge]`, so the default gate and the mock-RPC journey
+  # resolve byte-identically without it -- `docker compose config` omits profiled services, and the
+  # deny-by-default service list in system.test.ts keeps pinning exactly the four default services.
+  #
+  # Host A is the EXISTING api/worker pair: the scenario enables the profile AND points the
+  # MERCURY_ATLAS_* interpolation at Atlas, so one service definition serves both roles and the
+  # default stacks are untouched by construction. Host B is a second full pair on its OWN named
+  # volume -- separate SQLite, separate workspaces; nothing is shared with host A but the Atlas
+  # service, which is the entire point of the scenario.
+  #
+  # Atlas binds 0.0.0.0 because three other containers talk to it. assertServeable (atlas/config.ts)
+  # refuses a non-loopback bind without TLS, and that refusal is CORRECT here: a self-signed pair is
+  # generated in init-atlas, every container reads the CA from /atlas-state/ca.pem, and Mercury
+  # validates it through MERCURY_ATLAS_CA_FILE -- so the containerized scenario exercises the same
+  # verified-TLS path a real deployment has, not a disabled-verification shortcut.
+
+  # One-shot: mints the TLS pair, writes the contributor registry and migrates the Atlas database,
+  # all before the Atlas process starts. Contributor tokens bind hostId on the Atlas side; they are
+  # fixed test identities exactly like tok-alice, not secrets.
+  init-atlas:
+    image: mercury-e2e:local
+    restart: "no"
+    profiles: [knowledge]
+    environment:
+      ATLAS_DB: /atlas-state/atlas.db
+      MERCURY_E2E_TOKEN_A: ${MERCURY_E2E_TOKEN_A:-}
+      MERCURY_E2E_TOKEN_B: ${MERCURY_E2E_TOKEN_B:-}
+      MERCURY_E2E_ATLAS_PROJECT: ${MERCURY_E2E_ATLAS_PROJECT:-}
+    volumes:
+      - mercury-e2e-atlas:/atlas-state
+    command:
+      - sh
+      - -ec
+      - |
+        set -eu
+        test ! -e /atlas-state/atlas.db || { echo "init-atlas: already initialized"; exit 0; }
+        openssl req -x509 -newkey rsa:2048 -sha256 -days 3 -nodes \
+          -keyout /atlas-state/atlas-key.pem -out /atlas-state/ca.pem \
+          -subj "/CN=atlas" \
+          -addext "subjectAltName=DNS:atlas,DNS:localhost,IP:127.0.0.1" \
+          -addext "keyUsage=digitalSignature,keyEncipherment" \
+          -addext "extendedKeyUsage=serverAuth"
+        node -e '
+          const { writeFileSync } = require("node:fs");
+          if (!process.env.MERCURY_E2E_TOKEN_A || !process.env.MERCURY_E2E_TOKEN_B
+            || !process.env.MERCURY_E2E_ATLAS_PROJECT) {
+            throw new Error("init-atlas: token/project interpolation missing; the scenario would not be able to authenticate");
+          }
+          writeFileSync("/atlas-state/contributors.json", JSON.stringify({
+            [process.env.MERCURY_E2E_TOKEN_A]: { hostId: "host-a", projects: [process.env.MERCURY_E2E_ATLAS_PROJECT] },
+            [process.env.MERCURY_E2E_TOKEN_B]: { hostId: "host-b", projects: [process.env.MERCURY_E2E_ATLAS_PROJECT] },
+          }), { mode: 0o600 });
+        '
+        node atlas/cli.ts migrate
+        echo "init-atlas: ready"
+
+  atlas:
+    image: mercury-e2e:local
+    restart: "no"
+    profiles: [knowledge]
+    command: ["node", "atlas/cli.ts", "serve"]
+    environment:
+      ATLAS_DB: /atlas-state/atlas.db
+      ATLAS_BIND_HOST: 0.0.0.0
+      ATLAS_PORT: "4100"
+      # The pair minted by init-atlas; assertServeable requires it for a non-loopback bind, and the
+      # hosts verify it through MERCURY_ATLAS_CA_FILE.
+      ATLAS_TLS_CERT: /atlas-state/ca.pem
+      ATLAS_TLS_KEY: /atlas-state/atlas-key.pem
+      ATLAS_ADMIN_TOKEN: atlas-admin-token-local
+      ATLAS_CONTRIBUTORS_FILE: /atlas-state/contributors.json
+      ATLAS_LOG_LEVEL: info
+      # The healthcheck fetches loopback HTTPS from inside the container; NODE_EXTRA_CA_CERTS is the
+      # supported way to make that one process trust the self-signed CA. Mercury does NOT get this
+      # variable: the hosts must keep validating through MERCURY_ATLAS_CA_FILE, which is the
+      # configuration a real deployment uses.
+      NODE_EXTRA_CA_CERTS: /atlas-state/ca.pem
+    volumes:
+      - mercury-e2e-atlas:/atlas-state
+    depends_on:
+      init-atlas:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - 'fetch("https://127.0.0.1:4100/healthz").then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # One-shot: the fixture repository on host B's own volume. Same content recipe as `fixture`,
+  # separate volume: the two hosts share nothing but Atlas.
+  fixture-b:
+    image: mercury-e2e:local
+    restart: "no"
+    profiles: [knowledge]
+    volumes:
+      - mercury-e2e-state-b:/state
+    depends_on:
+      init-atlas:
+        condition: service_completed_successfully
+    command:
+      - sh
+      - -ec
+      - |
+        set -eu
+        repo=/state/fixture-repo
+        test ! -e "$$repo/.git" || { echo "fixture-b: already initialized"; exit 0; }
+        git init --initial-branch=main "$$repo"
+        cd "$$repo"
+        git config user.name "Mercury E2E Fixture"
+        git config user.email "e2e-fixture@example.invalid"
+        printf 'Mercury E2E fixture repository.\n' > README.md
+        git add README.md
+        git commit -q -m "fixture: initial commit"
+        echo "fixture-b: ready at $$repo commit $$(git rev-parse HEAD)"
+
+  api-b:
+    image: mercury-e2e:local
+    restart: "no"
+    profiles: [knowledge]
+    command: ["node", "src/cli.ts", "server"]
+    environment:
+      <<: *mercury-env
+      # Host B overrides: its own state volume, its own contributor identity. Everything else is the
+      # shared base block. The Atlas interpolation reaches api-b too because pack SELECTION happens
+      # at Run creation on the API (runService knowledge deps), not on the worker.
+      MERCURY_ATLAS_TOKEN: ${MERCURY_E2E_TOKEN_B:-}
+      MERCURY_ATLAS_HOST_ID: ${MERCURY_E2E_HOST_B:-host-b}
+    volumes:
+      - mercury-e2e-state-b:/state
+      # Host B reads the Atlas CA (read-only); it must never write Atlas state.
+      - mercury-e2e-atlas:/atlas-state:ro
+    ports:
+      - "127.0.0.1::3000"
+    depends_on:
+      fixture-b:
+        condition: service_completed_successfully
+      atlas:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - 'fetch("http://127.0.0.1:3000/healthz").then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  worker-b:
+    image: mercury-e2e:local
+    restart: "no"
+    profiles: [knowledge]
+    command: ["node", "src/cli.ts", "worker"]
+    environment:
+      <<: *mercury-env
+      MOCK_RPC_MODE: ${MERCURY_E2E_MOCK_RPC_MODE:-happy}
+      MERCURY_ATLAS_TOKEN: ${MERCURY_E2E_TOKEN_B:-}
+      MERCURY_ATLAS_HOST_ID: ${MERCURY_E2E_HOST_B:-host-b}
+    volumes:
+      - mercury-e2e-state-b:/state
+      - mercury-e2e-atlas:/atlas-state:ro
+    depends_on:
+      fixture-b:
+        condition: service_completed_successfully
+      atlas:
+        condition: service_healthy
+    stop_grace_period: 15s
+
 volumes:
   mercury-e2e-state:
+  mercury-e2e-state-b:
+  mercury-e2e-atlas:

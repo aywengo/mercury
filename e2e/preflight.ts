@@ -145,6 +145,31 @@ export async function preflight(): Promise<{ node: string; docker: string; compo
     throw new PreflightError(`compose model not found at ${COMPOSE_FILE}`);
   }
 
+  // effectiveFloor() tolerates a missing testcontainers because its job is a version floor, not a
+  // presence check. This check is presence: a checkout without the devDependency (npm ci --omit=dev,
+  // a trimmed node_modules, a production install) would otherwise fail at import time with a raw
+  // ERR_MODULE_NOT_FOUND from deep inside node --test, long after the readable preflight messages.
+  // Every file in this directory that starts containers imports testcontainers at module load, so
+  // there is no mode in which the suite can run without it -- failing here says exactly that.
+  const testcontainersManifest = join(REPO_ROOT, 'node_modules', 'testcontainers', 'package.json');
+  try {
+    await access(testcontainersManifest);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      throw new PreflightError(
+        'testcontainers is not installed. It is a devDependency, so `npm ci` provides it; a checkout'
+        + ' installed with --omit=dev cannot run this suite. `npm test` does not need it.',
+      );
+    }
+    // Anything else (EACCES, EIO, ...) is a real problem with THIS checkout, and a raw errno dump
+    // is not an answer. Same shape as the dependency-floor message: name the path, keep the detail.
+    const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    throw new PreflightError(
+      `cannot read ${testcontainersManifest}: ${detail}. Refusing to guess whether the suite can run.`,
+    );
+  }
+
   const docker = await run('docker', ['info', '--format', '{{.ServerVersion}}'], LIMITS.runtimeProbeMs);
   if (docker.code !== 0) {
     throw new PreflightError(

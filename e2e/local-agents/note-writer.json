@@ -1,0 +1,30 @@
+{
+  "id": "note-writer",
+  "description": "e2e: writes the Run task into .mercury/notes.jsonl (knowledge-base.md section 7.1)",
+  "command": "node",
+  "args": [
+    "/app/test/fixtures/mock-knowledge-echo-writer.mjs"
+  ],
+  "taskInput": {
+    "mode": "arg",
+    "flag": "--task"
+  },
+  "output": {
+    "format": "jsonl",
+    "stream": true,
+    "eventPath": "type"
+  },
+  "eventMap": {
+    "started": "step.started",
+    "message": "agent.message",
+    "completed": "done",
+    "failed": "run.failed"
+  },
+  "cancel": {
+    "signal": "SIGTERM",
+    "graceMs": 200
+  },
+  "capabilities": {
+    "skills": "none"
+  }
+}
