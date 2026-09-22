@@ -241,7 +241,12 @@ async function atlasFetch(key: keyof typeof SVC, method: string, path: string, t
   return parsed;
 }
 
-/** POSIX single-quote wrapper: the embedded scripts contain double quotes only. */
+/**
+ * POSIX single-quote wrapper for the few shell paths left (grep patterns). The embedded scripts
+ * DO contain single quotes -- SQL literals like `tier = 'promoted'` -- which is exactly what this
+ * escaping exists to carry. Scripts that can hold such payloads normally go through execNode's
+ * argv form instead, where no quoting layer exists at all.
+ */
 function shellQuote(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }

@@ -13,7 +13,9 @@ import { join } from 'node:path';
 
 const emit = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
 const i = process.argv.indexOf('--task');
-const task = i > 0 ? process.argv[i + 1] : '';
+// `?? ''` because --task as the LAST argv means the value is undefined; the structured failure
+// below must be the answer, not a TypeError from .trim().
+const task = (i > 0 ? process.argv[i + 1] : '') ?? '';
 
 if (!task.trim()) {
   emit({ type: 'failed', error: 'no task text reached the agent; the scenario would prove nothing' });
