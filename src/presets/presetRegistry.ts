@@ -129,8 +129,11 @@ export class PresetRegistry {
       return null;
     }
 
+    // One registry read per preset load, not one per referenced skill: validation asks
+    // membership questions against a Set, so a large catalog stays O(presets x refs).
+    const skillIds = this.deps.skills ? new Set(this.deps.skills.list().map((s) => s.id)) : null;
     const deps: ValidatePresetDeps = {
-      skillExists: (skillId) => (this.deps.skills ? this.deps.skills.list().some((s) => s.id === skillId) : false),
+      skillExists: (skillId) => (skillIds ? skillIds.has(skillId) : false),
       knownAgents: this.deps.knownAgents,
     };
     const validation = validatePreset(id, dir, manifest, deps);
@@ -141,7 +144,18 @@ export class PresetRegistry {
 
     const m = manifest as import('./types.ts').RolePresetManifest;
     const instFile = m.instruction?.file ?? 'INSTRUCTION.md';
-    const instructionBytes = readFileSync(join(dir, instFile));
+    // Validation already proved the path is contained and a regular file, but the READ can
+    // still fail (permissions changed between stat and read) -- keep it inside the finding
+    // contract instead of letting it degrade to PRESET_LOAD_FAILED.
+    let instructionBytes: Buffer;
+    try {
+      instructionBytes = readFileSync(join(dir, instFile));
+    } catch {
+      throw new PresetValidationFailure(id, [{
+        code: 'PRESET_INSTRUCTION_MISSING', field: 'instruction.file',
+        message: `instruction file ${JSON.stringify(instFile)} could not be read`,
+      }]);
+    }
     // Decoded with fatal: true so a preset whose instruction is not UTF-8 fails with a
     // structured finding instead of silently producing U+FFFD replacement characters.
     let instruction: string;
@@ -156,7 +170,6 @@ export class PresetRegistry {
 
     const files: Record<string, string> = {};
     collectFiles(dir, dir, files);
-    const manifestText = readFileSync(manifestPath, 'utf8');
     // The files map keys are preset-RELATIVE POSIX paths (section 4: "relative file paths").
     for (const [absPath, content] of Object.entries({ ...files })) {
       const rel = relative(dir, absPath).split(sep).join('/');

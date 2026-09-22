@@ -135,15 +135,23 @@ export function validatePreset(
         add('PRESET_INSTRUCTION_PATH', 'instruction.file',
           'instruction.file must not cross a symlink inside the preset directory');
       } else {
+        let st: import('node:fs').Stats | null = null;
         try {
-          statSync(abs);
+          st = statSync(abs);
         } catch {
           add('PRESET_INSTRUCTION_MISSING', 'instruction.file', `instruction file not found: ${JSON.stringify(file)}`);
         }
-        const size = instructionSize(abs);
-        if (size !== null && size > PRESET_INSTRUCTION_MAX_BYTES) {
-          add('PRESET_INSTRUCTION_SIZE', 'instruction.file',
-            `instruction file is ${size} bytes; the limit is ${PRESET_INSTRUCTION_MAX_BYTES}`);
+        // A directory (or any non-regular file) would pass existence and then die on read with
+        // EISDIR in the registry -- surface it here, with a stable code, while we still know why.
+        if (st && !st.isFile()) {
+          add('PRESET_INSTRUCTION_PATH', 'instruction.file',
+            `instruction.file must be a regular file: ${JSON.stringify(file)}`);
+        } else if (st) {
+          const size = instructionSize(abs);
+          if (size !== null && size > PRESET_INSTRUCTION_MAX_BYTES) {
+            add('PRESET_INSTRUCTION_SIZE', 'instruction.file',
+              `instruction file is ${size} bytes; the limit is ${PRESET_INSTRUCTION_MAX_BYTES}`);
+          }
         }
       }
     }
