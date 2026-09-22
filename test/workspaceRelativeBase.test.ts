@@ -46,7 +46,8 @@ test('a relative workspace base puts the worktree at the cwd-resolved path, with
     // so canonicalize BOTH sides before comparing prefixes.
     assert.ok(realpathSync(abs).startsWith(realpathSync(resolve(cwd, 'workspaces')) + '/'),
       `the worktree must resolve against the process cwd, got ${abs}`);
-    assert.ok(!abs.startsWith(realpathSync(repo)),
+    const realAbs = realpathSync(abs);
+    assert.ok(!realAbs.startsWith(realpathSync(repo) + '/'),
       'the worktree must not live inside the clone directory');
   } finally {
     process.chdir(prevCwd);
