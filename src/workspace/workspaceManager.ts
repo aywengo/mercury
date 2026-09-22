@@ -6,7 +6,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { Run, Workspace } from '../domain/types.ts';
 
 const execFileP = promisify(execFile);
@@ -117,7 +117,13 @@ export class WorkspaceManager {
   private cfg: WorkspaceManagerConfig;
 
   constructor(cfg: WorkspaceManagerConfig) {
-    this.cfg = cfg;
+    // Resolve the base once, here, where every consumer gets it (issue #703): a relative base
+    // (the shipped default './workspaces') is resolved by git against the CLONE directory for
+    // `git -C repoDir worktree add <relative target>`, while every Node-side consumer resolves
+    // the same string against the process cwd -- two directories answering to one path. An
+    // absolute base makes both readings the same directory. loadConfig resolves too, so the
+    // guarantee also holds for code that reads config.workspaceBase without this manager.
+    this.cfg = { ...cfg, baseDir: resolve(cfg.baseDir) };
   }
 
   /** Applies this manager's configured deadlines. `network: true` for clone/fetch. */
