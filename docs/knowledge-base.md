@@ -971,9 +971,11 @@ is the only variable between the two workspaces. Pointer channel `run_e6174faac3
 repository tracking `CLAUDE.md`: the tracked file stayed byte-identical and the pack stayed
 at `.mercury/knowledge/NOTES.md`, the §9.4 fallback behaving as built. All three Runs then
 failed at Claude's own authentication ("OAuth session expired and could not be refreshed" --
-the local credential was dead, and no `ANTHROPIC_API_KEY` was available), so whether the
-model reads either channel is still unmeasured. The remaining gap is the #589 method with a
-working Claude credential: a treated/control pair citing the observed first commands.
+the local credential was dead, and no `ANTHROPIC_API_KEY` was available), roughly a second
+into each Run. **No first command was observed on any of the three** -- the agent never got
+far enough to run one -- so the treated/control first-command contrast the #589 method turns
+on is exactly the part still unmeasured, along with whether the model reads either channel.
+The remaining gap is the same three Runs replayed with a working Claude credential.
 
 The matrix is expected to change as combinations are exercised, and a row moving from
 unverified to verified should cite the Run that proved it, in the way
