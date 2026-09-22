@@ -47,10 +47,12 @@ const CONTRIBUTOR = 'contract-contributor-token-0123';
 const READER = 'contract-reader-token-0123456789';
 const PROJECT = 'mercury';
 
+type ExtraContributors = Record<string, { hostId: string; projects: string[] }>;
+
 interface AtlasHandle {
   url: string;
   stop(): Promise<void>;
-  restart(): Promise<AtlasHandle>;
+  restart(opts?: { contributors?: ExtraContributors }): Promise<AtlasHandle>;
   dbPath: string;
   dir: string;
 }
@@ -63,11 +65,12 @@ interface AtlasHandle {
  * socket rather than the ones in the source, and that the CLI entry point works at all. An
  * in-process server would prove none of those and would look identical in the test output.
  */
-async function startAtlas(dir: string, extraEnv: Record<string, string> = {}): Promise<AtlasHandle> {
+async function startAtlas(dir: string, extraEnv: Record<string, string> = {}, extraContributors: Record<string, { hostId: string; projects: string[] }> = {}): Promise<AtlasHandle> {
   const dbPath = join(dir, 'atlas.db');
   const contributorsFile = join(dir, 'contributors.json');
   writeFileSync(contributorsFile, JSON.stringify({
     [CONTRIBUTOR]: { hostId: 'host-a', projects: [PROJECT] },
+    ...extraContributors,
   }), { mode: 0o600 });
 
   // Port 0 and then read the bound port out of the log line: a fixed port makes every parallel test
@@ -111,9 +114,9 @@ async function startAtlas(dir: string, extraEnv: Record<string, string> = {}): P
 
   return {
     url, dbPath, dir, stop,
-    restart: async () => {
+    restart: async (opts: { contributors?: ExtraContributors } = {}) => {
       await stop();
-      return startAtlas(dir, extraEnv);
+      return startAtlas(dir, extraEnv, opts.contributors ?? {});
     },
   };
 }

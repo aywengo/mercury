@@ -373,10 +373,12 @@ async function main(): Promise<void> {
         // warning `knowledge identity` prints for local paths.
         // Every git call in Mercury goes through runGit (the choke point gitTimeout.test.ts pins):
         // bounded, prompt-safe, and one door.
-        const git = async (gitArgs: string[]): Promise<string> => (await runGit(gitArgs, { cwd: abs })).stdout.trim();
+        // show returns raw bytes — trimming would mutate the record text the parser must preserve
+        // verbatim — so trimming is the caller's choice, not the helper's.
+        const git = async (gitArgs: string[]): Promise<string> => (await runGit(gitArgs, { cwd: abs })).stdout;
         let identitySource: string;
         try {
-          identitySource = await git(['remote', 'get-url', 'origin']);
+          identitySource = (await git(['remote', 'get-url', 'origin'])).trim();
         } catch {
           identitySource = abs;
         }
@@ -395,12 +397,12 @@ async function main(): Promise<void> {
         // Reuse the finalize harvester's git plumbing for the delta and the HEAD read. The checkout
         // itself is the workspace here; its HEAD is both the content source and the evidence sha.
         const bounds = { ...DEFAULT_BOUNDS };
-        const headSha = await git(['rev-parse', 'HEAD']);
+        const headSha = (await git(['rev-parse', 'HEAD'])).trim();
         // Not a worker finalize: there is no baseCommit delta to scope to. Read every record at HEAD
         // by listing the directory-equivalent through git: the harvester's diff needs a base, so list
         // tracked files directly.
         const listed = (await git(['ls-files', 'docs/decisions/']))
-          .split('\n').map((l) => l.trim()).filter((l) => l.endsWith('.md'));
+          .trim().split('\n').map((l) => l.trim()).filter((l) => l.endsWith('.md'));
         const outbox = new OutboxStore(db);
         const accepted: { path: string; claim: string }[] = [];
         const skipped: { path: string; id: string }[] = [];
@@ -408,8 +410,8 @@ async function main(): Promise<void> {
         for (const path of listed) {
           const text = await git(['show', `HEAD:${path}`]);
           // The parser re-normalizes: it wants the RAW source (URL or path), the same string the
-        // operator would give `knowledge identity` — not the already-normalized identity.
-        const parsed = parseDecisionRecord(text, { path, repoIdentity: identitySource, headSha, bounds });
+          // operator would give `knowledge identity` — not the already-normalized identity.
+          const parsed = parseDecisionRecord(text, { path, repoIdentity: identitySource, headSha, bounds });
           if (parsed.ok) {
             const contribution: NoteContribution = {
               projectId: config.knowledge.atlas.project,

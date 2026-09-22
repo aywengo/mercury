@@ -29,11 +29,18 @@ function cli(args: string[], extraEnv: Record<string, string> = {}): Promise<{ c
     const child = spawn(process.execPath, [join(ROOT, 'src', 'cli.ts'), ...args], { cwd: ROOT, env: { ...process.env, ...extraEnv } });
     let stdout = ''; let stderr = '';
     const killer = setTimeout(() => child.kill('SIGKILL'), 30_000);
+    let settled = false;
+    const done = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killer);
+      fn();
+    };
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
     child.stdout.on('data', (c: string) => { stdout += c; });
     child.stderr.on('data', (c: string) => { stderr += c; });
-    child.on('error', rej);
-    child.on('close', (code) => { clearTimeout(killer); res({ code, stdout, stderr }); });
+    child.on('error', (err) => done(() => rej(err)));
+    child.on('close', (code) => done(() => res({ code, stdout, stderr })));
   });
 }
 
