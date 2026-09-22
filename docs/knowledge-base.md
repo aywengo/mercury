@@ -976,7 +976,7 @@ into each Run. **No first command was observed on any of the three** -- the agen
 far enough to run one -- so the treated/control first-command contrast the #589 method turns
 on is exactly the part still unmeasured, along with whether the model reads either channel.
 The remaining gap is the same three Runs replayed with a working Claude credential; it is
-   tracked in the open issue [#708](https://github.com/aywengo/mercury/issues/708).
+tracked in the open issue [#708](https://github.com/aywengo/mercury/issues/708).
 
 The matrix is expected to change as combinations are exercised, and a row moving from
 unverified to verified should cite the Run that proved it, in the way
