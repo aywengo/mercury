@@ -302,6 +302,10 @@ function validateConstraintObject(
       add('PRESET_CONSTRAINT', `${field}.${key}`, 'must be a finite number');
     } else if (v < 0) {
       add('PRESET_CONSTRAINT', `${field}.${key}`, 'must be >= 0');
+    } else if (v > Number.MAX_SAFE_INTEGER) {
+      // The same bound Run creation enforces: a preset that validates here but overflows
+      // when applied would move the failure from creation (actionable) to execution (mystery).
+      add('PRESET_CONSTRAINT', `${field}.${key}`, `must be <= ${Number.MAX_SAFE_INTEGER}`);
     }
   }
   const rl = obj.resourceLimits;
@@ -346,6 +350,8 @@ function validateCeilings(
       add('PRESET_CONSTRAINT', `constraints.ceilings.${key}`, 'must be a finite integer');
     } else if (v < 0) {
       add('PRESET_CONSTRAINT', `constraints.ceilings.${key}`, 'must be >= 0');
+    } else if (v > Number.MAX_SAFE_INTEGER) {
+      add('PRESET_CONSTRAINT', `constraints.ceilings.${key}`, `must be <= ${Number.MAX_SAFE_INTEGER}`);
     }
   }
   if (c.resourceLimits !== undefined) {

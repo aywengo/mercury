@@ -22,7 +22,12 @@ export function builtinPresetsDir(): string {
 }
 
 export interface PresetRegistryDeps {
-  /** Skill existence for reference validation; defaults to this repo's registry. */
+  /**
+   * Skill existence for reference validation. ABSENT means no skills are visible, so every
+   * referenced skill is reported missing -- a registry that cannot see skills must not
+   * silently approve references to them. (No fallback to the repo's registry; the composition
+   * root passes it explicitly.)
+   */
   skills?: SkillRegistry;
   /** Known agent ids, from the same list Run creation validates against. */
   knownAgents?: readonly string[];
