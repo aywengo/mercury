@@ -954,29 +954,47 @@ this design. "Unverified" means nobody has run the combination; it is not a euph
 | --- | --- | --- | --- | --- |
 | `primeagent` | yes -- works in the workspace | `AGENTS.md` deltas | synthetic skill via `--skill` + context pointer | both channels are built for knowledge: `materializeKnowledge` writes the skill and `PrimeAgentAdapter` passes it on argv (#547). **Observed on a real Run (#589), PrimeAgent 0.9.4, channel `--skill`.** Treated `run_933c68e4684a498d`: one promoted operator note named `npm run test:atlas`, a script no doc in the repository mentions; the Run's first command was that script and `npm test` appears zero times across its 47 events. Control `run_d0f4dc05a8f44a1d`: same task, same repo, note retired so the pack selected empty, and the Run ran no test command at all. The pair is the counterfactual -- the note is what changed the behaviour. |
 | `pi`, `omp` (`rpc-agents/`) | yes -- work in the workspace | unknown | context pointer + prompt line | whether they act on a prompt line pointing at a file is unverified; [`crew/harness-capabilities.md`](crew/harness-capabilities.md) §7 Q3 asks the same about persona |
-| `claude` | yes | `CLAUDE.md` deltas | generated `CLAUDE.md` when none is tracked; else a pointer line in the stdin task text -- *degraded* | **The row described a channel that did not exist.** Both halves of it -- generating `CLAUDE.md`, and the stdin pointer fallback -- were design, while the status column's own preamble says every claim there is about today's code; `ClaudeCodeAdapter` had no knowledge code at all, so a Claude Run got a pack materialized into its workspace that nothing told the model about. Both halves are now built: the adapter copies the pack to `CLAUDE.md` when the repository does not track one, and otherwise names `.mercury/knowledge/NOTES.md` in the task text it writes to stdin -- the pack file rather than the context pointer §9.3 originally specified, because this adapter does not write that file. The adapter now writes the context file too (#612), and the task text points at it on every Run, so the §9.3 wording is true; whether Claude reads it unprompted is still unverified. The adapter-level tests are against the mock CLI, so they show the bytes reaching the two channels Claude Code is documented to read, not that a Run acted on them. **The channels are now observed populated on real Runs (below); what is still unmeasured is whether Claude reads or acts on either one.** Whether a generated `CLAUDE.md` is honoured alongside a tracked one is part of that unmeasured set, which is why the fallback exists. The channels are observed **populated** on real Runs against the real `claude` binary 2.1.260 -- generated channel `run_f1eaf871429c42be`, control `run_09005480332e4073`, pointer channel `run_e6174faac31746d7` (details in the paragraph after this table; all three Runs then failed at Claude's own authentication, so whether the model reads either channel is still unmeasured). |
+| `claude` | yes | `CLAUDE.md` deltas | generated `CLAUDE.md` when none is tracked; else a pointer line in the stdin task text -- *degraded* | **The row described a channel that did not exist** -- both halves were design while the status preamble claims today's code -- until #612 built them and #688 observed them on real Runs: the adapter copies the pack to a generated `CLAUDE.md` when the repository does not track one, and otherwise appends a pointer to `.mercury/knowledge/NOTES.md` to the stdin task text (§9.4 fallback; the tracked file is never written). **Measured on real Runs, `claude` binary 2.1.260 (#688 population, #707 behaviour): the treated Run with the generated channel made the note's unadvertised `make hello-obs` its first Bash attempt after orienting -- four tries, then reported the (false-for-this-fixture) pack claim stale and ran the repository's real `make hello` -- while the control with knowledge explicitly off never invented that command (`run_fb7a2ee4042849a1` vs control `run_0a3849515ece41f6`, the counterfactual); the pointer-channel Run's first command read exactly the file the pointer named, and it then followed the tracked `CLAUDE.md` (`make test-b`, exit 0) over the low-corroboration note (`make hello-obs`, exit 2), saying so (`run_128876bc246c4360`); the auth-failed trio that first showed channel population without model action is `run_f1eaf871429c42be`/`run_09005480332e4073`/`run_e6174faac31746d7` (details in the paragraph after this table). Still unobserved on `claude`: the write-back half -- the Runs' attempts to append `.mercury/notes.jsonl` were permission-blocked on the observation stack, so the harvest had nothing to queue. |
 | `hermes` | yes | `SOUL.md` deltas | generated `AGENTS.md` when none is tracked; else neutral files only -- *degraded* | **measured, and narrower than "blocked"**. The skill-namespace failure in [`crew/teams.md`](crew/teams.md) §3 that this row cited was fixed in #520 and observed on a real binary (Run `run_f3a4e81644be4081`, Hermes v0.21.2, recorded in #507). What was then measured (#541, same binary, one Run each and a single question, so reported as observed once rather than as reproduced) is that Hermes reads `AGENTS.md` from the workspace unprompted and does **not** read `.mercury/knowledge/NOTES.md`. So the channel §9.3 considered is genuinely absent, and the channel it did not consider exists: usable where no `AGENTS.md` is tracked, degraded where one is, because §9.4 forbids writing over a tracked file. #541 owns the §9.3 row and the adapter work. **Observed on a real Run (#589), Hermes Agent v0.21.2 (2026.9.11) upstream b7b35a84, channel generated `AGENTS.md`.** Treated `run_8d8cfc92f22b4fcf`: given a note naming `npm run test:atlas`, it ran that command and reported 117 pass / 0 fail, matching an independent run of the suite. **No control Run was executed for Hermes**, so this row shows Hermes acting on the note; it does not by itself show Hermes would have missed the command without it. Separately and independently of knowledge: a Hermes Run is **unobservable at tool level** (#594), and that is why the evidence above had to come from somewhere else. Quiet mode is the only non-interactive programmatic path and `hermes chat` has no JSON, stream or event mode, so the adapter emits no `tool.*` events -- the same Run read files, searched and ran a 117-test suite while producing 6 events with zero tool calls, and its command and output were read back from Hermes's own session store rather than from Mercury. `capabilities.static.toolEvents` is `'none'` for this reason; treat an empty tool set there as "could not see", never as "did nothing". |
 | `local-agents/` | yes, if the CLI works in cwd | depends on the CLI | neutral files; context pointer if declared | unverified per entry; `local-agents/` ships no example entry today |
 | `remote-agents/` | **no** -- no local workspace | no | opaque `knowledge` payload field, if declared | tier 2 only; the payload field is a protocol addition not yet designed |
 | `fake` | n/a | n/a | asserts and echoes | the test double for every host-side test in §16 |
 
 
-The `claude` row's channels were observed **populated** on real Runs against the real
-`claude` binary 2.1.260 (2026-09-22, #688). Treated `run_f1eaf871429c42be`, repository not
-tracking `CLAUDE.md`: `knowledge.selected` fired, the worker materialized
-`.mercury/knowledge/`, and the adapter wrote the generated `CLAUDE.md` beside the
-repository's own files at base commit `abeb216`. Control `run_09005480332e4073`: same task,
-same repository, knowledge off -- no `CLAUDE.md`, no `.mercury/knowledge/`, so the pipeline
-is the only variable between the two workspaces. Pointer channel `run_e6174faac31746d7`,
-repository tracking `CLAUDE.md`: the tracked file stayed byte-identical and the pack stayed
-at `.mercury/knowledge/NOTES.md`, the §9.4 fallback behaving as built. All three Runs then
-failed at Claude's own authentication ("OAuth session expired and could not be refreshed" --
-the local credential was dead, and no `ANTHROPIC_API_KEY` was available), roughly a second
-into each Run. **No first command was observed on any of the three** -- the agent never got
-far enough to run one -- so the treated/control first-command contrast the #589 method turns
-on is exactly the part still unmeasured, along with whether the model reads either channel.
-The remaining gap is the same three Runs replayed with a working Claude credential; it is
-tracked in the open issue [#707](https://github.com/aywengo/mercury/issues/707).
+The `claude` row's channels were first observed **populated** on real Runs against the real
+`claude` binary 2.1.260 (2026-09-22, #688): `knowledge.selected` fired, the worker
+materialized `.mercury/knowledge/`, the adapter wrote the generated `CLAUDE.md` beside the
+repository's own files at base `abeb216` (`run_f1eaf871429c42be`), the knowledge-off control
+stayed bare (`run_09005480332e4073`), and with a tracked `CLAUDE.md` the file stayed
+byte-identical while the pack stayed at `.mercury/knowledge/NOTES.md`
+(`run_e6174faac31746d7`). Those three died at Claude's own authentication before the model
+ran anything. #707 replayed the pair with a working credential (`run_fb7a2ee4042849a1`,
+`run_0a3849515ece41f6`, `run_128876bc246c4360`, same binary, 2026-09-22) and the behaviour
+contrast is now measured, and it is the same finding the `primeagent` row has:
+
+- **Treated, no tracked `CLAUDE.md`** (`run_fb7a2ee4042849a1`): the generated `CLAUDE.md`
+  carried the note naming `make hello-obs` -- a command no file in the repository mentions.
+  The Run's first Bash attempt after orienting (`ls && cat .mercury-context.json`) was
+  `make hello-obs`, attempted four times before it accepted `make: *** No rule to make
+  target 'hello-obs'` and reported the pack claim as stale, then ran the repository's real
+  `make hello`.
+- **Control, same task, knowledge explicitly off** (`run_0a3849515ece41f6`): no `CLAUDE.md`,
+  no knowledge dir, and **zero `hello-obs` attempts** -- it ran the repository's real
+  `make hello` and never invented the unadvertised command. The pair is the counterfactual:
+  the note is what made the treated Run reach for `make hello-obs`.
+- **Treated, tracked `CLAUDE.md`** (`run_128876bc246c4360`): the pointer channel acted on --
+  the task text pointed at `.mercury/knowledge/NOTES.md` and the Run's first command read
+  exactly that file plus the context file. It read the tracked `CLAUDE.md` (`make test-b`),
+  ran it (exit 0), cross-checked the pack note (`make hello-obs`, exit 2), and **followed the
+  tracked file over the low-corroboration note**, saying so.
+
+Two honest caveats. First, the note's claim was false for these fixtures (`hello-obs` has no
+Makefile rule), so what is measured is trust-and-attempt, not successful command adoption;
+the `primeagent` row's note named a command that existed. Second, the observation stack ran
+with a scoped `MERCURY_CLAUDE_ALLOWED_TOOLS` allowlist and non-interactive print mode, so
+the agents' attempts to append `.mercury/notes.jsonl` were permission-blocked and the
+knowledge harvest had nothing to queue -- the write-back half of the loop is still
+unobserved on `claude` (tracked in #707, which stays open for it).
 
 The matrix is expected to change as combinations are exercised, and a row moving from
 unverified to verified should cite the Run that proved it, in the way
@@ -1386,10 +1404,12 @@ later is worth building until the phase before it has been exercised by a real R
    reading an assertion, not a measurement, so a phase gated on it must verify the backend rather
    than trust the flag. Genuinely still missing: `persona.append` for Hermes. The `ClaudeCodeAdapter` row of §9.3
    has since been built (generated `CLAUDE.md`, with the stdin pointer fallback when one is
-   tracked). The channels are observed populated on real Runs (#688: `run_f1eaf871429c42be`,
-   `run_09005480332e4073`, `run_e6174faac31746d7`) -- the model's response to them is not,
-   because every Run died at Claude's own authentication before reading anything; §10
-   carries the detail.
+   tracked) and is now **measured end to end on the model side** (#688 populated the channels;
+   #707 replayed with a working credential: the treated Run's first Bash attempt was the note's
+   unadvertised `make hello-obs`, the knowledge-off control never invented it, and the pointer
+   Run read the pointed-at file first -- §10 carries the detail). Still open on `claude`: the
+   note write-back, permission-blocked on the observation stack -- tracked in
+   [#707](https://github.com/aywengo/mercury/issues/707), which is open.
 6. **Fleet reader and hardening.** The retention sweeps of §12. Was "`FLEET_ATLAS_URL`, the
    dashboard section, the soft placement signal", but all three are built: the Fleet reader
    shipped as `GET /fleet/knowledge` and the `fleet knowledge` CLI (#615 — counts only, always

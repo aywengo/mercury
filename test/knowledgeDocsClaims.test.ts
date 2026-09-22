@@ -73,22 +73,29 @@ function claudeRow(): string | null {
   return row ?? null;
 }
 
-test('the claude row cites the Runs that observed its channels (issue #688)', () => {
+test('the claude row cites the Runs that observed its channels (issues #688/#707)', () => {
   const row = claudeRow();
   assert.ok(row, 'the section 10 matrix must still carry a claude row');
-  // #688 observed both channels on real Runs against the real `claude` binary 2.1.260: the
-  // generated CLAUDE.md channel (run_f1eaf871429c42be), the knowledge-off control
-  // (run_09005480332e4073) and the tracked-file pointer channel (run_e6174faac31746d7). What
-  // those Runs could not show -- every one died at Claude's own authentication before the model
-  // read anything -- must stay stated, so the ids and the caveat are pinned the way the hermes
-  // row pins its measurement (#541).
+  // #707 measured the behaviour contrast on the real `claude` binary 2.1.260 with a working
+  // credential: the treated Run reached for the note's unadvertised `make hello-obs`
+  // (run_fb7a2ee4042849a1) while the knowledge-off control never invented it
+  // (run_0a3849515ece41f6), and the pointer-channel Run read the pointed-at file first
+  // (run_128876bc246c4360). The auth-failed trio that first showed channel POPULATION
+  // (#688: run_f1eaf871429c42be, run_09005480332e4073, run_e6174faac31746d7) stays cited, and
+  // the row must keep its one honest residual: the note write-back is still unobserved.
   assert.match(row, /2\.1\.260/, 'the row must name the binary version the observation ran on');
+  assert.match(row, /run_fb7a2ee4042849a1/,
+    'the row must cite the treated Run that acted on the generated CLAUDE.md channel');
+  assert.match(row, /run_0a3849515ece41f6/, 'the row must cite the knowledge-off control Run');
+  assert.match(row, /run_128876bc246c4360/, 'the row must cite the pointer-channel Run');
   assert.match(row, /run_f1eaf871429c42be/,
-    'the row must cite the treated Run that observed the generated CLAUDE.md channel');
-  assert.match(row, /run_09005480332e4073/, 'the row must cite the knowledge-off control Run');
-  assert.match(row, /run_e6174faac31746d7/, 'the row must cite the pointer-channel Run');
-  assert.match(row, /unmeasured/,
-    'the row must keep the model-behaviour caveat: channel population is observed, model action is not');
+    'the row must keep the #688 trio member that showed the generated channel populated');
+  assert.match(row, /run_09005480332e4073/,
+    'the row must keep the #688 trio member that showed the knowledge-off workspace bare');
+  assert.match(row, /run_e6174faac31746d7/,
+    'the row must keep the #688 trio member that showed the pointer channel populated');
+  assert.match(row, /unobserved|unmeasured/,
+    'the row must keep its residual caveat (the note write-back is still unobserved)');
 });
 
 // --- docs/status.md: one knowledge section, and the Hermes claim matches the tree ------------------
