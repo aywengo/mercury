@@ -1275,8 +1275,8 @@ Atlas ships the way Fleet ships, because Fleet already paid for the lessons:
 | Release | its own tag namespace and `docs/releases/atlas/`, documented in [`releasing.md`](releasing.md) when the first release is cut | `docs/releases/fleet/` |
 | Deploy | a systemd unit and environment file under `deploy/`, alongside the host's | `deploy/` |
 
-[`distribution.md`](distribution.md) and [`releasing.md`](releasing.md) now describe Atlas as
-released: the npm channel carries `@aywengo/mercury-atlas` on its own version stream and tag
+[`distribution.md`](distribution.md) and [`releasing.md`](releasing.md) now describe the Atlas
+release path: the npm channel carries `@aywengo/mercury-atlas` on its own version stream and tag
 (`atlas-vX.Y.Z`), npm being Atlas's only installable artifact — no bundle, no Homebrew formula —
 and the tests in `test/releaseDocs.test.ts` hold them to that. This document still offers **no
 `npm install` command** for a version the registry does not serve. This repository has a scarred

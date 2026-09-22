@@ -12,9 +12,9 @@ First working release: the knowledge service described in
 
 **Not published yet at the time this entry was written**: this entry moves the release into
 place (the notes file, the docs and the tests that hold them to the registry). `0.1.0` is not
-on the npm registry, and the `atlas-v0.1.0` tag has not been pushed. The registry comparison in
-`test/releaseDocs.test.ts` keeps this honest: once `0.1.0` is on the registry this warning must
-come off and the release notes must offer the install — and not before.
+on the npm registry. The registry comparison in `test/releaseDocs.test.ts` keeps this honest:
+once `0.1.0` is on the registry this warning must come off and the release notes must offer
+the install — and not before.
 
 ### Added
 
