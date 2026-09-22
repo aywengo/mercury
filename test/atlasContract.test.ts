@@ -44,6 +44,7 @@ void _summaryShapesAgree;
 const REPO = resolve(import.meta.dirname, '..');
 const ADMIN = 'contract-admin-token-0123456789';
 const CONTRIBUTOR = 'contract-contributor-token-0123';
+const CONTRIBUTOR_B = 'contract-contributor-b-0123456';
 const READER = 'contract-reader-token-0123456789';
 const PROJECT = 'mercury';
 
@@ -129,7 +130,7 @@ async function req(handle: AtlasHandle, method: string, path: string, token: str
   });
 }
 
-function contribution(claim: string, hostId: string, runId: string, agent: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+function contribution(claim: string, hostId: string, runId: string | null, agent: string | null, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     kind: 'fact',
     scope: 'project',
@@ -317,7 +318,7 @@ test('a runless repo-record contribution replays as duplicate without inflating 
     await req(handle, 'POST', '/v1/projects', ADMIN, { id: PROJECT, name: 'Mercury', repoIdentities: ['github.com/aywengo/mercury'] });
     const record = contribution(
       'a decision record indexed by an operator at the checkout HEAD',
-      'host-a', null as unknown as string, null as unknown as string,
+      'host-a', null, null,
       { provenance: { source: 'repo-record', hostId: 'host-a', runId: null, agent: null, harnessVersion: null, recordedAt: new Date().toISOString() } },
     );
     const first = await req(handle, 'POST', `/v1/projects/${PROJECT}/notes`, CONTRIBUTOR, { notes: [record] }, { 'idempotency-key': 'index:abc' });
@@ -347,6 +348,25 @@ test('a runless repo-record contribution replays as duplicate without inflating 
     const afterBody = await after.json() as { note: { corroboration: { runs: number } }; sources: unknown[] };
     assert.equal(afterBody.note.corroboration.runs, 1, 'neither path inflates corroboration');
     assert.equal(afterBody.sources.length, 1);
+
+    // Path 3 -- a second host indexing the same record. The unique key is per-host, so this IS a new
+    // source and SHOULD corroborate: two hosts independently reading one record is two observers.
+    handle = await handle.restart({ contributors: { [CONTRIBUTOR_B]: { hostId: 'host-b', projects: [PROJECT] } } });
+    const other = contribution(
+      'a decision record indexed by an operator at the checkout HEAD',
+      'host-b', null, null,
+      { provenance: { source: 'repo-record', hostId: 'host-b', runId: null, agent: null, harnessVersion: null, recordedAt: new Date().toISOString() } },
+    );
+    const second = await req(handle, 'POST', `/v1/projects/${PROJECT}/notes`, CONTRIBUTOR_B, { notes: [other] }, { 'idempotency-key': 'index:host-b' });
+    const secondResults = (await second.json() as { results: Record<string, string>[] }).results;
+    assert.equal(secondResults[0]!.duplicate, noteId, 'the claim deduplicates across hosts');
+    const final = await req(handle, 'GET', `/v1/projects/${PROJECT}/notes/${noteId}`, CONTRIBUTOR_B);
+    const finalBody = await final.json() as { note: { corroboration: { hosts: number; runs: number } }; sources: { hostId: string }[] };
+    // Two runless sources share the empty run id, so the RUN count stays 1 — a runless index is not
+    // a Run. The corroboration shows up in the HOST count: two hosts independently read one record.
+    assert.equal(finalBody.note.corroboration.hosts, 2, 'a second host indexing the same claim corroborates');
+    assert.equal(finalBody.note.corroboration.runs, 1, 'a runless index is not a second Run');
+    assert.deepEqual(finalBody.sources.map((s) => s.hostId).sort(), ['host-a', 'host-b']);
 
     void noteId;
   } finally {
