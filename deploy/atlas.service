@@ -1,0 +1,32 @@
+[Unit]
+Description=Mercury Atlas (project knowledge base for Mercury hosts)
+Documentation=file:///opt/atlas/atlas/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atlas
+Group=atlas
+WorkingDirectory=/opt/atlas
+EnvironmentFile=/etc/atlas/atlas.env
+ExecStart=/usr/bin/env node atlas/cli.ts serve
+Restart=on-failure
+RestartSec=5
+
+# Atlas closes idle keepalive sockets and unrefs its timers; shutdown is bounded in-process.
+# This is the outer bound, matching mercury.service and fleet.service.
+TimeoutStopSec=15
+
+# Hardening, matching deploy/mercury.service and deploy/fleet.service.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Atlas's own SQLite database and WAL sidecar. Deliberately NOT ATLAS_CONTRIBUTORS_FILE: that file
+# carries every contributor token and is read-only for the service (mode 0600, owned root:atlas),
+# so a write into /var/lib/atlas can never touch it.
+ReadWritePaths=/var/lib/atlas
+
+[Install]
+WantedBy=multi-user.target
