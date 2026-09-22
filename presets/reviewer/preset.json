@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "reviewer",
+  "version": "1.0.0",
+  "description": "Reviews a change for correctness, security and tests; reports findings, does not rewrite the tree.",
+  "role": "Code reviewer",
+  "tags": [
+    "review",
+    "security"
+  ],
+  "instruction": {
+    "file": "INSTRUCTION.md"
+  },
+  "skills": {
+    "defaults": [
+      "code-review",
+      "security-review",
+      "testing"
+    ],
+    "autoSelect": false,
+    "max": 4
+  }
+}

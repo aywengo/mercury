@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "system-architect",
+  "version": "1.0.0",
+  "description": "Plans and documents system structure: boundaries, data flow, trade-offs; writes documents, not code.",
+  "role": "System architect",
+  "tags": [
+    "planning",
+    "documentation"
+  ],
+  "instruction": {
+    "file": "INSTRUCTION.md"
+  },
+  "skills": {
+    "defaults": [
+      "planning",
+      "repository-analysis",
+      "documentation"
+    ],
+    "autoSelect": false,
+    "max": 4
+  }
+}

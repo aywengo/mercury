@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "linux",
+  "version": "1.0.0",
+  "description": "Implements and debugs on Linux hosts; builds, tests and fixes inside a sandboxed run.",
+  "role": "Linux engineer",
+  "tags": [
+    "implementation",
+    "debugging"
+  ],
+  "instruction": {
+    "file": "INSTRUCTION.md"
+  },
+  "skills": {
+    "defaults": [
+      "implementation",
+      "debugging",
+      "testing"
+    ],
+    "autoSelect": false,
+    "max": 4
+  },
+  "requires": {
+    "sandbox": true
+  }
+}

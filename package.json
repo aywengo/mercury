@@ -35,6 +35,7 @@
     "!client/test/",
     "ui/",
     ".agents/skills/",
+    "presets/",
     "local-agents/",
     "remote-agents/",
     "rpc-agents/",
