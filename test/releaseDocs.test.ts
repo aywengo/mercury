@@ -774,7 +774,7 @@ test('an Atlas notes file only ever offers an install for the version it documen
   for (const { file, own, text } of files) {
     const fences = text.match(/```[^\n]*\n[\s\S]*?```/g) ?? [];
     for (const fence of fences) {
-      for (const m of fence.matchAll(/npm (?:install|i)\b[^\n]*mercury-atlas(?:@([^\s`]+))?/g)) {
+      for (const m of fence.matchAll(/npm (?:install|i)\b[^\n]*@aywengo\/mercury-atlas(?:@([^\s`]+))?/g)) {
         const target = m[1];
         assert.ok(target === undefined || target === own,
           `docs/releases/atlas/${file} offers @${target}; a notes file may only name its own `
@@ -809,7 +809,7 @@ test('the Atlas notes preamble matches whether that version is actually publishe
     const preamble = text.split(/^##\s/m)[0];
     const saysUnpublished = /never (?:been )?published|not (?:yet )?published|not published yet|not on the npm registry/i.test(preamble);
     const offersOwnInstall = new RegExp(
-      `npm (?:install|i)\\b[^\\n]*mercury-atlas@${own.replace(/\./g, '\\.')}`).test(text);
+      `npm (?:install|i)\\b[^\\n]*@aywengo/mercury-atlas@${own.replace(/\./g, '\\.')}`).test(text);
     if (published.includes(own)) {
       assert.ok(!saysUnpublished,
         `docs/releases/atlas/${file} says the release has not happened, but ${own} is on the registry`);
@@ -853,7 +853,7 @@ test('the Atlas changelog keeps its unpublished warning while 0.1.0 is not on th
     assert.match(entry, /not published yet|not on the npm registry/i,
       'atlas/CHANGELOG.md 0.1.0 must say it is unpublished while the registry does not serve it');
     const fences = entry.match(/```[^\n]*\n[\s\S]*?```/g) ?? [];
-    assert.ok(!fences.some((b) => /npm (?:install|i)\b[^\n]*mercury-atlas@/.test(b)),
+    assert.ok(!fences.some((b) => /npm (?:install|i)\b[^\n]*@aywengo\/mercury-atlas@/.test(b)),
       'no runnable npm install of a specific version inside the unpublished 0.1.0 entry');
   } else if (published === true) {
     assert.doesNotMatch(entry, /not published yet|not on the npm registry/i,
