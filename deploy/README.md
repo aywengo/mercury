@@ -49,11 +49,35 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now mercury mercury-worker
 ```
 
+## Atlas (project knowledge base)
+
+[Atlas](../atlas/README.md) has its own unit, env file and data directory, hardened the same
+way. Its database holds every project's curated notes, which outlive every Run — the backup
+section below covers it alongside Mercury.
+
+```bash
+sudo useradd --system --home /opt/atlas --shell /usr/sbin/nologin atlas
+sudo mkdir -p /opt/atlas /var/lib/atlas /etc/atlas
+sudo cp -r /path/to/mercury/* /opt/atlas/
+sudo cp atlas.service /etc/systemd/system/
+
+# Configuration: loopback bind by default; TLS variables required off loopback; the contributors
+# file carries one token per host and must be 0600, owned atlas, outside /var/lib/atlas (the
+# unit's ReadWritePaths) so the service can read but never write it.
+sudo install -m 640 -o root -g atlas deploy/atlas.env.example /etc/atlas/atlas.env  # then edit
+sudo install -m 600 -o atlas -g atlas /dev/null /etc/atlas/contributors.json
+sudo systemctl daemon-reload
+sudo systemctl enable --now atlas
+```
+
+`systemd-analyze verify deploy/atlas.service` passes (checked alongside the existing units).
+
 ## Backup
 
 ```bash
-# cron: nightly at 02:30
-30 2 * * * MERCURY_DB=/var/lib/mercury/mercury.db BACKUP_DIR=/var/backups/mercury BACKUP_KEEP=7 /opt/mercury/deploy/backup.sh
+# cron: nightly at 02:30. One invocation backs Mercury AND Atlas (set ATLAS_DB); each product
+# gets its own verified snapshot with its own retention window.
+30 2 * * * MERCURY_DB=/var/lib/mercury/mercury.db ATLAS_DB=/var/lib/atlas/atlas.db BACKUP_DIR=/var/backups/mercury BACKUP_KEEP=7 /opt/mercury/deploy/backup.sh
 ```
 
 ## Restore
@@ -78,7 +102,20 @@ sudo systemctl start mercury mercury-worker
 
 Backups are verified at creation time by `backup.sh` (`PRAGMA integrity_check`), and the script
 refuses to run without `sqlite3` rather than falling back to `cp` -- see the comments in
-`deploy/backup.sh` for why copying a WAL-mode database is not a backup.
+`deploy/backup.sh` for why copying a WAL-mode database is not a backup. The Atlas snapshot is
+restorable the same way, with `atlas migrate` as the post-restore verification instead of a
+service restart (the schema migrates forward on boot, so a restored database that applies its
+migrations cleanly is a restorable database):
+
+```bash
+sudo systemctl stop atlas
+sudo cp /var/backups/mercury/atlas-YYYYMMDD-HHMMSS.db /var/lib/atlas/atlas.db
+sudo chown atlas:atlas /var/lib/atlas/atlas.db
+sudo rm -f /var/lib/atlas/atlas.db-wal /var/lib/atlas/atlas.db-shm
+sqlite3 /var/lib/atlas/atlas.db 'PRAGMA integrity_check;'          # must print exactly: ok
+sudo -u atlas env ATLAS_DB=/var/lib/atlas/atlas.db node atlas/cli.ts migrate  # must succeed
+sudo systemctl start atlas
+```
 
 ## Logs
 
