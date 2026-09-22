@@ -1,6 +1,7 @@
 // Environment configuration (all optional, sensible defaults).
 
 import { hostname } from 'node:os';
+import { resolve } from 'node:path';
 import { DEFAULT_BOUNDS, type KnowledgeBounds } from './knowledge/validation.ts';
 
 export interface Config {
@@ -233,7 +234,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     tls: env.MERCURY_TLS_CERT && env.MERCURY_TLS_KEY
       ? { cert: env.MERCURY_TLS_CERT, key: env.MERCURY_TLS_KEY }
       : null,
-    workspaceBase: env.MERCURY_WORKSPACE_BASE ?? './workspaces',
+    // Absolute at load (issue #703): git resolves a relative `worktree add` target against the
+    // clone directory (-C repoDir), while every Node-side consumer resolves the same string
+    // against the process cwd -- two directories answering to one path. The shipped default
+    // './workspaces' is exactly that shape, so resolve here, once, before anything consumes it.
+    workspaceBase: resolve(env.MERCURY_WORKSPACE_BASE ?? './workspaces'),
     workspaceMode: mode,
     apiTokens: parseTokens(env.MERCURY_API_TOKENS),
     adminToken: env.MERCURY_ADMIN_TOKEN ?? null,

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config.ts';
+import { isAbsolute } from 'node:path';
 
 test('numeric env vars fall back to defaults when non-numeric (issue #21)', () => {
   const cfg = loadConfig({
@@ -55,6 +56,20 @@ test('MERCURY_TRUST_PROXY defaults to 0 and rejects unsafe values (issue #65)', 
   assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '0' }).trustProxy, 0);
   assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '1' }).trustProxy, 1);
   assert.equal(loadConfig({ MERCURY_TRUST_PROXY: '2' }).trustProxy, 2);
+});
+
+test('workspaceBase resolves to an absolute path at load (issue #703)', () => {
+  // The worktree path reaches `git -C <clone> worktree add <path>`, where git resolves a relative
+  // target against the CLONE directory, while every Node-side consumer resolves it against the
+  // process cwd. A relative base therefore produced two directories answering to one path (the
+  // worktree landed inside the clone; the agent ran in an empty cwd-relative directory). The fix
+  // is at the load-time choke point: the config must never carry a relative base out the door.
+  assert.ok(isAbsolute(loadConfig({}).workspaceBase), 'unset -> the shipped default resolves against cwd');
+  assert.ok(isAbsolute(loadConfig({ MERCURY_WORKSPACE_BASE: './workspaces' }).workspaceBase),
+    'explicit relative value resolves against cwd too');
+  assert.ok(isAbsolute(loadConfig({ MERCURY_WORKSPACE_BASE: '/tmp/abs-workspaces' }).workspaceBase),
+    'an absolute value passes through unchanged');
+  assert.equal(loadConfig({ MERCURY_WORKSPACE_BASE: '/tmp/abs-workspaces' }).workspaceBase, '/tmp/abs-workspaces');
 });
 
 test('MERCURY_DEFAULT_AGENT defaults to fake', () => {
