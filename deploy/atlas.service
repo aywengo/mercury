@@ -24,8 +24,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 # Atlas's own SQLite database and WAL sidecar. Deliberately NOT ATLAS_CONTRIBUTORS_FILE: that file
-# carries every contributor token and is read-only for the service (mode 0600, owned root:atlas),
-# so a write into /var/lib/atlas can never touch it.
+# carries every contributor token. It lives outside the writable set (mode 0600, owned atlas), so
+# the service can read it at startup but no write through /var/lib/atlas can ever reach it.
 ReadWritePaths=/var/lib/atlas
 
 [Install]
