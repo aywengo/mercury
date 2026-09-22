@@ -16,10 +16,19 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
 | Atlas | `atlas/package.json` + `atlas/version.ts` (`ATLAS_VERSION`) | `atlas-vX.Y.Z` | `@aywengo/mercury-atlas` | `docs/releases/atlas/X.Y.Z.md` |
 
 The Atlas row describes the release path the workflow now handles. `@aywengo/mercury-atlas` has
-**no published version yet** (the notes directory is empty; the first release arrives with the
-distribution rollout, A6-4), so an `atlas-v` tag before that rollout fails exactly as designed: the
-notes file for its version does not exist. Like Fleet, Atlas attaches no bundle and has no Homebrew
-formula — npm is its only installable artifact.
+**no published version yet**: the release notes for `0.1.0` exist
+([`docs/releases/atlas/0.1.0.md`](releases/atlas/0.1.0.md)), and the registry comparison in
+`test/releaseDocs.test.ts` holds them to that fact — they warn instead of offering an install.
+An `atlas-v0.1.0` tag pushed before the first publish reaches the npm step and fails there: the
+package page does not exist, and no rehearsal can create it. Like Fleet, Atlas attaches no bundle
+and has no Homebrew formula — npm is its only installable artifact.
+
+**Atlas's first release needs the same one-time bootstrap as Fleet's** (step 4 of the first-release
+procedure below, run inside `atlas/` — the `prepare` script compiles `dist/` with the repository's
+TypeScript, so it must run from a checkout). After `npm trust github @aywengo/mercury-atlas` is
+configured on the package page, the tag path needs no credential. Until then the notes must keep
+saying the version is unpublished; flipping that warning is part of the release itself, the same
+way it was for Fleet.
 
 `HOST_VERSION` / `FLEET_VERSION` must equal the matching `package.json`
 `"version"`. Contract tests fail if they drift.

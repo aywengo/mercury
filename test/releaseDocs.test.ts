@@ -26,6 +26,15 @@ const ROOT = join(import.meta.dirname, '..');
  * SemVer in the run-up to it.
  */
 function claimsPackageAbsent(text: string): boolean {
+  return claimsScopedPackageAbsent(text, /\bpackage\b|mercury-fleet|mercury-atlas/i);
+}
+
+/**
+ * The same claim about a PACKAGE whose name arrives as a parameter, so the Atlas guards reuse the
+ * clause-scoping the Fleet guard paid for. The Fleet function above keeps its own name: four tests
+ * read it as the Fleet-specific rule.
+ */
+function claimsScopedPackageAbsent(text: string, name: RegExp): boolean {
   const phrase = /\b(?:does not exist|doesn't exist|is still absent|is not on the npm registry|absent from the npm registry|returns? `?404`?)/gi;
   for (const m of text.matchAll(phrase)) {
     // Scope to the CLAUSE, not a fixed character window. A window picked up versions from adjacent
@@ -38,7 +47,7 @@ function claimsPackageAbsent(text: string): boolean {
       m.index! - 2 > 0 && text.slice(m.index! - 2, m.index!) === '--' ? m.index! - 2 : -1,
       text.lastIndexOf('>', m.index!), 0);
     const clause = text.slice(start, m.index!);
-    const aboutPackage = /\bpackage\b|mercury-fleet/i.test(clause);
+    const aboutPackage = name.test(clause);
     const versionQualified = /\d+\.\d+\.\d+/.test(clause);
     if (aboutPackage && !versionQualified) return true;
   }
@@ -735,6 +744,182 @@ test('the docs do not call the Fleet package absent while the registry serves it
     'the package page exists; say which VERSION is unpublished instead of calling the package absent');
   // And the placeholder is a live trap: `latest` points at a non-release that prints `0.1.0`.
   assert.match(docs, /placeholder/, 'the docs must warn that latest points at a bootstrap placeholder');
+});
+
+// --- Atlas (A6-4): the same three guards Fleet's release needed, pointed at @aywengo/mercury-atlas.
+//
+// The Fleet versions of these rules exist because the docs advertised an install that was not there
+// (#431/#447/#453). Atlas is a third product with the same failure modes, so the rules extend rather
+// than being rewritten: a notes file may only offer its own version; the preamble must match what the
+// registry actually serves; and no document may call the PACKAGE absent once it exists. The
+// registry-driven checks skip when the registry is unreachable, exactly as Fleet's do -- CI must not
+// depend on a third party it does not control.
+
+/** The Atlas notes directory, read the same way the Fleet tests read theirs. */
+function atlasNotes(): { file: string; own: string; text: string }[] {
+  const dir = join(ROOT, 'docs', 'releases', 'atlas');
+  // README.md is the directory index, not a release notes file: it documents the directory, not a
+  // version, so it carries no version of its own and no install to check.
+  return readdirSync(dir).filter((f) => f.endsWith('.md') && f !== 'README.md').sort().map((f) => ({
+    file: f, own: f.replace(/\.md$/, ''), text: readFileSync(join(dir, f), 'utf8'),
+  }));
+}
+
+test('an Atlas notes file only ever offers an install for the version it documents', () => {
+  const files = atlasNotes();
+  assert.ok(files.length > 0, 'no Atlas notes found to check');
+  for (const { file, own, text } of files) {
+    const fences = text.match(/```[^\n]*\n[\s\S]*?```/g) ?? [];
+    for (const fence of fences) {
+      for (const m of fence.matchAll(/npm (?:install|i)\b[^\n]*mercury-atlas(?:@([^\s`]+))?/g)) {
+        const target = m[1];
+        assert.ok(target === undefined || target === own,
+          `docs/releases/atlas/${file} offers @${target}; a notes file may only name its own `
+          + `version ${own} (or none at all)`);
+      }
+    }
+  }
+});
+
+test('the Atlas notes preamble matches whether that version is actually published', async (t) => {
+  // Same registry-driven rule as the Fleet test above, with the same deadlock behind it: a notes
+  // file is also the GitHub Release body, so an unconditional "not published" would either make the
+  // release PR unmergeable or publish a false body. Versions the registry serves must offer their
+  // own install; versions it does not serve must warn up front.
+  const files = atlasNotes();
+  assert.ok(files.length > 0, 'no Atlas notes found to check');
+  let published: string[] | null = null;
+  try {
+    const res = await fetch('https://registry.npmjs.org/@aywengo%2fmercury-atlas',
+      { signal: AbortSignal.timeout(20_000) });
+    if (res.status === 404) published = [];
+    else if (res.status === 200) {
+      published = Object.keys(JSON.parse(await res.text()).versions ?? {});
+    } else { t.skip(`registry answered ${res.status}`); return; }
+  } catch {
+    t.skip('registry unreachable');
+    return;
+  }
+
+  let warned = 0, offered = 0;
+  for (const { file, own, text } of files) {
+    const preamble = text.split(/^##\s/m)[0];
+    const saysUnpublished = /never (?:been )?published|not (?:yet )?published|not published yet/i.test(preamble);
+    const offersOwnInstall = new RegExp(
+      `npm (?:install|i)\\b[^\\n]*mercury-atlas@${own.replace(/\./g, '\\.')}`).test(text);
+    if (published.includes(own)) {
+      assert.ok(!saysUnpublished,
+        `docs/releases/atlas/${file} says the release has not happened, but ${own} is on the registry`);
+      assert.ok(offersOwnInstall,
+        `docs/releases/atlas/${file} must offer the install for ${own}, which is published`);
+      offered++;
+    } else {
+      assert.ok(saysUnpublished,
+        `docs/releases/atlas/${file} must state before its first heading that ${own} has not been `
+        + 'published; the warning is positional, so a historical aside further down does not count');
+      assert.ok(!offersOwnInstall,
+        `docs/releases/atlas/${file} offers an install for ${own} while the registry does not serve it`);
+      warned++;
+    }
+  }
+  assert.equal(warned + offered, files.length, 'every Atlas notes file must be classified');
+});
+
+test('the Atlas changelog keeps its unpublished warning while 0.1.0 is not on the registry', async (t) => {
+  // Fleet's shape: a version recorded in the changelog that the registry never served can never be
+  // re-checked live, so the warning is pinned textually per version. For Atlas the 0.1.0 entry is
+  // LIVE until the bootstrap publish happens, so the warning is checked against the registry when it
+  // can answer, and pinned textually otherwise -- the entry must always carry the warning or the
+  // published status, never silence.
+  const log = read('atlas/CHANGELOG.md');
+  const at = log.indexOf('## [0.1.0]');
+  assert.ok(at >= 0, 'atlas/CHANGELOG.md must keep its 0.1.0 entry');
+  const entry = log.slice(at);
+
+  let published: boolean | null = null;
+  try {
+    const res = await fetch('https://registry.npmjs.org/@aywengo%2fmercury-atlas',
+      { signal: AbortSignal.timeout(20_000) });
+    if (res.status === 404) published = false;
+    else if (res.status === 200) {
+      published = Object.keys(JSON.parse(await res.text()).versions ?? {}).includes('0.1.0');
+    } else { published = null; }
+  } catch { published = null; }
+
+  if (published === false) {
+    assert.match(entry, /not published yet|not on the npm registry/i,
+      'atlas/CHANGELOG.md 0.1.0 must say it is unpublished while the registry does not serve it');
+    const fences = entry.match(/```[^\n]*\n[\s\S]*?```/g) ?? [];
+    assert.ok(!fences.some((b) => /npm (?:install|i)\b[^\n]*mercury-atlas@/.test(b)),
+      'no runnable npm install of a specific version inside the unpublished 0.1.0 entry');
+  } else if (published === true) {
+    assert.doesNotMatch(entry, /not published yet/i,
+      'atlas/CHANGELOG.md 0.1.0 is on the registry; remove the unpublished warning');
+  }
+  // published === null: the registry did not answer, so assert only the structural facts.
+  assert.match(entry, /^## \[0\.1\.0\] - \d{4}-\d{2}-\d{2}/m,
+    'the 0.1.0 entry must carry a release date');
+});
+
+test('no Atlas doc claims a shipped capability is absent', () => {
+  // The Fleet test's relationship rule, pointed at the Atlas tree. The changelog's "Not in this
+  // release" section was written at the knowledge-service cut and claimed the HOST side had nothing
+  // that talks to Atlas -- false by the time A6-4 shipped (host phases 1-5, #697/#698/#701). The
+  // rule is not a wording pin: rewrite the prose freely, but do not contradict the tree.
+  const shipped: Array<{ file: string; inAbsenceList: RegExp; deniedAs: string }> = [
+    { file: 'atlas/server.ts', inAbsenceList: /\b(?:atlas )?server\b/i, deniedAs: 'server' },
+    { file: 'atlas/notes.ts', inAbsenceList: /\bnote store\b/i, deniedAs: 'note store' },
+    { file: 'atlas/sweep.ts', inAbsenceList: /\b(?:retention )?sweep\b/i, deniedAs: 'sweep' },
+    { file: 'atlas/redact.ts', inAbsenceList: /\bredactor\b/i, deniedAs: 'redactor' },
+    { file: 'atlas/auth.ts', inAbsenceList: /caller authentication/i, deniedAs: 'authentication' },
+    { file: 'deploy/atlas.service', inAbsenceList: /\b(?:systemd )?unit\b/i, deniedAs: 'unit' },
+    // The host-side transport, in a different package: the coupling rule makes it foreign to atlas/,
+    // which is why the guard asserts the CHANGELOG does not deny its existence.
+    { file: 'src/knowledge/outbox.ts', inAbsenceList: /\boutbox\b/i, deniedAs: 'outbox' },
+    { file: 'src/knowledge/puller.ts', inAbsenceList: /\bpuller\b/i, deniedAs: 'puller' },
+  ];
+  const missing = shipped.filter((s) => !existsSync(join(ROOT, s.file))).map((s) => s.file);
+  assert.deepEqual(missing, [], 'every artifact listed here must be in the tree, or the guard proves nothing');
+
+  const absenceBody = /^#{2,4}[^\n]*\bnot (?:in this release|included|shipped)\b[^\n]*\n((?:(?!^#{2,4}\s)[\s\S])*)/gim;
+  const text = read('atlas/CHANGELOG.md');
+  const blocks = [...text.matchAll(absenceBody)].map((m) => m[1]);
+  assert.ok(blocks.length > 0 && blocks.some((b) => b.trim().length > 0),
+    'the absence-section extractor found nothing in atlas/CHANGELOG.md, so this guard would pass vacuously');
+
+  for (const { file, inAbsenceList, deniedAs } of shipped) {
+    for (const block of blocks) {
+      assert.ok(!inAbsenceList.test(block),
+        `atlas/CHANGELOG.md: ${file} ships, so it must not appear under a heading saying it does not`);
+    }
+    const denial = new RegExp(
+      `there (?:is|are) no[^.]*\\b${deniedAs}\\b|\\b${deniedAs}\\b[^.]{0,40}does not exist yet`, 'i');
+    assert.ok(!denial.test(text), `atlas/CHANGELOG.md denies "${deniedAs}" while ${file} is in the tree`);
+  }
+});
+
+test('the docs do not call the Atlas package absent while the registry serves it', async (t) => {
+  // The bootstrap creates the package page before 0.1.0 exists on it; at that moment "the package
+  // does not exist" is false while "0.1.0 is unpublished" stays true. Fleet needed a regression test
+  // because four documents had conflated the two. Atlas skips that mistake by guard.
+  const evergreen = ['atlas/CHANGELOG.md', 'docs/distribution.md', 'docs/releasing.md'];
+  const docsText = evergreen.map((f) => read(f)).join('\n');
+  let registryVersions: string[] | null = null;
+  try {
+    const res = await fetch('https://registry.npmjs.org/@aywengo%2fmercury-atlas',
+      { signal: AbortSignal.timeout(20_000) });
+    if (res.status === 404) registryVersions = [];
+    else if (res.status === 200) {
+      registryVersions = Object.keys(JSON.parse(await res.text()).versions ?? {});
+    } else { t.skip(`registry answered ${res.status}`); return; }
+  } catch {
+    t.skip('registry unreachable');
+    return;
+  }
+  if (registryVersions.length === 0) return; // nothing to contradict yet
+  assert.ok(!claimsScopedPackageAbsent(docsText, /\bpackage\b|mercury-atlas/i),
+    'the @aywengo/mercury-atlas package page exists; say which VERSION is unpublished instead of '
+    + 'calling the package absent');
 });
 
 test('the runbook does not claim a token publish preserves attestations', () => {
