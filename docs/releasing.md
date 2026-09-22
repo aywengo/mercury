@@ -21,7 +21,7 @@ provenance, and the maintainer-approved staged publish — with the release note
 [`docs/releases/atlas/0.1.0.md`](releases/atlas/0.1.0.md), held to the registry by the comparison
 in `test/releaseDocs.test.ts`. The one-time bootstrap ran the same day (`0.0.1-bootstrap` created
 the package page; `npm trust github` configured the trusted publisher), so from the `atlas-v0.1.0`
-tag on the path needs no secret. An `atlas-vX.Y.Z` tag pushed before a product's bootstrap still
+tag on, the path needs no secret. An `atlas-vX.Y.Z` tag pushed before a product's bootstrap still
 fails at the npm step: no rehearsal can create the package page. Like Fleet, Atlas attaches no
 bundle and has no Homebrew formula — npm is its only installable artifact.
 

@@ -15,9 +15,10 @@ Status header: npm, GitHub Release and Homebrew are all implemented in `release.
 | Host installer | `curl -fsSL https://github.com/aywengo/mercury/releases/latest/download/install.sh \| bash`, or `npx @aywengo/mercury host install` | host + `mercuryctl` | implemented (M6); asset ships with the next host release — see [`host-installer.md`](host-installer.md) |
 
 Atlas is packaged separately, not as a sixth channel: `@aywengo/mercury-atlas` ships through the
-npm channel only, with its own version stream and tag (`atlas-v<version>`): `npm install -g
-@aywengo/mercury-atlas` (live since 0.1.0; stable on `latest`). The other four channels (GitHub
-Release asset, checkout, Homebrew, host installer) carry the host and its CLI, never Atlas.
+npm channel only, with its own version stream and tag (`atlas-v<version>`) — install with
+`npm install -g @aywengo/mercury-atlas` (live since 0.1.0; stable on `latest`). The other four
+channels (GitHub Release asset, checkout, Homebrew, host installer) carry the host and its CLI,
+never Atlas.
 
 The host installer is the guided path for a fresh machine: it detects OS/arch,
 checks Node/curl/git, installs the pinned package into the user npm prefix (no
