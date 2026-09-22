@@ -48,7 +48,10 @@ function claimsScopedPackageAbsent(text: string, name: RegExp): boolean {
       text.lastIndexOf('>', m.index!), 0);
     const clause = text.slice(start, m.index!);
     const aboutPackage = name.test(clause);
-    const versionQualified = /\d+\.\d+\.\d+/.test(clause);
+    // "package page" is always a package-level claim: the page exists or it does not, regardless
+    // of which version the clause also mentions. A SemVer in the same clause does not qualify it.
+    const packagePage = /package page/i.test(clause);
+    const versionQualified = !packagePage && /\d+\.\d+\.\d+/.test(clause);
     if (aboutPackage && !versionQualified) return true;
   }
   return false;
