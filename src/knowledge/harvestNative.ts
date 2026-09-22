@@ -202,10 +202,21 @@ export async function harvestNative(input: HarvestNativeInput): Promise<HarvestN
       // missing base path reads as empty base text.
       baseText = (await runGit(['show', `${input.baseCommit}:${path}`], { cwd: input.workspacePath, timeoutMs: remaining() })).stdout;
     } catch (err) {
-      if (/exceeded its .* deadline/.test((err as Error).message)) {
+      const msg = (err as Error).message;
+      if (/exceeded its .* deadline/.test(msg)) {
         result.failed = true;
         result.rejected.push({ path, reason: 'harvest-timeout', source: 'distilled',
-          detail: (err as Error).message.slice(0, 160) });
+          detail: msg.slice(0, 160) });
+        continue;
+      }
+      // git names this exact case: `fatal: path 'X' does not exist in '<rev>'` (also "exists on
+      // disk, but not in" for add/rm races). That is the new-file shape: empty base, import all.
+      // ANY other git error is not interpretable as "new file" — treating it as one would import
+      // the whole HEAD file on, say, a corrupt base sha. Mark the step failed and skip the path.
+      if (!/does not exist in|exists on disk, but not in/.test(msg)) {
+        result.failed = true;
+        result.rejected.push({ path, reason: 'harvest-timeout', source: 'distilled',
+          detail: `git show base failed: ${msg.slice(0, 160)}` });
         continue;
       }
       baseText = '';
