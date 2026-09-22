@@ -571,6 +571,19 @@ Two sources the agent produced as a side effect of working, rather than as notes
   already knowledge the agent will read from the checkout, and copying it into Atlas would be
   the second copy K1 exists to prevent.
 
+  Built as [`src/knowledge/harvestNative.ts`](../src/knowledge/harvestNative.ts): paragraphs are
+  blank-line-separated blocks present at `HEAD` and absent at the base commit, so an unchanged or
+  deleted paragraph imports nothing. The provenance source is `distilled` — §7.3 names no source of
+  its own and §3's closed vocabulary has no better fit; the notes land `candidate` at Atlas, since
+  an edited memory file has no review step the way a merged decision record does. Two channel
+  rules: `.mercury/`, `.mercury-context.json` and `.agents/skills/mercury-knowledge/` are never
+  imported, whatever a diff claims (the pack must not corroborate its own notes); and an `AGENTS.md`
+  or `CLAUDE.md` that is **Added** in this Run's diff is skipped, because the only Added form of
+  those paths is plausibly the generated channel itself — a project's own file exists at the base
+  commit and arrives as Modified. K2 rejection is the expected shape here, not a defect:
+  harness-native text names harness paths and model ids, and the rejection volume is the signal
+  for whether this tier earns its keep (the same argument §16 makes about tier 2).
+
 Two boundaries hold here without exception. Every path is resolved through `resolveContained()`
 ([`src/skills/skillRegistry.ts`](../src/skills/skillRegistry.ts)), which already rejects
 traversal and symlink escapes for skills, so the harvester cannot be steered outside the

@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { openDatabase } from '../src/db/database.ts';
@@ -17,6 +17,7 @@ import { OutboxStore, idempotencyKey } from '../src/knowledge/outbox.ts';
 import { ReplicaStore } from '../src/knowledge/replica.ts';
 import { claimHash } from '../src/knowledge/validation.ts';
 import { harvestRecords } from '../src/knowledge/harvestRecords.ts';
+import { harvestNative, paragraphs } from '../src/knowledge/harvestNative.ts';
 import { DEFAULT_BOUNDS } from '../src/knowledge/validation.ts';
 import { makeEnv, makeGitRepo, tempDir, waitFor } from './helpers.ts';
 import type { KnowledgeSelectionDeps } from '../src/runs/runService.ts';
@@ -436,4 +437,184 @@ test('a workspace whose git fails fast still completes the Run with the failure 
   } finally {
     env.close();
   }
+});
+
+// ---------- tier-3 half two: harness-native memory files (§7.3, issue #686) ----------
+
+/** Track an AGENTS.md at the repo root BEFORE the Run's workspace is cut, so its edits arrive as
+ *  Modified rather than Added (the channel-file rule). */
+function seedTrackedAgentsMd(repoDir: string, text: string): void {
+  writeFileSync(join(repoDir, 'AGENTS.md'), text);
+  execFileSync('git', ['-C', repoDir, 'add', 'AGENTS.md']);
+  execFileSync('git', ['-C', repoDir, 'commit', '-q', '-m', 'track AGENTS.md']);
+}
+
+function plantAgentsParagraph(workspacePath: string, extra: string): void {
+  const p = join(workspacePath, 'AGENTS.md');
+  const before = readFileSync(p, 'utf8');
+  writeFileSync(p, `${before}\n${extra}\n`);
+  gitIn(workspacePath, 'add', 'AGENTS.md');
+  gitIn(workspacePath, 'commit', '-q', '-m', 'convention: update AGENTS.md');
+}
+
+test('a Run that commits a new paragraph to a tracked AGENTS.md queues one convention candidate', async () => {
+  const repo = makeGitRepo(tempDir('mercury-harvest-repo-'));
+  seedTrackedAgentsMd(repo, '# House rules\n\nKeep the main branch green.\n');
+  const outbox = new OutboxStore(openDatabase(':memory:'));
+  const env = makeEnv({
+    workspaceMode: 'git-worktree', repoDir: repo,
+    knowledge: selection(), knowledgeProject: 'mercury',
+    knowledgeHarvest: harvestCfg(), knowledgeOutbox: outbox,
+    fakeScript: [{ delayMs: 1500 }],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'work the build',
+      repository: { localPath: repo, baseBranch: 'main' },
+    });
+    await waitFor(() => env.runs.get(run.id)!.workspacePath !== null, 20_000);
+    plantAgentsParagraph(env.runs.get(run.id)!.workspacePath!, 'Run the smoke suite before every push.');
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 20_000);
+
+    const rows = outbox.takeBatch(10);
+    assert.equal(rows.length, 1, 'exactly the added paragraph is knowledge; the file itself is not');
+    const row = rows[0]!;
+    assert.equal(row.contribution.kind, 'convention');
+    assert.equal(row.contribution.claim, 'Run the smoke suite before every push.');
+    assert.equal(row.contribution.provenance?.source, 'distilled',
+      '§7.3 as built: the source vocabulary value is distilled, and the note lands candidate');
+    assert.equal(row.contribution.scope.startsWith('repo:'), true);
+    const evidence = row.contribution.evidence[0] as { type: string; path?: string; sha?: string };
+    assert.equal(evidence.type, 'repo-file');
+    assert.equal(evidence.path, 'AGENTS.md');
+    const head = execFileSync('git', ['-C', env.runs.get(run.id)!.workspacePath!, 'rev-parse', 'HEAD']).toString().trim();
+    assert.equal(evidence.sha, head);
+    const noted = env.events.list(run.id, 0, 200).find((e) => e.type === 'knowledge.noted');
+    assert.ok(noted, 'the accepted paragraph is on the timeline');
+    assert.equal((noted!.payload as { source?: string }).source, 'distilled');
+  } finally {
+    env.close();
+  }
+});
+
+test('unchanged and deleted paragraphs produce nothing', async () => {
+  const repo = makeGitRepo(tempDir('mercury-harvest-repo-'));
+  seedTrackedAgentsMd(repo, '# House rules\n\nKeep the main branch green.\n\nWrite tests first.\n');
+  const outbox = new OutboxStore(openDatabase(':memory:'));
+  const env = makeEnv({
+    workspaceMode: 'git-worktree', repoDir: repo,
+    knowledge: selection(), knowledgeProject: 'mercury',
+    knowledgeHarvest: harvestCfg(), knowledgeOutbox: outbox,
+    fakeScript: [{ delayMs: 1500 }],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'work the build',
+      repository: { localPath: repo, baseBranch: 'main' },
+    });
+    await waitFor(() => env.runs.get(run.id)!.workspacePath !== null, 20_000);
+    const ws = env.runs.get(run.id)!.workspacePath!;
+    // Rewrite the file WITHOUT adding a paragraph and delete SOUL.md's tracked sibling paragraph by
+    // removing 'Write tests first.' — both changes are M/D at the paragraph level but add nothing.
+    writeFileSync(join(ws, 'AGENTS.md'), '# House rules\n\nKeep the main branch green.\n');
+    gitIn(ws, 'add', 'AGENTS.md');
+    gitIn(ws, 'commit', '-q', '-m', 'tighten AGENTS.md');
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 20_000);
+
+    const rows = outbox.takeBatch(10);
+    assert.equal(rows.length, 0,
+      'a deletion or unchanged paragraph is not knowledge: only added paragraphs import');
+    const rejected = env.events.list(run.id, 0, 200).filter((e) => e.type === 'knowledge.rejected');
+    assert.equal(rejected.filter((e) => (e.payload as { source?: string }).source === 'distilled').length, 0,
+      'nothing to import is not a rejection either');
+  } finally {
+    env.close();
+  }
+});
+
+test('a paragraph naming a harness home path is rejected as k2-violation', async () => {
+  const repo = makeGitRepo(tempDir('mercury-harvest-repo-'));
+  seedTrackedAgentsMd(repo, '# House rules\n\nKeep the main branch green.\n');
+  const base = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD']).toString().trim();
+  const workspace = repo; // direct call: no Run needed for the K2 path
+  writeFileSync(join(workspace, 'AGENTS.md'),
+    '# House rules\n\nKeep the main branch green.\n\nRead your key from ~/.hermes/credentials first.\n');
+  execFileSync('git', ['-C', workspace, 'add', 'AGENTS.md']);
+  execFileSync('git', ['-C', workspace, 'commit', '-q', '-m', 'k2 bait']);
+  const res = await harvestNative({
+    workspacePath: workspace, baseCommit: base, bounds: { ...DEFAULT_BOUNDS },
+    notesAccepted: 0, repoIdentity: REPO_URL, hostId: 'host-a', runId: 'run-1', recordedAt: 'now',
+  });
+  assert.equal(res.accepted.length, 0);
+  assert.equal(res.rejected.length, 1);
+  assert.equal(res.rejected[0]!.reason, 'k2-violation');
+  assert.equal(res.rejected[0]!.source, 'distilled');
+  assert.equal(res.rejected[0]!.path, 'AGENTS.md');
+});
+
+test('an Added AGENTS.md (the possible generated channel) contributes nothing', async () => {
+  const repo = makeGitRepo(tempDir('mercury-harvest-repo-'));
+  const outbox = new OutboxStore(openDatabase(':memory:'));
+  const env = makeEnv({
+    workspaceMode: 'git-worktree', repoDir: repo,
+    knowledge: selection(), knowledgeProject: 'mercury',
+    knowledgeHarvest: harvestCfg(), knowledgeOutbox: outbox,
+    fakeScript: [{ delayMs: 1500 }],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'work the build',
+      repository: { localPath: repo, baseBranch: 'main' },
+    });
+    await waitFor(() => env.runs.get(run.id)!.workspacePath !== null, 20_000);
+    const ws = env.runs.get(run.id)!.workspacePath!;
+    // A Run that received a pack via a generated AGENTS.md (§9.3) and then committed it -- the
+    // exclusion is supposed to prevent exactly this, so the harvester asserts it as the second door.
+    writeFileSync(join(ws, 'AGENTS.md'), '# Knowledge pack\n\nAlways verify the artefact with the smoke suite.\n');
+    // `git add` refuses (§9.4's info/exclude is live here -- the error is the exclusion working);
+    // the second door exists for the force-add that defeats it.
+    gitIn(ws, 'add', '-f', 'AGENTS.md');
+    gitIn(ws, 'commit', '-q', '-m', 'add AGENTS.md');
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 20_000);
+    const rows = outbox.takeBatch(10);
+    assert.equal(rows.length, 0,
+      'the generated channel must never come back as knowledge (K3: the pack corroborating itself)');
+  } finally {
+    env.close();
+  }
+});
+
+test('direct: generated paths never import, subdir files scope to the directory, .cursor rules import', async () => {
+  const repo = makeGitRepo(tempDir('mercury-harvest-repo-'));
+  const base = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD']).toString().trim();
+  const skillDir = join(repo, '.agents/skills/mercury-knowledge');
+  mkdirSync(skillDir, { recursive: true });
+  writeFileSync(join(skillDir, 'SKILL.md'), '---\nname: x\n---\n\nPack note that must not return.\n');
+  mkdirSync(join(repo, 'docs/cursor'), { recursive: true });
+  mkdirSync(join(repo, '.cursor/rules'), { recursive: true });
+  writeFileSync(join(repo, '.cursor/rules/testing.mdc'), '---\ndescription: t\n---\n\nEvery change ships with a regression test.\n');
+  mkdirSync(join(repo, '.agents/skills/api-helper'), { recursive: true });
+  writeFileSync(join(repo, '.agents/skills/api-helper/SKILL.md'), '# API helper\n\nValidate input at the boundary.\n');
+  execFileSync('git', ['-C', repo, 'add', '.']);
+  execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'native files']);
+  const res = await harvestNative({
+    workspacePath: repo, baseCommit: base, bounds: { ...DEFAULT_BOUNDS },
+    notesAccepted: 0, repoIdentity: REPO_URL, hostId: 'host-a', runId: 'run-1', recordedAt: 'now',
+  });
+  const claims = res.accepted.map((a) => a.claim).sort();
+  assert.deepEqual(claims,
+    ['Every change ships with a regression test.', 'Validate input at the boundary.'],
+    'the generated skill note imports nothing; the .cursor rule and the subdir AGENTS.md paragraph do');
+  const subdir = res.accepted.find((a) => a.claim === 'Validate input at the boundary.')!;
+  assert.equal(subdir.scope, `repo:${(await import('../src/knowledge/identity.ts')).identityHash('github.com/aywengo/mercury')}#.agents/skills/api-helper`,
+    '§7.3: a file in a subdirectory scopes to the directory');
+  const cursor = res.accepted.find((a) => a.claim.startsWith('Every change'))!;
+  assert.equal(cursor.scope, `repo:${(await import('../src/knowledge/identity.ts')).identityHash('github.com/aywengo/mercury')}#.cursor/rules`,
+    'the .mdc rule also scopes to its directory');
+});
+
+test('direct: paragraph splitting ignores heading-only blocks and whole-file imports are impossible', () => {
+  const blocks = paragraphs('# Title\n\nReal paragraph.\n\n## Another heading\n\nSecond paragraph.\n');
+  assert.deepEqual(blocks, ['Real paragraph.', 'Second paragraph.'],
+    'a bare heading is structure, not a convention');
 });

@@ -23,6 +23,7 @@ import type { GoalStore } from '../runs/goalStore.ts';
 import { GENERATED_PATHS, NOTES_FILE, excludeFromGit, materializeKnowledge } from '../knowledge/materialize.ts';
 import { harvestNotes } from '../knowledge/harvest.ts';
 import { harvestRecords } from '../knowledge/harvestRecords.ts';
+import { harvestNative } from '../knowledge/harvestNative.ts';
 import { claimHash } from '../knowledge/validation.ts';
 import { createRedactor } from '../domain/redact.ts';
 import type { OutboxStore } from '../knowledge/outbox.ts';
@@ -1031,10 +1032,28 @@ export class Worker {
           })
         : null;
 
-      // Merge the two harvests: one accepted list into one insertInTx, one event stream. A rejected
-      // record and a rejected note carry the same event type with their own reason.
-      const mergedAccepted = [...(harvest?.accepted ?? []), ...(records?.accepted ?? [])];
-      const mergedRejected = [...(harvest?.rejected ?? []), ...(records?.rejected ?? [])];
+      // Tier-3 half two: harness-native memory files (§7.3, issue #686). Same committed range as
+      // half one, same cap and deadline, third result merged below. Expect heavy K2 rejection here:
+      // harness-native text is harness-specific by nature (§16 on tier 2 says the volume is the
+      // signal for whether the tier earns its keep).
+      const native = current.workspacePath && this.deps.knowledgeHarvest
+        ? await harvestNative({
+            workspacePath: current.workspacePath,
+            baseCommit: current.repository.baseCommit,
+            bounds: this.deps.knowledgeHarvest.bounds,
+            notesAccepted: (harvest?.accepted.length ?? 0) + (records?.accepted.length ?? 0),
+            repoIdentity: run.repository.url ?? run.repository.localPath ?? '',
+            hostId: this.deps.knowledgeHarvest.hostId,
+            runId: run.id,
+            agent: current.agent,
+            recordedAt: now,
+          })
+        : null;
+
+      // Merge the three harvests: one accepted list into one insertInTx, one event stream. A
+      // rejected record, paragraph and note carry the same event type with their own reason/source.
+      const mergedAccepted = [...(harvest?.accepted ?? []), ...(records?.accepted ?? []), ...(native?.accepted ?? [])];
+      const mergedRejected = [...(harvest?.rejected ?? []), ...(records?.rejected ?? []), ...(native?.rejected ?? [])];
 
       // One transaction for the terminal state AND the harvested notes (section 8.1). The property is
       // that there is no window in which a Run is complete and its notes are only in memory: if this
