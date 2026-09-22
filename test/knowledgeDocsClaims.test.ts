@@ -89,7 +89,11 @@ test('the claude row cites the Runs that observed its channels (issues #688/#707
   assert.match(row, /run_0a3849515ece41f6/, 'the row must cite the knowledge-off control Run');
   assert.match(row, /run_128876bc246c4360/, 'the row must cite the pointer-channel Run');
   assert.match(row, /run_f1eaf871429c42be/,
-    'the row must keep the #688 trio that first showed channel population');
+    'the row must keep the #688 trio member that showed the generated channel populated');
+  assert.match(row, /run_09005480332e4073/,
+    'the row must keep the #688 trio member that showed the knowledge-off workspace bare');
+  assert.match(row, /run_e6174faac31746d7/,
+    'the row must keep the #688 trio member that showed the pointer channel populated');
   assert.match(row, /unobserved|unmeasured/,
     'the row must keep its residual caveat (the note write-back is still unobserved)');
 });
