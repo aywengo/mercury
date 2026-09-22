@@ -25,13 +25,14 @@ tag on, the path needs no secret. An `atlas-vX.Y.Z` tag pushed before a product'
 fails at the npm step: no rehearsal can create the package page. Like Fleet, Atlas attaches no
 bundle and has no Homebrew formula — npm is its only installable artifact.
 
-**Atlas's first release needs the same one-time bootstrap as Fleet's**: create the package on
-npm, then configure trusted publishing for the `atlas` job (the Fleet-specific exception in the
-first-release procedure below, run inside `atlas/` — the `prepare` script compiles `dist/` with
-the repository's TypeScript, so it must run from a checkout). After `npm trust github @aywengo/mercury-atlas` is
-configured on the package page, the tag path needs no credential. Until then the notes must keep
-saying the version is unpublished; flipping that warning is part of the release itself, the same
-way it was for Fleet.
+**Atlas's first release used the same one-time bootstrap as Fleet's** (2026-09-22): create the
+package on npm, then configure trusted publishing for the `atlas` job (the Fleet-specific
+exception in the first-release procedure below, run inside `atlas/` — the `prepare` script
+compiles `dist/` with the repository's TypeScript, so it must run from a checkout). After
+`npm trust github @aywengo/mercury-atlas` is configured on the package page, the tag path needs
+no credential. Until a product's bootstrap happens, its notes must keep saying the version is
+unpublished; flipping that warning is part of the release itself, the same way it was for Fleet.
+The procedure below stays for the next product that needs it.
 
 `HOST_VERSION` / `FLEET_VERSION` must equal the matching `package.json`
 `"version"`. Contract tests fail if they drift.
