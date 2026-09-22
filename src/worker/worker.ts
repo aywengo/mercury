@@ -1126,6 +1126,17 @@ export class Worker {
           records: records.recordsSeen, failed: records.failed,
         }, 'decision records harvested from workspace');
       }
+      if (native?.skipped) {
+        // Same copy-mode visibility as the record harvest above.
+        log.debug({ mode: 'copy' }, 'harness-native harvest skipped: copy-mode workspace has no git delta');
+      } else if (native && (native.accepted.length > 0 || native.rejected.length > 0)) {
+        // K2-heavy rejection volume is the EXPECTED shape for this tier (§7.3/§16), so the counts
+        // must be visible for the keep-or-drop call on the tier itself.
+        log.info({
+          accepted: native.accepted.length, rejected: native.rejected.length,
+          files: native.filesSeen, failed: native.failed,
+        }, 'harness-native paragraphs harvested from workspace');
+      }
       log.info({ commits: commits.length, ...durations }, 'run completed');
       return;
     }
