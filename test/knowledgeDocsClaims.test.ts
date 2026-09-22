@@ -67,6 +67,30 @@ test('the matrix and the status header agree about Hermes', () => {
     + `(header=${headerClaimsMeasured}, row cites evidence=${rowCitesEvidence})`);
 });
 
+/** The `claude` row of the section 10 compatibility matrix, or null when the row is gone. */
+function claudeRow(): string | null {
+  const row = DOC.split('\n').find((l) => /^\|\s*`claude`/.test(l));
+  return row ?? null;
+}
+
+test('the claude row cites the Runs that observed its channels (issue #688)', () => {
+  const row = claudeRow();
+  assert.ok(row, 'the section 10 matrix must still carry a claude row');
+  // #688 observed both channels on real Runs against the real `claude` binary 2.1.260: the
+  // generated CLAUDE.md channel (run_f1eaf871429c42be), the knowledge-off control
+  // (run_09005480332e4073) and the tracked-file pointer channel (run_e6174faac31746d7). What
+  // those Runs could not show -- every one died at Claude's own authentication before the model
+  // read anything -- must stay stated, so the ids and the caveat are pinned the way the hermes
+  // row pins its measurement (#541).
+  assert.match(row, /2\.1\.260/, 'the row must name the binary version the observation ran on');
+  assert.match(row, /run_f1eaf871429c42be/,
+    'the row must cite the treated Run that observed the generated CLAUDE.md channel');
+  assert.match(row, /run_09005480332e4073/, 'the row must cite the knowledge-off control Run');
+  assert.match(row, /run_e6174faac31746d7/, 'the row must cite the pointer-channel Run');
+  assert.match(row, /unmeasured/,
+    'the row must keep the model-behaviour caveat: channel population is observed, model action is not');
+});
+
 // --- docs/status.md: one knowledge section, and the Hermes claim matches the tree ------------------
 //
 // Two sections describing the same subsystem were added to `docs/status.md` in a single day, by two
