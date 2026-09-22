@@ -11,8 +11,8 @@ function envInt(raw: string | undefined): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { applyHarnessGate, loadConfig } from './config.ts';
 import { openDatabase } from './db/database.ts';
 import { createRedactor } from './domain/redact.ts';
@@ -29,7 +29,11 @@ import { KnowledgePuller } from './knowledge/puller.ts';
 import { ReplicaStore } from './knowledge/replica.ts';
 import { OutboxStore } from './knowledge/outbox.ts';
 import { knowledgeStatus } from './knowledge/status.ts';
+import { runGit } from './workspace/workspaceManager.ts';
 import { repoIdentity } from './knowledge/identity.ts';
+import { parseDecisionRecord } from './knowledge/decisionRecord.ts';
+import { DEFAULT_BOUNDS } from './knowledge/validation.ts';
+import type { NoteContribution } from './knowledge/types.ts';
 import { submitOperatorNote } from './knowledge/operator.ts';
 import { AgentCapabilityRegistry, logAdapterCapabilities } from './adapters/capabilities.ts';
 import { GoalStore } from './runs/goalStore.ts';
@@ -80,6 +84,7 @@ function usageText(): string {
     '  redact-events   retroactive secret redaction of events.payload_json,',
     '                  run_inputs.input_json, runs.error, runs.task,',
     '                  runs.repository_json, runs.repositories_json',
+    '  knowledge       index        parse docs/decisions/ at a checkout HEAD into the outbox,',
     '  knowledge       flush        push the knowledge outbox to Atlas now, synchronously,',
     '                               and print what happened (phase 1)',
     '                identity     print the repo:<hash> scope key for a repository URL or path',
@@ -338,7 +343,116 @@ async function main(): Promise<void> {
         if (outcome.failed) process.exitCode = 1;
         return;
       }
-      process.stderr.write(`knowledge: unknown subcommand '${sub ?? ''}'. Expected flush, identity or status.\n`);
+      if (sub === 'index') {
+        const checkout = args[1];
+        if (!checkout) {
+          process.stderr.write(
+            'knowledge index: give the path to a checkout whose docs/decisions/ should be indexed.\n'
+            + 'Example: mercury knowledge index /srv/acme-api\n'
+            + 'Records are read at the checkout HEAD and queued in the outbox; `knowledge flush` sends them.\n',
+          );
+          process.exitCode = 1;
+          return;
+        }
+        if (!config.knowledge.atlas) {
+          process.stderr.write(
+            'knowledge index: MERCURY_ATLAS_URL is not set, so this host has no Atlas to queue for.\n'
+            + 'Nothing was read. Configure Atlas first; `flush` exists for the synchronous push.\n',
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const abs = resolve(checkout);
+        if (!existsSync(join(abs, '.git'))) {
+          process.stderr.write(`knowledge index: ${abs} is not a git checkout (no .git).\n`);
+          process.exitCode = 1;
+          return;
+        }
+        // The project's repo identity set decides which scopes Atlas accepts (§5): identity from the
+        // checkout's origin when it has one, else the host-local file/<path> identity, with the same
+        // warning `knowledge identity` prints for local paths.
+        // Every git call in Mercury goes through runGit (the choke point gitTimeout.test.ts pins):
+        // bounded, prompt-safe, and one door.
+        // show returns raw bytes — trimming would mutate the record text the parser must preserve
+        // verbatim — so trimming is the caller's choice, not the helper's.
+        const git = async (gitArgs: string[]): Promise<string> => (await runGit(gitArgs, { cwd: abs })).stdout;
+        let identitySource: string;
+        try {
+          identitySource = (await git(['remote', 'get-url', 'origin'])).trim();
+        } catch {
+          identitySource = abs;
+        }
+        const identity = repoIdentity(identitySource);
+        if (!identity) {
+          process.stderr.write(`knowledge index: cannot derive a repository identity from ${JSON.stringify(identitySource)}\n`);
+          process.exitCode = 1;
+          return;
+        }
+        if (identity.local) {
+          process.stderr.write(
+            `  note: ${JSON.stringify(identitySource)} is a local path, so the indexed scope matches only this host.\n`
+            + '  Index from a clone with an origin URL to get a scope other hosts agree on.\n',
+          );
+        }
+        // Reuse the finalize harvester's git plumbing for the delta and the HEAD read. The checkout
+        // itself is the workspace here; its HEAD is both the content source and the evidence sha.
+        const bounds = { ...DEFAULT_BOUNDS };
+        const headSha = (await git(['rev-parse', 'HEAD'])).trim();
+        // Not a worker finalize: there is no baseCommit delta to scope to. Read every record at HEAD
+        // by listing the directory-equivalent through git: the harvester's diff needs a base, so list
+        // tracked files directly.
+        const listed = (await git(['ls-files', 'docs/decisions/']))
+          .trim().split('\n').map((l) => l.trim()).filter((l) => l.endsWith('.md'));
+        const outbox = new OutboxStore(db);
+        const accepted: { path: string; claim: string }[] = [];
+        const skipped: { path: string; id: string }[] = [];
+        const rejected: { path: string; reason: string; detail?: string }[] = [];
+        for (const path of listed) {
+          const text = await git(['show', `HEAD:${path}`]);
+          // The parser re-normalizes: it wants the RAW source (URL or path), the same string the
+          // operator would give `knowledge identity` — not the already-normalized identity.
+          const parsed = parseDecisionRecord(text, { path, repoIdentity: identitySource, headSha, bounds });
+          if (parsed.ok) {
+            const contribution: NoteContribution = {
+              projectId: config.knowledge.atlas.project,
+              kind: parsed.draft.kind,
+              scope: parsed.draft.scope,
+              claim: parsed.draft.claim,
+              ...(parsed.draft.detail !== undefined ? { detail: parsed.draft.detail } : {}),
+              evidence: parsed.draft.evidence ?? [],
+              ...(parsed.draft.contradicts ? { contradicts: parsed.draft.contradicts } : {}),
+              provenance: {
+                source: 'repo-record',
+                hostId: config.knowledge.atlas.hostId,
+                // runless by definition: no Run produced these. The outbox key prefix becomes
+                // `index:` (see idempotencyKey) and Atlas stores the source with a null run id.
+                runId: undefined,
+                recordedAt: new Date().toISOString(),
+              },
+            };
+            outbox.insert([{ runId: null, contribution }]);
+            accepted.push({ path, claim: parsed.draft.claim });
+          } else if (parsed.skipped) {
+            skipped.push({ path, id: parsed.detail ?? '' });
+          } else {
+            rejected.push({ path, reason: parsed.reason, ...(parsed.detail ? { detail: parsed.detail } : {}) });
+          }
+        }
+        process.stdout.write(
+          `indexed ${accepted.length}, skipped ${skipped.length}, rejected ${rejected.length} `
+          + `from ${listed.length} record(s) at ${headSha.slice(0, 12)}\n`,
+        );
+        for (const a of accepted) process.stdout.write(`  accepted  ${a.path}  ${a.claim.slice(0, 90)}\n`);
+        for (const sk of skipped) process.stdout.write(`  skipped   ${sk.path}  (proposed, record ${sk.id})\n`);
+        for (const r of rejected) {
+          process.stdout.write(`  rejected  ${r.path}  ${r.reason}${r.detail ? ` -- ${r.detail}` : ''}\n`);
+        }
+        // CI-usable: a rejected record means the checkout has a problem an operator should see, so
+        // the command fails rather than quietly indexing the rest.
+        if (rejected.length > 0) process.exitCode = 1;
+        return;
+      }
+      process.stderr.write(`knowledge: unknown subcommand '${sub ?? ''}'. Expected index, flush, identity or status.\n`);
       process.exitCode = 1;
     } finally {
       db.close();

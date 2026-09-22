@@ -209,8 +209,10 @@ Live and covered by tests:
   `identity <url>...` prints the `repo:<hash>` scope key the pack selector computes and reads no
   database, so it works on the host whose configuration is the thing under investigation (a local
   path is answered but reported as host-local, because such a scope works there and matches nothing
-  elsewhere); and `flush` drains the outbox to Atlas in one synchronous pass rather than waiting for
-  the pusher's timer, and refuses with an explanation when no Atlas is configured;
+  elsewhere); `index <checkout>` parses a checkout's `docs/decisions/` records at HEAD into the
+  outbox runless (§6.3's bootstrap path), printing accepted/skipped/rejected and failing when a
+  record was rejected; and `flush` drains the outbox to Atlas in one synchronous pass rather than
+  waiting for the pusher's timer, and refuses with an explanation when no Atlas is configured;
 - retired-row retention on the host (`MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS`).
 - the **Fleet reader** (#615): `GET /fleet/knowledge` and the `fleet knowledge` CLI, counts
   only — Fleet can see per-project knowledge health without ever receiving note bodies. Two

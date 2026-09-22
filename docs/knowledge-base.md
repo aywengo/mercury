@@ -466,8 +466,10 @@ the second is what closes it in practice:
   outbox with `source: repo-record` and no `runId`. This is the bootstrap path for a
   repository that already has records, it runs on the host with the host's existing access,
   and it needs nothing from Atlas beyond the contributor token the host already holds. It is
-  idempotent: a record whose content hash is already known produces a corroboration, not a
-  duplicate (§12).
+  idempotent: re-running the index on the same host queues nothing new (the outbox keys on
+  `index:<claimHash>`) and Atlas answers `duplicate` without adding a source -- a runless
+  contribution is stored with an empty run id, so the `(note_id, host_id, run_id)` uniqueness
+  holds the line. A second host indexing the same record is what corroborates (§12).
 
 Service-side indexing is recorded in §18 as an option to revisit if the coverage gap turns out
 to matter more than the trust boundary. It is not designed here.
