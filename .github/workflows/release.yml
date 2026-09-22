@@ -9,6 +9,7 @@ on:
     tags:
       - 'host-v*.*.*'
       - 'fleet-v*.*.*'
+      - 'atlas-v*.*.*'
   # Rehearsal. A manual run executes everything a real release does -- tag parsing, the version and
   # release-notes checks, install, bundle build, the OIDC exchange -- and then stops short of the
   # three things that touch the outside world: `npm publish`, `gh release create`, and the Homebrew
@@ -31,6 +32,7 @@ on:
         options:
           - host
           - fleet
+          - atlas
 
 permissions:
   contents: write
@@ -73,17 +75,27 @@ jobs:
             rehearsal_product="${REHEARSAL_PRODUCT:-host}"
             case "$rehearsal_product" in
               fleet) rehearsal_manifest='fleet/package.json' ;;
+              atlas) rehearsal_manifest='atlas/package.json' ;;
               *)     rehearsal_manifest='package.json' ;;
             esac
             tag="${rehearsal_product}-v$(node -e "console.log(JSON.parse(require('fs').readFileSync('${rehearsal_manifest}','utf8')).version)")"
             echo "rehearsal: derived ${tag} from ${rehearsal_manifest}; a dispatch carries no tag"
           fi
-          if [[ ! "$tag" =~ ^(host|fleet)-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
-            echo "refusing tag ${tag}; expected host-vX.Y.Z[-prerelease] or fleet-vX.Y.Z[-prerelease]" >&2
+          if [[ ! "$tag" =~ ^(host|fleet|atlas)-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "refusing tag ${tag}; expected host-vX.Y.Z[-prerelease], fleet-vX.Y.Z[-prerelease] or atlas-vX.Y.Z[-prerelease]" >&2
             exit 1
           fi
           product="${BASH_REMATCH[1]}"
           version="${BASH_REMATCH[2]}"
+          # User-visible display name: release titles and failure bodies capitalize Fleet and Atlas
+          # and lowercase host, matching what shipped in rc1. Computed with a case statement rather
+          # than ${product_display}: that expansion needs bash 4, and the contract tests run this script
+          # with macOS's /bin/bash 3.2, where it is a bad substitution.
+          case "$product" in
+            fleet) product_display=Fleet ;;
+            atlas) product_display=Atlas ;;
+            *)     product_display=host ;;
+          esac
           notes="docs/releases/${product}/${version}.md"
           if [ ! -f "$notes" ]; then
             echo "missing ${notes}" >&2
@@ -98,6 +110,10 @@ jobs:
             pkg=$(node -e "console.log(JSON.parse(require('fs').readFileSync('fleet/package.json','utf8')).version)")
             [ "$pkg" = "$version" ] || { echo "fleet/package.json version ${pkg} != tag ${version}" >&2; exit 1; }
             title="Mercury Fleet v${version}"
+          elif [ "$product" = "atlas" ]; then
+            pkg=$(node -e "console.log(JSON.parse(require('fs').readFileSync('atlas/package.json','utf8')).version)")
+            [ "$pkg" = "$version" ] || { echo "atlas/package.json version ${pkg} != tag ${version}" >&2; exit 1; }
+            title="Mercury Atlas v${version}"
           else
             # Unreachable: the tag regex above admits host and fleet only. Kept fail-closed so that a
             # future product added to the regex without adding a branch here cannot publish with an
@@ -139,6 +155,8 @@ jobs:
           # "@" stays literal and only the slash is encoded.
           if [ "$product" = "host" ]; then
             pkg_name=$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).name)")
+          elif [ "$product" = "atlas" ]; then
+            pkg_name=$(node -e "console.log(JSON.parse(require('fs').readFileSync('atlas/package.json','utf8')).name)")
           else
             pkg_name=$(node -e "console.log(JSON.parse(require('fs').readFileSync('fleet/package.json','utf8')).name)")
           fi
@@ -313,6 +331,21 @@ jobs:
           # different route. No tag had ever been pushed, so nothing had ever exercised this path.
           npm ci --no-audit --no-fund
 
+          # Atlas tarball smoke, BEFORE anything irreversible. This is the exact failure the comment
+          # on tsconfig.fleet.json records: a `.ts` `bin` that packs cleanly and fails on first use.
+          # Pack the atlas directory, install the packed tarball into a temporary prefix, and run the
+          # installed binary -- the artifact a user would get, not the workspace. Runs on every path
+          # (tag and rehearsal) because a rehearsal that skips it would not rehearse the failure.
+          if [ "$product" = "atlas" ]; then
+            pack_json=$(cd atlas && npm pack --pack-destination "$RUNNER_TEMP" --json)
+            atlas_tarball=$(node -e "console.log(JSON.parse(process.argv[1])[0].filename)" "$pack_json")
+            atlas_smoke="$RUNNER_TEMP/atlas-smoke"
+            rm -rf "$atlas_smoke" && mkdir -p "$atlas_smoke"
+            npm install --no-save --prefix "$atlas_smoke" "$RUNNER_TEMP/$atlas_tarball" >/dev/null
+            "$atlas_smoke/node_modules/.bin/atlas" --version
+            echo "atlas tarball smoke: --version OK from the packed tarball"
+          fi
+
           # npm's default dist-tag is "latest" for ANY version, prerelease included -- `npm config get
           # tag` prints "latest". Publishing 0.1.0-rc1 without --tag would therefore make
           # `npm install @aywengo/mercury` resolve to the release candidate for everyone. So a
@@ -449,12 +482,16 @@ jobs:
             elif [ "$product" = "fleet" ]; then
               cp LICENSE fleet/LICENSE
               (cd fleet && npm publish --dry-run --access public --tag "$dist_tag") || npm_ok=0
+            elif [ "$product" = "atlas" ]; then
+              (cd atlas && npm publish --dry-run --access public --tag "$dist_tag") || npm_ok=0
             fi
           elif [ "$product" = "host" ]; then
             npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel" 2>&1 | tee "$npm_log" || npm_ok=0
           elif [ "$product" = "fleet" ]; then
             cp LICENSE fleet/LICENSE
             (cd fleet && npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel" 2>&1) | tee "$npm_log" || npm_ok=0
+          elif [ "$product" = "atlas" ]; then
+            (cd atlas && npm $npm_verb --access public --provenance --tag "$dist_tag" --loglevel "$npm_loglevel" 2>&1) | tee "$npm_log" || npm_ok=0
           fi
           if [ "${DRY_RUN:-}" = "true" ]; then
             # Not "submission succeeded": nothing was submitted, and a rehearsal log that reads like
@@ -597,7 +634,9 @@ jobs:
                 fi
                 echo "- The asset attached to this release: download and unpack the bundle."
               else
-                echo "**None. Fleet ships only through npm**, and this release attaches no asset and"
+                # Atlas ships the same way Fleet does: npm only, no bundle, no formula. The product
+                # name interpolates so the two npm-only products share one correct sentence.
+                echo "**None. ${product_display} ships only through npm**, and this release attaches no asset and"
                 echo "has no Homebrew formula, so this version is unavailable by every channel."
               fi
               echo ""
@@ -639,7 +678,7 @@ jobs:
                 echo "\`brew install\` to users."
               else
                 echo "Nothing else is attached to this release and there is no Homebrew formula for"
-                echo "Fleet, so approval on npmjs.com is the only way this version becomes installable."
+                echo "${product_display}, so approval on npmjs.com is the only way this version becomes installable."
               fi
             } >> "$notes"
           fi
@@ -708,25 +747,26 @@ jobs:
           # never on this job's exit status. A submit can fail on a version that is already published,
           # and "nothing is installable" would then be as false as "Homebrew is live" was.
           if [ "$npm_ok" = "0" ]; then
-            if [ "$product" = "fleet" ]; then
+            # Atlas fails exactly like Fleet: npm is its only installable channel.
+            if [ "$product" = "fleet" ] || [ "$product" = "atlas" ]; then
               if [ "$version_live" = "200" ]; then
-                echo "::warning::npm ${npm_verb} failed for ${tag}; ${pkg_name}@${version} is on the registry but was not published by this run, and Fleet has no other install channel"
+                echo "::warning::npm ${npm_verb} failed for ${tag}; ${pkg_name}@${version} is on the registry but was not published by this run, and ${product_display} has no other install channel"
                 echo "npm submission failed for ${tag}." >&2
                 echo "${pkg_name}@${version} IS installable -- but it was not published by this run and" >&2
-                echo "carries no provenance from it. Fleet ships only through npm." >&2
+                echo "carries no provenance from it. ${product_display} ships only through npm." >&2
               elif [ "$version_live" = "404" ]; then
-                echo "::error::npm ${npm_verb} failed for ${tag}; Fleet ships only through npm, so this release has no installable artifact at all"
+                echo "::error::npm ${npm_verb} failed for ${tag}; ${product_display} ships only through npm, so this release has no installable artifact at all"
                 echo "npm submission failed for ${tag}." >&2
-                echo "Fleet attaches no bundle and has no Homebrew formula: npm is its only installable" >&2
+                echo "${product_display} attaches no bundle and has no Homebrew formula: npm is its only installable" >&2
                 echo "channel, and ${pkg_name}@${version} is not on the registry." >&2
                 echo "NOTHING from this release is installable. Fix npm and re-tag; see the release body." >&2
               else
                 # A 000 or a 403/5xx answers nothing. Saying "not installable" here would repeat the
                 # mistake in the other direction, on an npm outage -- the outage this block exists to
                 # survive.
-                echo "::warning::npm ${npm_verb} failed for ${tag}; Fleet ships only through npm and the registry did not answer (HTTP ${version_live})"
+                echo "::warning::npm ${npm_verb} failed for ${tag}; ${product_display} ships only through npm and the registry did not answer (HTTP ${version_live})"
                 echo "npm submission failed for ${tag}." >&2
-                echo "Fleet ships only through npm. The registry returned HTTP ${version_live}, which does" >&2
+                echo "${product_display} ships only through npm. The registry returned HTTP ${version_live}, which does" >&2
                 echo "not answer whether ${pkg_name}@${version} is installable -- check before concluding." >&2
               fi
             else

@@ -97,7 +97,7 @@ function runTag(
     bundleLie?: string;
     exchange2?: string; exchange2Exit?: number; control?: string; controlExit?: number;
     control2?: string; control2Exit?: number; rehearsalProduct?: string; fleetPkgVersion?: string; omitFleetManifest?: boolean;
-    pkgVersionHttp?: string; installSh?: boolean } = {},
+    pkgVersionHttp?: string; installSh?: boolean; atlasPkgVersion?: string } = {},
 ): Run {
   // tempDir() registers the path with the file-level teardown in helpers.ts, which also runs when a
   // test file aborts partway -- something a per-test finally block cannot guarantee.
@@ -112,6 +112,14 @@ function runTag(
       writeFileSync(join(tmp, 'fleet', 'package.json'),
         JSON.stringify({ name: '@aywengo/mercury-fleet', version: opts.fleetPkgVersion ?? opts.pkgVersion ?? pkg.version }));
     }
+    // Atlas: the smoke must install a tarball whose bin RUNS, so the fixture carries a dist/cli.js
+    // the stub install copies into node_modules/.bin. `atlasPkgVersion` lets a test refuse on a
+    // manifest mismatch.
+    mkdirSync(join(tmp, 'atlas', 'dist'), { recursive: true });
+    writeFileSync(join(tmp, 'atlas', 'package.json'),
+      JSON.stringify({ name: '@aywengo/mercury-atlas', version: opts.atlasPkgVersion ?? opts.pkgVersion ?? pkg.version, bin: { atlas: 'dist/cli.js' } }));
+    writeFileSync(join(tmp, 'atlas', 'dist', 'cli.js'),
+      '#!/usr/bin/env node\nconsole.log("atlas " + (process.env.STUB_ATLAS_VERSION ?? "0.0.0-test"));\n');
     // The fleet branch copies LICENSE into fleet/ before publishing. Without it the fleet PUBLISH path
     // could not be exercised at all -- the only pre-existing fleet test asserted a version mismatch,
     // which exits before the cp, so the gap stayed invisible.
@@ -164,6 +172,27 @@ function runTag(
       const body = cmd === 'npm'
         ? '#!/bin/sh\ncase "$*" in\n  "stage --help") exit "${STUB_NPM_STAGE_RC:-0}" ;;\nesac\n'
           + 'echo "npm $*" >> "' + tmp + '/calls.log"\n'
+          // The atlas smoke path: `npm pack --pack-destination <dir> --json` answers the JSON shape
+          // npm prints AND leaves the named tarball on disk, because the step installs that file.
+          // The bytes are fake; what must be real is the flow pack -> install -> bin runs.
+          + 'case "$*" in\n'
+          + '  *pack*--json*)\n'
+          + '    v=$(node -e "const fs=require(\'fs\');const p=fs.existsSync(\'package.json\')?\'package.json\':\'atlas/package.json\';console.log(JSON.parse(fs.readFileSync(p,\'utf8\')).version)")\n'
+          + '    name="aywengo-mercury-atlas-${v}.tgz"\n'
+          + '    printf \'[{"filename":"%s"}]\' "$name"\n'
+          + '    for a in "$@"; do case "$a" in "$RUNNER_TEMP"|"${RUNNER_TEMP:-//none}") dest="$a" ;; esac; done\n'
+          + '    echo fake-tarball-bytes > "${dest:-.}/$name"\n'
+          + '    exit 0 ;;\n'
+          + '  *install*--prefix*)\n'
+          // Emulate a real install: the bin lands at <prefix>/node_modules/.bin/atlas and works.
+          + '    prefix=\'\'\n'
+          + '    prev=\'\'\n'
+          + '    for a in "$@"; do [ "$prev" = "--prefix" ] && prefix="$a"; prev="$a"; done\n'
+          + '    mkdir -p "$prefix/node_modules/.bin"\n'
+          + '    cp atlas/dist/cli.js "$prefix/node_modules/.bin/atlas"\n'
+          + '    chmod +x "$prefix/node_modules/.bin/atlas"\n'
+          + '    exit 0 ;;\n'
+          + 'esac\n'
           // Scoped to the submission: --provenance appears only on the publish/stage call. Failing
           // on every npm call instead also killed `npm ci`, which made three tests fail for a reason
           // that had nothing to do with what they were checking.
@@ -379,6 +408,7 @@ test('the workflow tag filter no longer admits cli', () => {
   // Both directions: dropping cli must not have dropped a product that still releases.
   assert.ok(filter.some((l) => l.includes('host-v')), 'host tag pattern missing from the filter');
   assert.ok(filter.some((l) => l.includes('fleet-v')), 'fleet tag pattern missing from the filter');
+  assert.ok(filter.some((l) => l.includes('atlas-v')), 'atlas tag pattern missing from the filter (A6-1)');
 });
 
 test('host and fleet keep their existing manifest comparison', () => {
@@ -393,6 +423,38 @@ test('host and fleet keep their existing manifest comparison', () => {
   assert.equal(fleet.status, 1, `fleet-v9.9.9 should still be refused, got exit ${fleet.status}`);
   assert.match(fleet.stderr, new RegExp(`fleet/package\\.json version ${V.replace(/\./g, '\\.')} != tag 9\\.9\\.9`),
     `refusal should name both versions: ${fleet.stderr}`);
+});
+
+test('an atlas tag rehearses end to end: manifest check, pack, install, smoke, no publish', () => {
+  // Acceptance 1 of #689, executed rather than asserted: a dry run on an atlas tag must reach the
+  // smoke step (pack -> install -> `atlas --version` from node_modules/.bin) and stop short of
+  // publishing. runTag appends the stub call log to stdout, so the calls are asserted there.
+  const r = runTag(`atlas-v${V}`, { notes: [`atlas/${V}.md`], event: 'workflow_dispatch', rehearsalProduct: 'atlas' });
+  assert.equal(r.status, 0, `expected the atlas rehearsal to pass, got exit ${r.status}:\n${r.stderr}`);
+  assert.match(r.stdout, /atlas tarball smoke: --version OK/, 'the smoke must run and pass');
+  assert.match(r.stdout, /DRY RUN: not submitting to npm/, 'a rehearsal never submits');
+  const calls = r.stdout.split('\n').filter((l) => /^npm /.test(l));
+  assert.ok(calls.some((l) => l.includes('pack') && l.includes('--json')), 'the smoke packs the atlas directory');
+  assert.ok(calls.some((l) => l.startsWith('npm install') && l.includes('--prefix')), 'the smoke installs the packed tarball');
+  assert.ok(!calls.some((l) => /publish --access public --tag(?!.*--dry-run)/.test(l) && !l.includes('--dry-run')),
+    'the rehearsal must not reach a real publish');
+});
+
+test('an atlas tag with a wrong manifest version is refused', () => {
+  const r = runTag('atlas-v9.9.9', { notes: ['atlas/9.9.9.md'], atlasPkgVersion: '0.0.3' });
+  assert.equal(r.status, 1, `atlas-v9.9.9 with manifest 0.0.3 should be refused, got ${r.status}`);
+  assert.match(r.stderr, /atlas\/package\.json version 0\.0\.3 != tag 9\.9\.9/,
+    `refusal should name both versions: ${r.stderr}`);
+});
+
+test('a tag of any other shape is still refused, listing all three prefixes', () => {
+  // Acceptance 2: the refusal message is the operator's map of what exists. Adding atlas to the
+  // regex without updating the message would leave the message lying about the accepted set.
+  const r = runTag('cli-v9.9.9', {});
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /refusing tag cli-v9\.9\.9/);
+  assert.match(r.stderr, /host-vX\.Y\.Z\[-prerelease\], fleet-vX\.Y\.Z\[-prerelease\] or atlas-vX\.Y\.Z\[-prerelease\]/,
+    `the refusal must list all three prefixes: ${r.stderr}`);
 });
 
 test('a matching host tag still publishes, so the guards did not over-tighten', () => {

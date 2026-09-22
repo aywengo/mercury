@@ -202,3 +202,20 @@ test('the contract_docs path filter covers every document those tests read', () 
 // above can only ever see paths a test spells out, and this suite also builds them with join() and
 // template literals, so a reverse assertion would flag documents that are read just fine. A guard that
 // cries wolf gets deleted rather than obeyed, so the direction that cannot be measured is left alone.
+
+test('the docs-contract filter covers every product release-notes directory', () => {
+  // The release-notes files are contract docs (releaseHygiene reads them), so a new product's notes
+  // directory must stay inside `docs/releases/**/*.md`. If someone narrows that glob per product —
+  // `docs/releases/host/*.md`, say — the atlas (or fleet) notes stop re-running the release hygiene
+  // checks on docs-only PRs, which is the #355 failure mode this file exists to prevent.
+  const globs = contractDocsGlobs();
+  assert.ok(
+    globs.some((g) => {
+      const re = globToRegExp(g);
+      return re.test('docs/releases/host/0.0.1.md')
+        && re.test('docs/releases/fleet/0.0.1.md')
+        && re.test('docs/releases/atlas/0.0.1.md');
+    }),
+    `the contract_docs filter must cover host, fleet and atlas release notes: ${JSON.stringify(globs)}`,
+  );
+});

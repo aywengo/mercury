@@ -52,7 +52,7 @@ const RUNBOOKS = ['docs/releasing.md', 'docs/distribution.md'];
 /** Tag shapes the workflow actually accepts, read from the step rather than restated here. */
 function acceptedTagRegex(): RegExp {
   const wf = read(WORKFLOW);
-  const m = wf.match(/=~ \^(\(host\|fleet\)[^ ]*?) \]\]/);
+  const m = wf.match(/=~ \^(\(host\|fleet\|atlas\)[^ ]*?) \]\]/);
   assert.ok(m, 'the tag regex must be findable in the release step; if it moved, update this test');
   return new RegExp('^' + m[1] + '$');
 }
@@ -115,7 +115,7 @@ test('the runbook tag annotation matches the release title the workflow creates'
   // the same string, and the check reads both sides rather than restating either.
   const wf = read(WORKFLOW);
   const titles = [...wf.matchAll(/title="Mercury (\S+) v\$\{version\}"/g)].map((m) => m[1]);
-  assert.deepEqual(titles.sort(), ['Fleet', 'host'], 'the workflow titles both products; update this test if that changes');
+  assert.deepEqual(titles.sort(), ['Atlas', 'Fleet', 'host'], 'the workflow titles all three products; update this test if that changes');
 
   const runbook = read('docs/releasing.md');
   const block = (runbook.match(/```bash\n([\s\S]*?git push origin[\s\S]*?)```/) ?? [])[1];
