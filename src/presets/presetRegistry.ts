@@ -223,7 +223,10 @@ function collectFiles(dir: string, base: string, out: Record<string, string>): v
 
 function exists(p: string): boolean {
   try {
-    return statSync(p).isFile() || statSync(p).isDirectory();
+    // One stat, two questions: calling statSync twice raced with itself and doubled the
+    // syscalls on every listing.
+    const st = statSync(p);
+    return st.isFile() || st.isDirectory();
   } catch {
     return false;
   }

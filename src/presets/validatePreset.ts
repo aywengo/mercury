@@ -5,13 +5,12 @@
 // design's list, in the order the design states it; each check runs so that ONE malformed aspect
 // does not mask the others (a preset with a bad id AND a missing instruction reports both).
 
-import { lstatSync, readlinkSync, statSync } from 'node:fs';
+import { readlinkSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type {
   PresetConstraintCeilings,
   PresetFinding,
   PresetValidation,
-  RolePresetManifest,
 } from './types.ts';
 import { ValidationError } from '../domain/errors.ts';
 
@@ -106,25 +105,32 @@ export function validatePreset(
   }
 
   // Instruction: containment first, then existence, size, and (in the registry) decodability.
-  // An absent block means the default file (INSTRUCTION.md) -- the type's comment on
-  // `instruction.file` says exactly that, and every shipped preset relies on it.
-  const inst = m.instruction ?? { file: 'INSTRUCTION.md' };
+  // An ABSENT block means the default file (INSTRUCTION.md) -- the type's comment on
+  // `instruction.file` says exactly that, and every shipped preset relies on it. An EXPLICIT
+  // null is not "absent": it is a shape error, because silently defaulting a value the author
+  // wrote is the accepted-but-ignored failure mode the repo refuses.
+  const inst = m.instruction === undefined ? { file: 'INSTRUCTION.md' } : m.instruction;
   if (typeof inst !== 'object' || inst === null || Array.isArray(inst)) {
     add('PRESET_INSTRUCTION', 'instruction', 'instruction must be an object with a file field');
   } else {
-    const file = (inst as Record<string, unknown>).file ?? 'INSTRUCTION.md';
+    const rawFile = (inst as Record<string, unknown>).file;
+    const file = rawFile === undefined ? 'INSTRUCTION.md' : rawFile;
     if (typeof file !== 'string' || file.length === 0) {
       add('PRESET_INSTRUCTION_PATH', 'instruction.file', 'instruction.file must be a non-empty string');
     } else {
       // Containment by the same rules the skill registry applies (section 7 reuses them):
-      // no absolute paths, no "..", no escape through the preset directory.
+      // no absolute paths, no ".." -- checked on the RAW path, because a normalized escape
+      // check alone would let `sub/../INSTRUCTION.md` through, and the design (section 2.1)
+      // rejects the segment itself, not just the escape.
       const abs = resolve(dir, file);
       const rel = relative(dir, abs);
       const escapes =
         isAbsolute(file) ||
         rel === '' ||
         rel.startsWith('..') ||
-        rel.split(sep).includes('..');
+        rel.split(sep).includes('..') ||
+        file.split('/').includes('..') ||
+        file.split('\\').includes('..');
       if (escapes) {
         add('PRESET_INSTRUCTION_PATH', 'instruction.file',
           'instruction.file must stay inside the preset directory (no absolute paths, no "..")');

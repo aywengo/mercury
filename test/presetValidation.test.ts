@@ -87,6 +87,28 @@ test('instruction escaping the preset directory is PRESET_INSTRUCTION_PATH (abso
     JSON.stringify(res3.findings));
 });
 
+test('explicit null instruction or file is a shape/path error, not a silent default', () => {
+  const nullBlock = { ...structuredClone(VALID), instruction: null };
+  const res = validatePreset('reviewer', presetDir(nullBlock), nullBlock);
+  assert.ok(res.findings.some((f) => f.code === 'PRESET_INSTRUCTION'),
+    JSON.stringify(res.findings));
+
+  const nullFile = { ...structuredClone(VALID), instruction: { file: null } };
+  const res2 = validatePreset('reviewer', presetDir(nullFile), nullFile);
+  assert.ok(res2.findings.some((f) => f.code === 'PRESET_INSTRUCTION_PATH'),
+    JSON.stringify(res2.findings));
+});
+
+test('a ".." segment in the raw instruction path is refused even when it resolves back inside', () => {
+  // `sub/../INSTRUCTION.md` normalizes to a contained path, but section 2.1 rejects the
+  // SEGMENT: a manifest that plays normalization games cannot be trusted to stay honest.
+  const tricky = { ...structuredClone(VALID), instruction: { file: 'sub/../INSTRUCTION.md' } };
+  const dir = presetDir(tricky);
+  mkdirSync(join(dir, 'sub'), { recursive: true });
+  const res = validatePreset('reviewer', dir, tricky);
+  assert.ok(res.findings.some((f) => f.code === 'PRESET_INSTRUCTION_PATH'), JSON.stringify(res.findings));
+});
+
 test('missing instruction is PRESET_INSTRUCTION_MISSING', () => {
   const dir = presetDir(VALID);
   rmSync(join(dir, 'INSTRUCTION.md'));
