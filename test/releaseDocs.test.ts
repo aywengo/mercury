@@ -856,7 +856,7 @@ test('the Atlas changelog keeps its unpublished warning while 0.1.0 is not on th
     assert.ok(!fences.some((b) => /npm (?:install|i)\b[^\n]*mercury-atlas@/.test(b)),
       'no runnable npm install of a specific version inside the unpublished 0.1.0 entry');
   } else if (published === true) {
-    assert.doesNotMatch(entry, /not published yet/i,
+    assert.doesNotMatch(entry, /not published yet|not on the npm registry/i,
       'atlas/CHANGELOG.md 0.1.0 is on the registry; remove the unpublished warning');
   }
   // published === null: the registry did not answer, so assert only the structural facts.
