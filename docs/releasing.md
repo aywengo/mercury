@@ -15,21 +15,24 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
 | Fleet | `fleet/package.json` + `fleet/version.ts` (`FLEET_VERSION`) | `fleet-vX.Y.Z` | `@aywengo/mercury-fleet` | `docs/releases/fleet/X.Y.Z.md` |
 | Atlas | `atlas/package.json` + `atlas/version.ts` (`ATLAS_VERSION`) | `atlas-vX.Y.Z` | `@aywengo/mercury-atlas` | `docs/releases/atlas/X.Y.Z.md` |
 
-The Atlas row describes the release path the workflow now handles. `@aywengo/mercury-atlas` has
-**no published version yet**: the release notes for `0.1.0` exist
-([`docs/releases/atlas/0.1.0.md`](releases/atlas/0.1.0.md)), and the registry comparison in
-`test/releaseDocs.test.ts` holds them to that fact — they warn instead of offering an install.
-An `atlas-v0.1.0` tag pushed before the first publish reaches the npm step and fails there: the
-package page does not exist, and no rehearsal can create it. Like Fleet, Atlas attaches no bundle
-and has no Homebrew formula — npm is its only installable artifact.
+The Atlas row describes the release path the workflow now handles. `@aywengo/mercury-atlas` is
+**published**: `0.1.0` shipped on 2026-09-22 through the tag path — the OIDC exchange, the signed
+provenance, and the maintainer-approved staged publish — with the release notes at
+[`docs/releases/atlas/0.1.0.md`](releases/atlas/0.1.0.md), held to the registry by the comparison
+in `test/releaseDocs.test.ts`. The one-time bootstrap ran the same day (`0.0.1-bootstrap` created
+the package page; `npm trust github` configured the trusted publisher), so from the `atlas-v0.1.0`
+tag on, the path needs no secret. An `atlas-vX.Y.Z` tag pushed before a product's bootstrap still
+fails at the npm step: no rehearsal can create the package page. Like Fleet, Atlas attaches no
+bundle and has no Homebrew formula — npm is its only installable artifact.
 
-**Atlas's first release needs the same one-time bootstrap as Fleet's**: create the package on
-npm, then configure trusted publishing for the `atlas` job (the Fleet-specific exception in the
-first-release procedure below, run inside `atlas/` — the `prepare` script compiles `dist/` with
-the repository's TypeScript, so it must run from a checkout). After `npm trust github @aywengo/mercury-atlas` is
-configured on the package page, the tag path needs no credential. Until then the notes must keep
-saying the version is unpublished; flipping that warning is part of the release itself, the same
-way it was for Fleet.
+**Atlas's first release used the same one-time bootstrap as Fleet's** (2026-09-22): create the
+package on npm, then configure trusted publishing for the `atlas` job (the Fleet-specific
+exception in the first-release procedure below, run inside `atlas/` — the `prepare` script
+compiles `dist/` with the repository's TypeScript, so it must run from a checkout). After
+`npm trust github @aywengo/mercury-atlas` is configured on the package page, the tag path needs
+no credential. Until a product's bootstrap happens, its notes must keep saying the version is
+unpublished; flipping that warning is part of the release itself, the same way it was for Fleet.
+The procedure below stays for the next product that needs it.
 
 `HOST_VERSION` / `FLEET_VERSION` must equal the matching `package.json`
 `"version"`. Contract tests fail if they drift.
