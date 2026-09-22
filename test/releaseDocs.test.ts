@@ -26,7 +26,7 @@ const ROOT = join(import.meta.dirname, '..');
  * SemVer in the run-up to it.
  */
 function claimsPackageAbsent(text: string): boolean {
-  return claimsScopedPackageAbsent(text, /\bpackage\b|mercury-fleet|mercury-atlas/i);
+  return claimsScopedPackageAbsent(text, /\bpackage\b|mercury-fleet/i);
 }
 
 /**
