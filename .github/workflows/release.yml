@@ -115,11 +115,12 @@ jobs:
             [ "$pkg" = "$version" ] || { echo "atlas/package.json version ${pkg} != tag ${version}" >&2; exit 1; }
             title="Mercury Atlas v${version}"
           else
-            # Unreachable: the tag regex above admits host and fleet only. Kept fail-closed so that a
-            # future product added to the regex without adding a branch here cannot publish with an
-            # unset title or skip the manifest comparison. The cli branch that used to live here was
-            # removed: a cli-vX.Y.Z tag published a GitHub Release and no artifact, because the CLI
-            # ships inside @aywengo/mercury and has no version of its own.
+            # Unreachable: the tag regex above admits host, fleet and atlas, and each has a branch
+            # here. Kept fail-closed so that a future product added to the regex without adding a
+            # branch here cannot publish with an unset title or skip the manifest comparison. The
+            # cli branch that used to live here was removed: a cli-vX.Y.Z tag published a GitHub
+            # Release and no artifact, because the CLI ships inside @aywengo/mercury and has no
+            # version of its own.
             echo "refusing tag ${tag}: product ${product} has no release branch" >&2
             exit 1
           fi
