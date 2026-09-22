@@ -129,35 +129,3 @@ export interface InvalidPreset {
   validation: PresetFinding[];
 }
 
-/**
- * The per-Run preset snapshot (section 4). Built once inside the Run-creation
- * transaction, stored as JSON in `run_presets.snapshot_json`, and the source of
- * truth for materialization and display. Source changes after creation cannot
- * touch it; `contentHash` pins the file bytes it was resolved from.
- */
-export interface ResolvedRolePreset {
-  schemaVersion: 1;
-  id: string;
-  version: string;
-  role: string;
-  description: string;
-  trust: 'builtin' | 'trusted' | 'untrusted';
-  /** The resolved instruction file content. */
-  instruction: string;
-  effectiveAgent: {
-    id: string;
-    model?: string;
-  };
-  /** Full skill snapshots, in effective order (required last, deduped, capped). */
-  effectiveSkills: import('../domain/types.ts').ResolvedSkill[];
-  effectiveConstraints: import('../domain/types.ts').RunConstraints;
-  source: {
-    kind: 'builtin' | 'mirror' | 'draft';
-    commit?: string;
-    relativePath: string;
-  };
-  /** Preset-relative POSIX path -> content (manifest, instruction, extras). */
-  files: Record<string, string>;
-  /** SHA-256 over the canonical file sequence; the durable snapshot identity. */
-  contentHash: string;
-}
