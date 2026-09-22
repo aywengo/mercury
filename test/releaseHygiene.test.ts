@@ -192,10 +192,10 @@ test('the step that describes the release job names both products and promises n
     'it still describes a cli tag; there is no cli tag, so it promises a release that cannot happen');
 });
 
-test('release.yml admits exactly host and fleet, and fails closed on anything else', () => {
+test('release.yml admits exactly host, fleet and atlas, and fails closed on anything else', () => {
   const wf = read('.github/workflows/release.yml');
   assert.ok(!/\(host\|fleet\|cli\)/.test(wf), 'the tag regex still admits cli');
-  assert.match(wf, /\^\(host\|fleet\)-v/, 'the tag regex must admit host and fleet');
+  assert.match(wf, /\^\(host\|fleet\|atlas\)-v/, 'the tag regex must admit host, fleet and atlas');
   // Fail-closed matters: with the cli branch deleted, an unmatched product must not reach
   // `gh release create` with an unset title.
   assert.match(wf, /has no release branch/, 'the else branch must refuse rather than fall through');

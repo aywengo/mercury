@@ -13,6 +13,13 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
 | --- | --- | --- | --- | --- |
 | Host | root `package.json` + `src/version.ts` (`HOST_VERSION`) | `host-vX.Y.Z` | `@aywengo/mercury` | `docs/releases/host/X.Y.Z.md` |
 | Fleet | `fleet/package.json` + `fleet/version.ts` (`FLEET_VERSION`) | `fleet-vX.Y.Z` | `@aywengo/mercury-fleet` | `docs/releases/fleet/X.Y.Z.md` |
+| Atlas | `atlas/package.json` + `atlas/version.ts` (`ATLAS_VERSION`) | `atlas-vX.Y.Z` | `@aywengo/mercury-atlas` | `docs/releases/atlas/X.Y.Z.md` |
+
+The Atlas row describes the release path the workflow now handles. `@aywengo/mercury-atlas` has
+**no published version yet** (the notes directory is empty; the first release arrives with the
+distribution rollout, A6-4), so an `atlas-v` tag before that rollout fails exactly as designed: the
+notes file for its version does not exist. Like Fleet, Atlas attaches no bundle and has no Homebrew
+formula — npm is its only installable artifact.
 
 `HOST_VERSION` / `FLEET_VERSION` must equal the matching `package.json`
 `"version"`. Contract tests fail if they drift.
@@ -127,8 +134,8 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    release gets a `fleet-` tag and nothing else:
 
    ```bash
-   product=host    # or: fleet
-   display=$([ "$product" = fleet ] && echo Fleet || echo host)
+   product=host    # or: fleet, atlas
+   display=$([ "$product" = fleet ] && echo Fleet || ([ "$product" = atlas ] && echo Atlas || echo host))
    git tag -a "${product}-vX.Y.Z" -m "Mercury ${display} vX.Y.Z"
    git push origin "${product}-vX.Y.Z"
    ```
@@ -136,8 +143,8 @@ nobody could install. Nothing was ever tagged with it and it has been removed.
    When both ship together, push both tags from the same commit; each runs its own release job.
 
 7. [`.github/workflows/release.yml`](../.github/workflows/release.yml) creates the GitHub Release from
-   the notes file for that tag and submits the package to npm with provenance. It handles `host` and
-   `fleet` tags only; any other tag is refused.
+   the notes file for that tag and submits the package to npm with provenance. It handles `host`,
+   `fleet` and `atlas` tags only; any other tag is refused.
 
 8. **A green run does not mean the version is installable.** The job submits with `npm stage publish`,
    which defers proof-of-presence to a maintainer, so `npm install` will not resolve the version until it
