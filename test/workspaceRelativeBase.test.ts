@@ -6,7 +6,7 @@ import { makeGitRepo, tempDir } from './helpers.ts';
 import type { Run } from '../src/domain/types.ts';
 
 // Issue #703: a relative MERCURY_WORKSPACE_BASE (the shipped default) handed git a relative
-// `worktree add` target. git resolves that target against the clone directory (--C repoDir),
+// `worktree add` target. git resolves that target against the clone directory (-C repoDir),
 // while the worker, adapters, GC and the recorded run.workspacePath resolve the same string
 // against the process cwd. The worktree landed INSIDE the clone; the agent ran in an empty
 // directory. Nothing caught it because every test env builds absolute temp paths -- so this
@@ -42,8 +42,9 @@ test('a relative workspace base puts the worktree at the cwd-resolved path, with
     // 2. It lives under the cwd-resolved base, not inside the clone.
     const abs = resolve(ws.path);
     assert.ok(isAbsolute(ws.path), 'the manager hands out absolute workspace paths');
-    // macOS tmpdir is under a symlinked prefix (/var -> /private/var), so compare real paths.
-    assert.ok(abs.startsWith(realpathSync(resolve(cwd, 'workspaces')) + '/'),
+    // macOS tmpdir sits under a symlinked prefix (/var -> /private/var, /tmp -> /private/tmp),
+    // so canonicalize BOTH sides before comparing prefixes.
+    assert.ok(realpathSync(abs).startsWith(realpathSync(resolve(cwd, 'workspaces')) + '/'),
       `the worktree must resolve against the process cwd, got ${abs}`);
     assert.ok(!abs.startsWith(realpathSync(repo)),
       'the worktree must not live inside the clone directory');
