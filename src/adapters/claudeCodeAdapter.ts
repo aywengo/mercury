@@ -176,15 +176,6 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // snapshot, but nothing here tells Claude Code to read it, so 'none' is the honest value --
       // 'workspacePaths' would advertise a capability nobody implemented.
       skills: 'none',
-      // Role Presets (docs/crew/role-presets.md §8): the prompt names workspace files explicitly
-      // (the knowledge pointer precedent), so the materialized instruction reaches the model as
-      // prompt-reference. Discovery of .mercury-context.json by the harness itself is unverified
-      // (section 10 keeps measured and assumed apart), which is exactly why the prompt names it.
-      // per-run model: MERCURY_CLAUDE_MODEL is operator configuration; a per-Run model would be a
-      // new --model surface and is not declared until measured.
-      roleInstruction: 'prompt-reference',
-      sandbox: true,
-      mcp: 'none',
     },
   };
   /** `claude --version` prints "2.1.260 (Claude Code)", so the default leading-dotted-number

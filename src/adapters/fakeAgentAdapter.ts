@@ -34,13 +34,6 @@ export class FakeAgentAdapter implements AgentAdapter {
       // the mapping rather than a harness. Declared rather than left absent so a test that reads this
       // field gets an answer instead of an absence it has to interpret.
       toolEvents: 'structured',
-      // The double consumes nothing, so every preset mechanism "works" -- a test scripting a
-      // preset Run exercises resolution and materialization without a harness. Declared rather
-      // than absent so the guard test sees an answer, not an omission.
-      roleInstruction: 'system',
-      perRunModel: true,
-      sandbox: true,
-      mcp: 'none',
     },
   };
   private cancelled = new Set<string>();

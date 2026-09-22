@@ -191,13 +191,6 @@ export class DaemonAgentAdapter implements AgentAdapter {
       // contents, so the daemon must resolve names in its own namespace.
       skills: 'nativeNames',
       humanInput: true,
-      // The supervisor is a per-uid service OUTSIDE any container this worker could set up:
-      // start() refuses sandboxed runs outright, so declaring sandbox true would advertise a
-      // capability start() throws on. roleInstruction is unmeasured for the daemon protocol,
-      // which under the §8 vocabulary means 'none' -- a preset demanding instruction behavior
-      // fails closed rather than silently dropping the role.
-      sandbox: false,
-      mcp: 'none',
     },
   };
   private opts: DaemonAgentAdapterOptions;

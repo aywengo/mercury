@@ -135,12 +135,6 @@ export class HermesAgentAdapter implements AgentAdapter {
       // readable stream. Declared so a Hermes transcript is labelled "unobservable" rather than read
       // as an agent that did nothing (issue #594).
       toolEvents: 'none',
-      // Role Presets (docs/crew/role-presets.md §8): no measured channel carries a role
-      // instruction to this harness, which under the §8 vocabulary means 'none' -- a preset
-      // demanding instruction behavior fails closed rather than silently dropping the role.
-      // The sandbox option exists on the adapter, so isolation is declarable.
-      sandbox: true,
-      mcp: 'none',
     },
   };
   /** `hermes --version` prints "Hermes Agent v0.21.2 (2026.9.11) · upstream …", so the
