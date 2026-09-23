@@ -47,7 +47,10 @@ function sanitizeLoadError(err: unknown, rootDir: string): string {
   // directory itself ('scandir .../presets'), read errors quote files below it.
   msg = msg.split(rootDir + sep).join('');
   msg = msg.split(rootDir).join('.');
-  msg = msg.replace(/(?:\/[A-Za-z0-9._-]+)+/g, (m) => m.slice(m.lastIndexOf('/') + 1));
+  // Collapse remaining absolute paths to their basename, both separators: a Linux host emits
+  // POSIX paths, a Windows host emits drive-letter/UNC backslash paths, and both would leak
+  // host layout through the diagnostics surface.
+  msg = msg.replace(/(?:[\\\/][A-Za-z0-9._-]+)+/g, (m) => m.slice(Math.max(m.lastIndexOf('/'), m.lastIndexOf('\\')) + 1));
   return msg.length > 300 ? msg.slice(0, 300) + '…' : msg;
 }
 
