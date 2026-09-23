@@ -98,6 +98,13 @@ export class PrimeAgentAdapter implements AgentAdapter {
       skills: 'workspacePaths',
       humanInput: true,
       resume: true,
+      // Role Presets (docs/crew/role-presets.md §8): the prompt already names workspace files the
+      // agent should read (.mercury-context.json), so the materialized instruction reaches the
+      // agent the same way -- prompt-reference. No per-run model argv exists; a preset that sets
+      // one fails closed instead of silently ignored.
+      roleInstruction: 'prompt-reference',
+      sandbox: true,
+      mcp: 'none',
       // RPC mode carries tool callbacks, and the shared translator maps them to tool.started /
       // tool.completed / tool.failed (eventTranslation.ts). Observed on real Runs, not inferred:
       // `run_933c68e4684a498d` recorded 47 events including tool calls. The contrast with Hermes
@@ -201,6 +208,16 @@ export class PrimeAgentAdapter implements AgentAdapter {
       // than written as null when there is no pack, so a Run without knowledge has a context file
       // identical to the one it had before this feature existed.
       ...(context.knowledge ? { knowledge: context.knowledge } : {}),
+      // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, hash and
+      // the workspace-relative instruction path. Omitted when the Run has no preset, so the
+      // context file stays byte-identical to the one it had before presets existed.
+      ...(context.preset ? {
+        preset: {
+          id: context.preset.id,
+          role: context.preset.role,
+          instructionPath: context.preset.instructionPath,
+        },
+      } : {}),
     }, null, 2));
 
     const sessionDir = join(workspacePath, this.opts.sessionDirName ?? SESSION_DIR_NAME);
@@ -463,6 +480,15 @@ export class PrimeAgentAdapter implements AgentAdapter {
 
 function buildPrompt(context: RunContext): string {
   const { run, workspace } = context;
+  // Role Preset (docs/crew/role-presets.md section 8): prompt-reference, not a system channel.
+  // Omitted when there is no preset, so the prompt stays byte-identical for preset-less Runs.
+  const presetLine = context.preset
+    ? [
+        '',
+        `You are filling the role: ${context.preset.role}. Your role instructions are in`,
+        `${context.preset.instructionPath} — read them before starting and follow them.`,
+      ].join('\n')
+    : '';
   return [
     'You are Mercury, an autonomous coding agent. Execute the task below inside this workspace.',
     '',
@@ -473,7 +499,8 @@ function buildPrompt(context: RunContext): string {
     '',
     `Work in this workspace (${workspace.path}). Make focused commits with clear messages as you make progress.`,
     'When the task is complete, reply with a concise summary of what you changed and why.',
-  ].join('\n');
+    presetLine,
+  ].filter((part) => part !== '').join('\n');
 }
 
 function eventsGenerator(session: Session): AsyncGenerator<AgentEvent> {

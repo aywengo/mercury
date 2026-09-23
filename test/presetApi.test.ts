@@ -1,0 +1,124 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import type { Express } from 'express';
+import { createApp } from '../src/api/server.ts';
+import { EventStream } from '../src/events/eventStream.ts';
+import { makeEnv, makeGitRepo, tempDir } from './helpers.ts';
+
+// HTTP seam for presets (docs/crew/role-presets.md section 9, Phase 2 slice): the block is
+// forwarded UNRESOLVED so HTTP callers hit the same validation in-process callers do, and the
+// Run detail response carries the snapshot as a sibling of run/skills/goal/knowledge. The
+// lesson from the goal/knowledge forwarding bugs (#539 et al): a route that drops the block
+// passes every unit test and breaks only at the seam.
+
+function makeApi(env: ReturnType<typeof makeEnv>) {
+  const stream = new EventStream(env.db, env.events, 10);
+  stream.start();
+  const app = createApp({
+    runService: env.runService,
+    events: env.events,
+    stream,
+    apiTokens: new Map([['tok-alice', 'alice']]),
+    adminToken: null,
+  });
+  return { app, close: () => stream.stop() };
+}
+
+async function listen(app: Express): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = await new Promise<import('node:http').Server>((r) => {
+    const s = app.listen(0, '127.0.0.1', () => r(s));
+  });
+  const { port } = server.address() as import('node:net').AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    close: () => new Promise<void>((r) => server.close(() => r())),
+  };
+}
+
+test('POST /api/runs with a preset creates the Run and GET detail returns the snapshot', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const base = url;
+    const auth = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+    const created = await fetch(`${base}/api/runs`, {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        task: 'Review the auth change',
+        repository: { localPath: repo },
+        preset: { id: 'reviewer' },
+      }),
+    });
+    assert.equal(created.status, 201);
+    const { runId } = (await created.json()) as { runId: string };
+
+    const detail = await (await fetch(`${base}/api/runs/${runId}`, {
+      headers: { authorization: 'Bearer tok-alice' },
+    })).json() as { preset: { id: string; role: string; trust: string; instruction: string; contentHash: string } | null };
+    assert.ok(detail.preset, 'the snapshot must ride along with the run detail');
+    assert.equal(detail.preset.id, 'reviewer');
+    assert.equal(detail.preset.role, 'Code reviewer');
+    assert.equal(detail.preset.trust, 'builtin');
+    assert.ok(detail.preset.instruction.length > 0);
+    assert.match(detail.preset.contentHash, /^[0-9a-f]{64}$/);
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
+
+test('POST /api/runs with an unknown preset id is a domain 404 naming the preset, not a 500', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const base = url;
+    const res = await fetch(`${base}/api/runs`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer tok-alice', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        task: 'x',
+        repository: { localPath: repo },
+        preset: { id: 'ghost-preset' },
+      }),
+    });
+    // NotFoundError maps to 404 by design (errors.ts: a referenced resource that does not
+    // exist -- here the preset -- is a 404 that names it, never a 500 leaking internals).
+    assert.equal(res.status, 404);
+    const body = await res.json() as { error: string };
+    assert.match(body.error, /Preset not found/);
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
+
+test('a request with no preset block behaves exactly as before (no preset key on the detail)', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const base = url;
+    const created = await fetch(`${base}/api/runs`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer tok-alice', 'content-type': 'application/json' },
+      body: JSON.stringify({ task: 'plain', repository: { localPath: repo } }),
+    });
+    assert.equal(created.status, 201);
+    const { runId } = (await created.json()) as { runId: string };
+    const detail = await (await fetch(`${base}/api/runs/${runId}`, {
+      headers: { authorization: 'Bearer tok-alice' },
+    })).json() as { preset: unknown };
+    assert.equal(detail.preset, null);
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});

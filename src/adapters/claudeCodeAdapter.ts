@@ -155,8 +155,14 @@ function taskText(session: Session): string {
   // so the pointer is what makes the file worth writing -- the same reason the other adapters put the
   // filename in their prompts rather than trusting the harness to find it.
   const base = `${task}\n\n(Full run context: repository, branch, base commit, constraints and selected skills are in ${CONTEXT_FILE} in the workspace root.)\n`;
-  if (!session.knowledgeDegraded) return base;
-  return `${base}\n(Project knowledge for this task is in ${NOTES_FILE} in the workspace.)\n`;
+  // Role Preset (docs/crew/role-presets.md section 8): prompt-reference. The preset line is
+  // appended like the knowledge line, and omitted when the Run has no preset so the task text
+  // stays byte-identical for preset-less Runs.
+  const preset = session.context.preset
+    ? `\n(You are filling the role: ${session.context.preset.role}. Your role instructions are in ${session.context.preset.instructionPath} in the workspace -- read them before starting and follow them.)\n`
+    : '';
+  if (!session.knowledgeDegraded) return `${base}${preset}`;
+  return `${base}\n(Project knowledge for this task is in ${NOTES_FILE} in the workspace.)\n${preset}`;
 }
 
 const DONE: AgentEvent = { type: '__done__', payload: {} };
@@ -176,6 +182,15 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // snapshot, but nothing here tells Claude Code to read it, so 'none' is the honest value --
       // 'workspacePaths' would advertise a capability nobody implemented.
       skills: 'none',
+      // Role Presets (docs/crew/role-presets.md §8): the prompt names workspace files explicitly
+      // (the knowledge pointer precedent), so the materialized instruction reaches the model as
+      // prompt-reference. Discovery of .mercury-context.json by the harness itself is unverified
+      // (section 10 keeps measured and assumed apart), which is why the prompt names it.
+      // per-run model: MERCURY_CLAUDE_MODEL is operator configuration; a per-Run model would be a
+      // new --model surface and is not declared until measured.
+      roleInstruction: 'prompt-reference',
+      sandbox: true,
+      mcp: 'none',
     },
   };
   /** `claude --version` prints "2.1.260 (Claude Code)", so the default leading-dotted-number
@@ -283,6 +298,16 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // task text says where. Omitted rather than null when there is no pack, so a Run without
       // knowledge has a context file identical to the one the other adapters would have written.
       ...(context.knowledge ? { knowledge: context.knowledge } : {}),
+      // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, hash and
+      // the workspace-relative instruction path. Omitted when the Run has no preset, so the
+      // context file stays byte-identical to the one it had before presets existed.
+      ...(context.preset ? {
+        preset: {
+          id: context.preset.id,
+          role: context.preset.role,
+          instructionPath: context.preset.instructionPath,
+        },
+      } : {}),
     }, null, 2));
 
     this.sessions.set(runId, session);

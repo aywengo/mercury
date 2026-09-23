@@ -15,6 +15,10 @@ import { EventStore } from '../events/eventStore.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { SkillSelector } from '../skills/skillSelector.ts';
 import { RunStore, newRunId } from './runStore.ts';
+import { PresetStore, type RunPresetRow } from './presetStore.ts';
+import type { PresetRegistry } from '../presets/presetRegistry.ts';
+import type { ResolvedRolePreset } from '../presets/types.ts';
+import { resolvePreset, type PresetCallerInput } from '../presets/resolvePreset.ts';
 import type { ReplicaStore } from '../knowledge/replica.ts';
 import { selectPack, type PackSelection } from '../knowledge/pack.ts';
 import { KnowledgeRequestError, knowledgeCapabilityMessage, parseKnowledgeRequest } from '../knowledge/request.ts';
@@ -68,6 +72,19 @@ export interface CreateRunInput {
    * in-process callers hit identical rules, exactly as `goal` does.
    */
   knowledge?: unknown;
+  /**
+   * Role Preset selection (docs/crew/role-presets.md section 5). `undefined` means no preset
+   * and the Run behaves exactly as before. Resolved in create() against the builtin registry;
+   * a caller-supplied `version` is an optimistic guard against resolving an unexpected
+   * current definition.
+   */
+  preset?: { id: string; version?: string };
+  /**
+   * A preset snapshot to store verbatim instead of resolving `preset` against the registry.
+   * Only retry uses this, exactly like `skillSnapshots`: a retried Run must execute the SAME
+   * bytes its parent executed, not a re-resolution of whatever the registry holds now.
+   */
+  presetSnapshot?: ResolvedRolePreset;
   idempotencyKey?: string;
 }
 
@@ -78,6 +95,11 @@ export interface RunServiceDeps {
   skills: SkillRegistry;
   selector: SkillSelector;
   knownAgents: string[];
+  /**
+   * Builtin preset registry. Absent means presets are off: a `preset` block on a Run is
+   * rejected rather than ignored (section 8.4 vocabulary, same shape as knowledge/goals).
+   */
+  presets?: PresetRegistry;
   /**
    * Per-agent capability snapshot, resolved from what each adapter declares plus the
    * harness version detected at startup. Optional: absent means nothing is known, which
@@ -120,6 +142,12 @@ export class RunService {
     this.deps = deps;
   }
 
+  /** Per-Run preset snapshots (section 6). Lazy: absent when presets are not wired. */
+  private presetStore(): PresetStore | null {
+    if (!this.deps.presets) return null;
+    return new PresetStore(this.deps.db);
+  }
+
   /** Registered agent ids (the adapters wired at startup). */
   listAgents(): string[] {
     return [...this.deps.knownAgents];
@@ -144,7 +172,85 @@ export class RunService {
       const existing = this.findByIdempotencyKey(input.ownerId, input.idempotencyKey);
       if (existing) return existing;
     }
-    const agent = input.agent ?? this.deps.defaultAgent;
+
+    // Preset resolution (section 5): BEFORE agent/skills/constraints so the preset acts as
+    // defaults the caller can override (and required fields the caller cannot). A retry that
+    // carries presetSnapshot skips resolution entirely -- same bytes as the parent, exactly
+    // like skillSnapshots.
+    let presetSnapshot: ResolvedRolePreset | null = input.presetSnapshot ?? null;
+    if (input.preset && !presetSnapshot) {
+      if (!this.deps.presets) {
+        throw new ValidationError('presets are not enabled on this server; remove the preset block');
+      }
+      const loaded = this.deps.presets.get(input.preset.id);
+      if (input.preset.version && loaded.version !== input.preset.version) {
+        throw new ValidationError(
+          `preset ${JSON.stringify(input.preset.id)} is version ${loaded.version}, not the requested ${input.preset.version}`,
+        );
+      }
+      if (!loaded.enabled) {
+        throw new ValidationError(`preset ${JSON.stringify(loaded.id)} is disabled`);
+      }
+      const stat = this.deps.agentCapabilities?.();
+      const selection = resolvePreset(
+        loaded.manifest,
+        {
+          agent: input.agent,
+          model: undefined, // per-Run model override arrives with a caller surface that has one
+          skills: input.skills,
+          constraints: input.constraints,
+        } satisfies PresetCallerInput,
+        {
+          defaultAgent: this.deps.defaultAgent,
+          defaultMaxDurationMs: this.deps.defaultMaxDurationMs,
+          defaultMaxRetries: this.deps.defaultMaxRetries,
+        },
+        {
+          knownAgents: this.deps.knownAgents,
+          staticCapabilities: (agentId) => stat?.[agentId]?.static,
+        },
+      );
+
+      // Skills: auto-selection (section 3.2 step 2) needs the task text and the available
+      // list, so the selector runs here, not inside resolvePreset -- which only flags the
+      // case (nothing named a skill, autoSelect not disabled). A nativeNames backend with
+      // preset skills is a guaranteed fatal exit (issue #507's lesson), so preset skills fail
+      // closed for one instead of being silently recorded.
+      let skillIds = selection.effectiveSkillIds;
+      if (selection.autoSelect) {
+        const skillDelivery = this.deps.agentCapabilities?.()[selection.effectiveAgent.id]?.static?.skills;
+        if (skillDelivery !== 'nativeNames') {
+          skillIds = this.deps.selector.select(input.task, this.deps.skills.list(), 4);
+        }
+      }
+      if (skillIds.length > 0
+        && this.deps.agentCapabilities?.()[selection.effectiveAgent.id]?.static?.skills === 'nativeNames') {
+        throw new ValidationError(
+          `preset ${JSON.stringify(loaded.id)} names skills, but agent ${JSON.stringify(selection.effectiveAgent.id)}`
+          + ' resolves skill names in its own store; a missing one is a fatal exit. Run this preset'
+          + ' on an agent that reads workspace skills.',
+        );
+      }
+      const resolvedSkills = this.deps.skills.resolve(skillIds);
+      presetSnapshot = {
+        schemaVersion: 1,
+        id: loaded.id,
+        version: loaded.version,
+        role: loaded.role,
+        description: loaded.description,
+        trust: loaded.trust,
+        instruction: loaded.instruction,
+        effectiveAgent: selection.effectiveAgent,
+        effectiveSkills: resolvedSkills,
+        effectiveConstraints: selection.effectiveConstraints,
+        source: { kind: loaded.source.kind, relativePath: loaded.source.relativePath },
+        files: loaded.files,
+        contentHash: loaded.contentHash,
+      };
+    }
+
+    const presetAgent = presetSnapshot?.effectiveAgent.id;
+    const agent = input.agent ?? presetAgent ?? this.deps.defaultAgent;
     if (!this.deps.knownAgents.includes(agent)) {
       throw new ValidationError(`Unknown agent: ${agent} (known: ${this.deps.knownAgents.join(', ')})`);
     }
@@ -245,16 +351,21 @@ export class RunService {
     // adapter declares `none` (#508) and every test Run uses it. `none` describes what the adapter
     // forwards, not whether Mercury may hold skill records -- so it must not change selection.
     const canUseMercurySkills = skillDelivery !== 'nativeNames';
-    const resolved = input.skillSnapshots ?? this.deps.skills.resolve(
-      input.skills === undefined || input.skills === null
-        // An omitted `skills` for a nativeNames backend resolves to NOTHING. Not "fallback
-        // suppressed" -- even a well-matched Mercury id is a fatal exit there, so selection is skipped
-        // rather than merely denied its fallback.
-        ? canUseMercurySkills
-          ? this.deps.selector.select(input.task, available, 4)
-          : []
-        : input.skills,
-    );
+    // A preset owns skill selection when it is present: the snapshot's effectiveSkills ARE the
+    // resolved list (autoSelect already applied above). A snapshot (retry) carries the parent's
+    // exact skill rows. Only a Run without a preset follows the original path.
+    const resolved = presetSnapshot
+      ? presetSnapshot.effectiveSkills
+      : input.skillSnapshots ?? this.deps.skills.resolve(
+          input.skills === undefined || input.skills === null
+            // An omitted `skills` for a nativeNames backend resolves to NOTHING. Not "fallback
+            // suppressed" -- even a well-matched Mercury id is a fatal exit there, so selection is skipped
+            // rather than merely denied its fallback.
+            ? canUseMercurySkills
+              ? this.deps.selector.select(input.task, available, 4)
+              : []
+            : input.skills,
+        );
 
     // Knowledge admission, validated before anything is written -- the same shape goal admission uses,
     // for the same reason: a block that is accepted and then quietly ignored leaves the caller believing
@@ -276,14 +387,20 @@ export class RunService {
       }
     }
 
-    const constraints: RunConstraints = {
-      maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
-      maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
-      budgetTokens: input.constraints?.budgetTokens,
-      budgetCost: input.constraints?.budgetCost,
-      resourceLimits: input.constraints?.resourceLimits,
-      allowedNetworks: input.constraints?.allowedNetworks,
-    };
+    // With a preset, the snapshot's effectiveConstraints ARE the Run's constraints: resolution
+    // already merged the caller input with preset ceilings/defaults and system policy, and the
+    // executed Run must match what the snapshot records (otherwise the snapshot documents
+    // limits the worker never applies). The legacy path below is the no-preset behavior.
+    const constraints: RunConstraints = presetSnapshot
+      ? presetSnapshot.effectiveConstraints
+      : {
+        maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
+        maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
+        budgetTokens: input.constraints?.budgetTokens,
+        budgetCost: input.constraints?.budgetCost,
+        resourceLimits: input.constraints?.resourceLimits,
+        allowedNetworks: input.constraints?.allowedNetworks,
+      };
 
     // `repository` is the primary (the workspace checks it out); `repositories`
     // holds additional repos cloned under workspace/repos/. When only the list
@@ -375,6 +492,33 @@ export class RunService {
         for (const skill of resolved) {
           this.deps.events.append(run.id, 'skill.selected', { skill: skill.id, version: skill.version, hash: skill.hash });
         }
+        // The preset snapshot lands in the SAME transaction as the Run row (section 5): a
+        // failure before commit leaves no partial Run or preset row, and a committed Run
+        // always carries the exact bytes it was created with.
+        if (presetSnapshot) {
+          const row: RunPresetRow = {
+            runId: run.id,
+            presetId: presetSnapshot.id,
+            presetVersion: presetSnapshot.version,
+            role: presetSnapshot.role,
+            trust: presetSnapshot.trust,
+            contentHash: presetSnapshot.contentHash,
+            sourceKind: presetSnapshot.source.kind,
+            sourceCommit: presetSnapshot.source.commit ?? null,
+            sourcePath: presetSnapshot.source.relativePath,
+            snapshot: presetSnapshot,
+          };
+          this.presetStore()!.insert(row);
+          this.deps.events.append(run.id, 'preset.selected', {
+            presetId: presetSnapshot.id,
+            version: presetSnapshot.version,
+            role: presetSnapshot.role,
+            trust: presetSnapshot.trust,
+            hash: presetSnapshot.contentHash,
+            sourceKind: presetSnapshot.source.kind,
+          });
+        }
+
         if (wantsPack && knowledgeDeps) {
           knowledgeSelection = selectPack(knowledgeDeps.replica, {
             projectId: knowledgeDeps.projectId,
@@ -561,6 +705,17 @@ export class RunService {
     return rows.map((r) => JSON.parse(r.snapshot_json) as ResolvedSkill);
   }
 
+  /**
+   * The preset snapshot a Run was created with, or null.
+   *
+   * Read from `run_presets`, never re-derived from the registry -- the same rule as
+   * getSkills and the knowledge pack: notes get revised and definitions change, and a
+   * read that re-resolved would silently rewrite what a past Run was told to be.
+   */
+  getPreset(runId: string): ResolvedRolePreset | null {
+    return this.presetStore()?.get(runId) ?? null;
+  }
+
   submitInput(runId: string, ownerId: string, isAdmin: boolean, value: unknown): void {
     const run = this.get(runId, ownerId, isAdmin);
     if (!run) throw new NotFoundError('run not found');
@@ -624,6 +779,10 @@ export class RunService {
       agent: original.agent,
       skillSnapshots,
       constraints: { ...original.constraints },
+      // The parent's preset snapshot, verbatim (section 6): a retry is the SAME task
+      // configuration, so it must not re-resolve "latest" -- a preset edited between the
+      // original and the retry must not change what the retry executes.
+      presetSnapshot: this.getPreset(runId) ?? undefined,
       goal: originalGoal
         ? {
             objective: originalGoal.objective,

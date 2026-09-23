@@ -191,6 +191,19 @@ export interface RunContext {
    * copy that could disagree with the first.
    */
   knowledge?: ContextKnowledgeBlock;
+  /**
+   * The Role Preset this Run materialized, when it has one (docs/crew/role-presets.md section 8).
+   * Passed in rather than read by the adapter, like `goal` and `knowledge`: an adapter that
+   * could read Run state could also invent it.
+   */
+  preset?: {
+    id: string;
+    role: string;
+    /** Workspace-relative path of the materialized instruction file. */
+    instructionPath: string;
+    instruction: string;
+    model?: string;
+  };
 }
 
 /**
@@ -420,6 +433,18 @@ export interface AgentStaticCapabilities {
   skills?: AgentSkillDelivery;
   /** Can Mercury append text to the agent's persona/system prompt? */
   personaAppend?: boolean;
+  /**
+   * How this adapter applies a Role Preset's role instruction (docs/crew/role-presets.md §8).
+   * Absent means 'none': the adapter cannot carry one, and a preset that demands instruction
+   * behavior fails closed instead of silently dropping the role.
+   */
+  roleInstruction?: 'system' | 'prompt-reference' | 'none';
+  /** The adapter accepts a structured per-Run model override (never argv). */
+  perRunModel?: boolean;
+  /** The adapter can execute this Run inside the sandbox manager's container. */
+  sandbox?: boolean;
+  /** Per-run MCP server support. 'none' until an adapter implements it (Phase 4+). */
+  mcp?: 'none' | 'per-run';
   /** Workspace-relative files the backend reads as persona/context, if any. */
   personaFiles?: string[];
   /** The backend accepts mid-Run human input. Derived from the adapter's input support. */
@@ -640,6 +665,11 @@ export const EVENT_TYPES = new Set([
   'knowledge.rejected',
   'knowledge.selected',
   'knowledge.noted',
+  // Role Presets (docs/crew/role-presets.md section 10). `preset.selected` is appended in the
+  // Run-creation transaction; `preset.materialized` by the worker once the workspace carries
+  // the files. Both were added with their emitters rather than before them.
+  'preset.selected',
+  'preset.materialized',
 ]);
 
 /**

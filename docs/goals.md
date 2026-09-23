@@ -925,7 +925,7 @@ matters because this section is what someone implements from.
           "maxTurns":    { "supported": false, "reason": "unsupported", "detectedVersion": null, "detectedRaw": null }
         }
       },
-      "static": { "skills": "none", "humanInput": true, "resume": true, "toolEvents": "structured" }
+      "static": { "skills": "none", "humanInput": true, "resume": true, "toolEvents": "structured", "roleInstruction": "system", "perRunModel": true, "sandbox": true, "mcp": "none" }
     },
     "primeagent": {
       "version": "0.9.4",
