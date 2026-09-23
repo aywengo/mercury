@@ -429,12 +429,15 @@ function checkDefaultsAgainstCeilings(
       );
     }
   }
+  // An array with non-string elements is shape-invalid (already PRESET_CONSTRAINT); only a
+  // well-formed list is cross-checked.
+  const nets = defaults.allowedNetworks;
   if (ceilings.networkMode === 'none'
-    && Array.isArray(defaults.allowedNetworks) && defaults.allowedNetworks.length > 0) {
+    && Array.isArray(nets) && nets.length > 0 && nets.every((n) => typeof n === 'string')) {
     add(
       'PRESET_DEFAULT_EXCEEDS_CEILING',
       'constraints.defaults.allowedNetworks',
-      `network ceiling is 'none' but defaults allow ${defaults.allowedNetworks.length} network(s)`,
+      `network ceiling is 'none' but defaults allow ${nets.length} network(s)`,
     );
   }
   const drl = defaults.resourceLimits;
