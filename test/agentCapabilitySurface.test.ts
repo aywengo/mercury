@@ -86,7 +86,12 @@ test('a declarative RPC agent JSON with a capabilities block surfaces it verbati
   const adapters = new RpcAgentRegistry(dir).load();
   const adapter = adapters['custom'];
   assert.ok(adapter, 'the registry did not load the config');
-  assert.deepEqual(adapter.capabilities.static, { skills: 'nativeNames', humanInput: true, personaAppend: false });
+  // Verbatim PLUS the adapter-supplied roleInstruction (#721): buildPrompt() renders the preset
+  // line unconditionally, so the declaration matches the behavior without the config saying it.
+  assert.deepEqual(adapter.capabilities.static, {
+    skills: 'nativeNames', humanInput: true, personaAppend: false,
+    roleInstruction: 'prompt-reference',
+  });
 });
 
 test('an adapter with no static block omits the key rather than sending an empty object', () => {
@@ -107,8 +112,11 @@ test('an adapter with no static block omits the key rather than sending an empty
       protocol: { modeFlag: '--mode', modeValue: 'rpc' }, eventMap: {},
     }));
     const bare = new RpcAgentRegistry(dir).load()['bare'];
-    assert.deepEqual(bare.capabilities, {}, 'an undeclared config must advertise nothing');
-    assert.ok(!('static' in bare.capabilities), 'static must be absent, not empty');
+    // RPC exception (#721): buildPrompt() renders the preset line unconditionally, so even a
+    // bare config advertises the roleInstruction the adapter's behavior guarantees. Local and
+    // remote keep the advertise-nothing contract.
+    assert.deepEqual(bare.capabilities, { static: { roleInstruction: 'prompt-reference' } },
+      'an undeclared RPC config advertises exactly its adapter-guaranteed role instruction');
   } finally { env.close(); }
 });
 
@@ -239,8 +247,11 @@ test('an empty capabilities block yields no static key rather than an empty one'
     protocol: { modeFlag: '--mode', modeValue: 'rpc' }, eventMap: {}, capabilities: {},
   }));
   const adapter = new RpcAgentRegistry(dir).load()['a'];
-  assert.deepEqual(adapter.capabilities, {}, 'an empty block must produce no capabilities at all');
-  assert.ok(!('static' in adapter.capabilities), 'static must be absent, not {}');
+  // RPC exception (#721): an empty block still advertises the adapter-guaranteed role
+  // instruction, because the prompt line does not depend on the block.
+  assert.deepEqual(adapter.capabilities, { static: { roleInstruction: 'prompt-reference' } },
+    'an empty block yields exactly the adapter-guaranteed role instruction');
+  assert.ok(!('skills' in (adapter.capabilities.static ?? {})), 'no fabricated keys beyond roleInstruction');
 });
 
 test('the value guard is shared by all three declarative adapters', async () => {
