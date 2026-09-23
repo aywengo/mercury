@@ -343,8 +343,11 @@ Crew is being designed as four staged products:
 3. Git-backed preset distribution and owner drafts;
 4. bounded Workflow Templates.
 
-No Crew API or source implementation currently exists. See
-[`crew/README.md`](crew/README.md).
+Milestone A (builtin Role Presets: registry, Run resolution and snapshots,
+read API, dashboard Roles page) is implemented and reviewed; see
+[`crew/roadmap.md`](crew/roadmap.md) for what shipped in each phase. Per-run
+MCP, Git-backed preset distribution and owner drafts, and Workflow Templates
+remain design-only.
 
 ### OIDC/SSO
 
@@ -367,8 +370,8 @@ Named network destinations remain design-only. Do not treat recorded
 3. Reverify and repair daemon mode only if resident PrimeAgent sessions provide
    concrete value over RPC.
 4. Implement Crew in the dependency order documented in its roadmap. Its Phase 0
-   correctness prerequisites are complete, so Milestone A (Role Presets, Phases
-   1-3) is the next work; Milestone B waits on item 2 above.
+   correctness prerequisites and Milestone A (Role Presets, Phases 1-3) are
+   complete; Milestone B waits on item 2 above.
 
 ## Sources of truth
 
