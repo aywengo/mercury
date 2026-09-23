@@ -250,6 +250,71 @@ test('resume: respawns with --resume <sessionFile>', async () => {
   }
 });
 
+const PRESET = {
+  id: 'reviewer',
+  version: '1.0.0',
+  role: 'Code reviewer',
+  trust: 'builtin' as const,
+  contentHash: 'b1946ac92492d2347c6235b4d2611184e0f2a1c8a0d5de4f4e5d4c9d5a3b7c2d',
+  instructionPath: '.mercury/preset/INSTRUCTION.md',
+  instruction: 'Review hunks before you write code.',
+};
+
+test('resume prompt repeats the preset reference (#722, AC 2)', async () => {
+  const { context, workspacePath } = makeContext();
+  const adapter = new PrimeAgentAdapter(MOCK);
+  const promptFile = join(workspacePath, 'prompts.jsonl');
+  try {
+    const handle = await adapter.start(context);
+    await collectAll(handle);
+    // the RPC process stays alive after agent_end; stop it so resume() respawns
+    await adapter.cancel(context.run.id).catch(() => {});
+    // Worker retry path: the retry context carries the preset; resume adopts it onto the
+    // session and names it in the one-liner, worded like the first prompt's preset line.
+    const sessionFile = join(workspacePath, 'session.jsonl');
+    writeFileSync(sessionFile, JSON.stringify({ ok: true }));
+    process.env.MOCK_RPC_PROMPT_FILE = promptFile;
+    const handle2 = await adapter.resume(context.run.id, {
+      ...context,
+      preset: PRESET,
+      resumeSessionFile: sessionFile,
+    });
+    await collectAll(handle2);
+    const prompts = readFileSync(promptFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as string);
+    const resumePrompt = prompts[prompts.length - 1]!;
+    assert.ok(resumePrompt.includes(`You are filling the role: ${PRESET.role}`),
+      'the resume prompt names the role the way the first prompt does');
+    assert.equal(resumePrompt.split(PRESET.instructionPath).length - 1, 1,
+      'the instruction path is named exactly once');
+    await adapter.cancel(context.run.id).catch(() => {});
+  } finally {
+    delete process.env.MOCK_RPC_PROMPT_FILE;
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});
+
+test('resume without a preset sends the unprefixed one-liner (#722, AC 1)', async () => {
+  const { context } = makeContext();
+  const adapter = new PrimeAgentAdapter(MOCK);
+  try {
+    const handle = await adapter.start(context);
+    await collectAll(handle);
+    await adapter.cancel(context.run.id).catch(() => {});
+    // No preset anywhere: the resume prompt must stay the exact base sentence.
+    const promptFile = join(context.workspace.path, 'prompts2.jsonl');
+    process.env.MOCK_RPC_PROMPT_FILE = promptFile;
+    const handle2 = await adapter.resume(context.run.id);
+    await collectAll(handle2);
+    const prompts = readFileSync(promptFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as string);
+    assert.equal(prompts[prompts.length - 1],
+      'Continue the task from where you left off. Read .mercury-context.json for the original task and constraints.');
+    await adapter.cancel(context.run.id).catch(() => {});
+  } finally {
+    delete process.env.MOCK_RPC_PROMPT_FILE;
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});
+
 test('trace context: run/worker ids are exported to the agent process env (section 25)', async () => {
   const { context, workspacePath } = makeContext();
   const runId = 'run_trace';

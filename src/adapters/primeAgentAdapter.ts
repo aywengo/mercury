@@ -58,6 +58,9 @@ interface Session {
   runId: string;
   run: Run;
   constraints: RunConstraints;
+  /** The preset pointer from the Run's context, kept so the resume prompt names the role
+   *  instruction the way the first prompt did (#722, docs/crew/role-presets.md section 8). */
+  preset?: NonNullable<RunContext['preset']>;
   client: RpcClient | null;
   workspacePath: string;
   sessionFile: string | null;
@@ -173,6 +176,7 @@ export class PrimeAgentAdapter implements AgentAdapter {
       runId,
       run: context.run,
       constraints: context.constraints,
+      ...(context.preset ? { preset: context.preset } : {}),
       client: null,
       workspacePath,
       sessionFile: null,
@@ -208,13 +212,17 @@ export class PrimeAgentAdapter implements AgentAdapter {
       // than written as null when there is no pack, so a Run without knowledge has a context file
       // identical to the one it had before this feature existed.
       ...(context.knowledge ? { knowledge: context.knowledge } : {}),
-      // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, hash and
-      // the workspace-relative instruction path. Omitted when the Run has no preset, so the
+      // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, content
+      // hash and the workspace-relative instruction path — the identity fields that let the
+      // agent see which bytes it runs under. Omitted when the Run has no preset, so the
       // context file stays byte-identical to the one it had before presets existed.
       ...(context.preset ? {
         preset: {
           id: context.preset.id,
+          version: context.preset.version,
           role: context.preset.role,
+          trust: context.preset.trust,
+          contentHash: context.preset.contentHash,
           instructionPath: context.preset.instructionPath,
         },
       } : {}),
@@ -421,12 +429,21 @@ export class PrimeAgentAdapter implements AgentAdapter {
     const sessionFile = context?.resumeSessionFile ?? session.sessionFile ?? readSessionPath(session.workspacePath);
     if (!sessionFile) throw new Error(`No persisted session file for run ${runId}; use retry-from-scratch`);
 
+    // The retry path may resolve pointers the first attempt did not carry (a preset added between
+    // attempts, a pack materialized after a crash). Adopt the retry context's pointers the same
+    // way createSession() would have (#722).
+    if (context?.preset) session.preset = context.preset;
+    // The first run's gate settled; a resumed session must be able to settle its own exit, or
+    // agent.end on the resume cannot mark done and the events generator never returns.
+    rearmExitGate(session);
+
     const spawnCmd = this.wrapForSandbox({ run: session.run, constraints: session.constraints } as RunContext, [
       '--mode', 'rpc',
       '--cwd', session.workspacePath,
       '--resume', sessionFile,
       // No goal flags here on purpose -- see goalArgs(). The resumed session already owns the
-      // goal it was started with.
+      // goal it was started with. The preset line IS re-sent, but in the resume one-liner below,
+      // not here: see the prompt call after client.start().
       ...(this.opts.args ?? []),
     ]);
     const client = new RpcClient({
@@ -468,7 +485,17 @@ export class PrimeAgentAdapter implements AgentAdapter {
     });
 
     await client.start();
-    await client.prompt('Continue the task from where you left off. Read .mercury-context.json for the original task and constraints.');
+    // Role Preset (#722, docs/crew/role-presets.md section 8): the resume prompt repeats the
+    // preset reference exactly as the first prompt worded it. The prime resume one-liner already
+    // re-states the context-file pointer; the role is the same kind of pointer, and
+    // prompt-reference adapters apply the preset on resume (section 8) rather than relying on
+    // history carrying it.
+    const presetLine = session.preset
+      ? ` You are filling the role: ${session.preset.role}. Your role instructions are in`
+        + ` ${session.preset.instructionPath} — read them before continuing and follow them.`
+      : '';
+    await client.prompt('Continue the task from where you left off. Read .mercury-context.json for the original task and constraints.'
+      + presetLine);
 
     return { runId, events: eventsGenerator(session), exit: session.exitPromise, terminate: async () => this.terminate(runId) };
   }

@@ -593,6 +593,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     session.cancelled = false;
     session.terminated = false;
     rearmExitGate(session);
+    // Role Preset parity (#722, docs/crew/role-presets.md section 8): claude -p REQUIRES a prompt,
+    // so resume() re-sends the task text via spawnProcess()'s stdin write, and taskText() includes
+    // the preset line whenever session.context carries a preset. The role reference is therefore
+    // repeated on resume by construction, not by a separate code path; asserted by the Claude
+    // resume tests.
     this.spawnProcess(session, this.buildArgv(session.sessionId));
     return {
       runId,

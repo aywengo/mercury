@@ -198,7 +198,13 @@ export interface RunContext {
    */
   preset?: {
     id: string;
+    /** Definition version this snapshot resolved from. */
+    version: string;
     role: string;
+    /** Registry-assigned trust of the preset definition. */
+    trust: 'builtin' | 'trusted' | 'untrusted';
+    /** SHA-256 over the preset files the snapshot pinned. */
+    contentHash: string;
     /** Workspace-relative path of the materialized instruction file. */
     instructionPath: string;
     instruction: string;
