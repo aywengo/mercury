@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "kafka",
+  "version": "1.0.0",
+  "description": "Advises on Kafka usage from repository analysis alone; no live cluster tools in this preset.",
+  "role": "Kafka advisor",
+  "tags": [
+    "kafka",
+    "advisory"
+  ],
+  "instruction": {
+    "file": "INSTRUCTION.md"
+  },
+  "skills": {
+    "defaults": [
+      "repository-analysis",
+      "debugging"
+    ],
+    "autoSelect": false,
+    "max": 4
+  }
+}
