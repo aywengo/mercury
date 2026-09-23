@@ -6,7 +6,8 @@ This roadmap ships Crew as four separate products:
 Role Presets -> per-run MCP -> Preset Store -> Workflow Templates
 ```
 
-Status: **Milestone A (Role Presets, Phases 0-3) is complete. Phases 4-11 are design only.**
+Status: **Milestone A (Role Presets, Phases 0-3) is implemented; acceptance criteria 7 and 8 of
+[`role-presets.md`](role-presets.md) §12 are still open** (#721, #722). **Phases 4-11 are design only.**
 The earlier collapse of those two facts into one "design only" line made the roadmap say the
 prerequisite had not been done when it had -- see
 [`../phase-0-issues.md`](../phase-0-issues.md) ("All acceptance criteria are now met") and the Recommended
@@ -216,7 +217,8 @@ Run integration, MCP, Git mirror, user drafts and workflows.
 
 ## 6. Phase 2 — Run resolution and snapshots
 
-**Status: complete** — #716, merged as `a6b4d79`.
+**Status: implemented; AC 7 and AC 8 do not hold yet** — #716, merged as `a6b4d79`. The fail-closed
+capability check is #721 and resume parity is #722; re-stamp this phase when both land.
 
 Estimate: **3–5 days**. Depends on Phase 1.
 

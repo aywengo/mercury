@@ -226,6 +226,45 @@ test('roadmap.md states Phase 0 is complete and does not call the whole roadmap 
     + 'by phase, or defer the overall status to docs/status.md.');
 });
 
+// --- Milestone A's stamp must agree across documents (#720) -------------------------------
+//
+// The milestone stamp moved three times in one week (#719 stamped complete, #720 un-stamped it
+// after AC 7/AC 8 were found open, the follow-up set re-stamps when the fixes land). Two documents
+// carrying the same fact is exactly how a reader ends up trusting neither, so the stamp itself is
+// now cross-checked: whatever the roadmap claims about Milestone A, status.md must say the same.
+const STATUS_MD = readFileSync(new URL('../docs/status.md', import.meta.url), 'utf8');
+
+test('the Milestone A stamp in roadmap.md and status.md agree', () => {
+  const roadmapComplete = /Milestone A \(Role Presets, Phases 0-3\) is complete/.test(ROADMAP);
+  // Scope both the listing check and the follow-up scan to the Role Presets section: the rest of
+  // status.md (e.g. Recommended priority) may legitimately cite #721-#724 forever, and a section
+  // renumbered or renamed must fail LOUDLY here, not silently pass as "no follow-ups".
+  const sectionStart = STATUS_MD.indexOf('### Role Presets (Crew Milestone A)');
+  const sectionEnd = sectionStart === -1 ? -1 : STATUS_MD.indexOf('\n### ', sectionStart + 10);
+  const section = sectionStart === -1 ? '' : STATUS_MD.slice(sectionStart, sectionEnd === -1 ? undefined : sectionEnd);
+  const statusListsMilestone = sectionStart !== -1;
+  const followupRefs = section.match(/#7(?:2[1-4])/g) ?? [];
+  // BOTH states are fully specified, so neither document can drift half-way:
+  //  - "complete": the roadmap stamps it, status.md lists Milestone A under Implemented, and
+  //    NO follow-up number from the set remains in status.md's Role Presets section.
+  //  - "open": the roadmap withholds the stamp, and status.md MUST both list the milestone and
+    //    name the open follow-ups -- omitting the section entirely must fail, not pass.
+  if (roadmapComplete) {
+    assert.ok(statusListsMilestone,
+      'roadmap.md stamps Milestone A complete, but docs/status.md no longer lists it under Implemented');
+    assert.deepEqual(followupRefs, [],
+      'roadmap.md stamps Milestone A complete, but docs/status.md still references open follow-ups: '
+      + JSON.stringify(followupRefs));
+  } else {
+    assert.ok(statusListsMilestone,
+      'roadmap.md withholds the Milestone A stamp, so docs/status.md must still list it under '
+      + 'Implemented (it vanished?)');
+    assert.ok(followupRefs.length > 0,
+      'roadmap.md withholds the Milestone A stamp, so docs/status.md must name the open follow-up '
+      + 'issues (#721-#724); it names none, which reads as "complete with no gaps"');
+  }
+});
+
 test('no Crew doc claims Hermes cannot execute a Run', () => {
   const offenders: string[] = [];
   for (const [name, text] of Object.entries(DOCS)) {
