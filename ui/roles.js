@@ -22,9 +22,10 @@ function roleCard(p) {
     <div class="row" style="margin-bottom:6px">
       <h3 style="margin:0">${esc(p.role)}</h3>
       <span class="badge ${p.enabled ? '' : 'muted'}">${esc(p.enabled ? 'enabled' : 'disabled')}</span>
-      <span class="mono muted">v${esc(p.version)}</span>
+      <span class="mono muted">${esc(p.id)} · v${esc(p.version)}</span>
       <span class="spacer" style="flex:1"></span>
       <button class="secondary small" data-act="inspect">details</button>
+      <button class="small" data-act="toggle-run">Run task as this role</button>
     </div>
     <p style="margin:4px 0">${esc(p.description)}</p>
     <p class="muted mono" style="margin:2px 0; font-size:12px">${esc((p.tags || []).join(' · '))}</p>
@@ -42,19 +43,22 @@ function roleCard(p) {
           <input data-branch type="text" style="width:100%" value="main">
         </div>
       </div>
-      <p style="margin-top:8px"><button data-act="run">Run task as this role</button></p>
+      <p style="margin-top:8px"><button data-act="run">Create run</button></p>
     </div>
   `;
   el.querySelector('[data-act="inspect"]').addEventListener('click', () => toggleDetail(el, p));
-  const runBtn = el.querySelector('[data-act="run"]');
+  const toggleBtn = el.querySelector('[data-act="toggle-run"]');
   if (p.enabled) {
-    runBtn.addEventListener('click', () => runAsRole(el, p));
+    toggleBtn.addEventListener('click', () => {
+      el.querySelector('[data-runform]').classList.toggle('hidden');
+    });
   } else {
-    // A disabled preset is rejected by RunService on create; wiring the handler would offer a
+    // A disabled preset is rejected by RunService on create; offering the form would be a
     // guaranteed-error path. Disabled is still VIEWABLE (details stay available).
-    runBtn.disabled = true;
-    runBtn.title = 'This preset is disabled; an operator must enable it before it can run.';
+    toggleBtn.disabled = true;
+    toggleBtn.title = 'This preset is disabled; an operator must enable it before it can run.';
   }
+  el.querySelector('[data-act="run"]').addEventListener('click', () => runAsRole(el, p));
   return el;
 }
 
