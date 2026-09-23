@@ -5,7 +5,7 @@ Drafted 2026-09-23 against `main` at `2d7e8e6`. It covers what has to exist befo
 milestones B0 and B1 of [`dispatcher-bot-design.md`](dispatcher-bot-design.md), and the N1 nightly
 skills. The format follows the `issue-fix-loop` contract used by
 [`crew-milestone-a-followups.md`](crew-milestone-a-followups.md): each issue gives the mechanism with
-file evidence, the fix, acceptance criteria and likely files, and ships as one PR. **Not yet filed.**
+file evidence, the fix, acceptance criteria and likely files, and ships as one PR. Filed 2026-09-23 as #727–#742; each heading below carries its number.
 
 ## Summary
 
@@ -49,7 +49,7 @@ The left column gets Mercury working on itself; the right column replaces the st
 
 ---
 
-## N0-1 — Protect `main` and give the nightly host its own GitHub identity
+## N0-1 (#727) — Protect `main` and give the nightly host its own GitHub identity
 
 **Labels:** `security`, `deployment`, `priority: high`
 **Blocked by:** —
@@ -81,7 +81,7 @@ GitHub settings; `docs/operations.md`.
 
 ---
 
-## N0-2 — Nightly labels and the trust rule in the triage doc
+## N0-2 (#728) — Nightly labels and the trust rule in the triage doc
 
 **Labels:** `documentation`, `priority: medium`
 **Blocked by:** —
@@ -111,7 +111,7 @@ take.
 
 ---
 
-## B0-1 — `parseTokens` truncates owners containing `:`; settle the bot owner-id form
+## B0-1 (#729) — `parseTokens` truncates owners containing `:`; settle the bot owner-id form
 
 **Labels:** `bug`, `security`, `priority: high`
 **Blocked by:** —
@@ -145,7 +145,7 @@ colon is affected.
 
 ---
 
-## B0-2 — Pin idempotency replay over HTTP
+## B0-2 (#730) — Pin idempotency replay over HTTP
 
 **Labels:** `testing`, `priority: medium`
 **Blocked by:** —
@@ -173,7 +173,7 @@ route's create call).
 
 ---
 
-## B0-3 — `constraints.notAfter`: an absolute deadline that counts queue time
+## B0-3 (#731) — `constraints.notAfter`: an absolute deadline that counts queue time
 
 **Labels:** `enhancement`, `priority: high`
 **Blocked by:** —
@@ -211,7 +211,7 @@ express.
 
 ---
 
-## B0-4 — Hand-rolled cron evaluator and derived idempotency keys
+## B0-4 (#732) — Hand-rolled cron evaluator and derived idempotency keys
 
 **Labels:** `enhancement`, `priority: medium`
 **Blocked by:** —
@@ -239,7 +239,7 @@ process restarts. If DST handling passes ~150 lines, stop and revisit the §16 d
 
 ---
 
-## B0-5 — Bot config schema, credentials file and `host bot validate`
+## B0-5 (#733) — Bot config schema, credentials file and `host bot validate`
 
 **Labels:** `enhancement`, `cli`, `priority: medium`
 **Blocked by:** B0-1, B0-4
@@ -270,7 +270,7 @@ coupling test.
 
 ---
 
-## B0-6 — `workspace-audit` skill, run by hand
+## B0-6 (#734) — `workspace-audit` skill, run by hand
 
 **Labels:** `enhancement`, `priority: low`
 **Blocked by:** —
@@ -289,7 +289,7 @@ A hand-dispatched Run completes and reports workspaces older than the retention 
 
 ---
 
-## B1-1 — `host bot run`: the scheduler process
+## B1-1 (#735) — `host bot run`: the scheduler process
 
 **Labels:** `enhancement`, `priority: high`
 **Blocked by:** B0-2, B0-5
@@ -315,7 +315,7 @@ double-dispatch; mutations from §15.5 (key input, non-terminal set) are caught.
 
 ---
 
-## B1-2 — `host bot dispatch` and `host bot status`
+## B1-2 (#736) — `host bot dispatch` and `host bot status`
 
 **Labels:** `enhancement`, `cli`, `priority: medium`
 **Blocked by:** B1-1
@@ -325,7 +325,7 @@ counted from the API).
 
 ---
 
-## B1-3 — Per-alias service install/uninstall
+## B1-3 (#737) — Per-alias service install/uninstall
 
 **Labels:** `enhancement`, `deployment`, `priority: medium`
 **Blocked by:** B1-1
@@ -335,7 +335,7 @@ prints the §17.7 consequence and offers `--reassign-runs <owner>`. Landing this
 
 ---
 
-## N1-1 — Deterministic ladder selection and trust check
+## N1-1 (#738) — Deterministic ladder selection and trust check
 
 **Labels:** `enhancement`, `security`, `priority: high`
 **Blocked by:** N0-2
@@ -371,7 +371,7 @@ return.
 
 ---
 
-## N1-2 — `nightly-e2e` skill
+## N1-2 (#739) — `nightly-e2e` skill
 
 **Labels:** `enhancement`, `testing`, `priority: high`
 **Blocked by:** N1-1
@@ -388,7 +388,7 @@ passes on rerun is not filed.
 
 ---
 
-## N1-3 — `nightly-next` skill
+## N1-3 (#740) — `nightly-next` skill
 
 **Labels:** `enhancement`, `priority: high`
 **Blocked by:** N1-1, #721, #722
@@ -406,7 +406,7 @@ without entering NEEDS_INPUT; `rung: none` → the Run ends without changes.
 
 ---
 
-## N1-4 — `nightly-report` skill
+## N1-4 (#741) — `nightly-report` skill
 
 **Labels:** `enhancement`, `priority: medium`
 **Blocked by:** —
@@ -417,7 +417,7 @@ closed by the next night's report.
 
 ---
 
-## N1-5 — launchd stopgap: nightly Runs before the bot exists
+## N1-5 (#742) — launchd stopgap: nightly Runs before the bot exists
 
 **Labels:** `deployment`, `priority: medium`
 **Blocked by:** N0-1, N1-2, N1-3, N1-4, B0-3, #721
