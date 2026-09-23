@@ -6,10 +6,11 @@ This roadmap ships Crew as four separate products:
 Role Presets -> per-run MCP -> Preset Store -> Workflow Templates
 ```
 
-Status: **Phase 0 is complete; Phases 1-11 are design only.** Those two facts were collapsed into one
-"design only" line, which made the roadmap say the prerequisite had not been done when it had -- see
+Status: **Milestone A (Role Presets, Phases 0-3) is complete. Phases 4-11 are design only.**
+The earlier collapse of those two facts into one "design only" line made the roadmap say the
+prerequisite had not been done when it had -- see
 [`../phase-0-issues.md`](../phase-0-issues.md) ("All acceptance criteria are now met") and the Recommended
-priority in [`../status.md`](../status.md), which points at Milestone A as the next work. A contributor
+priority in [`../status.md`](../status.md). A contributor
 reading the old line would have re-implemented 2-3 days of merged, reviewed work or waited on a gate that had
 already been passed.
 
@@ -176,6 +177,8 @@ Role Preset schema, API and UI.
 
 ## 5. Phase 1 — builtin preset registry
 
+**Status: complete** — #714, merged as `07b0755`.
+
 Estimate: **3–4 days**. Depends on Phase 0.
 
 ### Scope
@@ -212,6 +215,8 @@ Estimate: **3–4 days**. Depends on Phase 0.
 Run integration, MCP, Git mirror, user drafts and workflows.
 
 ## 6. Phase 2 — Run resolution and snapshots
+
+**Status: complete** — #716, merged as `a6b4d79`.
 
 Estimate: **3–5 days**. Depends on Phase 1.
 
@@ -256,6 +261,9 @@ Estimate: **3–5 days**. Depends on Phase 1.
 Preset browser APIs, editing, MCP and workflows.
 
 ## 7. Phase 3 — read API and dashboard
+
+**Status: complete** — #718, merged as `cd4bf04`. Milestone A is done: users can browse builtin
+roles and create an ordinary durable Run from one.
 
 Estimate: **3–4 days**. Depends on Phase 2. Completes Milestone A.
 

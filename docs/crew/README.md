@@ -5,8 +5,12 @@ first product is deliberately smaller than the name suggests: a user chooses a
 **Role Preset** and Mercury creates one ordinary Run with a resolved instruction,
 skill set, agent preference and constraints.
 
-Status: **design only.** None of the types, APIs or storage described in this
-directory are implemented unless a section explicitly says otherwise.
+Status: **Milestone A implemented.** The Role Preset path described in
+[`role-presets.md`](role-presets.md) — manifest registry, validation, Run
+resolution and snapshots, workspace materialization, read API and dashboard —
+is implemented (docs/crew/roadmap.md Phases 1-3). Everything else in this
+directory (per-run MCP, preset store, teams, workflows) remains design-only
+unless a section explicitly says otherwise.
 
 This directory supersedes the original all-in-one `docs/crew-design.md`, which
 was removed as superseded. Its content is history, available from git history at
