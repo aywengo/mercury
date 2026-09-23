@@ -317,7 +317,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       }
     }
 
-        // The run-context file (docs/knowledge-base.md section 9.2), written for every Run exactly like
+    // The run-context file (docs/knowledge-base.md section 9.2), written for every Run exactly like
     // the prime, rpc and daemon adapters write it. Claude Code's own discovery of this file is
     // unverified -- CLAUDE.md is the documented channel -- so taskText() below also points at it, the
     // same way the other adapters' prompts do.
