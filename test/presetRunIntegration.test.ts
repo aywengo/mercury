@@ -351,6 +351,9 @@ test('AC 7: a requires.sandbox preset on a sandbox-false agent is rejected at cr
       }),
       /declares sandbox: false/,
     );
+    // Nothing was written: no Run row for this owner, no run_presets row at all.
+    assert.deepEqual(env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 50 }).runs, []);
+    assert.equal((env.db.prepare('SELECT COUNT(*) AS n FROM run_presets').get() as { n: number }).n, 0);
   } finally {
     env.close();
   }
