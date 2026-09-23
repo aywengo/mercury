@@ -337,36 +337,7 @@ export class RpcAgentAdapter implements AgentAdapter {
     const workspacePath = context.workspace.path;
 
     // Run context file the task prompt points the agent at.
-    writeFileSync(join(workspacePath, CONTEXT_FILE), JSON.stringify({
-      runId,
-      task: context.run.task,
-      repository: context.repository,
-      repositories: context.repositories,
-      workspace: workspacePath,
-      branch: context.workspace.branch,
-      baseCommit: context.workspace.baseCommit,
-      skills: context.skills.map((s) => ({ id: s.id, version: s.version, hash: s.hash })),
-      constraints: context.constraints,
-      // The pointer, not the notes. These adapters' prompts already tell the agent to read this file, so
-      // a harness finds the pack with no prompt change and no new channel (section 9.2). Omitted rather
-      // than written as null when there is no pack, so a Run without knowledge has a context file
-      // identical to the one it had before this feature existed.
-      ...(context.knowledge ? { knowledge: context.knowledge } : {}),
-      // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, content
-      // hash and the workspace-relative instruction path — the identity fields that let the
-      // agent see which bytes it runs under. Omitted when the Run has no preset, so the
-      // context file stays byte-identical to the one it had before presets existed.
-      ...(context.preset ? {
-        preset: {
-          id: context.preset.id,
-          version: context.preset.version,
-          role: context.preset.role,
-          trust: context.preset.trust,
-          contentHash: context.preset.contentHash,
-          instructionPath: context.preset.instructionPath,
-        },
-      } : {}),
-    }, null, 2));
+    writeContextFile(workspacePath, context);
 
     const sessionDir = join(workspacePath, SESSION_DIR_NAME);
     mkdirSync(sessionDir, { recursive: true });
@@ -491,6 +462,9 @@ export class RpcAgentAdapter implements AgentAdapter {
     // truth, so adopt the retry context's pointers the same way createSession() would have (#722).
     if (context?.knowledge) session.knowledge = context.knowledge;
     if (context?.preset) session.preset = context.preset;
+    // A retry runs in a fresh workspace; without this rewrite the resume prompt names a context
+    // file that is not there. In-process resumes pass no context and keep the file start() wrote.
+    if (context) writeContextFile(session.workspacePath, context);
 
     const sessionDir = join(session.workspacePath, SESSION_DIR_NAME);
     const argv = this.buildArgv({
@@ -560,6 +534,44 @@ export function buildPrompt(context: RunContext): string {
 function presetLine(preset: NonNullable<RunContext['preset']>): string {
   return `You are filling the role: ${preset.role}. Your role instructions are in`
     + ` ${preset.instructionPath} — read them before starting and follow them.`;
+}
+
+/**
+ * The run-context file the prompts point at (docs/knowledge-base.md 9.2). Written by start() and
+ * rewritten by resume() when the retry path supplies a context: a retry runs in a FRESH workspace,
+ * so without the rewrite the resume prompt would name a file that is not there (#744 review).
+ */
+function writeContextFile(workspacePath: string, context: RunContext): void {
+  writeFileSync(join(workspacePath, CONTEXT_FILE), JSON.stringify({
+    runId: context.run.id,
+    task: context.run.task,
+    repository: context.repository,
+    repositories: context.repositories,
+    workspace: workspacePath,
+    branch: context.workspace.branch,
+    baseCommit: context.workspace.baseCommit,
+    skills: context.skills.map((s) => ({ id: s.id, version: s.version, hash: s.hash })),
+    constraints: context.constraints,
+    // The pointer, not the notes. These adapters' prompts already tell the agent to read this file, so
+    // a harness finds the pack with no prompt change and no new channel (section 9.2). Omitted rather
+    // than written as null when there is no pack, so a Run without knowledge has a context file
+    // identical to the one it had before this feature existed.
+    ...(context.knowledge ? { knowledge: context.knowledge } : {}),
+    // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, content
+    // hash and the workspace-relative instruction path — the identity fields that let the
+    // agent see which bytes it runs under. Omitted when the Run has no preset, so the
+    // context file stays byte-identical to the one it had before presets existed.
+    ...(context.preset ? {
+      preset: {
+        id: context.preset.id,
+        version: context.preset.version,
+        role: context.preset.role,
+        trust: context.preset.trust,
+        contentHash: context.preset.contentHash,
+        instructionPath: context.preset.instructionPath,
+      },
+    } : {}),
+  }, null, 2));
 }
 
 /** A minimal RunContext reconstructed from a Session, carrying exactly what buildResumePrompt
