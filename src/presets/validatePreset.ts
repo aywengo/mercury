@@ -124,10 +124,13 @@ export function validatePreset(
       // rejects the segment itself, not just the escape.
       const abs = resolve(dir, file);
       const rel = relative(dir, abs);
+      // The escape test is SEGMENT-based, not prefix-based: '..foo.md' is a legitimate file
+      // name that startsWith('..') would wrongly reject, while the '..' SEGMENT is what
+      // escapes. The raw-path segment checks below cover 'sub/../x' games; the rel check
+      // covers platforms where resolve() normalizes differently.
       const escapes =
         isAbsolute(file) ||
         rel === '' ||
-        rel.startsWith('..') ||
         rel.split(sep).includes('..') ||
         file.split('/').includes('..') ||
         file.split('\\').includes('..');

@@ -109,6 +109,14 @@ test('a ".." segment in the raw instruction path is refused even when it resolve
   assert.ok(res.findings.some((f) => f.code === 'PRESET_INSTRUCTION_PATH'), JSON.stringify(res.findings));
 });
 
+test('a file NAME starting with ".." is legitimate; only the ".." SEGMENT escapes', () => {
+  const name = { ...structuredClone(VALID), instruction: { file: '..foo.md' } };
+  const dir = presetDir(name, { '..foo.md': 'dots are legal in names' });
+  const res = validatePreset('reviewer', dir, name);
+  assert.ok(!res.findings.some((f) => f.code === 'PRESET_INSTRUCTION_PATH'),
+    JSON.stringify(res.findings));
+});
+
 test('missing instruction is PRESET_INSTRUCTION_MISSING', () => {
   const dir = presetDir(VALID);
   rmSync(join(dir, 'INSTRUCTION.md'));
