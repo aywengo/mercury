@@ -37,6 +37,7 @@ async function loadRun() {
     try { agentCaps = (await api('/api/agents')).capabilities || {}; } catch { agentCaps = {}; }
   }
   renderRun(data.run, data.skills || [], data.goal, agentCaps);
+  renderPreset(data.preset);
   // Page through history until caught up (issue #54).
   //
   // The endpoint returns at most 1000 events per call, and `lastSequence` is the run's TRUE
@@ -102,6 +103,28 @@ function renderGoal(goal) {
     contractEl.innerHTML = goalContractHtml(goal);
     contractEl.classList.toggle('hidden', contractEl.innerHTML === '');
   }
+}
+
+/**
+ * The resolved preset snapshot as a read-only identity block (docs/crew/role-presets.md
+ * section 9): which role, which bytes (content hash), what the agent was told to be, and the
+ * effective skills/constraints the snapshot resolved to. Absent -> the section stays empty,
+ * because a Run without a preset has no role to show and a blank would read as "hidden".
+ */
+function renderPreset(preset) {
+  const el = $('f-preset');
+  if (!preset) { el.innerHTML = '<dt>Role</dt><dd>—</dd>'; return; }
+  const skills = (preset.effectiveSkills || []).map((s) => esc(s.id)).join(', ') || 'none';
+  const c = preset.effectiveConstraints || {};
+  const cons = Object.entries(c).filter(([, v]) => v !== undefined && v !== null);
+  el.innerHTML = `
+    <dt>Role</dt><dd>${esc(preset.role)} <span class="mono muted">${esc(preset.id)} v${esc(preset.version)}</span></dd>
+    <dt>Trust</dt><dd>${esc(preset.trust)}</dd>
+    <dt title="SHA-256 over the preset files this Run was created from — the durable identity of what it executes">Content hash</dt><dd class="mono">${esc(preset.contentHash)}</dd>
+    <dt>Instruction</dt><dd><pre class="mono" style="white-space:pre-wrap; margin:0; padding:8px; background:var(--bg, #f6f6f6); border-radius:6px">${esc(preset.instruction || '')}</pre></dd>
+    <dt>Effective skills</dt><dd>${skills}</dd>
+    <dt>Effective constraints</dt><dd>${cons.length ? esc(cons.map(([k, v]) => k + '=' + JSON.stringify(v)).join(', ')) : 'none'}</dd>
+  `;
 }
 
 function renderRun(r, skills, goal, caps) {

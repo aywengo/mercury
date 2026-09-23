@@ -178,7 +178,20 @@ export function createApp(deps: ServerDeps): Express {
       res.setHeader('content-type', 'text/plain; version=0.0.4; charset=utf-8');
       res.end(
         renderPrometheus(
-          collectMetrics(deps.db, { leases, now, eventStream: deps.stream.metrics(), wakeupsReceived: deps.wakeupStats?.() ?? null }),
+          collectMetrics(deps.db, {
+            leases,
+            now,
+            eventStream: deps.stream.metrics(),
+            wakeupsReceived: deps.wakeupStats?.() ?? null,
+            // Registry validity at scrape time; omitted when presets are off here, which
+            // keeps the series ABSENT rather than zero (collect.ts).
+            presets: deps.runService.presetRegistry()
+              ? () => {
+                const all = deps.runService.presetRegistry()!.listAll();
+                return { valid: all.presets.length, invalid: all.invalid.length };
+              }
+              : undefined,
+          }),
         ),
       );
     } catch (err) {

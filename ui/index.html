@@ -12,6 +12,7 @@
 <header>
   <h1>⚡ Mercury</h1>
   <span class="muted">durable coding orchestration</span>
+  <a href="/roles.html">Roles</a>
   <span class="spacer"></span>
   <span class="user" id="user-label"></span>
   <button class="secondary small hidden" id="logout-btn">logout</button>
@@ -33,6 +34,11 @@
         <div>
           <label class="muted">Task</label><br>
           <textarea id="task" rows="3" style="width:100%" placeholder="e.g. Fix the failing integration tests and prepare a PR"></textarea>
+          <label class="muted">Role</label><br>
+          <select id="role" style="width:100%">
+            <option value="">no role</option>
+          </select>
+          <p class="hint" style="margin:2px 0 0"><a href="/roles.html">Browse roles →</a></p>
         </div>
         <div>
           <label class="muted">Repository</label><br>

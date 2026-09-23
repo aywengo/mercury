@@ -122,6 +122,24 @@ export interface MetricsSnapshot {
   knowledgeReplicaNotes: number;
   /** Cumulative failed pull attempts. A pull failure costs freshness, never correctness. */
   knowledgePullFailures: number;
+  /**
+   * Builtin presets by registry validity (docs/crew/role-presets.md section 10).
+   *
+   * A registry count, not a database one: validity is filesystem state discovered at load time.
+   * The provider is a thunk supplied by the composition root; absent means this process has no
+   * registry and BOTH series are omitted rather than zero — "no such surface here" and
+   * "all presets valid" are different facts (the same distinction knowledgeOutboxDepth draws).
+   */
+  presetsByValidity?: Record<string, number>;
+  /**
+   * Runs ever created with each builtin preset, labelled by preset id (SQL aggregate over
+   * `run_presets`, same reasoning as every other number here: the table is the record).
+   *
+   * preset id is the label — NOT role text — because ids are registry-validated against a
+   * closed pattern while role is free text; the label set grows only with the catalog, which
+   * is the bounded-by-construction rule this module runs on.
+   */
+  runsByPreset: Record<string, number>;
   /** Runs that ever had a sandbox policy applied. */
   sandboxEnabled: number;
   /** Total runs ever created. Pair with sandboxEnabled in PromQL for an enablement RATE. */
@@ -295,6 +313,12 @@ const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'];
 export interface CollectOptions {
   /** Live leases from RunQueue.activeLeases(); omitted when no queue is wired (same as /healthz/workers). */
   leases?: ActiveLease[];
+  /**
+   * Builtin-preset validity counts from the live registry (docs/crew/role-presets.md section 10).
+   * A thunk rather than a registry: this module stays free of filesystem concerns and the answer
+   * is fresh at scrape time. Omitted when this process has no registry (API-only or presets off).
+   */
+  presets?: () => { valid: number; invalid: number };
   /** Clock injection for deterministic lease-age maths. */
   now?: number;
   /** Live EventStream counters from this process; omitted (-> null) when no stream is wired. */
@@ -397,6 +421,17 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
     .get() as { n: number };
   const totalRow = db.prepare('SELECT COUNT(*) AS n FROM runs').get() as { n: number };
 
+  // Runs by preset (docs/crew/role-presets.md section 10). A plain aggregate over run_presets:
+  // the table is the record, and the label (preset id) is registry-pattern-bounded, so the
+  // series count grows with the catalog, never with traffic. Seeding is unnecessary — unlike a
+  // status set, the interesting zero case is "no preset Runs yet", where an EMPTY series is the
+  // honest answer and every panel reads "no data" correctly.
+  const presetRows = db
+    .prepare('SELECT preset_id AS id, COUNT(*) AS n FROM run_presets GROUP BY preset_id')
+    .all() as { id: string; n: number }[];
+  const runsByPreset: Record<string, number> = {};
+  for (const r of presetRows) runsByPreset[r.id] = Number(r.n);
+
   const leases = opts.leases ?? [];
   let leaseExpiresInSeconds: number | null = null;
   for (const lease of leases) {
@@ -419,6 +454,8 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
     knowledgeReplicaSeq: Number(replicaRow?.s) || 0,
     knowledgeReplicaNotes: Number(replicaRow?.n) || 0,
     knowledgePullFailures: Number.isFinite(Number(pullFailRow?.value)) ? Number(pullFailRow?.value) : 0,
+    runsByPreset,
+    ...(opts.presets ? { presetsByValidity: { valid: opts.presets().valid, invalid: opts.presets().invalid } } : {}),
     sandboxEnabled: Number(sandboxRow.n) || 0,
     runsTotal: Number(totalRow.n) || 0,
     workers: leases.length,

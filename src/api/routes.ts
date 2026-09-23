@@ -134,6 +134,93 @@ export function createRoutes(deps: RoutesDeps): Router {
     });
   });
 
+  // GET /api/presets — browse builtin roles (docs/crew/role-presets.md section 9).
+  //
+  // Every authenticated user, not owner-scoped: a preset is host configuration, not per-owner
+  // data — the same reason /api/agents is unscoped. The list carries the short fields the
+  // Roles page renders (id, role, version, tags, description, enabled); instruction text and
+  // file bytes live on the detail endpoint so the list stays a list.
+  //
+  // Diagnostics are admin-gated with ?diagnostics=1: an invalid preset (bad manifest, missing
+  // instruction file) is an OPERATOR concern — the fix is editing files on the host, which only
+  // an operator can do. The design keeps them out of the Run event stream for the same reason
+  // (section 10: registry load failures are startup logs and metrics, not Run events), so they
+  // surface here instead, clearly separated from the browsable roles.
+  router.get('/presets', (req: Request, res: Response) => {
+    const registry = deps.runService.presetRegistry();
+    if (!registry) {
+      res.status(404).json({ error: 'presets are not served by this process' });
+      return;
+    }
+    const presets = registry.list().map((p) => ({
+      id: p.id,
+      role: p.role,
+      version: p.version,
+      tags: p.tags,
+      description: p.description,
+      enabled: p.enabled,
+      trust: p.trust,
+      contentHash: p.contentHash,
+    }));
+    const out: Record<string, unknown> = { presets };
+    if (req.query.diagnostics === '1' || req.query.diagnostics === 'true') {
+      if (!req.auth?.isAdmin) {
+        res.status(403).json({ error: 'preset diagnostics require an admin token' });
+        return;
+      }
+      // Bounded: one entry per invalid preset directory, findings capped by the validator's
+      // own per-field codes (no file contents, no absolute paths).
+      out.invalid = registry.listAll().invalid.map((bad) => ({
+        id: bad.id,
+        findings: bad.validation,
+      }));
+    }
+    res.json(out);
+  });
+
+  // GET /api/presets/:presetId — inspect one role: the instruction text, skill lists, agent
+  // preference and constraints the "Run task as this role" flow needs to show BEFORE running.
+  // What it never contains: runtime secrets (a builtin manifest cannot carry any — validation
+  // rejects unknown keys, and the instruction is repo-relative file content, not env).
+  router.get('/presets/:presetId', (req: Request, res: Response) => {
+    const registry = deps.runService.presetRegistry();
+    if (!registry) {
+      res.status(404).json({ error: 'presets are not served by this process' });
+      return;
+    }
+    try {
+      const p = registry.get(req.params.presetId);
+      const m = p.manifest;
+      res.json({
+        id: p.id,
+        role: p.role,
+        version: p.version,
+        tags: p.tags,
+        description: p.description,
+        enabled: p.enabled,
+        trust: p.trust,
+        contentHash: p.contentHash,
+        instruction: p.instruction,
+        agent: m.agent
+          ? { id: m.agent.id, required: m.agent.required ?? false, model: m.agent.model }
+          : null,
+        skills: m.skills
+          ? {
+            defaults: m.skills.defaults ?? [],
+            required: m.skills.required ?? [],
+            autoSelect: m.skills.autoSelect,
+            max: m.skills.max,
+          }
+          : null,
+        constraints: m.constraints ?? null,
+        requires: m.requires ?? null,
+        source: { kind: p.source.kind, relativePath: p.source.relativePath },
+      });
+    } catch (err) {
+      sendError(res, err, deps.logger);
+    }
+  });
+
   // GET /api/knowledge/status -- admin only (docs/knowledge-base.md section 8.5).
   //
   // Admin rather than owner-scoped because it describes the HOST, not a Run: outbox depth, the

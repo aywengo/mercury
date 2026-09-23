@@ -288,7 +288,13 @@ export class Worker {
   }
 
   private async execute(run: Run): Promise<void> {
-    const log = this.logger(run.id);
+    // The snapshot row is the label source for every log line of this Run (section 10). One
+    // indexed read; null for the common no-preset case.
+    const presetRow = this.deps.runService.getPreset(run.id);
+    const presetDims = presetRow
+      ? { id: presetRow.id, version: presetRow.version, trust: presetRow.trust }
+      : undefined;
+    const log = this.logger(run.id, presetDims);
     // A worker MUST verify the Run is still in a non-terminal state and that it
     // holds the lease before executing (Mercury.md section 17).
     const current = this.deps.runs.get(run.id);
@@ -354,7 +360,7 @@ export class Worker {
       // Role Preset materialization (docs/crew/role-presets.md section 7): from the stored
       // snapshot bytes, never a live registry read -- the snapshot is the source of truth and
       // a source edit after creation must not change what this Run executes (section 4.1).
-      const presetSnapshot = this.deps.runService.getPreset(run.id);
+      const presetSnapshot = presetRow;
       let presetContext: RunContext['preset'];
       if (presetSnapshot) {
         const materialized = writePreset(workspace.path, presetSnapshot);
@@ -1344,8 +1350,16 @@ export class Worker {
     }
   }
 
-  private logger(runId: string) {
-    return this.deps.logger.child({ runId, workerId: this.deps.workerId });
+  private logger(runId: string, preset?: { id: string; version: string; trust: string }) {
+    // Role dimensions ride every per-run log line (docs/crew/role-presets.md section 10).
+    // The values come from the stored snapshot row, not the live registry, so the log for a
+    // Run agrees with what the Run actually carries even if the operator edits the manifest
+    // later. Bounded labels: id/version/trust are catalog-controlled, never paths or URLs.
+    return this.deps.logger.child({
+      runId,
+      workerId: this.deps.workerId,
+      ...(preset ? { presetId: preset.id, presetVersion: preset.version, presetTrust: preset.trust } : {}),
+    });
   }
 
   private log(level: 'info' | 'warn' | 'error', msg: string, fields: Record<string, unknown>): void {

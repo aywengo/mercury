@@ -34,12 +34,30 @@ async function loadAgents() {
   }
 }
 
+async function loadRoles() {
+  try {
+    const data = await api('/api/presets');
+    const select = $('role');
+    const current = select.value;
+    for (const p of data.presets || []) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.enabled ? p.role + ' (' + p.id + ')' : p.role + ' (disabled)';
+      select.appendChild(opt);
+    }
+    if (current) select.value = current;
+  } catch {
+    // Roles are optional: keep "no role" as the only option when the surface is absent.
+  }
+}
+
 function showApp() {
   $('login').classList.add('hidden');
   $('app').classList.remove('hidden');
   $('logout-btn').classList.remove('hidden');
   $('user-label').textContent = user?.isAdmin ? 'admin' : user?.ownerId || '';
   loadAgents();
+  loadRoles();
   loadRuns();
 }
 
@@ -71,6 +89,10 @@ $('create-btn').addEventListener('click', async () => {
   const repoPath = $('repo').value.trim();
   const repository = repoPath ? { localPath: repoPath, baseBranch: $('branch').value.trim() || 'main' } : {};
   const body = { task, repository, agent: $('agent').value };
+  // Role selection is optional: an empty value sends no preset block at all, so a Run without
+  // a role stays byte-identical to the pre-presets API shape (roadmap §7 acceptance 5).
+  const role = $('role').value;
+  if (role) body.preset = { id: role };
   try {
     const res = await api('/api/runs', { method: 'POST', json: true, body: JSON.stringify(body) });
     $('task').value = '';
