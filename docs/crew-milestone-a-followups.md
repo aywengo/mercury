@@ -4,8 +4,8 @@ Drafted 2026-09-23 against `main` at `bfe1420`, after a review of #714 (`07b0755
 #718 (`cd4bf04`) and #719 (`bfe1420`) against [`crew/role-presets.md`](crew/role-presets.md). The format follows
 the `issue-fix-loop` contract used by [`atlas-phase-5-6-issues.md`](atlas-phase-5-6-issues.md):
 each issue gives the mechanism with file evidence, the choke point, acceptance criteria, a regression
-test that fails on base, and one PR. The numbers are placeholders (`C-0` … `C-5`). When the issues are
-filed, replace them with GitHub numbers.
+test that fails on base, and one PR. Filed 2026-09-23 as #720 (C-0), #721 (C-1), #722 (C-2), #723 (C-3),
+#724 (C-4) and #725 (C-5); each heading below carries its number.
 
 ## Summary
 
@@ -41,7 +41,7 @@ C-5 resource-limit format validation (independent, low)
 
 ---
 
-## C-0 — docs: roadmap and status claim Milestone A complete while AC 7 and AC 8 are open
+## C-0 (#720) — docs: roadmap and status claim Milestone A complete while AC 7 and AC 8 are open
 
 **Labels:** `documentation`, `priority: medium`
 **Blocked by:** —
@@ -74,7 +74,7 @@ merged tree (C-1, C-2). This is the same overclaim pattern that #579 and #512 fi
 
 ---
 
-## C-1 — Enforce the §8 capability vocabulary at Run creation (AC 7)
+## C-1 (#721) — Enforce the §8 capability vocabulary at Run creation (AC 7)
 
 **Labels:** `bug`, `priority: high`
 **Blocked by:** —
@@ -143,7 +143,7 @@ acceptance 1 creates a Run.
 
 ---
 
-## C-2 — Resume must carry the preset like start does (AC 8)
+## C-2 (#722) — Resume must carry the preset like start does (AC 8)
 
 **Labels:** `bug`, `priority: high`
 **Blocked by:** —
@@ -201,7 +201,7 @@ their tests.
 
 ---
 
-## C-3 — Network and resource ceilings: one rejects narrowing, one lets defaults widen
+## C-3 (#723) — Network and resource ceilings: one rejects narrowing, one lets defaults widen
 
 **Labels:** `bug`, `priority: medium`
 **Blocked by:** —
@@ -255,7 +255,7 @@ Extend `test/presetResolution.test.ts` (acceptance 1 and 2) and `test/presetVali
 
 ---
 
-## C-4 — Skill resolution: code and §3.2 disagree; decide which one moves
+## C-4 (#724) — Skill resolution: code and §3.2 disagree; decide which one moves
 
 **Labels:** `design-decision`, `priority: medium`
 **Blocked by:** —
@@ -303,7 +303,7 @@ for each step, including a `required`-only preset.
 
 ---
 
-## C-5 — Reject invalid CPU, memory and disk values before insert (§3.3)
+## C-5 (#725) — Reject invalid CPU, memory and disk values before insert (§3.3)
 
 **Labels:** `enhancement`, `priority: low`
 **Blocked by:** —
