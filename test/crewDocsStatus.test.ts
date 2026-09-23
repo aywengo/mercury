@@ -236,16 +236,27 @@ const STATUS_MD = readFileSync(new URL('../docs/status.md', import.meta.url), 'u
 
 test('the Milestone A stamp in roadmap.md and status.md agree', () => {
   const roadmapComplete = /Milestone A \(Role Presets, Phases 0-3\) is complete/.test(ROADMAP);
-  const statusSaysImplemented = /Role Presets \(Crew Milestone A\)/.test(STATUS_MD)
-    && STATUS_MD.includes('### Role Presets (Crew Milestone A)');
-  const statusSaysFollowupsOpen = /#721|#722|#723|#724/.test(STATUS_MD);
-  assert.equal(roadmapComplete, statusSaysImplemented && !statusSaysFollowupsOpen,
-    'roadmap.md and docs/status.md disagree about Milestone A: the roadmap says '
-    + (roadmapComplete ? '"complete"' : '"implemented, AC 7/AC 8 open"')
-    + ' while status.md ' + (statusSaysFollowupsOpen ? 'still lists the open follow-ups'
-      : (statusSaysImplemented ? 'lists Milestone A under Implemented with no open follow-ups'
-        : 'does not list Milestone A under Implemented'))
-    + '. Stamp both sides of the agreement in the same PR.');
+  const statusListsMilestone = STATUS_MD.includes('### Role Presets (Crew Milestone A)');
+  const followupRefs = STATUS_MD.match(/#7(?:2[1-4])/g) ?? [];
+  // BOTH states are fully specified, so neither document can drift half-way:
+  //  - "complete": the roadmap stamps it, status.md lists Milestone A under Implemented, and
+  //    NO follow-up number from the set remains in status.md's Role Presets section.
+  //  - "open": the roadmap withholds the stamp, and status.md MUST both list the milestone and
+    //    name the open follow-ups -- omitting the section entirely must fail, not pass.
+  if (roadmapComplete) {
+    assert.ok(statusListsMilestone,
+      'roadmap.md stamps Milestone A complete, but docs/status.md no longer lists it under Implemented');
+    assert.deepEqual(followupRefs, [],
+      'roadmap.md stamps Milestone A complete, but docs/status.md still references open follow-ups: '
+      + JSON.stringify(followupRefs));
+  } else {
+    assert.ok(statusListsMilestone,
+      'roadmap.md withholds the Milestone A stamp, so docs/status.md must still list it under '
+      + 'Implemented (it vanished?)');
+    assert.ok(followupRefs.length > 0,
+      'roadmap.md withholds the Milestone A stamp, so docs/status.md must name the open follow-up '
+      + 'issues (#721-#724); it names none, which reads as "complete with no gaps"');
+  }
 });
 
 test('no Crew doc claims Hermes cannot execute a Run', () => {
