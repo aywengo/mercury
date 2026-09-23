@@ -236,8 +236,14 @@ const STATUS_MD = readFileSync(new URL('../docs/status.md', import.meta.url), 'u
 
 test('the Milestone A stamp in roadmap.md and status.md agree', () => {
   const roadmapComplete = /Milestone A \(Role Presets, Phases 0-3\) is complete/.test(ROADMAP);
-  const statusListsMilestone = STATUS_MD.includes('### Role Presets (Crew Milestone A)');
-  const followupRefs = STATUS_MD.match(/#7(?:2[1-4])/g) ?? [];
+  // Scope both the listing check and the follow-up scan to the Role Presets section: the rest of
+  // status.md (e.g. Recommended priority) may legitimately cite #721-#724 forever, and a section
+  // renumbered or renamed must fail LOUDLY here, not silently pass as "no follow-ups".
+  const sectionStart = STATUS_MD.indexOf('### Role Presets (Crew Milestone A)');
+  const sectionEnd = sectionStart === -1 ? -1 : STATUS_MD.indexOf('\n### ', sectionStart + 10);
+  const section = sectionStart === -1 ? '' : STATUS_MD.slice(sectionStart, sectionEnd === -1 ? undefined : sectionEnd);
+  const statusListsMilestone = sectionStart !== -1;
+  const followupRefs = section.match(/#7(?:2[1-4])/g) ?? [];
   // BOTH states are fully specified, so neither document can drift half-way:
   //  - "complete": the roadmap stamps it, status.md lists Milestone A under Implemented, and
   //    NO follow-up number from the set remains in status.md's Role Presets section.
