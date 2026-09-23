@@ -51,12 +51,15 @@ export interface ResolvedPresetSelection {
    * false -- "no skills" is a decision, not an absence of one.
    */
   autoSelect: boolean;
+  /** Effective skill maximum (min of the manifest max and the system cap) for the selector budget. */
+  skillCap: number;
   effectiveConstraints: RunConstraints;
   /** True when the preset demanded sandboxing (RunService/worker fail closed on it). */
   requiresSandbox: boolean;
 }
 
-const SKILL_SYSTEM_CAP = 4;
+/** System cap on effective skills (section 3.2 step 5); the manifest max can only lower it. */
+export const SKILL_SYSTEM_CAP = 4;
 
 export function resolvePreset(
   manifest: RolePresetManifest,
@@ -69,6 +72,7 @@ export function resolvePreset(
     effectiveAgent: resolveAgent(manifest, caller, system, caps),
     effectiveSkillIds: skillResolution.ids,
     autoSelect: skillResolution.autoSelect,
+    skillCap: skillResolution.cap,
     effectiveConstraints: resolveConstraints(manifest, caller, system),
     requiresSandbox: manifest.requires?.sandbox === true,
   };
@@ -180,13 +184,23 @@ function resolveAgent(
 function resolveSkillIds(
   manifest: RolePresetManifest,
   caller: PresetCallerInput,
-): { ids: string[]; autoSelect: boolean } {
+): { ids: string[]; autoSelect: boolean; cap: number } {
   const s = manifest.skills;
+  // Section 3.2 step 1, as amended by #724: the caller provides a LIST; an explicit empty list
+  // means "no skills" and suppresses defaults and auto-selection -- it is a decision, not an
+  // absence. Absent falls back to the preset defaults.
   const callerProvided = caller.skills !== undefined;
   const start = callerProvided ? [...(caller.skills as string[])] : [...(s?.defaults ?? [])];
   const required = s?.required ?? [];
-  if (!callerProvided && start.length === 0 && required.length === 0 && s?.autoSelect !== false) {
-    return { ids: [], autoSelect: true };
+  // Step 2 as specified: the selector runs whenever the START list is empty -- a required-only
+  // preset keeps auto-selection, with the required skills appended AFTER the selector's picks
+  // (RunService owns the selector and does the append, then dedupes and caps). An explicit
+  // caller [] still suppresses it: the list is empty because the caller chose that (step 1
+  // amendment), not because nobody named a skill.
+  const autoSelect = start.length === 0 && !callerProvided && s?.autoSelect !== false;
+  const cap = Math.min(s?.max ?? SKILL_SYSTEM_CAP, SKILL_SYSTEM_CAP);
+  if (autoSelect) {
+    return { ids: required, autoSelect: true, cap };
   }
   const ids = [...start, ...required];
   const seen = new Set<string>();
@@ -196,13 +210,12 @@ function resolveSkillIds(
     seen.add(id);
     out.push(id);
   }
-  const cap = Math.min(s?.max ?? SKILL_SYSTEM_CAP, SKILL_SYSTEM_CAP);
   if (out.length > cap) {
     throw new ValidationError(
       `preset resolves to ${out.length} skills; the effective maximum is ${cap}`,
     );
   }
-  return { ids: out, autoSelect: false };
+  return { ids: out, autoSelect: false, cap };
 }
 
 /**

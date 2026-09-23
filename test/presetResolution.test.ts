@@ -44,16 +44,19 @@ test('explicit caller [] means "no skills": defaults skipped, autoSelect suppres
   assert.equal(r.autoSelect, false, 'an explicit empty list is a decision, not silence');
 });
 
-test('undefined caller skills + empty defaults + autoSelect sets the autoSelect flag, required blocks it', () => {
+test('undefined caller skills + empty defaults: autoSelect runs even for required-only presets (#724)', () => {
   const quiet = manifest({ skills: { autoSelect: true } });
   const r1 = resolvePreset(quiet, {}, SYSTEM, CAPS);
   assert.deepEqual(r1.effectiveSkillIds, []);
   assert.equal(r1.autoSelect, true, 'RunService must run the selector');
 
+  // Section 3.2 as amended by #724: the selector runs whenever the START list is empty, so a
+  // required-only preset keeps auto-selection; RunService appends the required skills after the
+  // selector's picks. resolveSkillIds hands back exactly the required ids for that append.
   const withRequired = manifest({ skills: { autoSelect: true, required: ['secretary-check'] } });
   const r2 = resolvePreset(withRequired, {}, SYSTEM, CAPS);
   assert.deepEqual(r2.effectiveSkillIds, ['secretary-check']);
-  assert.equal(r2.autoSelect, false, 'required skills make the list non-empty; no auto-select');
+  assert.equal(r2.autoSelect, true, 'required-only does not block auto-selection');
 
   const disabled = manifest({ skills: { autoSelect: false } });
   const r3 = resolvePreset(disabled, {}, SYSTEM, CAPS);

@@ -86,6 +86,57 @@ test('a Run with a builtin preset completes end to end with the fake adapter and
   }
 });
 
+test('a required-only preset keeps auto-selection: required rides after the selector picks (#724)', async () => {
+  // Section 3.2 as amended by #724: the selector runs whenever the caller provides no list and
+  // the start list is empty -- a required-only preset does not silently lose it. The required
+  // skill is appended AFTER the selector's picks (steps 3-4) and survives the cap.
+  const skillsDir = tempDir('mercury-skills-724-');
+  const writeSkill = (id: string): void => {
+    mkdirSync(join(skillsDir, id), { recursive: true });
+    writeFileSync(join(skillsDir, id, 'SKILL.md'),
+      `---\nname: ${id}\nversion: 1.0.0\ndescription: Fixture skill for #724.\ncapabilities: [testing]\n---\n\nFixture body.\n`);
+  };
+  writeSkill('testing');
+  writeSkill('security-review');
+  const presetsDir = tempDir('mercury-presets-724-');
+  const dir = join(presetsDir, 'required-only');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'preset.json'), JSON.stringify({
+    schemaVersion: 1, id: 'required-only', version: '1.0.0',
+    description: 'required-only preset', role: 'Required-only role',
+    skills: { required: ['security-review'] },
+  }));
+  writeFileSync(join(dir, 'INSTRUCTION.md'), 'REQUIRED-ONLY INSTRUCTION');
+
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = makeEnv({
+    workspaceMode: 'copy',
+    repoDir: repo,
+    skillsDir,
+    presetsDir,
+    fakeScript: [{ event: { type: 'run.completed', payload: {} } }],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      // Keyword-matched by the deterministic selector (testing: 'test', 'suite').
+      task: 'test the failing integration suite',
+      repository: { localPath: repo },
+      preset: { id: 'required-only' },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 10_000);
+    const preset = env.runService.getPreset(run.id)!;
+    assert.ok(preset);
+    const ids = preset.effectiveSkills.map((s) => s.id);
+    assert.ok(ids.includes('testing'), `the selector must have run: ${JSON.stringify(ids)}`);
+    assert.ok(ids.includes('security-review'), `required must be appended: ${JSON.stringify(ids)}`);
+    assert.equal(ids.indexOf('security-review'), ids.length - 1,
+      'required comes after the selector picks');
+  } finally {
+    env.close();
+  }
+});
+
 test('source mutation after creation cannot change the workspace bytes (section 4.1)', async () => {
   // The point of the snapshot contract: edit the SHIPPED preset's source? No -- mutate a TEMP
   // registry copy so the shipped catalog is untouched, then create a Run and edit the source
