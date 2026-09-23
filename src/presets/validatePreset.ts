@@ -413,10 +413,14 @@ function checkDefaultsAgainstCeilings(
   // Shape-invalid fields are already reported as PRESET_CONSTRAINT by the per-object checks;
   // this cross-check must never throw on them (one malformed aspect does not mask the others),
   // so every access is guarded and invalid shapes simply produce no cross-check finding.
+  const finiteInt = (v: unknown): v is number =>
+    typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v);
   for (const key of ['maxDurationMs', 'maxRetries'] as const) {
     const d = defaults[key];
     const ceiling = ceilings[key];
-    if (typeof d !== 'number' || typeof ceiling !== 'number') continue;
+    // NaN/Infinity/fractional values are already PRESET_CONSTRAINT findings; the cross-check
+    // runs only on values that would survive those, so it never adds a second finding for them.
+    if (!finiteInt(d) || !finiteInt(ceiling)) continue;
     if (d > ceiling) {
       add(
         'PRESET_DEFAULT_EXCEEDS_CEILING',
