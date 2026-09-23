@@ -455,7 +455,14 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
     knowledgeReplicaNotes: Number(replicaRow?.n) || 0,
     knowledgePullFailures: Number.isFinite(Number(pullFailRow?.value)) ? Number(pullFailRow?.value) : 0,
     runsByPreset,
-    ...(opts.presets ? { presetsByValidity: { valid: opts.presets().valid, invalid: opts.presets().invalid } } : {}),
+    ...(opts.presets
+      ? (() => {
+        // One call, reused: the provider walks the registry directory, and two calls could
+        // straddle an operator edit and report a validity set that never existed.
+        const counts = opts.presets!();
+        return { presetsByValidity: { valid: counts.valid, invalid: counts.invalid } };
+      })()
+      : {}),
     sandboxEnabled: Number(sandboxRow.n) || 0,
     runsTotal: Number(totalRow.n) || 0,
     workers: leases.length,

@@ -46,7 +46,15 @@ function roleCard(p) {
     </div>
   `;
   el.querySelector('[data-act="inspect"]').addEventListener('click', () => toggleDetail(el, p));
-  el.querySelector('[data-act="run"]').addEventListener('click', () => runAsRole(el, p));
+  const runBtn = el.querySelector('[data-act="run"]');
+  if (p.enabled) {
+    runBtn.addEventListener('click', () => runAsRole(el, p));
+  } else {
+    // A disabled preset is rejected by RunService on create; wiring the handler would offer a
+    // guaranteed-error path. Disabled is still VIEWABLE (details stay available).
+    runBtn.disabled = true;
+    runBtn.title = 'This preset is disabled; an operator must enable it before it can run.';
+  }
   return el;
 }
 

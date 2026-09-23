@@ -38,14 +38,17 @@ async function loadRoles() {
   try {
     const data = await api('/api/presets');
     const select = $('role');
-    const current = select.value;
+    // Rebuild from scratch so a refresh cannot stack duplicate options; "no role" first.
+    select.innerHTML = '<option value="">no role</option>';
     for (const p of data.presets || []) {
       const opt = document.createElement('option');
       opt.value = p.id;
       opt.textContent = p.enabled ? p.role + ' (' + p.id + ')' : p.role + ' (disabled)';
+      // A disabled preset deterministically fails on create (RunService rejects it); offering
+      // it as selectable would turn a UI choice into a guaranteed server error.
+      opt.disabled = !p.enabled;
       select.appendChild(opt);
     }
-    if (current) select.value = current;
   } catch {
     // Roles are optional: keep "no role" as the only option when the surface is absent.
   }
