@@ -279,19 +279,19 @@ function resolveConstraints(
 
   // networkMode ceiling (section 3.3): the preset speaks the honest coarse vocabulary; the
   // constraint keeps the existing allowedNetworks shape (empty = none, non-empty = bridge).
+  // A ceiling is an upper bound and can only NARROW (#723): no network is narrower than
+  // 'none', so the none ceiling forces an empty list regardless of defaults (a manifest whose
+  // defaults violate its own ceiling is refused at load; resolution still fails closed here),
+  // and 'bridge' admits caller [] -- no network is a valid narrowing of bridge. Only a caller
+  // value WIDER than the ceiling is rejected.
   if (ceilings.networkMode === 'none') {
     if (call.allowedNetworks !== undefined && call.allowedNetworks.length > 0) {
       throw new ValidationError(
         'constraint allowedNetworks conflicts with the preset network ceiling (none)',
       );
     }
-    effective.allowedNetworks = defaults.allowedNetworks ?? [];
+    effective.allowedNetworks = [];
   } else if (ceilings.networkMode === 'bridge') {
-    if (call.allowedNetworks !== undefined && call.allowedNetworks.length === 0) {
-      throw new ValidationError(
-        'constraint allowedNetworks = [] conflicts with the preset network ceiling (bridge)',
-      );
-    }
     effective.allowedNetworks = call.allowedNetworks ?? defaults.allowedNetworks;
   } else if (call.allowedNetworks !== undefined || defaults.allowedNetworks !== undefined) {
     effective.allowedNetworks = call.allowedNetworks ?? defaults.allowedNetworks;

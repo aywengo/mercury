@@ -263,14 +263,27 @@ test('networkMode none: a caller list is REFUSED, not silently dropped', () => {
   assert.deepEqual(r.effectiveConstraints.allowedNetworks, []);
 });
 
-test('networkMode bridge: an empty caller allowlist is refused; non-empty passes', () => {
+test('networkMode bridge: an empty caller allowlist is admitted (a ceiling can only narrow, #723)', () => {
   const bridge = manifest({ constraints: { ceilings: { networkMode: 'bridge' } } });
-  assert.throws(
-    () => resolvePreset(bridge, { constraints: { allowedNetworks: [] } }, SYSTEM, CAPS),
-    /conflicts with the preset network ceiling/,
-  );
+  // No network is narrower than bridge, so caller [] is a valid narrowing (acceptance 1).
+  const empty = resolvePreset(bridge, { constraints: { allowedNetworks: [] } }, SYSTEM, CAPS);
+  assert.deepEqual(empty.effectiveConstraints.allowedNetworks, []);
+  // Caller naming networks still passes through under the bridge ceiling.
   const r = resolvePreset(bridge, { constraints: { allowedNetworks: ['github.com'] } }, SYSTEM, CAPS);
   assert.deepEqual(r.effectiveConstraints.allowedNetworks, ['github.com']);
+});
+
+test('networkMode none: the ceiling forces an empty effective allowlist (#723)', () => {
+  // Even when reached directly with defaults that would widen it (registry load refuses such a
+  // manifest; resolution still fails closed -- acceptance 2).
+  const m = manifest({
+    constraints: {
+      defaults: { allowedNetworks: ['github.com'] },
+      ceilings: { networkMode: 'none' },
+    },
+  });
+  const r = resolvePreset(m, {}, SYSTEM, CAPS);
+  assert.deepEqual(r.effectiveConstraints.allowedNetworks, []);
 });
 
 test('requires.sandbox injects a sandbox request when the caller and preset defaults name none', () => {

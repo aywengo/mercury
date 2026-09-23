@@ -210,6 +210,88 @@ test('negative, non-finite and non-integer constraint numbers are PRESET_CONSTRA
   assert.ok(codes.includes('constraints.ceilings.networkMode'));
 });
 
+test('defaults above the manifest ceilings are PRESET_DEFAULT_EXCEEDS_CEILING (#723)', () => {
+  const body = {
+    ...structuredClone(VALID),
+    constraints: {
+      defaults: { maxDurationMs: 3_600_000, maxRetries: 5 },
+      ceilings: { maxDurationMs: 600_000, maxRetries: 2 },
+    },
+  };
+  const res = validatePreset('reviewer', presetDir(body), body);
+  assert.ok(!res.valid);
+  const codes = res.findings.filter((f) => f.code === 'PRESET_DEFAULT_EXCEEDS_CEILING').map((f) => f.field);
+  assert.ok(codes.includes('constraints.defaults.maxDurationMs'));
+  assert.ok(codes.includes('constraints.defaults.maxRetries'));
+});
+
+test('network ceiling none with non-empty default networks is PRESET_DEFAULT_EXCEEDS_CEILING (#723)', () => {
+  const body = {
+    ...structuredClone(VALID),
+    constraints: {
+      defaults: { allowedNetworks: ['github.com'] },
+      ceilings: { networkMode: 'none' },
+    },
+  };
+  const res = validatePreset('reviewer', presetDir(body), body);
+  assert.ok(!res.valid);
+  assert.ok(res.findings.some(
+    (f) => f.code === 'PRESET_DEFAULT_EXCEEDS_CEILING'
+      && f.field === 'constraints.defaults.allowedNetworks',
+  ));
+});
+
+test('a resourceLimits default differing from its ceiling is refused at load, not at Run creation (#723)', () => {
+  const body = {
+    ...structuredClone(VALID),
+    constraints: {
+      defaults: { resourceLimits: { memory: '1g' } },
+      ceilings: { resourceLimits: { memory: '2g' } },
+    },
+  };
+  const res = validatePreset('reviewer', presetDir(body), body);
+  assert.ok(!res.valid);
+  assert.ok(res.findings.some(
+    (f) => f.code === 'PRESET_DEFAULT_EXCEEDS_CEILING'
+      && f.field === 'constraints.defaults.resourceLimits.memory',
+  ));
+});
+
+test('invalid constraint shapes never make the cross-check throw (#723, review)', () => {
+  // validatePreset accumulates findings; the defaults-vs-ceilings pass must not turn a shape
+  // error already reported as PRESET_CONSTRAINT into an exception that masks the rest.
+  const body = {
+    ...structuredClone(VALID),
+    constraints: {
+      defaults: {
+        maxDurationMs: 'lots' as unknown as number,
+        allowedNetworks: null,
+        resourceLimits: null,
+      },
+      ceilings: {
+        maxDurationMs: '600_000' as unknown as number,
+        networkMode: 'none',
+        resourceLimits: null,
+      },
+    },
+  };
+  const res = validatePreset('reviewer', presetDir(body), body);
+  assert.ok(res.findings.some((f) => f.code === 'PRESET_CONSTRAINT'));
+  assert.deepEqual(res.findings.filter((f) => f.code === 'PRESET_DEFAULT_EXCEEDS_CEILING'), []);
+});
+
+test('defaults equal to their ceilings stay valid (#723)', () => {
+  const body = {
+    ...structuredClone(VALID),
+    constraints: {
+      defaults: { maxDurationMs: 600_000, resourceLimits: { memory: '2g' }, allowedNetworks: [] },
+      ceilings: { maxDurationMs: 600_000, networkMode: 'none', resourceLimits: { memory: '2g' } },
+    },
+  };
+  const res = validatePreset('reviewer', presetDir(body), body);
+  assert.deepEqual(res.findings.filter((f) => f.code === 'PRESET_DEFAULT_EXCEEDS_CEILING'), []);
+});
+
 test('unknown manifest keys are a hard error -- including a manifest trying to set trust', () => {
   const body = { ...structuredClone(VALID), trust: 'trusted' };
   const res = validatePreset('reviewer', presetDir(body), body);
