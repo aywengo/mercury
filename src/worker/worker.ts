@@ -1423,7 +1423,10 @@ export async function writeSkills(workspacePath: string, skills: ResolvedSkill[]
 export function writePreset(
   workspacePath: string,
   snapshot: ResolvedRolePreset,
-): { id: string; role: string; instructionPath: string; instruction: string; model?: string; byteCount: number } {
+): {
+  id: string; version: string; role: string; trust: ResolvedRolePreset['trust'];
+  contentHash: string; instructionPath: string; instruction: string; model?: string; byteCount: number;
+} {
   const presetRoot = join(workspacePath, '.mercury', 'preset');
   let byteCount = 0;
   for (const [rel, content] of Object.entries(snapshot.files)) {
@@ -1449,7 +1452,10 @@ export function writePreset(
   const instructionPath = `.mercury/preset/${instructionPathOf(snapshot)}`;
   return {
     id: snapshot.id,
+    version: snapshot.version,
     role: snapshot.role,
+    trust: snapshot.trust,
+    contentHash: snapshot.contentHash,
     instructionPath,
     instruction: snapshot.instruction,
     ...(snapshot.effectiveAgent.model !== undefined ? { model: snapshot.effectiveAgent.model } : {}),

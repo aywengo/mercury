@@ -231,6 +231,34 @@ test('a JSONL object split across two stdout chunks is still parsed', async () =
   assert.ok(types(events).includes('tool.started'), 'the straddled tool_use line must still parse');
 });
 
+test('resume re-sends the task text including the preset line (#722, AC 2)', async () => {
+  // claude -p REQUIRES a prompt, so the resume spawn re-sends taskText() on stdin, and
+  // taskText() includes the preset line whenever the context carries a preset. The env file
+  // records the LAST spawn's stdin, which after resume is the resume's task text.
+  const envFile = tempFile('claude-env-', '.json');
+  const a = adapter({ env: { MOCK_CLAUDE_ENV_FILE: envFile } });
+  const ctx = makeContext();
+  const preset = {
+    id: 'reviewer',
+    version: '1.0.0',
+    role: 'Code reviewer',
+    trust: 'builtin' as const,
+    contentHash: 'b1946ac92492d2347c6235b4d2611184e0f2a1c8a0d5de4f4e5d4c9d5a3b7c2d',
+    instructionPath: '.mercury/preset/INSTRUCTION.md',
+    instruction: 'Review hunks before you write code.',
+  };
+  const { exit: firstExit } = await drain(await a.start({ ...ctx, preset }));
+  assert.equal(firstExit.reason, 'completed');
+  const { exit: resumedExit } = await drain(await a.resume(ctx.run.id, { ...ctx, preset }));
+  a.dispose(ctx.run.id);
+  assert.equal(resumedExit.reason, 'completed');
+  const seen = JSON.parse(readFileSync(envFile, 'utf8')) as { task: string };
+  assert.ok(seen.task.includes(`You are filling the role: ${preset.role}`),
+    'the resumed task text must name the role');
+  assert.equal(seen.task.split(preset.instructionPath).length - 1, 1,
+    'the instruction path is named exactly once on resume');
+});
+
 test('resume passes -r with the session id captured from the stream', async () => {
   // The mock APPENDS argv per spawn, so this asserts the spawn COUNT as well as its flags. That
   // matters: when the file was overwritten in place, a resume whose spawn never happened (EMFILE

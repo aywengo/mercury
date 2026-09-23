@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -462,6 +462,88 @@ test('resume prompt carries the same conditional line', () => {
   // With a pack the resume prompt is the base sentence plus the line, so the base is recoverable.
   assert.ok(withPack.startsWith(withoutPack),
     'the resume line appends to the same base sentence rather than replacing it');
+});
+
+const PRESET = {
+  id: 'reviewer',
+  version: '1.0.0',
+  role: 'Code reviewer',
+  trust: 'builtin' as const,
+  contentHash: 'b1946ac92492d2347c6235b4d2611184e0f2a1c8a0d5de4f4e5d4c9d5a3b7c2d',
+  instructionPath: '.mercury/preset/INSTRUCTION.md',
+  instruction: 'Review hunks before you write code.',
+};
+
+test('resume prompt carries the preset line exactly once (#722)', () => {
+  const { context } = makeContext();
+  const base = buildResumePrompt(context);
+  // Without a preset the resume prompt is byte-identical to base (acceptance 1).
+  const withPreset = buildResumePrompt({ ...context, preset: PRESET });
+  assert.ok(withPreset.startsWith(base),
+    'the preset line appends to the same base sentence rather than replacing it');
+  assert.equal(countOccurrences(withPreset, PRESET.instructionPath), 1,
+    'the instruction path must be named exactly once');
+  assert.ok(withPreset.includes(`You are filling the role: ${PRESET.role}`),
+    'the resume prompt names the role the way the first prompt does');
+  // Knowledge + preset together: both lines, each exactly once.
+  const both = buildResumePrompt({ ...context, knowledge: KNOWLEDGE, preset: PRESET });
+  assert.equal(countOccurrences(both, NOTES_FILE), 1);
+  assert.equal(countOccurrences(both, PRESET.instructionPath), 1);
+  assert.ok(both.startsWith(base));
+});
+
+test('the started adapter sends the preset line on resume (mock captures the prompt)', async () => {
+  const { context, workspacePath } = makeContext();
+  const promptFile = join(workspacePath, 'prompts.jsonl');
+  const adapter = new RpcAgentAdapter(piConfig({ env: { MOCK_RPC_PROMPT_FILE: promptFile } }));
+  try {
+    const handle = await adapter.start(context);
+    await collectAll(handle);
+    // The RPC process stays alive after agent_end; stop it so resume() respawns.
+    await adapter.cancel(context.run.id).catch(() => {});
+    // Worker retry path: the retry context carries the preset, and the session file recorded by
+    // the first run is resumed.
+    const sessionFile = join(workspacePath, 'sessions', 'session-1.json');
+    mkdirSync(join(sessionFile, '..'), { recursive: true });
+    writeFileSync(sessionFile, JSON.stringify({ ok: true }));
+    const handle2 = await adapter.resume(context.run.id, {
+      ...context,
+      preset: PRESET,
+      resumeSessionFile: sessionFile,
+    });
+    await collectAll(handle2);
+    const prompts = readFileSync(promptFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as string);
+    const resumePrompt = prompts[prompts.length - 1]!;
+    assert.equal(countOccurrences(resumePrompt, PRESET.instructionPath), 1,
+      'the resumed session must be told the role instruction path exactly once');
+    assert.ok(resumePrompt.includes(`You are filling the role: ${PRESET.role}`),
+      'the resume prompt names the role the way the first prompt does');
+    await adapter.cancel(context.run.id).catch(() => {});
+  } finally {
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});
+
+test('the context file preset block carries the full identity (#722, AC 3)', async () => {
+  // The comment promises id, version, role, trust, content hash and the instruction path; the
+  // block must deliver exactly that, so an agent can see which bytes it runs under.
+  const { context, workspacePath } = makeContext();
+  const adapter = new RpcAgentAdapter(piConfig());
+  try {
+    const handle = await adapter.start({ ...context, preset: PRESET });
+    await collectAll(handle);
+    const parsed = JSON.parse(readFileSync(join(workspacePath, '.mercury-context.json'), 'utf8')) as {
+      preset?: Record<string, unknown>;
+    };
+    assert.ok(parsed.preset, 'the context file must carry a preset block');
+    assert.deepEqual(
+      Object.keys(parsed.preset).sort(),
+      ['contentHash', 'id', 'instructionPath', 'role', 'trust', 'version'],
+    );
+    await adapter.cancel(context.run.id).catch(() => {});
+  } finally {
+    adapter.cancel(context.run.id).catch(() => {});
+  }
 });
 
 test('the started adapter actually sends the knowledge line (mock captures the prompt)', async () => {

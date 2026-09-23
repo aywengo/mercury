@@ -133,6 +133,43 @@ function lstatExists(path: string): boolean {
 }
 
 /**
+ * The run-context file (docs/knowledge-base.md 9.2). Written by start() and rewritten by resume()
+ * when the retry path supplies a context: a retry runs in a FRESH workspace, so without the
+ * rewrite the task text would name a file that is not there (#744 review).
+ */
+function writeContextFile(workspacePath: string, context: RunContext): void {
+  writeFileSync(join(workspacePath, CONTEXT_FILE), JSON.stringify({
+    runId: context.run.id,
+    task: context.run.task,
+    repository: context.repository,
+    repositories: context.repositories,
+    workspace: workspacePath,
+    branch: context.workspace.branch,
+    baseCommit: context.workspace.baseCommit,
+    skills: context.skills.map((s) => ({ id: s.id, version: s.version, hash: s.hash })),
+    constraints: context.constraints,
+    // The pointer, not the notes, matching the other adapters: the pack is at NOTES_FILE and the
+    // task text says where. Omitted rather than null when there is no pack, so a Run without
+    // knowledge has a context file identical to the one the other adapters would have written.
+    ...(context.knowledge ? { knowledge: context.knowledge } : {}),
+    // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, content
+    // hash and the workspace-relative instruction path — the identity fields that let the
+    // agent see which bytes it runs under. Omitted when the Run has no preset, so the
+    // context file stays byte-identical to the one it had before presets existed.
+    ...(context.preset ? {
+      preset: {
+        id: context.preset.id,
+        version: context.preset.version,
+        role: context.preset.role,
+        trust: context.preset.trust,
+        contentHash: context.preset.contentHash,
+        instructionPath: context.preset.instructionPath,
+      },
+    } : {}),
+  }, null, 2));
+}
+
+/**
  * The text handed to `claude -p` on stdin.
  *
  * Normally the run task verbatim. When a pack exists but `CLAUDE.md` was tracked and so left alone, the
@@ -284,31 +321,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // the prime, rpc and daemon adapters write it. Claude Code's own discovery of this file is
     // unverified -- CLAUDE.md is the documented channel -- so taskText() below also points at it, the
     // same way the other adapters' prompts do.
-    writeFileSync(join(context.workspace.path, CONTEXT_FILE), JSON.stringify({
-      runId,
-      task: context.run.task,
-      repository: context.repository,
-      repositories: context.repositories,
-      workspace: context.workspace.path,
-      branch: context.workspace.branch,
-      baseCommit: context.workspace.baseCommit,
-      skills: context.skills.map((s) => ({ id: s.id, version: s.version, hash: s.hash })),
-      constraints: context.constraints,
-      // The pointer, not the notes, matching the other adapters: the pack is at NOTES_FILE and the
-      // task text says where. Omitted rather than null when there is no pack, so a Run without
-      // knowledge has a context file identical to the one the other adapters would have written.
-      ...(context.knowledge ? { knowledge: context.knowledge } : {}),
-      // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, hash and
-      // the workspace-relative instruction path. Omitted when the Run has no preset, so the
-      // context file stays byte-identical to the one it had before presets existed.
-      ...(context.preset ? {
-        preset: {
-          id: context.preset.id,
-          role: context.preset.role,
-          instructionPath: context.preset.instructionPath,
-        },
-      } : {}),
-    }, null, 2));
+    writeContextFile(context.workspace.path, context);
 
     this.sessions.set(runId, session);
     this.spawnProcess(session, this.buildArgv(null));
@@ -593,6 +606,18 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     session.cancelled = false;
     session.terminated = false;
     rearmExitGate(session);
+    // A retry runs in a fresh workspace; adopt the retry context wholesale so the resumed spawn
+    // (task text, sandbox wrap, preset line) and the rewritten context file describe the SAME
+    // run. In-process resumes pass no context and keep what start() wrote.
+    if (context) {
+      session.context = context;
+      writeContextFile(context.workspace.path, context);
+    }
+    // Role Preset parity (#722, docs/crew/role-presets.md section 8): claude -p REQUIRES a prompt,
+    // so resume() re-sends the task text via spawnProcess()'s stdin write, and taskText() includes
+    // the preset line whenever session.context carries a preset. The role reference is therefore
+    // repeated on resume by construction, not by a separate code path; asserted by the Claude
+    // resume tests.
     this.spawnProcess(session, this.buildArgv(session.sessionId));
     return {
       runId,

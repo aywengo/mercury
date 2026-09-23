@@ -165,6 +165,9 @@ interface Session {
    *  file the same way the first prompt did (issue #687). The notes stay on disk; this is the
    *  pointer only, exactly as RunContext.knowledge is documented. */
   knowledge?: ContextKnowledgeBlock;
+  /** The preset pointer from the Run's context, kept for the same reason as `knowledge`
+   *  (#722, AC 8): the resume prompt names the role instruction the way the first prompt did. */
+  preset?: NonNullable<RunContext['preset']>;
   client: RpcClient | null;
   workspacePath: string;
   sessionFile: string | null;
@@ -313,6 +316,7 @@ export class RpcAgentAdapter implements AgentAdapter {
       run: context.run,
       constraints: context.constraints,
       ...(context.knowledge ? { knowledge: context.knowledge } : {}),
+      ...(context.preset ? { preset: context.preset } : {}),
       client: null,
       workspacePath,
       sessionFile: null,
@@ -333,32 +337,7 @@ export class RpcAgentAdapter implements AgentAdapter {
     const workspacePath = context.workspace.path;
 
     // Run context file the task prompt points the agent at.
-    writeFileSync(join(workspacePath, CONTEXT_FILE), JSON.stringify({
-      runId,
-      task: context.run.task,
-      repository: context.repository,
-      repositories: context.repositories,
-      workspace: workspacePath,
-      branch: context.workspace.branch,
-      baseCommit: context.workspace.baseCommit,
-      skills: context.skills.map((s) => ({ id: s.id, version: s.version, hash: s.hash })),
-      constraints: context.constraints,
-      // The pointer, not the notes. These adapters' prompts already tell the agent to read this file, so
-      // a harness finds the pack with no prompt change and no new channel (section 9.2). Omitted rather
-      // than written as null when there is no pack, so a Run without knowledge has a context file
-      // identical to the one it had before this feature existed.
-      ...(context.knowledge ? { knowledge: context.knowledge } : {}),
-      // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, hash and
-      // the workspace-relative instruction path. Omitted when the Run has no preset, so the
-      // context file stays byte-identical to the one it had before presets existed.
-      ...(context.preset ? {
-        preset: {
-          id: context.preset.id,
-          role: context.preset.role,
-          instructionPath: context.preset.instructionPath,
-        },
-      } : {}),
-    }, null, 2));
+    writeContextFile(workspacePath, context);
 
     const sessionDir = join(workspacePath, SESSION_DIR_NAME);
     mkdirSync(sessionDir, { recursive: true });
@@ -478,6 +457,17 @@ export class RpcAgentAdapter implements AgentAdapter {
     const sessionFile = context?.resumeSessionFile ?? session.sessionFile ?? readSessionPath(session.workspacePath);
     if (!sessionFile) throw new Error(`No persisted session file for run ${runId}; use retry-from-scratch`);
 
+    // The retry path may resolve pointers the first attempt did not carry (a preset added between
+    // attempts, a pack materialized after a crash). The session's copies are the prompt source of
+    // truth, so adopt the retry context's pointers the same way createSession() would have (#722).
+    if (context?.knowledge) session.knowledge = context.knowledge;
+    if (context?.preset) session.preset = context.preset;
+    // A retry runs in a fresh workspace; without this rewrite the resume prompt names a context
+    // file that is not there. In-process resumes pass no context and keep the file start() wrote.
+    // The file is written into the workspace the resumed process runs in (session.workspacePath),
+    // with the override's pointer fields adopted above.
+    if (context) writeContextFile(session.workspacePath, { ...context, workspace: { ...context.workspace, path: session.workspacePath } });
+
     const sessionDir = join(session.workspacePath, SESSION_DIR_NAME);
     const argv = this.buildArgv({
       run: session.run,
@@ -493,6 +483,10 @@ export class RpcAgentAdapter implements AgentAdapter {
     session.done = false;
     session.cancelled = false;
     session.terminated = false;
+    // The first run's gate settled (usually 'completed'); a resumed session must be able to
+    // settle its own exit, or agent.end on the resume cannot mark done and the events generator
+    // never returns. Claude and daemon resume paths re-arm the same way (#722 surfaced this).
+    rearmExitGate(session);
 
     await client.start();
     await client.prompt(buildResumePrompt(sessionContext(session)));
@@ -544,9 +538,47 @@ function presetLine(preset: NonNullable<RunContext['preset']>): string {
     + ` ${preset.instructionPath} — read them before starting and follow them.`;
 }
 
+/**
+ * The run-context file the prompts point at (docs/knowledge-base.md 9.2). Written by start() and
+ * rewritten by resume() when the retry path supplies a context: a retry runs in a FRESH workspace,
+ * so without the rewrite the resume prompt would name a file that is not there (#744 review).
+ */
+function writeContextFile(workspacePath: string, context: RunContext): void {
+  writeFileSync(join(workspacePath, CONTEXT_FILE), JSON.stringify({
+    runId: context.run.id,
+    task: context.run.task,
+    repository: context.repository,
+    repositories: context.repositories,
+    workspace: workspacePath,
+    branch: context.workspace.branch,
+    baseCommit: context.workspace.baseCommit,
+    skills: context.skills.map((s) => ({ id: s.id, version: s.version, hash: s.hash })),
+    constraints: context.constraints,
+    // The pointer, not the notes. These adapters' prompts already tell the agent to read this file, so
+    // a harness finds the pack with no prompt change and no new channel (section 9.2). Omitted rather
+    // than written as null when there is no pack, so a Run without knowledge has a context file
+    // identical to the one it had before this feature existed.
+    ...(context.knowledge ? { knowledge: context.knowledge } : {}),
+    // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, content
+    // hash and the workspace-relative instruction path — the identity fields that let the
+    // agent see which bytes it runs under. Omitted when the Run has no preset, so the
+    // context file stays byte-identical to the one it had before presets existed.
+    ...(context.preset ? {
+      preset: {
+        id: context.preset.id,
+        version: context.preset.version,
+        role: context.preset.role,
+        trust: context.preset.trust,
+        contentHash: context.preset.contentHash,
+        instructionPath: context.preset.instructionPath,
+      },
+    } : {}),
+  }, null, 2));
+}
+
 /** A minimal RunContext reconstructed from a Session, carrying exactly what buildResumePrompt
- *  reads: `knowledge`. The other fields are filled to satisfy the type; no prompt code path reads
- *  them (verified by the snapshot test, which passes the same shape). */
+ *  reads: `knowledge` and `preset`. The other fields are filled to satisfy the type; no prompt
+ *  code path reads them (verified by the snapshot test, which passes the same shape). */
 function sessionContext(session: Session): RunContext {
   return {
     run: session.run,
@@ -555,6 +587,7 @@ function sessionContext(session: Session): RunContext {
     skills: [],
     constraints: session.constraints,
     ...(session.knowledge ? { knowledge: session.knowledge } : {}),
+    ...(session.preset ? { preset: session.preset } : {}),
   };
 }
 
@@ -564,7 +597,12 @@ function sessionContext(session: Session): RunContext {
  */
 export function buildResumePrompt(context: RunContext): string {
   const base = `Continue the task from where you left off. Read ${CONTEXT_FILE} for the original task and constraints.`;
-  return context.knowledge ? `${base} ${knowledgeLine()}` : base;
+  // Same rule as the knowledge line (issue #687): the resume prompt repeats the pointer the first
+  // prompt carried, and a Run without either is byte-identical to the pre-feature prompt (#722).
+  const parts = [base];
+  if (context.knowledge) parts.push(knowledgeLine());
+  if (context.preset) parts.push(presetLine(context.preset));
+  return parts.join(' ');
 }
 
 function eventsGenerator(session: Session): AsyncGenerator<AgentEvent> {
