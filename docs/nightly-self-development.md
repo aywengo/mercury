@@ -144,6 +144,8 @@ Role presets (Crew Milestone A): tester, fixer, planner.
 
 ## 8. Roadmap
 
+The issue set for N0, N1 and dispatcher B0–B1 is [`nightly-issues.md`](nightly-issues.md).
+
 ### N0 — guardrails (no bot code)
 
 Bot identity, branch protection, labels, trust rule written down, pinned host
