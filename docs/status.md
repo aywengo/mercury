@@ -171,6 +171,27 @@ boundaries.
 
 ## Implemented
 
+### Role Presets (Crew Milestone A)
+
+The builtin Role Preset path ships end to end: manifest registry with validation and
+content hashing, per-Run snapshots in `run_presets`, workspace materialization from the
+snapshot bytes, the preset read API, the dashboard Roles page, and preset dimensions in
+Run logs and metrics. See [`crew/roadmap.md`](crew/roadmap.md) for the phase-by-phase
+record (PRs #714, #716, #718, #719).
+
+Not yet, tracked as follow-ups against the milestone:
+
+- #721 (C-1): unsupported required adapter capabilities are not rejected at Run
+  creation — a preset with an instruction still runs on agents whose `roleInstruction`
+  is `none`, and a `requires.sandbox` preset on an adapter without sandbox fails at
+  `start()` instead of at creation.
+- #722 (C-2): `resume()` does not repeat the preset reference the way `start()` does;
+  only `.mercury-context.json` keeps the role reachable on the resumed session.
+- #723 (C-3): preset network and resource ceilings reject narrowing values and admit
+  defaults that are wider than the preset's own ceiling.
+- #724 (C-4): skill resolution diverges from `role-presets.md` §3.2 in two documented
+  places; a decision on which side moves is still open.
+
 ### Knowledge base (Atlas)
 
 Atlas is a separate, optional service: one HTTP endpoint holding curated project knowledge,
@@ -334,20 +355,18 @@ dashboard, and that need has not been demonstrated. See
 [`cli-tui-design.md`](cli-tui-design.md) for the architecture, protocol
 contracts and milestone roadmap.
 
-### Crew
+### Crew (beyond Milestone A)
 
-Crew is being designed as four staged products:
+Crew is staged as four products (see [`crew/README.md`](crew/README.md)). Builtin Role
+Presets are implemented (above). The remaining three are design-only:
 
-1. builtin Role Presets;
-2. generic per-run MCP with enforceable policy;
-3. Git-backed preset distribution and owner drafts;
-4. bounded Workflow Templates.
+1. generic per-run MCP with enforceable policy;
+2. Git-backed preset distribution and owner drafts;
+3. bounded Workflow Templates.
 
-Milestone A (builtin Role Presets: registry, Run resolution and snapshots,
-read API, dashboard Roles page) is implemented and reviewed; see
-[`crew/roadmap.md`](crew/roadmap.md) for what shipped in each phase. Per-run
-MCP, Git-backed preset distribution and owner drafts, and Workflow Templates
-remain design-only.
+Milestone A's own open items — fail-closed capability checks (#721), resume parity
+(#722), ceiling fixes (#723) and the skill-semantics decision (#724) — are tracked in
+[`crew-milestone-a-followups.md`](crew-milestone-a-followups.md).
 
 ### OIDC/SSO
 
@@ -369,9 +388,8 @@ Named network destinations remain design-only. Do not treat recorded
    per-run MCP would be advertised on top of a boundary that does not hold.
 3. Reverify and repair daemon mode only if resident PrimeAgent sessions provide
    concrete value over RPC.
-4. Implement Crew in the dependency order documented in its roadmap. Its Phase 0
-   correctness prerequisites and Milestone A (Role Presets, Phases 1-3) are
-   complete; Milestone B waits on item 2 above.
+4. Close the Crew Milestone A follow-ups (#721-#724) before Milestone B. Milestone B
+   also waits on item 2 above.
 
 ## Sources of truth
 

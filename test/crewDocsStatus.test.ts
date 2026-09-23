@@ -226,6 +226,28 @@ test('roadmap.md states Phase 0 is complete and does not call the whole roadmap 
     + 'by phase, or defer the overall status to docs/status.md.');
 });
 
+// --- Milestone A's stamp must agree across documents (#720) -------------------------------
+//
+// The milestone stamp moved three times in one week (#719 stamped complete, #720 un-stamped it
+// after AC 7/AC 8 were found open, the follow-up set re-stamps when the fixes land). Two documents
+// carrying the same fact is exactly how a reader ends up trusting neither, so the stamp itself is
+// now cross-checked: whatever the roadmap claims about Milestone A, status.md must say the same.
+const STATUS_MD = readFileSync(new URL('../docs/status.md', import.meta.url), 'utf8');
+
+test('the Milestone A stamp in roadmap.md and status.md agree', () => {
+  const roadmapComplete = /Milestone A \(Role Presets, Phases 0-3\) is complete/.test(ROADMAP);
+  const statusSaysImplemented = /Role Presets \(Crew Milestone A\)/.test(STATUS_MD)
+    && STATUS_MD.includes('### Role Presets (Crew Milestone A)');
+  const statusSaysFollowupsOpen = /#721|#722|#723|#724/.test(STATUS_MD);
+  assert.equal(roadmapComplete, statusSaysImplemented && !statusSaysFollowupsOpen,
+    'roadmap.md and docs/status.md disagree about Milestone A: the roadmap says '
+    + (roadmapComplete ? '"complete"' : '"implemented, AC 7/AC 8 open"')
+    + ' while status.md ' + (statusSaysFollowupsOpen ? 'still lists the open follow-ups'
+      : (statusSaysImplemented ? 'lists Milestone A under Implemented with no open follow-ups'
+        : 'does not list Milestone A under Implemented'))
+    + '. Stamp both sides of the agreement in the same PR.');
+});
+
 test('no Crew doc claims Hermes cannot execute a Run', () => {
   const offenders: string[] = [];
   for (const [name, text] of Object.entries(DOCS)) {
