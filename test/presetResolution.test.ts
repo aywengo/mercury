@@ -30,6 +30,29 @@ test('no preset preference: system default agent, caller skills pass through', (
   assert.equal(r.requiresSandbox, false);
 });
 
+test('explicit caller [] means "no skills": defaults skipped, autoSelect suppressed, required still applied', () => {
+  const m = manifest({ skills: { defaults: ['code-review'], required: ['secretary-check'], autoSelect: true } });
+  const r = resolvePreset(m, { skills: [] }, SYSTEM, CAPS);
+  assert.deepEqual(r.effectiveSkillIds, ['secretary-check'], 'defaults skipped, required kept');
+  assert.equal(r.autoSelect, false, 'an explicit empty list is a decision, not silence');
+});
+
+test('undefined caller skills + empty defaults + autoSelect sets the autoSelect flag, required blocks it', () => {
+  const quiet = manifest({ skills: { autoSelect: true } });
+  const r1 = resolvePreset(quiet, {}, SYSTEM, CAPS);
+  assert.deepEqual(r1.effectiveSkillIds, []);
+  assert.equal(r1.autoSelect, true, 'RunService must run the selector');
+
+  const withRequired = manifest({ skills: { autoSelect: true, required: ['secretary-check'] } });
+  const r2 = resolvePreset(withRequired, {}, SYSTEM, CAPS);
+  assert.deepEqual(r2.effectiveSkillIds, ['secretary-check']);
+  assert.equal(r2.autoSelect, false, 'required skills make the list non-empty; no auto-select');
+
+  const disabled = manifest({ skills: { autoSelect: false } });
+  const r3 = resolvePreset(disabled, {}, SYSTEM, CAPS);
+  assert.equal(r3.autoSelect, false, 'autoSelect:false disables the flag even when silent');
+});
+
 test('caller agent wins over a preset default agent', () => {
   const m = manifest({ agent: { id: 'primeagent' } });
   const r = resolvePreset(m, { agent: 'claude' }, SYSTEM, CAPS);

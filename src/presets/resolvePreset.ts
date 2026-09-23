@@ -13,7 +13,11 @@ import type { RolePresetManifest } from './types.ts';
 export interface PresetCallerInput {
   agent?: string;
   model?: string;
-  /** Explicit caller skill list; undefined/empty means "use preset defaults". */
+  /**
+   * Caller skill list. `undefined` means "use preset defaults"; an EXPLICIT empty array means
+   * "no skills" -- defaults are skipped and auto-selection is suppressed. `required` skills are
+   * appended in both cases (the caller cannot remove them, section 3.2).
+   */
   skills?: string[];
   constraints?: Partial<RunConstraints>;
 }
@@ -41,6 +45,12 @@ export interface ResolvedPresetSelection {
    * which owns the registry.
    */
   effectiveSkillIds: string[];
+  /**
+   * True only when nothing named a skill and the preset has not disabled auto-selection:
+   * RunService must run the deterministic selector. An explicit caller `[]` keeps this
+   * false -- "no skills" is a decision, not an absence of one.
+   */
+  autoSelect: boolean;
   effectiveConstraints: RunConstraints;
   /** True when the preset demanded sandboxing (RunService/worker fail closed on it). */
   requiresSandbox: boolean;
@@ -54,9 +64,11 @@ export function resolvePreset(
   system: PresetSystemPolicy,
   caps: PresetCapabilityLookup,
 ): ResolvedPresetSelection {
+  const skillResolution = resolveSkillIds(manifest, caller);
   return {
     effectiveAgent: resolveAgent(manifest, caller, system, caps),
-    effectiveSkillIds: resolveSkillIds(manifest, caller),
+    effectiveSkillIds: skillResolution.ids,
+    autoSelect: skillResolution.autoSelect,
     effectiveConstraints: resolveConstraints(manifest, caller, system),
     requiresSandbox: manifest.requires?.sandbox === true,
   };
@@ -126,23 +138,27 @@ function resolveAgent(
 }
 
 /**
- * Skill precedence (section 3.2): caller list when non-empty, else preset defaults; then
- * autoSelect unless disabled and still empty; then required appended (the caller cannot
- * remove them); dedupe by first occurrence; cap.
+ * Skill precedence (section 3.2): caller list when PROVIDED (an explicit empty array means
+ * "no skills" -- it suppresses defaults AND auto-select), otherwise preset defaults; required
+ * appended in every case (the caller cannot remove them); dedupe by first occurrence; cap.
+ *
+ * Auto-select fires only when nothing names a skill (no caller list, empty defaults, empty
+ * required) and the preset has not disabled it. Selection itself needs the task text and the
+ * available-skill list -- inputs this pure function does not have -- so the result carries an
+ * `autoSelect` flag and RunService runs the selector.
  */
-function resolveSkillIds(manifest: RolePresetManifest, caller: PresetCallerInput): string[] {
+function resolveSkillIds(
+  manifest: RolePresetManifest,
+  caller: PresetCallerInput,
+): { ids: string[]; autoSelect: boolean } {
   const s = manifest.skills;
-  const callerList = caller.skills ?? [];
-  let ids: string[] = callerList.length > 0
-    ? [...callerList]
-    : [...(s?.defaults ?? [])];
-  if (ids.length === 0 && callerList.length === 0 && s?.autoSelect !== false) {
-    // Marker for the existing deterministic selector: RunService recognizes the empty array
-    // + autoSelect contract. We return [] and let RunService select, because selection needs
-    // the task text and the available-skill list -- inputs this pure function does not have.
-    return [];
+  const callerProvided = caller.skills !== undefined;
+  const start = callerProvided ? [...(caller.skills as string[])] : [...(s?.defaults ?? [])];
+  const required = s?.required ?? [];
+  if (!callerProvided && start.length === 0 && required.length === 0 && s?.autoSelect !== false) {
+    return { ids: [], autoSelect: true };
   }
-  ids = [...ids, ...(s?.required ?? [])];
+  const ids = [...start, ...required];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const id of ids) {
@@ -156,7 +172,7 @@ function resolveSkillIds(manifest: RolePresetManifest, caller: PresetCallerInput
       `preset resolves to ${out.length} skills; the effective maximum is ${cap}`,
     );
   }
-  return out;
+  return { ids: out, autoSelect: false };
 }
 
 /**

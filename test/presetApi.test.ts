@@ -64,7 +64,7 @@ test('POST /api/runs with a preset creates the Run and GET detail returns the sn
     assert.ok(detail.preset.instruction.length > 0);
     assert.match(detail.preset.contentHash, /^[0-9a-f]{64}$/);
   } finally {
-    stopSrv();
+    await stopSrv();
     api.close();
     env.close();
   }
@@ -92,7 +92,7 @@ test('POST /api/runs with an unknown preset id is a domain 404 naming the preset
     const body = await res.json() as { error: string };
     assert.match(body.error, /Preset not found/);
   } finally {
-    stopSrv();
+    await stopSrv();
     api.close();
     env.close();
   }
@@ -117,7 +117,7 @@ test('a request with no preset block behaves exactly as before (no preset key on
     })).json() as { preset: unknown };
     assert.equal(detail.preset, null);
   } finally {
-    stopSrv();
+    await stopSrv();
     api.close();
     env.close();
   }

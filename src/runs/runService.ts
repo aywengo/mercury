@@ -211,13 +211,13 @@ export class RunService {
         },
       );
 
-      // Skills: the empty + autoSelect contract (section 3.2 step 2) needs the task text and
-      // the available list, so selection happens here, not inside resolvePreset. A nativeNames
-      // backend with preset skills is a guaranteed fatal exit (issue #507's lesson), so preset
-      // skills fail closed for one instead of being silently recorded.
+      // Skills: auto-selection (section 3.2 step 2) needs the task text and the available
+      // list, so the selector runs here, not inside resolvePreset -- which only flags the
+      // case (nothing named a skill, autoSelect not disabled). A nativeNames backend with
+      // preset skills is a guaranteed fatal exit (issue #507's lesson), so preset skills fail
+      // closed for one instead of being silently recorded.
       let skillIds = selection.effectiveSkillIds;
-      const autoSelect = loaded.manifest.skills?.autoSelect !== false;
-      if (skillIds.length === 0 && (input.skills === undefined || input.skills === null) && autoSelect) {
+      if (selection.autoSelect) {
         const skillDelivery = this.deps.agentCapabilities?.()[selection.effectiveAgent.id]?.static?.skills;
         if (skillDelivery !== 'nativeNames') {
           skillIds = this.deps.selector.select(input.task, this.deps.skills.list(), 4);
@@ -387,14 +387,20 @@ export class RunService {
       }
     }
 
-    const constraints: RunConstraints = {
-      maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
-      maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
-      budgetTokens: input.constraints?.budgetTokens,
-      budgetCost: input.constraints?.budgetCost,
-      resourceLimits: input.constraints?.resourceLimits,
-      allowedNetworks: input.constraints?.allowedNetworks,
-    };
+    // With a preset, the snapshot's effectiveConstraints ARE the Run's constraints: resolution
+    // already merged the caller input with preset ceilings/defaults and system policy, and the
+    // executed Run must match what the snapshot records (otherwise the snapshot documents
+    // limits the worker never applies). The legacy path below is the no-preset behavior.
+    const constraints: RunConstraints = presetSnapshot
+      ? presetSnapshot.effectiveConstraints
+      : {
+        maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
+        maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
+        budgetTokens: input.constraints?.budgetTokens,
+        budgetCost: input.constraints?.budgetCost,
+        resourceLimits: input.constraints?.resourceLimits,
+        allowedNetworks: input.constraints?.allowedNetworks,
+      };
 
     // `repository` is the primary (the workspace checks it out); `repositories`
     // holds additional repos cloned under workspace/repos/. When only the list

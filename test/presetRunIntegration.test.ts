@@ -9,9 +9,29 @@ import type { ResolvedRolePreset } from '../src/presets/types.ts';
 // docs/crew/role-presets.md sections 4.1, 5, 6 and 7: selection -> snapshot -> materialization,
 // with the snapshot (not the live registry) as the source of truth.
 
-function makeApi(env: ReturnType<typeof makeEnv>) {
-  return env;
-}
+test('the Run row enforces the snapshot: run.constraints === preset.effectiveConstraints', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false });
+  try {
+    // linux requires.sandbox -> an injected resourceLimits request; caller maxDurationMs is
+    // merged in. The Run's PERSISTED constraints must equal the snapshot's resolved set --
+    // otherwise the snapshot documents limits the worker never applies.
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'Diagnose the failing mount',
+      repository: { localPath: repo },
+      preset: { id: 'linux' },
+      constraints: { maxDurationMs: 45_000 },
+    });
+    const preset = env.runService.getPreset(run.id)!;
+    assert.ok(preset);
+    assert.deepEqual(run.constraints, preset.effectiveConstraints);
+    assert.deepEqual(run.constraints.resourceLimits, {}, 'requires.sandbox injected the isolation request');
+    assert.equal(run.constraints.maxDurationMs, 45_000);
+  } finally {
+    env.close();
+  }
+});
 
 test('a Run with a builtin preset completes end to end with the fake adapter and stores the snapshot', async () => {
   const repo = makeGitRepo(tempDir('mercury-repo-'));

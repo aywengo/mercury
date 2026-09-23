@@ -39,12 +39,20 @@ function rowToSnapshot(row: PresetDbRow): ResolvedRolePreset {
     ...(JSON.parse(row.snapshot_json) as ResolvedRolePreset),
     // Identity columns are authoritative over the JSON: they are what dashboards join on,
     // and a snapshot that disagrees with its own row is a bug this keeps visible rather
-    // than something a reader has to reconcile.
+    // than something a reader has to reconcile. `source` rides the same columns
+    // (source_kind/source_commit/source_path) and writePreset copies snapshot.source into
+    // PROVENANCE.json, so it is reconstructed too -- a JSON that disagrees with its row must
+    // not leak into provenance.
     id: row.preset_id,
     version: row.preset_version,
     role: row.role,
     trust: row.trust as ResolvedRolePreset['trust'],
     contentHash: row.content_hash,
+    source: {
+      kind: row.source_kind as ResolvedRolePreset['source']['kind'],
+      ...(row.source_commit !== null ? { commit: row.source_commit } : {}),
+      relativePath: row.source_path,
+    },
   };
 }
 
