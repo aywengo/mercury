@@ -464,7 +464,9 @@ export class RpcAgentAdapter implements AgentAdapter {
     if (context?.preset) session.preset = context.preset;
     // A retry runs in a fresh workspace; without this rewrite the resume prompt names a context
     // file that is not there. In-process resumes pass no context and keep the file start() wrote.
-    if (context) writeContextFile(session.workspacePath, context);
+    // The file is written into the workspace the resumed process runs in (session.workspacePath),
+    // with the override's pointer fields adopted above.
+    if (context) writeContextFile(session.workspacePath, { ...context, workspace: { ...context.workspace, path: session.workspacePath } });
 
     const sessionDir = join(session.workspacePath, SESSION_DIR_NAME);
     const argv = this.buildArgv({

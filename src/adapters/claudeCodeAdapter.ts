@@ -606,10 +606,13 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     session.cancelled = false;
     session.terminated = false;
     rearmExitGate(session);
-    // A retry runs in a fresh workspace; rewrite the context file when the retry path supplied a
-    // context, or the task text would name a file that is not there. In-process resumes pass no
-    // context and keep the file start() wrote.
-    if (context) writeContextFile(session.context.workspace.path, context);
+    // A retry runs in a fresh workspace; adopt the retry context wholesale so the resumed spawn
+    // (task text, sandbox wrap, preset line) and the rewritten context file describe the SAME
+    // run. In-process resumes pass no context and keep what start() wrote.
+    if (context) {
+      session.context = context;
+      writeContextFile(context.workspace.path, context);
+    }
     // Role Preset parity (#722, docs/crew/role-presets.md section 8): claude -p REQUIRES a prompt,
     // so resume() re-sends the task text via spawnProcess()'s stdin write, and taskText() includes
     // the preset line whenever session.context carries a preset. The role reference is therefore

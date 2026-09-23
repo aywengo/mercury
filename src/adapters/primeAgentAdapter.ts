@@ -406,7 +406,9 @@ export class PrimeAgentAdapter implements AgentAdapter {
     if (context?.preset) session.preset = context.preset;
     // A retry runs in a fresh workspace; without this rewrite the resume prompt names a context
     // file that is not there. In-process resumes pass no context and keep the file start() wrote.
-    if (context) writeContextFile(session.workspacePath, context);
+    // The file is written into the workspace the resumed process runs in (session.workspacePath),
+    // with the override's pointer fields adopted above.
+    if (context) writeContextFile(session.workspacePath, { ...context, workspace: { ...context.workspace, path: session.workspacePath } });
     // The first run's gate settled; a resumed session must be able to settle its own exit, or
     // agent.end on the resume cannot mark done and the events generator never returns.
     rearmExitGate(session);
