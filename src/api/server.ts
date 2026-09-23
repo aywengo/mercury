@@ -183,13 +183,22 @@ export function createApp(deps: ServerDeps): Express {
             now,
             eventStream: deps.stream.metrics(),
             wakeupsReceived: deps.wakeupStats?.() ?? null,
-            // Registry validity at scrape time; omitted when presets are off here, which
-            // keeps the series ABSENT rather than zero (collect.ts).
+            // Registry validity, cached briefly: listAll() walks and hashes preset files
+            // synchronously, and scrapers hit this endpoint every few seconds. 15s staleness
+            // is invisible on a gauge that moves when an operator edits the catalog, and it
+            // keeps a scrape from turning into continuous filesystem I/O on the event loop.
+            // Omitted when presets are off here, which keeps the series ABSENT rather than
+            // zero (collect.ts).
             presets: deps.runService.presetRegistry()
-              ? () => {
-                const all = deps.runService.presetRegistry()!.listAll();
-                return { valid: all.presets.length, invalid: all.invalid.length };
-              }
+              ? (() => {
+                let cache: { at: number; counts: { valid: number; invalid: number } } | null = null;
+                return () => {
+                  if (cache && Date.now() - cache.at < 15_000) return cache.counts;
+                  const all = deps.runService.presetRegistry()!.listAll();
+                  cache = { at: Date.now(), counts: { valid: all.presets.length, invalid: all.invalid.length } };
+                  return cache.counts;
+                };
+              })()
               : undefined,
           }),
         ),
