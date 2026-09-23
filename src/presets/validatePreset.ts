@@ -6,7 +6,7 @@
 // does not mask the others (a preset with a bad id AND a missing instruction reports both).
 
 import { readlinkSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type {
   PresetConstraintCeilings,
   PresetFinding,
@@ -195,9 +195,17 @@ export function validatePreset(
       required.forEach((id, i) => {
         if (!exists(id)) add('PRESET_SKILL_MISSING', `skills.required[${i}]`, `skill not found: ${JSON.stringify(id)}`);
       });
-      // Cap AFTER deduplication (section 2.1), preserving first occurrence.
+      // Cap AFTER deduplication (section 2.1), preserving first occurrence. The manifest max
+      // participates only when it is a VALID non-negative integer: NaN/Infinity/fractions are
+      // already PRESET_SKILLS_SHAPE findings above, and letting them into Math.min would mask
+      // the cap finding (NaN comparisons are always false) or misreport the bound.
       const deduped = new Set([...required, ...defaults]);
-      const effectiveMax = typeof s.max === 'number' ? Math.min(s.max, PRESET_SKILL_SYSTEM_CAP) : PRESET_SKILL_SYSTEM_CAP;
+      const manifestMax = typeof s.max === 'number' && Number.isInteger(s.max) && s.max >= 0
+        ? s.max
+        : undefined;
+      const effectiveMax = manifestMax !== undefined
+        ? Math.min(manifestMax, PRESET_SKILL_SYSTEM_CAP)
+        : PRESET_SKILL_SYSTEM_CAP;
       if (deduped.size > effectiveMax) {
         add('PRESET_SKILL_CAP', 'skills',
           `required + defaults name ${deduped.size} distinct skills; the effective maximum is ${effectiveMax}`);

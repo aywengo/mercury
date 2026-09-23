@@ -8,7 +8,7 @@
 
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { dataPath } from '../paths.ts';
 import { NotFoundError, ValidationError } from '../domain/errors.ts';
 import { assertNoSymlinkBelow, compareSkillIds, resolveContained } from '../skills/skillRegistry.ts';

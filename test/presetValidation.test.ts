@@ -163,6 +163,18 @@ test('cap is enforced AFTER deduplication and system-capped', () => {
   assert.ok(res3.findings.some((f) => f.code === 'PRESET_SKILL_CAP' && f.field === 'skills.max'));
 });
 
+test('an invalid skills.max does not mask the cap finding', () => {
+  // NaN max would make every Math.min comparison false and silently skip the cap check.
+  const nan = {
+    ...structuredClone(VALID),
+    skills: { defaults: ['a', 'b'], required: ['c', 'd', 'e'], max: Number.NaN },
+  };
+  const res = validatePreset('reviewer', presetDir(nan), nan, { skillExists: () => true });
+  assert.ok(res.findings.some((f) => f.code === 'PRESET_SKILLS_SHAPE' && f.field === 'skills.max'));
+  assert.ok(res.findings.some((f) => f.code === 'PRESET_SKILL_CAP'),
+    'the cap finding must still fire with the system cap: ' + JSON.stringify(res.findings));
+});
+
 test('a required agent must exist and required=true demands agent.id', () => {
   const unknown = { ...structuredClone(VALID), agent: { id: 'nope', required: true } };
   const res = validatePreset('reviewer', presetDir(unknown), unknown, { knownAgents: ['fake', 'claude'] });
