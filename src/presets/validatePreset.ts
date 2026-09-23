@@ -410,10 +410,13 @@ function checkDefaultsAgainstCeilings(
   ceilings: PresetConstraintCeilings,
   add: (code: string, field: string, message: string) => void,
 ): void {
+  // Shape-invalid fields are already reported as PRESET_CONSTRAINT by the per-object checks;
+  // this cross-check must never throw on them (one malformed aspect does not mask the others),
+  // so every access is guarded and invalid shapes simply produce no cross-check finding.
   for (const key of ['maxDurationMs', 'maxRetries'] as const) {
     const d = defaults[key];
     const ceiling = ceilings[key];
-    if (d === undefined || ceiling === undefined) continue;
+    if (typeof d !== 'number' || typeof ceiling !== 'number') continue;
     if (d > ceiling) {
       add(
         'PRESET_DEFAULT_EXCEEDS_CEILING',
@@ -423,18 +426,22 @@ function checkDefaultsAgainstCeilings(
     }
   }
   if (ceilings.networkMode === 'none'
-    && defaults.allowedNetworks !== undefined && defaults.allowedNetworks.length > 0) {
+    && Array.isArray(defaults.allowedNetworks) && defaults.allowedNetworks.length > 0) {
     add(
       'PRESET_DEFAULT_EXCEEDS_CEILING',
       'constraints.defaults.allowedNetworks',
       `network ceiling is 'none' but defaults allow ${defaults.allowedNetworks.length} network(s)`,
     );
   }
-  if (ceilings.resourceLimits !== undefined && defaults.resourceLimits !== undefined) {
+  const drl = defaults.resourceLimits;
+  const crl = ceilings.resourceLimits;
+  if (drl !== undefined && crl !== undefined
+    && typeof drl === 'object' && !Array.isArray(drl)
+    && typeof crl === 'object' && !Array.isArray(crl)) {
     for (const key of ['cpu', 'memory', 'disk'] as const) {
-      const d = defaults.resourceLimits[key];
-      const ceiling = ceilings.resourceLimits[key];
-      if (d === undefined || ceiling === undefined) continue;
+      const d = drl[key];
+      const ceiling = crl[key];
+      if (typeof d !== 'string' || typeof ceiling !== 'string') continue;
       if (d !== ceiling) {
         add(
           'PRESET_DEFAULT_EXCEEDS_CEILING',

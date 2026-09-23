@@ -257,6 +257,29 @@ test('a resourceLimits default differing from its ceiling is refused at load, no
   ));
 });
 
+test('invalid constraint shapes never make the cross-check throw (#723, review)', () => {
+  // validatePreset accumulates findings; the defaults-vs-ceilings pass must not turn a shape
+  // error already reported as PRESET_CONSTRAINT into an exception that masks the rest.
+  const body = {
+    ...structuredClone(VALID),
+    constraints: {
+      defaults: {
+        maxDurationMs: 'lots' as unknown as number,
+        allowedNetworks: null,
+        resourceLimits: { memory: null },
+      },
+      ceilings: {
+        maxDurationMs: '600_000' as unknown as number,
+        networkMode: 'none',
+        resourceLimits: { memory: null },
+      },
+    },
+  };
+  const res = validatePreset('reviewer', presetDir(body), body);
+  assert.ok(res.findings.some((f) => f.code === 'PRESET_CONSTRAINT'));
+  assert.deepEqual(res.findings.filter((f) => f.code === 'PRESET_DEFAULT_EXCEEDS_CEILING'), []);
+});
+
 test('defaults equal to their ceilings stay valid (#723)', () => {
   const body = {
     ...structuredClone(VALID),
