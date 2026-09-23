@@ -46,9 +46,10 @@ export interface ResolvedPresetSelection {
    */
   effectiveSkillIds: string[];
   /**
-   * True only when nothing named a skill and the preset has not disabled auto-selection:
-   * RunService must run the deterministic selector. An explicit caller `[]` keeps this
-   * false -- "no skills" is a decision, not an absence of one.
+   * True when the start list was empty, the caller provided no list, and the preset has not
+   * disabled auto-selection: RunService must run the deterministic selector and then append the
+   * preset's required skills (#724). An explicit caller `[]` keeps this false -- "no skills" is
+   * a decision, not an absence of one.
    */
   autoSelect: boolean;
   /** Effective skill maximum (min of the manifest max and the system cap) for the selector budget. */
