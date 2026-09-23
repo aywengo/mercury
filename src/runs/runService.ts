@@ -225,7 +225,16 @@ export class RunService {
           // selector's budget shrinks by the required count so the merged, deduplicated list
           // still fits the effective maximum without dropping a required skill -- required
           // skills are "always present" by definition.
-          const required = selection.effectiveSkillIds;
+          // Validation caps DISTINCT ids, so dedupe before the budget math: duplicates in the
+          // required list would otherwise shrink the selector's budget more than the final
+          // deduped list needs.
+          const required: string[] = [];
+          const seenRequired = new Set<string>();
+          for (const id of selection.effectiveSkillIds) {
+            if (seenRequired.has(id)) continue;
+            seenRequired.add(id);
+            required.push(id);
+          }
           const cap = selection.skillCap;
           const picks = this.deps.selector.select(
             input.task,
