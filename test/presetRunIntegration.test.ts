@@ -300,6 +300,11 @@ test('per-run log lines carry the preset dimensions (id, version, trust); no-pre
     const plainExecuting = lines.find((l) => l.msg === 'executing run' && l.fields.runId === plain.id);
     assert.ok(plainExecuting);
     assert.equal(plainExecuting!.fields.presetId, undefined, 'no preset -> no preset label');
+
+    // Other per-run sites (finalize) get the same dimensions, not just the first line.
+    const completed = lines.find((l) => l.msg === 'run completed' && l.fields.runId === run.id);
+    assert.ok(completed, 'the finalize line was captured');
+    assert.equal(completed!.fields.presetId, 'reviewer');
   } finally {
     env.close();
   }

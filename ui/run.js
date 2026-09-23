@@ -108,8 +108,9 @@ function renderGoal(goal) {
 /**
  * The resolved preset snapshot as a read-only identity block (docs/crew/role-presets.md
  * section 9): which role, which bytes (content hash), what the agent was told to be, and the
- * effective skills/constraints the snapshot resolved to. Absent -> the section stays empty,
- * because a Run without a preset has no role to show and a blank would read as "hidden".
+ * effective skills/constraints the snapshot resolved to. Absent -> an explicit "—" placeholder,
+ * because a Run without a preset has no role to show, and hiding the section entirely would read
+ * as the page forgetting the feature exists rather than as "this Run has no role".
  */
 function renderPreset(preset) {
   const el = $('f-preset');

@@ -288,13 +288,13 @@ export class Worker {
   }
 
   private async execute(run: Run): Promise<void> {
-    // The snapshot row is the label source for every log line of this Run (section 10). One
-    // indexed read; null for the common no-preset case.
+    // Warm the per-run log-label cache (section 10); also the materialization source below.
     const presetRow = this.deps.runService.getPreset(run.id);
-    const presetDims = presetRow
-      ? { id: presetRow.id, version: presetRow.version, trust: presetRow.trust }
-      : undefined;
-    const log = this.logger(run.id, presetDims);
+    this.presetLogCache = {
+      runId: run.id,
+      ...(presetRow ? { dims: { id: presetRow.id, version: presetRow.version, trust: presetRow.trust } } : {}),
+    };
+    const log = this.logger(run.id);
     // A worker MUST verify the Run is still in a non-terminal state and that it
     // holds the lease before executing (Mercury.md section 17).
     const current = this.deps.runs.get(run.id);
@@ -1350,15 +1350,32 @@ export class Worker {
     }
   }
 
-  private logger(runId: string, preset?: { id: string; version: string; trust: string }) {
-    // Role dimensions ride every per-run log line (docs/crew/role-presets.md section 10).
-    // The values come from the stored snapshot row, not the live registry, so the log for a
-    // Run agrees with what the Run actually carries even if the operator edits the manifest
-    // later. Bounded labels: id/version/trust are catalog-controlled, never paths or URLs.
+  /**
+   * Per-run log bindings. Role dimensions ride EVERY per-run log line (docs/crew/role-presets.md
+   * section 10) — drive, agent events, finalize, auto-retry — so the lookup lives here instead of
+   * at each call site, where a missed argument silently drops the labels. The values come from
+   * the stored snapshot row, not the live registry, so the log for a Run agrees with what the Run
+   * actually carries even if the operator edits the manifest later. Bounded labels: id/version/
+   * trust are catalog-controlled, never paths or URLs.
+   *
+   * The memo holds ONE run: a worker executes (at most) one Run at a time on this path, and
+   * handleAgentEvent fires per agent event, so a map would grow for no benefit.
+   */
+  private presetLogCache: { runId: string; dims?: { id: string; version: string; trust: string } } | null = null;
+
+  private logger(runId: string): Logger {
+    if (this.presetLogCache?.runId !== runId) {
+      const snapshot = this.deps.runService.getPreset(runId);
+      this.presetLogCache = {
+        runId,
+        ...(snapshot ? { dims: { id: snapshot.id, version: snapshot.version, trust: snapshot.trust } } : {}),
+      };
+    }
+    const dims = this.presetLogCache.dims;
     return this.deps.logger.child({
       runId,
       workerId: this.deps.workerId,
-      ...(preset ? { presetId: preset.id, presetVersion: preset.version, presetTrust: preset.trust } : {}),
+      ...(dims ? { presetId: dims.id, presetVersion: dims.version, presetTrust: dims.trust } : {}),
     });
   }
 
