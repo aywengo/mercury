@@ -131,7 +131,9 @@ a preset is host configuration, not per-owner data (the same rule as
 
 `GET /api/presets` returns `{ presets: [...] }` with the short fields the
 Roles page renders — `id`, `role`, `version`, `tags`, `description`,
-`enabled`, `trust` and `contentHash`. Adding `?diagnostics=1` requires an
+`enabled`, `trust` and `contentHash`. Disabled presets ARE listed, with
+`enabled: false`; the UI renders them visible but unrunnable, and creating a
+Run with one is a domain error. Adding `?diagnostics=1` requires an
 admin token and appends `invalid: [...]` with the per-preset validation
 findings for preset directories that failed to load; invalid presets never
 appear in the browsable list, and registry load failures are startup logs and

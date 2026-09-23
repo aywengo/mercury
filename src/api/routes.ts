@@ -152,7 +152,11 @@ export function createRoutes(deps: RoutesDeps): Router {
       res.status(404).json({ error: 'presets are not served by this process' });
       return;
     }
-    const presets = registry.list().map((p) => ({
+    // includeDisabled: the Roles page renders disabled roles as visible-but-unrunnable
+    // (select disabled, run button off). Hiding them here would make the page's "disabled"
+    // badge dead code and leave an operator's disabled catalog invisible to the UI that
+    // explains why a role cannot run.
+    const presets = registry.list({ includeDisabled: true }).map((p) => ({
       id: p.id,
       role: p.role,
       version: p.version,

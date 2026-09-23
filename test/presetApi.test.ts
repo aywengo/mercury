@@ -179,6 +179,40 @@ test('GET /api/presets diagnostics are admin-gated; unknown preset id is a 404 n
   }
 });
 
+test('the browse list includes disabled presets, marked enabled:false and not runnable', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const root = tempDir('mercury-presets-');
+  const dir = join(root, 'paused');
+  mkdirSync(dir);
+  writeFileSync(join(dir, 'preset.json'), JSON.stringify({
+    schemaVersion: 1, id: 'paused', version: '1.0.0', role: 'Paused role',
+    description: 'temporarily off', enabled: false, instruction: { file: 'INSTRUCTION.md' },
+  }));
+  writeFileSync(join(dir, 'INSTRUCTION.md'), 'Do the paused task carefully.');
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false, presetsDir: root });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const list = await (await fetch(`${url}/api/presets`, {
+      headers: { authorization: 'Bearer tok-alice' },
+    })).json() as { presets: Array<{ id: string; enabled: boolean }> };
+    const paused = list.presets.find((p) => p.id === 'paused');
+    assert.ok(paused, 'a disabled preset must still be listed');
+    assert.equal(paused!.enabled, false);
+    // and creating a Run with it is the existing domain rejection.
+    const res = await fetch(`${url}/api/runs`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer tok-alice', 'content-type': 'application/json' },
+      body: JSON.stringify({ task: 't', repository: { localPath: repo }, preset: { id: 'paused' } }),
+    });
+    assert.equal(res.status, 400);
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
+
 test('a broken preset directory shows up in admin diagnostics, not in the browsable list', async () => {
   const repo = makeGitRepo(tempDir('mercury-repo-'));
   const root = tempDir('mercury-presets-');
