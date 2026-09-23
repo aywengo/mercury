@@ -7,11 +7,8 @@
 
 import { readlinkSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
-import type {
-  PresetConstraintCeilings,
-  PresetFinding,
-  PresetValidation,
-} from './types.ts';
+import type { RunConstraints } from '../domain/types.ts';
+import type { PresetConstraintCeilings, PresetFinding, PresetValidation } from './types.ts';
 import { ValidationError } from '../domain/errors.ts';
 
 export const PRESET_INSTRUCTION_MAX_BYTES = 32 * 1024;
@@ -260,6 +257,19 @@ export function validatePreset(
       if (c.ceilings !== undefined) {
         validateCeilings(c.ceilings, add);
       }
+      // Defaults must respect the manifest's OWN ceilings (#723): a preset whose defaults
+      // violate its ceilings is unrunnable by construction -- resolution clamps or refuses --
+      // and the author must learn that at load, not at Run creation. Exact-match for
+      // resourceLimits strings, because "narrower" is not comparable until C-5 parses them.
+      if (c.defaults !== undefined && c.ceilings !== undefined
+        && typeof c.defaults === 'object' && c.defaults !== null && !Array.isArray(c.defaults)
+        && typeof c.ceilings === 'object' && c.ceilings !== null && !Array.isArray(c.ceilings)) {
+        checkDefaultsAgainstCeilings(
+          c.defaults as Partial<RunConstraints>,
+          c.ceilings as PresetConstraintCeilings,
+          add,
+        );
+      }
     }
   }
 
@@ -384,6 +394,55 @@ function validateCeilings(
   }
   if (c.networkMode !== undefined && c.networkMode !== 'none' && c.networkMode !== 'bridge') {
     add('PRESET_CONSTRAINT', 'constraints.ceilings.networkMode', 'networkMode must be "none" or "bridge"');
+  }
+}
+
+/**
+ * Defaults versus the manifest's own ceilings (#723). A default above a numeric ceiling is
+ * clamped silently at resolution today; here it becomes a load-time finding so the author sees
+ * it. networkMode 'none' with non-empty default networks would yield bridge at resolution —
+ * wider than the preset's own ceiling. resourceLimits compares exactly: free-form strings are
+ * not orderable until C-5 parses them, so any difference is a finding under the same rule
+ * resolution applies to callers.
+ */
+function checkDefaultsAgainstCeilings(
+  defaults: Partial<RunConstraints>,
+  ceilings: PresetConstraintCeilings,
+  add: (code: string, field: string, message: string) => void,
+): void {
+  for (const key of ['maxDurationMs', 'maxRetries'] as const) {
+    const d = defaults[key];
+    const ceiling = ceilings[key];
+    if (d === undefined || ceiling === undefined) continue;
+    if (d > ceiling) {
+      add(
+        'PRESET_DEFAULT_EXCEEDS_CEILING',
+        `constraints.defaults.${key}`,
+        `default ${d} exceeds the preset ceiling of ${ceiling}`,
+      );
+    }
+  }
+  if (ceilings.networkMode === 'none'
+    && defaults.allowedNetworks !== undefined && defaults.allowedNetworks.length > 0) {
+    add(
+      'PRESET_DEFAULT_EXCEEDS_CEILING',
+      'constraints.defaults.allowedNetworks',
+      `network ceiling is 'none' but defaults allow ${defaults.allowedNetworks.length} network(s)`,
+    );
+  }
+  if (ceilings.resourceLimits !== undefined && defaults.resourceLimits !== undefined) {
+    for (const key of ['cpu', 'memory', 'disk'] as const) {
+      const d = defaults.resourceLimits[key];
+      const ceiling = ceilings.resourceLimits[key];
+      if (d === undefined || ceiling === undefined) continue;
+      if (d !== ceiling) {
+        add(
+          'PRESET_DEFAULT_EXCEEDS_CEILING',
+          `constraints.defaults.resourceLimits.${key}`,
+          `default ${JSON.stringify(d)} differs from the preset ceiling ${JSON.stringify(ceiling)}`,
+        );
+      }
+    }
   }
 }
 
