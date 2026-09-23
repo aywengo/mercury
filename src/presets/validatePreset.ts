@@ -9,6 +9,7 @@ import { readlinkSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { RunConstraints } from '../domain/types.ts';
 import type { PresetConstraintCeilings, PresetFinding, PresetValidation } from './types.ts';
+import { parseByteLimit, parseCpuLimit } from '../sandbox/resourceLimits.ts';
 import { ValidationError } from '../domain/errors.ts';
 
 export const PRESET_INSTRUCTION_MAX_BYTES = 32 * 1024;
@@ -342,6 +343,17 @@ function validateConstraintObject(
           add('PRESET_CONSTRAINT', `${field}.resourceLimits.${k}`, `unknown resourceLimits key: ${k}`);
         } else if (typeof v !== 'string') {
           add('PRESET_CONSTRAINT', `${field}.resourceLimits.${k}`, 'must be a string');
+        } else {
+          // Section 3.3: malformed values are a registry finding at load, not a container-start
+          // failure. Same parsers Run creation uses (#725).
+          if (k === 'cpu' && parseCpuLimit(v) === null) {
+            add('PRESET_CONSTRAINT', `${field}.resourceLimits.cpu`,
+              `${JSON.stringify(v)} is not a positive decimal (e.g. "1.5")`);
+          }
+          if (k !== 'cpu' && parseByteLimit(v) === null) {
+            add('PRESET_CONSTRAINT', `${field}.resourceLimits.${k}`,
+              `${JSON.stringify(v)} is not a positive integer with an optional b/k/m/g suffix (e.g. "512m")`);
+          }
         }
       }
     }

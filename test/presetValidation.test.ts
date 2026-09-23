@@ -210,6 +210,32 @@ test('negative, non-finite and non-integer constraint numbers are PRESET_CONSTRA
   assert.ok(codes.includes('constraints.ceilings.networkMode'));
 });
 
+test('malformed resourceLimits values are PRESET_CONSTRAINT findings at load (#725)', () => {
+  const body = {
+    ...structuredClone(VALID),
+    constraints: {
+      defaults: {
+        resourceLimits: { cpu: 'x', memory: 'abc', disk: '0m' },
+      },
+    },
+  };
+  const res = validatePreset('reviewer', presetDir(body), body);
+  const fields = res.findings.filter((f) => f.code === 'PRESET_CONSTRAINT').map((f) => f.field);
+  assert.ok(fields.includes('constraints.defaults.resourceLimits.cpu'));
+  assert.ok(fields.includes('constraints.defaults.resourceLimits.memory'));
+  assert.ok(fields.includes('constraints.defaults.resourceLimits.disk'));
+  // Valid forms produce no finding.
+  const good = {
+    ...structuredClone(VALID),
+    constraints: { defaults: { resourceLimits: { cpu: '1.5', memory: '512M', disk: '10g' } } },
+  };
+  const res2 = validatePreset('reviewer', presetDir(good), good);
+  assert.deepEqual(
+    res2.findings.filter((f) => f.field.startsWith('constraints.defaults.resourceLimits')),
+    [],
+  );
+});
+
 test('defaults above the manifest ceilings are PRESET_DEFAULT_EXCEEDS_CEILING (#723)', () => {
   const body = {
     ...structuredClone(VALID),
