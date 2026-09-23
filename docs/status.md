@@ -346,7 +346,8 @@ Crew is being designed as four staged products:
 Milestone A (builtin Role Presets: registry, Run resolution and snapshots,
 read API, dashboard Roles page) is implemented and reviewed; see
 [`crew/roadmap.md`](crew/roadmap.md) for what shipped in each phase. Per-run
-MCP, the Preset Store and Workflow Templates remain design-only.
+MCP, Git-backed preset distribution and owner drafts, and Workflow Templates
+remain design-only.
 
 ### OIDC/SSO
 
