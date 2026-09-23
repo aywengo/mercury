@@ -43,7 +43,10 @@ export interface PresetRegistryDeps {
  */
 function sanitizeLoadError(err: unknown, rootDir: string): string {
   let msg = String(err instanceof Error ? err.message : err);
+  // Strip the root with AND without a trailing separator: readdir/scandir errors quote the
+  // directory itself ('scandir .../presets'), read errors quote files below it.
   msg = msg.split(rootDir + sep).join('');
+  msg = msg.split(rootDir).join('.');
   msg = msg.replace(/(?:\/[A-Za-z0-9._-]+)+/g, (m) => m.slice(m.lastIndexOf('/') + 1));
   return msg.length > 300 ? msg.slice(0, 300) + '…' : msg;
 }
