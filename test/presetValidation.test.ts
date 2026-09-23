@@ -266,12 +266,12 @@ test('invalid constraint shapes never make the cross-check throw (#723, review)'
       defaults: {
         maxDurationMs: 'lots' as unknown as number,
         allowedNetworks: null,
-        resourceLimits: { memory: null },
+        resourceLimits: null,
       },
       ceilings: {
         maxDurationMs: '600_000' as unknown as number,
         networkMode: 'none',
-        resourceLimits: { memory: null },
+        resourceLimits: null,
       },
     },
   };

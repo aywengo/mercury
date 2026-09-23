@@ -442,7 +442,8 @@ function checkDefaultsAgainstCeilings(
   }
   const drl = defaults.resourceLimits;
   const crl = ceilings.resourceLimits;
-  if (drl !== undefined && crl !== undefined
+  // typeof null === 'object', so null needs its own guard before any property access.
+  if (drl !== null && crl !== null && drl !== undefined && crl !== undefined
     && typeof drl === 'object' && !Array.isArray(drl)
     && typeof crl === 'object' && !Array.isArray(crl)) {
     for (const key of ['cpu', 'memory', 'disk'] as const) {
