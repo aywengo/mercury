@@ -98,6 +98,24 @@ export function createApp(deps: ServerDeps): Express {
   const app = express();
   const sessions = deps.sessions ?? createSessionStore();
 
+  // Registry validity for /metrics, cached across requests (not per request): listAll() walks
+  // and hashes preset files synchronously, and scrapers hit the endpoint every few seconds. A
+  // 15s TTL makes a scrape O(1) filesystem work; the staleness is invisible on a gauge that
+  // moves only when an operator edits the catalog. Defined ONCE here so the cache persists.
+  // Null when presets are off in this process, which keeps the series ABSENT rather than zero
+  // (collect.ts).
+  const presetValidityProvider = deps.runService.presetRegistry()
+    ? (() => {
+      let cache: { at: number; counts: { valid: number; invalid: number } } | null = null;
+      return () => {
+        if (cache && Date.now() - cache.at < 15_000) return cache.counts;
+        const all = deps.runService.presetRegistry()!.listAll();
+        cache = { at: Date.now(), counts: { valid: all.presets.length, invalid: all.invalid.length } };
+        return cache.counts;
+      };
+    })()
+    : undefined;
+
   // Set before any middleware that reads req.ip. Default (0 / undefined) leaves Express on its
   // own default of trusting nothing, so a direct bind keeps per-socket limits.
   const trustProxy = deps.trustProxy ?? 0;
@@ -183,23 +201,7 @@ export function createApp(deps: ServerDeps): Express {
             now,
             eventStream: deps.stream.metrics(),
             wakeupsReceived: deps.wakeupStats?.() ?? null,
-            // Registry validity, cached briefly: listAll() walks and hashes preset files
-            // synchronously, and scrapers hit this endpoint every few seconds. 15s staleness
-            // is invisible on a gauge that moves when an operator edits the catalog, and it
-            // keeps a scrape from turning into continuous filesystem I/O on the event loop.
-            // Omitted when presets are off here, which keeps the series ABSENT rather than
-            // zero (collect.ts).
-            presets: deps.runService.presetRegistry()
-              ? (() => {
-                let cache: { at: number; counts: { valid: number; invalid: number } } | null = null;
-                return () => {
-                  if (cache && Date.now() - cache.at < 15_000) return cache.counts;
-                  const all = deps.runService.presetRegistry()!.listAll();
-                  cache = { at: Date.now(), counts: { valid: all.presets.length, invalid: all.invalid.length } };
-                  return cache.counts;
-                };
-              })()
-              : undefined,
+            presets: presetValidityProvider,
           }),
         ),
       );
