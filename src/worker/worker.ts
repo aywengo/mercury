@@ -3,7 +3,8 @@
 // (Mercury.md sections 4.3, 17, 19-21).
 
 import type { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isTerminal, STUCK_CANDIDATE_STATUSES } from '../domain/stateMachine.ts';
 import { harnessMayRevise, translateHarnessGoal, type HarnessGoalReport } from '../domain/goalEvents.ts';
@@ -14,6 +15,7 @@ import type {
   AgentAdapter,
   AgentCapabilitySummary, AgentEvent, AgentExit, AgentHandle, AgentInput, ErrorKind, Run, RunContext, ResolvedSkill,
 } from '../domain/types.ts';
+import type { ResolvedRolePreset } from '../presets/types.ts';
 import type { EventStore } from '../events/eventStore.ts';
 import type { Logger } from '../logger.ts';
 import { RunQueue, LEASE_EXPIRED_ERROR } from '../queue/runQueue.ts';
@@ -349,6 +351,23 @@ export class Worker {
       const skills = this.deps.runService.getSkills(run.id);
       await writeSkills(workspace.path, skills);
 
+      // Role Preset materialization (docs/crew/role-presets.md section 7): from the stored
+      // snapshot bytes, never a live registry read -- the snapshot is the source of truth and
+      // a source edit after creation must not change what this Run executes (section 4.1).
+      const presetSnapshot = this.deps.runService.getPreset(run.id);
+      let presetContext: RunContext['preset'];
+      if (presetSnapshot) {
+        const materialized = writePreset(workspace.path, presetSnapshot);
+        presetContext = materialized;
+        this.deps.events.append(run.id, 'preset.materialized', {
+          presetId: presetSnapshot.id,
+          version: presetSnapshot.version,
+          fileCount: Object.keys(presetSnapshot.files).length,
+          byteCount: materialized.byteCount,
+          instructionHash: createHash('sha256').update(presetSnapshot.instruction).digest('hex'),
+        });
+      }
+
       // Exclude every generated path from the git view (section 9.4), for EVERY Run, not only pack
       // Runs. The adapters write `.mercury-context.json` for every Run (prime, rpc, daemon, claude),
       // and `materializeKnowledge` below only runs when a pack exists -- so a no-pack Run's context
@@ -437,6 +456,7 @@ export class Worker {
         // database behind the worker.
         goal: this.deps.goals?.get(run.id) ?? undefined,
         ...(knowledgePointer ? { knowledge: knowledgePointer } : {}),
+        ...(presetContext ? { preset: presetContext } : {}),
       };
 
       // Resume wiring (roadmap p11): a retry run resumes the parent's agent
@@ -1355,6 +1375,70 @@ export async function writeSkills(workspacePath: string, skills: ResolvedSkill[]
       writeFileSync(dest, content);
     }
   }
+}
+
+/**
+ * Materialize a Run's Role Preset from its STORED snapshot (docs/crew/role-presets.md section 7):
+ *
+ *   workspace/.mercury/preset/preset.json
+ *   workspace/.mercury/preset/INSTRUCTION.md   (or the manifest's instruction file name)
+ *   workspace/.mercury/preset/PROVENANCE.json
+ *
+ * Exported for tests: the write side of the snapshot contract, next to writeSkills. Every
+ * destination is contained (issue #58's write-side rule) and the snapshot's files map is the
+ * only input -- the live registry is never consulted here, because a source edit between
+ * creation and execution must not change the bytes a queued Run sees (section 4.1).
+ */
+export function writePreset(
+  workspacePath: string,
+  snapshot: ResolvedRolePreset,
+): { id: string; role: string; instructionPath: string; instruction: string; model?: string; byteCount: number } {
+  const presetRoot = join(workspacePath, '.mercury', 'preset');
+  let byteCount = 0;
+  for (const [rel, content] of Object.entries(snapshot.files)) {
+    // Contained on both halves, like writeSkills. Snapshot keys are preset-relative POSIX paths
+    // produced by the registry, but this is the write side and must not depend on that.
+    const dest = resolveContained(presetRoot, rel);
+    mkdirSync(join(dest, '..'), { recursive: true });
+    writeFileSync(dest, content);
+    byteCount += Buffer.byteLength(content, 'utf8');
+  }
+  const provenance = {
+    presetId: snapshot.id,
+    version: snapshot.version,
+    role: snapshot.role,
+    trust: snapshot.trust,
+    contentHash: snapshot.contentHash,
+    source: snapshot.source,
+    instructionFile: instructionPathOf(snapshot),
+  };
+  const provDest = resolveContained(presetRoot, 'PROVENANCE.json');
+  writeFileSync(provDest, JSON.stringify(provenance, null, 2));
+  byteCount += Buffer.byteLength(JSON.stringify(provenance, null, 2), 'utf8');
+  const instructionPath = `.mercury/preset/${instructionPathOf(snapshot)}`;
+  return {
+    id: snapshot.id,
+    role: snapshot.role,
+    instructionPath,
+    instruction: snapshot.instruction,
+    ...(snapshot.effectiveAgent.model !== undefined ? { model: snapshot.effectiveAgent.model } : {}),
+    byteCount,
+  };
+}
+
+/** The manifest-declared instruction file name, defaulting to INSTRUCTION.md (section 2). */
+function instructionPathOf(snapshot: ResolvedRolePreset): string {
+  const m = snapshot.files['preset.json'];
+  if (m) {
+    try {
+      const parsed = JSON.parse(m) as { instruction?: { file?: string } };
+      return parsed.instruction?.file ?? 'INSTRUCTION.md';
+    } catch {
+      // Unparsable manifest inside a committed snapshot would mean the creation write was
+      // corrupted; materializing the default name fails the read below loudly instead.
+    }
+  }
+  return 'INSTRUCTION.md';
 }
 
 /** Read the persisted agent session file from a workspace (.mercury-session-path). */

@@ -59,6 +59,7 @@ import { SandboxManager } from './sandbox/sandboxManager.ts';
 import { Worker } from './worker/worker.ts';
 import { startServer } from './api/server.ts';
 import { dataPath } from './paths.ts';
+import { PresetRegistry } from './presets/presetRegistry.ts';
 import { runHostInstall } from './host/install.ts';
 import { runHostProbe } from './host/probe.ts';
 import { runHostSetup } from './host/setup.ts';
@@ -574,12 +575,21 @@ async function main(): Promise<void> {
   // `knowledge pull` left them.
   const knowledgeReplica = config.knowledge.atlas ? new ReplicaStore(db) : null;
 
+  // Role Presets ship with the package (docs/crew/role-presets.md section 2). Built here so the
+  // referenced-skill check reads the SAME registry Runs resolve against, and the required-agent
+  // check reads the SAME adapter list Runs validate against.
+  const presets = new PresetRegistry(dataPath('presets'), {
+    skills,
+    knownAgents: Object.keys(gatedAdapters),
+  });
+
   const runService = new RunService({
     db,
     runs,
     events,
     skills,
     selector,
+    presets,
     knownAgents: Object.keys(gatedAdapters),
     agentCapabilities: () => agentCapabilities.snapshot(),
     goals,

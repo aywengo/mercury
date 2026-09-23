@@ -333,6 +333,33 @@ export const MIGRATIONS: string[] = [
   -- which is why this is a DELETE and not an UPDATE to zero.
   DELETE FROM knowledge_replica_cursor;
   `,
+  // v12: the per-Run Role Preset snapshot (docs/crew/role-presets.md section 6).
+  //
+  // One row per Run, written inside the Run-creation transaction next to run_skills. The row
+  // carries the IDENTITY columns the dashboards aggregate on (preset_id, version, role, trust,
+  // hash, source) and the full SNAPSHOT as JSON -- the same split run_skills uses. The database
+  // stores only immutable per-Run snapshots; the preset DEFINITION stays a file on disk.
+  //
+  // snapshot_json is the executable truth: the worker materializes from these bytes and never
+  // re-reads the live registry, so editing or deleting a preset after creation cannot change
+  // what a queued Run does (section 4.1, the run_skills lesson).
+  `
+  CREATE TABLE IF NOT EXISTS run_presets (
+    run_id          TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    preset_id       TEXT NOT NULL,
+    preset_version  TEXT NOT NULL,
+    role            TEXT NOT NULL,
+    trust           TEXT NOT NULL,
+    content_hash    TEXT NOT NULL,
+    source_kind     TEXT NOT NULL,
+    source_commit   TEXT,
+    source_path     TEXT NOT NULL,
+    snapshot_json   TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_run_presets_identity
+    ON run_presets(preset_id, preset_version);
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

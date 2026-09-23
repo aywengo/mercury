@@ -16,6 +16,7 @@ import { RunService } from '../src/runs/runService.ts';
 import { AgentCapabilityRegistry } from '../src/adapters/capabilities.ts';
 import { GoalStore } from '../src/runs/goalStore.ts';
 import { settleGoalOnTerminal } from '../src/runs/goalSettlement.ts';import { SkillRegistry } from '../src/skills/skillRegistry.ts';
+import { PresetRegistry } from '../src/presets/presetRegistry.ts';
 import { createSkillSelector } from '../src/skills/skillSelector.ts';
 import { WorkspaceManager } from '../src/workspace/workspaceManager.ts';
 import { FakeAgentAdapter, type FakeAgentConfig } from '../src/adapters/fakeAgentAdapter.ts';
@@ -74,6 +75,11 @@ export function makeEnv(opts: {
    */
   skillsDir?: string;
   /**
+   * Preset registry root (default: this repo's `presets/`). Tests that create malformed
+   * presets point this at a temp dir instead of editing the shipped catalog.
+   */
+  presetsDir?: string;
+  /**
    * Knowledge selection deps for the RunService, mirroring src/cli.ts.
    *
    * Optional and spread rather than always set, so a test that does not ask for knowledge gets a
@@ -120,12 +126,19 @@ export function makeEnv(opts: {
   const agentCapabilities = new AgentCapabilityRegistry(adapters);
   if (opts.probeCapabilities) agentCapabilities.start();
 
+  // Presets default to the shipped catalog; a test can point the registry at a temp dir to
+  // mutate definitions (the same reason skillsDir exists).
+  const presets = new PresetRegistry(opts.presetsDir ?? join(import.meta.dirname, '..', 'presets'), {
+    skills,
+    knownAgents: Object.keys(adapters),
+  });
   const runService = new RunService({
     db,
     runs,
     events,
     skills,
     selector: createSkillSelector(),
+    presets,
     knownAgents: Object.keys(adapters),
     agentCapabilities: () => agentCapabilities.snapshot(),
     goals,

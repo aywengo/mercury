@@ -204,6 +204,9 @@ export function createRoutes(deps: RoutesDeps): Router {
         // correct, the route was correct, and the block was unreachable over HTTP. Same shape of defect as
         // the knowledgeNotes wiring in #539 -- unit tests of both halves cannot see the seam.
         knowledge: body.knowledge,
+        // Same seam, same lesson (docs/crew/role-presets.md section 5): the preset block is
+        // forwarded unresolved so HTTP and in-process callers hit identical validation.
+        preset: body.preset,
         idempotencyKey: typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined,
       });
       res.status(201).json({ runId: run.id, status: run.status });
@@ -246,6 +249,10 @@ export function createRoutes(deps: RoutesDeps): Router {
       run,
       skills: deps.runService.getSkills(run.id),
       goal: deps.runService.getGoal(run.id),
+      // Sibling rather than a field on `run` (same shape as `goal`): the snapshot is immutable
+      // per-Run data with its own lifecycle. The full instruction text is included; runtime
+      // secrets never enter a snapshot (section 9: "never runtime secrets").
+      preset: deps.runService.getPreset(run.id),
       // Sibling rather than a field on `run`, for the same reason `goal` is: the pack is a snapshot with
       // its own lifecycle, and folding it in would make `GET /api/runs` carry a blob nobody lists.
       knowledge: deps.runService.getKnowledge(run.id),

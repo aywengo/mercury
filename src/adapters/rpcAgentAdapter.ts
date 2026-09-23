@@ -343,6 +343,16 @@ export class RpcAgentAdapter implements AgentAdapter {
       // than written as null when there is no pack, so a Run without knowledge has a context file
       // identical to the one it had before this feature existed.
       ...(context.knowledge ? { knowledge: context.knowledge } : {}),
+      // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, hash and
+      // the workspace-relative instruction path. Omitted when the Run has no preset, so the
+      // context file stays byte-identical to the one it had before presets existed.
+      ...(context.preset ? {
+        preset: {
+          id: context.preset.id,
+          role: context.preset.role,
+          instructionPath: context.preset.instructionPath,
+        },
+      } : {}),
     }, null, 2));
 
     const sessionDir = join(workspacePath, SESSION_DIR_NAME);
@@ -511,10 +521,22 @@ export function buildPrompt(context: RunContext): string {
     `Read ${CONTEXT_FILE} in the workspace root for the full run context (repository, branch, base commit, constraints, selected skills).`,
     'The selected skills are available under .agents/skills/ — read the relevant SKILL.md files and follow their guidance.',
     ...(context.knowledge ? [knowledgeLine()] : []),
+    // Role Preset (docs/crew/role-presets.md section 8): prompt-reference. Omitted when the Run
+    // has no preset, so preset-less prompts stay byte-identical.
+    ...(context.preset ? [presetLine(context.preset)] : []),
     '',
     `Work in this workspace (${workspace.path}). Make focused commits with clear messages as you make progress.`,
     'When the task is complete, reply with a concise summary of what you changed and why.',
   ].join('\n');
+}
+
+/**
+ * The one Role Preset line of docs/crew/role-presets.md section 8: name the role and the
+ * materialized instruction file, so the harness is told to follow it. Mirrors knowledgeLine().
+ */
+function presetLine(preset: NonNullable<RunContext['preset']>): string {
+  return `You are filling the role: ${preset.role}. Your role instructions are in`
+    + ` ${preset.instructionPath} — read them before starting and follow them.`;
 }
 
 /** A minimal RunContext reconstructed from a Session, carrying exactly what buildResumePrompt

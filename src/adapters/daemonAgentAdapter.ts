@@ -191,6 +191,13 @@ export class DaemonAgentAdapter implements AgentAdapter {
       // contents, so the daemon must resolve names in its own namespace.
       skills: 'nativeNames',
       humanInput: true,
+      // The supervisor is a per-uid service OUTSIDE any container this worker could set up:
+      // start() refuses sandboxed runs outright, so declaring sandbox true would advertise a
+      // capability start() throws on. roleInstruction is unmeasured for the daemon protocol,
+      // which under the §8 vocabulary means 'none' -- a preset demanding instruction behavior
+      // fails closed rather than silently dropping the role.
+      sandbox: false,
+      mcp: 'none',
     },
   };
   private opts: DaemonAgentAdapterOptions;
@@ -247,6 +254,16 @@ export class DaemonAgentAdapter implements AgentAdapter {
       // than written as null when there is no pack, so a Run without knowledge has a context file
       // identical to the one it had before this feature existed.
       ...(context.knowledge ? { knowledge: context.knowledge } : {}),
+      // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, hash and
+      // the workspace-relative instruction path. Omitted when the Run has no preset, so the
+      // context file stays byte-identical to the one it had before presets existed.
+      ...(context.preset ? {
+        preset: {
+          id: context.preset.id,
+          role: context.preset.role,
+          instructionPath: context.preset.instructionPath,
+        },
+      } : {}),
     }, null, 2));
 
     const sessionDir = join(workspacePath, this.opts.sessionDirName ?? SESSION_DIR_NAME);
