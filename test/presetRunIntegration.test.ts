@@ -325,10 +325,11 @@ test('AC 7: a preset with an instruction is rejected at creation on a roleInstru
         ownerId: 'alice', task: 't', repository: { localPath: repo },
         preset: { id: 'reviewer' }, agent: 'hermes',
       }),
-      /agent "hermes" cannot receive one \(roleInstruction: none\)/,
+      /agent "hermes" cannot receive one \(roleInstruction: none -- the agent's static block declares roleInstruction: 'none'\)/,
     );
-    // Nothing was written: no Run row, no run_presets row.
-    assert.equal(env.runService.getPreset('nonexistent'), null);
+    // Nothing was written: no Run row for this owner, no run_presets row at all.
+    assert.deepEqual(env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 50 }).runs, []);
+    assert.equal((env.db.prepare('SELECT COUNT(*) AS n FROM run_presets').get() as { n: number }).n, 0);
   } finally {
     env.close();
   }

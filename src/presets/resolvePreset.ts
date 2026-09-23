@@ -137,10 +137,18 @@ function resolveAgent(
   // a 'none' agent to be admissible on.
   const stat = caps.staticCapabilities?.(id);
   if (stat === undefined || stat.roleInstruction === undefined || stat.roleInstruction === 'none') {
+    // Three distinct reasons, three distinct wordings: an operator fixing this needs to know
+    // whether the adapter was never measured ('unknown'), simply does not declare the field
+    // ('undeclared'), or measured 'none'. All three refuse; only the first two are fixable by
+    // declaring an honest value.
+    const declared = stat === undefined
+      ? 'unknown -- the agent has no declared static capabilities'
+      : stat.roleInstruction === undefined
+        ? "undeclared -- the agent's static block omits roleInstruction"
+        : "none -- the agent's static block declares roleInstruction: 'none'";
     throw new ValidationError(
       `preset ${JSON.stringify(manifest.id)} carries a role instruction, but agent`
-      + ` ${JSON.stringify(id)} cannot receive one (roleInstruction:`
-      + ` ${stat?.roleInstruction ?? (stat === undefined ? 'unknown' : 'none')});`
+      + ` ${JSON.stringify(id)} cannot receive one (roleInstruction: ${declared});`
       + ' pick an agent that applies role instructions',
     );
   }

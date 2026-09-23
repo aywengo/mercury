@@ -189,17 +189,15 @@ export class RpcAgentAdapter implements AgentAdapter {
    *  mutates a config before startup is reflected instead of silently stale. */
   get capabilities(): AgentCapabilities {
     const goals = this.cfg.goalSupport;
-    // roleInstruction is an ADAPTER-level fact, not a config-level one: this class renders the
-    // preset line into buildPrompt() unconditionally (section 8), so every RPC backend carries
-    // 'prompt-reference' regardless of what the JSON declares. A config may still narrow it to
-    // 'none' for a backend whose prompts would ignore the line.
-    const stat: AgentStaticCapabilities = {
-      ...(this.cfg.capabilities ?? {}),
-      roleInstruction: this.cfg.capabilities?.roleInstruction ?? 'prompt-reference',
-    };
+    const stat = this.cfg.capabilities;
+    // roleInstruction is declared in the agent's config file, NOT defaulted here: the capability
+    // surface contract is that a config surfaces verbatim and an undeclared config advertises
+    // nothing. The shipped pi/omp configs declare 'prompt-reference' (this class renders
+    // presetLine() into buildPrompt(), section 8); a third-party config without the field is
+    // 'none' by the §8 vocabulary, which is the honest answer for a harness nobody measured.
     // An EMPTY block is omitted rather than surfaced as `static: {}`. An empty object reads as "this
     // backend declares nothing" -- the same claim an absent key makes, but one that was never made.
-    const hasStatic = Object.keys(stat).length > 0;
+    const hasStatic = stat !== undefined && Object.keys(stat).length > 0;
     return {
       ...(goals ? { goals } : {}),
       ...(hasStatic ? { static: stat } : {}),

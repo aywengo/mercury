@@ -118,7 +118,7 @@ test('unknown capabilities fail closed for a model', () => {
   const m = manifest({ agent: { model: 'sonnet' } });
   assert.throws(
     () => resolvePreset(m, {}, SYSTEM, NO_CAPS),
-    /roleInstruction: unknown/,
+    /roleInstruction: unknown -- the agent has no declared static capabilities/,
   );
 });
 
@@ -146,7 +146,7 @@ test('a preset with an instruction fails closed on a roleInstruction-none or unk
   };
   assert.throws(
     () => resolvePreset(withInstruction, { agent: 'hermes' }, SYSTEM, noneCaps),
-    /agent "hermes" cannot receive one \(roleInstruction: none\)/,
+    /agent "hermes" cannot receive one \(roleInstruction: none -- the agent's static block declares roleInstruction: 'none'\)/,
   );
   // sandbox:false + requires.sandbox -> rejected at creation (acceptance 3). daemon carries a
   // capable roleInstruction here so the sandbox leg is what fires.
@@ -164,7 +164,7 @@ test('a preset with an instruction fails closed on a roleInstruction-none or unk
   // Unknown caps + instruction -> rejected (fail closed).
   assert.throws(
     () => resolvePreset(withInstruction, {}, SYSTEM, NO_CAPS),
-    /roleInstruction: unknown/,
+    /roleInstruction: unknown -- the agent has no declared static capabilities/,
   );
 });
 
