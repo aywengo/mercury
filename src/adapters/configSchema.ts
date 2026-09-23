@@ -87,8 +87,10 @@ export const CAPABILITIES_SCHEMA = object({
   humanInput: leaf,
   resume: leaf,
   knowledge: leaf,
-  // Role Preset capability vocabulary (docs/crew/role-presets.md section 8). An RPC config may
-  // narrow roleInstruction to 'none'; the adapter supplies 'prompt-reference' as the default.
+  // Role Preset capability vocabulary (docs/crew/role-presets.md section 8). The schema only
+  // ACCEPTS and value-validates these keys; it supplies no defaults. The shipped pi/omp configs
+  // declare roleInstruction: 'prompt-reference' (their prompts render the preset line); a config
+  // that omits the field is 'none' by the §8 vocabulary, which is what resolution enforces.
   roleInstruction: leaf,
   perRunModel: leaf,
   sandbox: leaf,
