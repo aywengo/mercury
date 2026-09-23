@@ -212,15 +212,50 @@ export class RunService {
       );
 
       // Skills: auto-selection (section 3.2 step 2) needs the task text and the available
-      // list, so the selector runs here, not inside resolvePreset -- which only flags the
-      // case (nothing named a skill, autoSelect not disabled). A nativeNames backend with
+      // list, so the selector runs here, not inside resolvePreset -- which flags the case
+      // (empty start list, autoSelect not disabled). A nativeNames backend with
       // preset skills is a guaranteed fatal exit (issue #507's lesson), so preset skills fail
       // closed for one instead of being silently recorded.
       let skillIds = selection.effectiveSkillIds;
       if (selection.autoSelect) {
         const skillDelivery = this.deps.agentCapabilities?.()[selection.effectiveAgent.id]?.static?.skills;
         if (skillDelivery !== 'nativeNames') {
-          skillIds = this.deps.selector.select(input.task, this.deps.skills.list(), 4);
+          // Section 3.2 as amended by #724: the selector runs whenever the start list is empty,
+          // and the preset's required skills are appended AFTER its picks (steps 3-4). The
+          // selector's budget shrinks by the DISTINCT required count so the merged, deduplicated
+          // list still fits the effective maximum without dropping a required skill -- required
+          // skills are "always present" by definition.
+          // Validation caps DISTINCT ids, so dedupe before the budget math: duplicates in the
+          // required list would otherwise shrink the selector's budget more than the final
+          // deduped list needs.
+          const required: string[] = [];
+          const seenRequired = new Set<string>();
+          for (const id of selection.effectiveSkillIds) {
+            if (seenRequired.has(id)) continue;
+            seenRequired.add(id);
+            required.push(id);
+          }
+          const cap = selection.skillCap;
+          const picks = this.deps.selector.select(
+            input.task,
+            this.deps.skills.list(),
+            Math.max(0, cap - required.length),
+          );
+          const seen = new Set<string>();
+          skillIds = [];
+          for (const id of [...picks, ...required]) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+            skillIds.push(id);
+          }
+          // Step 5, enforced on the final merged list rather than assumed from the budget: a
+          // selector that ignores its budget or an over-cap required set fails the Run at
+          // creation with the same message resolveSkillIds uses for the named path.
+          if (skillIds.length > cap) {
+            throw new ValidationError(
+              `preset resolves to ${skillIds.length} skills; the effective maximum is ${cap}`,
+            );
+          }
         }
       }
       if (skillIds.length > 0

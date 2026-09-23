@@ -166,9 +166,11 @@ export function createSkillSelector(): SkillSelector {
       const picked = scored.slice(0, maxSkills).map((s) => s.id);
       if (picked.length > 0) return picked;
       // An honest empty answer beats a confident wrong one. With fallback suppressed the selector
-      // returns [] rather than four Mercury ids the target backend cannot resolve.
+      // returns [] rather than four Mercury ids the target backend cannot resolve. The fallback
+      // honours maxSkills like the scored path: callers budget by it (runService shrinks the
+      // budget by the preset's required count, #746 review).
       if (!allowFallback) return [];
-      return FALLBACK.filter((id) => available.some((a) => a.id === id));
+      return FALLBACK.filter((id) => available.some((a) => a.id === id)).slice(0, maxSkills);
     },
   };
 }

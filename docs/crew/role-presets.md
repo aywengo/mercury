@@ -153,12 +153,18 @@ Preset skills have two meanings:
 - `required` skills are always present;
 - `defaults` are used when the caller does not provide an explicit skill list.
 
-Resolution is:
+Resolution is (#724, aligned with `resolveSkillIds()`):
 
-1. start with caller skills when non-empty, otherwise preset defaults;
-2. if still empty and `autoSelect` is not false, run the existing deterministic
-   selector;
-3. append required skills;
+1. start with the caller's skills when the caller provides a list — an explicit
+   empty list means "no skills": it suppresses the selector in step 2, since it
+   is a decision rather than an absence, but required skills still apply in
+   step 3 (they cannot be removed); when the caller provides no list, start with
+   the preset defaults;
+2. if the start list is still empty, the caller provided no list, and
+   `autoSelect` is not false, run the existing deterministic selector;
+3. append required skills after the selector's picks; the selector's budget is
+   the effective maximum minus the distinct required count, so the merged list
+   fits step 5 without dropping a required skill;
 4. deduplicate by id while preserving the first occurrence;
 5. enforce the effective maximum;
 6. resolve and snapshot every skill.
