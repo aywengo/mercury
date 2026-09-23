@@ -222,8 +222,8 @@ export class RunService {
         if (skillDelivery !== 'nativeNames') {
           // Section 3.2 as amended by #724: the selector runs whenever the start list is empty,
           // and the preset's required skills are appended AFTER its picks (steps 3-4). The
-          // selector's budget shrinks by the required count so the merged, deduplicated list
-          // still fits the effective maximum without dropping a required skill -- required
+          // selector's budget shrinks by the DISTINCT required count so the merged, deduplicated
+          // list still fits the effective maximum without dropping a required skill -- required
           // skills are "always present" by definition.
           // Validation caps DISTINCT ids, so dedupe before the budget math: duplicates in the
           // required list would otherwise shrink the selector's budget more than the final

@@ -163,8 +163,8 @@ Resolution is (#724, aligned with `resolveSkillIds()`):
 2. if the start list is still empty, the caller provided no list, and
    `autoSelect` is not false, run the existing deterministic selector;
 3. append required skills after the selector's picks; the selector's budget is
-   the effective maximum minus the required count, so the merged list fits
-   step 5 without dropping a required skill;
+   the effective maximum minus the distinct required count, so the merged list
+   fits step 5 without dropping a required skill;
 4. deduplicate by id while preserving the first occurrence;
 5. enforce the effective maximum;
 6. resolve and snapshot every skill.
