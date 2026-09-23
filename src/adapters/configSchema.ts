@@ -87,10 +87,24 @@ export const CAPABILITIES_SCHEMA = object({
   humanInput: leaf,
   resume: leaf,
   knowledge: leaf,
+  // Role Preset capability vocabulary (docs/crew/role-presets.md section 8). The schema only
+  // ACCEPTS and value-validates these keys; it supplies no defaults. The shipped pi/omp configs
+  // declare roleInstruction: 'prompt-reference' (their prompts render the preset line); a config
+  // that omits the field is 'none' by the §8 vocabulary, which is what resolution enforces.
+  roleInstruction: leaf,
+  perRunModel: leaf,
+  sandbox: leaf,
+  mcp: leaf,
 });
 
 /** The three ways a backend can receive skills. Mirrors AgentSkillDelivery in domain/types.ts. */
 export const SKILL_DELIVERY_MODES = ['workspacePaths', 'nativeNames', 'none'] as const;
+
+/** How a backend can receive a Role Preset's role instruction. Mirrors the §8 vocabulary. */
+export const ROLE_INSTRUCTION_MODES = ['system', 'prompt-reference', 'none'] as const;
+
+/** Per-run MCP support. 'per-run' does not exist until Phase 4; 'none' is the honest value. */
+export const MCP_MODES = ['none', 'per-run'] as const;
 
 /**
  * Validate the static capability block's VALUES, not just its keys.
@@ -107,7 +121,8 @@ export const SKILL_DELIVERY_MODES = ['workspacePaths', 'nativeNames', 'none'] as
  */
 export function assertCapabilities(
   capabilities: { skills?: unknown; personaAppend?: unknown; personaFiles?: unknown;
-    humanInput?: unknown; resume?: unknown; knowledge?: unknown } | undefined,
+    humanInput?: unknown; resume?: unknown; knowledge?: unknown;
+    roleInstruction?: unknown; perRunModel?: unknown; sandbox?: unknown; mcp?: unknown } | undefined,
   label: string,
 ): void {
   if (capabilities === undefined) return;
@@ -115,13 +130,25 @@ export function assertCapabilities(
     throw new Error(`${label}: capabilities must be an object`);
   }
   const bad = (msg: string): never => { throw new Error(`${label}: ${msg}`); };
-  const { skills, personaAppend, personaFiles, humanInput, resume, knowledge } = capabilities;
+  const { skills, personaAppend, personaFiles, humanInput, resume, knowledge,
+    roleInstruction, perRunModel, sandbox, mcp } = capabilities;
   if (skills !== undefined
     && !(typeof skills === 'string' && (SKILL_DELIVERY_MODES as readonly string[]).includes(skills))) {
     bad(`capabilities.skills must be one of ${SKILL_DELIVERY_MODES.join(' | ')}, got ${JSON.stringify(skills)}`);
   }
+  if (roleInstruction !== undefined
+    && !(typeof roleInstruction === 'string'
+      && (ROLE_INSTRUCTION_MODES as readonly string[]).includes(roleInstruction))) {
+    bad(`capabilities.roleInstruction must be one of ${ROLE_INSTRUCTION_MODES.join(' | ')},`
+      + ` got ${JSON.stringify(roleInstruction)}`);
+  }
+  if (mcp !== undefined
+    && !(typeof mcp === 'string' && (MCP_MODES as readonly string[]).includes(mcp))) {
+    bad(`capabilities.mcp must be one of ${MCP_MODES.join(' | ')}, got ${JSON.stringify(mcp)}`);
+  }
   for (const [name, val] of [['personaAppend', personaAppend], ['humanInput', humanInput],
-                             ['resume', resume], ['knowledge', knowledge]] as const) {
+                             ['resume', resume], ['knowledge', knowledge],
+                             ['perRunModel', perRunModel], ['sandbox', sandbox]] as const) {
     if (val !== undefined && typeof val !== 'boolean') {
       bad(`capabilities.${name} must be a boolean, got ${JSON.stringify(val)}`);
     }

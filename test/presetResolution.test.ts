@@ -8,7 +8,14 @@ import type { RolePresetManifest } from '../src/presets/types.ts';
 // no registry, no db.
 
 const SYSTEM = { defaultAgent: 'fake', defaultMaxDurationMs: 60_000, defaultMaxRetries: 2 };
-const CAPS = { knownAgents: ['fake', 'primeagent', 'claude'] };
+// Static capabilities like production passes (RunService.create wires agentCapabilities.snapshot()).
+// A test that wants the UNKNOWN case builds its own lookup without staticCapabilities (#721).
+const CAPS = {
+  knownAgents: ['fake', 'primeagent', 'claude'],
+  staticCapabilities: (id: string) => (id === 'fake'
+    ? { roleInstruction: 'system' as const, sandbox: true, perRunModel: true, mcp: 'none' as const }
+    : { roleInstruction: 'prompt-reference' as const, sandbox: true, mcp: 'none' as const }),
+};
 
 function manifest(over: Partial<RolePresetManifest> = {}): RolePresetManifest {
   return {
@@ -85,23 +92,88 @@ test('an unknown selected agent is rejected through the known-agent check', () =
 });
 
 test('model: caller wins over the preset default; modelRequired rejects a conflicting caller', () => {
+  // perRunModel: true — a model cannot resolve against unknown capabilities anymore (#721), and
+  // the instruction check runs first, so the block carries roleInstruction too.
+  const MODEL_CAPS = {
+    knownAgents: CAPS.knownAgents,
+    staticCapabilities: () => ({ roleInstruction: 'system' as const, perRunModel: true }),
+  };
   const m = manifest({ agent: { model: 'sonnet' } });
-  const r = resolvePreset(m, { model: 'haiku' }, SYSTEM, { ...CAPS });
+  const r = resolvePreset(m, { model: 'haiku' }, SYSTEM, MODEL_CAPS);
   assert.equal(r.effectiveAgent.model, 'haiku');
 
   const req = manifest({ agent: { model: 'sonnet', modelRequired: true } });
-  const silent = resolvePreset(req, {}, SYSTEM, { ...CAPS });
+  const silent = resolvePreset(req, {}, SYSTEM, MODEL_CAPS);
   assert.equal(silent.effectiveAgent.model, 'sonnet');
   assert.throws(
-    () => resolvePreset(req, { model: 'haiku' }, SYSTEM, { ...CAPS }),
+    () => resolvePreset(req, { model: 'haiku' }, SYSTEM, MODEL_CAPS),
     /requires model "sonnet"/,
+  );
+});
+
+const NO_CAPS = { knownAgents: CAPS.knownAgents };
+
+test('unknown capabilities fail closed for a model', () => {
+  // staticCapabilities returns undefined for everything: "unknown is not supported" (#721).
+  const m = manifest({ agent: { model: 'sonnet' } });
+  assert.throws(
+    () => resolvePreset(m, {}, SYSTEM, NO_CAPS),
+    /roleInstruction: unknown -- the agent has no declared static capabilities/,
+  );
+});
+
+test('a preset with an instruction fails closed on a roleInstruction-none or unknown agent', () => {
+  // The seed manifests all carry instruction files; the test manifest() helper builds one with
+  // instruction undefined, so name an instruction file explicitly via the manifest's instruction
+  // block if the type has one... the instruction lives on the manifest's `instruction` field.
+  const withInstruction = manifest({ instruction: { file: 'INSTRUCTION.md' } } as Partial<RolePresetManifest>);
+  // fake declares roleInstruction: 'system' -> admitted.
+  const fakeCaps = {
+    knownAgents: CAPS.knownAgents,
+    staticCapabilities: (id: string) => (id === 'fake' ? { roleInstruction: 'system' as const } : undefined),
+  };
+  const ok = resolvePreset(withInstruction, {}, SYSTEM, fakeCaps);
+  assert.equal(ok.effectiveAgent.id, 'fake');
+  // hermes declares 'none' -> rejected with the agent named.
+  const noneCaps = {
+    knownAgents: [...CAPS.knownAgents, 'hermes', 'daemon'],
+    staticCapabilities: (id: string) => {
+      if (id === 'hermes') return { roleInstruction: 'none' as const, sandbox: true };
+      if (id === 'daemon') return { roleInstruction: 'none' as const, sandbox: false };
+      if (id === 'fake') return { roleInstruction: 'system' as const, sandbox: true };
+      return undefined;
+    },
+  };
+  assert.throws(
+    () => resolvePreset(withInstruction, { agent: 'hermes' }, SYSTEM, noneCaps),
+    /agent "hermes" cannot receive one \(roleInstruction: none -- the agent's static block declares roleInstruction: 'none'\)/,
+  );
+  // sandbox:false + requires.sandbox -> rejected at creation (acceptance 3). daemon carries a
+  // capable roleInstruction here so the sandbox leg is what fires.
+  const sb = manifest({ requires: { sandbox: true } });
+  const daemonCaps = {
+    knownAgents: noneCaps.knownAgents,
+    staticCapabilities: (id: string) => (id === 'daemon'
+      ? { roleInstruction: 'prompt-reference' as const, sandbox: false }
+      : noneCaps.staticCapabilities(id)),
+  };
+  assert.throws(
+    () => resolvePreset(sb, { agent: 'daemon' }, SYSTEM, daemonCaps),
+    /declares sandbox: false/,
+  );
+  // Unknown caps + instruction -> rejected (fail closed).
+  assert.throws(
+    () => resolvePreset(withInstruction, {}, SYSTEM, NO_CAPS),
+    /roleInstruction: unknown -- the agent has no declared static capabilities/,
   );
 });
 
 test('a preset model fails closed when the selected adapter cannot take a per-Run model', () => {
   const caps = {
     knownAgents: CAPS.knownAgents,
-    staticCapabilities: (id: string) => (id === 'fake' ? { perRunModel: false } : undefined),
+    staticCapabilities: (id: string) => (id === 'fake'
+      ? { roleInstruction: 'system' as const, perRunModel: false }
+      : undefined),
   };
   const m = manifest({ agent: { model: 'sonnet' } });
   assert.throws(

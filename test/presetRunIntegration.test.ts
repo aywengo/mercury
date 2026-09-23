@@ -309,3 +309,79 @@ test('per-run log lines carry the preset dimensions (id, version, trust); no-pre
     env.close();
   }
 });
+
+test('AC 7: a preset with an instruction is rejected at creation on a roleInstruction-none agent', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  // A hermes-shaped adapter: no preset rendering, roleInstruction 'none', sandbox available.
+  const hermesLike = {
+    id: 'hermes',
+    capabilities: { static: { skills: 'none' as const, roleInstruction: 'none' as const, sandbox: true, mcp: 'none' as const } },
+    start: () => { throw new Error('not used'); },
+  } as unknown as import('../src/adapters/agentAdapter.ts').AgentAdapter;
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false, adapters: { hermes: hermesLike } });
+  try {
+    assert.throws(
+      () => env.runService.create({
+        ownerId: 'alice', task: 't', repository: { localPath: repo },
+        preset: { id: 'reviewer' }, agent: 'hermes',
+      }),
+      /agent "hermes" cannot receive one \(roleInstruction: none -- the agent's static block declares roleInstruction: 'none'\)/,
+    );
+    // Nothing was written: no Run row for this owner, no run_presets row at all.
+    assert.deepEqual(env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 50 }).runs, []);
+    assert.equal((env.db.prepare('SELECT COUNT(*) AS n FROM run_presets').get() as { n: number }).n, 0);
+  } finally {
+    env.close();
+  }
+});
+
+test('AC 7: a requires.sandbox preset on a sandbox-false agent is rejected at creation', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const daemonLike = {
+    id: 'daemon',
+    capabilities: { static: { skills: 'nativeNames' as const, roleInstruction: 'prompt-reference' as const, sandbox: false, mcp: 'none' as const } },
+    start: () => { throw new Error('not used'); },
+  } as unknown as import('../src/adapters/agentAdapter.ts').AgentAdapter;
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false, adapters: { daemon: daemonLike } });
+  try {
+    assert.throws(
+      () => env.runService.create({
+        ownerId: 'alice', task: 't', repository: { localPath: repo },
+        preset: { id: 'linux' }, agent: 'daemon',
+      }),
+      /declares sandbox: false/,
+    );
+    // Nothing was written: no Run row for this owner, no run_presets row at all.
+    assert.deepEqual(env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 50 }).runs, []);
+    assert.equal((env.db.prepare('SELECT COUNT(*) AS n FROM run_presets').get() as { n: number }).n, 0);
+  } finally {
+    env.close();
+  }
+});
+
+test('AC 7: a Run without a preset on a roleInstruction-none agent is unaffected', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  // A fake EXECUTOR wearing the hermes capability block: the point is AC 10 (no-preset Runs are
+  // byte-identical), not hermes protocol coverage.
+  class HermesShapedFake extends FakeAgentAdapter {
+    // Own property, not a getter: the base class's field initializer would shadow a prototype
+    // getter (class fields are own properties assigned in the constructor).
+    override capabilities = {
+      static: { skills: 'none' as const, roleInstruction: 'none' as const, sandbox: true, mcp: 'none' as const },
+    };
+  }
+  const env = makeEnv({
+    workspaceMode: 'copy', repoDir: repo,
+    fakeScript: [{ event: { type: 'run.completed', payload: {} } }],
+    adapters: { hermes: new HermesShapedFake({ script: [{ event: { type: 'run.completed', payload: {} } }] }) },
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'no role here', repository: { localPath: repo }, agent: 'hermes',
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 10_000);
+    assert.equal(env.runService.getPreset(run.id), null);
+  } finally {
+    env.close();
+  }
+});

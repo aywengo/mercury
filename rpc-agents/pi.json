@@ -1,8 +1,9 @@
 {
   "id": "pi",
-  "description": "Pi Agent (pi.dev) \u2014 minimal terminal coding harness (Earendil)",
+  "description": "Pi Agent (pi.dev) — minimal terminal coding harness (Earendil)",
   "capabilities": {
-    "skills": "workspacePaths"
+    "skills": "workspacePaths",
+    "roleInstruction": "prompt-reference"
   },
   "command": "pi",
   "args": [],

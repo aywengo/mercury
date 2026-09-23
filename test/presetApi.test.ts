@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { Express } from 'express';
 import { createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
+import { FakeAgentAdapter } from '../src/adapters/fakeAgentAdapter.ts';
 import { makeEnv, makeGitRepo, tempDir } from './helpers.ts';
 
 // HTTP seam for presets (docs/crew/role-presets.md section 9, Phase 2 slice): the block is
@@ -263,6 +264,41 @@ test('a broken preset directory shows up in admin diagnostics, not in the browsa
     const all = env.runService.presetRegistry()!.listAll();
     assert.ok(all.invalid.some((bad) => bad.id === 'broken'), 'the validator saw the broken directory');
     assert.ok(all.invalid.find((bad) => bad.id === 'broken')!.validation.length > 0);
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
+
+test('POST /api/runs with a preset on a roleInstruction-none agent is a 400 naming the agent', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  class HermesShapedFake extends FakeAgentAdapter {
+    // Own property, not a getter: the base class's field initializer would shadow a prototype
+    // getter (class fields are own properties assigned in the constructor).
+    override capabilities = {
+      static: { skills: 'none' as const, roleInstruction: 'none' as const, sandbox: true, mcp: 'none' as const },
+    };
+  }
+  const env = makeEnv({
+    workspaceMode: 'copy', repoDir: repo, workerEnabled: false,
+    adapters: { hermes: new HermesShapedFake({ script: [] }) },
+  });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const res = await fetch(`${url}/api/runs`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer tok-alice', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        task: 'Review the auth change', repository: { localPath: repo },
+        agent: 'hermes', preset: { id: 'reviewer' },
+      }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json() as { error: string };
+    assert.match(body.error, /agent "hermes" cannot receive one/);
+    assert.match(body.error, /roleInstruction: none/);
   } finally {
     await stopSrv();
     api.close();
