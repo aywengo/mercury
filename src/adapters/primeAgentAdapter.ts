@@ -486,13 +486,13 @@ export class PrimeAgentAdapter implements AgentAdapter {
 
     await client.start();
     // Role Preset (#722, docs/crew/role-presets.md section 8): the resume prompt repeats the
-    // preset reference exactly as the first prompt worded it. The prime resume one-liner already
+    // preset reference with the first prompt's exact wording. The prime resume one-liner already
     // re-states the context-file pointer; the role is the same kind of pointer, and
     // prompt-reference adapters apply the preset on resume (section 8) rather than relying on
     // history carrying it.
     const presetLine = session.preset
       ? ` You are filling the role: ${session.preset.role}. Your role instructions are in`
-        + ` ${session.preset.instructionPath} — read them before continuing and follow them.`
+        + ` ${session.preset.instructionPath} — read them before starting and follow them.`
       : '';
     await client.prompt('Continue the task from where you left off. Read .mercury-context.json for the original task and constraints.'
       + presetLine);

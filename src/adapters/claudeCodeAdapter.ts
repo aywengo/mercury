@@ -298,13 +298,17 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // task text says where. Omitted rather than null when there is no pack, so a Run without
       // knowledge has a context file identical to the one the other adapters would have written.
       ...(context.knowledge ? { knowledge: context.knowledge } : {}),
-      // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, hash and
-      // the workspace-relative instruction path. Omitted when the Run has no preset, so the
+      // Role Preset (docs/crew/role-presets.md section 7): id, version, role, trust, content
+      // hash and the workspace-relative instruction path — the identity fields that let the
+      // agent see which bytes it runs under. Omitted when the Run has no preset, so the
       // context file stays byte-identical to the one it had before presets existed.
       ...(context.preset ? {
         preset: {
           id: context.preset.id,
+          version: context.preset.version,
           role: context.preset.role,
+          trust: context.preset.trust,
+          contentHash: context.preset.contentHash,
           instructionPath: context.preset.instructionPath,
         },
       } : {}),

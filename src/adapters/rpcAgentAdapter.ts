@@ -563,8 +563,8 @@ function presetLine(preset: NonNullable<RunContext['preset']>): string {
 }
 
 /** A minimal RunContext reconstructed from a Session, carrying exactly what buildResumePrompt
- *  reads: `knowledge`. The other fields are filled to satisfy the type; no prompt code path reads
- *  them (verified by the snapshot test, which passes the same shape). */
+ *  reads: `knowledge` and `preset`. The other fields are filled to satisfy the type; no prompt
+ *  code path reads them (verified by the snapshot test, which passes the same shape). */
 function sessionContext(session: Session): RunContext {
   return {
     run: session.run,
