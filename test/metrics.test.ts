@@ -279,6 +279,7 @@ test('label values are escaped so a value cannot forge metric lines', () => {
     knowledgeReplicaSeq: 0,
     knowledgeReplicaNotes: 0,
     knowledgePullFailures: 0,
+    runsByPreset: {},
     sandboxEnabled: 0,
     runsTotal: 0,
     workers: 0,
@@ -826,4 +827,44 @@ test('a corrupt push-failure counter reads as zero rather than poisoning /metric
   } finally {
     env.close();
   }
+});
+
+test('runs by preset is a SQL aggregate over run_presets, labelled by id', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    env.runService.create({ ownerId: 'alice', task: 'a', preset: { id: 'reviewer' } });
+    env.runService.create({ ownerId: 'alice', task: 'b', preset: { id: 'reviewer' } });
+    env.runService.create({ ownerId: 'alice', task: 'c', preset: { id: 'linux' } });
+    env.runService.create({ ownerId: 'alice', task: 'no preset' });
+    const snap = collectMetrics(env.db);
+    assert.equal(snap.runsByPreset['reviewer'], 2);
+    assert.equal(snap.runsByPreset['linux'], 1);
+    const rendered = renderPrometheus(snap);
+    assert.match(rendered, /mercury_runs_by_preset\{presetId="reviewer"\} 2/);
+    assert.match(rendered, /mercury_runs_by_preset\{presetId="linux"\} 1/);
+  } finally { env.close(); }
+});
+
+test('preset validity series are present with a registry and ABSENT without one', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    // with the registry (makeEnv wires one)
+    const withRegistry = collectMetrics(env.db, {
+      presets: () => {
+        const all = env.runService.presetRegistry()!.listAll();
+        return { valid: all.presets.length, invalid: all.invalid.length };
+      },
+    });
+    assert.ok(withRegistry.presetsByValidity);
+    assert.ok((withRegistry.presetsByValidity?.valid ?? 0) >= 4,
+      'the shipped catalog loads: ' + JSON.stringify(withRegistry.presetsByValidity));
+    assert.equal(withRegistry.presetsByValidity?.invalid, 0);
+    const rendered = renderPrometheus(withRegistry);
+    assert.match(rendered, /mercury_presets_by_validity\{validity="valid"\} /);
+
+    // without a provider (presets off / API-only): series ABSENT, not zero.
+    const without = collectMetrics(env.db);
+    assert.equal(without.presetsByValidity, undefined);
+    assert.doesNotMatch(renderPrometheus(without), /mercury_presets_by_validity/);
+  } finally { env.close(); }
 });

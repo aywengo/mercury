@@ -30,7 +30,7 @@ async function listen(app: Express): Promise<{ port: number; close: () => Promis
 }
 
 test('UI files exist and are served without auth', async () => {
-  for (const f of ['index.html', 'run.html', 'app.js', 'index.js', 'run.js', 'style.css']) {
+  for (const f of ['index.html', 'run.html', 'roles.html', 'app.js', 'index.js', 'run.js', 'roles.js', 'style.css']) {
     assert.ok(existsSync(join(UI_DIR, f)), `missing ui/${f}`);
   }
   const env = makeEnv({ workerEnabled: false });
@@ -71,10 +71,15 @@ test('UI files exist and are served without auth', async () => {
 test('UI pages reference the correct assets', () => {
   const index = readFileSync(join(UI_DIR, 'index.html'), 'utf8');
   const run = readFileSync(join(UI_DIR, 'run.html'), 'utf8');
+  const roles = readFileSync(join(UI_DIR, 'roles.html'), 'utf8');
   assert.match(index, /<script type="module" src="\/index\.js">/);
   assert.match(index, /<link rel="stylesheet" href="\/style\.css">/);
   assert.match(index, /<option value="fake">fake<\/option>/);
   assert.match(run, /<script type="module" src="\/run\.js">/);
+  // Roles page (docs/crew/role-presets.md section 9): served like the other pages, same assets.
+  assert.match(roles, /<script type="module" src="\/roles\.js">/);
+  assert.match(roles, /<link rel="stylesheet" href="\/style\.css">/);
+  assert.match(index, /href="\/roles\.html"/, 'the run list links to the Roles page');
   // both pages use the shared helpers
   assert.match(readFileSync(join(UI_DIR, 'index.js'), 'utf8'), /from '\.\/app\.js'/);
   // The dashboard must still honour the server's default agent. It used to read `defaultAgent` inline in

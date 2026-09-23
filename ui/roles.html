@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mercury — Roles</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1><a href="/">⚡ Mercury</a></h1>
+  <span class="muted">durable coding orchestration</span>
+  <span class="spacer"></span>
+  <span class="user" id="user-label"></span>
+  <button class="secondary small hidden" id="logout-btn">logout</button>
+</header>
+
+<main>
+  <div id="login" class="hidden">
+    <h2>Sign in</h2>
+    <p class="muted">Enter your Mercury API token (the value after <code>Bearer</code>).</p>
+    <input id="token-input" type="password" placeholder="tok-..." autocomplete="off">
+    <p style="margin-top:12px"><button id="login-btn">Sign in</button></p>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="row" style="margin-bottom:10px">
+      <h2 style="margin:0; font-size:16px">Roles</h2>
+      <span class="muted">builtin presets — pick one and run a task with it</span>
+      <span class="spacer" style="flex:1"></span>
+      <button class="secondary small" id="refresh-btn">refresh</button>
+    </div>
+    <div id="error-box" class="error-banner hidden"></div>
+    <div id="roles"></div>
+    <p id="empty" class="muted hidden" style="text-align:center; padding:20px">No roles yet.</p>
+  </div>
+</main>
+
+<script type="module" src="/roles.js"></script>
+</body>
+</html>

@@ -104,6 +104,30 @@ export function renderPrometheus(m: MetricsSnapshot): string {
   // knowledge metrics that describe a push, and both exist because a push failure is deliberately
   // NOT a Run event: a batch is not a Run, so Crew invariant 4 says it is a log line and a metric.
   // Without these two series the whole failure mode is invisible to a scraper.
+  // Role Presets (docs/crew/role-presets.md section 10). Two families: registry validity
+  // (operator-facing health of the catalog) and Runs by preset id (usage, feeding the §7
+  // decision gate). presetsByValidity is omitted entirely when this process has no registry —
+  // absent, not zero, so "presets off here" never reads as "catalog broken".
+  if (m.presetsByValidity) {
+    writeGauge(
+      out,
+      'mercury_presets_by_validity',
+      'Builtin presets by registry validity. An invalid count above zero means the catalog has a'
+        + ' broken preset directory an operator must fix;',
+      Object.entries(m.presetsByValidity)
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([validity, n]) => [{ validity }, n]),
+    );
+  }
+  writeGauge(
+    out,
+    'mercury_runs_by_preset',
+    'Runs ever created with each builtin preset, by preset id. The usage signal behind the'
+      + ' Milestone A decision gate;',
+    Object.entries(m.runsByPreset)
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([presetId, n]) => [{ presetId }, n]),
+  );
   writeGauge(
     out,
     'mercury_knowledge_outbox_depth',

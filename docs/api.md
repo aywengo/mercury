@@ -118,6 +118,36 @@ All endpoints in this table require authentication. Goal state is documented in
 [goals.md](goals.md); the HTTP contract for the two goal routes is in
 [Goal endpoints](#goal-endpoints) below.
 
+## Preset endpoints
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/presets` | List browsable builtin roles |
+| `GET` | `/api/presets/:presetId` | Inspect one role (instruction, skills, constraints, hash) |
+
+Both require authentication and are available to every authenticated caller:
+a preset is host configuration, not per-owner data (the same rule as
+`/api/agents`).
+
+`GET /api/presets` returns `{ presets: [...] }` with the short fields the
+Roles page renders — `id`, `role`, `version`, `tags`, `description`,
+`enabled`, `trust` and `contentHash`. Disabled presets ARE listed, with
+`enabled: false`; the UI renders them visible but unrunnable, and creating a
+Run with one is a domain error. Adding `?diagnostics=1` requires an
+admin token and appends `invalid: [...]` with the per-preset validation
+findings for preset directories that failed to load; invalid presets never
+appear in the browsable list, and registry load failures are startup logs and
+metrics ([role-presets.md](crew/role-presets.md) section 10), not Run events.
+
+`GET /api/presets/:presetId` adds the instruction text, the agent preference,
+the default/required skill lists, the constraint block and the preset-relative
+source path. It never returns runtime secrets — a builtin manifest cannot
+carry any (validation rejects unknown keys). An unknown id is a `404` naming
+the preset; a preset whose files are invalid is a `400` carrying its findings.
+Running a task with a role is `POST /api/runs` with a `preset: { id, version? }`
+block ([role-presets.md](crew/role-presets.md) section 9); omitting the block
+keeps the Run payload exactly as it was before presets existed.
+
 ## Knowledge endpoints
 
 These endpoints are served only by processes that have `knowledgeStatus` or `knowledgeNotes`

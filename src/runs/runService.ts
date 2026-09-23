@@ -716,6 +716,15 @@ export class RunService {
     return this.presetStore()?.get(runId) ?? null;
   }
 
+  /**
+   * The builtin preset registry, or null when presets are off. The API read surface
+   * (browse/inspect) goes through this accessor so the composition root stays the only place
+   * that knows how the registry is built -- exactly like listAgents for the agent ids.
+   */
+  presetRegistry(): PresetRegistry | null {
+    return this.deps.presets ?? null;
+  }
+
   submitInput(runId: string, ownerId: string, isAdmin: boolean, value: unknown): void {
     const run = this.get(runId, ownerId, isAdmin);
     if (!run) throw new NotFoundError('run not found');

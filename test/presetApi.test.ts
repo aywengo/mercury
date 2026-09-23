@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Express } from 'express';
 import { createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
@@ -116,6 +118,151 @@ test('a request with no preset block behaves exactly as before (no preset key on
       headers: { authorization: 'Bearer tok-alice' },
     })).json() as { preset: unknown };
     assert.equal(detail.preset, null);
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
+
+test('GET /api/presets lists builtin roles and GET /api/presets/:id inspects one', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const auth = { authorization: 'Bearer tok-alice' };
+    const list = await (await fetch(`${url}/api/presets`, { headers: auth })).json() as {
+      presets: Array<{ id: string; role: string; version: string; tags: string[]; description: string; enabled: boolean; trust: string; contentHash: string }>;
+    };
+    const ids = list.presets.map((p) => p.id);
+    assert.ok(ids.includes('reviewer') && ids.includes('linux'), 'shipped catalog is browsable: ' + ids);
+    const reviewer = list.presets.find((p) => p.id === 'reviewer')!;
+    assert.equal(reviewer.trust, 'builtin');
+    assert.match(reviewer.contentHash, /^[0-9a-f]{64}$/);
+    assert.ok(!('instruction' in reviewer), 'the list stays a list; instruction rides the detail');
+
+    const detail = await (await fetch(`${url}/api/presets/reviewer`, { headers: auth })).json() as {
+      id: string; instruction: string; agent: { id: string; required: boolean } | null;
+      skills: { defaults: string[]; required: string[]; autoSelect?: boolean; max?: number } | null; contentHash: string;
+    };
+    assert.equal(detail.id, 'reviewer');
+    assert.ok(detail.instruction.length > 0);
+    assert.match(detail.contentHash, /^[0-9a-f]{64}$/);
+    assert.deepEqual(detail.skills?.defaults, ['code-review', 'security-review', 'testing']);
+    assert.equal(detail.skills?.autoSelect, false);
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
+
+test('GET /api/presets diagnostics are admin-gated; unknown preset id is a 404 naming it', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const user = { authorization: 'Bearer tok-alice' };
+    const gated = await fetch(`${url}/api/presets?diagnostics=1`, { headers: user });
+    assert.equal(gated.status, 403, 'diagnostics are an operator concern, not a browsing one');
+
+    const missing = await fetch(`${url}/api/presets/ghost-preset`, { headers: user });
+    assert.equal(missing.status, 404);
+    const body = await missing.json() as { error: string };
+    assert.match(body.error, /ghost-preset/);
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
+
+test('the detail endpoint of an invalid preset is a 400 carrying the findings array', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const root = tempDir('mercury-presets-');
+  const dir = join(root, 'badhash');
+  mkdirSync(dir);
+  writeFileSync(join(dir, 'preset.json'), JSON.stringify({
+    schemaVersion: 1, id: 'badhash', version: '1.0.0', role: 'Bad', description: 'x',
+    instruction: { file: 'MISSING.md' },
+  }));
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false, presetsDir: root });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const res = await fetch(`${url}/api/presets/badhash`, {
+      headers: { authorization: 'Bearer tok-alice' },
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json() as { error: string; findings: Array<{ code: string; field: string }> };
+    assert.ok(Array.isArray(body.findings) && body.findings.length > 0);
+    assert.ok(body.findings.some((f) => f.code === 'PRESET_INSTRUCTION_MISSING'));
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
+
+test('the browse list includes disabled presets, marked enabled:false and not runnable', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const root = tempDir('mercury-presets-');
+  const dir = join(root, 'paused');
+  mkdirSync(dir);
+  writeFileSync(join(dir, 'preset.json'), JSON.stringify({
+    schemaVersion: 1, id: 'paused', version: '1.0.0', role: 'Paused role',
+    description: 'temporarily off', enabled: false, instruction: { file: 'INSTRUCTION.md' },
+  }));
+  writeFileSync(join(dir, 'INSTRUCTION.md'), 'Do the paused task carefully.');
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false, presetsDir: root });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const list = await (await fetch(`${url}/api/presets`, {
+      headers: { authorization: 'Bearer tok-alice' },
+    })).json() as { presets: Array<{ id: string; enabled: boolean }> };
+    const paused = list.presets.find((p) => p.id === 'paused');
+    assert.ok(paused, 'a disabled preset must still be listed');
+    assert.equal(paused!.enabled, false);
+    // and creating a Run with it is the existing domain rejection.
+    const res = await fetch(`${url}/api/runs`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer tok-alice', 'content-type': 'application/json' },
+      body: JSON.stringify({ task: 't', repository: { localPath: repo }, preset: { id: 'paused' } }),
+    });
+    assert.equal(res.status, 400);
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
+
+test('a broken preset directory shows up in admin diagnostics, not in the browsable list', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const root = tempDir('mercury-presets-');
+  const broken = join(root, 'broken');
+  mkdirSync(broken);
+  writeFileSync(join(broken, 'preset.json'), '{"schemaVersion":1,"id":"broken"}');
+  const env = makeEnv({
+    workspaceMode: 'copy', repoDir: repo, workerEnabled: false,
+    presetsDir: root,
+  });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    // Admin surface: the server's admin token is null in makeApi, so exercise the registry
+    // through runService (the same accessor the route uses) for the diagnostics content, and
+    // the HTTP list for visibility.
+    const list = await (await fetch(`${url}/api/presets`, {
+      headers: { authorization: 'Bearer tok-alice' },
+    })).json() as { presets: Array<{ id: string }> };
+    assert.ok(!list.presets.some((p) => p.id === 'broken'), 'an invalid preset is not browsable');
+    const all = env.runService.presetRegistry()!.listAll();
+    assert.ok(all.invalid.some((bad) => bad.id === 'broken'), 'the validator saw the broken directory');
+    assert.ok(all.invalid.find((bad) => bad.id === 'broken')!.validation.length > 0);
   } finally {
     await stopSrv();
     api.close();

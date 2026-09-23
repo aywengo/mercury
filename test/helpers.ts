@@ -157,7 +157,19 @@ export function makeEnv(opts: {
         info: (f, m) => opts.logCapture!('info', m, f),
         warn: (f, m) => opts.logCapture!('warn', m, f),
         error: (f, m) => opts.logCapture!('error', m, f),
-        child: () => captureLogger!,
+        // Merge, like the real child() (logger.ts): the worker's per-run bindings (runId,
+        // presetId, ...) are part of the captured line. A drop-everything child() made tests
+        // that filter captured lines by those bindings impossible to write.
+        child: (fields) => {
+          const merged = { ...fields };
+          return {
+            debug: (f, m) => opts.logCapture!('debug', m, { ...merged, ...f }),
+            info: (f, m) => opts.logCapture!('info', m, { ...merged, ...f }),
+            warn: (f, m) => opts.logCapture!('warn', m, { ...merged, ...f }),
+            error: (f, m) => opts.logCapture!('error', m, { ...merged, ...f }),
+            child: (f2) => captureLogger!.child({ ...merged, ...f2 }),
+          };
+        },
       }
     : null;
   const worker = new Worker({

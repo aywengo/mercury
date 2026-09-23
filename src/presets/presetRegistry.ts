@@ -33,6 +33,27 @@ export interface PresetRegistryDeps {
   knownAgents?: readonly string[];
 }
 
+/**
+ * Sanitize an unexpected load error for the diagnostics surface. Node I/O error messages
+ * embed absolute paths ("ENOENT: no such file or directory, open '/Users/.../presets/x/y'"),
+ * and diagnostics must not leak host filesystem layout (docs/crew/role-presets.md section 10:
+ * labels stay bounded; the API strips what it cannot bound). Occurrences of the registry root
+ * are replaced with the preset-relative form; any other absolute path is reduced to its
+ * basename. Length-capped so a hostile filename cannot flood the response.
+ */
+function sanitizeLoadError(err: unknown, rootDir: string): string {
+  let msg = String(err instanceof Error ? err.message : err);
+  // Strip the root with AND without a trailing separator: readdir/scandir errors quote the
+  // directory itself ('scandir .../presets'), read errors quote files below it.
+  msg = msg.split(rootDir + sep).join('');
+  msg = msg.split(rootDir).join('.');
+  // Collapse remaining absolute paths to their basename, both separators: a Linux host emits
+  // POSIX paths, a Windows host emits drive-letter/UNC backslash paths, and both would leak
+  // host layout through the diagnostics surface.
+  msg = msg.replace(/(?:[\\\/][A-Za-z0-9._-]+)+/g, (m) => m.slice(Math.max(m.lastIndexOf('/'), m.lastIndexOf('\\')) + 1));
+  return msg.length > 300 ? msg.slice(0, 300) + '…' : msg;
+}
+
 export class PresetRegistry {
   private readonly rootDir: string;
   private readonly deps: PresetRegistryDeps;
@@ -73,7 +94,7 @@ export class PresetRegistry {
         // and listAll() must not surface it as a diagnostic failure either.
         if (err instanceof NotFoundError) continue;
         invalid.push({ id, validation: err instanceof PresetValidationFailure ? err.findings : [{
-          code: 'PRESET_LOAD_FAILED', field: '', message: String(err instanceof Error ? err.message : err),
+          code: 'PRESET_LOAD_FAILED', field: '', message: sanitizeLoadError(err, this.rootDir),
         }] });
       }
     }

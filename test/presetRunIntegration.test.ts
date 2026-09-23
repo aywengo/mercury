@@ -273,3 +273,39 @@ test('an unknown preset id is a domain 404-shaped validation error; a version mi
     env.close();
   }
 });
+
+test('per-run log lines carry the preset dimensions (id, version, trust); no-preset logs do not', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const lines: Array<{ level: string; msg: string; fields: Record<string, unknown> }> = [];
+  const env = makeEnv({
+    workspaceMode: 'copy',
+    repoDir: repo,
+    fakeScript: [{ event: { type: 'run.completed', payload: {} } }],
+    logCapture: (level, msg, fields) => lines.push({ level, msg, fields }),
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'log dims', repository: { localPath: repo },
+      preset: { id: 'reviewer' },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 10_000);
+    const executing = lines.find((l) => l.msg === 'executing run' && l.fields.runId === run.id);
+    assert.ok(executing, 'the executing-run line was captured: ' + JSON.stringify(lines.map((l) => l.msg)));
+    assert.equal(executing!.fields.presetId, 'reviewer');
+    assert.equal(executing!.fields.presetVersion, '1.0.0');
+    assert.equal(executing!.fields.presetTrust, 'builtin');
+
+    const plain = env.runService.create({ ownerId: 'alice', task: 'no role', repository: { localPath: repo } });
+    await waitFor(() => env.runs.get(plain.id)!.status === 'COMPLETED', 10_000);
+    const plainExecuting = lines.find((l) => l.msg === 'executing run' && l.fields.runId === plain.id);
+    assert.ok(plainExecuting);
+    assert.equal(plainExecuting!.fields.presetId, undefined, 'no preset -> no preset label');
+
+    // Other per-run sites (finalize) get the same dimensions, not just the first line.
+    const completed = lines.find((l) => l.msg === 'run completed' && l.fields.runId === run.id);
+    assert.ok(completed, 'the finalize line was captured');
+    assert.equal(completed!.fields.presetId, 'reviewer');
+  } finally {
+    env.close();
+  }
+});
