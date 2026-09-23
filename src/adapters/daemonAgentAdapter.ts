@@ -193,10 +193,13 @@ export class DaemonAgentAdapter implements AgentAdapter {
       humanInput: true,
       // The supervisor is a per-uid service OUTSIDE any container this worker could set up:
       // start() refuses sandboxed runs outright, so declaring sandbox true would advertise a
-      // capability start() throws on. roleInstruction is unmeasured for the daemon protocol,
-      // which under the §8 vocabulary means 'none' -- a preset demanding instruction behavior
-      // fails closed rather than silently dropping the role.
+      // capability start() throws on.
       sandbox: false,
+      // roleInstruction is unmeasured for the daemon protocol. Declared EXPLICITLY (not omitted):
+      // under the §8 vocabulary omitted means the same 'none', but the resolution check (#721)
+      // keys its rejection message off the declared value, and a reader of the capability block
+      // should see the claim, not have to reconstruct it from an absence.
+      roleInstruction: 'none',
       mcp: 'none',
     },
   };

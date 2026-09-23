@@ -136,9 +136,11 @@ export class HermesAgentAdapter implements AgentAdapter {
       // as an agent that did nothing (issue #594).
       toolEvents: 'none',
       // Role Presets (docs/crew/role-presets.md §8): no measured channel carries a role
-      // instruction to this harness, which under the §8 vocabulary means 'none' -- a preset
-      // demanding instruction behavior fails closed rather than silently dropping the role.
-      // The sandbox option exists on the adapter, so isolation is declarable.
+      // instruction to this harness. Declared EXPLICITLY as 'none' (rather than omitted): a
+      // preset demanding instruction behavior fails closed at creation, and the declaration is
+      // visible instead of reconstructed from an absence. The sandbox option exists on the
+      // adapter, so isolation is declarable.
+      roleInstruction: 'none',
       sandbox: true,
       mcp: 'none',
     },

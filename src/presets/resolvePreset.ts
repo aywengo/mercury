@@ -126,13 +126,35 @@ function resolveAgent(
   } else {
     model = caller.model ?? presetAgent?.model;
   }
-  if (model !== undefined) {
-    const stat = caps.staticCapabilities?.(id);
-    if (stat && stat.perRunModel !== true) {
-      throw new ValidationError(
-        `preset sets a model but agent ${JSON.stringify(id)} cannot take a per-Run model`,
-      );
-    }
+  // Capability vocabulary (section 8), enforced AT CREATION: a Run admitted here must not
+  // discover at execution time that its harness never received the role, or that the sandbox
+  // request the preset demands is one the adapter refuses. Unknown capabilities fail closed:
+  // "unknown" is not supported, which is the same rule the goal fields use (docs/status.md).
+  //
+  // Every VALID preset carries an instruction: an absent manifest block means the default
+  // INSTRUCTION.md file, and validation refuses a missing file (PRESET_INSTRUCTION_MISSING).
+  // So the role-instruction check is unconditional -- there is no instruction-less preset for
+  // a 'none' agent to be admissible on.
+  const stat = caps.staticCapabilities?.(id);
+  if (stat === undefined || stat.roleInstruction === undefined || stat.roleInstruction === 'none') {
+    throw new ValidationError(
+      `preset ${JSON.stringify(manifest.id)} carries a role instruction, but agent`
+      + ` ${JSON.stringify(id)} cannot receive one (roleInstruction:`
+      + ` ${stat?.roleInstruction ?? (stat === undefined ? 'unknown' : 'none')});`
+      + ' pick an agent that applies role instructions',
+    );
+  }
+  if (manifest.requires?.sandbox === true && stat.sandbox === false) {
+    throw new ValidationError(
+      `preset ${JSON.stringify(manifest.id)} requires sandboxed execution, but agent`
+      + ` ${JSON.stringify(id)} declares sandbox: false`,
+    );
+  }
+  if (model !== undefined && stat.perRunModel !== true) {
+    // stat is non-undefined here: the role-instruction check above threw otherwise.
+    throw new ValidationError(
+      `preset sets a model but agent ${JSON.stringify(id)} cannot take a per-Run model`,
+    );
   }
   return { id, ...(model !== undefined ? { model } : {}) };
 }
