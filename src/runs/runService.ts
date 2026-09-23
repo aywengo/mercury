@@ -248,6 +248,14 @@ export class RunService {
             seen.add(id);
             skillIds.push(id);
           }
+          // Step 5, enforced on the final merged list rather than assumed from the budget: a
+          // selector that ignores its budget or an over-cap required set fails the Run at
+          // creation with the same message resolveSkillIds uses for the named path.
+          if (skillIds.length > cap) {
+            throw new ValidationError(
+              `preset resolves to ${skillIds.length} skills; the effective maximum is ${cap}`,
+            );
+          }
         }
       }
       if (skillIds.length > 0
