@@ -310,7 +310,10 @@ function validateConstraintObject(
     const v = obj[key];
     if (v === undefined) continue;
     if (typeof v !== 'number' || !Number.isFinite(v) || (key !== 'budgetCost' && !Number.isInteger(v))) {
-      add('PRESET_CONSTRAINT', `${field}.${key}`, 'must be a finite number');
+      // Same distinction runService draws: budgetCost is a money amount and may be fractional;
+      // the other three are counts/durations and must be integers.
+      const integral = key !== 'budgetCost';
+      add('PRESET_CONSTRAINT', `${field}.${key}`, `must be a finite ${integral ? 'integer' : 'number'}`);
     } else if (v < 0) {
       add('PRESET_CONSTRAINT', `${field}.${key}`, 'must be >= 0');
     } else if (v > Number.MAX_SAFE_INTEGER) {
