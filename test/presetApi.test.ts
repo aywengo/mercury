@@ -179,6 +179,33 @@ test('GET /api/presets diagnostics are admin-gated; unknown preset id is a 404 n
   }
 });
 
+test('the detail endpoint of an invalid preset is a 400 carrying the findings array', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const root = tempDir('mercury-presets-');
+  const dir = join(root, 'badhash');
+  mkdirSync(dir);
+  writeFileSync(join(dir, 'preset.json'), JSON.stringify({
+    schemaVersion: 1, id: 'badhash', version: '1.0.0', role: 'Bad', description: 'x',
+    instruction: { file: 'MISSING.md' },
+  }));
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false, presetsDir: root });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const res = await fetch(`${url}/api/presets/badhash`, {
+      headers: { authorization: 'Bearer tok-alice' },
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json() as { error: string; findings: Array<{ code: string; field: string }> };
+    assert.ok(Array.isArray(body.findings) && body.findings.length > 0);
+    assert.ok(body.findings.some((f) => f.code === 'PRESET_INSTRUCTION_MISSING'));
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
+
 test('the browse list includes disabled presets, marked enabled:false and not runnable', async () => {
   const repo = makeGitRepo(tempDir('mercury-repo-'));
   const root = tempDir('mercury-presets-');

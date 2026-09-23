@@ -4,6 +4,7 @@ import { Router, type Request, type Response } from 'express';
 import type { EventStore } from '../events/eventStore.ts';
 import type { EventStream } from '../events/eventStream.ts';
 import type { RunService } from '../runs/runService.ts';
+import { PresetValidationFailure } from '../presets/presetRegistry.ts';
 import type { RunStatus } from '../domain/types.ts';
 import { isTerminal } from '../domain/stateMachine.ts';
 import { requireAuth } from './auth.ts';
@@ -221,6 +222,13 @@ export function createRoutes(deps: RoutesDeps): Router {
         source: { kind: p.source.kind, relativePath: p.source.relativePath },
       });
     } catch (err) {
+      // A preset whose files are invalid is a 400 whose body carries the findings themselves:
+      // the string message summarizes, but callers (and the operator reading the response)
+      // want the per-field codes. Everything else keeps the generic sendError mapping.
+      if (err instanceof PresetValidationFailure) {
+        res.status(400).json({ error: err.message, findings: err.findings });
+        return;
+      }
       sendError(res, err, deps.logger);
     }
   });
