@@ -224,6 +224,18 @@ test('malformed resourceLimits values are PRESET_CONSTRAINT findings at load (#7
   assert.ok(fields.includes('constraints.defaults.resourceLimits.cpu'));
   assert.ok(fields.includes('constraints.defaults.resourceLimits.memory'));
   assert.ok(fields.includes('constraints.defaults.resourceLimits.disk'));
+  // Ceilings get the same grammar (#725 review).
+  const ceilBody = {
+    ...structuredClone(VALID),
+    constraints: {
+      ceilings: { resourceLimits: { cpu: 'x', memory: 'abc', disk: '0m' } },
+    },
+  };
+  const resC = validatePreset('reviewer', presetDir(ceilBody), ceilBody);
+  const cfields = resC.findings.filter((f) => f.code === 'PRESET_CONSTRAINT').map((f) => f.field);
+  assert.ok(cfields.includes('constraints.ceilings.resourceLimits.cpu'));
+  assert.ok(cfields.includes('constraints.ceilings.resourceLimits.memory'));
+  assert.ok(cfields.includes('constraints.ceilings.resourceLimits.disk'));
   // Valid forms produce no finding.
   const good = {
     ...structuredClone(VALID),

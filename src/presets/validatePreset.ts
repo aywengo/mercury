@@ -400,6 +400,17 @@ function validateCeilings(
           add('PRESET_CONSTRAINT', `constraints.ceilings.resourceLimits.${k}`, `unknown resourceLimits key: ${k}`);
         } else if (typeof v !== 'string') {
           add('PRESET_CONSTRAINT', `constraints.ceilings.resourceLimits.${k}`, 'must be a string');
+        } else {
+          // Same value grammar as defaults (#725 review): a malformed ceiling would compare
+          // against defaults at load and reach the runtime at execution.
+          if (k === 'cpu' && parseCpuLimit(v) === null) {
+            add('PRESET_CONSTRAINT', `constraints.ceilings.resourceLimits.cpu`,
+              `${JSON.stringify(v)} is not a positive decimal (e.g. "1.5")`);
+          }
+          if (k !== 'cpu' && parseByteLimit(v) === null) {
+            add('PRESET_CONSTRAINT', `constraints.ceilings.resourceLimits.${k}`,
+              `${JSON.stringify(v)} is not a positive integer with an optional b/k/m/g suffix (e.g. "512m")`);
+          }
         }
       }
     }
