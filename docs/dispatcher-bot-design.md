@@ -282,6 +282,16 @@ and the server's idempotency path returns the original Run.
 > capability does not exist — implementing it server-side is a prerequisite of
 > B1, not a detail inside it, because every other guard in this document treats
 > the key as the correctness backstop.
+>
+> **Met (B0, issue #730, 2026-09-24).** The server replays: same owner + key
+> twice returns the SAME `runId` with 201 both times and exactly one Run in the
+> list; the same key under a different owner creates two Runs; the header
+> absent creates a Run every time. Pinned over real HTTP by the
+> `idempotency-key` contract tests in `test/api.test.ts`
+> (`idempotency-key returns same run (#730, B0-2 contract)`,
+> `idempotency-key is owner-scoped: same key, different owner -> different runs (issue #8)`,
+> `idempotency-key absent -> every POST creates a Run (#730, B0-2 contract)`),
+> so a route that stops forwarding the header fails CI.
 
 ### 5.3 singleFlight and missed fires
 
