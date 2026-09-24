@@ -38,11 +38,12 @@ export interface RunConstraints {
   maxDurationMs: number;
   maxRetries: number;
   /**
-   * Absolute wall-clock deadline (ISO-8601) that counts QUEUE time, unlike maxDurationMs which
-   * starts when the worker begins driving the Run (#731). A Run past `notAfter` at claim time
-   * goes terminal without starting; while running, the effective deadline is
-   * min(startedAt + maxDurationMs, notAfter) through the same timeout path. Retries inherit it
-   * unchanged, so a retry cannot extend the window.
+   * Absolute wall-clock deadline (ISO-8601 WITH an explicit UTC offset — `Z` or `±hh:mm`; a
+   * timezone-less string is refused because it would be read as server-local time) that counts
+   * QUEUE time, unlike maxDurationMs which starts when the worker begins driving the Run (#731).
+   * A Run past `notAfter` at claim time goes terminal without starting; while running, the
+   * effective deadline is min(startedAt + maxDurationMs, notAfter) through the same timeout
+   * path. Retries inherit it unchanged, so a retry cannot extend the window.
    */
   notAfter?: string;
   budgetTokens?: number;

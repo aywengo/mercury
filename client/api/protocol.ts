@@ -29,7 +29,7 @@ export interface RepositoryContext {
 export interface RunConstraints {
   maxDurationMs: number;
   maxRetries: number;
-  /** Absolute wall-clock deadline (ISO-8601) that counts queue time (issue #731). */
+  /** Absolute wall-clock deadline (ISO-8601 with explicit UTC offset) that counts queue time (issue #731). */
   notAfter?: string;
   budgetTokens?: number;
   budgetCost?: number;

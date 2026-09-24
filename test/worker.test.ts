@@ -300,6 +300,11 @@ test('notAfter: a run held in the queue past its deadline never starts (#731, B0
     const failed = env.events.list(run.id).find((e) => e.type === 'run.failed');
     assert.ok(failed);
     assert.equal((failed!.payload as { error?: string }).error, 'deadline passed before start');
+    // The RUN ROW carries the error too (Copilot round 2 on PR #750): FAILED with a null error
+    // field is the contradiction this must not leave behind.
+    const row = env.runs.get(run.id)!;
+    assert.equal(row.error, 'deadline passed before start');
+    assert.equal(row.errorKind, 'infrastructure');
   } finally {
     env.close();
   }
@@ -1064,18 +1069,19 @@ test('failure bookkeeping is all-or-nothing, not four independent writes (issue 
   }
 });
 
-test('both failure-bookkeeping sites are wrapped in a transaction (issue #106)', () => {
+test('every failure-bookkeeping site is wrapped in a transaction (issue #106, #731)', () => {
   // The behavioural test above covers finalize()'s agent-failure branch, which is reachable through
   // the fake adapter. The execute() catch branch (infrastructure failure) needs the drive loop to
   // throw rather than the agent to fail, which no adapter script produces -- so this pins the
   // structure instead. Weaker than the behavioural test, and deliberately honest about it: it
-  // proves the wrap exists, not that it commits atomically.
+  // proves the wrap exists, not that it commits atomically. Three sites exist: the finalize
+  // agent-failure branch, the execute() catch branch, and the claim-time notAfter refusal (#731).
   const src = readFileSync(join(import.meta.dirname, '..', 'src', 'worker', 'worker.ts'), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '');
   const wrapped = src.match(/tx\(this\.deps\.db, \(\) => \{[\s\S]*?setError[\s\S]*?'run\.failed'[\s\S]*?transition[\s\S]*?\}\)/g) ?? [];
-  assert.equal(wrapped.length, 2,
-    `expected both failure paths wrapped in tx(), found ${wrapped.length}`);
+  assert.equal(wrapped.length, 3,
+    `expected all three failure paths wrapped in tx(), found ${wrapped.length}`);
   // maybeAutoRetry must stay OUTSIDE each transaction: it is async, tx() is sync, and a retry run
   // must not be rolled back together with the failure record that caused it. Checked per-block --
   // scanning the whole file would also match the legitimate call on the line AFTER the block.

@@ -329,15 +329,23 @@ export class Worker {
         log.warn({ notAfter: run.constraints.notAfter }, 'notAfter passed before start; refusing to start');
         this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
         const message = 'deadline passed before start';
-        this.deps.events.append(run.id, 'run.deadline_missed', {
-          runId: run.id,
-          notAfter: run.constraints.notAfter,
-          reason: message,
+        // One transaction, like the infrastructure-failure path above: the run record's
+        // error/errorKind, the events and the terminal transition commit together, so no reader
+        // can observe FAILED with a null error or events without the status.
+        tx(this.deps.db, () => {
+          this.deps.runs.setError(run.id, message, 'infrastructure');
+          this.deps.events.append(run.id, 'run.deadline_missed', {
+            runId: run.id,
+            notAfter: run.constraints.notAfter,
+            reason: message,
+          });
+          this.deps.events.append(run.id, 'error', { message });
+          this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
+          this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
         });
-        this.deps.events.append(run.id, 'error', { message });
-        this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
-        this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
         this.deps.queue.releaseLease(run.id, this.deps.workerId);
+        // NO auto-retry: unlike an infrastructure failure during execution, waiting cannot help —
+        // the deadline has passed, so a retried Run would be refused at claim time again.
         // active/presetLogCache are NOT touched here: loop()'s finally removes the run from
         // `active`, and logger() refreshes the preset-log cache when the next runId is logged.
         return;
