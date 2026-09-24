@@ -137,7 +137,6 @@ test('create + get + list with owner scoping', async () => {
   }
 });
 
-test('idempotency-key returns same run (#730, B0-2 contract)', async () => {
 test('notAfter flows through POST /api/runs unchanged (#731, B0-3)', async () => {
   const env = makeEnv({ workerEnabled: false });
   try {
@@ -182,6 +181,8 @@ test('notAfter flows through POST /api/runs unchanged (#731, B0-3)', async () =>
     env.close();
   }
 });
+
+test('idempotency-key returns same run (#730, B0-2 contract)', async () => {
 
   const env = makeEnv({ workerEnabled: false });
   try {
