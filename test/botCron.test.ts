@@ -25,10 +25,6 @@ const MIN = 60_000;
 // A fixed clock: 2026-03-01 (a Sunday) 00:00:00 UTC.
 const BASE = Date.UTC(2026, 2, 1, 0, 0, 0);
 
-function utc(ms: number): { utc: string } {
-  return { utc: new Date(ms).toISOString() };
-}
-
 test('parseCron accepts the documented syntax and expands steps and lists', () => {
   const p = parseCron('*/15 0-23/6 1,15 * 1-5');
   assert.deepEqual([...p.minutes].sort((a, b) => a - b), [0, 15, 30, 45]);
@@ -72,9 +68,20 @@ test('cronMatches on a fixed UTC clock (§15.1 set)', () => {
   assert.ok(!cronMatches(domOrDow, Date.UTC(2026, 5, 9, 0, 0), 'UTC')); // a Tuesday
 });
 
+test('a manually-constructed CronParts with an empty day set never fires (#752 round 2)', () => {
+  const empty = { minutes: parseCron('* * * * *').minutes, hours: parseCron('* * * * *').hours,
+                  daysOfMonth: new Set<number>(), months: parseCron('* * * * *').months, daysOfWeek: new Set<number>() };
+  assert.equal(cronMatches(empty, Date.UTC(2026, 5, 8, 9, 0), 'UTC'), false);
+  // A FULL day set stays unrestricted ('*' semantics).
+  const full = { minutes: parseCron('* * * * *').minutes, hours: parseCron('* * * * *').hours,
+                 daysOfMonth: parseCron('* * * * *').daysOfMonth, months: parseCron('* * * * *').months,
+                 daysOfWeek: parseCron('* * * * *').daysOfWeek };
+  assert.equal(cronMatches(full, Date.UTC(2026, 5, 8, 9, 0), 'UTC'), true);
+});
+
 test('due() lists each scheduled minute in the window exactly once', () => {
   const fires = due('*/15 * * * *', BASE, BASE + 45 * MIN, 'UTC');
-  assert.deepEqual(fires.map(scheduledMinuteIso), [
+  assert.deepEqual(fires.map((ms) => scheduledMinuteIso(ms)), [
     '2026-03-01T00:15:00.000Z',
     '2026-03-01T00:30:00.000Z',
     '2026-03-01T00:45:00.000Z',
@@ -136,6 +143,29 @@ test('derived keys are stable across restarts and pin the scheduled minute', () 
   assert.notEqual(k1, dispatchKey('nightly-gc', 'other-task', Date.UTC(2026, 5, 10, 3, 15)));
   assert.notEqual(k1, dispatchKey('nightly-gc', 'workspace-audit', Date.UTC(2026, 5, 10, 3, 16)));
   assert.notEqual(k1, dispatchKey('other-bot', 'workspace-audit', Date.UTC(2026, 5, 10, 3, 15)));
+});
+
+test('dispatchKey with tz local collapses fall-back repeats to one key (#752 round 2)', async () => {
+  // The two instants whose LOCAL wall clock is 02:30 on 2026-10-25 (Europe/Warsaw) must derive
+  // the same key — the server's idempotency replay then makes the double window-safe.
+  // Run in a child process: the key depends on host-local wall clock for tz: 'local'.
+  const out = await (async () => {
+    const script = `import { dispatchKey } from ${JSON.stringify(new URL('../src/host/bots/keys.ts', import.meta.url).href)};
+      const k1 = dispatchKey('b', 't', Date.UTC(2026, 9, 25, 0, 30), 'local');
+      const k2 = dispatchKey('b', 't', Date.UTC(2026, 9, 25, 1, 30), 'local');
+      console.log(JSON.stringify({ k1, k2, same: k1 === k2 }));`;
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8', timeout: 30_000, env: { ...process.env, TZ: 'Europe/Warsaw' },
+    });
+    if (r.status !== 0) throw new Error(r.stderr);
+    return r.stdout;
+  })();
+  const parsed = JSON.parse(out.trim()) as { k1: string; k2: string; same: boolean };
+  assert.ok(parsed.same, `fall-back instants must share one key, got ${parsed.k1} vs ${parsed.k2}`);
+  // UTC keys stay instant-derived: distinct instants, distinct keys.
+  const a = dispatchKey('b', 't', Date.UTC(2026, 9, 25, 0, 30));
+  const b = dispatchKey('b', 't', Date.UTC(2026, 9, 25, 1, 30));
+  assert.notEqual(a, b);
 });
 
 test('botOwnerId enforces the B0-1 colon-free form and the alias grammar', () => {

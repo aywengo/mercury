@@ -139,14 +139,22 @@ export function cronMatches(parts: CronParts, instantMs: number, tz: CronTz): bo
   if (!parts.minutes.has(w.minute)) return false;
   if (!parts.hours.has(w.hour)) return false;
   if (!parts.months.has(w.month)) return false;
-  const domRestricted = parts.daysOfMonth !== null && parts.daysOfMonth.size > 0 && !isEveryDay(parts.daysOfMonth);
-  const dowRestricted = parts.daysOfWeek !== null && parts.daysOfWeek.size > 0 && !isEveryDow(parts.daysOfWeek);
-  if (domRestricted && dowRestricted) {
+  // Three states per day field: EMPTY set matches nothing (a manually-constructed CronParts with
+  // no legal days can never fire — Copilot round 2 on PR #752); a FULL set is unrestricted,
+  // exactly what parseCron produces for '*'; anything between is restricted.
+  const domState = parts.daysOfMonth === null || parts.daysOfMonth.size === 0
+    ? 'none'
+    : isEveryDay(parts.daysOfMonth) ? 'any' : 'restricted';
+  const dowState = parts.daysOfWeek === null || parts.daysOfWeek.size === 0
+    ? 'none'
+    : isEveryDow(parts.daysOfWeek) ? 'any' : 'restricted';
+  if (domState === 'none' || dowState === 'none') return false;
+  if (domState === 'restricted' && dowState === 'restricted') {
     // Standard cron: when both day fields are restricted, EITHER match fires.
     return parts.daysOfMonth!.has(w.dayOfMonth) || parts.daysOfWeek!.has(w.dayOfWeek);
   }
-  if (domRestricted) return parts.daysOfMonth!.has(w.dayOfMonth);
-  if (dowRestricted) return parts.daysOfWeek!.has(w.dayOfWeek);
+  if (domState === 'restricted') return parts.daysOfMonth!.has(w.dayOfMonth);
+  if (dowState === 'restricted') return parts.daysOfWeek!.has(w.dayOfWeek);
   return true;
 }
 
