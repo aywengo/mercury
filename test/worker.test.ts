@@ -325,8 +325,9 @@ test('notAfter stops a running run even when maxDurationMs would allow more (#73
       task: 'x',
       agent: 'fake',
       repository: { localPath: repo },
-      // The run would be allowed 60s; the absolute deadline fires in ~1.5s.
-      constraints: { maxDurationMs: 60_000, notAfter: new Date(Date.now() + 1_500).toISOString() },
+      // The run would be allowed 60s; the absolute deadline fires in ~2.5s — comfortably after
+      // startup on slow CI, still ~1.5s before the ~4s script finishes.
+      constraints: { maxDurationMs: 60_000, notAfter: new Date(Date.now() + 2_500).toISOString() },
     });
     await waitFor(() => env.runs.get(run.id)!.status === 'TIMED_OUT', 10_000);
     const timedOut = env.events.list(run.id).find((e) => e.type === 'run.timed_out');

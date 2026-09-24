@@ -316,44 +316,6 @@ export class Worker {
       this.deps.queue.releaseLease(run.id, this.deps.workerId);
       return;
     }
-    // notAfter claim-time refusal (#731): a Run whose absolute deadline passed while it sat in
-    // the queue must never start. It goes terminal FAILED with a distinct error kind rather
-    // than being silently dropped: the creator is waiting on a status, not a vanishing Run.
-    if (run.constraints.notAfter !== undefined) {
-      const notAfterMs = Date.parse(run.constraints.notAfter);
-      if (Number.isFinite(notAfterMs) && Date.now() >= notAfterMs) {
-        // The claim is accepted (QUEUED -> STARTING, like every execution) and then refused:
-        // the state machine has no QUEUED -> FAILED edge, and widening it for one caller would
-        // weaken an invariant every other path relies on. STARTING -> FAILED is the sanctioned
-        // route for a run that was claimed but never began real work.
-        log.warn({ notAfter: run.constraints.notAfter }, 'notAfter passed before start; refusing to start');
-        const message = 'deadline passed before start';
-        // One transaction, like the infrastructure-failure path above: the STARTING transition,
-        // the run record's error/errorKind, the events and the terminal transition commit
-        // together, so no reader can observe FAILED with a null error or events without the
-        // status. STARTING inside the tx also closes the crash window: a worker that died between
-        // a standalone STARTING and the failure record would leave a run stuck in STARTING to be
-        // reaped as lease-expired instead of the honest deadline-missed refusal.
-        tx(this.deps.db, () => {
-          this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
-          this.deps.runs.setError(run.id, message, 'infrastructure');
-          this.deps.events.append(run.id, 'run.deadline_missed', {
-            runId: run.id,
-            notAfter: run.constraints.notAfter,
-            reason: message,
-          });
-          this.deps.events.append(run.id, 'error', { message });
-          this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
-          this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
-        });
-        this.deps.queue.releaseLease(run.id, this.deps.workerId);
-        // NO auto-retry: unlike an infrastructure failure during execution, waiting cannot help —
-        // the deadline has passed, so a retried Run would be refused at claim time again.
-        // active/presetLogCache are NOT touched here: loop()'s finally removes the run from
-        // `active`, and logger() refreshes the preset-log cache when the next runId is logged.
-        return;
-      }
-    }
     log.info({ agent: run.agent, attempt: run.attempt }, 'executing run');
 
     // Declared out here so the finally can reach it (issues #46, #47). The agent handle is
@@ -364,6 +326,44 @@ export class Worker {
     let handle: AgentHandle | null = null;
 
     try {
+      // notAfter claim-time refusal (#731): a Run whose absolute deadline passed while it sat
+      // in the queue must never start. It goes terminal FAILED with a distinct error kind
+      // rather than being silently dropped: the creator is waiting on a status, not a vanishing
+      // Run. INSIDE the try deliberately: a tx() failure (e.g. SQLITE_BUSY) lands in this
+      // method's catch, which runs the same failure bookkeeping and the finally that releases
+      // the lease, so a refusal that cannot record itself still leaves the Run consistent.
+      if (run.constraints.notAfter !== undefined) {
+        const notAfterMs = Date.parse(run.constraints.notAfter);
+        if (Number.isFinite(notAfterMs) && Date.now() >= notAfterMs) {
+          // The claim is accepted (QUEUED -> STARTING, like every execution) and then refused:
+          // the state machine has no QUEUED -> FAILED edge, and widening it for one caller
+          // would weaken an invariant every other path relies on. STARTING -> FAILED is the
+          // sanctioned route for a run that was claimed but never began real work.
+          log.warn({ notAfter: run.constraints.notAfter }, 'notAfter passed before start; refusing to start');
+          const message = 'deadline passed before start';
+          // One transaction, like the infrastructure-failure path below: the STARTING
+          // transition, the run record's error/errorKind, the events and the terminal
+          // transition commit together, so no reader can observe FAILED with a null error or
+          // events without the status.
+          tx(this.deps.db, () => {
+            this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
+            this.deps.runs.setError(run.id, message, 'infrastructure');
+            this.deps.events.append(run.id, 'run.deadline_missed', {
+              runId: run.id,
+              notAfter: run.constraints.notAfter,
+              reason: message,
+            });
+            this.deps.events.append(run.id, 'error', { message });
+            this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
+            this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+          });
+          // NO auto-retry: unlike an infrastructure failure during execution, waiting cannot
+          // help — the deadline has passed, so a retried Run would be refused here again.
+          // Plain return: this method's finally owns terminate/dispose/releaseLease on every
+          // exit path, so the refusal must not release the lease itself.
+          return;
+        }
+      }
       // QUEUED -> STARTING
       this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
 
