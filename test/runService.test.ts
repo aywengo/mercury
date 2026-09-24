@@ -418,6 +418,28 @@ test('create rejects malformed constraints (issue #28)', () => {
   }
 });
 
+test('notAfter accepts ISO-8601 without seconds (round 8, #731)', () => {
+  const env = makeEnv();
+  try {
+    // ISO-8601 does not require seconds; the contract requires only the explicit offset.
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'x',
+      agent: 'fake',
+      constraints: {
+        maxDurationMs: 60_000,
+        // Minute precision, no seconds, explicit Z — valid ISO-8601, valid per the contract.
+        notAfter: new Date(Date.now() + 3_600_000).toISOString().replace(/:\d\d\.\d+Z$/, 'Z'),
+      },
+    });
+    const stored = env.runs.get(run.id)!.constraints.notAfter as string;
+    assert.match(stored, /T\d\d:\d\dZ$/);
+    assert.ok(!Number.isNaN(Date.parse(stored)));
+  } finally {
+    env.close();
+  }
+});
+
 test('notAfter is persisted verbatim and inherited by retries (#731, B0-3)', async () => {
   const env = makeEnv({ workerEnabled: false });
   try {

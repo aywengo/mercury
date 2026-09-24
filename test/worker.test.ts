@@ -324,9 +324,9 @@ test('notAfter: a refusal tx() failure still leaves the run terminal and the lea
     // The deadline passes while the run sits in QUEUED.
     await new Promise((r) => setTimeout(r, 1_600));
     // Sabotage the FIRST QUEUED -> STARTING transition (the refusal tx's claim step): the tx
-    // fails before its callback, so the refusal record never lands. The catch's bookkeeping
-    // must rescue the run: take the claim step itself, record the failure, and the finally
-    // releases the lease — no run stranded leased/QUEUED until expiry.
+    // fails and rolls back, so the refusal record never lands. The catch's bookkeeping must
+    // rescue the run: take the claim step itself, record the failure, and the finally releases
+    // the lease — no run stranded leased/QUEUED until expiry.
     const realTransition = env.runs.transition.bind(env.runs);
     let sabotageUsed = false;
     (env.runs as unknown as { transition: unknown }).transition = (id: string, to: string, patch?: Record<string, unknown>) => {

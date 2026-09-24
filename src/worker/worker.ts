@@ -576,11 +576,11 @@ export class Worker {
         // run is a separate decision that must not roll back the failure record it responds to.
         tx(this.deps.db, () => {
           // The claim-time notAfter refusal (#731) can land in this catch with the run still
-          // QUEUED — its refusal tx() can fail before the callback runs (e.g. BEGIN IMMEDIATE
-          // hitting SQLITE_BUSY). QUEUED -> FAILED is not a legal edge, so take the sanctioned
-          // QUEUED -> STARTING claim step first (we hold the lease; we claimed this run) and
-          // the terminal transition below is valid. Every other error path reaches this tx with
-          // the run STARTING-or-later, so the guard is a no-op for them.
+          // QUEUED — its refusal tx() can fail (BEGIN IMMEDIATE hitting SQLITE_BUSY, or a
+          // write inside the callback failing). QUEUED -> FAILED is not a legal edge, so take
+          // the sanctioned QUEUED -> STARTING claim step first (we hold the lease; we claimed
+          // this run) and the terminal transition below is valid. Every other error path
+          // reaches this tx with the run STARTING-or-later, so the guard is a no-op for them.
           const current = this.deps.runs.get(run.id);
           if (current && current.status === 'QUEUED') {
             this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
