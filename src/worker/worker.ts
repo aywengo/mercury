@@ -330,8 +330,9 @@ export class Worker {
       // in the queue must never start. It goes terminal FAILED with a distinct error kind
       // rather than being silently dropped: the creator is waiting on a status, not a vanishing
       // Run. INSIDE the try deliberately: a tx() failure (e.g. SQLITE_BUSY) lands in this
-      // method's catch, which runs the same failure bookkeeping and the finally that releases
-      // the lease, so a refusal that cannot record itself still leaves the Run consistent.
+      // method's catch, whose bookkeeping handles the still-QUEUED case (it takes the claim
+      // step before the terminal transition) and whose finally releases the lease, so a refusal
+      // that cannot record itself still ends with the Run terminal and the lease released.
       if (run.constraints.notAfter !== undefined) {
         const notAfterMs = Date.parse(run.constraints.notAfter);
         if (Number.isFinite(notAfterMs) && Date.now() >= notAfterMs) {
@@ -574,6 +575,16 @@ export class Worker {
         // maybeAutoRetry stays OUTSIDE: it is async, tx() is synchronous, and creating a retry
         // run is a separate decision that must not roll back the failure record it responds to.
         tx(this.deps.db, () => {
+          // The claim-time notAfter refusal (#731) can land in this catch with the run still
+          // QUEUED — its refusal tx() can fail before the callback runs (e.g. BEGIN IMMEDIATE
+          // hitting SQLITE_BUSY). QUEUED -> FAILED is not a legal edge, so take the sanctioned
+          // QUEUED -> STARTING claim step first (we hold the lease; we claimed this run) and
+          // the terminal transition below is valid. Every other error path reaches this tx with
+          // the run STARTING-or-later, so the guard is a no-op for them.
+          const current = this.deps.runs.get(run.id);
+          if (current && current.status === 'QUEUED') {
+            this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
+          }
           this.deps.runs.setError(run.id, message, 'infrastructure');
           this.deps.events.append(run.id, 'error', { message });
           this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });

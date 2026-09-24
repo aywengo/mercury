@@ -310,6 +310,52 @@ test('notAfter: a run held in the queue past its deadline never starts (#731, B0
   }
 });
 
+test('notAfter: a refusal tx() failure still leaves the run terminal and the lease released (#731, B0-3, Copilot round 7)', async () => {
+  const repo = tempDir('mercury-notafter-txfail-');
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'x',
+      agent: 'fake',
+      repository: { localPath: repo },
+      constraints: { maxDurationMs: 60_000, notAfter: new Date(Date.now() + 1_200).toISOString() },
+    });
+    // The deadline passes while the run sits in QUEUED.
+    await new Promise((r) => setTimeout(r, 1_600));
+    // Sabotage the FIRST QUEUED -> STARTING transition (the refusal tx's claim step): the tx
+    // fails before its callback, so the refusal record never lands. The catch's bookkeeping
+    // must rescue the run: take the claim step itself, record the failure, and the finally
+    // releases the lease — no run stranded leased/QUEUED until expiry.
+    const realTransition = env.runs.transition.bind(env.runs);
+    let sabotageUsed = false;
+    (env.runs as unknown as { transition: unknown }).transition = (id: string, to: string, patch?: Record<string, unknown>) => {
+      if (!sabotageUsed && to === 'STARTING') {
+        sabotageUsed = true;
+        throw new Error('BEGIN IMMEDIATE: database is locked (sabotage)');
+      }
+      return realTransition(id, to as never, patch as never);
+    };
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    assert.ok(sabotageUsed, 'the sabotaged transition must have been hit');
+    // The rescue records the error that actually failed (the tx failure), not the refusal
+    // message — the refusal tx rolled back, so there is no deadline_missed event to re-emit.
+    // What matters: the run is terminal with a recorded error, not stranded leased/QUEUED.
+    const row = env.runs.get(run.id)!;
+    assert.equal(row.status, 'FAILED');
+    assert.equal(row.error, 'BEGIN IMMEDIATE: database is locked (sabotage)');
+    assert.equal(row.errorKind, 'infrastructure');
+    const types = env.events.list(run.id).map((e) => e.type);
+    assert.ok(types.includes('run.failed'), 'the rescue must record run.failed');
+    assert.ok(!types.includes('run.deadline_missed'), 'the rolled-back refusal tx left no deadline_missed event');
+    // The finally released the lease: nothing is claimable (the run is terminal).
+    assert.equal(env.queue.claim('w2', 60_000), null);
+  } finally {
+    env.close();
+  }
+});
+
 test('notAfter stops a running run even when maxDurationMs would allow more (#731, B0-3)', async () => {
   const repo = tempDir('mercury-notafter-running-');
   const env = makeEnv({
