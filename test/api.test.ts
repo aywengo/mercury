@@ -137,7 +137,7 @@ test('create + get + list with owner scoping', async () => {
   }
 });
 
-test('idempotency-key returns same run', async () => {
+test('idempotency-key returns same run (#730, B0-2 contract)', async () => {
   const env = makeEnv({ workerEnabled: false });
   try {
     const { app, close: closeStream } = makeApi(env);
@@ -148,9 +148,46 @@ test('idempotency-key returns same run', async () => {
       const body = JSON.stringify({ task: 'x', agent: 'fake' });
       const r1 = await fetch(`${base}/api/runs`, { method: 'POST', headers, body });
       const r2 = await fetch(`${base}/api/runs`, { method: 'POST', headers, body });
+      // BOTH responses are 201: the replay is indistinguishable from a fresh create at the HTTP
+      // surface (same status, same shape) — the bot can replay without special-casing.
+      assert.equal(r1.status, 201);
+      assert.equal(r2.status, 201);
       const j1 = (await r1.json()) as { runId: string };
       const j2 = (await r2.json()) as { runId: string };
       assert.equal(j1.runId, j2.runId);
+      // Exactly ONE run exists: the second POST must not have created a duplicate.
+      const list = await fetch(`${base}/api/runs`, { headers: { authorization: 'Bearer tok-alice' } });
+      const listBody = (await list.json()) as { runs: { id: string }[] };
+      assert.equal(listBody.runs.length, 1);
+      assert.equal(listBody.runs[0]!.id, j1.runId);
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('idempotency-key absent -> every POST creates a Run (#730, B0-2 contract)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const body = JSON.stringify({ task: 'x', agent: 'fake' });
+      const r1 = await fetch(`${base}/api/runs`, { method: 'POST', headers, body });
+      const r2 = await fetch(`${base}/api/runs`, { method: 'POST', headers, body });
+      assert.equal(r1.status, 201);
+      assert.equal(r2.status, 201);
+      const j1 = (await r1.json()) as { runId: string };
+      const j2 = (await r2.json()) as { runId: string };
+      assert.notEqual(j1.runId, j2.runId);
+      const list = await fetch(`${base}/api/runs`, { headers: { authorization: 'Bearer tok-alice' } });
+      const listBody = (await list.json()) as { runs: unknown[] };
+      assert.equal(listBody.runs.length, 2);
     } finally {
       await srv.close();
       closeStream();
