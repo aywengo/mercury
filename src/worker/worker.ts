@@ -326,6 +326,45 @@ export class Worker {
     let handle: AgentHandle | null = null;
 
     try {
+      // notAfter claim-time refusal (#731): a Run whose absolute deadline passed while it sat
+      // in the queue must never start. It goes terminal FAILED with a distinct error kind
+      // rather than being silently dropped: the creator is waiting on a status, not a vanishing
+      // Run. INSIDE the try deliberately: a tx() failure (e.g. SQLITE_BUSY) lands in this
+      // method's catch, whose bookkeeping handles the still-QUEUED case (it takes the claim
+      // step before the terminal transition) and whose finally releases the lease, so a refusal
+      // that cannot record itself still ends with the Run terminal and the lease released.
+      if (run.constraints.notAfter !== undefined) {
+        const notAfterMs = Date.parse(run.constraints.notAfter);
+        if (Number.isFinite(notAfterMs) && Date.now() >= notAfterMs) {
+          // The claim is accepted (QUEUED -> STARTING, like every execution) and then refused:
+          // the state machine has no QUEUED -> FAILED edge, and widening it for one caller
+          // would weaken an invariant every other path relies on. STARTING -> FAILED is the
+          // sanctioned route for a run that was claimed but never began real work.
+          log.warn({ notAfter: run.constraints.notAfter }, 'notAfter passed before start; refusing to start');
+          const message = 'deadline passed before start';
+          // One transaction, like the infrastructure-failure path below: the STARTING
+          // transition, the run record's error/errorKind, the events and the terminal
+          // transition commit together, so no reader can observe FAILED with a null error or
+          // events without the status.
+          tx(this.deps.db, () => {
+            this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
+            this.deps.runs.setError(run.id, message, 'infrastructure');
+            this.deps.events.append(run.id, 'run.deadline_missed', {
+              runId: run.id,
+              notAfter: run.constraints.notAfter,
+              reason: message,
+            });
+            this.deps.events.append(run.id, 'error', { message });
+            this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
+            this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+          });
+          // NO auto-retry: unlike an infrastructure failure during execution, waiting cannot
+          // help — the deadline has passed, so a retried Run would be refused here again.
+          // Plain return: this method's finally owns terminate/dispose/releaseLease on every
+          // exit path, so the refusal must not release the lease itself.
+          return;
+        }
+      }
       // QUEUED -> STARTING
       this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
 
@@ -536,6 +575,16 @@ export class Worker {
         // maybeAutoRetry stays OUTSIDE: it is async, tx() is synchronous, and creating a retry
         // run is a separate decision that must not roll back the failure record it responds to.
         tx(this.deps.db, () => {
+          // The claim-time notAfter refusal (#731) can land in this catch with the run still
+          // QUEUED — its refusal tx() can fail (BEGIN IMMEDIATE hitting SQLITE_BUSY, or a
+          // write inside the callback failing). QUEUED -> FAILED is not a legal edge, so take
+          // the sanctioned QUEUED -> STARTING claim step first (we hold the lease; we claimed
+          // this run) and the terminal transition below is valid. Every other error path
+          // reaches this tx with the run STARTING-or-later, so the guard is a no-op for them.
+          const current = this.deps.runs.get(run.id);
+          if (current && current.status === 'QUEUED') {
+            this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
+          }
           this.deps.runs.setError(run.id, message, 'infrastructure');
           this.deps.events.append(run.id, 'error', { message });
           this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
@@ -601,6 +650,14 @@ export class Worker {
     const log = this.logger(run.id);
     const startedMs = Date.parse(startedAt);
     const maxDurationMs = run.constraints.maxDurationMs;
+    // notAfter (#731): an absolute wall-clock deadline that counts queue time. The effective
+    // deadline is the earlier of the two, through the same timeout path. The claim-time check
+    // refuses most expired runs, but notAfter is only checked there once — a run that slips
+    // through STARTING (workspace/preset work can take time) is stopped here immediately, which
+    // is why this path must exist rather than trusting the claim-time check alone.
+    const notAfterMs = run.constraints.notAfter !== undefined ? Date.parse(run.constraints.notAfter) : null;
+    const notAfterEffective = notAfterMs !== null && Number.isFinite(notAfterMs) && notAfterMs < startedMs + maxDurationMs;
+    const deadlineMs = notAfterEffective ? notAfterMs! : startedMs + maxDurationMs;
     let cancelled = false;
     let timedOut = false;
     let inputTimedOut = false;
@@ -639,7 +696,7 @@ export class Worker {
           await adapter.cancel(run.id);
           break;
         }
-        const remaining = maxDurationMs - (Date.now() - startedMs);
+        const remaining = deadlineMs - Date.now();
         if (remaining <= 0) {
           timedOut = true;
           await handle.terminate();
@@ -737,7 +794,15 @@ export class Worker {
       ]);
 
       if (cancelled) return { status: 'CANCELLED', exit };
-      if (timedOut) return { status: 'TIMED_OUT', exit, reason: 'max-duration' };
+      if (timedOut) {
+        // Which bound fired matters to operators (#731): a notAfter stop means the WINDOW ended
+        // (queue time counted); a max-duration stop means the RUN ran too long. Classified by
+        // which bound deadlineMs was built from — NOT by Date.now() at this point, because
+        // the exit-wait grace (up to 10s) can push the clock past notAfter after a max-duration
+        // stop, which would misreport the cause.
+        const reason = notAfterEffective ? 'not-after' : 'max-duration';
+        return { status: 'TIMED_OUT', exit, reason };
+      }
       if (inputTimedOut) return { status: 'TIMED_OUT', exit, reason: 'input-timeout' };
       if (exit.code === 0) return { status: 'COMPLETED', exit };
       // Honor the adapter's own attribution, whatever it is. Special-casing 'infrastructure' here would
