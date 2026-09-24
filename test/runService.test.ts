@@ -336,6 +336,8 @@ test('create rejects malformed constraints (issue #28)', () => {
       ['memory', '0m', /resourceLimits\.memory "0m" is not a positive integer/],
       ['memory', '1.5g', /resourceLimits\.memory "1\.5g" is not a positive integer/],
       ['disk', '10x', /resourceLimits\.disk "10x" is not a positive integer/],
+      ['cpu', '9'.repeat(400), /resourceLimits\.cpu "9+ is not a positive decimal|not a positive decimal/],
+      ['memory', '9'.repeat(400) + 'g', /not a positive integer/],
     ] as [string, string, RegExp][]) {
       assert.throws(
         () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ resourceLimits: { [k]: v } }) }),

@@ -9,7 +9,9 @@
 export function parseCpuLimit(v: string): number | null {
   if (!/^\d+(\.\d+)?$/.test(v)) return null;
   const n = Number(v);
-  return n > 0 ? n : null;
+  // A 400-digit string overflows to Infinity, which would pass `n > 0`; no finite value is
+  // rejected by the finite check (docker's own ceiling is far below this).
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /**
@@ -21,5 +23,5 @@ export function parseByteLimit(v: string): number | null {
   const m = /^(\d+)([bkmg])?$/i.exec(v);
   if (!m) return null;
   const n = Number(m[1]);
-  return n > 0 ? n : null;
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
