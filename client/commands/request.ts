@@ -93,7 +93,7 @@ export function buildCreateRequest(flags: CreateFlags, read: ReadContext): Creat
     // the operator's screen, not after a round trip. An ABSOLUTE deadline needs an explicit UTC
     // offset (Z or ±hh:mm): a timezone-less string is read as server-local time, so the operator
     // and the host could disagree about when the window ends.
-    if (Number.isNaN(Date.parse(flags.notAfter)) || !/^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)(?:Z|[+-]\d{2}:?\d{2})$/.test(flags.notAfter)) {
+    if (Number.isNaN(Date.parse(flags.notAfter)) || !/^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)(?:Z|[+-]\d{2}:\d{2})$/.test(flags.notAfter)) {
       throw new UsageError(`--not-after is not an ISO-8601 timestamp with an explicit UTC offset (Z or ±hh:mm): ${flags.notAfter}`);
     }
     request.constraints = { ...request.constraints, notAfter: flags.notAfter };

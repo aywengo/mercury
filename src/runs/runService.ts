@@ -943,7 +943,7 @@ function validateConstraints(c: Record<string, unknown>): void {
     // different hosts. Require an explicit Z or ±hh:mm offset and parse once.
     if (
       typeof na !== 'string'
-      || !/^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)(?:Z|[+-]\d{2}:?\d{2})$/.test(na)
+      || !/^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)(?:Z|[+-]\d{2}:\d{2})$/.test(na)
       || Number.isNaN(Date.parse(na))
     ) {
       throw new ValidationError('constraint notAfter must be an ISO-8601 timestamp with an explicit UTC offset (Z or ±hh:mm)');

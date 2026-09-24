@@ -327,12 +327,15 @@ export class Worker {
         // weaken an invariant every other path relies on. STARTING -> FAILED is the sanctioned
         // route for a run that was claimed but never began real work.
         log.warn({ notAfter: run.constraints.notAfter }, 'notAfter passed before start; refusing to start');
-        this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
         const message = 'deadline passed before start';
-        // One transaction, like the infrastructure-failure path above: the run record's
-        // error/errorKind, the events and the terminal transition commit together, so no reader
-        // can observe FAILED with a null error or events without the status.
+        // One transaction, like the infrastructure-failure path above: the STARTING transition,
+        // the run record's error/errorKind, the events and the terminal transition commit
+        // together, so no reader can observe FAILED with a null error or events without the
+        // status. STARTING inside the tx also closes the crash window: a worker that died between
+        // a standalone STARTING and the failure record would leave a run stuck in STARTING to be
+        // reaped as lease-expired instead of the honest deadline-missed refusal.
         tx(this.deps.db, () => {
+          this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
           this.deps.runs.setError(run.id, message, 'infrastructure');
           this.deps.events.append(run.id, 'run.deadline_missed', {
             runId: run.id,

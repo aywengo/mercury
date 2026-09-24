@@ -396,6 +396,13 @@ test('create rejects malformed constraints (issue #28)', () => {
       /explicit UTC offset/,
       'a timezone-less timestamp must be refused, not silently read as local time',
     );
+    // The offset must carry the colon: '...+0200' is refused so the documented ±hh:mm contract
+    // and the parser cannot drift (Copilot round 3 on PR #750).
+    const colonless = new Date(Date.now() + 3_600_000).toISOString().replace('Z', '') + '+0200';
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ notAfter: colonless }) }),
+      /explicit UTC offset/,
+    );
     assert.throws(
       () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ notAfter: new Date(Date.now() - 60_000).toISOString() }) }),
       /notAfter must be in the future/,
