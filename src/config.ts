@@ -167,12 +167,29 @@ function parseArgs(raw: string | undefined): string[] {
   return raw.split(/\s+/).filter(Boolean);
 }
 
+/**
+ * Parse MERCURY_API_TOKENS: `token:owner` pairs, comma-separated. The split is strict — an
+ * entry with more or fewer than exactly one `:` refuses the whole load (#729): the silent
+ * `tok-a:bot:maint -> owner "bot"` truncation made every misconfigured bot share one owner
+ * scope, and a truncated authorization mapping must never parse as something smaller. The
+ * error names the entry's 0-based position, never the token itself, so the message is safe
+ * for logs. Bot owner ids use the colon-free form `bot-<alias>` (dispatcher-bot-design.md 4.2).
+ */
 function parseTokens(raw: string | undefined): Map<string, string> {
   const map = new Map<string, string>();
   if (!raw) return map;
-  for (const pair of raw.split(',')) {
-    const [token, owner] = pair.split(':');
-    if (token && owner) map.set(token.trim(), owner.trim());
+  const entries = raw.split(',');
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]!.trim();
+    if (entry === '') continue;
+    const parts = entry.split(':');
+    if (parts.length !== 2 || !parts[0]!.trim() || !parts[1]!.trim()) {
+      throw new Error(
+        `MERCURY_API_TOKENS entry ${i} must be exactly 'token:owner' (one colon);`
+        + ` got an entry with ${parts.length === 1 ? 'no' : String(parts.length - 1)} extra colon segment(s)`,
+      );
+    }
+    map.set(parts[0]!.trim(), parts[1]!.trim());
   }
   return map;
 }

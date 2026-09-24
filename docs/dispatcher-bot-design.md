@@ -201,15 +201,17 @@ Rules:
   so explicitly when they drift — a rotated token in one place and not the other
   is the predictable failure mode of this design.
 
-**Owner-id form is a B0 prerequisite, not a free choice.** This document writes
-the owner id as `bot:<alias>` throughout for readability, but whether the colon
-is legal depends on how `MERCURY_API_TOKENS` is parsed into the token→owner map
-(the `parseTokens` referenced from `src/api/auth.ts`). If entries are split on
-`:`, then `tok-bot-maint-…:bot:maint` already has three segments and is
-ambiguous. B0 checks the parser and picks one of: keep `bot:<alias>` because the
-parser splits on first-colon-only; switch to `bot-<alias>`; or use a different
-separator in the env entry. Everything else in this document is unaffected by
-which — only the literal string changes.
+**Owner-id form decided: `bot-<alias>`** (B0, issue #729, 2026-09-24). The
+`MERCURY_API_TOKENS` parser splits each entry on `:` and now REFUSES any entry
+that does not have exactly one colon, so an env entry could never carry
+`bot-<alias>` without truncating to owner `bot`. The parser's strictness is the
+reason for the choice: the colon-free form keeps the env format unambiguous
+(`tok-bot-maint-…:bot-maint`), the owner id stays filesystem- and
+systemd-safe for unit names and state files, and every misconfigured entry
+fails the load loudly instead of silently sharing an owner scope. This
+document previously wrote `bot-<alias>` throughout; every occurrence is now
+`bot-<alias>`. The corresponding env entry for a bot is
+`tok-bot-<alias>-…:bot-<alias>`.
 
 Collapsing the two copies to one (a server-side bot token file the server reads
 directly, so the env file never carries bot tokens) is a real improvement and a
@@ -265,7 +267,7 @@ and stays deferred (§16).
 Firing a task means: `POST /api/runs` with the task's template (the same request
 model `mercuryctl runs create --file` accepts — task, repository, agent, skills,
 constraints, goal), with an **idempotency key derived deterministically**:
-`bot:<alias>:<task-name>:<scheduled-fire-iso-minute>`. A crash between dispatch
+`bot-<alias>:<task-name>:<scheduled-fire-iso-minute>`. A crash between dispatch
 and recording cannot double-dispatch: a retry after the crash reuses the key,
 and the server's idempotency path returns the original Run.
 
@@ -495,7 +497,7 @@ Every coordination cycle:
    the request's own bounded size plus the response cap (the previous cycle's
    overage is a secondary check, not the only one), `maxDispatchesPerHour` cap
    per §6.2 guard 4, per-action idempotency key
-   `bot:<alias>:cycle:<cycle-id>:<action-index>`.
+   `bot-<alias>:cycle:<cycle-id>:<action-index>`.
 
 Two changes here make "closed vocabulary" true of the whole action rather than
 just its `kind`. The earlier `value: "<free text>"` form closed the verb and left
@@ -871,7 +873,7 @@ Nothing is enabled by default: the feature exists only where a bot is configured
     `inStatusLongerThanMs` (§6.1);
   - a `reason`/provenance field on input events (§7);
   - the `MERCURY_API_TOKENS` parse format, which decides the owner-id form
-    (§4.2) — settle `bot:<alias>` vs `bot-<alias>` here, before it is written
+    (§4.2) — settle `bot-<alias>` vs `bot-<alias>` here, before it is written
     into config fixtures, unit names and tests.
   Each is either confirmed by a test or becomes a named server-side task in the
   milestone that needs it (B1, B2, B2, B0 respectively).
@@ -972,7 +974,7 @@ corrected one cost estimate.
 | §9, §3, §14.3 | observer bots could `POST input` on another owner's NEEDS_INPUT Run | observer scope is read-only with no exception; bots escalate by dispatching their own Run | it was the only cross-owner write, the landing point for §8.5's injection chain, and guarded only by a status check inside a route. Escalation covers the case; read-only is far easier to keep true |
 | §8.3 | `input` bounded by the answer allowlist | bounded by the allowlist **and** an own-Run ownership check | the worst case of a hijacked planner is now a wrong answer to a Run whose task text the bot itself wrote |
 | §9, §18 B2 | observer scope described as "a small change in `src/api/auth.ts`" | sized honestly: `AuthContext` is `{ ownerId, isAdmin }` with admin as `ownerId: '*'`, so observer is a third posture in a two-state model plus an `isAdmin` audit | read from the code, not the design; #140 is the reason not to fork `resolveCredential` |
-| §4.2, §18 B0 | owner id written as `bot:<alias>` throughout | form is a B0 prerequisite: the `MERCURY_API_TOKENS` parser decides whether the colon is legal | `tok-…:bot:maint` may already be ambiguous under a split-on-colon parser |
+| §4.2, §18 B0 | owner id written as `bot-<alias>` throughout | form is a B0 prerequisite: the `MERCURY_API_TOKENS` parser decides whether the colon is legal | `tok-…:bot:maint` may already be ambiguous under a split-on-colon parser |
 | §18 B0 | `workspace-audit` assumed to exist | named B0 deliverable, written and hand-run before the scheduler | it validates the `template` surface against a real task, and is useful with no bot at all |
 
 ### 2026-09-20 (a) — first design review folded in
