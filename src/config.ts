@@ -173,7 +173,7 @@ function parseArgs(raw: string | undefined): string[] {
  * `tok-a:bot:maint -> owner "bot"` truncation made every misconfigured bot share one owner
  * scope, and a truncated authorization mapping must never parse as something smaller. The
  * error names the entry's 0-based position, never the token itself, so the message is safe
- * for logs. Bot owner ids use the colon-free form `bot-<alias>` (dispatcher-bot-design.md 4.2).
+ * for logs. Bot owner ids use the colon-free form `bot-<alias>` (docs/dispatcher-bot-design.md §4.2).
  */
 function parseTokens(raw: string | undefined): Map<string, string> {
   const map = new Map<string, string>();
