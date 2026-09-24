@@ -19,9 +19,12 @@ export type CronTz = 'UTC' | 'local' | { offsetMinutes: number };
 export interface CronParts {
   minutes: Set<number>;
   hours: Set<number>;
-  daysOfMonth: Set<number> | null; // null = unrestricted (*)
+  // Day fields are always POPULATED sets (parseCron expands `*` to every legal value);
+  // "unrestricted" is inferred by cronMatches via isEveryDay/isEveryDow, not by null. The | null
+  // keeps manual construction possible for callers that precompute a subset.
+  daysOfMonth: Set<number> | null;
   months: Set<number>;
-  daysOfWeek: Set<number> | null; // 0 = Sunday; null = unrestricted (*)
+  daysOfWeek: Set<number> | null; // 0 and 7 both mean Sunday
 }
 
 export class CronParseError extends Error {
@@ -172,9 +175,15 @@ export function parseTz(raw: string | undefined): CronTz {
   if (!m) {
     throw new CronParseError(`tz must be 'UTC', 'local', or a fixed offset like '+02:00', got '${raw}'`);
   }
+  const hh = Number(m[2]);
+  const mm = Number(m[3]);
+  // A fixed offset beyond ±23:59 (or :60 minutes) is a config typo, not a zone: refuse it rather
+  // than silently shifting schedules into the next day.
+  if (hh > 23 || mm > 59) {
+    throw new CronParseError(`tz offset ${raw} is out of range (hours 00-23, minutes 00-59)`);
+  }
   const sign = m[1] === '-' ? -1 : 1;
-  const offsetMinutes = sign * (Number(m[2]) * 60 + Number(m[3]));
-  return { offsetMinutes };
+  return { offsetMinutes: sign * (hh * 60 + mm) };
 }
 
 /**

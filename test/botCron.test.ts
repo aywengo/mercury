@@ -92,6 +92,9 @@ test('fixed-offset tz evaluates the shifted wall clock', () => {
   assert.ok(cronMatches(parseCron('15 1 * * *'), inst, { offsetMinutes: 120 }));
   assert.ok(!cronMatches(parseCron('15 23 * * *'), inst, { offsetMinutes: 120 }));
   assert.throws(() => parseTz('Europe/Warsaw'), /fixed offset/, 'named zones stay deferred (§16)');
+  // Out-of-range offsets are config typos, not zones (Copilot round 1 on PR #752).
+  assert.throws(() => parseTz('+24:00'), /out of range/);
+  assert.throws(() => parseTz('-00:60'), /out of range/);
   assert.equal(parseTz(undefined), 'UTC');
   assert.deepEqual(parseTz('+02:00'), { offsetMinutes: 120 });
   const tz = parseTz('-05:30') as { offsetMinutes: number };
