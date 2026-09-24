@@ -366,6 +366,21 @@ test('--goal cannot be combined with --file', () => {
   assert.match(r.stderr, /--file cannot be combined/);
 });
 
+test('runs create --not-after that is not a timestamp is rejected locally', () => {
+  const r = cli(['runs', 'create', '--task', 'contract: bad not-after',
+                 '--repo', 'https://example.invalid/r.git',
+                 '--not-after', 'tomorrow-ish']);
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /--not-after is not an ISO-8601 timestamp/);
+  assert.ok(!r.stderr.includes('agent'), r.stderr);
+});
+
+test('--not-after cannot be combined with --file', () => {
+  const r = cli(['runs', 'create', '--file', '-', '--not-after', '2026-01-01T00:00:00Z']);
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /--file cannot be combined/);
+});
+
 test('a dead endpoint exits 7 with a transport message, not a stack trace', () => {
   const port = 1; // nothing listens here
   const r = cli(['runs', 'list'], { MERCURY_CLIENT_URL: `http://127.0.0.1:${port}` });

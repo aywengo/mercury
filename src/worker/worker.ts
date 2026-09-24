@@ -316,6 +316,33 @@ export class Worker {
       this.deps.queue.releaseLease(run.id, this.deps.workerId);
       return;
     }
+    // notAfter claim-time refusal (#731): a Run whose absolute deadline passed while it sat in
+    // the queue must never start. It goes terminal FAILED with a distinct error kind rather
+    // than being silently dropped: the creator is waiting on a status, not a vanishing Run.
+    if (run.constraints.notAfter !== undefined) {
+      const notAfterMs = Date.parse(run.constraints.notAfter);
+      if (Number.isFinite(notAfterMs) && Date.now() >= notAfterMs) {
+        // The claim is accepted (QUEUED -> STARTING, like every execution) and then refused:
+        // the state machine has no QUEUED -> FAILED edge, and widening it for one caller would
+        // weaken an invariant every other path relies on. STARTING -> FAILED is the sanctioned
+        // route for a run that was claimed but never began real work.
+        log.warn({ notAfter: run.constraints.notAfter }, 'notAfter passed before start; refusing to start');
+        this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
+        const message = 'deadline passed before start';
+        this.deps.events.append(run.id, 'run.deadline_missed', {
+          runId: run.id,
+          notAfter: run.constraints.notAfter,
+          reason: message,
+        });
+        this.deps.events.append(run.id, 'error', { message });
+        this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
+        this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+        this.deps.queue.releaseLease(run.id, this.deps.workerId);
+        this.active.delete(run.id);
+        this.presetLogCache = null;
+        return;
+      }
+    }
     log.info({ agent: run.agent, attempt: run.attempt }, 'executing run');
 
     // Declared out here so the finally can reach it (issues #46, #47). The agent handle is
@@ -601,6 +628,13 @@ export class Worker {
     const log = this.logger(run.id);
     const startedMs = Date.parse(startedAt);
     const maxDurationMs = run.constraints.maxDurationMs;
+    // notAfter (#731): an absolute wall-clock deadline that counts queue time. The effective
+    // deadline is the earlier of the two, through the same timeout path; a run that starts
+    // after its notAfter was already refused at claim time (see execute()).
+    const notAfterMs = run.constraints.notAfter !== undefined ? Date.parse(run.constraints.notAfter) : null;
+    const deadlineMs = notAfterMs !== null && Number.isFinite(notAfterMs)
+      ? Math.min(startedMs + maxDurationMs, notAfterMs)
+      : startedMs + maxDurationMs;
     let cancelled = false;
     let timedOut = false;
     let inputTimedOut = false;
@@ -639,7 +673,7 @@ export class Worker {
           await adapter.cancel(run.id);
           break;
         }
-        const remaining = maxDurationMs - (Date.now() - startedMs);
+        const remaining = deadlineMs - Date.now();
         if (remaining <= 0) {
           timedOut = true;
           await handle.terminate();
@@ -737,7 +771,14 @@ export class Worker {
       ]);
 
       if (cancelled) return { status: 'CANCELLED', exit };
-      if (timedOut) return { status: 'TIMED_OUT', exit, reason: 'max-duration' };
+      if (timedOut) {
+        // Which bound fired matters to operators (#731): a notAfter stop means the WINDOW ended
+        // (queue time counted); a max-duration stop means the RUN ran too long.
+        const reason = notAfterMs !== null && Number.isFinite(notAfterMs) && Date.now() >= notAfterMs
+          ? 'not-after'
+          : 'max-duration';
+        return { status: 'TIMED_OUT', exit, reason };
+      }
       if (inputTimedOut) return { status: 'TIMED_OUT', exit, reason: 'input-timeout' };
       if (exit.code === 0) return { status: 'COMPLETED', exit };
       // Honor the adapter's own attribution, whatever it is. Special-casing 'infrastructure' here would

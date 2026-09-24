@@ -22,10 +22,12 @@ export interface CreateFlags {
   skills?: string;
   /** JSON goal spec (docs/goals.md §3); parsed here so a typo fails locally, not on the wire. */
   goal?: string;
+  /** Absolute deadline (ISO-8601), counts queue time (#731). */
+  notAfter?: string;
 }
 
 /** Flags that describe request content, and therefore cannot accompany --file. */
-const REQUEST_FLAGS = ['--task', '--repo', '--agent', '--skills', '--goal'] as const;
+const REQUEST_FLAGS = ['--task', '--repo', '--agent', '--skills', '--goal', '--not-after'] as const;
 
 export interface ReadContext {
   stdinIsTty: boolean;
@@ -41,10 +43,18 @@ export interface ReadContext {
  * out, and a misspelled field is ignored outright. Both return 201.
  */
 export function buildCreateRequest(flags: CreateFlags, read: ReadContext): CreateRunRequest {
-  const supplied = REQUEST_FLAGS.filter((name) => {
-    const key = name.slice(2) as keyof CreateFlags;
-    return flags[key] !== undefined;
-  });
+  // Flag name -> CreateFlags key. Multi-word flags ('--not-after') do not map to their camelCase
+  // option by slicing, so the mapping is explicit: a silent miss would treat a supplied flag as
+  // absent and let --file swallow it.
+  const REQUEST_FLAG_KEYS: Record<(typeof REQUEST_FLAGS)[number], keyof CreateFlags> = {
+    '--task': 'task',
+    '--repo': 'repo',
+    '--agent': 'agent',
+    '--skills': 'skills',
+    '--goal': 'goal',
+    '--not-after': 'notAfter',
+  };
+  const supplied = REQUEST_FLAGS.filter((name) => flags[REQUEST_FLAG_KEYS[name]] !== undefined);
 
   if (flags.file !== undefined && supplied.length > 0) {
     throw new UsageError(
@@ -77,6 +87,14 @@ export function buildCreateRequest(flags: CreateFlags, read: ReadContext): Creat
   if (flags.skills !== undefined) {
     request.skills = flags.skills.split(',').map((s) => s.trim()).filter((s) => s !== '');
     if (request.skills.length === 0) throw new UsageError('--skills got no names; expected a comma-separated list');
+  }
+  if (flags.notAfter !== undefined) {
+    // Refuse locally what the server will refuse anyway: an unparseable deadline should fail on
+    // the operator's screen, not after a round trip.
+    if (Number.isNaN(Date.parse(flags.notAfter))) {
+      throw new UsageError(`--not-after is not an ISO-8601 timestamp: ${flags.notAfter}`);
+    }
+    request.constraints = { ...request.constraints, notAfter: flags.notAfter };
   }
   if (flags.goal !== undefined) {
     try {

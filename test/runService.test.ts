@@ -380,12 +380,58 @@ test('create rejects malformed constraints (issue #28)', () => {
     // empty constraints object accepted
     const empty = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: {} });
     assert.ok(empty.id);
+    // notAfter (#731): must be a parseable ISO-8601 timestamp in the future.
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ notAfter: 'not-a-date' }) }),
+      /notAfter must be an ISO-8601 timestamp/,
+    );
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ notAfter: 123 }) }),
+      /notAfter must be an ISO-8601 timestamp/,
+    );
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ notAfter: new Date(Date.now() - 60_000).toISOString() }) }),
+      /notAfter must be in the future/,
+    );
     // valid constraints still accepted (0 is legitimate)
     const run = env.runService.create({
       ownerId: 'alice', task: 'x', agent: 'fake',
       constraints: { maxRetries: 0, maxDurationMs: 60_000, resourceLimits: { cpu: '1' }, allowedNetworks: [] },
     });
     assert.ok(run.id);
+  } finally {
+    env.close();
+  }
+});
+
+test('notAfter is persisted verbatim and inherited by retries (#731, B0-3)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const notAfter = new Date(Date.now() + 3_600_000).toISOString();
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake',
+      constraints: { maxDurationMs: 60_000, notAfter },
+    });
+    assert.equal(run.constraints.notAfter, notAfter, 'stored exactly as given');
+    // retry() requires a terminal run; take it through the sanctioned QUEUED -> STARTING -> FAILED.
+    env.runs.transition(run.id, 'STARTING', { leaseOwner: 'w' });
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+    const retried = env.runService.retry(run.id, 'alice', true);
+    assert.equal(retried.constraints.notAfter, notAfter, 'retry inherits the same absolute deadline');
+    // A retry of a run whose deadline already passed cannot sneak past validation: the copy is
+    // re-validated, so the retry is refused loudly instead of silently extending the window.
+    const expired = env.runService.create({
+      ownerId: 'alice', task: 'y', agent: 'fake',
+      constraints: { maxDurationMs: 60_000, notAfter: new Date(Date.now() + 50).toISOString() },
+    });
+    await new Promise((r) => setTimeout(r, 120));
+    env.runs.transition(expired.id, 'STARTING', { leaseOwner: 'w' });
+    env.runs.transition(expired.id, 'FAILED', { completedAt: new Date().toISOString() });
+    assert.throws(
+      () => env.runService.retry(expired.id, 'alice', true),
+      /notAfter must be in the future/,
+      'retrying past an expired deadline is a caller error, not a window extension',
+    );
   } finally {
     env.close();
   }

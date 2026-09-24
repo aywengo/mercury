@@ -279,6 +279,61 @@ test('timeout: RUNNING -> TIMED_OUT', async () => {
   }
 });
 
+test('notAfter: a run held in the queue past its deadline never starts (#731, B0-3)', async () => {
+  const repo = tempDir('mercury-notafter-queued-');
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'x',
+      agent: 'fake',
+      repository: { localPath: repo },
+      constraints: { maxDurationMs: 60_000, notAfter: new Date(Date.now() + 1_200).toISOString() },
+    });
+    // The deadline passes while the run sits in QUEUED.
+    await new Promise((r) => setTimeout(r, 1_600));
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    const types = env.events.list(run.id).map((e) => e.type);
+    assert.ok(!types.includes('run.started'), 'the run must never start');
+    assert.ok(types.includes('run.deadline_missed'), 'the refusal must be visible as an event');
+    const failed = env.events.list(run.id).find((e) => e.type === 'run.failed');
+    assert.ok(failed);
+    assert.equal((failed!.payload as { error?: string }).error, 'deadline passed before start');
+  } finally {
+    env.close();
+  }
+});
+
+test('notAfter stops a running run even when maxDurationMs would allow more (#731, B0-3)', async () => {
+  const repo = tempDir('mercury-notafter-running-');
+  const env = makeEnv({
+    // Stays busy well past the deadline: total scripted delay ~4s.
+    fakeScript: [
+      { event: { type: 'agent.message', payload: { text: 'slow' } }, delayMs: 2_000 },
+      { event: { type: 'agent.message', payload: { text: 'still slow' } }, delayMs: 2_000 },
+    ],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'x',
+      agent: 'fake',
+      repository: { localPath: repo },
+      // The run would be allowed 60s; the absolute deadline fires in ~1.5s.
+      constraints: { maxDurationMs: 60_000, notAfter: new Date(Date.now() + 1_500).toISOString() },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'TIMED_OUT', 10_000);
+    const timedOut = env.events.list(run.id).find((e) => e.type === 'run.timed_out');
+    assert.ok(timedOut);
+    assert.equal((timedOut!.payload as { reason?: string }).reason, 'not-after');
+    // A started run carries run.started: the deadline stopped it mid-flight, not at claim.
+    assert.ok(env.events.list(run.id).map((e) => e.type).includes('run.started'));
+  } finally {
+    env.close();
+  }
+});
+
 test('duplicate execution prevention: two workers, one executes', async () => {
   const env = makeEnv({
     workerEnabled: false,

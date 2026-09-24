@@ -340,6 +340,12 @@ Supported fields:
 
 - `maxDurationMs` — enforced by the worker;
 - `maxRetries` — enforced for automatic infrastructure retries;
+- `notAfter` — optional ISO-8601 absolute deadline that counts QUEUE time
+  (issue #731). A Run past `notAfter` at claim time fails with
+  `deadline passed before start` without starting; while running, the Run is
+  stopped at the earlier of `maxDurationMs` (from start) and `notAfter`
+  (absolute). Retries inherit it unchanged, so a retry cannot extend the
+  window. Must be in the future at creation.
 - `budgetTokens` — recorded, not enforced;
 - `budgetCost` — recorded, not enforced;
 - `resourceLimits` — optional `cpu`, `memory`, `disk` strings;

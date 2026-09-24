@@ -138,6 +138,51 @@ test('create + get + list with owner scoping', async () => {
 });
 
 test('idempotency-key returns same run (#730, B0-2 contract)', async () => {
+test('notAfter flows through POST /api/runs unchanged (#731, B0-3)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      // invalid timestamp -> the RunService validation error, not a 500
+      const bad = await fetch(`${base}/api/runs`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake', constraints: { maxDurationMs: 60_000, notAfter: 'not-a-date' } }),
+      });
+      assert.equal(bad.status, 400);
+      const badBody = (await bad.json()) as { error?: string };
+      assert.match(badBody.error ?? '', /notAfter must be an ISO-8601 timestamp/);
+      // already-past timestamp -> 400
+      const past = await fetch(`${base}/api/runs`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake', constraints: { maxDurationMs: 60_000, notAfter: new Date(Date.now() - 60_000).toISOString() } }),
+      });
+      assert.equal(past.status, 400);
+      // valid timestamp round-trips: GET shows the same constraint back
+      const notAfter = new Date(Date.now() + 3_600_000).toISOString();
+      const ok = await fetch(`${base}/api/runs`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake', constraints: { maxDurationMs: 60_000, notAfter } }),
+      });
+      assert.equal(ok.status, 201);
+      const { runId } = (await ok.json()) as { runId: string };
+      const got = await fetch(`${base}/api/runs/${runId}`, { headers: { authorization: 'Bearer tok-alice' } });
+      const gotBody = (await got.json()) as { run: { constraints: { notAfter?: string } } };
+      assert.equal(gotBody.run.constraints.notAfter, notAfter);
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
   const env = makeEnv({ workerEnabled: false });
   try {
     const { app, close: closeStream } = makeApi(env);

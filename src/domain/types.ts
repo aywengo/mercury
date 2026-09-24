@@ -37,6 +37,14 @@ export interface RunConstraints {
   // maxDurationMs deadline, and these should be renamed back to max* at that point.
   maxDurationMs: number;
   maxRetries: number;
+  /**
+   * Absolute wall-clock deadline (ISO-8601) that counts QUEUE time, unlike maxDurationMs which
+   * starts when the worker begins driving the Run (#731). A Run past `notAfter` at claim time
+   * goes terminal without starting; while running, the effective deadline is
+   * min(startedAt + maxDurationMs, notAfter) through the same timeout path. Retries inherit it
+   * unchanged, so a retry cannot extend the window.
+   */
+  notAfter?: string;
   budgetTokens?: number;
   budgetCost?: number;
   resourceLimits?: { cpu?: string; memory?: string; disk?: string };
@@ -676,6 +684,10 @@ export const EVENT_TYPES = new Set([
   // the files. Both were added with their emitters rather than before them.
   'preset.selected',
   'preset.materialized',
+  // Absolute-deadline refusal (issue #731, B0-3). Emitted by the worker when a claimed Run's
+  // notAfter passed while it sat in the queue: the Run goes STARTING -> FAILED without starting,
+  // and this event is the operator-visible record of WHY, ahead of the generic run.failed.
+  'run.deadline_missed',
 ]);
 
 /**
