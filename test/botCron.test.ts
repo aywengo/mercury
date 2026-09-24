@@ -1,7 +1,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { parseCron, cronMatches, due, parseTz, CronParseError } from '../src/host/bots/cron.ts';
 import { botOwnerId, dispatchKey, scheduledMinuteIso } from '../src/host/bots/keys.ts';
+
+/**
+ * Run a snippet in a child process with TZ pinned at startup: `local` wall-clock evaluation is
+ * the one host-dependent path in the scheduler, and process.env.TZ mutated mid-run is only
+ * reliably honoured on some platforms (it worked on macOS, silently did not on the CI runner).
+ * Spawning pins it the way production would see it.
+ */
+async function runWithTz(tz: string, snippet: string): Promise<string> {
+  const script = `import { due } from ${JSON.stringify(new URL('../src/host/bots/cron.ts', import.meta.url).href)};\n${snippet}`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: { ...process.env, TZ: tz },
+  });
+  if (r.status !== 0) throw new Error(`DST child failed (${r.status}): ${r.stderr}`);
+  return r.stdout;
+}
 
 const MIN = 60_000;
 // A fixed clock: 2026-03-01 (a Sunday) 00:00:00 UTC.
@@ -80,37 +98,29 @@ test('fixed-offset tz evaluates the shifted wall clock', () => {
   assert.equal(tz.offsetMinutes, -330);
 });
 
-test('tz: local — a 02:30 daily task fires exactly once on spring-forward (TZ=Europe/Warsaw)', () => {
+test('tz: local — a 02:30 daily task fires exactly once on spring-forward (TZ=Europe/Warsaw)', async () => {
   // EU spring-forward 2026-03-29: 02:00 -> 03:00 local, so 02:30 local does not exist that day.
-  // The task must fire on the days around it normally and not fire twice/zero on OTHER days;
-  // the non-existent minute simply produces no fire (the honest cron semantic).
-  const prevTz = process.env.TZ;
-  process.env.TZ = 'Europe/Warsaw';
-  try {
+  // Host-local time must be pinned per PROCESS (TZ is read at startup; mutating process.env.TZ
+  // mid-run is platform-dependent), so the DST cases run in a child process spawned with the TZ.
+  const out = await runWithTz('Europe/Warsaw', `
     const fires = due('30 2 * * *', Date.UTC(2026, 2, 27, 0, 0), Date.UTC(2026, 2, 31, 0, 0), 'local');
-    const days = fires.map((ms) => new Date(ms).toISOString().slice(0, 10));
-    // 03-27 and 03-28 have a local 02:30; 03-29 (spring-forward) has none; 03-30 resumes.
-    assert.deepEqual(days, ['2026-03-27', '2026-03-28', '2026-03-30']);
-  } finally {
-    if (prevTz === undefined) delete process.env.TZ;
-    else process.env.TZ = prevTz;
-  }
+    console.log(JSON.stringify(fires.map((ms) => new Date(ms).toISOString().slice(0, 10))));
+  `);
+  // 03-27 and 03-28 have a local 02:30; 03-29 (spring-forward) has none; 03-30 resumes.
+  assert.deepEqual(JSON.parse(out.trim()), ['2026-03-27', '2026-03-28', '2026-03-30']);
 });
 
-test('tz: local — a 02:30 daily task fires exactly once on fall-back (TZ=Europe/Warsaw)', () => {
+test('tz: local — a 02:30 daily task fires exactly once on fall-back (TZ=Europe/Warsaw)', async () => {
   // EU fall-back 2026-10-25: 03:00 -> 02:00 local, so 02:30 local happens TWICE in wall-clock
   // terms; the scheduler must fire exactly once for the day.
-  const prevTz = process.env.TZ;
-  process.env.TZ = 'Europe/Warsaw';
-  try {
+  const out = await runWithTz('Europe/Warsaw', `
     const fires = due('30 2 * * *', Date.UTC(2026, 9, 24, 0, 0), Date.UTC(2026, 9, 27, 0, 0), 'local');
     const days = fires.map((ms) => new Date(ms).toISOString().slice(0, 10));
-    assert.equal(days.filter((d) => d === '2026-10-25').length, 1, 'fall-back day fires once, not twice');
-    assert.deepEqual(days, ['2026-10-24', '2026-10-25', '2026-10-26']);
-  } finally {
-    if (prevTz === undefined) delete process.env.TZ;
-    else process.env.TZ = prevTz;
-  }
+    console.log(JSON.stringify({ days, onFallBack: days.filter((d) => d === '2026-10-25').length }));
+  `);
+  const parsed = JSON.parse(out.trim()) as { days: string[]; onFallBack: number };
+  assert.equal(parsed.onFallBack, 1, 'fall-back day fires once, not twice');
+  assert.deepEqual(parsed.days, ['2026-10-24', '2026-10-25', '2026-10-26']);
 });
 
 test('derived keys are stable across restarts and pin the scheduled minute', () => {

@@ -200,7 +200,7 @@ export function due(cron: string, afterMs: number, nowMs: number, tz: CronTz = '
     // (different hour/minute) are never merged by this key.
     const w = wallClock(instant, tz);
     const key = `${w.year}-${w.month}-${w.dayOfMonth}T${w.hour}:${w.minute}`;
-    if (false) continue;
+    if (seen.has(key)) continue;
     seen.add(key);
     out.push(instant);
   }
