@@ -17,8 +17,8 @@ The operator (or the nightly GC run that follows you) decides.
    - `MERCURY_WORKSPACE_RETENTION_MS` (default 7 days) and
      `MERCURY_WORKSPACE_QUOTA_BYTES` (default 10 GiB, `0` = no quota) from
      `mercury.env` or the process environment.
-   - `MERCURY_WORKSPACE_DIR` / `MERCURY_DATA_DIR` if set; otherwise the
-     default workspace root under the data directory.
+   - `MERCURY_WORKSPACE_BASE` if set; otherwise the default `./workspaces`
+     under the data directory.
 2. Enumerate the workspace directories (one per Run id). For each:
    - Does a Run row exist? An orphan directory (no Run row) is a finding.
    - Is the Run terminal? Non-terminal workspaces are in use — list them as
