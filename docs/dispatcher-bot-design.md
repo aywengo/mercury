@@ -283,9 +283,10 @@ and the server's idempotency path returns the original Run.
 > list; the same key under a different owner creates two Runs; the header
 > absent creates a Run every time. Pinned over real HTTP by the
 > `idempotency-key` contract tests in `test/api.test.ts`
-> (`idempotency-key returns same run`, `idempotency-key is owner-scoped…`,
-> `idempotency-key absent …`), so a route that stops forwarding the header
-> fails CI.
+> (`idempotency-key returns same run (#730, B0-2 contract)`,
+> `idempotency-key is owner-scoped: same key, different owner -> different runs (issue #8)`,
+> `idempotency-key absent -> every POST creates a Run (#730, B0-2 contract)`),
+> so a route that stops forwarding the header fails CI.
 
 ### 5.3 singleFlight and missed fires
 
