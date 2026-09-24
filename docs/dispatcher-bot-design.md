@@ -203,16 +203,17 @@ Rules:
 
 **Owner-id form decided: `bot-<alias>`** (B0, issue #729, 2026-09-24). Each
 `MERCURY_API_TOKENS` entry is a single `token:owner` pair, and the parser now
-REFUSES any entry that does not have exactly one colon. An owner id written
-with a colon — `bot:<alias>`, the form this document previously used — would
-have made the entry `tok-bot:bot:<alias>`, which the old split truncated to
+REFUSES any entry that does not have exactly one colon. A colon-containing
+owner id — the colon-joined alias form this document previously used — would
+have made a bot's env entry carry two colons, which the old split truncated to
 owner `bot`, so every bot on the host silently shared one owner scope. That
 truncation is why the colon-free form was chosen: the env format stays
 unambiguous (`tok-bot-<alias>-…:bot-<alias>`), the owner id stays filesystem-
 and systemd-safe for unit names and state files, and every misconfigured entry
-fails the load loudly instead of silently sharing an owner scope. This
-document previously wrote `bot:<alias>` throughout; every occurrence is now
-`bot-<alias>`. The corresponding env entry for a bot is
+fails the load loudly instead of silently sharing an owner scope. The
+deprecated colon-joined spelling is deliberately NOT reproduced here so it
+cannot be copied back into a config file; this document now writes
+`bot-<alias>` throughout. The corresponding env entry for a bot is
 `tok-bot-<alias>-…:bot-<alias>`.
 
 Collapsing the two copies to one (a server-side bot token file the server reads
@@ -875,7 +876,7 @@ Nothing is enabled by default: the feature exists only where a bot is configured
     `inStatusLongerThanMs` (§6.1);
   - a `reason`/provenance field on input events (§7);
   - the `MERCURY_API_TOKENS` parse format, which decides the owner-id form
-    (§4.2) — settle `bot-<alias>` vs `bot:<alias>` here, before it is written
+    (§4.2) — settle the colon-free owner-id form `bot-<alias>` here, before it is written
     into config fixtures, unit names and tests.
   Each is either confirmed by a test or becomes a named server-side task in the
   milestone that needs it (B1, B2, B2, B0 respectively).
