@@ -24,6 +24,12 @@ It stores `mercury.db` plus workspaces relative to the current directory.
   and the dashboard login box;
 - right of the colon is the owner id (`alice`).
 
+Each entry must contain exactly one colon. An entry with none (`tok-alice`) or
+more than one (`tok-a:bot:maint`) fails config load, naming the entry's position
+and never echoing the token (#729) — a silently truncated authorization mapping
+would make two principals share one owner scope. Bot owner ids use the
+colon-free form `bot-<alias>` (see `docs/dispatcher-bot-design.md` 4.2).
+
 Do not type the owner id or the whole `tok-alice:alice` string into the dashboard.
 
 Creating a Run without `agent` uses `fake` (no coding-agent CLI). Migrations apply

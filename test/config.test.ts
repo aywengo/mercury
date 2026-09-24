@@ -3,6 +3,59 @@ import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config.ts';
 import { isAbsolute } from 'node:path';
 
+test('MERCURY_API_TOKENS parses single-colon token:owner pairs (#729)', () => {
+  const cfg = loadConfig({ MERCURY_API_TOKENS: 'tok-alice:alice, tok-bot:bot-nightly' });
+  assert.deepEqual(cfg.apiTokens.get('tok-alice'), 'alice');
+  assert.deepEqual(cfg.apiTokens.get('tok-bot'), 'bot-nightly');
+});
+
+test('MERCURY_API_TOKENS refuses entries with more than one colon (#729, B0-1)', () => {
+  // The old destructuring split silently mapped tok-a:bot:maint to owner "bot", so two
+  // misconfigured bots shared one owner scope. Refuse the load, name the entry position,
+  // never the token.
+  assert.throws(
+    () => loadConfig({ MERCURY_API_TOKENS: 'tok-a:bot:maint' }),
+    (err: unknown) => {
+      const msg = String(err);
+      return /entry 0/.test(msg) && /one colon/.test(msg) && !msg.includes('tok-a');
+    },
+    'the error must name the position and must not echo the token',
+  );
+  // The offending entry is identified among valid neighbours.
+  assert.throws(
+    () => loadConfig({ MERCURY_API_TOKENS: 'tok-alice:alice,tok-b:bot:x:y' }),
+    /entry 1/,
+  );
+});
+
+test('MERCURY_API_TOKENS refuses entries with no colon or empty halves (#729)', () => {
+  assert.throws(() => loadConfig({ MERCURY_API_TOKENS: 'tok-alice' }), /entry 0/);
+  assert.throws(() => loadConfig({ MERCURY_API_TOKENS: 'tok-alice:' }), /entry 0/);
+  assert.throws(() => loadConfig({ MERCURY_API_TOKENS: ':alice' }), /entry 0/);
+  // The message names the ACTUAL defect: a one-colon entry with an empty half must not be
+  // misreported as having extra colon segments (Copilot round 1 on PR #749).
+  assert.throws(
+    () => loadConfig({ MERCURY_API_TOKENS: 'tok-alice:' }),
+    (err: unknown) => /entry 0/.test(String(err)) && /empty owner half/.test(String(err)) && !/colon segment/.test(String(err)),
+  );
+  assert.throws(
+    () => loadConfig({ MERCURY_API_TOKENS: ':alice' }),
+    (err: unknown) => /entry 0/.test(String(err)) && /empty token half/.test(String(err)),
+  );
+  assert.throws(
+    () => loadConfig({ MERCURY_API_TOKENS: 'tok-alice' }),
+    (err: unknown) => /no colon separating token from owner/.test(String(err)),
+  );
+});
+
+test('MERCURY_API_TOKENS accepts an empty list and skips empty segments (#729)', () => {
+  assert.deepEqual(loadConfig({}).apiTokens.size, 0);
+  const cfg = loadConfig({ MERCURY_API_TOKENS: 'tok-a:a,,tok-b:b,' });
+  assert.deepEqual(cfg.apiTokens.get('tok-a'), 'a');
+  assert.deepEqual(cfg.apiTokens.get('tok-b'), 'b');
+  assert.equal(cfg.apiTokens.size, 2);
+});
+
 test('numeric env vars fall back to defaults when non-numeric (issue #21)', () => {
   const cfg = loadConfig({
     MERCURY_BACKLOG_ALERT_THRESHOLD: 'abc',
