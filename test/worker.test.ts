@@ -279,6 +279,113 @@ test('timeout: RUNNING -> TIMED_OUT', async () => {
   }
 });
 
+test('notAfter: a run held in the queue past its deadline never starts (#731, B0-3)', async () => {
+  const repo = tempDir('mercury-notafter-queued-');
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'x',
+      agent: 'fake',
+      repository: { localPath: repo },
+      constraints: { maxDurationMs: 60_000, notAfter: new Date(Date.now() + 1_200).toISOString() },
+    });
+    // The deadline passes while the run sits in QUEUED.
+    await new Promise((r) => setTimeout(r, 1_600));
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    const types = env.events.list(run.id).map((e) => e.type);
+    assert.ok(!types.includes('run.started'), 'the run must never start');
+    assert.ok(types.includes('run.deadline_missed'), 'the refusal must be visible as an event');
+    const failed = env.events.list(run.id).find((e) => e.type === 'run.failed');
+    assert.ok(failed);
+    assert.equal((failed!.payload as { error?: string }).error, 'deadline passed before start');
+    // The RUN ROW carries the error too (Copilot round 2 on PR #750): FAILED with a null error
+    // field is the contradiction this must not leave behind.
+    const row = env.runs.get(run.id)!;
+    assert.equal(row.error, 'deadline passed before start');
+    assert.equal(row.errorKind, 'infrastructure');
+  } finally {
+    env.close();
+  }
+});
+
+test('notAfter: a refusal tx() failure still leaves the run terminal and the lease released (#731, B0-3, Copilot round 7)', async () => {
+  const repo = tempDir('mercury-notafter-txfail-');
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'x',
+      agent: 'fake',
+      repository: { localPath: repo },
+      constraints: { maxDurationMs: 60_000, notAfter: new Date(Date.now() + 1_200).toISOString() },
+    });
+    // The deadline passes while the run sits in QUEUED.
+    await new Promise((r) => setTimeout(r, 1_600));
+    // Sabotage the FIRST QUEUED -> STARTING transition (the refusal tx's claim step): the tx
+    // fails and rolls back, so the refusal record never lands. The catch's bookkeeping must
+    // rescue the run: take the claim step itself, record the failure, and the finally releases
+    // the lease — no run stranded leased/QUEUED until expiry.
+    const realTransition = env.runs.transition.bind(env.runs);
+    let sabotageUsed = false;
+    (env.runs as unknown as { transition: unknown }).transition = (id: string, to: string, patch?: Record<string, unknown>) => {
+      if (!sabotageUsed && to === 'STARTING') {
+        sabotageUsed = true;
+        throw new Error('BEGIN IMMEDIATE: database is locked (sabotage)');
+      }
+      return realTransition(id, to as never, patch as never);
+    };
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    assert.ok(sabotageUsed, 'the sabotaged transition must have been hit');
+    // The rescue records the error that actually failed (the tx failure), not the refusal
+    // message — the refusal tx rolled back, so there is no deadline_missed event to re-emit.
+    // What matters: the run is terminal with a recorded error, not stranded leased/QUEUED.
+    const row = env.runs.get(run.id)!;
+    assert.equal(row.status, 'FAILED');
+    assert.equal(row.error, 'BEGIN IMMEDIATE: database is locked (sabotage)');
+    assert.equal(row.errorKind, 'infrastructure');
+    const types = env.events.list(run.id).map((e) => e.type);
+    assert.ok(types.includes('run.failed'), 'the rescue must record run.failed');
+    assert.ok(!types.includes('run.deadline_missed'), 'the rolled-back refusal tx left no deadline_missed event');
+    // The finally released the lease: nothing is claimable (the run is terminal).
+    assert.equal(env.queue.claim('w2', 60_000), null);
+  } finally {
+    env.close();
+  }
+});
+
+test('notAfter stops a running run even when maxDurationMs would allow more (#731, B0-3)', async () => {
+  const repo = tempDir('mercury-notafter-running-');
+  const env = makeEnv({
+    // Stays busy well past the deadline: total scripted delay ~4s.
+    fakeScript: [
+      { event: { type: 'agent.message', payload: { text: 'slow' } }, delayMs: 2_000 },
+      { event: { type: 'agent.message', payload: { text: 'still slow' } }, delayMs: 2_000 },
+    ],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'x',
+      agent: 'fake',
+      repository: { localPath: repo },
+      // The run would be allowed 60s; the absolute deadline fires in ~2.5s — comfortably after
+      // startup on slow CI, still ~1.5s before the ~4s script finishes.
+      constraints: { maxDurationMs: 60_000, notAfter: new Date(Date.now() + 2_500).toISOString() },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'TIMED_OUT', 10_000);
+    const timedOut = env.events.list(run.id).find((e) => e.type === 'run.timed_out');
+    assert.ok(timedOut);
+    assert.equal((timedOut!.payload as { reason?: string }).reason, 'not-after');
+    // A started run carries run.started: the deadline stopped it mid-flight, not at claim.
+    assert.ok(env.events.list(run.id).map((e) => e.type).includes('run.started'));
+  } finally {
+    env.close();
+  }
+});
+
 test('duplicate execution prevention: two workers, one executes', async () => {
   const env = makeEnv({
     workerEnabled: false,
@@ -1009,18 +1116,19 @@ test('failure bookkeeping is all-or-nothing, not four independent writes (issue 
   }
 });
 
-test('both failure-bookkeeping sites are wrapped in a transaction (issue #106)', () => {
+test('every failure-bookkeeping site is wrapped in a transaction (issue #106, #731)', () => {
   // The behavioural test above covers finalize()'s agent-failure branch, which is reachable through
   // the fake adapter. The execute() catch branch (infrastructure failure) needs the drive loop to
   // throw rather than the agent to fail, which no adapter script produces -- so this pins the
   // structure instead. Weaker than the behavioural test, and deliberately honest about it: it
-  // proves the wrap exists, not that it commits atomically.
+  // proves the wrap exists, not that it commits atomically. Three sites exist: the finalize
+  // agent-failure branch, the execute() catch branch, and the claim-time notAfter refusal (#731).
   const src = readFileSync(join(import.meta.dirname, '..', 'src', 'worker', 'worker.ts'), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '');
   const wrapped = src.match(/tx\(this\.deps\.db, \(\) => \{[\s\S]*?setError[\s\S]*?'run\.failed'[\s\S]*?transition[\s\S]*?\}\)/g) ?? [];
-  assert.equal(wrapped.length, 2,
-    `expected both failure paths wrapped in tx(), found ${wrapped.length}`);
+  assert.equal(wrapped.length, 3,
+    `expected all three failure paths wrapped in tx(), found ${wrapped.length}`);
   // maybeAutoRetry must stay OUTSIDE each transaction: it is async, tx() is sync, and a retry run
   // must not be rolled back together with the failure record that caused it. Checked per-block --
   // scanning the whole file would also match the legitimate call on the line AFTER the block.

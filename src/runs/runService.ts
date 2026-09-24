@@ -432,6 +432,8 @@ export class RunService {
       : {
         maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
         maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
+        // Absolute deadline that counts queue time (#731); inherited verbatim by retries.
+        notAfter: input.constraints?.notAfter,
         budgetTokens: input.constraints?.budgetTokens,
         budgetCost: input.constraints?.budgetCost,
         resourceLimits: input.constraints?.resourceLimits,
@@ -857,7 +859,7 @@ function isUniqueViolation(err: unknown): boolean {
 }
 
 const NUMERIC_CONSTRAINT_KEYS = ['maxDurationMs', 'maxRetries', 'budgetTokens', 'budgetCost'] as const;
-const CONSTRAINT_KEYS = new Set(['maxDurationMs', 'maxRetries', 'budgetTokens', 'budgetCost', 'resourceLimits', 'allowedNetworks']);
+const CONSTRAINT_KEYS = new Set(['maxDurationMs', 'maxRetries', 'budgetTokens', 'budgetCost', 'resourceLimits', 'allowedNetworks', 'notAfter']);
 
 // Renamed by issue #63 because max* implied enforcement that does not exist. Rejecting them with a
 // migration message (rather than the generic "Unknown constraint") is deliberate: a stale client
@@ -932,6 +934,24 @@ function validateConstraints(c: Record<string, unknown>): void {
   if (an !== undefined) {
     if (!Array.isArray(an) || an.some((x) => typeof x !== 'string')) {
       throw new ValidationError('constraint allowedNetworks must be an array of strings');
+    }
+  }
+  const na = c.notAfter;
+  if (na !== undefined) {
+    // An ABSOLUTE deadline must name its offset: a timezone-less '2026-01-01T00:00:00' parses via
+    // Date.parse as server-local time, so the same config string means different instants on
+    // different hosts. Require an explicit Z or ±hh:mm offset and parse once.
+    if (
+      typeof na !== 'string'
+      || !/^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?:Z|[+-]\d{2}:\d{2})$/.test(na)
+      || Number.isNaN(Date.parse(na))
+    ) {
+      throw new ValidationError('constraint notAfter must be an ISO-8601 timestamp with an explicit UTC offset (Z or ±hh:mm)');
+    }
+    // Must be in the future AT CREATION: a deadline already passed would make the Run
+    // unstartable by construction, which is a caller mistake, not a queue state (#731).
+    if (Date.parse(na) <= Date.now()) {
+      throw new ValidationError('constraint notAfter must be in the future');
     }
   }
 }
