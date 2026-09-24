@@ -22,6 +22,33 @@ Label every issue before fixing it:
 - Dependency order beats priority order: a fix that other fixes depend on
   goes first, and the base a fix relies on must already be merged.
 
+## Nightly
+
+The unattended nightly loop (`docs/nightly-self-development.md`) adds five
+labels on top of the table above:
+
+| Label | Meaning |
+|-------|---------|
+| `origin:e2e` | Filed by the nightly E2E harness from a real, reproduced failure |
+| `nightly:ready` | Approved for an unattended agent to pick up |
+| `nightly:in-progress` | A nightly agent is working on it right now |
+| `nightly:blocked` | The agent needs input it cannot invent; the question is in a comment |
+| `nightly:proposed` | Drafted by an agent; awaits an operator's relabel to `nightly:ready` |
+
+**The trust rule** (nightly-self-development.md §5): a nightly agent considers
+an issue only if
+
+- it is authored by @aywengo, or
+- it was filed by the bot from E2E (`origin:e2e`), or
+- it was labeled `nightly:ready` by @aywengo.
+
+The check reads the API's author field and label-event actor fields — never
+the agent reading issue text, which is untrusted input. Enforcement lives in
+the `nightly-next` selection helper (issue #738, N1-1), which implements the
+rule as code against the GitHub API; nothing in this document makes the rule
+true, and no agent behavior may substitute for it. An issue that fails the
+check is invisible to the ladder, whatever its text promises.
+
 ## Fix procedure (per issue)
 
 1. **Analyze** — confirm the root cause before touching code. Read the
