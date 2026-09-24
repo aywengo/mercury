@@ -32,6 +32,20 @@ test('MERCURY_API_TOKENS refuses entries with no colon or empty halves (#729)', 
   assert.throws(() => loadConfig({ MERCURY_API_TOKENS: 'tok-alice' }), /entry 0/);
   assert.throws(() => loadConfig({ MERCURY_API_TOKENS: 'tok-alice:' }), /entry 0/);
   assert.throws(() => loadConfig({ MERCURY_API_TOKENS: ':alice' }), /entry 0/);
+  // The message names the ACTUAL defect: a one-colon entry with an empty half must not be
+  // misreported as having extra colon segments (Copilot round 1 on PR #749).
+  assert.throws(
+    () => loadConfig({ MERCURY_API_TOKENS: 'tok-alice:' }),
+    (err: unknown) => /entry 0/.test(String(err)) && /empty owner half/.test(String(err)) && !/colon segment/.test(String(err)),
+  );
+  assert.throws(
+    () => loadConfig({ MERCURY_API_TOKENS: ':alice' }),
+    (err: unknown) => /entry 0/.test(String(err)) && /empty token half/.test(String(err)),
+  );
+  assert.throws(
+    () => loadConfig({ MERCURY_API_TOKENS: 'tok-alice' }),
+    (err: unknown) => /no colon separating token from owner/.test(String(err)),
+  );
 });
 
 test('MERCURY_API_TOKENS accepts an empty list and skips empty segments (#729)', () => {

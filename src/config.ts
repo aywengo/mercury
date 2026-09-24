@@ -184,9 +184,18 @@ function parseTokens(raw: string | undefined): Map<string, string> {
     if (entry === '') continue;
     const parts = entry.split(':');
     if (parts.length !== 2 || !parts[0]!.trim() || !parts[1]!.trim()) {
+      // Name the actual defect, not a guess: an entry can be malformed by SHAPE (wrong number of
+      // colons) or by CONTENT (one side empty). 'tok-alice:' has exactly one colon, so an
+      // "extra colon segments" phrasing would send the operator hunting for a second colon that
+      // does not exist. The token itself is never echoed (it is a credential).
+      const colons = (entry.match(/:/g) ?? []).length;
+      const shape = colons === 0
+        ? 'no colon separating token from owner'
+        : colons === 1
+          ? (parts[0]!.trim() ? 'empty owner half' : 'empty token half')
+          : `${colons} colons (expected exactly one colon)`;
       throw new Error(
-        `MERCURY_API_TOKENS entry ${i} must be exactly 'token:owner' (one colon);`
-        + ` got an entry with ${parts.length === 1 ? 'no' : String(parts.length - 1)} extra colon segment(s)`,
+        `MERCURY_API_TOKENS entry ${i} must be exactly 'token:owner'; got an entry with ${shape}`,
       );
     }
     map.set(parts[0]!.trim(), parts[1]!.trim());

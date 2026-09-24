@@ -201,15 +201,17 @@ Rules:
   so explicitly when they drift — a rotated token in one place and not the other
   is the predictable failure mode of this design.
 
-**Owner-id form decided: `bot-<alias>`** (B0, issue #729, 2026-09-24). The
-`MERCURY_API_TOKENS` parser splits each entry on `:` and now REFUSES any entry
-that does not have exactly one colon, so an env entry could never carry
-`bot-<alias>` without truncating to owner `bot`. The parser's strictness is the
-reason for the choice: the colon-free form keeps the env format unambiguous
-(`tok-bot-maint-…:bot-maint`), the owner id stays filesystem- and
-systemd-safe for unit names and state files, and every misconfigured entry
+**Owner-id form decided: `bot-<alias>`** (B0, issue #729, 2026-09-24). Each
+`MERCURY_API_TOKENS` entry is a single `token:owner` pair, and the parser now
+REFUSES any entry that does not have exactly one colon. An owner id written
+with a colon — `bot:<alias>`, the form this document previously used — would
+have made the entry `tok-bot:bot:<alias>`, which the old split truncated to
+owner `bot`, so every bot on the host silently shared one owner scope. That
+truncation is why the colon-free form was chosen: the env format stays
+unambiguous (`tok-bot-<alias>-…:bot-<alias>`), the owner id stays filesystem-
+and systemd-safe for unit names and state files, and every misconfigured entry
 fails the load loudly instead of silently sharing an owner scope. This
-document previously wrote `bot-<alias>` throughout; every occurrence is now
+document previously wrote `bot:<alias>` throughout; every occurrence is now
 `bot-<alias>`. The corresponding env entry for a bot is
 `tok-bot-<alias>-…:bot-<alias>`.
 
@@ -873,7 +875,7 @@ Nothing is enabled by default: the feature exists only where a bot is configured
     `inStatusLongerThanMs` (§6.1);
   - a `reason`/provenance field on input events (§7);
   - the `MERCURY_API_TOKENS` parse format, which decides the owner-id form
-    (§4.2) — settle `bot-<alias>` vs `bot-<alias>` here, before it is written
+    (§4.2) — settle `bot-<alias>` vs `bot:<alias>` here, before it is written
     into config fixtures, unit names and tests.
   Each is either confirmed by a test or becomes a named server-side task in the
   milestone that needs it (B1, B2, B2, B0 respectively).
