@@ -19,7 +19,7 @@ test('registry lists all skills', () => {
   assert.deepEqual(ids, [
     'code-review', 'debugging', 'deployment', 'documentation', 'frontend', 'git-pr',
     'implementation', 'issue-fix-loop', 'planning', 'repository-analysis',
-    'security-review', 'testing',
+    'security-review', 'testing', 'workspace-audit',
   ]);
 });
 
