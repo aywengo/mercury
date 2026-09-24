@@ -894,7 +894,14 @@ Nothing is enabled by default: the feature exists only where a bot is configured
   runnable by hand through `mercuryctl runs create --file` before any scheduler
   exists. It is independently useful on day one, and firing it manually is how
   the `template` surface in §12 gets validated against a real task rather than
-  an invented one.
+  an invented one. Status (B0, issue #734, 2026-09-24): the skill is written
+  (`.agents/skills/workspace-audit/`, read-only audit, never GCs), the dispatch
+  template lives at `deploy/nightly/workspace-audit.json`, and both are pinned by
+  `test/workspaceAuditSkill.test.ts` — the template passes the client's
+  `validateCreateRunRequest`, its skills resolve in the shipped registry, and
+  auto-selection picks the skill for an audit-shaped task. The hand-dispatched
+  Run on a seeded host is the operator step that completes the acceptance
+  (`mercuryctl runs create --file deploy/nightly/workspace-audit.json`).
 - bot config schema + validation (unknown-key refusal, alias rules, the
   `run` + `singleFlight` warning);
 - `bot-credentials.json` read/permission rules (shared shape with the client's

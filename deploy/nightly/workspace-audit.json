@@ -1,0 +1,10 @@
+{
+  "task": "Run the workspace-audit skill: read this host's GC configuration (MERCURY_WORKSPACE_RETENTION_MS, MERCURY_WORKSPACE_QUOTA_BYTES, workspace root), enumerate every workspace directory, and report the keep / in-use / would-remove / orphan / would-evict verdict table with sizes and totals per the skill's What to report section. READ-ONLY: change nothing. This Run exists to validate the template surface before any scheduler exists (B0-6).",
+  "skills": [
+    "workspace-audit"
+  ],
+  "constraints": {
+    "maxDurationMs": 600000,
+    "maxRetries": 0
+  }
+}
