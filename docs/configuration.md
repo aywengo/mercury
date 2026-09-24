@@ -347,7 +347,7 @@ ${XDG_CONFIG_HOME:-~/.config}/mercury/bots/<alias>.json
 The alias is the file name and must match `^[a-z][a-z0-9-]{0,31}$`. Unknown
 keys are refused with a did-you-mean suggestion; `triggers` and `brain` are
 reserved and refused until B2/B3. Each task needs `name` (unique per bot,
-`[a-z0-9-]`), `cron` (5-field, UTC unless `tz`), and `template` (create-Run
+`[a-z0-9-]+`), `cron` (5-field, UTC unless `tz`), and `template` (create-Run
 request fields, `task` required). Validate offline:
 
 ```bash

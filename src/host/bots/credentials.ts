@@ -96,8 +96,13 @@ export function registeredOwnerForToken(token: string, apiTokensRaw: string | un
     if (trimmed === '') continue;
     // Same strict shape loadConfig enforces (B0-1): exactly one colon, both halves non-empty.
     const parts = trimmed.split(':');
-    if (parts.length !== 2 || !parts[0] || !parts[1]) continue; // invalid here = invalid there
-    if (parts[0] === token) return parts[1];
+    // Trim both halves exactly like loadConfig's parseTokens: 'tok : bot-x' is legal there and
+    // must not read as unregistered here.
+    if (parts.length !== 2) continue; // invalid here = invalid there (loadConfig throws first)
+    const tok = (parts[0] ?? '').trim();
+    const owner = (parts[1] ?? '').trim();
+    if (!tok || !owner) continue;
+    if (tok === token) return owner;
   }
   return null;
 }

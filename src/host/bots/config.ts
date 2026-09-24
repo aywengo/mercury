@@ -175,10 +175,9 @@ function validateTask(path: string, raw: Record<string, unknown>, index: number,
 
 /** Load and validate one bot config by alias. Throws with a named field on any problem. */
 export function loadBotConfig(alias: string, env: NodeJS.ProcessEnv = process.env): BotConfig {
+  // botConfigPath validates the alias (the same regex the caller-visible name obeys), so no
+  // second check here.
   const path = botConfigPath(alias, env);
-  if (!BOT_ALIAS_RE.test(alias)) {
-    throw new Error(`bot alias must match ${BOT_ALIAS_RE.source}, got '${alias}'`);
-  }
   let rawText: string;
   try {
     rawText = readFileSync(path, 'utf8');
@@ -213,7 +212,7 @@ export function loadBotConfig(alias: string, env: NodeJS.ProcessEnv = process.en
       if (!(API_KEYS as readonly string[]).includes(key)) refuseUnknown(path, 'api', key, API_KEYS);
     }
     if (apiRaw.url !== undefined) {
-      if (typeof apiRaw.url !== 'string' || !(apiRaw.url as string).startsWith('http')) {
+      if (typeof apiRaw.url !== 'string' || !/^https?:\/\//.test(apiRaw.url as string)) {
         refuse(path, 'api.url', 'must be an http(s) URL');
       }
       api.url = apiRaw.url as string;

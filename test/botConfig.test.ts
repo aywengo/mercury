@@ -94,6 +94,7 @@ test('fixture set: each malformed config is refused with a named field', () => {
       { name: 'a', cron: '* * * * *', template: { task: 'x' }, maxCatchUp: -1 },
     ] } }, field: /schedule\.tasks\[0\]\.maxCatchUp/, message: /non-negative integer/ },
     { label: 'bad api url', cfg: { ...OK_CFG, api: { url: 'ftp://x' } }, field: /api\.url/, message: /http/ },
+    { label: 'fake http scheme', cfg: { ...OK_CFG, api: { url: 'httpx://x' } }, field: /api\.url/, message: /http/ },
     { label: 'bad timeout', cfg: { ...OK_CFG, api: { url: 'http://x', timeoutMs: 0 } }, field: /api\.timeoutMs/, message: /positive integer/ },
   ];
   for (const fx of fixtures) {
@@ -179,6 +180,8 @@ test('two-copy agreement: drifted copies are reported, agreeing copies resolve t
   assert.equal(botOwnerId('maint'), 'bot-maint');
   // Registered as the right owner.
   assert.equal(registeredOwnerForToken('tok-1', 'tok-1:bot-maint,tok-2:alice'), 'bot-maint');
+  // Whitespace around the halves must not read as unregistered (loadConfig trims both halves).
+  assert.equal(registeredOwnerForToken('tok-1', ' tok-1 : bot-maint , tok-2:alice'), 'bot-maint');
   // Not registered at all.
   assert.equal(registeredOwnerForToken('tok-9', 'tok-1:bot-maint'), null);
   // Registered but for someone else (drift after rotation).

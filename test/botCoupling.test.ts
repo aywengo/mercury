@@ -19,6 +19,9 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const BOTS_DIR = new URL('../src/host/bots', import.meta.url).pathname;
+// Length of '<repo>/src' — slicing an absolute path by the repo root's length+1 yields the
+// repo-relative module path ('src/host/bots/keys.ts').
+const ROOT_LEN = new URL('..', import.meta.url).pathname.replace(/\/$/, '').length;
 
 function sourceFiles(dir: string): string[] {
   const out: string[] = [];
@@ -47,29 +50,25 @@ test('the bots directory is non-empty and actually being scanned', () => {
 });
 
 test('bot code imports only its own modules, node builtins, and the redactor exception', () => {
-  const path = new URL('../src/host/bots/', import.meta.url).pathname;
+  const BOTS_PREFIX = 'src/host/bots/';
   for (const file of sourceFiles(BOTS_DIR)) {
-    const rel = file.slice(path.length);
+    // Resolve against the ABSOLUTE file path so '..' can legitimately escape src/host/bots/
+    // (that is exactly how the documented redactor exception, ../../domain/redact.ts, is written).
+    const dir = file.slice(0, file.lastIndexOf('/'));
     const text = readFileSync(file, 'utf8');
     for (const m of text.matchAll(SPECIFIER_RE)) {
       const spec = m[1]!;
       if (spec.startsWith('node:')) continue;
       if (spec.startsWith('./') || spec.startsWith('../')) {
-        // Resolve relative imports against the file and require the target to be allowlisted.
-        const base = rel.split('/').slice(0, -1);
-        for (const seg of spec.split('/')) {
-          if (seg === '.' || seg === '') continue;
-          if (seg === '..') base.pop();
-          else base.push(seg);
-        }
-        const resolved = ['src/host/bots', ...base].join('/');
-        const target = resolved.endsWith('.ts') ? resolved : `${resolved}.ts`;
+        const resolved = join(dir, spec);
+        const withinRoot = resolved.slice(ROOT_LEN + 1);
+        const target = withinRoot.endsWith('.ts') ? withinRoot : `${withinRoot}.ts`;
         assert.ok(
           ALLOWED_SRC.includes(target),
-          `${rel} imports '${spec}' -> ${target}, which is outside the bot allowlist (${ALLOWED_SRC.join(', ')}). Bot code imports the API surface and the redactor exception, not server internals (§15 item 4). If this import is genuinely required, extend the allowlist AND document the exception here and in the design.`,
+          `${file.slice(BOTS_DIR.length + 1)} imports '${spec}' -> ${target}, which is outside the bot allowlist (${ALLOWED_SRC.join(', ')}). Bot code imports the API surface and the redactor exception, not server internals (§15 item 4). If this import is genuinely required, extend the allowlist AND document the exception here and in the design.`,
         );
       } else {
-        assert.fail(`${rel} imports bare specifier '${spec}' — bot code must not depend on packages beyond node builtins (the bot ships inside @aywengo/mercury with no extra runtime deps)`);
+        assert.fail(`${file.slice(BOTS_DIR.length + 1)} imports bare specifier '${spec}' — bot code must not depend on packages beyond node builtins (the bot ships inside @aywengo/mercury with no extra runtime deps)`);
       }
     }
   }
