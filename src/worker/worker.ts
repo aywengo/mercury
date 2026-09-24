@@ -640,8 +640,10 @@ export class Worker {
     const startedMs = Date.parse(startedAt);
     const maxDurationMs = run.constraints.maxDurationMs;
     // notAfter (#731): an absolute wall-clock deadline that counts queue time. The effective
-    // deadline is the earlier of the two, through the same timeout path; a run that starts
-    // after its notAfter was already refused at claim time (see execute()).
+    // deadline is the earlier of the two, through the same timeout path. The claim-time check
+    // refuses most expired runs, but notAfter is only checked there once — a run that slips
+    // through STARTING (workspace/preset work can take time) is stopped here immediately, which
+    // is why this path must exist rather than trusting the claim-time check alone.
     const notAfterMs = run.constraints.notAfter !== undefined ? Date.parse(run.constraints.notAfter) : null;
     const notAfterEffective = notAfterMs !== null && Number.isFinite(notAfterMs) && notAfterMs < startedMs + maxDurationMs;
     const deadlineMs = notAfterEffective ? notAfterMs! : startedMs + maxDurationMs;
@@ -784,7 +786,7 @@ export class Worker {
       if (timedOut) {
         // Which bound fired matters to operators (#731): a notAfter stop means the WINDOW ended
         // (queue time counted); a max-duration stop means the RUN ran too long. Classified by
-        // which deadline deadlineMs was built from — NOT by Date.now() at this point, because
+        // which bound deadlineMs was built from — NOT by Date.now() at this point, because
         // the exit-wait grace (up to 10s) can push the clock past notAfter after a max-duration
         // stop, which would misreport the cause.
         const reason = notAfterEffective ? 'not-after' : 'max-duration';
