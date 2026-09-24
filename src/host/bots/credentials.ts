@@ -75,6 +75,11 @@ export function readBotCredentials(alias: string, env: NodeJS.ProcessEnv = proce
     if (typeof pair[key] !== 'string' || (pair[key] as string).trim() === '') {
       throw new Error(`${path}: entry '${alias}.${key}' must be a non-empty string`);
     }
+    if ((pair[key] as string) !== (pair[key] as string).trim()) {
+      // A padded token would present as ' tok-…' and read as drifted/unregistered, sending the
+      // operator to check the wrong file. Name the field and the fix instead.
+      throw new Error(`${path}: entry '${alias}.${key}' has leading or trailing whitespace; remove it (the file is read verbatim, not trimmed)`);
+    }
   }
   if (typeof pair.api !== 'string') {
     throw new Error(`${path}: entry '${alias}.api' is required (the bot's Mercury API token)`);
@@ -91,18 +96,27 @@ export function readBotCredentials(alias: string, env: NodeJS.ProcessEnv = proce
  */
 export function registeredOwnerForToken(token: string, apiTokensRaw: string | undefined): string | null {
   if (apiTokensRaw === undefined || apiTokensRaw.trim() === '') return null;
-  for (const entry of apiTokensRaw.split(',')) {
-    const trimmed = entry.trim();
+  const entries = apiTokensRaw.split(',');
+  for (let i = 0; i < entries.length; i++) {
+    const trimmed = entries[i]!.trim();
     if (trimmed === '') continue;
-    // Same strict shape loadConfig enforces (B0-1): exactly one colon, both halves non-empty.
+    // Same strict shape loadConfig enforces (B0-1) — INCLUDING the failure: validate runs before
+    // loadConfig(), and skipping a malformed entry would report 'not registered' for an env that
+    // actually stops the host at boot. Fail with the same safe, index-based error (no token
+    // value echoed) so the operator fixes the real problem.
     const parts = trimmed.split(':');
-    // Trim both halves exactly like loadConfig's parseTokens: 'tok : bot-x' is legal there and
-    // must not read as unregistered here.
-    if (parts.length !== 2) continue; // invalid here = invalid there (loadConfig throws first)
-    const tok = (parts[0] ?? '').trim();
-    const owner = (parts[1] ?? '').trim();
-    if (!tok || !owner) continue;
-    if (tok === token) return owner;
+    if (parts.length !== 2 || !parts[0]!.trim() || !parts[1]!.trim()) {
+      const colons = (trimmed.match(/:/g) ?? []).length;
+      const shape = colons === 0
+        ? 'no colon separating token from owner'
+        : colons === 1
+          ? (parts[0]!.trim() ? 'empty owner half' : 'empty token half')
+          : `${colons} colons (expected exactly one colon)`;
+      throw new Error(
+        `MERCURY_API_TOKENS entry ${i} must be exactly 'token:owner'; got an entry with ${shape}`,
+      );
+    }
+    if (parts[0]!.trim() === token) return parts[1]!.trim();
   }
   return null;
 }

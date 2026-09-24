@@ -276,16 +276,33 @@ async function main(): Promise<void> {
     // Two-copy agreement (§4.2): the credentials copy vs the MERCURY_API_TOKENS copy. The token
     // value itself is never printed; the owner ids are the observable, safe half.
     if (token !== undefined) {
-      const owner = registeredOwnerForToken(token, process.env.MERCURY_API_TOKENS);
-      const expected = botOwnerId(alias);
-      if (owner === null) {
-        process.stdout.write(`agreement FAIL: the credentials token for '${alias}' is not registered in MERCURY_API_TOKENS\n`);
+      // --alias is user input: botOwnerId throws on an alias that violates the form, and validate
+      // must always end in a FAIL line, never a stack trace. (The config block above would have
+      // failed for the same alias, but validate keeps going to report every surface it can.)
+      let expected: string;
+      try {
+        expected = botOwnerId(alias);
+      } catch (err) {
+        process.stdout.write(`agreement FAIL: ${(err as Error).message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      try {
+        const owner = registeredOwnerForToken(token, process.env.MERCURY_API_TOKENS);
+        if (owner === null) {
+          process.stdout.write(`agreement FAIL: the credentials token for '${alias}' is not registered in MERCURY_API_TOKENS\n`);
+          failed = true;
+        } else if (owner !== expected) {
+          process.stdout.write(`agreement FAIL: the credentials token for '${alias}' is registered as owner '${owner}', expected '${expected}'\n`);
+          failed = true;
+        } else {
+          process.stdout.write(`agreement ok: both copies register owner '${expected}'\n`);
+        }
+      } catch (err) {
+        // registeredOwnerForToken refuses to guess past a malformed MERCURY_API_TOKENS: the env
+        // would stop the host at boot, so name the entry instead of reporting drift.
+        process.stdout.write(`agreement FAIL: ${(err as Error).message}\n`);
         failed = true;
-      } else if (owner !== expected) {
-        process.stdout.write(`agreement FAIL: the credentials token for '${alias}' is registered as owner '${owner}', expected '${expected}'\n`);
-        failed = true;
-      } else {
-        process.stdout.write(`agreement ok: both copies register owner '${expected}'\n`);
       }
     }
     process.exitCode = failed ? 1 : 0;

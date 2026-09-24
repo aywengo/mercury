@@ -17,11 +17,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const BOTS_DIR = new URL('../src/host/bots', import.meta.url).pathname;
-// Length of '<repo>/src' — slicing an absolute path by the repo root's length+1 yields the
+const BOTS_DIR = fileURLToPath(new URL('../src/host/bots', import.meta.url));
+// Length of the repo root — slicing an absolute path by the repo root's length+1 yields the
 // repo-relative module path ('src/host/bots/keys.ts').
-const ROOT_LEN = new URL('..', import.meta.url).pathname.replace(/\/$/, '').length;
+const ROOT_LEN = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '').length;
 
 function sourceFiles(dir: string): string[] {
   const out: string[] = [];

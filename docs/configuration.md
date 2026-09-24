@@ -364,8 +364,9 @@ The bot's API token lives in two deliberate places (§4.2): the server side of
 ${XDG_CONFIG_HOME:-~/.config}/mercury/bot-credentials.json  (mode 0600)
 ```
 
-keyed by alias with an `api` token per bot. `host bot validate` reports the
-pair as drifted when the copies disagree.
+keyed by alias with an `api` token per bot (an optional `llm` token per entry
+is accepted for the B3 brain; other keys are refused). `host bot validate`
+reports the pair as drifted when the copies disagree.
 
 ## Host installer
 

@@ -172,6 +172,15 @@ test('credentials: 0600 ok; group-readable refused; missing alias named; bad sha
       cleanup();
     }
   }
+  // whitespace-padded token value: named at the field, not misread as drift later
+  {
+    const { env, cleanup } = withBots({}, { json: { maint: { api: ' tok-bot-maint-1 ' } } });
+    try {
+      assert.throws(() => readBotCredentials('maint', env), /entry 'maint\.api' has leading or trailing whitespace/);
+    } finally {
+      cleanup();
+    }
+  }
 });
 
 test('two-copy agreement: drifted copies are reported, agreeing copies resolve to bot-<alias>', () => {
@@ -189,4 +198,9 @@ test('two-copy agreement: drifted copies are reported, agreeing copies resolve t
   // Empty/absent env.
   assert.equal(registeredOwnerForToken('tok-1', undefined), null);
   assert.equal(registeredOwnerForToken('tok-1', ''), null);
+  // Malformed env is NOT skipped: validate runs before loadConfig, so the same safe, index-based
+  // error (no token echoed) must surface here.
+  assert.throws(() => registeredOwnerForToken('tok-1', 'tok-1'), /entry 0 must be exactly 'token:owner'.*no colon/);
+  assert.throws(() => registeredOwnerForToken('tok-1', 'tok-1:'), /entry 0 must be exactly 'token:owner'.*empty owner half/);
+  assert.throws(() => registeredOwnerForToken('tok-1', 'a:b:c'), /entry 0 must be exactly 'token:owner'.*2 colons/);
 });
