@@ -154,7 +154,7 @@ test('notAfter flows through POST /api/runs unchanged (#731, B0-3)', async () =>
       });
       assert.equal(bad.status, 400);
       const badBody = (await bad.json()) as { error?: string };
-      assert.match(badBody.error ?? '', /notAfter must be an ISO-8601 timestamp/);
+      assert.match(badBody.error ?? '', /notAfter must be an ISO-8601 timestamp with an explicit UTC offset/);
       // already-past timestamp -> 400
       const past = await fetch(`${base}/api/runs`, {
         method: 'POST',

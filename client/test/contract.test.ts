@@ -371,7 +371,7 @@ test('runs create --not-after that is not a timestamp is rejected locally', () =
                  '--repo', 'https://example.invalid/r.git',
                  '--not-after', 'tomorrow-ish']);
   assert.equal(r.code, 2, r.stderr);
-  assert.match(r.stderr, /--not-after is not an ISO-8601 timestamp/);
+  assert.match(r.stderr, /--not-after is not an ISO-8601 timestamp with an explicit UTC offset/);
   assert.ok(!r.stderr.includes('agent'), r.stderr);
 });
 

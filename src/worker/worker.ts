@@ -338,8 +338,8 @@ export class Worker {
         this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
         this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
         this.deps.queue.releaseLease(run.id, this.deps.workerId);
-        this.active.delete(run.id);
-        this.presetLogCache = null;
+        // active/presetLogCache are NOT touched here: loop()'s finally removes the run from
+        // `active`, and logger() refreshes the preset-log cache when the next runId is logged.
         return;
       }
     }
@@ -632,9 +632,8 @@ export class Worker {
     // deadline is the earlier of the two, through the same timeout path; a run that starts
     // after its notAfter was already refused at claim time (see execute()).
     const notAfterMs = run.constraints.notAfter !== undefined ? Date.parse(run.constraints.notAfter) : null;
-    const deadlineMs = notAfterMs !== null && Number.isFinite(notAfterMs)
-      ? Math.min(startedMs + maxDurationMs, notAfterMs)
-      : startedMs + maxDurationMs;
+    const notAfterEffective = notAfterMs !== null && Number.isFinite(notAfterMs) && notAfterMs < startedMs + maxDurationMs;
+    const deadlineMs = notAfterEffective ? notAfterMs! : startedMs + maxDurationMs;
     let cancelled = false;
     let timedOut = false;
     let inputTimedOut = false;
@@ -773,10 +772,11 @@ export class Worker {
       if (cancelled) return { status: 'CANCELLED', exit };
       if (timedOut) {
         // Which bound fired matters to operators (#731): a notAfter stop means the WINDOW ended
-        // (queue time counted); a max-duration stop means the RUN ran too long.
-        const reason = notAfterMs !== null && Number.isFinite(notAfterMs) && Date.now() >= notAfterMs
-          ? 'not-after'
-          : 'max-duration';
+        // (queue time counted); a max-duration stop means the RUN ran too long. Classified by
+        // which deadline deadlineMs was built from — NOT by Date.now() at this point, because
+        // the exit-wait grace (up to 10s) can push the clock past notAfter after a max-duration
+        // stop, which would misreport the cause.
+        const reason = notAfterEffective ? 'not-after' : 'max-duration';
         return { status: 'TIMED_OUT', exit, reason };
       }
       if (inputTimedOut) return { status: 'TIMED_OUT', exit, reason: 'input-timeout' };

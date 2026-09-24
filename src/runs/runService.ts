@@ -938,8 +938,15 @@ function validateConstraints(c: Record<string, unknown>): void {
   }
   const na = c.notAfter;
   if (na !== undefined) {
-    if (typeof na !== 'string' || Number.isNaN(Date.parse(na))) {
-      throw new ValidationError('constraint notAfter must be an ISO-8601 timestamp');
+    // An ABSOLUTE deadline must name its offset: a timezone-less '2026-01-01T00:00:00' parses via
+    // Date.parse as server-local time, so the same config string means different instants on
+    // different hosts. Require an explicit Z or ±hh:mm offset and parse once.
+    if (
+      typeof na !== 'string'
+      || !/^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)(?:Z|[+-]\d{2}:?\d{2})$/.test(na)
+      || Number.isNaN(Date.parse(na))
+    ) {
+      throw new ValidationError('constraint notAfter must be an ISO-8601 timestamp with an explicit UTC offset (Z or ±hh:mm)');
     }
     // Must be in the future AT CREATION: a deadline already passed would make the Run
     // unstartable by construction, which is a caller mistake, not a queue state (#731).

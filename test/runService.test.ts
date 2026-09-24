@@ -380,14 +380,21 @@ test('create rejects malformed constraints (issue #28)', () => {
     // empty constraints object accepted
     const empty = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: {} });
     assert.ok(empty.id);
-    // notAfter (#731): must be a parseable ISO-8601 timestamp in the future.
+    // notAfter (#731): must be an ISO-8601 timestamp WITH an explicit UTC offset — a
+    // timezone-less string parses as server-local time, so the same value means different
+    // instants on different hosts (Copilot round 1 on PR #750).
     assert.throws(
       () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ notAfter: 'not-a-date' }) }),
-      /notAfter must be an ISO-8601 timestamp/,
+      /notAfter must be an ISO-8601 timestamp with an explicit UTC offset/,
     );
     assert.throws(
       () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ notAfter: 123 }) }),
-      /notAfter must be an ISO-8601 timestamp/,
+      /notAfter must be an ISO-8601 timestamp with an explicit UTC offset/,
+    );
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ notAfter: new Date(Date.now() + 3_600_000).toISOString().replace('Z', '') }) }),
+      /explicit UTC offset/,
+      'a timezone-less timestamp must be refused, not silently read as local time',
     );
     assert.throws(
       () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ notAfter: new Date(Date.now() - 60_000).toISOString() }) }),
