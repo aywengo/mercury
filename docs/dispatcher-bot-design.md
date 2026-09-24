@@ -270,7 +270,7 @@ and stays deferred (§16).
 Firing a task means: `POST /api/runs` with the task's template (the same request
 model `mercuryctl runs create --file` accepts — task, repository, agent, skills,
 constraints, goal), with an **idempotency key derived deterministically**:
-`bot-<alias>:<task-name>:<scheduled-fire-iso-minute>`. A crash between dispatch
+`bot-<alias>:<task-name>:<scheduled-fire-wall-minute>` — the scheduled minute as a `w`-prefixed wall-clock label (`w2026-06-10T03:15`) computed in the task's zone, deliberately not an ISO instant so no zone designator can mis-state the wall clock or re-split DST fall-back instants. A crash between dispatch
 and recording cannot double-dispatch: a retry after the crash reuses the key,
 and the server's idempotency path returns the original Run.
 

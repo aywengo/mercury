@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { parseCron, cronMatches, due, parseTz, CronParseError } from '../src/host/bots/cron.ts';
-import { botOwnerId, dispatchKey, scheduledMinuteIso } from '../src/host/bots/keys.ts';
+import { botOwnerId, dispatchKey, scheduledWallMinuteId } from '../src/host/bots/keys.ts';
 
 /**
  * Run a snippet in a child process with TZ pinned at startup: `local` wall-clock evaluation is
@@ -81,10 +81,10 @@ test('a manually-constructed CronParts with an empty day set never fires (#752 r
 
 test('due() lists each scheduled minute in the window exactly once', () => {
   const fires = due('*/15 * * * *', BASE, BASE + 45 * MIN, 'UTC');
-  assert.deepEqual(fires.map((ms) => scheduledMinuteIso(ms)), [
-    '2026-03-01T00:15:00.000Z',
-    '2026-03-01T00:30:00.000Z',
-    '2026-03-01T00:45:00.000Z',
+  assert.deepEqual(fires.map((ms) => scheduledWallMinuteId(ms)), [
+    'w2026-03-01T00:15',
+    'w2026-03-01T00:30',
+    'w2026-03-01T00:45',
   ]);
   // An empty window (now == after) yields nothing.
   assert.deepEqual(due('*/15 * * * *', BASE, BASE, 'UTC'), []);
@@ -138,11 +138,18 @@ test('derived keys are stable across restarts and pin the scheduled minute', () 
   const k2 = dispatchKey('nightly-gc', 'workspace-audit', Date.UTC(2026, 5, 10, 3, 15, 59, 999));
   // Sub-minute jitter does not change the key: the key carries the scheduled MINUTE.
   assert.equal(k1, k2);
-  assert.equal(k1, 'bot-nightly-gc:workspace-audit:2026-06-10T03:15:00.000Z');
+  assert.equal(k1, 'bot-nightly-gc:workspace-audit:w2026-06-10T03:15');
   // A different task or minute or bot -> a different key.
   assert.notEqual(k1, dispatchKey('nightly-gc', 'other-task', Date.UTC(2026, 5, 10, 3, 15)));
   assert.notEqual(k1, dispatchKey('nightly-gc', 'workspace-audit', Date.UTC(2026, 5, 10, 3, 16)));
   assert.notEqual(k1, dispatchKey('other-bot', 'workspace-audit', Date.UTC(2026, 5, 10, 3, 15)));
+});
+
+test('dispatchKey refuses task names that would make the colon-delimited key ambiguous', () => {
+  assert.throws(() => dispatchKey('nightly-gc', 'weird:task', Date.UTC(2026, 5, 10, 3, 15)), /must match/);
+  assert.throws(() => dispatchKey('nightly-gc', '', Date.UTC(2026, 5, 10, 3, 15)), /must match/);
+  assert.throws(() => dispatchKey('nightly-gc', 'spaces in name', Date.UTC(2026, 5, 10, 3, 15)), /must match/);
+  assert.doesNotThrow(() => dispatchKey('nightly-gc', 'workspace-audit', Date.UTC(2026, 5, 10, 3, 15)));
 });
 
 test('dispatchKey with tz local collapses fall-back repeats to one key (#752 round 2)', async () => {
@@ -175,6 +182,9 @@ test('botOwnerId enforces the B0-1 colon-free form and the alias grammar', () =>
   assert.throws(() => botOwnerId(''), /alias/);
 });
 
-test('scheduledMinuteIso truncates to the minute in UTC', () => {
-  assert.equal(scheduledMinuteIso(Date.UTC(2026, 5, 10, 3, 15, 30)), '2026-06-10T03:15:00.000Z');
+test('scheduledWallMinuteId truncates to the minute in UTC and never claims UTC', () => {
+  assert.equal(scheduledWallMinuteId(Date.UTC(2026, 5, 10, 3, 15, 30)), 'w2026-06-10T03:15');
+  // The label carries no zone designator: the fields are wall-clock in the task's zone, so a
+  // `Z` would lie for local/offset zones and an offset would re-split fall-back instants.
+  assert.ok(!/Z$|[+-]\d\d:\d\d$/.test(scheduledWallMinuteId(Date.UTC(2026, 5, 10, 3, 15, 30), 'local')));
 });
