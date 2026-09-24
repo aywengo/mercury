@@ -24,8 +24,9 @@ Label every issue before fixing it:
 
 ## Nightly
 
-The unattended nightly loop (`docs/nightly-self-development.md`) adds five
-labels on top of the table above:
+The unattended nightly loop specified in
+[`nightly-self-development.md`](nightly-self-development.md) — designed, not
+running yet — defines five labels on top of the table above:
 
 | Label | Meaning |
 |-------|---------|
@@ -35,7 +36,8 @@ labels on top of the table above:
 | `nightly:blocked` | The agent needs input it cannot invent; the question is in a comment |
 | `nightly:proposed` | Drafted by an agent; awaits an operator's relabel to `nightly:ready` |
 
-**The trust rule** (nightly-self-development.md §5): a nightly agent considers
+**The trust rule** (§5 of `nightly-self-development.md`): a nightly agent
+will consider
 an issue only if
 
 - it is authored by @aywengo, or
@@ -43,11 +45,11 @@ an issue only if
 - it was labeled `nightly:ready` by @aywengo.
 
 The check reads the API's author field and label-event actor fields — never
-the agent reading issue text, which is untrusted input. Enforcement lives in
-the `nightly-next` selection helper (issue #738, N1-1), which implements the
-rule as code against the GitHub API; nothing in this document makes the rule
-true, and no agent behavior may substitute for it. An issue that fails the
-check is invisible to the ladder, whatever its text promises.
+the agent reading issue text, which is untrusted input. Enforcement will live
+in the `nightly-next` selection helper (issue #738, N1-1), which implements the
+rule as code against the GitHub API; until that ships, the rule is written
+policy, not working code, and nothing in this document makes it true. An issue
+that fails the check is invisible to the ladder, whatever its text promises.
 
 ## Fix procedure (per issue)
 
