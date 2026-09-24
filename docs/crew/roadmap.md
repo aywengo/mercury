@@ -6,14 +6,15 @@ This roadmap ships Crew as four separate products:
 Role Presets -> per-run MCP -> Preset Store -> Workflow Templates
 ```
 
-Status: **Milestone A (Role Presets, Phases 0-3) is implemented; acceptance criteria 7 and 8 of
-[`role-presets.md`](role-presets.md) §12 are still open** (#721, #722). **Phases 4-11 are design only.**
-The earlier collapse of those two facts into one "design only" line made the roadmap say the
-prerequisite had not been done when it had -- see
-[`../phase-0-issues.md`](../phase-0-issues.md) ("All acceptance criteria are now met") and the Recommended
-priority in [`../status.md`](../status.md). A contributor
-reading the old line would have re-implemented 2-3 days of merged, reviewed work or waited on a gate that had
-already been passed.
+Status: **Milestone A (Role Presets, Phases 0-3) is complete.** Every §12 acceptance criterion
+holds: AC 7 (capabilities fail closed) closed by #721 (`c8f7d85`) and AC 8 (resume parity) closed
+by #722 (`2c8c0d5`); the C-3/C-4/C-5 follow-ups closed as #723 (`561d880`), #724 (`e35ffbc`) and
+#725 (`8507642`). **Phases 4-11 are design only.** The earlier collapse of "Milestone A done" and
+"Phases 4-11 design only" into one line made the roadmap say the prerequisite had not been done
+when it had -- see [`../phase-0-issues.md`](../phase-0-issues.md) ("All acceptance criteria are now
+met") and the Recommended priority in [`../status.md`](../status.md); the later un-stamp in #726
+was the mirror image, stamping complete while AC 7/AC 8 were still open. Both drift modes are
+guarded by `test/crewDocsStatus.test.ts`.
 
 The status of Crew as a whole is owned by [`../status.md`](../status.md); this document keeps the phase
 breakdown and defers to it, so the two cannot disagree again the way they did here.
@@ -217,8 +218,8 @@ Run integration, MCP, Git mirror, user drafts and workflows.
 
 ## 6. Phase 2 — Run resolution and snapshots
 
-**Status: implemented; AC 7 and AC 8 do not hold yet** — #716, merged as `a6b4d79`. The fail-closed
-capability check is #721 and resume parity is #722; re-stamp this phase when both land.
+**Status: complete** — #716, merged as `a6b4d79`; AC 7 closed by #721 (`c8f7d85`) and AC 8 by
+#722 (`2c8c0d5`).
 
 Estimate: **3–5 days**. Depends on Phase 1.
 

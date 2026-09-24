@@ -179,18 +179,13 @@ snapshot bytes, the preset read API, the dashboard Roles page, and preset dimens
 Run logs and metrics. See [`crew/roadmap.md`](crew/roadmap.md) for the phase-by-phase
 record (PRs #714, #716, #718, #719).
 
-Not yet, tracked as follow-ups against the milestone:
-
-- #721 (C-1): unsupported required adapter capabilities are not rejected at Run
-  creation — a preset with an instruction still runs on agents whose `roleInstruction`
-  is `none`, and a `requires.sandbox` preset on an adapter without sandbox fails at
-  `start()` instead of at creation.
-- #722 (C-2): `resume()` does not repeat the preset reference the way `start()` does;
-  only `.mercury-context.json` keeps the role reachable on the resumed session.
-- #723 (C-3): preset network and resource ceilings reject narrowing values and admit
-  defaults that are wider than the preset's own ceiling.
-- #724 (C-4): skill resolution diverges from `role-presets.md` §3.2 in two documented
-  places; a decision on which side moves is still open.
+The milestone's follow-up review set is closed and every §12 acceptance criterion of
+[`crew/role-presets.md`](crew/role-presets.md) now holds: capabilities fail closed at Run
+creation (`c8f7d85`), resume carries the preset reference like start does (`2c8c0d5`),
+preset ceilings can only narrow and defaults are checked against them at load (`561d880`),
+skill resolution matches §3.2 with an explicit empty caller list meaning "no skills"
+(`e35ffbc`), and malformed CPU/memory/disk values are rejected before the Run is inserted
+(`8507642`). The per-fix records live in [`crew/roadmap.md`](crew/roadmap.md).
 
 ### Knowledge base (Atlas)
 
