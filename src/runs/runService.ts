@@ -14,6 +14,7 @@ import type { GoalStore } from './goalStore.ts';
 import { EventStore } from '../events/eventStore.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { SkillSelector } from '../skills/skillSelector.ts';
+import { parseByteLimit, parseCpuLimit } from '../sandbox/resourceLimits.ts';
 import { RunStore, newRunId } from './runStore.ts';
 import { PresetStore, type RunPresetRow } from './presetStore.ts';
 import type { PresetRegistry } from '../presets/presetRegistry.ts';
@@ -915,6 +916,15 @@ function validateConstraints(c: Record<string, unknown>): void {
       }
       if (typeof v !== 'string') {
         throw new ValidationError(`resourceLimits.${k} must be a string`);
+      }
+      // Section 3.3: malformed values are rejected BEFORE the Run is inserted, not at container
+      // start where they first fail. The parsers mirror what the sandbox manager passes to
+      // docker/podman (#725).
+      if (k === 'cpu' && parseCpuLimit(v) === null) {
+        throw new ValidationError(`resourceLimits.cpu ${JSON.stringify(v)} is not a positive decimal (e.g. "1.5")`);
+      }
+      if (k !== 'cpu' && parseByteLimit(v) === null) {
+        throw new ValidationError(`resourceLimits.${k} ${JSON.stringify(v)} is not a positive integer with an optional b/k/m/g suffix (e.g. "512m")`);
       }
     }
   }

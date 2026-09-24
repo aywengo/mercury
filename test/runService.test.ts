@@ -326,6 +326,27 @@ test('create rejects malformed constraints (issue #28)', () => {
       () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ allowedNetworks: ['ok', 42] }) }),
       /allowedNetworks must be an array of strings/,
     );
+    // Section 3.3 (#725): malformed resourceLimit VALUES are a 400 at creation, not a container
+    // start failure. CPU must be a positive decimal; memory/disk an integer with b/k/m/g suffix.
+    for (const [k, v, msg] of [
+      ['cpu', 'x', /resourceLimits\.cpu "x" is not a positive decimal/],
+      ['cpu', '0', /resourceLimits\.cpu "0" is not a positive decimal/],
+      ['cpu', '-1.5', /resourceLimits\.cpu "-1\.5" is not a positive decimal/],
+      ['memory', 'abc', /resourceLimits\.memory "abc" is not a positive integer/],
+      ['memory', '0m', /resourceLimits\.memory "0m" is not a positive integer/],
+      ['memory', '1.5g', /resourceLimits\.memory "1\.5g" is not a positive integer/],
+      ['disk', '10x', /resourceLimits\.disk "10x" is not a positive integer/],
+      ['cpu', '9'.repeat(400), /resourceLimits\.cpu "9+ is not a positive decimal|not a positive decimal/],
+      ['memory', '9'.repeat(400) + 'g', /not a positive integer/],
+    ] as [string, string, RegExp][]) {
+      assert.throws(
+        () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ resourceLimits: { [k]: v } }) }),
+        msg,
+      );
+    }
+    // Valid values still admitted (suffixes case-insensitive; bare integers).
+    const ok = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ resourceLimits: { cpu: '1.5', memory: '512M', disk: '10' } }) });
+    assert.equal(ok.constraints.resourceLimits?.cpu, '1.5');
     // NaN (the literal issue-#28 bug)
     assert.throws(
       () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', constraints: loose({ maxRetries: NaN }) }),
