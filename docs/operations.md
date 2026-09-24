@@ -306,6 +306,40 @@ Back up the database and retain repository/workspace artifacts according to
 your recovery objective. A database restore cannot recreate workspaces that
 were separately deleted.
 
+## The nightly host's GitHub identity
+
+Mercury's nightly self-development work (`docs/nightly-self-development.md`)
+operates on this repository from a host — eventually through the dispatcher bot
+(`docs/dispatcher-bot-design.md`). That host must not use a personal token.
+
+**Identity.** The nightly host acts as a dedicated identity — a GitHub App or
+a machine user — fine-grained to `aywengo/mercury` and nothing else. It is not
+a collaborator's account and it is not on `main`'s bypass list
+(ruleset `main-protection`), so everything it does goes through pull requests.
+
+**Scopes.** Issues read/write (file and comment on nightly findings), pull
+requests read/write (open, review, merge its own PRs), contents read/write
+(read the repo, push branches). Nothing beyond that: no admin, no secrets, no
+other repositories.
+
+**Token location.** The identity's credential lives only in the host's Mercury
+harness environment (the same channel agent credentials already use). It never
+appears in task text, Run events, or logs; Mercury's secret redactor is a
+safety net, not the mechanism. Rotate by replacing the credential in the
+harness environment.
+
+**Pinned version.** The host runs a released `@aywengo/mercury` version from
+npm, upgraded by hand — the nightly agent never runs Mercury from a checkout of
+itself, and never upgrades its own runtime. Upgrades are an operator step with
+the release notes in front of them.
+
+**Branch protection.** `main` is protected by the `main-protection` ruleset:
+pull request required, the aggregate `ci` check required green, force pushes
+and deletions blocked. `@aywengo` holds the bypass so documentation commits can
+continue to land directly; no automation is on the bypass list. The bot
+identity is minted by the operator; until it exists, acceptance for issue
+#727's push-rejection check waits on that credential.
+
 ## Common failure symptoms
 
 ### Run remains queued
