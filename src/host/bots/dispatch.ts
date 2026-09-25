@@ -72,9 +72,12 @@ export async function dispatchTask(
   }
   const task = cfg.tasks.find((t) => t.name === taskName)!;
   if (task.singleFlight) {
-    // Walk the owner-run list the same way the scheduler does: a parked Run on ANY page blocks.
+    // Walk the owner-run list the same way the scheduler does: a parked Run on ANY page blocks,
+    // and exhausting the page cap WITHOUT reaching the end fails CLOSED — an old non-terminal
+    // Run could be hiding past the cap, and dispatching over it is the one wrong outcome.
     // The blocking Run's id is kept so the refusal is actionable (cancel/wait/inspect THAT Run).
     let blocker: { id: string; status: string } | undefined;
+    let capExhausted = false;
     let cursor: string | null = null;
     for (let page = 0; page < 20; page++) {
       const res = await client.listOwnRuns(200, cursor);
@@ -85,6 +88,14 @@ export async function dispatchTask(
       if (blocker) break;
       cursor = res.nextCursor ?? null;
       if (!cursor) break;
+      if (page === 19) capExhausted = true;
+    }
+    if (!blocker && capExhausted) {
+      return {
+        fired: false,
+        reason: `singleFlight scan hit the 20-page cap without reaching the end of the run list — refusing to dispatch (an old non-terminal Run could be past the cap)`,
+        fire,
+      };
     }
     if (blocker) {
       return {

@@ -156,3 +156,30 @@ test('statusView marks the API-backed sections unavailable and the caller fails 
   const rendered = renderStatus(cfg([task()]), view, now);
   assert.match(rendered, /UNAVAILABLE/);
 });
+
+
+test('dispatch singleFlight fails closed at the page cap (round-3 review)', async () => {
+  const now = Date.now();
+  const client: SchedulerClient = {
+    async listOwnRuns() { return { runs: [{ id: 'r', status: 'COMPLETED', constraints: { botTask: 'nightly' } }], nextCursor: 'more' }; },
+    async createRun() { return { runId: 'x', replayed: false }; },
+  };
+  const d = await dispatchTask(cfg([task({ singleFlight: true })]), client, 'nightly', { nowMs: now, dryRun: false, yes: true });
+  assert.equal(d.fired, false, 'cap exhaustion without reaching the list end refuses to dispatch');
+  assert.match(d.reason ?? '', /page cap/);
+});
+
+test('statusView marks the hourly count partial when the page cap hits (round-3 review)', async () => {
+  const now = Date.now();
+  const client: SchedulerClient = {
+    async listOwnRuns() { return { runs: [{ id: 'r', status: 'COMPLETED', constraints: { botTask: 'nightly' }, createdAt: new Date(now - 5 * MIN).toISOString() }], nextCursor: 'more' }; },
+    async createRun() { return { runId: 'x', replayed: false }; },
+  };
+  const view = await statusView(cfg([task()]), client, now);
+  assert.equal(view.hourlyCapHit, true);
+  const rendered = renderStatus(cfg([task()]), view, now);
+  assert.match(rendered, /partial: page cap reached/);
+  // A walk that reaches the list end is not partial.
+  const view2 = await statusView(cfg([task()]), fakeClient(), now);
+  assert.equal(view2.hourlyCapHit, false);
+});

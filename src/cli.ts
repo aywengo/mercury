@@ -424,8 +424,9 @@ async function main(): Promise<void> {
     try {
       const cfg = loadBotConfig(alias);
       const client = makeBotClient(cfg);
-      const view = await statusView(cfg, client, Date.now());
-      process.stdout.write(renderStatus(cfg, view, Date.now()) + '\n');
+      const nowMs = Date.now();
+      const view = await statusView(cfg, client, nowMs);
+      process.stdout.write(renderStatus(cfg, view, nowMs) + '\n');
       process.exitCode = view.apiError ? 1 : 0;
     } catch (err) {
       const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);

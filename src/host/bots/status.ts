@@ -55,6 +55,7 @@ export async function statusView(cfg: BotConfig, client: SchedulerClient, nowMs:
   let cursor: string | null = null;
   let firstPage = true;
   let pastWindow = false;
+  let capHit = false;
   try {
     for (let page = 0; page < 20 && !pastWindow; page++) {
       const res = await client.listOwnRuns(200, cursor);
@@ -74,10 +75,12 @@ export async function statusView(cfg: BotConfig, client: SchedulerClient, nowMs:
       firstPage = false;
       cursor = res.nextCursor ?? null;
       if (!cursor) break;
+      if (page === 19) capHit = true;
     }
   } catch (err) {
     view.apiError = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
   }
+  view.hourlyCapHit = capHit;
   return view;
 }
 
@@ -100,7 +103,7 @@ export function renderStatus(cfg: BotConfig, view: StatusView, nowMs: number): s
       lines.push(`  action ${a.id} task=${a.task ?? '-'} ${a.status} ${a.createdAt}`);
     }
     if (view.lastActions.length === 0) lines.push('  action (none yet)');
-    lines.push(`  dispatches in the last hour: ${view.dispatchesLastHour}`);
+    lines.push(`  dispatches in the last hour: ${view.dispatchesLastHour}${view.hourlyCapHit ? ' (partial: page cap reached)' : ''}`);
   }
   return lines.join('\n');
 }
