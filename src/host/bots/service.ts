@@ -442,6 +442,9 @@ export function uninstallBotService(
       const { text, removed } = removeBotTokenFromEnv(readFileSync(envFile, 'utf8'), alias);
       if (removed > 0) {
         writeFileSync(envFile, text, { mode: 0o600 });
+        // Same mode-repair rule as removeBotCredential: writeFileSync's mode applies only at
+        // creation, so a mercury.env that drifted to 0644 must be repaired, not left readable.
+        chmodSync(envFile, 0o600);
         io.out(`Removed the bot-${alias} entry from MERCURY_API_TOKENS in ${envFile}.\n`);
       } else {
         io.out(`No bot-${alias} entry found in MERCURY_API_TOKENS (${envFile}); nothing to remove there.\n`);

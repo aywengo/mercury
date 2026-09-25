@@ -226,6 +226,19 @@ test('uninstall --yes (linux) removes the unit, bot files, credentials entry and
   }
 });
 
+test('the mercury.env rewrite repairs a drifted (0644) mode after removing the entry (round-3 review)', () => {
+  const dir = tempDir('bot-svc-envmode-');
+  const env = setupBot(dir);
+  const envFile = join(env.XDG_CONFIG_HOME!, 'mercury', 'mercury.env');
+  chmodSync(envFile, 0o644);
+  const io = { out: () => {}, err: () => {} };
+  const code = uninstallBotService('linux', 'nightly', io, env, { yes: true, keepEnv: false, reassignOwner: null });
+  assert.equal(code, 0);
+  assert.equal(statSync(envFile).mode & 0o777, 0o600, 'the rewrite repairs the drifted mode');
+  assert.doesNotMatch(readFileSync(envFile, 'utf8'), /bot-nightly/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('uninstall --yes --keep-env keeps MERCURY_API_TOKENS; a missing entry says so', () => {
   const dir = tempDir('bot-svc-un3-');
   const env = setupBot(dir);
