@@ -297,10 +297,13 @@ test('--reassign-runs refuses clearly (no owner-transfer API) and writes nothing
   const env = setupBot(dir);
   let errBuf = '';
   const io = { out: () => {}, err: (s: string) => { errBuf += s; } };
-  const code = uninstallBotService('linux', 'nightly', io, env, { yes: true, keepEnv: false, reassignOwner: 'alice' });
+  let outBuf = '';
+  const io2 = { out: (s: string) => { outBuf += s; }, err: (s: string) => { errBuf += s; } };
+  const code = uninstallBotService('linux', 'nightly', io2, env, { yes: true, keepEnv: false, reassignOwner: 'alice' });
   assert.equal(code, 1);
   assert.match(errBuf, /--reassign-runs is not supported yet/);
   assert.match(errBuf, /#760/);
+  assert.match(outBuf, /Teardown consequence \(§17\.7\): Runs owned by bot-nightly remain/, 'the consequence is printed even on the refusal path');
   assert.ok(existsSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bots', 'nightly.json')), 'nothing removed');
   rmSync(dir, { recursive: true, force: true });
 });

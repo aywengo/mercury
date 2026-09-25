@@ -375,11 +375,6 @@ export function uninstallBotService(
   opts: BotServiceUninstallOptions = { yes: false, keepEnv: false, reassignOwner: null },
 ): number {
   assertAlias(alias);
-  if (opts.reassignOwner !== null) {
-    io.err(`host bot service uninstall: --reassign-runs is not supported yet: no owner-transfer API exists ` +
-      `(aywengo/mercury#760). The bot's Runs stay owned by bot-${alias}.\n`);
-    return 1;
-  }
   const plist = botPlistPath(alias, env);
   const unitPath = botUnitPath(alias, env);
   const wrapper = botWrapperPath(alias, env);
@@ -390,6 +385,13 @@ export function uninstallBotService(
     ` the '${alias}' entry in the shared bot credentials file,` +
     `${opts.keepEnv ? '' : ` the bot-${alias} entry in MERCURY_API_TOKENS,`} then print the §17.7 consequence.\n`);
   io.out(teardownConsequence(alias) + '\n');
+  if (opts.reassignOwner !== null) {
+    // Checked after the consequence print: the contract is that uninstall ALWAYS states what
+    // happens to the bot's Runs, including on this refusal path.
+    io.err(`host bot service uninstall: --reassign-runs is not supported yet: no owner-transfer API exists ` +
+      `(aywengo/mercury#760). The bot's Runs stay owned by bot-${alias}.\n`);
+    return 1;
+  }
   if (!opts.yes) {
     io.err('host bot service uninstall: nothing written — re-run with --yes to remove the bot.\n');
     return 1;
