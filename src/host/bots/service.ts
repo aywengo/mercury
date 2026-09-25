@@ -285,12 +285,14 @@ export function removeBotTokenFromEnv(envText: string, alias: string): { text: s
     const m = /^MERCURY_API_TOKENS=(.*)$/.exec(line);
     if (!m) return line;
     const entries = m[1]!.split(',').map((e) => e.trim()).filter((e) => e !== '');
-    // The same strict shape src/config.ts enforces at load: exactly one 'token:owner' colon.
-    // An unparseable line must fail the edit rather than survive a "successful" uninstall
-    // half-edited; the error carries the entry INDEX, never the token material.
-    for (const e of entries) {
-      if ((e.match(/:/g) ?? []).length !== 1) {
-        throw new Error(`MERCURY_API_TOKENS entry ${entries.indexOf(e)} in line ${lineNo + 1} is not 'token:owner'; fix mercury.env by hand`);
+    // The same strict shape src/config.ts's parseTokens enforces at load: exactly one colon and
+    // both halves non-empty. An unparseable line must fail the edit rather than survive a
+    // "successful" uninstall half-edited; the error carries the entry INDEX, never token material.
+    for (let ei = 0; ei < entries.length; ei++) {
+      const e = entries[ei]!;
+      const colon = e.indexOf(':');
+      if (colon <= 0 || colon === e.length - 1 || e.includes(':', colon + 1)) {
+        throw new Error(`MERCURY_API_TOKENS entry ${ei} in line ${lineNo + 1} is not 'token:owner'; fix mercury.env by hand`);
       }
     }
     const kept = entries.filter((e) => {
@@ -322,6 +324,9 @@ export function removeBotCredential(alias: string, env: NodeJS.ProcessEnv = proc
   if (!(alias in obj)) return false;
   delete obj[alias];
   writeFileSync(path, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 });
+  // writeFileSync's mode applies only at CREATION; an existing file keeps its bits, so enforce
+  // the 0600 gate this module promises (a drifted mode must not survive a rewrite).
+  chmodSync(path, 0o600);
   return true;
 }
 
@@ -366,7 +371,7 @@ export function uninstallBotService(
   const stateFile = botStateFile(alias, env);
   const configFile = botConfigFile(alias, env);
   const envFile = envFilePath(env);
-  io.out(`Plan: remove ${platform === 'darwin' ? plist : unitPath} (and its wrapper), ${stateFile}, ${configFile},` +
+  io.out(`Plan: remove ${platform === 'darwin' ? `${plist} (and its wrapper)` : unitPath}, ${stateFile}, ${configFile},` +
     ` the '${alias}' entry in the shared bot credentials file,` +
     `${opts.keepEnv ? '' : ` the bot-${alias} entry in MERCURY_API_TOKENS,`} then print the §17.7 consequence.\n`);
   io.out(teardownConsequence(alias) + '\n');

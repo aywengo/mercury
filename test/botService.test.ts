@@ -291,6 +291,17 @@ test('removeBotCredential removes only the alias entry and keeps 0600', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('removeBotCredential enforces 0600 on an existing file whose mode drifted (round-2 review)', () => {
+  const dir = tempDir('bot-svc-cred2-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  const cp = join(cfg, 'mercury', 'bot-credentials.json');
+  writeFileSync(cp, JSON.stringify({ a: { api: 't1' }, b: { api: 't2' } }), { mode: 0o644 });
+  assert.equal(removeBotCredential('a', { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv), true);
+  assert.equal(statSync(cp).mode & 0o777, 0o600, 'the rewrite repairs a drifted mode');
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('teardownConsequence names the owner and the §17.7 rule', () => {
   const s = teardownConsequence('nightly');
   assert.match(s, /bot-nightly/);
@@ -321,9 +332,13 @@ test('install/uninstall refuse an alias that violates the §4.1 contract (path s
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('removeBotTokenFromEnv refuses a malformed entry by index without echoing the token', () => {
+test('removeBotTokenFromEnv refuses malformed entries by index without echoing the token', () => {
   const bad = 'MERCURY_API_TOKENS=tok-alice:alice, tok-no-colon\n';
   assert.throws(() => removeBotTokenFromEnv(bad, 'nightly'), /entry 1 .* not 'token:owner'/);
+  // parseTokens parity: both halves must be non-empty, exactly one colon.
+  assert.throws(() => removeBotTokenFromEnv('MERCURY_API_TOKENS=tok:\n', 'nightly'), /entry 0 .* not 'token:owner'/);
+  assert.throws(() => removeBotTokenFromEnv('MERCURY_API_TOKENS=:bot-nightly\n', 'nightly'), /entry 0 .* not 'token:owner'/);
+  assert.throws(() => removeBotTokenFromEnv('MERCURY_API_TOKENS=a:b:c\n', 'nightly'), /not 'token:owner'/);
   try {
     removeBotTokenFromEnv(bad, 'nightly');
   } catch (e) {
