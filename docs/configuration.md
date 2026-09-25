@@ -389,6 +389,30 @@ task (config + cron, works offline), the bot's recent Runs, and the
 dispatches-in-the-last-hour count read from the API — never from local state;
 unreachable API marks those two sections UNAVAILABLE and exits non-zero.
 
+Per-alias service (§10, B1-3): the same machinery `host service` uses, one
+unit per bot.
+
+```bash
+mercury host bot service install   --alias <a> [--dry-run]
+mercury host bot service uninstall --alias <a> --yes [--keep-env] [--reassign-runs <owner>]
+```
+
+`install` writes a launchd agent (`com.mercury.bot.<alias>`) or a systemd user
+unit (`mercury-bot-<alias>.service`) whose `ExecStart` runs
+`mercury host bot run --alias <alias>`; the wrapper sources `mercury.env` the
+same way the host service does (the bot's token still comes only from
+`bot-credentials.json`, §4.2). `--dry-run` prints the unit and writes nothing.
+Enabling is idempotent (a loaded agent is booted out, then bootstrapped fresh).
+
+`uninstall` removes the unit, the bot's state file, its `<alias>.json`, the
+alias entry in the shared `bot-credentials.json`, and — unless `--keep-env` —
+the `token:bot-<alias>` entry in `MERCURY_API_TOKENS` (every other entry and
+hand-set variable is preserved). It ALWAYS prints the §17.7 consequence: the
+bot's Runs remain in the database but become readable only to an admin or
+observer token once the owner's token is gone. Without `--yes` it prints the
+plan and writes nothing. `--reassign-runs <owner>` is refused until the
+owner-transfer API exists (#760).
+
 ## Host installer
 
 Variables written by `mercury host setup` (docs/host-installer.md M3). The wizard
