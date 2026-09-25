@@ -262,9 +262,17 @@ export function parseBotServiceUninstallArgs(args: string[]): { alias: string } 
     } else if (a === '--keep-env') {
       out.keepEnv = true;
     } else if (a === '--reassign-runs') {
-      out.reassignOwner = args[++i] ?? '';
+      const v = args[++i];
+      if (v === undefined || v.trim() === '') {
+        throw new Error('host bot service uninstall: --reassign-runs requires an owner value');
+      }
+      out.reassignOwner = v;
     } else if (a.startsWith('--reassign-runs=')) {
-      out.reassignOwner = a.slice('--reassign-runs='.length);
+      const v = a.slice('--reassign-runs='.length);
+      if (v.trim() === '') {
+        throw new Error('host bot service uninstall: --reassign-runs requires an owner value');
+      }
+      out.reassignOwner = v;
     } else {
       throw new Error(`host bot service uninstall: unknown argument '${a}'. Expected --alias <a>, --yes, --keep-env, --reassign-runs <owner>`);
     }
@@ -276,7 +284,8 @@ export function parseBotServiceUninstallArgs(args: string[]): { alias: string } 
 /**
  * Remove the alias's `token:bot-<alias>` entry from the MERCURY_API_TOKENS value in the env
  * file, preserving every other entry and every other line (#677's preservation rule). Returns
- * the number of entries removed (0 or 1). Throws on a malformed line rather than guessing.
+ * the number of entries removed (0 when the alias is absent; duplicates each count). Throws on
+ * a malformed line rather than guessing.
  */
 export function removeBotTokenFromEnv(envText: string, alias: string): { text: string; removed: number } {
   const lines = envText.split('\n');
@@ -321,7 +330,9 @@ export function removeBotCredential(alias: string, env: NodeJS.ProcessEnv = proc
   }
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return false;
   const obj = raw as Record<string, unknown>;
-  if (!(alias in obj)) return false;
+  // Own-property check: `alias in obj` also matches Object.prototype ('constructor'), which
+  // would report success while removing nothing.
+  if (!Object.prototype.hasOwnProperty.call(obj, alias)) return false;
   delete obj[alias];
   writeFileSync(path, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 });
   // writeFileSync's mode applies only at CREATION; an existing file keeps its bits, so enforce

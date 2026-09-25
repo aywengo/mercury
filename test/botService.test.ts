@@ -55,6 +55,8 @@ test('install/uninstall arg parsing: --alias required, flags collected, unknown 
   assert.equal(u.keepEnv, true);
   assert.equal(u.reassignOwner, null);
   assert.equal(parseBotServiceUninstallArgs(['--alias=ops', '--reassign-runs', 'alice']).reassignOwner, 'alice');
+  assert.throws(() => parseBotServiceUninstallArgs(['--alias=ops', '--reassign-runs']), /requires an owner value/, 'missing value is a usage error, not a refusal');
+  assert.throws(() => parseBotServiceUninstallArgs(['--alias=ops', '--reassign-runs=']), /requires an owner value/);
   assert.throws(() => parseBotServiceUninstallArgs(['--alias=ops', '--bogus']), /unknown argument/);
 });
 
