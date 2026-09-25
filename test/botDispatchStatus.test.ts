@@ -183,3 +183,41 @@ test('statusView marks the hourly count partial when the page cap hits (round-3 
   const view2 = await statusView(cfg([task()]), fakeClient(), now);
   assert.equal(view2.hourlyCapHit, false);
 });
+
+
+test('hourly walk: missing createdAt neither counts nor ends the walk (round-4 review)', async () => {
+  const now = Date.now();
+  const client: SchedulerClient = {
+    async listOwnRuns(_limit: number, cursor: string | null) {
+      if (!cursor) return { runs: [{ id: 'r1', status: 'COMPLETED', constraints: { botTask: 'nightly' }, createdAt: new Date(now - 5 * MIN).toISOString() }, { id: 'r2', status: 'COMPLETED', constraints: { botTask: 'nightly' } }], nextCursor: 'c2' };
+      return { runs: [{ id: 'r3', status: 'COMPLETED', constraints: { botTask: 'nightly' }, createdAt: new Date(now - 30 * MIN).toISOString() }], nextCursor: null };
+    },
+    async createRun() { return { runId: 'x', replayed: false }; },
+  };
+  const view = await statusView(cfg([task()]), client, now);
+  assert.equal(view.dispatchesLastHour, 2, 'r2 has no timestamp: skipped, walk continues, r3 still counts');
+  assert.equal(view.hourlyCapHit, false);
+});
+
+test('hourly walk stops on the first page when its newest Run is already out of window (round-4 review)', async () => {
+  const now = Date.now();
+  let pages = 0;
+  const client: SchedulerClient = {
+    async listOwnRuns() {
+      pages++;
+      return { runs: [{ id: 'old', status: 'COMPLETED', constraints: { botTask: 'nightly' }, createdAt: new Date(now - 61 * MIN).toISOString() }], nextCursor: 'more' };
+    },
+    async createRun() { return { runId: 'x', replayed: false }; },
+  };
+  const view = await statusView(cfg([task()]), client, now);
+  assert.equal(pages, 1, 'no further page is fetched once a finite timestamp is out of window');
+  assert.equal(view.dispatchesLastHour, 0);
+  assert.equal(view.lastActions.length, 1, 'first-page last-actions are still collected');
+});
+
+test('renderStatus: the dispatches line carries the UNAVAILABLE reason (round-4 review)', async () => {
+  const view = await statusView(cfg([task()]), { async listOwnRuns() { throw new TypeError('boom'); }, async createRun() { return { runId: 'x', replayed: false }; } }, Date.now());
+  assert.ok(view.apiError);
+  const rendered = renderStatus(cfg([task()]), view, Date.now());
+  assert.match(rendered, /dispatches in the last hour: UNAVAILABLE \(TypeError: boom\)/);
+});

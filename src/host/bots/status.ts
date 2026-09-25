@@ -63,13 +63,18 @@ export async function statusView(cfg: BotConfig, client: SchedulerClient, nowMs:
         if (firstPage) {
           view.lastActions.push({ id: run.id, task: run.constraints?.botTask ?? null, status: run.status, createdAt: run.createdAt ?? '' });
         }
+        // Only a FINITE timestamp decides the window cut-off: a missing/unparseable createdAt
+        // neither counts nor ends the walk (treating it as "past window" would undercount).
         const createdAtMs = Date.parse(run.createdAt ?? '');
-        if (Number.isFinite(createdAtMs) && createdAtMs >= hourAgoMs) {
+        if (!Number.isFinite(createdAtMs)) continue;
+        if (createdAtMs >= hourAgoMs) {
           view.dispatchesLastHour++;
         } else {
-          // Runs arrive newest-first; a Run older than the window means every later Run is too.
-          // Stop paging entirely (the first page's last-actions are already collected).
-          if (!firstPage) pastWindow = true;
+          // Runs arrive newest-first; the first out-of-window Run means every later Run is older
+          // too. Stop paging — including on the first page (its remaining last-actions are still
+          // collected by finishing this loop; no further page is fetched).
+          pastWindow = true;
+          if (!firstPage) break;
         }
       }
       firstPage = false;
@@ -97,7 +102,7 @@ export function renderStatus(cfg: BotConfig, view: StatusView, nowMs: number): s
   }
   if (view.apiError) {
     lines.push(`  last actions: UNAVAILABLE (${view.apiError})`);
-    lines.push(`  dispatches/hour: UNAVAILABLE`);
+    lines.push(`  dispatches in the last hour: UNAVAILABLE (${view.apiError})`);
   } else {
     for (const a of view.lastActions.slice(0, 10)) {
       lines.push(`  action ${a.id} task=${a.task ?? '-'} ${a.status} ${a.createdAt}`);
