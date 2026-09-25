@@ -66,7 +66,9 @@ import { runHostSetup } from './host/setup.ts';
 import { installService, serviceStatus, uninstallService, parseServiceArgs, type ServiceOptions } from './host/service.ts';
 import { runHostDoctor } from './host/doctor.ts';
 import { loadBotConfig, botConfigPath } from './host/bots/config.ts';
-import { runBot } from './host/bots/process.ts';
+import { runBot, makeBotClient } from './host/bots/process.ts';
+import { dispatchTask } from './host/bots/dispatch.ts';
+import { statusView, renderStatus } from './host/bots/status.ts';
 import { botCredentialsPath, readBotCredentials, registeredOwnerForToken } from './host/bots/credentials.ts';
 import { botOwnerId } from './host/bots/keys.ts';
 import { hostStatus, printStatus, upgradeHost, uninstallHost } from './host/lifecycle.ts';
@@ -102,6 +104,9 @@ function usageText(): string {
     '                               (interactive wizard or --non-interactive --answers)',
     '                service     install|status|uninstall the launchd/systemd unit',
     '                               that runs the host (--dry-run prints the unit)',
+    '                bot dispatch --alias <a> --task <n>',
+    '                                           fire one task now (--yes writes; --dry-run previews)',
+    '                bot status --alias <a>     next fires, last actions, dispatches in the last hour',
     '                bot run --alias <a>        run one bot scheduler (one process per bot; --once',
     '                               runs a single tick for tests);',
     '                               SIGINT/SIGTERM stop the timer, never cancel a Run)',
@@ -348,8 +353,90 @@ async function main(): Promise<void> {
       });
     return;
   }
+  // `host bot dispatch --alias <a> --task <name> [--yes] [--dry-run]` — manual fire (§11).
+  if (cmd === 'host' && args[0] === 'bot' && args[1] === 'dispatch') {
+    const rest = args.slice(2);
+    let alias: string | undefined;
+    let taskName: string | undefined;
+    let yes = false;
+    let dryRun = false;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '--alias') { alias = rest[i + 1]; i++; }
+      else if (rest[i]?.startsWith('--alias=')) alias = rest[i]!.slice('--alias='.length);
+      else if (rest[i] === '--task') { taskName = rest[i + 1]; i++; }
+      else if (rest[i]?.startsWith('--task=')) taskName = rest[i]!.slice('--task='.length);
+      else if (rest[i] === '--yes') yes = true;
+      else if (rest[i] === '--dry-run') dryRun = true;
+      else {
+        process.stderr.write(`host bot dispatch: unknown argument '${rest[i]}'.\n`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    if (!alias || !taskName) {
+      process.stderr.write('host bot dispatch: --alias <a> and --task <name> are required\n');
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      const cfg = loadBotConfig(alias);
+      const client = makeBotClient(cfg);
+      const decision = await dispatchTask(cfg, client, taskName, { nowMs: Date.now(), dryRun, yes });
+      // The resolved plan (key + body) prints for a dry-run preview or a successful dispatch —
+      // not on a refusal, where it would leak template material into terminals/logs.
+      if (decision.fire && (decision.fired || decision.reason === 'dry-run')) {
+        process.stdout.write(`key ${decision.fire.key}\n`);
+        process.stdout.write(`body ${JSON.stringify(decision.fire.body)}\n`);
+      }
+      if (decision.fired) {
+        process.stdout.write(`dispatched task '${taskName}'\n`);
+        process.exitCode = 0;
+      } else {
+        process.stdout.write(`${decision.reason}\n`);
+        // dry-run is a successful preview; a refusal is not.
+        process.exitCode = decision.reason === 'dry-run' ? 0 : 1;
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      process.stderr.write(`host bot dispatch: ${detail}\n`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+  // `host bot status --alias <a>` — next fires, last actions, dispatches/hour (§11).
+  if (cmd === 'host' && args[0] === 'bot' && args[1] === 'status') {
+    const rest = args.slice(2);
+    let alias: string | undefined;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '--alias') { alias = rest[i + 1]; i++; }
+      else if (rest[i]?.startsWith('--alias=')) alias = rest[i]!.slice('--alias='.length);
+      else {
+        process.stderr.write(`host bot status: unknown argument '${rest[i]}'.\n`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    if (!alias) {
+      process.stderr.write('host bot status: --alias <a> is required\n');
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      const cfg = loadBotConfig(alias);
+      const client = makeBotClient(cfg);
+      const nowMs = Date.now();
+      const view = await statusView(cfg, client, nowMs);
+      process.stdout.write(renderStatus(cfg, view, nowMs) + '\n');
+      process.exitCode = view.apiError ? 1 : 0;
+    } catch (err) {
+      const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      process.stderr.write(`host bot status: ${detail}\n`);
+      process.exitCode = 1;
+    }
+    return;
+  }
   if (cmd === 'host' && args[0] === 'bot') {
-    process.stderr.write(`host bot: unknown subcommand '${args[1] ?? ''}'. Expected run or validate.\n`);
+    process.stderr.write(`host bot: unknown subcommand '${args[1] ?? ''}'. Expected run, validate, dispatch or status.\n`);
     process.exitCode = 1;
     return;
   }
