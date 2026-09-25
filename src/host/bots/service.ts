@@ -27,6 +27,14 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSy
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { envFilePath, resolveMercuryBin } from '../service.ts';
+import { BOT_ALIAS_RE } from './config.ts';
+
+/** The §4.1 alias contract is also a path-safety contract: unit names and file paths are built from it. */
+function assertAlias(alias: string): void {
+  if (!BOT_ALIAS_RE.test(alias)) {
+    throw new Error(`bot alias must match ${BOT_ALIAS_RE.source}, got '${alias}'`);
+  }
+}
 
 /** The launchd label for one bot (macOS). */
 export function botLaunchdLabel(alias: string): string {
@@ -153,6 +161,7 @@ export function installBotService(
   env: NodeJS.ProcessEnv = process.env,
   dryRun = false,
 ): number {
+  assertAlias(alias);
   let bin: string;
   try {
     bin = resolveMercuryBin(env);
@@ -272,10 +281,18 @@ export function parseBotServiceUninstallArgs(args: string[]): { alias: string } 
 export function removeBotTokenFromEnv(envText: string, alias: string): { text: string; removed: number } {
   const lines = envText.split('\n');
   let removed = 0;
-  const outLines = lines.map((line) => {
+  const outLines = lines.map((line, lineNo) => {
     const m = /^MERCURY_API_TOKENS=(.*)$/.exec(line);
     if (!m) return line;
     const entries = m[1]!.split(',').map((e) => e.trim()).filter((e) => e !== '');
+    // The same strict shape src/config.ts enforces at load: exactly one 'token:owner' colon.
+    // An unparseable line must fail the edit rather than survive a "successful" uninstall
+    // half-edited; the error carries the entry INDEX, never the token material.
+    for (const e of entries) {
+      if ((e.match(/:/g) ?? []).length !== 1) {
+        throw new Error(`MERCURY_API_TOKENS entry ${entries.indexOf(e)} in line ${lineNo + 1} is not 'token:owner'; fix mercury.env by hand`);
+      }
+    }
     const kept = entries.filter((e) => {
       const owner = e.slice(e.indexOf(':') + 1);
       if (owner === `bot-${alias}`) { removed++; return false; }
@@ -337,6 +354,7 @@ export function uninstallBotService(
   env: NodeJS.ProcessEnv = process.env,
   opts: BotServiceUninstallOptions = { yes: false, keepEnv: false, reassignOwner: null },
 ): number {
+  assertAlias(alias);
   if (opts.reassignOwner !== null) {
     io.err(`host bot service uninstall: --reassign-runs is not supported yet: no owner-transfer API exists ` +
       `(aywengo/mercury#760). The bot's Runs stay owned by bot-${alias}.\n`);
@@ -350,7 +368,7 @@ export function uninstallBotService(
   const envFile = envFilePath(env);
   io.out(`Plan: remove ${platform === 'darwin' ? plist : unitPath} (and its wrapper), ${stateFile}, ${configFile},` +
     ` the '${alias}' entry in the shared bot credentials file,` +
-    `${opts.keepEnv ? '' : ' the bot-<alias> entry in MERCURY_API_TOKENS,'} then print the §17.7 consequence.\n`);
+    `${opts.keepEnv ? '' : ` the bot-${alias} entry in MERCURY_API_TOKENS,`} then print the §17.7 consequence.\n`);
   io.out(teardownConsequence(alias) + '\n');
   if (!opts.yes) {
     io.err('host bot service uninstall: nothing written — re-run with --yes to remove the bot.\n');

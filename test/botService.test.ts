@@ -309,3 +309,24 @@ test('subprocess smoke: `host bot service install --alias x --dry-run` exits 0',
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test('install/uninstall refuse an alias that violates the §4.1 contract (path safety)', () => {
+  const dir = tempDir('bot-svc-alias-');
+  const env = { XDG_CONFIG_HOME: join(dir, 'cfg'), XDG_STATE_HOME: join(dir, 'state'), HOME: join(dir, 'home') } as NodeJS.ProcessEnv;
+  const io = { out: () => {}, err: () => {} };
+  assert.throws(() => installBotService('linux', '../escape', io, env, false), /bot alias must match/);
+  assert.throws(() => uninstallBotService('linux', 'UPPER', io, env, { yes: true, keepEnv: false, reassignOwner: null }), /bot alias must match/);
+  assert.ok(!existsSync(join(dir, 'cfg', 'systemd')), 'nothing written for an invalid alias');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('removeBotTokenFromEnv refuses a malformed entry by index without echoing the token', () => {
+  const bad = 'MERCURY_API_TOKENS=tok-alice:alice, tok-no-colon\n';
+  assert.throws(() => removeBotTokenFromEnv(bad, 'nightly'), /entry 1 .* not 'token:owner'/);
+  try {
+    removeBotTokenFromEnv(bad, 'nightly');
+  } catch (e) {
+    assert.doesNotMatch((e as Error).message, /tok-alice|tok-no-colon/, 'no token material in the error');
+  }
+});
