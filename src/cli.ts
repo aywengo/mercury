@@ -102,7 +102,8 @@ function usageText(): string {
     '                               (interactive wizard or --non-interactive --answers)',
     '                service     install|status|uninstall the launchd/systemd unit',
     '                               that runs the host (--dry-run prints the unit)',
-    '                bot run --alias <a>        run one bot scheduler (one process per bot;',
+    '                bot run --alias <a>        run one bot scheduler (one process per bot; --once',
+    '                               runs a single tick for tests);',
     '                               SIGINT/SIGTERM stop the timer, never cancel a Run)',
     '                bot validate --alias <a>   offline check of one bot: config parses and',
     '                               validates, credentials file is 0600 and has the alias, and',
@@ -341,7 +342,8 @@ async function main(): Promise<void> {
       .catch((err: unknown) => {
         // Startup failures (config, credentials, healthz probe) reject BEFORE runBot's internal
         // try/catch: report and exit non-zero rather than dying on an unhandled rejection.
-        process.stderr.write(`host bot run: ${(err as Error).message}\n`);
+        const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+        process.stderr.write(`host bot run: ${detail}\n`);
         process.exitCode = 1;
       });
     return;

@@ -163,7 +163,7 @@ export async function runBot(alias: string, env: NodeJS.ProcessEnv = process.env
       }
     } while (!stopping);
   } catch (err) {
-    log(`bot=${alias} fatal: ${(err as Error).message}`);
+    log(`bot=${alias} fatal: ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`);
     exitCode = 1;
   }
   log(`bot=${alias} exit ${exitCode}`);
