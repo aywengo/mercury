@@ -335,6 +335,39 @@ Requires `MERCURY_ATLAS_URL` to be set; omitting the URL disables the whole feat
 | `MERCURY_KNOWLEDGE_RETIRED_RETENTION_MS` | `604800000` | How long non-promoted (retired) rows are kept in the host-side replica before being swept, in ms. Default is 7 days. Must be at least several multiples of `MERCURY_KNOWLEDGE_PULL_INTERVAL_MS` so the cursor has advanced past any in-flight page before a swept row could be replayed. See §8.3 of [knowledge-base.md](../docs/knowledge-base.md). |
 | `MERCURY_KNOWLEDGE_OUTBOX_ALERT_DEPTH` | `1000` | Outbox depth that triggers a `knowledge.outbox.alert` event. |
 
+## Bots
+
+Dispatcher-bot configuration (§4 of `dispatcher-bot-design.md`) is one JSON
+file per bot:
+
+```text
+${XDG_CONFIG_HOME:-~/.config}/mercury/bots/<alias>.json
+```
+
+The alias is the file name and must match `^[a-z][a-z0-9-]{0,31}$`. Unknown
+keys are refused with a did-you-mean suggestion; `triggers` and `brain` are
+reserved and refused until B2/B3. Each task needs `name` (unique per bot,
+`[a-z0-9-]+`), `cron` (5-field, UTC unless `tz`), and `template` (create-Run
+request fields, `task` required). Validate offline:
+
+```bash
+mercury host bot validate --alias <a>
+```
+
+The command checks the config, the credentials file, and the two-copy token
+agreement; it makes no network calls and never prints a token value.
+
+The bot's API token lives in two deliberate places (§4.2): the server side of
+`MERCURY_API_TOKENS` (as `tok-bot-<alias>:bot-<alias>`), and the bot's own
+
+```text
+${XDG_CONFIG_HOME:-~/.config}/mercury/bot-credentials.json  (mode 0600)
+```
+
+keyed by alias with an `api` token per bot (an optional `llm` token per entry
+is accepted for the B3 brain; other keys are refused). `host bot validate`
+reports the pair as drifted when the copies disagree.
+
 ## Host installer
 
 Variables written by `mercury host setup` (docs/host-installer.md M3). The wizard

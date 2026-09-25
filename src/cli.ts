@@ -65,6 +65,9 @@ import { runHostProbe } from './host/probe.ts';
 import { runHostSetup } from './host/setup.ts';
 import { installService, serviceStatus, uninstallService, parseServiceArgs, type ServiceOptions } from './host/service.ts';
 import { runHostDoctor } from './host/doctor.ts';
+import { loadBotConfig, botConfigPath } from './host/bots/config.ts';
+import { botCredentialsPath, readBotCredentials, registeredOwnerForToken } from './host/bots/credentials.ts';
+import { botOwnerId } from './host/bots/keys.ts';
 import { hostStatus, printStatus, upgradeHost, uninstallHost } from './host/lifecycle.ts';
 import { HOST_VERSION } from './version.ts';
 
@@ -98,6 +101,9 @@ function usageText(): string {
     '                               (interactive wizard or --non-interactive --answers)',
     '                service     install|status|uninstall the launchd/systemd unit',
     '                               that runs the host (--dry-run prints the unit)',
+    '                bot validate --alias <a>   offline check of one bot: config parses and',
+    '                               validates, credentials file is 0600 and has the alias, and',
+    '                               the two token copies agree (§4.2)',
     '                doctor      healthz, Fleet reachability and one smoke Run per',
     '                               enabled harness (--json for machine output)',
     '                status      show the current host state (read-only)',
@@ -218,6 +224,92 @@ async function main(): Promise<void> {
       return;
     }
     process.stderr.write(`host service: unknown subcommand '${sub ?? ''}'. Expected install, status or uninstall.\n`);
+    process.exitCode = 1;
+    return;
+  }
+  // `host bot validate --alias <a>` — offline (§11): no API call, no database. It answers the
+  // three questions an operator asks before the first scheduled night: does the config parse and
+  // validate, is the credentials file private and present for this alias, and do the two token
+  // copies (credentials file vs MERCURY_API_TOKENS) agree? Runs before loadConfig() like the
+  // other host commands: the bot's own config is the thing under inspection, and a host whose
+  // mercury.env is broken must still be able to diagnose its bots.
+  if (cmd === 'host' && args[0] === 'bot' && args[1] === 'validate') {
+    const rest = args.slice(2);
+    let alias: string | undefined;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '--alias') {
+        alias = rest[i + 1];
+        i++;
+      } else if (rest[i]?.startsWith('--alias=')) {
+        alias = rest[i]!.slice('--alias='.length);
+      } else {
+        process.stderr.write(`host bot validate: unknown argument '${rest[i]}'.\n`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    if (!alias) {
+      process.stderr.write('host bot validate: --alias <a> is required\n');
+      process.exitCode = 1;
+      return;
+    }
+    let failed = false;
+    // Config.
+    try {
+      const cfg = loadBotConfig(alias);
+      process.stdout.write(`config ok: ${botConfigPath(alias)} (${cfg.tasks.length} task${cfg.tasks.length === 1 ? '' : 's'})\n`);
+      for (const w of cfg.warnings) process.stdout.write(`config warn: ${w}\n`);
+    } catch (err) {
+      process.stdout.write(`config FAIL: ${(err as Error).message}\n`);
+      failed = true;
+    }
+    // Credentials.
+    let token: string | undefined;
+    try {
+      const pair = readBotCredentials(alias);
+      token = pair.api;
+      process.stdout.write(`credentials ok: ${botCredentialsPath()} has '${alias}' (0600-checked)\n`);
+    } catch (err) {
+      process.stdout.write(`credentials FAIL: ${(err as Error).message}\n`);
+      failed = true;
+    }
+    // Two-copy agreement (§4.2): the credentials copy vs the MERCURY_API_TOKENS copy. The token
+    // value itself is never printed; the owner ids are the observable, safe half.
+    if (token !== undefined) {
+      // --alias is user input: botOwnerId throws on an alias that violates the form, and validate
+      // must always end in a FAIL line, never a stack trace. (The config block above would have
+      // failed for the same alias, but validate keeps going to report every surface it can.)
+      let expected: string;
+      try {
+        expected = botOwnerId(alias);
+      } catch (err) {
+        process.stdout.write(`agreement FAIL: ${(err as Error).message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      try {
+        const owner = registeredOwnerForToken(token, process.env.MERCURY_API_TOKENS);
+        if (owner === null) {
+          process.stdout.write(`agreement FAIL: the credentials token for '${alias}' is not registered in MERCURY_API_TOKENS\n`);
+          failed = true;
+        } else if (owner !== expected) {
+          process.stdout.write(`agreement FAIL: the credentials token for '${alias}' is registered as owner '${owner}', expected '${expected}'\n`);
+          failed = true;
+        } else {
+          process.stdout.write(`agreement ok: both copies register owner '${expected}'\n`);
+        }
+      } catch (err) {
+        // registeredOwnerForToken refuses to guess past a malformed MERCURY_API_TOKENS: the env
+        // would stop the host at boot, so name the entry instead of reporting drift.
+        process.stdout.write(`agreement FAIL: ${(err as Error).message}\n`);
+        failed = true;
+      }
+    }
+    process.exitCode = failed ? 1 : 0;
+    return;
+  }
+  if (cmd === 'host' && args[0] === 'bot') {
+    process.stderr.write(`host bot: unknown subcommand '${args[1] ?? ''}'. Expected validate.\n`);
     process.exitCode = 1;
     return;
   }
