@@ -432,6 +432,9 @@ test('state file is written after the tick with 0600 and read back across restar
     assert.equal(mode, 0o600, 'state file is owner-only');
     // Absent state = no onMiss window, not a crash.
     assert.deepEqual(readBotState('never', env), {});
+    // An alias is interpolated into the path: reject traversal-shaped aliases loudly.
+    assert.throws(() => botStatePath('../escape', env), /alias must match/);
+    assert.throws(() => botStatePath('a/b', env), /alias must match/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -464,4 +467,19 @@ test('singleFlight fails closed when the list walk exceeds the page cap', async 
   const out = await tick(cfg([task({ singleFlight: true })]), client, { nowMs: now, afterMs: now - MIN });
   assert.equal(out.dispatched.length, 0, 'cap exhaustion refuses guarded dispatch (fail-closed)');
   assert.match(out.errors[0]!.message, /page cap/);
+});
+
+
+test('maxCatchUp: 0 means NO catch-up fires (slice(-0) guard, round-5 review)', async () => {
+  const now = Date.UTC(2026, 5, 10, 3, 15, 0);
+  const c = fakeClient();
+  const out = await tick(cfg([task({ onMiss: 'run', maxCatchUp: 0 })]), c, { nowMs: now, afterMs: now - 6 * MIN });
+  assert.equal(out.dispatched.length, 1, 'cap 0 suppresses catch-up only; the on-time fire still runs');
+  assert.equal(out.skippedMissed.length, 5, 'cap 0 must not degrade to unbounded catch-up (slice(-0) guard)');
+  assert.ok(c.calls.every((x) => x.key === 'bot-ops:nightly:w2026-06-10T03:15'));
+  // A positive cap still keeps the newest N.
+  const c2 = fakeClient();
+  const out2 = await tick(cfg([task({ onMiss: 'run', maxCatchUp: 1 })]), c2, { nowMs: now, afterMs: now - 3 * MIN });
+  assert.equal(out2.dispatched.length, 2, '1 missed + 1 on-time');
+  assert.ok(c2.calls.some((x) => x.key === 'bot-ops:nightly:w2026-06-10T03:14'));
 });

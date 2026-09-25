@@ -237,8 +237,10 @@ export async function tick(
       } else {
         // 'run': once per missed interval, capped at maxCatchUp (default 3), newest wins the cap,
         // oldest first so a catch-up batch processes in schedule order.
-        const cap = Math.max(0, task.maxCatchUp ?? 3);
-        selected.push(...missed.slice(-cap));
+        // slice(-0) === slice(0), so a 0 cap must be special-cased: cap 0 means NO catch-up.
+        const cap = task.maxCatchUp ?? 3;
+        if (cap > 0) selected.push(...missed.slice(-cap));
+        else for (const f of missed) outcome.skippedMissed.push({ task: taskName, fireMs: f.fireMs, reason: 'maxCatchUp=0' });
       }
     }
     // Deterministic dispatch order: scheduled minute ascending.

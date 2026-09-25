@@ -22,6 +22,11 @@ const PROBE_ATTEMPTS = 5;
 const PROBE_BACKOFF_CAP_MS = 15_000;
 
 export function botStatePath(alias: string, env: NodeJS.ProcessEnv = process.env): string {
+  // Same alias vocabulary as the config loader — these helpers are exported, so an unvalidated
+  // alias here would be a path-traversal hole ('../x' escapes the bots dir).
+  if (!/^[a-z][a-z0-9-]{0,31}$/.test(alias)) {
+    throw new Error(`bot alias must match ^[a-z][a-z0-9-]{0,31}$, got '${alias}'`);
+  }
   const xdg = env.XDG_STATE_HOME;
   const base = xdg && xdg.trim() !== '' ? xdg : join(homedir(), '.local', 'state');
   return join(base, 'mercury', 'bots', `${alias}.state.json`);
@@ -81,7 +86,7 @@ export function makeBotClient(cfg: BotConfig, env: NodeJS.ProcessEnv = process.e
       }
       throw new Error(`API unreachable after ${PROBE_ATTEMPTS} attempts: ${lastErr?.message ?? 'unknown'}`);
     },
-    async listOwnRuns(limit = 200, cursor?: string): Promise<{ runs: BotRunView[]; nextCursor: string | null }> {
+    async listOwnRuns(limit = 200, cursor?: string | null): Promise<{ runs: BotRunView[]; nextCursor: string | null }> {
       const cur = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
       const res = await call(`/api/runs?limit=${limit}${cur}`);
       if (!res.ok) throw new Error(`GET /api/runs answered ${res.status}`);
