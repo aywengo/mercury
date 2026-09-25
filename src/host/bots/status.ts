@@ -21,7 +21,10 @@ export interface NextFire {
 /** The next scheduled fire per task, strictly after `nowMs`, within `horizonMs` (default 24h). */
 export function nextFires(cfg: BotConfig, nowMs: number, horizonMs = 24 * 3_600_000): NextFire[] {
   const out: NextFire[] = [];
-  const horizonH = Math.round(horizonMs / 3_600_000);
+  // Exact horizon in the message: whole hours render as `24h`, anything else as minutes
+  // (90m stays `90m` — rounding would misreport an overridden horizon).
+  const horizonMin = horizonMs / 60_000;
+  const horizonLabel = horizonMin % 60 === 0 ? `${horizonMin / 60}h` : `${horizonMin}m`;
   for (const task of cfg.tasks) {
     const tz: CronTz = parseTz(task.tz);
     const fires = due(task.cron, nowMs, nowMs + horizonMs, tz);
@@ -29,7 +32,7 @@ export function nextFires(cfg: BotConfig, nowMs: number, horizonMs = 24 * 3_600_
       // A task whose cron cannot fire within the horizon is reported as such, not silently
       // dropped: an operator staring at `status` must see the difference between "fires later"
       // and "this schedule is impossible on this clock". The message names the actual horizon.
-      out.push({ task: task.name, fireMs: NaN, wallMinute: `none within ${horizonH}h`, tz: task.tz ?? 'UTC' });
+      out.push({ task: task.name, fireMs: NaN, wallMinute: `none within ${horizonLabel}`, tz: task.tz ?? 'UTC' });
       continue;
     }
     out.push({ task: task.name, fireMs: fires[0]!, wallMinute: scheduledWallMinuteId(fires[0]!, tz), tz: task.tz ?? 'UTC' });

@@ -139,7 +139,7 @@ test('statusView walks pages for the hourly count until Runs fall out of the win
     { runs: [{ id: 'r2', status: 'COMPLETED', constraints: { botTask: 'nightly' }, createdAt: new Date(now - 30 * MIN).toISOString() }], nextCursor: 'c3' },
     { runs: [{ id: 'r3', status: 'COMPLETED', constraints: { botTask: 'nightly' }, createdAt: new Date(now - 61 * MIN).toISOString() }], nextCursor: null },
   ];
-  const view = await statusView(cfg([task()]), fakeClient(undefined, { pages: [...pages] }), now);
+  const view = await statusView(cfg([task()]), fakeClient([], { pages: [...pages] }), now);
   assert.equal(view.dispatchesLastHour, 2, 'page 2 counts, page 3 (older than the window) does not');
 });
 

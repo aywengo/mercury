@@ -10,7 +10,9 @@
 // key, constraints) and touches nothing (§11: the dry-run mode is not optional).
 
 import { botOwnerId, scheduledWallMinuteId } from './keys.ts';
-import { resolveTemplate } from './scheduler.ts';
+import { resolveTemplate, runIsNonTerminal } from './scheduler.ts';
+// runIsNonTerminal is scheduler.ts's terminal deny-list (the ONE deliberate wire-vocabulary copy
+// at the bot boundary — §15 item 4); sharing it keeps scheduler and manual dispatch identical.
 import { parseTz, type CronTz } from './cron.ts';
 import type { BotConfig } from './config.ts';
 import type { SchedulerClient } from './scheduler.ts';
@@ -107,10 +109,4 @@ export async function dispatchTask(
   }
   const res = await client.createRun({ taskName, fireMs: opts.nowMs, wallMinute: fire.wallMinute, key: fire.key, body: fire.body });
   return { fired: true, fire };
-}
-
-// Local copy of the terminal deny-list (same wire-vocabulary rule as scheduler.ts — §15 item 4).
-const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
-function runIsNonTerminal(status: string): boolean {
-  return !(TERMINAL_STATUSES as readonly string[]).includes(status);
 }
