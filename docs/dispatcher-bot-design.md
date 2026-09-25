@@ -934,7 +934,23 @@ typecheck + focused tests green.
   as a recorded-only attribution hint. `test/botScheduler.test.ts` (21 tests)
   covers unit/contract/subprocess, including 100 fires -> exactly 100 keyed
   Runs and the NEEDS_INPUT no-refire rule;
-- `host bot dispatch` (manual fire) and `host bot status`;
+- `host bot dispatch` (manual fire) and `host bot status`. Status (B1-2,
+  issue #736, 2026-09-25): `src/host/bots/dispatch.ts` resolves the task
+  template through the scheduler's own `resolveTemplate` and writes with the
+  manual idempotency key `bot-<alias>:<task>:manual-<w<wall minute>>` (the
+  wall label in the task's cron tz, `manual-` preventing collision with a
+  scheduled fire); writing requires `--yes`, `--dry-run` prints the resolved
+  plan and touches nothing, and `singleFlight` applies unchanged — the scan
+  shares the scheduler's terminal deny-list and fails CLOSED at the page cap.
+  `src/host/bots/status.ts` renders next fires offline (an impossible schedule
+  is reported with its actual horizon, never silently dropped) and the
+  recent-Runs sections from the API only — paged, newest-first, counting stops
+  at the first finite out-of-window timestamp (missing timestamps neither
+  count nor end the walk; a page-cap stop marks the hourly count partial), and
+  an unreachable API marks both sections UNAVAILABLE with the reason and fails
+  the command. `test/botDispatchStatus.test.ts` (15 tests) covers the key
+  replay window, the `--yes`/`--dry-run` gates, singleFlight blocking and
+  fail-closed, the paging stops, and the UNAVAILABLE degradation;
 - service install/uninstall per alias (including the §17.7 teardown message);
 - subprocess tests against a real test server with a fake clock.
 
