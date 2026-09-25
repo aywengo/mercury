@@ -18,6 +18,8 @@ import type { SchedulerClient } from './scheduler.ts';
 export interface ManualFire {
   taskName: string;
   key: string;
+  /** The plain `w…` wall-minute label in the task's tz (the manual- key carries `manual-` + it). */
+  wallMinute: string;
   body: Record<string, unknown>;
 }
 
@@ -47,7 +49,7 @@ export function buildManualFire(cfg: BotConfig, taskName: string, nowMs: number)
   // taskName directly (dispatchKey's third segment would be the scheduled-minute label this key
   // deliberately replaces).
   const key = `${botOwnerId(cfg.alias)}:${taskName}:manual-${wallMinute}`;
-  return { taskName, key, body };
+  return { taskName, key, wallMinute, body };
 }
 
 /**
@@ -92,7 +94,7 @@ export async function dispatchTask(
       };
     }
   }
-  const res = await client.createRun({ taskName, fireMs: opts.nowMs, wallMinute: fire.key.split(':').pop()!, key: fire.key, body: fire.body });
+  const res = await client.createRun({ taskName, fireMs: opts.nowMs, wallMinute: fire.wallMinute, key: fire.key, body: fire.body });
   return { fired: true, fire };
 }
 
