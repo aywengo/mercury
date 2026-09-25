@@ -358,12 +358,13 @@ test('subprocess `host bot run --once` fires on schedule against the real server
     const botsDir = join(dir, 'mercury', 'bots');
     mkdirSync(botsDir, { recursive: true });
     writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ 'ops': { api: 'bot-token-ops' } }), { mode: 0o600 });
-    // Cron that matches the CURRENT minute, so the on-time fire is deterministic.
-    const now = new Date();
-    const minute = now.getUTCMinutes();
+    // The cron minute is pinned 5 minutes IN THE PAST (inside the state window) instead of the
+    // current minute: a past minute never moves, so a slow subprocess start or a minute boundary
+    // between computing the cron and the bot's tick cannot miss the fire (round-4 review).
+    const fireMinute = new Date(Date.now() - 5 * 60_000).getUTCMinutes();
     writeFileSync(join(botsDir, 'ops.json'), JSON.stringify({
       api: { url: S.base },
-      schedule: { tasks: [{ name: 'now-task', cron: `${minute} * * * *`, template: { task: 'subprocess maintenance {{fire.iso}}' }, singleFlight: false, onMiss: 'collapse' }] },
+      schedule: { tasks: [{ name: 'now-task', cron: `${fireMinute} * * * *`, template: { task: 'subprocess maintenance {{fire.iso}}' }, singleFlight: false, onMiss: 'collapse' }] },
     }));
     // Fresh bots do not fire the current minute (no onMiss window). Seed the state file 10 minutes
     // back so the current-minute fire is in-window: onMiss=collapse dispatches it keyed to its
@@ -395,11 +396,10 @@ test('subprocess restart mid-cycle does not double-dispatch (state + derived key
     const botsDir = join(dir, 'mercury', 'bots');
     mkdirSync(botsDir, { recursive: true });
     writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ 'ops': { api: 'bot-token-ops' } }), { mode: 0o600 });
-    const now = new Date();
-    const minute = now.getUTCMinutes();
+    const fireMinute = new Date(Date.now() - 5 * 60_000).getUTCMinutes();
     writeFileSync(join(botsDir, 'ops.json'), JSON.stringify({
       api: { url: S.base },
-      schedule: { tasks: [{ name: 'now-task', cron: `${minute} * * * *`, template: { task: 'restart-safe' }, singleFlight: false, onMiss: 'skip' }] },
+      schedule: { tasks: [{ name: 'now-task', cron: `${fireMinute} * * * *`, template: { task: 'restart-safe' }, singleFlight: false, onMiss: 'collapse' }] },
     }));
     mkdirSync(join(stateDir, 'mercury', 'bots'), { recursive: true });
     writeFileSync(join(stateDir, 'mercury', 'bots', 'ops.state.json'), JSON.stringify({ lastTickMs: Date.now() - 10 * 60_000 }));
