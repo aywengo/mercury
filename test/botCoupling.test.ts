@@ -20,9 +20,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const BOTS_DIR = fileURLToPath(new URL('../src/host/bots', import.meta.url));
-// Length of the repo root — slicing an absolute path by the repo root's length+1 yields the
-// repo-relative module path ('src/host/bots/keys.ts').
-const ROOT_LEN = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '').length;
+// Length of the repo root — slicing an absolute path by the repo root's length + separator
+// yields the repo-relative module path ('src/host/bots/keys.ts'). The separator is platform
+// real: fileURLToPath gives '\' on Windows, so derive it instead of assuming '/'.
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const ROOT_LEN = ROOT.length - (ROOT.endsWith('/') || ROOT.endsWith('\\') ? 1 : 0);
+const ROOT_SEP = ROOT.slice(-1);
 
 function sourceFiles(dir: string): string[] {
   const out: string[] = [];
