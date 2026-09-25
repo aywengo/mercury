@@ -107,6 +107,6 @@ export async function dispatchTask(
       };
     }
   }
-  const res = await client.createRun({ taskName, fireMs: opts.nowMs, wallMinute: fire.wallMinute, key: fire.key, body: fire.body });
+  await client.createRun({ taskName, fireMs: opts.nowMs, wallMinute: fire.wallMinute, key: fire.key, body: fire.body });
   return { fired: true, fire };
 }

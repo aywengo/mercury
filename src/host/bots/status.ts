@@ -32,10 +32,10 @@ export function nextFires(cfg: BotConfig, nowMs: number, horizonMs = 24 * 3_600_
       // A task whose cron cannot fire within the horizon is reported as such, not silently
       // dropped: an operator staring at `status` must see the difference between "fires later"
       // and "this schedule is impossible on this clock". The message names the actual horizon.
-      out.push({ task: task.name, fireMs: NaN, wallMinute: `none within ${horizonLabel}`, tz: task.tz ?? 'UTC' });
+      out.push({ task: task.name, fireMs: NaN, wallMinute: `none within ${horizonLabel}`, tz: task.tz || 'UTC' });
       continue;
     }
-    out.push({ task: task.name, fireMs: fires[0]!, wallMinute: scheduledWallMinuteId(fires[0]!, tz), tz: task.tz ?? 'UTC' });
+    out.push({ task: task.name, fireMs: fires[0]!, wallMinute: scheduledWallMinuteId(fires[0]!, tz), tz: task.tz || 'UTC' });
   }
   return out;
 }
