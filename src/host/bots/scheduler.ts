@@ -16,8 +16,9 @@ import type { BotConfig, BotTaskConfig } from './config.ts';
 // The terminal deny-list is a deliberate wire-vocabulary copy of
 // src/domain/stateMachine.ts TERMINAL_STATUSES (the bot boundary forbids src/ internals except
 // the redactor — §15 item 4). Drift is made visible by the contract tests that pin the status
-// set over HTTP; a NEW server status is excluded from 'non-terminal' by default, which is the
-// direction this check must err in.
+// set over HTTP. Because the check is "status IS in the terminal list", a NEW server status is
+// NOT in the list and therefore counts as non-terminal: singleFlight blocks on it. Firing while
+// a Run sits in an unknown state is the one direction this check must never err toward.
 const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
 type RunStatus = string;
 function isTerminal(status: RunStatus): boolean {
@@ -60,7 +61,7 @@ export interface SchedulerClient {
   createRun(req: DispatchRequest): Promise<{ runId: string; replayed: boolean }>;
 }
 
-/** Non-terminal means NOT in the terminal deny-list, so a future status is excluded by default. */
+/** Non-terminal means NOT in the terminal deny-list: a future status is not in the list, so it blocks. */
 export function runIsNonTerminal(status: RunStatus): boolean {
   return !isTerminal(status);
 }
@@ -73,9 +74,7 @@ export function runIsNonTerminal(status: RunStatus): boolean {
  */
 export function resolveTemplate(
   task: BotTaskConfig,
-  fireMs: number,
   tzParts: { date: string; time: string; iso: string },
-  env: NodeJS.ProcessEnv = process.env,
 ): Record<string, unknown> {
   const template: Record<string, unknown> = { ...task.template };
   const substitute = (value: unknown): unknown => {
@@ -148,7 +147,6 @@ export async function tick(
   opts: {
     nowMs: number;
     afterMs?: number;
-    ownerId: string;
   },
 ): Promise<TickOutcome> {
   const afterMs = opts.afterMs ?? opts.nowMs - 60_000;
@@ -244,7 +242,7 @@ export async function tick(
       };
       let body: Record<string, unknown>;
       try {
-        body = resolveTemplate(task, fire.fireMs, tzParts);
+        body = resolveTemplate(task, tzParts);
       } catch (err) {
         outcome.errors.push({ task: taskName, fireMs: fire.fireMs, message: (err as Error).message });
         continue;

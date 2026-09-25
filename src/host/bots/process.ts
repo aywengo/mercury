@@ -6,15 +6,15 @@
 // idempotency key makes a repeated dispatch safe, and the bot never cancels a Run on shutdown.
 //
 // State file: ${XDG_STATE_HOME:-~/.local/state}/mercury/bots/<alias>.state.json (0600), written
-// AFTER a successful dispatch. It records lastTickMs so a restart can evaluate onMiss; the file
-// is an optimisation — non-double-dispatch comes from the derived key, never from the file.
+// after every completed tick (dispatch or not). It records lastTickMs so a restart can evaluate
+// onMiss; the file is an optimisation — non-double-dispatch comes from the derived key, never
+// from the file (§5.3).
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { loadBotConfig, botsDir, type BotConfig } from './config.ts';
+import { loadBotConfig, type BotConfig } from './config.ts';
 import { readBotCredentials } from './credentials.ts';
-import { botOwnerId } from './keys.ts';
 import { tick, type SchedulerClient, type BotRunView, type DispatchRequest } from './scheduler.ts';
 
 const TICK_MS = 60_000;
@@ -129,12 +129,11 @@ export async function runBot(alias: string, env: NodeJS.ProcessEnv = process.env
   };
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
-  const statePath = botStatePath(alias, env);
   let lastTickMs = readBotState(alias, env).lastTickMs ?? now();
   try {
     do {
       const nowMs = now();
-      const outcome = await tickFn(cfg, client, { nowMs, afterMs: lastTickMs, ownerId: botOwnerId(alias) });
+      const outcome = await tickFn(cfg, client, { nowMs, afterMs: lastTickMs });
       for (const d of outcome.dispatched) {
         log(`bot=${alias} task=${d.task} fire=${new Date(d.fireMs).toISOString()} run=${d.runId}${d.replayed ? ' (replayed)' : ''}`);
       }

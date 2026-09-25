@@ -43,7 +43,7 @@ const MIN = 60_000;
 test('tick dispatches the on-time fire with the derived key and botTask hint', async () => {
   const now = Date.UTC(2026, 5, 10, 3, 15, 30); // 03:15:30 — the 03:15 fire is on-time
   const c = fakeClient();
-  const out = await tick(cfg([task()]), c, { nowMs: now, afterMs: now - MIN, ownerId: 'bot-ops' });
+  const out = await tick(cfg([task()]), c, { nowMs: now, afterMs: now - MIN });
   assert.equal(out.dispatched.length, 1);
   assert.equal(c.calls.length, 1);
   const call = c.calls[0]!;
@@ -65,7 +65,7 @@ test('100 fires produce exactly 100 keyed dispatches when nothing blocks (accept
   let dispatched = 0;
   for (let i = 1; i <= 100; i++) {
     const nowMs = start + i * MIN;
-    const out = await tick(cfg([task()]), c, { nowMs, afterMs: nowMs - MIN, ownerId: 'bot-ops' });
+    const out = await tick(cfg([task()]), c, { nowMs, afterMs: nowMs - MIN });
     dispatched += out.dispatched.length;
   }
   assert.equal(dispatched, 100);
@@ -82,16 +82,16 @@ test('a 100-minute catch-up window yields exactly what onMiss allows (acceptance
   const start = Date.UTC(2026, 5, 10, 0, 0, 0);
   const now = start + 100 * MIN;
   const cSkip = fakeClient();
-  const outSkip = await tick(cfg([task({ onMiss: 'skip' })]), cSkip, { nowMs: now, afterMs: start, ownerId: 'bot-ops' });
+  const outSkip = await tick(cfg([task({ onMiss: 'skip' })]), cSkip, { nowMs: now, afterMs: start });
   assert.equal(outSkip.dispatched.length, 1);
   assert.equal(outSkip.skippedMissed.length, 99);
   // run with maxCatchUp 3: 3 missed + 1 on-time.
   const cRun = fakeClient();
-  const outRun = await tick(cfg([task({ onMiss: 'run', singleFlight: false })]), cRun, { nowMs: now, afterMs: start, ownerId: 'bot-ops' });
+  const outRun = await tick(cfg([task({ onMiss: 'run', singleFlight: false })]), cRun, { nowMs: now, afterMs: start });
   assert.equal(outRun.dispatched.length, 4);
   // collapse: 1 missed (keyed to minute 99) + 1 on-time.
   const cCol = fakeClient();
-  const outCol = await tick(cfg([task({ onMiss: 'collapse' })]), cCol, { nowMs: now, afterMs: start, ownerId: 'bot-ops' });
+  const outCol = await tick(cfg([task({ onMiss: 'collapse' })]), cCol, { nowMs: now, afterMs: start });
   assert.equal(outCol.dispatched.length, 2);
   assert.ok(cCol.calls.some((x) => x.key === 'bot-ops:nightly:w2026-06-10T01:39'));
 });
@@ -100,13 +100,13 @@ test('singleFlight skips NEEDS_INPUT (and every non-terminal status), dispatches
   const now = Date.UTC(2026, 5, 10, 3, 15, 30);
   for (const status of ['QUEUED', 'STARTING', 'RUNNING', 'NEEDS_INPUT'] as const) {
     const c = fakeClient([{ id: 'r1', status, constraints: { botTask: 'nightly' } }]);
-    const out = await tick(cfg([task({ singleFlight: true })]), c, { nowMs: now, afterMs: now - MIN, ownerId: 'bot-ops' });
+    const out = await tick(cfg([task({ singleFlight: true })]), c, { nowMs: now, afterMs: now - MIN });
     assert.equal(c.calls.length, 0, `${status} must block`);
     assert.equal(out.skippedSingleFlight.length, 1);
   }
   for (const status of ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const) {
     const c = fakeClient([{ id: 'r1', status, constraints: { botTask: 'nightly' } }]);
-    await tick(cfg([task({ singleFlight: true })]), c, { nowMs: now, afterMs: now - MIN, ownerId: 'bot-ops' });
+    await tick(cfg([task({ singleFlight: true })]), c, { nowMs: now, afterMs: now - MIN });
     assert.equal(c.calls.length, 1, `${status} must not block`);
   }
 });
@@ -121,7 +121,7 @@ test('onMiss skip drops missed fires but still fires the on-time one', async () 
   const now = Date.UTC(2026, 5, 10, 3, 15, 0);
   const c = fakeClient();
   // Down for 3 minutes: fires at 03:13 and 03:14 are missed, 03:15 is on-time.
-  const out = await tick(cfg([task({ onMiss: 'skip' })]), c, { nowMs: now, afterMs: now - 3 * MIN, ownerId: 'bot-ops' });
+  const out = await tick(cfg([task({ onMiss: 'skip' })]), c, { nowMs: now, afterMs: now - 3 * MIN });
   assert.equal(out.dispatched.length, 1);
   assert.equal(c.calls[0]!.key, 'bot-ops:nightly:w2026-06-10T03:15');
   assert.deepEqual(out.skippedMissed.map((s) => s.fireMs), [now - 2 * MIN, now - MIN]);
@@ -130,7 +130,7 @@ test('onMiss skip drops missed fires but still fires the on-time one', async () 
 test('onMiss collapse fires once keyed to the newest MISSED scheduled minute', async () => {
   const now = Date.UTC(2026, 5, 10, 3, 15, 0);
   const c = fakeClient();
-  const out = await tick(cfg([task({ onMiss: 'collapse' })]), c, { nowMs: now, afterMs: now - 3 * MIN, ownerId: 'bot-ops' });
+  const out = await tick(cfg([task({ onMiss: 'collapse' })]), c, { nowMs: now, afterMs: now - 3 * MIN });
   assert.equal(out.dispatched.length, 2, 'on-time fire + the collapsed missed fire');
   const keys = c.calls.map((x) => x.key);
   assert.ok(keys.includes('bot-ops:nightly:w2026-06-10T03:14'), 'collapse keys to the missed minute, not now');
@@ -138,7 +138,7 @@ test('onMiss collapse fires once keyed to the newest MISSED scheduled minute', a
   // exactly one dispatch, keyed to the newest missed scheduled minute.
   const c2 = fakeClient();
   const fiveMinNow = Date.UTC(2026, 5, 10, 3, 12, 59); // cron */5: fires 03:00/05/10, none at 03:12
-  const out2 = await tick(cfg([task({ onMiss: 'collapse', cron: '*/5 * * * *' })]), c2, { nowMs: fiveMinNow, afterMs: fiveMinNow - 11 * MIN, ownerId: 'bot-ops' });
+  const out2 = await tick(cfg([task({ onMiss: 'collapse', cron: '*/5 * * * *' })]), c2, { nowMs: fiveMinNow, afterMs: fiveMinNow - 11 * MIN });
   assert.equal(out2.dispatched.length, 1);
   assert.equal(c2.calls[0]!.key, 'bot-ops:nightly:w2026-06-10T03:10');
 });
@@ -146,7 +146,7 @@ test('onMiss collapse fires once keyed to the newest MISSED scheduled minute', a
 test('onMiss run fires once per missed interval capped at maxCatchUp (default 3)', async () => {
   const now = Date.UTC(2026, 5, 10, 3, 15, 0);
   const c = fakeClient();
-  await tick(cfg([task({ onMiss: 'run', singleFlight: false })]), c, { nowMs: now, afterMs: now - 6 * MIN, ownerId: 'bot-ops' });
+  await tick(cfg([task({ onMiss: 'run', singleFlight: false })]), c, { nowMs: now, afterMs: now - 6 * MIN });
   // 6 missed fires (03:09..03:14) + on-time (03:15); cap keeps the newest 3 missed.
   assert.equal(c.calls.length, 4);
   assert.deepEqual(
@@ -159,14 +159,14 @@ test('onMiss run fires once per missed interval capped at maxCatchUp (default 3)
     ],
   );
   const c2 = fakeClient();
-  await tick(cfg([task({ onMiss: 'run', maxCatchUp: 2, singleFlight: false })]), c2, { nowMs: now, afterMs: now - 6 * MIN, ownerId: 'bot-ops' });
+  await tick(cfg([task({ onMiss: 'run', maxCatchUp: 2, singleFlight: false })]), c2, { nowMs: now, afterMs: now - 6 * MIN });
   assert.equal(c2.calls.length, 3);
 });
 
 test('run + singleFlight collapses to one fire within a tick (the pinned §5.3 interaction)', async () => {
   const now = Date.UTC(2026, 5, 10, 3, 15, 0);
   const c = fakeClient(); // empty run list: nothing blocks fire #1
-  const out = await tick(cfg([task({ onMiss: 'run', singleFlight: true })]), c, { nowMs: now, afterMs: now - 3 * MIN, ownerId: 'bot-ops' });
+  const out = await tick(cfg([task({ onMiss: 'run', singleFlight: true })]), c, { nowMs: now, afterMs: now - 3 * MIN });
   // Fire #1 (oldest catch-up) dispatches; fires #2/#3/#4 see the tick's own dispatch and skip.
   assert.equal(out.dispatched.length, 1);
   assert.equal(out.skippedSingleFlight.length, 2, 'fires #2 and #3 see the tick\'s own dispatch');
@@ -176,9 +176,9 @@ test('run + singleFlight collapses to one fire within a tick (the pinned §5.3 i
 test('derived keys are stable across ticks: the same window replays the same key', async () => {
   const now = Date.UTC(2026, 5, 10, 3, 15, 30);
   const c1 = fakeClient();
-  await tick(cfg([task()]), c1, { nowMs: now, afterMs: now - MIN, ownerId: 'bot-ops' });
+  await tick(cfg([task()]), c1, { nowMs: now, afterMs: now - MIN });
   const c2 = fakeClient();
-  await tick(cfg([task()]), c2, { nowMs: now + 5_000, afterMs: now - MIN, ownerId: 'bot-ops' });
+  await tick(cfg([task()]), c2, { nowMs: now + 5_000, afterMs: now - MIN });
   assert.equal(c1.calls[0]!.key, c2.calls[0]!.key, 'restart mid-window derives the same key');
 });
 
@@ -186,7 +186,7 @@ test('a listOwnRuns failure refuses singleFlight dispatch but not singleFlight:f
   const now = Date.UTC(2026, 5, 10, 3, 15, 30);
   const c = fakeClient();
   c.failList = 'boom';
-  const out = await tick(cfg([task({ singleFlight: true, name: 'guarded' }), task({ singleFlight: false, name: 'free' })]), c, { nowMs: now, afterMs: now - MIN, ownerId: 'bot-ops' });
+  const out = await tick(cfg([task({ singleFlight: true, name: 'guarded' }), task({ singleFlight: false, name: 'free' })]), c, { nowMs: now, afterMs: now - MIN });
   assert.equal(c.calls.length, 1);
   assert.equal(c.calls[0]!.body.task !== undefined, true);
   assert.match(out.errors[0]!.message, /singleFlight unavailable: boom/);
@@ -196,26 +196,24 @@ test('a listOwnRuns failure refuses singleFlight dispatch but not singleFlight:f
 test('resolveTemplate substitutes {{fire.*}} and resolves notAfterAt in UTC and fixed offsets', () => {
   const fire = Date.UTC(2026, 5, 10, 3, 15, 0);
   const parts = { date: '2026-06-10', time: '03:15', iso: scheduledWallMinuteId(fire, 'UTC') };
-  const out = resolveTemplate(task({ template: { task: 'x', notAfterAt: '06:00' } }), fire, parts);
+  const out = resolveTemplate(task({ template: { task: 'x', notAfterAt: '06:00' } }), parts);
   assert.equal(out.notAfterAt, undefined, 'the helper is consumed, not sent');
   // UTC: 06:00Z on the fire's date.
   assert.equal((out.constraints as Record<string, unknown>).notAfter, '2026-06-10T06:00:00.000Z');
   // +02:00: 06:00 wall = 04:00Z.
   const out2 = resolveTemplate(
     task({ tz: '+02:00', template: { task: 'x', notAfterAt: '06:00' } }),
-    fire,
     { date: '2026-06-10', time: '03:15', iso: scheduledWallMinuteId(fire, { offsetMinutes: 120 }) },
   );
   assert.equal((out2.constraints as Record<string, unknown>).notAfter, '2026-06-10T04:00:00.000Z');
   // An explicit template notAfter wins over the helper.
   const out3 = resolveTemplate(
     task({ template: { task: 'x', notAfterAt: '06:00', constraints: { notAfter: '2026-06-10T23:00:00Z' } } }),
-    fire,
     parts,
   );
   assert.equal((out3.constraints as Record<string, unknown>).notAfter, '2026-06-10T23:00:00Z');
   // A malformed helper is a loud error, not a silent drop.
-  assert.throws(() => resolveTemplate(task({ template: { task: 'x', notAfterAt: '6pm' } }), fire, parts), /notAfterAt/);
+  assert.throws(() => resolveTemplate(task({ template: { task: 'x', notAfterAt: '6pm' } }), parts), /notAfterAt/);
 });
 
 
@@ -293,7 +291,7 @@ test('tick through the real client: 100 fires -> 100 Runs, each keyed to its own
     let dispatched = 0;
     for (let i = 1; i <= 100; i++) {
       const nowMs = start + i * MIN;
-      const out = await tick(cfg([task()]), client, { nowMs, afterMs: nowMs - MIN, ownerId: 'bot-ops' });
+      const out = await tick(cfg([task()]), client, { nowMs, afterMs: nowMs - MIN });
       dispatched += out.dispatched.length;
     }
     assert.equal(dispatched, 100);
@@ -319,7 +317,7 @@ test('singleFlight through the real server: a Run parked in NEEDS_INPUT blocks t
     S.env.runs.transition(list.runs[0]!.id, 'RUNNING' as never);
     S.env.runs.transition(list.runs[0]!.id, 'NEEDS_INPUT' as never);
     const now = Date.UTC(2026, 5, 10, 3, 16, 30);
-    const out = await tick(cfg([task({ singleFlight: true })]), client, { nowMs: now, afterMs: now - MIN, ownerId: 'bot-ops' });
+    const out = await tick(cfg([task({ singleFlight: true })]), client, { nowMs: now, afterMs: now - MIN });
     assert.equal(out.dispatched.length, 0);
     assert.equal(out.skippedSingleFlight.length, 1);
   } finally {

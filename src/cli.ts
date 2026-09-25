@@ -336,7 +336,14 @@ async function main(): Promise<void> {
       process.exitCode = 1;
       return;
     }
-    void runBot(alias, process.env, { once }).then((code) => { process.exitCode = code; });
+    void runBot(alias, process.env, { once })
+      .then((code) => { process.exitCode = code; })
+      .catch((err: unknown) => {
+        // Startup failures (config, credentials, healthz probe) reject BEFORE runBot's internal
+        // try/catch: report and exit non-zero rather than dying on an unhandled rejection.
+        process.stderr.write(`host bot run: ${(err as Error).message}\n`);
+        process.exitCode = 1;
+      });
     return;
   }
   if (cmd === 'host' && args[0] === 'bot') {
