@@ -87,6 +87,8 @@ esac
     PATH: `${bin}:${process.env.PATH ?? ''}`,
     LAUNCHCTL_LOG: join(dir, 'launchctl.log'),
   };
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
+  const plistPath = join(home, 'Library', 'LaunchAgents', 'com.mercury.bot.nightly.plist');
   const savedPath = process.env.PATH;
   const savedLog = process.env.LAUNCHCTL_LOG;
   const savedHome = process.env.HOME;
@@ -98,10 +100,10 @@ esac
     assert.equal(code, 0, 'first install exits 0');
     const firstCalls = readFileSync(join(dir, 'launchctl.log'), 'utf8').trim().split('\n');
     assert.deepEqual(firstCalls, [
-      `print gui/501/com.mercury.bot.nightly`,
-      `bootstrap gui/501 ${join(home, 'Library', 'LaunchAgents', 'com.mercury.bot.nightly.plist')}`,
+      `print gui/${uid}/com.mercury.bot.nightly`,
+      `bootstrap gui/${uid} ${plistPath}`,
     ], 'nothing loaded: print decides, then straight bootstrap (no bootout)');
-    assert.ok(existsSync(join(home, 'Library', 'LaunchAgents', 'com.mercury.bot.nightly.plist')));
+    assert.ok(existsSync(plistPath));
     assert.ok(existsSync(join(dir, 'state', 'mercury', 'bots', 'run-nightly.sh')));
     // Re-run with the agent "loaded": print -> bootout -> bootstrap.
     process.env.LAUNCHCTL_LOADED = '1';
@@ -110,9 +112,9 @@ esac
     assert.equal(code, 0);
     const secondCalls = readFileSync(join(dir, 'launchctl.log'), 'utf8').trim().split('\n');
     assert.deepEqual(secondCalls, [
-      `print gui/501/com.mercury.bot.nightly`,
-      `bootout gui/501/com.mercury.bot.nightly`,
-      `bootstrap gui/501 ${join(home, 'Library', 'LaunchAgents', 'com.mercury.bot.nightly.plist')}`,
+      `print gui/${uid}/com.mercury.bot.nightly`,
+      `bootout gui/${uid}/com.mercury.bot.nightly`,
+      `bootstrap gui/${uid} ${plistPath}`,
     ]);
   } finally {
     process.env.PATH = savedPath;
