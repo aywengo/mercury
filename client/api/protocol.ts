@@ -31,6 +31,8 @@ export interface RunConstraints {
   maxRetries: number;
   /** Absolute wall-clock deadline (ISO-8601 with explicit UTC offset) that counts queue time (issue #731). */
   notAfter?: string;
+  /** Bot attribution hint, recorded only (dispatcher-bot-design §4.3). */
+  botTask?: string;
   budgetTokens?: number;
   budgetCost?: number;
   resourceLimits?: { cpu?: string; memory?: string; disk?: string };

@@ -46,6 +46,13 @@ export interface RunConstraints {
    * path. Retries inherit it unchanged, so a retry cannot extend the window.
    */
   notAfter?: string;
+  /**
+   * Client-supplied bot attribution hint (dispatcher-bot-design §4.3, B1-1 #735): which bot task
+   * dispatched this Run. RECORDED ONLY — it is a hint inside an owner scope (the bot reads its
+   * own Runs for singleFlight), never a trust boundary and never read for anything that crosses
+   * owners. The server sets the real attribution (`ownerId`) from the authenticated token.
+   */
+  botTask?: string;
   budgetTokens?: number;
   budgetCost?: number;
   resourceLimits?: { cpu?: string; memory?: string; disk?: string };

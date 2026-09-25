@@ -348,6 +348,11 @@ Supported fields:
   `maxDurationMs` (from start) and `notAfter` (absolute). Retries inherit it
   unchanged, so a retry cannot extend the window. Must be in the future at
   creation.
+- `botTask` — recorded, not enforced: the dispatching bot task's name
+  (dispatcher-bot-design §4.3). A hint inside an owner scope that lets a bot
+  group its own Runs (`singleFlight`); it is never read for anything that
+  crosses owners and never replaces the authenticated `ownerId`. Must match
+  `^[a-z0-9-]+$` when present.
 - `budgetTokens` — recorded, not enforced;
 - `budgetCost` — recorded, not enforced;
 - `resourceLimits` — optional `cpu`, `memory`, `disk` strings;
