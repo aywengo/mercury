@@ -923,7 +923,17 @@ typecheck + focused tests green.
 
 - bot process (`host bot run --alias`) with the scheduler timer, dispatch via
   the loopback API, `singleFlight` over non-terminal statuses, `onMiss`, state
-  file;
+  file. Status (B1-1, issue #735, 2026-09-25): `src/host/bots/scheduler.ts`
+  and `process.ts` implement the timer, the wall-minute idempotency keys,
+  `singleFlight` as a terminal-status deny-list walked over the WHOLE
+  owner-run list (keyset paging; a parked NEEDS_INPUT ages out of page one —
+  the walk is capped and hits fail closed), `onMiss` skip/collapse/run keyed
+  to the missed scheduled minute, `resolveTemplate` with the
+  `{{fire.*}}`/`notAfterAt` helpers, the 0600 state file written after the
+  tick, the `/healthz` probe with capped backoff, and `constraints.botTask`
+  as a recorded-only attribution hint. `test/botScheduler.test.ts` (21 tests)
+  covers unit/contract/subprocess, including 100 fires -> exactly 100 keyed
+  Runs and the NEEDS_INPUT no-refire rule;
 - `host bot dispatch` (manual fire) and `host bot status`;
 - service install/uninstall per alias (including the §17.7 teardown message);
 - subprocess tests against a real test server with a fake clock.
