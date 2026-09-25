@@ -57,6 +57,8 @@ export interface BotRunView {
   id: string;
   status: RunStatus;
   constraints?: { botTask?: string };
+  /** ISO creation timestamp; present on real server payloads (used by the hourly count). */
+  createdAt?: string;
 }
 
 export interface SchedulerClient {

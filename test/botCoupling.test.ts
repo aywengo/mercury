@@ -46,13 +46,15 @@ const ALLOWED_SRC = [
   'src/host/bots/config.ts',
   'src/host/bots/credentials.ts',
   'src/host/bots/scheduler.ts',
+  'src/host/bots/dispatch.ts',
+  'src/host/bots/status.ts',
   'src/host/bots/process.ts',
   'src/domain/redact.ts', // the documented redactor exception (§15 item 4)
 ];
 
 test('the bots directory is non-empty and actually being scanned', () => {
   const files = sourceFiles(BOTS_DIR);
-  assert.ok(files.length >= 6, `expected the bots modules, scanned ${files.length}`);
+  assert.ok(files.length >= 8, `expected the bots modules, scanned ${files.length}`);
 });
 
 test('bot code imports only its own modules, node builtins, and the redactor exception', () => {

@@ -368,6 +368,25 @@ keyed by alias with an `api` token per bot (an optional `llm` token per entry
 is accepted for the B3 brain; other keys are refused). `host bot validate`
 reports the pair as drifted when the copies disagree.
 
+Manual fire and status (§11):
+
+```bash
+mercury host bot dispatch --alias <a> --task <name>   # refused without --yes
+mercury host bot dispatch --alias <a> --task <name> --dry-run
+mercury host bot status   --alias <a>
+```
+
+`dispatch` resolves the task template exactly as the scheduler would fire it
+now and writes with an idempotency key of
+`bot-<alias>:<task>:manual-<w<UTC wall minute>>` — two invocations inside the
+same minute replay to one Run, a retry after a crash replays, and the key can
+never collide with a scheduled fire's. `singleFlight` applies as configured; a
+refusal names the parked Run rather than stacking. `--dry-run` prints the
+resolved body and key and writes nothing. `status` prints the next fire per
+task (config + cron, works offline), the bot's recent Runs, and the
+dispatches-in-the-last-hour count read from the API — never from local state;
+unreachable API marks those two sections UNAVAILABLE and exits non-zero.
+
 ## Host installer
 
 Variables written by `mercury host setup` (docs/host-installer.md M3). The wizard
