@@ -378,9 +378,11 @@ mercury host bot status   --alias <a>
 
 `dispatch` resolves the task template exactly as the scheduler would fire it
 now and writes with an idempotency key of
-`bot-<alias>:<task>:manual-<w<UTC wall minute>>` — two invocations inside the
-same minute replay to one Run, a retry after a crash replays, and the key can
-never collide with a scheduled fire's. `singleFlight` applies as configured; a
+`bot-<alias>:<task>:manual-<w<wall minute>>` — the wall label is computed in
+the task's cron timezone (`tz`, UTC by default), the same label a scheduled
+fire at that minute would carry. Two invocations inside the same minute
+replay to one Run, a retry after a crash replays, and the key can never
+collide with a scheduled fire's (the `manual-` segment). `singleFlight` applies as configured; a
 refusal names the parked Run rather than stacking. `--dry-run` prints the
 resolved body and key and writes nothing. `status` prints the next fire per
 task (config + cron, works offline), the bot's recent Runs, and the

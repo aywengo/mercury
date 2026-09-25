@@ -85,7 +85,7 @@ test('dispatch --yes fires with singleFlight respected', async () => {
   const c2 = fakeClient([{ id: 'r1', status: 'NEEDS_INPUT', constraints: { botTask: 'nightly' } }]);
   const d2 = await dispatchTask(cfg([task({ singleFlight: true })]), c2, 'nightly', { nowMs: now, dryRun: false, yes: true });
   assert.equal(d2.fired, false);
-  assert.match(d2.reason ?? '', /singleFlight/);
+  assert.match(d2.reason ?? '', /singleFlight: task 'nightly' has non-terminal Run r1 \(status NEEDS_INPUT\)/);
   assert.equal(c2.calls.length, 0);
   // singleFlight: false fires regardless.
   const c3 = fakeClient([{ id: 'r1', status: 'NEEDS_INPUT', constraints: { botTask: 'nightly' } }]);

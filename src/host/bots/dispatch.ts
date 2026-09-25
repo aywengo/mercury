@@ -11,8 +11,8 @@
 
 import { botOwnerId, scheduledWallMinuteId } from './keys.ts';
 import { resolveTemplate } from './scheduler.ts';
-import { due, parseTz, type CronTz } from './cron.ts';
-import type { BotConfig, BotTaskConfig } from './config.ts';
+import { parseTz, type CronTz } from './cron.ts';
+import type { BotConfig } from './config.ts';
 import type { SchedulerClient } from './scheduler.ts';
 
 export interface ManualFire {
@@ -71,22 +71,23 @@ export async function dispatchTask(
   const task = cfg.tasks.find((t) => t.name === taskName)!;
   if (task.singleFlight) {
     // Walk the owner-run list the same way the scheduler does: a parked Run on ANY page blocks.
-    const counts = new Map<string, number>();
+    // The blocking Run's id is kept so the refusal is actionable (cancel/wait/inspect THAT Run).
+    let blocker: { id: string; status: string } | undefined;
     let cursor: string | null = null;
     for (let page = 0; page < 20; page++) {
       const res = await client.listOwnRuns(200, cursor);
       for (const run of res.runs) {
-        const tn = run.constraints?.botTask;
-        if (!tn) continue;
-        if (runIsNonTerminal(run.status)) counts.set(tn, (counts.get(tn) ?? 0) + 1);
+        if (run.constraints?.botTask !== taskName) continue;
+        if (runIsNonTerminal(run.status)) { blocker = { id: run.id, status: run.status }; break; }
       }
+      if (blocker) break;
       cursor = res.nextCursor ?? null;
       if (!cursor) break;
     }
-    if ((counts.get(taskName) ?? 0) > 0) {
+    if (blocker) {
       return {
         fired: false,
-        reason: `singleFlight: task '${taskName}' has a non-terminal Run — cancel it or wait, or set singleFlight: false for this task`,
+        reason: `singleFlight: task '${taskName}' has non-terminal Run ${blocker.id} (status ${blocker.status}) — cancel it or wait, or set singleFlight: false for this task`,
         fire,
       };
     }

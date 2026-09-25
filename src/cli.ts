@@ -383,7 +383,9 @@ async function main(): Promise<void> {
       const cfg = loadBotConfig(alias);
       const client = makeBotClient(cfg);
       const decision = await dispatchTask(cfg, client, taskName, { nowMs: Date.now(), dryRun, yes });
-      if (decision.fire) {
+      // The resolved plan (key + body) prints for a dry-run preview or a successful dispatch —
+      // not on a refusal, where it would leak template material into terminals/logs.
+      if (decision.fire && (decision.fired || decision.reason === 'dry-run')) {
         process.stdout.write(`key ${decision.fire.key}\n`);
         process.stdout.write(`body ${JSON.stringify(decision.fire.body)}\n`);
       }

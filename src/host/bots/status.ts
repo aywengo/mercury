@@ -6,7 +6,7 @@
 // marks the API-backed sections unavailable with the reason, and exits non-zero — a read-only
 // command still fails loudly when it cannot do its whole job.
 
-import { due, parseTz, wallClock, type CronTz } from './cron.ts';
+import { due, parseTz, type CronTz } from './cron.ts';
 import { scheduledWallMinuteId } from './keys.ts';
 import type { BotConfig } from './config.ts';
 import type { SchedulerClient, BotRunView } from './scheduler.ts';
@@ -53,8 +53,9 @@ export async function statusView(cfg: BotConfig, client: SchedulerClient, nowMs:
   const hourAgoMs = nowMs - 3_600_000;
   let cursor: string | null = null;
   let firstPage = true;
+  let pastWindow = false;
   try {
-    for (let page = 0; page < 20; page++) {
+    for (let page = 0; page < 20 && !pastWindow; page++) {
       const res = await client.listOwnRuns(200, cursor);
       for (const run of res.runs) {
         if (firstPage) {
@@ -64,9 +65,9 @@ export async function statusView(cfg: BotConfig, client: SchedulerClient, nowMs:
         if (Number.isFinite(createdAtMs) && createdAtMs >= hourAgoMs) {
           view.dispatchesLastHour++;
         } else {
-          // Runs arrive newest-first; once a Run is older than the window, later pages only add
-          // older Runs — stop counting but finish the first page for last-actions.
-          if (!firstPage) break;
+          // Runs arrive newest-first; a Run older than the window means every later Run is too.
+          // Stop paging entirely (the first page's last-actions are already collected).
+          if (!firstPage) pastWindow = true;
         }
       }
       firstPage = false;
