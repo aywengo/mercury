@@ -81,11 +81,12 @@ export function makeBotClient(cfg: BotConfig, env: NodeJS.ProcessEnv = process.e
       }
       throw new Error(`API unreachable after ${PROBE_ATTEMPTS} attempts: ${lastErr?.message ?? 'unknown'}`);
     },
-    async listOwnRuns(limit = 200): Promise<BotRunView[]> {
-      const res = await call(`/api/runs?limit=${limit}`);
+    async listOwnRuns(limit = 200, cursor?: string): Promise<{ runs: BotRunView[]; nextCursor: string | null }> {
+      const cur = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
+      const res = await call(`/api/runs?limit=${limit}${cur}`);
       if (!res.ok) throw new Error(`GET /api/runs answered ${res.status}`);
-      const data = (await res.json()) as { runs: BotRunView[] };
-      return data.runs ?? [];
+      const data = (await res.json()) as { runs: BotRunView[]; nextCursor: string | null };
+      return { runs: data.runs ?? [], nextCursor: data.nextCursor ?? null };
     },
     async createRun(req: DispatchRequest): Promise<{ runId: string; replayed: boolean }> {
       const res = await call('/api/runs', {

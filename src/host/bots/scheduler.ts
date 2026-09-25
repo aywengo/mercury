@@ -55,8 +55,12 @@ export interface BotRunView {
 }
 
 export interface SchedulerClient {
-  /** List the bot's own Runs (owner-scoped server-side). Returns up to `limit`. */
-  listOwnRuns(limit?: number): Promise<BotRunView[]>;
+  /**
+   * List the bot's own Runs (owner-scoped server-side), one page. `nextCursor` feeds the next
+   * call; the caller MUST walk to exhaustion — a long-lived non-terminal Run (a parked
+   * NEEDS_INPUT) ages out of the first `created_at DESC` page, and singleFlight misses it.
+   */
+  listOwnRuns(limit?: number, cursor?: string | null): Promise<{ runs: BotRunView[]; nextCursor: string | null }>;
   /** POST /api/runs with the derived Idempotency-Key; replays return the original Run. */
   createRun(req: DispatchRequest): Promise<{ runId: string; replayed: boolean }>;
 }
@@ -153,32 +157,43 @@ export async function tick(
   const outcome: TickOutcome = { dispatched: [], skippedSingleFlight: [], skippedMissed: [], errors: [] };
   // One list per tick, not per fire: the bot owns its Runs, so one page holds everything the
   // singleFlight check needs for every task.
-  let ownRuns: BotRunView[] | undefined;
   let listFailed: string | undefined;
   let countsCache: Map<string, number> | undefined;
+  // Walk EVERY page of the owner-scoped list, not just the first: GET /api/runs is keyset-paged
+  // `created_at DESC`, so a long-lived non-terminal Run (a parked NEEDS_INPUT) ages out of page
+  // one and would stop blocking dispatches — exactly the stacking singleFlight exists to prevent.
+  // The walk is bounded, and hitting the bound is treated like a failed list: refuse to dispatch
+  // guarded tasks (fail-closed) rather than guess.
+  const PAGE_LIMIT = 200;
+  const MAX_PAGES = 20;
   const nonTerminalByTask = async (): Promise<Map<string, number> | null> => {
     if (listFailed) return null;
     if (countsCache) return countsCache;
-    if (ownRuns === undefined) {
-      try {
-        ownRuns = await client.listOwnRuns(200);
-      } catch (err) {
-        // If we cannot see our own Runs we cannot honour singleFlight: refuse to dispatch that
-        // task rather than risk stacking Runs on a parked one. The next tick retries. Tasks with
-        // `singleFlight: false` do not need the list and still dispatch (§5.3: the check exists
-        // for tasks that declared it).
-        listFailed = (err as Error).message;
-        return null;
-      }
-    }
     const map = new Map<string, number>();
-    for (const run of ownRuns!) {
-      const taskName = run.constraints?.botTask;
-      if (!taskName) continue;
-      if (runIsNonTerminal(run.status)) map.set(taskName, (map.get(taskName) ?? 0) + 1);
+    try {
+      let cursor: string | null = null;
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const res = await client.listOwnRuns(PAGE_LIMIT, cursor);
+        for (const run of res.runs) {
+          const taskName = run.constraints?.botTask;
+          if (!taskName) continue;
+          if (runIsNonTerminal(run.status)) map.set(taskName, (map.get(taskName) ?? 0) + 1);
+        }
+        cursor = res.nextCursor ?? null;
+        if (!cursor) return (countsCache = map);
+      }
+    } catch (err) {
+      // If we cannot see our own Runs we cannot honour singleFlight: refuse to dispatch that
+      // task rather than risk stacking Runs on a parked one. The next tick retries. Tasks with
+      // `singleFlight: false` do not need the list and still dispatch (§5.3: the check exists
+      // for tasks that declared it).
+      listFailed = `singleFlight list walk failed: ${(err as Error).message}`;
+      return null;
     }
-    countsCache = map;
-    return map;
+    // MAX_PAGES exhausted with more pages remaining: the run list is larger than the walk can
+    // prove, so an old non-terminal Run might be hiding past the cap. Fail closed.
+    listFailed = `singleFlight list walk hit the ${MAX_PAGES}-page cap; refusing to dispatch guarded tasks`;
+    return null;
   };
 
   // Compute all due fires first (pure), then apply per-task policy.
@@ -227,7 +242,7 @@ export async function tick(
       if (task.singleFlight) {
         counts = await nonTerminalByTask();
         if (counts === null) {
-          outcome.errors.push({ task: taskName, fireMs: fire.fireMs, message: `singleFlight unavailable: ${listFailed}` });
+          outcome.errors.push({ task: taskName, fireMs: fire.fireMs, message: listFailed ?? 'singleFlight unavailable' });
           continue;
         }
         if ((counts.get(taskName) ?? 0) > 0) {

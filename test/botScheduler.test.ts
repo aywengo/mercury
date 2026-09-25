@@ -21,14 +21,16 @@ function cfg(tasks: BotTaskConfig[], alias = 'ops', apiUrl?: string): BotConfig 
   return { alias, tasks, api: apiUrl ? { url: apiUrl } : {}, warnings: [] };
 }
 
-/** Scripted client: records createRun calls, serves a canned run list. */
-function fakeClient(ownRuns: BotRunView[] = []): SchedulerClient & { calls: DispatchRequest[]; failList: string | null } {
+/** Scripted client: records createRun calls, serves a canned run list (one page). */
+function fakeClient(ownRuns: BotRunView[] = []): SchedulerClient & { calls: DispatchRequest[]; failList: string | null; listCalls: number } {
   const self = {
     calls: [] as DispatchRequest[],
     failList: null as string | null,
-    async listOwnRuns(): Promise<BotRunView[]> {
+    listCalls: 0,
+    async listOwnRuns(_limit?: number, _cursor?: string | null): Promise<{ runs: BotRunView[]; nextCursor: string | null }> {
+      self.listCalls++;
       if (self.failList) throw new Error(self.failList);
-      return ownRuns;
+      return { runs: ownRuns, nextCursor: null };
     },
     async createRun(req: DispatchRequest) {
       self.calls.push(req);
@@ -189,7 +191,7 @@ test('a listOwnRuns failure refuses singleFlight dispatch but not singleFlight:f
   const out = await tick(cfg([task({ singleFlight: true, name: 'guarded' }), task({ singleFlight: false, name: 'free' })]), c, { nowMs: now, afterMs: now - MIN });
   assert.equal(c.calls.length, 1);
   assert.equal(c.calls[0]!.body.task !== undefined, true);
-  assert.match(out.errors[0]!.message, /singleFlight unavailable: boom/);
+  assert.match(out.errors[0]!.message, /singleFlight list walk failed: boom/);
   assert.equal(out.errors[0]!.task, 'guarded');
 });
 
@@ -433,4 +435,33 @@ test('state file is written after the tick with 0600 and read back across restar
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+
+test('singleFlight walks ALL list pages: a parked NEEDS_INPUT run on page 2 still blocks (round-2 review)', async () => {
+  const now = Date.UTC(2026, 5, 10, 3, 15, 30);
+  // Page 1: one terminal run; page 2: the old parked NEEDS_INPUT run.
+  const pages = [
+    { runs: [{ id: 'r-new', status: 'COMPLETED', constraints: { botTask: 'nightly' } }], nextCursor: 'c2' },
+    { runs: [{ id: 'r-old', status: 'NEEDS_INPUT', constraints: { botTask: 'nightly' } }], nextCursor: null },
+  ];
+  let page = 0;
+  const client: SchedulerClient = {
+    async listOwnRuns() { return pages[Math.min(page++, pages.length - 1)]!; },
+    async createRun(req) { return { runId: 'x', replayed: false }; },
+  };
+  const out = await tick(cfg([task({ singleFlight: true })]), client, { nowMs: now, afterMs: now - MIN });
+  assert.equal(out.dispatched.length, 0, 'the page-2 parked run must block');
+  assert.equal(out.skippedSingleFlight.length, 1);
+});
+
+test('singleFlight fails closed when the list walk exceeds the page cap', async () => {
+  const now = Date.UTC(2026, 5, 10, 3, 15, 30);
+  const client: SchedulerClient = {
+    async listOwnRuns() { return { runs: [{ id: 'r', status: 'COMPLETED', constraints: { botTask: 'nightly' } }], nextCursor: 'more' }; },
+    async createRun(req) { return { runId: 'x', replayed: false }; },
+  };
+  const out = await tick(cfg([task({ singleFlight: true })]), client, { nowMs: now, afterMs: now - MIN });
+  assert.equal(out.dispatched.length, 0, 'cap exhaustion refuses guarded dispatch (fail-closed)');
+  assert.match(out.errors[0]!.message, /page cap/);
 });
