@@ -99,7 +99,9 @@ export function makeBotClient(cfg: BotConfig, env: NodeJS.ProcessEnv = process.e
         headers: { 'idempotency-key': req.key },
         body: JSON.stringify(req.body),
       });
-      if (!res.ok && res.status !== 201) {
+      // The §5.2 contract is EXACTLY 201 (created) or 200 (replay). Anything else — 202/204 included
+      // — would parse garbage or hide a contract break, so it is refused before res.json().
+      if (res.status !== 201 && res.status !== 200) {
         throw new Error(`POST /api/runs answered ${res.status}`);
       }
       const data = (await res.json()) as { runId: string };
