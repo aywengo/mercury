@@ -279,6 +279,19 @@ test('uninstall is idempotent on a host where nothing is installed', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('a malformed credentials file fails the uninstall loudly instead of leaving the token (round-5 review)', () => {
+  const dir = tempDir('bot-svc-badcred-');
+  const env = setupBot(dir);
+  writeFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), '{not json');
+  let errBuf = '';
+  const io = { out: () => {}, err: (s: string) => { errBuf += s; } };
+  const code = uninstallBotService('linux', 'nightly', io, env, { yes: true, keepEnv: false, reassignOwner: null });
+  assert.equal(code, 1);
+  assert.match(errBuf, /cannot update .*bot-credentials\.json: not valid JSON/);
+  assert.match(errBuf, /remove the 'nightly' entry by hand/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('--reassign-runs refuses clearly (no owner-transfer API) and writes nothing', () => {
   const dir = tempDir('bot-svc-un6-');
   const env = setupBot(dir);

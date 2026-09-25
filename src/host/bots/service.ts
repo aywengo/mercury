@@ -325,10 +325,14 @@ export function removeBotCredential(alias: string, env: NodeJS.ProcessEnv = proc
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, 'utf8'));
-  } catch {
-    return false; // not ours to fix here: validate/doctor report a malformed credentials file
+  } catch (e) {
+    // Uninstall must not claim success while leaving a token copy on disk: a malformed
+    // credentials file fails the uninstall loudly (the alias entry may still be inside).
+    throw new Error(`cannot update ${path}: not valid JSON (${(e as Error).message}); remove the '${alias}' entry by hand`);
   }
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`cannot update ${path}: must be a JSON object keyed by bot alias; remove the '${alias}' entry by hand`);
+  }
   const obj = raw as Record<string, unknown>;
   // Own-property check: `alias in obj` also matches Object.prototype ('constructor'), which
   // would report success while removing nothing.
@@ -445,8 +449,13 @@ export function uninstallBotService(
       }
     }
   }
-  if (removeBotCredential(alias, env)) {
-    io.out(`Removed the '${alias}' entry from the shared bot credentials file.\n`);
+  try {
+    if (removeBotCredential(alias, env)) {
+      io.out(`Removed the '${alias}' entry from the shared bot credentials file.\n`);
+    }
+  } catch (e) {
+    io.err(`host bot service: ${(e as Error).message}\n`);
+    return 1;
   }
   if (!opts.keepEnv && existsSync(envFile)) {
     try {
