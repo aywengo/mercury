@@ -66,6 +66,7 @@ import { runHostSetup } from './host/setup.ts';
 import { installService, serviceStatus, uninstallService, parseServiceArgs, type ServiceOptions } from './host/service.ts';
 import { runHostDoctor } from './host/doctor.ts';
 import { loadBotConfig, botConfigPath } from './host/bots/config.ts';
+import { runBot } from './host/bots/process.ts';
 import { botCredentialsPath, readBotCredentials, registeredOwnerForToken } from './host/bots/credentials.ts';
 import { botOwnerId } from './host/bots/keys.ts';
 import { hostStatus, printStatus, upgradeHost, uninstallHost } from './host/lifecycle.ts';
@@ -101,6 +102,8 @@ function usageText(): string {
     '                               (interactive wizard or --non-interactive --answers)',
     '                service     install|status|uninstall the launchd/systemd unit',
     '                               that runs the host (--dry-run prints the unit)',
+    '                bot run --alias <a>        run one bot scheduler (one process per bot;',
+    '                               SIGINT/SIGTERM stop the timer, never cancel a Run)',
     '                bot validate --alias <a>   offline check of one bot: config parses and',
     '                               validates, credentials file is 0600 and has the alias, and',
     '                               the two token copies agree (§4.2)',
@@ -308,8 +311,36 @@ async function main(): Promise<void> {
     process.exitCode = failed ? 1 : 0;
     return;
   }
+  // `host bot run --alias <a>` — the scheduler process (§10). One process per bot; like validate,
+  // it runs before loadConfig() because the bot's own config and credentials are its world.
+  if (cmd === 'host' && args[0] === 'bot' && args[1] === 'run') {
+    const rest = args.slice(2);
+    let alias: string | undefined;
+    let once = false;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === '--alias') {
+        alias = rest[i + 1];
+        i++;
+      } else if (rest[i]?.startsWith('--alias=')) {
+        alias = rest[i]!.slice('--alias='.length);
+      } else if (rest[i] === '--once') {
+        once = true;
+      } else {
+        process.stderr.write(`host bot run: unknown argument '${rest[i]}'.\n`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    if (!alias) {
+      process.stderr.write('host bot run: --alias <a> is required\n');
+      process.exitCode = 1;
+      return;
+    }
+    void runBot(alias, process.env, { once }).then((code) => { process.exitCode = code; });
+    return;
+  }
   if (cmd === 'host' && args[0] === 'bot') {
-    process.stderr.write(`host bot: unknown subcommand '${args[1] ?? ''}'. Expected validate.\n`);
+    process.stderr.write(`host bot: unknown subcommand '${args[1] ?? ''}'. Expected run or validate.\n`);
     process.exitCode = 1;
     return;
   }

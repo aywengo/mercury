@@ -434,6 +434,8 @@ export class RunService {
         maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
         // Absolute deadline that counts queue time (#731); inherited verbatim by retries.
         notAfter: input.constraints?.notAfter,
+        // Bot attribution hint (dispatcher-bot-design §4.3); recorded verbatim, never enforced.
+        botTask: input.constraints?.botTask,
         budgetTokens: input.constraints?.budgetTokens,
         budgetCost: input.constraints?.budgetCost,
         resourceLimits: input.constraints?.resourceLimits,
@@ -859,7 +861,7 @@ function isUniqueViolation(err: unknown): boolean {
 }
 
 const NUMERIC_CONSTRAINT_KEYS = ['maxDurationMs', 'maxRetries', 'budgetTokens', 'budgetCost'] as const;
-const CONSTRAINT_KEYS = new Set(['maxDurationMs', 'maxRetries', 'budgetTokens', 'budgetCost', 'resourceLimits', 'allowedNetworks', 'notAfter']);
+const CONSTRAINT_KEYS = new Set(['maxDurationMs', 'maxRetries', 'budgetTokens', 'budgetCost', 'resourceLimits', 'allowedNetworks', 'notAfter', 'botTask']);
 
 // Renamed by issue #63 because max* implied enforcement that does not exist. Rejecting them with a
 // migration message (rather than the generic "Unknown constraint") is deliberate: a stale client
@@ -934,6 +936,15 @@ function validateConstraints(c: Record<string, unknown>): void {
   if (an !== undefined) {
     if (!Array.isArray(an) || an.some((x) => typeof x !== 'string')) {
       throw new ValidationError('constraint allowedNetworks must be an array of strings');
+    }
+  }
+  const bt = c.botTask;
+  if (bt !== undefined) {
+    // A recorded-only hint (§4.3), but the bot's singleFlight groups Runs by it, so constrain it
+    // to the same task-name vocabulary the bot config enforces (keys.ts dispatchKey). Anything
+    // else would let two different tasks collide under one hint.
+    if (typeof bt !== 'string' || !/^[a-z0-9-]+$/.test(bt)) {
+      throw new ValidationError('constraint botTask must be a string matching ^[a-z0-9-]+$');
     }
   }
   const na = c.notAfter;
