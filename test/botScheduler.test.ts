@@ -191,7 +191,7 @@ test('a listOwnRuns failure refuses singleFlight dispatch but not singleFlight:f
   const out = await tick(cfg([task({ singleFlight: true, name: 'guarded' }), task({ singleFlight: false, name: 'free' })]), c, { nowMs: now, afterMs: now - MIN });
   assert.equal(c.calls.length, 1);
   assert.equal(c.calls[0]!.body.task !== undefined, true);
-  assert.match(out.errors[0]!.message, /singleFlight list walk failed: boom/);
+  assert.match(out.errors[0]!.message, /singleFlight list walk failed: Error: boom/);
   assert.equal(out.errors[0]!.task, 'guarded');
 });
 

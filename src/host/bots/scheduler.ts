@@ -25,6 +25,11 @@ function isTerminal(status: RunStatus): boolean {
   return (TERMINAL_STATUSES as readonly string[]).includes(status);
 }
 
+/** Loggable error detail: keep the name, and never print 'undefined' for a non-Error throw. */
+function errDetail(err: unknown): string {
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+}
+
 export interface ScheduledFire {
   task: BotTaskConfig;
   /** The scheduled fire instant (ms epoch). */
@@ -187,7 +192,7 @@ export async function tick(
       // task rather than risk stacking Runs on a parked one. The next tick retries. Tasks with
       // `singleFlight: false` do not need the list and still dispatch (§5.3: the check exists
       // for tasks that declared it).
-      listFailed = `singleFlight list walk failed: ${(err as Error).message}`;
+      listFailed = `singleFlight list walk failed: ${errDetail(err)}`;
       return null;
     }
     // MAX_PAGES exhausted with more pages remaining: the run list is larger than the walk can
@@ -259,7 +264,7 @@ export async function tick(
       try {
         body = resolveTemplate(task, tzParts);
       } catch (err) {
-        outcome.errors.push({ task: taskName, fireMs: fire.fireMs, message: (err as Error).message });
+        outcome.errors.push({ task: taskName, fireMs: fire.fireMs, message: errDetail(err) });
         continue;
       }
       const constraints = { ...((body.constraints as Record<string, unknown>) ?? {}) };
@@ -280,7 +285,7 @@ export async function tick(
           counts?.set(taskName, (counts?.get(taskName) ?? 0) + 1);
         }
       } catch (err) {
-        outcome.errors.push({ task: taskName, fireMs: fire.fireMs, message: (err as Error).message });
+        outcome.errors.push({ task: taskName, fireMs: fire.fireMs, message: errDetail(err) });
       }
     }
   }
