@@ -58,9 +58,14 @@ test('bot code imports only its own modules, node builtins, and the redactor exc
   for (const file of sourceFiles(BOTS_DIR)) {
     // Resolve against the ABSOLUTE file path so '..' can legitimately escape src/host/bots/
     // (that is exactly how the documented redactor exception, ../../domain/redact.ts, is written).
-    const dir = file.slice(0, file.lastIndexOf('/'));
+    // sourceFiles() yields platform-native separators: cut at whichever one is present.
+    const sep = file.includes('/') && !file.includes('\\') ? '/' : '\\';
+    const dir = file.slice(0, file.lastIndexOf(sep));
     const text = readFileSync(file, 'utf8');
-    for (const m of text.matchAll(SPECIFIER_RE)) {
+    // Strip line comments before scanning: a comment mentioning `import { X } from '…'` is not
+    // an import, and a false positive here fails the suite for prose.
+    const code = text.split('\n').map((l) => l.replace(/(^|\s)\/\/.*$/, '')).join('\n');
+    for (const m of code.matchAll(SPECIFIER_RE)) {
       const spec = m[1]!;
       if (spec.startsWith('node:')) continue;
       if (spec.startsWith('./') || spec.startsWith('../')) {
