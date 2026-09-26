@@ -105,6 +105,18 @@ test('the digest files one issue with all sections and closes yesterday\'s repor
   assert.deepEqual((created.body as { labels: string[] }).labels, ['nightly:report']);
 });
 
+test('searches are bounded to the night window [night, night+1) (backfills stay on-date)', async () => {
+  const { io, calls } = ioWith({});
+  await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
+  const searches = calls.filter((c) => c.method === 'GET' && c.path.startsWith('/search/issues?')).map((c) => decodeURIComponent(c.path));
+  assert.equal(searches.length, 3);
+  for (const q of searches) {
+    assert.ok(q.includes('created:2026-09-26..2026-09-27') || q.includes('commented:2026-09-26..2026-09-27'), `bounded: ${q}`);
+    assert.ok(!q.includes('created:>='), `no open-ended lower bound: ${q}`);
+    assert.ok(!q.includes('commented:>='), `no open-ended lower bound: ${q}`);
+  }
+});
+
 test('dry-run assembles everything and writes nothing', async () => {
   const { io, calls } = ioWith({
     searchItems: { 'is:pr created': [{ number: 700, title: 'a PR', html_url: 'u1' }] },
