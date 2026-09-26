@@ -3,8 +3,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, existsSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { rmSync, existsSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { tempDir } from './helpers.ts';
 
 import {
@@ -380,6 +380,27 @@ test('state file: 0600, corrupt file resets the clock instead of crashing', asyn
     assert.equal(stat.mode & 0o777, 0o600);
     writeFileSync(p, '{not json');
     assert.deepEqual(loadFlakeState({ XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }), {}, 'corrupt state resets, not crashes');
+  } finally {
+    cleanup();
+  }
+});
+
+test('loadFlakeState drops wrong-shape entries (arrays, non-objects, bad nights) instead of crashing', () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const p = join(dir, 'mercury/nightly/e2e-flakes.json');
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({
+      good: { test: 't', error: 'e', nights: ['2026-09-01'] },
+      arr: ['not', 'an', 'entry'],
+      str: 'just a string',
+      noNights: { test: 't', error: 'e' },
+      badNights: { test: 't', error: 'e', nights: [1, 2] },
+    }));
+    const state = loadFlakeState({ XDG_STATE_HOME: dir });
+    assert.deepEqual(Object.keys(state), ['good'], 'only well-shaped entries survive');
+    const state2 = loadFlakeState({ XDG_STATE_HOME: dir, GH_TOKEN: 'x' });
+    assert.equal(state2['good']!.nights[0], '2026-09-01');
   } finally {
     cleanup();
   }

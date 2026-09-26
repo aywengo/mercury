@@ -30,6 +30,7 @@
 
 import { basename } from 'node:path';
 import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -106,9 +107,7 @@ export function normalizeErrorLine(line: string): string {
 
 /** The fingerprint: sha-256 over test name + normalized error, first 16 hex chars. */
 export async function fingerprintOf(test: string, error: string): Promise<string> {
-  const data = new TextEncoder().encode(`${test}\n${normalizeErrorLine(error)}`);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(digest)).slice(0, 8).map((b) => b.toString(16).padStart(2, '0')).join('');
+  return createHash('sha256').update(`${test}\n${normalizeErrorLine(error)}`).digest('hex').slice(0, 16);
 }
 
 /** The hidden marker an issue carries in its body; searches match on it, not on prose. */
@@ -183,8 +182,19 @@ export function loadFlakeState(env: NodeJS.ProcessEnv): FlakeState {
   const p = statePath(env);
   if (!existsSync(p)) return {};
   try {
-    const raw = JSON.parse(readFileSync(p, 'utf8')) as FlakeState;
-    return raw && typeof raw === 'object' ? raw : {};
+    const raw: unknown = JSON.parse(readFileSync(p, 'utf8'));
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    // Shape-validate every entry: a valid-JSON-but-wrong shape (an array, a stray string, an
+    // entry without a nights array) would otherwise corrupt later saves or crash the night.
+    const out: FlakeState = {};
+    for (const [fp, entry] of Object.entries(raw as Record<string, unknown>)) {
+      if (entry === null || typeof entry !== 'object') continue;
+      const e = entry as { test?: unknown; error?: unknown; nights?: unknown };
+      if (typeof e.test !== 'string' || typeof e.error !== 'string' || !Array.isArray(e.nights)) continue;
+      if (!e.nights.every((n) => typeof n === 'string')) continue;
+      out[fp] = { test: e.test, error: e.error, nights: [...e.nights] };
+    }
+    return out;
   } catch {
     return {}; // a corrupt state file resets the flake clocks rather than crashing the night
   }
