@@ -512,6 +512,51 @@ test('a 2xx search response with an unexpected body fails with a targeted error'
   );
 });
 
+test('a concurrent same-night duplicate is reconciled: the smaller number survives', async () => {
+  // Two invocations created 902 (ours) and 701 (theirs). The listing after create shows both.
+  const { io: base } = ioWith({
+    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
+  });
+  let createCount = 0;
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('labels=nightly%3Areport')) {
+        // Second listing (post-create reconciliation) reveals the concurrent duplicate 701.
+        if (createCount > 0) {
+          return { body: [
+            { number: 902, title: 'nightly report — 2026-09-26' },
+            { number: 701, title: 'nightly report — 2026-09-26' },
+            { number: 500, title: 'nightly report — 2026-09-25' },
+          ], status: 200 };
+        }
+        return base.get(path);
+      }
+      return base.get(path);
+    },
+    async post() { createCount += 1; return { body: { number: 902 }, status: 201 }; },
+    async patch(path) { return { body: {}, status: 200 }; },
+  };
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.issue, 701, 'the smaller same-night number is the survivor');
+  assert.equal(out.closedPrevious, 500);
+});
+
+test('a 2xx Mercury runs response with an unparsable payload degrades the section, not the digest', async () => {
+  const io: ReportIo = {
+    mercury: {
+      async get(path) {
+        if (path.startsWith('/api/runs?')) return { body: null, status: 200 }; // invalid JSON -> null
+        return { body: { events: [] }, status: 200 };
+      },
+    },
+    async get() { return { body: [], status: 200 }; },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const stopped = await collectRunsStopped(io.mercury!, '2026-09-26');
+  assert.deepEqual(stopped, []);
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);

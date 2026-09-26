@@ -163,8 +163,13 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
       // failing the whole digest - same policy as unreadable per-run events.
       return out;
     }
-    const body = res.body as { runs?: { id?: string; task?: string; status?: string; constraints?: { notAfter?: string } }[]; nextCursor?: string };
-    const runs = body.runs ?? [];
+    const body = res.body as { runs?: { id?: string; task?: string; status?: string; constraints?: { notAfter?: string } }[]; nextCursor?: string } | null;
+    if (body === null || typeof body !== 'object' || !Array.isArray(body.runs)) {
+      // A 2xx with an unparsable payload (proxy error page, invalid JSON -> null) is an
+      // unreadable listing: degrade to the partial result, do not fail the digest.
+      return out;
+    }
+    const runs = body.runs;
     for (const run of runs) {
       if (!run.id) continue;
       // notAfter must land on the report night. Cheap pre-filter before the per-run events
@@ -310,6 +315,30 @@ export async function runReport(
       throw new Error(`digest issue create returned no issue number (POST status ${created.status}); yesterday's report stays open`);
     }
   }
+
+  // Post-create reconciliation for the create/create race: two invocations can both observe no
+  // same-night report before either POST completes. Re-list the open reports and close every
+  // same-night duplicate except the SMALLEST issue number - the rule is deterministic, so both
+  // invocations converge on the same survivor no matter the order. (This run's JSON may report
+  // an issue that a concurrent reconciliation then closes; the next night's report closes any
+  // residue as an older night.)
+  const sameNight: number[] = [issue!];
+  for (let page = 1; page <= SEARCH_CAP; page++) {
+    const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
+    const res = await io.get(path);
+    if (res.status < 200 || res.status >= 300) break; // unreadable: the next night's close loop heals
+    const prev = (res.body as { number?: number; title?: string }[] | null) ?? [];
+    for (const dup of prev) {
+      if (dup.number !== undefined && dup.title === title && !sameNight.includes(dup.number)) sameNight.push(dup.number);
+    }
+    if (prev.length < 100) break;
+  }
+  const survivor = Math.min(...sameNight);
+  for (const n of sameNight) {
+    if (n === survivor) continue;
+    await io.patch(`/repos/${opts.repo}/issues/${n}`, { state: 'closed' });
+  }
+  if (survivor !== issue) issue = survivor;
 
   let closedPrevious: number | undefined;
   for (const old of closeables) {
