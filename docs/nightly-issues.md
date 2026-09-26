@@ -396,6 +396,17 @@ only when the same fingerprint flakes on three nights.
 A seeded failure is filed once, then commented on (not re-filed) on the second run; a failure that
 passes on rerun is not filed.
 
+
+> **Status 2026-09-26 (shipped, #766):** `nightly-e2e` lives at `.agents/skills/nightly/e2e.ts`
+> (N1-1's deterministic-script pattern). Runs `npm run test:e2e` bounded at the prepr gate's
+> 20-minute deadline, reruns each failure once on its own file to separate flakes from defects,
+> and fingerprints real failures (sha-256 of the test name + the normalized error: volatile ids,
+> POSIX/Windows/relative/absolute paths, durations and numbers stripped). The hidden marker
+> `<!-- nightly-e2e-fp:<hash> -->` is the dedup key: comment-never-refile. Flakes file exactly
+> once after three DISTINCT nights (a failed create on the threshold night rolls the night back
+> for a retry). Failed searches, unparseable output, empty error lines, and dry-runs are honest
+> observations that never file; `GH_TOKEN` is demanded only at the first real GitHub touch. 29
+> tests over injected I/O (`test/nightlyE2e.test.ts`); 16 Copilot review rounds to merge.
 ---
 
 ## N1-3 (#740) — `nightly-next` skill
