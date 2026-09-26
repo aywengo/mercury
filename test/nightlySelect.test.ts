@@ -246,6 +246,30 @@ test('runSelectorWith claims exactly one issue and returns it (normal case)', as
   assert.match(s.reason, /#60/);
 });
 
+test('labelActorsFor: an actor-less labeled event fails closed (round-5 note)', () => {
+  // A labeled event with no visible actor must NOT inherit the previous trusted actor: the final
+  // state is UNKNOWN, which is not trusted.
+  const withGap: LabelEvent[] = [
+    { event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } },
+    { event: 'labeled', label: { name: 'nightly:ready' } }, // actor missing (payload truncated?)
+  ];
+  assert.deepEqual(readyActorsFor(issue({ number: 80 }), withGap), [],
+    'an actor-less final labeled event is unknown, not the previous actor');
+  // Same for the e2e label path.
+  const e2eGap: LabelEvent[] = [
+    { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'origin:e2e' } },
+    { event: 'labeled', label: { name: 'origin:e2e' } },
+  ];
+  assert.deepEqual(labelActorsFor(e2eGap, 'origin:e2e'), []);
+  // An actor-less label followed by a visible re-label resolves to the visible actor.
+  const recovered: LabelEvent[] = [
+    { event: 'labeled', label: { name: 'origin:e2e' } },
+    { event: 'unlabeled', label: { name: 'origin:e2e' } },
+    { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'origin:e2e' } },
+  ];
+  assert.deepEqual(labelActorsFor(recovered, 'origin:e2e'), ['mercury-nightly']);
+});
+
 test('runSelectorWith skips the e2e timeline walk for non-nightly authors (#764 round 3)', async () => {
   // The e2e trust clause can only pass for nightly-authored issues, so the timeline (the most
   // expensive per-issue read) is walked only for nightly-authored e2e issues and ready-labeled

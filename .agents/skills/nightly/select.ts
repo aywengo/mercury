@@ -116,13 +116,18 @@ export function readyActorsFor(issue: GhIssue, timeline: LabelEvent[]): string[]
  * on the label NOW, not one from history.
  */
 export function labelActorsFor(timeline: LabelEvent[], labelName: string): string[] {
-  let current: string | null = null; // actor of the latest 'labeled' while not unlabeled since
+  // `current: string | null | MISSING` — MISSING means "a labeled event exists whose actor we
+  // cannot see". That is not the same as "no current actor's predecessor": inheriting the PREVIOUS
+  // actor across an actor-less re-label would attribute a label nobody can verify to a trusted
+  // actor, so an actor-less final labeled event fails CLOSED (unknown, not trusted).
+  const MISSING = Symbol('missing');
+  let current: string | null | typeof MISSING = null;
   for (const e of timeline) {
     if (e.label?.name !== labelName) continue;
-    if (e.event === 'labeled' && e.actor?.login) current = e.actor.login;
+    if (e.event === 'labeled') current = e.actor?.login ?? MISSING;
     if (e.event === 'unlabeled') current = null;
   }
-  return current ? [current] : [];
+  return typeof current === 'string' ? [current] : [];
 }
 
 export function isExcluded(issue: GhIssue): boolean {
