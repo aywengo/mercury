@@ -352,7 +352,12 @@ export async function runSelectorWith(
       }
       if (!capped) {
         readyByTrusted = labelActorsFor(timeline, L_READY).includes(TRUSTED_AUTHOR);
-        e2eByNightly = labels.includes(L_E2E) && labelActorsFor(timeline, L_E2E).includes(NIGHTLY_IDENTITY);
+        // Author check INSIDE the assignment, so e2eByNightly stays false for a foreign-author
+        // issue even when its timeline was walked for the ready clause (a ready-labeled issue
+        // authored by someone else must never report the e2e reason text).
+        e2eByNightly = issueAuthor(issue) === NIGHTLY_IDENTITY
+          && labels.includes(L_E2E)
+          && labelActorsFor(timeline, L_E2E).includes(NIGHTLY_IDENTITY);
       }
     }
     candidates.push({ issue, readyByTrusted, e2eByNightly });

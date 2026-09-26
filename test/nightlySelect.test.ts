@@ -270,6 +270,27 @@ test('labelActorsFor: an actor-less labeled event fails closed (round-5 note)', 
   assert.deepEqual(labelActorsFor(recovered, 'origin:e2e'), ['mercury-nightly']);
 });
 
+test('runSelectorWith: a foreign-author issue with BOTH labels reports the ready reason (round-6)', async () => {
+  // A foreign-author issue carrying nightly:ready AND origin:e2e gets its timeline walked for the
+  // ready clause; e2eByNightly must still be false (the author check lives in the assignment), so
+  // a rung-1 pick reports the ready reason, never the e2e reason.
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) {
+        return { body: [{ event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } }, { event: 'labeled', actor: { login: 'random-dev' }, label: { name: 'origin:e2e' } }], link: null };
+      }
+      return { body: [issue({ number: 90, user: { login: 'random-dev' }, labels: [{ name: 'nightly:ready' }, { name: 'origin:e2e' }] })], link: null };
+    },
+    async post(path: string) { return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 1);
+  assert.equal(s.issue, 90);
+  assert.match(s.reason, /nightly:ready/, 'the reason names the ready clause, not the e2e clause');
+  assert.doesNotMatch(s.reason, /origin:e2e/);
+});
+
 test('runSelectorWith skips the e2e timeline walk for non-nightly authors (#764 round 3)', async () => {
   // The e2e trust clause can only pass for nightly-authored issues, so the timeline (the most
   // expensive per-issue read) is walked only for nightly-authored e2e issues and ready-labeled
