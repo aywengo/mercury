@@ -120,7 +120,10 @@ issue `nightly:blocked`, put the question in an issue comment, finish the Run.
    version, upgraded deliberately by a human. Work happens in Run workspaces,
    never in the installation.
 5. **Credentials.** The GitHub token reaches Runs through the harness
-   environment, never through task text, argv or events.
+   environment, never through task text, argv or events. Until credential
+   profiles (`credential-profiles-design.md`) ship, this requires a host
+   dedicated to the nightly identity (that design's §12), because local Runs
+   inherit the worker's whole environment.
 6. **Budgets.** Maximum PRs per night and token budget per night, enforced by
    the skills. The per-hour dispatch cap of `dispatcher-bot-design.md` is not
    in the B1 config; the nightly schedule is bounded by its cron and

@@ -453,6 +453,7 @@ The bot can now schedule everything in `nightly-self-development.md` §4.1, but 
    1. The nightly GitHub identity exists (named, not only described), and its token is present only in the harness environment on the host.
    2. Ruleset `main-protection` requires ≥ 1 approving review. Today `required_approving_review_count` is 0, so an identity with PR and contents write could merge its own PR on green CI, which breaks the v1 human-merge rule. @aywengo's bypass still allows direct merges.
    3. The host runs a released `@aywengo/mercury` version, not a checkout.
+   3a. The host is dedicated to the nightly identity (`credential-profiles-design.md` §12): `MERCURY_API_TOKENS` holds only `bot-nightly` and the operator token; `GH_TOKEN` is in `mercury.env` and in `MERCURY_SECRETS`; git authors as `mercury-nightly` and uses `gh auth setup-git`; no `gh auth login` on the host user.
    4. There is a `MERCURY_API_TOKENS` entry for `bot-nightly`, and `bot-credentials.json` is 0600.
    5. `mercury host bot validate --alias nightly` reports nothing.
    6. `mercury host bot dispatch --alias nightly --task <t> --dry-run` for each task shows `botTask` set and `notAfter` at today's 06:00 local.
