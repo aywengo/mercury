@@ -4,7 +4,7 @@
  * One GitHub issue per night, labeled `nightly:report`, closed by the next night's report:
  *
  *   - PRs opened tonight and issues filed tonight (GitHub search, repo-scoped, bounded).
- *   - Issues commented on tonight (search `commented:NIGHT..NIGHT+1`, bounded).
+ *   - Issues commented on tonight (search `commented:NIGHT`, exactly that day).
  *   - Blocked items: open issues labeled `nightly:blocked` with their latest blocking question.
  *   - Runs stopped by `notAfter` (the §4.3 window end) — optional section, only when
  *     `MERCURY_REPORT_API_URL` + `MERCURY_REPORT_TOKEN` are set; the Mercury runs API is read
@@ -51,9 +51,10 @@ export interface ReportResult extends ReportData {
 }
 
 function assertRepo(repo: string): void {
-  // Mirrors select.ts's validation exactly (same authority, same env).
+  // Mirrors select.ts's validation: same regex AND the same error message, so both skills
+  // fail identically on a bad repo.
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
-    throw new Error(`repo must be exactly owner/name (e.g. aywengo/mercury); got '${repo}'`);
+    throw new Error(`REPO must be exactly owner/name (e.g. aywengo/mercury); got '${repo}'`);
   }
 }
 
@@ -189,13 +190,6 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   return lines.join('\n');
 }
 
-/** The day AFTER the report night (the search upper bound: [night, night+1) is one local day). */
-function nextDay(night: string): string {
-  const d = new Date(`${night}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().slice(0, 10);
-}
-
 /** Assemble the digest (all reads), file the issue, close yesterday's. */
 export async function runReport(
   io: ReportIo,
@@ -203,12 +197,12 @@ export async function runReport(
   opts: { repo: string; night: string; dryRun: boolean },
 ): Promise<ReportResult> {
   assertRepo(opts.repo);
-  // Search window [night, night+1): a backfill with an older --night must not include later
-  // activity, and a late run must not include tomorrow's.
-  const dayAfter = nextDay(opts.night);
-  const prs = await search(io, opts.repo, `is:pr created:${opts.night}..${dayAfter}`);
-  const issuesFiled = await search(io, opts.repo, `is:issue created:${opts.night}..${dayAfter}`);
-  const issuesCommented = await search(io, opts.repo, `is:issue commented:${opts.night}..${dayAfter}`);
+  // Exactly the report night: GitHub date qualifiers match one UTC day, and a range
+  // `night..night+1` would be INCLUSIVE of both ends (two full days). A backfill with an older
+  // --night must not include later activity; a late run must not include tomorrow's.
+  const prs = await search(io, opts.repo, `is:pr created:${opts.night}`);
+  const issuesFiled = await search(io, opts.repo, `is:issue created:${opts.night}`);
+  const issuesCommented = await search(io, opts.repo, `is:issue commented:${opts.night}`);
   const blocked = await collectBlocked(io, opts.repo);
   const runsStopped = io.mercury ? await collectRunsStopped(io.mercury, opts.night) : [];
   const flakes = collectFlakes(env, opts.night);
