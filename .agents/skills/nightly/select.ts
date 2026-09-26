@@ -20,12 +20,15 @@
  *   3. Docs → proposals (§6) — reported as `rung: 3` with no issue: the nightly drafts the
  *      issue set itself; selection has nothing to claim.
  *
- * An issue is eligible only under §5's trust rule: authored by @aywengo, filed from E2E
- * (`origin:e2e`), or labeled `nightly:ready` by @aywengo — the actor comes from the timeline's
- * labeled events, never from issue text. `nightly:in-progress`, `nightly:blocked` and
- * `nightly:proposed` exclude an issue outright. The chosen issue is claimed by adding
- * `nightly:in-progress` BEFORE the decision is printed; if a re-read shows the label already
- * present (a concurrent or retried nightly got there first), the selector picks again.
+ * An issue is eligible only under §5's trust rule: authored by @aywengo, filed by the nightly
+ * identity from E2E (`origin:e2e` — the AUTHOR must be the nightly identity AND the CURRENT label
+ * must carry the nightly identity as its timeline actor, because a label alone is provenance
+ * anyone with triage access can apply), or labeled `nightly:ready` by @aywengo — the actor comes
+ * from the timeline's labeled events, never from issue text.
+ * `nightly:in-progress`, `nightly:blocked` and `nightly:proposed` exclude an issue outright.
+ * The chosen issue is claimed by adding `nightly:in-progress` BEFORE the decision is printed;
+ * 422 already-exists on the claim means a concurrent or retried nightly got there first and the
+ * selector picks again.
  *
  * Output: exactly one JSON line `{ rung, issue?, reason }` or `{ rung: "none", reason }`.
  *
@@ -40,6 +43,12 @@
 import { basename } from 'node:path';
 
 const TRUSTED_AUTHOR = 'aywengo';
+/**
+ * The nightly GitHub identity (docs/operations.md, "The nightly host's GitHub identity"). The
+ * trust root must NOT be configurable from a Run's environment: an env override would let the
+ * process under test grant itself trust. Change it here, in code review, when the identity changes.
+ */
+const NIGHTLY_IDENTITY = 'mercury-nightly';
 const L_READY = 'nightly:ready';
 const L_IN_PROGRESS = 'nightly:in-progress';
 const L_BLOCKED = 'nightly:blocked';
@@ -77,12 +86,17 @@ export function issueAuthor(issue: GhIssue): string {
   return issue.user?.login ?? '';
 }
 
-/** §5 trust: authored by @aywengo, filed from E2E, or nightly:ready by @aywengo (timeline actor). */
-export function isTrusted(issue: GhIssue, readyByTrusted: boolean): boolean {
+/** §5 trust: authored by @aywengo, filed by the nightly identity from E2E, or nightly:ready by
+ * @aywengo. The ready clause is author-INDEPENDENT — a @aywengo approval makes even a
+ * nightly-authored issue eligible — so it is checked first. The E2E clause is held to the same
+ * standard as ready: the issue must be AUTHORED by the nightly identity AND the CURRENT
+ * origin:e2e label must carry the nightly identity as its timeline actor. A label alone is
+ * provenance anyone with triage access can apply — the author is what makes it "filed by the bot
+ * from E2E". */
+export function isTrusted(issue: GhIssue, readyByTrusted: boolean, e2eByNightly: boolean): boolean {
   if (issueAuthor(issue) === TRUSTED_AUTHOR) return true;
-  const labels = issueLabels(issue);
-  if (labels.includes(L_E2E)) return true;
-  return readyByTrusted;
+  if (readyByTrusted) return true;
+  return issueAuthor(issue) === NIGHTLY_IDENTITY && issueLabels(issue).includes(L_E2E) && e2eByNightly;
 }
 
 /**
@@ -92,13 +106,28 @@ export function isTrusted(issue: GhIssue, readyByTrusted: boolean): boolean {
  * approval an operator gave is the one on the label NOW, not one from history.
  */
 export function readyActorsFor(issue: GhIssue, timeline: LabelEvent[]): string[] {
-  let current: string | null = null; // actor of the latest 'labeled' while not unlabeled since
+  return labelActorsFor(timeline, L_READY);
+}
+
+/**
+ * The CURRENT actor of `labelName`, from the issue's timeline: walk labeled/unlabeled events for
+ * that label in order; the final state decides. A trusted actor's label that was later unlabeled
+ * and re-applied by someone else is NOT the trusted actor's — the approval that counts is the one
+ * on the label NOW, not one from history.
+ */
+export function labelActorsFor(timeline: LabelEvent[], labelName: string): string[] {
+  // `current: string | null | MISSING` — MISSING means "a labeled event exists whose actor we
+  // cannot see". That is not the same as "no current actor's predecessor": inheriting the PREVIOUS
+  // actor across an actor-less re-label would attribute a label nobody can verify to a trusted
+  // actor, so an actor-less final labeled event fails CLOSED (unknown, not trusted).
+  const MISSING = Symbol('missing');
+  let current: string | null | typeof MISSING = null;
   for (const e of timeline) {
-    if (e.label?.name !== L_READY) continue;
-    if (e.event === 'labeled' && e.actor?.login) current = e.actor.login;
+    if (e.label?.name !== labelName) continue;
+    if (e.event === 'labeled') current = e.actor?.login ?? MISSING;
     if (e.event === 'unlabeled') current = null;
   }
-  return current ? [current] : [];
+  return typeof current === 'string' ? [current] : [];
 }
 
 export function isExcluded(issue: GhIssue): boolean {
@@ -123,6 +152,11 @@ export function ageKey(issue: GhIssue): number {
 export interface Candidate {
   issue: GhIssue;
   readyByTrusted: boolean; // nightly:ready applied by @aywengo (timeline-verified)
+  /** origin:e2e trusted through the nightly identity: true ONLY when the issue is authored by
+   * the nightly identity AND the CURRENT origin:e2e label's timeline actor is that identity.
+   * False when the label is absent, the author differs, the actor differs, or the timeline walk
+   * was skipped or hit its cap (fail closed). */
+  e2eByNightly: boolean;
 }
 
 /**
@@ -136,14 +170,14 @@ export function selectLadder(
   /** Candidates seen before claims were dropped (a caller mutating the array passes this). */
   seenCount?: number,
 ): Selection {
-  const eligible = candidates.filter((c) => !isExcluded(c.issue) && isTrusted(c.issue, c.readyByTrusted));
+  const eligible = candidates.filter((c) => !isExcluded(c.issue) && isTrusted(c.issue, c.readyByTrusted, c.e2eByNightly));
 
   // Rung 1: origin:e2e or trusted nightly:ready, priority then age.
   if (opts.e2eRunTerminal) {
     const rung1 = eligible
       .filter((c) => {
         const labels = issueLabels(c.issue);
-        return labels.includes(L_E2E) || c.readyByTrusted;
+        return (labels.includes(L_E2E) && c.e2eByNightly) || c.readyByTrusted;
       })
       .sort((a, b) => priorityRank(a.issue) - priorityRank(b.issue) || ageKey(a.issue) - ageKey(b.issue));
     if (rung1.length > 0) {
@@ -152,8 +186,8 @@ export function selectLadder(
       return {
         rung: 1,
         issue: top.issue.number,
-        reason: labels.includes(L_E2E)
-          ? `origin:e2e issue #${top.issue.number} (trusted: filed from E2E), priority ${priorityRank(top.issue) < PRIORITY_ORDER.length ? PRIORITY_ORDER[priorityRank(top.issue)] : 'none'}, oldest-first`
+        reason: labels.includes(L_E2E) && top.e2eByNightly
+          ? `origin:e2e issue #${top.issue.number} (trusted: filed by @${NIGHTLY_IDENTITY} from E2E), priority ${priorityRank(top.issue) < PRIORITY_ORDER.length ? PRIORITY_ORDER[priorityRank(top.issue)] : 'none'}, oldest-first`
           : `nightly:ready by @${TRUSTED_AUTHOR} on #${top.issue.number}, priority ${priorityRank(top.issue) < PRIORITY_ORDER.length ? PRIORITY_ORDER[priorityRank(top.issue)] : 'none'}, oldest-first`,
       };
     }
@@ -294,11 +328,18 @@ export async function runSelectorWith(
   const real = issues.filter((i) => !i.pull_request);
   const candidates: Candidate[] = [];
   for (const issue of real) {
+    // The timeline is a security input for BOTH actor-checked trust clauses (nightly:ready by
+    // @aywengo; origin:e2e by the nightly identity): walk it (bounded) when it can change the
+    // verdict. The e2e clause can only pass for nightly-authored issues, so other authors skip
+    // the walk (the timeline is the most expensive read per issue); a missed later
+    // labeled/unlabeled event would misreport the CURRENT actor. A hit cap fails closed
+    // (treated as not trusted).
+    const labels = issueLabels(issue);
+    const needTimeline = labels.includes(L_READY)
+      || (labels.includes(L_E2E) && issueAuthor(issue) === NIGHTLY_IDENTITY);
     let readyByTrusted = false;
-    if (issueLabels(issue).includes(L_READY)) {
-      // The timeline is paginated: walk it (bounded) because a missed later labeled/unlabeled
-      // event would misreport the CURRENT ready actor — this is a security gate, so a hit cap
-      // fails closed (treated as not trusted).
+    let e2eByNightly = false;
+    if (needTimeline) {
       const timeline: LabelEvent[] = [];
       let tlPath: string | null = `/repos/${repo}/issues/${issue.number}/timeline?per_page=100`;
       let capped = false;
@@ -309,9 +350,17 @@ export async function runSelectorWith(
         tlPath = next ? next.replace('https://api.github.com', '') : null;
         if (page === 9 && tlPath) capped = true;
       }
-      readyByTrusted = !capped && readyActorsFor(issue, timeline).includes(TRUSTED_AUTHOR);
+      if (!capped) {
+        readyByTrusted = labelActorsFor(timeline, L_READY).includes(TRUSTED_AUTHOR);
+        // Author check INSIDE the assignment, so e2eByNightly stays false for a foreign-author
+        // issue even when its timeline was walked for the ready clause (a ready-labeled issue
+        // authored by someone else must never report the e2e reason text).
+        e2eByNightly = issueAuthor(issue) === NIGHTLY_IDENTITY
+          && labels.includes(L_E2E)
+          && labelActorsFor(timeline, L_E2E).includes(NIGHTLY_IDENTITY);
+      }
     }
-    candidates.push({ issue, readyByTrusted });
+    candidates.push({ issue, readyByTrusted, e2eByNightly });
   }
   const e2eTerminal = await e2eRunTerminal(env);
   // A capped list walk means open items exist beyond page 10 (they may all be PRs or PR-like):

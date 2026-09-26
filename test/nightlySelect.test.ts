@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import {
   isExcluded,
   isTrusted,
+  issueAuthor,
+  issueLabels,
+  labelActorsFor,
   priorityRank,
   readyActorsFor,
   selectLadder,
@@ -20,7 +23,16 @@ function labeled(actor: string, label: string): LabelEvent {
   return { event: 'labeled', actor: { login: actor }, label: { name: label } };
 }
 function cand(i: GhIssue, timeline: LabelEvent[] = []): Candidate {
-  return { issue: i, readyByTrusted: readyActorsFor(i, timeline).includes('aywengo') };
+  return {
+    issue: i,
+    readyByTrusted: readyActorsFor(i, timeline).includes('aywengo'),
+    e2eByNightly: issueAuthor(i) === 'mercury-nightly'
+      && issueLabels(i).includes('origin:e2e')
+      && labelActorsFor(timeline, 'origin:e2e').includes('mercury-nightly'),
+  };
+}
+function e2eLabeled(actor: string): LabelEvent {
+  return { event: 'labeled', actor: { login: actor }, label: { name: 'origin:e2e' } };
 }
 
 const TERMINAL = { e2eRunTerminal: true };
@@ -45,24 +57,95 @@ test('a nightly:ready label applied by another actor is ignored; by @aywengo it 
   assert.notEqual(s2.issue, 2);
 });
 
-test('origin:e2e is trusted regardless of author', () => {
-  const c = [cand(issue({ number: 4, user: { login: 'mercury-bot[bot]' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-21T00:00:00Z' }))];
-  const s = selectLadder(c, TERMINAL);
+test('origin:e2e is trusted only from the nightly identity (#764)', () => {
+  // An origin:e2e issue authored by ANOTHER user is not eligible — the label alone is provenance
+  // anyone with triage access can apply (#764 fixture 1, foreign author).
+  const foreign = cand(issue({ number: 4, user: { login: 'mercury-bot[bot]' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-21T00:00:00Z' }));
+  const sForeign = selectLadder([foreign], TERMINAL);
+  assert.notEqual(sForeign.issue, 4);
+  assert.equal(sForeign.rung === 'none' || sForeign.rung === 3, true);
+
+  // The SAME issue authored by the nightly identity, with the e2e label applied by the nightly
+  // identity, is eligible (fixture 1, nightly author).
+  const nightly = cand(
+    issue({ number: 5, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-21T00:00:00Z' }),
+    [e2eLabeled('mercury-nightly')],
+  );
+  const sNightly = selectLadder([nightly], TERMINAL);
+  assert.equal(sNightly.rung, 1);
+  assert.equal(sNightly.issue, 5);
+  assert.match(sNightly.reason, /origin:e2e/);
+
+  // Nightly-authored WITHOUT origin:e2e is not eligible through this clause (fixture 2); it is
+  // also not rung 2 (rung 2 requires @aywengo authorship) — it lands on rung 3/none.
+  const noLabel = cand(issue({ number: 6, user: { login: 'mercury-nightly' }, created_at: '2026-09-21T00:00:00Z' }));
+  const sNone = selectLadder([noLabel], TERMINAL);
+  assert.notEqual(sNone.issue, 6);
+
+  // An e2e label applied by someone OTHER than the nightly identity fails the actor check even
+  // with the nightly author — the same standard as nightly:ready.
+  const stolen = cand(
+    issue({ number: 7, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-21T00:00:00Z' }),
+    [e2eLabeled('random-dev')],
+  );
+  const sStolen = selectLadder([stolen], TERMINAL);
+  assert.notEqual(sStolen.issue, 7);
+
+  // The CURRENT actor decides: nightly applied it, someone unlabeled and re-applied it — not trusted.
+  const takenOver = cand(
+    issue({ number: 8, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-21T00:00:00Z' }),
+    [
+      e2eLabeled('mercury-nightly'),
+      { event: 'unlabeled', actor: { login: 'random-dev' }, label: { name: 'origin:e2e' } },
+      e2eLabeled('random-dev'),
+    ],
+  );
+  const sTaken = selectLadder([takenOver], TERMINAL);
+  assert.notEqual(sTaken.issue, 8);
+});
+
+test('nightly:ready by @aywengo trusts a nightly-authored issue (ready clause is author-independent)', () => {
+  // The ready clause does not care who authored the issue: a @aywengo-applied CURRENT ready label
+  // makes even a mercury-nightly-authored issue eligible (#764 review round 2).
+  const c = cand(
+    issue({ number: 60, user: { login: 'mercury-nightly' }, labels: [{ name: 'nightly:ready' }], created_at: '2026-09-21T00:00:00Z' }),
+    [labeled('aywengo', 'nightly:ready')],
+  );
+  const s = selectLadder([c], TERMINAL);
   assert.equal(s.rung, 1);
-  assert.equal(s.issue, 4);
-  assert.match(s.reason, /origin:e2e/);
+  assert.equal(s.issue, 60);
+});
+
+test('mutation control: the label-only check would trust the foreign e2e issue (#764 fixture 3)', () => {
+  // The pre-#764 behavior — trusting any issue that carries origin:e2e — would pick issue 4 here.
+  // If this fixture ever picks 4, the label-only check is back.
+  const foreign = cand(issue({ number: 4, user: { login: 'random-dev' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-20T00:00:00Z' }));
+  const s = selectLadder([foreign], TERMINAL);
+  assert.notEqual(s.issue, 4, 'origin:e2e without nightly identity authorship must stay ineligible');
+  // Direct on the unit (round-7 note): the ladder-level fixture above cannot see a PARTIAL
+  // regression where isTrusted trusts a bare label again while rung-1 still requires
+  // e2eByNightly. Assert the trust predicate itself: a bare label with a foreign author and a
+  // nightly author without the actor verification are both untrusted, in every combination.
+  const bare = issue({ number: 4, user: { login: 'random-dev' }, labels: [{ name: 'origin:e2e' }] });
+  assert.equal(isTrusted(bare, false, false), false);
+  assert.equal(isTrusted(bare, true, false), true, 'the ready clause stays author-independent');
+  const nightlyBare = issue({ number: 5, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }] });
+  assert.equal(isTrusted(nightlyBare, false, false), false,
+    'label present + nightly author but the actor check failed: NOT trusted');
+  assert.equal(isTrusted(nightlyBare, false, true), true,
+    'label present + nightly author + actor verified: trusted');
 });
 
 test('rung 1 orders by priority label then age', () => {
-  const old_low = issue({ number: 10, labels: [{ name: 'origin:e2e' }, { name: 'priority: low' }], created_at: '2026-09-10T00:00:00Z' });
-  const new_high = issue({ number: 11, labels: [{ name: 'origin:e2e' }, { name: 'priority: high' }], created_at: '2026-09-24T00:00:00Z' });
-  const old_none = issue({ number: 12, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-11T00:00:00Z' });
-  const s = selectLadder([cand(old_low), cand(new_high), cand(old_none)], TERMINAL);
+  const old_low = cand(issue({ number: 10, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }, { name: 'priority: low' }], created_at: '2026-09-10T00:00:00Z' }), [e2eLabeled('mercury-nightly')]);
+  const new_high = cand(issue({ number: 11, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }, { name: 'priority: high' }], created_at: '2026-09-24T00:00:00Z' }), [e2eLabeled('mercury-nightly')]);
+  const old_none = cand(issue({ number: 12, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-11T00:00:00Z' }), [e2eLabeled('mercury-nightly')]);
+  const s = selectLadder([old_low, new_high, old_none], TERMINAL);
   assert.equal(s.issue, 11, 'high priority beats older low/no-priority');
-  const s2 = selectLadder([cand(old_low), cand(old_none)], TERMINAL);
+  const s2 = selectLadder([old_low, old_none], TERMINAL);
   assert.equal(s2.issue, 10, 'low has a priority rank; absent priority sorts last');
-  const same_pri_old = issue({ number: 13, labels: [{ name: 'origin:e2e' }, { name: 'priority: high' }], created_at: '2026-09-12T00:00:00Z' });
-  const s3 = selectLadder([cand(new_high), cand(same_pri_old)], TERMINAL);
+  const same_pri_old = cand(issue({ number: 13, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }, { name: 'priority: high' }], created_at: '2026-09-12T00:00:00Z' }), [e2eLabeled('mercury-nightly')]);
+  const s3 = selectLadder([new_high, same_pri_old], TERMINAL);
   assert.equal(s3.issue, 13, 'same priority: oldest first');
 });
 
@@ -108,10 +191,11 @@ test('rung 3 / none', () => {
 });
 
 test('isTrusted / isExcluded / priorityRank unit behavior', () => {
-  assert.equal(isTrusted(issue({ number: 1, user: { login: 'aywengo' } }), false), true);
-  assert.equal(isTrusted(issue({ number: 2, user: { login: 'x' }, labels: [{ name: 'origin:e2e' }] }), false), true);
-  assert.equal(isTrusted(issue({ number: 3, user: { login: 'x' } }), true), true, 'ready-by-trusted flag');
-  assert.equal(isTrusted(issue({ number: 4, user: { login: 'x' } }), false), false);
+  assert.equal(isTrusted(issue({ number: 1, user: { login: 'aywengo' } }), false, false), true);
+  assert.equal(isTrusted(issue({ number: 2, user: { login: 'x' }, labels: [{ name: 'origin:e2e' }] }), false, false), false,
+    'a bare origin:e2e label with a foreign author is NOT trusted (#764)');
+  assert.equal(isTrusted(issue({ number: 3, user: { login: 'x' } }), true, false), true, 'ready-by-trusted flag');
+  assert.equal(isTrusted(issue({ number: 4, user: { login: 'x' } }), false, false), false);
   assert.equal(isExcluded(issue({ number: 5, labels: [{ name: 'nightly:in-progress' }] })), true);
   assert.equal(priorityRank(issue({ number: 6, labels: [{ name: 'priority: high' }] })), 0);
   assert.equal(priorityRank(issue({ number: 7, labels: [{ name: 'priority: low' }] })), 2);
@@ -133,7 +217,7 @@ test('readyActorsFor tracks the CURRENT ready state, not history (round-2 review
     { event: 'labeled', actor: { login: 'random-dev' }, label: { name: 'nightly:ready' } },
   ];
   assert.deepEqual(readyActorsFor(issue({ number: 10 }), taken_over), ['random-dev']);
-  assert.equal(isTrusted(issue({ number: 10, labels: [{ name: 'nightly:ready' }] }), readyActorsFor(issue({ number: 10 }), taken_over).includes('aywengo')), false);
+  assert.equal(isTrusted(issue({ number: 10, labels: [{ name: 'nightly:ready' }] }), readyActorsFor(issue({ number: 10 }), taken_over).includes('aywengo'), false), false);
   // aywengo labeled, other unlabeled, aywengo re-labeled: trusted again.
   const reclaimed: LabelEvent[] = [
     { event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } },
@@ -172,6 +256,89 @@ test('runSelectorWith claims exactly one issue and returns it (normal case)', as
   ], 'exactly one claim POST in the normal case');
   assert.ok(events.indexOf('post /repos/aywengo/mercury/issues/60/labels') !== -1, 'the claim is issued before runSelectorWith resolves');
   assert.match(s.reason, /#60/);
+});
+
+test('labelActorsFor: an actor-less labeled event fails closed (round-5 note)', () => {
+  // A labeled event with no visible actor must NOT inherit the previous trusted actor: the final
+  // state is UNKNOWN, which is not trusted.
+  const withGap: LabelEvent[] = [
+    { event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } },
+    { event: 'labeled', label: { name: 'nightly:ready' } }, // actor missing (payload truncated?)
+  ];
+  assert.deepEqual(readyActorsFor(issue({ number: 80 }), withGap), [],
+    'an actor-less final labeled event is unknown, not the previous actor');
+  // Same for the e2e label path.
+  const e2eGap: LabelEvent[] = [
+    { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'origin:e2e' } },
+    { event: 'labeled', label: { name: 'origin:e2e' } },
+  ];
+  assert.deepEqual(labelActorsFor(e2eGap, 'origin:e2e'), []);
+  // An actor-less label followed by a visible re-label resolves to the visible actor.
+  const recovered: LabelEvent[] = [
+    { event: 'labeled', label: { name: 'origin:e2e' } },
+    { event: 'unlabeled', label: { name: 'origin:e2e' } },
+    { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'origin:e2e' } },
+  ];
+  assert.deepEqual(labelActorsFor(recovered, 'origin:e2e'), ['mercury-nightly']);
+});
+
+test('runSelectorWith: a foreign-author issue with BOTH labels reports the ready reason (round-6)', async () => {
+  // A foreign-author issue carrying nightly:ready AND origin:e2e gets its timeline walked for the
+  // ready clause; e2eByNightly must still be false (the author check lives in the assignment), so
+  // a rung-1 pick reports the ready reason, never the e2e reason.
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) {
+        return { body: [{ event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } }, { event: 'labeled', actor: { login: 'random-dev' }, label: { name: 'origin:e2e' } }], link: null };
+      }
+      return { body: [issue({ number: 90, user: { login: 'random-dev' }, labels: [{ name: 'nightly:ready' }, { name: 'origin:e2e' }] })], link: null };
+    },
+    async post(path: string) { return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 1);
+  assert.equal(s.issue, 90);
+  assert.match(s.reason, /nightly:ready/, 'the reason names the ready clause, not the e2e clause');
+  assert.doesNotMatch(s.reason, /origin:e2e/);
+});
+
+test('runSelectorWith skips the e2e timeline walk for non-nightly authors (#764 round 3)', async () => {
+  // The e2e trust clause can only pass for nightly-authored issues, so the timeline (the most
+  // expensive per-issue read) is walked only for nightly-authored e2e issues and ready-labeled
+  // issues. A foreign-author e2e issue gets NO timeline call.
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const gets: string[] = [];
+  const io = {
+    async get(path: string) {
+      gets.push(path);
+      return { body: [
+        issue({ number: 70, user: { login: 'random-dev' }, labels: [{ name: 'origin:e2e' }] }),
+        issue({ number: 71, user: { login: 'aywengo' } }),
+      ], link: null };
+    },
+    async post(path: string) { return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 2, 'the foreign e2e issue is not eligible; the @aywengo issue is rung 2');
+  assert.equal(gets.filter((p) => p.includes('/timeline')).length, 0,
+    'no timeline is walked for a foreign-author origin:e2e issue');
+  // And the nightly-authored e2e issue DOES get its timeline walked.
+  const gets2: string[] = [];
+  const io2 = {
+    async get(path: string) {
+      gets2.push(path);
+      if (path.includes('/timeline')) {
+        return { body: [{ event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'origin:e2e' } }], link: null };
+      }
+      return { body: [issue({ number: 72, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }] })], link: null };
+    },
+    async post(path: string) { return true; },
+  };
+  const s2 = await runSelectorWith(io2, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s2.rung, 1, 'the nightly-authored e2e issue passes through the timeline actor check');
+  assert.equal(gets2.filter((p) => p.includes('/timeline')).length, 1,
+    'exactly one timeline walk for the nightly-authored e2e issue');
 });
 
 test('runSelectorWith re-selects only when GitHub says the label was already there (422 racer)', async () => {
