@@ -115,7 +115,6 @@ async function blockingQuestion(io: ReportIo, repo: string, issue: number): Prom
   return question;
 }
 
-/** TIMED_OUT runs whose run.timed_out reason event says 'not-after' (the §4.3 window end). */
 /** TIMED_OUT runs stopped by the §4.3 window end DURING the report night: cursor-paginated
  * (bounded), each candidate filtered by its constraints.notAfter falling on the report night's
  * local date before the events fetch (a backfill must not show other nights' stops). */
@@ -190,6 +189,13 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   return lines.join('\n');
 }
 
+/** The day AFTER the report night (the search upper bound: [night, night+1) is one local day). */
+function nextDay(night: string): string {
+  const d = new Date(`${night}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
 /** Assemble the digest (all reads), file the issue, close yesterday's. */
 export async function runReport(
   io: ReportIo,
@@ -197,9 +203,12 @@ export async function runReport(
   opts: { repo: string; night: string; dryRun: boolean },
 ): Promise<ReportResult> {
   assertRepo(opts.repo);
-  const prs = await search(io, opts.repo, 'is:pr created:>=' + opts.night);
-  const issuesFiled = await search(io, opts.repo, 'is:issue created:>=' + opts.night);
-  const issuesCommented = await search(io, opts.repo, 'is:issue commented:>=' + opts.night);
+  // Search window [night, night+1): a backfill with an older --night must not include later
+  // activity, and a late run must not include tomorrow's.
+  const dayAfter = nextDay(opts.night);
+  const prs = await search(io, opts.repo, `is:pr created:${opts.night}..${dayAfter}`);
+  const issuesFiled = await search(io, opts.repo, `is:issue created:${opts.night}..${dayAfter}`);
+  const issuesCommented = await search(io, opts.repo, `is:issue commented:${opts.night}..${dayAfter}`);
   const blocked = await collectBlocked(io, opts.repo);
   const runsStopped = io.mercury ? await collectRunsStopped(io.mercury, opts.night) : [];
   const flakes = collectFlakes(env, opts.night);
