@@ -38,8 +38,9 @@ const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
 export interface GhLabel { name?: string | null }
 
-/** The injected I/O surface (same shape as the selector's, plus issue-label reads and comment
- * posts for the exit paths). io.post returns true when a label was NEWLY added. */
+/** The injected I/O surface: generic read/comment calls (`get`, `post`) plus label-specific
+ * writes - `postLabel` returns true when a label was NEWLY added (2xx) and false when it was
+ * already present (422); `deleteLabel` returns true on 2xx and false when the label was absent. */
 export interface NextIo {
   get(path: string): Promise<{ body: unknown; status: number }>;
   post(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
@@ -58,11 +59,16 @@ export interface NextSelection {
   action: 'fix-loop' | 'draft-proposals' | 'no-op';
 }
 
+/** Every entry point interpolates repo into API paths: one strict owner/name check. */
+function assertRepo(repo: string): void {
+  if (!REPO_RE.test(repo)) {
+    throw new Error(`repo must be exactly owner/name (e.g. aywengo/mercury); got '${repo}'`);
+  }
+}
+
 /** Run the ladder (with claim) and report what the agent should do. */
 export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: string; dryRun: boolean }): Promise<NextSelection> {
-  if (!REPO_RE.test(opts.repo)) {
-    throw new Error(`repo must be exactly owner/name (e.g. aywengo/mercury); got '${opts.repo}'`);
-  }
+  assertRepo(opts.repo);
   const selection = await runSelectorWith(
     {
       // The selector's io.post is label-add semantics (boolean); comments use io.post's generic form.
@@ -83,21 +89,28 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: 
 
 /** The success exit path: the fix-loop finished (PR open/merged, or nothing actionable). */
 export async function finishIssue(io: NextIo, opts: { repo: string; issue: number }): Promise<{ removed: boolean }> {
+  assertRepo(opts.repo);
   const removed = await io.deleteLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels/${encodeURIComponent(L_IN_PROGRESS)}`);
   return { removed };
 }
 
 /** The never-asks exit path: hand the question to a human via GitHub, remove the claim, finish. */
 export async function blockIssue(io: NextIo, opts: { repo: string; issue: number; reason: string }): Promise<{ removed: boolean; labeled: boolean; commented: boolean }> {
+  assertRepo(opts.repo);
   const reason = opts.reason.trim();
   if (reason === '') throw new Error('a blocked exit needs a non-empty --reason (the question a human must answer)');
   // Label FIRST so a crash between the two writes still shows the blocked state; the comment is
-  // the second write.
+  // the second write. The comment MUST land before the claim is released - otherwise the issue is
+  // unlabeled AND questionless (a silent stall). A failed comment fails hard; a rerun retries the
+  // same writes (the label add is idempotent: already-present → false).
   const labeled = await io.postLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels`, { labels: [L_BLOCKED] });
   const res = await io.post(`/repos/${opts.repo}/issues/${opts.issue}/comments`, {
     body: `The nightly stopped on this issue instead of asking (nightly Runs never ask, §4.4).\n\n**Blocking question:** ${reason}\n\nClaim released; the issue is labeled \`${L_BLOCKED}\` for a human to answer or relabel.`,
   });
-  const commented = res.status >= 200 && res.status < 300;
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`blocked exit failed: the question comment was not accepted (POST returned ${res.status}); the claim stays so the next night retries`);
+  }
+  const commented = true;
   const removed = await io.deleteLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels/${encodeURIComponent(L_IN_PROGRESS)}`);
   return { removed, labeled, commented };
 }

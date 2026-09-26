@@ -146,6 +146,25 @@ test('blockedAlready reads the label state for idempotent retries', async () => 
   assert.equal(await blockedAlready(io2, { repo: REPO, issue: 13 }), false);
 });
 
+test('a failed comment POST keeps the claim and fails hard (blocked = label + question)', async () => {
+  const { io, calls } = ioWith([], {});
+  // Override post to return a 503:
+  const failingIo: NextIo = { ...io, async post() { return { body: {}, status: 503 }; } };
+  await assert.rejects(
+    () => blockIssue(failingIo, { repo: REPO, issue: 14, reason: 'Which preset wins?' }),
+    /question comment was not accepted/,
+  );
+  // The claim is NOT removed:
+  assert.equal(calls.filter((c) => c.method === 'DELETE').length, 0, 'the claim stays for a retry');
+  assert.equal(calls.filter((c) => c.method === 'POST-LABEL').length, 1, 'the label was applied first');
+});
+
+test('exit paths validate the repo too (they interpolate it into API paths)', async () => {
+  const { io } = ioWith([], {});
+  await assert.rejects(() => finishIssue(io, { repo: '../escape', issue: 1 }), /owner\/name/);
+  await assert.rejects(() => blockIssue(io, { repo: '../escape', issue: 1, reason: 'x' }), /owner\/name/);
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith([], {});
   await assert.rejects(() => runNext(io, ENV, { repo: '../escape', dryRun: false }), /owner\/name/);
