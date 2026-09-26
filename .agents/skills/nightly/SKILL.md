@@ -48,6 +48,35 @@ printed. The label-add response decides: 2xx means the claim is ours; 422
 already-exists means a concurrent or retried nightly won — the selector drops
 that issue and re-selects. `--dry-run` prints the decision and writes nothing.
 
+## E2E (`e2e.ts`, N1-2)
+
+```bash
+node .agents/skills/nightly/e2e.ts --repo aywengo/mercury [--dry-run] [--state <state-home-dir>]
+```
+
+`--state` relocates the flake-state STATE-HOME (the file lands at
+`<state-home>/mercury/nightly/e2e-flakes.json`) — useful under CI/cron where
+`XDG_STATE_HOME` is not set.
+
+`GH_TOKEN` (or `GITHUB_TOKEN`) is demanded only when GitHub is actually
+touched — a green suite and `--dry-run` need no credentials.
+
+Runs `npm run test:e2e` once (the host needs Docker), reruns each failure ONCE
+on its own file to separate flakes from defects, then:
+
+- **Real failure** — fingerprinted (sha-256 of test name + normalized error;
+  volatile ids, paths, durations and numbers stripped). Open issues are
+  searched for the hidden marker `<!-- nightly-e2e-fp:<hash> -->`: a match gets
+  a comment with the night's date; no match files a new `origin:e2e` issue
+  carrying the marker in the body. Later nights comment, never re-file.
+- **Flake** (passes on rerun) — listed in the report, never filed, until the
+  same fingerprint has flaked on three DISTINCT nights (state at
+  `${XDG_STATE_HOME:-~/.local/state}/mercury/nightly/e2e-flakes.json`); the
+  third night files a flaky-test defect citing all three nights — exactly
+  once (later nights only report the flake again).
+
+The report is exactly one JSON line `{ pass, fail, real, flakes }`.
+
 ## Tests
 
 `test/nightlySelect.test.ts` pins the ladder on fixture-shaped issues and
