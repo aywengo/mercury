@@ -13,11 +13,12 @@
  *
  * Output: exactly one JSON line
  * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, blocked, runsStopped, flakes }`.
- * No dependencies; all I/O injectable. Everything is read-only except the digest issue itself.
+ * No dependencies; all I/O injectable. Writes: the digest issue itself and the close of the
+ * previous open report (recorded only when the close returns 2xx).
  */
 
 import { basename } from 'node:path';
-import { loadFlakeState } from './e2e.ts';
+import { loadFlakeState, localDateString } from './e2e.ts';
 
 const L_REPORT = 'nightly:report';
 const L_BLOCKED = 'nightly:blocked';
@@ -239,8 +240,11 @@ export async function runReport(
     const prev = (res.body as { number?: number }[] | null) ?? [];
     for (const old of prev) {
       if (old.number === undefined || old.number === issue) continue;
-      await io.patch(`/repos/${opts.repo}/issues/${old.number}`, { state: 'closed' });
-      closedPrevious = closedPrevious ?? old.number;
+      const closed = await io.patch(`/repos/${opts.repo}/issues/${old.number}`, { state: 'closed' });
+      // Record the close only when it SUCCEEDED: the CLI's ghPatch returns non-2xx without
+      // throwing, and the JSON must not claim a close that did not happen. The digest is already
+      // filed, so a failed close is reported, not fatal - tonight's run closes it.
+      if (closed.status >= 200 && closed.status < 300) closedPrevious = closedPrevious ?? old.number;
     }
     if (prev.length < 100) break;
   }
@@ -308,7 +312,10 @@ if (isMain) {
     return i >= 0 ? args[i + 1] : undefined;
   };
   const repo = flag('--repo') ?? process.env.REPO ?? '';
-  const night = flag('--night') ?? new Date().toISOString().slice(0, 10);
+  // Local calendar date, not UTC: a nightly scheduled in local tz that fires at 00:05 belongs
+  // to that local day even when UTC has rolled over (same rule as e2e.ts). The default is
+  // computed lazily, only when --night is absent.
+  const night = flag('--night') ?? localDateString();
   const dryRun = args.includes('--dry-run');
   runReport(
     {
