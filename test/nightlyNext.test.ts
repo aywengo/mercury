@@ -161,11 +161,20 @@ test('a failed comment POST keeps the claim and fails hard (blocked = label + qu
 
 test('exit paths validate the repo too (they interpolate it into API paths)', async () => {
   const { io } = ioWith([], {});
-  await assert.rejects(() => finishIssue(io, { repo: '../escape', issue: 1 }), /owner\/name/);
-  await assert.rejects(() => blockIssue(io, { repo: '../escape', issue: 1, reason: 'x' }), /owner\/name/);
+  // 'no-slash' fails the owner/name shape in every entry point:
+  await assert.rejects(() => finishIssue(io, { repo: 'no-slash', issue: 1 }), /owner\/name/);
+  await assert.rejects(() => blockIssue(io, { repo: 'no-slash', issue: 1, reason: 'x' }), /owner\/name/);
+  await assert.rejects(() => runNext(io, ENV, { repo: 'no-slash', dryRun: false }), /owner\/name/);
+});
+
+test('repo validation accepts dot-segment names like octo-org/.github (aligned with select.ts)', async () => {
+  const { io, calls } = ioWith([], {});
+  const out = await runNext(io, ENV, { repo: 'octo-org/.github', dryRun: true });
+  assert.equal(out.rung, 'none');
+  assert.equal(calls.filter((c) => c.method.startsWith('POST')).length, 0);
 });
 
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith([], {});
-  await assert.rejects(() => runNext(io, ENV, { repo: '../escape', dryRun: false }), /owner\/name/);
+  await assert.rejects(() => runNext(io, ENV, { repo: 'no-slash', dryRun: false }), /owner\/name/);
 });

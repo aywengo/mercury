@@ -35,7 +35,9 @@ import { runSelectorWith } from './select.ts';
 
 const L_IN_PROGRESS = 'nightly:in-progress';
 const L_BLOCKED = 'nightly:blocked';
-const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+// Mirrors select.ts's validation EXACTLY: the selector is the authority and both read the same
+// env; two different regexes would silently disagree on valid repos (e.g. 'octo-org/.github').
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 export interface GhLabel { name?: string | null }
 
@@ -43,7 +45,9 @@ export interface GhLabel { name?: string | null }
  * writes - `postLabel` returns true when a label was NEWLY added (2xx) and false when it was
  * already present (422); `deleteLabel` returns true on 2xx and false when the label was absent. */
 export interface NextIo {
-  get(path: string): Promise<{ body: unknown; status: number }>;
+  /** `link` is the raw Link header (or null): the selector's bounded pagination parses rel="next"
+   * from it. An implementation that drops it silently caps selection at the first page. */
+  get(path: string): Promise<{ body: unknown; status: number; link?: string | null }>;
   post(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
   /** Label add: true = newly added (2xx); false = already present (422 already-exists). */
   postLabel(path: string, body: unknown): Promise<boolean>;
