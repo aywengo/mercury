@@ -4,7 +4,7 @@
  * One GitHub issue per night, labeled `nightly:report`, closed by the next night's report:
  *
  *   - PRs opened tonight and issues filed tonight (GitHub search, repo-scoped, bounded).
- *   - Issues commented on tonight (search `commented:>=NIGHT`, bounded).
+ *   - Issues commented on tonight (search `commented:NIGHT..NIGHT+1`, bounded).
  *   - Blocked items: open issues labeled `nightly:blocked` with their latest blocking question.
  *   - Runs stopped by `notAfter` (the §4.3 window end) — optional section, only when
  *     `MERCURY_REPORT_API_URL` + `MERCURY_REPORT_TOKEN` are set; the Mercury runs API is read
