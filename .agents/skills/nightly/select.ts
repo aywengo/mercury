@@ -147,8 +147,10 @@ export function ageKey(issue: GhIssue): number {
 export interface Candidate {
   issue: GhIssue;
   readyByTrusted: boolean; // nightly:ready applied by @aywengo (timeline-verified)
-  /** origin:e2e currently applied by the nightly identity (timeline-verified); false when the
-   * issue does not carry the label. */
+  /** origin:e2e trusted through the nightly identity: true ONLY when the issue is authored by
+   * the nightly identity AND the CURRENT origin:e2e label's timeline actor is that identity.
+   * False when the label is absent, the author differs, the actor differs, or the timeline walk
+   * was skipped or hit its cap (fail closed). */
   e2eByNightly: boolean;
 }
 
