@@ -24,6 +24,8 @@ const L_REPORT = 'nightly:report';
 const L_BLOCKED = 'nightly:blocked';
 const SEARCH_PER_PAGE = 100;
 const SEARCH_CAP = 10; // pages of 100 = 1000 hits, bounded
+const LAST_PAGES = 3; // comment pages scanned, counting back from the Link-header last page
+const MAX_COMMENT_PAGES = 100; // sanity cap on the Link-derived last page
 
 export interface ReportIo {
   get(path: string): Promise<{ body: unknown; status: number; link?: string | null }>;
@@ -99,22 +101,34 @@ export async function collectBlocked(io: ReportIo, repo: string): Promise<{ numb
 export async function blockingQuestion(io: ReportIo, repo: string, issue: number): Promise<string | undefined> {
   let question: string | undefined;
   let lastComment: string | undefined; // body of the newest comment seen so far (fallback)
-  for (let page = 1; page <= 10; page++) {
-    const res = await io.get(`/repos/${repo}/issues/${issue}/comments?per_page=100&page=${page}`);
-    if (res.status < 200 || res.status >= 300) break; // unreadable comments: leave the question unset
-    const comments = (res.body as { body?: string }[] | null) ?? [];
+  // Comments are returned OLDEST first and the interesting marker is near the END. Discover the
+  // last page from the Link header (res.link) and scan at most LAST_PAGES back from it, so a
+  // >1000-comment thread still finds the newest marker within a bounded number of requests.
+  // Without a Link header (<= 1 page) only page 1 exists.
+  const res1 = await io.get(`/repos/${repo}/issues/${issue}/comments?per_page=100&page=1`);
+  if (res1.status < 200 || res1.status >= 300) return undefined; // unreadable comments: leave the question unset
+  const lastRel = /<[^>]*[?&]page=(\d+)[^>]*>;\s*rel="last"/.exec(res1.link ?? '');
+  const lastPage = Math.max(1, Math.min(MAX_COMMENT_PAGES, lastRel ? Number(lastRel[1]) : 1));
+  const startPage = Math.max(1, lastPage - (LAST_PAGES - 1));
+  for (let page = startPage; page <= lastPage; page++) {
+    let comments: { body?: string }[];
+    if (page === 1) {
+      comments = (res1.body as { body?: string }[] | null) ?? [];
+    } else {
+      const res = await io.get(`/repos/${repo}/issues/${issue}/comments?per_page=100&page=${page}`);
+      if (res.status < 200 || res.status >= 300) break; // unreadable page: scan what we have
+      comments = (res.body as { body?: string }[] | null) ?? [];
+    }
     for (const c of comments) {
       if (!c.body) continue;
       const marker = c.body.split('\n').find((l) => l.startsWith('**Blocking question:**'));
       if (marker) question = marker.replace(/^\*\*Blocking question:\*\*\s*/, '');
     }
-    // A FULL page (100) may be the LAST page: the follow-up page comes back empty, and then the
-    // true last comment lives on THIS page. Remember it so the fallback below still works when
-    // the count is an exact multiple of 100.
+    // The newest comment of the scanned window is the fallback source. A FULL page (100) can be
+    // the LAST page (the follow-up would be empty), so remember it on every non-empty page.
     if (comments.length > 0 && question === undefined) {
       lastComment = comments[comments.length - 1]?.body;
     }
-    if (comments.length < 100) break;
   }
   if (question === undefined && lastComment !== undefined) question = lastComment.slice(0, 200);
   return question;

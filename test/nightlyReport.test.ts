@@ -231,7 +231,13 @@ test('blocked question: the LAST **Blocking question:** marker wins across pages
     async get(path) {
       calls.push({ method: 'GET', path });
       if (path.includes('/comments')) {
-        if (/[?&]page=1(?=&|$)/.test(path)) return { body: page1, status: 200 };
+        if (/[?&]page=1(?=&|$)/.test(path)) {
+          return {
+            body: page1,
+            status: 200,
+            link: '<https://api.github.com/repos/x/y/issues/501/comments?per_page=100&page=2>; rel="next", <https://api.github.com/repos/x/y/issues/501/comments?per_page=100&page=2>; rel="last"',
+          };
+        }
         return { body: [{ body: '**Blocking question:** newest question' }], status: 200 };
       }
       if (path.includes('/issues?labels=')) return { body: [{ number: 501, title: 'blocked thing' }], status: 200 };
@@ -243,6 +249,10 @@ test('blocked question: the LAST **Blocking question:** marker wins across pages
   const blocked = await collectBlocked(io, REPO);
   assert.equal(blocked.length, 1);
   assert.equal(blocked[0]!.question, 'newest question');
+  // The Link-header discovery must SKIP straight to the last page: no page-walk through
+  // intermediate pages (page=1 then page=2 only).
+  const commentPages = calls.filter((c) => c.path.includes('/comments')).map((c) => c.path);
+  assert.ok(commentPages.length <= 2, `bounded scan: ${commentPages.length} requests`);
 });
 
 test('the digest is created BEFORE yesterday\'s close (a create failure never leaves zero reports)', async () => {
@@ -380,6 +390,36 @@ test('exactly 100 comments with no marker: the fallback takes the TRUE last comm
   };
   const q = await blockingQuestion(io, REPO, 502);
   assert.equal(q, 'noise 99', 'fallback reads the last comment of the last NON-EMPTY page');
+});
+
+test('a >1000-comment thread: the scan jumps to the Link-header last page (newest marker found)', async () => {
+  const requested: number[] = [];
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('/comments')) {
+        const m = /[?&]page=(\d+)/.exec(path);
+        const page = m ? Number(m[1]) : 1;
+        requested.push(page);
+        if (page === 1) {
+          return {
+            body: [{ body: '**Blocking question:** stale question' }],
+            status: 200,
+            link: '<https://api.github.com/repos/x/y/issues/502/comments?per_page=100&page=7>; rel="next", <https://api.github.com/repos/x/y/issues/502/comments?per_page=100&page=7>; rel="last"',
+          };
+        }
+        if (page === 7) return { body: [{ body: '**Blocking question:** newest question' }], status: 200 };
+        return { body: [], status: 200 };
+      }
+      return { body: [], status: 200 };
+    },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const q = await blockingQuestion(io, REPO, 502);
+  assert.equal(q, 'newest question', 'the newest marker on the last page wins over the stale one on page 1');
+  // The scan is the bounded TAIL: page 1, then the last LAST_PAGES(3) pages [5,6,7] - never a
+  // full oldest-first walk of the thread.
+  assert.deepEqual(requested, [1, 5, 6, 7], 'page 1 then the bounded tail before the last page');
 });
 
 test('repo validation refuses a non owner/name value', async () => {
