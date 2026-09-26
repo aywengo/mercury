@@ -77,6 +77,31 @@ on its own file to separate flakes from defects, then:
 
 The report is exactly one JSON line `{ pass, fail, real, flakes }`.
 
+## Next (`next.ts`, N1-3)
+
+```bash
+node .agents/skills/nightly/next.ts run --repo aywengo/mercury [--dry-run]
+node .agents/skills/nightly/next.ts finish --repo aywengo/mercury --issue <n>
+node .agents/skills/nightly/next.ts blocked --repo aywengo/mercury --issue <n> --reason "<question>"
+```
+
+`run` executes the N1-1 ladder (rung 1 trusted issues, rung 2 new @aywengo issues, rung 3 docs →
+proposals) and claims the chosen issue `nightly:in-progress` (already done by the selector before
+the report). The output's `action` is the Run's instruction:
+
+- **`fix-loop`** (rung 1–2): execute the `issue-fix-loop` procedure on the claimed issue — root
+  cause, scoped fix with a regression test, one PR, independent review. This skill (the nightly
+  Run) plays the implementer role the loop's procedure assigns.
+- **`draft-proposals`** (rung 3): draft `nightly:proposed` issues from a roadmap section in the
+  docs (§6) and NEVER implement — one night of latency buys a human decision.
+- **`no-op`** (rung `none`): end the Run without changes.
+
+**Never asks (§4.4):** a nightly Run must end without NEEDS_INPUT. When in doubt, run
+`blocked --reason "<the question>"`: it labels the issue `nightly:blocked`, posts the question as
+an issue comment, and releases the claim. On success run `finish` — every exit path this skill
+controls removes `nightly:in-progress`. A Run stopped by its deadline keeps the claim (§4.3);
+`nightly-report` lists it and the next night resets it.
+
 ## Tests
 
 `test/nightlySelect.test.ts` pins the ladder on fixture-shaped issues and
