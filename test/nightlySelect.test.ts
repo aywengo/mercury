@@ -230,11 +230,34 @@ test('e2eRunTerminal fails CLOSED when the gate is configured but unevaluable (r
 });
 
 
+test('e2eRunTerminal fails closed when the page cap is hit with more pages beyond (round-6 review)', async () => {
+  const { e2eRunTerminal } = await import('../.agents/skills/nightly/select.ts');
+  const { createServer } = await import('node:http');
+  // Always another page, never an e2e Run in sight: the cap must fail the gate, not pass it.
+  let n = 0;
+  const srv = createServer((_req, res) => {
+    n++;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ runs: [{ task: 'nightly-report', status: 'COMPLETED' }], nextCursor: `c${n}` }));
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const addr = srv.address();
+  const url = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+  try {
+    assert.equal(await e2eRunTerminal({ MERCURY_API_URL: url, MERCURY_API_TOKEN: 't' }), false, 'more pages beyond the cap: fail closed');
+    assert.ok(n >= 20, 'the walk actually hit the cap');
+  } finally {
+    srv.close();
+  }
+});
+
 test('runSelectorWith refuses an empty or malformed REPO before building URLs (round-3 review)', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const io = { async get() { return []; }, async post() { return true; } };
-  await assert.rejects(() => runSelectorWith(io, { REPO: '' }, true), /REPO is required/);
-  await assert.rejects(() => runSelectorWith(io, {}, true), /REPO is required/);
+  await assert.rejects(() => runSelectorWith(io, { REPO: '' }, true), /REPO must be exactly owner\/name/);
+  await assert.rejects(() => runSelectorWith(io, {}, true), /REPO must be exactly owner\/name/);
+  await assert.rejects(() => runSelectorWith(io, { REPO: 'owner/name/extra' }, true), /REPO must be exactly owner\/name/);
+  await assert.rejects(() => runSelectorWith(io, { REPO: 'owner/name?x=y' }, true), /REPO must be exactly owner\/name/);
 });
 
 test('e2eRunTerminal walks pages: a non-terminal e2e Run past page one fails the gate (round-3 review)', async () => {

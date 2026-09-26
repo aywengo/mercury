@@ -243,12 +243,12 @@ export async function e2eRunTerminal(env: NodeJS.ProcessEnv): Promise<boolean> {
       const next = body.nextCursor ?? null;
       if (!next) break;
       cursor = next;
-      if (page === 19 && found > 0 && nonTerminal === 0) {
-        // Cap hit with only terminal e2e Runs seen so far: older pages could still hide one.
+      if (page === 19) {
+        // Cap hit with MORE pages beyond: tonight's e2e Run could be on any of them.
         return false; // fail closed
       }
     }
-    if (found === 0) return true; // no e2e Run tonight: nothing to wait for
+    if (found === 0) return true; // reached the list end: no e2e Run tonight, nothing to wait for
     return nonTerminal === 0;
   } catch {
     return false; // configured but unreachable: fail closed
@@ -263,8 +263,10 @@ export async function runSelectorWith(
   dryRun: boolean,
 ): Promise<Selection> {
   const repo = env.REPO ?? '';
-  if (!repo.trim() || repo.includes('//')) {
-    throw new Error('REPO is required as owner/name (e.g. aywengo/mercury); got an empty or malformed value');
+  // REPO is interpolated into API paths for reads AND label writes: validate it strictly as
+  // owner/name so no path or query injection is possible.
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    throw new Error(`REPO must be exactly owner/name (e.g. aywengo/mercury); got '${repo}'`);
   }
   // The open-issue list is walked with Link-header pagination (bounded at 10 pages = 1000
   // issues): an eligible candidate past page one must not be invisible to a deterministic selector.
