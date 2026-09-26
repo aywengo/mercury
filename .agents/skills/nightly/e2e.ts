@@ -27,6 +27,7 @@
  */
 
 import { basename } from 'node:path';
+import { homedir } from 'node:os';
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -84,7 +85,7 @@ export function normalizeErrorLine(line: string): string {
     .replace(/\b[0-9a-f]{16,}\b/g, '<hex>')
     .replace(/(?:[A-Za-z]:)?(?:\\|\/)private(?:\\|\/)tmp(?:\\|\/)[^\s:'"]+/g, 'tmp/<dir>')
     .replace(/(?:[A-Za-z]:)?(?:\\|\/)tmp(?:\\|\/)[^\s:'"]+/g, 'tmp/<dir>')
-    .replace(/(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+\.(?:ts|js|mjs|cjs)/g, (m) => basename(m))
+    .replace(/(?:[A-Za-z]:)?(?:\\|\/)(?:[A-Za-z0-9_.-]+[\/])+[A-Za-z0-9_.-]+\.(?:ts|js|mjs|cjs)/g, (m) => basename(m))
     .replace(/:\d+(?::\d+)?/g, '')
     .replace(/\b\d+(?:\.\d+)?\s*(?:ms|s|min|h)\b/g, '<dur>')
     .replace(/\b\d+(?:,\d{3})*\b/g, '<n>')
@@ -157,10 +158,14 @@ export interface FlakeState { [fingerprint: string]: { test: string; error: stri
 
 /** The flake memory: `${XDG_STATE_HOME:-~/.local/state}/mercury/nightly/e2e-flakes.json`, 0600. */
 export function statePath(env: NodeJS.ProcessEnv): string {
-  const base = env.XDG_STATE_HOME && env.XDG_STATE_HOME.trim() !== ''
-    ? env.XDG_STATE_HOME
-    : `${env.HOME ?? ''}/.local/state`;
-  return `${base}/mercury/nightly/e2e-flakes.json`;
+  if (env.XDG_STATE_HOME && env.XDG_STATE_HOME.trim() !== '') {
+    return `${env.XDG_STATE_HOME}/mercury/nightly/e2e-flakes.json`;
+  }
+  const home = env.HOME && env.HOME.trim() !== '' ? env.HOME : homedir();
+  if (!home || home.trim() === '' || home === '/') {
+    throw new Error('cannot locate a state directory: set XDG_STATE_HOME (or HOME) — the flake clock needs a writable home');
+  }
+  return `${home}/.local/state/mercury/nightly/e2e-flakes.json`;
 }
 
 export function loadFlakeState(env: NodeJS.ProcessEnv): FlakeState {
@@ -356,23 +361,18 @@ export async function runE2eSkill(
   return report;
 }
 
-/** Find the OPEN issue whose body carries the exact fingerprint marker. Bounded at 10 pages. */
+/** Find the OPEN issue whose body carries the exact fingerprint marker. Walks ?page=N (the io
+ * contract hides headers, and GitHub's REST pagination accepts an explicit page parameter),
+ * bounded at 10 pages = the newest 1000 open issues. */
 export async function findIssueByMarker(io: E2eIo, repo: string, marker: string, token: string): Promise<number | null> {
-  let cursor: string | null = `/repos/${repo}/issues?state=open&per_page=100`;
-  for (let page = 0; page < 10 && cursor; page++) {
-    const { body } = await io.get(cursor);
+  for (let page = 1; page <= 10; page++) {
+    const { body } = await io.get(`/repos/${repo}/issues?state=open&per_page=100&page=${page}`);
     const issues = (body as { number?: number; body?: string | null; pull_request?: unknown }[] | null) ?? [];
     for (const issue of issues) {
       if (issue.pull_request) continue;
       if ((issue.body ?? '').includes(marker)) return issue.number ?? null;
     }
-    // The real transport paginates via Link headers; the io contract hides headers, so the search
-    // walks only the first page of the real GitHub call — the nightly keeps its OWN index instead:
-    // search by marker in the issue LIST is the best available exact-string filter through this
-    // contract, and a marker past the first 100 open issues stays invisible. Acceptable: issues
-    // filed by the nightly start open at the top (created_at DESC) and the oldest flake defects
-    // that scroll past were either fixed or are stale.
-    break;
+    if (issues.length < 100) break; // last page
   }
   return null;
 }
