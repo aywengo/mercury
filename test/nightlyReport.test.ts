@@ -1,0 +1,181 @@
+// The morning digest (N1-4, #741): assemble the night's data, file one nightly:report issue,
+// close yesterday's. All I/O injected — no network.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+
+import { runReport, collectBlocked, collectRunsStopped, collectFlakes, type ReportIo } from '../.agents/skills/nightly/report.ts';
+
+const REPO = 'aywengo/mercury';
+const ENV = { GH_TOKEN: 'test-token' };
+
+interface Recorded { method: string; path: string; body?: unknown }
+
+function ioWith(opts: {
+  searchItems?: Record<string, unknown[]>;
+  issues?: { number: number; title: string; labels?: { name: string }[] }[];
+  comments?: Record<number, { body: string }[]>;
+  timedOutRuns?: { id: string; task: string; status: string }[];
+  notAfterRunIds?: string[];
+  mercury?: boolean;
+} = {}): { io: ReportIo; calls: Recorded[] } {
+  const calls: Recorded[] = [];
+  const io: ReportIo = {
+    async get(path) {
+      calls.push({ method: 'GET', path });
+      if (path.startsWith('/search/issues?')) {
+        const q = decodeURIComponent(path);
+        for (const [needle, items] of Object.entries(opts.searchItems ?? {})) {
+          if (q.includes(needle)) return { body: { items }, status: 200 };
+        }
+        return { body: { items: [] }, status: 200 };
+      }
+      if (path.includes('/issues?labels=nightly%3Ablocked')) {
+        return { body: (opts.issues ?? []).filter((i) => i.labels?.some((l) => l.name === 'nightly:blocked')), status: 200 };
+      }
+      if (path.includes('/issues?labels=nightly%3Areport')) {
+        // Yesterday's open report:
+        return { body: opts.issues?.filter((i) => i.labels?.some((l) => l.name === 'nightly:report')) ?? [], status: 200 };
+      }
+      const c = path.match(/\/issues\/(\d+)\/comments/);
+      if (c) return { body: opts.comments?.[Number(c[1])] ?? [], status: 200 };
+      return { body: [], status: 200 };
+    },
+    async post(path, body) {
+      calls.push({ method: 'POST', path, body });
+      return { body: { number: 900 }, status: 201 };
+    },
+    async patch(path, body) {
+      calls.push({ method: 'PATCH', path, body });
+      return { body: {}, status: 200 };
+    },
+    ...(opts.mercury ? {
+      mercury: {
+        async get(path) {
+          calls.push({ method: 'MGET', path });
+          if (path.startsWith('/api/runs?')) return { body: { runs: opts.timedOutRuns ?? [] }, status: 200 };
+          const id = path.match(/\/api\/runs\/([^/]+)\/events/)?.[1];
+          const events = id && opts.notAfterRunIds?.includes(id)
+            ? [{ type: 'run.timed_out', data: { reason: 'not-after' } }]
+            : [];
+          return { body: { events }, status: 200 };
+        },
+      },
+    } : {}),
+  };
+  return { io, calls };
+}
+
+test('the digest files one issue with all sections and closes yesterday\'s report', async () => {
+  const { io, calls } = ioWith({
+    searchItems: {
+      'is:pr created': [{ number: 700, title: 'a PR', html_url: 'u1' }],
+      'is:issue created': [{ number: 701, title: 'a bug', html_url: 'u2', user: { login: 'mercury-nightly' } }],
+      'is:issue commented': [{ number: 702, title: 'older issue', html_url: 'u3' }],
+    },
+    issues: [
+      { number: 500, title: 'yesterday\'s report', labels: [{ name: 'nightly:report' }] },
+      { number: 501, title: 'blocked thing', labels: [{ name: 'nightly:blocked' }] },
+    ],
+    comments: { 501: [{ body: '**Blocking question:** Which preset wins?' }] },
+  });
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.issue, 900);
+  assert.equal(out.closedPrevious, 500, 'yesterday\'s report is closed');
+  assert.equal(out.prs.length, 1);
+  assert.equal(out.issuesFiled.length, 1);
+  assert.equal(out.issuesFiled[0]!.author, 'mercury-nightly');
+  assert.equal(out.issuesCommented.length, 1);
+  assert.equal(out.blocked.length, 1);
+  assert.equal(out.blocked[0]!.question, 'Which preset wins?');
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  assert.match(body, /# nightly report — 2026-09-26/);
+  assert.match(body, /## PRs opened/);
+  assert.match(body, /\[a PR\]\(u1\)/);
+  assert.match(body, /## Blocked .nightly:blocked, waiting on a human./);
+  assert.match(body, /Which preset wins\?/);
+  assert.match(body, /## Runs stopped by notAfter/);
+  assert.match(body, /## Flakes/);
+  const closed = calls.filter((c) => c.method === 'PATCH');
+  assert.equal(closed.length, 1);
+  assert.match(closed[0]!.path, /issues\/500$/);
+  assert.deepEqual((created.body as { labels: string[] }).labels, ['nightly:report']);
+});
+
+test('dry-run assembles everything and writes nothing', async () => {
+  const { io, calls } = ioWith({
+    searchItems: { 'is:pr created': [{ number: 700, title: 'a PR', html_url: 'u1' }] },
+  });
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
+  assert.equal(out.issue, undefined);
+  assert.equal(out.prs.length, 1);
+  assert.equal(calls.filter((c) => c.method === 'POST' || c.method === 'PATCH').length, 0);
+});
+
+test('empty night: every section says none, the issue still files', async () => {
+  const { io, calls } = ioWith({});
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.issue, 900);
+  assert.equal(out.prs.length, 0);
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  assert.match(body, /_none_/);
+});
+
+test('runs stopped by notAfter come from the Mercury API (TIMED_OUT + the reason event)', async () => {
+  const { io } = ioWith({
+    mercury: true,
+    timedOutRuns: [
+      { id: 'run_a', task: 'nightly-next', status: 'TIMED_OUT' },
+      { id: 'run_b', task: 'nightly-e2e', status: 'TIMED_OUT' },
+    ],
+    notAfterRunIds: ['run_b'], // run_a timed out on max-duration, not the window end
+  });
+  const stopped = await collectRunsStopped(io.mercury!);
+  assert.deepEqual(stopped, [{ runId: 'run_b', task: 'nightly-e2e', status: 'TIMED_OUT' }]);
+});
+
+test('without Mercury config the runs section is empty, not faked', async () => {
+  const { io } = ioWith({});
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
+  assert.deepEqual(out.runsStopped, []);
+});
+
+test('blocked collection attaches the latest blocking question', async () => {
+  const { io } = ioWith({
+    issues: [{ number: 501, title: 'blocked thing', labels: [{ name: 'nightly:blocked' }] }],
+    comments: { 501: [{ body: 'unrelated' }, { body: '**Blocking question:** the real question' }] },
+  });
+  const blocked = await collectBlocked(io, REPO);
+  assert.equal(blocked.length, 1);
+  assert.equal(blocked[0]!.question, 'the real question');
+});
+
+test('flakes come from the e2e flake-clock state file', () => {
+  const dir = join('/tmp', `mercury-report-test-${process.pid}-${Date.now()}`);
+  try {
+    mkdirSync(join(dir, 'mercury/nightly'), { recursive: true });
+    writeFileSync(
+      join(dir, 'mercury/nightly/e2e-flakes.json'),
+      JSON.stringify({
+        fp1: { test: 'lease expires early', error: 'e', nights: ['2026-09-24', '2026-09-25'] },
+        fp2: { test: 'another flake', error: 'e', nights: ['2026-09-20'] },
+      }),
+    );
+    const flakes = collectFlakes({ XDG_STATE_HOME: dir }, '2026-09-26');
+    assert.equal(flakes.length, 2);
+    assert.equal(flakes[0]!.fingerprint, 'fp1', 'most recent night first');
+    rmSync(dir, { recursive: true, force: true });
+  } catch (e) {
+    rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
+});
+
+test('repo validation refuses a non owner/name value', async () => {
+  const { io } = ioWith({});
+  await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);
+});
