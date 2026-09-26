@@ -104,6 +104,18 @@ test('origin:e2e is trusted only from the nightly identity (#764)', () => {
   assert.notEqual(sTaken.issue, 8);
 });
 
+test('nightly:ready by @aywengo trusts a nightly-authored issue (ready clause is author-independent)', () => {
+  // The ready clause does not care who authored the issue: a @aywengo-applied CURRENT ready label
+  // makes even a mercury-nightly-authored issue eligible (review round 2 on PR #765).
+  const c = cand(
+    issue({ number: 60, user: { login: 'mercury-nightly' }, labels: [{ name: 'nightly:ready' }], created_at: '2026-09-21T00:00:00Z' }),
+    [labeled('aywengo', 'nightly:ready')],
+  );
+  const s = selectLadder([c], TERMINAL);
+  assert.equal(s.rung, 1);
+  assert.equal(s.issue, 60);
+});
+
 test('mutation control: the label-only check would trust the foreign e2e issue (#764 fixture 3)', () => {
   // The pre-#764 behavior — trusting any issue that carries origin:e2e — would pick issue 4 here.
   // If this fixture ever picks 4, the label-only check is back.

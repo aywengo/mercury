@@ -21,9 +21,10 @@
  *      issue set itself; selection has nothing to claim.
  *
  * An issue is eligible only under §5's trust rule: authored by @aywengo, filed by the nightly
- * identity from E2E (`origin:e2e` — the AUTHOR must be the nightly identity, because a label
- * alone is provenance anyone with triage access can apply), or labeled `nightly:ready` by
- * @aywengo — the actor comes from the timeline's labeled events, never from issue text.
+ * identity from E2E (`origin:e2e` — the AUTHOR must be the nightly identity AND the CURRENT label
+ * must carry the nightly identity as its timeline actor, because a label alone is provenance
+ * anyone with triage access can apply), or labeled `nightly:ready` by @aywengo — the actor comes
+ * from the timeline's labeled events, never from issue text.
  * `nightly:in-progress`, `nightly:blocked` and `nightly:proposed` exclude an issue outright.
  * The chosen issue is claimed by adding `nightly:in-progress` BEFORE the decision is printed;
  * 422 already-exists on the claim means a concurrent or retried nightly got there first and the
@@ -86,16 +87,16 @@ export function issueAuthor(issue: GhIssue): string {
 }
 
 /** §5 trust: authored by @aywengo, filed by the nightly identity from E2E, or nightly:ready by
- * @aywengo (timeline actor). The E2E clause is held to the same standard as nightly:ready: the
- * issue must be AUTHORED by the nightly identity AND the CURRENT origin:e2e label must carry the
- * nightly identity as its timeline actor. A label alone is provenance anyone with triage access
- * can apply — the author is what makes it "filed by the bot from E2E". */
+ * @aywengo. The ready clause is author-INDEPENDENT — a @aywengo approval makes even a
+ * nightly-authored issue eligible — so it is checked first. The E2E clause is held to the same
+ * standard as ready: the issue must be AUTHORED by the nightly identity AND the CURRENT
+ * origin:e2e label must carry the nightly identity as its timeline actor. A label alone is
+ * provenance anyone with triage access can apply — the author is what makes it "filed by the bot
+ * from E2E". */
 export function isTrusted(issue: GhIssue, readyByTrusted: boolean, e2eByNightly: boolean): boolean {
   if (issueAuthor(issue) === TRUSTED_AUTHOR) return true;
-  if (issueAuthor(issue) === NIGHTLY_IDENTITY) {
-    return issueLabels(issue).includes(L_E2E) && e2eByNightly;
-  }
-  return readyByTrusted;
+  if (readyByTrusted) return true;
+  return issueAuthor(issue) === NIGHTLY_IDENTITY && issueLabels(issue).includes(L_E2E) && e2eByNightly;
 }
 
 /**
