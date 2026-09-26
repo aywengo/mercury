@@ -116,7 +116,9 @@ test('searches cover the LOCAL night as a UTC instant window (not the UTC day)',
   // the night and of the next day, as ISO instants with a +00:00 offset. The window must be an
   // instant range (a UTC-day qualifier would miss the hours between local and UTC midnight).
   const toIso = (day: string): string => new Date(`${day}T00:00:00`).toISOString().replace(/\.\d{3}Z$/, '+00:00');
-  const win = `${toIso('2026-09-26')}..${toIso('2026-09-27')}`;
+  // The upper bound is one second BEFORE the next local midnight (inclusive ranges): the
+  // boundary instant itself belongs to tomorrow's window only.
+  const win = `${toIso('2026-09-26')}..${new Date(new Date('2026-09-27T00:00:00').getTime() - 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00')}`;
   for (const q of searches) {
     assert.ok(q.includes(`created:${win}`) || q.includes(`commented:${win}`), `local-window: ${q}`);
     assert.ok(!q.includes('created:2026-09-26&'), `no UTC-day qualifier: ${q}`);
@@ -638,6 +640,24 @@ test('backfill-added nights are sorted chronologically (max night is the sort ke
   const flakes = collectFlakes({ XDG_STATE_HOME: dir }, '2026-09-26');
   assert.equal(flakes[0]!.fingerprint, 'fp_backfilled', 'max night 2026-09-26 sorts first despite the unsorted list');
   assert.equal(flakes[0]!.nights.join(','), '2026-09-26,2026-09-24', 'the displayed list keeps its stored order (only the sort key changed)');
+});
+
+test('a 2xx open-report listing with an unexpected body fails BEFORE any write', async () => {
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('labels=nightly%3Areport')) return { body: null, status: 200 }; // invalid JSON -> null
+      return { body: { items: [] }, status: 200 };
+    },
+    async post() { return { body: { number: 905 }, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  let posted = false;
+  const spy: ReportIo = { ...io, async post(path, body) { posted = true; return io.post(path, body); } };
+  await assert.rejects(
+    () => runReport(spy, ENV, { repo: REPO, night: '2026-09-26', dryRun: false }),
+    /unexpected body \(expected an issue array\)/,
+  );
+  assert.equal(posted, false, 'no duplicate is created when the listing is unreadable');
 });
 
 test('repo validation refuses a non owner/name value', async () => {

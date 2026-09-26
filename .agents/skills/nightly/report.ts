@@ -280,11 +280,12 @@ export async function runReport(
   // plain `created:NIGHT` misses everything between local midnight and 02:00 (verified live:
   // the local window finds PRs the UTC-day search does not). `night` is parsed as LOCAL time
   // (no Z suffix) and converted to ISO with a +00:00 offset, the format GitHub's search
-  // accepts. The range's endpoints are inclusive instants; the only overlap with tomorrow's
-  // window is the single midnight instant itself.
+  // accepts. GitHub ranges are INCLUSIVE on both ends, so the upper bound is one SECOND before
+  // the next local midnight: [00:00, 24:00) - the boundary instant itself belongs to tomorrow's
+  // window only, and no item is counted twice.
   const startIso = new Date(`${opts.night}T00:00:00`).toISOString().replace(/\.\d{3}Z$/, '+00:00');
   const endNight = nextDay(opts.night);
-  const endIso = new Date(`${endNight}T00:00:00`).toISOString().replace(/\.\d{3}Z$/, '+00:00');
+  const endIso = new Date(new Date(`${endNight}T00:00:00`).getTime() - 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00');
   const prs = await search(io, opts.repo, `is:pr created:${startIso}..${endIso}`);
   const issuesFiled = await search(io, opts.repo, `is:issue created:${startIso}..${endIso}`);
   const issuesCommented = await search(io, opts.repo, `is:issue commented:${startIso}..${endIso}`);
@@ -313,8 +314,11 @@ export async function runReport(
     const res = await io.get(path);
     if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
     // GET /issues returns PRs as well: entries carrying a pull_request property are never
-    // digest candidates (a PR with this label/title is not a report).
-    const prev = (res.body as { number?: number; title?: string; pull_request?: unknown }[] | null) ?? [];
+    // digest candidates (a PR with this label/title is not a report). A 2xx with an unparsable
+    // payload (parse failure -> null) must not read as ZERO open reports - that would create a
+    // duplicate and skip yesterday's close.
+    const prev = res.body as { number?: number; title?: string; pull_request?: unknown }[] | null;
+    if (!Array.isArray(prev)) throw new Error(`GET ${path} -> 2xx with an unexpected body (expected an issue array)`);
     for (const old of prev) {
       if (old.number === undefined || old.pull_request !== undefined) continue;
       if (old.title === title) issue = issue ?? old.number;
@@ -355,7 +359,8 @@ export async function runReport(
     const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
     const res = await io.get(path);
     if (res.status < 200 || res.status >= 300) break; // unreadable: the next night's close loop heals
-    const prev = (res.body as { number?: number; title?: string; pull_request?: unknown }[] | null) ?? [];
+    const prev = res.body as { number?: number; title?: string; pull_request?: unknown }[] | null;
+    if (!Array.isArray(prev)) break; // unreadable: the next night's close loop heals
     for (const dup of prev) {
       if (dup.number === undefined || dup.pull_request !== undefined) continue;
       if (dup.title === title && !sameNight.includes(dup.number)) sameNight.push(dup.number);
