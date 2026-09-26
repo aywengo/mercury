@@ -274,20 +274,37 @@ test('two flake nights on DIFFERENT fingerprints do not accumulate into a filing
   }
 });
 
-test('dry-run observes and reports but never writes to GitHub', async () => {
+test('dry-run observes and reports but never touches GitHub (no token needed)', async () => {
   const { dir, cleanup } = tempStateDir();
   try {
     const failure = { name: 'real defect', error: 'AssertionError: boom', file: 'e2e/system.test.ts' };
-    const posts: { path: string; body: unknown }[] = [];
+    const calls: { path: string; body?: unknown }[] = [];
     const io: E2eIo = {
       async run() { return { code: 1, output: failingOutput(failure.name, failure.error, failure.file) }; },
-      async get() { return { body: [], status: 200 }; },
-      async post(path, body) { posts.push({ path, body }); return { body: { number: 1 }, status: 201 }; },
+      async get(path) { calls.push({ path }); return { body: [], status: 200 }; },
+      async post(path, body) { calls.push({ path, body }); return { body: { number: 1 }, status: 201 }; },
     };
-    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: true, night: '2026-09-26' });
-    assert.equal(posts.length, 0, 'no GitHub writes in dry-run');
+    // No GH_TOKEN at all: dry-run is local observation.
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir }, { repo: 'aywengo/mercury', dryRun: true, night: '2026-09-26' });
+    assert.equal(calls.length, 0, 'no GitHub reads OR writes in dry-run');
     assert.equal(report.real.length, 1);
     assert.equal(report.real[0]!.action, 'dry-run');
+    assert.equal(report.real[0]!.issue, undefined, 'dry-run does not resolve the issue');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a green suite needs no GH_TOKEN either (token demanded only on GitHub I/O)', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const io: E2eIo = {
+      run: PASSING,
+      async get() { throw new Error('no reads on a green suite'); },
+      async post() { throw new Error('no writes on a green suite'); },
+    };
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-09-26' });
+    assert.deepEqual(report, { pass: 12, fail: 0, real: [], flakes: [] });
   } finally {
     cleanup();
   }

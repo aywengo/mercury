@@ -20,7 +20,8 @@
  * `{ pass, fail, real: [...], flakes: [...] }` — see E2eReport.
  *
  * Usage: `node .agents/skills/nightly/e2e.ts --repo aywengo/mercury [--dry-run] [--state <path>]`
- * Environment: GH_TOKEN (or GITHUB_TOKEN) for the GitHub API. The suite runs via
+ * Environment: GH_TOKEN (or GITHUB_TOKEN), demanded only when GitHub is actually touched — a green
+ * suite (no failures) and --dry-run (local observation) need no credentials. The suite runs via
  * `npm run test:e2e` from the repository root (needs Docker).
  *
  * No dependencies. Fetch only. Everything testable is a pure function or runs over injected I/O.
@@ -305,13 +306,14 @@ export async function runE2eSkill(
       continue;
     }
     // Real failure: comment on the open issue carrying the marker, or file a new one.
+    // Dry-run is local observation: it never reads GitHub, so it needs no credentials.
+    if (opts.dryRun) {
+      report.real.push({ test: failure.test, error: failure.error, fingerprint: fp, action: 'dry-run' });
+      continue;
+    }
     const marker = fpMarker(fp);
     const existing = await findIssueByMarker(io, opts.repo, marker, token());
     if (existing) {
-      if (opts.dryRun) {
-        report.real.push({ test: failure.test, error: failure.error, fingerprint: fp, issue: existing, action: 'dry-run' });
-        continue;
-      }
       const comment = [
         `Reproduced on the night of ${opts.night}. The failure fingerprint matches this issue.`,
         '',
@@ -329,10 +331,6 @@ export async function runE2eSkill(
         // The comment failed (rate limit, permissions): still record the observation honestly.
         report.real.push({ test: failure.test, error: failure.error, fingerprint: fp, issue: existing, action: 'dry-run' });
       }
-      continue;
-    }
-    if (opts.dryRun) {
-      report.real.push({ test: failure.test, error: failure.error, fingerprint: fp, action: 'dry-run' });
       continue;
     }
     const body = [
@@ -404,12 +402,18 @@ if (isMain) {
       child.on('exit', (code) => { clearTimeout(killer); resolve({ code: code ?? 1, output }); });
       child.on('error', () => { clearTimeout(killer); resolve({ code: 1, output }); });
     });
-  const token = ghToken(env);
+  // Lazy: the token is demanded only when a GitHub call is actually made — a green suite or
+  // --dry-run needs no credentials.
+  let cachedToken: string | null = null;
+  const token = (): string => {
+    if (cachedToken === null) cachedToken = ghToken(env);
+    return cachedToken;
+  };
   runE2eSkill(
     {
       run,
-      get: async (path) => await ghGet(path, token),
-      post: async (path, body) => await ghPost(path, body, token),
+      get: async (path) => await ghGet(path, token()),
+      post: async (path, body) => await ghPost(path, body, token()),
     },
     env,
     { repo, dryRun, night: new Date().toISOString().slice(0, 10) },
