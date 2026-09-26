@@ -434,6 +434,18 @@ test('a page-1 marker is still seen when the thread grows past the scanned tail'
   assert.equal(q, 'the only question', 'a page-1 marker beats the fallback chatter even on long threads');
 });
 
+test('a 2xx search response with an unexpected body fails with a targeted error', async () => {
+  const io: ReportIo = {
+    async get() { return { body: null, status: 200 }; }, // parse failure -> null body
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  await assert.rejects(
+    () => runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true }),
+    /unexpected body \(expected \{items/,
+  );
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);

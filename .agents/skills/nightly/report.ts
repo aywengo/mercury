@@ -67,7 +67,13 @@ async function search(io: ReportIo, repo: string, query: string): Promise<{ numb
     const path = `/search/issues?q=${encodeURIComponent(`repo:${repo} ${query}`)}&per_page=${SEARCH_PER_PAGE}&page=${page}`;
     const res = await io.get(path);
     if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
-    const items = ((res.body as { items?: { number?: number; title?: string; html_url?: string; user?: { login?: string } }[] }).items ?? []);
+    // A 2xx with an unexpected payload (parse failure -> null, rate-limit JSON, ...) must fail
+    // with a targeted error, not a TypeError deep in the loop.
+    const body = res.body as { items?: { number?: number; title?: string; html_url?: string; user?: { login?: string } }[] } | null;
+    if (body === null || typeof body !== 'object' || !Array.isArray(body.items)) {
+      throw new Error(`GET ${path} -> 2xx with an unexpected body (expected {items: [...]})`);
+    }
+    const items = body.items;
     for (const it of items) {
       out.push({ number: it.number, title: it.title ?? '', url: it.html_url, ...(it.user?.login ? { author: it.user.login } : {}) });
     }
