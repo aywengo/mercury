@@ -3,12 +3,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { runReport, collectBlocked, collectRunsStopped, collectFlakes, blockingQuestion, type ReportIo } from '../.agents/skills/nightly/report.ts';
 import { localDateString } from '../.agents/skills/nightly/e2e.ts';
+import { tempDir } from './helpers.ts';
 
 const REPO = 'aywengo/mercury';
 const ENV = { GH_TOKEN: 'test-token' };
@@ -283,24 +283,18 @@ test('the digest is created BEFORE yesterday\'s close (a create failure never le
 });
 
 test('flakes come from the e2e flake-clock state file', () => {
-  const dir = join(tmpdir(), `mercury-report-test-${process.pid}-${Date.now()}`);
-  try {
-    mkdirSync(join(dir, 'mercury/nightly'), { recursive: true });
-    writeFileSync(
-      join(dir, 'mercury/nightly/e2e-flakes.json'),
-      JSON.stringify({
-        fp1: { test: 'lease expires early', error: 'e', nights: ['2026-09-24', '2026-09-25'] },
-        fp2: { test: 'another flake', error: 'e', nights: ['2026-09-20'] },
-      }),
-    );
-    const flakes = collectFlakes({ XDG_STATE_HOME: dir }, '2026-09-26');
-    assert.equal(flakes.length, 2);
-    assert.equal(flakes[0]!.fingerprint, 'fp1', 'most recent night first');
-    rmSync(dir, { recursive: true, force: true });
-  } catch (e) {
-    rmSync(dir, { recursive: true, force: true });
-    throw e;
-  }
+  const dir = tempDir('mercury-report-test-');
+  mkdirSync(join(dir, 'mercury/nightly'), { recursive: true });
+  writeFileSync(
+    join(dir, 'mercury/nightly/e2e-flakes.json'),
+    JSON.stringify({
+      fp1: { test: 'lease expires early', error: 'e', nights: ['2026-09-24', '2026-09-25'] },
+      fp2: { test: 'another flake', error: 'e', nights: ['2026-09-20'] },
+    }),
+  );
+  const flakes = collectFlakes({ XDG_STATE_HOME: dir }, '2026-09-26');
+  assert.equal(flakes.length, 2);
+  assert.equal(flakes[0]!.fingerprint, 'fp1', 'most recent night first');
 });
 
 test('a 2xx create without a parseable number fails hard BEFORE closing yesterday\'s report', async () => {
@@ -331,23 +325,17 @@ test('a 2xx create without a parseable number fails hard BEFORE closing yesterda
 });
 
 test('collectFlakes filters nights to <= the report night (a backfill shows no future dates)', () => {
-  const dir = join(tmpdir(), `mercury-report-test2-${process.pid}-${Date.now()}`);
-  try {
-    mkdirSync(join(dir, 'mercury/nightly'), { recursive: true });
-    writeFileSync(
-      join(dir, 'mercury/nightly/e2e-flakes.json'),
-      JSON.stringify({
-        fp1: { test: 'lease flake', error: 'e', nights: ['2026-09-24', '2026-09-28'] },
-        fp2: { test: 'future-only flake', error: 'e', nights: ['2026-09-30'] },
-      }),
-    );
-    const flakes = collectFlakes({ XDG_STATE_HOME: dir }, '2026-09-26');
-    assert.deepEqual(flakes, [{ fingerprint: 'fp1', test: 'lease flake', nights: ['2026-09-24'] }], 'future nights are filtered out; future-only entries disappear');
-    rmSync(dir, { recursive: true, force: true });
-  } catch (e) {
-    rmSync(dir, { recursive: true, force: true });
-    throw e;
-  }
+  const dir = tempDir('mercury-report-test2-');
+  mkdirSync(join(dir, 'mercury/nightly'), { recursive: true });
+  writeFileSync(
+    join(dir, 'mercury/nightly/e2e-flakes.json'),
+    JSON.stringify({
+      fp1: { test: 'lease flake', error: 'e', nights: ['2026-09-24', '2026-09-28'] },
+      fp2: { test: 'future-only flake', error: 'e', nights: ['2026-09-30'] },
+    }),
+  );
+  const flakes = collectFlakes({ XDG_STATE_HOME: dir }, '2026-09-26');
+  assert.deepEqual(flakes, [{ fingerprint: 'fp1', test: 'lease flake', nights: ['2026-09-24'] }], 'future nights are filtered out; future-only entries disappear');
 });
 
 test('a FAILED close is not claimed: closedPrevious stays unset (JSON tells the truth)', async () => {
