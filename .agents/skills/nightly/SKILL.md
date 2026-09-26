@@ -110,7 +110,10 @@ node .agents/skills/nightly/report.ts --repo aywengo/mercury [--night YYYY-MM-DD
 ```
 
 Files ONE digest issue per night, labeled `nightly:report`, titled
-`nightly report — <night>`, and closes the previous open report issue. Sections:
+`nightly report — <night>`, and closes the previous open report issue.
+Credentials: `GH_TOKEN`/`GITHUB_TOKEN` is required for every request — the
+searches too, including `--dry-run` — and needs repo write because the run
+files and closes issues. Sections:
 
 - **PRs opened** and **issues filed** tonight (GitHub search, repo-scoped).
 - **Issues commented** tonight.
