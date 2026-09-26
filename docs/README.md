@@ -132,6 +132,9 @@ from git history and is not an implementation guide.
 - [`Dispatcher bots`](dispatcher-bot-design.md) — optional host-resident bots with
   an alias, cron-scheduled Run dispatch, declarative event triggers and an optional
   redacted LLM connection for coordination. Design; not implemented.
+- [`Laya integration`](laya-integration-design.md) — System-1 selection with a
+  local Laya sidecar: harness:model choice for dispatcher bots and a task-affinity
+  soft-rank signal for Fleet; shadow before enforce. Design; not implemented.
 
 ## Reviews
 
