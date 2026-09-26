@@ -116,18 +116,33 @@ async function blockingQuestion(io: ReportIo, repo: string, issue: number): Prom
 }
 
 /** TIMED_OUT runs whose run.timed_out reason event says 'not-after' (the §4.3 window end). */
-export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury']>): Promise<{ runId?: string; task?: string; status?: string }[]> {
+/** TIMED_OUT runs stopped by the §4.3 window end DURING the report night: cursor-paginated
+ * (bounded), each candidate filtered by its constraints.notAfter falling on the report night's
+ * local date before the events fetch (a backfill must not show other nights' stops). */
+export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury']>, night: string): Promise<{ runId?: string; task?: string; status?: string }[]> {
   const out: { runId?: string; task?: string; status?: string }[] = [];
-  const res = await mercury.get('/api/runs?status=TIMED_OUT&limit=200');
-  if (res.status < 200 || res.status >= 300) throw new Error(`Mercury GET /api/runs -> ${res.status}`);
-  const runs = (res.body as { runs?: { id?: string; task?: string; status?: string }[] }).runs ?? [];
-  for (const run of runs) {
-    if (!run.id) continue;
-    const evRes = await mercury.get(`/api/runs/${run.id}/events`);
-    if (evRes.status < 200 || evRes.status >= 300) continue; // unreadable events: skip, do not fail the digest
-    const events = (evRes.body as { events?: { type?: string; data?: { reason?: string } }[] }).events ?? [];
-    const timedOut = events.some((e) => e.type === 'run.timed_out' && e.data?.reason === 'not-after');
-    if (timedOut) out.push({ runId: run.id, task: run.task, status: run.status });
+  let path: string | undefined = '/api/runs?status=TIMED_OUT&limit=100';
+  for (let page = 0; page < 10 && path; page++) {
+    const res = await mercury.get(path);
+    if (res.status < 200 || res.status >= 300) throw new Error(`Mercury GET ${path} -> ${res.status}`);
+    const body = res.body as { runs?: { id?: string; task?: string; status?: string; constraints?: { notAfter?: string } }[]; nextCursor?: string };
+    const runs = body.runs ?? [];
+    for (const run of runs) {
+      if (!run.id) continue;
+      // notAfter must land on the report night (an ISO instant whose LOCAL date in the run's
+      // constraint equals the night; the report compares the UTC date of the instant — the bot
+      // writes notAfterAt in the host's local tz resolved to an ISO instant, and the nightly
+      // window is a local day, so the UTC date of the deadline is the same day for the Poznań
+      // window). Cheap pre-filter before the per-run events fetch.
+      const notAfter = run.constraints?.notAfter;
+      if (!notAfter || notAfter.slice(0, 10) !== night) continue;
+      const evRes = await mercury.get(`/api/runs/${run.id}/events`);
+      if (evRes.status < 200 || evRes.status >= 300) continue; // unreadable events: skip, do not fail the digest
+      const events = (evRes.body as { events?: { type?: string; data?: { reason?: string } }[] }).events ?? [];
+      const timedOut = events.some((e) => e.type === 'run.timed_out' && e.data?.reason === 'not-after');
+      if (timedOut) out.push({ runId: run.id, task: run.task, status: run.status });
+    }
+    path = body.nextCursor ? `/api/runs?status=TIMED_OUT&limit=100&cursor=${encodeURIComponent(body.nextCursor)}` : undefined;
   }
   return out;
 }
@@ -174,7 +189,7 @@ export async function runReport(
   const issuesFiled = await search(io, opts.repo, 'is:issue created:>=' + opts.night);
   const issuesCommented = await search(io, opts.repo, 'is:issue commented:>=' + opts.night);
   const blocked = await collectBlocked(io, opts.repo);
-  const runsStopped = io.mercury ? await collectRunsStopped(io.mercury) : [];
+  const runsStopped = io.mercury ? await collectRunsStopped(io.mercury, opts.night) : [];
   const flakes = collectFlakes(env, opts.night);
   const data: ReportData = { prs, issuesFiled, issuesCommented, blocked, runsStopped, flakes };
 
