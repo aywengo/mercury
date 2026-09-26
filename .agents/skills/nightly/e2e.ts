@@ -291,15 +291,24 @@ export async function runE2eSkill(
     report.real.push({ test: '<unparseable suite failure>', error: normalizeErrorLine(first.output.split('\n').find((l) => l.trim() !== '') ?? ''), fingerprint: '', action: 'dry-run' });
     return report;
   }
-  // The token is required only when GitHub is actually read/written; a fully dry or green night
-  // with no failures must not demand credentials.
-  let cachedToken: string | null = null;
-  const token = (): string => {
-    if (cachedToken === null) cachedToken = ghToken(env);
-    return cachedToken;
-  };
   const state = loadFlakeState(env);
   let stateDirty = false;
+
+  // Credentials are demanded lazily at the FIRST actual GitHub touch (a green suite returned
+  // earlier; dry-run and unparseable paths continue without any): the gated io below enforces
+  // that for the real transport AND for injected io.
+  let tokenChecked = false;
+  const gatedIo: E2eIo = {
+    run: io.run,
+    async get(path) {
+      if (!tokenChecked) { ghToken(env); tokenChecked = true; }
+      return io.get(path);
+    },
+    async post(path, body) {
+      if (!tokenChecked) { ghToken(env); tokenChecked = true; }
+      return io.post(path, body);
+    },
+  };
 
   for (const failure of failures) {
     // Rerun ONCE. A named file reruns just that file (the suite is minutes long; the rerun's job
@@ -344,7 +353,7 @@ export async function runE2eSkill(
           '',
           'Filed per docs/nightly-issues.md §N1-2: the same fingerprint flaked on three nights, so it is a defect worth a dedicated fix, not a report line.',
         ].join('\n');
-        const res = await io.post(`/repos/${opts.repo}/issues`, { title: `Flaky test: ${failure.test}`, body, labels: ['origin:e2e'] });
+        const res = await gatedIo.post(`/repos/${opts.repo}/issues`, { title: `Flaky test: ${failure.test}`, body, labels: ['origin:e2e'] });
         if (res.status >= 200 && res.status < 300) {
           const issue = (res.body as { number?: number })?.number;
           report.flakes.push({ test: failure.test, error: failure.error, fingerprint: fp, nights, ...(issue ? { issue } : {}) });
@@ -371,8 +380,10 @@ export async function runE2eSkill(
     const marker = fpMarker(fp);
     let existing: number | null;
     try {
-      existing = await findIssueByMarker(io, opts.repo, marker);
+      existing = await findIssueByMarker(gatedIo, opts.repo, marker);
     } catch (e: unknown) {
+      if (e instanceof Error && e.message.includes('GH_TOKEN')) throw e; // missing credentials is not a "failed search"
+
       // The search failed (rate limit, permissions, unexpected response): "no match" is NOT
       // established, so filing could duplicate. Record the observation and skip this night.
       report.real.push({ test: failure.test, error: failure.error, fingerprint: fp, action: 'dry-run' });
@@ -389,7 +400,7 @@ export async function runE2eSkill(
         '',
         marker,
       ].join('\n');
-      const res = await io.post(`/repos/${opts.repo}/issues/${existing}/comments`, { body: comment });
+      const res = await gatedIo.post(`/repos/${opts.repo}/issues/${existing}/comments`, { body: comment });
       if (res.status >= 200 && res.status < 300) {
         report.real.push({ test: failure.test, error: failure.error, fingerprint: fp, issue: existing, action: 'commented' });
       } else {
@@ -412,7 +423,7 @@ export async function runE2eSkill(
       '',
       marker,
     ].join('\n');
-    const res = await io.post(`/repos/${opts.repo}/issues`, { title: `E2E failure: ${failure.test}`, body, labels: ['origin:e2e'] });
+    const res = await gatedIo.post(`/repos/${opts.repo}/issues`, { title: `E2E failure: ${failure.test}`, body, labels: ['origin:e2e'] });
     if (res.status >= 200 && res.status < 300) {
       const issue = (res.body as { number?: number })?.number;
       report.real.push({ test: failure.test, error: failure.error, fingerprint: fp, ...(issue ? { issue } : {}), action: 'filed' });

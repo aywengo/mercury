@@ -712,6 +712,25 @@ test('a failure with no extractable error line is observed, never filed (name-on
   }
 });
 
+test('a real failure with no GH_TOKEN fails at the first GitHub touch', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const failure = { name: 'real defect', error: 'AssertionError: boom', file: 'e2e/system.test.ts' };
+    const io: E2eIo = {
+      async run() { return { code: 1, output: failingOutput(failure.name, failure.error, failure.file) }; },
+      async get() { return { body: [], status: 200 }; },
+      async post() { return { body: { number: 1 }, status: 201 }; },
+    };
+    await assert.rejects(
+      () => runE2eSkill(io, { XDG_STATE_HOME: dir }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-09-26' }),
+      /GH_TOKEN/,
+      'the gated io demands credentials at the first real GitHub touch',
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const io: E2eIo = { run: PASSING, async get() { return { body: [], status: 200 }; }, async post() { return { body: {}, status: 201 }; } };
   await assert.rejects(
