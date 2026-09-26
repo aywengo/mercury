@@ -220,7 +220,7 @@ async function ghGet(path: string, token: string): Promise<{ body: unknown; stat
     headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  if (!res.ok && res.status >= 500) throw new Error(`GET ${path} -> ${res.status}`);
+  // Every HTTP response is returned, 5xx included — callers own the non-2xx policy.
   return { body: await res.json().catch(() => null), status: res.status };
 }
 
@@ -231,7 +231,9 @@ async function ghPost(path: string, body: unknown, token: string): Promise<{ bod
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  if (!res.ok && res.status >= 500) throw new Error(`POST ${path} -> ${res.status}`);
+  // EVERY HTTP response is returned, 5xx included: the callers own the non-2xx policy (rollback,
+  // honest observation) and the single-line report must always be emitted. Network-level errors
+  // (DNS, abort) still throw — they are not responses.
   return { body: await res.json().catch(() => null), status: res.status };
 }
 

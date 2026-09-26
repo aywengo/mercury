@@ -478,6 +478,32 @@ test('a failed flake filing on the threshold night rolls the night back and the 
   }
 });
 
+test('a failed comment post (5xx) records the observation honestly and still reports', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const failure = { name: 'known defect', error: 'AssertionError: known', file: 'e2e/system.test.ts' };
+    const fp = await fingerprintOf(failure.name, failure.error);
+    const io: E2eIo = {
+      async run() { return { code: 1, output: failingOutput(failure.name, failure.error, failure.file) }; },
+      async get(path) {
+        if (path.startsWith('/repos/aywengo/mercury/issues?')) {
+          return { body: [{ number: 501, body: `defect body\n<!-- nightly-e2e-fp:${fp} -->\n` }], status: 200 };
+        }
+        return { body: [], status: 200 };
+      },
+      async post() { return { body: {}, status: 503 }; },
+    };
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-09-26' });
+    // One JSON-serializable report line regardless of GitHub failures:
+    assert.equal(JSON.parse(JSON.stringify(report)) === null, false);
+    assert.equal(report.real.length, 1);
+    assert.equal(report.real[0]!.action, 'dry-run', 'a failed comment is an unrecorded observation');
+    assert.equal(report.real[0]!.issue, 501);
+  } finally {
+    cleanup();
+  }
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const io: E2eIo = { run: PASSING, async get() { return { body: [], status: 200 }; }, async post() { return { body: {}, status: 201 }; } };
   await assert.rejects(
