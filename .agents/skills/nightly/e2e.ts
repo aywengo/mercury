@@ -310,7 +310,13 @@ export async function runE2eSkill(
           const issue = (res.body as { number?: number })?.number;
           report.flakes.push({ test: failure.test, error: failure.error, fingerprint: fp, nights, ...(issue ? { issue } : {}) });
         } else {
-          report.flakes.push({ test: failure.test, error: failure.error, fingerprint: fp, nights });
+          // The create failed (rate limit, permissions): roll THIS night back off the clock so
+          // the counter returns to FLAKE_FILE_NIGHTS - 1 and the NEXT night retries the filing.
+          // Without the rollback the burned threshold night would make the flake unfillable.
+          const entry = state[fp]!;
+          const k = entry.nights.lastIndexOf(opts.night);
+          if (k !== -1) entry.nights.splice(k, 1);
+          report.flakes.push({ test: failure.test, error: failure.error, fingerprint: fp, nights: entry.nights.length });
         }
       } else {
         report.flakes.push({ test: failure.test, error: failure.error, fingerprint: fp, nights });

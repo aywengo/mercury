@@ -435,6 +435,49 @@ test('localDateString is the LOCAL date, not UTC', () => {
   assert.equal(localDateString(d2), `${d2.getFullYear()}-${String(d2.getMonth() + 1).padStart(2, '0')}-${String(d2.getDate()).padStart(2, '0')}`);
 });
 
+test('a failed flake filing on the threshold night rolls the night back and the next night retries', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const failure = { name: 'recurring flake', error: 'AssertionError: flaky lease', file: 'fleet/lease.test.ts' };
+    const nights = ['2026-09-22', '2026-09-23', '2026-09-24', '2026-09-25'];
+    let filed = 0;
+    for (let i = 0; i < nights.length; i++) {
+      let first = true;
+      const posts: { path: string; body: unknown }[] = [];
+      // Night 3 (index 2): the create FAILS (503). Every other create would succeed.
+      const failCreate = i === 2;
+      const io: E2eIo = {
+        async run() {
+          if (first) { first = false; return { code: 1, output: failingOutput(failure.name, failure.error, failure.file) }; }
+          return { code: 0, output: 'ℹ pass 12\nℹ fail 0' };
+        },
+        async get() { return { body: [], status: 200 }; },
+        async post(path, body) {
+          posts.push({ path, body });
+          if (failCreate) return { body: {}, status: 503 };
+          return { body: { number: 810 + i }, status: 201 };
+        },
+      };
+      const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: nights[i]! });
+      filed += posts.filter((p) => p.path === '/repos/aywengo/mercury/issues' && report.flakes.some((fl) => fl.issue !== undefined)).length;
+      if (i === 2) {
+        assert.equal(posts.length, 1, 'threshold night attempted the filing');
+        assert.equal(report.flakes[0]!.issue, undefined, 'the create failed: no issue recorded');
+        const state = loadFlakeState({ XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' });
+        const fp = Object.keys(state)[0]!;
+        assert.equal(state[fp]!.nights.length, 2, 'the failed night was rolled back off the clock');
+      }
+      if (i === 3) {
+        assert.equal(posts.length, 1, 'the next night RETRIES the filing');
+        assert.equal(report.flakes[0]!.issue, 813);
+      }
+    }
+    assert.equal(filed, 1, 'filed exactly once overall');
+  } finally {
+    cleanup();
+  }
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const io: E2eIo = { run: PASSING, async get() { return { body: [], status: 200 }; }, async post() { return { body: {}, status: 201 }; } };
   await assert.rejects(
