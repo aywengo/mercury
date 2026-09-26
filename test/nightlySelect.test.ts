@@ -122,6 +122,18 @@ test('mutation control: the label-only check would trust the foreign e2e issue (
   const foreign = cand(issue({ number: 4, user: { login: 'random-dev' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-20T00:00:00Z' }));
   const s = selectLadder([foreign], TERMINAL);
   assert.notEqual(s.issue, 4, 'origin:e2e without nightly identity authorship must stay ineligible');
+  // Direct on the unit (round-7 note): the ladder-level fixture above cannot see a PARTIAL
+  // regression where isTrusted trusts a bare label again while rung-1 still requires
+  // e2eByNightly. Assert the trust predicate itself: a bare label with a foreign author and a
+  // nightly author without the actor verification are both untrusted, in every combination.
+  const bare = issue({ number: 4, user: { login: 'random-dev' }, labels: [{ name: 'origin:e2e' }] });
+  assert.equal(isTrusted(bare, false, false), false);
+  assert.equal(isTrusted(bare, true, false), true, 'the ready clause stays author-independent');
+  const nightlyBare = issue({ number: 5, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }] });
+  assert.equal(isTrusted(nightlyBare, false, false), false,
+    'label present + nightly author but the actor check failed: NOT trusted');
+  assert.equal(isTrusted(nightlyBare, false, true), true,
+    'label present + nightly author + actor verified: trusted');
 });
 
 test('rung 1 orders by priority label then age', () => {
