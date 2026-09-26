@@ -17,7 +17,7 @@ interface Recorded { method: string; path: string; body?: unknown }
 
 function ioWith(opts: {
   searchItems?: Record<string, unknown[]>;
-  issues?: { number: number; title: string; labels?: { name: string }[] }[];
+  issues?: { number: number; title: string; labels?: { name: string }[]; pull_request?: unknown }[];
   comments?: Record<number, { body: string }[]>;
   timedOutRuns?: { id: string; task: string; status: string; constraints?: { notAfter?: string } }[];
   notAfterRunIds?: string[];
@@ -590,6 +590,54 @@ test('a 2xx Mercury events response with an unparsable payload skips the run, no
   };
   const stopped = await collectRunsStopped(io.mercury!, '2026-09-26');
   assert.deepEqual(stopped, []);
+});
+
+test('a PR carrying the nightly:report label is never a digest candidate', async () => {
+  const { io } = ioWith({
+    issues: [
+      { number: 710, title: 'nightly report — 2026-09-26', labels: [{ name: 'nightly:report' }], pull_request: { url: 'u' } },
+      { number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] },
+    ],
+  });
+  let created = 0;
+  const io2: ReportIo = {
+    ...io,
+    async post() { created += 1; return { body: { number: 904 }, status: 201 }; },
+  };
+  const out = await runReport(io2, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(created, 1, 'the PR is not reused as the digest');
+  assert.equal(out.issue, 904);
+  assert.equal(out.closedPrevious, 500, 'the real previous-night issue still closes');
+});
+
+test('a 2xx blocked listing with an unexpected body fails with a targeted error (no silent empty)', async () => {
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('labels=nightly%3Ablocked')) return { body: null, status: 200 };
+      return { body: [], status: 200 };
+    },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  await assert.rejects(
+    () => collectBlocked(io, REPO),
+    /unexpected body \(expected an issue array\)/,
+  );
+});
+
+test('backfill-added nights are sorted chronologically (max night is the sort key)', () => {
+  const dir = tempDir('mercury-report-test3-');
+  mkdirSync(join(dir, 'mercury/nightly'), { recursive: true });
+  writeFileSync(
+    join(dir, 'mercury/nightly/e2e-flakes.json'),
+    JSON.stringify({
+      fp_backfilled: { test: 'backfilled', error: 'e', nights: ['2026-09-26', '2026-09-24'] }, // appended out of order
+      fp_normal: { test: 'normal', error: 'e', nights: ['2026-09-25'] },
+    }),
+  );
+  const flakes = collectFlakes({ XDG_STATE_HOME: dir }, '2026-09-26');
+  assert.equal(flakes[0]!.fingerprint, 'fp_backfilled', 'max night 2026-09-26 sorts first despite the unsorted list');
+  assert.equal(flakes[0]!.nights.join(','), '2026-09-26,2026-09-24', 'the displayed list keeps its stored order (only the sort key changed)');
 });
 
 test('repo validation refuses a non owner/name value', async () => {

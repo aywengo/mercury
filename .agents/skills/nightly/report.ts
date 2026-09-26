@@ -90,8 +90,14 @@ export async function collectBlocked(io: ReportIo, repo: string): Promise<{ numb
     const path = `/repos/${repo}/issues?labels=${encodeURIComponent(L_BLOCKED)}&state=open&per_page=100&page=${page}`;
     const res = await io.get(path);
     if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
-    const issues = (res.body as { number?: number; title?: string }[] | null) ?? [];
+    // A 2xx with an unparsable payload (parse failure -> null) must not silently read as ZERO
+    // blocked issues; that would hide real blockers from the digest. Targeted error instead.
+    const issues = res.body as { number?: number; title?: string; pull_request?: unknown }[] | null;
+    if (!Array.isArray(issues)) {
+      throw new Error(`GET ${path} -> 2xx with an unexpected body (expected an issue array)`);
+    }
     for (const issue of issues) {
+      if (issue.pull_request !== undefined) continue; // the issues listing includes PRs
       if (issue.number === undefined) continue;
       out.push({ number: issue.number, title: issue.title ?? '', question: await blockingQuestion(io, repo, issue.number) });
     }
@@ -209,6 +215,11 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
   return out;
 }
 
+/** The most recent night in a (possibly unsorted, e.g. after a backfill) night list. */
+function newestNight(nights: string[]): string {
+  return nights.reduce((acc, n) => (n > acc ? n : acc), nights[0] ?? '');
+}
+
 /** Flake-clock entries as of `night`: only nights <= the report night (a backfill run with an
  * older --night must not display future dates), most recent last-night first. */
 export function collectFlakes(env: NodeJS.ProcessEnv, night: string): { fingerprint: string; test: string; nights: string[] }[] {
@@ -216,7 +227,9 @@ export function collectFlakes(env: NodeJS.ProcessEnv, night: string): { fingerpr
   return Object.entries(state)
     .map(([fingerprint, entry]) => ({ fingerprint, test: entry.test, nights: entry.nights.filter((n) => n <= night) }))
     .filter((f) => f.nights.length > 0)
-    .sort((a, b) => (b.nights[b.nights.length - 1] ?? '').localeCompare(a.nights[a.nights.length - 1] ?? ''));
+    // recordFlakeNight APPENDS, so a backfill can leave nights unsorted: the sort key must be
+    // the MAX of the filtered nights, not the last stored element.
+    .sort((a, b) => newestNight(b.nights).localeCompare(newestNight(a.nights)));
 }
 
 function digestBody(night: string, data: ReportData, note?: string): string {
@@ -299,9 +312,11 @@ export async function runReport(
     const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
     const res = await io.get(path);
     if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
-    const prev = (res.body as { number?: number; title?: string }[] | null) ?? [];
+    // GET /issues returns PRs as well: entries carrying a pull_request property are never
+    // digest candidates (a PR with this label/title is not a report).
+    const prev = (res.body as { number?: number; title?: string; pull_request?: unknown }[] | null) ?? [];
     for (const old of prev) {
-      if (old.number === undefined) continue;
+      if (old.number === undefined || old.pull_request !== undefined) continue;
       if (old.title === title) issue = issue ?? old.number;
       else if (old.title === `nightly report — ${prevNight}`) closeables.push({ number: old.number, title: old.title });
     }
@@ -340,9 +355,10 @@ export async function runReport(
     const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
     const res = await io.get(path);
     if (res.status < 200 || res.status >= 300) break; // unreadable: the next night's close loop heals
-    const prev = (res.body as { number?: number; title?: string }[] | null) ?? [];
+    const prev = (res.body as { number?: number; title?: string; pull_request?: unknown }[] | null) ?? [];
     for (const dup of prev) {
-      if (dup.number !== undefined && dup.title === title && !sameNight.includes(dup.number)) sameNight.push(dup.number);
+      if (dup.number === undefined || dup.pull_request !== undefined) continue;
+      if (dup.title === title && !sameNight.includes(dup.number)) sameNight.push(dup.number);
     }
     if (prev.length < 100) break;
   }
