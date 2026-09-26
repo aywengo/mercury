@@ -40,9 +40,9 @@ the timeline's labeled events. `nightly:in-progress`, `nightly:blocked` and
 ## Claim
 
 The chosen issue is labeled `nightly:in-progress` BEFORE the decision is
-printed; a re-read that already shows the label means a concurrent or retried
-nightly won — the selector re-selects. `--dry-run` prints the decision and
-writes nothing.
+printed. The label-add response decides: 2xx means the claim is ours; 422
+already-exists means a concurrent or retried nightly won — the selector drops
+that issue and re-selects. `--dry-run` prints the decision and writes nothing.
 
 ## Tests
 

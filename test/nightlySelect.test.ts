@@ -212,6 +212,9 @@ test('e2eRunTerminal fails CLOSED when the gate is configured but unevaluable (r
   const { e2eRunTerminal } = await import('../.agents/skills/nightly/select.ts');
   // Unset env: no gate configured → passed.
   assert.equal(await e2eRunTerminal({}), true);
+  // HALF-configured (exactly one of URL/token): a misconfiguration fails closed.
+  assert.equal(await e2eRunTerminal({ MERCURY_API_URL: 'http://127.0.0.1:9' }), false);
+  assert.equal(await e2eRunTerminal({ MERCURY_API_TOKEN: 't' }), false);
   // Configured but unreachable → fail closed.
   assert.equal(await e2eRunTerminal({ MERCURY_API_URL: 'http://127.0.0.1:9', MERCURY_API_TOKEN: 't' }), false, 'unreachable host: rung 1 must not start on a guess');
   // Configured, reachable, non-2xx → fail closed.

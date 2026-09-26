@@ -219,12 +219,15 @@ async function ghPost(path: string, body: unknown, token: string): Promise<boole
 }
 
 /** Tonight's nightly-e2e Run must be terminal before rung 1 offers work.
- * Unset env = no gate configured = passed. A CONFIGURED gate that cannot be evaluated
- * (unreachable host, bad token, non-2xx) fails CLOSED: rung 1 does not start on a guess. */
+ * Unset env = no gate configured = passed. A PARTIALLY configured gate (exactly one of
+ * URL/token) fails closed — a half-set gate is a misconfiguration, not an absence. A fully
+ * configured gate that cannot be evaluated (unreachable host, bad token, non-2xx) also fails
+ * CLOSED: rung 1 does not start on a guess. */
 export async function e2eRunTerminal(env: NodeJS.ProcessEnv): Promise<boolean> {
   const url = env.MERCURY_API_URL;
   const token = env.MERCURY_API_TOKEN;
-  if (!url || !token) return true; // no host configured: no gate exists
+  if (!url && !token) return true; // no gate configured at all
+  if (!url || !token) return false; // half-configured: fail closed
   try {
     // Walk the run list with the same paged discipline the bot scheduler uses: a long-lived
     // non-terminal nightly-e2e Run can age out of page one, and missing it would pass the gate
@@ -315,8 +318,9 @@ export async function runSelectorWith(
   // the ladder must report rung 3 rather than a false 'none'.
   const seen = candidates.length + (listCapped ? 1 : 0);
   let selection = selectLadder(candidates, { e2eRunTerminal: e2eTerminal }, seen);
-  // Claim BEFORE returning: label nightly:in-progress, then re-read; if the label was already
-  // there (a concurrent nightly won), pick again from the remaining candidates.
+  // Claim BEFORE returning: label nightly:in-progress. GitHub's 2xx means the claim is ours;
+  // 422 already-exists means a concurrent or retried nightly won — drop the candidate and pick
+  // again from the remaining ones.
   while (typeof selection.issue === 'number' && !dryRun) {
     const added = await io.post(`/repos/${repo}/issues/${selection.issue}/labels`, { labels: [L_IN_PROGRESS] });
     if (added) {
