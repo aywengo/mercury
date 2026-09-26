@@ -7,6 +7,7 @@ import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { runReport, collectBlocked, collectRunsStopped, collectFlakes, type ReportIo } from '../.agents/skills/nightly/report.ts';
+import { localDateString } from '../.agents/skills/nightly/e2e.ts';
 
 const REPO = 'aywengo/mercury';
 const ENV = { GH_TOKEN: 'test-token' };
@@ -311,6 +312,27 @@ test('collectFlakes filters nights to <= the report night (a backfill shows no f
     rmSync(dir, { recursive: true, force: true });
     throw e;
   }
+});
+
+test('a FAILED close is not claimed: closedPrevious stays unset (JSON tells the truth)', async () => {
+  const { io } = ioWith({
+    issues: [{ number: 500, title: 'yesterday', labels: [{ name: 'nightly:report' }] }],
+  });
+  const failingClose: ReportIo = {
+    ...io,
+    async patch() {
+      return { body: { message: 'validation failed' }, status: 422 }; // close rejected
+    },
+  };
+  const out = await runReport(failingClose, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.issue, 900);
+  assert.equal(out.closedPrevious, undefined, 'a 422 close is NOT recorded as closed');
+});
+
+test('localDateString is what the test env defaults to (UTC-rollover rule shared with e2e.ts)', () => {
+  // Pins the contract: the CLI default night comes from localDateString (local calendar day),
+  // not toISOString (UTC day) - a 00:05 local fire belongs to the local day.
+  assert.match(localDateString(), /^\d{4}-\d{2}-\d{2}$/);
 });
 
 test('repo validation refuses a non owner/name value', async () => {
