@@ -136,10 +136,22 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
       // window). Cheap pre-filter before the per-run events fetch.
       const notAfter = run.constraints?.notAfter;
       if (!notAfter || notAfter.slice(0, 10) !== night) continue;
-      const evRes = await mercury.get(`/api/runs/${run.id}/events`);
-      if (evRes.status < 200 || evRes.status >= 300) continue; // unreadable events: skip, do not fail the digest
-      const events = (evRes.body as { events?: { type?: string; data?: { reason?: string } }[] }).events ?? [];
-      const timedOut = events.some((e) => e.type === 'run.timed_out' && e.data?.reason === 'not-after');
+      // The events endpoint caps a page at 1000: scan forward via nextCursor (bounded) so the
+      // terminal run.timed_out event is observed even on long runs.
+      let evPath: string | undefined = `/api/runs/${run.id}/events`;
+      let timedOut = false;
+      let evPages = 0;
+      while (evPath && evPages < 10 && !timedOut) {
+        const evRes = await mercury.get(evPath);
+        if (evRes.status < 200 || evRes.status >= 300) break; // unreadable events: skip, do not fail the digest
+        const evBody = evRes.body as { events?: { type?: string; data?: { reason?: string } }[]; nextCursor?: number; hasMore?: boolean };
+        const events = evBody.events ?? [];
+        timedOut = events.some((e) => e.type === 'run.timed_out' && e.data?.reason === 'not-after');
+        evPages += 1;
+        evPath = evBody.hasMore && evBody.nextCursor !== undefined && events.length > 0
+          ? `/api/runs/${run.id}/events?after=${evBody.nextCursor}`
+          : undefined;
+      }
       if (timedOut) out.push({ runId: run.id, task: run.task, status: run.status });
     }
     path = body.nextCursor ? `/api/runs?status=TIMED_OUT&limit=100&cursor=${encodeURIComponent(body.nextCursor)}` : undefined;

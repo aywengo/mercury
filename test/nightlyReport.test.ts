@@ -60,7 +60,7 @@ function ioWith(opts: {
           const events = id && opts.notAfterRunIds?.includes(id)
             ? [{ type: 'run.timed_out', data: { reason: 'not-after' } }]
             : [];
-          return { body: { events }, status: 200 };
+          return { body: { events, nextCursor: events.length > 0 ? 5 : 0, hasMore: false }, status: 200 };
         },
       },
     } : {}),
@@ -137,6 +137,33 @@ test('runs stopped by notAfter: scoped to the report night, reason event require
   });
   const stopped = await collectRunsStopped(io.mercury!, '2026-09-26');
   assert.deepEqual(stopped, [{ runId: 'run_b', task: 'nightly-e2e', status: 'TIMED_OUT' }]);
+});
+
+test('a run.timed_out event past the first events page is still found (nextCursor walk)', async () => {
+  const calls: string[] = [];
+  const eventsPages: Record<string, { body: unknown; status: number }> = {
+    '/api/runs/run_long/events': { body: { events: Array.from({ length: 1000 }, () => ({ type: 'log', data: {} })), nextCursor: 1000, hasMore: true }, status: 200 },
+    '/api/runs/run_long/events?after=1000': { body: { events: [{ type: 'run.timed_out', data: { reason: 'not-after' } }], nextCursor: 1005, hasMore: false }, status: 200 },
+  };
+  const io: ReportIo = {
+    mercury: {
+      async get(path) {
+        calls.push(path);
+        if (path.startsWith('/api/runs?')) {
+          return { body: { runs: [{ id: 'run_long', task: 'nightly-next', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-26T04:00:00.000Z' } }] }, status: 200 };
+        }
+        const page = eventsPages[path];
+        if (page) return page;
+        return { body: { events: [] }, status: 200 };
+      },
+    },
+    async get() { return { body: [], status: 200 }; },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const stopped = await collectRunsStopped(io.mercury!, '2026-09-26');
+  assert.deepEqual(stopped, [{ runId: 'run_long', task: 'nightly-next', status: 'TIMED_OUT' }]);
+  assert.ok(calls.some((c) => c.includes('after=1000')), 'the walk resumed from nextCursor');
 });
 
 test('without Mercury config the runs section is empty, not faked', async () => {
