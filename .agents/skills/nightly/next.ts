@@ -112,7 +112,7 @@ export async function blockIssue(io: NextIo, opts: { repo: string; issue: number
   // already present); the post-state is always "labeled" when this function returns.
   const newlyLabeled = await io.postLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels`, { labels: [L_BLOCKED] });
   const res = await io.post(`/repos/${opts.repo}/issues/${opts.issue}/comments`, {
-    body: `The nightly stopped on this issue instead of asking (nightly Runs never ask, §4.4).\n\n**Blocking question:** ${reason}\n\nClaim released; the issue is labeled \`${L_BLOCKED}\` for a human to answer or relabel.`,
+    body: `The nightly stopped on this issue instead of asking (nightly Runs never ask, §4.4).\n\n**Blocking question:** ${reason}\n\nThe issue is labeled \`${L_BLOCKED}\` for a human to answer or relabel; the \`${L_IN_PROGRESS}\` claim is being released right after this comment.`,
   });
   if (res.status < 200 || res.status >= 300) {
     throw new Error(`blocked exit failed: the question comment was not accepted (POST returned ${res.status}); the claim stays so the next night retries`);
