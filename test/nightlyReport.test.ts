@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { runReport, collectBlocked, collectRunsStopped, collectFlakes, type ReportIo } from '../.agents/skills/nightly/report.ts';
+import { runReport, collectBlocked, collectRunsStopped, collectFlakes, blockingQuestion, type ReportIo } from '../.agents/skills/nightly/report.ts';
 import { localDateString } from '../.agents/skills/nightly/e2e.ts';
 
 const REPO = 'aywengo/mercury';
@@ -333,6 +333,27 @@ test('localDateString is what the test env defaults to (UTC-rollover rule shared
   // Pins the contract: the CLI default night comes from localDateString (local calendar day),
   // not toISOString (UTC day) - a 00:05 local fire belongs to the local day.
   assert.match(localDateString(), /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test('exactly 100 comments with no marker: the fallback takes the TRUE last comment', async () => {
+  const pages: { body: string }[][] = [
+    Array.from({ length: 100 }, (_, k) => ({ body: `noise ${k}` })), // full page, no marker
+    [], // next page is empty: the caller must remember page 1's last comment
+  ];
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('/comments?')) {
+        const m = /[?&]page=(\d+)/.exec(path);
+        const page = m ? Number(m[1]) : 1;
+        return { body: pages[page - 1] ?? [], status: 200 };
+      }
+      return { body: [], status: 200 };
+    },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const q = await blockingQuestion(io, REPO, 502);
+  assert.equal(q, 'noise 99', 'fallback reads the last comment of the last NON-EMPTY page');
 });
 
 test('repo validation refuses a non owner/name value', async () => {

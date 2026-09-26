@@ -95,8 +95,10 @@ export async function collectBlocked(io: ReportIo, repo: string): Promise<{ numb
 /** The blocking question for an issue: walk the comment pages (bounded) and take the LAST
  * `**Blocking question:**` marker - the most recent blocked exit. If no marker exists (a
  * hand-labeled blocked issue), fall back to the last comment body, truncated. */
-async function blockingQuestion(io: ReportIo, repo: string, issue: number): Promise<string | undefined> {
+/** Exported for tests. */
+export async function blockingQuestion(io: ReportIo, repo: string, issue: number): Promise<string | undefined> {
   let question: string | undefined;
+  let lastComment: string | undefined; // body of the newest comment seen so far (fallback)
   for (let page = 1; page <= 10; page++) {
     const res = await io.get(`/repos/${repo}/issues/${issue}/comments?per_page=100&page=${page}`);
     if (res.status < 200 || res.status >= 300) break; // unreadable comments: leave the question unset
@@ -106,14 +108,15 @@ async function blockingQuestion(io: ReportIo, repo: string, issue: number): Prom
       const marker = c.body.split('\n').find((l) => l.startsWith('**Blocking question:**'));
       if (marker) question = marker.replace(/^\*\*Blocking question:\*\*\s*/, '');
     }
-    if (comments.length < 100) {
-      if (question === undefined) {
-        const last = comments[comments.length - 1];
-        if (last?.body) question = last.body.slice(0, 200);
-      }
-      break;
+    // A FULL page (100) may be the LAST page: the follow-up page comes back empty, and then the
+    // true last comment lives on THIS page. Remember it so the fallback below still works when
+    // the count is an exact multiple of 100.
+    if (comments.length > 0 && question === undefined) {
+      lastComment = comments[comments.length - 1]?.body;
     }
+    if (comments.length < 100) break;
   }
+  if (question === undefined && lastComment !== undefined) question = lastComment.slice(0, 200);
   return question;
 }
 
