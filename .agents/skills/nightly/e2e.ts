@@ -255,7 +255,7 @@ export interface E2eIo {
 export async function runE2eSkill(
   io: E2eIo,
   env: NodeJS.ProcessEnv,
-  opts: { repo: string; dryRun: boolean; night: string; suiteTimeoutMs?: number; cwd?: string },
+  opts: { repo: string; dryRun: boolean; night: string; suiteTimeoutMs?: number },
 ): Promise<E2eReport> {
   if (!REPO_RE.test(opts.repo)) {
     throw new Error(`repo must be exactly owner/name (e.g. aywengo/mercury); got '${opts.repo}'`);
