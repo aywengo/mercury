@@ -96,7 +96,7 @@ export function normalizeErrorLine(line: string): string {
     .replace(/\b[0-9a-f]{16,}\b/g, '<hex>')
     .replace(/(?:[A-Za-z]:)?(?:\\|\/)private(?:\\|\/)tmp(?:\\|\/)[^\s:'"]+/g, 'tmp/<dir>')
     .replace(/(?:[A-Za-z]:)?(?:\\|\/)tmp(?:\\|\/)[^\s:'"]+/g, 'tmp/<dir>')
-    .replace(/(?:[A-Za-z]:)?(?:\\|\/)(?:[A-Za-z0-9_.-]+[\/])+[A-Za-z0-9_.-]+\.(?:ts|js|mjs|cjs)/g, (m) => basename(m))
+    .replace(/(?:[A-Za-z]:)?(?:\\|\/)(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+\.(?:ts|js|mjs|cjs)/g, (m) => basename(m.replace(/\\/g, '/')))
     .replace(/:\d+(?::\d+)?/g, '')
     .replace(/\b\d+(?:\.\d+)?\s*(?:ms|s|min|h)\b/g, '<dur>')
     .replace(/\b\d+(?:,\d{3})*\b/g, '<n>')

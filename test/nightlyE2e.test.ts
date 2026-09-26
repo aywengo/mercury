@@ -94,6 +94,16 @@ test('normalizeErrorLine strips volatile ids, paths, durations and numbers', asy
   assert.match(a, /<dur>/);
 });
 
+test('normalizeErrorLine reduces Windows backslash paths to basenames too', async () => {
+  // The same defect on a Windows checkout and a POSIX checkout must share a fingerprint.
+  const win = normalizeErrorLine('AssertionError: numbers diverge at C:\\Users\\me\\repo\\src\\a.ts:12:5');
+  const posix = normalizeErrorLine('AssertionError: numbers diverge at /home/me/repo/src/a.ts:12:5');
+  assert.equal(win, posix, 'platform-independent normalization');
+  assert.match(win, / at a\.ts$/);
+  const win2 = normalizeErrorLine('Error: socket hang up at D:\\ci\\ws\\e2e\\system.test.ts:9:9');
+  assert.match(win2, / at system\.test\.ts$/);
+});
+
 test('fingerprintOf is stable and matches the marker helper', async () => {
   const fp1 = await fingerprintOf('alpha works', 'AssertionError: numbers diverge');
   const fp2 = await fingerprintOf('alpha works', 'AssertionError: numbers diverge');
