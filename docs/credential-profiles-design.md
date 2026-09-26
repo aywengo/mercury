@@ -27,7 +27,7 @@ repository, and it breaks in three ordinary situations:
 | Local adapters | the worker's **whole** environment, plus adapter-level `config.env` | `localAgentAdapter.ts:407`, `claudeCodeAdapter.ts:349`, `hermesAgentAdapter.ts:275`, `rpc/rpcClient.ts:117` (`...process.env`) |
 | Workspace git (clone, worktree) | the whole environment plus prompt suppression; credential helpers from the host user's git config still apply | `workspaceManager.ts` `GIT_ENV` |
 | Sandbox (Docker) | an allowlist; `GH_*`, `GITHUB_*`, `GIT_*` are **never** forwarded, even when listed in `MERCURY_SANDBOX_ENV` | `sandboxManager.ts` `NEVER_FORWARD` |
-| Redaction | exact values of forwarded sandbox credentials and `MERCURY_SECRETS`; shape patterns include fine-grained `github_pat_` but **not** classic `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` | `domain/redact.ts:49` |
+| Redaction | exact values of forwarded sandbox credentials and `MERCURY_SECRETS`; shape patterns cover GitHub classic (`gh[pousr]_`) and fine-grained (`github_pat_`) tokens | `domain/redact.ts:48-49`, `test/redact.test.ts:129` |
 | Run record | `ownerId`, `repository` (+ optional `repositories`); no credential or project reference | `domain/types.ts` |
 
 So local mode has one identity per host, and sandbox mode has no GitHub identity at all.
@@ -181,9 +181,8 @@ behave as today in sandbox mode: no source-control credentials.
 
 Every value a profile injects joins the exact-value redaction set for that Run, regardless of length.
 The operator declared these values secret, so the length threshold for guessed secrets does not
-apply. Independently, the shape patterns gain the classic GitHub token prefixes (`ghp_`, `gho_`,
-`ghu_`, `ghs_`, `ghr_`). That part is needed before the first nightly night and does not wait for the
-rest of this design (CP-1).
+apply. Shape-based redaction already covers GitHub classic and fine-grained tokens (§2) and stays as the
+floor.
 
 ## 9. Failure modes
 
@@ -223,8 +222,8 @@ own OS user, dedicated to it:
 
 - `MERCURY_API_TOKENS` on that host contains only `bot-nightly` and the operator's token, so every Run
   there is nightly work and inheriting the whole environment gives the token to nobody else.
-- `GH_TOKEN` is in that host's `mercury.env` (0600) and in `MERCURY_SECRETS`, until CP-1 covers the
-  classic shape.
+- `GH_TOKEN` is in that host's `mercury.env` (0600). Classic tokens are already redacted by shape;
+  listing the value in `MERCURY_SECRETS` as well is optional.
 - The host user's git is set to author as `mercury-nightly`
   (`334104664+mercury-nightly@users.noreply.github.com`) and to use `gh` as its credential helper
   (`gh auth setup-git`), which reads `GH_TOKEN` from the environment. Nobody runs `gh auth login` on
@@ -255,7 +254,7 @@ global git settings. The dedicated host can then accept other owners.
 
 | Id | Scope | Depends on |
 | --- | --- | --- |
-| CP-1 | Redact classic GitHub token shapes (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) | — |
+| CP-1 | ~~Redact classic GitHub token shapes~~: not needed, already covered (§2) | — |
 | CP-2 | Profile file: schema, loader, permission and overlap checks, `host credentials validate` | — |
 | CP-3 | Repository id normalization and resolution; creation-time refusal; `credentialProfile` on Runs; claim/resume parity; `host credentials resolve` | CP-2 |
 | CP-4 | Local adapters: layered environment (§6.1), isolated git and gh config, generated gitconfig with identity and credential helper | CP-3 |
@@ -263,7 +262,7 @@ global git settings. The dedicated host can then accept other owners.
 | CP-6 | Sandbox per-profile opt-in | CP-4 |
 | CP-7 | Exact-value redaction of profile values; doctor checks; `configuration.md` and `operations.md`; §12 migration notes | CP-4 |
 
-CP-1 is independent and should land before the first nightly night. CP-4 is the behaviour change
+CP-1 was dropped after checking the tree (§16). CP-4 is the behaviour change
 (§6.1) and ships behind a release note, since Runs without a profile lose ambient credentials.
 
 ## 15. Open questions
@@ -279,6 +278,12 @@ CP-1 is independent and should land before the first nightly night. CP-4 is the 
    enforced anywhere in Mercury today (`status.md`), and this design does not start that.
 
 ## 16. Revision history
+
+### 2026-09-26: CP-1 dropped
+
+The first draft claimed classic GitHub tokens (`ghp_` …) were not redacted by shape. They are:
+`domain/redact.ts:48` (`gh[pousr]_`), pinned by `test/redact.test.ts:129`. §2, §8, §12 and §14 were
+corrected.
 
 ### 2026-09-26: initial specification
 

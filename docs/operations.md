@@ -347,9 +347,9 @@ today: local adapters pass the worker's whole environment to every Run. Until
 credential profiles (`docs/credential-profiles-design.md`) ship, the nightly
 identity runs on a host, or a separate Mercury instance under its own OS user,
 that serves nothing else: `MERCURY_API_TOKENS` holds only `bot-nightly` and the
-operator's token. `GH_TOKEN` lives in that host's `mercury.env` (0600) and is
-also listed in `MERCURY_SECRETS`, because shape-based redaction does not yet
-catch classic `ghp_` tokens. The host user's git authors as `mercury-nightly`
+operator's token. `GH_TOKEN` lives in that host's `mercury.env` (0600); classic
+tokens are redacted by shape (`src/domain/redact.ts`), and listing the value in
+`MERCURY_SECRETS` too is optional. The host user's git authors as `mercury-nightly`
 (`334104664+mercury-nightly@users.noreply.github.com`) and uses `gh` as its
 credential helper (`gh auth setup-git`), which reads `GH_TOKEN` from the
 environment. Nobody runs `gh auth login` on that user.
