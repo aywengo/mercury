@@ -230,6 +230,7 @@ export async function e2eRunTerminal(env: NodeJS.ProcessEnv): Promise<boolean> {
       if (cursor) qs.set('cursor', cursor);
       const res = await fetch(`${url.replace(/\/$/, '')}/api/runs?${qs}`, {
         headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
       if (!res.ok) return false; // configured but unevaluable: fail closed
       const body = (await res.json()) as { runs?: { task?: string; status?: string }[]; nextCursor?: string | null };
@@ -280,8 +281,20 @@ export async function runSelectorWith(
   for (const issue of real) {
     let readyByTrusted = false;
     if (issueLabels(issue).includes(L_READY)) {
-      const timeline = (await io.get(`/repos/${repo}/issues/${issue.number}/timeline?per_page=100`)) as LabelEvent[];
-      readyByTrusted = readyActorsFor(issue, timeline).includes(TRUSTED_AUTHOR);
+      // The timeline is paginated: walk it (bounded) because a missed later labeled/unlabeled
+      // event would misreport the CURRENT ready actor — this is a security gate, so a hit cap
+      // fails closed (treated as not trusted).
+      const timeline: LabelEvent[] = [];
+      let tlPath: string | null = `/repos/${repo}/issues/${issue.number}/timeline?per_page=100`;
+      let capped = false;
+      for (let page = 0; page < 10 && tlPath; page++) {
+        const { body, link } = (await io.get(tlPath)) as { body: LabelEvent[]; link?: string | null };
+        timeline.push(...body);
+        const next = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
+        tlPath = next ? next.replace('https://api.github.com', '') : null;
+        if (page === 9 && tlPath) capped = true;
+      }
+      readyByTrusted = !capped && readyActorsFor(issue, timeline).includes(TRUSTED_AUTHOR);
     }
     candidates.push({ issue, readyByTrusted });
   }
@@ -308,7 +321,7 @@ export async function runSelector(repo: string, env: NodeJS.ProcessEnv, dryRun: 
   const token = ghToken(env);
   return runSelectorWith(
     {
-      get: async (path) => (await ghGet(path, token)).body,
+      get: async (path) => await ghGet(path, token),
       post: (path, body) => ghPost(path, body, token),
     },
     { ...env, REPO: repo },

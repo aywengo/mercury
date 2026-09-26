@@ -281,3 +281,42 @@ test('the open-issue list walks Link-header pages (round-4 review)', async () =>
   assert.equal(s.issue, 82, 'the page-2 candidate is visible to the ladder');
   assert.equal(paths.filter((p) => p.startsWith('/repos/')).length, 2, 'both pages fetched');
 });
+
+
+test('the timeline walk is paginated and a hit cap fails closed (round-5 review)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const ready_issue = issue({ number: 90, labels: [{ name: 'nightly:ready' }] });
+  const paths: string[] = [];
+  const io = {
+    async get(path: string) {
+      paths.push(path);
+      if (path.includes('/timeline')) {
+        paths.push(`tl:${path}`);
+        if (path.includes('page=2')) {
+          return { body: [{ event: 'labeled', actor: { login: 'random-dev' }, label: { name: 'nightly:ready' } }], link: null };
+        }
+        return { body: [{ event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } }], link: '<https://api.github.com/repos/aywengo/mercury/issues/90/timeline?per_page=100&page=2>; rel="next"' };
+      }
+      return { body: [ready_issue], link: null };
+    },
+    async post() { return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.issue, undefined, 'the CURRENT ready actor (page 2) is random-dev, not aywengo: not trusted');
+  assert.ok(paths.some((p) => p.includes('page=2')), 'the second timeline page was fetched');
+  // A capped walk (always another page) fails closed: no claim, rung 3/none, not trusted.
+  const io2 = {
+    async get(path: string) {
+      if (path.includes('/timeline')) {
+        return { body: [{ event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } }], link: '<https://api.github.com/repos/aywengo/mercury/issues/90/timeline?per_page=100&page=2>; rel="next"' };
+      }
+      return { body: [ready_issue], link: null };
+    },
+    async post() { return true; },
+  };
+  const posts: string[] = [];
+  const io3 = { async get(path: string) { return io2.get(path); }, async post(p2: string) { posts.push(p2); return true; } };
+  const s2 = await runSelectorWith(io3, { REPO: 'aywengo/mercury' }, false);
+  assert.deepEqual(posts, [], 'a capped timeline never trusts: no claim is attempted');
+  assert.notEqual(s2.rung, 1);
+});
