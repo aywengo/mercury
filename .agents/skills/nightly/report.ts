@@ -152,8 +152,9 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
   for (let page = 0; page < 10 && path; page++) {
     const res = await mercury.get(path);
     if (res.status < 200 || res.status >= 300) {
-      // The Mercury section is optional/best-effort: a failing runs listing degrades the section
-      // to empty (same policy as unreadable per-run events) instead of failing the whole digest.
+      // The Mercury section is optional/best-effort: a failing runs listing ends the scan and
+      // returns what was collected so far (an empty list on a first-page failure) instead of
+      // failing the whole digest - same policy as unreadable per-run events.
       return out;
     }
     const body = res.body as { runs?: { id?: string; task?: string; status?: string; constraints?: { notAfter?: string } }[]; nextCursor?: string };
