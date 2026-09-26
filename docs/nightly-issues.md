@@ -423,18 +423,49 @@ closed by the next night's report.
 
 ---
 
-## N1-5 (#742) — launchd stopgap: nightly Runs before the bot exists
+## N1-5 (#742) — Nightly bot config and first-night checklist
 
 **Labels:** `deployment`, `priority: medium`
-**Blocked by:** N0-1, N1-2, N1-3, N1-4, B0-3, #721
+**Blocked by:** #739 (N1-2), #740 (N1-3), #741 (N1-4)
+
+> Rewritten 2026-09-26. This issue was a launchd stopgap for running nightly Runs before the dispatcher bot existed. B1 landed (#735 scheduler, #736 dispatch/status, #737 service install), so the stopgap is superseded: the first night runs on a real bot config instead.
+
+### Mechanism
+
+The bot can now schedule everything in `nightly-self-development.md` §4.1, but no nightly bot config exists, and nothing records the preconditions checked before the first unattended night. Two specifics from the tree matter:
+
+- `notAfterAt: "HH:MM"` in a template resolves to `constraints.notAfter` on the fire's date (`src/host/bots/scheduler.ts:83`). This is the 06:00 cutoff.
+- A template without `constraints.maxDurationMs` gets 1 h, and without `maxRetries` gets 0 (`src/host/bots/dispatch.ts`). The E2E suite can exceed 1 h, so its task must set a duration explicitly.
 
 ### Fix
 
-`deploy/nightly/`: three Run templates and a launchd plist (plus a systemd timer equivalent) that call
-`mercuryctl runs create --file <template> --idempotency-key nightly-<task>-<date>-<HHMM> --not-after
-<date>T06:00` on the §4.1 schedule. This is deliberately thin, and retired by B1-3.
+1. **Example config** `deploy/nightly-bot.json.example`, alias `nightly` (owner `bot-nightly`), three tasks, all with `tz: "local"`, `singleFlight: true`, `onMiss: "skip"` and `notAfterAt: "06:00"`:
+
+   | Task | Cron | `maxDurationMs` |
+   | --- | --- | --- |
+   | `nightly-e2e` | `5 0 * * *` | sized to the suite's observed runtime plus margin |
+   | `nightly-next` | `*/20 0-4 * * *` | ≤ 80 min (the last fire at 04:40 still ends by 06:00 via `notAfter`) |
+   | `nightly-report` | `40 5 * * *` | 15 min |
+
+   Titles use `{{fire.date}}`. Task text points each Run at its nightly skill; nothing in the text grants authority, since the skill and the selector (#738) decide what is worked on.
+
+2. **Checklist** in `docs/operations.md`, section "Running the nightly bot", to be walked through before enabling the service:
+   1. The nightly GitHub identity exists (named, not only described), and its token is present only in the harness environment on the host.
+   2. Ruleset `main-protection` requires ≥ 1 approving review. Today `required_approving_review_count` is 0, so an identity with PR and contents write could merge its own PR on green CI, which breaks the v1 human-merge rule. @aywengo's bypass still allows direct merges.
+   3. The host runs a released `@aywengo/mercury` version, not a checkout.
+   4. There is a `MERCURY_API_TOKENS` entry for `bot-nightly`, and `bot-credentials.json` is 0600.
+   5. `mercury host bot validate --alias nightly` reports nothing.
+   6. `mercury host bot dispatch --alias nightly --task <t> --dry-run` for each task shows `botTask` set and `notAfter` at today's 06:00 local.
+   7. Docker is available to Runs (E2E uses testcontainers).
+   8. `mercury host bot service install --alias nightly`.
 
 ### Acceptance
 
-Three consecutive nights: Runs fire on schedule, none runs past 06:00, a repeated fire in the same
-minute creates no second Run, and a report issue exists each morning.
+1. A test loads `deploy/nightly-bot.json.example` through the real config loader and it validates without warnings, so the example cannot rot.
+2. A test resolves the `nightly-e2e` template for a 00:05 fire in `Europe/Warsaw` and gets `notAfter` = 06:00 the same local date. It covers a normal date and both DST-switch dates.
+3. The checklist is in `docs/operations.md`, and N1-5 in `docs/nightly-issues.md` points to it.
+4. First nights: three consecutive nights with fires on schedule, no Run running past 06:00, and a `nightly-report` issue each morning. This is recorded as a comment on this issue before it closes.
+
+### Likely files
+
+`deploy/nightly-bot.json.example`, `test/botConfig*.test.ts` (or a new `test/nightlyBotConfig.test.ts`), `docs/operations.md`, `docs/nightly-issues.md`.
