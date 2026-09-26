@@ -1,9 +1,10 @@
 # Nightly self-development — Mercury working on Mercury
 
-Status: **roadmap; nothing is implemented.** This document specifies how a
-Mercury host, driven by a dispatcher bot (`dispatcher-bot-design.md`), works on
-the `aywengo/mercury` repository unattended between 00:00 and 06:00 local time.
-No skill, bot config or label described here exists yet.
+Status: **in progress — N0 done, N1 partly done, dispatcher B0–B1 done;
+nothing runs unattended yet.** See §8.1 for the per-milestone status. This
+document specifies how a Mercury host, driven by a dispatcher bot
+(`dispatcher-bot-design.md`), works on the `aywengo/mercury` repository
+unattended between 00:00 and 06:00 local time.
 
 ## 1. Summary
 
@@ -63,6 +64,9 @@ If the worker runs one Run at a time, E2E and the ladder serialize through the
 queue. If it runs more, `nightly-next` must check that tonight's E2E Run is
 terminal before taking rung 1 (bugs it may be about to file).
 
+The bot config implementing this schedule is #742
+(`deploy/nightly-bot.json.example`).
+
 ### 4.2 The ladder
 
 Each `nightly-next` Run evaluates, in order, and takes the first rung with work:
@@ -72,16 +76,21 @@ Each `nightly-next` Run evaluates, in order, and takes the first rung with work:
 2. **New @aywengo issues** — authored by @aywengo, not yet labeled.
 3. **Docs → proposals** — §6.
 
-Selection runs in the skill as code against the GitHub API. The chosen issue is
-labeled `nightly:in-progress` before work starts, so a concurrent or retried Run
-does not take it twice.
+Selection runs as code against the GitHub API
+(`.agents/skills/nightly/select.ts`, #738). The chosen issue is labeled
+`nightly:in-progress` before work starts, so a concurrent or retried Run does
+not take it twice.
 
 ### 4.3 The window ends at 06:00
 
 - The last `nightly-next` fire is 04:40.
-- Every nightly Run carries a deadline that ends it before 06:00. **If Runs
-  have no deadline constraint today, adding one is a server prerequisite of
-  N2** — the bot never cancels Runs on shutdown.
+- Every nightly Run carries `constraints.notAfter` (#731), an absolute deadline
+  that also counts time spent queued: a Run past it is never started, and a
+  running Run is stopped at it. Bot templates set it with `notAfterAt: "06:00"`,
+  resolved on the fire's date. The bot never cancels Runs on shutdown, so this
+  constraint is the only thing that enforces the window.
+- A template without `constraints.maxDurationMs` gets 1 h from the bot. The
+  E2E task sets its own.
 - A Run stopped by its deadline leaves its issue labeled `nightly:in-progress`
   with a comment; `nightly-report` lists it, and the next night resets it.
 
@@ -98,25 +107,31 @@ issue `nightly:blocked`, put the question in an issue comment, finish the Run.
 1. **Trusted issues only.** The ladder considers an issue only if it is authored
    by @aywengo, filed by the bot from E2E, or labeled `nightly:ready` by
    @aywengo. Checked from the API's author and label-event actor fields, never
-   by the agent reading issue text.
+   by the agent reading issue text (#738).
 2. **Bot identity.** A GitHub App or machine user with fine-grained permissions
    on `aywengo/mercury` only: issues, pull requests, contents on branches.
-3. **Branch protection.** `main` requires review and green checks; the bot
-   cannot push to it.
+   Documented in `docs/operations.md`.
+3. **Branch protection.** `main` is protected by the `main-protection` ruleset:
+   PR required, `ci` required green, force-push and deletion blocked, @aywengo
+   alone on the bypass list. **The ruleset must require at least one approving
+   review before the first night.** With zero, the nightly identity could merge
+   its own PR on green CI.
 4. **Pinned host.** The nightly host runs a released `@aywengo/mercury`
    version, upgraded deliberately by a human. Work happens in Run workspaces,
    never in the installation.
 5. **Credentials.** The GitHub token reaches Runs through the harness
    environment, never through task text, argv or events.
-6. **Budgets.** Maximum PRs per night, token budget per night, and the
-   dispatcher's `maxDispatchesPerHour`.
-7. **Fail-closed capabilities.** Crew #721 (fail-closed capability checks) is
-   closed before anything runs unattended.
+6. **Budgets.** Maximum PRs per night and token budget per night, enforced by
+   the skills. The per-hour dispatch cap of `dispatcher-bot-design.md` is not
+   in the B1 config; the nightly schedule is bounded by its cron and
+   `singleFlight`.
+7. **Fail-closed capabilities.** Crew #721 is closed (PR #743).
 
 ### 5.1 Labels
 
 `nightly:ready`, `nightly:in-progress`, `nightly:blocked`, `nightly:proposed`,
-`origin:e2e`.
+`origin:e2e` — created (#728); meanings and the trust rule are in
+`docs/issue-triage.md`.
 
 ## 6. Docs → features, gated
 
@@ -130,23 +145,66 @@ decision on *what* gets built.
 
 ## 7. Skills
 
-- **`nightly-e2e`** — `npm run test:e2e` (the host needs Docker). Reruns each
-  failure once to separate flakes from defects. Fingerprints each real failure
-  (test name + normalized assertion/error), searches issues for the
+- **`nightly-e2e`** (#739) — `npm run test:e2e` (the host needs Docker). Reruns
+  each failure once to separate flakes from defects. Fingerprints each real
+  failure (test name + normalized assertion/error), searches issues for the
   fingerprint, comments on a match or files a new `origin:e2e` issue. Flakes
   are reported, not filed, until they recur on N nights.
-- **`nightly-next`** — the ladder (§4.2), then the issue-fix-loop for the
-  chosen issue.
-- **`nightly-report`** — one digest: PRs opened, issues filed or updated,
-  blocked items with their questions, Runs stopped by deadline, budget used.
+- **`nightly-next`** (#740) — the ladder (§4.2), then the issue-fix-loop for
+  the chosen issue; rung 3 drafts proposals only.
+- **`nightly-report`** (#741) — one digest: PRs opened, issues filed or
+  updated, blocked items with their questions, Runs stopped by deadline,
+  budget used.
 
 Role presets (Crew Milestone A): tester, fixer, planner.
 
 ## 8. Roadmap
 
-The issue set for N0, N1 and dispatcher B0–B1 is [`nightly-issues.md`](nightly-issues.md).
+The issue set for N0, N1 and dispatcher B0–B1 is
+[`nightly-issues.md`](nightly-issues.md).
 
-### N0 — guardrails (no bot code)
+### 8.1 Status (2026-09-26)
+
+| Milestone | Status | Issues |
+| --- | --- | --- |
+| N0 guardrails | **done**, except ruleset approvals (§5.3) | #727, #728 |
+| Dispatcher B0 | **done** | #729–#734 |
+| Dispatcher B1 | **done** | #735–#737 |
+| N1 skills | **in progress** — selector done | #738 done; #739, #740, #741 open |
+| N2 unattended | **not started** — bot config + first nights | #742 |
+| N3 docs → proposals | not started — needs nights, no new issues | (rung 3 in #740) |
+| N4 reactive | **not filed** — waits for evidence (§8.2 stage 4) | — |
+| N5 brain | **not filed** — waits for evidence (§8.2 stage 5) | — |
+
+Non-blocking follow-ups from B1: #759 (`host bot status` partial data on API
+failure), #760 (owner-transfer API for `--reassign-runs`).
+
+### 8.2 Stages
+
+The milestones below are delivered in five stages. Each stage adds autonomy
+only after the previous one has produced evidence that it can be trusted.
+
+1. **First night (N1 → N2).** Owner steps: set ruleset approvals to 1; create
+   and name the nightly identity. Agent work: #739–#741, then #742. Then walk
+   the #742 checklist, `host bot service install --alias nightly`, and record
+   three clean nights on #742.
+2. **Prove it (N2 acceptance, no new code).** Run nightly until the N2
+   acceptance holds (seven consecutive nights) and the §9 metrics have a
+   baseline. Defects the nights reveal become ordinary issues, and the ladder
+   takes them.
+3. **Docs → features (N3).** Review `nightly:proposed` issues and relabel the
+   ones worth doing to `nightly:ready`; later nights implement them. Needs
+   only time and review.
+4. **Reactive (N4 = dispatcher B2).** File the issue set only after stage 2
+   shows which failures actually occur. Requires `statusChangedAt` on the runs
+   list and the trigger engine.
+5. **Brain (N5 = dispatcher B3), optional.** File only if `nightly:blocked`
+   is a frequent outcome in the reports. Requires the `reason` field on input
+   events.
+
+Auto-merge is a later policy decision (§9), not a stage.
+
+### N0 — guardrails (no bot code) — done
 
 Bot identity, branch protection, labels, trust rule written down, pinned host
 version, budgets decided.
@@ -155,22 +213,25 @@ version, budgets decided.
 fixture test (issues by other authors, and labels applied by other actors, are
 excluded).
 
-### N1 — skills run by hand (parallel with dispatcher B0)
+### N1 — nightly skills — in progress
 
-`nightly-e2e`, `nightly-next`, `nightly-report` written and run through
-`mercuryctl runs create --file`, like B0's `workspace-audit`.
+`nightly-e2e`, `nightly-next`, `nightly-report`, and the selector they share.
+Originally they were to be run by hand before the bot existed. B1 landed first,
+so they are exercised through `host bot dispatch` instead.
 
 *Acceptance*: a seeded E2E failure is filed once and commented on the second
 run, not filed twice; `nightly-next` picks the right rung on seeded GitHub
 states; a Run that would need input ends with `nightly:blocked` instead.
 
-### N2 — unattended (dispatcher B0 + B1)
+### N2 — unattended (dispatcher B0 + B1) — not started
 
-Bot config with the §4.1 schedule; B0 prerequisites (idempotency replay,
-owner-id form) plus the Run deadline (§4.3).
+The nightly bot config with the §4.1 schedule and the first-night checklist
+(#742). B0 prerequisites (idempotency replay, owner-id form) and the Run
+deadline (§4.3) are done.
 
 *Acceptance*: seven consecutive nights with no double fires, every Run
 attributable to the bot, nothing running after 06:00, a report every morning.
+#742 closes after the first three; N2 closes after seven.
 
 ### N3 — docs → proposals (§6)
 
@@ -178,12 +239,12 @@ attributable to the bot, nothing running after 06:00, a report every morning.
 nothing labeled `nightly:proposed` is implemented without the `nightly:ready`
 relabel.
 
-### N4 — reactive (dispatcher B2)
+### N4 — reactive (dispatcher B2) — not filed
 
 A failed nightly Run triggers a triage/escalation Run that lands in the morning
 report; `maxChainDepth` stays at 2.
 
-### N5 — optional brain (dispatcher B3)
+### N5 — optional brain (dispatcher B3) — not filed
 
 The brain answers questions on the bot's own Runs from an allowlist (`skip`,
 `abort`). Prioritization stays in the skill.
@@ -203,6 +264,14 @@ is windowed. Always-on is simpler; windowed relies on Run durability across
 restarts.
 
 ## 10. Revision history
+
+### 2026-09-26 — status and stages
+
+Added §8.1 (status) and §8.2 (stages). §4.3 now describes the shipped
+`notAfter` (#731) instead of a prerequisite. §5.3 records the `main-protection`
+ruleset and its missing approval requirement. §5.6 notes that the per-hour
+dispatch cap is not in the B1 config. N1 is no longer "run by hand", since B1
+landed first, and the launchd stopgap is replaced by the bot config (#742).
 
 ### 2026-09-23 — initial roadmap
 
