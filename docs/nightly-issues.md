@@ -350,7 +350,13 @@ rule exists to close.
 
 A small script shipped with the skills (`.agents/skills/nightly/select.ts`, no dependencies, `gh api` or
 `fetch` with the harness token) that outputs one JSON decision:
-`{ rung, issue, reason }` or `{ rung: "none" }`.
+`{ rung, issue, reason }` or `{ rung: "none" }`. Status (N1-1, issue #738,
+2026-09-26): shipped and merged (PR #762) — the selector decides from GitHub
+metadata only (author, labels, timeline label actors), implements the
+§4.2 ladder with the e2e-terminal gate (paged, fail-closed), claims the chosen
+issue with `nightly:in-progress` before returning (422-already-exists = a
+racer won: re-select), and is pinned by `test/nightlySelect.test.ts`
+(21 tests).
 
 - Trust: author login, and for `nightly:ready` the actor of the labeling event from the issue timeline.
 - Excludes `nightly:in-progress`, `nightly:blocked` and `nightly:proposed`.
