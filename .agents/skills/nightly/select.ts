@@ -169,8 +169,8 @@ export function selectLadder(
   }
 
   // Rung 3: docs → proposals (§6). The nightly drafts the issue set itself; nothing to claim.
-  // 'none' is only for a repo with no open issues at all — including when every candidate was
-  // already claimed by a concurrent nightly (the callers drop claimed candidates).
+// Rung 3 covers every "issues existed but rungs 1-2 have nothing eligible" case — including a
+// caller that dropped claimed candidates. 'none' means the repo had ZERO open issues.
   if (candidates.length > 0 || (seenCount ?? 0) > 0) {
     return { rung: 3, reason: 'rungs 1 and 2 have no eligible work; the night drafts docs → proposals (§6)' };
   }
