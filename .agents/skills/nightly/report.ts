@@ -52,10 +52,10 @@ export interface ReportResult extends ReportData {
 }
 
 function assertRepo(repo: string): void {
-  // Mirrors select.ts's validation: same regex AND the same error message, so both skills
-  // fail identically on a bad repo.
+  // Same regex and the same error message as next.ts/e2e.ts, so every nightly entrypoint fails
+  // identically on a bad repo.
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
-    throw new Error(`REPO must be exactly owner/name (e.g. aywengo/mercury); got '${repo}'`);
+    throw new Error(`repo must be exactly owner/name (e.g. aywengo/mercury); got '${repo}'`);
   }
 }
 
@@ -258,7 +258,7 @@ export async function runReport(
 
 function ghToken(env: NodeJS.ProcessEnv): string {
   const tok = env.GH_TOKEN || env.GITHUB_TOKEN || '';
-  if (!tok) throw new Error('GH_TOKEN (or GITHUB_TOKEN) is required: the report files and closes issues');
+  if (!tok) throw new Error('GH_TOKEN (or GITHUB_TOKEN) is required - even for --dry-run, which still runs the searches');
   return tok;
 }
 
