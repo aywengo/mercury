@@ -100,7 +100,7 @@ export async function finishIssue(io: NextIo, opts: { repo: string; issue: numbe
 }
 
 /** The never-asks exit path: hand the question to a human via GitHub, remove the claim, finish. */
-export async function blockIssue(io: NextIo, opts: { repo: string; issue: number; reason: string }): Promise<{ removed: boolean; labeled: boolean; commented: boolean }> {
+export async function blockIssue(io: NextIo, opts: { repo: string; issue: number; reason: string }): Promise<{ removed: boolean; newlyLabeled: boolean; commented: boolean }> {
   assertRepo(opts.repo);
   const reason = opts.reason.trim();
   if (reason === '') throw new Error('a blocked exit needs a non-empty --reason (the question a human must answer)');
@@ -108,7 +108,9 @@ export async function blockIssue(io: NextIo, opts: { repo: string; issue: number
   // the second write. The comment MUST land before the claim is released - otherwise the issue is
   // unlabeled AND questionless (a silent stall). A failed comment fails hard; a rerun retries the
   // same writes (the label add is idempotent: already-present → false).
-  const labeled = await io.postLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels`, { labels: [L_BLOCKED] });
+  // `newlyLabeled` = the label add was NEW (false on an idempotent retry where the label was
+  // already present); the post-state is always "labeled" when this function returns.
+  const newlyLabeled = await io.postLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels`, { labels: [L_BLOCKED] });
   const res = await io.post(`/repos/${opts.repo}/issues/${opts.issue}/comments`, {
     body: `The nightly stopped on this issue instead of asking (nightly Runs never ask, §4.4).\n\n**Blocking question:** ${reason}\n\nClaim released; the issue is labeled \`${L_BLOCKED}\` for a human to answer or relabel.`,
   });
@@ -117,7 +119,7 @@ export async function blockIssue(io: NextIo, opts: { repo: string; issue: number
   }
   const commented = true;
   const removed = await io.deleteLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels/${encodeURIComponent(L_IN_PROGRESS)}`);
-  return { removed, labeled, commented };
+  return { removed, newlyLabeled, commented };
 }
 
 /** Idempotence helper for retries: a re-run of `blocked` on an already-blocked issue is a no-op

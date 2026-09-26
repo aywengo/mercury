@@ -121,7 +121,13 @@ test('finish removes nightly:in-progress (the success exit path)', async () => {
 test('blocked labels, comments the question, and removes the claim — the Run never asks', async () => {
   const { io, calls } = ioWith([], {});
   const out = await blockIssue(io, { repo: REPO, issue: 12, reason: 'Which of two presets should win?' });
-  assert.equal(out.labeled, true);
+  assert.equal(out.newlyLabeled, true);
+  // An idempotent retry (label already present) reports newlyLabeled: false, not a failure:
+  const { io: io2, setNewly } = ioWith([], {});
+  setNewly(false);
+  const out2 = await blockIssue(io2, { repo: REPO, issue: 12, reason: 'Which of two presets should win?' });
+  assert.equal(out2.newlyLabeled, false);
+  assert.equal(out2.removed, true);
   assert.equal(out.commented, true);
   assert.equal(out.removed, true);
   const order = calls.map((c) => c.method);
