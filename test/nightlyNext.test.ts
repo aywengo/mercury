@@ -27,7 +27,7 @@ function ioWith(issues: GhIssue[], timelines: Record<number, LabelEvent[]>, opts
       }
       const tl = path.match(/\/issues\/(\d+)\/timeline/);
       if (tl) return { body: timelines[Number(tl[1])] ?? [], status: 200, link: null };
-      const single = path.match(new RegExp(`^/repos/${REPO}/issues/(\\d+)$`));
+      const single = path.match(new RegExp(`^/repos/${REPO.replace('/', '\\/')}/issues/(\\d+)$`));
       if (single) {
         const found = issues.find((i) => i.number === Number(single[1]));
         return { body: found ?? null, status: found ? 200 : 404 };

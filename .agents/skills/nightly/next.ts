@@ -118,6 +118,7 @@ export async function blockIssue(io: NextIo, opts: { repo: string; issue: number
 /** Idempotence helper for retries: a re-run of `blocked` on an already-blocked issue is a no-op
  * repeat of the same writes (label add returns already-present; the comment repeats). */
 export async function blockedAlready(io: NextIo, opts: { repo: string; issue: number }): Promise<boolean> {
+  assertRepo(opts.repo);
   const res = await io.get(`/repos/${opts.repo}/issues/${opts.issue}`);
   if (res.status < 200 || res.status >= 300) return false;
   const labels = ((res.body as { labels?: GhLabel[] }).labels ?? []).map((l) => l.name ?? '');
