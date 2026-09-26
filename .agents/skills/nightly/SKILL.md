@@ -103,6 +103,25 @@ an issue comment, and releases the claim. On success run `finish` — every exit
 controls removes `nightly:in-progress`. A Run stopped by its deadline keeps the claim (§4.3);
 `nightly-report` lists it and the next night resets it.
 
+## Report (`report.ts`, N1-4)
+
+```bash
+node .agents/skills/nightly/report.ts --repo aywengo/mercury [--night YYYY-MM-DD] [--dry-run]
+```
+
+Files ONE digest issue per night, labeled `nightly:report`, titled
+`nightly report — <night>`, and closes the previous open report issue. Sections:
+
+- **PRs opened** and **issues filed** tonight (GitHub search, repo-scoped).
+- **Issues commented** tonight.
+- **Blocked** — open `nightly:blocked` issues with their blocking question (the never-asks exit
+  from `next.ts`).
+- **Runs stopped by notAfter** — the §4.3 window end. Read from the Mercury runs API
+  (`MERCURY_REPORT_API_URL` + `MERCURY_REPORT_TOKEN`); when unset the section is empty, not faked.
+- **Flakes** — the `nightly-e2e` flake-clock state (same state file).
+
+The report is read-only except for the digest issue itself and the close of yesterday's.
+
 ## Tests
 
 `test/nightlySelect.test.ts` pins the ladder on fixture-shaped issues and
