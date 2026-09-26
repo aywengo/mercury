@@ -951,7 +951,23 @@ typecheck + focused tests green.
   the command. `test/botDispatchStatus.test.ts` (15 tests) covers the key
   replay window, the `--yes`/`--dry-run` gates, singleFlight blocking and
   fail-closed, the paging stops, and the UNAVAILABLE degradation;
-- service install/uninstall per alias (including the §17.7 teardown message);
+- service install/uninstall per alias (including the §17.7 teardown message).
+  Status (B1-3, issue #737, 2026-09-26): `src/host/bots/service.ts` writes a
+  launchd agent (`com.mercury.bot.<alias>`) / systemd user unit
+  (`mercury-bot-<alias>.service`) through the same machinery `host service`
+  uses — same wrapper sourcing `mercury.env` (the bot's token still comes only
+  from `bot-credentials.json`, §4.2), same idempotent enable choreography,
+  `ExecStart` running `host bot run --alias <alias>`, `--dry-run` printing the
+  unit. Uninstall removes the unit, the state file, the `<alias>.json`, the
+  alias entry in the shared credentials file, and the `token:bot-<alias>`
+  entry in `MERCURY_API_TOKENS` (parseTokens-shape strict, everything else
+  preserved per #677), repairing any drifted 0600 mode it rewrites, and
+  ALWAYS prints the §17.7 consequence — including on the `--reassign-runs`
+  refusal path (#760 files the missing owner-transfer API). A malformed
+  credentials file aborts the uninstall loudly rather than leaving a token
+  copy behind. `test/botService.test.ts` (18 tests) pins the unit text, the
+  launchctl choreography call-by-call, the file/env removals, the gates, and
+  the loud-failure paths;
 - subprocess tests against a real test server with a fake clock.
 
 *Acceptance*: §17 items 1, 2, 3 and 7 hold for a brain-less bot; a scheduled
