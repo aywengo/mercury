@@ -85,11 +85,20 @@ export function isTrusted(issue: GhIssue, readyByTrusted: boolean): boolean {
   return readyByTrusted;
 }
 
-/** The actor(s) who applied nightly:ready, from the issue's timeline (labeled events only). */
+/**
+ * Whether the CURRENT nightly:ready was applied by the trusted actor, from the issue's timeline:
+ * walk labeled/unlabeled events for the ready label in order; the final state decides. An
+ * @aywengo ready that was later unlabeled and re-applied by someone else is NOT trusted — the
+ * approval an operator gave is the one on the label NOW, not one from history.
+ */
 export function readyActorsFor(issue: GhIssue, timeline: LabelEvent[]): string[] {
-  return timeline
-    .filter((e) => e.event === 'labeled' && e.label?.name === L_READY && e.actor?.login)
-    .map((e) => e.actor!.login!);
+  let current: string | null = null; // actor of the latest 'labeled' while not unlabeled since
+  for (const e of timeline) {
+    if (e.label?.name !== L_READY) continue;
+    if (e.event === 'labeled' && e.actor?.login) current = e.actor.login;
+    if (e.event === 'unlabeled') current = null;
+  }
+  return current ? [current] : [];
 }
 
 export function isExcluded(issue: GhIssue): boolean {

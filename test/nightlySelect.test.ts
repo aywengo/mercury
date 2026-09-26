@@ -36,10 +36,10 @@ test('a nightly:ready label applied by another actor is ignored; by @aywengo it 
   const other = issue({ number: 2, labels: [{ name: 'nightly:ready' }] });
   const self = issue({ number: 3, labels: [{ name: 'nightly:ready' }] });
   const tOther = [labeled('random-dev', 'nightly:ready')];
-  const tSelf = [labeled('aywengo', 'nightly:ready'), labeled('random-dev', 'nightly:ready')];
+  const tSelf = [labeled('random-dev', 'nightly:ready'), labeled('aywengo', 'nightly:ready')];
   const s = selectLadder([cand(other, tOther), cand(self, tSelf)], TERMINAL);
   assert.equal(s.rung, 1);
-  assert.equal(s.issue, 3, 'only the @aywengo-applied ready label counts');
+  assert.equal(s.issue, 3, 'only the @aywengo-applied CURRENT ready label counts');
   // The other-labeled issue alone: not rung 1.
   const s2 = selectLadder([cand(other, tOther)], TERMINAL);
   assert.notEqual(s2.issue, 2);
@@ -118,14 +118,36 @@ test('isTrusted / isExcluded / priorityRank unit behavior', () => {
   assert.equal(priorityRank(issue({ number: 8 })), 3);
 });
 
-test('readyActorsFor reads only labeled events for the ready label', () => {
-  const events: LabelEvent[] = [
+test('readyActorsFor tracks the CURRENT ready state, not history (round-2 review)', () => {
+  // aywengo labeled, then UNLABELED: no current ready approval.
+  const unlabeled: LabelEvent[] = [
     { event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } },
     { event: 'labeled', actor: { login: 'x' }, label: { name: 'bug' } },
     { event: 'unlabeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } },
+  ];
+  assert.deepEqual(readyActorsFor(issue({ number: 9 }), unlabeled), []);
+  // aywengo labeled, someone else unlabeled and re-labeled: the CURRENT approval is not aywengo's.
+  const taken_over: LabelEvent[] = [
+    { event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } },
+    { event: 'unlabeled', actor: { login: 'random-dev' }, label: { name: 'nightly:ready' } },
+    { event: 'labeled', actor: { login: 'random-dev' }, label: { name: 'nightly:ready' } },
+  ];
+  assert.deepEqual(readyActorsFor(issue({ number: 10 }), taken_over), ['random-dev']);
+  assert.equal(isTrusted(issue({ number: 10, labels: [{ name: 'nightly:ready' }] }), readyActorsFor(issue({ number: 10 }), taken_over).includes('aywengo')), false);
+  // aywengo labeled, other unlabeled, aywengo re-labeled: trusted again.
+  const reclaimed: LabelEvent[] = [
+    { event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } },
+    { event: 'unlabeled', actor: { login: 'random-dev' }, label: { name: 'nightly:ready' } },
+    { event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } },
+  ];
+  assert.deepEqual(readyActorsFor(issue({ number: 11 }), reclaimed), ['aywengo']);
+  // The simple case stays: one labeled event by aywengo.
+  const simple: LabelEvent[] = [
+    { event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } },
+    { event: 'labeled', actor: { login: 'x' }, label: { name: 'bug' } },
     { event: 'closed', actor: { login: 'aywengo' } },
   ];
-  assert.deepEqual(readyActorsFor(issue({ number: 9 }), events), ['aywengo']);
+  assert.deepEqual(readyActorsFor(issue({ number: 12 }), simple), ['aywengo']);
 });
 
 
