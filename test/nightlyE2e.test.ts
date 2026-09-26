@@ -134,6 +134,49 @@ test('parseFailures extracts names, errors and files from the spec reporter', ()
   assert.equal(failures[0]!.file, 'e2e/system.test.ts');
 });
 
+test('parseFailures keeps Windows drive-letter paths intact (no drive-colon truncation)', () => {
+  const out = [
+    '✖ windows defect (0.5ms)',
+    'ℹ pass 0',
+    'ℹ fail 1',
+    '',
+    '✖ failing tests:',
+    '',
+    'test at C:\\ci\\ws\\e2e\\system.test.ts:42:1',
+    '✖ windows defect (0.5ms)',
+    '  AssertionError: boom',
+  ].join('\n');
+  const failures = parseFailures(out);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.file, 'C:\\ci\\ws\\e2e\\system.test.ts');
+  assert.equal(failures[0]!.error, 'AssertionError: boom');
+});
+
+test('parseFailures error-scan stays inside the matching detail entry', () => {
+  // Two failures: the error found for each must come from ITS OWN detail entry, never from an
+  // earlier/later block (a scan that started at the wrong offset would corrupt fingerprints).
+  const out = [
+    '✖ first (0.5ms)',
+    '✖ second (0.6ms)',
+    'ℹ pass 0',
+    'ℹ fail 2',
+    '',
+    '✖ failing tests:',
+    '',
+    'test at a.test.ts:1:1',
+    '✖ first (0.5ms)',
+    '  Error: first error',
+    '',
+    'test at b.test.ts:2:1',
+    '✖ second (0.6ms)',
+    '  Error: second error',
+  ].join('\n');
+  const failures = parseFailures(out);
+  assert.equal(failures.length, 2);
+  assert.deepEqual(failures.map((f) => f.error), ['Error: first error', 'Error: second error']);
+  assert.deepEqual(failures.map((f) => f.file), ['a.test.ts', 'b.test.ts']);
+});
+
 test('parseCounts reads the summary', () => {
   assert.deepEqual(parseCounts('ℹ pass 12\nℹ fail 3'), { pass: 12, fail: 3 });
   assert.deepEqual(parseCounts('nothing here'), { pass: 0, fail: 0 });

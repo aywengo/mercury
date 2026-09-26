@@ -128,9 +128,13 @@ export function parseFailures(output: string): SuiteFailure[] {
   const failures: SuiteFailure[] = [];
   let pendingFile: string | undefined;
   for (const l of detail) {
-    const at = /^\s*test at (.*?):\d+(?::\d+)?\s*$/.exec(l);
+    // Greedy capture + suffix strip: a non-greedy (.*?) would stop at the drive colon of
+    // C:\repo\system.test.ts:42:1 and capture just 'C'.
+    const at = /^\s*test at (.+):\d+(?::\d+)?\s*$/.exec(l);
     if (at?.[1]) {
-      pendingFile = at[1];
+      // Greedy capture keeps Windows drive colons; any trailing :line:col groups were matched by
+      // the suffix regex, but a single-suffix line can leave :N inside the capture - strip it.
+      pendingFile = at[1].replace(/:\d+$/, '');
       continue;
     }
     const fail = /^✖\s+(.+?)\s+\(\d+(?:\.\d+)?m?s\)\s*$/.exec(l);
@@ -144,6 +148,7 @@ export function parseFailures(output: string): SuiteFailure[] {
   }
   for (const f of failures) {
     const idx = detail.findIndex((l) => l.startsWith(`✖ ${f.test} (`) || l.startsWith(`✖ ${f.test} `));
+    if (idx === -1) continue; // no detail block line for this name: leave the error empty
     for (let i = idx + 1; i < detail.length && i < idx + 12; i++) {
       const l = detail[i]!;
       const s = l.trim();
@@ -344,7 +349,7 @@ export async function runE2eSkill(
     const marker = fpMarker(fp);
     let existing: number | null;
     try {
-      existing = await findIssueByMarker(io, opts.repo, marker, token());
+      existing = await findIssueByMarker(io, opts.repo, marker);
     } catch (e: unknown) {
       // The search failed (rate limit, permissions, unexpected response): "no match" is NOT
       // established, so filing could duplicate. Record the observation and skip this night.
@@ -400,7 +405,7 @@ export async function runE2eSkill(
 /** Find the OPEN issue whose body carries the exact fingerprint marker. Walks ?page=N (the io
  * contract hides headers, and GitHub's REST pagination accepts an explicit page parameter),
  * bounded at 10 pages = the newest 1000 open issues. */
-export async function findIssueByMarker(io: E2eIo, repo: string, marker: string, token: string): Promise<number | null> {
+export async function findIssueByMarker(io: E2eIo, repo: string, marker: string): Promise<number | null> {
   for (let page = 1; page <= 10; page++) {
     const res = await io.get(`/repos/${repo}/issues?state=open&per_page=100&page=${page}`);
     if (res.status < 200 || res.status >= 300) {
