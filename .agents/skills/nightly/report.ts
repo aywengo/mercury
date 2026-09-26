@@ -184,9 +184,11 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
       while (evPath && evPages < 10 && !timedOut) {
         const evRes = await mercury.get(evPath);
         if (evRes.status < 200 || evRes.status >= 300) break; // unreadable events: skip, do not fail the digest
-        const evBody = evRes.body as { events?: { type?: string; data?: { reason?: string } }[]; nextCursor?: number; hasMore?: boolean };
+        // The API returns MercuryEvent objects: the reason lives in `payload` (the worker
+        // appends run.timed_out with payload { runId, reason }).
+        const evBody = evRes.body as { events?: { type?: string; payload?: { reason?: string } }[]; nextCursor?: number; hasMore?: boolean };
         const events = evBody.events ?? [];
-        timedOut = events.some((e) => e.type === 'run.timed_out' && e.data?.reason === 'not-after');
+        timedOut = events.some((e) => e.type === 'run.timed_out' && e.payload?.reason === 'not-after');
         evPages += 1;
         evPath = evBody.hasMore && evBody.nextCursor !== undefined && events.length > 0
           ? `/api/runs/${run.id}/events?after=${evBody.nextCursor}`
@@ -267,40 +269,56 @@ export async function runReport(
     return { night: opts.night, ...data };
   }
 
-  // Create the digest FIRST, then close yesterday's: a create failure must never leave the repo
-  // with NO open report. Worst case of a close failure is two open reports until tonight's next
-  // run closes them - strictly better than a missing digest.
-  const body = digestBody(opts.night, data);
-  const created = await io.post(`/repos/${opts.repo}/issues`, {
-    title: `nightly report — ${opts.night}`,
-    body,
-    labels: [L_REPORT],
-  });
-  if (created.status < 200 || created.status >= 300) {
-    throw new Error(`digest issue create failed: POST /repos/${opts.repo}/issues -> ${created.status}`);
-  }
-  const issue = (created.body as { number?: number } | null)?.number;
-  if (issue === undefined) {
-    // A 2xx create whose body we could not parse: closing yesterday's now could leave ZERO open
-    // reports (the new one is unidentifiable). Fail hard instead; the retry re-runs the night.
-    throw new Error(`digest issue create returned no issue number (POST status ${created.status}); yesterday's report stays open`);
-  }
+  // The digest title carries its night: creation is IDEMPOTENT (a retry after a timeout or a
+  // failed close reuses the same-night issue instead of filing a duplicate), and the close loop
+  // NEVER touches a same-night issue (a concurrent invocation's digest is not ours to close).
+  const title = `nightly report — ${opts.night}`;
 
-  let closedPrevious: number | undefined;
+  // Find open reports; reuse a same-night one if it exists.
+  let issue: number | undefined;
+  const closeables: { number: number; title?: string }[] = [];
   for (let page = 1; page <= SEARCH_CAP; page++) {
     const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
     const res = await io.get(path);
     if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
-    const prev = (res.body as { number?: number }[] | null) ?? [];
+    const prev = (res.body as { number?: number; title?: string }[] | null) ?? [];
     for (const old of prev) {
-      if (old.number === undefined || old.number === issue) continue;
-      const closed = await io.patch(`/repos/${opts.repo}/issues/${old.number}`, { state: 'closed' });
-      // Record the close only when it SUCCEEDED: the CLI's ghPatch returns non-2xx without
-      // throwing, and the JSON must not claim a close that did not happen. The digest is already
-      // filed, so a failed close is reported, not fatal - tonight's run closes it.
-      if (closed.status >= 200 && closed.status < 300) closedPrevious = closedPrevious ?? old.number;
+      if (old.number === undefined) continue;
+      if (old.title === title) issue = issue ?? old.number;
+      else closeables.push({ number: old.number, title: old.title });
     }
     if (prev.length < 100) break;
+  }
+
+  // Create the digest FIRST, then close yesterday's: a create failure must never leave the repo
+  // with NO open report. Worst case of a close failure is two open reports until tonight's next
+  // run closes them - strictly better than a missing digest.
+  if (issue === undefined) {
+    const body = digestBody(opts.night, data);
+    const created = await io.post(`/repos/${opts.repo}/issues`, {
+      title,
+      body,
+      labels: [L_REPORT],
+    });
+    if (created.status < 200 || created.status >= 300) {
+      throw new Error(`digest issue create failed: POST /repos/${opts.repo}/issues -> ${created.status}`);
+    }
+    issue = (created.body as { number?: number } | null)?.number;
+    if (issue === undefined) {
+      // A 2xx create whose body we could not parse: closing yesterday's now could leave ZERO open
+      // reports (the new one is unidentifiable). Fail hard instead; the retry re-runs the night.
+      throw new Error(`digest issue create returned no issue number (POST status ${created.status}); yesterday's report stays open`);
+    }
+  }
+
+  let closedPrevious: number | undefined;
+  for (const old of closeables) {
+    if (old.number === issue) continue;
+    const closed = await io.patch(`/repos/${opts.repo}/issues/${old.number}`, { state: 'closed' });
+    // Record the close only when it SUCCEEDED: the CLI's ghPatch returns non-2xx without
+    // throwing, and the JSON must not claim a close that did not happen. The digest is already
+    // filed, so a failed close is reported, not fatal - tonight's run closes it.
+    if (closed.status >= 200 && closed.status < 300) closedPrevious = closedPrevious ?? old.number;
   }
   return { night: opts.night, ...(issue !== undefined ? { issue } : {}), ...(closedPrevious !== undefined ? { closedPrevious } : {}), ...data };
 }

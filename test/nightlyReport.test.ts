@@ -60,7 +60,7 @@ function ioWith(opts: {
           if (path.startsWith('/api/runs?')) return { body: { runs: opts.timedOutRuns ?? [] }, status: 200 };
           const id = path.match(/\/api\/runs\/([^/]+)\/events/)?.[1];
           const events = id && opts.notAfterRunIds?.includes(id)
-            ? [{ type: 'run.timed_out', data: { reason: 'not-after' } }]
+            ? [{ type: 'run.timed_out', payload: { runId: 'r', reason: 'not-after' } }]
             : [];
           return { body: { events, nextCursor: events.length > 0 ? 5 : 0, hasMore: false }, status: 200 };
         },
@@ -179,11 +179,41 @@ test('runs stopped by notAfter: scoped to the report night, reason event require
   assert.deepEqual(stopped, [{ runId: 'run_b', task: 'nightly-e2e', status: 'TIMED_OUT' }]);
 });
 
+test('the reason is read from MercuryEvent.payload (the real API shape), not .data', async () => {
+  const { io } = ioWith({
+    mercury: true,
+    timedOutRuns: [
+      { id: 'run_p', task: 'nightly-e2e', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-26T04:00:00.000Z' } },
+    ],
+    notAfterRunIds: ['run_p'],
+  });
+  const stopped = await collectRunsStopped(io.mercury!, '2026-09-26');
+  assert.deepEqual(stopped, [{ runId: 'run_p', task: 'nightly-e2e', status: 'TIMED_OUT' }]);
+
+  // A run whose timed_out event carries the reason in a different field is NOT reported: the
+  // fixture used by earlier drafts (data.reason) would have masked a real bug here.
+  const io2: ReportIo = {
+    mercury: {
+      async get(path) {
+        if (path.startsWith('/api/runs?')) {
+          return { body: { runs: [{ id: 'run_d', task: 'x', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-26T04:00:00.000Z' } }] }, status: 200 };
+        }
+        return { body: { events: [{ type: 'run.timed_out', data: { reason: 'not-after' } }] }, status: 200 };
+      },
+    },
+    async get() { return { body: [], status: 200 }; },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const stopped2 = await collectRunsStopped(io2.mercury!, '2026-09-26');
+  assert.deepEqual(stopped2, [], 'a data-shaped reason is not the Mercury API contract');
+});
+
 test('a run.timed_out event past the first events page is still found (nextCursor walk)', async () => {
   const calls: string[] = [];
   const eventsPages: Record<string, { body: unknown; status: number }> = {
     '/api/runs/run_long/events': { body: { events: Array.from({ length: 1000 }, () => ({ type: 'log', data: {} })), nextCursor: 1000, hasMore: true }, status: 200 },
-    '/api/runs/run_long/events?after=1000': { body: { events: [{ type: 'run.timed_out', data: { reason: 'not-after' } }], nextCursor: 1005, hasMore: false }, status: 200 },
+    '/api/runs/run_long/events?after=1000': { body: { events: [{ type: 'run.timed_out', payload: { runId: 'r', reason: 'not-after' } }], nextCursor: 1005, hasMore: false }, status: 200 },
   };
   const io: ReportIo = {
     mercury: {
@@ -295,6 +325,42 @@ test('flakes come from the e2e flake-clock state file', () => {
   const flakes = collectFlakes({ XDG_STATE_HOME: dir }, '2026-09-26');
   assert.equal(flakes.length, 2);
   assert.equal(flakes[0]!.fingerprint, 'fp1', 'most recent night first');
+});
+
+test('a retry reuses the same-night digest (idempotent create, no duplicate)', async () => {
+  const order: string[] = [];
+  const { io: base } = ioWith({
+    issues: [
+      { number: 700, title: 'nightly report — 2026-09-26', labels: [{ name: 'nightly:report' }] },
+      { number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] },
+    ],
+  });
+  const io: ReportIo = {
+    async get(path) { const r = await base.get(path); order.push('GET ' + path.slice(0, 40)); return r; },
+    async post(path, body) { order.push('POST ' + path); return { body: { number: 901 }, status: 201 }; },
+    async patch(path) { order.push('PATCH ' + path); return { body: {}, status: 200 }; },
+  };
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.issue, 700, 'the existing same-night digest is reused');
+  assert.equal(out.closedPrevious, 500, "yesterday's is still closed");
+  assert.ok(!order.some((o) => o.startsWith('POST')), 'no create happens when the same-night report exists');
+});
+
+test('a same-night digest from a concurrent run is NEVER closed', async () => {
+  const { io } = ioWith({
+    issues: [
+      { number: 701, title: 'nightly report — 2026-09-26', labels: [{ name: 'nightly:report' }] }, // concurrent
+      { number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] },
+    ],
+  });
+  const closedPaths: string[] = [];
+  const failingClose: ReportIo = {
+    ...io,
+    async post(path, body) { return { body: { number: 902 }, status: 201 }; },
+    async patch(path) { closedPaths.push(path); return { body: {}, status: 200 }; },
+  };
+  await runReport(failingClose, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.deepEqual(closedPaths, ['/repos/aywengo/mercury/issues/500'], 'only the OTHER night\'s report is closed');
 });
 
 test('a 2xx create without a parseable number fails hard BEFORE closing yesterday\'s report', async () => {
