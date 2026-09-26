@@ -1,0 +1,335 @@
+/**
+ * `nightly/report.ts` — the morning digest (N1-4, #741).
+ *
+ * One GitHub issue per night, labeled `nightly:report`, closed by the next night's report:
+ *
+ *   - PRs opened tonight and issues filed tonight (GitHub search, repo-scoped, bounded).
+ *   - Issues commented on tonight (search `commented:NIGHT`, exactly that day).
+ *   - Blocked items: open issues labeled `nightly:blocked` with their latest blocking question.
+ *   - Runs stopped by `notAfter` (the §4.3 window end) — optional section, only when
+ *     `MERCURY_REPORT_API_URL` + `MERCURY_REPORT_TOKEN` are set; the Mercury runs API is read
+ *     for TIMED_OUT runs and their `run.timed_out` reason event.
+ *   - Flakes: the nightly-e2e flake clock (same state file) — recent fingerprint nights.
+ *
+ * Output: exactly one JSON line
+ * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, blocked, runsStopped, flakes }`.
+ * No dependencies; all I/O injectable. Writes: the digest issue itself and the close of the
+ * previous open report (recorded only when the close returns 2xx).
+ */
+
+import { basename } from 'node:path';
+import { loadFlakeState, localDateString } from './e2e.ts';
+
+const L_REPORT = 'nightly:report';
+const L_BLOCKED = 'nightly:blocked';
+const SEARCH_PER_PAGE = 100;
+const SEARCH_CAP = 10; // pages of 100 = 1000 hits, bounded
+
+export interface ReportIo {
+  get(path: string): Promise<{ body: unknown; status: number; link?: string | null }>;
+  post(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
+  /** PATCH (issue close) — separate so tests can record it distinctly. */
+  patch(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
+  /** Mercury runs API (optional source). */
+  mercury?: {
+    get(path: string): Promise<{ body: unknown; status: number }>;
+  };
+}
+
+export interface ReportData {
+  prs: { number?: number; title: string; url?: string }[];
+  issuesFiled: { number?: number; title: string; url?: string; author?: string }[];
+  issuesCommented: { number?: number; title: string; url?: string }[];
+  blocked: { number?: number; title: string; question?: string }[];
+  runsStopped: { runId?: string; task?: string; status?: string }[];
+  flakes: { fingerprint: string; test: string; nights: string[] }[];
+}
+
+export interface ReportResult extends ReportData {
+  night: string;
+  issue?: number;
+  closedPrevious?: number;
+}
+
+function assertRepo(repo: string): void {
+  // Mirrors select.ts's validation: same regex AND the same error message, so both skills
+  // fail identically on a bad repo.
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    throw new Error(`REPO must be exactly owner/name (e.g. aywengo/mercury); got '${repo}'`);
+  }
+}
+
+async function search(io: ReportIo, repo: string, query: string): Promise<{ number?: number; title: string; url?: string; author?: string }[]> {
+  const out: { number?: number; title: string; url?: string; author?: string }[] = [];
+  for (let page = 1; page <= SEARCH_CAP; page++) {
+    const path = `/search/issues?q=${encodeURIComponent(`repo:${repo} ${query}`)}&per_page=${SEARCH_PER_PAGE}&page=${page}`;
+    const res = await io.get(path);
+    if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
+    const items = ((res.body as { items?: { number?: number; title?: string; html_url?: string; user?: { login?: string } }[] }).items ?? []);
+    for (const it of items) {
+      out.push({ number: it.number, title: it.title ?? '', url: it.html_url, ...(it.user?.login ? { author: it.user.login } : {}) });
+    }
+    if (items.length < SEARCH_PER_PAGE) break;
+  }
+  return out;
+}
+
+/** Open issues labeled nightly:blocked, each with the most recent **Blocking question:** marker
+ * as the question (falling back to the last comment only when no marker exists). */
+export async function collectBlocked(io: ReportIo, repo: string): Promise<{ number?: number; title: string; question?: string }[]> {
+  const out: { number?: number; title: string; question?: string }[] = [];
+  for (let page = 1; page <= SEARCH_CAP; page++) {
+    const path = `/repos/${repo}/issues?labels=${encodeURIComponent(L_BLOCKED)}&state=open&per_page=100&page=${page}`;
+    const res = await io.get(path);
+    if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
+    const issues = (res.body as { number?: number; title?: string }[] | null) ?? [];
+    for (const issue of issues) {
+      if (issue.number === undefined) continue;
+      out.push({ number: issue.number, title: issue.title ?? '', question: await blockingQuestion(io, repo, issue.number) });
+    }
+    if (issues.length < 100) break;
+  }
+  return out;
+}
+
+/** The blocking question for an issue: walk the comment pages (bounded) and take the LAST
+ * `**Blocking question:**` marker - the most recent blocked exit. If no marker exists (a
+ * hand-labeled blocked issue), fall back to the last comment body, truncated. */
+async function blockingQuestion(io: ReportIo, repo: string, issue: number): Promise<string | undefined> {
+  let question: string | undefined;
+  for (let page = 1; page <= 10; page++) {
+    const res = await io.get(`/repos/${repo}/issues/${issue}/comments?per_page=100&page=${page}`);
+    if (res.status < 200 || res.status >= 300) break; // unreadable comments: leave the question unset
+    const comments = (res.body as { body?: string }[] | null) ?? [];
+    for (const c of comments) {
+      if (!c.body) continue;
+      const marker = c.body.split('\n').find((l) => l.startsWith('**Blocking question:**'));
+      if (marker) question = marker.replace(/^\*\*Blocking question:\*\*\s*/, '');
+    }
+    if (comments.length < 100) {
+      if (question === undefined) {
+        const last = comments[comments.length - 1];
+        if (last?.body) question = last.body.slice(0, 200);
+      }
+      break;
+    }
+  }
+  return question;
+}
+
+/** TIMED_OUT runs stopped by the §4.3 window end DURING the report night: cursor-paginated
+ * (bounded), each candidate filtered by its constraints.notAfter falling on the report night's
+ * local date before the events fetch (a backfill must not show other nights' stops). */
+export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury']>, night: string): Promise<{ runId?: string; task?: string; status?: string }[]> {
+  const out: { runId?: string; task?: string; status?: string }[] = [];
+  let path: string | undefined = '/api/runs?status=TIMED_OUT&limit=100';
+  for (let page = 0; page < 10 && path; page++) {
+    const res = await mercury.get(path);
+    if (res.status < 200 || res.status >= 300) throw new Error(`Mercury GET ${path} -> ${res.status}`);
+    const body = res.body as { runs?: { id?: string; task?: string; status?: string; constraints?: { notAfter?: string } }[]; nextCursor?: string };
+    const runs = body.runs ?? [];
+    for (const run of runs) {
+      if (!run.id) continue;
+      // notAfter must land on the report night (an ISO instant whose LOCAL date in the run's
+      // constraint equals the night; the report compares the UTC date of the instant — the bot
+      // writes notAfterAt in the host's local tz resolved to an ISO instant, and the nightly
+      // window is a local day, so the UTC date of the deadline is the same day for the Poznań
+      // window). Cheap pre-filter before the per-run events fetch.
+      const notAfter = run.constraints?.notAfter;
+      if (!notAfter || notAfter.slice(0, 10) !== night) continue;
+      // The events endpoint caps a page at 1000: scan forward via nextCursor (bounded) so the
+      // terminal run.timed_out event is observed even on long runs.
+      let evPath: string | undefined = `/api/runs/${run.id}/events`;
+      let timedOut = false;
+      let evPages = 0;
+      while (evPath && evPages < 10 && !timedOut) {
+        const evRes = await mercury.get(evPath);
+        if (evRes.status < 200 || evRes.status >= 300) break; // unreadable events: skip, do not fail the digest
+        const evBody = evRes.body as { events?: { type?: string; data?: { reason?: string } }[]; nextCursor?: number; hasMore?: boolean };
+        const events = evBody.events ?? [];
+        timedOut = events.some((e) => e.type === 'run.timed_out' && e.data?.reason === 'not-after');
+        evPages += 1;
+        evPath = evBody.hasMore && evBody.nextCursor !== undefined && events.length > 0
+          ? `/api/runs/${run.id}/events?after=${evBody.nextCursor}`
+          : undefined;
+      }
+      if (timedOut) out.push({ runId: run.id, task: run.task, status: run.status });
+    }
+    path = body.nextCursor ? `/api/runs?status=TIMED_OUT&limit=100&cursor=${encodeURIComponent(body.nextCursor)}` : undefined;
+  }
+  return out;
+}
+
+/** Flake-clock entries as of `night`: only nights <= the report night (a backfill run with an
+ * older --night must not display future dates), most recent last-night first. */
+export function collectFlakes(env: NodeJS.ProcessEnv, night: string): { fingerprint: string; test: string; nights: string[] }[] {
+  const state = loadFlakeState(env);
+  return Object.entries(state)
+    .map(([fingerprint, entry]) => ({ fingerprint, test: entry.test, nights: entry.nights.filter((n) => n <= night) }))
+    .filter((f) => f.nights.length > 0)
+    .sort((a, b) => (b.nights[b.nights.length - 1] ?? '').localeCompare(a.nights[a.nights.length - 1] ?? ''));
+}
+
+function digestBody(night: string, data: ReportData, note?: string): string {
+  const lines: string[] = [`# nightly report — ${night}`, ''];
+  if (note) lines.push(`_${note}_`, '');
+  const list = (items: { title: string; url?: string; number?: number }[], empty: string): string =>
+    items.length === 0 ? empty : items.map((it) => {
+      const text = it.title || (it.number !== undefined ? `#${it.number}` : 'untitled');
+      return `- ${it.url ? `[${text}](${it.url})` : text}`;
+    }).join('\n');
+  lines.push('## PRs opened', list(data.prs, '_none_'), '');
+  lines.push('## Issues filed', list(data.issuesFiled, '_none_'), '');
+  lines.push('## Issues commented', list(data.issuesCommented, '_none_'), '');
+  lines.push('## Blocked (nightly:blocked, waiting on a human)',
+    data.blocked.length === 0 ? '_none_' : data.blocked.map((b) => `- #${b.number} ${b.title}${b.question ? ` — question: ${b.question}` : ''}`).join('\n'), '');
+  lines.push('## Runs stopped by notAfter (the 06:00 window end)',
+    data.runsStopped.length === 0 ? '_none_' : data.runsStopped.map((r) => `- \`${r.runId}\` — ${(r.task ?? '').slice(0, 120)}`).join('\n'), '');
+  lines.push('## Flakes (nightly-e2e clock)',
+    data.flakes.length === 0 ? '_none_' : data.flakes.map((f) => `- \`${f.fingerprint}\` ${f.test} — nights: ${f.nights.join(', ')}`).join('\n'), '');
+  lines.push('---', '_Closed by tomorrow night\'s report._');
+  return lines.join('\n');
+}
+
+/** Assemble the digest (all reads), file the issue, close yesterday's. */
+export async function runReport(
+  io: ReportIo,
+  env: NodeJS.ProcessEnv,
+  opts: { repo: string; night: string; dryRun: boolean },
+): Promise<ReportResult> {
+  assertRepo(opts.repo);
+  // Exactly the report night: GitHub date qualifiers match one UTC day, and a range
+  // `night..night+1` would be INCLUSIVE of both ends (two full days). A backfill with an older
+  // --night must not include later activity; a late run must not include tomorrow's.
+  const prs = await search(io, opts.repo, `is:pr created:${opts.night}`);
+  const issuesFiled = await search(io, opts.repo, `is:issue created:${opts.night}`);
+  const issuesCommented = await search(io, opts.repo, `is:issue commented:${opts.night}`);
+  const blocked = await collectBlocked(io, opts.repo);
+  const runsStopped = io.mercury ? await collectRunsStopped(io.mercury, opts.night) : [];
+  const flakes = collectFlakes(env, opts.night);
+  const data: ReportData = { prs, issuesFiled, issuesCommented, blocked, runsStopped, flakes };
+
+  if (opts.dryRun) {
+    return { night: opts.night, ...data };
+  }
+
+  // Create the digest FIRST, then close yesterday's: a create failure must never leave the repo
+  // with NO open report. Worst case of a close failure is two open reports until tonight's next
+  // run closes them - strictly better than a missing digest.
+  const body = digestBody(opts.night, data);
+  const created = await io.post(`/repos/${opts.repo}/issues`, {
+    title: `nightly report — ${opts.night}`,
+    body,
+    labels: [L_REPORT],
+  });
+  if (created.status < 200 || created.status >= 300) {
+    throw new Error(`digest issue create failed: POST /repos/${opts.repo}/issues -> ${created.status}`);
+  }
+  const issue = (created.body as { number?: number } | null)?.number;
+  if (issue === undefined) {
+    // A 2xx create whose body we could not parse: closing yesterday's now could leave ZERO open
+    // reports (the new one is unidentifiable). Fail hard instead; the retry re-runs the night.
+    throw new Error(`digest issue create returned no issue number (POST status ${created.status}); yesterday's report stays open`);
+  }
+
+  let closedPrevious: number | undefined;
+  for (let page = 1; page <= SEARCH_CAP; page++) {
+    const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
+    const res = await io.get(path);
+    if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
+    const prev = (res.body as { number?: number }[] | null) ?? [];
+    for (const old of prev) {
+      if (old.number === undefined || old.number === issue) continue;
+      const closed = await io.patch(`/repos/${opts.repo}/issues/${old.number}`, { state: 'closed' });
+      // Record the close only when it SUCCEEDED: the CLI's ghPatch returns non-2xx without
+      // throwing, and the JSON must not claim a close that did not happen. The digest is already
+      // filed, so a failed close is reported, not fatal - tonight's run closes it.
+      if (closed.status >= 200 && closed.status < 300) closedPrevious = closedPrevious ?? old.number;
+    }
+    if (prev.length < 100) break;
+  }
+  return { night: opts.night, ...(issue !== undefined ? { issue } : {}), ...(closedPrevious !== undefined ? { closedPrevious } : {}), ...data };
+}
+
+// ---- CLI ----
+
+function ghToken(env: NodeJS.ProcessEnv): string {
+  const tok = env.GH_TOKEN || env.GITHUB_TOKEN || '';
+  if (!tok) throw new Error('GH_TOKEN (or GITHUB_TOKEN) is required: the report files and closes issues');
+  return tok;
+}
+
+const FETCH_TIMEOUT_MS = 30_000;
+
+async function ghGet(path: string, token: string): Promise<{ body: unknown; status: number; link?: string | null }> {
+  const res = await fetch(`https://api.github.com${path}`, {
+    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  return { body: await res.json().catch(() => null), status: res.status, link: res.headers.get('link') };
+}
+
+async function ghPost(path: string, body: unknown, token: string): Promise<{ body: unknown; status: number }> {
+  const res = await fetch(`https://api.github.com${path}`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  return { body: await res.json().catch(() => null), status: res.status };
+}
+
+async function ghPatch(path: string, body: unknown, token: string): Promise<{ body: unknown; status: number }> {
+  const res = await fetch(`https://api.github.com${path}`, {
+    method: 'PATCH',
+    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  return { body: await res.json().catch(() => null), status: res.status };
+}
+
+function mercuryFromEnv(env: NodeJS.ProcessEnv): ReportIo['mercury'] | undefined {
+  const url = env.MERCURY_REPORT_API_URL;
+  const token = env.MERCURY_REPORT_TOKEN;
+  if (!url || !token) return undefined; // the section is omitted, not faked
+  return {
+    get: async (path) => {
+      const res = await fetch(`${url.replace(/\/+$/, '')}${path}`, {
+        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+      return { body: await res.json().catch(() => null), status: res.status };
+    },
+  };
+}
+
+const isMain = process.argv[1] && import.meta.url.endsWith(basename(process.argv[1]));
+if (isMain) {
+  const args = process.argv.slice(2);
+  const flag = (name: string): string | undefined => {
+    const i = args.indexOf(name);
+    return i >= 0 ? args[i + 1] : undefined;
+  };
+  const repo = flag('--repo') ?? process.env.REPO ?? '';
+  // Local calendar date, not UTC: a nightly scheduled in local tz that fires at 00:05 belongs
+  // to that local day even when UTC has rolled over (same rule as e2e.ts). The default is
+  // computed lazily, only when --night is absent.
+  const night = flag('--night') ?? localDateString();
+  const dryRun = args.includes('--dry-run');
+  runReport(
+    {
+      get: async (path) => await ghGet(path, ghToken(process.env)),
+      post: async (path, body) => await ghPost(path, body, ghToken(process.env)),
+      patch: async (path, body) => await ghPatch(path, body, ghToken(process.env)),
+      mercury: mercuryFromEnv(process.env),
+    },
+    process.env,
+    { repo, night, dryRun },
+  )
+    .then((out) => { process.stdout.write(JSON.stringify(out) + '\n'); })
+    .catch((e: unknown) => {
+      console.error(String(e instanceof Error ? e.message : e));
+      process.exit(1);
+    });
+}
