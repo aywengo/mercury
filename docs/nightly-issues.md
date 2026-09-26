@@ -425,6 +425,16 @@ issue comment and finishes. It removes `nightly:in-progress` on every exit path.
 On a seeded repo: bug → PR; a blocked case → `nightly:blocked` plus a comment, and the Run ends
 without entering NEEDS_INPUT; `rung: none` → the Run ends without changes.
 
+
+> **Status 2026-09-26 (shipped, #767):** `nightly-next` lives at `.agents/skills/nightly/next.ts`
+> (the deterministic driver; the fix-loop itself is agent procedure via SKILL.md). `run` executes
+> the N1-1 ladder — the selector claims `nightly:in-progress` before reporting — and reports the
+> Run's action: `fix-loop` (rung 1–2, the issue-fix-loop procedure on the claimed issue),
+> `draft-proposals` (rung 3: draft `nightly:proposed` issues from the docs, §6, never implement),
+> or `no-op` (rung `none`, zero writes). Exit paths: `finish` releases the claim; `blocked
+> --reason` labels `nightly:blocked`, posts the question, and releases it — the comment must land
+> before the claim is released, and a failed comment keeps the claim for a retry. Never asks
+> (§4.4): no nightly Run ends in NEEDS_INPUT. 16 tests over injected I/O.
 ---
 
 ## N1-4 (#741) — `nightly-report` skill
