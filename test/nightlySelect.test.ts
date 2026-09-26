@@ -106,7 +106,7 @@ test('origin:e2e is trusted only from the nightly identity (#764)', () => {
 
 test('nightly:ready by @aywengo trusts a nightly-authored issue (ready clause is author-independent)', () => {
   // The ready clause does not care who authored the issue: a @aywengo-applied CURRENT ready label
-  // makes even a mercury-nightly-authored issue eligible (review round 2 on PR #765).
+  // makes even a mercury-nightly-authored issue eligible (#764 review round 2).
   const c = cand(
     issue({ number: 60, user: { login: 'mercury-nightly' }, labels: [{ name: 'nightly:ready' }], created_at: '2026-09-21T00:00:00Z' }),
     [labeled('aywengo', 'nightly:ready')],
@@ -244,6 +244,44 @@ test('runSelectorWith claims exactly one issue and returns it (normal case)', as
   ], 'exactly one claim POST in the normal case');
   assert.ok(events.indexOf('post /repos/aywengo/mercury/issues/60/labels') !== -1, 'the claim is issued before runSelectorWith resolves');
   assert.match(s.reason, /#60/);
+});
+
+test('runSelectorWith skips the e2e timeline walk for non-nightly authors (#764 round 3)', async () => {
+  // The e2e trust clause can only pass for nightly-authored issues, so the timeline (the most
+  // expensive per-issue read) is walked only for nightly-authored e2e issues and ready-labeled
+  // issues. A foreign-author e2e issue gets NO timeline call.
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const gets: string[] = [];
+  const io = {
+    async get(path: string) {
+      gets.push(path);
+      return { body: [
+        issue({ number: 70, user: { login: 'random-dev' }, labels: [{ name: 'origin:e2e' }] }),
+        issue({ number: 71, user: { login: 'aywengo' } }),
+      ], link: null };
+    },
+    async post(path: string) { return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 2, 'the foreign e2e issue is not eligible; the @aywengo issue is rung 2');
+  assert.equal(gets.filter((p) => p.includes('/timeline')).length, 0,
+    'no timeline is walked for a foreign-author origin:e2e issue');
+  // And the nightly-authored e2e issue DOES get its timeline walked.
+  const gets2: string[] = [];
+  const io2 = {
+    async get(path: string) {
+      gets2.push(path);
+      if (path.includes('/timeline')) {
+        return { body: [{ event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'origin:e2e' } }], link: null };
+      }
+      return { body: [issue({ number: 72, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }] })], link: null };
+    },
+    async post(path: string) { return true; },
+  };
+  const s2 = await runSelectorWith(io2, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s2.rung, 1, 'the nightly-authored e2e issue passes through the timeline actor check');
+  assert.equal(gets2.filter((p) => p.includes('/timeline')).length, 1,
+    'exactly one timeline walk for the nightly-authored e2e issue');
 });
 
 test('runSelectorWith re-selects only when GitHub says the label was already there (422 racer)', async () => {

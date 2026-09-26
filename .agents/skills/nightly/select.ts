@@ -322,11 +322,14 @@ export async function runSelectorWith(
   const candidates: Candidate[] = [];
   for (const issue of real) {
     // The timeline is a security input for BOTH actor-checked trust clauses (nightly:ready by
-    // @aywengo; origin:e2e by the nightly identity): walk it (bounded) whenever either label is
-    // present, because a missed later labeled/unlabeled event would misreport the CURRENT actor.
-    // A hit cap fails closed (treated as not trusted).
+    // @aywengo; origin:e2e by the nightly identity): walk it (bounded) when it can change the
+    // verdict. The e2e clause can only pass for nightly-authored issues, so other authors skip
+    // the walk (the timeline is the most expensive read per issue); a missed later
+    // labeled/unlabeled event would misreport the CURRENT actor. A hit cap fails closed
+    // (treated as not trusted).
     const labels = issueLabels(issue);
-    const needTimeline = labels.includes(L_READY) || labels.includes(L_E2E);
+    const needTimeline = labels.includes(L_READY)
+      || (labels.includes(L_E2E) && issueAuthor(issue) === NIGHTLY_IDENTITY);
     let readyByTrusted = false;
     let e2eByNightly = false;
     if (needTimeline) {
