@@ -312,7 +312,15 @@ export async function runE2eSkill(
       continue;
     }
     const marker = fpMarker(fp);
-    const existing = await findIssueByMarker(io, opts.repo, marker, token());
+    let existing: number | null;
+    try {
+      existing = await findIssueByMarker(io, opts.repo, marker, token());
+    } catch (e: unknown) {
+      // The search failed (rate limit, permissions, unexpected response): "no match" is NOT
+      // established, so filing could duplicate. Record the observation and skip this night.
+      report.real.push({ test: failure.test, error: failure.error, fingerprint: fp, action: 'dry-run' });
+      continue;
+    }
     if (existing) {
       const comment = [
         `Reproduced on the night of ${opts.night}. The failure fingerprint matches this issue.`,
@@ -364,8 +372,11 @@ export async function runE2eSkill(
  * bounded at 10 pages = the newest 1000 open issues. */
 export async function findIssueByMarker(io: E2eIo, repo: string, marker: string, token: string): Promise<number | null> {
   for (let page = 1; page <= 10; page++) {
-    const { body } = await io.get(`/repos/${repo}/issues?state=open&per_page=100&page=${page}`);
-    const issues = (body as { number?: number; body?: string | null; pull_request?: unknown }[] | null) ?? [];
+    const res = await io.get(`/repos/${repo}/issues?state=open&per_page=100&page=${page}`);
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`issue search failed: GET /repos/${repo}/issues page ${page} returned ${res.status}`);
+    }
+    const issues = (res.body as { number?: number; body?: string | null; pull_request?: unknown }[] | null) ?? [];
     for (const issue of issues) {
       if (issue.pull_request) continue;
       if ((issue.body ?? '').includes(marker)) return issue.number ?? null;

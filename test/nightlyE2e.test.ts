@@ -391,6 +391,26 @@ test('the suite rerun is a single-file rerun when the failure names a file', asy
   }
 });
 
+test('a failed issue search never files (duplication risk) - observation recorded instead', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const failure = { name: 'real defect', error: 'AssertionError: boom', file: 'e2e/system.test.ts' };
+    const posts: { path: string; body: unknown }[] = [];
+    const io: E2eIo = {
+      async run() { return { code: 1, output: failingOutput(failure.name, failure.error, failure.file) }; },
+      async get() { return { body: 'rate limited', status: 403 }; },
+      async post(path, body) { posts.push({ path, body }); return { body: { number: 1 }, status: 201 }; },
+    };
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-09-26' });
+    assert.equal(posts.length, 0, 'no filing when the search failed: "no match" is not established');
+    assert.equal(report.real.length, 1);
+    assert.equal(report.real[0]!.action, 'dry-run');
+    assert.equal(report.real[0]!.issue, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const io: E2eIo = { run: PASSING, async get() { return { body: [], status: 200 }; }, async post() { return { body: {}, status: 201 }; } };
   await assert.rejects(
