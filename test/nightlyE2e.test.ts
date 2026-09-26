@@ -636,6 +636,44 @@ test('a real failure fingerprints the RERUN error line when the rerun names the 
   }
 });
 
+test('a failure with no extractable error line is observed, never filed (name-only fingerprints)', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    // The suite fails; the detail block names the file but the rerun passes (flake path would
+    // record the night with an empty error too) — so force the RERUN to fail WITHOUT a parseable
+    // error line for the test: rerunFails but parseFailures finds the test with error ''.
+    const suiteOut = [
+      '✖ nameless failure (0.5ms)',
+      'ℹ pass 0',
+      'ℹ fail 1',
+      '',
+      '✖ failing tests:',
+      '',
+      'test at e2e/system.test.ts:3:1',
+      '✖ nameless failure (0.5ms)',
+    ].join('\n'); // no error line follows the detail entry
+    const posts: { path: string; body: unknown }[] = [];
+    let suite = 0;
+    const io: E2eIo = {
+      async run() {
+        suite += 1;
+        if (suite === 1) return { code: 1, output: suiteOut };
+        // Rerun fails but its detail block carries a DIFFERENT test's error only:
+        return { code: 1, output: 'ℹ fail 1\n\n✖ failing tests:\n\ntest at e2e/system.test.ts:3:1\n✖ nameless failure (0.5ms)\n' };
+      },
+      async get() { return { body: [], status: 200 }; },
+      async post(path, body) { posts.push({ path, body }); return { body: { number: 1 }, status: 201 }; },
+    };
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-09-26' });
+    assert.equal(posts.length, 0, 'never file a name-only fingerprint');
+    assert.equal(report.real.length, 1);
+    assert.equal(report.real[0]!.action, 'dry-run');
+    assert.equal(report.real[0]!.error, '');
+  } finally {
+    cleanup();
+  }
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const io: E2eIo = { run: PASSING, async get() { return { body: [], status: 200 }; }, async post() { return { body: {}, status: 201 }; } };
   await assert.rejects(

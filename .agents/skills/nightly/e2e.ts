@@ -312,6 +312,12 @@ export async function runE2eSkill(
       const same = rerunFailures.find((f) => f.test === failure.test);
       if (same && same.error) failure.error = same.error;
     }
+    if (!failure.error) {
+      // No error line could be extracted from either run: the fingerprint would collapse to the
+      // test name alone and could merge distinct defects. Observe honestly; skip filing.
+      report.real.push({ test: failure.test, error: '', fingerprint: '', action: 'dry-run' });
+      continue;
+    }
     const fp = await fingerprintOf(failure.test, failure.error);
     if (rerun.code === 0) {
       // Flake. Record the night; file only when the same fingerprint flaked on FLAKE_FILE_NIGHTS nights.
