@@ -78,7 +78,7 @@ test('the digest files one issue with all sections and closes yesterday\'s repor
       'is:issue commented': [{ number: 702, title: 'older issue', html_url: 'u3' }],
     },
     issues: [
-      { number: 500, title: 'yesterday\'s report', labels: [{ name: 'nightly:report' }] },
+      { number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] },
       { number: 501, title: 'blocked thing', labels: [{ name: 'nightly:blocked' }] },
     ],
     comments: { 501: [{ body: '**Blocking question:** Which preset wins?' }] },
@@ -288,7 +288,7 @@ test('blocked question: the LAST **Blocking question:** marker wins across pages
 test('the digest is created BEFORE yesterday\'s close (a create failure never leaves zero reports)', async () => {
   const order: string[] = [];
   const { io: base } = ioWith({
-    issues: [{ number: 500, title: 'yesterday', labels: [{ name: 'nightly:report' }] }],
+    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
   });
   const io: ReportIo = {
     async get(path) {
@@ -366,7 +366,7 @@ test('a same-night digest from a concurrent run is NEVER closed', async () => {
 test('a 2xx create without a parseable number fails hard BEFORE closing yesterday\'s report', async () => {
   const order: string[] = [];
   const { io: base } = ioWith({
-    issues: [{ number: 500, title: 'yesterday', labels: [{ name: 'nightly:report' }] }],
+    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
   });
   const io: ReportIo = {
     async get(path) {
@@ -406,7 +406,7 @@ test('collectFlakes filters nights to <= the report night (a backfill shows no f
 
 test('a FAILED close is not claimed: closedPrevious stays unset (JSON tells the truth)', async () => {
   const { io } = ioWith({
-    issues: [{ number: 500, title: 'yesterday', labels: [{ name: 'nightly:report' }] }],
+    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
   });
   const failingClose: ReportIo = {
     ...io,
@@ -547,6 +547,41 @@ test('a 2xx Mercury runs response with an unparsable payload degrades the sectio
       async get(path) {
         if (path.startsWith('/api/runs?')) return { body: null, status: 200 }; // invalid JSON -> null
         return { body: { events: [] }, status: 200 };
+      },
+    },
+    async get() { return { body: [], status: 200 }; },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const stopped = await collectRunsStopped(io.mercury!, '2026-09-26');
+  assert.deepEqual(stopped, []);
+});
+
+test('a backfill never closes a NEWER report: only the immediately previous night closes', async () => {
+  const { io } = ioWith({
+    issues: [
+      { number: 600, title: 'nightly report — 2026-09-26', labels: [{ name: 'nightly:report' }] }, // NEWER than the backfill night
+      { number: 500, title: 'nightly report — 2026-09-20', labels: [{ name: 'nightly:report' }] }, // not the previous night either
+    ],
+  });
+  const closedPaths: string[] = [];
+  const backfill: ReportIo = {
+    ...io,
+    async post() { return { body: { number: 903 }, status: 201 }; },
+    async patch(path) { closedPaths.push(path); return { body: {}, status: 200 }; },
+  };
+  await runReport(backfill, ENV, { repo: REPO, night: '2026-09-25', dryRun: false });
+  assert.deepEqual(closedPaths, [], 'no newer or unrelated-night report is closed by a backfill');
+});
+
+test('a 2xx Mercury events response with an unparsable payload skips the run, not the digest', async () => {
+  const io: ReportIo = {
+    mercury: {
+      async get(path) {
+        if (path.startsWith('/api/runs?')) {
+          return { body: { runs: [{ id: 'run_bad', task: 'x', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-26T04:00:00.000Z' } }] }, status: 200 };
+        }
+        return { body: null, status: 200 }; // invalid events JSON -> null
       },
     },
     async get() { return { body: [], status: 200 }; },

@@ -191,8 +191,11 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
         if (evRes.status < 200 || evRes.status >= 300) break; // unreadable events: skip, do not fail the digest
         // The API returns MercuryEvent objects: the reason lives in `payload` (the worker
         // appends run.timed_out with payload { runId, reason }).
-        const evBody = evRes.body as { events?: { type?: string; payload?: { reason?: string } }[]; nextCursor?: number; hasMore?: boolean };
-        const events = evBody.events ?? [];
+        const evBody = evRes.body as { events?: { type?: string; payload?: { reason?: string } }[]; nextCursor?: number; hasMore?: boolean } | null;
+        if (evBody === null || typeof evBody !== 'object' || !Array.isArray(evBody.events)) {
+          break; // unparsable events page: skip this run, do not fail the digest
+        }
+        const events = evBody.events;
         timedOut = events.some((e) => e.type === 'run.timed_out' && e.payload?.reason === 'not-after');
         evPages += 1;
         evPath = evBody.hasMore && evBody.nextCursor !== undefined && events.length > 0
@@ -245,6 +248,13 @@ function nextDay(night: string): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** The day BEFORE the report night (the only report this run is allowed to close). */
+function prevDay(night: string): string {
+  const d = new Date(`${night}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
 /** Assemble the digest (all reads), file the issue, close yesterday's. */
 export async function runReport(
   io: ReportIo,
@@ -279,7 +289,10 @@ export async function runReport(
   // NEVER touches a same-night issue (a concurrent invocation's digest is not ours to close).
   const title = `nightly report — ${opts.night}`;
 
-  // Find open reports; reuse a same-night one if it exists.
+  // Find open reports; reuse a same-night one if it exists. The close set (below) is ONLY the
+  // immediately previous night's report: a backfill (--night <today-1> while today's digest is
+  // open) or a clock-skewed run must never erase a NEWER digest.
+  const prevNight = prevDay(opts.night);
   let issue: number | undefined;
   const closeables: { number: number; title?: string }[] = [];
   for (let page = 1; page <= SEARCH_CAP; page++) {
@@ -290,7 +303,7 @@ export async function runReport(
     for (const old of prev) {
       if (old.number === undefined) continue;
       if (old.title === title) issue = issue ?? old.number;
-      else closeables.push({ number: old.number, title: old.title });
+      else if (old.title === `nightly report — ${prevNight}`) closeables.push({ number: old.number, title: old.title });
     }
     if (prev.length < 100) break;
   }
