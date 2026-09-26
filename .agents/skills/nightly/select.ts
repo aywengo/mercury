@@ -1,9 +1,9 @@
 /**
  * `nightly/select.ts` — the deterministic ladder selector (N1-1, #738).
  *
- * Docs/dispatcher-bot... no: docs/nightly-self-development.md §4.2 (the ladder) and §5 (the
- * trust rule). An agent reading issue text to decide what to work on is exactly the injection
- * surface the trust rule closes, so this skill decides from GitHub METADATA only:
+ * Spec: docs/nightly-self-development.md §4.2 (the ladder) and §5 (the trust rule). An agent
+ * reading issue text to decide what to work on is exactly the injection surface the trust rule
+ * closes, so this skill decides from GitHub METADATA only:
  *
  *   - author login,
  *   - label names,
@@ -172,7 +172,7 @@ export function selectLadder(
 // Rung 3 covers every "issues existed but rungs 1-2 have nothing eligible" case — including a
 // caller that dropped claimed candidates. 'none' means the repo had ZERO open issues.
   if (candidates.length > 0 || (seenCount ?? 0) > 0) {
-    return { rung: 3, reason: 'rungs 1 and 2 have no eligible work; the night drafts docs → proposals (§6)' };
+    return { rung: 3, reason: 'rungs 1 and 2 have no eligible work; the nightly drafts docs → proposals (§6)' };
   }
   return { rung: 'none', reason: 'no open issues at all' };
 }
