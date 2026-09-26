@@ -112,15 +112,19 @@ node .agents/skills/nightly/report.ts --repo aywengo/mercury [--night YYYY-MM-DD
 Files ONE digest issue per night, labeled `nightly:report`, titled
 `nightly report — <night>`, and closes the previous open report issue.
 Credentials: `GH_TOKEN`/`GITHUB_TOKEN` is required for every request — the
-searches too, including `--dry-run` — and needs repo write because the run
-files and closes issues. Sections:
+searches too, including `--dry-run`. A read-only token is enough for
+`--dry-run`; a real run also needs repo write because it files and closes
+issues. Sections:
 
 - **PRs opened** and **issues filed** tonight (GitHub search, repo-scoped).
 - **Issues commented** tonight.
 - **Blocked** — open `nightly:blocked` issues with their blocking question (the never-asks exit
   from `next.ts`).
 - **Runs stopped by notAfter** — the §4.3 window end. Read from the Mercury runs API
-  (`MERCURY_REPORT_API_URL` + `MERCURY_REPORT_TOKEN`); when unset the section is empty, not faked.
+  (`MERCURY_REPORT_API_URL` + `MERCURY_REPORT_TOKEN`). `MERCURY_REPORT_API_URL` is the server
+  ROOT without `/api` (e.g. `http://127.0.0.1:4620`) — the script appends `/api/runs` itself;
+  a URL that already ends in `/api` silently yields an empty section. When unset the section
+  is empty, not faked.
 - **Flakes** — the `nightly-e2e` flake-clock state (same state file).
 
 The report is read-only except for the digest issue itself and the close of yesterday's.
