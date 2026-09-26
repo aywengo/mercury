@@ -4,7 +4,7 @@
  * One GitHub issue per night, labeled `nightly:report`, closed by the next night's report:
  *
  *   - PRs opened tonight and issues filed tonight (GitHub search, repo-scoped, bounded).
- *   - Issues commented on tonight (search `commented:NIGHT`, exactly that day).
+ *   - Issues commented on tonight (search `commented:<night-local-start>..<night-local-end>`).
  *   - Blocked items: open issues labeled `nightly:blocked` with their latest blocking question.
  *   - Runs stopped by `notAfter` (the §4.3 window end) — optional section, only when
  *     `MERCURY_REPORT_API_URL` + `MERCURY_REPORT_TOKEN` are set; the Mercury runs API is read
@@ -52,9 +52,9 @@ export interface ReportResult extends ReportData {
 }
 
 function assertRepo(repo: string): void {
-  // Same regex and the same error message as next.ts/e2e.ts, so every nightly entrypoint fails
-  // identically on a bad repo.
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+  // Same regex and message as e2e.ts (#739): segments must START alphanumeric, so '..' can
+  // never reach a URL segment. (next.ts/select.ts still carry the older loose form.)
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(repo)) {
     throw new Error(`repo must be exactly owner/name (e.g. aywengo/mercury); got '${repo}'`);
   }
 }
@@ -128,7 +128,11 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
   let path: string | undefined = '/api/runs?status=TIMED_OUT&limit=100';
   for (let page = 0; page < 10 && path; page++) {
     const res = await mercury.get(path);
-    if (res.status < 200 || res.status >= 300) throw new Error(`Mercury GET ${path} -> ${res.status}`);
+    if (res.status < 200 || res.status >= 300) {
+      // The Mercury section is optional/best-effort: a failing runs listing degrades the section
+      // to empty (same policy as unreadable per-run events) instead of failing the whole digest.
+      return out;
+    }
     const body = res.body as { runs?: { id?: string; task?: string; status?: string; constraints?: { notAfter?: string } }[]; nextCursor?: string };
     const runs = body.runs ?? [];
     for (const run of runs) {
@@ -194,6 +198,14 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   return lines.join('\n');
 }
 
+/** The day AFTER the report night, computed in UTC on the date string itself (calendar
+ * arithmetic on the LABEL, not on the current time). */
+function nextDay(night: string): string {
+  const d = new Date(`${night}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
 /** Assemble the digest (all reads), file the issue, close yesterday's. */
 export async function runReport(
   io: ReportIo,
@@ -201,12 +213,19 @@ export async function runReport(
   opts: { repo: string; night: string; dryRun: boolean },
 ): Promise<ReportResult> {
   assertRepo(opts.repo);
-  // Exactly the report night: GitHub date qualifiers match one UTC day, and a range
-  // `night..night+1` would be INCLUSIVE of both ends (two full days). A backfill with an older
-  // --night must not include later activity; a late run must not include tomorrow's.
-  const prs = await search(io, opts.repo, `is:pr created:${opts.night}`);
-  const issuesFiled = await search(io, opts.repo, `is:issue created:${opts.night}`);
-  const issuesCommented = await search(io, opts.repo, `is:issue commented:${opts.night}`);
+  // The LOCAL night as a UTC instant range [00:00 local, 00:00 local next day): GitHub search
+  // date qualifiers match one UTC DAY, but the nightly window is local - in Poznań (UTC+2) a
+  // plain `created:NIGHT` misses everything between local midnight and 02:00 (verified live:
+  // the local window finds PRs the UTC-day search does not). `night` is parsed as LOCAL time
+  // (no Z suffix) and converted to ISO with a +00:00 offset, the format GitHub's search
+  // accepts. The range's endpoints are inclusive instants; the only overlap with tomorrow's
+  // window is the single midnight instant itself.
+  const startIso = new Date(`${opts.night}T00:00:00`).toISOString().replace(/\.\d{3}Z$/, '+00:00');
+  const endNight = nextDay(opts.night);
+  const endIso = new Date(`${endNight}T00:00:00`).toISOString().replace(/\.\d{3}Z$/, '+00:00');
+  const prs = await search(io, opts.repo, `is:pr created:${startIso}..${endIso}`);
+  const issuesFiled = await search(io, opts.repo, `is:issue created:${startIso}..${endIso}`);
+  const issuesCommented = await search(io, opts.repo, `is:issue commented:${startIso}..${endIso}`);
   const blocked = await collectBlocked(io, opts.repo);
   const runsStopped = io.mercury ? await collectRunsStopped(io.mercury, opts.night) : [];
   const flakes = collectFlakes(env, opts.night);

@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { runReport, collectBlocked, collectRunsStopped, collectFlakes, blockingQuestion, type ReportIo } from '../.agents/skills/nightly/report.ts';
@@ -106,17 +107,40 @@ test('the digest files one issue with all sections and closes yesterday\'s repor
   assert.deepEqual((created.body as { labels: string[] }).labels, ['nightly:report']);
 });
 
-test('searches match exactly the report night (no two-day range, no open-ended bound)', async () => {
+test('searches cover the LOCAL night as a UTC instant window (not the UTC day)', async () => {
   const { io, calls } = ioWith({});
   await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
   const searches = calls.filter((c) => c.method === 'GET' && c.path.startsWith('/search/issues?')).map((c) => decodeURIComponent(c.path));
   assert.equal(searches.length, 3);
   for (const q of searches) {
-    assert.ok(q.includes('created:2026-09-26&') || q.includes('commented:2026-09-26&'), `exact-day: ${q}`);
-    assert.ok(!q.includes('..2026-09-27'), `no inclusive two-day range: ${q}`);
-    assert.ok(!q.includes('created:>='), `no open-ended lower bound: ${q}`);
-    assert.ok(!q.includes('commented:>='), `no open-ended lower bound: ${q}`);
+    // The window endpoints are ISO instants with an explicit +00:00 offset (GitHub-accepted
+    // format), computed from LOCAL midnight - a UTC-day qualifier would miss the hours between
+    // local midnight and UTC midnight.
+    assert.ok(q.includes('created:2026-09-25T22:00:00+00:00..2026-09-26T22:00:00+00:00') || q.includes('commented:2026-09-25T22:00:00+00:00..2026-09-26T22:00:00+00:00'), `local-window: ${q}`);
+    assert.ok(!q.includes('created:2026-09-26&'), `no UTC-day qualifier: ${q}`);
+    assert.ok(!q.includes('commented:2026-09-26&'), `no UTC-day qualifier: ${q}`);
   }
+});
+
+test('a failed Mercury runs listing degrades the section to empty instead of failing the digest', async () => {
+  let listingCalls = 0;
+  const io: ReportIo = {
+    mercury: {
+      async get(path) {
+        if (path.startsWith('/api/runs?')) {
+          listingCalls += 1;
+          return { body: { message: 'internal error' }, status: 500 };
+        }
+        return { body: { events: [] }, status: 200 };
+      },
+    },
+    async get() { return { body: [], status: 200 }; },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const stopped = await collectRunsStopped(io.mercury!, '2026-09-26');
+  assert.deepEqual(stopped, []);
+  assert.equal(listingCalls, 1, 'one attempt, no crash');
 });
 
 test('dry-run assembles everything and writes nothing', async () => {
@@ -295,7 +319,7 @@ test('a 2xx create without a parseable number fails hard BEFORE closing yesterda
 });
 
 test('collectFlakes filters nights to <= the report night (a backfill shows no future dates)', () => {
-  const dir = join('/tmp', `mercury-report-test2-${process.pid}-${Date.now()}`);
+  const dir = join(tmpdir(), `mercury-report-test2-${process.pid}-${Date.now()}`);
   try {
     mkdirSync(join(dir, 'mercury/nightly'), { recursive: true });
     writeFileSync(
