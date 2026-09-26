@@ -94,8 +94,8 @@ export async function collectBlocked(io: ReportIo, repo: string): Promise<{ numb
 
 /** The blocking question for an issue: walk the comment pages (bounded) and take the LAST
  * `**Blocking question:**` marker - the most recent blocked exit. If no marker exists (a
- * hand-labeled blocked issue), fall back to the last comment body, truncated. */
-/** Exported for tests. */
+ * hand-labeled blocked issue), fall back to the last comment body, truncated. Exported for
+ * tests. */
 export async function blockingQuestion(io: ReportIo, repo: string, issue: number): Promise<string | undefined> {
   let question: string | undefined;
   let lastComment: string | undefined; // body of the newest comment seen so far (fallback)
@@ -137,13 +137,15 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
     const runs = body.runs ?? [];
     for (const run of runs) {
       if (!run.id) continue;
-      // notAfter must land on the report night (an ISO instant whose LOCAL date in the run's
-      // constraint equals the night; the report compares the UTC date of the instant — the bot
-      // writes notAfterAt in the host's local tz resolved to an ISO instant, and the nightly
-      // window is a local day, so the UTC date of the deadline is the same day for the Poznań
-      // window). Cheap pre-filter before the per-run events fetch.
+      // notAfter must land on the report night. Cheap pre-filter before the per-run events
+      // fetch; the comparison itself is local-date based (see below).
       const notAfter = run.constraints?.notAfter;
-      if (!notAfter || notAfter.slice(0, 10) !== night) continue;
+      // Compare the notAfter instant's LOCAL calendar date to the night (the night is a local
+      // date; slicing the ISO string would compare the UTC date and drop runs whose 06:00 local
+      // deadline lands on the next/previous UTC day). Unparsable instants are skipped.
+      if (!notAfter) continue;
+      const notAfterDate = new Date(notAfter);
+      if (Number.isNaN(notAfterDate.getTime()) || localDateString(notAfterDate) !== night) continue;
       // The events endpoint caps a page at 1000: scan forward via nextCursor (bounded) so the
       // terminal run.timed_out event is observed even on long runs.
       let evPath: string | undefined = `/api/runs/${run.id}/events`;

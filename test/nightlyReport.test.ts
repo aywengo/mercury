@@ -273,7 +273,7 @@ test('the digest is created BEFORE yesterday\'s close (a create failure never le
 });
 
 test('flakes come from the e2e flake-clock state file', () => {
-  const dir = join('/tmp', `mercury-report-test-${process.pid}-${Date.now()}`);
+  const dir = join(tmpdir(), `mercury-report-test-${process.pid}-${Date.now()}`);
   try {
     mkdirSync(join(dir, 'mercury/nightly'), { recursive: true });
     writeFileSync(
