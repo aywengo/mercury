@@ -72,7 +72,8 @@ async function search(io: ReportIo, repo: string, query: string): Promise<{ numb
   return out;
 }
 
-/** Open issues labeled nightly:blocked, each with the latest comment as the question. */
+/** Open issues labeled nightly:blocked, each with the most recent **Blocking question:** marker
+ * as the question (falling back to the last comment only when no marker exists). */
 export async function collectBlocked(io: ReportIo, repo: string): Promise<{ number?: number; title: string; question?: string }[]> {
   const out: { number?: number; title: string; question?: string }[] = [];
   for (let page = 1; page <= SEARCH_CAP; page++) {
@@ -145,7 +146,7 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   if (note) lines.push(`_${note}_`, '');
   const list = (items: { title: string; url?: string; number?: number }[], empty: string): string =>
     items.length === 0 ? empty : items.map((it) => {
-      const text = it.title || `#${it.number}`;
+      const text = it.title || (it.number !== undefined ? `#${it.number}` : 'untitled');
       return `- ${it.url ? `[${text}](${it.url})` : text}`;
     }).join('\n');
   lines.push('## PRs opened', list(data.prs, '_none_'), '');
