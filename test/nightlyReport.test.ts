@@ -422,6 +422,30 @@ test('a >1000-comment thread: the scan jumps to the Link-header last page (newes
   assert.deepEqual(requested, [1, 5, 6, 7], 'page 1 then the bounded tail before the last page');
 });
 
+test('a page-1 marker is still seen when the thread grows past the scanned tail', async () => {
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('/comments')) {
+        const m = /[?&]page=(\d+)/.exec(path);
+        const page = m ? Number(m[1]) : 1;
+        if (page === 1) {
+          return {
+            body: [{ body: '**Blocking question:** the only question' }],
+            status: 200,
+            link: '<https://api.github.com/repos/x/y/issues/503/comments?per_page=100&page=9>; rel="last"',
+          };
+        }
+        return { body: [{ body: 'chatter' }], status: 200 };
+      }
+      return { body: [], status: 200 };
+    },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const q = await blockingQuestion(io, REPO, 503);
+  assert.equal(q, 'the only question', 'a page-1 marker beats the fallback chatter even on long threads');
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);

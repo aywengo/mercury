@@ -109,16 +109,25 @@ export async function blockingQuestion(io: ReportIo, repo: string, issue: number
   if (res1.status < 200 || res1.status >= 300) return undefined; // unreadable comments: leave the question unset
   const lastRel = /<[^>]*[?&]page=(\d+)[^>]*>;\s*rel="last"/.exec(res1.link ?? '');
   const lastPage = Math.max(1, Math.min(MAX_COMMENT_PAGES, lastRel ? Number(lastRel[1]) : 1));
-  const startPage = Math.max(1, lastPage - (LAST_PAGES - 1));
-  for (let page = startPage; page <= lastPage; page++) {
-    let comments: { body?: string }[];
-    if (page === 1) {
-      comments = (res1.body as { body?: string }[] | null) ?? [];
-    } else {
-      const res = await io.get(`/repos/${repo}/issues/${issue}/comments?per_page=100&page=${page}`);
-      if (res.status < 200 || res.status >= 300) break; // unreadable page: scan what we have
-      comments = (res.body as { body?: string }[] | null) ?? [];
+  // Page 1 is ALREADY fetched: scan it for markers even when the tail scan starts later. An
+  // old marker on page 1 is only ever a fallback candidate (a newer marker on a later page
+  // overwrites it), and it is strictly better than missing a marker entirely.
+  {
+    const page1Comments = (res1.body as { body?: string }[] | null) ?? [];
+    for (const c of page1Comments) {
+      if (!c.body) continue;
+      const marker = c.body.split('\n').find((l) => l.startsWith('**Blocking question:**'));
+      if (marker) question = marker.replace(/^\*\*Blocking question:\*\*\s*/, '');
     }
+    if (page1Comments.length > 0 && question === undefined) {
+      lastComment = page1Comments[page1Comments.length - 1]?.body;
+    }
+  }
+  const startPage = Math.max(2, lastPage - (LAST_PAGES - 1));
+  for (let page = startPage; page <= lastPage; page++) {
+    const res = await io.get(`/repos/${repo}/issues/${issue}/comments?per_page=100&page=${page}`);
+    if (res.status < 200 || res.status >= 300) break; // unreadable page: scan what we have
+    const comments = (res.body as { body?: string }[] | null) ?? [];
     for (const c of comments) {
       if (!c.body) continue;
       const marker = c.body.split('\n').find((l) => l.startsWith('**Blocking question:**'));
