@@ -173,6 +173,34 @@ test('exit paths validate the repo too (they interpolate it into API paths)', as
   await assert.rejects(() => runNext(io, ENV, { repo: 'no-slash', dryRun: false }), /owner\/name/);
 });
 
+test('a non-2xx read fails loud instead of surfacing as a parse error', async () => {
+  const issues = [issue({ number: 10, labels: [{ name: 'nightly:ready' }] })];
+  const { io } = ioWith(issues, {});
+  const failingIo: NextIo = {
+    ...io,
+    async get(path) {
+      if (path.startsWith(`/repos/${REPO}/issues?`)) return { body: 'oops', status: 500, link: null };
+      return { body: [], status: 200, link: null };
+    },
+  };
+  await assert.rejects(() => runNext(failingIo, ENV, { repo: REPO, dryRun: false }), /GET .* -> 500/);
+});
+
+test('a 422 that is NOT already-exists fails hard (a blocked exit must not proceed label-less)', async () => {
+  // The real transport maps only already_exists 422s to false; simulate the throw via postLabel.
+  const { io, calls } = ioWith([], {});
+  const ioBad: NextIo = {
+    ...io,
+    async postLabel() { throw new Error('POST /labels -> 422 validation failed: Invalid request'); },
+  };
+  await assert.rejects(
+    () => blockIssue(ioBad, { repo: REPO, issue: 15, reason: 'Needs a human decision' }),
+    /422 validation failed/,
+  );
+  assert.equal(calls.filter((c) => c.method === 'DELETE').length, 0, 'no claim release without the label');
+  assert.equal(calls.filter((c) => c.method === 'POST' && c.path.endsWith('/comments')).length, 0, 'no comment without the label');
+});
+
 test('repo validation accepts dot-segment names like octo-org/.github (aligned with select.ts)', async () => {
   const { io, calls } = ioWith([], {});
   const out = await runNext(io, ENV, { repo: 'octo-org/.github', dryRun: true });

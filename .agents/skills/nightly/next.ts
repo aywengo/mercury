@@ -76,8 +76,15 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: 
   assertRepo(opts.repo);
   const selection = await runSelectorWith(
     {
+      // Fail loud on non-2xx reads: the selector assumes its transport throws (its own ghGet
+      // does), and a silent error body would surface as a confusing parse failure instead.
+      // `link` (the raw Link header) rides along for bounded pagination.
+      get: async (path) => {
+        const res = await io.get(path);
+        if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
+        return res;
+      },
       // The selector's io.post is label-add semantics (boolean); comments use io.post's generic form.
-      get: (path) => io.get(path),
       post: (path, body) => io.postLabel(path, body),
     },
     { ...env, REPO: opts.repo },
@@ -167,9 +174,17 @@ async function ghPostLabel(path: string, body: unknown, token: string): Promise<
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
-  // 2xx = the claim is ours; 422 already-exists = a concurrent nightly won.
+  // 2xx = the label was newly added. 422 means already-exists ONLY when the payload says so (the
+  // concurrent-nightly case); any other 422 is a configuration error and throws (same policy as
+  // select.ts) - silently returning false would let a blocked exit proceed without the label.
   if (res.status >= 200 && res.status < 300) return true;
-  if (res.status === 422) return false;
+  if (res.status === 422) {
+    const payload = (await res.json().catch(() => null)) as { message?: string; errors?: { code?: string }[] } | null;
+    const already = payload?.errors?.some((e) => e.code === 'already_exists') ||
+      (payload?.message ?? '').toLowerCase().includes('already');
+    if (already) return false;
+    throw new Error(`POST ${path} -> 422 validation failed${payload?.message ? `: ${payload.message}` : ''}`);
+  }
   throw new Error(`POST ${path} -> ${res.status}`);
 }
 
