@@ -17,7 +17,7 @@ function ioWith(opts: {
   searchItems?: Record<string, unknown[]>;
   issues?: { number: number; title: string; labels?: { name: string }[] }[];
   comments?: Record<number, { body: string }[]>;
-  timedOutRuns?: { id: string; task: string; status: string }[];
+  timedOutRuns?: { id: string; task: string; status: string; constraints?: { notAfter?: string } }[];
   notAfterRunIds?: string[];
   mercury?: boolean;
 } = {}): { io: ReportIo; calls: Recorded[] } {
@@ -125,16 +125,17 @@ test('empty night: every section says none, the issue still files', async () => 
   assert.match(body, /_none_/);
 });
 
-test('runs stopped by notAfter come from the Mercury API (TIMED_OUT + the reason event)', async () => {
+test('runs stopped by notAfter: scoped to the report night, reason event required', async () => {
   const { io } = ioWith({
     mercury: true,
     timedOutRuns: [
-      { id: 'run_a', task: 'nightly-next', status: 'TIMED_OUT' },
-      { id: 'run_b', task: 'nightly-e2e', status: 'TIMED_OUT' },
+      { id: 'run_a', task: 'nightly-next', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-25T23:59:59.000Z' } },
+      { id: 'run_b', task: 'nightly-e2e', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-26T04:00:00.000Z' } },
+      { id: 'run_c', task: 'nightly-next', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-26T04:00:00.000Z' } },
     ],
-    notAfterRunIds: ['run_b'], // run_a timed out on max-duration, not the window end
+    notAfterRunIds: ['run_b'], // run_c: right night but max-duration stop; run_a: wrong night
   });
-  const stopped = await collectRunsStopped(io.mercury!);
+  const stopped = await collectRunsStopped(io.mercury!, '2026-09-26');
   assert.deepEqual(stopped, [{ runId: 'run_b', task: 'nightly-e2e', status: 'TIMED_OUT' }]);
 });
 
