@@ -45,7 +45,7 @@ B0-4 cron ─────┼──► B0-5 config + validate ──► B1-1 sche
 B0-6 audit ────┘                                                └──► B1-3 service ──► retire N1-5
 ```
 
-The left column gets Mercury working on itself; the right column replaces the stopgap with the bot.
+Originally the left column ran on a launchd stopgap until the right column delivered the bot. B1 landed first, so N1-5 is now the nightly bot config itself (2026-09-26).
 
 ---
 
