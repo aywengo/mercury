@@ -177,6 +177,44 @@ test('parseFailures error-scan stays inside the matching detail entry', () => {
   assert.deepEqual(failures.map((f) => f.file), ['a.test.ts', 'b.test.ts']);
 });
 
+test('normalizeErrorLine collapses relative paths to basenames like absolute ones', () => {
+  const rel = normalizeErrorLine('AssertionError: numbers diverge at e2e/system.test.ts:9:9');
+  const abs = normalizeErrorLine('AssertionError: numbers diverge at /home/x/repo/e2e/system.test.ts:9:9');
+  const bare = normalizeErrorLine('AssertionError: numbers diverge at system.test.ts:9:9');
+  assert.equal(rel, abs, 'relative and absolute spellings share a fingerprint');
+  assert.equal(rel, bare);
+  assert.match(rel, / at system\.test\.ts$/);
+});
+
+test('parseFailures does not bind a name-prefix failure to another block', () => {
+  // 'alpha' is a prefix of 'alpha works': the error-scan must not attach alpha's error to the
+  // 'alpha works' block (or vice versa).
+  const out = [
+    '✖ alpha (0.5ms)',
+    '✖ alpha works (0.6ms)',
+    'ℹ pass 0',
+    'ℹ fail 2',
+    '',
+    '✖ failing tests:',
+    '',
+    'test at a.test.ts:1:1',
+    '✖ alpha (0.5ms)',
+    '  Error: alpha error',
+    '',
+    'test at b.test.ts:2:1',
+    '✖ alpha works (0.6ms)',
+    '  Error: alpha works error',
+  ].join('\n');
+  const failures = parseFailures(out);
+  assert.equal(failures.length, 2);
+  const alpha = failures.find((f) => f.test === 'alpha')!;
+  const works = failures.find((f) => f.test === 'alpha works')!;
+  assert.equal(alpha.error, 'Error: alpha error');
+  assert.equal(alpha.file, 'a.test.ts');
+  assert.equal(works.error, 'Error: alpha works error');
+  assert.equal(works.file, 'b.test.ts');
+});
+
 test('parseCounts reads the summary', () => {
   assert.deepEqual(parseCounts('ℹ pass 12\nℹ fail 3'), { pass: 12, fail: 3 });
   assert.deepEqual(parseCounts('nothing here'), { pass: 0, fail: 0 });

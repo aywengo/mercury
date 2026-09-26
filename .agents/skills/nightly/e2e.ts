@@ -98,6 +98,7 @@ export function normalizeErrorLine(line: string): string {
     .replace(/(?:[A-Za-z]:)?(?:\\|\/)private(?:\\|\/)tmp(?:\\|\/)[^\s:'"]+/g, 'tmp/<dir>')
     .replace(/(?:[A-Za-z]:)?(?:\\|\/)tmp(?:\\|\/)[^\s:'"]+/g, 'tmp/<dir>')
     .replace(/(?:[A-Za-z]:)?(?:\\|\/)(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+\.(?:ts|js|mjs|cjs)/g, (m) => basename(m.replace(/\\/g, '/')))
+    .replace(/(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+\.(?:ts|js|mjs|cjs)/g, (m) => basename(m.replace(/\\/g, '/')))
     .replace(/:\d+(?::\d+)?/g, '')
     .replace(/\b\d+(?:\.\d+)?\s*(?:ms|s|min|h)\b/g, '<dur>')
     .replace(/\b\d+(?:,\d{3})*\b/g, '<n>')
@@ -147,7 +148,9 @@ export function parseFailures(output: string): SuiteFailure[] {
     }
   }
   for (const f of failures) {
-    const idx = detail.findIndex((l) => l.startsWith(`✖ ${f.test} (`) || l.startsWith(`✖ ${f.test} `));
+    // Duration form first; the no-duration form must be an EXACT line match - a prefix match
+    // would bind 'alpha' to the block of 'alpha works' when one name prefixes another.
+    const idx = detail.findIndex((l) => l.startsWith(`✖ ${f.test} (`) || l.trim() === `✖ ${f.test}`);
     if (idx === -1) continue; // no detail block line for this name: leave the error empty
     for (let i = idx + 1; i < detail.length && i < idx + 12; i++) {
       const l = detail[i]!;
@@ -464,7 +467,9 @@ if (isMain) {
       child.stdout.on('data', (d: string) => { output += d; });
       child.stderr.on('data', (d: string) => { output += d; });
       const killer = setTimeout(() => child.kill('SIGKILL'), o.timeoutMs);
-      child.on('exit', (code) => { clearTimeout(killer); resolve({ code: code ?? 1, output }); });
+      // 'close', not 'exit': exit can fire before stdout/stderr are fully drained, truncating the
+      // output the parser and fingerprints depend on.
+      child.on('close', (code) => { clearTimeout(killer); resolve({ code: code ?? 1, output }); });
       child.on('error', () => { clearTimeout(killer); resolve({ code: 1, output }); });
     });
   // Lazy: the token is demanded only when a GitHub call is actually made — a green suite or
