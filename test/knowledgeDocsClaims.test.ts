@@ -81,8 +81,11 @@ test('the claude row cites the Runs that observed its channels (issues #688/#707
   // (run_fb7a2ee4042849a1) while the knowledge-off control never invented it
   // (run_0a3849515ece41f6), and the pointer-channel Run read the pointed-at file first
   // (run_128876bc246c4360). The auth-failed trio that first showed channel POPULATION
-  // (#688: run_f1eaf871429c42be, run_09005480332e4073, run_e6174faac31746d7) stays cited, and
-  // the row must keep its one honest residual: the note write-back is still unobserved.
+  // (#688: run_f1eaf871429c42be, run_09005480332e4073, run_e6174faac31746d7) stays cited.
+  // The write-back half closed on 2026-09-26: with Write/Edit on .mercury/notes.jsonl scoped
+  // into the stack's allowlist, the treated pair's notes survived validation and reached Atlas
+  // as candidates (run_87afd91b01204687, run_0f5a28c4d3d24619), so the row must now cite the
+  // write-back evidence instead of carrying an unobserved caveat.
   assert.match(row, /2\.1\.260/, 'the row must name the binary version the observation ran on');
   assert.match(row, /run_fb7a2ee4042849a1/,
     'the row must cite the treated Run that acted on the generated CLAUDE.md channel');
@@ -94,8 +97,14 @@ test('the claude row cites the Runs that observed its channels (issues #688/#707
     'the row must keep the #688 trio member that showed the knowledge-off workspace bare');
   assert.match(row, /run_e6174faac31746d7/,
     'the row must keep the #688 trio member that showed the pointer channel populated');
-  assert.match(row, /unobserved|unmeasured/,
-    'the row must keep its residual caveat (the note write-back is still unobserved)');
+  assert.match(row, /run_87afd91b01204687/,
+    'the row must cite the pointer-channel Run whose tier-1 note reached Atlas (write-back)');
+  assert.match(row, /run_0f5a28c4d3d24619/,
+    'the row must cite the generated-channel Run whose tier-1 note reached Atlas (write-back)');
+  assert.match(row, /run_297154f0c1e94471/,
+    'the row must keep the first write-back attempt the validator refused (invalid-contradicts)');
+  assert.match(row, /candidate/,
+    'the write-back evidence must name the tier the notes landed at on Atlas');
 });
 
 // --- docs/status.md: one knowledge section, and the Hermes claim matches the tree ------------------
