@@ -66,6 +66,7 @@ import { runHostSetup } from './host/setup.ts';
 import { installService, serviceStatus, uninstallService, parseServiceArgs, type ServiceOptions } from './host/service.ts';
 import { runHostDoctor } from './host/doctor.ts';
 import { loadBotConfig, botConfigPath } from './host/bots/config.ts';
+import { installBotService, uninstallBotService, parseBotServiceInstallArgs, parseBotServiceUninstallArgs } from './host/bots/service.ts';
 import { runBot, makeBotClient } from './host/bots/process.ts';
 import { dispatchTask } from './host/bots/dispatch.ts';
 import { statusView, renderStatus } from './host/bots/status.ts';
@@ -113,6 +114,10 @@ function usageText(): string {
     '                bot validate --alias <a>   offline check of one bot: config parses and',
     '                               validates, credentials file is 0600 and has the alias, and',
     '                               the two token copies agree (§4.2)',
+    '                bot service install --alias <a>',
+    '                                           install the per-bot launchd/systemd unit',
+    '                               (--dry-run prints the unit); uninstall stops it and removes',
+    '                               the bot\'s files (--yes writes; §17.7 consequence is printed)',
     '                doctor      healthz, Fleet reachability and one smoke Run per',
     '                               enabled harness (--json for machine output)',
     '                status      show the current host state (read-only)',
@@ -435,8 +440,39 @@ async function main(): Promise<void> {
     }
     return;
   }
+  // `host bot service install|uninstall --alias <a>` — per-alias launchd/systemd units (§10, B1-3).
+  // Runs before loadConfig() like the other bot commands: the unit wraps `host bot run`, and an
+  // uninstall must work on a host whose mercury.env is otherwise broken (it EDITS that file).
+  if (cmd === 'host' && args[0] === 'bot' && args[1] === 'service') {
+    const sub = args[2];
+    const rest = args.slice(3);
+    const io = { out: (s: string) => process.stdout.write(s), err: (s: string) => process.stderr.write(s) };
+    if (sub === 'install') {
+      try {
+        const { alias, dryRun } = parseBotServiceInstallArgs(rest);
+        process.exitCode = installBotService(process.platform, alias, io, process.env, dryRun);
+      } catch (e) {
+        process.stderr.write((e as Error).message + '\n');
+        process.exitCode = 1;
+      }
+      return;
+    }
+    if (sub === 'uninstall') {
+      try {
+        const { alias, ...opts } = parseBotServiceUninstallArgs(rest);
+        process.exitCode = uninstallBotService(process.platform, alias, io, process.env, opts);
+      } catch (e) {
+        process.stderr.write((e as Error).message + '\n');
+        process.exitCode = 1;
+      }
+      return;
+    }
+    process.stderr.write(`host bot service: unknown subcommand '${sub ?? ''}'. Expected install or uninstall.\n`);
+    process.exitCode = 1;
+    return;
+  }
   if (cmd === 'host' && args[0] === 'bot') {
-    process.stderr.write(`host bot: unknown subcommand '${args[1] ?? ''}'. Expected run, validate, dispatch or status.\n`);
+    process.stderr.write(`host bot: unknown subcommand '${args[1] ?? ''}'. Expected run, validate, dispatch, status or service.\n`);
     process.exitCode = 1;
     return;
   }
