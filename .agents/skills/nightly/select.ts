@@ -185,12 +185,16 @@ function ghToken(env: NodeJS.ProcessEnv): string {
   return tok;
 }
 
-async function ghGet(path: string, token: string): Promise<unknown> {
+/** Every fetch is bounded: a stalled connection must not hang the nightly (same rule as process.ts). */
+const FETCH_TIMEOUT_MS = 30_000;
+
+async function ghGet(path: string, token: string): Promise<{ body: unknown; link?: string | null }> {
   const res = await fetch(`https://api.github.com${path}`, {
     headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
-  return res.json();
+  return { body: await res.json(), link: res.headers.get('link') };
 }
 
 /** Returns true when the label was newly added (2xx); false when GitHub says it is already there (422). */
@@ -199,6 +203,7 @@ async function ghPost(path: string, body: unknown, token: string): Promise<boole
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (res.ok) return true;
   if (res.status === 422) return false; // Validation Failed: the label is already present
@@ -260,7 +265,16 @@ export async function runSelectorWith(
   if (!repo.trim() || repo.includes('//')) {
     throw new Error('REPO is required as owner/name (e.g. aywengo/mercury); got an empty or malformed value');
   }
-  const issues = (await io.get(`/repos/${repo}/issues?state=open&per_page=100`)) as GhIssue[];
+  // The open-issue list is walked with Link-header pagination (bounded at 10 pages = 1000
+  // issues): an eligible candidate past page one must not be invisible to a deterministic selector.
+  const issues: GhIssue[] = [];
+  let listPath: string | null = `/repos/${repo}/issues?state=open&per_page=100`;
+  for (let page = 0; page < 10 && listPath; page++) {
+    const { body, link } = (await io.get(listPath)) as { body: GhIssue[]; link?: string | null };
+    issues.push(...body);
+    const next = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
+    listPath = next ? next.replace('https://api.github.com', '') : null;
+  }
   const real = issues.filter((i) => !i.pull_request);
   const candidates: Candidate[] = [];
   for (const issue of real) {
@@ -294,7 +308,7 @@ export async function runSelector(repo: string, env: NodeJS.ProcessEnv, dryRun: 
   const token = ghToken(env);
   return runSelectorWith(
     {
-      get: (path) => ghGet(path, token),
+      get: async (path) => (await ghGet(path, token)).body,
       post: (path, body) => ghPost(path, body, token),
     },
     { ...env, REPO: repo },

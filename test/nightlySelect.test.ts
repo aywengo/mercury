@@ -157,7 +157,7 @@ test('runSelectorWith claims exactly one issue and returns it (normal case)', as
   const io = {
     async get(path: string) {
       events.push(`get ${path}`);
-      return [issue({ number: 60, user: { login: 'aywengo' } })];
+      return { body: [issue({ number: 60, user: { login: 'aywengo' } })], link: null };
     },
     async post(path: string) {
       events.push(`post ${path}`);
@@ -179,7 +179,7 @@ test('runSelectorWith re-selects only when GitHub says the label was already the
   const posts: string[] = [];
   let first = true;
   const io = {
-    async get() { return [issue({ number: 62, user: { login: 'aywengo' } }), issue({ number: 63, user: { login: 'aywengo' } })]; },
+    async get() { return { body: [issue({ number: 62, user: { login: 'aywengo' } }), issue({ number: 63, user: { login: 'aywengo' } })], link: null }; },
     async post(path: string) {
       posts.push(path);
       if (first) { first = false; return false; } // 422: a racer already claimed #62
@@ -199,7 +199,7 @@ test('runSelectorWith --dry-run never posts the claim', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const posts: string[] = [];
   const io = {
-    async get() { return [issue({ number: 70, user: { login: 'aywengo' } })]; },
+    async get() { return { body: [issue({ number: 70, user: { login: 'aywengo' } })], link: null }; },
     async post(path: string) { posts.push(path); return true; },
   };
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, true);
@@ -258,4 +258,26 @@ test('e2eRunTerminal walks pages: a non-terminal e2e Run past page one fails the
   } finally {
     srv.close();
   }
+});
+
+
+test('the open-issue list walks Link-header pages (round-4 review)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const paths: string[] = [];
+  const io = {
+    async get(path: string) {
+      paths.push(path);
+      if (path.includes('page=2') || path.includes('page%3D2')) {
+        return { body: [issue({ number: 82, user: { login: 'aywengo' } })], link: null };
+      }
+      return {
+        body: [issue({ number: 81, user: { login: 'random' }, labels: [{ name: 'question' }] })],
+        link: '<https://api.github.com/repos/aywengo/mercury/issues?state=open&per_page=100&page=2>; rel="next"',
+      };
+    },
+    async post() { return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
+  assert.equal(s.issue, 82, 'the page-2 candidate is visible to the ladder');
+  assert.equal(paths.filter((p) => p.startsWith('/repos/')).length, 2, 'both pages fetched');
 });
