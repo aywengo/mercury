@@ -108,14 +108,14 @@ issue `nightly:blocked`, put the question in an issue comment, finish the Run.
    by @aywengo, filed by the bot from E2E, or labeled `nightly:ready` by
    @aywengo. Checked from the API's author and label-event actor fields, never
    by the agent reading issue text (#738).
-2. **Bot identity.** A GitHub App or machine user with fine-grained permissions
-   on `aywengo/mercury` only: issues, pull requests, contents on branches.
-   Documented in `docs/operations.md`.
+2. **Bot identity.** The machine user `mercury-nightly`, Write collaborator on
+   `aywengo/mercury` only, classic PAT with `repo` scope (fine-grained tokens do
+   not work for collaborators on a personal repository). Documented in
+   `docs/operations.md`.
 3. **Branch protection.** `main` is protected by the `main-protection` ruleset:
    PR required, `ci` required green, force-push and deletion blocked, @aywengo
-   alone on the bypass list. **The ruleset must require at least one approving
-   review before the first night.** With zero, the nightly identity could merge
-   its own PR on green CI.
+   alone on the bypass list, one approving review required (set 2026-09-26), so
+   the nightly identity cannot merge its own PRs.
 4. **Pinned host.** The nightly host runs a released `@aywengo/mercury`
    version, upgraded deliberately by a human. Work happens in Run workspaces,
    never in the installation.
@@ -167,7 +167,7 @@ The issue set for N0, N1 and dispatcher B0–B1 is
 
 | Milestone | Status | Issues |
 | --- | --- | --- |
-| N0 guardrails | **done**, except ruleset approvals (§5.3) | #727, #728 |
+| N0 guardrails | **done** — identity `mercury-nightly`, approvals = 1 | #727, #728 |
 | Dispatcher B0 | **done** | #729–#734 |
 | Dispatcher B1 | **done** | #735–#737 |
 | N1 skills | **in progress** — selector done | #738 done; #739, #740, #741 open |
@@ -184,8 +184,9 @@ failure), #760 (owner-transfer API for `--reassign-runs`).
 The milestones below are delivered in five stages. Each stage adds autonomy
 only after the previous one has produced evidence that it can be trusted.
 
-1. **First night (N1 → N2).** Owner steps: set ruleset approvals to 1; create
-   and name the nightly identity. Agent work: #739–#741, then #742. Then walk
+1. **First night (N1 → N2).** Owner steps done 2026-09-26 (approvals = 1,
+   identity `mercury-nightly`); the token goes into the host harness
+   environment with the #742 checklist. Agent work: #739–#741, then #742. Then walk
    the #742 checklist, `host bot service install --alias nightly`, and record
    three clean nights on #742.
 2. **Prove it (N2 acceptance, no new code).** Run nightly until the N2
@@ -264,6 +265,11 @@ is windowed. Always-on is simpler; windowed relies on Run durability across
 restarts.
 
 ## 10. Revision history
+
+### 2026-09-26 — identity named
+
+Nightly identity is `mercury-nightly` (classic PAT, see §5.2); `main-protection`
+requires one approving review. N0 has no remaining owner steps.
 
 ### 2026-09-26 — status and stages
 

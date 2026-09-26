@@ -312,15 +312,29 @@ Mercury's nightly self-development work (`docs/nightly-self-development.md`)
 operates on this repository from a host — eventually through the dispatcher bot
 (`docs/dispatcher-bot-design.md`). That host must not use a personal token.
 
-**Identity.** The nightly host acts as a dedicated identity — a GitHub App or
-a machine user — fine-grained to `aywengo/mercury` and nothing else. It is not
-a collaborator's account and it is not on `main`'s bypass list
-(ruleset `main-protection`), so everything it does goes through pull requests.
+**Identity.** The nightly host acts as the machine user
+[`mercury-nightly`](https://github.com/mercury-nightly), a repository
+collaborator on `aywengo/mercury` with the Write role and on no other
+repository. It is not a collaborator's personal account and it is not on
+`main`'s bypass list (ruleset `main-protection`), so everything it does goes
+through pull requests.
 
-**Scopes.** Issues read/write (file and comment on nightly findings), pull
-requests read/write (open, review, merge its own PRs), contents read/write
-(read the repo, push branches). Nothing beyond that: no admin, no secrets, no
-other repositories.
+**Credential.** A classic personal access token owned by `mercury-nightly`,
+scope `repo` only, 90-day expiry. Not fine-grained: GitHub does not let a
+fine-grained token contribute to a repository where its user is only a
+repository collaborator, which is the case for a machine user on a personally
+owned repository. `repo` is bounded in practice by the account's memberships,
+so the account must never be added to another repository. `workflow` is
+deliberately absent: the identity cannot push changes to
+`.github/workflows/`, so it cannot alter its own CI gate. A GitHub App
+(true per-repository permissions) would need hourly token minting on the host
+that keeps the App key out of Runs; that is future work.
+
+**Scopes in effect.** Issues (file and comment on nightly findings), pull
+requests (open and update its own), contents (read the repo, push branches).
+It cannot merge: `main-protection` requires one approving review, and an
+author cannot approve its own pull request. Merging is @aywengo's, in the
+morning (`nightly-self-development.md` §2, goal 3).
 
 **Token location.** The identity's credential lives only in the host's Mercury
 harness environment (the same channel agent credentials already use). It never
@@ -334,11 +348,12 @@ itself, and never upgrades its own runtime. Upgrades are an operator step with
 the release notes in front of them.
 
 **Branch protection.** `main` is protected by the `main-protection` ruleset:
-pull request required, the aggregate `ci` check required green, force pushes
+pull request with one approving review required, the aggregate `ci` check
+required green, force pushes
 and deletions blocked. `@aywengo` holds the bypass so documentation commits can
-continue to land directly; no automation is on the bypass list. The bot
-identity is minted by the operator; until it exists, acceptance for issue
-#727's push-rejection check waits on that credential.
+continue to land directly; no automation is on the bypass list. Pull requests
+authored by @aywengo cannot be self-approved and are merged through the bypass
+(`gh pr merge --admin`).
 
 ## Common failure symptoms
 
