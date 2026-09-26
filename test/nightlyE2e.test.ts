@@ -72,8 +72,7 @@ function ioWithFirstFailure(failure: { name: string; error: string; file: string
         }
         return { code: 0, output: 'ℹ pass 12\nℹ fail 0' };
       },
-      async get(path) {
-        posts.push; // keep the reference used
+      async get(_path) {
         return { body: [], status: 200 };
       },
       async post(path, body) {
@@ -241,10 +240,23 @@ test('a flake on three distinct nights files a flaky-test defect (state carries 
       }
     }
     assert.equal(filed, 1, 'filed exactly once across the three nights');
-    // A fourth flake night comments on the flake issue? No — it reports the flake; filing happened.
+    // A FOURTH flake night must not re-file (nights === threshold, not >=).
+    let first4 = true;
+    const posts4: { path: string; body: unknown }[] = [];
+    const io4: E2eIo = {
+      async run() {
+        if (first4) { first4 = false; return { code: 1, output: failingOutput(failure.name, failure.error, failure.file) }; }
+        return { code: 0, output: 'ℹ pass 12\nℹ fail 0' };
+      },
+      async get() { return { body: [], status: 200 }; },
+      async post(path, body) { posts4.push({ path, body }); return { body: { number: 901 }, status: 201 }; },
+    };
+    const report4 = await runE2eSkill(io4, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-09-25' });
+    assert.equal(posts4.length, 0, 'night 4: still no filing');
+    assert.equal(report4.flakes.length, 1);
     const state = loadFlakeState({ XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' });
     const fp = Object.keys(state)[0]!;
-    assert.equal(state[fp]!.nights.length, 3);
+    assert.equal(state[fp]!.nights.length, 4);
   } finally {
     cleanup();
   }

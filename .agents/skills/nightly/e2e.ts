@@ -277,7 +277,9 @@ export async function runE2eSkill(
       // Flake. Record the night; file only when the same fingerprint flaked on FLAKE_FILE_NIGHTS nights.
       const nights = recordFlakeNight(state, fp, failure.test, failure.error, opts.night);
       stateDirty = true;
-      if (nights >= FLAKE_FILE_NIGHTS && !opts.dryRun) {
+      // Exactly ONCE: nights counts DISTINCT nights, so === hits only on the threshold night.
+      // >= would re-file the same flaky-test issue on nights 4, 5, ... (no filed-marker state).
+      if (nights === FLAKE_FILE_NIGHTS && !opts.dryRun) {
         const nightsList = state[fp]!.nights.join(', ');
         const body = [
           `Flake filed by the nightly E2E skill (N1-2): the fingerprint below flaked on ${nights} distinct nights (${nightsList}).`,

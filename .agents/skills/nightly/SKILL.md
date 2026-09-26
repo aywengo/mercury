@@ -51,8 +51,11 @@ that issue and re-selects. `--dry-run` prints the decision and writes nothing.
 ## E2E (`e2e.ts`, N1-2)
 
 ```bash
-GH_TOKEN=<token> node .agents/skills/nightly/e2e.ts --repo aywengo/mercury [--dry-run]
+node .agents/skills/nightly/e2e.ts --repo aywengo/mercury [--dry-run]
 ```
+
+`GH_TOKEN` (or `GITHUB_TOKEN`) is demanded only when GitHub is actually
+touched — a green suite and `--dry-run` need no credentials.
 
 Runs `npm run test:e2e` once (the host needs Docker), reruns each failure ONCE
 on its own file to separate flakes from defects, then:
@@ -65,7 +68,8 @@ on its own file to separate flakes from defects, then:
 - **Flake** (passes on rerun) — listed in the report, never filed, until the
   same fingerprint has flaked on three DISTINCT nights (state at
   `${XDG_STATE_HOME:-~/.local/state}/mercury/nightly/e2e-flakes.json`); the
-  third night files a flaky-test defect citing all three nights.
+  third night files a flaky-test defect citing all three nights — exactly
+  once (later nights only report the flake again).
 
 The report is exactly one JSON line `{ pass, fail, real, flakes }`.
 
