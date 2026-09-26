@@ -184,26 +184,30 @@ async function ghGet(path: string, token: string): Promise<unknown> {
   return res.json();
 }
 
-async function ghPost(path: string, body: unknown, token: string): Promise<void> {
+/** Returns true when the label was newly added (2xx); false when GitHub says it is already there (422). */
+async function ghPost(path: string, body: unknown, token: string): Promise<boolean> {
   const res = await fetch(`https://api.github.com${path}`, {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-  // 200/201 added; 422 already-labeled is fine (the re-read below decides).
-  if (!res.ok && res.status !== 422) throw new Error(`POST ${path} -> ${res.status}`);
+  if (res.ok) return true;
+  if (res.status === 422) return false; // Validation Failed: the label is already present
+  throw new Error(`POST ${path} -> ${res.status}`);
 }
 
-/** Tonight's nightly-e2e Run must be terminal before rung 1 offers work. Unset env = gate passed. */
+/** Tonight's nightly-e2e Run must be terminal before rung 1 offers work.
+ * Unset env = no gate configured = passed. A CONFIGURED gate that cannot be evaluated
+ * (unreachable host, bad token, non-2xx) fails CLOSED: rung 1 does not start on a guess. */
 export async function e2eRunTerminal(env: NodeJS.ProcessEnv): Promise<boolean> {
   const url = env.MERCURY_API_URL;
   const token = env.MERCURY_API_TOKEN;
-  if (!url || !token) return true; // no host configured: the gate cannot be evaluated, treat as passed
+  if (!url || !token) return true; // no host configured: no gate exists
   try {
     const res = await fetch(`${url.replace(/\/$/, '')}/api/runs?limit=100`, {
       headers: { authorization: `Bearer ${token}` },
     });
-    if (!res.ok) return true;
+    if (!res.ok) return false; // configured but unevaluable: fail closed
     const body = (await res.json()) as { runs?: { task?: string; status?: string }[] };
     const runs = body.runs ?? [];
     const tonight = runs.filter((r) => (r.task ?? '').includes('nightly-e2e'));
@@ -211,13 +215,14 @@ export async function e2eRunTerminal(env: NodeJS.ProcessEnv): Promise<boolean> {
     const TERMINAL = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'];
     return tonight.every((r) => TERMINAL.includes(r.status ?? ''));
   } catch {
-    return true; // the host being unreachable must not block the ladder with a lie; say so in the reason? no: keep silent, rung decision explains
+    return false; // configured but unreachable: fail closed
   }
 }
 
-/** The full pipeline over an INJECTED fetch-like transport (tests pass recordings; main passes ghGet/ghPost). */
+/** The full pipeline over an INJECTED fetch-like transport (tests pass recordings; main passes ghGet/ghPost).
+ * io.post returns true when the claim label was newly added, false when it was already present. */
 export async function runSelectorWith(
-  io: { get: (path: string) => Promise<unknown>; post: (path: string, body: unknown) => Promise<void> },
+  io: { get: (path: string) => Promise<unknown>; post: (path: string, body: unknown) => Promise<boolean> },
   env: NodeJS.ProcessEnv,
   dryRun: boolean,
 ): Promise<Selection> {
@@ -239,16 +244,15 @@ export async function runSelectorWith(
   // Claim BEFORE returning: label nightly:in-progress, then re-read; if the label was already
   // there (a concurrent nightly won), pick again from the remaining candidates.
   while (typeof selection.issue === 'number' && !dryRun) {
-    await io.post(`/repos/${repo}/issues/${selection.issue}/labels`, { labels: [L_IN_PROGRESS] });
-    const fresh = (await io.get(`/repos/${repo}/issues/${selection.issue}`)) as GhIssue;
-    if (issueLabels(fresh).includes(L_IN_PROGRESS)) {
-      // Could be ours or a racer's. Re-read timing cannot distinguish; the re-select below
-      // excludes it either way, which is the safe outcome (one claim, no double work).
-      candidates.splice(candidates.findIndex((c) => c.issue.number === selection.issue), 1);
-      selection = selectLadder(candidates, { e2eRunTerminal: e2eTerminal }, seen);
-    } else {
+    const added = await io.post(`/repos/${repo}/issues/${selection.issue}/labels`, { labels: [L_IN_PROGRESS] });
+    if (added) {
+      // The claim is ours (2xx): the contract is one claimed issue, returned.
       break;
     }
+    // 422: the label was ALREADY there — a concurrent or retried nightly won the race. Drop the
+    // candidate and pick again; if everything is taken, the ladder reports rung 3.
+    candidates.splice(candidates.findIndex((c) => c.issue.number === selection.issue), 1);
+    selection = selectLadder(candidates, { e2eRunTerminal: e2eTerminal }, seen);
   }
   return selection;
 }

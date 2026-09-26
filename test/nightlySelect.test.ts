@@ -129,34 +129,48 @@ test('readyActorsFor reads only labeled events for the ready label', () => {
 });
 
 
-test('runSelectorWith claims the chosen issue BEFORE returning, and re-selects on a racer', async () => {
+test('runSelectorWith claims exactly one issue and returns it (normal case)', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const events: string[] = [];
-  const issues: Record<number, GhIssue> = {
-    60: issue({ number: 60, user: { login: 'aywengo' } }),
-    61: issue({ number: 61, user: { login: 'aywengo' } }),
-  };
-  // Re-reads report the label as present (the claim landed), so the selector re-selects.
   const io = {
     async get(path: string) {
       events.push(`get ${path}`);
-      const m = /issues\/(\d+)$/.exec(path);
-      if (m) return { ...issues[Number(m[1])!]!, labels: [{ name: 'nightly:in-progress' }] };
-      return Object.values(issues);
+      return [issue({ number: 60, user: { login: 'aywengo' } })];
     },
     async post(path: string) {
       events.push(`post ${path}`);
+      return true;
     },
   };
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
-  // First claim on #60, then re-select picks #61 and claims it too (also reported taken).
+  assert.equal(s.rung, 2);
+  assert.equal(s.issue, 60, 'the claimed issue is returned');
   assert.deepEqual(events.filter((e) => e.startsWith('post')), [
     'post /repos/aywengo/mercury/issues/60/labels',
-    'post /repos/aywengo/mercury/issues/61/labels',
-  ]);
-  assert.equal(s.rung, 3, 'both candidates claimed: nothing left, docs rung reported');
-  const firstPost = events.findIndex((e) => e.startsWith('post'));
-  assert.ok(firstPost < events.length - 1, 'the claim POST happens before the decision is returned');
+  ], 'exactly one claim POST in the normal case');
+  assert.ok(events.indexOf('post /repos/aywengo/mercury/issues/60/labels') !== -1, 'the claim is issued before runSelectorWith resolves');
+  assert.match(s.reason, /#60/);
+});
+
+test('runSelectorWith re-selects only when GitHub says the label was already there (422 racer)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const posts: string[] = [];
+  let first = true;
+  const io = {
+    async get() { return [issue({ number: 62, user: { login: 'aywengo' } }), issue({ number: 63, user: { login: 'aywengo' } })]; },
+    async post(path: string) {
+      posts.push(path);
+      if (first) { first = false; return false; } // 422: a racer already claimed #62
+      return true;
+    },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
+  assert.deepEqual(posts, [
+    '/repos/aywengo/mercury/issues/62/labels',
+    '/repos/aywengo/mercury/issues/63/labels',
+  ], 'the racer-taken candidate is dropped, the next one is claimed');
+  assert.equal(s.issue, 63);
+  assert.equal(s.rung, 2);
 });
 
 test('runSelectorWith --dry-run never posts the claim', async () => {
@@ -164,9 +178,31 @@ test('runSelectorWith --dry-run never posts the claim', async () => {
   const posts: string[] = [];
   const io = {
     async get() { return [issue({ number: 70, user: { login: 'aywengo' } })]; },
-    async post(path: string) { posts.push(path); },
+    async post(path: string) { posts.push(path); return true; },
   };
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, true);
   assert.equal(s.issue, 70);
   assert.deepEqual(posts, [], '--dry-run prints the decision and writes nothing');
+});
+
+
+test('e2eRunTerminal fails CLOSED when the gate is configured but unevaluable (round-1 review)', async () => {
+  const { e2eRunTerminal } = await import('../.agents/skills/nightly/select.ts');
+  // Unset env: no gate configured → passed.
+  assert.equal(await e2eRunTerminal({}), true);
+  // Configured but unreachable → fail closed.
+  assert.equal(await e2eRunTerminal({ MERCURY_API_URL: 'http://127.0.0.1:9', MERCURY_API_TOKEN: 't' }), false, 'unreachable host: rung 1 must not start on a guess');
+  // Configured, reachable, non-2xx → fail closed.
+  const S = await (async () => {
+    const { createServer } = await import('node:http');
+    const srv = createServer((_req, res) => { res.statusCode = 500; res.end('boom'); });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const addr = srv.address();
+    return { srv, url: `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}` };
+  })();
+  try {
+    assert.equal(await e2eRunTerminal({ MERCURY_API_URL: S.url, MERCURY_API_TOKEN: 't' }), false, 'non-2xx: fail closed');
+  } finally {
+    S.srv.close();
+  }
 });
