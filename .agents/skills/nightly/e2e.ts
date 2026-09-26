@@ -282,6 +282,12 @@ export async function runE2eSkill(
   if (first.code === 0) return report;
 
   const failures = parseFailures(first.output);
+  if (failures.length === 0) {
+    // The suite failed but the reporter output yielded no parseable failures (format drift,
+    // harness crash). Never file blind: one honest observation, no GitHub actions.
+    report.real.push({ test: '<unparseable suite failure>', error: normalizeErrorLine(first.output.split('\n').find((l) => l.trim() !== '') ?? ''), fingerprint: '', action: 'dry-run' });
+    return report;
+  }
   // The token is required only when GitHub is actually read/written; a fully dry or green night
   // with no failures must not demand credentials.
   let cachedToken: string | null = null;
@@ -299,6 +305,13 @@ export async function runE2eSkill(
       ? ['node', '--test', failure.file]
       : ['npm', 'run', 'test:e2e'];
     const rerun = await io.run(rerunArgv, { timeoutMs });
+    if (rerun.code !== 0) {
+      // The rerun is the confirmation run: when it names the same test with a different primary
+      // error line, THAT is the reproducible signature — fingerprint and file from the rerun.
+      const rerunFailures = parseFailures(rerun.output);
+      const same = rerunFailures.find((f) => f.test === failure.test);
+      if (same && same.error) failure.error = same.error;
+    }
     const fp = await fingerprintOf(failure.test, failure.error);
     if (rerun.code === 0) {
       // Flake. Record the night; file only when the same fingerprint flaked on FLAKE_FILE_NIGHTS nights.

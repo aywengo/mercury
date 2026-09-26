@@ -578,6 +578,64 @@ test('a failed comment post (5xx) records the observation honestly and still rep
   }
 });
 
+test('a failing suite with unparseable output records one observation and never files', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    // Non-zero exit, but the output has no spec-reporter failure block at all.
+    const calls: { path: string; body?: unknown }[] = [];
+    const io: E2eIo = {
+      async run() { return { code: 1, output: 'spawn ENOENT: the harness itself crashed' }; },
+      async get(path) { calls.push({ path }); return { body: [], status: 200 }; },
+      async post(path, body) { calls.push({ path, body }); return { body: { number: 1 }, status: 201 }; },
+    };
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-09-26' });
+    assert.equal(calls.length, 0, 'never file based on unparseable output');
+    assert.equal(report.real.length, 1);
+    assert.equal(report.real[0]!.action, 'dry-run');
+    assert.match(report.real[0]!.test, /unparseable/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a real failure fingerprints the RERUN error line when the rerun names the same test', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const failure = { name: 'shifting defect', error: 'Error: first flavor at a.test.ts:1:1', file: 'e2e/system.test.ts' };
+    const rerunOut = [
+      '✖ shifting defect (0.4ms)',
+      'ℹ pass 0',
+      'ℹ fail 1',
+      '',
+      '✖ failing tests:',
+      '',
+      'test at e2e/system.test.ts:3:1',
+      '✖ shifting defect (0.4ms)',
+      '  Error: reproducible flavor',
+    ].join('\n');
+    const posts: { path: string; body: unknown }[] = [];
+    let suite = 0;
+    const io: E2eIo = {
+      async run() {
+        suite += 1;
+        if (suite === 1) return { code: 1, output: failingOutput(failure.name, failure.error, failure.file) };
+        return { code: 1, output: rerunOut };
+      },
+      async get() { return { body: [], status: 200 }; },
+      async post(path, body) { posts.push({ path, body }); return { body: { number: 950 }, status: 201 }; },
+    };
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-09-26' });
+    assert.equal(report.real.length, 1);
+    assert.equal(report.real[0]!.action, 'filed');
+    // The filed body cites the RERUN's error (the reproducible signature):
+    const body = String((posts[0]!.body as { body?: string }).body);
+    assert.match(body, /reproducible flavor/);
+    assert.doesNotMatch(body, /first flavor/);
+  } finally {
+    cleanup();
+  }
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const io: E2eIo = { run: PASSING, async get() { return { body: [], status: 200 }; }, async post() { return { body: {}, status: 201 }; } };
   await assert.rejects(
