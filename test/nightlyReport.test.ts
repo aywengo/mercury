@@ -112,11 +112,13 @@ test('searches cover the LOCAL night as a UTC instant window (not the UTC day)',
   await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
   const searches = calls.filter((c) => c.method === 'GET' && c.path.startsWith('/search/issues?')).map((c) => decodeURIComponent(c.path));
   assert.equal(searches.length, 3);
+  // Expected endpoints derived the same way the implementation derives them: local midnight of
+  // the night and of the next day, as ISO instants with a +00:00 offset. The window must be an
+  // instant range (a UTC-day qualifier would miss the hours between local and UTC midnight).
+  const toIso = (day: string): string => new Date(`${day}T00:00:00`).toISOString().replace(/\.\d{3}Z$/, '+00:00');
+  const win = `${toIso('2026-09-26')}..${toIso('2026-09-27')}`;
   for (const q of searches) {
-    // The window endpoints are ISO instants with an explicit +00:00 offset (GitHub-accepted
-    // format), computed from LOCAL midnight - a UTC-day qualifier would miss the hours between
-    // local midnight and UTC midnight.
-    assert.ok(q.includes('created:2026-09-25T22:00:00+00:00..2026-09-26T22:00:00+00:00') || q.includes('commented:2026-09-25T22:00:00+00:00..2026-09-26T22:00:00+00:00'), `local-window: ${q}`);
+    assert.ok(q.includes(`created:${win}`) || q.includes(`commented:${win}`), `local-window: ${q}`);
     assert.ok(!q.includes('created:2026-09-26&'), `no UTC-day qualifier: ${q}`);
     assert.ok(!q.includes('commented:2026-09-26&'), `no UTC-day qualifier: ${q}`);
   }
