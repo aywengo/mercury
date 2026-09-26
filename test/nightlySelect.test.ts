@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import {
   isExcluded,
   isTrusted,
+  issueAuthor,
+  issueLabels,
+  labelActorsFor,
   priorityRank,
   readyActorsFor,
   selectLadder,
@@ -20,7 +23,16 @@ function labeled(actor: string, label: string): LabelEvent {
   return { event: 'labeled', actor: { login: actor }, label: { name: label } };
 }
 function cand(i: GhIssue, timeline: LabelEvent[] = []): Candidate {
-  return { issue: i, readyByTrusted: readyActorsFor(i, timeline).includes('aywengo') };
+  return {
+    issue: i,
+    readyByTrusted: readyActorsFor(i, timeline).includes('aywengo'),
+    e2eByNightly: issueAuthor(i) === 'mercury-nightly'
+      && issueLabels(i).includes('origin:e2e')
+      && labelActorsFor(timeline, 'origin:e2e').includes('mercury-nightly'),
+  };
+}
+function e2eLabeled(actor: string): LabelEvent {
+  return { event: 'labeled', actor: { login: actor }, label: { name: 'origin:e2e' } };
 }
 
 const TERMINAL = { e2eRunTerminal: true };
@@ -45,24 +57,71 @@ test('a nightly:ready label applied by another actor is ignored; by @aywengo it 
   assert.notEqual(s2.issue, 2);
 });
 
-test('origin:e2e is trusted regardless of author', () => {
-  const c = [cand(issue({ number: 4, user: { login: 'mercury-bot[bot]' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-21T00:00:00Z' }))];
-  const s = selectLadder(c, TERMINAL);
-  assert.equal(s.rung, 1);
-  assert.equal(s.issue, 4);
-  assert.match(s.reason, /origin:e2e/);
+test('origin:e2e is trusted only from the nightly identity (#764)', () => {
+  // An origin:e2e issue authored by ANOTHER user is not eligible — the label alone is provenance
+  // anyone with triage access can apply (#764 fixture 1, foreign author).
+  const foreign = cand(issue({ number: 4, user: { login: 'mercury-bot[bot]' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-21T00:00:00Z' }));
+  const sForeign = selectLadder([foreign], TERMINAL);
+  assert.notEqual(sForeign.issue, 4);
+  assert.equal(sForeign.rung === 'none' || sForeign.rung === 3, true);
+
+  // The SAME issue authored by the nightly identity, with the e2e label applied by the nightly
+  // identity, is eligible (fixture 1, nightly author).
+  const nightly = cand(
+    issue({ number: 5, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-21T00:00:00Z' }),
+    [e2eLabeled('mercury-nightly')],
+  );
+  const sNightly = selectLadder([nightly], TERMINAL);
+  assert.equal(sNightly.rung, 1);
+  assert.equal(sNightly.issue, 5);
+  assert.match(sNightly.reason, /origin:e2e/);
+
+  // Nightly-authored WITHOUT origin:e2e is not eligible through this clause (fixture 2); it is
+  // also not rung 2 (rung 2 requires @aywengo authorship) — it lands on rung 3/none.
+  const noLabel = cand(issue({ number: 6, user: { login: 'mercury-nightly' }, created_at: '2026-09-21T00:00:00Z' }));
+  const sNone = selectLadder([noLabel], TERMINAL);
+  assert.notEqual(sNone.issue, 6);
+
+  // An e2e label applied by someone OTHER than the nightly identity fails the actor check even
+  // with the nightly author — the same standard as nightly:ready.
+  const stolen = cand(
+    issue({ number: 7, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-21T00:00:00Z' }),
+    [e2eLabeled('random-dev')],
+  );
+  const sStolen = selectLadder([stolen], TERMINAL);
+  assert.notEqual(sStolen.issue, 7);
+
+  // The CURRENT actor decides: nightly applied it, someone unlabeled and re-applied it — not trusted.
+  const takenOver = cand(
+    issue({ number: 8, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-21T00:00:00Z' }),
+    [
+      e2eLabeled('mercury-nightly'),
+      { event: 'unlabeled', actor: { login: 'random-dev' }, label: { name: 'origin:e2e' } },
+      e2eLabeled('random-dev'),
+    ],
+  );
+  const sTaken = selectLadder([takenOver], TERMINAL);
+  assert.notEqual(sTaken.issue, 8);
+});
+
+test('mutation control: the label-only check would trust the foreign e2e issue (#764 fixture 3)', () => {
+  // The pre-#764 behavior — trusting any issue that carries origin:e2e — would pick issue 4 here.
+  // If this fixture ever picks 4, the label-only check is back.
+  const foreign = cand(issue({ number: 4, user: { login: 'random-dev' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-20T00:00:00Z' }));
+  const s = selectLadder([foreign], TERMINAL);
+  assert.notEqual(s.issue, 4, 'origin:e2e without nightly identity authorship must stay ineligible');
 });
 
 test('rung 1 orders by priority label then age', () => {
-  const old_low = issue({ number: 10, labels: [{ name: 'origin:e2e' }, { name: 'priority: low' }], created_at: '2026-09-10T00:00:00Z' });
-  const new_high = issue({ number: 11, labels: [{ name: 'origin:e2e' }, { name: 'priority: high' }], created_at: '2026-09-24T00:00:00Z' });
-  const old_none = issue({ number: 12, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-11T00:00:00Z' });
-  const s = selectLadder([cand(old_low), cand(new_high), cand(old_none)], TERMINAL);
+  const old_low = cand(issue({ number: 10, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }, { name: 'priority: low' }], created_at: '2026-09-10T00:00:00Z' }), [e2eLabeled('mercury-nightly')]);
+  const new_high = cand(issue({ number: 11, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }, { name: 'priority: high' }], created_at: '2026-09-24T00:00:00Z' }), [e2eLabeled('mercury-nightly')]);
+  const old_none = cand(issue({ number: 12, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-11T00:00:00Z' }), [e2eLabeled('mercury-nightly')]);
+  const s = selectLadder([old_low, new_high, old_none], TERMINAL);
   assert.equal(s.issue, 11, 'high priority beats older low/no-priority');
-  const s2 = selectLadder([cand(old_low), cand(old_none)], TERMINAL);
+  const s2 = selectLadder([old_low, old_none], TERMINAL);
   assert.equal(s2.issue, 10, 'low has a priority rank; absent priority sorts last');
-  const same_pri_old = issue({ number: 13, labels: [{ name: 'origin:e2e' }, { name: 'priority: high' }], created_at: '2026-09-12T00:00:00Z' });
-  const s3 = selectLadder([cand(new_high), cand(same_pri_old)], TERMINAL);
+  const same_pri_old = cand(issue({ number: 13, user: { login: 'mercury-nightly' }, labels: [{ name: 'origin:e2e' }, { name: 'priority: high' }], created_at: '2026-09-12T00:00:00Z' }), [e2eLabeled('mercury-nightly')]);
+  const s3 = selectLadder([new_high, same_pri_old], TERMINAL);
   assert.equal(s3.issue, 13, 'same priority: oldest first');
 });
 
@@ -108,10 +167,11 @@ test('rung 3 / none', () => {
 });
 
 test('isTrusted / isExcluded / priorityRank unit behavior', () => {
-  assert.equal(isTrusted(issue({ number: 1, user: { login: 'aywengo' } }), false), true);
-  assert.equal(isTrusted(issue({ number: 2, user: { login: 'x' }, labels: [{ name: 'origin:e2e' }] }), false), true);
-  assert.equal(isTrusted(issue({ number: 3, user: { login: 'x' } }), true), true, 'ready-by-trusted flag');
-  assert.equal(isTrusted(issue({ number: 4, user: { login: 'x' } }), false), false);
+  assert.equal(isTrusted(issue({ number: 1, user: { login: 'aywengo' } }), false, false), true);
+  assert.equal(isTrusted(issue({ number: 2, user: { login: 'x' }, labels: [{ name: 'origin:e2e' }] }), false, false), false,
+    'a bare origin:e2e label with a foreign author is NOT trusted (#764)');
+  assert.equal(isTrusted(issue({ number: 3, user: { login: 'x' } }), true, false), true, 'ready-by-trusted flag');
+  assert.equal(isTrusted(issue({ number: 4, user: { login: 'x' } }), false, false), false);
   assert.equal(isExcluded(issue({ number: 5, labels: [{ name: 'nightly:in-progress' }] })), true);
   assert.equal(priorityRank(issue({ number: 6, labels: [{ name: 'priority: high' }] })), 0);
   assert.equal(priorityRank(issue({ number: 7, labels: [{ name: 'priority: low' }] })), 2);
@@ -133,7 +193,7 @@ test('readyActorsFor tracks the CURRENT ready state, not history (round-2 review
     { event: 'labeled', actor: { login: 'random-dev' }, label: { name: 'nightly:ready' } },
   ];
   assert.deepEqual(readyActorsFor(issue({ number: 10 }), taken_over), ['random-dev']);
-  assert.equal(isTrusted(issue({ number: 10, labels: [{ name: 'nightly:ready' }] }), readyActorsFor(issue({ number: 10 }), taken_over).includes('aywengo')), false);
+  assert.equal(isTrusted(issue({ number: 10, labels: [{ name: 'nightly:ready' }] }), readyActorsFor(issue({ number: 10 }), taken_over).includes('aywengo'), false), false);
   // aywengo labeled, other unlabeled, aywengo re-labeled: trusted again.
   const reclaimed: LabelEvent[] = [
     { event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } },

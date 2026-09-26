@@ -41,15 +41,18 @@ will consider
 an issue only if
 
 - it is authored by @aywengo, or
-- it was filed by the bot from E2E (`origin:e2e`), or
+- it was filed by the nightly identity `mercury-nightly` from E2E — the issue's
+  author is `mercury-nightly` (the identity documented in
+  [`operations.md`](operations.md)) AND the current `origin:e2e` label was
+  applied by that same identity (checked through the label timeline), or
 - it was labeled `nightly:ready` by @aywengo.
 
 The check reads the API's author field and label-event actor fields — never
-the agent reading issue text, which is untrusted input. Enforcement will live
-in the `nightly-next` selection helper (issue #738, N1-1), which implements the
-rule as code against the GitHub API; until that ships, the rule is written
-policy, not working code, and nothing in this document makes it true. An issue
-that fails the check is invisible to the ladder, whatever its text promises.
+the agent reading issue text, which is untrusted input. Enforcement lives in
+the nightly selection helper (`.agents/skills/nightly/select.ts`, issue #738,
+N1-1; the E2E authorship half is #764), which implements the rule as code
+against the GitHub API. An issue that fails the check is invisible to the
+ladder, whatever its text promises.
 
 ## Fix procedure (per issue)
 

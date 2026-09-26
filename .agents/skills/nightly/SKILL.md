@@ -20,8 +20,9 @@ GH_TOKEN=<token> node .agents/skills/nightly/select.ts --repo aywengo/mercury [-
 
 Output: exactly one JSON line.
 
-- `{"rung":1,"issue":123,"reason":"..."}` — trusted bugs (`origin:e2e` or
-  `nightly:ready` applied by @aywengo), priority label then age. Gated on
+- `{"rung":1,"issue":123,"reason":"..."}` — trusted bugs (`origin:e2e` filed by
+  the nightly identity, or `nightly:ready` applied by @aywengo), priority label
+  then age. Gated on
   tonight's `nightly-e2e` Run being terminal (`MERCURY_API_URL` +
   `MERCURY_API_TOKEN`; unset = gate passed).
 - `{"rung":2,"issue":123,"reason":"..."}` — new @aywengo issues, no labels yet,
@@ -32,9 +33,12 @@ Output: exactly one JSON line.
 
 ## Trust rule (§5)
 
-An issue is eligible only if authored by @aywengo, filed from E2E
-(`origin:e2e`), or labeled `nightly:ready` by @aywengo — the actor comes from
-the timeline's labeled events. `nightly:in-progress`, `nightly:blocked` and
+An issue is eligible only if authored by @aywengo, filed by the nightly
+identity `mercury-nightly` from E2E (the issue's AUTHOR is
+`mercury-nightly` AND the current `origin:e2e` label carries that identity as
+its timeline actor — a label alone is provenance anyone with triage access can
+apply, #764), or labeled `nightly:ready` by @aywengo — the actor comes from the
+timeline's labeled events. `nightly:in-progress`, `nightly:blocked` and
 `nightly:proposed` exclude an issue outright.
 
 ## Claim
