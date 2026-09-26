@@ -197,7 +197,9 @@ async function ghGet(path: string, token: string): Promise<{ body: unknown; link
   return { body: await res.json(), link: res.headers.get('link') };
 }
 
-/** Returns true when the label was newly added (2xx); false when GitHub says it is already there (422). */
+/** Returns true when the label was newly added (2xx); false ONLY for GitHub's
+ * already-exists validation failure (the racer case). Any other 422 is a real configuration
+ * error and throws instead of silently skipping work. */
 async function ghPost(path: string, body: unknown, token: string): Promise<boolean> {
   const res = await fetch(`https://api.github.com${path}`, {
     method: 'POST',
@@ -206,7 +208,13 @@ async function ghPost(path: string, body: unknown, token: string): Promise<boole
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (res.ok) return true;
-  if (res.status === 422) return false; // Validation Failed: the label is already present
+  if (res.status === 422) {
+    const payload = (await res.json().catch(() => null)) as { message?: string; errors?: { code?: string }[] } | null;
+    const already = payload?.errors?.some((e) => e.code === 'already_exists') ||
+      (payload?.message ?? '').toLowerCase().includes('already');
+    if (already) return false;
+    throw new Error(`POST ${path} -> 422 validation failed${payload?.message ? `: ${payload.message}` : ''}`);
+  }
   throw new Error(`POST ${path} -> ${res.status}`);
 }
 
@@ -272,11 +280,13 @@ export async function runSelectorWith(
   // issues): an eligible candidate past page one must not be invisible to a deterministic selector.
   const issues: GhIssue[] = [];
   let listPath: string | null = `/repos/${repo}/issues?state=open&per_page=100`;
+  let listCapped = false;
   for (let page = 0; page < 10 && listPath; page++) {
     const { body, link } = (await io.get(listPath)) as { body: GhIssue[]; link?: string | null };
     issues.push(...body);
     const next = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
     listPath = next ? next.replace('https://api.github.com', '') : null;
+    if (page === 9 && listPath) listCapped = true;
   }
   const real = issues.filter((i) => !i.pull_request);
   const candidates: Candidate[] = [];
@@ -301,7 +311,9 @@ export async function runSelectorWith(
     candidates.push({ issue, readyByTrusted });
   }
   const e2eTerminal = await e2eRunTerminal(env);
-  const seen = candidates.length;
+  // A capped list walk means open items exist beyond page 10 (they may all be PRs or PR-like):
+  // the ladder must report rung 3 rather than a false 'none'.
+  const seen = candidates.length + (listCapped ? 1 : 0);
   let selection = selectLadder(candidates, { e2eRunTerminal: e2eTerminal }, seen);
   // Claim BEFORE returning: label nightly:in-progress, then re-read; if the label was already
   // there (a concurrent nightly won), pick again from the remaining candidates.

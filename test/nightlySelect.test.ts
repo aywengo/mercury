@@ -343,3 +343,36 @@ test('the timeline walk is paginated and a hit cap fails closed (round-5 review)
   assert.deepEqual(posts, [], 'a capped timeline never trusts: no claim is attempted');
   assert.notEqual(s2.rung, 1);
 });
+
+
+test('ghPost 422: only already-exists re-selects; other validation failures throw (round-9 review)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  // A 422 whose body does NOT indicate already-exists must surface, not silently skip work.
+  const io = {
+    async get() { return { body: [issue({ number: 95, user: { login: 'aywengo' } })], link: null }; },
+    async post() {
+      const err = new Error('POST /labels -> 422 validation failed: Invalid request.\n\n"labels" for code "invalid"');
+      throw err;
+    },
+  };
+  // The injected post throws (the real ghPost would for a non-already-exists 422): runSelectorWith
+  // propagates it instead of re-selecting.
+  await assert.rejects(() => runSelectorWith(io, { REPO: 'aywengo/mercury' }, false), /422 validation failed/);
+});
+
+test('a capped open-issue list reports rung 3, never a false none (round-9 review)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const paths: string[] = [];
+  const io = {
+    async get(path: string) {
+      paths.push(path);
+      // Every page has ONLY PRs (filtered out) and always another page: 0 candidates, capped.
+      // Pages 1..10 all return a next link, so the walk hits the 10-page cap mid-list.
+      return { body: [issue({ number: 100 + paths.length, pull_request: {} })], link: `<https://api.github.com/repos/aywengo/mercury/issues?state=open&per_page=100&page=${paths.length + 1}>; rel="next"` };
+    },
+    async post() { return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
+  assert.equal(s.rung, 3, 'a capped walk means open items exist beyond the cap: docs rung, not none');
+  assert.equal(paths.length, 10, 'the walk stopped at the cap');
+});
