@@ -34,7 +34,7 @@ External blockers, already filed: **#721** (fail-closed capability checks, Crew 
 ```
 N0-1 branch protection + bot identity ─┐
 N0-2 nightly labels + triage doc ──────┤
-#721, #722 (Crew) ─────────────────────┼──► N1-5 launchd stopgap ──► first unattended night
+#721, #722 (Crew) ─────────────────────┼──► N1-5 bot config ──► first unattended night
 N1-1 selection helper ──► N1-2, N1-3 ──┤
 N1-4 report ───────────────────────────┘
 B0-3 notAfter ─────────────────────────────► N1-5 (Runs must stop by 06:00)
@@ -42,7 +42,7 @@ B0-3 notAfter ──────────────────────
 B0-1 owner-id ─┐
 B0-2 replay ───┤
 B0-4 cron ─────┼──► B0-5 config + validate ──► B1-1 scheduler ──► B1-2 dispatch/status
-B0-6 audit ────┘                                                └──► B1-3 service ──► retire N1-5
+B0-6 audit ────┘                                                └──► B1-3 service ──► N1-5
 ```
 
 Originally the left column ran on a launchd stopgap until the right column delivered the bot. B1 landed first, so N1-5 is now the nightly bot config itself (2026-09-26).
