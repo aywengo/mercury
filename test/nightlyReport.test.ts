@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 
 import { runReport, collectBlocked, collectRunsStopped, collectFlakes, type ReportIo } from '../.agents/skills/nightly/report.ts';
 
