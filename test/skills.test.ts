@@ -18,7 +18,7 @@ test('registry lists all skills', () => {
   // or losing its SKILL.md. Discovery logic itself is not covered here -- see #79.
   assert.deepEqual(ids, [
     'code-review', 'debugging', 'deployment', 'documentation', 'frontend', 'git-pr',
-    'implementation', 'issue-fix-loop', 'planning', 'repository-analysis',
+    'implementation', 'issue-fix-loop', 'nightly', 'planning', 'repository-analysis',
     'security-review', 'testing', 'workspace-audit',
   ]);
 });
