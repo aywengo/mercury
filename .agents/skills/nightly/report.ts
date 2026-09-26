@@ -132,12 +132,13 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
   return out;
 }
 
-/** Flake-clock entries, most recent night first. */
+/** Flake-clock entries as of `night`: only nights <= the report night (a backfill run with an
+ * older --night must not display future dates), most recent last-night first. */
 export function collectFlakes(env: NodeJS.ProcessEnv, night: string): { fingerprint: string; test: string; nights: string[] }[] {
   const state = loadFlakeState(env);
   return Object.entries(state)
-    .map(([fingerprint, entry]) => ({ fingerprint, test: entry.test, nights: entry.nights }))
-    .filter((f) => f.nights.some((n) => n <= night)) // anything recorded so far
+    .map(([fingerprint, entry]) => ({ fingerprint, test: entry.test, nights: entry.nights.filter((n) => n <= night) }))
+    .filter((f) => f.nights.length > 0)
     .sort((a, b) => (b.nights[b.nights.length - 1] ?? '').localeCompare(a.nights[a.nights.length - 1] ?? ''));
 }
 
@@ -193,7 +194,12 @@ export async function runReport(
   if (created.status < 200 || created.status >= 300) {
     throw new Error(`digest issue create failed: POST /repos/${opts.repo}/issues -> ${created.status}`);
   }
-  const issue = (created.body as { number?: number }).number;
+  const issue = (created.body as { number?: number } | null)?.number;
+  if (issue === undefined) {
+    // A 2xx create whose body we could not parse: closing yesterday's now could leave ZERO open
+    // reports (the new one is unidentifiable). Fail hard instead; the retry re-runs the night.
+    throw new Error(`digest issue create returned no issue number (POST status ${created.status}); yesterday's report stays open`);
+  }
 
   let closedPrevious: number | undefined;
   for (let page = 1; page <= SEARCH_CAP; page++) {

@@ -225,6 +225,53 @@ test('flakes come from the e2e flake-clock state file', () => {
   }
 });
 
+test('a 2xx create without a parseable number fails hard BEFORE closing yesterday\'s report', async () => {
+  const order: string[] = [];
+  const { io: base } = ioWith({
+    issues: [{ number: 500, title: 'yesterday', labels: [{ name: 'nightly:report' }] }],
+  });
+  const io: ReportIo = {
+    async get(path) {
+      const r = await base.get(path);
+      if (path.includes('/issues?labels=nightly%3Areport')) order.push('list-prev');
+      return r;
+    },
+    async post() {
+      order.push('create-digest');
+      return { body: null, status: 201 }; // 2xx but unparsable: no number
+    },
+    async patch(path) {
+      order.push('close-prev');
+      return { body: {}, status: 200 };
+    },
+  };
+  await assert.rejects(
+    () => runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false }),
+    /no issue number/,
+  );
+  assert.equal(order.filter((o) => o === 'close-prev').length, 0, 'nothing is closed when the new digest is unidentifiable');
+});
+
+test('collectFlakes filters nights to <= the report night (a backfill shows no future dates)', () => {
+  const dir = join('/tmp', `mercury-report-test2-${process.pid}-${Date.now()}`);
+  try {
+    mkdirSync(join(dir, 'mercury/nightly'), { recursive: true });
+    writeFileSync(
+      join(dir, 'mercury/nightly/e2e-flakes.json'),
+      JSON.stringify({
+        fp1: { test: 'lease flake', error: 'e', nights: ['2026-09-24', '2026-09-28'] },
+        fp2: { test: 'future-only flake', error: 'e', nights: ['2026-09-30'] },
+      }),
+    );
+    const flakes = collectFlakes({ XDG_STATE_HOME: dir }, '2026-09-26');
+    assert.deepEqual(flakes, [{ fingerprint: 'fp1', test: 'lease flake', nights: ['2026-09-24'] }], 'future nights are filtered out; future-only entries disappear');
+    rmSync(dir, { recursive: true, force: true });
+  } catch (e) {
+    rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);
