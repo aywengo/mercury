@@ -359,6 +359,10 @@ racer won: re-select), and is pinned by `test/nightlySelect.test.ts`
 (21 tests).
 
 - Trust: author login, and for `nightly:ready` the actor of the labeling event from the issue timeline.
+  Follow-up #764 (2026-09-26, PR #765): the `origin:e2e` clause trusts only the nightly identity —
+  the issue's AUTHOR is `mercury-nightly` AND the current label's timeline actor is that identity
+  (a label alone is provenance anyone with triage access can apply); an actor-less final labeled
+  event fails closed.
 - Excludes `nightly:in-progress`, `nightly:blocked` and `nightly:proposed`.
 - Claims the chosen issue by adding `nightly:in-progress` before returning it; if the label is already
   there on re-read, it picks again.
