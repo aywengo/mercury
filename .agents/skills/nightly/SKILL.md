@@ -51,8 +51,12 @@ that issue and re-selects. `--dry-run` prints the decision and writes nothing.
 ## E2E (`e2e.ts`, N1-2)
 
 ```bash
-node .agents/skills/nightly/e2e.ts --repo aywengo/mercury [--dry-run]
+node .agents/skills/nightly/e2e.ts --repo aywengo/mercury [--dry-run] [--state <state-home-dir>]
 ```
+
+`--state` relocates the flake-state STATE-HOME (the file lands at
+`<state-home>/mercury/nightly/e2e-flakes.json`) — useful under CI/cron where
+`XDG_STATE_HOME` is not set.
 
 `GH_TOKEN` (or `GITHUB_TOKEN`) is demanded only when GitHub is actually
 touched — a green suite and `--dry-run` need no credentials.

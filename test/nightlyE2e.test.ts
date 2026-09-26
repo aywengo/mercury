@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { tempDir } from './helpers.ts';
 
 import {
+  localDateString,
   normalizeErrorLine,
   fingerprintOf,
   fpMarker,
@@ -421,6 +422,17 @@ test('a failed issue search never files (duplication risk) - observation recorde
   } finally {
     cleanup();
   }
+});
+
+test('localDateString is the LOCAL date, not UTC', () => {
+  // A date where UTC has rolled over but local has not: 2026-09-26T00:30 local == 2026-09-25T22:30Z
+  // under a UTC+2 offset. Build it from local fields so the assertion is zone-independent:
+  const d = new Date(2026, 8, 26, 0, 30, 0); // local Sep 26 00:30
+  assert.equal(localDateString(d), '2026-09-26');
+  // Padding and field agreement for an arbitrary midday date:
+  const d2 = new Date(2027, 0, 5, 12, 0, 0);
+  assert.equal(localDateString(d2), '2027-01-05');
+  assert.equal(localDateString(d2), `${d2.getFullYear()}-${String(d2.getMonth() + 1).padStart(2, '0')}-${String(d2.getDate()).padStart(2, '0')}`);
 });
 
 test('repo validation refuses a non owner/name value', async () => {

@@ -19,10 +19,11 @@
  * Output: exactly one JSON line
  * `{ pass, fail, real: [...], flakes: [...] }` — see E2eReport.
  *
- * Usage: `node .agents/skills/nightly/e2e.ts --repo aywengo/mercury [--dry-run] [--state <path>]`
+ * Usage: `node .agents/skills/nightly/e2e.ts --repo aywengo/mercury [--dry-run] [--state <state-home-dir>]`
  * Environment: GH_TOKEN (or GITHUB_TOKEN), demanded only when GitHub is actually touched — a green
  * suite (no failures) and --dry-run (local observation) need no credentials. The suite runs via
- * `npm run test:e2e` from the repository root (needs Docker).
+ * `npm run test:e2e` from the repository root (needs Docker). `--state` overrides XDG_STATE_HOME
+ * (the STATE-HOME directory; the flake state lands at <state-home>/mercury/nightly/e2e-flakes.json).
  *
  * No dependencies. Fetch only. Everything testable is a pure function or runs over injected I/O.
  */
@@ -36,6 +37,15 @@ const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 /** A flake is filed as a defect only after the same fingerprint flaked on 3 distinct nights. */
 export const FLAKE_FILE_NIGHTS = 3;
 const FETCH_TIMEOUT_MS = 30_000;
+
+/** The LOCAL date as YYYY-MM-DD (a nightly that fires at 00:05 local belongs to that local day,
+ * even when UTC has already rolled over). */
+export function localDateString(d: Date = new Date()): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
 export interface SuiteFailure {
   /** The failing test's full name from the spec reporter. */
@@ -397,7 +407,7 @@ if (isMain) {
   const dryRun = args.includes('--dry-run');
   const stateArg = args.includes('--state') ? args[args.indexOf('--state') + 1] : undefined;
   if (!repo) {
-    console.error('usage: e2e.ts --repo <owner/name> [--dry-run] [--state <path>]');
+    console.error('usage: e2e.ts --repo <owner/name> [--dry-run] [--state <state-home-dir>]');
     process.exit(1);
   }
   const env = { ...process.env, ...(stateArg ? { XDG_STATE_HOME: stateArg } : {}) };
@@ -429,7 +439,9 @@ if (isMain) {
       post: async (path, body) => await ghPost(path, body, token()),
     },
     env,
-    { repo, dryRun, night: new Date().toISOString().slice(0, 10) },
+    // Local date, not UTC: a 00:05 local fire must count as THIS local night (UTC can already
+    // be the next day).
+    { repo, dryRun, night: localDateString() },
   )
     .then((report) => { process.stdout.write(JSON.stringify(report) + '\n'); })
     .catch((e: unknown) => {
