@@ -213,16 +213,37 @@ export async function e2eRunTerminal(env: NodeJS.ProcessEnv): Promise<boolean> {
   const token = env.MERCURY_API_TOKEN;
   if (!url || !token) return true; // no host configured: no gate exists
   try {
-    const res = await fetch(`${url.replace(/\/$/, '')}/api/runs?limit=100`, {
-      headers: { authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) return false; // configured but unevaluable: fail closed
-    const body = (await res.json()) as { runs?: { task?: string; status?: string }[] };
-    const runs = body.runs ?? [];
-    const tonight = runs.filter((r) => (r.task ?? '').includes('nightly-e2e'));
-    if (tonight.length === 0) return true; // no e2e Run tonight: nothing to wait for
+    // Walk the run list with the same paged discipline the bot scheduler uses: a long-lived
+    // non-terminal nightly-e2e Run can age out of page one, and missing it would pass the gate
+    // while tonight's verdict is still open. Bounded at 20 pages, fail closed at the cap.
     const TERMINAL = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'];
-    return tonight.every((r) => TERMINAL.includes(r.status ?? ''));
+    let cursor: string | null = null;
+    let found = 0;
+    let nonTerminal = 0;
+    for (let page = 0; page < 20; page++) {
+      const qs = new URLSearchParams({ limit: '100' });
+      if (cursor) qs.set('cursor', cursor);
+      const res = await fetch(`${url.replace(/\/$/, '')}/api/runs?${qs}`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return false; // configured but unevaluable: fail closed
+      const body = (await res.json()) as { runs?: { task?: string; status?: string }[]; nextCursor?: string | null };
+      for (const r of body.runs ?? []) {
+        if ((r.task ?? '').includes('nightly-e2e')) {
+          found++;
+          if (!TERMINAL.includes(r.status ?? '')) nonTerminal++;
+        }
+      }
+      const next = body.nextCursor ?? null;
+      if (!next) break;
+      cursor = next;
+      if (page === 19 && found > 0 && nonTerminal === 0) {
+        // Cap hit with only terminal e2e Runs seen so far: older pages could still hide one.
+        return false; // fail closed
+      }
+    }
+    if (found === 0) return true; // no e2e Run tonight: nothing to wait for
+    return nonTerminal === 0;
   } catch {
     return false; // configured but unreachable: fail closed
   }
@@ -236,6 +257,9 @@ export async function runSelectorWith(
   dryRun: boolean,
 ): Promise<Selection> {
   const repo = env.REPO ?? '';
+  if (!repo.trim() || repo.includes('//')) {
+    throw new Error('REPO is required as owner/name (e.g. aywengo/mercury); got an empty or malformed value');
+  }
   const issues = (await io.get(`/repos/${repo}/issues?state=open&per_page=100`)) as GhIssue[];
   const real = issues.filter((i) => !i.pull_request);
   const candidates: Candidate[] = [];

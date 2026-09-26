@@ -228,3 +228,34 @@ test('e2eRunTerminal fails CLOSED when the gate is configured but unevaluable (r
     S.srv.close();
   }
 });
+
+
+test('runSelectorWith refuses an empty or malformed REPO before building URLs (round-3 review)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const io = { async get() { return []; }, async post() { return true; } };
+  await assert.rejects(() => runSelectorWith(io, { REPO: '' }, true), /REPO is required/);
+  await assert.rejects(() => runSelectorWith(io, {}, true), /REPO is required/);
+});
+
+test('e2eRunTerminal walks pages: a non-terminal e2e Run past page one fails the gate (round-3 review)', async () => {
+  const { e2eRunTerminal } = await import('../.agents/skills/nightly/select.ts');
+  // Local fake host serving two pages: page 1 has other tasks, page 2 has a RUNNING nightly-e2e.
+  const { createServer } = await import('node:http');
+  const srv = createServer((req, res) => {
+    const u = new URL(req.url ?? '/', 'http://x');
+    res.setHeader('content-type', 'application/json');
+    if (u.searchParams.get('cursor')) {
+      res.end(JSON.stringify({ runs: [{ task: 'nightly-e2e', status: 'RUNNING' }], nextCursor: null }));
+    } else {
+      res.end(JSON.stringify({ runs: [{ task: 'nightly-report', status: 'COMPLETED' }], nextCursor: 'c2' }));
+    }
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const addr = srv.address();
+  const url = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
+  try {
+    assert.equal(await e2eRunTerminal({ MERCURY_API_URL: url, MERCURY_API_TOKEN: 't' }), false, 'the aging-out RUNNING e2e Run must still gate rung 1');
+  } finally {
+    srv.close();
+  }
+});
