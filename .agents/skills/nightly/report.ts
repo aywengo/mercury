@@ -21,7 +21,6 @@ import { loadFlakeState } from './e2e.ts';
 
 const L_REPORT = 'nightly:report';
 const L_BLOCKED = 'nightly:blocked';
-const L_IN_PROGRESS = 'nightly:in-progress';
 const SEARCH_PER_PAGE = 100;
 const SEARCH_CAP = 10; // pages of 100 = 1000 hits, bounded
 
@@ -83,18 +82,36 @@ export async function collectBlocked(io: ReportIo, repo: string): Promise<{ numb
     const issues = (res.body as { number?: number; title?: string }[] | null) ?? [];
     for (const issue of issues) {
       if (issue.number === undefined) continue;
-      let question: string | undefined;
-      const cRes = await io.get(`/repos/${repo}/issues/${issue.number}/comments?per_page=100`);
-      if (cRes.status >= 200 && cRes.status < 300) {
-        const comments = (cRes.body as { body?: string }[] | null) ?? [];
-        const last = comments[comments.length - 1];
-        if (last?.body) question = last.body.split('\n').find((l) => l.startsWith('**Blocking question:**'))?.replace(/^\*\*Blocking question:\*\*\s*/, '') ?? last.body.slice(0, 200);
-      }
-      out.push({ number: issue.number, title: issue.title ?? '', question });
+      out.push({ number: issue.number, title: issue.title ?? '', question: await blockingQuestion(io, repo, issue.number) });
     }
     if (issues.length < 100) break;
   }
   return out;
+}
+
+/** The blocking question for an issue: walk the comment pages (bounded) and take the LAST
+ * `**Blocking question:**` marker - the most recent blocked exit. If no marker exists (a
+ * hand-labeled blocked issue), fall back to the last comment body, truncated. */
+async function blockingQuestion(io: ReportIo, repo: string, issue: number): Promise<string | undefined> {
+  let question: string | undefined;
+  for (let page = 1; page <= 10; page++) {
+    const res = await io.get(`/repos/${repo}/issues/${issue}/comments?per_page=100&page=${page}`);
+    if (res.status < 200 || res.status >= 300) break; // unreadable comments: leave the question unset
+    const comments = (res.body as { body?: string }[] | null) ?? [];
+    for (const c of comments) {
+      if (!c.body) continue;
+      const marker = c.body.split('\n').find((l) => l.startsWith('**Blocking question:**'));
+      if (marker) question = marker.replace(/^\*\*Blocking question:\*\*\s*/, '');
+    }
+    if (comments.length < 100) {
+      if (question === undefined) {
+        const last = comments[comments.length - 1];
+        if (last?.body) question = last.body.slice(0, 200);
+      }
+      break;
+    }
+  }
+  return question;
 }
 
 /** TIMED_OUT runs whose run.timed_out reason event says 'not-after' (the §4.3 window end). */
@@ -127,7 +144,10 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   const lines: string[] = [`# nightly report — ${night}`, ''];
   if (note) lines.push(`_${note}_`, '');
   const list = (items: { title: string; url?: string; number?: number }[], empty: string): string =>
-    items.length === 0 ? empty : items.map((it) => `- ${it.url ? `[${it.title ?? it.number}](${it.url})` : (it.title ?? it.number)}`).join('\n');
+    items.length === 0 ? empty : items.map((it) => {
+      const text = it.title || `#${it.number}`;
+      return `- ${it.url ? `[${text}](${it.url})` : text}`;
+    }).join('\n');
   lines.push('## PRs opened', list(data.prs, '_none_'), '');
   lines.push('## Issues filed', list(data.issuesFiled, '_none_'), '');
   lines.push('## Issues commented', list(data.issuesCommented, '_none_'), '');
@@ -160,21 +180,9 @@ export async function runReport(
     return { night: opts.night, ...data };
   }
 
-  // Close the PREVIOUS open nightly:report issue (there should be exactly one; close all found).
-  let closedPrevious: number | undefined;
-  for (let page = 1; page <= SEARCH_CAP; page++) {
-    const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
-    const res = await io.get(path);
-    if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
-    const prev = (res.body as { number?: number }[] | null) ?? [];
-    for (const issue of prev) {
-      if (issue.number === undefined) continue;
-      await io.patch(`/repos/${opts.repo}/issues/${issue.number}`, { state: 'closed' });
-      closedPrevious = closedPrevious ?? issue.number;
-    }
-    if (prev.length < 100) break;
-  }
-
+  // Create the digest FIRST, then close yesterday's: a create failure must never leave the repo
+  // with NO open report. Worst case of a close failure is two open reports until tonight's next
+  // run closes them - strictly better than a missing digest.
   const body = digestBody(opts.night, data);
   const created = await io.post(`/repos/${opts.repo}/issues`, {
     title: `nightly report — ${opts.night}`,
@@ -185,6 +193,20 @@ export async function runReport(
     throw new Error(`digest issue create failed: POST /repos/${opts.repo}/issues -> ${created.status}`);
   }
   const issue = (created.body as { number?: number }).number;
+
+  let closedPrevious: number | undefined;
+  for (let page = 1; page <= SEARCH_CAP; page++) {
+    const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
+    const res = await io.get(path);
+    if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
+    const prev = (res.body as { number?: number }[] | null) ?? [];
+    for (const old of prev) {
+      if (old.number === undefined || old.number === issue) continue;
+      await io.patch(`/repos/${opts.repo}/issues/${old.number}`, { state: 'closed' });
+      closedPrevious = closedPrevious ?? old.number;
+    }
+    if (prev.length < 100) break;
+  }
   return { night: opts.night, ...(issue !== undefined ? { issue } : {}), ...(closedPrevious !== undefined ? { closedPrevious } : {}), ...data };
 }
 

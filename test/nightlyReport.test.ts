@@ -154,6 +154,56 @@ test('blocked collection attaches the latest blocking question', async () => {
   assert.equal(blocked[0]!.question, 'the real question');
 });
 
+test('blocked question: the LAST **Blocking question:** marker wins across pages', async () => {
+  // Build an io whose comments API pages: page 1 has 100 comments (full page, no marker at the
+  // end), page 2 has the newest marker.
+  const page1 = Array.from({ length: 100 }, (_, k) => ({ body: k === 0 ? '**Blocking question:** old question' : `noise ${k}` }));
+  const calls: Recorded[] = [];
+  const io: ReportIo = {
+    async get(path) {
+      calls.push({ method: 'GET', path });
+      if (path.includes('/comments')) {
+        if (/[?&]page=1(?=&|$)/.test(path)) return { body: page1, status: 200 };
+        return { body: [{ body: '**Blocking question:** newest question' }], status: 200 };
+      }
+      if (path.includes('/issues?labels=')) return { body: [{ number: 501, title: 'blocked thing' }], status: 200 };
+      return { body: [], status: 200 };
+    },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const blocked = await collectBlocked(io, REPO);
+  assert.equal(blocked.length, 1);
+  assert.equal(blocked[0]!.question, 'newest question');
+});
+
+test('the digest is created BEFORE yesterday\'s close (a create failure never leaves zero reports)', async () => {
+  const order: string[] = [];
+  const { io: base } = ioWith({
+    issues: [{ number: 500, title: 'yesterday', labels: [{ name: 'nightly:report' }] }],
+  });
+  const io: ReportIo = {
+    async get(path) {
+      const r = await base.get(path);
+      if (path.includes('/issues?labels=nightly%3Areport')) order.push('list-prev');
+      return r;
+    },
+    async post(path) {
+      order.push('create-digest');
+      return { body: { number: 900 }, status: 201 };
+    },
+    async patch(path) {
+      order.push('close-prev');
+      return { body: {}, status: 200 };
+    },
+  };
+  await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  const created = order.indexOf('create-digest');
+  const closed = order.indexOf('close-prev');
+  assert.ok(created !== -1 && closed !== -1);
+  assert.ok(created < closed, `digest create (${created}) must precede the close (${closed})`);
+});
+
 test('flakes come from the e2e flake-clock state file', () => {
   const dir = join('/tmp', `mercury-report-test-${process.pid}-${Date.now()}`);
   try {
