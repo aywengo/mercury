@@ -9,7 +9,8 @@
  *   - rung 3: docs → proposals — DRAFT ONLY (§6): the agent drafts `nightly:proposed` issues and
  *     never implements.
  *
- * The chosen issue is claimed `nightly:in-progress` by the selector before this skill reports it.
+ * The chosen issue is claimed `nightly:in-progress` by the selector before this skill reports it
+ * (except in `--dry-run`, which selects and reports but writes nothing).
  * **Never asks** (§4.4): a nightly Run must end without NEEDS_INPUT — when in doubt, `blocked`
  * labels the issue, posts the question as an issue comment, and the Run finishes.
  *

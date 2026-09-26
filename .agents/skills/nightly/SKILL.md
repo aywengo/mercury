@@ -87,7 +87,8 @@ node .agents/skills/nightly/next.ts blocked --repo aywengo/mercury --issue <n> -
 
 `run` executes the N1-1 ladder (rung 1 trusted issues, rung 2 new @aywengo issues, rung 3 docs →
 proposals) and claims the chosen issue `nightly:in-progress` (already done by the selector before
-the report). The output's `action` is the Run's instruction:
+the report; `--dry-run` selects and reports WITHOUT claiming). The output's `action` is the Run's
+instruction:
 
 - **`fix-loop`** (rung 1–2): execute the `issue-fix-loop` procedure on the claimed issue — root
   cause, scoped fix with a regression test, one PR, independent review. This skill (the nightly
