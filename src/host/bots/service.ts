@@ -298,15 +298,16 @@ export function removeBotTokenFromEnv(envText: string, alias: string): { text: s
     // both halves non-empty. An unparseable line must fail the edit rather than survive a
     // "successful" uninstall half-edited; the error carries the entry INDEX, never token material.
     for (let ei = 0; ei < entries.length; ei++) {
-      const e = entries[ei]!;
-      const colon = e.indexOf(':');
-      if (colon <= 0 || colon === e.length - 1 || e.includes(':', colon + 1)) {
+      const parts = entries[ei]!.split(':');
+      // parseTokens parity (src/config.ts): exactly two segments, both non-empty AFTER trimming —
+      // 'tok: ' is malformed, and 'tok-bot: bot-nightly' (spaces around the colon) is valid.
+      if (parts.length !== 2 || !parts[0]!.trim() || !parts[1]!.trim()) {
         throw new Error(`MERCURY_API_TOKENS entry ${ei} in line ${lineNo + 1} is not 'token:owner'; fix mercury.env by hand`);
       }
     }
     const kept = entries.filter((e) => {
-      const owner = e.slice(e.indexOf(':') + 1);
-      if (owner === `bot-${alias}`) { removed++; return false; }
+      const [tok, owner] = e.split(':');
+      if (owner!.trim() === `bot-${alias}`) { removed++; return false; }
       return true;
     });
     if (kept.length === 0) return '';

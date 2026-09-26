@@ -161,6 +161,14 @@ test('removeBotTokenFromEnv removes only the bot entry, preserving the rest', ()
   const r2 = removeBotTokenFromEnv(envText, 'ghost');
   assert.equal(r2.removed, 0);
   assert.equal(r2.text, envText);
+  // Spaced halves are valid (parseTokens trims): entry matched and removed.
+  const spaced = 'MERCURY_API_TOKENS=tok-bot-nightly-9: bot-nightly, tok-alice:alice\n';
+  const r3 = removeBotTokenFromEnv(spaced, 'nightly');
+  assert.equal(r3.removed, 1);
+  assert.match(r3.text, /tok-alice:alice/);
+  assert.doesNotMatch(r3.text, /bot-nightly/);
+  // A whitespace-only half is malformed (parseTokens refuses it too).
+  assert.throws(() => removeBotTokenFromEnv('MERCURY_API_TOKENS=tok: \n', 'nightly'), /not 'token:owner'/);
 });
 
 // ---- uninstall ----
