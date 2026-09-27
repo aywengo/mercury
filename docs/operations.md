@@ -367,6 +367,51 @@ continue to land directly; no automation is on the bypass list. Pull requests
 authored by @aywengo cannot be self-approved and are merged through the bypass
 (`gh pr merge --admin`).
 
+## Running the nightly bot
+
+Walk this checklist before enabling the nightly bot service on the host
+(`deploy/nightly-bot.json.example`, alias `nightly`; issue #742). Every item is
+a precondition for the FIRST unattended night — re-check after any change to
+the host, the identity, or the ruleset.
+
+1. **Identity exists and is named.** The `mercury-nightly` account is set up
+   (name, avatar, not only the handle), and its token is present only in the
+   harness environment on the host — never in task text, events, or shell
+   history.
+2. **Branch protection requires a human review.** Ruleset `main-protection`
+   must have `required_approving_review_count >= 1`. With 0, an identity with
+   PR and contents write could merge its own PR on green CI, which breaks the
+   v1 human-merge rule. The `@aywengo` bypass is expected to remain direct-merge
+   capable.
+3. **Released binary, not a checkout.** `mercury --version` (or the systemd
+   unit's package version) shows a released `@aywengo/mercury` version.
+3a. **The host is dedicated to the nightly identity**
+   (`credential-profiles-design.md` §12): `MERCURY_API_TOKENS` holds only
+   `bot-nightly` and the operator token; `GH_TOKEN` is in `mercury.env` (0600)
+   and listed in `MERCURY_SECRETS`; the host user's git authors as
+   `mercury-nightly` and uses `gh auth setup-git`; nobody runs
+   `gh auth login` on the host user.
+4. **Bot token registered.** A `MERCURY_API_TOKENS` entry for `bot-nightly`
+   exists, and `~/.config/mercury/bot-credentials.json` is mode 0600.
+5. **Config validates clean.** Install the example
+   (`mkdir -p ${XDG_CONFIG_HOME:-~/.config}/mercury/bots &&
+   cp deploy/nightly-bot.json.example .../bots/nightly.json`), then
+   `mercury host bot validate --alias nightly` reports nothing — no errors,
+   no warnings.
+6. **Dry-run each task.**
+   `mercury host bot dispatch --alias nightly --task <t> --dry-run` for each of
+   the three tasks shows `botTask` set and `notAfter` at today's 06:00 local
+   time.
+7. **Docker is available to Runs** — the E2E task uses testcontainers, so the
+   sandbox must expose a working container runtime (see *Sandboxed execution*).
+8. **Enable the service.** `mercury host bot service install --alias nightly`,
+   then confirm the timer fires on schedule the first night before leaving it
+   unattended.
+
+After the first nights: three consecutive scheduled nights with fires on
+schedule, no Run running past 06:00, and a `nightly-report` digest issue each
+morning are recorded as a comment on issue #742 before it closes.
+
 ## Common failure symptoms
 
 ### Run remains queued

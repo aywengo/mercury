@@ -452,7 +452,13 @@ failed closes; never erases a newer report). Follow-ups: #769, #770, #771, #772.
 ## N1-5 (#742) — Nightly bot config and first-night checklist
 
 **Labels:** `deployment`, `priority: medium`
-**Blocked by:** #739 (N1-2), #740 (N1-3), #741 (N1-4)
+**Blocked by:** #739 (N1-2), #740 (N1-3), #741 (N1-4) — all done
+**Shipped** (PR below): `deploy/nightly-bot.json.example` (three §4.1 tasks, `tz: "local"`,
+`notAfterAt: "06:00"`, explicit `maxDurationMs` — e2e 4 h, next 80 min, report 15 min — pinned by
+`test/nightlyBotConfig.test.ts` through the real `loadBotConfig` and `resolveTemplate`). The
+pre-first-night checklist lives in `docs/operations.md`, section "Running the nightly bot".
+Acceptance 4 (three consecutive scheduled nights) is recorded as a comment on the issue before it
+closes.
 
 > Rewritten 2026-09-26. This issue was a launchd stopgap for running nightly Runs before the dispatcher bot existed. B1 landed (#735 scheduler, #736 dispatch/status, #737 service install), so the stopgap is superseded: the first night runs on a real bot config instead.
 
