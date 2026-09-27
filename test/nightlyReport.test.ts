@@ -843,6 +843,32 @@ test('run task text is sanitized inside inline-code spans', async () => {
   assert.ok(body.includes('`runX` — `evil ## injected`'), 'task text is a single sanitized code span');
 });
 
+test('a fresh issue closed before the reconciliation listing can neither win nor be closed', async () => {
+  // Our POST returned 701 (fresh = open at create time), but the operator closes it before the
+  // reconciliation listing runs; the listing then shows only open duplicate 702.
+  const { io: base } = ioWith({
+    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
+  });
+  const patched: number[] = [];
+  let openGets = 0;
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('state=all')) return { body: [], status: 200 };
+      if (path.includes('state=open') && !path.includes('nightly%3Ablocked')) {
+        openGets += 1;
+        if (openGets >= 2) return { body: [{ number: 702, title: 'nightly report — 2026-09-26' }], status: 200 };
+        return base.get(path);
+      }
+      return base.get(path);
+    },
+    async post() { return { body: { number: 701 }, status: 201 }; },
+    async patch(path) { patched.push(Number(/issues\/(\d+)$/.exec(path)![1])); return { body: {}, status: 200 }; },
+  };
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.issue, 702, 'the confirmed-open duplicate is the survivor');
+  assert.deepEqual(patched, [500], 'the stale-closed 701 is never PATCHed and never wins Math.min');
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);

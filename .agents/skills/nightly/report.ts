@@ -419,9 +419,13 @@ export async function runReport(
   // both invocations converge on the same survivor no matter the order. (This run's JSON may report
   // an issue that a concurrent reconciliation then closes; the next night's report closes any
   // residue as an older night.)
-  // Only OPEN digests participate: a reuse candidate the operator closed must never win the
-  // reconciliation, or closing the open duplicates would leave the night with no open report.
-  const sameNight: number[] = reusedOpen ? [issue!] : [];
+  // The reconciliation set is built ONLY from the CURRENT open listing. The earlier all-states
+  // hit (or this run's fresh POST) can go stale in the window before this listing - an operator
+  // may close our issue in between - and a stale-open number winning Math.min would close the
+  // actually-open duplicates and leave the night with no open digest. The listing is the same
+  // source of truth the close PATCHes act on.
+  const sameNight: number[] = [];
+  let oursOpen = false;
   for (let page = 1; page <= SEARCH_CAP; page++) {
     const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
     const res = await io.get(path);
@@ -430,25 +434,28 @@ export async function runReport(
     if (!Array.isArray(prev)) break; // unreadable: the next night's close loop heals
     for (const dup of prev) {
       if (dup.number === undefined || dup.pull_request !== undefined) continue;
-      if (dup.title === title && !sameNight.includes(dup.number)) sameNight.push(dup.number);
+      if (dup.title !== title) continue;
+      if (dup.number === issue) oursOpen = true;
+      if (!sameNight.includes(dup.number)) sameNight.push(dup.number);
     }
     if (prev.length < 100) break;
   }
-  // The winner of the reconciliation is the SMALLEST OPEN number, and ONLY the winner's
-  // invocation closes the others. A losing invocation closes NOTHING: two independent closers
-  // could otherwise each kill the other's survivor and leave the night with no open digest. The
-  // loser just reports the survivor; its own issue is closed by the winner (or by tomorrow's
-  // prevNight close if the winner died first). A closed reuse candidate stays closed - the
-  // operator's closure stands - and an open duplicate is healed by ITS owner or by tomorrow's
-  // prevNight close.
+  // The winner of the reconciliation is the SMALLEST number confirmed open NOW, and ONLY the
+  // winner's invocation closes the others. A losing invocation closes NOTHING: two independent
+  // closers could otherwise each kill the other's survivor and leave the night with no open
+  // digest. The loser just reports the survivor; its own issue is closed by the winner (or by
+  // tomorrow's prevNight close if the winner died first). An issue closed before the listing
+  // (operator closure) is not in the set at all, so it can neither win nor be re-closed; an
+  // unreadable listing leaves the set empty and closes nothing (healed by tomorrow's
+  // prevNight close).
   if (sameNight.length > 0) {
     const survivor = Math.min(...sameNight);
-    if (survivor === issue) {
+    if (oursOpen && survivor === issue) {
       for (const n of sameNight) {
         if (n === survivor) continue;
         await io.patch(`/repos/${opts.repo}/issues/${n}`, { state: 'closed' });
       }
-    } else {
+    } else if (survivor !== issue) {
       issue = survivor;
     }
   }
