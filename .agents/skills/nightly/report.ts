@@ -347,9 +347,6 @@ export async function runReport(
   const title = `nightly report — ${opts.night}`;
 
   let issue: number | undefined;
-  // True when `issue` was REUSED and is open (a fresh create is open too). A closed reuse
-  // candidate must never win the reconciliation below.
-  let reusedOpen = false;
   // Idempotency first: look for an existing same-night digest in ANY state (an operator or an
   // interrupted cleanup can close it before a retry; the retry must reuse, not duplicate).
   for (let page = 1; page <= SEARCH_CAP && issue === undefined; page++) {
@@ -362,7 +359,6 @@ export async function runReport(
       if (cand.number === undefined || cand.pull_request !== undefined) continue;
       if (cand.title === title) {
         issue = cand.number;
-        reusedOpen = cand.state !== 'closed';
         break;
       }
     }
@@ -405,7 +401,6 @@ export async function runReport(
       throw new Error(`digest issue create failed: POST /repos/${opts.repo}/issues -> ${created.status}`);
     }
     issue = (created.body as { number?: number } | null)?.number;
-    reusedOpen = true; // a fresh create is open
     if (issue === undefined) {
       // A 2xx create whose body we could not parse: closing yesterday's now could leave ZERO open
       // reports (the new one is unidentifiable). Fail hard instead; the retry re-runs the night.
