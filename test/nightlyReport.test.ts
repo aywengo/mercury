@@ -1070,6 +1070,27 @@ test('non-string comment bodies are skipped, not crashed on', async () => {
   assert.equal(q, 'the question', 'null/number/missing bodies are skipped; the string body wins');
 });
 
+test('an oversized digest is truncated under the GitHub issue-body budget', async () => {
+  // 900 PRs with long titles: far past what 65,536 allows once escaped.
+  const bigTitle = 'x'.repeat(80);
+  const items = Array.from({ length: 900 }, (_, k) => ({ number: k + 1, title: bigTitle, html_url: `https://github.com/aywengo/mercury/pull/${k + 1}` }));
+  const { io, calls } = ioWith({
+    searchItems: { 'is:pr created': items },
+  });
+  await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  assert.ok(body.length <= 65_536, `body must fit the GitHub limit (got ${body.length})`);
+  assert.match(body, /omitted \(issue-body budget\)/, 'the truncation marker states the omitted count');
+  // A small night still renders every section (no truncation markers anywhere).
+  const { io: io2, calls: calls2 } = ioWith({});
+  await runReport(io2, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  const created2 = calls2.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body2 = String((created2.body as { body: string }).body);
+  assert.ok(!body2.includes('omitted'), 'an empty night truncates nothing');
+  assert.match(body2, /## Flakes/);
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);

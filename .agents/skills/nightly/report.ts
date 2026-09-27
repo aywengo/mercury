@@ -284,25 +284,50 @@ function codeSpan(text: string, max = 120): string {
 }
 
 function digestBody(night: string, data: ReportData, note?: string): string {
+  // GitHub rejects issue bodies over 65,536 characters: the POST would fail AFTER all reads
+  // and the night would end with no digest at all. Render under a shared budget and note how
+  // many items were omitted.
+  const BUDGET = 60_000;
   const lines: string[] = [`# nightly report — ${night}`, ''];
   if (note) lines.push(`_${note}_`, '');
-  const list = (items: { title: string; url?: string; number?: number }[], empty: string): string =>
-    items.length === 0 ? empty : items.map((it) => {
+  let size = lines.join('\n').length;
+  const fits = (s: string): boolean => {
+    // +1 accounts for the joining newline between pushed entries.
+    const cost = s.length + 1;
+    if (size + cost > BUDGET) return false;
+    size += cost;
+    return true;
+  };
+  const list = (items: { title: string; url?: string; number?: number }[], empty: string): string => {
+    if (items.length === 0) return empty;
+    const out: string[] = [];
+    let omitted = 0;
+    for (const it of items) {
       // Titles are user-controlled: escape Markdown so `](...)` etc. cannot alter the rendered
       // digest or spoof a link target.
       const text = escMd(it.title || (it.number !== undefined ? `#${it.number}` : 'untitled'));
-      return `- ${it.url ? `[${text}](<${it.url}>)` : text}`;
-    }).join('\n');
-  lines.push('## PRs opened', list(data.prs, '_none_'), '');
-  lines.push('## Issues filed', list(data.issuesFiled, '_none_'), '');
-  lines.push('## Issues commented', list(data.issuesCommented, '_none_'), '');
-  lines.push('## Blocked (nightly:blocked, waiting on a human)',
-    data.blocked.length === 0 ? '_none_' : data.blocked.map((b) => `- #${b.number} ${escMd(b.title)}${b.question ? ` — question: ${escMd(b.question)}` : ''}`).join('\n'), '');
-  lines.push('## Runs stopped by notAfter (the 06:00 window end)',
-    data.runsStopped.length === 0 ? '_none_' : data.runsStopped.map((r) => `- ${codeSpan(r.runId ?? '')} — ${codeSpan(r.task ?? '')}`).join('\n'), '');
-  lines.push('## Flakes (nightly-e2e clock)',
-    data.flakes.length === 0 ? '_none_' : data.flakes.map((f) => `- ${codeSpan(f.fingerprint, 16)} ${escMd(f.test)} — nights: ${f.nights.join(', ')}`).join('\n'), '');
-  lines.push('---', '_Closed by tomorrow night\'s report._');
+      const line = `- ${it.url ? `[${text}](<${it.url}>)` : text}`;
+      if (!fits(line)) { omitted += 1; continue; }
+      out.push(line);
+    }
+    if (omitted > 0) out.push(`_… ${omitted} more item${omitted === 1 ? '' : 's'} omitted (issue-body budget)_`);
+    return out.join('\n');
+  };
+  const section = (heading: string, body: string): void => {
+    // If the heading itself does not fit, the budget is exhausted: emit nothing more.
+    if (!fits(heading)) return;
+    lines.push(heading, body, '');
+  };
+  section('## PRs opened', list(data.prs, '_none_'));
+  section('## Issues filed', list(data.issuesFiled, '_none_'));
+  section('## Issues commented', list(data.issuesCommented, '_none_'));
+  section('## Blocked (nightly:blocked, waiting on a human)',
+    data.blocked.length === 0 ? '_none_' : data.blocked.map((b) => `- #${b.number} ${escMd(b.title)}${b.question ? ` — question: ${escMd(b.question)}` : ''}`).join('\n'));
+  section('## Runs stopped by notAfter (the 06:00 window end)',
+    data.runsStopped.length === 0 ? '_none_' : data.runsStopped.map((r) => `- ${codeSpan(r.runId ?? '')} — ${codeSpan(r.task ?? '')}`).join('\n'));
+  section('## Flakes (nightly-e2e clock)',
+    data.flakes.length === 0 ? '_none_' : data.flakes.map((f) => `- ${codeSpan(f.fingerprint, 16)} ${escMd(f.test)} — nights: ${f.nights.join(', ')}`).join('\n'));
+  lines.push('---', "_Closed by tomorrow night's report._");
   return lines.join('\n');
 }
 
