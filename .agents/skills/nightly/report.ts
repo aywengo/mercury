@@ -14,12 +14,12 @@
  *
  * Output: exactly one JSON line
  * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, blocked, runsStopped, flakes }`.
- * No dependencies; all I/O injectable. Writes: the digest issue itself, the close of the
- * previous open report, the closure of same-night duplicates created by a racing retry
- * (the smallest OPEN issue number survives; a closed reuse candidate never wins), and a
- * bounded stale-retry pass that closes open reports from the TWO nights before the previous
- * one (a failed prevNight close would otherwise stay open forever; those titles are strictly
- * older than any current digest).
+ * No dependencies; all I/O injectable. Writes: the digest issue itself and the close of
+ * every OPEN digest titled `nightly report — D` with D strictly BEFORE the report night - one
+ * rule that self-heals failed closes on any later night and can never erase a newer report.
+ * Same-night duplicates from a racing retry heal the next night (their day turns older).
+ * Single-writer scheduling (one report fire per night) is Mercury's job, enforced by the bot
+ * config's singleFlight, not here.
  */
 
 import { basename } from 'node:path';
@@ -29,7 +29,6 @@ const L_REPORT = 'nightly:report';
 const L_BLOCKED = 'nightly:blocked';
 const SEARCH_PER_PAGE = 100;
 const SEARCH_CAP = 10; // pages of 100 = 1000 hits, bounded
-const LAST_PAGES = 3; // comment pages scanned, counting back from the Link-header last page
 
 export interface ReportIo {
   get(path: string): Promise<{ body: unknown; status: number; link?: string | null }>;
@@ -127,43 +126,17 @@ export async function collectBlocked(io: ReportIo, repo: string): Promise<{ numb
  * hand-labeled blocked issue), fall back to the last comment body, truncated. Exported for
  * tests. */
 export async function blockingQuestion(io: ReportIo, repo: string, issue: number): Promise<string | undefined> {
+  // The blocking question is written by OUR nightly-next skill, so page 1 plus the Link-header
+  // LAST page is enough - no multi-page walk. (Longer term the question moves to the issue
+  // body; see the follow-up issue.)
   let question: string | undefined;
   let lastComment: string | undefined; // body of the newest comment seen so far (fallback)
-  // Comments are returned OLDEST first and the interesting marker is near the END. Discover the
-  // last page from the Link header (res.link) and scan at most LAST_PAGES back from it, so a
-  // >1000-comment thread still finds the newest marker within a bounded number of requests.
-  // Without a Link header (<= 1 page) only page 1 exists.
   const res1 = await io.get(`/repos/${repo}/issues/${issue}/comments?per_page=100&page=1`);
   if (res1.status < 200 || res1.status >= 300) return undefined; // unreadable comments: leave the question unset
-  const lastRel = /<[^>]*[?&]page=(\d+)[^>]*>;\s*rel="last"/.exec(res1.link ?? '');
-  // No artificial cap: the scan itself is bounded to LAST_PAGES requests counting back from the
-  // parsed last page, so even a 10k+ comment thread costs a fixed number of requests and still
-  // reaches the real tail. Only an invalid number falls back to page 1.
-  const parsed = lastRel ? Number(lastRel[1]) : 1;
-  const lastPage = Number.isInteger(parsed) && parsed >= 1 ? parsed : 1;
-  // Page 1 is ALREADY fetched: scan it for markers even when the tail scan starts later. An
-  // old marker on page 1 is only ever a fallback candidate (a newer marker on a later page
-  // overwrites it), and it is strictly better than missing a marker entirely.
-  {
+  const scanPage = (res: { body: unknown; status: number }): void => {
+    if (res.status < 200 || res.status >= 300) return; // unreadable page: scan what we have
     // Same shape validation as every other list response: a 2xx non-array (proxy error page,
     // JSON object) makes the question unreadable, it must not crash the digest.
-    const page1Comments = Array.isArray(res1.body)
-      ? (res1.body as { body?: string }[]).filter((c): c is { body: string } =>
-          c !== null && typeof c === 'object' && typeof (c as { body?: unknown }).body === 'string')
-      : [];
-    for (const c of page1Comments) {
-      if (!c.body) continue;
-      const marker = c.body.split('\n').find((l) => l.startsWith('**Blocking question:**'));
-      if (marker) question = marker.replace(/^\*\*Blocking question:\*\*\s*/, '');
-    }
-    if (page1Comments.length > 0 && question === undefined) {
-      lastComment = page1Comments[page1Comments.length - 1]?.body;
-    }
-  }
-  const startPage = Math.max(2, lastPage - (LAST_PAGES - 1));
-  for (let page = startPage; page <= lastPage; page++) {
-    const res = await io.get(`/repos/${repo}/issues/${issue}/comments?per_page=100&page=${page}`);
-    if (res.status < 200 || res.status >= 300) break; // unreadable page: scan what we have
     const comments = Array.isArray(res.body)
       ? (res.body as { body: string }[]).filter((c): c is { body: string } =>
           c !== null && typeof c === 'object' && typeof (c as { body?: unknown }).body === 'string')
@@ -173,15 +146,22 @@ export async function blockingQuestion(io: ReportIo, repo: string, issue: number
       const marker = c.body.split('\n').find((l) => l.startsWith('**Blocking question:**'));
       if (marker) question = marker.replace(/^\*\*Blocking question:\*\*\s*/, '');
     }
-    // The newest comment of the scanned window is the fallback source. A FULL page (100) can be
-    // the LAST page (the follow-up would be empty), so remember it on every non-empty page.
     if (comments.length > 0 && question === undefined) {
       lastComment = comments[comments.length - 1]?.body;
     }
+  };
+  scanPage(res1);
+  const lastRel = /<[^>]*[?&]page=(\d+)[^>]*>;\s*rel="last"/.exec(res1.link ?? '');
+  const parsed = lastRel ? Number(lastRel[1]) : 1;
+  const lastPage = Number.isInteger(parsed) && parsed >= 2 ? parsed : 0;
+  if (lastPage >= 2) {
+    const res = await io.get(`/repos/${repo}/issues/${issue}/comments?per_page=100&page=${lastPage}`);
+    scanPage(res);
   }
   if (question === undefined && lastComment !== undefined) question = lastComment.slice(0, 200);
   return question;
 }
+
 
 /** Issues from `candidates` that received a comment DURING the night window [startMs, endMs]:
  * reads each candidate's comments (page 1, newest-first is not guaranteed - scan the page),
@@ -192,50 +172,43 @@ export async function blockingQuestion(io: ReportIo, repo: string, issue: number
 export async function collectIssuesCommented(
   io: ReportIo,
   repo: string,
-  candidates: { number?: number }[],
+  candidates: { number?: number; title: string; url?: string }[],
   startMs: number,
   endMs: number,
 ): Promise<{ number?: number; title: string; url?: string }[]> {
-  const out: { number?: number; title: string; url?: string }[] = [];
-  for (const cand of candidates) {
-    if (cand.number === undefined) continue;
-    // Pages are OLDEST-first (ascending): walk forward until a page starts past the window end
-    // (later pages are newer still), bounded at 10 pages of 100. A busy issue can push the
-    // target-night comments onto page 2+ when the run lands days later, so a single page would
-    // wrongly omit it.
-    let page = 1;
-    let commentedDuringNight = false;
-    while (page <= 10) {
-      const path = `/repos/${repo}/issues/${cand.number}/comments?per_page=100&page=${page}`;
-      let res;
-      try {
-        res = await io.get(path);
-      } catch {
-        break; // transport error on this candidate: keep what was scanned, do not fail the digest
-      }
-      if (res.status < 200 || res.status >= 300) break; // unreadable: skip this candidate
-      const comments = Array.isArray(res.body)
-        ? (res.body as { body?: unknown; created_at?: unknown }[]).filter((c): c is { body: string; created_at: string } =>
-            c !== null && typeof c === 'object' && typeof c.body === 'string' && typeof c.created_at === 'string')
-        : [];
-      for (const c of comments) {
-        const ts = Date.parse(c.created_at);
-        if (!Number.isNaN(ts) && ts >= startMs && ts <= endMs) { commentedDuringNight = true; break; }
-      }
-      if (commentedDuringNight) break;
-      // Ascending order: when the LAST (newest) comment on this page is still before the
-      // window start, later pages start even later - but the NEXT page could still cross INTO
-      // the window. Stop only when this page's newest comment is at/after endMs (everything
-      // later is past the window) or the page was short (last page).
-      const last = comments[comments.length - 1];
-      const lastTs = last ? Date.parse(last.created_at) : Number.NaN;
-      if (comments.length < 100 || (!Number.isNaN(lastTs) && lastTs >= endMs)) break;
-      page += 1;
+  // ONE repo-level listing replaces per-candidate comment fetches:
+  // GET /repos/{o}/{r}/issues/comments?since=<startIso> returns every comment on every issue
+  // created at/after the window start. Filter to the window end here, collect the distinct
+  // issue numbers, and intersect with the `updated:<range>` search candidates (which carry
+  // title/url). Bounded at 10 pages of 100 = 1000 comments per night.
+  const commentedNumbers = new Set<number>();
+  let path: string | undefined = `/repos/${repo}/issues/comments?since=${encodeURIComponent(new Date(startMs).toISOString())}&per_page=100`;
+  for (let page = 0; page < 10 && path; page++) {
+    let res;
+    try {
+      res = await io.get(path);
+    } catch {
+      break; // transport error: keep what was scanned, do not fail the digest
     }
-    if (commentedDuringNight) out.push(cand as { number?: number; title: string; url?: string });
+    if (res.status < 200 || res.status >= 300) break; // unreadable: section degrades, same policy as the other reads
+    const comments = Array.isArray(res.body)
+      ? (res.body as { body?: unknown; created_at?: unknown; issue_url?: unknown }[]).filter(
+          (c): c is { created_at: string; issue_url: string } =>
+            c !== null && typeof c === 'object' && typeof c.created_at === 'string' && typeof c.issue_url === 'string')
+      : [];
+    for (const c of comments) {
+      const ts = Date.parse(c.created_at);
+      if (Number.isNaN(ts) || ts < startMs || ts > endMs) continue;
+      const m = /\/issues\/(\d+)$/.exec(c.issue_url);
+      if (m) commentedNumbers.add(Number(m[1]));
+    }
+    if (comments.length < 100) break; // short page = last page
+    const next = /<([^>]+)>;\s*rel="next"/.exec(res.link ?? '');
+    path = next ? next[1].replace('https://api.github.com', '') : undefined;
   }
-  return out;
+  return candidates.filter((c) => c.number !== undefined && commentedNumbers.has(c.number));
 }
+
 
 /** TIMED_OUT runs stopped by the §4.3 window end DURING the report night: cursor-paginated
  * (bounded), each candidate filtered by its constraints.notAfter falling on the report night's
@@ -494,41 +467,33 @@ export async function runReport(
     if ((all ?? []).length < 100) break;
   }
 
-  // Find OPEN reports for the close set: the immediately previous night's report, plus a
-  // bounded STALE-RETRY set of the two nights before it. The primary set is prevNight only: a
-  // backfill (--night <today-1> while today's digest is open) or a clock-skewed run must never
-  // erase a NEWER digest. But a FAILED prevNight close would otherwise stay open forever
-  // (later runs only ever target their own prevNight), so the retry set re-closes open digests
-  // for prevNight-1 and prevNight-2 - strictly OLDER than any current open report, so the
-  // retry can never close a newer digest either.
-  const prevNight = prevDay(opts.night);
-  const retryNights = new Set([prevDay(prevNight), prevDay(prevDay(prevNight))]);
-  const closeables: { number: number; title?: string }[] = [];
-  const staleRetries: { number: number; title?: string }[] = [];
+  // Close set: ONE rule - every OPEN digest titled exactly `nightly report — D` with D < night.
+  // Strictly older than the digest this run creates/reuses, so a newer report is never erased,
+  // and a FAILED close self-heals on any later night (the same rule re-runs over all older
+  // nights - no special retry pass). Same-night duplicates from a racing retry (D == night) are
+  // NOT closed here; they heal tomorrow when their day is older than that night. Single-writer
+  // scheduling (one report fire per night) is enforced by Mercury's bot config, not here.
+  const closeables: { number: number }[] = [];
   for (let page = 1; page <= SEARCH_CAP; page++) {
     const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
     const res = await io.get(path);
     if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
     // GET /issues returns PRs as well: entries carrying a pull_request property are never
-    // digest candidates (a PR with this label/title is not a report). A 2xx with an unparsable
-    // payload (parse failure -> null) must not read as ZERO open reports - that would create a
-    // duplicate and skip yesterday's close.
+    // digest candidates. A 2xx with an unparsable payload (parse failure -> null) must not read
+    // as ZERO open reports - that would create a duplicate and skip the close pass.
     const prev = res.body as { number?: number; title?: string; pull_request?: unknown }[] | null;
     if (!Array.isArray(prev)) throw new Error(`GET ${path} -> 2xx with an unexpected body (expected an issue array)`);
     for (const old of prev) {
       if (old.number === undefined || old.pull_request !== undefined) continue;
-      if (old.title === `nightly report — ${prevNight}`) closeables.push({ number: old.number, title: old.title });
-      else if (typeof old.title === 'string' && old.title.startsWith('nightly report — ')
-        && retryNights.has(old.title.slice('nightly report — '.length))) {
-        staleRetries.push({ number: old.number, title: old.title });
-      }
+      const m = /^nightly report — (\d{4}-\d{2}-\d{2})$/.exec(old.title ?? '');
+      if (m && m[1] < opts.night) closeables.push({ number: old.number });
     }
     if (prev.length < 100) break;
   }
 
-  // Create the digest FIRST, then close yesterday's: a create failure must never leave the repo
-  // with NO open report. Worst case of a close failure is two open reports until tonight's next
-  // run closes them - strictly better than a missing digest.
+  // Create the digest FIRST, then close the older ones: a create failure must never leave the
+  // repo with NO open report. Worst case of a close failure is two open reports until tonight's
+  // next run closes them - strictly better than a missing digest.
   if (issue === undefined) {
     const body = digestBody(opts.night, data);
     const created = await io.post(`/repos/${opts.repo}/issues`, {
@@ -541,90 +506,11 @@ export async function runReport(
     }
     const parsed = (created.body as { number?: unknown } | null)?.number;
     // Only a positive integer is an identifiable digest: null/0/string/negative all mean we
-    // cannot know which issue to report (or protect from closing) - same invariant as a null
-    // body. Fail hard instead of closing yesterday's; the retry re-runs the night.
+    // cannot know which issue to report. Fail hard instead of closing; the retry re-runs the night.
     if (typeof parsed !== 'number' || !Number.isInteger(parsed) || parsed <= 0) {
-      throw new Error(`digest issue create returned no usable issue number (POST status ${created.status}, got ${JSON.stringify(parsed) ?? 'null'}); yesterday's report stays open`);
+      throw new Error(`digest issue create returned no usable issue number (POST status ${created.status}, got ${JSON.stringify(parsed) ?? 'null'}); older reports stay open`);
     }
     issue = parsed;
-  }
-
-  // Post-create reconciliation for the create/create race: two invocations can both observe no
-  // same-night report before either POST completes. Re-list the open reports and close every
-  // same-night duplicate except the SMALLEST OPEN issue number - the rule is deterministic, so
-  // both invocations converge on the same survivor no matter the order. (This run's JSON may report
-  // an issue that a concurrent reconciliation then closes; the next night's report closes any
-  // residue as an older night.)
-  // The reconciliation set is built ONLY from the CURRENT open listing. The earlier all-states
-  // hit (or this run's fresh POST) can go stale in the window before this listing - an operator
-  // may close our issue in between - and a stale-open number winning Math.min would close the
-  // actually-open duplicates and leave the night with no open digest. The listing is the same
-  // source of truth the close PATCHes act on.
-  const sameNight: number[] = [];
-  let oursOpen = false;
-  for (let page = 1; page <= SEARCH_CAP; page++) {
-    const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
-    const res = await io.get(path);
-    if (res.status < 200 || res.status >= 300) break; // unreadable: the next night's close loop heals
-    const prev = res.body as { number?: number; title?: string; pull_request?: unknown }[] | null;
-    if (!Array.isArray(prev)) break; // unreadable: the next night's close loop heals
-    for (const dup of prev) {
-      if (dup.number === undefined || dup.pull_request !== undefined) continue;
-      if (dup.title !== title) continue;
-      if (dup.number === issue) oursOpen = true;
-      if (!sameNight.includes(dup.number)) sameNight.push(dup.number);
-    }
-    if (prev.length < 100) break;
-  }
-  // The winner of the reconciliation is the SMALLEST number confirmed open NOW, and ONLY the
-  // winner's invocation closes the others. A losing invocation closes NOTHING: two independent
-  // closers could otherwise each kill the other's survivor and leave the night with no open
-  // digest. The loser just reports the survivor; its own issue is closed by the winner (or by
-  // tomorrow's prevNight close if the winner died first). An issue closed before the listing
-  // (operator closure) is not in the set at all, so it can neither win nor be re-closed; an
-  // unreadable listing leaves the set empty and closes nothing (healed by tomorrow's
-  // prevNight close).
-  if (sameNight.length > 0) {
-    const survivor = Math.min(...sameNight);
-    // Revalidate the survivor before the cleanup: the open listing is not a lock, and an
-    // operator can close the winner between the listing and these PATCHes - closing the
-    // duplicates then would leave the night with NO open digest. A fresh GET of the survivor
-    // must confirm it open before (and between) the closes; anything else (closed, non-2xx,
-    // unparsable) ABORTS the cleanup, leaving open duplicates that tomorrow's prevNight close
-    // heals - the safe direction. Residual race: an operator closing the survivor exactly
-    // between a revalidation and the next PATCH cannot be excluded with the REST API (no
-    // conditional PATCH on issues); the window is one round-trip and any residue still heals
-    // via tomorrow's prevNight close, which matches these titles.
-    const survivorOpen = async (): Promise<boolean> => {
-      const check = await io.get(`/repos/${opts.repo}/issues/${survivor}`);
-      if (check.status < 200 || check.status >= 300) return false; // unreadable: do not close anything
-      const c = check.body as { state?: string; pull_request?: unknown } | null;
-      if (c === null || typeof c !== 'object' || c.pull_request !== undefined) return false;
-      return c.state === 'open';
-    };
-    if (survivor === issue && oursOpen && await survivorOpen()) {
-      for (const n of sameNight) {
-        if (n === survivor) continue;
-        if (!(await survivorOpen())) break; // the winner vanished mid-cleanup: stop closing
-        await io.patch(`/repos/${opts.repo}/issues/${n}`, { state: 'closed' });
-      }
-    } else {
-      // A loser (including a closed-reuse invocation whose issue is not even in the open set)
-      // reports the OPEN winner. It may still help the cleanup - closing every duplicate
-      // EXCEPT the winner, guarded by the same revalidation: the winner's survival is checked
-      // before each PATCH, so two losers with divergent listings can never close each other's
-      // survivor (the second one aborts when the first closed it), and the open winner always
-      // remains. When our issue was the winner but an operator closed it mid-window, we close
-      // nothing: the winner is gone, and the duplicates heal via tomorrow's prevNight pass.
-      if (!(survivor === issue) && await survivorOpen()) {
-        for (const n of sameNight) {
-          if (n === survivor) continue;
-          if (!(await survivorOpen())) break;
-          await io.patch(`/repos/${opts.repo}/issues/${n}`, { state: 'closed' });
-        }
-      }
-      issue = survivor;
-    }
   }
 
   let closedPrevious: number | undefined;
@@ -635,13 +521,6 @@ export async function runReport(
     // throwing, and the JSON must not claim a close that did not happen. The digest is already
     // filed, so a failed close is reported, not fatal - tonight's run closes it.
     if (closed.status >= 200 && closed.status < 300) closedPrevious = closedPrevious ?? old.number;
-  }
-  // Stale-retry pass: failed previous closes would otherwise stay open permanently (every
-  // later run only targets ITS prevNight). These titles are strictly older than the current
-  // digest, so closing them cannot erase a newer report.
-  for (const stale of staleRetries) {
-    if (stale.number === issue) continue;
-    await io.patch(`/repos/${opts.repo}/issues/${stale.number}`, { state: 'closed' });
   }
   return { night: opts.night, ...(issue !== undefined ? { issue } : {}), ...(closedPrevious !== undefined ? { closedPrevious } : {}), ...data };
 }

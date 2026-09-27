@@ -130,12 +130,12 @@ issues. Sections:
   is empty, not faked.
 - **Flakes** — the `nightly-e2e` flake-clock state (same state file).
 
-The report is read-only except for the digest issue itself, the close of
-yesterday's open report, the closure of same-night duplicates from a racing
-retry (the smallest OPEN issue number survives), and a bounded stale-retry
-pass that closes open reports from the TWO nights before yesterday's (a
-failed close would otherwise stay open forever; those titles are strictly
-older than any current digest, so a newer report is never erased).
+The report is read-only except for the digest issue itself and the close
+of every OPEN digest titled `nightly report — D` with D strictly before the
+report night. One rule: a failed close self-heals on any later night, a
+newer report is never erased, and same-night duplicates from a racing retry
+heal the next night. Single-writer scheduling is Mercury's bot config job
+(`singleFlight`), not the script's.
 
 ## Tests
 

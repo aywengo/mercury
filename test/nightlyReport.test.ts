@@ -91,10 +91,19 @@ test('the digest files one issue with all sections and closes yesterday\'s repor
     ],
     comments: {
       501: [{ body: '**Blocking question:** Which preset wins?' }],
-      702: [{ body: 'a nightly comment', created_at: new Date('2026-09-26T12:00:00').toISOString() }],
     },
   });
-  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  // The commented section reads the repo-level since listing (one call), not per-issue pages.
+  const io2: ReportIo = {
+    ...io,
+    async get(path) {
+      if (path.includes('/issues/comments?since=')) {
+        return { body: [{ body: 'a nightly comment', created_at: '2026-09-26T12:00:00Z', issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/702' }], status: 200 };
+      }
+      return io.get(path);
+    },
+  };
+  const out = await runReport(io2, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
   assert.equal(out.issue, 900);
   assert.equal(out.closedPrevious, 500, 'yesterday\'s report is closed');
   assert.equal(out.prs.length, 1);
@@ -486,9 +495,8 @@ test('a >1000-comment thread: the scan jumps to the Link-header last page (newes
   };
   const q = await blockingQuestion(io, REPO, 502);
   assert.equal(q, 'newest question', 'the newest marker on the last page wins over the stale one on page 1');
-  // The scan is the bounded TAIL: page 1, then the last LAST_PAGES(3) pages [5,6,7] - never a
-  // full oldest-first walk of the thread.
-  assert.deepEqual(requested, [1, 5, 6, 7], 'page 1 then the bounded tail before the last page');
+  // The question is written by our own nightly-next: page 1 plus the Link LAST page is enough.
+  assert.deepEqual(requested, [1, 7], 'page 1 then the last page - no multi-page walk');
 });
 
 test('a page-1 marker is still seen when the thread grows past the scanned tail', async () => {
@@ -527,35 +535,6 @@ test('a 2xx search response with an unexpected body fails with a targeted error'
   );
 });
 
-test('a concurrent same-night duplicate is reconciled: the smaller number survives', async () => {
-  // Two invocations created 902 (ours) and 701 (theirs). The listing after create shows both.
-  const { io: base } = ioWith({
-    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
-  });
-  let createCount = 0;
-  const io: ReportIo = {
-    async get(path) {
-      if (path.includes('labels=nightly%3Areport')) {
-        // Second listing (post-create reconciliation) reveals the concurrent duplicate 701.
-        if (createCount > 0) {
-          return { body: [
-            { number: 902, title: 'nightly report — 2026-09-26' },
-            { number: 701, title: 'nightly report — 2026-09-26' },
-            { number: 500, title: 'nightly report — 2026-09-25' },
-          ], status: 200 };
-        }
-        return base.get(path);
-      }
-      return base.get(path);
-    },
-    async post() { createCount += 1; return { body: { number: 902 }, status: 201 }; },
-    async patch(path) { return { body: {}, status: 200 }; },
-  };
-  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
-  assert.equal(out.issue, 701, 'the smaller same-night number is the survivor');
-  assert.equal(out.closedPrevious, 500);
-});
-
 test('a 2xx Mercury runs response with an unparsable payload degrades the section, not the digest', async () => {
   const io: ReportIo = {
     mercury: {
@@ -572,11 +551,11 @@ test('a 2xx Mercury runs response with an unparsable payload degrades the sectio
   assert.deepEqual(stopped, []);
 });
 
-test('a backfill never closes a NEWER report: only the immediately previous night closes', async () => {
+test('a backfill never closes a NEWER report (it does close strictly older digests)', async () => {
   const { io } = ioWith({
     issues: [
       { number: 600, title: 'nightly report — 2026-09-26', labels: [{ name: 'nightly:report' }] }, // NEWER than the backfill night
-      { number: 500, title: 'nightly report — 2026-09-20', labels: [{ name: 'nightly:report' }] }, // not the previous night either
+      { number: 500, title: 'nightly report — 2026-09-20', labels: [{ name: 'nightly:report' }] }, // older: closed
     ],
   });
   const closedPaths: string[] = [];
@@ -586,9 +565,9 @@ test('a backfill never closes a NEWER report: only the immediately previous nigh
     async patch(path) { closedPaths.push(path); return { body: {}, status: 200 }; },
   };
   await runReport(backfill, ENV, { repo: REPO, night: '2026-09-25', dryRun: false });
-  assert.deepEqual(closedPaths, [], 'no newer or unrelated-night report is closed by a backfill');
+  assert.equal(closedPaths.length, 1, 'exactly the older digest closes');
+  assert.match(closedPaths[0]!, /issues\/500$/, 'the newer report is never closed');
 });
-
 test('a 2xx Mercury events response with an unparsable payload skips the run, not the digest', async () => {
   const io: ReportIo = {
     mercury: {
@@ -715,34 +694,6 @@ test('a CLOSED same-night digest is reused (all-states lookup), not duplicated',
   assert.equal(out.issue, 690);
 });
 
-test('a LOSING invocation closes nothing (only the smallest number survives the cleanup)', async () => {
-  // Our invocation created 902; the reconciliation listing shows 701 (smaller) and ours.
-  const { io: base } = ioWith({
-    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
-  });
-  let createCount = 0;
-  const patched: number[] = [];
-  const io: ReportIo = {
-    async get(path) {
-      if (path.includes('labels=nightly%3Areport')) {
-        if (createCount > 0) {
-          return { body: [
-            { number: 902, title: 'nightly report — 2026-09-26' },
-            { number: 701, title: 'nightly report — 2026-09-26' },
-          ], status: 200 };
-        }
-        return base.get(path);
-      }
-      return base.get(path);
-    },
-    async post() { createCount += 1; return { body: { number: 902 }, status: 201 }; },
-    async patch(path) { patched.push(Number(/issues\/(\d+)$/.exec(path)![1])); return { body: {}, status: 200 }; },
-  };
-  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
-  assert.equal(out.issue, 701, 'the loser reports the survivor');
-  assert.deepEqual(patched, [500], 'the loser closes ONLY the previous night - never its own issue or the survivor');
-});
-
 test('user-controlled titles are Markdown-escaped in the digest body', async () => {
   const { io } = ioWith({
     searchItems: {
@@ -762,35 +713,6 @@ test('user-controlled titles are Markdown-escaped in the digest body', async () 
   // The brackets/parens are escaped: the link cannot be broken out of.
   assert.ok(!body.includes('[x](https://evil.example)'), 'the raw injection is gone');
   assert.ok(body.includes('x\\]\\(https://evil.example\\)'), 'the title is escaped');
-});
-
-test('a CLOSED reuse candidate never wins the reconciliation; the open duplicate survives', async () => {
-  const { io: base } = ioWith({
-    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
-  });
-  const patched: number[] = [];
-  let openGets = 0;
-  const io: ReportIo = {
-    async get(path) {
-      if (path.includes('state=all')) {
-        return { body: [{ number: 690, title: 'nightly report — 2026-09-26', state: 'closed' }], status: 200 };
-      }
-      if (path.includes('state=open') && !path.includes('nightly%3Ablocked')) {
-        openGets += 1;
-        if (openGets >= 2) {
-          // Reconciliation listing: an OPEN same-night duplicate exists next to the closed reuse.
-          return { body: [{ number: 701, title: 'nightly report — 2026-09-26' }], status: 200 };
-        }
-        return base.get(path);
-      }
-      return base.get(path);
-    },
-    async post() { throw new Error('no create expected: the closed same-night digest is reused'); },
-    async patch(path) { patched.push(Number(/issues\/(\d+)$/.exec(path)![1])); return { body: {}, status: 200 }; },
-  };
-  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
-  assert.equal(out.issue, 701, 'the OPEN duplicate is the survivor, not the closed reuse candidate');
-  assert.deepEqual(patched, [500], 'only yesterday is closed here: the closed candidate stays closed and the open winner heals the rest');
 });
 
 test('collectRunsStopped survives a transport error on the listing or on one run\'s events', async () => {
@@ -856,32 +778,6 @@ test('run task text is sanitized inside inline-code spans', async () => {
   assert.ok(body.includes('`runX` — `evil ## injected`'), 'task text is a single sanitized code span');
 });
 
-test('a fresh issue closed before the reconciliation listing can neither win nor be closed', async () => {
-  // Our POST returned 701 (fresh = open at create time), but the operator closes it before the
-  // reconciliation listing runs; the listing then shows only open duplicate 702.
-  const { io: base } = ioWith({
-    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
-  });
-  const patched: number[] = [];
-  let openGets = 0;
-  const io: ReportIo = {
-    async get(path) {
-      if (path.includes('state=all')) return { body: [], status: 200 };
-      if (path.includes('state=open') && !path.includes('nightly%3Ablocked')) {
-        openGets += 1;
-        if (openGets >= 2) return { body: [{ number: 702, title: 'nightly report — 2026-09-26' }], status: 200 };
-        return base.get(path);
-      }
-      return base.get(path);
-    },
-    async post() { return { body: { number: 701 }, status: 201 }; },
-    async patch(path) { patched.push(Number(/issues\/(\d+)$/.exec(path)![1])); return { body: {}, status: 200 }; },
-  };
-  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
-  assert.equal(out.issue, 702, 'the confirmed-open duplicate is the survivor');
-  assert.deepEqual(patched, [500], 'the stale-closed 701 is never PATCHed and never wins Math.min');
-});
-
 test('a malformed 2xx comment-page body is an unreadable question, not a crash', async () => {
   const io: ReportIo = {
     async get(path) {
@@ -922,65 +818,15 @@ test('the CLI default night is the COMPLETED prior night (05:40 fire vs 06:00 cu
   assert.equal(defaultNight(), defaultNight(new Date()));
 });
 
-test('the survivor is revalidated before and during duplicate cleanup', async () => {
-  // Winner invocation: our create returned 700 (smallest); open duplicates 701 and 702.
-  // Survivor GET #1 says open -> close 702 first (descending does not matter; we keep the
-  // listed order but assert the abort). Survivor GET #2 says closed -> the loop must STOP:
-  // 701 stays open (healed tomorrow) and the night keeps its open survivor semantics.
-  const { io: base } = ioWith({
-    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
-  });
-  const patched: number[] = [];
-  let survivorChecks = 0;
-  const io: ReportIo = {
-    async get(path) {
-      if (/\/issues\/700$/.test(path)) {
-        survivorChecks += 1;
-        // Check #1 (before cleanup): open. Check #2 (between closes): CLOSED - abort.
-        return { body: { state: survivorChecks >= 2 ? 'closed' : 'open' }, status: 200 };
-      }
-      if (path.includes('state=all')) return { body: [], status: 200 };
-      if (path.includes('state=open') && !path.includes('nightly%3Ablocked')) {
-        // closeables listing: prevNight only.
-        return base.get(path);
-      }
-      return base.get(path);
-    },
-    async post() { return { body: { number: 700 }, status: 201 }; },
-    async patch(path) { patched.push(Number(/issues\/(\d+)$/.exec(path)![1])); return { body: {}, status: 200 }; },
-  };
-  // Feed the reconciliation listing via a dedicated override layer.
-  let reconAsked = false;
-  const io2: ReportIo = {
-    ...io,
-    async get(path) {
-      if (path.includes('state=open') && !path.includes('nightly%3Ablocked') && reconAsked) {
-        return { body: [{ number: 700, title: 'nightly report — 2026-09-26' }, { number: 701, title: 'nightly report — 2026-09-26' }, { number: 702, title: 'nightly report — 2026-09-26' }], status: 200 };
-      }
-      if (path.includes('state=open') && !path.includes('nightly%3Ablocked')) {
-        reconAsked = true;
-        // First open GET is the closeables scan: prevNight fixture.
-        return base.get(path);
-      }
-      return io.get(path);
-    },
-  };
-  const out = await runReport(io2, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
-  assert.equal(out.issue, 700);
-  assert.ok(survivorChecks >= 2, 'the survivor was revalidated');
-  // The second revalidation (before 701's PATCH) observed the survivor CLOSED: the cleanup
-  // aborts with NO duplicate closed. 701/702 stay open and are healed by tomorrow's prevNight
-  // close - the night never loses its digest to a stale winner.
-  assert.deepEqual(patched, [500], 'only yesterday is closed; the cleanup aborted before closing any duplicate');
-});
-
-test('stale older reports left open by failed closes are retried; newer ones never', async () => {
+test('closes EVERY open digest older than the night (failed-close self-heal) and never a newer one', async () => {
   const { io: base } = ioWith({
     issues: [
+      { number: 440, title: 'nightly report — 2026-09-21', labels: [{ name: 'nightly:report' }] }, // stale (failed close)
+      { number: 480, title: 'nightly report — 2026-09-24', labels: [{ name: 'nightly:report' }] }, // stale
       { number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }, // prevNight
-      { number: 480, title: 'nightly report — 2026-09-24', labels: [{ name: 'nightly:report' }] }, // retry night
-      { number: 460, title: 'nightly report — 2026-09-23', labels: [{ name: 'nightly:report' }] }, // retry night
-      { number: 440, title: 'nightly report — 2026-09-21', labels: [{ name: 'nightly:report' }] }, // TOO old: outside the bounded retry
+      { number: 600, title: 'nightly report — 2026-09-26', labels: [{ name: 'nightly:report' }] }, // SAME night: not closed
+      { number: 700, title: 'nightly report — 2026-09-27', labels: [{ name: 'nightly:report' }] }, // NEWER: not closed
+      { number: 470, title: 'postmortem notes — 2026-09-24', labels: [{ name: 'nightly:report' }] }, // lookalike title
     ],
   });
   const patched: number[] = [];
@@ -989,8 +835,6 @@ test('stale older reports left open by failed closes are retried; newer ones nev
     async get(path) {
       if (path.includes('state=all')) return { body: [], status: 200 };
       if (path.includes('state=open') && !path.includes('nightly%3Ablocked')) {
-        // The reconciliation listing (after create) shows only the current digest; the
-        // closeables listing (before create) returns the fixture.
         return createSeen ? { body: [{ number: 900, title: 'nightly report — 2026-09-26' }], status: 200 } : base.get(path);
       }
       return base.get(path);
@@ -1000,11 +844,9 @@ test('stale older reports left open by failed closes are retried; newer ones nev
   };
   const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
   assert.equal(out.issue, 900);
-  // prevNight + both retry nights closed; the too-old 2026-09-21 stays open (bounded policy)
-  // and the current digest 900 is never touched.
-  assert.deepEqual(patched.sort((a, b) => a - b), [460, 480, 500]);
+  assert.deepEqual(patched.sort((a, b) => a - b), [440, 480, 500],
+    'every strictly-older digest closes (self-healing failed closes); same-night/newer/lookalike never');
 });
-
 test('an unrelated nightly:report title that merely ends in a retry date is NOT closed', async () => {
   const { io: base } = ioWith({
     issues: [
@@ -1145,89 +987,56 @@ test('a create returning 0/null/string is unidentifiable: hard error, nothing cl
   }
 });
 
-test('commented candidates paginate: night comments past page 1 are still found', async () => {
+test('commented candidates paginate: the repo-level since listing finds window comments, and the result intersects the updated: candidates', async () => {
   const { io: base } = ioWith({
-    searchItems: { 'is:issue updated': [{ number: 703, title: 'busy issue', html_url: 'u9' }] },
+    searchItems: {
+      'is:issue updated': [
+        { number: 703, title: 'busy issue', html_url: 'u9' },
+        { number: 704, title: 'quiet issue', html_url: 'u10' },
+      ],
+    },
   });
-  const pages: Record<number, { body: string; created_at: string }[]> = {
-    1: Array.from({ length: 100 }, (_, k) => ({ body: `old ${k}`, created_at: '2026-09-20T00:00:00Z' })),
-    2: [
-      { body: 'still old', created_at: '2026-09-25T23:00:00Z' },
-      { body: 'night comment', created_at: '2026-09-26T12:00:00Z' },
-    ],
-  };
-  let fetches = 0;
   const io: ReportIo = {
+    ...base,
     async get(path) {
-      if (/\/issues\/703\/comments/.test(path)) {
-        fetches += 1;
-        const m = /[?&]page=(\d+)/.exec(path);
-        return { body: pages[Number(m?.[1] ?? 1)] ?? [], status: 200 };
+      if (path.includes('/issues/comments?since=')) {
+        // One comment INSIDE the window on 703, one before it (filtered by created_at),
+        // one on a non-candidate issue (dropped by the intersection).
+        return { body: [
+          { body: 'in window', created_at: '2026-09-26T12:00:00Z', issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/703' },
+          { body: 'too old', created_at: '2026-09-25T23:00:00Z', issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/703' },
+          { body: 'other issue', created_at: '2026-09-26T13:00:00Z', issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/999' },
+        ], status: 200 };
       }
       return base.get(path);
     },
-    async post() { return { body: {}, status: 201 }; },
-    async patch() { return { body: {}, status: 200 }; },
   };
-  const out = await collectIssuesCommented(io, REPO, [{ number: 703 }], Date.parse('2026-09-26T00:00:00+00:00'), Date.parse('2026-09-26T23:59:59+00:00'));
-  assert.equal(out.length, 1, 'the night comment on page 2 is found');
-  assert.equal(fetches, 2, 'exactly two pages were walked');
-  // An issue whose page-1 comments are entirely BEFORE the window start keeps walking (the
-  // next page may enter the window) - covered by the two-page walk above.
-});
-
-test('a closed-reuse loser still closes the OTHER open duplicates under the survivor guard', async () => {
-  // Closed #600 is reused; open duplicates 701 and 702 exist. Our loser lists survivor 701,
-  // and the survivor revalidations all say open -> it closes 702 (not 701, not 600).
-  const { io: base } = ioWith({
-    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
-  });
-  const patched: number[] = [];
-  let openGets = 0;
-  const io: ReportIo = {
-    async get(path) {
-      if (path.includes('state=all')) {
-        return { body: [{ number: 600, title: 'nightly report — 2026-09-26', state: 'closed' }], status: 200 };
-      }
-      if (/\/issues\/701$/.test(path)) return { body: { state: 'open' }, status: 200 };
-      if (path.includes('state=open') && !path.includes('nightly%3Ablocked')) {
-        openGets += 1;
-        if (openGets >= 2) {
-          return { body: [{ number: 701, title: 'nightly report — 2026-09-26' }, { number: 702, title: 'nightly report — 2026-09-26' }], status: 200 };
-        }
-        return base.get(path);
-      }
-      return base.get(path);
-    },
-    async post() { throw new Error('no create expected'); },
-    async patch(path) { patched.push(Number(/issues\/(\d+)$/.exec(path)![1])); return { body: {}, status: 200 }; },
-  };
-  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
-  assert.equal(out.issue, 701, 'the open winner is the reported digest');
-  assert.deepEqual(patched.sort((a, b) => a - b), [500, 702], 'yesterday + the non-winner duplicate are closed; the winner stays open');
+  const out = await collectIssuesCommented(
+    io, REPO,
+    [{ number: 703, title: 'busy issue', url: 'u9' }, { number: 704, title: 'quiet issue', url: 'u10' }],
+    Date.parse('2026-09-26T00:00:00+00:00'), Date.parse('2026-09-26T23:59:59+00:00'),
+  );
+  assert.deepEqual(out.map((c) => c.number), [703], 'only the candidate with an in-window comment survives');
 });
 
 test('flake state with newlines/tampered nights cannot inject digest content', async () => {
+  // The loader reads $XDG_STATE_HOME/mercury/nightly/e2e-flakes.json - write the tampered
+  // fixture exactly there (review finding: the fixture previously wrote to the wrong path and
+  // passed vacuously).
   const dir = tempDir('nightly-flakes-inject');
-  const statePath = join(dir, 'e2e-flakes.json');
-  writeFileSync(statePath, JSON.stringify({
+  const statePath = join(dir, 'mercury', 'nightly');
+  mkdirSync(statePath, { recursive: true });
+  writeFileSync(join(statePath, 'e2e-flakes.json'), JSON.stringify({
     fingerprintOf: { nights: ['2026-09-24', 'INJECTED\n## heading', 'not-a-date'], test: 'evil\n## injected heading' },
   }));
   const env = { ...ENV, XDG_STATE_HOME: dir };
-  const flakes = collectFlakes(env, '2026-09-26');
-  // Whatever the reader kept, render it: injection must be neutralized.
-  const { io } = ioWith({});
-  await runReport(io, env, { repo: REPO, night: '2026-09-26', dryRun: true });
-  const lines = flakes.length > 0 ? null : null;
-  // Render via digestBody path through a full run with mercury absent (flakes come from state).
-  const { io: io2, calls } = ioWith({});
-  await runReport(io2, env, { repo: REPO, night: '2026-09-26', dryRun: false });
+  const { io: ioRun, calls } = ioWith({});
+  await runReport(ioRun, env, { repo: REPO, night: '2026-09-26', dryRun: false });
   const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
   const body = String((created.body as { body: string }).body);
   assert.ok(!body.includes('\n## injected heading'), 'no injected heading line');
   assert.ok(!body.includes('INJECTED\n## heading'), 'the tampered night string is flattened or dropped');
 });
-
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);
