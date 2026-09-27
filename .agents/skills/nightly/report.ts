@@ -7,7 +7,7 @@
  *   - Issues commented on tonight (candidates from the supported `updated:<range>` search,
  *     filtered by per-issue comment timestamps - GitHub search has no `commented:<range>`).
  *   - Blocked items: open issues labeled `nightly:blocked` with their latest blocking question.
- *   - Runs stopped by `notAfter` (the §4.3 window end) — optional section, only when
+ *   - Runs stopped by `notAfter` (the §4.3 window end 06:00 local) — optional section, only when
  *     `MERCURY_REPORT_API_URL` + `MERCURY_REPORT_TOKEN` are set; the Mercury runs API is read
  *     for TIMED_OUT runs and their `run.timed_out` reason event.
  *   - Flakes: the nightly-e2e flake clock (same state file) — recent fingerprint nights.
@@ -383,6 +383,31 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   return lines.join('\n');
 }
 
+/** The §4.3 night window end, wall clock on the night's LOCAL date. The night is
+ * [00:00, 06:00) local (dispatcher-bot-design §5 / nightly-self-development §4.3): the
+ * work window the bot config enforces with `notAfterAt: "06:00"`. The report fired at
+ * 06:05 covers exactly that window, so tonight's ladder activity is digested this
+ * morning — not ~24 h later mixed with daytime — and runs stopped AT 06:00 are
+ * observable, which a 05:40 fire could never see. */
+export const NIGHT_END = '06:00';
+
+/** The night window [00:00 local, 06:00 local) of `night` as a half-open instant range.
+ * Exported for tests (the DST-switch dates must round-trip through the host zone). */
+export function nightWindow(night: string): { startMs: number; endMs: number; startIso: string; endIso: string } {
+  // LOCAL parsing (no Z): `new Date('YYYY-MM-DDT00:00:00')` is local per ES spec.
+  const startMs = new Date(`${night}T00:00:00`).getTime();
+  const [hh, mm] = NIGHT_END.split(':').map(Number) as [number, number];
+  const endMs = new Date(`${night}T${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00`).getTime();
+  if (Number.isNaN(startMs) || Number.isNaN(endMs) || endMs <= startMs) {
+    throw new Error(`night window for ${night} is not a valid increasing local range`);
+  }
+  // GitHub search ranges are INCLUSIVE on both ends; one second below the end keeps the
+  // boundary instant (06:00:00) out of this night (it belongs to no nightly activity window).
+  const endIso = new Date(endMs - 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00');
+  const startIso = new Date(startMs).toISOString().replace(/\.\d{3}Z$/, '+00:00');
+  return { startMs, endMs, startIso, endIso };
+}
+
 /** The day AFTER the report night, computed in UTC on the date string itself (calendar
  * arithmetic on the LABEL, not on the current time). */
 function nextDay(night: string): string {
@@ -398,12 +423,19 @@ function prevDay(night: string): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** The night the report covers when --night is absent: the COMPLETED prior local night. The bot
- * fires this CLI at 05:40, before that day's 06:00 notAfter cutoff, so "today" would swallow
- * post-report activity and omit today's 06:00 stops from every later report; the finished
- * night's deadline stops have all happened by fire time. */
+/** The night the report covers when --night is absent: the §4.3 window that just ENDED -
+ * today's local date when the fire is at/after 06:00 local (the bot config fires the report
+ * at 06:05), yesterday's date in the small hours before midnight-carryover edge handling.
+ * A fire before 06:00 local still belongs to YESTERDAY's window (it is pre-deadline activity
+ * the 06:05 report will cover), so the boundary is the window end, not local midnight. */
 export function defaultNight(now: Date = new Date()): string {
-  return prevDay(localDateString(now));
+  const [hh, mm] = NIGHT_END.split(':').map(Number) as [number, number];
+  const cutoff = new Date(now);
+  cutoff.setHours(hh, mm, 0, 0);
+  // Before 06:00 local the current window has not ended yet: the report covers the COMPLETED
+  // prior window (yesterday's date). At/after 06:00 local it covers the window that just
+  // ended: today's date.
+  return now.getTime() >= cutoff.getTime() ? localDateString(now) : prevDay(localDateString(now));
 }
 
 /** Assemble the digest (all reads), file the issue, close yesterday's. */
@@ -414,17 +446,17 @@ export async function runReport(
 ): Promise<ReportResult> {
   assertRepo(opts.repo);
   assertNight(opts.night);
-  // The LOCAL night as a UTC instant range [00:00 local, 00:00 local next day): GitHub search
-  // date qualifiers match one UTC DAY, but the nightly window is local - in Poznań (UTC+2) a
-  // plain `created:NIGHT` misses everything between local midnight and 02:00 (verified live:
-  // the local window finds PRs the UTC-day search does not). `night` is parsed as LOCAL time
-  // (no Z suffix) and converted to ISO with a +00:00 offset, the format GitHub's search
-  // accepts. GitHub ranges are INCLUSIVE on both ends, so the upper bound is one SECOND before
-  // the next local midnight: [00:00, 24:00) - the boundary instant itself belongs to tomorrow's
-  // window only, and no item is counted twice.
-  const startIso = new Date(`${opts.night}T00:00:00`).toISOString().replace(/\.\d{3}Z$/, '+00:00');
-  const endNight = nextDay(opts.night);
-  const endIso = new Date(new Date(`${endNight}T00:00:00`).getTime() - 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00');
+  // The §4.3 night window as a UTC instant range [00:00 local, 06:00 local): GitHub search
+  // date qualifiers need explicit instants - a plain `created:NIGHT` matches one UTC DAY, but
+  // the nightly window is local - in Poznań (UTC+2) that misses everything between local
+  // midnight and 02:00 (verified live: the local window finds PRs the UTC-day search does
+  // not). `night` is parsed as LOCAL time (no Z suffix) and converted to ISO with a +00:00
+  // offset, the format GitHub's search accepts. Ranges are INCLUSIVE on both ends, so the
+  // upper bound is one SECOND before 06:00 local: the boundary instant itself belongs to no
+  // nightly activity, and no item is counted twice.
+  const win = nightWindow(opts.night);
+  const startIso = win.startIso;
+  const endIso = win.endIso;
   const prs = await search(io, opts.repo, `is:pr created:${startIso}..${endIso}`);
   const issuesFiled = await search(io, opts.repo, `is:issue created:${startIso}..${endIso}`);
   // GitHub's issue search does NOT support a commented:<range> qualifier (verified live: the
@@ -433,7 +465,7 @@ export async function runReport(
   // comments and keeps only issues with a comment authored DURING the night (bounded).
   const updatedCandidates = await search(io, opts.repo, `is:issue updated:${startIso}..${endIso}`);
   const issuesCommented = await collectIssuesCommented(io, opts.repo, updatedCandidates,
-    Date.parse(startIso), Date.parse(endIso));
+    win.startMs, win.endMs - 1000);
   const blocked = await collectBlocked(io, opts.repo);
   const runsStopped = io.mercury ? await collectRunsStopped(io.mercury, opts.night) : [];
   const flakes = collectFlakes(env, opts.night);
@@ -594,13 +626,12 @@ if (isMain) {
     return value;
   };
   const repo = flag('--repo') ?? process.env.REPO ?? '';
-  // Local calendar date, not UTC: a nightly scheduled in local tz that fires at 00:05 belongs
-  // to that local day even when UTC has rolled over (same rule as e2e.ts). The DEFAULT is the
-  // COMPLETED prior night (lazy, only when --night is absent): the bot fires the report at
-  // 05:40, BEFORE that day's 06:00 notAfter cutoff, so "today" would swallow post-report
-  // activity and omit today's 06:00 stops from every later report. Reporting the finished
-  // night means every deadline stop it lists has already happened.
-  const night = flag('--night') ?? prevDay(localDateString());
+  // Local calendar date, not UTC: the night label is the local date of the window the fire
+  // covers (same rule as e2e.ts). The DEFAULT (lazy, only when --night is absent): the §4.3
+  // window that just ENDED - today's date when the fire is at/after 06:00 local (the bot
+  // config fires the report at 06:05), yesterday's date before that. Reporting the finished
+  // window means every deadline stop it lists has already happened.
+  const night = flag('--night') ?? defaultNight();
   const dryRun = args.includes('--dry-run');
   runReport(
     {

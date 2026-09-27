@@ -49,7 +49,11 @@ test('the example config parses and every task passes the real cron/tz parsers',
     parseCron(t.cron as string); // throws on a bad expression
     parseTz(t.tz as string);
     const template = t.template as Record<string, unknown>;
-    assert.equal(template.notAfterAt, '06:00');
+    // e2e and next carry the §4.3 window end 06:00; the report fires at 06:05 (after the
+    // window it digests, #771) so its own deadline is 07:00 - a 06:00 deadline would be in the
+    // past at fire time and the Run would never start.
+    const expectedNotAfter = t.name === 'nightly-report' ? '07:00' : '06:00';
+    assert.equal(template.notAfterAt, expectedNotAfter);
     const constraints = template.constraints as Record<string, number>;
     assert.ok(constraints.maxDurationMs > 0, 'every task sets maxDurationMs explicitly');
     assert.equal(constraints.maxRetries, 0, 'nightly runs never retry into the window');
@@ -89,6 +93,18 @@ test('next fires at most every 20 minutes and the last fire is 04:40 (inside the
   const constraints = next.template.constraints as { maxDurationMs: number };
   // 80 min backstop: the 04:40 fire ends by 06:00 even without notAfter.
   assert.ok(constraints.maxDurationMs <= 80 * 60_000);
+});
+
+test('the report fires 06:05 (§4.3 window just ended) and its deadline is 07:00, never a past 06:00', () => {
+  // #771: the report must list runs stopped AT 06:00 - impossible from a 05:40 fire - so it
+  // fires just after the window ends. Its notAfterAt resolves on ITS fire date to 07:00: a
+  // 06:00 deadline would already be in the past at 06:05 and the Run would never start.
+  const report = taskOf('nightly-report');
+  assert.equal(report.cron, '5 6 * * *');
+  report.tz = 'local';
+  const resolved = resolveTemplate(report, { date: '2026-09-27', time: '06:05', iso: 'w2026-09-27T06:05' });
+  const notAfter = new Date((resolved.constraints as { notAfter: string }).notAfter);
+  assert.equal(notAfter.getTime(), new Date(2026, 8, 27, 7, 0).getTime(), '07:00 local on the fire date');
 });
 
 test('notAfterAt resolves to 06:00 wall on the FIRE local date (same date, never shifted)', () => {

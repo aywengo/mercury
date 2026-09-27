@@ -54,7 +54,7 @@ times waste the window; the ladder avoids both.
 | --- | --- | --- |
 | `nightly-e2e` | `5 0 * * *` | run E2E, file/update defect issues |
 | `nightly-next` | `*/20 0-4 * * *`, `singleFlight: true` | take the top ladder rung |
-| `nightly-report` | `40 5 * * *` | morning digest |
+| `nightly-report` | `5 6 * * *` | morning digest of the §4.3 window that just ended (#771) |
 
 `tz: "local"` so midnight is Poznań midnight. The EU DST switch happens at
 02:00/03:00 local, inside the window: two nights a year are 5 h or 7 h long.
@@ -93,6 +93,10 @@ not take it twice.
   E2E task sets its own.
 - A Run stopped by its deadline leaves its issue labeled `nightly:in-progress`
   with a comment; `nightly-report` lists it, and the next night resets it.
+- The report fires at 06:05 (#771), just after the window it digests: a night
+  is [00:00, 06:00) local, and a 05:40 fire could never list runs stopped AT
+  06:00. The report task's own deadline is 07:00 - a 06:00 deadline would be in
+  the past at fire time and the Run would never start.
 
 ### 4.4 Nightly Runs never ask
 

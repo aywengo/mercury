@@ -137,10 +137,12 @@ node .agents/skills/nightly/report.ts --repo aywengo/mercury [--night YYYY-MM-DD
 ```
 
 Files ONE digest issue per night, labeled `nightly:report`, titled
-`nightly report — <night>`, and closes the previous open report issue.
-Without `--night` the report covers the COMPLETED prior local night (the
-bot fires this at 05:40, before that day's 06:00 `notAfter` cutoff, so
-"today" would still be open and its deadline stops unobserved).
+`nightly report — <night>`, and closes every open report for a strictly
+older night. A night is the §4.3 window [00:00, 06:00) local. Without
+`--night` the report covers the window that just ENDED: the bot fires this
+at 06:05 (#771), after that cutoff, so tonight's ladder work and the
+06:00 deadline stops are in this morning's digest - a 05:40 fire could
+never observe them.
 Credentials: `GH_TOKEN`/`GITHUB_TOKEN` is required for every request — the
 searches too, including `--dry-run`. A read-only token is enough for
 `--dry-run`; a real run also needs repo write because it files and closes
