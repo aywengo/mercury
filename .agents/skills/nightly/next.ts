@@ -32,6 +32,7 @@
 import { basename } from 'node:path';
 
 import { runSelectorWith } from './select.ts';
+import { assertRepo, ghToken, ghGet, ghPost, ghPatch, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const L_IN_PROGRESS = 'nightly:in-progress';
 const L_BLOCKED = 'nightly:blocked';
@@ -40,7 +41,8 @@ const L_BLOCKED = 'nightly:blocked';
 const NIGHTLY_AUTHOR = 'mercury-nightly';
 // Mirrors select.ts's validation EXACTLY: the selector is the authority and both read the same
 // env; two different regexes would silently disagree on valid repos (e.g. 'octo-org/.github').
-const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+// REPO_RE/assertRepo come from shared.ts (#769): the STRICT form, one regex everywhere
+// (the loose mirror of select.ts accepted dot-leading segments; report.ts/e2e.ts already refused them).
 
 export interface GhLabel { name?: string | null }
 
@@ -71,12 +73,6 @@ export interface NextSelection {
 }
 
 /** Every entry point interpolates repo into API paths: one strict owner/name check. */
-function assertRepo(repo: string): void {
-  if (!REPO_RE.test(repo)) {
-    throw new Error(`repo must be exactly owner/name (e.g. aywengo/mercury); got '${repo}'`);
-  }
-}
-
 /** Run the ladder (with claim) and report what the agent should do. */
 export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: string; dryRun: boolean }): Promise<NextSelection> {
   assertRepo(opts.repo);
@@ -167,42 +163,6 @@ export async function blockedAlready(io: NextIo, opts: { repo: string; issue: nu
 }
 
 // ---- GitHub I/O (thin, bounded, same shape as select.ts/e2e.ts) ----
-
-function ghToken(env: NodeJS.ProcessEnv): string {
-  const tok = env.GH_TOKEN || env.GITHUB_TOKEN || '';
-  if (!tok) throw new Error('GH_TOKEN (or GITHUB_TOKEN) is required: nightly-next reads and labels issues');
-  return tok;
-}
-
-const FETCH_TIMEOUT_MS = 30_000;
-
-async function ghGet(path: string, token: string): Promise<{ body: unknown; status: number; link?: string | null }> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  return { body: await res.json().catch(() => null), status: res.status, link: res.headers.get('link') };
-}
-
-async function ghPost(path: string, body: unknown, token: string): Promise<{ body: unknown; status: number }> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  return { body: await res.json().catch(() => null), status: res.status };
-}
-
-async function ghPatch(path: string, body: unknown, token: string): Promise<{ body: unknown; status: number }> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method: 'PATCH',
-    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  return { body: await res.json().catch(() => null), status: res.status };
-}
 
 async function ghPostLabel(path: string, body: unknown, token: string): Promise<boolean> {
   const res = await fetch(`https://api.github.com${path}`, {

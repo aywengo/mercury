@@ -41,6 +41,7 @@
  */
 
 import { basename } from 'node:path';
+import { REPO_RE, ghToken, ghGet as ghGetRaw, ghPost as ghPostRaw, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const TRUSTED_AUTHOR = 'aywengo';
 /**
@@ -213,37 +214,23 @@ export function selectLadder(
 
 // ---- GitHub/host I/O (thin, fail-loud) ----
 
-function ghToken(env: NodeJS.ProcessEnv): string {
-  const tok = env.GH_TOKEN || env.GITHUB_TOKEN || '';
-  if (!tok) throw new Error('GH_TOKEN (or GITHUB_TOKEN) is required: the selector reads GitHub metadata only');
-  return tok;
-}
-
-/** Every fetch is bounded: a stalled connection must not hang the nightly (same rule as process.ts). */
-const FETCH_TIMEOUT_MS = 30_000;
-
+/** The selector's fail-loud read policy on the shared raw GET (#769): any non-2xx throws. */
 async function ghGet(path: string, token: string): Promise<{ body: unknown; link?: string | null }> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!res.ok) throw new Error(`GET ${path} -> ${res.status}`);
-  return { body: await res.json(), link: res.headers.get('link') };
+  const res = await ghGetRaw(path, token);
+  if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
+  return { body: res.body, link: res.link };
 }
 
 /** Returns true when the label was newly added (2xx); false ONLY for GitHub's
  * already-exists validation failure (the racer case). Any other 422 is a real configuration
  * error and throws instead of silently skipping work. */
+/** The label-add POST (already-exists -> false) on the shared raw POST (#769). The 422 payload
+ * arrives parsed in `body` (shared ghFetch consumed it). */
 async function ghPost(path: string, body: unknown, token: string): Promise<boolean> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (res.ok) return true;
+  const res = await ghPostRaw(path, body, token);
+  if (res.status >= 200 && res.status < 300) return true;
   if (res.status === 422) {
-    const payload = (await res.json().catch(() => null)) as { message?: string; errors?: { code?: string }[] } | null;
+    const payload = res.body as { message?: string; errors?: { code?: string }[] } | null;
     const already = payload?.errors?.some((e) => e.code === 'already_exists') ||
       (payload?.message ?? '').toLowerCase().includes('already');
     if (already) return false;
@@ -308,9 +295,10 @@ export async function runSelectorWith(
   dryRun: boolean,
 ): Promise<Selection> {
   const repo = env.REPO ?? '';
-  // REPO is interpolated into API paths for reads AND label writes: validate it strictly as
-  // owner/name so no path or query injection is possible.
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+  // REPO is interpolated into API paths for reads AND label writes: validate it with the shared
+  // strict assertRepo (#769) so no path or query injection is possible and every nightly script
+  // agrees on what a valid repo is (segments must START alphanumeric - '..' can never slip in).
+  if (!REPO_RE.test(repo)) {
     throw new Error(`REPO must be exactly owner/name (e.g. aywengo/mercury); got '${repo}'`);
   }
   // The open-issue list is walked with Link-header pagination (bounded at 10 pages = 1000
