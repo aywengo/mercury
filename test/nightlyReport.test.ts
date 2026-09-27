@@ -13,6 +13,14 @@ import { tempDir } from './helpers.ts';
 const REPO = 'aywengo/mercury';
 const ENV = { GH_TOKEN: 'test-token' };
 
+// Fixture deadlines built from LOCAL wall-clock values, never hard-coded UTC instants:
+// collectRunsStopped compares notAfter via the process's LOCAL calendar date, so a fixed
+// '...T04:00:00Z' changes meaning per host timezone (CI runs TZ=UTC). Local 06:00 on the
+// 26th is the §4.3 window end on that night in every timezone; local 06:00 on the 25th is
+// always the WRONG night.
+const NA26 = new Date('2026-09-26T06:00:00').toISOString();
+const NA25 = new Date('2026-09-25T06:00:00').toISOString();
+
 interface Recorded { method: string; path: string; body?: unknown }
 
 function ioWith(opts: {
@@ -171,9 +179,9 @@ test('runs stopped by notAfter: scoped to the report night, reason event require
   const { io } = ioWith({
     mercury: true,
     timedOutRuns: [
-      { id: 'run_a', task: 'nightly-next', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-25T23:59:59.000Z' } },
-      { id: 'run_b', task: 'nightly-e2e', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-26T04:00:00.000Z' } },
-      { id: 'run_c', task: 'nightly-next', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-26T04:00:00.000Z' } },
+      { id: 'run_a', task: 'nightly-next', status: 'TIMED_OUT', constraints: { notAfter: NA25 } },
+      { id: 'run_b', task: 'nightly-e2e', status: 'TIMED_OUT', constraints: { notAfter: NA26 } },
+      { id: 'run_c', task: 'nightly-next', status: 'TIMED_OUT', constraints: { notAfter: NA26 } },
     ],
     notAfterRunIds: ['run_b'], // run_c: right night but max-duration stop; run_a: wrong night
   });
@@ -185,7 +193,7 @@ test('the reason is read from MercuryEvent.payload (the real API shape), not .da
   const { io } = ioWith({
     mercury: true,
     timedOutRuns: [
-      { id: 'run_p', task: 'nightly-e2e', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-26T04:00:00.000Z' } },
+      { id: 'run_p', task: 'nightly-e2e', status: 'TIMED_OUT', constraints: { notAfter: NA26 } },
     ],
     notAfterRunIds: ['run_p'],
   });
@@ -198,7 +206,7 @@ test('the reason is read from MercuryEvent.payload (the real API shape), not .da
     mercury: {
       async get(path) {
         if (path.startsWith('/api/runs?')) {
-          return { body: { runs: [{ id: 'run_d', task: 'x', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-26T04:00:00.000Z' } }] }, status: 200 };
+          return { body: { runs: [{ id: 'run_d', task: 'x', status: 'TIMED_OUT', constraints: { notAfter: NA26 } }] }, status: 200 };
         }
         return { body: { events: [{ type: 'run.timed_out', data: { reason: 'not-after' } }] }, status: 200 };
       },
@@ -222,7 +230,7 @@ test('a run.timed_out event past the first events page is still found (nextCurso
       async get(path) {
         calls.push(path);
         if (path.startsWith('/api/runs?')) {
-          return { body: { runs: [{ id: 'run_long', task: 'nightly-next', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-26T04:00:00.000Z' } }] }, status: 200 };
+          return { body: { runs: [{ id: 'run_long', task: 'nightly-next', status: 'TIMED_OUT', constraints: { notAfter: NA26 } }] }, status: 200 };
         }
         const page = eventsPages[path];
         if (page) return page;
@@ -581,7 +589,7 @@ test('a 2xx Mercury events response with an unparsable payload skips the run, no
     mercury: {
       async get(path) {
         if (path.startsWith('/api/runs?')) {
-          return { body: { runs: [{ id: 'run_bad', task: 'x', status: 'TIMED_OUT', constraints: { notAfter: '2026-09-26T04:00:00.000Z' } }] }, status: 200 };
+          return { body: { runs: [{ id: 'run_bad', task: 'x', status: 'TIMED_OUT', constraints: { notAfter: NA26 } }] }, status: 200 };
         }
         return { body: null, status: 200 }; // invalid events JSON -> null
       },
