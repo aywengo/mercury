@@ -54,7 +54,7 @@ test('a Run with a builtin preset completes end to end with the fake adapter and
     const preset = env.runService.getPreset(run.id);
     assert.ok(preset);
     assert.equal(preset!.id, 'reviewer');
-    assert.equal(preset!.version, '1.0.0');
+    assert.equal(preset!.version, '1.1.0');
     assert.equal(preset!.role, 'Code reviewer');
     assert.equal(preset!.trust, 'builtin');
     assert.match(preset!.contentHash, /^[0-9a-f]{64}$/);
@@ -318,7 +318,7 @@ test('an unknown preset id is a domain 404-shaped validation error; a version mi
         ownerId: 'alice', task: 't', repository: { localPath: repo },
         preset: { id: 'reviewer', version: '9.9.9' },
       }),
-      /is version 1\.0\.0, not the requested 9\.9\.9/,
+      /is version 1\.1\.0, not the requested 9\.9\.9/,
     );
   } finally {
     env.close();
@@ -343,7 +343,7 @@ test('per-run log lines carry the preset dimensions (id, version, trust); no-pre
     const executing = lines.find((l) => l.msg === 'executing run' && l.fields.runId === run.id);
     assert.ok(executing, 'the executing-run line was captured: ' + JSON.stringify(lines.map((l) => l.msg)));
     assert.equal(executing!.fields.presetId, 'reviewer');
-    assert.equal(executing!.fields.presetVersion, '1.0.0');
+    assert.equal(executing!.fields.presetVersion, '1.1.0');
     assert.equal(executing!.fields.presetTrust, 'builtin');
 
     const plain = env.runService.create({ ownerId: 'alice', task: 'no role', repository: { localPath: repo } });
