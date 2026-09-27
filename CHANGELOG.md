@@ -8,6 +8,87 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-27
+
+Minor release. Two headline additions: **dispatcher bots** (the host schedules agent Runs from a
+cron config, with deadlines and single-flight), and the **knowledge system completed with Atlas
+0.1.0** (harvest, replica, curation UI, and a second product on npm). Plus Crew presets, the
+`mercury host` installer/lifecycle suite, the operator goal surface, and the nightly
+self-development loop running on its own bot config.
+
+### Added
+
+- **Dispatcher bots (B0/B1, #728–#738).** A bot is one JSON config at
+  `~/.config/mercury/bots/<alias>.json` listing scheduled tasks: a hand-rolled cron evaluator with
+  fixed-offset timezones (#732, #752), derived idempotency keys so a retry replays to the same Run
+  (#730, #751), config validation that refuses unknown keys with a did-you-mean hint and reserves
+  `triggers`/`brain` for later phases (#733, #756), the scheduler process `mercury host bot run`
+  (#735, #757), manual `dispatch`/`status` commands (#736, #758), per-alias systemd service
+  install/uninstall (#737, #761), and the read-only `workspace-audit` skill for pre-GC audits
+  (#734, #753).
+- **`constraints.notAfter` on a Run (#731, #750).** An absolute deadline that counts queued time:
+  a Run past it is never started, a running Run is stopped at it. Bot templates set it with
+  `notAfterAt: "HH:MM"`, resolved on the fire's local date — the 06:00 nightly window.
+- **The nightly self-development loop (N0–N1, #727–#742).** The machine identity
+  `mercury-nightly` is documented with its credential boundary and the review-required ruleset
+  (#727, #754); nightly labels + the trust rule live in the triage doc (#728, #755). Skills:
+  deterministic ladder selection with origin-trust checks (#738, #762), the e2e skill — run the
+  suite, dedupe by fingerprint, file-or-comment with trust restricted to the nightly identity
+  (#739, #766; #764, #765), the `nightly-next` driver that takes the top rung and exits
+  `finish`/`blocked` (#740, #767), the `nightly-report` digest — one GitHub issue per night under
+  a 60k budget with Markdown sanitization and a single self-healing close rule (#741, #768), and
+  the shipped bot config `deploy/nightly-bot.json.example` + the "Running the nightly bot"
+  pre-first-night checklist in `docs/operations.md` (#742, #774).
+- **Knowledge system finished and Atlas 0.1.0 released (A0–A6, #533–#712).** The Atlas service:
+  notes with sequence-bearing replication, curation, a partial UNIQUE index backing the
+  one-live-note-per-claim rule, a retention sweep, tombstoned deletion (#533–#537, #562–#571,
+  #590). The host side: operator notes + a pusher that runs, the replica, the knowledge pack a
+  Run is actually given (including Hermes via AGENTS.md and Claude Code via the pack),
+  provenance-carrying pulls, repo-scope keys, harvest at finalize, decision-record parsing from
+  `docs/decisions/`, checkout backfill, harness-memory import, and the pack named in the RPC
+  prompt (#534–#548, #553–#567, #695–#698). Release plumbing for `@aywengo/mercury-atlas`:
+  registry guards, systemd unit, backups, a containerized two-host e2e (#699–#702). Channel
+  measurement for the claude adapter (#707, #711, #763).
+- **Crew role presets (Phases 1–3 + Milestone A, #714–#747).** Built-in preset registry, Run
+  resolution and snapshots, preset read API + the Roles dashboard + log/metric dimensions, the §8
+  capability vocabulary enforced at Run creation, ceilings that can only narrow, skill-resolution
+  semantics pinned (explicit `[]` means none, required-only keeps auto-selection), invalid
+  CPU/memory/disk rejected before insert, and presets shipped as guidance (reviewer 1.1.0 uses
+  the code-review severity scale).
+- **The operator goal surface (#679–#681).** `mercuryctl runs goal`, `runs goal-cancel`,
+  `create --goal`: the goal a Run serves is now settable and cancellable from the CLI.
+- **`mercury host` installer and lifecycle (M1–M6, #628–#644).** `install.sh` +
+  `mercury host install` with an installer CI matrix (Debian/Fedora containers, macOS), the
+  `mercury host setup` wizard (probes before it prompts, muted token prompts, safe env charset,
+  answers files that reject unknown keys, hand-set variables preserved on re-run, honest dry-run
+  and root gate), a harness probe with per-adapter minimum versions, `mercury host service` +
+  `mercury host doctor` (dials the LAN address behind a 0.0.0.0 bind), `mercury host
+  status/upgrade/uninstall` + re-run guard with redacted diff, bats suite + checksum + install
+  docs, and `/dev/tty` reading for every prompt (#651–#678).
+- **Fleet knows more about hosts (#508–#510, #613, #615, #618).** API schema negotiation so an
+  old host fails at registration, not at first use; Atlas project health via a reader token;
+  hosts ranked by knowledge freshness without filtering on it; tool observability rendered in
+  `mercuryctl agents` (#601–#603).
+
+### Fixed
+
+- **Skills execute from the Run's stored snapshot, not the live registry (#506).** A registry
+  change between create and execute no longer alters a queued Run; unknown skill names in the
+  snapshot are refused with a named error (#507, #520).
+- **Workspace and git hardening (#509, #621, #703/#705).** Every git call is bounded and can no
+  longer prompt; generated paths are excluded from Run git on every Run; the workspace base
+  resolves to an absolute path; scp-form repository identities collapse dot segments (#558).
+- **Adapters say what they can do (#519, #594, #599).** Capability summaries describe how a
+  backend receives skills and goals; a harness that cannot be observed at tool level says so;
+  `.mercury-context.json` is written by the claude adapter like the other three (#612).
+- **Goals fixed across surfaces (goals 9, 13, 14; #481–#493).** Mid-run objective changes are
+  recorded instead of dropped, the executing harness is named, "never attempted" is separable
+  from "stopped short", the run list distinguishes both `unmet` kinds, and goal fields the agent
+  cannot act on are refused at create.
+- **Atlas fixes (#552, #559, #560, #564).** An admin retry no longer replays its own idempotency
+  key; note provenance is carried into the replica; a retired note no longer swallows every later
+  copy of its claim.
+
 ## [0.1.1] - 2026-09-11
 
 Patch release. **Hermes could not execute a single Run in any published version**; this is the
