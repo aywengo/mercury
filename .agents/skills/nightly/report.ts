@@ -15,7 +15,7 @@
  * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, blocked, runsStopped, flakes }`.
  * No dependencies; all I/O injectable. Writes: the digest issue itself, the close of the
  * previous open report, and the closure of same-night duplicates created by a racing retry
- * (the smallest issue number always survives).
+ * (the smallest OPEN issue number survives; a closed reuse candidate never wins).
  */
 
 import { basename } from 'node:path';
@@ -329,6 +329,9 @@ export async function runReport(
   const title = `nightly report — ${opts.night}`;
 
   let issue: number | undefined;
+  // True when `issue` was REUSED and is open (a fresh create is open too). A closed reuse
+  // candidate must never win the reconciliation below.
+  let reusedOpen = false;
   // Idempotency first: look for an existing same-night digest in ANY state (an operator or an
   // interrupted cleanup can close it before a retry; the retry must reuse, not duplicate).
   for (let page = 1; page <= SEARCH_CAP && issue === undefined; page++) {
@@ -341,6 +344,7 @@ export async function runReport(
       if (cand.number === undefined || cand.pull_request !== undefined) continue;
       if (cand.title === title) {
         issue = cand.number;
+        reusedOpen = cand.state !== 'closed';
         break;
       }
     }
@@ -383,6 +387,7 @@ export async function runReport(
       throw new Error(`digest issue create failed: POST /repos/${opts.repo}/issues -> ${created.status}`);
     }
     issue = (created.body as { number?: number } | null)?.number;
+    reusedOpen = true; // a fresh create is open
     if (issue === undefined) {
       // A 2xx create whose body we could not parse: closing yesterday's now could leave ZERO open
       // reports (the new one is unidentifiable). Fail hard instead; the retry re-runs the night.
@@ -392,11 +397,13 @@ export async function runReport(
 
   // Post-create reconciliation for the create/create race: two invocations can both observe no
   // same-night report before either POST completes. Re-list the open reports and close every
-  // same-night duplicate except the SMALLEST issue number - the rule is deterministic, so both
-  // invocations converge on the same survivor no matter the order. (This run's JSON may report
+  // same-night duplicate except the SMALLEST OPEN issue number - the rule is deterministic, so
+  // both invocations converge on the same survivor no matter the order. (This run's JSON may report
   // an issue that a concurrent reconciliation then closes; the next night's report closes any
   // residue as an older night.)
-  const sameNight: number[] = [issue!];
+  // Only OPEN digests participate: a reuse candidate the operator closed must never win the
+  // reconciliation, or closing the open duplicates would leave the night with no open report.
+  const sameNight: number[] = reusedOpen ? [issue!] : [];
   for (let page = 1; page <= SEARCH_CAP; page++) {
     const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
     const res = await io.get(path);
@@ -409,19 +416,23 @@ export async function runReport(
     }
     if (prev.length < 100) break;
   }
-  // The winner of the reconciliation is the SMALLEST number, and ONLY the winner's invocation
-  // closes the others. A losing invocation closes NOTHING: two independent closers could
-  // otherwise each kill the other's survivor and leave the night with no open digest. The loser
-  // just reports the survivor; its own issue is closed by the winner (or by tomorrow's
-  // prevNight close if the winner died first).
-  const survivor = Math.min(...sameNight);
-  if (survivor === issue) {
-    for (const n of sameNight) {
-      if (n === survivor) continue;
-      await io.patch(`/repos/${opts.repo}/issues/${n}`, { state: 'closed' });
+  // The winner of the reconciliation is the SMALLEST OPEN number, and ONLY the winner's
+  // invocation closes the others. A losing invocation closes NOTHING: two independent closers
+  // could otherwise each kill the other's survivor and leave the night with no open digest. The
+  // loser just reports the survivor; its own issue is closed by the winner (or by tomorrow's
+  // prevNight close if the winner died first). A closed reuse candidate stays closed - the
+  // operator's closure stands - and an open duplicate is healed by ITS owner or by tomorrow's
+  // prevNight close.
+  if (sameNight.length > 0) {
+    const survivor = Math.min(...sameNight);
+    if (survivor === issue) {
+      for (const n of sameNight) {
+        if (n === survivor) continue;
+        await io.patch(`/repos/${opts.repo}/issues/${n}`, { state: 'closed' });
+      }
+    } else {
+      issue = survivor;
     }
-  } else {
-    issue = survivor;
   }
 
   let closedPrevious: number | undefined;

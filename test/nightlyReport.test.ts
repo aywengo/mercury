@@ -751,6 +751,35 @@ test('user-controlled titles are Markdown-escaped in the digest body', async () 
   assert.ok(body.includes('x\\]\\(https://evil.example\\)'), 'the title is escaped');
 });
 
+test('a CLOSED reuse candidate never wins the reconciliation; the open duplicate survives', async () => {
+  const { io: base } = ioWith({
+    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
+  });
+  const patched: number[] = [];
+  let openGets = 0;
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('state=all')) {
+        return { body: [{ number: 690, title: 'nightly report — 2026-09-26', state: 'closed' }], status: 200 };
+      }
+      if (path.includes('state=open') && !path.includes('nightly%3Ablocked')) {
+        openGets += 1;
+        if (openGets >= 2) {
+          // Reconciliation listing: an OPEN same-night duplicate exists next to the closed reuse.
+          return { body: [{ number: 701, title: 'nightly report — 2026-09-26' }], status: 200 };
+        }
+        return base.get(path);
+      }
+      return base.get(path);
+    },
+    async post() { throw new Error('no create expected: the closed same-night digest is reused'); },
+    async patch(path) { patched.push(Number(/issues\/(\d+)$/.exec(path)![1])); return { body: {}, status: 200 }; },
+  };
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.issue, 701, 'the OPEN duplicate is the survivor, not the closed reuse candidate');
+  assert.deepEqual(patched, [500], 'only yesterday is closed here: the closed candidate stays closed and the open winner heals the rest');
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);

@@ -129,7 +129,7 @@ issues. Sections:
 
 The report is read-only except for the digest issue itself, the close of
 yesterday's open report, and the closure of same-night duplicates from a
-racing retry (the smallest issue number survives).
+racing retry (the smallest OPEN issue number survives).
 
 ## Tests
 
