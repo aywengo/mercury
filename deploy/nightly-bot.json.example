@@ -1,0 +1,68 @@
+{
+  "description": "Nightly self-development bot (docs/nightly-self-development.md section 4.1; issue #742). Install: mkdir -p ${XDG_CONFIG_HOME:-~/.config}/mercury/bots && cp deploy/nightly-bot.json.example ${XDG_CONFIG_HOME:-~/.config}/mercury/bots/nightly.json, then 'mercury host bot validate --alias nightly'. All tasks use tz 'local': the host must run Europe/Warsaw so 'local' is Poznan time (parseTz has no IANA names, and a fixed offset like '+01:00' would miss the EU DST switch inside the 00:00-06:00 window). notAfterAt '06:00' ends every Run by 06:00 local on the fire date.",
+  "api": {
+    "url": "http://127.0.0.1:4620",
+    "timeoutMs": 30000
+  },
+  "schedule": {
+    "tasks": [
+      {
+        "name": "nightly-e2e",
+        "cron": "5 0 * * *",
+        "tz": "local",
+        "singleFlight": true,
+        "onMiss": "skip",
+        "template": {
+          "task": "nightly-e2e {{fire.date}}: run the E2E suite per .agents/skills/nightly/SKILL.md (e2e.ts); file or update defect issues; never ask; stay inside the 06:00 window.",
+          "notAfterAt": "06:00",
+          "constraints": {
+            "maxDurationMs": 14400000,
+            "maxRetries": 0
+          },
+          "skills": [
+            "issue-fix-loop",
+            "testing"
+          ]
+        }
+      },
+      {
+        "name": "nightly-next",
+        "cron": "*/20 0-4 * * *",
+        "tz": "local",
+        "singleFlight": true,
+        "onMiss": "skip",
+        "template": {
+          "task": "nightly-next {{fire.date}} {{fire.time}}: take the top rung of the nightly ladder per .agents/skills/nightly/SKILL.md (next.ts); finish or mark blocked; never ask; stay inside the 06:00 window.",
+          "notAfterAt": "06:00",
+          "constraints": {
+            "maxDurationMs": 4800000,
+            "maxRetries": 0
+          },
+          "skills": [
+            "issue-fix-loop",
+            "testing"
+          ]
+        }
+      },
+      {
+        "name": "nightly-report",
+        "cron": "40 5 * * *",
+        "tz": "local",
+        "singleFlight": true,
+        "onMiss": "skip",
+        "template": {
+          "task": "nightly-report {{fire.date}}: file the morning digest per .agents/skills/nightly/SKILL.md (report.ts); never ask; stay inside the 06:00 window.",
+          "notAfterAt": "06:00",
+          "constraints": {
+            "maxDurationMs": 900000,
+            "maxRetries": 0
+          },
+          "skills": [
+            "issue-fix-loop",
+            "testing"
+          ]
+        }
+      }
+    ]
+  }
+}
