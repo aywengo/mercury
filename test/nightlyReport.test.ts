@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { runReport, collectBlocked, collectRunsStopped, collectFlakes, blockingQuestion, type ReportIo } from '../.agents/skills/nightly/report.ts';
+import { runReport, collectBlocked, collectRunsStopped, collectFlakes, blockingQuestion, defaultNight, type ReportIo } from '../.agents/skills/nightly/report.ts';
 import { localDateString } from '../.agents/skills/nightly/e2e.ts';
 import { tempDir } from './helpers.ts';
 
@@ -893,6 +893,20 @@ test('a malformed 2xx comment-page body is an unreadable question, not a crash',
   };
   const q = await blockingQuestion(io, REPO, 502);
   assert.equal(q, 'real question', 'malformed entries are skipped, valid ones still scanned');
+});
+
+test('the CLI default night is the COMPLETED prior night (05:40 fire vs 06:00 cutoff)', () => {
+  // The scheduled fire is 05:40 local, BEFORE the 06:00 notAfter end: defaulting to "today"
+  // would query a window that is still open (post-report activity swallowed, today's 06:00
+  // stops missing from every later report). The default must be yesterday.
+  const now = new Date('2026-09-27T05:40:00'); // LOCAL 05:40
+  assert.equal(defaultNight(now), '2026-09-26');
+  // A fire just after local midnight (00:05) also reports the completed night: 00:05 on the
+  // 1st reports the night that ended at 06:00 of the previous month-day.
+  const justAfterMidnight = new Date('2026-10-01T00:05:00');
+  assert.equal(defaultNight(justAfterMidnight), '2026-09-30');
+  // Equivalence with the documented expression, pinned against the host clock:
+  assert.equal(defaultNight(), defaultNight(new Date()));
 });
 
 test('repo validation refuses a non owner/name value', async () => {

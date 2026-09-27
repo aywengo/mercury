@@ -316,6 +316,14 @@ function prevDay(night: string): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** The night the report covers when --night is absent: the COMPLETED prior local night. The bot
+ * fires this CLI at 05:40, before that day's 06:00 notAfter cutoff, so "today" would swallow
+ * post-report activity and omit today's 06:00 stops from every later report; the finished
+ * night's deadline stops have all happened by fire time. */
+export function defaultNight(now: Date = new Date()): string {
+  return prevDay(localDateString(now));
+}
+
 /** Assemble the digest (all reads), file the issue, close yesterday's. */
 export async function runReport(
   io: ReportIo,
@@ -535,9 +543,12 @@ if (isMain) {
   };
   const repo = flag('--repo') ?? process.env.REPO ?? '';
   // Local calendar date, not UTC: a nightly scheduled in local tz that fires at 00:05 belongs
-  // to that local day even when UTC has rolled over (same rule as e2e.ts). The default is
-  // computed lazily, only when --night is absent.
-  const night = flag('--night') ?? localDateString();
+  // to that local day even when UTC has rolled over (same rule as e2e.ts). The DEFAULT is the
+  // COMPLETED prior night (lazy, only when --night is absent): the bot fires the report at
+  // 05:40, BEFORE that day's 06:00 notAfter cutoff, so "today" would swallow post-report
+  // activity and omit today's 06:00 stops from every later report. Reporting the finished
+  // night means every deadline stop it lists has already happened.
+  const night = flag('--night') ?? prevDay(localDateString());
   const dryRun = args.includes('--dry-run');
   runReport(
     {
