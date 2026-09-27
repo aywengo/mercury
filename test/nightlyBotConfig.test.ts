@@ -57,9 +57,16 @@ test('the example config parses and every task passes the real cron/tz parsers',
     const constraints = template.constraints as Record<string, number>;
     assert.ok(constraints.maxDurationMs > 0, 'every task sets maxDurationMs explicitly');
     assert.equal(constraints.maxRetries, 0, 'nightly runs never retry into the window');
-    // nightly SKILL.md 1.1.0: nightly task templates list issue-fix-loop and testing as required
-    // skills, so the procedure never depends on keyword matching against issue text.
-    assert.deepEqual(template.skills, ['issue-fix-loop', 'testing']);
+    // nightly SKILL.md 1.1.1: skills are listed explicitly per task, so the procedure never
+    // depends on keyword matching against issue text - and only nightly-next, the task that
+    // fixes, gets issue-fix-loop. e2e files or comments only; the report only reports
+    // (explicit [] = no skills, Crew #724 decision 1A).
+    const expectedSkills: Record<string, string[]> = {
+      'nightly-e2e': ['testing'],
+      'nightly-next': ['issue-fix-loop', 'testing'],
+      'nightly-report': [],
+    };
+    assert.deepEqual(template.skills, expectedSkills[t.name as string]);
   }
 });
 
@@ -101,6 +108,9 @@ test('the report fires 06:05 (§4.3 window just ended) and its deadline is 07:00
   // 06:00 deadline would already be in the past at 06:05 and the Run would never start.
   const report = taskOf('nightly-report');
   assert.equal(report.cron, '5 6 * * *');
+  // The task text must not tell the agent to stay inside the 06:00 window: it runs after it.
+  assert.doesNotMatch(report.template.task as string, /inside the 06:00 window/);
+  assert.match(report.template.task as string, /night that just ended/);
   report.tz = 'local';
   const resolved = resolveTemplate(report, { date: '2026-09-27', time: '06:05', iso: 'w2026-09-27T06:05' });
   const notAfter = new Date((resolved.constraints as { notAfter: string }).notAfter);
