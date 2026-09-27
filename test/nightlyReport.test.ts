@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { runReport, collectBlocked, collectRunsStopped, collectFlakes, blockingQuestion, defaultNight, collectIssuesCommented, nightWindow, NIGHT_END, type ReportIo } from '../.agents/skills/nightly/report.ts';
+import { runReport, collectBlocked, collectRunsStopped, collectFlakes, blockingQuestion, questionFromBody, defaultNight, collectIssuesCommented, nightWindow, NIGHT_END, type ReportIo } from '../.agents/skills/nightly/report.ts';
 import { localDateString } from '../.agents/skills/nightly/e2e.ts';
 import { tempDir } from './helpers.ts';
 
@@ -25,7 +25,7 @@ interface Recorded { method: string; path: string; body?: unknown }
 
 function ioWith(opts: {
   searchItems?: Record<string, unknown[]>;
-  issues?: { number: number; title: string; labels?: { name: string }[]; pull_request?: unknown }[];
+  issues?: { number: number; title: string; body?: string; labels?: { name: string }[]; pull_request?: unknown }[];
   comments?: Record<number, { body: string; created_at?: string }[]>;
   timedOutRuns?: { id: string; task: string; status: string; constraints?: { notAfter?: string } }[];
   notAfterRunIds?: string[];
@@ -1088,4 +1088,34 @@ test('the §4.3 window keeps 06:00-stopped runs observable: notAfter on the nigh
   const stoppedAtDeadline = new Date('2026-09-26T06:00:00'); // local wall clock, host UTC in CI
   assert.ok(stoppedAtDeadline.getTime() >= win.startMs && stoppedAtDeadline.getTime() <= win.endMs,
     'the 06:00 stop instant is covered by the window range (endMs inclusive of the boundary)');
+});
+
+
+test('blocked question: the issue BODY marker wins with zero comment requests (#770)', async () => {
+  const { io, calls } = ioWith({
+    issues: [{ number: 502, title: 'nightly-filed blocked', body: 'defect body\n\n<!-- nightly:blocking-question\nWhich retry policy?\n-->', labels: [{ name: 'nightly:blocked' }] }],
+  });
+  const blocked = await collectBlocked(io, REPO);
+  assert.equal(blocked.length, 1);
+  assert.equal(blocked[0]!.question, 'Which retry policy?');
+  // The listing already carried the body: NO comment endpoint was hit.
+  assert.equal(calls.filter((c) => c.path.includes('/comments')).length, 0, 'no comment reads for a body-marker issue');
+});
+
+test('blocked question: a hand-labeled issue without a body marker falls back to comment pages', async () => {
+  const { io, calls } = ioWith({
+    issues: [{ number: 503, title: 'hand-labeled', body: 'plain user body - no marker', labels: [{ name: 'nightly:blocked' }] }],
+    comments: { 503: [{ body: 'unrelated' }, { body: '**Blocking question:** the comment question' }] },
+  });
+  const blocked = await collectBlocked(io, REPO);
+  assert.equal(blocked[0]!.question, 'the comment question');
+  assert.ok(calls.filter((c) => c.path.includes('/comments')).length > 0, 'comment scan ran');
+});
+
+test('questionFromBody: verbatim reason, whitespace-trimmed; empty or absent marker is undefined', () => {
+  assert.equal(questionFromBody('body\n\n<!-- nightly:blocking-question\nWhy did rung 2 skip the preset?\n-->'), 'Why did rung 2 skip the preset?');
+  assert.equal(questionFromBody('no marker'), undefined);
+  assert.equal(questionFromBody('body\n\n<!-- nightly:blocking-question\n   \n-->'), undefined, 'empty reason is no question');
+  // A stale marker followed by MORE body text is not the trailing marker: no false positive.
+  assert.equal(questionFromBody('<!-- nightly:blocking-question\nx\n-->\n\nreal body text'), undefined);
 });
