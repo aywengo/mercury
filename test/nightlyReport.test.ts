@@ -395,7 +395,7 @@ test('a 2xx create without a parseable number fails hard BEFORE closing yesterda
   };
   await assert.rejects(
     () => runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false }),
-    /no issue number/,
+    /no usable issue number/,
   );
   assert.equal(order.filter((o) => o === 'close-prev').length, 0, 'nothing is closed when the new digest is unidentifiable');
 });
@@ -1115,6 +1115,29 @@ test('every section is budget-bound: a huge blocked list cannot blow the body li
   const body = String((created.body as { body: string }).body);
   assert.ok(body.length <= 65_536, `body must fit the GitHub limit (got ${body.length})`);
   assert.match(body, /omitted \(issue-body budget\)/);
+});
+
+test('a create returning 0/null/string is unidentifiable: hard error, nothing closed', async () => {
+  for (const bad of [null, 0, '901', -5]) {
+    const { io: base } = ioWith({
+      issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
+    });
+    const patched: number[] = [];
+    const io: ReportIo = {
+      ...base,
+      async get(path) {
+        if (path.includes('state=all')) return { body: [], status: 200 };
+        return base.get(path);
+      },
+      async post() { return { body: { number: bad }, status: 201 }; },
+      async patch(path) { patched.push(Number(/issues\/(\d+)$/.exec(path)![1])); return { body: {}, status: 200 }; },
+    };
+    await assert.rejects(
+      () => runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false }),
+      /no usable issue number/,
+    );
+    assert.deepEqual(patched, [], `nothing is closed for an unidentifiable create (case ${JSON.stringify(bad)})`);
+  }
 });
 
 test('repo validation refuses a non owner/name value', async () => {

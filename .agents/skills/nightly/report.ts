@@ -313,10 +313,14 @@ function digestBody(night: string, data: ReportData, note?: string): string {
     if (omitted > 0) out.push(`_… ${omitted} more item${omitted === 1 ? '' : 's'} omitted (issue-body budget)_`);
     return out.join('\n');
   };
-  const section = (heading: string, body: string): void => {
-    // If the heading itself does not fit, the budget is exhausted: emit nothing more.
+  // Each section RESERVES its heading first (charging it to the budget), then renders its
+  // body line-by-line through the same charge. An overflowing body is truncated with the
+  // omitted marker - it never silently discards already-rendered data, and a section that
+  // starts always keeps at least its heading and its empty-state/omitted marker.
+  const section = (heading: string, render: () => string): void => {
     if (!fits(heading)) return;
-    lines.push(heading, body, '');
+    lines.push(heading);
+    lines.push(render(), '');
   };
   // The hand-mapped sections go through the SAME budget: one line at a time, over-budget
   // lines dropped with the same omitted marker, so no section can silently blow the limit.
@@ -331,14 +335,14 @@ function digestBody(night: string, data: ReportData, note?: string): string {
     if (omitted > 0) out.push(`_… ${omitted} more item${omitted === 1 ? '' : 's'} omitted (issue-body budget)_`);
     return out.join('\n');
   };
-  section('## PRs opened', list(data.prs, '_none_'));
-  section('## Issues filed', list(data.issuesFiled, '_none_'));
-  section('## Issues commented', list(data.issuesCommented, '_none_'));
-  section('## Blocked (nightly:blocked, waiting on a human)',
+  section('## PRs opened', () => list(data.prs, '_none_'));
+  section('## Issues filed', () => list(data.issuesFiled, '_none_'));
+  section('## Issues commented', () => list(data.issuesCommented, '_none_'));
+  section('## Blocked (nightly:blocked, waiting on a human)', () =>
     bounded(data.blocked.map((b) => `- #${b.number} ${escMd(b.title)}${b.question ? ` — question: ${escMd(b.question)}` : ''}`), '_none_'));
-  section('## Runs stopped by notAfter (the 06:00 window end)',
+  section('## Runs stopped by notAfter (the 06:00 window end)', () =>
     bounded(data.runsStopped.map((r) => `- ${codeSpan(r.runId ?? '')} — ${codeSpan(r.task ?? '')}`), '_none_'));
-  section('## Flakes (nightly-e2e clock)',
+  section('## Flakes (nightly-e2e clock)', () =>
     bounded(data.flakes.map((f) => `- ${codeSpan(f.fingerprint, 16)} ${escMd(f.test)} — nights: ${f.nights.join(', ')}`), '_none_'));
   lines.push('---', "_Closed by tomorrow night's report._");
   return lines.join('\n');
@@ -467,12 +471,14 @@ export async function runReport(
     if (created.status < 200 || created.status >= 300) {
       throw new Error(`digest issue create failed: POST /repos/${opts.repo}/issues -> ${created.status}`);
     }
-    issue = (created.body as { number?: number } | null)?.number;
-    if (issue === undefined) {
-      // A 2xx create whose body we could not parse: closing yesterday's now could leave ZERO open
-      // reports (the new one is unidentifiable). Fail hard instead; the retry re-runs the night.
-      throw new Error(`digest issue create returned no issue number (POST status ${created.status}); yesterday's report stays open`);
+    const parsed = (created.body as { number?: unknown } | null)?.number;
+    // Only a positive integer is an identifiable digest: null/0/string/negative all mean we
+    // cannot know which issue to report (or protect from closing) - same invariant as a null
+    // body. Fail hard instead of closing yesterday's; the retry re-runs the night.
+    if (typeof parsed !== 'number' || !Number.isInteger(parsed) || parsed <= 0) {
+      throw new Error(`digest issue create returned no usable issue number (POST status ${created.status}, got ${JSON.stringify(parsed) ?? 'null'}); yesterday's report stays open`);
     }
+    issue = parsed;
   }
 
   // Post-create reconciliation for the create/create race: two invocations can both observe no
