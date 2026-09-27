@@ -400,8 +400,9 @@ the host, the identity, or the ruleset.
    no warnings.
 6. **Dry-run each task.**
    `mercury host bot dispatch --alias nightly --task <t> --dry-run` for each of
-   the three tasks shows `botTask` set and `notAfter` at today's 06:00 local
-   time.
+   the three tasks shows `botTask` set and `notAfter` at the task's deadline:
+   today's 06:00 local for `nightly-e2e`/`nightly-next`, 07:00 for
+   `nightly-report` (it fires 06:05, after the window it digests — #771).
 7. **Docker is available to Runs** — the E2E task uses testcontainers, so the
    sandbox must expose a working container runtime (see *Sandboxed execution*).
 8. **Enable the service.** `mercury host bot service install --alias nightly`,

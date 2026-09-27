@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { runReport, collectBlocked, collectRunsStopped, collectFlakes, blockingQuestion, defaultNight, collectIssuesCommented, type ReportIo } from '../.agents/skills/nightly/report.ts';
+import { runReport, collectBlocked, collectRunsStopped, collectFlakes, blockingQuestion, defaultNight, collectIssuesCommented, nightWindow, NIGHT_END, type ReportIo } from '../.agents/skills/nightly/report.ts';
 import { localDateString } from '../.agents/skills/nightly/e2e.ts';
 import { tempDir } from './helpers.ts';
 
@@ -94,11 +94,16 @@ test('the digest files one issue with all sections and closes yesterday\'s repor
     },
   });
   // The commented section reads the repo-level since listing (one call), not per-issue pages.
+  // The comment timestamp is INSIDE the night window of the HOST zone (derived via nightWindow,
+  // not hard-coded UTC: a fixed instant falls outside the local [00:00,06:00) window on
+  // non-UTC hosts).
+  const winForFixture = nightWindow('2026-09-26');
+  const inWindow = new Date(winForFixture.startMs + 30 * 60_000).toISOString();
   const io2: ReportIo = {
     ...io,
     async get(path) {
       if (path.includes('/issues/comments?since=')) {
-        return { body: [{ body: 'a nightly comment', created_at: '2026-09-26T12:00:00Z', issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/702' }], status: 200 };
+        return { body: [{ body: 'a nightly comment', created_at: inWindow, issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/702' }], status: 200 };
       }
       return io.get(path);
     },
@@ -127,18 +132,20 @@ test('the digest files one issue with all sections and closes yesterday\'s repor
   assert.deepEqual((created.body as { labels: string[] }).labels, ['nightly:report']);
 });
 
-test('searches cover the LOCAL night as a UTC instant window (not the UTC day)', async () => {
+test('searches cover the §4.3 night window [00:00, 06:00) local as UTC instants (not the UTC day)', async () => {
   const { io, calls } = ioWith({});
   await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
   const searches = calls.filter((c) => c.method === 'GET' && c.path.startsWith('/search/issues?')).map((c) => decodeURIComponent(c.path));
   assert.equal(searches.length, 3);
-  // Expected endpoints derived the same way the implementation derives them: local midnight of
-  // the night and of the next day, as ISO instants with a +00:00 offset. The window must be an
-  // instant range (a UTC-day qualifier would miss the hours between local and UTC midnight).
-  const toIso = (day: string): string => new Date(`${day}T00:00:00`).toISOString().replace(/\.\d{3}Z$/, '+00:00');
-  // The upper bound is one second BEFORE the next local midnight (inclusive ranges): the
-  // boundary instant itself belongs to tomorrow's window only.
-  const win = `${toIso('2026-09-26')}..${new Date(new Date('2026-09-27T00:00:00').getTime() - 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00')}`;
+  // Expected endpoints derived the same way the implementation derives them: local midnight and
+  // local 06:00 of the night, as ISO instants with a +00:00 offset. The window must be an
+  // instant range (a UTC-day qualifier would miss the hours between local and UTC midnight) -
+  // and it must END at 06:00 local (§4.3), not at the next midnight, so tonight's ladder work
+  // is reported this morning and 06:00 deadline stops are observable.
+  const toIso = (wall: string): string => new Date(wall).toISOString().replace(/\.\d{3}Z$/, '+00:00');
+  // The upper bound is one second BEFORE 06:00 local (inclusive ranges): the boundary instant
+  // itself belongs to no nightly activity window.
+  const win = `${toIso('2026-09-26T00:00:00')}..${new Date(new Date('2026-09-26T06:00:00').getTime() - 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00')}`;
   for (const q of searches) {
     // commented:<range> is unsupported by GitHub search (verified live); the commented section
     // candidates come from the supported updated:<range> search instead.
@@ -1003,9 +1010,9 @@ test('commented candidates paginate: the repo-level since listing finds window c
         // One comment INSIDE the window on 703, one before it (filtered by created_at),
         // one on a non-candidate issue (dropped by the intersection).
         return { body: [
-          { body: 'in window', created_at: '2026-09-26T12:00:00Z', issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/703' },
-          { body: 'too old', created_at: '2026-09-25T23:00:00Z', issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/703' },
-          { body: 'other issue', created_at: '2026-09-26T13:00:00Z', issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/999' },
+          { body: 'in window', created_at: '2026-09-26T02:30:00Z', issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/703' },
+          { body: 'too old', created_at: '2026-09-26T01:15:00Z', issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/703' },
+          { body: 'other issue', created_at: '2026-09-26T04:45:00Z', issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/999' },
         ], status: 200 };
       }
       return base.get(path);
@@ -1040,4 +1047,45 @@ test('flake state with newlines/tampered nights cannot inject digest content', a
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);
+});
+
+test('defaultNight: at/after 06:00 local the window that just ended is TODAY; before it, yesterday', () => {
+  const at = (wall: string): Date => new Date(wall);
+  // Fire at 06:05 local (the bot config cron): today's window [00:00, 06:00) just ended.
+  assert.equal(defaultNight(at('2026-09-27T06:05:00')), '2026-09-27');
+  // Exactly at the boundary (06:00:00) the window is complete: today.
+  assert.equal(defaultNight(at('2026-09-27T06:00:00')), '2026-09-27');
+  // One minute before the boundary: the window has not ended; the completed window is yesterday's.
+  assert.equal(defaultNight(at('2026-09-27T05:59:00')), '2026-09-26');
+  // Mid-window fire (manual rerun at 03:00): still yesterday's completed window.
+  assert.equal(defaultNight(at('2026-09-27T03:00:00')), '2026-09-26');
+});
+
+test('nightWindow: [00:00, 06:00) local instants with the boundary second excluded', () => {
+  const win = nightWindow('2026-09-26');
+  // Expected instants derived through the host zone exactly like the implementation (a hard
+  // UTC wall would only hold on a UTC host; the contract is the LOCAL wall clock). The start
+  // must be local midnight of the night and the end local 06:00 (one second subtracted).
+  const localIso = (wall: string): string => new Date(wall).toISOString().replace(/\.\d{3}Z$/, '+00:00');
+  assert.equal(win.startIso, localIso('2026-09-26T00:00:00'));
+  // The search upper bound: one second BEFORE local 06:00 (GitHub ranges are inclusive).
+  assert.equal(win.endIso, new Date(new Date('2026-09-26T06:00:00').getTime() - 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00'));
+  assert.equal(win.endMs - win.startMs, 6 * 3_600_000);
+  assert.equal(NIGHT_END, '06:00');
+  // The window is 6 LOCAL hours even across the DST switch nights (the local wall arithmetic
+  // handles the zone; these are the §4.3 windows the bot config's notAfter enforces).
+  const spring = nightWindow('2026-03-29');
+  const autumn = nightWindow('2026-10-25');
+  assert.ok(spring.endMs > spring.startMs);
+  assert.ok(autumn.endMs > autumn.startMs);
+});
+
+test('the §4.3 window keeps 06:00-stopped runs observable: notAfter on the night local date matches', () => {
+  // collectRunsStopped filters candidates by localDateString(notAfter) === night. With the
+  // report firing at 06:05 covering the same local date, a run stopped AT 06:00:00 local on
+  // that date is inside the report's coverage - the exact gap the 05:40 fire had.
+  const win = nightWindow('2026-09-26');
+  const stoppedAtDeadline = new Date('2026-09-26T06:00:00'); // local wall clock, host UTC in CI
+  assert.ok(stoppedAtDeadline.getTime() >= win.startMs && stoppedAtDeadline.getTime() <= win.endMs,
+    'the 06:00 stop instant is covered by the window range (endMs inclusive of the boundary)');
 });
