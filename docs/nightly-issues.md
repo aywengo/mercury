@@ -441,10 +441,11 @@ without entering NEEDS_INPUT; `rung: none` → the Run ends without changes.
 
 **Labels:** `enhancement`, `priority: medium`
 **Blocked by:** —
-
-One digest per night: PRs opened, issues filed or commented, blocked items with their questions, Runs
-stopped by `notAfter`, flakes. Delivered as a single GitHub issue per night (label `nightly:report`),
-closed by the next night's report.
+**Done 2026-09-27** (PR #768, squash `de49e83`). One digest per night: PRs opened, issues filed or
+commented, blocked items with their questions, Runs stopped by `notAfter`, flakes. Delivered as a
+single GitHub issue per night (label `nightly:report`), closed by the next night's report. Write
+scope: the digest itself + close of every open `nightly report — D` with D < night (self-healing
+failed closes; never erases a newer report). Follow-ups: #769, #770, #771, #772.
 
 ---
 
