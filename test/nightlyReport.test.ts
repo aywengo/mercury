@@ -909,6 +909,58 @@ test('the CLI default night is the COMPLETED prior night (05:40 fire vs 06:00 cu
   assert.equal(defaultNight(), defaultNight(new Date()));
 });
 
+test('the survivor is revalidated before and during duplicate cleanup', async () => {
+  // Winner invocation: our create returned 700 (smallest); open duplicates 701 and 702.
+  // Survivor GET #1 says open -> close 702 first (descending does not matter; we keep the
+  // listed order but assert the abort). Survivor GET #2 says closed -> the loop must STOP:
+  // 701 stays open (healed tomorrow) and the night keeps its open survivor semantics.
+  const { io: base } = ioWith({
+    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
+  });
+  const patched: number[] = [];
+  let survivorChecks = 0;
+  const io: ReportIo = {
+    async get(path) {
+      if (/\/issues\/700$/.test(path)) {
+        survivorChecks += 1;
+        // Check #1 (before cleanup): open. Check #2 (between closes): CLOSED - abort.
+        return { body: { state: survivorChecks >= 2 ? 'closed' : 'open' }, status: 200 };
+      }
+      if (path.includes('state=all')) return { body: [], status: 200 };
+      if (path.includes('state=open') && !path.includes('nightly%3Ablocked')) {
+        // closeables listing: prevNight only.
+        return base.get(path);
+      }
+      return base.get(path);
+    },
+    async post() { return { body: { number: 700 }, status: 201 }; },
+    async patch(path) { patched.push(Number(/issues\/(\d+)$/.exec(path)![1])); return { body: {}, status: 200 }; },
+  };
+  // Feed the reconciliation listing via a dedicated override layer.
+  let reconAsked = false;
+  const io2: ReportIo = {
+    ...io,
+    async get(path) {
+      if (path.includes('state=open') && !path.includes('nightly%3Ablocked') && reconAsked) {
+        return { body: [{ number: 700, title: 'nightly report — 2026-09-26' }, { number: 701, title: 'nightly report — 2026-09-26' }, { number: 702, title: 'nightly report — 2026-09-26' }], status: 200 };
+      }
+      if (path.includes('state=open') && !path.includes('nightly%3Ablocked')) {
+        reconAsked = true;
+        // First open GET is the closeables scan: prevNight fixture.
+        return base.get(path);
+      }
+      return io.get(path);
+    },
+  };
+  const out = await runReport(io2, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.issue, 700);
+  assert.ok(survivorChecks >= 2, 'the survivor was revalidated');
+  // The second revalidation (before 701's PATCH) observed the survivor CLOSED: the cleanup
+  // aborts with NO duplicate closed. 701/702 stay open and are healed by tomorrow's prevNight
+  // close - the night never loses its digest to a stale winner.
+  assert.deepEqual(patched, [500], 'only yesterday is closed; the cleanup aborted before closing any duplicate');
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);

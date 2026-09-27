@@ -459,9 +459,26 @@ export async function runReport(
   // prevNight close).
   if (sameNight.length > 0) {
     const survivor = Math.min(...sameNight);
-    if (oursOpen && survivor === issue) {
+    // Revalidate the survivor before the cleanup: the open listing is not a lock, and an
+    // operator can close the winner between the listing and these PATCHes - closing the
+    // duplicates then would leave the night with NO open digest. A fresh GET of the survivor
+    // must confirm it open before (and between) the closes; anything else (closed, non-2xx,
+    // unparsable) ABORTS the cleanup, leaving open duplicates that tomorrow's prevNight close
+    // heals - the safe direction. Residual race: an operator closing the survivor exactly
+    // between a revalidation and the next PATCH cannot be excluded with the REST API (no
+    // conditional PATCH on issues); the window is one round-trip and any residue still heals
+    // via tomorrow's prevNight close, which matches these titles.
+    const survivorOpen = async (): Promise<boolean> => {
+      const check = await io.get(`/repos/${opts.repo}/issues/${survivor}`);
+      if (check.status < 200 || check.status >= 300) return false; // unreadable: do not close anything
+      const c = check.body as { state?: string; pull_request?: unknown } | null;
+      if (c === null || typeof c !== 'object' || c.pull_request !== undefined) return false;
+      return c.state === 'open';
+    };
+    if (oursOpen && survivor === issue && await survivorOpen()) {
       for (const n of sameNight) {
         if (n === survivor) continue;
+        if (!(await survivorOpen())) break; // the winner vanished mid-cleanup: stop closing
         await io.patch(`/repos/${opts.repo}/issues/${n}`, { state: 'closed' });
       }
     } else if (survivor !== issue) {
