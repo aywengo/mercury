@@ -103,6 +103,40 @@ an issue comment, and releases the claim. On success run `finish` — every exit
 controls removes `nightly:in-progress`. A Run stopped by its deadline keeps the claim (§4.3);
 `nightly-report` lists it and the next night resets it.
 
+## Report (`report.ts`, N1-4)
+
+```bash
+node .agents/skills/nightly/report.ts --repo aywengo/mercury [--night YYYY-MM-DD] [--dry-run]
+```
+
+Files ONE digest issue per night, labeled `nightly:report`, titled
+`nightly report — <night>`, and closes the previous open report issue.
+Without `--night` the report covers the COMPLETED prior local night (the
+bot fires this at 05:40, before that day's 06:00 `notAfter` cutoff, so
+"today" would still be open and its deadline stops unobserved).
+Credentials: `GH_TOKEN`/`GITHUB_TOKEN` is required for every request — the
+searches too, including `--dry-run`. A read-only token is enough for
+`--dry-run`; a real run also needs repo write because it files and closes
+issues. Sections:
+
+- **PRs opened** and **issues filed** tonight (GitHub search, repo-scoped).
+- **Issues commented** tonight.
+- **Blocked** — open `nightly:blocked` issues with their blocking question (the never-asks exit
+  from `next.ts`).
+- **Runs stopped by notAfter** — the §4.3 window end. Read from the Mercury runs API
+  (`MERCURY_REPORT_API_URL` + `MERCURY_REPORT_TOKEN`). `MERCURY_REPORT_API_URL` is the server
+  ROOT without `/api` (e.g. `http://127.0.0.1:4620`) — the script appends `/api/runs` itself;
+  a URL that already ends in `/api` silently yields an empty section. When unset the section
+  is empty, not faked.
+- **Flakes** — the `nightly-e2e` flake-clock state (same state file).
+
+The report is read-only except for the digest issue itself and the close
+of every OPEN digest titled `nightly report — D` with D strictly before the
+report night. One rule: a failed close self-heals on any later night, a
+newer report is never erased, and same-night duplicates from a racing retry
+heal the next night. Single-writer scheduling is Mercury's bot config job
+(`singleFlight`), not the script's.
+
 ## Tests
 
 `test/nightlySelect.test.ts` pins the ladder on fixture-shaped issues and
