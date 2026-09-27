@@ -398,7 +398,14 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   section('## Runs stopped by notAfter (the 06:00 window end)', () =>
     bounded(data.runsStopped.map((r) => `- ${codeSpan(r.runId ?? '')} — ${codeSpan(r.task ?? '')}`), '_none_'));
   section('## Flakes (nightly-e2e clock)', () =>
-    bounded(data.flakes.map((f) => `- ${codeSpan(f.fingerprint, 16)} ${escMd(f.test)} — nights: ${f.nights.join(', ')}`), '_none_'));
+    bounded(data.flakes.map((f) => {
+      // State-derived text: flatten newlines BEFORE other rendering so a tampered entry or a
+      // newline-bearing test name cannot inject headings/lists into the public digest. Night
+      // entries must look like YYYY-MM-DD; malformed ones are dropped from the line.
+      const nights = f.nights.filter((n) => /^\d{4}-\d{2}-\d{2}$/.test(n)).map((n) => codeSpan(n, 10));
+      const test = escMd(f.test.replace(/[\r\n]+/g, ' '));
+      return `- ${codeSpan(f.fingerprint, 16)} ${test} — nights: ${nights.join(', ')}`;
+    }), '_none_'));
   lines.push('---', "_Closed by tomorrow night's report._");
   return lines.join('\n');
 }
@@ -595,13 +602,27 @@ export async function runReport(
       if (c === null || typeof c !== 'object' || c.pull_request !== undefined) return false;
       return c.state === 'open';
     };
-    if (oursOpen && survivor === issue && await survivorOpen()) {
+    if (survivor === issue && oursOpen && await survivorOpen()) {
       for (const n of sameNight) {
         if (n === survivor) continue;
         if (!(await survivorOpen())) break; // the winner vanished mid-cleanup: stop closing
         await io.patch(`/repos/${opts.repo}/issues/${n}`, { state: 'closed' });
       }
-    } else if (survivor !== issue) {
+    } else {
+      // A loser (including a closed-reuse invocation whose issue is not even in the open set)
+      // reports the OPEN winner. It may still help the cleanup - closing every duplicate
+      // EXCEPT the winner, guarded by the same revalidation: the winner's survival is checked
+      // before each PATCH, so two losers with divergent listings can never close each other's
+      // survivor (the second one aborts when the first closed it), and the open winner always
+      // remains. When our issue was the winner but an operator closed it mid-window, we close
+      // nothing: the winner is gone, and the duplicates heal via tomorrow's prevNight pass.
+      if (!(survivor === issue) && await survivorOpen()) {
+        for (const n of sameNight) {
+          if (n === survivor) continue;
+          if (!(await survivorOpen())) break;
+          await io.patch(`/repos/${opts.repo}/issues/${n}`, { state: 'closed' });
+        }
+      }
       issue = survivor;
     }
   }

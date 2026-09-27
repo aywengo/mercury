@@ -1176,6 +1176,58 @@ test('commented candidates paginate: night comments past page 1 are still found'
   // next page may enter the window) - covered by the two-page walk above.
 });
 
+test('a closed-reuse loser still closes the OTHER open duplicates under the survivor guard', async () => {
+  // Closed #600 is reused; open duplicates 701 and 702 exist. Our loser lists survivor 701,
+  // and the survivor revalidations all say open -> it closes 702 (not 701, not 600).
+  const { io: base } = ioWith({
+    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
+  });
+  const patched: number[] = [];
+  let openGets = 0;
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('state=all')) {
+        return { body: [{ number: 600, title: 'nightly report — 2026-09-26', state: 'closed' }], status: 200 };
+      }
+      if (/\/issues\/701$/.test(path)) return { body: { state: 'open' }, status: 200 };
+      if (path.includes('state=open') && !path.includes('nightly%3Ablocked')) {
+        openGets += 1;
+        if (openGets >= 2) {
+          return { body: [{ number: 701, title: 'nightly report — 2026-09-26' }, { number: 702, title: 'nightly report — 2026-09-26' }], status: 200 };
+        }
+        return base.get(path);
+      }
+      return base.get(path);
+    },
+    async post() { throw new Error('no create expected'); },
+    async patch(path) { patched.push(Number(/issues\/(\d+)$/.exec(path)![1])); return { body: {}, status: 200 }; },
+  };
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.issue, 701, 'the open winner is the reported digest');
+  assert.deepEqual(patched.sort((a, b) => a - b), [500, 702], 'yesterday + the non-winner duplicate are closed; the winner stays open');
+});
+
+test('flake state with newlines/tampered nights cannot inject digest content', async () => {
+  const dir = tempDir('nightly-flakes-inject');
+  const statePath = join(dir, 'e2e-flakes.json');
+  writeFileSync(statePath, JSON.stringify({
+    fingerprintOf: { nights: ['2026-09-24', 'INJECTED\n## heading', 'not-a-date'], test: 'evil\n## injected heading' },
+  }));
+  const env = { ...ENV, XDG_STATE_HOME: dir };
+  const flakes = collectFlakes(env, '2026-09-26');
+  // Whatever the reader kept, render it: injection must be neutralized.
+  const { io } = ioWith({});
+  await runReport(io, env, { repo: REPO, night: '2026-09-26', dryRun: true });
+  const lines = flakes.length > 0 ? null : null;
+  // Render via digestBody path through a full run with mercury absent (flakes come from state).
+  const { io: io2, calls } = ioWith({});
+  await runReport(io2, env, { repo: REPO, night: '2026-09-26', dryRun: false });
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  assert.ok(!body.includes('\n## injected heading'), 'no injected heading line');
+  assert.ok(!body.includes('INJECTED\n## heading'), 'the tampered night string is flattened or dropped');
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);
