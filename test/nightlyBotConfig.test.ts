@@ -53,6 +53,9 @@ test('the example config parses and every task passes the real cron/tz parsers',
     const constraints = template.constraints as Record<string, number>;
     assert.ok(constraints.maxDurationMs > 0, 'every task sets maxDurationMs explicitly');
     assert.equal(constraints.maxRetries, 0, 'nightly runs never retry into the window');
+    // nightly SKILL.md 1.1.0: nightly task templates list issue-fix-loop and testing as required
+    // skills, so the procedure never depends on keyword matching against issue text.
+    assert.deepEqual(template.skills, ['issue-fix-loop', 'testing']);
   }
 });
 

@@ -18,7 +18,11 @@
           "constraints": {
             "maxDurationMs": 14400000,
             "maxRetries": 0
-          }
+          },
+          "skills": [
+            "issue-fix-loop",
+            "testing"
+          ]
         }
       },
       {
@@ -33,7 +37,11 @@
           "constraints": {
             "maxDurationMs": 4800000,
             "maxRetries": 0
-          }
+          },
+          "skills": [
+            "issue-fix-loop",
+            "testing"
+          ]
         }
       },
       {
@@ -48,7 +56,11 @@
           "constraints": {
             "maxDurationMs": 900000,
             "maxRetries": 0
-          }
+          },
+          "skills": [
+            "issue-fix-loop",
+            "testing"
+          ]
         }
       }
     ]
