@@ -373,6 +373,28 @@ export class RunStore {
     const run = this.get(id);
     return run ? isTerminal(run.status) : true;
   }
+
+  /**
+   * Rewrite `owner_id` for every Run of `fromOwner` to `toOwner` in ONE transaction and return
+   * the transferred ids (§17.7, #760). A removed bot's Runs must become readable by the
+   * inheriting owner atomically - a partial transfer (some runs bot-owned, some operator-owned)
+   * would make an operator-facing list silently incomplete.
+   *
+   * Callers own the per-Run audit event: the store cannot import the event store, so it hands
+   * back the ids and the service appends inside its own transaction scope.
+   */
+  reassignOwner(fromOwner: string, toOwner: string): string[] {
+    return tx(this.db, () => {
+      const rows = this.db
+        .prepare('SELECT id FROM runs WHERE owner_id = ?')
+        .all(fromOwner) as { id: string }[];
+      if (rows.length === 0) return [];
+      this.db
+        .prepare('UPDATE runs SET owner_id = ? WHERE owner_id = ?')
+        .run(toOwner, fromOwner);
+      return rows.map((r) => r.id);
+    });
+  }
 }
 
 function camelToSnake(s: string): string {

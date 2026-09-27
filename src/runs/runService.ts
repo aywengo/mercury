@@ -153,6 +153,33 @@ export class RunService {
   listAgents(): string[] {
     return [...this.deps.knownAgents];
   }
+
+  /**
+   * Owner-transfer for a removed bot's Runs (§17.7, #760): rewrites owner_id for every Run of
+   * `fromOwner` inside one transaction and appends a `run.owner_reassigned` event per Run, so
+   * the audit trail survives the ownership change.
+   *
+   * Validation is shape-only for `toOwner` on purpose: the common case is transferring to a
+   * NEW owner (the operator inheriting a dead bot's Runs) who may own no Runs yet - there is no
+   * server-side owner registry to check against, and the admin caller names the target.
+   *
+   * Redaction is unaffected: events pass the redactor at append time and were already redacted
+   * at write time; the transfer changes WHO can read them (owner-scoped listing), not WHAT is
+   * stored. No secret material rides on the event payload.
+   */
+  reassignRuns(opts: { fromOwner: string; toOwner: string }): { transferred: number; runIds: string[] } {
+    const OWNER_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/;
+    const from = opts.fromOwner.trim();
+    const to = opts.toOwner.trim();
+    if (!OWNER_RE.test(from)) throw new ValidationError(`fromOwner must match ${OWNER_RE.source}; got '${opts.fromOwner}'`);
+    if (!OWNER_RE.test(to)) throw new ValidationError(`toOwner must match ${OWNER_RE.source}; got '${opts.toOwner}'`);
+    if (from === to) throw new ValidationError('fromOwner and toOwner must differ');
+    const runIds = this.deps.runs.reassignOwner(from, to);
+    for (const runId of runIds) {
+      this.deps.events.append(runId, 'run.owner_reassigned', { fromOwner: from, toOwner: to });
+    }
+    return { transferred: runIds.length, runIds };
+  }
   /** Capability snapshot for every registered agent (docs/goals.md 13.6). */
   listAgentCapabilities(): Record<string, AgentCapabilitySummary> {
     return this.deps.agentCapabilities?.() ?? {};

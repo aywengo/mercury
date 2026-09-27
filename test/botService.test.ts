@@ -16,6 +16,7 @@ import {
   installBotService,
   parseBotServiceInstallArgs,
   parseBotServiceUninstallArgs,
+  reassignBotRuns,
   removeBotCredential,
   removeBotTokenFromEnv,
   teardownConsequence,
@@ -309,8 +310,10 @@ test('--reassign-runs refuses clearly (no owner-transfer API) and writes nothing
   const io2 = { out: (s: string) => { outBuf += s; }, err: (s: string) => { errBuf += s; } };
   const code = uninstallBotService('linux', 'nightly', io2, env, { yes: true, keepEnv: false, reassignOwner: 'alice' });
   assert.equal(code, 1);
-  assert.match(errBuf, /--reassign-runs is not supported yet/);
-  assert.match(errBuf, /#760/);
+  // The transfer now exists (#760) and runs in the CLI layer BEFORE teardown; a direct call to
+  // uninstallBotService with the flag set is a mis-use and says so instead of pretending.
+  assert.match(errBuf, /--reassign-runs was not applied/);
+  assert.match(errBuf, /before teardown/);
   assert.match(outBuf, /Teardown consequence \(§17\.7\): Runs owned by bot-nightly remain/, 'the consequence is printed even on the refusal path');
   assert.ok(existsSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bots', 'nightly.json')), 'nothing removed');
   rmSync(dir, { recursive: true, force: true });
@@ -383,4 +386,48 @@ test('removeBotTokenFromEnv refuses malformed entries by index without echoing t
   } catch (e) {
     assert.doesNotMatch((e as Error).message, /tok-alice|tok-no-colon/, 'no token material in the error');
   }
+});
+
+
+test('reassignBotRuns: POSTs the transfer with the admin token and the bot-config API base (#760)', async () => {
+  const dir = tempDir('bot-svc-reassign-');
+  const env = setupBot(dir);
+  env.MERCURY_ADMIN_TOKEN = 'tok-admin-9';
+  const calls: { url: string; init: { headers: Record<string, string>; body: string } }[] = [];
+  const io = { out: (s: string) => {}, err: (s: string) => {} };
+  const rc = await reassignBotRuns('nightly', 'alice', io, env, async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, status: 200, json: async () => ({ transferred: 3 }) };
+  });
+  assert.equal(rc, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, 'http://127.0.0.1:3000/api/runs/reassign', 'the bot config api.url');
+  assert.equal(calls[0]!.init.headers.authorization, 'Bearer tok-admin-9');
+  assert.deepEqual(JSON.parse(calls[0]!.init.body), { fromOwner: 'bot-nightly', toOwner: 'alice' });
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('reassignBotRuns: no admin token, or a failed transfer, aborts with exit 1 and a message', async () => {
+  const dir = tempDir('bot-svc-reassign2-');
+  const env = setupBot(dir);
+  delete env.MERCURY_ADMIN_TOKEN;
+  let errBuf = '';
+  const io = { out: (s: string) => {}, err: (s: string) => { errBuf += s; } };
+  const rc = await reassignBotRuns('nightly', 'alice', io, env, async () => {
+    throw new Error('should not be called without a token');
+  });
+  assert.equal(rc, 1);
+  assert.match(errBuf, /MERCURY_ADMIN_TOKEN/);
+  // Failed HTTP transfer:
+  const env2 = setupBot(dir + 'b');
+  env2.MERCURY_ADMIN_TOKEN = 'tok-admin-9';
+  errBuf = '';
+  const rc2 = await reassignBotRuns('nightly', 'alice', io, env2, async () => ({
+    ok: false, status: 403, json: async () => ({ error: 'run reassignment requires an admin token' }),
+  }));
+  assert.equal(rc2, 1);
+  assert.match(errBuf, /403/);
+  assert.match(errBuf, /Nothing was uninstalled/);
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir + 'b', { recursive: true, force: true });
 });

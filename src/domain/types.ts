@@ -652,6 +652,9 @@ export const EVENT_TYPES = new Set([
   // emits (issue #60). A test now fails if any append uses a type absent from this set.
   'lease.lost',
   'sandbox.enabled',
+  // Owner transfer for a removed bot's Runs (dispatcher-bot-design §17.7, #760): appended by
+  // RunService.reassignRuns, payload { fromOwner, toOwner } - no secret material.
+  'run.owner_reassigned',
   // Goal lifecycle (docs/goals.md section 6). Appended by the worker and by adapters that
   // can observe a goal; NEVER by anything that judges whether the work was done. Mercury
   // records what the harness reported -- `goal.unmet` is the sole exception and it asserts

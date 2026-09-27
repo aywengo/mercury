@@ -66,7 +66,7 @@ import { runHostSetup } from './host/setup.ts';
 import { installService, serviceStatus, uninstallService, parseServiceArgs, type ServiceOptions } from './host/service.ts';
 import { runHostDoctor } from './host/doctor.ts';
 import { loadBotConfig, botConfigPath } from './host/bots/config.ts';
-import { installBotService, uninstallBotService, parseBotServiceInstallArgs, parseBotServiceUninstallArgs } from './host/bots/service.ts';
+import { installBotService, uninstallBotService, reassignBotRuns, parseBotServiceInstallArgs, parseBotServiceUninstallArgs } from './host/bots/service.ts';
 import { runBot, makeBotClient } from './host/bots/process.ts';
 import { dispatchTask } from './host/bots/dispatch.ts';
 import { statusView, renderStatus } from './host/bots/status.ts';
@@ -460,6 +460,15 @@ async function main(): Promise<void> {
     if (sub === 'uninstall') {
       try {
         const { alias, ...opts } = parseBotServiceUninstallArgs(rest);
+        // The §17.7 transfer runs BEFORE teardown: a failure aborts the uninstall, so the bot is
+        // never half-removed with its Runs moved (or unmoved) behind its own deleted token.
+        if (opts.reassignOwner !== null) {
+          const rc = await reassignBotRuns(alias, opts.reassignOwner, io, process.env);
+          if (rc !== 0) {
+            process.exitCode = rc;
+            return;
+          }
+        }
         process.exitCode = uninstallBotService(process.platform, alias, io, process.env, opts);
       } catch (e) {
         process.stderr.write((e as Error).message + '\n');
