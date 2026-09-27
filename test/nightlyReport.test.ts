@@ -869,6 +869,32 @@ test('a fresh issue closed before the reconciliation listing can neither win nor
   assert.deepEqual(patched, [500], 'the stale-closed 701 is never PATCHed and never wins Math.min');
 });
 
+test('a malformed 2xx comment-page body is an unreadable question, not a crash', async () => {
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('/comments')) {
+        const m = /[?&]page=(\d+)/.exec(path);
+        const page = m ? Number(m[1]) : 1;
+        // Page 1 is an OBJECT (with a Link header advertising last=2); page 2 is an array
+        // of junk entries plus one valid comment.
+        if (page === 1) {
+          return {
+            body: { message: 'proxy error page' },
+            status: 200,
+            link: '<https://api.github.com/repos/x/y/issues/502/comments?per_page=100&page=2>; rel="last"',
+          };
+        }
+        return { body: [null, 'nope', { body: '**Blocking question:** real question' }], status: 200 };
+      }
+      return { body: [], status: 200 };
+    },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const q = await blockingQuestion(io, REPO, 502);
+  assert.equal(q, 'real question', 'malformed entries are skipped, valid ones still scanned');
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);
