@@ -1055,6 +1055,21 @@ test('the CLI rejects a flag present without its value (strict flag parsing)', a
   assert.match(r2.output, /--repo requires a value/);
 });
 
+test('non-string comment bodies are skipped, not crashed on', async () => {
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('/comments')) {
+        return { body: [{ body: null }, { body: 42 }, { nobody: true }, { body: '**Blocking question:** the question' }], status: 200 };
+      }
+      return { body: [], status: 200 };
+    },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const q = await blockingQuestion(io, REPO, 502);
+  assert.equal(q, 'the question', 'null/number/missing bodies are skipped; the string body wins');
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);

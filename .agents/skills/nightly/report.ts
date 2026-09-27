@@ -147,7 +147,8 @@ export async function blockingQuestion(io: ReportIo, repo: string, issue: number
     // Same shape validation as every other list response: a 2xx non-array (proxy error page,
     // JSON object) makes the question unreadable, it must not crash the digest.
     const page1Comments = Array.isArray(res1.body)
-      ? (res1.body as { body?: string }[]).filter((c): c is { body?: string } => c !== null && typeof c === 'object')
+      ? (res1.body as { body?: string }[]).filter((c): c is { body: string } =>
+          c !== null && typeof c === 'object' && typeof (c as { body?: unknown }).body === 'string')
       : [];
     for (const c of page1Comments) {
       if (!c.body) continue;
@@ -163,7 +164,8 @@ export async function blockingQuestion(io: ReportIo, repo: string, issue: number
     const res = await io.get(`/repos/${repo}/issues/${issue}/comments?per_page=100&page=${page}`);
     if (res.status < 200 || res.status >= 300) break; // unreadable page: scan what we have
     const comments = Array.isArray(res.body)
-      ? (res.body as { body?: string }[]).filter((c): c is { body?: string } => c !== null && typeof c === 'object')
+      ? (res.body as { body: string }[]).filter((c): c is { body: string } =>
+          c !== null && typeof c === 'object' && typeof (c as { body?: unknown }).body === 'string')
       : [];
     for (const c of comments) {
       if (!c.body) continue;
