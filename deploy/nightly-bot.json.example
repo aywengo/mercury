@@ -13,16 +13,13 @@
         "singleFlight": true,
         "onMiss": "skip",
         "template": {
-          "task": "nightly-e2e {{fire.date}}: run the E2E suite per .agents/skills/nightly/SKILL.md (e2e.ts); file or update defect issues; never ask; stay inside the 06:00 window.",
+          "task": "nightly-e2e {{fire.date}}: run the E2E suite per .agents/skills/nightly/SKILL.md (e2e.ts); file or update defect issues, never fix them in this Run; never ask; stay inside the 06:00 window.",
           "notAfterAt": "06:00",
           "constraints": {
             "maxDurationMs": 14400000,
             "maxRetries": 0
           },
-          "skills": [
-            "issue-fix-loop",
-            "testing"
-          ]
+          "skills": []
         }
       },
       {
@@ -51,16 +48,13 @@
         "singleFlight": true,
         "onMiss": "skip",
         "template": {
-          "task": "nightly-report {{fire.date}}: file the morning digest per .agents/skills/nightly/SKILL.md (report.ts); never ask; stay inside the 06:00 window.",
+          "task": "nightly-report {{fire.date}}: file the morning digest of the night that just ended ([00:00, 06:00) local) per .agents/skills/nightly/SKILL.md (report.ts); report only, never fix; never ask; finish before 07:00.",
           "notAfterAt": "07:00",
           "constraints": {
             "maxDurationMs": 900000,
             "maxRetries": 0
           },
-          "skills": [
-            "issue-fix-loop",
-            "testing"
-          ]
+          "skills": []
         }
       }
     ]
