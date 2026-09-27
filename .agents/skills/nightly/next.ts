@@ -35,6 +35,9 @@ import { runSelectorWith } from './select.ts';
 
 const L_IN_PROGRESS = 'nightly:in-progress';
 const L_BLOCKED = 'nightly:blocked';
+/** The nightly machine identity (docs/operations.md): only issues it FILED get the body
+ * question marker on a blocked exit (#770) - user-authored bodies are never edited. */
+const NIGHTLY_AUTHOR = 'mercury-nightly';
 // Mirrors select.ts's validation EXACTLY: the selector is the authority and both read the same
 // env; two different regexes would silently disagree on valid repos (e.g. 'octo-org/.github').
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -53,6 +56,9 @@ export interface NextIo {
   postLabel(path: string, body: unknown): Promise<boolean>;
   /** Label removal (DELETE /labels/<name>): true on 2xx. */
   deleteLabel(path: string): Promise<boolean>;
+  /** Issue body update (PATCH /issues/<n>). Optional: only the blocked exit uses it, and only
+   * for issues the nightly identity filed (#770). */
+  patch?(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
 }
 
 export interface NextSelection {
@@ -125,6 +131,27 @@ export async function blockIssue(io: NextIo, opts: { repo: string; issue: number
     throw new Error(`blocked exit failed: the question comment was not accepted (POST returned ${res.status}); the claim stays so the next night retries`);
   }
   const commented = true;
+  // The comment is the source of truth for the question. When the nightly identity FILED the
+  // issue (its own defect report, author `mercury-nightly`), the question ALSO goes into the
+  // issue body as a trailing invisible HTML-comment marker (#770): the morning report then reads
+  // the question from the issue LISTING it already fetches - one object, zero comment requests -
+  // while user-authored issues keep their body untouched (the nightly must not edit content it
+  // does not own). Best-effort: a failed body patch degrades to the comment path, never fails
+  // the blocked exit. A prior marker (a second blocked exit) is REPLACED so the body always
+  // carries the latest question.
+  try {
+    const issueRes = await io.get(`/repos/${opts.repo}/issues/${opts.issue}`);
+    if (issueRes.status >= 200 && issueRes.status < 300 && io.patch) {
+      const issueBody = issueRes.body as { user?: { login?: string }; body?: string } | null;
+      if (issueBody?.user?.login === NIGHTLY_AUTHOR && typeof issueBody.body === 'string') {
+        const stripped = issueBody.body.replace(/\n?<!-- nightly:blocking-question[\s\S]*?-->$/, '');
+        const marker = `\n\n<!-- nightly:blocking-question\n${reason}\n-->`;
+        await io.patch(`/repos/${opts.repo}/issues/${opts.issue}`, { body: stripped + marker });
+      }
+    }
+  } catch {
+    // Body marker is an optimization; the comment already carries the question.
+  }
   const removed = await io.deleteLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels/${encodeURIComponent(L_IN_PROGRESS)}`);
   return { removed, newlyLabeled, commented };
 }
@@ -160,6 +187,16 @@ async function ghGet(path: string, token: string): Promise<{ body: unknown; stat
 async function ghPost(path: string, body: unknown, token: string): Promise<{ body: unknown; status: number }> {
   const res = await fetch(`https://api.github.com${path}`, {
     method: 'POST',
+    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  return { body: await res.json().catch(() => null), status: res.status };
+}
+
+async function ghPatch(path: string, body: unknown, token: string): Promise<{ body: unknown; status: number }> {
+  const res = await fetch(`https://api.github.com${path}`, {
+    method: 'PATCH',
     headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -206,6 +243,7 @@ function realIo(env: NodeJS.ProcessEnv): NextIo {
     post: async (path, body) => await ghPost(path, body, token),
     postLabel: async (path, body) => await ghPostLabel(path, body, token),
     deleteLabel: async (path) => await ghDelete(path, token),
+    patch: async (path, body) => await ghPatch(path, body, token),
   };
 }
 

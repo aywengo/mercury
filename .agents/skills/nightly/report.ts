@@ -97,8 +97,9 @@ async function search(io: ReportIo, repo: string, query: string): Promise<{ numb
   return out;
 }
 
-/** Open issues labeled nightly:blocked, each with the most recent **Blocking question:** marker
- * as the question (falling back to the last comment only when no marker exists). */
+/** Open issues labeled nightly:blocked, each with its blocking question: the issue BODY marker
+ * first (nightly-filed issues carry it from the blocked exit, #770 - zero extra requests), then
+ * the most recent **Blocking question:** comment marker, then the last comment. */
 export async function collectBlocked(io: ReportIo, repo: string): Promise<{ number?: number; title: string; question?: string }[]> {
   const out: { number?: number; title: string; question?: string }[] = [];
   for (let page = 1; page <= SEARCH_CAP; page++) {
@@ -107,24 +108,39 @@ export async function collectBlocked(io: ReportIo, repo: string): Promise<{ numb
     if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
     // A 2xx with an unparsable payload (parse failure -> null) must not silently read as ZERO
     // blocked issues; that would hide real blockers from the digest. Targeted error instead.
-    const issues = res.body as { number?: number; title?: string; pull_request?: unknown }[] | null;
+    const issues = res.body as { number?: number; title?: string; body?: string; pull_request?: unknown }[] | null;
     if (!Array.isArray(issues)) {
       throw new Error(`GET ${path} -> 2xx with an unexpected body (expected an issue array)`);
     }
     for (const issue of issues) {
       if (issue.pull_request !== undefined) continue; // the issues listing includes PRs
       if (issue.number === undefined) continue;
-      out.push({ number: issue.number, title: issue.title ?? '', question: await blockingQuestion(io, repo, issue.number) });
+      // The body marker is free (the listing already returned the body): try it BEFORE any
+      // comment request. Unreadable/absent body falls through to the comment scan.
+      const fromBody = typeof issue.body === 'string' ? questionFromBody(issue.body) : undefined;
+      const question = fromBody ?? await blockingQuestion(io, repo, issue.number);
+      out.push({ number: issue.number, title: issue.title ?? '', ...(question !== undefined ? { question } : {}) });
     }
     if (issues.length < 100) break;
   }
   return out;
 }
 
-/** The blocking question for an issue: walk the comment pages (bounded) and take the LAST
- * `**Blocking question:**` marker - the most recent blocked exit. If no marker exists (a
- * hand-labeled blocked issue), fall back to the last comment body, truncated. Exported for
- * tests. */
+/** The trailing invisible marker the nightly blocked exit appends to nightly-filed issue bodies:
+ * `<!-- nightly:blocking-question\n<reason>\n-->` (#770). Returns the reason verbatim (single
+ * line - the blocked exit trims the reason), or undefined when the body carries no marker. */
+export function questionFromBody(body: string): string | undefined {
+  const m = /<!-- nightly:blocking-question\n([\s\S]*?)-->\s*$/.exec(body);
+  if (!m) return undefined;
+  const reason = m[1]!.trim();
+  return reason === '' ? undefined : reason;
+}
+
+/** The blocking question for an issue from its COMMENTS: walk the comment pages (bounded) and
+ * take the LAST `**Blocking question:**` marker - the most recent blocked exit. If no marker
+ * exists (a hand-labeled blocked issue), fall back to the last comment body, truncated.
+ * Only reached when the issue BODY carried no nightly marker (collectBlocked checks that first,
+ * #770). Exported for tests. */
 export async function blockingQuestion(io: ReportIo, repo: string, issue: number): Promise<string | undefined> {
   // The blocking question is written by OUR nightly-next skill, so page 1 plus the Link-header
   // LAST page is enough - no multi-page walk. (Longer term the question moves to the issue

@@ -125,9 +125,12 @@ Nightly-specific rules on top of `issue-fix-loop`:
 **Never asks (§4.4):** a nightly Run must end without NEEDS_INPUT. When in doubt — ambiguous
 acceptance criteria, a needed credential or design decision, an unmerged dependency, a limit
 from the table above — run `blocked --reason "<the question>"`: it labels the issue
-`nightly:blocked`, posts the question as an issue comment, and releases the claim. On success
-run `finish` — every exit path this skill controls removes `nightly:in-progress`. A Run stopped
-by its deadline keeps the claim (§4.3);
+`nightly:blocked`, posts the question as an issue comment, and releases the claim. On issues
+the nightly identity itself filed, the blocked exit also appends the question to the issue
+body as an invisible `<!-- nightly:blocking-question -->` marker (#770) — user-authored bodies
+are never edited — so `nightly-report` reads the question from the issue listing without any
+comment request. On success run `finish` — every exit path this skill controls removes
+`nightly:in-progress`. A Run stopped by its deadline keeps the claim (§4.3);
 `nightly-report` lists it and the next night resets it.
 
 ## Report (`report.ts`, N1-4)

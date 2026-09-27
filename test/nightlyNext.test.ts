@@ -46,6 +46,10 @@ function ioWith(issues: GhIssue[], timelines: Record<number, LabelEvent[]>, opts
       calls.push({ method: 'DELETE', path });
       return true;
     },
+    async patch(path, body) {
+      calls.push({ method: 'PATCH', path, body });
+      return { body: {}, status: 200 };
+    },
   };
   return { io, calls, setNewly: (v: boolean) => { newly = v; } };
 }
@@ -211,4 +215,34 @@ test('repo validation accepts dot-segment names like octo-org/.github (aligned w
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith([], {});
   await assert.rejects(() => runNext(io, ENV, { repo: 'no-slash', dryRun: false }), /owner\/name/);
+});
+
+
+test('blocked exit: the body marker is written ONLY for issues the nightly identity filed (#770)', async () => {
+  const nightlyFiled = [{ ...issue({ number: 20, user: { login: 'mercury-nightly' } }), body: 'defect report body' } as unknown as GhIssue];
+  const userFiled = [{ ...issue({ number: 21, user: { login: 'aywengo' } }), body: 'a human wrote this' } as unknown as GhIssue];
+  // nightly-filed: the body is patched with the trailing invisible marker, original body preserved.
+  const a = ioWith(nightlyFiled, {});
+  await blockIssue(a.io, { repo: REPO, issue: 20, reason: 'Which retry policy?' });
+  const patchA = a.calls.find((c) => c.method === 'PATCH');
+  assert.ok(patchA, 'nightly-filed issue gets the body marker');
+  const bodyA = String((patchA!.body as { body: string }).body);
+  assert.ok(bodyA.startsWith('defect report body'), 'existing body preserved');
+  assert.match(bodyA, /<!-- nightly:blocking-question\nWhich retry policy\?\n-->$/, 'trailing marker');
+  // user-filed: no PATCH at all (the nightly must not edit user-authored bodies).
+  const b = ioWith(userFiled, {});
+  await blockIssue(b.io, { repo: REPO, issue: 21, reason: 'Which retry policy?' });
+  assert.equal(b.calls.find((c) => c.method === 'PATCH'), undefined, 'user-authored body untouched');
+  // A second blocked exit REPLACES the prior marker instead of stacking.
+  const twice = ioWith([{ ...issue({ number: 20, user: { login: 'mercury-nightly' } }), body: 'defect report body\n\n<!-- nightly:blocking-question\nold question\n-->' } as unknown as GhIssue], {});
+  await blockIssue(twice.io, { repo: REPO, issue: 20, reason: 'newer question' });
+  const patchTwice = twice.calls.find((c) => c.method === 'PATCH')!;
+  const bodyTwice = String((patchTwice.body as { body: string }).body);
+  assert.ok(!bodyTwice.includes('old question'), 'prior marker replaced');
+  assert.ok(bodyTwice.includes('newer question'));
+  // A failed body patch does not fail the blocked exit (the comment remains the source of truth).
+  const failing = ioWith(nightlyFiled, {});
+  const failingIo: NextIo = { ...failing.io, async patch() { throw new Error('network gone'); } };
+  const out = await blockIssue(failingIo, { repo: REPO, issue: 20, reason: 'still blocked' });
+  assert.equal(out.commented, true, 'the blocked exit survives a body-marker failure');
 });
