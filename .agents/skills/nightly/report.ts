@@ -248,19 +248,27 @@ export function collectFlakes(env: NodeJS.ProcessEnv, night: string): { fingerpr
     .sort((a, b) => newestNight(b.nights).localeCompare(newestNight(a.nights)));
 }
 
+/** Escape Markdown-significant characters in user-controlled text (titles, questions) so a
+ * crafted title cannot inject links/images into the digest. */
+function escMd(text: string): string {
+  return text.replace(/([\\`*_\[\]()<>#!])/g, '\\$1');
+}
+
 function digestBody(night: string, data: ReportData, note?: string): string {
   const lines: string[] = [`# nightly report — ${night}`, ''];
   if (note) lines.push(`_${note}_`, '');
   const list = (items: { title: string; url?: string; number?: number }[], empty: string): string =>
     items.length === 0 ? empty : items.map((it) => {
-      const text = it.title || (it.number !== undefined ? `#${it.number}` : 'untitled');
-      return `- ${it.url ? `[${text}](${it.url})` : text}`;
+      // Titles are user-controlled: escape Markdown so `](...)` etc. cannot alter the rendered
+      // digest or spoof a link target.
+      const text = escMd(it.title || (it.number !== undefined ? `#${it.number}` : 'untitled'));
+      return `- ${it.url ? `[${text}](<${it.url}>)` : text}`;
     }).join('\n');
   lines.push('## PRs opened', list(data.prs, '_none_'), '');
   lines.push('## Issues filed', list(data.issuesFiled, '_none_'), '');
   lines.push('## Issues commented', list(data.issuesCommented, '_none_'), '');
   lines.push('## Blocked (nightly:blocked, waiting on a human)',
-    data.blocked.length === 0 ? '_none_' : data.blocked.map((b) => `- #${b.number} ${b.title}${b.question ? ` — question: ${b.question}` : ''}`).join('\n'), '');
+    data.blocked.length === 0 ? '_none_' : data.blocked.map((b) => `- #${b.number} ${escMd(b.title)}${b.question ? ` — question: ${escMd(b.question)}` : ''}`).join('\n'), '');
   lines.push('## Runs stopped by notAfter (the 06:00 window end)',
     data.runsStopped.length === 0 ? '_none_' : data.runsStopped.map((r) => `- \`${r.runId}\` — ${(r.task ?? '').slice(0, 120)}`).join('\n'), '');
   lines.push('## Flakes (nightly-e2e clock)',
@@ -401,12 +409,20 @@ export async function runReport(
     }
     if (prev.length < 100) break;
   }
+  // The winner of the reconciliation is the SMALLEST number, and ONLY the winner's invocation
+  // closes the others. A losing invocation closes NOTHING: two independent closers could
+  // otherwise each kill the other's survivor and leave the night with no open digest. The loser
+  // just reports the survivor; its own issue is closed by the winner (or by tomorrow's
+  // prevNight close if the winner died first).
   const survivor = Math.min(...sameNight);
-  for (const n of sameNight) {
-    if (n === survivor) continue;
-    await io.patch(`/repos/${opts.repo}/issues/${n}`, { state: 'closed' });
+  if (survivor === issue) {
+    for (const n of sameNight) {
+      if (n === survivor) continue;
+      await io.patch(`/repos/${opts.repo}/issues/${n}`, { state: 'closed' });
+    }
+  } else {
+    issue = survivor;
   }
-  if (survivor !== issue) issue = survivor;
 
   let closedPrevious: number | undefined;
   for (const old of closeables) {

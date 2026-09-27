@@ -96,7 +96,7 @@ test('the digest files one issue with all sections and closes yesterday\'s repor
   const body = String((created.body as { body: string }).body);
   assert.match(body, /# nightly report — 2026-09-26/);
   assert.match(body, /## PRs opened/);
-  assert.match(body, /\[a PR\]\(u1\)/);
+  assert.match(body, /\[a PR\]\(<u1>\)/);
   assert.match(body, /## Blocked .nightly:blocked, waiting on a human./);
   assert.match(body, /Which preset wins\?/);
   assert.match(body, /## Runs stopped by notAfter/);
@@ -700,6 +700,55 @@ test('a CLOSED same-night digest is reused (all-states lookup), not duplicated',
   const out = await runReport(spy, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
   assert.equal(created, 0, 'no duplicate is created when the closed same-night digest exists');
   assert.equal(out.issue, 690);
+});
+
+test('a LOSING invocation closes nothing (only the smallest number survives the cleanup)', async () => {
+  // Our invocation created 902; the reconciliation listing shows 701 (smaller) and ours.
+  const { io: base } = ioWith({
+    issues: [{ number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }],
+  });
+  let createCount = 0;
+  const patched: number[] = [];
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('labels=nightly%3Areport')) {
+        if (createCount > 0) {
+          return { body: [
+            { number: 902, title: 'nightly report — 2026-09-26' },
+            { number: 701, title: 'nightly report — 2026-09-26' },
+          ], status: 200 };
+        }
+        return base.get(path);
+      }
+      return base.get(path);
+    },
+    async post() { createCount += 1; return { body: { number: 902 }, status: 201 }; },
+    async patch(path) { patched.push(Number(/issues\/(\d+)$/.exec(path)![1])); return { body: {}, status: 200 }; },
+  };
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.issue, 701, 'the loser reports the survivor');
+  assert.deepEqual(patched, [500], 'the loser closes ONLY the previous night - never its own issue or the survivor');
+});
+
+test('user-controlled titles are Markdown-escaped in the digest body', async () => {
+  const { io } = ioWith({
+    searchItems: {
+      'is:pr created': [{ number: 710, title: 'x](https://evil.example) and ![img](y', html_url: 'https://github.com/aywengo/mercury/pull/710' }],
+    },
+  });
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
+  assert.match(out.prs[0]!.title!, /x\]\(https:\/\/evil\.example\)/);
+  const { io: io2, calls } = ioWith({
+    searchItems: {
+      'is:pr created': [{ number: 710, title: 'x](https://evil.example)', html_url: 'https://github.com/aywengo/mercury/pull/710' }],
+    },
+  });
+  await runReport(io2, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  const created = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  // The brackets/parens are escaped: the link cannot be broken out of.
+  assert.ok(!body.includes('[x](https://evil.example)'), 'the raw injection is gone');
+  assert.ok(body.includes('x\\]\\(https://evil.example\\)'), 'the title is escaped');
 });
 
 test('repo validation refuses a non owner/name value', async () => {
