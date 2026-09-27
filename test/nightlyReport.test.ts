@@ -1028,7 +1028,9 @@ test('an unrelated nightly:report title that merely ends in a retry date is NOT 
 test('the CLI rejects a flag present without its value (strict flag parsing)', async () => {
   // The CLI block only runs when the module is the entry point; spawn it for real.
   const { execFileSync } = await import('node:child_process');
-  const script = '/Users/roman/devops/mercury/.agents/skills/nightly/report.ts';
+  // Resolve relative to THIS test file: CI checks out the repo at a different path, so a
+  // hard-coded /Users/... path cannot exist there.
+  const script = new URL('../.agents/skills/nightly/report.ts', import.meta.url).pathname;
   const run = (args: string[]): { output: string; status: number } => {
     try {
       const stdout = execFileSync(process.execPath, [script, ...args], {
