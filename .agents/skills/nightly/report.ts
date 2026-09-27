@@ -182,6 +182,43 @@ export async function blockingQuestion(io: ReportIo, repo: string, issue: number
   return question;
 }
 
+/** Issues from `candidates` that received a comment DURING the night window [startMs, endMs]:
+ * reads each candidate's comments (page 1, newest-first is not guaranteed - scan the page),
+ * bounded per issue. An unreadable comment page skips that candidate (best-effort, same policy
+ * as the other reads). GitHub search cannot filter by commented:<range> (unsupported), so the
+ * updated:<range> candidate set is filtered here.
+ */
+async function collectIssuesCommented(
+  io: ReportIo,
+  repo: string,
+  candidates: { number?: number }[],
+  startMs: number,
+  endMs: number,
+): Promise<{ number?: number; title: string; url?: string }[]> {
+  const out: { number?: number; title: string; url?: string }[] = [];
+  for (const cand of candidates) {
+    if (cand.number === undefined) continue;
+    const path = `/repos/${repo}/issues/${cand.number}/comments?per_page=100&sort=created&direction=desc`;
+    let res;
+    try {
+      res = await io.get(path);
+    } catch {
+      continue; // transport error on this candidate: skip it, do not fail the digest
+    }
+    if (res.status < 200 || res.status >= 300) continue; // unreadable: skip this candidate
+    const comments = Array.isArray(res.body)
+      ? (res.body as { body?: unknown; created_at?: unknown }[]).filter((c): c is { body: string; created_at: string } =>
+          c !== null && typeof c === 'object' && typeof c.body === 'string' && typeof c.created_at === 'string')
+      : [];
+    const commentedDuringNight = comments.some((c) => {
+      const ts = Date.parse(c.created_at);
+      return !Number.isNaN(ts) && ts >= startMs && ts <= endMs;
+    });
+    if (commentedDuringNight) out.push(cand as { number?: number; title: string; url?: string });
+  }
+  return out;
+}
+
 /** TIMED_OUT runs stopped by the §4.3 window end DURING the report night: cursor-paginated
  * (bounded), each candidate filtered by its constraints.notAfter falling on the report night's
  * local date before the events fetch (a backfill must not show other nights' stops). */
@@ -392,7 +429,13 @@ export async function runReport(
   const endIso = new Date(new Date(`${endNight}T00:00:00`).getTime() - 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00');
   const prs = await search(io, opts.repo, `is:pr created:${startIso}..${endIso}`);
   const issuesFiled = await search(io, opts.repo, `is:issue created:${startIso}..${endIso}`);
-  const issuesCommented = await search(io, opts.repo, `is:issue commented:${startIso}..${endIso}`);
+  // GitHub's issue search does NOT support a commented:<range> qualifier (verified live: the
+  // range form matches nothing while comments:>0 matches over a hundred). Candidates come from
+  // the supported updated:<range> search; collectIssuesCommented then reads each candidate's
+  // comments and keeps only issues with a comment authored DURING the night (bounded).
+  const updatedCandidates = await search(io, opts.repo, `is:issue updated:${startIso}..${endIso}`);
+  const issuesCommented = await collectIssuesCommented(io, opts.repo, updatedCandidates,
+    Date.parse(startIso), Date.parse(endIso));
   const blocked = await collectBlocked(io, opts.repo);
   const runsStopped = io.mercury ? await collectRunsStopped(io.mercury, opts.night) : [];
   const flakes = collectFlakes(env, opts.night);

@@ -26,7 +26,7 @@ interface Recorded { method: string; path: string; body?: unknown }
 function ioWith(opts: {
   searchItems?: Record<string, unknown[]>;
   issues?: { number: number; title: string; labels?: { name: string }[]; pull_request?: unknown }[];
-  comments?: Record<number, { body: string }[]>;
+  comments?: Record<number, { body: string; created_at?: string }[]>;
   timedOutRuns?: { id: string; task: string; status: string; constraints?: { notAfter?: string } }[];
   notAfterRunIds?: string[];
   mercury?: boolean;
@@ -83,13 +83,16 @@ test('the digest files one issue with all sections and closes yesterday\'s repor
     searchItems: {
       'is:pr created': [{ number: 700, title: 'a PR', html_url: 'u1' }],
       'is:issue created': [{ number: 701, title: 'a bug', html_url: 'u2', user: { login: 'mercury-nightly' } }],
-      'is:issue commented': [{ number: 702, title: 'older issue', html_url: 'u3' }],
+      'is:issue updated': [{ number: 702, title: 'older issue', html_url: 'u3' }],
     },
     issues: [
       { number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] },
       { number: 501, title: 'blocked thing', labels: [{ name: 'nightly:blocked' }] },
     ],
-    comments: { 501: [{ body: '**Blocking question:** Which preset wins?' }] },
+    comments: {
+      501: [{ body: '**Blocking question:** Which preset wins?' }],
+      702: [{ body: 'a nightly comment', created_at: new Date('2026-09-26T12:00:00').toISOString() }],
+    },
   });
   const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
   assert.equal(out.issue, 900);
@@ -128,9 +131,11 @@ test('searches cover the LOCAL night as a UTC instant window (not the UTC day)',
   // boundary instant itself belongs to tomorrow's window only.
   const win = `${toIso('2026-09-26')}..${new Date(new Date('2026-09-27T00:00:00').getTime() - 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00')}`;
   for (const q of searches) {
-    assert.ok(q.includes(`created:${win}`) || q.includes(`commented:${win}`), `local-window: ${q}`);
+    // commented:<range> is unsupported by GitHub search (verified live); the commented section
+    // candidates come from the supported updated:<range> search instead.
+    assert.ok(q.includes(`created:${win}`) || q.includes(`updated:${win}`), `local-window: ${q}`);
     assert.ok(!q.includes('created:2026-09-26&'), `no UTC-day qualifier: ${q}`);
-    assert.ok(!q.includes('commented:2026-09-26&'), `no UTC-day qualifier: ${q}`);
+    assert.ok(!q.includes('commented:'), `no unsupported commented qualifier: ${q}`);
   }
 });
 
