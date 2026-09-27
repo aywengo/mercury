@@ -1,7 +1,7 @@
 ---
 name: issue-fix-loop
 version: 1.2.0
-description: Fix a tracked issue through the proven per-issue loop — root-cause analysis, scoped fix with regression test, one PR, independent sub-agent review, merge. Use when fixing a GitHub issue or any bug tracked as a unit of work.
+description: Fix a tracked issue through the proven per-issue loop — root-cause analysis, scoped fix with regression test, one PR, independent sub-agent review, then merge or hand-off (unattended Runs stop at a ready-for-review PR). Use when fixing a GitHub issue or any bug tracked as a unit of work.
 capabilities: [bugfix, issue, pull-request, review, workflow, regression]
 ---
 
