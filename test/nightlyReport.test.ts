@@ -1025,6 +1025,34 @@ test('an unrelated nightly:report title that merely ends in a retry date is NOT 
   assert.deepEqual(patched.sort((a, b) => a - b), [500], 'only the exact prevNight title is closed; the lookalike stays open');
 });
 
+test('the CLI rejects a flag present without its value (strict flag parsing)', async () => {
+  // The CLI block only runs when the module is the entry point; spawn it for real.
+  const { execFileSync } = await import('node:child_process');
+  const script = '/Users/roman/devops/mercury/.agents/skills/nightly/report.ts';
+  const run = (args: string[]): { output: string; status: number } => {
+    try {
+      const stdout = execFileSync(process.execPath, [script, ...args], {
+        env: { ...process.env, GH_TOKEN: 'unused' },
+        encoding: 'utf8',
+        timeout: 30_000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return { output: stdout, status: 0 };
+    } catch (e) {
+      const err = e as { stdout?: string; stderr?: string; status?: number; message?: string };
+      return { output: `${err.stdout ?? ''}${err.stderr ?? err.message ?? String(e)}`, status: err.status ?? 1 };
+    }
+  };
+  // `--night` followed by another flag: an error, never a silent default to the prior night.
+  const r1 = run(['--night', '--repo', 'aywengo/mercury']);
+  assert.notEqual(r1.status, 0);
+  assert.match(r1.output, /--night requires a value/);
+  // `--repo` without a value is the same class of error (offline: fails before any request).
+  const r2 = run(['--repo', '--dry-run']);
+  assert.notEqual(r2.status, 0);
+  assert.match(r2.output, /--repo requires a value/);
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);

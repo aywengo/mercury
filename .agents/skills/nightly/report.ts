@@ -574,9 +574,17 @@ function mercuryFromEnv(env: NodeJS.ProcessEnv): ReportIo['mercury'] | undefined
 const isMain = process.argv[1] && import.meta.url.endsWith(basename(process.argv[1]));
 if (isMain) {
   const args = process.argv.slice(2);
+  // A flag present WITHOUT its value (end of argv, or followed by another flag) must be an
+  // error, not a silent default: `report.ts --night` would otherwise fall back to the prior
+  // night and file/close a report for a different target than the operator asked for.
   const flag = (name: string): string | undefined => {
     const i = args.indexOf(name);
-    return i >= 0 ? args[i + 1] : undefined;
+    if (i < 0) return undefined;
+    const value = args[i + 1];
+    if (value === undefined || value.startsWith('--')) {
+      throw new Error(`${name} requires a value (got ${value === undefined ? 'nothing' : 'another flag'})`);
+    }
+    return value;
   };
   const repo = flag('--repo') ?? process.env.REPO ?? '';
   // Local calendar date, not UTC: a nightly scheduled in local tz that fires at 00:05 belongs
