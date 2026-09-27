@@ -393,7 +393,7 @@ Create Run accepts:
   "repository": { "url": "https://github.com/acme/app" },
   "preset": {
     "id": "reviewer",
-    "version": "1.0.0"
+    "version": "1.1.0"
   }
 }
 ```

@@ -56,27 +56,13 @@ ladder, whatever its text promises.
 
 ## Fix procedure (per issue)
 
-1. **Analyze** — confirm the root cause before touching code. Read the
-   failing path end to end and state the mechanism, not the symptom.
-   Identify an existing test to model the regression test on.
-2. **Implement** — fix the root cause at the single choke point (the one
-   write/read path, not every caller). Add a regression test and prove it:
-   it fails on the base, passes on the fix. Run typecheck, the focused
-   suite, then the full suite; record the pass counts.
-3. **Open a PR** — one PR per issue; branch `fix/issue-<N>-<slug>`,
-   description links the issue with `Fixes #N`. Keep the diff scoped to
-   the issue.
-4. **Independent review** — a separate reviewer (sub-agent or second
-   model) reviews the PR. Classify findings as blocking vs non-blocking.
-5. **Address comments** — for each finding:
-   - Fix it if feasible and worth fixing.
-   - Waive it if risky or unrelated — with a one-line reason, never
-     silently.
-   - File a **new issue** for anything that deserves tracking.
-   - Repeat review until all comments are addressed.
-6. **Merge** — merge, close the issue, record the closing PR/commit.
-
-Then pick up the next open issue in priority order.
+The procedure lives in one place:
+[`.agents/skills/issue-fix-loop/SKILL.md`](../.agents/skills/issue-fix-loop/SKILL.md) —
+analyze the root cause, fix at the choke point with a proven regression test, one PR per issue,
+independent review (at most 2 rounds, trusted reviewers only, a blocking test for findings),
+then done or hand-off. It is not repeated here so the two copies cannot drift; review
+severities are defined in
+[`.agents/skills/code-review/SKILL.md`](../.agents/skills/code-review/SKILL.md).
 
 ## Rules of thumb
 

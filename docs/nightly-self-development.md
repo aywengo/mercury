@@ -128,10 +128,13 @@ issue `nightly:blocked`, put the question in an issue comment, finish the Run.
    profiles (`credential-profiles-design.md`) ship, this requires a host
    dedicated to the nightly identity (that design's §12), because local Runs
    inherit the worker's whole environment.
-6. **Budgets.** Maximum PRs per night and token budget per night, enforced by
-   the skills. The per-hour dispatch cap of `dispatcher-bot-design.md` is not
-   in the B1 config; the nightly schedule is bounded by its cron and
-   `singleFlight`.
+6. **Budgets.** Per-Run caps are rules in the `nightly` skill ("Unattended
+   limits"): at most 2 review rounds per PR, one PR per Run, one batched push
+   per round, and a hand-off when the diff outgrows 3x its first passing
+   version. The per-night caps (maximum PRs and tokens per night) are not
+   enforced by code yet; until they are, the nightly schedule is bounded by its
+   cron, `singleFlight` and `notAfter`. The per-hour dispatch cap of
+   `dispatcher-bot-design.md` is not in the B1 config.
 7. **Fail-closed capabilities.** Crew #721 is closed (PR #743).
 
 ### 5.1 Labels
@@ -272,6 +275,12 @@ is windowed. Always-on is simpler; windowed relies on Run durability across
 restarts.
 
 ## 10. Revision history
+
+### 2026-09-27 — budgets located
+
+§5.6 now says where each budget lives: per-Run caps (review rounds, PRs per
+Run, batched pushes, diff growth) are rules in the `nightly` skill; per-night
+PR and token caps are not enforced by code yet.
 
 ### 2026-09-26 — identity named
 
