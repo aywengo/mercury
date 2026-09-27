@@ -969,6 +969,37 @@ test('the survivor is revalidated before and during duplicate cleanup', async ()
   assert.deepEqual(patched, [500], 'only yesterday is closed; the cleanup aborted before closing any duplicate');
 });
 
+test('stale older reports left open by failed closes are retried; newer ones never', async () => {
+  const { io: base } = ioWith({
+    issues: [
+      { number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] }, // prevNight
+      { number: 480, title: 'nightly report — 2026-09-24', labels: [{ name: 'nightly:report' }] }, // retry night
+      { number: 460, title: 'nightly report — 2026-09-23', labels: [{ name: 'nightly:report' }] }, // retry night
+      { number: 440, title: 'nightly report — 2026-09-21', labels: [{ name: 'nightly:report' }] }, // TOO old: outside the bounded retry
+    ],
+  });
+  const patched: number[] = [];
+  let createSeen = false;
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('state=all')) return { body: [], status: 200 };
+      if (path.includes('state=open') && !path.includes('nightly%3Ablocked')) {
+        // The reconciliation listing (after create) shows only the current digest; the
+        // closeables listing (before create) returns the fixture.
+        return createSeen ? { body: [{ number: 900, title: 'nightly report — 2026-09-26' }], status: 200 } : base.get(path);
+      }
+      return base.get(path);
+    },
+    async post() { createSeen = true; return { body: { number: 900 }, status: 201 }; },
+    async patch(path) { patched.push(Number(/issues\/(\d+)$/.exec(path)![1])); return { body: {}, status: 200 }; },
+  };
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.issue, 900);
+  // prevNight + both retry nights closed; the too-old 2026-09-21 stays open (bounded policy)
+  // and the current digest 900 is never touched.
+  assert.deepEqual(patched.sort((a, b) => a - b), [460, 480, 500]);
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);

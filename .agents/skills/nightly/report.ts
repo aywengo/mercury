@@ -379,11 +379,17 @@ export async function runReport(
     if ((all ?? []).length < 100) break;
   }
 
-  // Find OPEN reports for the close set: ONLY the immediately previous night's report. A
+  // Find OPEN reports for the close set: the immediately previous night's report, plus a
+  // bounded STALE-RETRY set of the two nights before it. The primary set is prevNight only: a
   // backfill (--night <today-1> while today's digest is open) or a clock-skewed run must never
-  // erase a NEWER digest.
+  // erase a NEWER digest. But a FAILED prevNight close would otherwise stay open forever
+  // (later runs only ever target their own prevNight), so the retry set re-closes open digests
+  // for prevNight-1 and prevNight-2 - strictly OLDER than any current open report, so the
+  // retry can never close a newer digest either.
   const prevNight = prevDay(opts.night);
+  const retryNights = new Set([prevDay(prevNight), prevDay(prevDay(prevNight))]);
   const closeables: { number: number; title?: string }[] = [];
+  const staleRetries: { number: number; title?: string }[] = [];
   for (let page = 1; page <= SEARCH_CAP; page++) {
     const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
     const res = await io.get(path);
@@ -397,6 +403,9 @@ export async function runReport(
     for (const old of prev) {
       if (old.number === undefined || old.pull_request !== undefined) continue;
       if (old.title === `nightly report — ${prevNight}`) closeables.push({ number: old.number, title: old.title });
+      else if (typeof old.title === 'string' && retryNights.has(old.title.slice('nightly report — '.length))) {
+        staleRetries.push({ number: old.number, title: old.title });
+      }
     }
     if (prev.length < 100) break;
   }
@@ -494,6 +503,13 @@ export async function runReport(
     // throwing, and the JSON must not claim a close that did not happen. The digest is already
     // filed, so a failed close is reported, not fatal - tonight's run closes it.
     if (closed.status >= 200 && closed.status < 300) closedPrevious = closedPrevious ?? old.number;
+  }
+  // Stale-retry pass: failed previous closes would otherwise stay open permanently (every
+  // later run only targets ITS prevNight). These titles are strictly older than the current
+  // digest, so closing them cannot erase a newer report.
+  for (const stale of staleRetries) {
+    if (stale.number === issue) continue;
+    await io.patch(`/repos/${opts.repo}/issues/${stale.number}`, { state: 'closed' });
   }
   return { night: opts.night, ...(issue !== undefined ? { issue } : {}), ...(closedPrevious !== undefined ? { closedPrevious } : {}), ...data };
 }
