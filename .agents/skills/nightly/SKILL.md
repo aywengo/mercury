@@ -127,7 +127,9 @@ issues. Sections:
   is empty, not faked.
 - **Flakes** — the `nightly-e2e` flake-clock state (same state file).
 
-The report is read-only except for the digest issue itself and the close of yesterday's.
+The report is read-only except for the digest issue itself, the close of
+yesterday's open report, and the closure of same-night duplicates from a
+racing retry (the smallest issue number survives).
 
 ## Tests
 

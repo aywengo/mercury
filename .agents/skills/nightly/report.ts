@@ -13,8 +13,9 @@
  *
  * Output: exactly one JSON line
  * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, blocked, runsStopped, flakes }`.
- * No dependencies; all I/O injectable. Writes: the digest issue itself and the close of the
- * previous open report (recorded only when the close returns 2xx).
+ * No dependencies; all I/O injectable. Writes: the digest issue itself, the close of the
+ * previous open report, and the closure of same-night duplicates created by a racing retry
+ * (the smallest issue number always survives).
  */
 
 import { basename } from 'node:path';
@@ -25,7 +26,6 @@ const L_BLOCKED = 'nightly:blocked';
 const SEARCH_PER_PAGE = 100;
 const SEARCH_CAP = 10; // pages of 100 = 1000 hits, bounded
 const LAST_PAGES = 3; // comment pages scanned, counting back from the Link-header last page
-const MAX_COMMENT_PAGES = 100; // sanity cap on the Link-derived last page
 
 export interface ReportIo {
   get(path: string): Promise<{ body: unknown; status: number; link?: string | null }>;
@@ -132,7 +132,11 @@ export async function blockingQuestion(io: ReportIo, repo: string, issue: number
   const res1 = await io.get(`/repos/${repo}/issues/${issue}/comments?per_page=100&page=1`);
   if (res1.status < 200 || res1.status >= 300) return undefined; // unreadable comments: leave the question unset
   const lastRel = /<[^>]*[?&]page=(\d+)[^>]*>;\s*rel="last"/.exec(res1.link ?? '');
-  const lastPage = Math.max(1, Math.min(MAX_COMMENT_PAGES, lastRel ? Number(lastRel[1]) : 1));
+  // No artificial cap: the scan itself is bounded to LAST_PAGES requests counting back from the
+  // parsed last page, so even a 10k+ comment thread costs a fixed number of requests and still
+  // reaches the real tail. Only an invalid number falls back to page 1.
+  const parsed = lastRel ? Number(lastRel[1]) : 1;
+  const lastPage = Number.isInteger(parsed) && parsed >= 1 ? parsed : 1;
   // Page 1 is ALREADY fetched: scan it for markers even when the tail scan starts later. An
   // old marker on page 1 is only ever a fallback candidate (a newer marker on a later page
   // overwrites it), and it is strictly better than missing a marker entirely.
