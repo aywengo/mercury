@@ -388,9 +388,11 @@ export function uninstallBotService(
   io.out(teardownConsequence(alias) + '\n');
   if (opts.reassignOwner !== null) {
     // Checked after the consequence print: the contract is that uninstall ALWAYS states what
-    // happens to the bot's Runs, including on this refusal path.
-    io.err(`host bot service uninstall: --reassign-runs is not supported yet: no owner-transfer API exists ` +
-      `(aywengo/mercury#760). The bot's Runs stay owned by bot-${alias}.\n`);
+    // happens to the bot's Runs, including on this refusal path. The TRANSFER itself runs in the
+    // CLI layer (reassignRunsForBot, #760) BEFORE this function is called - teardown must never
+    // start on a half-transferred bot, and this sync function cannot await the HTTP call.
+    io.err(`host bot service uninstall: --reassign-runs was not applied (the CLI runs it before ` +
+      `teardown; it requires MERCURY_ADMIN_TOKEN and a reachable API). The bot's Runs stay owned by bot-${alias}.\n`);
     return 1;
   }
   if (!opts.yes) {
@@ -479,4 +481,64 @@ export function uninstallBotService(
     }
   }
   return 0;
+}
+
+
+/** Reassign a removed bot's Runs to another owner (§17.7, #760): POST /api/runs/reassign with the
+ * host's admin token. Called by the CLI BEFORE uninstallBotService so teardown never starts on a
+ * half-transferred bot; a failure here aborts the uninstall with exit code 1.
+ *
+ * `post` is injectable for tests; the default is the platform fetch with a bounded timeout. The
+ * API base follows the bot's own config (`api.url`) with the same fallback the bot process uses,
+ * so a host whose mercury.env is broken can still reach its API the way the bot did. */
+export async function reassignBotRuns(
+  alias: string,
+  toOwner: string,
+  io: { out: (s: string) => void; err: (s: string) => void },
+  env: NodeJS.ProcessEnv = process.env,
+  post: (url: string, init: { headers: Record<string, string>; body: string; signal: AbortSignal }) =>
+    Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> = (url, init) => fetch(url, init) as ReturnType<typeof fetch>,
+): Promise<number> {
+  assertAlias(alias);
+  const owner = toOwner.trim();
+  if (owner === '') {
+    io.err('host bot service uninstall: --reassign-runs requires an owner value.\n');
+    return 1;
+  }
+  const adminToken = env.MERCURY_ADMIN_TOKEN ?? '';
+  if (adminToken === '') {
+    io.err('host bot service uninstall: --reassign-runs requires MERCURY_ADMIN_TOKEN (an admin token) in the environment.\n');
+    return 1;
+  }
+  // The bot config may already be gone (a re-run after a partial uninstall); fall back to the
+  // default base the bot process would have used.
+  let baseUrl = `http://127.0.0.1:${env.MERCURY_PORT ?? 3000}`;
+  try {
+    const cfgPath = botConfigFile(alias, env);
+    if (existsSync(cfgPath)) {
+      const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as { api?: { url?: string } };
+      if (cfg.api?.url) baseUrl = cfg.api.url.replace(/\/$/, '');
+    }
+  } catch {
+    // Unreadable config: the default base stands.
+  }
+  try {
+    const res = await post(`${baseUrl}/api/runs/reassign`, {
+      headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ fromOwner: `bot-${alias}`, toOwner: owner }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => null) as { error?: string } | null;
+      io.err(`host bot service uninstall: run reassignment failed (POST /api/runs/reassign -> ${res.status}` +
+        `${detail?.error ? `: ${detail.error}` : ''}). Nothing was uninstalled.\n`);
+      return 1;
+    }
+    const data = await res.json() as { transferred?: number };
+    io.out(`Reassigned ${data.transferred ?? 0} Run(s) from bot-${alias} to ${owner}.\n`);
+    return 0;
+  } catch (err) {
+    io.err(`host bot service uninstall: run reassignment failed (${err instanceof Error ? err.message : String(err)}). Nothing was uninstalled.\n`);
+    return 1;
+  }
 }

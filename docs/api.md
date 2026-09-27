@@ -431,6 +431,30 @@ The browser dashboard uses `fetch()` streaming rather than native
 `EventSource`, because authenticated fetches need the session cookie behavior
 used by the rest of the app.
 
+### POST /api/runs/reassign
+
+Admin-only owner transfer for a removed bot's Runs
+([dispatcher-bot-design §17.7](dispatcher-bot-design.md); issue #760). Rewrites `owner_id` for
+every Run of `fromOwner` inside one transaction and appends a `run.owner_reassigned` event to
+each transferred Run, so the audit trail survives the ownership change.
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/runs/reassign \
+  -H "Authorization: Bearer $MERCURY_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"fromOwner": "bot-nightly", "toOwner": "alice"}'
+```
+
+Response: `{ "transferred": <n>, "runIds": [...] }`. An owner with no Runs answers
+`transferred: 0` (idempotent, not an error).
+
+`fromOwner` and `toOwner` are owner labels (no whitespace, 1–64 chars, must differ); `toOwner`
+is deliberately not checked against an owner registry — the common case transfers to a NEW owner
+who owns no Runs yet. Redaction is unaffected: events were redacted at write time and pass the
+redactor again on read; the transfer changes who can list the Runs, never what is stored.
+`host bot service uninstall --reassign-runs <owner>` calls this route with the host's admin
+token before any teardown, and aborts the uninstall when it fails.
+
 ## Input, cancellation and retry
 
 Submit input only while a Run is `NEEDS_INPUT`:

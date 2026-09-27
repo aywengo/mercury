@@ -283,6 +283,25 @@ export function createRoutes(deps: RoutesDeps): Router {
     res.status(202).json({ claimHash: outcome.claimHash, queued: outcome.queued });
   });
 
+  // POST /api/runs/reassign - admin-only owner transfer for a removed bot's Runs (§17.7, #760).
+  // 403 (not 404) for an authenticated non-admin: the endpoint's existence is operator-level
+  // knowledge, matching the knowledge-status precedent.
+  router.post('/runs/reassign', (req: Request, res: Response) => {
+    if (!req.auth?.isAdmin) {
+      res.status(403).json({ error: 'run reassignment requires an admin token' });
+      return;
+    }
+    const body = req.body ?? {};
+    try {
+      const fromOwner = typeof body.fromOwner === 'string' ? body.fromOwner : '';
+      const toOwner = typeof body.toOwner === 'string' ? body.toOwner : '';
+      const out = deps.runService.reassignRuns({ fromOwner, toOwner });
+      res.json({ transferred: out.transferred, runIds: out.runIds });
+    } catch (err) {
+      sendError(res, err, deps.logger);
+    }
+  });
+
   // POST /api/runs
   router.post('/runs', (req: Request, res: Response) => {
     const body = req.body ?? {};
