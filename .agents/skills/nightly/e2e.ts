@@ -30,23 +30,19 @@
 
 import { basename } from 'node:path';
 import { homedir } from 'node:os';
+import { REPO_RE, localDateString, ghToken, ghGet, ghPost, FETCH_TIMEOUT_MS } from './shared.ts';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+// REPO_RE comes from shared.ts (#769): one strict regex everywhere.
 /** A flake is filed as a defect only after the same fingerprint flaked on 3 distinct nights. */
 export const FLAKE_FILE_NIGHTS = 3;
-const FETCH_TIMEOUT_MS = 30_000;
 
-/** The LOCAL date as YYYY-MM-DD (a nightly that fires at 00:05 local belongs to that local day,
- * even when UTC has already rolled over). */
-export function localDateString(d: Date = new Date()): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
+
+// The LOCAL date helper lives in shared.ts (#769); re-exported so report.ts and the tests keep
+// one import path.
+export { localDateString } from './shared.ts';
 
 export interface SuiteFailure {
   /** The failing test's full name from the spec reporter. */
@@ -226,34 +222,6 @@ export function recordFlakeNight(state: FlakeState, fp: string, test: string, er
 }
 
 // ---- GitHub I/O (thin, bounded, fail-closed on transport) ----
-
-function ghToken(env: NodeJS.ProcessEnv): string {
-  const tok = env.GH_TOKEN || env.GITHUB_TOKEN || '';
-  if (!tok) throw new Error('GH_TOKEN (or GITHUB_TOKEN) is required: the skill files and comments on issues');
-  return tok;
-}
-
-async function ghGet(path: string, token: string): Promise<{ body: unknown; status: number }> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  // Every HTTP response is returned, 5xx included — callers own the non-2xx policy.
-  return { body: await res.json().catch(() => null), status: res.status };
-}
-
-async function ghPost(path: string, body: unknown, token: string): Promise<{ body: unknown; status: number }> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  // EVERY HTTP response is returned, 5xx included: the callers own the non-2xx policy (rollback,
-  // honest observation) and the single-line report must always be emitted. Network-level errors
-  // (DNS, abort) still throw — they are not responses.
-  return { body: await res.json().catch(() => null), status: res.status };
-}
 
 /** The injected I/O surface: the suite runner and the GitHub calls. Tests pass fakes. */
 export interface E2eIo {

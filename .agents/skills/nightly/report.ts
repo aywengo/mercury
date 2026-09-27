@@ -23,7 +23,8 @@
  */
 
 import { basename } from 'node:path';
-import { loadFlakeState, localDateString } from './e2e.ts';
+import { loadFlakeState } from './e2e.ts';
+import { assertRepo, localDateString, nextDay, prevDay, ghGet, ghPost, ghPatch, ghToken, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const L_REPORT = 'nightly:report';
 const L_BLOCKED = 'nightly:blocked';
@@ -65,14 +66,6 @@ function assertNight(night: string): void {
   const roundTrip = `${new Date(`${night}T12:00:00Z`).getUTCFullYear()}-${String(new Date(`${night}T12:00:00Z`).getUTCMonth() + 1).padStart(2, '0')}-${String(new Date(`${night}T12:00:00Z`).getUTCDate()).padStart(2, '0')}`;
   if (roundTrip !== night) {
     throw new Error(`night is not a real calendar date: '${night}'`);
-  }
-}
-
-function assertRepo(repo: string): void {
-  // Same regex and message as e2e.ts (#739): segments must START alphanumeric, so '..' can
-  // never reach a URL segment. (next.ts/select.ts still carry the older loose form.)
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(repo)) {
-    throw new Error(`repo must be exactly owner/name (e.g. aywengo/mercury); got '${repo}'`);
   }
 }
 
@@ -424,21 +417,6 @@ export function nightWindow(night: string): { startMs: number; endMs: number; st
   return { startMs, endMs, startIso, endIso };
 }
 
-/** The day AFTER the report night, computed in UTC on the date string itself (calendar
- * arithmetic on the LABEL, not on the current time). */
-function nextDay(night: string): string {
-  const d = new Date(`${night}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().slice(0, 10);
-}
-
-/** The day BEFORE the report night (the only report this run is allowed to close). */
-function prevDay(night: string): string {
-  const d = new Date(`${night}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() - 1);
-  return d.toISOString().slice(0, 10);
-}
-
 /** The night the report covers when --night is absent: the §4.3 window that just ENDED -
  * today's local date when the fire is at/after 06:00 local (the bot config fires the report
  * at 06:05), yesterday's date in the small hours before midnight-carryover edge handling.
@@ -574,42 +552,6 @@ export async function runReport(
 }
 
 // ---- CLI ----
-
-function ghToken(env: NodeJS.ProcessEnv): string {
-  const tok = env.GH_TOKEN || env.GITHUB_TOKEN || '';
-  if (!tok) throw new Error('GH_TOKEN (or GITHUB_TOKEN) is required - even for --dry-run, which still runs the searches');
-  return tok;
-}
-
-const FETCH_TIMEOUT_MS = 30_000;
-
-async function ghGet(path: string, token: string): Promise<{ body: unknown; status: number; link?: string | null }> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  return { body: await res.json().catch(() => null), status: res.status, link: res.headers.get('link') };
-}
-
-async function ghPost(path: string, body: unknown, token: string): Promise<{ body: unknown; status: number }> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  return { body: await res.json().catch(() => null), status: res.status };
-}
-
-async function ghPatch(path: string, body: unknown, token: string): Promise<{ body: unknown; status: number }> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method: 'PATCH',
-    headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  return { body: await res.json().catch(() => null), status: res.status };
-}
 
 function mercuryFromEnv(env: NodeJS.ProcessEnv): ReportIo['mercury'] | undefined {
   const url = env.MERCURY_REPORT_API_URL;

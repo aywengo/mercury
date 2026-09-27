@@ -205,10 +205,15 @@ test('a 422 that is NOT already-exists fails hard (a blocked exit must not proce
   assert.equal(calls.filter((c) => c.method === 'POST' && c.path.endsWith('/comments')).length, 0, 'no comment without the label');
 });
 
-test('repo validation accepts dot-segment names like octo-org/.github (aligned with select.ts)', async () => {
+test('repo validation refuses dot-LEADING segments like octo-org/.github (strict shared regex, #769)', async () => {
+  // The old loose mirror accepted it; e2e/report already refused dot-leading segments. One strict
+  // regex everywhere now: a repo named '.github' is refused by the nightly scripts (the nightly
+  // never targets such a repo, and '..' must never reach a URL segment).
   const { io, calls } = ioWith([], {});
-  const out = await runNext(io, ENV, { repo: 'octo-org/.github', dryRun: true });
-  assert.equal(out.rung, 'none');
+  await assert.rejects(
+    () => runNext(io, ENV, { repo: 'octo-org/.github', dryRun: true }),
+    /repo must be exactly owner\/name/,
+  );
   assert.equal(calls.filter((c) => c.method.startsWith('POST')).length, 0);
 });
 
