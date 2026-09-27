@@ -660,6 +660,48 @@ test('a 2xx open-report listing with an unexpected body fails BEFORE any write',
   assert.equal(posted, false, 'no duplicate is created when the listing is unreadable');
 });
 
+test('an impossible calendar date is rejected before any read or write', async () => {
+  const { io, calls } = ioWith({});
+  await assert.rejects(
+    () => runReport(io, ENV, { repo: REPO, night: '2026-02-30', dryRun: false }),
+    /not a real calendar date/,
+  );
+  assert.equal(calls.length, 0, 'no requests happen for an impossible night');
+  await assert.rejects(
+    () => runReport(io, ENV, { repo: REPO, night: '2026-9-6', dryRun: false }),
+    /night must be YYYY-MM-DD/,
+  );
+});
+
+test('a CLOSED same-night digest is reused (all-states lookup), not duplicated', async () => {
+  const { io: base } = ioWith({
+    issues: [
+      { number: 690, title: 'nightly report — 2026-09-26', labels: [{ name: 'nightly:report' }] }, // closed by an operator
+      { number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] },
+    ],
+  });
+  const stateAll: ReportIo = {
+    ...base,
+    async get(path) {
+      const r = await base.get(path);
+      if (path.includes('state=all')) {
+        // All-states listing: include the closed same-night issue (state field).
+        return { body: [
+          { number: 690, title: 'nightly report — 2026-09-26', state: 'closed' },
+          { number: 500, title: 'nightly report — 2026-09-25', state: 'open' },
+        ], status: 200 };
+      }
+      return r;
+    },
+    async post() { return { body: { number: 906 }, status: 201 }; },
+  };
+  let created = 0;
+  const spy: ReportIo = { ...stateAll, async post(path, body) { created += 1; return stateAll.post(path, body); } };
+  const out = await runReport(spy, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(created, 0, 'no duplicate is created when the closed same-night digest exists');
+  assert.equal(out.issue, 690);
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);

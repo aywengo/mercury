@@ -53,6 +53,18 @@ export interface ReportResult extends ReportData {
   closedPrevious?: number;
 }
 
+/** A real YYYY-MM-DD: format check AND calendar round-trip (2026-02-30 normalizes to March 2,
+ * which would title one night while searching another). */
+function assertNight(night: string): void {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(night)) {
+    throw new Error(`night must be YYYY-MM-DD; got '${night}'`);
+  }
+  const roundTrip = `${new Date(`${night}T12:00:00Z`).getUTCFullYear()}-${String(new Date(`${night}T12:00:00Z`).getUTCMonth() + 1).padStart(2, '0')}-${String(new Date(`${night}T12:00:00Z`).getUTCDate()).padStart(2, '0')}`;
+  if (roundTrip !== night) {
+    throw new Error(`night is not a real calendar date: '${night}'`);
+  }
+}
+
 function assertRepo(repo: string): void {
   // Same regex and message as e2e.ts (#739): segments must START alphanumeric, so '..' can
   // never reach a URL segment. (next.ts/select.ts still carry the older loose form.)
@@ -275,6 +287,7 @@ export async function runReport(
   opts: { repo: string; night: string; dryRun: boolean },
 ): Promise<ReportResult> {
   assertRepo(opts.repo);
+  assertNight(opts.night);
   // The LOCAL night as a UTC instant range [00:00 local, 00:00 local next day): GitHub search
   // date qualifiers match one UTC DAY, but the nightly window is local - in Poznań (UTC+2) a
   // plain `created:NIGHT` misses everything between local midnight and 02:00 (verified live:
@@ -303,11 +316,29 @@ export async function runReport(
   // NEVER touches a same-night issue (a concurrent invocation's digest is not ours to close).
   const title = `nightly report — ${opts.night}`;
 
-  // Find open reports; reuse a same-night one if it exists. The close set (below) is ONLY the
-  // immediately previous night's report: a backfill (--night <today-1> while today's digest is
-  // open) or a clock-skewed run must never erase a NEWER digest.
-  const prevNight = prevDay(opts.night);
   let issue: number | undefined;
+  // Idempotency first: look for an existing same-night digest in ANY state (an operator or an
+  // interrupted cleanup can close it before a retry; the retry must reuse, not duplicate).
+  for (let page = 1; page <= SEARCH_CAP && issue === undefined; page++) {
+    const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=all&per_page=100&page=${page}`;
+    const res = await io.get(path);
+    if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
+    const all = res.body as { number?: number; title?: string; pull_request?: unknown; state?: string }[] | null;
+    if (!Array.isArray(all)) throw new Error(`GET ${path} -> 2xx with an unexpected body (expected an issue array)`);
+    for (const cand of all) {
+      if (cand.number === undefined || cand.pull_request !== undefined) continue;
+      if (cand.title === title) {
+        issue = cand.number;
+        break;
+      }
+    }
+    if ((all ?? []).length < 100) break;
+  }
+
+  // Find OPEN reports for the close set: ONLY the immediately previous night's report. A
+  // backfill (--night <today-1> while today's digest is open) or a clock-skewed run must never
+  // erase a NEWER digest.
+  const prevNight = prevDay(opts.night);
   const closeables: { number: number; title?: string }[] = [];
   for (let page = 1; page <= SEARCH_CAP; page++) {
     const path = `/repos/${opts.repo}/issues?labels=${encodeURIComponent(L_REPORT)}&state=open&per_page=100&page=${page}`;
@@ -321,8 +352,7 @@ export async function runReport(
     if (!Array.isArray(prev)) throw new Error(`GET ${path} -> 2xx with an unexpected body (expected an issue array)`);
     for (const old of prev) {
       if (old.number === undefined || old.pull_request !== undefined) continue;
-      if (old.title === title) issue = issue ?? old.number;
-      else if (old.title === `nightly report — ${prevNight}`) closeables.push({ number: old.number, title: old.title });
+      if (old.title === `nightly report — ${prevNight}`) closeables.push({ number: old.number, title: old.title });
     }
     if (prev.length < 100) break;
   }
