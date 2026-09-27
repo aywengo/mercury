@@ -14,8 +14,11 @@
  * Output: exactly one JSON line
  * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, blocked, runsStopped, flakes }`.
  * No dependencies; all I/O injectable. Writes: the digest issue itself, the close of the
- * previous open report, and the closure of same-night duplicates created by a racing retry
- * (the smallest OPEN issue number survives; a closed reuse candidate never wins).
+ * previous open report, the closure of same-night duplicates created by a racing retry
+ * (the smallest OPEN issue number survives; a closed reuse candidate never wins), and a
+ * bounded stale-retry pass that closes open reports from the TWO nights before the previous
+ * one (a failed prevNight close would otherwise stay open forever; those titles are strictly
+ * older than any current digest).
  */
 
 import { basename } from 'node:path';
@@ -403,7 +406,8 @@ export async function runReport(
     for (const old of prev) {
       if (old.number === undefined || old.pull_request !== undefined) continue;
       if (old.title === `nightly report — ${prevNight}`) closeables.push({ number: old.number, title: old.title });
-      else if (typeof old.title === 'string' && retryNights.has(old.title.slice('nightly report — '.length))) {
+      else if (typeof old.title === 'string' && old.title.startsWith('nightly report — ')
+        && retryNights.has(old.title.slice('nightly report — '.length))) {
         staleRetries.push({ number: old.number, title: old.title });
       }
     }

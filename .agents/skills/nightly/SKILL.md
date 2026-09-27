@@ -131,8 +131,11 @@ issues. Sections:
 - **Flakes** — the `nightly-e2e` flake-clock state (same state file).
 
 The report is read-only except for the digest issue itself, the close of
-yesterday's open report, and the closure of same-night duplicates from a
-racing retry (the smallest OPEN issue number survives).
+yesterday's open report, the closure of same-night duplicates from a racing
+retry (the smallest OPEN issue number survives), and a bounded stale-retry
+pass that closes open reports from the TWO nights before yesterday's (a
+failed close would otherwise stay open forever; those titles are strictly
+older than any current digest, so a newer report is never erased).
 
 ## Tests
 

@@ -1000,6 +1000,31 @@ test('stale older reports left open by failed closes are retried; newer ones nev
   assert.deepEqual(patched.sort((a, b) => a - b), [460, 480, 500]);
 });
 
+test('an unrelated nightly:report title that merely ends in a retry date is NOT closed', async () => {
+  const { io: base } = ioWith({
+    issues: [
+      { number: 500, title: 'nightly report — 2026-09-25', labels: [{ name: 'nightly:report' }] },
+      { number: 470, title: 'postmortem notes — 2026-09-24', labels: [{ name: 'nightly:report' }] }, // same suffix, different prefix
+    ],
+  });
+  const patched: number[] = [];
+  let createSeen = false;
+  const io: ReportIo = {
+    async get(path) {
+      if (path.includes('state=all')) return { body: [], status: 200 };
+      if (path.includes('state=open') && !path.includes('nightly%3Ablocked')) {
+        return createSeen ? { body: [{ number: 900, title: 'nightly report — 2026-09-26' }], status: 200 } : base.get(path);
+      }
+      return base.get(path);
+    },
+    async post() { createSeen = true; return { body: { number: 900 }, status: 201 }; },
+    async patch(path) { patched.push(Number(/issues\/(\d+)$/.exec(path)![1])); return { body: {}, status: 200 }; },
+  };
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.equal(out.issue, 900);
+  assert.deepEqual(patched.sort((a, b) => a - b), [500], 'only the exact prevNight title is closed; the lookalike stays open');
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);
