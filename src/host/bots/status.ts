@@ -86,6 +86,12 @@ export async function statusView(cfg: BotConfig, client: SchedulerClient, nowMs:
       if (page === 19) capHit = true;
     }
   } catch (err) {
+    // apiError must imply "nothing here is usable" (#759): a walk that threw after processing
+    // pages leaves view.lastActions / view.dispatchesLastHour partially populated, and the only
+    // current caller already ignores them on apiError - but a future caller reading the fields
+    // would see a plausible-looking half-truth. Reset both so apiError implies empty.
+    view.lastActions = [];
+    view.dispatchesLastHour = 0;
     view.apiError = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
   }
   view.hourlyCapHit = capHit;
