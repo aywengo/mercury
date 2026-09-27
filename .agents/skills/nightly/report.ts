@@ -178,7 +178,14 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
   const out: { runId?: string; task?: string; status?: string }[] = [];
   let path: string | undefined = '/api/runs?status=TIMED_OUT&limit=100';
   for (let page = 0; page < 10 && path; page++) {
-    const res = await mercury.get(path);
+    let res: Awaited<ReturnType<typeof mercury.get>>;
+    try {
+      res = await mercury.get(path);
+    } catch {
+      // Transport errors (fetch timeout/connection reset) are the same best-effort case as a
+      // failing status: end the scan and return what was collected so far.
+      return out;
+    }
     if (res.status < 200 || res.status >= 300) {
       // The Mercury section is optional/best-effort: a failing runs listing ends the scan and
       // returns what was collected so far (an empty list on a first-page failure) instead of
@@ -209,7 +216,12 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
       let timedOut = false;
       let evPages = 0;
       while (evPath && evPages < 10 && !timedOut) {
-        const evRes = await mercury.get(evPath);
+        let evRes: Awaited<ReturnType<typeof mercury.get>>;
+        try {
+          evRes = await mercury.get(evPath);
+        } catch {
+          break; // transport error on this run's events: skip the run, do not fail the digest
+        }
         if (evRes.status < 200 || evRes.status >= 300) break; // unreadable events: skip, do not fail the digest
         // The API returns MercuryEvent objects: the reason lives in `payload` (the worker
         // appends run.timed_out with payload { runId, reason }).
@@ -254,6 +266,12 @@ function escMd(text: string): string {
   return text.replace(/([\\`*_\[\]()<>#!])/g, '\\$1');
 }
 
+/** Caller-controlled text inside a Markdown inline-code span: code spans cannot be escaped with
+ * backslashes, so strip the delimiter characters and flatten newlines instead of escaping. */
+function codeSpan(text: string, max = 120): string {
+  return `\`${text.replace(/[`\r\n]+/g, ' ').slice(0, max)}\``;
+}
+
 function digestBody(night: string, data: ReportData, note?: string): string {
   const lines: string[] = [`# nightly report — ${night}`, ''];
   if (note) lines.push(`_${note}_`, '');
@@ -270,9 +288,9 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   lines.push('## Blocked (nightly:blocked, waiting on a human)',
     data.blocked.length === 0 ? '_none_' : data.blocked.map((b) => `- #${b.number} ${escMd(b.title)}${b.question ? ` — question: ${escMd(b.question)}` : ''}`).join('\n'), '');
   lines.push('## Runs stopped by notAfter (the 06:00 window end)',
-    data.runsStopped.length === 0 ? '_none_' : data.runsStopped.map((r) => `- \`${r.runId}\` — ${(r.task ?? '').slice(0, 120)}`).join('\n'), '');
+    data.runsStopped.length === 0 ? '_none_' : data.runsStopped.map((r) => `- ${codeSpan(r.runId ?? '')} — ${codeSpan(r.task ?? '')}`).join('\n'), '');
   lines.push('## Flakes (nightly-e2e clock)',
-    data.flakes.length === 0 ? '_none_' : data.flakes.map((f) => `- \`${f.fingerprint}\` ${f.test} — nights: ${f.nights.join(', ')}`).join('\n'), '');
+    data.flakes.length === 0 ? '_none_' : data.flakes.map((f) => `- ${codeSpan(f.fingerprint, 16)} ${escMd(f.test)} — nights: ${f.nights.join(', ')}`).join('\n'), '');
   lines.push('---', '_Closed by tomorrow night\'s report._');
   return lines.join('\n');
 }

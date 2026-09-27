@@ -780,6 +780,69 @@ test('a CLOSED reuse candidate never wins the reconciliation; the open duplicate
   assert.deepEqual(patched, [500], 'only yesterday is closed here: the closed candidate stays closed and the open winner heals the rest');
 });
 
+test('collectRunsStopped survives a transport error on the listing or on one run\'s events', async () => {
+  const notAfter = new Date(Date.now()).toISOString();
+  // The notAfter must land on the report night (local date of today).
+  const night = localDateString(new Date());
+  const na = new Date(night + 'T06:00:00');
+  const { io: listingIo } = ioWith({});
+  const listingFails: ReportIo = {
+    ...listingIo,
+    mercury: {
+      async get() { throw new Error('ECONNRESET'); },
+    },
+  };
+  const out = await collectRunsStopped(listingFails.mercury!, night);
+  assert.deepEqual(out, [], 'a listing transport error degrades to an empty section');
+  // Per-run events failure: the listing works, the events fetch throws - the run is skipped,
+  // the digest is not failed.
+  const { io: evIo } = ioWith({
+    timedOutRuns: [{ id: 'runX', task: 'build docs', status: 'TIMED_OUT', constraints: { notAfter: na.toISOString() } }],
+    notAfterRunIds: ['runX'],
+    mercury: true,
+  });
+  let eventsAsked = 0;
+  const evFails: ReportIo = {
+    ...evIo,
+    mercury: {
+      async get(path) {
+        if (path.includes('/events')) { eventsAsked += 1; throw new Error('fetch timeout'); }
+        return evIo.mercury!.get(path);
+      },
+    },
+  };
+  const out2 = await collectRunsStopped(evFails.mercury!, night);
+  assert.ok(eventsAsked >= 1, 'the events endpoint was reached');
+  assert.deepEqual(out2, [], 'an events transport error skips the run instead of failing');
+});
+
+test('run task text is sanitized inside inline-code spans', async () => {
+  const night = localDateString(new Date());
+  const na = new Date(night + 'T06:00:00');
+  const { io } = ioWith({
+    timedOutRuns: [{ id: 'runX', task: 'evil`\n## injected list', status: 'TIMED_OUT', constraints: { notAfter: na.toISOString() } }],
+    notAfterRunIds: ['runX'],
+    mercury: true,
+  });
+  const stopped = await collectRunsStopped(io.mercury!, night);
+  assert.equal(stopped.length, 1);
+  // The digest body renders the sanitized task through a full run.
+  const { io: io3, calls: calls3 } = ioWith({
+    searchItems: {},
+    timedOutRuns: [{ id: 'runX', task: 'evil`\n## injected', status: 'TIMED_OUT', constraints: { notAfter: na.toISOString() } }],
+    notAfterRunIds: ['runX'],
+    mercury: true,
+  });
+  await runReport(io3, ENV, { repo: REPO, night, dryRun: false });
+  const created = calls3.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  // The flattened text may legitimately CONTAIN '## injected' mid-line inside the code span;
+  // the injection invariant is that no NEW LINE starts with it (a real heading/list injection).
+  assert.ok(!body.includes('\n## injected'), 'no injected heading line exists');
+  assert.ok(!body.includes('evil`'), 'the backtick delimiter is stripped');
+  assert.ok(body.includes('`runX` — `evil ## injected`'), 'task text is a single sanitized code span');
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);
