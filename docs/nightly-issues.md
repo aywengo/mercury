@@ -453,7 +453,7 @@ failed closes; never erases a newer report). Follow-ups: #769, #770, #771, #772.
 
 **Labels:** `deployment`, `priority: medium`
 **Blocked by:** #739 (N1-2), #740 (N1-3), #741 (N1-4) — all done
-**Shipped** (PR below): `deploy/nightly-bot.json.example` (three §4.1 tasks, `tz: "local"`,
+**Shipped 2026-09-27** (PR #774, squash `d5360e8`): `deploy/nightly-bot.json.example` (three §4.1 tasks, `tz: "local"`,
 `notAfterAt: "06:00"`, explicit `maxDurationMs` — e2e 4 h, next 80 min, report 15 min — pinned by
 `test/nightlyBotConfig.test.ts` through the real `loadBotConfig` and `resolveTemplate`). The
 pre-first-night checklist lives in `docs/operations.md`, section "Running the nightly bot".
