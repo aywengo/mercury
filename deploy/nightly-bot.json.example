@@ -19,9 +19,7 @@
             "maxDurationMs": 14400000,
             "maxRetries": 0
           },
-          "skills": [
-            "testing"
-          ]
+          "skills": []
         }
       },
       {

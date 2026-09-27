@@ -59,10 +59,11 @@ test('the example config parses and every task passes the real cron/tz parsers',
     assert.equal(constraints.maxRetries, 0, 'nightly runs never retry into the window');
     // nightly SKILL.md 1.1.1: skills are listed explicitly per task, so the procedure never
     // depends on keyword matching against issue text - and only nightly-next, the task that
-    // fixes, gets issue-fix-loop. e2e files or comments only; the report only reports
+    // fixes, gets any skill. e2e files or comments only (the testing skill says to fix regressions, so it
+    // is not loaded there - Copilot review on #781); the report only reports
     // (explicit [] = no skills, Crew #724 decision 1A).
     const expectedSkills: Record<string, string[]> = {
-      'nightly-e2e': ['testing'],
+      'nightly-e2e': [],
       'nightly-next': ['issue-fix-loop', 'testing'],
       'nightly-report': [],
     };
