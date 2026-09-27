@@ -1091,6 +1091,32 @@ test('an oversized digest is truncated under the GitHub issue-body budget', asyn
   assert.match(body2, /## Flakes/);
 });
 
+test('every section is budget-bound: a huge blocked list cannot blow the body limit', async () => {
+  // 700 blocked issues with long questions - the blocked section alone exceeds the budget.
+  const blocked = Array.from({ length: 700 }, (_, k) => ({
+    number: k + 1,
+    title: 'b'.repeat(70),
+    question: 'q'.repeat(200),
+  }));
+  const { io, calls } = ioWith({
+    issues: blocked.map((b) => ({ number: b.number, title: b.title, labels: [{ name: 'nightly:blocked' }] })),
+    comments: Object.fromEntries(blocked.map((b) => [b.number, [{ body: `**Blocking question:** ${b.question}` }]])),
+  });
+  // blocked entries need the marker on the FIRST comment page; ioWith serves opts.comments for
+  // /issues/:n/comments ✓. The blocked listing returns all labeled issues ✓.
+  await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
+  // Dry-run only exposes prs; render the blocked section through a full run instead.
+  const { io: io2, calls: calls2 } = ioWith({
+    issues: blocked.map((b) => ({ number: b.number, title: b.title, labels: [{ name: 'nightly:blocked' }] })),
+    comments: Object.fromEntries(blocked.map((b) => [b.number, [{ body: `**Blocking question:** ${b.question}` }]])),
+  });
+  await runReport(io2, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  const created = calls2.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!;
+  const body = String((created.body as { body: string }).body);
+  assert.ok(body.length <= 65_536, `body must fit the GitHub limit (got ${body.length})`);
+  assert.match(body, /omitted \(issue-body budget\)/);
+});
+
 test('repo validation refuses a non owner/name value', async () => {
   const { io } = ioWith({});
   await assert.rejects(() => runReport(io, ENV, { repo: 'no-slash', night: '2026-09-26', dryRun: true }), /owner\/name/);

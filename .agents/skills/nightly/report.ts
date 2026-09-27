@@ -318,15 +318,28 @@ function digestBody(night: string, data: ReportData, note?: string): string {
     if (!fits(heading)) return;
     lines.push(heading, body, '');
   };
+  // The hand-mapped sections go through the SAME budget: one line at a time, over-budget
+  // lines dropped with the same omitted marker, so no section can silently blow the limit.
+  const bounded = (items: string[], empty: string): string => {
+    if (items.length === 0) return empty;
+    const out: string[] = [];
+    let omitted = 0;
+    for (const line of items) {
+      if (!fits(line)) { omitted += 1; continue; }
+      out.push(line);
+    }
+    if (omitted > 0) out.push(`_… ${omitted} more item${omitted === 1 ? '' : 's'} omitted (issue-body budget)_`);
+    return out.join('\n');
+  };
   section('## PRs opened', list(data.prs, '_none_'));
   section('## Issues filed', list(data.issuesFiled, '_none_'));
   section('## Issues commented', list(data.issuesCommented, '_none_'));
   section('## Blocked (nightly:blocked, waiting on a human)',
-    data.blocked.length === 0 ? '_none_' : data.blocked.map((b) => `- #${b.number} ${escMd(b.title)}${b.question ? ` — question: ${escMd(b.question)}` : ''}`).join('\n'));
+    bounded(data.blocked.map((b) => `- #${b.number} ${escMd(b.title)}${b.question ? ` — question: ${escMd(b.question)}` : ''}`), '_none_'));
   section('## Runs stopped by notAfter (the 06:00 window end)',
-    data.runsStopped.length === 0 ? '_none_' : data.runsStopped.map((r) => `- ${codeSpan(r.runId ?? '')} — ${codeSpan(r.task ?? '')}`).join('\n'));
+    bounded(data.runsStopped.map((r) => `- ${codeSpan(r.runId ?? '')} — ${codeSpan(r.task ?? '')}`), '_none_'));
   section('## Flakes (nightly-e2e clock)',
-    data.flakes.length === 0 ? '_none_' : data.flakes.map((f) => `- ${codeSpan(f.fingerprint, 16)} ${escMd(f.test)} — nights: ${f.nights.join(', ')}`).join('\n'));
+    bounded(data.flakes.map((f) => `- ${codeSpan(f.fingerprint, 16)} ${escMd(f.test)} — nights: ${f.nights.join(', ')}`), '_none_'));
   lines.push('---', "_Closed by tomorrow night's report._");
   return lines.join('\n');
 }
