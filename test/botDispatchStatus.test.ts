@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildManualFire, dispatchTask } from '../src/host/bots/dispatch.ts';
 import { nextFires, statusView, renderStatus } from '../src/host/bots/status.ts';
-import { tick, type SchedulerClient, type BotRunView } from '../src/host/bots/scheduler.ts';
+import { type SchedulerClient, type BotRunView } from '../src/host/bots/scheduler.ts';
 import type { BotConfig, BotTaskConfig } from '../src/host/bots/config.ts';
 
 function task(over: Partial<BotTaskConfig> = {}): BotTaskConfig {
@@ -220,4 +220,37 @@ test('renderStatus: the dispatches line carries the UNAVAILABLE reason (round-4 
   assert.ok(view.apiError);
   const rendered = renderStatus(cfg([task()]), view, Date.now());
   assert.match(rendered, /dispatches in the last hour: UNAVAILABLE \(TypeError: boom\)/);
+});
+
+
+test('apiError implies an empty view body: partial pages are reset (#759)', async () => {
+  // A client that yields one good page (partial lastActions + hourly count) then throws must NOT
+  // leave that partial data next to apiError - a future caller could read it as a plausible
+  // half-truth. The catch resets both fields; renderStatus already treats apiError as UNAVAILABLE.
+  const now = Date.now();
+  let first = true;
+  const client: SchedulerClient = {
+    async listOwnRuns() {
+      if (first) {
+        first = false;
+        return {
+          runs: [
+            { id: 'r1', status: 'RUNNING', constraints: { botTask: 'nightly' }, createdAt: new Date(now - 5 * MIN).toISOString() },
+            { id: 'r2', status: 'COMPLETED', constraints: { botTask: 'nightly' }, createdAt: new Date(now - 30 * MIN).toISOString() },
+          ],
+          nextCursor: 'cursor-2',
+        };
+      }
+      throw new TypeError('network gone mid-walk');
+    },
+    async createRun() { return { runId: 'x', replayed: false }; },
+  };
+  const view = await statusView(cfg([task()]), client, now);
+  assert.ok(view.apiError, 'the error is recorded');
+  assert.match(view.apiError!, /network gone/);
+  assert.deepEqual(view.lastActions, [], 'partial lastActions cleared');
+  assert.equal(view.dispatchesLastHour, 0, 'partial hourly count cleared');
+  const rendered = renderStatus(cfg([task()]), view, now);
+  assert.match(rendered, /UNAVAILABLE/);
+  assert.doesNotMatch(rendered, /r1/, 'no partial action leaks into the render');
 });
