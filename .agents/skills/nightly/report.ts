@@ -4,7 +4,8 @@
  * One GitHub issue per night, labeled `nightly:report`, closed by the next night's report:
  *
  *   - PRs opened tonight and issues filed tonight (GitHub search, repo-scoped, bounded).
- *   - Issues commented on tonight (search `commented:<night-local-start>..<night-local-end>`).
+ *   - Issues commented on tonight (candidates from the supported `updated:<range>` search,
+ *     filtered by per-issue comment timestamps - GitHub search has no `commented:<range>`).
  *   - Blocked items: open issues labeled `nightly:blocked` with their latest blocking question.
  *   - Runs stopped by `notAfter` (the §4.3 window end) — optional section, only when
  *     `MERCURY_REPORT_API_URL` + `MERCURY_REPORT_TOKEN` are set; the Mercury runs API is read
@@ -188,7 +189,7 @@ export async function blockingQuestion(io: ReportIo, repo: string, issue: number
  * as the other reads). GitHub search cannot filter by commented:<range> (unsupported), so the
  * updated:<range> candidate set is filtered here.
  */
-async function collectIssuesCommented(
+export async function collectIssuesCommented(
   io: ReportIo,
   repo: string,
   candidates: { number?: number }[],
@@ -198,22 +199,39 @@ async function collectIssuesCommented(
   const out: { number?: number; title: string; url?: string }[] = [];
   for (const cand of candidates) {
     if (cand.number === undefined) continue;
-    const path = `/repos/${repo}/issues/${cand.number}/comments?per_page=100&sort=created&direction=desc`;
-    let res;
-    try {
-      res = await io.get(path);
-    } catch {
-      continue; // transport error on this candidate: skip it, do not fail the digest
+    // Pages are OLDEST-first (ascending): walk forward until a page starts past the window end
+    // (later pages are newer still), bounded at 10 pages of 100. A busy issue can push the
+    // target-night comments onto page 2+ when the run lands days later, so a single page would
+    // wrongly omit it.
+    let page = 1;
+    let commentedDuringNight = false;
+    while (page <= 10) {
+      const path = `/repos/${repo}/issues/${cand.number}/comments?per_page=100&page=${page}`;
+      let res;
+      try {
+        res = await io.get(path);
+      } catch {
+        break; // transport error on this candidate: keep what was scanned, do not fail the digest
+      }
+      if (res.status < 200 || res.status >= 300) break; // unreadable: skip this candidate
+      const comments = Array.isArray(res.body)
+        ? (res.body as { body?: unknown; created_at?: unknown }[]).filter((c): c is { body: string; created_at: string } =>
+            c !== null && typeof c === 'object' && typeof c.body === 'string' && typeof c.created_at === 'string')
+        : [];
+      for (const c of comments) {
+        const ts = Date.parse(c.created_at);
+        if (!Number.isNaN(ts) && ts >= startMs && ts <= endMs) { commentedDuringNight = true; break; }
+      }
+      if (commentedDuringNight) break;
+      // Ascending order: when the LAST (newest) comment on this page is still before the
+      // window start, later pages start even later - but the NEXT page could still cross INTO
+      // the window. Stop only when this page's newest comment is at/after endMs (everything
+      // later is past the window) or the page was short (last page).
+      const last = comments[comments.length - 1];
+      const lastTs = last ? Date.parse(last.created_at) : Number.NaN;
+      if (comments.length < 100 || (!Number.isNaN(lastTs) && lastTs >= endMs)) break;
+      page += 1;
     }
-    if (res.status < 200 || res.status >= 300) continue; // unreadable: skip this candidate
-    const comments = Array.isArray(res.body)
-      ? (res.body as { body?: unknown; created_at?: unknown }[]).filter((c): c is { body: string; created_at: string } =>
-          c !== null && typeof c === 'object' && typeof c.body === 'string' && typeof c.created_at === 'string')
-      : [];
-    const commentedDuringNight = comments.some((c) => {
-      const ts = Date.parse(c.created_at);
-      return !Number.isNaN(ts) && ts >= startMs && ts <= endMs;
-    });
     if (commentedDuringNight) out.push(cand as { number?: number; title: string; url?: string });
   }
   return out;

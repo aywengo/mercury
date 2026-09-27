@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { runReport, collectBlocked, collectRunsStopped, collectFlakes, blockingQuestion, defaultNight, type ReportIo } from '../.agents/skills/nightly/report.ts';
+import { runReport, collectBlocked, collectRunsStopped, collectFlakes, blockingQuestion, defaultNight, collectIssuesCommented, type ReportIo } from '../.agents/skills/nightly/report.ts';
 import { localDateString } from '../.agents/skills/nightly/e2e.ts';
 import { tempDir } from './helpers.ts';
 
@@ -1143,6 +1143,37 @@ test('a create returning 0/null/string is unidentifiable: hard error, nothing cl
     );
     assert.deepEqual(patched, [], `nothing is closed for an unidentifiable create (case ${JSON.stringify(bad)})`);
   }
+});
+
+test('commented candidates paginate: night comments past page 1 are still found', async () => {
+  const { io: base } = ioWith({
+    searchItems: { 'is:issue updated': [{ number: 703, title: 'busy issue', html_url: 'u9' }] },
+  });
+  const pages: Record<number, { body: string; created_at: string }[]> = {
+    1: Array.from({ length: 100 }, (_, k) => ({ body: `old ${k}`, created_at: '2026-09-20T00:00:00Z' })),
+    2: [
+      { body: 'still old', created_at: '2026-09-25T23:00:00Z' },
+      { body: 'night comment', created_at: '2026-09-26T12:00:00Z' },
+    ],
+  };
+  let fetches = 0;
+  const io: ReportIo = {
+    async get(path) {
+      if (/\/issues\/703\/comments/.test(path)) {
+        fetches += 1;
+        const m = /[?&]page=(\d+)/.exec(path);
+        return { body: pages[Number(m?.[1] ?? 1)] ?? [], status: 200 };
+      }
+      return base.get(path);
+    },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const out = await collectIssuesCommented(io, REPO, [{ number: 703 }], Date.parse('2026-09-26T00:00:00+00:00'), Date.parse('2026-09-26T23:59:59+00:00'));
+  assert.equal(out.length, 1, 'the night comment on page 2 is found');
+  assert.equal(fetches, 2, 'exactly two pages were walked');
+  // An issue whose page-1 comments are entirely BEFORE the window start keeps walking (the
+  // next page may enter the window) - covered by the two-page walk above.
 });
 
 test('repo validation refuses a non owner/name value', async () => {
