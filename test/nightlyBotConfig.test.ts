@@ -12,7 +12,7 @@ import { loadBotConfig } from '../src/host/bots/config.ts';
 import { parseCron, parseTz } from '../src/host/bots/cron.ts';
 import { resolveTemplate } from '../src/host/bots/scheduler.ts';
 import type { BotTaskConfig } from '../src/host/bots/config.ts';
-import { tempDir } from './helpers.ts';
+import { makeEnv, tempDir } from './helpers.ts';
 
 const EXAMPLE_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'deploy', 'nightly-bot.json.example');
 
@@ -178,14 +178,36 @@ test('every example task template carries a repository (#785)', () => {
   }
 });
 
-test('a resolved example template passes RunService.create validation (#785, regression)', async () => {
-  // The failure was AT CREATE-TIME VALIDATION of the body the bot dispatches, not in the loader.
-  // Drive the real create path with the resolved template body (stub workspace IO not needed -
-  // create only validates; the workspace error last night came from the WORKER, but create
-  // accepts bodies the worker then rejects - so also assert the shape the worker needs).
-  const cfg = readExample();
-  const task = cfg.schedule.tasks.find((t) => t.name === 'nightly-next') as unknown as BotTaskConfig;
-  const body = resolveTemplate(task, { date: '2026-10-01', time: '00:00', iso: 'w2026-10-01T00:00' });
-  const repo = (body as { repository?: { url?: string } }).repository;
-  assert.ok(repo?.url, 'the dispatch body carries repository.url - the worker builds the workspace from it');
+test('a resolved example template passes RunService.create and persists the repository (#785)', () => {
+  // The failure was at WORKSPACE SETUP in the worker, which only sees what create PERSISTED.
+  // Drive the real create path (worker disabled - create must not touch the workspace) with the
+  // exact body the bot dispatches: task/constraints/skills/repository from the resolved template.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const cfg = readExample();
+    const task = cfg.schedule.tasks.find((t) => t.name === 'nightly-next') as unknown as BotTaskConfig;
+    const body = resolveTemplate(task, { date: '2030-10-01', time: '00:00', iso: 'w2030-10-01T00:00' }) as {
+      task: string; constraints: Record<string, unknown>; skills: string[]; repository: { url: string };
+    };
+    const run = env.runService.create({
+      ownerId: 'bot-nightly',
+      task: body.task,
+      constraints: body.constraints as never,
+      skills: body.skills,
+      repository: body.repository,
+      idempotencyKey: 'test-785-nightly-next',
+    });
+    assert.equal(run.repository?.url, 'https://github.com/aywengo/mercury.git', 'create PERSISTS the repository the worker needs');
+    // The inverse defect: create WITHOUT a repository still succeeds - that is precisely what made
+    // night 1 fail 20 Runs downstream (worker-side). Keep this documented, not 'fixed' here: create
+    // intentionally accepts repo-less Runs (localPath runs, later repo attach).
+    const repoless = env.runService.create({
+      ownerId: 'bot-nightly',
+      task: 'no repository - the worker will fail this at workspace setup (#785)',
+      idempotencyKey: 'test-785-repoless',
+    });
+    assert.ok(!(repoless.repository as { url?: string } | undefined)?.url, 'create accepts a repo-less Run - the worker fails it later, which is the #785 trap documented, not hidden');
+  } finally {
+    env.close();
+  }
 });
