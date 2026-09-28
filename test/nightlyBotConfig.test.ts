@@ -186,7 +186,14 @@ test('a resolved example template passes RunService.create and persists the repo
   try {
     const cfg = readExample();
     const task = cfg.schedule.tasks.find((t) => t.name === 'nightly-next') as unknown as BotTaskConfig;
-    const body = resolveTemplate(task, { date: '2030-10-01', time: '00:00', iso: 'w2030-10-01T00:00' }) as {
+    // Derive the fire minute from NOW (+1 day) instead of a hard-coded date (#787 review r2):
+    // notAfterAt resolves to 06:00 local on the FIRE date, and validateConstraints rejects a
+    // notAfter in the past - a fixed date is a time bomb that starts failing the day after it.
+    // The fire wall-minute is only a substitution input; any in-window date keeps the test honest.
+    const fire = new Date(Date.now() + 24 * 3_600_000);
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    const date = `${fire.getFullYear()}-${pad(fire.getMonth() + 1)}-${pad(fire.getDate())}`;
+    const body = resolveTemplate(task, { date, time: '00:00', iso: `w${date}T00:00` }) as {
       task: string; constraints: Record<string, unknown>; skills: string[]; repository: { url: string };
     };
     const run = env.runService.create({
