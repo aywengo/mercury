@@ -162,3 +162,30 @@ test('the example documents the fixed-offset DST caveat and ships tz local for t
   const description = String(cfg.description ?? '');
   assert.ok(description.includes('tz'), 'description mentions how tz local maps to the host zone');
 });
+
+
+test('every example task template carries a repository (#785)', () => {
+  // Night 1 of #742 dispatched 20 Runs that ALL failed at workspace setup: the templates had no
+  // repository, and the worker cannot build a workspace without one. resolveTemplate forwards the
+  // template verbatim to POST /api/runs, so the example must carry a repository object per task.
+  const cfg = readExample();
+  for (const raw of cfg.schedule.tasks) {
+    const repo = (raw as { template?: { repository?: unknown } }).template?.repository;
+    assert.ok(repo && typeof repo === 'object' && !Array.isArray(repo), `${String((raw as { name: string }).name)}: template.repository is an object`);
+    const url = (repo as { url?: unknown }).url;
+    assert.equal(typeof url, 'string');
+    assert.match(url as string, /^https:\/\/github\.com\/[a-zA-Z0-9-]+\/[a-zA-Z0-9._-]+\.git$/, 'an https clone URL');
+  }
+});
+
+test('a resolved example template passes RunService.create validation (#785, regression)', async () => {
+  // The failure was AT CREATE-TIME VALIDATION of the body the bot dispatches, not in the loader.
+  // Drive the real create path with the resolved template body (stub workspace IO not needed -
+  // create only validates; the workspace error last night came from the WORKER, but create
+  // accepts bodies the worker then rejects - so also assert the shape the worker needs).
+  const cfg = readExample();
+  const task = cfg.schedule.tasks.find((t) => t.name === 'nightly-next') as unknown as BotTaskConfig;
+  const body = resolveTemplate(task, { date: '2026-10-01', time: '00:00', iso: 'w2026-10-01T00:00' });
+  const repo = (body as { repository?: { url?: string } }).repository;
+  assert.ok(repo?.url, 'the dispatch body carries repository.url - the worker builds the workspace from it');
+});

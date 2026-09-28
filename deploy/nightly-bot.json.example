@@ -19,7 +19,10 @@
             "maxDurationMs": 14400000,
             "maxRetries": 0
           },
-          "skills": []
+          "skills": [],
+          "repository": {
+            "url": "https://github.com/aywengo/mercury.git"
+          }
         }
       },
       {
@@ -38,7 +41,10 @@
           "skills": [
             "issue-fix-loop",
             "testing"
-          ]
+          ],
+          "repository": {
+            "url": "https://github.com/aywengo/mercury.git"
+          }
         }
       },
       {
@@ -54,7 +60,10 @@
             "maxDurationMs": 900000,
             "maxRetries": 0
           },
-          "skills": []
+          "skills": [],
+          "repository": {
+            "url": "https://github.com/aywengo/mercury.git"
+          }
         }
       }
     ]
