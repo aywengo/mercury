@@ -197,7 +197,11 @@ test('a resolved example template passes RunService.create and persists the repo
       repository: body.repository,
       idempotencyKey: 'test-785-nightly-next',
     });
-    assert.equal(run.repository?.url, 'https://github.com/aywengo/mercury.git', 'create PERSISTS the repository the worker needs');
+    // Read the row BACK through the store: the worker sees the persisted Run, not create's
+    // in-memory return, so the seam this test pins is store round-trip, not the return value.
+    const stored = env.runs.get(run.id);
+    assert.ok(stored, 'the created Run row exists');
+    assert.equal((stored!.repository as { url?: string } | undefined)?.url, 'https://github.com/aywengo/mercury.git', 'the STORED Run carries repository.url - what the worker actually reads');
     // The inverse defect: create WITHOUT a repository still succeeds - that is precisely what made
     // night 1 fail 20 Runs downstream (worker-side). Keep this documented, not 'fixed' here: create
     // intentionally accepts repo-less Runs (localPath runs, later repo attach).
