@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { readFileSync } from 'node:fs';
-import { execFile } from 'node:child_process';
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AddressInfo } from 'node:net';
 // Imported per test rather than at module scope. A static import of a symbol that does not exist
@@ -191,6 +192,52 @@ test('the configured deadline is honoured rather than the built-in default', asy
   } finally { await black.close(); }
 });
 
+
+test('a supplied localPath is used for the worktree, not re-cloned from the url (#596)', async () => {
+  // The knowledge tests pass both a url (knowledge selection resolves its repo identity from
+  // `url ?? localPath`) and a local fixture repo (the workspace source). When both are set the
+  // workspace manager must build the worktree from the localPath. Before the fix it cloned from the
+  // url instead, paying a network clone per Run; under parallel load that contention pushed the
+  // worker past the 20 s completion deadline.
+  const black = await blackHole();
+  const repoDir = tempDir('mercury-localpath-');
+  const git = (args: string[]) => execFileSync('git', args, { cwd: repoDir, timeout: 60_000 });
+  git(['init', '-q', '-b', 'main']);
+  git(['config', 'user.email', 't@t']);
+  git(['config', 'user.name', 'T']);
+  writeFileSync(join(repoDir, 'README.md'), '# r\n');
+  git(['add', '.']);
+  git(['commit', '-q', '-m', 'init']);
+  const fixtureHead = git(['rev-parse', 'HEAD']).toString().trim();
+
+  const { WorkspaceManager } = await loadWm();
+  const mgr = new WorkspaceManager({
+    baseDir: tempDir('mercury-localpath-wm-'),
+    mode: 'git-worktree',
+    gitNetworkTimeoutMs: 1_200,
+  });
+  try {
+    const started = Date.now();
+    // The worktree must come from the local fixture. If the code under test instead clones the
+    // (unresponsive) url, create() rejects after the 1_200 ms network deadline -- and this test
+    // turns that into a fast failure rather than a hang. The outer withDeadline is a backstop only.
+    const ws = await withDeadline(
+      mgr.create({
+        id: 'run_local', agent: 'fake', task: 'x',
+        repository: { url: black.url, localPath: repoDir, baseBranch: 'main' },
+        repositories: [],
+      } as never),
+      15_000,
+      'WorkspaceManager.create() with localPath + url',
+    );
+    assert.ok(ws.path, 'a workspace was created from the localPath');
+    // The worktree HEAD must match the local fixture, proving the checkout came from localPath
+    // (a worktree built from the url could not have this HEAD).
+    const head = execFileSync('git', ['-C', ws.path, 'rev-parse', 'HEAD'], { timeout: 10_000 }).toString().trim();
+    assert.equal(head, fixtureHead, 'worktree HEAD must match the local fixture');
+    assert.ok(Date.now() - started < 10_000, `the localPath shortcut was not taken: ${Date.now() - started} ms`);
+  } finally { await black.close(); }
+});
 test('no git call bypasses the choke point', () => {
   // The fix is a choke point, so the property worth pinning is that it stays the only door. A new
   // execFile('git', ...) added elsewhere would silently have no timeout and no prompt guard.
