@@ -20,7 +20,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { DockerComposeEnvironment, StartedDockerComposeEnvironment, Wait } from 'testcontainers';
+import { DockerComposeEnvironment, StartedDockerComposeEnvironment, StartupCheckStrategy, type StartupStatus, Wait } from 'testcontainers';
 import {
   COMPOSE_FILE, DIAGNOSTIC_CAP_BYTES, E2E_DIR, LIMITS, PROJECT_PREFIX,
   capBuffer, deadServices, assertServicesAlive, inspectionCommands, preflight, teardownOutcome,
@@ -272,6 +272,24 @@ test('every container the gate starts is visible to the reaper', async () => {
  * proven to report anything. The override makes the API die for real, and the assertion is that the
  * report names it and carries the reason.
  */
+// Docker 29 changed health semantics for exited containers (#789): a container that dies before
+// its first probe (this crash happens at ~1.5s, start_period is 5s) reports
+// State.Health.Status='unhealthy' with ZERO probe log entries, and HealthCheckWaitStrategy rejects
+// up() on the first unhealthy reading. The scenario's premise is that the API dies on startup, so
+// the wait strategy must treat that death as the expected startup outcome and let up() resolve -
+// the guard under test (assertServicesAlive) is what turns the death into a diagnosis.
+class DiesAsExpected extends StartupCheckStrategy {
+  // Parameters<typeof ...> keeps the Dockerode client type import-free (testcontainers does not
+  // re-export it); the shape is pinned by the base class we subclass.
+  async checkStartupState(...args: Parameters<StartupCheckStrategy['checkStartupState']>): Promise<StartupStatus> {
+    const [dockerClient, containerId] = args;
+    const info = await dockerClient.getContainer(containerId).inspect();
+    if (info.State.Running || info.State.Paused) return 'PENDING';
+    // The override exists only to crash the API on database open; exit 1 IS the expected outcome.
+    return info.State.ExitCode === 1 ? 'SUCCESS' : 'FAIL';
+  }
+}
+
 test('a service that dies after its healthcheck passes is named, with its reason', async () => {
   await preflight();
   const project = `${PROJECT_PREFIX}-dead-${suffix()}`;
@@ -279,7 +297,7 @@ test('a service that dies after its healthcheck passes is named, with its reason
     .withProjectName(project)
     .withStartupTimeout(LIMITS.startupMs)
     .withWaitStrategy('fixture-1', Wait.forOneShotStartup())
-    .withWaitStrategy('api-1', Wait.forHealthCheck())
+    .withWaitStrategy('api-1', new DiesAsExpected())
     .up();
   running.push(env);
 
