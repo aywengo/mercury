@@ -260,6 +260,15 @@ test('a credential-bearing repository URL is never echoed in normalization error
     assert.ok(!message.includes(secret), 'the token must not appear in the scheme error');
     assert.match(message, /\[REDACTED\]/, 'userinfo is redacted in place');
   }
+  // Username-only credential (no colon) is redacted too (round 5):
+  try {
+    normalizeRepositoryId(`ftp://${secret}@example.org/a/b`);
+    assert.fail('expected a refusal');
+  } catch (err) {
+    const message = (err as Error).message;
+    assert.ok(!message.includes(secret), 'a bare-token username must not appear');
+    assert.match(message, /\[REDACTED\]/);
+  }
   // Even the 'does not look like' path redacts:
   try {
     normalizeRepositoryId(`git@github.com:a/${secret}/x`);

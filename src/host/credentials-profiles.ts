@@ -65,9 +65,11 @@ const PROFILE_FIELDS: ReadonlySet<string> = new Set(['name', 'repositories', 'ow
  * `/*` after the owner is the org/user pattern. `localPath` repositories have no id and never
  * match a profile; they are not normalized here.
  */
-/** Redact userinfo (user:password@) from a URL-ish string before it may appear in an error. */
+/** Redact the whole authority userinfo (with or without a password) before input reaches an error. */
 function redactUserInfo(s: string): string {
-  return s.replace(/(\/\/)([^@/\s:]+):([^@\s/]+)@/g, '$1$2:[REDACTED]@');
+  // '//<anything>@' -> '//[REDACTED]@': a bare token in the username slot (ftp://ghp_...@host)
+  // must be covered too, not only user:password forms.
+  return s.replace(/(\/\/)[^@\s/]+@/g, '$1[REDACTED]@');
 }
 
 export function normalizeRepositoryId(raw: string): string {
