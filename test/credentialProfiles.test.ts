@@ -66,6 +66,9 @@ test('normalization table: SSH/HTTPS/.git/case equal; subpaths and bad shapes re
   assert.equal(normalizeRepositoryId('github.com/a/b'), 'github.com/a/b');
   assert.equal(normalizeRepositoryId('https://github.com/a/b/'), 'github.com/a/b');
   assert.equal(normalizeRepositoryId('github.com/aywengo/*'), 'github.com/aywengo/*');
+  // A bare two-segment id is malformed, NOT a wildcard: accepting it would silently broaden the
+  // profile's scope to a whole owner (Copilot review on #799).
+  assert.throws(() => normalizeRepositoryId('github.com/aywengo'), /host\/owner\/name or host\/owner\/\*/);
   assert.equal(normalizeRepositoryId('https://gitlab.com/a/b'), 'gitlab.com/a/b');
   assert.throws(() => normalizeRepositoryId('ftp://github.com/a/b'), /unsupported repository URL scheme/);
   assert.throws(() => normalizeRepositoryId('https://github.com/a/b/c'), /host\/owner\/name/);
@@ -135,6 +138,46 @@ test('a file wider than 0600 is refused, same shape as bot-credentials.json (#78
   const dir = tempDir('cp2-mode-');
   assert.throws(() => loadCredentialProfiles(writeProfiles(dir, VALID, 0o644)), /readable by group or others/);
   assert.throws(() => assertProfilesFileSafe(credentialProfilesPath(envWith(dir))), /chmod 600/);
+});
+
+test('malformed JSON is refused without echoing file contents (never-print-values)', () => {
+  const dir = tempDir('cp2-json-');
+  const cfg = join(dir, 'cfg', 'mercury');
+  mkdirSync(cfg, { recursive: true });
+  const path = join(cfg, 'credential-profiles.json');
+  writeFileSync(path, '{"profiles": [{"name": "a", "token: ghp_ABCDEF0123456789}]}'); // unquoted value inside
+  chmodSync(path, 0o600);
+  try {
+    loadCredentialProfiles(envWith(dir));
+    assert.fail('expected a refusal');
+  } catch (err) {
+    const message = (err as Error).message;
+    assert.match(message, /malformed JSON/);
+    assert.ok(!message.includes('ghp_ABCDEF'), 'the parse error must not carry file excerpts');
+  }
+});
+
+test('unknown keys inside git are refused (#784 review)', () => {
+  const dir = tempDir('cp2-gitkeys-');
+  const bad = { profiles: [{ ...VALID.profiles[0]!, git: { authorEamil: 'typo@example.com' } }] };
+  assert.throws(() => loadCredentialProfiles(writeProfiles(dir, bad)), /unknown field 'git\.authorEamil'/);
+});
+
+test('validate: a directory or unreadable file source is not ok (review finding)', () => {
+  const dir = tempDir('cp2-src-');
+  const cfg = join(dir, 'cfg', 'mercury');
+  const secretDir = join(dir, 'secrets');
+  mkdirSync(cfg, { recursive: true });
+  mkdirSync(secretDir, { recursive: true }); // a DIRECTORY where a file should be
+  const path = join(cfg, 'credential-profiles.json');
+  writeFileSync(path, JSON.stringify({
+    profiles: [{ name: 'n', repositories: ['github.com/a/b'], owners: ['o'], env: { T: { file: secretDir } } }],
+  }));
+  chmodSync(path, 0o600);
+  const lines = validateCredentialProfiles(envWith(dir));
+  const line = lines.find((l) => l.message.includes('env \'T\''));
+  assert.equal(line?.ok, false);
+  assert.match(line!.message, /not a regular file/);
 });
 
 test('validate prints profile names, patterns and file-source presence - never values (#784)', () => {

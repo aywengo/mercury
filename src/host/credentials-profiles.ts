@@ -10,7 +10,7 @@
 // hard refusal naming the file and the field. Values are never printed - not in errors, not in
 // validate output.
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -82,7 +82,13 @@ export function normalizeRepositoryId(raw: string): string {
   if (!/^[a-z0-9.-]+$/.test(host) || !/^[a-z0-9-]+$/.test(owner)) {
     throw new Error(`repository id '${original}' does not look like host/owner/name`);
   }
-  if (name === undefined || name === '*') return `${host}/${owner}/*`;
+  if (name === undefined) {
+    // 'host/owner' alone is NOT the org pattern: only an explicit trailing '/*' is (§5.2). A bare
+    // two-segment id is a malformed entry, and accepting it as a wildcard would silently broaden
+    // the profile's credential scope to a whole owner.
+    throw new Error(`repository id '${original}' must be host/owner/name or host/owner/* (add the explicit /* for an owner-wide pattern)`);
+  }
+  if (name === '*') return `${host}/${owner}/*`;
   if (extra.length > 0 || !/^[a-z0-9._-]+$/.test(name)) {
     throw new Error(`repository id '${original}' does not look like host/owner/name`);
   }
@@ -166,6 +172,12 @@ function validateProfile(raw: RawProfile, seenNames: Set<string>): CredentialPro
       throw new Error(`${where2}: git must be an object (authorName, authorEmail, httpsToken)`);
     }
     const g = raw.git as { authorName?: unknown; authorEmail?: unknown; httpsToken?: unknown };
+    const gitFields: ReadonlySet<string> = new Set(['authorName', 'authorEmail', 'httpsToken']);
+    for (const key of Object.keys(g)) {
+      if (!gitFields.has(key)) {
+        throw new Error(`${where2}: unknown field 'git.${key}' (expected authorName, authorEmail, httpsToken)`);
+      }
+    }
     git = {};
     if (g.authorName !== undefined) {
       if (typeof g.authorName !== 'string' || g.authorName.trim() === '') throw new Error(`${where2}: git.authorName must be a non-empty string`);
@@ -204,8 +216,10 @@ export function loadCredentialProfiles(env: NodeJS.ProcessEnv = process.env): Cr
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
-  } catch (err) {
-    throw new Error(`${path}: malformed JSON: ${(err as Error).message}`);
+  } catch {
+    // Intentionally no parse-error text: SyntaxError messages can embed excerpts of the file's
+    // contents (e.g. an unquoted secret), and this module never prints values. Position only.
+    throw new Error(`${path}: malformed JSON (fix the syntax; position visible in an editor, not here)`);
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(`${path}: top level must be an object with a 'profiles' array`);
@@ -273,10 +287,21 @@ export function validateCredentialProfiles(env: NodeJS.ProcessEnv = process.env)
     for (const [key, value] of Object.entries(profile.env)) {
       if (value.file !== undefined) {
         const target = value.file.startsWith('~') ? join(homedir(), value.file.slice(1)) : value.file;
-        const readable = existsSync(target);
+        // 'Present' must mean what drive time needs: a regular file this user can READ. A
+        // directory or an unreadable file would fail at §9 drive time while existsSync said ok.
+        let ok = false;
+        let why = 'MISSING';
+        try {
+          statSync(target); // throws when absent
+          accessSync(target, fsConstants.R_OK);
+          ok = statSync(target).isFile();
+          if (!ok) why = 'not a regular file';
+        } catch {
+          ok = false;
+        }
         lines.push({
-          ok: readable,
-          message: `profile '${profile.name}': env '${key}' source ${readable ? 'present' : 'MISSING'} (${target})`,
+          ok,
+          message: `profile '${profile.name}': env '${key}' source ${ok ? 'present' : why} (${target})`,
         });
       }
     }
