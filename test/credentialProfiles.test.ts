@@ -70,7 +70,7 @@ test('normalization table: SSH/HTTPS/.git/case equal; subpaths and bad shapes re
   // profile's scope to a whole owner (Copilot review on #799).
   assert.throws(() => normalizeRepositoryId('github.com/aywengo'), /host\/owner\/name or host\/owner\/\*/);
   // '*' is the owner-wide pattern only as the LAST segment; 'a/*/private' is a malformed subpath.
-  assert.throws(() => normalizeRepositoryId('github.com/acme/*/private'), /only stands alone as the last segment/);
+  assert.throws(() => normalizeRepositoryId('github.com/acme/*/private'), /repositories entry must be/);
   assert.equal(normalizeRepositoryId('https://gitlab.com/a/b'), 'gitlab.com/a/b');
   assert.throws(() => normalizeRepositoryId('ftp://github.com/a/b'), /unsupported repository URL scheme/);
   assert.throws(() => normalizeRepositoryId('https://github.com/a/b/c'), /host\/owner\/name/);
@@ -236,5 +236,36 @@ test('git.httpsToken error never echoes the supplied value (schema failures resp
     const message = (err as Error).message;
     assert.match(message, /does not name an entry/);
     assert.ok(!message.includes('ghp_ABCDEF'), 'the supplied value must not appear in the error');
+  }
+});
+
+test('a credential-bearing repository URL is never echoed in normalization errors (review round 4)', () => {
+  const dir = tempDir('cp2-credurl-');
+  const secret = 'ghp_SUPERSECRET0123456789';
+  const bad = { profiles: [{ name: 'n', repositories: [`https://user:${secret}@github.com/a/b/c/d`], owners: ['o'], env: {} }] };
+  try {
+    loadCredentialProfiles(writeProfiles(dir, bad));
+    assert.fail('expected a refusal');
+  } catch (err) {
+    const message = (err as Error).message;
+    assert.ok(!message.includes(secret), 'the token must not appear in the error');
+    assert.match(message, /repositories entry must be/, 'shape errors name the expectation, not the input');
+  }
+  // The unsupported-scheme error still quotes the input - userinfo redacted in place:
+  try {
+    normalizeRepositoryId(`ftp://user:${secret}@example.org/a/b`);
+    assert.fail('expected a refusal');
+  } catch (err) {
+    const message = (err as Error).message;
+    assert.ok(!message.includes(secret), 'the token must not appear in the scheme error');
+    assert.match(message, /\[REDACTED\]/, 'userinfo is redacted in place');
+  }
+  // Even the 'does not look like' path redacts:
+  try {
+    normalizeRepositoryId(`git@github.com:a/${secret}/x`);
+    assert.fail('expected a refusal');
+  } catch (err) {
+    const message = (err as Error).message;
+    assert.ok(!message.includes(secret), 'SSH-form secrets are redacted too');
   }
 });

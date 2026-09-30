@@ -65,8 +65,13 @@ const PROFILE_FIELDS: ReadonlySet<string> = new Set(['name', 'repositories', 'ow
  * `/*` after the owner is the org/user pattern. `localPath` repositories have no id and never
  * match a profile; they are not normalized here.
  */
+/** Redact userinfo (user:password@) from a URL-ish string before it may appear in an error. */
+function redactUserInfo(s: string): string {
+  return s.replace(/(\/\/)([^@/\s:]+):([^@\s/]+)@/g, '$1$2:[REDACTED]@');
+}
+
 export function normalizeRepositoryId(raw: string): string {
-  const original = raw;
+  const original = redactUserInfo(raw);
   let s = raw.trim();
   if (s === '') throw new Error('repository id is empty');
   const scp = /^(?:ssh:\/\/)?git@([^/:]+):(.+?)$/i.exec(s);
@@ -77,25 +82,27 @@ export function normalizeRepositoryId(raw: string): string {
   s = s.replace(/^www\./i, '');
   s = s.toLowerCase();
   const segments = s.split('/').filter((p) => p !== '');
-  if (segments.length < 2) throw new Error(`repository id '${original}' does not look like host/owner/name`);
+  // Shape errors never quote the input: a repository entry can carry a credential in any position
+  // (userinfo, scp path), and the operator has the file - the field is what matters (§9).
+  if (segments.length < 2) throw new Error(`repositories entry must be host/owner/name or host/owner/*`);
   const [host, owner, name, ...extra] = segments;
   if (!/^[a-z0-9.-]+$/.test(host) || !/^[a-z0-9-]+$/.test(owner)) {
-    throw new Error(`repository id '${original}' does not look like host/owner/name`);
+    throw new Error(`repositories entry must be host/owner/name or host/owner/*`);
   }
   if (name === undefined) {
     // 'host/owner' alone is NOT the org pattern: only an explicit trailing '/*' is (§5.2). A bare
     // two-segment id is a malformed entry, and accepting it as a wildcard would silently broaden
     // the profile's credential scope to a whole owner.
-    throw new Error(`repository id '${original}' must be host/owner/name or host/owner/* (add the explicit /* for an owner-wide pattern)`);
+    throw new Error(`repositories entry must be host/owner/name or host/owner/* (add the explicit /* for an owner-wide pattern)`);
   }
   // 'host/owner/*/private' is a malformed subpath, not an owner-wide pattern: the '*' is only the
   // owner-wide pattern when it is the LAST segment (Copilot review round 2 on #799).
   if (name === '*' && extra.length > 0) {
-    throw new Error(`repository id '${original}' must be host/owner/name or host/owner/* (a '*' only stands alone as the last segment)`);
+    throw new Error(`repositories entry must be host/owner/name or host/owner/* (a '*' only stands alone as the last segment)`);
   }
   if (name === '*') return `${host}/${owner}/*`;
   if (extra.length > 0 || !/^[a-z0-9._-]+$/.test(name)) {
-    throw new Error(`repository id '${original}' does not look like host/owner/name`);
+    throw new Error(`repositories entry must be host/owner/name or host/owner/*`);
   }
   return `${host}/${owner}/${name}`;
 }
