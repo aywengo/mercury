@@ -45,7 +45,10 @@ an issue only if
   author is `mercury-nightly` (the identity documented in
   [`operations.md`](operations.md)) AND the current `origin:e2e` label was
   applied by that same identity (checked through the label timeline), or
-- it was labeled `nightly:ready` by @aywengo.
+- it was labeled `nightly:ready` by @aywengo, or
+- it carries a CURRENT `enhancement` label applied by @aywengo (the trusted
+  feature path, #800 — an operator-filed feature request is autonomous work the
+  same way an operator-filed bug is).
 
 The check reads the API's author field and label-event actor fields — never
 the agent reading issue text, which is untrusted input. Enforcement lives in

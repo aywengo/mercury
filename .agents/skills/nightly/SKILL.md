@@ -40,9 +40,10 @@ An issue is eligible only if authored by @aywengo, filed by the nightly
 identity `mercury-nightly` from E2E (the issue's AUTHOR is
 `mercury-nightly` AND the current `origin:e2e` label carries that identity as
 its timeline actor — a label alone is provenance anyone with triage access can
-apply, #764), or labeled `nightly:ready` by @aywengo — the actor comes from the
-timeline's labeled events. `nightly:in-progress`, `nightly:blocked` and
-`nightly:proposed` exclude an issue outright.
+apply, #764), labeled `nightly:ready` by @aywengo, or carrying a CURRENT
+`enhancement` label applied by @aywengo (the trusted feature path, #800) — the
+actor comes from the timeline's labeled events. `nightly:in-progress`,
+`nightly:blocked` and `nightly:proposed` exclude an issue outright.
 
 ## Claim
 

@@ -120,11 +120,12 @@ issue `nightly:blocked`, put the question in an issue comment, finish the Run.
 1. **Trusted issues only.** The ladder considers an issue only if it is authored
    by @aywengo, filed by the nightly identity from E2E — the issue's AUTHOR is
    `mercury-nightly` and the CURRENT `origin:e2e` label carries the nightly
-   identity as its timeline actor — or labeled `nightly:ready` by @aywengo.
-   Checked from the API's author and label-event actor fields, never by the
-   agent reading issue text (#738, #764): a label alone is provenance anyone
-   with triage access can apply, so the middle clause verifies who filed the
-   issue, not just which label it carries.
+   identity as its timeline actor — labeled `nightly:ready` by @aywengo, or
+   carrying a CURRENT `enhancement` label applied by @aywengo (the trusted
+   feature path, #800). Checked from the API's author and label-event actor
+   fields, never by the agent reading issue text (#738, #764): a label alone is
+   provenance anyone with triage access can apply, so the label clauses verify
+   the actor, not just which label it carries.
 2. **Bot identity.** The machine user `mercury-nightly`, Write collaborator on
    `aywengo/mercury` only, classic PAT with `repo` scope (fine-grained tokens do
    not work for collaborators on a personal repository). Documented in
