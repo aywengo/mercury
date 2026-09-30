@@ -64,7 +64,7 @@ test('the example config parses and every task passes the real cron/tz parsers',
     // (explicit [] = no skills, Crew #724 decision 1A).
     const expectedSkills: Record<string, string[]> = {
       'nightly-e2e': [],
-      'nightly-next': ['issue-fix-loop', 'testing'],
+      'nightly-next': ['issue-fix-loop', 'planning', 'implementation', 'testing'],
       'nightly-report': [],
     };
     assert.deepEqual(template.skills, expectedSkills[t.name as string]);
@@ -99,8 +99,11 @@ test('next fires at most every 20 minutes and the last fire is 04:40 (inside the
   const next = taskOf('nightly-next');
   assert.equal(next.cron, '*/20 0-4 * * *');
   const constraints = next.template.constraints as { maxDurationMs: number };
-  // 80 min backstop: the 04:40 fire ends by 06:00 even without notAfter.
-  assert.ok(constraints.maxDurationMs <= 80 * 60_000);
+  // #800: 4h room for feature-sized fix-loops (80 min timed out five times), same cap as the
+  // e2e task. notAfterAt 06:00 still ends every Run at the window boundary, so even the 04:40
+  // fire cannot leak past 06:00; the cap only stops a single Run from eating the whole night.
+  assert.ok(constraints.maxDurationMs <= 4 * 3_600_000);
+  assert.ok(constraints.maxDurationMs > 80 * 60_000, 'feature work needs more than the old 80 min');
 });
 
 test('the report fires 06:05 (§4.3 window just ended) and its deadline is 07:00, never a past 06:00', () => {

@@ -16,15 +16,18 @@
  *      additionally waits until tonight's `nightly-e2e` Run is terminal (queried from the host
  *      API with the same token the Run was created with): no new autonomous work starts while
  *      the E2E verdict for tonight is still open.
- *   2. New @aywengo issues — authored by @aywengo, no labels at all, oldest first.
- *   3. Docs → proposals (§6) — reported as `rung: 3` with no issue: the nightly drafts the
+ *   2. Trusted features — `enhancement` issues the trusted author filed, or whose CURRENT
+ *      `enhancement` label carries @aywengo as its timeline actor, priority then age (#800).
+ *   3. New @aywengo issues — authored by @aywengo, no labels at all, oldest first.
+ *   4. Docs → proposals (§6) — reported as `rung: 4` with no issue: the nightly drafts the
  *      issue set itself; selection has nothing to claim.
  *
  * An issue is eligible only under §5's trust rule: authored by @aywengo, filed by the nightly
  * identity from E2E (`origin:e2e` — the AUTHOR must be the nightly identity AND the CURRENT label
  * must carry the nightly identity as its timeline actor, because a label alone is provenance
- * anyone with triage access can apply), or labeled `nightly:ready` by @aywengo — the actor comes
- * from the timeline's labeled events, never from issue text.
+ * anyone with triage access can apply), labeled `nightly:ready` by @aywengo, or whose CURRENT
+ * `enhancement` label carries @aywengo as its timeline actor (#800) — the actor comes from the
+ * timeline's labeled events, never from issue text.
  * `nightly:in-progress`, `nightly:blocked` and `nightly:proposed` exclude an issue outright.
  * The chosen issue is claimed by adding `nightly:in-progress` BEFORE the decision is printed;
  * 422 already-exists on the claim means a concurrent or retried nightly got there first and the
@@ -41,7 +44,7 @@
  */
 
 import { basename } from 'node:path';
-import { REPO_RE, ghToken, ghGet as ghGetRaw, ghPost as ghPostRaw, FETCH_TIMEOUT_MS } from './shared.ts';
+import { REPO_RE, ghToken, ghGet as ghGetRaw, ghPost as ghPostRaw, ghDelete as ghDeleteRaw, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const TRUSTED_AUTHOR = 'aywengo';
 /**
@@ -55,6 +58,7 @@ const L_IN_PROGRESS = 'nightly:in-progress';
 const L_BLOCKED = 'nightly:blocked';
 const L_PROPOSED = 'nightly:proposed';
 const L_E2E = 'origin:e2e';
+const L_ENH = 'enhancement';
 const EXCLUDED = [L_IN_PROGRESS, L_BLOCKED, L_PROPOSED] as const;
 const PRIORITY_ORDER = ['priority: high', 'priority: medium', 'priority: low'] as const;
 
@@ -71,6 +75,7 @@ export interface LabelEvent {
   event?: string | null;
   actor?: { login?: string | null } | null;
   label?: { name?: string | null } | null;
+  created_at?: string | null;
 }
 
 export interface Selection {
@@ -87,16 +92,17 @@ export function issueAuthor(issue: GhIssue): string {
   return issue.user?.login ?? '';
 }
 
-/** §5 trust: authored by @aywengo, filed by the nightly identity from E2E, or nightly:ready by
- * @aywengo. The ready clause is author-INDEPENDENT — a @aywengo approval makes even a
- * nightly-authored issue eligible — so it is checked first. The E2E clause is held to the same
- * standard as ready: the issue must be AUTHORED by the nightly identity AND the CURRENT
+/** §5 trust: authored by @aywengo, filed by the nightly identity from E2E, nightly:ready by
+ * @aywengo, or enhancement by @aywengo. The ready and enhancement clauses are author-INDEPENDENT
+ * — a @aywengo label makes even a nightly-authored issue eligible. The E2E clause is held to the
+ * same standard as ready: the issue must be AUTHORED by the nightly identity AND the CURRENT
  * origin:e2e label must carry the nightly identity as its timeline actor. A label alone is
  * provenance anyone with triage access can apply — the author is what makes it "filed by the bot
  * from E2E". */
-export function isTrusted(issue: GhIssue, readyByTrusted: boolean, e2eByNightly: boolean): boolean {
+export function isTrusted(issue: GhIssue, readyByTrusted: boolean, e2eByNightly: boolean, enhByTrusted = false): boolean {
   if (issueAuthor(issue) === TRUSTED_AUTHOR) return true;
   if (readyByTrusted) return true;
+  if (enhByTrusted) return true;
   return issueAuthor(issue) === NIGHTLY_IDENTITY && issueLabels(issue).includes(L_E2E) && e2eByNightly;
 }
 
@@ -131,6 +137,32 @@ export function labelActorsFor(timeline: LabelEvent[], labelName: string): strin
   return typeof current === 'string' ? [current] : [];
 }
 
+/**
+ * When the CURRENT `labelName` was applied, from the issue's timeline: the same walk as
+ * `labelActorsFor`, but returning the final labeled event's timestamp (null = not currently
+ * labeled). This is how a stale `nightly:in-progress` claim is recognized: a claim whose label
+ * event predates the current night was left by a deadline-stopped Run (§4.3), not by a
+ * concurrent one.
+ */
+export function lastLabeledAt(timeline: LabelEvent[], labelName: string): string | null {
+  let current: string | null = null;
+  for (const e of timeline) {
+    if (e.label?.name !== labelName) continue;
+    if (e.event === 'labeled') current = e.created_at ?? null;
+    if (e.event === 'unlabeled') current = null;
+  }
+  return current;
+}
+
+/** The start of the CURRENT night (local 00:00), the claim-freshness boundary: the nightly
+ * window is [00:00, 06:00) local (§4.3), so a claim applied before today's local midnight
+ * cannot belong to a Run that is alive right now. */
+export function nightStartLocal(now: Date = new Date()): number {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
 export function isExcluded(issue: GhIssue): boolean {
   const labels = issueLabels(issue);
   return EXCLUDED.some((l) => labels.includes(l));
@@ -158,6 +190,9 @@ export interface Candidate {
    * False when the label is absent, the author differs, the actor differs, or the timeline walk
    * was skipped or hit its cap (fail closed). */
   e2eByNightly: boolean;
+  /** enhancement applied by @aywengo (timeline-verified): the CURRENT enhancement label's
+   * timeline actor is the trusted author (#800). False when absent/actor differs/cap hit. */
+  enhByTrusted: boolean;
 }
 
 /**
@@ -171,7 +206,7 @@ export function selectLadder(
   /** Candidates seen before claims were dropped (a caller mutating the array passes this). */
   seenCount?: number,
 ): Selection {
-  const eligible = candidates.filter((c) => !isExcluded(c.issue) && isTrusted(c.issue, c.readyByTrusted, c.e2eByNightly));
+  const eligible = candidates.filter((c) => !isExcluded(c.issue) && isTrusted(c.issue, c.readyByTrusted, c.e2eByNightly, c.enhByTrusted));
 
   // Rung 1: origin:e2e or trusted nightly:ready, priority then age.
   if (opts.e2eRunTerminal) {
@@ -194,20 +229,39 @@ export function selectLadder(
     }
   }
 
-  // Rung 2: new @aywengo issues — authored by @aywengo, not yet labeled, oldest first.
+  // Rung 2: trusted feature requests (#800) — `enhancement` issues authored by @aywengo, or
+  // whose CURRENT enhancement label was applied by @aywengo (timeline-verified), priority then
+  // age. An operator-filed feature request is autonomous work the same way a filed bug is: the
+  // author's authorship is the trust root, and the review gate (never merge without review)
+  // still applies to whatever the night builds.
   const rung2 = eligible
-    .filter((c) => issueAuthor(c.issue) === TRUSTED_AUTHOR && issueLabels(c.issue).length === 0)
-    .sort((a, b) => ageKey(a.issue) - ageKey(b.issue));
+    .filter((c) => {
+      const labels = issueLabels(c.issue);
+      return (issueAuthor(c.issue) === TRUSTED_AUTHOR && labels.includes(L_ENH)) || c.enhByTrusted;
+    })
+    .sort((a, b) => priorityRank(a.issue) - priorityRank(b.issue) || ageKey(a.issue) - ageKey(b.issue));
   if (rung2.length > 0) {
     const top = rung2[0]!;
-    return { rung: 2, issue: top.issue.number, reason: `new @${TRUSTED_AUTHOR} issue #${top.issue.number}, no labels yet, oldest-first` };
+    const reason = top.enhByTrusted
+      ? `enhancement issue #${top.issue.number} (trusted: labeled enhancement by @${TRUSTED_AUTHOR}), priority ${priorityRank(top.issue) < PRIORITY_ORDER.length ? PRIORITY_ORDER[priorityRank(top.issue)] : 'none'}, oldest-first`
+      : `enhancement issue #${top.issue.number} (trusted: filed by @${TRUSTED_AUTHOR}), priority ${priorityRank(top.issue) < PRIORITY_ORDER.length ? PRIORITY_ORDER[priorityRank(top.issue)] : 'none'}, oldest-first`;
+    return { rung: 2, issue: top.issue.number, reason };
   }
 
-  // Rung 3: docs → proposals (§6). The nightly drafts the issue set itself; nothing to claim.
-// Rung 3 covers every "issues existed but rungs 1-2 have nothing eligible" case — including a
+  // Rung 3: new @aywengo issues — authored by @aywengo, not yet labeled, oldest first.
+  const rung3 = eligible
+    .filter((c) => issueAuthor(c.issue) === TRUSTED_AUTHOR && issueLabels(c.issue).length === 0)
+    .sort((a, b) => ageKey(a.issue) - ageKey(b.issue));
+  if (rung3.length > 0) {
+    const top = rung3[0]!;
+    return { rung: 3, issue: top.issue.number, reason: `new @${TRUSTED_AUTHOR} issue #${top.issue.number}, no labels yet, oldest-first` };
+  }
+
+  // Rung 4: docs → proposals (§6). The nightly drafts the issue set itself; nothing to claim.
+// Rung 4 covers every "issues existed but rungs 1-3 have nothing eligible" case — including a
 // caller that dropped claimed candidates. 'none' means the repo had ZERO open issues.
   if (candidates.length > 0 || (seenCount ?? 0) > 0) {
-    return { rung: 3, reason: 'rungs 1 and 2 have no eligible work; the nightly drafts docs → proposals (§6)' };
+    return { rung: 4, reason: 'rungs 1 to 3 have no eligible work; the nightly drafts docs → proposals (§6)' };
   }
   return { rung: 'none', reason: 'no open issues at all' };
 }
@@ -288,9 +342,14 @@ export async function e2eRunTerminal(env: NodeJS.ProcessEnv): Promise<boolean> {
 }
 
 /** The full pipeline over an INJECTED fetch-like transport (tests pass recordings; main passes ghGet/ghPost).
- * io.post returns true when the claim label was newly added, false when it was already present. */
+ * io.post returns true when the claim label was newly added, false when it was already present.
+ * io.del returns true on 2xx and false when the label was absent (the stale-claim reset). */
 export async function runSelectorWith(
-  io: { get: (path: string) => Promise<unknown>; post: (path: string, body: unknown) => Promise<boolean> },
+  io: {
+    get: (path: string) => Promise<unknown>;
+    post: (path: string, body: unknown) => Promise<boolean>;
+    del?: (path: string) => Promise<boolean>;
+  },
   env: NodeJS.ProcessEnv,
   dryRun: boolean,
 ): Promise<Selection> {
@@ -324,9 +383,13 @@ export async function runSelectorWith(
     // (treated as not trusted).
     const labels = issueLabels(issue);
     const needTimeline = labels.includes(L_READY)
+      || labels.includes(L_ENH)
+      || labels.includes(L_IN_PROGRESS)
       || (labels.includes(L_E2E) && issueAuthor(issue) === NIGHTLY_IDENTITY);
     let readyByTrusted = false;
     let e2eByNightly = false;
+    let enhByTrusted = false;
+    let staleClaim = false;
     if (needTimeline) {
       const timeline: LabelEvent[] = [];
       let tlPath: string | null = `/repos/${repo}/issues/${issue.number}/timeline?per_page=100`;
@@ -346,9 +409,39 @@ export async function runSelectorWith(
         e2eByNightly = issueAuthor(issue) === NIGHTLY_IDENTITY
           && labels.includes(L_E2E)
           && labelActorsFor(timeline, L_E2E).includes(NIGHTLY_IDENTITY);
+        enhByTrusted = labelActorsFor(timeline, L_ENH).includes(TRUSTED_AUTHOR);
+        // §4.3 stale-claim reset: an in-progress claim applied BEFORE the current night belongs
+        // to a deadline-stopped Run ("nightly-report lists it, and the next night resets it").
+        // Such a claim must not exclude the issue forever. A claim from TONIGHT still excludes:
+        // that is a live concurrent/retried Run. In a dry run the stale label is only reported
+        // around, never written.
+        const claimedAt = lastLabeledAt(timeline, L_IN_PROGRESS);
+        if (labels.includes(L_IN_PROGRESS) && claimedAt !== null) {
+          const t0 = Date.parse(claimedAt);
+          if (Number.isFinite(t0) && t0 < nightStartLocal()) {
+            staleClaim = true;
+            if (!dryRun) {
+              if (!io.del) throw new Error('stale claim reset needs io.del; the injected transport lacks it');
+              try {
+                const removed = await io.del(`/repos/${repo}/issues/${issue.number}/labels/${encodeURIComponent(L_IN_PROGRESS)}`);
+                if (!removed) {
+                  // Absent label: the claim was released between the list walk and now; fine.
+                  staleClaim = true;
+                }
+              } catch (e) {
+                // Fail closed for THIS issue only: keep it excluded, keep selecting the rest.
+                console.error(`stale-claim reset failed for #${issue.number}: ${String(e instanceof Error ? e.message : e)}`);
+                staleClaim = false;
+              }
+            }
+          }
+        }
       }
     }
-    candidates.push({ issue, readyByTrusted, e2eByNightly });
+    // A reset stale claim no longer excludes the issue: drop the label from the candidate's view.
+    const effectiveLabels = staleClaim ? labels.filter((l) => l !== L_IN_PROGRESS) : labels;
+    const effectiveIssue = staleClaim ? { ...issue, labels: effectiveLabels.map((name) => ({ name })) } : issue;
+    candidates.push({ issue: effectiveIssue, readyByTrusted, e2eByNightly, enhByTrusted });
   }
   const e2eTerminal = await e2eRunTerminal(env);
   // A capped list walk means open items exist beyond page 10 (they may all be PRs or PR-like):
@@ -378,6 +471,12 @@ export async function runSelector(repo: string, env: NodeJS.ProcessEnv, dryRun: 
     {
       get: async (path) => await ghGet(path, token),
       post: (path, body) => ghPost(path, body, token),
+      del: async (path) => {
+        const res = await ghDeleteRaw(path, token);
+        if (res.status >= 200 && res.status < 300) return true;
+        if (res.status === 404) return false; // label already absent
+        throw new Error(`DELETE ${path} -> ${res.status}`);
+      },
     },
     { ...env, REPO: repo },
     dryRun,

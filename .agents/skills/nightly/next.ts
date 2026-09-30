@@ -5,8 +5,10 @@
  * (SKILL.md commands it on the claimed issue). The ladder (§4.2) is `select.ts`'s:
  *
  *   - rung 1: trusted `origin:e2e` / `nightly:ready` issues (priority, then age)
- *   - rung 2: new @aywengo issues, not yet labeled (age)
- *   - rung 3: docs → proposals — DRAFT ONLY (§6): the agent drafts `nightly:proposed` issues and
+ *   - rung 2: trusted `enhancement` issues — authored by @aywengo or labeled enhancement by
+ *     @aywengo (timeline actor) — priority, then age (#800)
+ *   - rung 3: new @aywengo issues, not yet labeled (age)
+ *   - rung 4: docs → proposals — DRAFT ONLY (§6): the agent drafts `nightly:proposed` issues and
  *     never implements.
  *
  * The chosen issue is claimed `nightly:in-progress` by the selector before this skill reports it
@@ -92,10 +94,10 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: 
     { ...env, REPO: opts.repo },
     opts.dryRun,
   );
-  if (selection.rung === 1 || selection.rung === 2) {
+  if (selection.rung === 1 || selection.rung === 2 || selection.rung === 3) {
     return { ...selection, action: 'fix-loop' };
   }
-  if (selection.rung === 3) {
+  if (selection.rung === 4) {
     return { ...selection, action: 'draft-proposals' };
   }
   return { rung: 'none', reason: selection.reason, action: 'no-op' };

@@ -134,7 +134,8 @@ body as an invisible `<!-- nightly:blocking-question -->` marker (#770) — user
 are never edited — so `nightly-report` reads the question from the issue listing without any
 comment request. On success run `finish` — every exit path this skill controls removes
 `nightly:in-progress`. A Run stopped by its deadline keeps the claim (§4.3);
-`nightly-report` lists it and the next night resets it.
+`nightly-report` lists it and the next night's selector removes the stale claim
+(#800) before selecting.
 
 ## Report (`report.ts`, N1-4)
 

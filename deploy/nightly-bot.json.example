@@ -35,11 +35,13 @@
           "task": "nightly-next {{fire.date}} {{fire.time}}: take the top rung of the nightly ladder per .agents/skills/nightly/SKILL.md (next.ts); finish or mark blocked; never ask; stay inside the 06:00 window.",
           "notAfterAt": "06:00",
           "constraints": {
-            "maxDurationMs": 4800000,
+            "maxDurationMs": 14400000,
             "maxRetries": 0
           },
           "skills": [
             "issue-fix-loop",
+            "planning",
+            "implementation",
             "testing"
           ],
           "repository": {

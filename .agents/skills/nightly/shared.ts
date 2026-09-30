@@ -76,3 +76,7 @@ export function ghPost(path: string, body: unknown, token: string): Promise<{ bo
 export function ghPatch(path: string, body: unknown, token: string): Promise<{ body: unknown; status: number }> {
   return ghFetch('PATCH', path, token, body);
 }
+
+export function ghDelete(path: string, token: string): Promise<{ body: unknown; status: number; link?: string | null }> {
+  return ghFetch('DELETE', path, token);
+}
