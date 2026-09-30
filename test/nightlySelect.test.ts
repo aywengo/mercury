@@ -29,6 +29,7 @@ function cand(i: GhIssue, timeline: LabelEvent[] = []): Candidate {
     e2eByNightly: issueAuthor(i) === 'mercury-nightly'
       && issueLabels(i).includes('origin:e2e')
       && labelActorsFor(timeline, 'origin:e2e').includes('mercury-nightly'),
+    enhByTrusted: labelActorsFor(timeline, 'enhancement').includes('aywengo'),
   };
 }
 function e2eLabeled(actor: string): LabelEvent {
@@ -41,7 +42,7 @@ test('an issue by another author is never chosen (trust rule §5)', () => {
   const c = [cand(issue({ number: 1, user: { login: 'random-dev' } }))];
   const s = selectLadder(c, TERMINAL);
   assert.notEqual(s.issue, 1);
-  assert.equal(s.rung === 'none' || s.rung === 3, true);
+  assert.equal(s.rung === 'none' || s.rung === 4, true);
 });
 
 test('a nightly:ready label applied by another actor is ignored; by @aywengo it is trusted', () => {
@@ -63,7 +64,7 @@ test('origin:e2e is trusted only from the nightly identity (#764)', () => {
   const foreign = cand(issue({ number: 4, user: { login: 'mercury-bot[bot]' }, labels: [{ name: 'origin:e2e' }], created_at: '2026-09-21T00:00:00Z' }));
   const sForeign = selectLadder([foreign], TERMINAL);
   assert.notEqual(sForeign.issue, 4);
-  assert.equal(sForeign.rung === 'none' || sForeign.rung === 3, true);
+  assert.equal(sForeign.rung === 'none' || sForeign.rung === 4, true);
 
   // The SAME issue authored by the nightly identity, with the e2e label applied by the nightly
   // identity, is eligible (fixture 1, nightly author).
@@ -77,7 +78,7 @@ test('origin:e2e is trusted only from the nightly identity (#764)', () => {
   assert.match(sNightly.reason, /origin:e2e/);
 
   // Nightly-authored WITHOUT origin:e2e is not eligible through this clause (fixture 2); it is
-  // also not rung 2 (rung 2 requires @aywengo authorship) — it lands on rung 3/none.
+  // also not rung 3 (rung 3 requires @aywengo authorship) — it lands on rung 4/none.
   const noLabel = cand(issue({ number: 6, user: { login: 'mercury-nightly' }, created_at: '2026-09-21T00:00:00Z' }));
   const sNone = selectLadder([noLabel], TERMINAL);
   assert.notEqual(sNone.issue, 6);
@@ -164,9 +165,9 @@ test('rung 2: a new @aywengo issue with no labels, oldest first', () => {
   const a = issue({ number: 30, user: { login: 'aywengo' }, created_at: '2026-09-22T00:00:00Z' });
   const b = issue({ number: 31, user: { login: 'aywengo' }, created_at: '2026-09-23T00:00:00Z' });
   const s = selectLadder([cand(b), cand(a)], TERMINAL);
-  assert.equal(s.rung, 2);
+  assert.equal(s.rung, 3);
   assert.equal(s.issue, 30, 'rung 1 empty, oldest first');
-  // A labeled @aywengo issue is NOT rung 2 (labels mean someone triaged it).
+  // A labeled @aywengo issue is NOT rung 3 (labels mean someone triaged it).
   const labeled_ay = issue({ number: 32, user: { login: 'aywengo' }, labels: [{ name: 'bug' }] });
   const s2 = selectLadder([cand(labeled_ay)], TERMINAL);
   assert.notEqual(s2.issue, 32);
@@ -176,16 +177,16 @@ test('rung 1 waits until tonight\'s nightly-e2e Run is terminal', () => {
   const c = cand(issue({ number: 40, labels: [{ name: 'origin:e2e' }] }));
   const s = selectLadder([c], { e2eRunTerminal: false });
   assert.notEqual(s.issue, 40, 'e2e verdict still open: rung 1 does not offer work');
-  // Rung 2 still works while e2e is open.
+  // Rung 3 still works while e2e is open.
   const ay = issue({ number: 41, user: { login: 'aywengo' } });
   const s2 = selectLadder([c, cand(ay)], { e2eRunTerminal: false });
-  assert.equal(s2.rung, 2);
+  assert.equal(s2.rung, 3);
   assert.equal(s2.issue, 41);
 });
 
-test('rung 3 / none', () => {
+test('rung 4 / none', () => {
   const s = selectLadder([cand(issue({ number: 50, user: { login: 'random' }, labels: [{ name: 'question' }] }))], TERMINAL);
-  assert.equal(s.rung, 3, 'untrusted issues exist but nothing eligible: docs → proposals rung');
+  assert.equal(s.rung, 4, 'untrusted issues exist but nothing eligible: docs → proposals rung');
   const s2 = selectLadder([], TERMINAL);
   assert.equal(s2.rung, 'none');
 });
@@ -238,9 +239,14 @@ test('readyActorsFor tracks the CURRENT ready state, not history (round-2 review
 test('runSelectorWith claims exactly one issue and returns it (normal case)', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const events: string[] = [];
+  // #801 round 3: after the claim POST the selector verifies ownership through the timeline -
+  // the final nightly:in-progress labeled event must carry the nightly identity (our own POST
+  // makes us the last writer on GitHub).
+  const ourClaim = [{ event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' } }];
   const io = {
     async get(path: string) {
       events.push(`get ${path}`);
+      if (path.includes('/timeline')) return { body: ourClaim, link: null };
       return { body: [issue({ number: 60, user: { login: 'aywengo' } })], link: null };
     },
     async post(path: string) {
@@ -249,13 +255,52 @@ test('runSelectorWith claims exactly one issue and returns it (normal case)', as
     },
   };
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
-  assert.equal(s.rung, 2);
+  assert.equal(s.rung, 3);
   assert.equal(s.issue, 60, 'the claimed issue is returned');
   assert.deepEqual(events.filter((e) => e.startsWith('post')), [
     'post /repos/aywengo/mercury/issues/60/labels',
   ], 'exactly one claim POST in the normal case');
+  assert.ok(events.some((e) => e.includes('/timeline')), 'ownership is verified through the timeline after the claim');
   assert.ok(events.indexOf('post /repos/aywengo/mercury/issues/60/labels') !== -1, 'the claim is issued before runSelectorWith resolves');
   assert.match(s.reason, /#60/);
+});
+
+test('a foreign actor as the final claim event is NOT our claim: re-select (#801 round 3)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  // GitHub's add-labels is idempotent (duplicate POST -> 200, verified 2026-09-30), so a
+  // competitor's label looks identical to ours in the POST response; only the timeline actor
+  // tells them apart.
+  const theirClaim = [{ event: 'labeled', actor: { login: 'someone-else' }, label: { name: 'nightly:in-progress' } }];
+  const posts: string[] = [];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: theirClaim, link: null };
+      return { body: [issue({ number: 66, user: { login: 'aywengo' } })], link: null };
+    },
+    async post(path: string) { posts.push(path); return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
+  assert.notEqual(s.issue, 66, 'the competitor holds the claim: the candidate is dropped');
+  assert.equal(posts.length, 1, 'no second claim POST for a dropped candidate');
+});
+
+test('a capped claim-ownership walk fails closed: the candidate is dropped (#801 round 3)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  let timelineGets = 0;
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) {
+        timelineGets++;
+        // Always another page: the walk hits its 10-page cap.
+        return { body: [{ event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' } }], link: '<https://api.github.com/repos/aywengo/mercury/issues/67/timeline?per_page=100&page=2>; rel="next"' };
+      }
+      return { body: [issue({ number: 67, user: { login: 'aywengo' } })], link: null };
+    },
+    async post() { return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
+  assert.notEqual(s.issue, 67, 'ownership that cannot be verified is not ownership (fail closed)');
+  assert.equal(timelineGets, 10, 'the walk bounded at its cap');
 });
 
 test('labelActorsFor: an actor-less labeled event fails closed (round-5 note)', () => {
@@ -320,7 +365,7 @@ test('runSelectorWith skips the e2e timeline walk for non-nightly authors (#764 
     async post(path: string) { return true; },
   };
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, true);
-  assert.equal(s.rung, 2, 'the foreign e2e issue is not eligible; the @aywengo issue is rung 2');
+  assert.equal(s.rung, 3, 'the foreign e2e issue is not eligible; the @aywengo issue is rung 3');
   assert.equal(gets.filter((p) => p.includes('/timeline')).length, 0,
     'no timeline is walked for a foreign-author origin:e2e issue');
   // And the nightly-authored e2e issue DOES get its timeline walked.
@@ -341,25 +386,33 @@ test('runSelectorWith skips the e2e timeline walk for non-nightly authors (#764 
     'exactly one timeline walk for the nightly-authored e2e issue');
 });
 
-test('runSelectorWith re-selects only when GitHub says the label was already there (422 racer)', async () => {
+test('runSelectorWith re-selects only when GitHub says the claim is not ours (racer)', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const posts: string[] = [];
   let first = true;
+  const ourClaim = [{ event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' } }];
+  const theirClaim = [{ event: 'labeled', actor: { login: 'racer-bot' }, label: { name: 'nightly:in-progress' } }];
   const io = {
-    async get() { return { body: [issue({ number: 62, user: { login: 'aywengo' } }), issue({ number: 63, user: { login: 'aywengo' } })], link: null }; },
+    async get(path: string) {
+      if (path.includes('/issues/62/timeline')) return { body: theirClaim, link: null };
+      if (path.includes('/timeline')) return { body: ourClaim, link: null };
+      return { body: [issue({ number: 62, user: { login: 'aywengo' } }), issue({ number: 63, user: { login: 'aywengo' } })], link: null };
+    },
     async post(path: string) {
       posts.push(path);
-      if (first) { first = false; return false; } // 422: a racer already claimed #62
+      if (first) { first = false; return true; } // 200 (idempotent), but #62's timeline says racer
       return true;
     },
   };
+  // Round 3 (#801): the racer signal is the TIMELINE ACTOR, not a 422 - GitHub's add-labels is
+  // idempotent. The first candidate's claim is not ours, so it is dropped and #63 is claimed.
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
   assert.deepEqual(posts, [
     '/repos/aywengo/mercury/issues/62/labels',
     '/repos/aywengo/mercury/issues/63/labels',
   ], 'the racer-taken candidate is dropped, the next one is claimed');
   assert.equal(s.issue, 63);
-  assert.equal(s.rung, 2);
+  assert.equal(s.rung, 3);
 });
 
 test('runSelectorWith --dry-run never posts the claim', async () => {
@@ -457,9 +510,11 @@ test('e2eRunTerminal walks pages: a non-terminal e2e Run past page one fails the
 test('the open-issue list walks Link-header pages (round-4 review)', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const paths: string[] = [];
+  const ourClaim = [{ event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' } }];
   const io = {
     async get(path: string) {
       paths.push(path);
+      if (path.includes('/timeline')) return { body: ourClaim, link: null };
       if (path.includes('page=2') || path.includes('page%3D2')) {
         return { body: [issue({ number: 82, user: { login: 'aywengo' } })], link: null };
       }
@@ -472,7 +527,7 @@ test('the open-issue list walks Link-header pages (round-4 review)', async () =>
   };
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
   assert.equal(s.issue, 82, 'the page-2 candidate is visible to the ladder');
-  assert.equal(paths.filter((p) => p.startsWith('/repos/')).length, 2, 'both pages fetched');
+  assert.equal(paths.filter((p) => p.startsWith('/repos/') && p.includes('issues?')).length, 2, 'both list pages fetched');
 });
 
 
@@ -497,7 +552,7 @@ test('the timeline walk is paginated and a hit cap fails closed (round-5 review)
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, true);
   assert.equal(s.issue, undefined, 'the CURRENT ready actor (page 2) is random-dev, not aywengo: not trusted');
   assert.ok(paths.some((p) => p.includes('page=2')), 'the second timeline page was fetched');
-  // A capped walk (always another page) fails closed: no claim, rung 3/none, not trusted.
+  // A capped walk (always another page) fails closed: no claim, rung 4/none, not trusted.
   const io2 = {
     async get(path: string) {
       if (path.includes('/timeline')) {
@@ -530,7 +585,7 @@ test('ghPost 422: only already-exists re-selects; other validation failures thro
   await assert.rejects(() => runSelectorWith(io, { REPO: 'aywengo/mercury' }, false), /422 validation failed/);
 });
 
-test('a capped open-issue list reports rung 3, never a false none (round-9 review)', async () => {
+test('a capped open-issue list reports rung 4, never a false none (round-9 review)', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const paths: string[] = [];
   const io = {
@@ -543,6 +598,133 @@ test('a capped open-issue list reports rung 3, never a false none (round-9 revie
     async post() { return true; },
   };
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
-  assert.equal(s.rung, 3, 'a capped walk means open items exist beyond the cap: docs rung, not none');
+  assert.equal(s.rung, 4, 'a capped walk means open items exist beyond the cap: docs rung, not none');
   assert.equal(paths.length, 10, 'the walk stopped at the cap');
+});
+
+
+// ---- #800: the enhancement rung and the stale-claim reset ----
+
+test('rung 2: a trusted-author enhancement issue is selected, priority then age (#800)', () => {
+  const older = issue({ number: 11, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }], created_at: '2026-09-21T00:00:00Z' });
+  const newerHigh = issue({ number: 12, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }, { name: 'priority: high' }], created_at: '2026-09-23T00:00:00Z' });
+  const s = selectLadder([cand(older), cand(newerHigh)], TERMINAL);
+  assert.equal(s.rung, 2);
+  assert.equal(s.issue, 12, 'priority: high beats age inside the rung');
+  assert.match(s.reason, /enhancement issue #12/);
+  const s2 = selectLadder([cand(older)], TERMINAL);
+  assert.equal(s2.issue, 11, 'then oldest first');
+  assert.match(s2.reason, /filed by @aywengo/);
+});
+
+test('rung 2: an enhancement label from an unverified actor on a foreign issue is NOT eligible (#800)', () => {
+  // Same discipline as nightly:ready (#764): a label anyone can apply is not provenance. A
+  // foreign-authored issue with a foreign-applied enhancement label stays out of the ladder.
+  const foreign = issue({ number: 13, user: { login: 'random-dev' }, labels: [{ name: 'enhancement' }] });
+  const s = selectLadder([cand(foreign, [labeled('random-dev', 'enhancement')])], TERMINAL);
+  assert.equal(s.rung === 'none' || s.rung === 4, true, 'falls through to the docs rung, never rung 2');
+});
+
+test('rung 2: an @aywengo-applied enhancement label trusts a foreign-author issue (#800)', () => {
+  const nightlyAuthored = issue({ number: 14, user: { login: 'mercury-nightly' }, labels: [{ name: 'enhancement' }] });
+  const s = selectLadder([cand(nightlyAuthored, [labeled('aywengo', 'enhancement')])], TERMINAL);
+  assert.equal(s.rung, 2);
+  assert.equal(s.issue, 14);
+  assert.match(s.reason, /labeled enhancement by @aywengo/);
+});
+
+test('rung 2 keeps its place after rung 1: ready still wins over enhancement (#800)', () => {
+  const enh = issue({ number: 15, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }], created_at: '2026-09-20T00:00:00Z' });
+  const ready = issue({ number: 16, labels: [{ name: 'nightly:ready' }], created_at: '2026-09-25T00:00:00Z' });
+  const s = selectLadder([cand(enh), cand(ready, [labeled('aywengo', 'nightly:ready')])], TERMINAL);
+  assert.equal(s.rung, 1);
+  assert.equal(s.issue, 16);
+});
+
+test('a stale nightly:in-progress claim is reset and the issue becomes selectable (#800)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  // Claim labeled three days ago: a deadline-stopped Run's leftover (§4.3 "the next night
+  // resets it" - previously promised, never implemented).
+  const claimed = issue({ number: 61, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const staleEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: '2026-09-27T21:00:00Z' };
+  const dels: string[] = [];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [staleEvent], link: null };
+      return { body: [claimed], link: null };
+    },
+    async post(path: string) { return true; },
+    async del(path: string) { dels.push(path); return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
+  assert.equal(s.issue, 61, 'the stale-claimed issue is selected');
+  assert.deepEqual(dels, ['/repos/aywengo/mercury/issues/61/labels/nightly%3Ain-progress' ], 'the stale claim is removed before the new claim');
+});
+
+test('a claim from TONIGHT still excludes the issue (live Run, not stale) (#800)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const claimed = issue({ number: 62, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const freshEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [freshEvent], link: null };
+      return { body: [claimed], link: null };
+    },
+    async post(path: string) { return true; },
+    async del(path: string) { dels.push(path); return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
+  assert.notEqual(s.issue, 62, 'a tonight-claim means a live concurrent Run');
+  assert.equal(dels.length, 0, 'nothing is deleted behind a live claim');
+});
+
+test('--dry-run resets nothing: the stale claim is only reported around (#800)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const claimed = issue({ number: 63, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const staleEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: '2026-09-27T21:00:00Z' };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [staleEvent], link: null };
+      return { body: [claimed], link: null };
+    },
+    async post(path: string) { posts.push(path); return true; },
+    async del(path: string) { dels.push(path); return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.issue, 63, 'dry-run reports the decision');
+  assert.equal(dels.length, 0, 'dry-run writes nothing');
+  assert.deepEqual(posts, []);
+});
+
+test('a FAILED stale-claim reset fails closed for that issue only (#800)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const claimed = issue({ number: 64, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const fresh = issue({ number: 65, user: { login: 'aywengo' } });
+  const staleEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: '2026-09-27T21:00:00Z' };
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [staleEvent], link: null };
+      return { body: [claimed, fresh], link: null };
+    },
+    async post(path: string) { return true; },
+    async del() { throw new Error('GitHub 500'); },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
+  assert.equal(s.issue, 65, 'the stuck issue is skipped, the rest of the night still works');
+});
+
+test('lastLabeledAt walks the timeline like labelActorsFor (re-label loses the old date) (#800)', async () => {
+  const { lastLabeledAt } = await import('../.agents/skills/nightly/select.ts');
+  const timeline = [
+    { event: 'labeled', label: { name: 'nightly:in-progress' }, created_at: '2026-09-20T00:00:00Z' },
+    { event: 'unlabeled', label: { name: 'nightly:in-progress' } },
+    { event: 'labeled', label: { name: 'nightly:in-progress' }, created_at: '2026-09-29T12:00:00Z' },
+  ];
+  assert.equal(lastLabeledAt(timeline, 'nightly:in-progress'), '2026-09-29T12:00:00Z');
+  assert.equal(lastLabeledAt([timeline[0]!], 'nightly:in-progress'), '2026-09-20T00:00:00Z');
+  assert.equal(lastLabeledAt([{ event: 'unlabeled', label: { name: 'nightly:in-progress' } }], 'nightly:in-progress'), null);
+  assert.equal(lastLabeledAt([], 'nightly:in-progress'), null);
 });

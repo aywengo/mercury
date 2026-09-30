@@ -19,6 +19,9 @@ function issue(over: Partial<GhIssue> & { number: number }): GhIssue {
 function ioWith(issues: GhIssue[], timelines: Record<number, LabelEvent[]>, opts: { newly?: boolean; listStatus?: number } = {}) {
   const calls: { method: string; path: string; body?: unknown }[] = [];
   let newly = opts.newly ?? true;
+  // Label claims made through postLabel become timeline events (the selector verifies claim
+  // ownership through the timeline's final actor, #801 round 3).
+  const claimEvents = new Map<number, LabelEvent[]>();
   const io: NextIo = {
     async get(path) {
       calls.push({ method: 'GET', path });
@@ -26,7 +29,7 @@ function ioWith(issues: GhIssue[], timelines: Record<number, LabelEvent[]>, opts
         return { body: issues, status: opts.listStatus ?? 200, link: null };
       }
       const tl = path.match(/\/issues\/(\d+)\/timeline/);
-      if (tl) return { body: timelines[Number(tl[1])] ?? [], status: 200, link: null };
+      if (tl) return { body: [...(timelines[Number(tl[1])] ?? []), ...(claimEvents.get(Number(tl[1])) ?? [])], status: 200, link: null };
       const single = path.match(new RegExp(`^/repos/${REPO.replace('/', '\\/')}/issues/(\\d+)$`));
       if (single) {
         const found = issues.find((i) => i.number === Number(single[1]));
@@ -40,6 +43,11 @@ function ioWith(issues: GhIssue[], timelines: Record<number, LabelEvent[]>, opts
     },
     async postLabel(path, body) {
       calls.push({ method: 'POST-LABEL', path, body });
+      const m = path.match(/\/issues\/(\d+)\/labels$/);
+      if (m) {
+        const n = Number(m[1]);
+        claimEvents.set(n, [...(claimEvents.get(n) ?? []), { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: (body as { labels: string[] }).labels[0] } } as unknown as LabelEvent]);
+      }
       return newly;
     },
     async deleteLabel(path) {
@@ -68,24 +76,45 @@ test('rung 1: a trusted nightly:ready issue is selected, claimed, and handed to 
   assert.deepEqual((claim!.body as { labels: string[] }).labels, ['nightly:in-progress']);
 });
 
-test('rung 2: a new @aywengo issue is chosen when no trusted work exists', async () => {
-  const issues = [issue({ number: 20, user: { login: 'aywengo' } })];
+test('rung 2: a trusted enhancement issue is chosen and handed to the fix-loop (#800)', async () => {
+  const issues = [issue({ number: 20, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }] })];
   const { io, calls } = ioWith(issues, {});
   const out = await runNext(io, ENV, { repo: REPO, dryRun: false });
   assert.equal(out.rung, 2);
+  assert.equal(out.issue, 20);
+  assert.equal(out.action, 'fix-loop', 'a feature request runs the same issue-fix-loop as a bug');
+  assert.ok(calls.some((c) => c.method === 'POST-LABEL'));
+});
+
+test('a stale nightly:in-progress claim is reset through runNext (deleteLabel forwarded, #800)', async () => {
+  const staleClaimed = issue({ number: 21, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const staleEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: '2026-09-27T21:00:00Z' } as unknown as LabelEvent;
+  const { io, calls } = ioWith([staleClaimed], { 21: [staleEvent] });
+  const out = await runNext(io, ENV, { repo: REPO, dryRun: false });
+  assert.equal(out.issue, 21, 'the stale-claimed issue is selected');
+  assert.ok(calls.some((c) => c.method === 'DELETE' && c.path.endsWith('/labels/nightly%3Ain-progress')),
+    'the stale claim is removed via NextIo.deleteLabel');
+  assert.ok(calls.some((c) => c.method === 'POST-LABEL'), 'then claimed fresh');
+});
+
+test('rung 3: a new @aywengo issue is chosen when no trusted work exists', async () => {
+  const issues = [issue({ number: 20, user: { login: 'aywengo' } })];
+  const { io, calls } = ioWith(issues, {});
+  const out = await runNext(io, ENV, { repo: REPO, dryRun: false });
+  assert.equal(out.rung, 3);
   assert.equal(out.issue, 20);
   assert.equal(out.action, 'fix-loop');
   assert.ok(calls.some((c) => c.method === 'POST-LABEL'));
 });
 
-test('rung 3: open issues but nothing eligible → draft-proposals, no claim', async () => {
+test('rung 4: open issues but nothing eligible → draft-proposals, no claim', async () => {
   const issues = [issue({ number: 30, user: { login: 'someone' }, labels: [{ name: 'help wanted' }] })];
   const { io, calls } = ioWith(issues, {});
   const out = await runNext(io, ENV, { repo: REPO, dryRun: false });
-  assert.equal(out.rung, 3);
-  assert.equal(out.action, 'draft-proposals', 'rung 3 drafts nightly:proposed issues and never implements');
+  assert.equal(out.rung, 4);
+  assert.equal(out.action, 'draft-proposals', 'rung 4 drafts nightly:proposed issues and never implements');
   assert.equal(out.issue, undefined);
-  assert.equal(calls.filter((c) => c.method === 'POST-LABEL').length, 0, 'rung 3 claims nothing');
+  assert.equal(calls.filter((c) => c.method === 'POST-LABEL').length, 0, 'rung 4 claims nothing');
 });
 
 test("rung 'none': zero open issues → no-op, zero writes", async () => {
@@ -109,7 +138,7 @@ test('a label the selector cannot verify (no timeline actor) never reaches rung 
   // Timeline says the ready label was applied by someone else:
   const { io } = ioWith(issues, { 11: [{ event: 'labeled', label: { name: 'nightly:ready' }, actor: { login: 'not-aywengo' } } as unknown as LabelEvent] });
   const out = await runNext(io, ENV, { repo: REPO, dryRun: false });
-  assert.equal(out.rung, 3, 'untrusted ready falls through to proposals');
+  assert.equal(out.rung, 4, 'untrusted ready falls through to proposals');
   assert.equal(out.action, 'draft-proposals');
 });
 

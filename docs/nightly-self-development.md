@@ -73,8 +73,16 @@ Each `nightly-next` Run evaluates, in order, and takes the first rung with work:
 
 1. **Trusted bugs** — `origin:e2e` issues and `nightly:ready` issues, by
    priority label then age.
-2. **New @aywengo issues** — authored by @aywengo, not yet labeled.
-3. **Docs → proposals** — §6.
+2. **Trusted features** (#800) — `enhancement` issues authored by @aywengo, or
+   whose CURRENT `enhancement` label was applied by @aywengo (the same
+   timeline-actor rule as `nightly:ready`), by priority label then age.
+3. **New @aywengo issues** — authored by @aywengo, not yet labeled.
+4. **Docs → proposals** — §6.
+
+Before selecting, the selector resets stale claims (#800): an issue whose
+CURRENT `nightly:in-progress` label event predates the current night's local
+midnight was left by a deadline-stopped Run; the label is removed so the issue
+is claimable again. A claim from tonight still excludes (a live Run holds it).
 
 Selection runs as code against the GitHub API
 (`.agents/skills/nightly/select.ts`, #738). The chosen issue is labeled
@@ -92,7 +100,8 @@ not take it twice.
 - A template without `constraints.maxDurationMs` gets 1 h from the bot. The
   E2E task sets its own.
 - A Run stopped by its deadline leaves its issue labeled `nightly:in-progress`
-  with a comment; `nightly-report` lists it, and the next night resets it.
+  with a comment; `nightly-report` lists it, and the next night's selector
+  removes the stale claim (#800) before selecting.
 - The report fires at 06:05 (#771), just after the window it digests: a night
   is [00:00, 06:00) local, and a 05:40 fire could never list runs stopped AT
   06:00. The report task's own deadline is 07:00 - a 06:00 deadline would be in
@@ -111,11 +120,12 @@ issue `nightly:blocked`, put the question in an issue comment, finish the Run.
 1. **Trusted issues only.** The ladder considers an issue only if it is authored
    by @aywengo, filed by the nightly identity from E2E — the issue's AUTHOR is
    `mercury-nightly` and the CURRENT `origin:e2e` label carries the nightly
-   identity as its timeline actor — or labeled `nightly:ready` by @aywengo.
-   Checked from the API's author and label-event actor fields, never by the
-   agent reading issue text (#738, #764): a label alone is provenance anyone
-   with triage access can apply, so the middle clause verifies who filed the
-   issue, not just which label it carries.
+   identity as its timeline actor — labeled `nightly:ready` by @aywengo, or
+   carrying a CURRENT `enhancement` label applied by @aywengo (the trusted
+   feature path, #800). Checked from the API's author and label-event actor
+   fields, never by the agent reading issue text (#738, #764): a label alone is
+   provenance anyone with triage access can apply, so the label clauses verify
+   the actor, not just which label it carries.
 2. **Bot identity.** The machine user `mercury-nightly`, Write collaborator on
    `aywengo/mercury` only, classic PAT with `repo` scope (fine-grained tokens do
    not work for collaborators on a personal repository). Documented in
@@ -165,7 +175,7 @@ decision on *what* gets built.
   fingerprint, comments on a match or files a new `origin:e2e` issue. Flakes
   are reported, not filed, until they recur on N nights.
 - **`nightly-next`** (#740) — the ladder (§4.2), then the issue-fix-loop for
-  the chosen issue; rung 3 drafts proposals only.
+  the chosen issue; rung 4 drafts proposals only.
 - **`nightly-report`** (#741) — one digest: PRs opened, issues filed or
   updated, blocked items with their questions, Runs stopped by deadline,
   budget used.
