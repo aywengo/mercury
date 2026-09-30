@@ -88,6 +88,11 @@ export function normalizeRepositoryId(raw: string): string {
     // the profile's credential scope to a whole owner.
     throw new Error(`repository id '${original}' must be host/owner/name or host/owner/* (add the explicit /* for an owner-wide pattern)`);
   }
+  // 'host/owner/*/private' is a malformed subpath, not an owner-wide pattern: the '*' is only the
+  // owner-wide pattern when it is the LAST segment (Copilot review round 2 on #799).
+  if (name === '*' && extra.length > 0) {
+    throw new Error(`repository id '${original}' must be host/owner/name or host/owner/* (a '*' only stands alone as the last segment)`);
+  }
   if (name === '*') return `${host}/${owner}/*`;
   if (extra.length > 0 || !/^[a-z0-9._-]+$/.test(name)) {
     throw new Error(`repository id '${original}' does not look like host/owner/name`);

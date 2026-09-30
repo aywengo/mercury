@@ -69,6 +69,8 @@ test('normalization table: SSH/HTTPS/.git/case equal; subpaths and bad shapes re
   // A bare two-segment id is malformed, NOT a wildcard: accepting it would silently broaden the
   // profile's scope to a whole owner (Copilot review on #799).
   assert.throws(() => normalizeRepositoryId('github.com/aywengo'), /host\/owner\/name or host\/owner\/\*/);
+  // '*' is the owner-wide pattern only as the LAST segment; 'a/*/private' is a malformed subpath.
+  assert.throws(() => normalizeRepositoryId('github.com/acme/*/private'), /only stands alone as the last segment/);
   assert.equal(normalizeRepositoryId('https://gitlab.com/a/b'), 'gitlab.com/a/b');
   assert.throws(() => normalizeRepositoryId('ftp://github.com/a/b'), /unsupported repository URL scheme/);
   assert.throws(() => normalizeRepositoryId('https://github.com/a/b/c'), /host\/owner\/name/);
