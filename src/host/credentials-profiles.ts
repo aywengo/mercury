@@ -149,8 +149,18 @@ function validateProfile(raw: RawProfile, seenNames: Set<string>): CredentialPro
   if (raw.env !== undefined && (typeof raw.env !== 'object' || raw.env === null || Array.isArray(raw.env))) {
     throw new Error(`${where2}: env must be an object keyed by variable name`);
   }
-  const env: Record<string, ProfileEnvValue> = {};
-  for (const [key, value] of Object.entries((raw.env ?? {}) as Record<string, unknown>)) {
+  // Null-prototype dictionary: Object.entries on a plain object only sees OWN keys so inherited
+  // names like 'toString' cannot pass the httpsToken cross-check, and a '__proto__' entry from the
+  // file becomes an ordinary key instead of mutating Object.prototype.
+  const rawEnv: Record<string, unknown> = Object.create(null);
+  for (const [k, v] of Object.entries((raw.env ?? {}) as Record<string, unknown>)) {
+    // defineProperty, not assignment: '__proto__' from JSON.parse is an own key of the parsed
+    // object, but plain assignment onto a null-proto target would still be fine - using
+    // defineProperty keeps the copy explicit and setter-free either way.
+    Object.defineProperty(rawEnv, k, { value: v, enumerable: true, writable: true, configurable: true });
+  }
+  const env: Record<string, ProfileEnvValue> = Object.create(null);
+  for (const [key, value] of Object.entries(rawEnv)) {
     if (FORBIDDEN_ENV_RE.test(key)) {
       throw new Error(`${where2}: env '${key}' matches MERCURY_ which the host reserves; profiles must not override host configuration`);
     }
@@ -193,9 +203,13 @@ function validateProfile(raw: RawProfile, seenNames: Set<string>): CredentialPro
       git.authorEmail = g.authorEmail;
     }
     if (g.httpsToken !== undefined) {
-      if (typeof g.httpsToken !== 'string' || g.httpsToken === '') throw new Error(`${where2}: git.httpsToken must name an env entry`);
-      if (!(g.httpsToken in env)) {
-        throw new Error(`${where2}: git.httpsToken '${g.httpsToken}' does not name an entry in this profile's env`);
+      if (typeof g.httpsToken !== 'string' || g.httpsToken === '') {
+        throw new Error(`${where2}: git.httpsToken must be a non-empty string naming an env entry`);
+      }
+      // The value is whatever the file author put there - sometimes a pasted secret instead of a
+      // NAME. Never echo it (§5.1: values never appear in errors or output).
+      if (!Object.prototype.hasOwnProperty.call(env, g.httpsToken)) {
+        throw new Error(`${where2}: git.httpsToken does not name an entry in this profile's env (available: ${Object.keys(env).join(', ') || 'none'})`);
       }
       git.httpsToken = g.httpsToken;
     }

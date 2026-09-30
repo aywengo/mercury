@@ -203,3 +203,38 @@ test('validate prints profile names, patterns and file-source presence - never v
   const missing = lines.find((l) => l.message.includes('GH_TOKEN'));
   assert.equal(missing?.ok, false, 'a missing file source is reported not-ok');
 });
+
+test('env dictionary has no inherited keys: toString cannot satisfy httpsToken (review round 3)', () => {
+  const dir = tempDir('cp2-proto-');
+  const bad = { profiles: [{ name: 'n', repositories: ['github.com/a/b'], owners: ['o'],
+    env: {}, git: { httpsToken: 'toString' } }] };
+  assert.throws(() => loadCredentialProfiles(writeProfiles(dir, bad)), /does not name an entry/);
+});
+
+test('__proto__ in the file is an ordinary env key, not prototype mutation (review round 3)', () => {
+  const dir = tempDir('cp2-dunder-');
+  const before = ({} as Record<string, unknown>).__proto__;
+  const raw = '{"profiles":[{"name":"n","repositories":["github.com/a/b"],"owners":["o"],"env":{"__proto__":{"value":"x"}},"git":{"httpsToken":"__proto__"}}]}';
+  const cfg = join(dir, 'cfg', 'mercury');
+  mkdirSync(cfg, { recursive: true });
+  const path = join(cfg, 'credential-profiles.json');
+  writeFileSync(path, raw);
+  chmodSync(path, 0o600);
+  const { profiles } = loadCredentialProfiles(envWith(dir));
+  assert.equal(profiles[0]!.env['__proto__']?.value, 'x');
+  assert.equal(({} as Record<string, unknown>).__proto__, before, 'Object.prototype untouched');
+});
+
+test('git.httpsToken error never echoes the supplied value (schema failures respect never-print)', () => {
+  const dir = tempDir('cp2-tokenleak-');
+  const bad = { profiles: [{ name: 'n', repositories: ['github.com/a/b'], owners: ['o'],
+    env: {}, git: { httpsToken: 'ghp_ABCDEF0123456789abcdef' } }] };
+  try {
+    loadCredentialProfiles(writeProfiles(dir, bad));
+    assert.fail('expected a refusal');
+  } catch (err) {
+    const message = (err as Error).message;
+    assert.match(message, /does not name an entry/);
+    assert.ok(!message.includes('ghp_ABCDEF'), 'the supplied value must not appear in the error');
+  }
+});
