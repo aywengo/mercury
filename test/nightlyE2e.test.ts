@@ -18,6 +18,7 @@ import {
   saveFlakeState,
   recordFlakeNight,
   runE2eSkill,
+  ensureDependencies,
   type E2eIo,
   type FlakeState,
 } from '../.agents/skills/nightly/e2e.ts';
@@ -737,4 +738,42 @@ test('repo validation refuses a non owner/name value', async () => {
     () => runE2eSkill(io, {}, { repo: '../escape', dryRun: true, night: '2026-09-26' }),
     /owner\/name/,
   );
+});
+
+test('ensureDependencies installs when node_modules is missing and skips when present', async () => {
+  const { dir, cleanup } = tempStateDir();
+  const noDeps = join(dir, 'no-deps');
+  const withDeps = join(dir, 'with-deps');
+  mkdirSync(noDeps);
+  mkdirSync(withDeps);
+  mkdirSync(join(withDeps, 'node_modules'));
+  try {
+    const installed: string[][] = [];
+    await ensureDependencies(async (argv) => { installed.push(argv); return { code: 0, output: '' }; }, noDeps);
+    assert.deepEqual(installed, [['npm', 'ci']], 'a missing node_modules must trigger `npm ci`');
+
+    const skipped: string[][] = [];
+    await ensureDependencies(async (argv) => { skipped.push(argv); return { code: 0, output: '' }; }, withDeps);
+    assert.deepEqual(skipped, [], 'an existing node_modules must not trigger `npm ci`');
+  } finally {
+    cleanup();
+  }
+});
+
+test('ensureDependencies throws when npm ci fails', async () => {
+  const { dir, cleanup } = tempStateDir();
+  const noDeps = join(dir, 'no-deps');
+  mkdirSync(noDeps);
+  try {
+    const runs: string[][] = [];
+    await assert.rejects(
+      () =>
+        ensureDependencies(async (argv) => { runs.push(argv); return { code: 1, output: 'npm ci: ENOENT' }; }, noDeps),
+      /the E2E suite cannot run/,
+      'a failed install must throw so the caller stops, not proceed to a suite that could not load',
+    );
+    assert.deepEqual(runs, [['npm', 'ci']], 'the failing command must still be the install attempt');
+  } finally {
+    cleanup();
+  }
 });

@@ -28,7 +28,7 @@
  * No dependencies. Fetch only. Everything testable is a pure function or runs over injected I/O.
  */
 
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { REPO_RE, localDateString, ghToken, ghGet, ghPost, FETCH_TIMEOUT_MS } from './shared.ts';
 import { createHash } from 'node:crypto';
@@ -422,6 +422,30 @@ export async function findIssueByMarker(io: E2eIo, repo: string, marker: string)
   return null;
 }
 
+/**
+ * Install the suite's dependencies when the workspace has no node_modules.
+ *
+ * A fresh Run workspace is a clean git worktree with nothing installed: the workspace
+ * manager creates the tree and installs no dependencies. Left unchecked, `npm run
+ * test:e2e` fails to load (ERR_MODULE_NOT_FOUND) before any test runs, and the spec
+ * reporter reports the file as a failing "test" — which this skill would file as a
+ * defect for a suite that is actually healthy. The guard turns that environment problem
+ * into a clear, honest error instead of a spurious issue.
+ *
+ * Throws when the install fails, so the caller can stop without proceeding to a suite
+ * that could not load.
+ */
+export async function ensureDependencies(
+  run: E2eIo['run'],
+  cwd: string,
+): Promise<void> {
+  if (existsSync(join(cwd, 'node_modules'))) return;
+  const dep = await run(['npm', 'ci'], { timeoutMs: 300_000 });
+  if (dep.code !== 0) {
+    throw new Error('the E2E suite cannot run: `npm ci` failed\n' + dep.output.slice(-1000));
+  }
+}
+
 // ---- main ----
 
 const isMain = process.argv[1] && import.meta.url.endsWith(basename(process.argv[1]));
@@ -451,6 +475,16 @@ if (isMain) {
       child.on('close', (code) => { clearTimeout(killer); resolve({ code: code ?? 1, output }); });
       child.on('error', () => { clearTimeout(killer); resolve({ code: 1, output }); });
     });
+  // A fresh Run workspace has no node_modules (the workspace manager installs nothing).
+  // Without the suite's dependencies the suite would fail to load (ERR_MODULE_NOT_FOUND)
+  // and this skill would file a spurious issue for healthy tests. Install them, or stop
+  // with an honest error rather than proceeding to a suite that could not load.
+  try {
+    await ensureDependencies(run, cwd);
+  } catch (e) {
+    console.error(String(e instanceof Error ? e.message : e));
+    process.exit(1);
+  }
   // Lazy: the token is demanded only when a GitHub call is actually made — a green suite or
   // --dry-run needs no credentials.
   let cachedToken: string | null = null;
