@@ -102,8 +102,7 @@ test('next fires at most every 20 minutes and the last fire is 04:40 (inside the
   // #800: 4h room for feature-sized fix-loops (80 min timed out five times), same cap as the
   // e2e task. notAfterAt 06:00 still ends every Run at the window boundary, so even the 04:40
   // fire cannot leak past 06:00; the cap only stops a single Run from eating the whole night.
-  assert.ok(constraints.maxDurationMs <= 4 * 3_600_000);
-  assert.ok(constraints.maxDurationMs > 80 * 60_000, 'feature work needs more than the old 80 min');
+  assert.equal(constraints.maxDurationMs, 4 * 3_600_000);
 });
 
 test('the report fires 06:05 (§4.3 window just ended) and its deadline is 07:00, never a past 06:00', () => {

@@ -78,6 +78,17 @@ test('rung 2: a trusted enhancement issue is chosen and handed to the fix-loop (
   assert.ok(calls.some((c) => c.method === 'POST-LABEL'));
 });
 
+test('a stale nightly:in-progress claim is reset through runNext (deleteLabel forwarded, #800)', async () => {
+  const staleClaimed = issue({ number: 21, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const staleEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: '2026-09-27T21:00:00Z' } as unknown as LabelEvent;
+  const { io, calls } = ioWith([staleClaimed], { 21: [staleEvent] });
+  const out = await runNext(io, ENV, { repo: REPO, dryRun: false });
+  assert.equal(out.issue, 21, 'the stale-claimed issue is selected');
+  assert.ok(calls.some((c) => c.method === 'DELETE' && c.path.endsWith('/labels/nightly%3Ain-progress')),
+    'the stale claim is removed via NextIo.deleteLabel');
+  assert.ok(calls.some((c) => c.method === 'POST-LABEL'), 'then claimed fresh');
+});
+
 test('rung 3: a new @aywengo issue is chosen when no trusted work exists', async () => {
   const issues = [issue({ number: 20, user: { login: 'aywengo' } })];
   const { io, calls } = ioWith(issues, {});

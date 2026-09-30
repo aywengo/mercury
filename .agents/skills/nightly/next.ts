@@ -90,6 +90,9 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: 
       },
       // The selector's io.post is label-add semantics (boolean); comments use io.post's generic form.
       post: (path, body) => io.postLabel(path, body),
+      // The stale-claim reset (#800) deletes labels: forward the same DELETE transport the
+      // finish/blocked exits use, or a pre-midnight claim would throw instead of reset.
+      del: (path) => io.deleteLabel(path),
     },
     { ...env, REPO: opts.repo },
     opts.dryRun,
