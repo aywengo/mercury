@@ -192,17 +192,24 @@ export class WorkspaceManager {
   }
 
   private async ensureRepo(run: Run): Promise<string> {
-    const source = run.repository.url ?? run.repository.localPath;
-    if (!source) throw new Error('Workspace requires repository.url or repository.localPath');
-    if (run.repository.localPath && !run.repository.url) {
-      if (!existsSync(run.repository.localPath)) throw new Error(`localPath not found: ${run.repository.localPath}`);
-      return run.repository.localPath;
+    const { localPath, url } = run.repository;
+    // A localPath is the repository to build the worktree from. When it is set it wins over the
+    // url, matching copy mode (createCopy: localPath ?? url). The url is metadata — knowledge
+    // selection resolves its repo identity from `url ?? localPath` in RunService, not from the
+    // checkout source. Previously this branch cloned from the url whenever it was set, even when a
+    // localPath was supplied, so a test that passed a local fixture repo alongside the url (for
+    // identity) paid a full network clone per Run. Under parallel load that clone contention is what
+    // pushed the worker past the 20 s completion deadline (issue #596).
+    if (localPath) {
+      if (!existsSync(localPath)) throw new Error(`localPath not found: ${localPath}`);
+      return localPath;
     }
-    const key = createHash('sha1').update(source).digest('hex').slice(0, 12);
+    if (!url) throw new Error('Workspace requires repository.url or repository.localPath');
+    const key = createHash('sha1').update(url).digest('hex').slice(0, 12);
     const repoDir = join(this.cfg.baseDir, 'repos', key);
     if (!existsSync(join(repoDir, '.git'))) {
       mkdirSync(repoDir, { recursive: true });
-      await this.git(['clone', '--quiet', source, repoDir], { network: true });
+      await this.git(['clone', '--quiet', url, repoDir], { network: true });
     } else {
       await this.git(['-C', repoDir, 'fetch', '--quiet', 'origin'], { network: true });
     }
