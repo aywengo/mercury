@@ -448,17 +448,38 @@ export async function runSelectorWith(
   // the ladder must report rung 3 rather than a false 'none'.
   const seen = candidates.length + (listCapped ? 1 : 0);
   let selection = selectLadder(candidates, { e2eRunTerminal: e2eTerminal }, seen);
-  // Claim BEFORE returning: label nightly:in-progress. GitHub's 2xx means the claim is ours;
-  // 422 already-exists means a concurrent or retried nightly won — drop the candidate and pick
-  // again from the remaining ones.
+  // Claim BEFORE returning: label nightly:in-progress, then VERIFY ownership through the same
+  // primitive the trust rule uses - the label timeline's CURRENT actor (round-3 review on #801).
+  // GitHub's add-labels endpoint is IDEMPOTENT (a duplicate POST returns 200 with the label
+  // list, verified 2026-09-30 on this repo), so the assumed 422 already-exists never fires and
+  // a competitor's claim would look like ours. After the POST, the final labeled event for
+  // nightly:in-progress must carry OUR identity as actor: our own POST makes us the last
+  // writer, so a foreign final actor means someone claimed between our read and write - drop
+  // the candidate and re-select. Residual window: a claim that lands between our DELETE (stale
+  // reset) and POST, or a manual claimant who never verifies - labels alone cannot exclude
+  // those; singleFlight and the morning report are the mitigation (documented, not defended).
   while (typeof selection.issue === 'number' && !dryRun) {
-    const added = await io.post(`/repos/${repo}/issues/${selection.issue}/labels`, { labels: [L_IN_PROGRESS] });
-    if (added) {
-      // The claim is ours (2xx): the contract is one claimed issue, returned.
+    const claimPath = `/repos/${repo}/issues/${selection.issue}/labels`;
+    await io.post(claimPath, { labels: [L_IN_PROGRESS] });
+    // Ownership check: walk the timeline (bounded, fail closed at the cap or on an actor-less
+    // final event - the same discipline as the trust walk).
+    const timeline: LabelEvent[] = [];
+    let tlPath: string | null = `/repos/${repo}/issues/${selection.issue}/timeline?per_page=100`;
+    let capped = false;
+    for (let page = 0; page < 10 && tlPath; page++) {
+      const { body, link } = (await io.get(tlPath)) as { body: LabelEvent[]; link?: string | null };
+      timeline.push(...body);
+      const next = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
+      tlPath = next ? next.replace('https://api.github.com', '') : null;
+      if (page === 9 && tlPath) capped = true;
+    }
+    const actors = capped ? [] : labelActorsFor(timeline, L_IN_PROGRESS);
+    if (!capped && actors.length === 1 && actors[0] === NIGHTLY_IDENTITY) {
+      // The claim is ours: the contract is one claimed issue, returned.
       break;
     }
-    // 422: the label was ALREADY there — a concurrent or retried nightly won the race. Drop the
-    // candidate and pick again; if everything is taken, the ladder reports rung 3.
+    // A capped walk, a hidden actor, or a foreign current claim: not verifiably ours - drop the
+    // candidate and pick again; if everything is taken, the ladder reports rung 4.
     candidates.splice(candidates.findIndex((c) => c.issue.number === selection.issue), 1);
     selection = selectLadder(candidates, { e2eRunTerminal: e2eTerminal }, seen);
   }

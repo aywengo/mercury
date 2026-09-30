@@ -19,6 +19,9 @@ function issue(over: Partial<GhIssue> & { number: number }): GhIssue {
 function ioWith(issues: GhIssue[], timelines: Record<number, LabelEvent[]>, opts: { newly?: boolean; listStatus?: number } = {}) {
   const calls: { method: string; path: string; body?: unknown }[] = [];
   let newly = opts.newly ?? true;
+  // Label claims made through postLabel become timeline events (the selector verifies claim
+  // ownership through the timeline's final actor, #801 round 3).
+  const claimEvents = new Map<number, LabelEvent[]>();
   const io: NextIo = {
     async get(path) {
       calls.push({ method: 'GET', path });
@@ -26,7 +29,7 @@ function ioWith(issues: GhIssue[], timelines: Record<number, LabelEvent[]>, opts
         return { body: issues, status: opts.listStatus ?? 200, link: null };
       }
       const tl = path.match(/\/issues\/(\d+)\/timeline/);
-      if (tl) return { body: timelines[Number(tl[1])] ?? [], status: 200, link: null };
+      if (tl) return { body: [...(timelines[Number(tl[1])] ?? []), ...(claimEvents.get(Number(tl[1])) ?? [])], status: 200, link: null };
       const single = path.match(new RegExp(`^/repos/${REPO.replace('/', '\\/')}/issues/(\\d+)$`));
       if (single) {
         const found = issues.find((i) => i.number === Number(single[1]));
@@ -40,6 +43,11 @@ function ioWith(issues: GhIssue[], timelines: Record<number, LabelEvent[]>, opts
     },
     async postLabel(path, body) {
       calls.push({ method: 'POST-LABEL', path, body });
+      const m = path.match(/\/issues\/(\d+)\/labels$/);
+      if (m) {
+        const n = Number(m[1]);
+        claimEvents.set(n, [...(claimEvents.get(n) ?? []), { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: (body as { labels: string[] }).labels[0] } } as unknown as LabelEvent]);
+      }
       return newly;
     },
     async deleteLabel(path) {

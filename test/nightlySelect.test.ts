@@ -239,9 +239,14 @@ test('readyActorsFor tracks the CURRENT ready state, not history (round-2 review
 test('runSelectorWith claims exactly one issue and returns it (normal case)', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const events: string[] = [];
+  // #801 round 3: after the claim POST the selector verifies ownership through the timeline -
+  // the final nightly:in-progress labeled event must carry the nightly identity (our own POST
+  // makes us the last writer on GitHub).
+  const ourClaim = [{ event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' } }];
   const io = {
     async get(path: string) {
       events.push(`get ${path}`);
+      if (path.includes('/timeline')) return { body: ourClaim, link: null };
       return { body: [issue({ number: 60, user: { login: 'aywengo' } })], link: null };
     },
     async post(path: string) {
@@ -255,8 +260,47 @@ test('runSelectorWith claims exactly one issue and returns it (normal case)', as
   assert.deepEqual(events.filter((e) => e.startsWith('post')), [
     'post /repos/aywengo/mercury/issues/60/labels',
   ], 'exactly one claim POST in the normal case');
+  assert.ok(events.some((e) => e.includes('/timeline')), 'ownership is verified through the timeline after the claim');
   assert.ok(events.indexOf('post /repos/aywengo/mercury/issues/60/labels') !== -1, 'the claim is issued before runSelectorWith resolves');
   assert.match(s.reason, /#60/);
+});
+
+test('a foreign actor as the final claim event is NOT our claim: re-select (#801 round 3)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  // GitHub's add-labels is idempotent (duplicate POST -> 200, verified 2026-09-30), so a
+  // competitor's label looks identical to ours in the POST response; only the timeline actor
+  // tells them apart.
+  const theirClaim = [{ event: 'labeled', actor: { login: 'someone-else' }, label: { name: 'nightly:in-progress' } }];
+  const posts: string[] = [];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: theirClaim, link: null };
+      return { body: [issue({ number: 66, user: { login: 'aywengo' } })], link: null };
+    },
+    async post(path: string) { posts.push(path); return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
+  assert.notEqual(s.issue, 66, 'the competitor holds the claim: the candidate is dropped');
+  assert.equal(posts.length, 1, 'no second claim POST for a dropped candidate');
+});
+
+test('a capped claim-ownership walk fails closed: the candidate is dropped (#801 round 3)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  let timelineGets = 0;
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) {
+        timelineGets++;
+        // Always another page: the walk hits its 10-page cap.
+        return { body: [{ event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' } }], link: '<https://api.github.com/repos/aywengo/mercury/issues/67/timeline?per_page=100&page=2>; rel="next"' };
+      }
+      return { body: [issue({ number: 67, user: { login: 'aywengo' } })], link: null };
+    },
+    async post() { return true; },
+  };
+  const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
+  assert.notEqual(s.issue, 67, 'ownership that cannot be verified is not ownership (fail closed)');
+  assert.equal(timelineGets, 10, 'the walk bounded at its cap');
 });
 
 test('labelActorsFor: an actor-less labeled event fails closed (round-5 note)', () => {
@@ -342,18 +386,26 @@ test('runSelectorWith skips the e2e timeline walk for non-nightly authors (#764 
     'exactly one timeline walk for the nightly-authored e2e issue');
 });
 
-test('runSelectorWith re-selects only when GitHub says the label was already there (422 racer)', async () => {
+test('runSelectorWith re-selects only when GitHub says the claim is not ours (racer)', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const posts: string[] = [];
   let first = true;
+  const ourClaim = [{ event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' } }];
+  const theirClaim = [{ event: 'labeled', actor: { login: 'racer-bot' }, label: { name: 'nightly:in-progress' } }];
   const io = {
-    async get() { return { body: [issue({ number: 62, user: { login: 'aywengo' } }), issue({ number: 63, user: { login: 'aywengo' } })], link: null }; },
+    async get(path: string) {
+      if (path.includes('/issues/62/timeline')) return { body: theirClaim, link: null };
+      if (path.includes('/timeline')) return { body: ourClaim, link: null };
+      return { body: [issue({ number: 62, user: { login: 'aywengo' } }), issue({ number: 63, user: { login: 'aywengo' } })], link: null };
+    },
     async post(path: string) {
       posts.push(path);
-      if (first) { first = false; return false; } // 422: a racer already claimed #62
+      if (first) { first = false; return true; } // 200 (idempotent), but #62's timeline says racer
       return true;
     },
   };
+  // Round 3 (#801): the racer signal is the TIMELINE ACTOR, not a 422 - GitHub's add-labels is
+  // idempotent. The first candidate's claim is not ours, so it is dropped and #63 is claimed.
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
   assert.deepEqual(posts, [
     '/repos/aywengo/mercury/issues/62/labels',
@@ -458,9 +510,11 @@ test('e2eRunTerminal walks pages: a non-terminal e2e Run past page one fails the
 test('the open-issue list walks Link-header pages (round-4 review)', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const paths: string[] = [];
+  const ourClaim = [{ event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' } }];
   const io = {
     async get(path: string) {
       paths.push(path);
+      if (path.includes('/timeline')) return { body: ourClaim, link: null };
       if (path.includes('page=2') || path.includes('page%3D2')) {
         return { body: [issue({ number: 82, user: { login: 'aywengo' } })], link: null };
       }
@@ -473,7 +527,7 @@ test('the open-issue list walks Link-header pages (round-4 review)', async () =>
   };
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
   assert.equal(s.issue, 82, 'the page-2 candidate is visible to the ladder');
-  assert.equal(paths.filter((p) => p.startsWith('/repos/')).length, 2, 'both pages fetched');
+  assert.equal(paths.filter((p) => p.startsWith('/repos/') && p.includes('issues?')).length, 2, 'both list pages fetched');
 });
 
 
