@@ -71,6 +71,7 @@ import { runBot, makeBotClient } from './host/bots/process.ts';
 import { dispatchTask } from './host/bots/dispatch.ts';
 import { statusView, renderStatus } from './host/bots/status.ts';
 import { botCredentialsPath, readBotCredentials, registeredOwnerForToken } from './host/bots/credentials.ts';
+import { validateCredentialProfiles } from './host/credentials-profiles.ts';
 import { botOwnerId } from './host/bots/keys.ts';
 import { hostStatus, printStatus, upgradeHost, uninstallHost } from './host/lifecycle.ts';
 import { HOST_VERSION } from './version.ts';
@@ -111,6 +112,9 @@ function usageText(): string {
     '                bot run --alias <a>        run one bot scheduler (one process per bot; --once',
     '                               runs a single tick for tests);',
     '                               SIGINT/SIGTERM stop the timer, never cancel a Run)',
+    '                credentials validate       offline check of credential-profiles.json:',
+    '                               0600, schema, overlapping repository patterns, file sources',
+    '                               readable; prints profile names and patterns, never values',
     '                bot validate --alias <a>   offline check of one bot: config parses and',
     '                               validates, credentials file is 0600 and has the alias, and',
     '                               the two token copies agree (§4.2)',
@@ -247,6 +251,27 @@ async function main(): Promise<void> {
   // copies (credentials file vs MERCURY_API_TOKENS) agree? Runs before loadConfig() like the
   // other host commands: the bot's own config is the thing under inspection, and a host whose
   // mercury.env is broken must still be able to diagnose its bots.
+  if (cmd === 'host' && args[0] === 'credentials') {
+    // CP-2 (issue #784): offline check of the credential-profiles file. No profile resolution, no
+    // Run behaviour change - the surface prints what a human needs to fix the file, never a value.
+    if (args[1] !== undefined && args[1] !== 'validate') {
+      process.stderr.write("host credentials: unknown subcommand '" + args[1] + "'. Expected validate.\n");
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      const lines = validateCredentialProfiles();
+      for (const line of lines) {
+        process.stdout.write((line.ok ? 'ok:   ' : 'FAIL: ') + line.message + '\n');
+      }
+      if (lines.some((l) => !l.ok)) process.exitCode = 1;
+    } catch (err) {
+      process.stdout.write(`FAIL: ${(err as Error).message}\n`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   if (cmd === 'host' && args[0] === 'bot' && args[1] === 'validate') {
     const rest = args.slice(2);
     let alias: string | undefined;
