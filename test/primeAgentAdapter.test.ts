@@ -194,6 +194,8 @@ test('silent agent death: agent_end with zero output -> exit 1, failed, explaine
     assert.equal(exit.reason, 'failed');
     assert.equal(exit.errorKind, 'agent');
     assert.match(exit.message ?? '', /without any output/);
+    // The provider's own error text is preserved (the worker redacts before persisting, #803):
+    assert.match(exit.message ?? '', /Connection error\./);
     // The agent.end event still flowed (the worker sees the terminal signal), and no
     // substantive events preceded it.
     assert.ok(events.some((e) => e.type === 'agent.end'));

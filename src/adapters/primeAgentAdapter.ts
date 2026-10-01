@@ -32,10 +32,11 @@ import { SKILL_ID as KNOWLEDGE_SKILL_ID , CONTEXT_FILE } from '../knowledge/mate
 
 const SESSION_DIR_NAME = '.mercury-sessions';
 const SESSION_PATH_FILE = '.mercury-session-path';
-/** Events that prove the agent produced real work. agent.message covers assistant text AND the
- * translator's own [agent] informational lines; tool.* covers any tool execution; input.required
- * a human dialog; goal.* a goal report. */
-const SUBSTANTIVE_EVENT = /^(agent\.message|tool\.(started|completed|failed)|input\.(required|received)|goal\.)/;
+/** Raw RPC frames that prove the model produced real work: a text delta, a tool execution, an
+ * input dialog, a goal report. Deliberately NOT the auto_retry and compaction status frames (the
+ * translator surfaces those as agent.message, but they are status chatter, not output - #803
+ * round 1). */
+const SUBSTANTIVE_RPC_EVENT = /^(message_update|tool_execution_start|extension_ui_request|goal_update)$/;
 const OUTPUT_LOG = 'agent-output.log';
 
 export interface PrimeAgentAdapterOptions {
@@ -283,40 +284,7 @@ export class PrimeAgentAdapter implements AgentAdapter {
     });
     session.client = client;
 
-client.onEvent((ev) => {
-      for (const translated of this.translate(session, ev)) {
-        push(session, translated);
-        if (SUBSTANTIVE_EVENT.test(translated.type)) {
-          // Assistant text, a tool call, an input dialog or a goal report: the model actually
-          // did something. The skill.* auto-selection events do NOT count - they are Mercury's
-          // own bookkeeping, not the agent's (#803).
-          session.sawSubstantiveOutput = true;
-        }
-        if (translated.type === 'agent.end' && !session.exitSettled) {
-          // Agent finished; resolve the exit promise (the RPC process may stay alive).
-          // `done` is set under the same guard as before; settlement then goes through the shared
-          // helper instead of repeating its first-writer-wins check inline (issue #148).
-          session.done = true;
-          const code = (translated.payload as { code?: number }).code ?? 0;
-          if (code === 0 && !session.sawSubstantiveOutput) {
-            // Silent agent death (#803): the supervisor reported a completed turn but the model
-            // never produced text, a tool call or a dialog - normally a provider failure before
-            // the first token. Recording COMPLETED here paints an outage green; fail instead,
-            // blaming the agent (a retryable infrastructure classification would re-burn the
-            // queue against a provider that is still down).
-            settleExit(session, {
-              code: 1,
-              signal: null,
-              reason: 'failed',
-              errorKind: 'agent',
-              message: 'Agent ended without any output (no assistant message, tool call, input request or goal report); the model provider likely failed before the first token',
-            });
-            continue;
-          }
-          settleExit(session, { code, signal: null, reason: code === 0 ? 'completed' : 'failed' });
-        }
-      }
-    });
+      this.wireEvents(session, client);
     client.onExit((code, signal) => {
       if (session.done) return;
       session.done = true;
@@ -471,19 +439,10 @@ client.onEvent((ev) => {
     session.cancelled = false;
     session.terminated = false;
 
-    client.onEvent((ev) => {
-      for (const translated of this.translate(session, ev)) {
-        push(session, translated);
-        if (translated.type === 'agent.end' && !session.exitSettled) {
-          // Agent finished; resolve the exit promise (the RPC process may stay alive).
-          // `done` is set under the same guard as before; settlement then goes through the shared
-          // helper instead of repeating its first-writer-wins check inline (issue #148).
-          session.done = true;
-          const code = (translated.payload as { code?: number }).code ?? 0;
-          settleExit(session, { code, signal: null, reason: code === 0 ? 'completed' : 'failed' });
-        }
-      }
-    });
+    // Per-invocation state: the resumed turn is judged on ITS OWN output, not the first
+    // attempt's (#803 round 1).
+    session.sawSubstantiveOutput = false;
+    this.wireEvents(session, client);
     client.onExit((code, signal) => {
       if (session.done) return;
       session.done = true;
@@ -509,6 +468,52 @@ client.onEvent((ev) => {
 
   private translate(session: Session, ev: RpcEvent): AgentEvent[] {
     return session.translator.translate(ev);
+  }
+
+  /**
+   * The shared client.onEvent handler for start() and resume(): same substantive-output tracking
+   * and same zero-output completion guard on both paths (#803 round 1 - resume() previously
+   * settled every zero-code agent.end as completed and never reset the per-turn flag).
+   */
+  private wireEvents(session: Session, client: RpcClient): void {
+    client.onEvent((ev) => {
+      // Substantive output is judged on the RAW RPC event, not the translated type: the
+      // translator maps informational compaction_*/auto_retry_* frames to agent.message too, and
+      // a provider failure that exhausts retries would then look like real work (#803 round 1).
+      // A text delta, a tool execution, an input dialog or a goal report is the model doing work.
+      if (SUBSTANTIVE_RPC_EVENT.test(ev.type ?? '')) session.sawSubstantiveOutput = true;
+      for (const translated of this.translate(session, ev)) {
+        push(session, translated);
+        if (translated.type === 'agent.end' && !session.exitSettled) {
+          // Agent finished; resolve the exit promise (the RPC process may stay alive).
+          // `done` is set under the same guard as before; settlement then goes through the shared
+          // helper instead of repeating its first-writer-wins check inline (issue #148).
+          session.done = true;
+          const payload = translated.payload as { code?: number; error?: string };
+          const code = payload.code ?? 0;
+          if (code === 0 && !session.sawSubstantiveOutput) {
+            // Silent agent death (#803): the supervisor reported a completed turn but the model
+            // never produced text, a tool call or a dialog - normally a provider failure before
+            // the first token. Recording COMPLETED here paints an outage green; fail instead,
+            // blaming the agent (a retryable infrastructure classification would re-burn the
+            // queue against a provider that is still down). The provider's own error message
+            // (agent_end.messages[*].errorMessage, when present) beats the generic guess; the
+            // worker redacts before persisting.
+            settleExit(session, {
+              code: 1,
+              signal: null,
+              reason: 'failed',
+              errorKind: 'agent',
+              message: payload.error
+                ? `Agent ended without any output (no assistant message, tool call, input request or goal report): ${payload.error}`
+                : 'Agent ended without any output (no assistant message, tool call, input request or goal report); the model provider likely failed before the first token',
+            });
+            continue;
+          }
+          settleExit(session, { code, signal: null, reason: code === 0 ? 'completed' : 'failed' });
+        }
+      }
+    });
   }
 }
 

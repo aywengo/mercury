@@ -28,6 +28,9 @@ export interface RpcEvent {
   placeholder?: string;
   prefill?: string;
   assistantMessageEvent?: { type?: string; delta?: string };
+  /** Carried by `agent_end`: the turn's final messages, including any assistant message whose
+   * stopReason is 'error' with a provider errorMessage (#803). */
+  messages?: { stopReason?: string; errorMessage?: string }[];
   /** Carried by `goal_update`. Typed loosely on purpose -- see HarnessGoalReport. */
   goal?: HarnessGoalReport;
 }
@@ -118,7 +121,13 @@ export class EventTranslator {
         return [{ type: translated.eventType, payload: stripUndefined({ ...ev.goal }) }];
       }
       case 'agent_end': {
-        return [{ type: 'agent.end', payload: { code: ev.result ?? 0 } }];
+        // Surface per-message errors with the terminal event (#803): a turn that ended after a
+        // provider failure carries messages[*].stopReason 'error' + errorMessage. The adapter
+        // uses them to explain a zero-output failure instead of a generic guess.
+        const errored = (ev.messages ?? []).find(
+          (mm) => mm?.stopReason === 'error' && typeof mm.errorMessage === 'string' && mm.errorMessage !== '',
+        );
+        return [{ type: 'agent.end', payload: stripUndefined({ code: ev.result ?? 0, ...(errored ? { error: errored.errorMessage } : {}) }) }];
       }
       case 'compaction_started':
       case 'compaction_completed':

@@ -85,10 +85,11 @@ function runPromptScript() {
   }
   if (mode === 'silent') {
     // #803: the supervisor reports a clean turn but the model never produced anything
-    // (provider down before the first token). agent_end, zero substantive events.
+    // (provider down before the first token). agent_end carries the errored assistant
+    // message exactly as the real supervisor does; zero substantive events.
     send({ type: 'agent_start' });
     send({ type: 'turn_start' });
-    send({ type: 'agent_end', messages: [] });
+    send({ type: 'agent_end', messages: [{ role: 'assistant', content: [], stopReason: 'error', errorMessage: 'Connection error.' }] });
     return;
   }
   if (mode === 'hang') {
