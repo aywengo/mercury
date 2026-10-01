@@ -25,13 +25,31 @@ import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run,
 
 import { probeVersion } from './versionProbe.ts';
 import { RpcClient, type RpcEvent } from './rpc/rpcClient.ts';
-import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
+import { EventTranslator, buildExtensionUiResponse, SYNTHETIC_STATUS_TEXTS } from './eventTranslation.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts';
 import { SKILL_ID as KNOWLEDGE_SKILL_ID , CONTEXT_FILE } from '../knowledge/materialize.ts';
 
 const SESSION_DIR_NAME = '.mercury-sessions';
 const SESSION_PATH_FILE = '.mercury-session-path';
+/**
+ * Whether a translated Mercury event proves the model produced real work (#803). Assistant text
+ * counts; the translator's own '[agent] ' agent.message lines for auto_retry/compaction status
+ * frames do NOT (a retry-exhausted provider failure emits those and then agent_end - counting
+ * them would recreate the silent-green failure this guard exists for). Tool executions, input
+ * dialogs and goal reports all validate in the translator before they are emitted, so a merely
+ * present-but-discarded raw frame (setStatus notify, empty message) never reaches here.
+ */
+function isSubstantive(ev: AgentEvent): boolean {
+  if (ev.type === 'agent.message') {
+    const text = (ev.payload as { text?: unknown }).text;
+    if (typeof text !== 'string' || text === '') return false;
+    // Exclude exactly the translator's synthetic status lines, not a prefix: a genuine assistant
+    // reply may legitimately start with '[agent] ' (#803 round 3).
+    return !SYNTHETIC_STATUS_TEXTS.has(text);
+  }
+  return /^(tool\.(started|completed|failed)|input\.(required|received)|goal\.)/.test(ev.type);
+}
 const OUTPUT_LOG = 'agent-output.log';
 
 export interface PrimeAgentAdapterOptions {
@@ -73,6 +91,11 @@ interface Session {
   waiters: ((ev: AgentEvent) => void)[];
   exitPromise: Promise<AgentExit>;
   exitResolve: (exit: AgentExit) => void;
+  /** Whether the session produced ANY substantive agent activity (assistant text, a tool call,
+   * an input dialog, a goal report). agent.end with code 0 and none of these is a silent agent
+   * death - typically the model provider failed before the first token (#803): without this
+   * check the worker records the run COMPLETED and a whole night can pass as silent green. */
+  sawSubstantiveOutput: boolean;
 }
 
 const DONE: AgentEvent = { type: '__done__', payload: {} };
@@ -186,6 +209,7 @@ export class PrimeAgentAdapter implements AgentAdapter {
       terminated: false,
       queue: [],
       waiters: [],
+      sawSubstantiveOutput: false,
         ...createExitGate(),
     };
     this.sessions.set(runId, session);
@@ -273,19 +297,7 @@ export class PrimeAgentAdapter implements AgentAdapter {
     });
     session.client = client;
 
-    client.onEvent((ev) => {
-      for (const translated of this.translate(session, ev)) {
-        push(session, translated);
-        if (translated.type === 'agent.end' && !session.exitSettled) {
-          // Agent finished; resolve the exit promise (the RPC process may stay alive).
-          // `done` is set under the same guard as before; settlement then goes through the shared
-          // helper instead of repeating its first-writer-wins check inline (issue #148).
-          session.done = true;
-          const code = (translated.payload as { code?: number }).code ?? 0;
-          settleExit(session, { code, signal: null, reason: code === 0 ? 'completed' : 'failed' });
-        }
-      }
-    });
+      this.wireEvents(session, client);
     client.onExit((code, signal) => {
       if (session.done) return;
       session.done = true;
@@ -440,19 +452,10 @@ export class PrimeAgentAdapter implements AgentAdapter {
     session.cancelled = false;
     session.terminated = false;
 
-    client.onEvent((ev) => {
-      for (const translated of this.translate(session, ev)) {
-        push(session, translated);
-        if (translated.type === 'agent.end' && !session.exitSettled) {
-          // Agent finished; resolve the exit promise (the RPC process may stay alive).
-          // `done` is set under the same guard as before; settlement then goes through the shared
-          // helper instead of repeating its first-writer-wins check inline (issue #148).
-          session.done = true;
-          const code = (translated.payload as { code?: number }).code ?? 0;
-          settleExit(session, { code, signal: null, reason: code === 0 ? 'completed' : 'failed' });
-        }
-      }
-    });
+    // Per-invocation state: the resumed turn is judged on ITS OWN output, not the first
+    // attempt's (#803 round 1).
+    session.sawSubstantiveOutput = false;
+    this.wireEvents(session, client);
     client.onExit((code, signal) => {
       if (session.done) return;
       session.done = true;
@@ -478,6 +481,56 @@ export class PrimeAgentAdapter implements AgentAdapter {
 
   private translate(session: Session, ev: RpcEvent): AgentEvent[] {
     return session.translator.translate(ev);
+  }
+
+  /**
+   * The shared client.onEvent handler for start() and resume(): same substantive-output tracking
+   * and same zero-output completion guard on both paths (#803 round 1 - resume() previously
+   * settled every zero-code agent.end as completed and never reset the per-turn flag).
+   */
+  private wireEvents(session: Session, client: RpcClient): void {
+    client.onEvent((ev) => {
+      for (const translated of this.translate(session, ev)) {
+        push(session, translated);
+        if (isSubstantive(translated)) {
+          // Judged on the TRANSLATED Mercury event with its payload validated (#803 round 2):
+          // assistant text (but not the translator's own '[agent] ' status chatter for
+          // auto_retry/compaction frames, which would let a retry-exhausted failure masquerade
+          // as work), a real tool execution, an input dialog, or a goal report. Raw-frame
+          // matching would over-count (e.g. extension_ui_request with a discarded setStatus
+          // method, or an empty message_update).
+          session.sawSubstantiveOutput = true;
+        }
+        if (translated.type === 'agent.end' && !session.exitSettled) {
+          // Agent finished; resolve the exit promise (the RPC process may stay alive).
+          // `done` is set under the same guard as before; settlement then goes through the shared
+          // helper instead of repeating its first-writer-wins check inline (issue #148).
+          session.done = true;
+          const payload = translated.payload as { code?: number; error?: string };
+          const code = payload.code ?? 0;
+          if (code === 0 && !session.sawSubstantiveOutput) {
+            // Silent agent death (#803): the supervisor reported a completed turn but the model
+            // never produced text, a tool call or a dialog - normally a provider failure before
+            // the first token. Recording COMPLETED here paints an outage green; fail instead,
+            // blaming the agent (a retryable infrastructure classification would re-burn the
+            // queue against a provider that is still down). The provider's own error message
+            // (agent_end.messages[*].errorMessage, when present) beats the generic guess; the
+            // worker redacts before persisting.
+            settleExit(session, {
+              code: 1,
+              signal: null,
+              reason: 'failed',
+              errorKind: 'agent',
+              message: payload.error
+                ? `Agent ended without any output (no assistant message, tool call, input request or goal report): ${payload.error}`
+                : 'Agent ended without any output (no assistant message, tool call, input request or goal report); the model provider likely failed before the first token',
+            });
+            continue;
+          }
+          settleExit(session, { code, signal: null, reason: code === 0 ? 'completed' : 'failed' });
+        }
+      }
+    });
   }
 }
 

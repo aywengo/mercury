@@ -183,6 +183,63 @@ test('spawn failure: command not found -> exit 127, reason failed', async () => 
   assert.equal(events.length, 0);
 });
 
+test('silent agent death: agent_end with zero output -> exit 1, failed, explained (#803)', async () => {
+  const { context } = makeContext();
+  const adapter = new PrimeAgentAdapter(MOCK);
+  process.env.MOCK_RPC_MODE = 'silent';
+  try {
+    const handle = await adapter.start({ ...context, run: makeRun({ id: 'run_silent' }) });
+    const { events, exit } = await collectAll(handle);
+    assert.equal(exit.code, 1, 'a zero-output turn must not be recorded as a completed run');
+    assert.equal(exit.reason, 'failed');
+    assert.equal(exit.errorKind, 'agent');
+    assert.match(exit.message ?? '', /without any output/);
+    // The provider's own error text is preserved (the worker redacts before persisting, #803):
+    assert.match(exit.message ?? '', /Connection error\./);
+    // The agent.end event still flowed (the worker sees the terminal signal), and no
+    // substantive events preceded it.
+    assert.ok(events.some((e) => e.type === 'agent.end'));
+    assert.equal(events.some((e) => e.type === 'agent.message' || e.type.startsWith('tool.')), false);
+  } finally {
+    delete process.env.MOCK_RPC_MODE;
+    adapter.cancel('run_silent').catch(() => {});
+  }
+});
+
+test('a discarded notify frame does not make a zero-output run completed (#803 round 2)', async () => {
+  const { context } = makeContext();
+  const adapter = new PrimeAgentAdapter(MOCK);
+  process.env.MOCK_RPC_MODE = 'silent-status';
+  try {
+    const handle = await adapter.start({ ...context, run: makeRun({ id: 'run_silent_status' }) });
+    const { events, exit } = await collectAll(handle);
+    assert.equal(exit.code, 1, 'setStatus notify is not agent output');
+    assert.equal(exit.reason, 'failed');
+    assert.match(exit.message ?? '', /Connection error\./);
+    // The notify frame produced no Mercury event at all.
+    assert.equal(events.some((e) => e.type === 'input.required'), false);
+  } finally {
+    delete process.env.MOCK_RPC_MODE;
+    adapter.cancel('run_silent_status').catch(() => {});
+  }
+});
+
+test('a genuine assistant reply that starts with the agent-prefix is real output -> completes (#803 round 3)', async () => {
+  const { context } = makeContext();
+  const adapter = new PrimeAgentAdapter(MOCK);
+  process.env.MOCK_RPC_MODE = 'agent-prefixed';
+  try {
+    const handle = await adapter.start({ ...context, run: makeRun({ id: 'run_prefixed' }) });
+    const { events, exit } = await collectAll(handle);
+    assert.equal(exit.code, 0, 'real assistant text completes the run even with the [agent] prefix');
+    assert.equal(exit.reason, 'completed');
+    assert.ok(events.some((e) => e.type === 'agent.message'));
+  } finally {
+    delete process.env.MOCK_RPC_MODE;
+    adapter.cancel('run_prefixed').catch(() => {});
+  }
+});
+
 test('agent crash before agent_end -> exit with code, reason failed', async () => {
   const { context } = makeContext();
   const adapter = new PrimeAgentAdapter(MOCK);

@@ -13,6 +13,16 @@
 import type { AgentEvent } from '../domain/types.ts';
 import { translateHarnessGoal, type HarnessGoalReport } from '../domain/goalEvents.ts';
 
+/** The exact synthetic agent.message texts the translator emits for the compaction and auto_retry
+ * status frames. The adapter's substantive-output check excludes THESE, not a '[agent] ' prefix
+ * (#803 round 3): a genuine assistant reply can legitimately start with that prefix. */
+export const SYNTHETIC_STATUS_TEXTS: ReadonlySet<string> = new Set([
+  '[agent] compaction_started',
+  '[agent] compaction_completed',
+  '[agent] auto_retry_started',
+  '[agent] auto_retry_completed',
+]);
+
 export interface RpcEvent {
   type: string;
   id?: string;
@@ -28,6 +38,9 @@ export interface RpcEvent {
   placeholder?: string;
   prefill?: string;
   assistantMessageEvent?: { type?: string; delta?: string };
+  /** Carried by `agent_end`: the turn's final messages, including any assistant message whose
+   * stopReason is 'error' with a provider errorMessage (#803). */
+  messages?: { stopReason?: string; errorMessage?: string }[];
   /** Carried by `goal_update`. Typed loosely on purpose -- see HarnessGoalReport. */
   goal?: HarnessGoalReport;
 }
@@ -118,12 +131,21 @@ export class EventTranslator {
         return [{ type: translated.eventType, payload: stripUndefined({ ...ev.goal }) }];
       }
       case 'agent_end': {
-        return [{ type: 'agent.end', payload: { code: ev.result ?? 0 } }];
+        // Surface per-message errors with the terminal event (#803): a turn that ended after a
+        // provider failure carries messages[*].stopReason 'error' + errorMessage. The adapter
+        // uses them to explain a zero-output failure instead of a generic guess.
+        const errored = (ev.messages ?? []).find(
+          (mm) => mm?.stopReason === 'error' && typeof mm.errorMessage === 'string' && mm.errorMessage !== '',
+        );
+        return [{ type: 'agent.end', payload: stripUndefined({ code: ev.result ?? 0, ...(errored ? { error: errored.errorMessage } : {}) }) }];
       }
       case 'compaction_started':
       case 'compaction_completed':
       case 'auto_retry_started':
       case 'auto_retry_completed': {
+        // Exactly these four synthetic status lines - exported so the adapter's substantive-
+        // output check can exclude precisely them without misclassifying a genuine assistant
+        // reply that merely STARTS with '[agent] ' (#803 round 3).
         return [{ type: 'agent.message', payload: { text: `[agent] ${ev.type}` } }];
       }
       default:
