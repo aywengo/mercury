@@ -1,8 +1,8 @@
 class MercuryAi < Formula
   desc "Durable orchestration layer for long-running coding-agent runs"
   homepage "https://github.com/aywengo/mercury"
-  url "https://github.com/aywengo/mercury/releases/download/host-v0.2.0/mercury-0.2.0-bundle.tar.gz"
-  sha256 "3e12c2869c3b4299611ed51c2d83dcd0afe011284d3e24a93cbaf9764e266138"
+  url "https://github.com/aywengo/mercury/releases/download/host-v0.2.1/mercury-0.2.1-bundle.tar.gz"
+  sha256 "8c55365b8beedae22f7a4db902fdc7ba8946d108697665b5494a7be525a5ef57"
   license "MIT"
 
   depends_on "node"
