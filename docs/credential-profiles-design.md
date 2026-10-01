@@ -256,7 +256,7 @@ global git settings. The dedicated host can then accept other owners.
 | --- | --- | --- |
 | CP-1 | ~~Redact classic GitHub token shapes~~: not needed, already covered (§2) | — |
 | CP-2 (#784) | Profile file: schema, loader, permission and overlap checks, `host credentials validate` | — |
-| CP-3 | Repository id normalization and resolution; creation-time refusal; `credentialProfile` on Runs; claim/resume parity; `host credentials resolve` | CP-2 |
+| CP-3 (#807) | Repository id normalization and resolution; creation-time refusal; `credentialProfile` on Runs; claim/resume parity; `host credentials resolve` | CP-2 |
 | CP-4 | Local adapters: layered environment (§6.1), isolated git and gh config, generated gitconfig with identity and credential helper | CP-3 |
 | CP-5 | Workspace git uses the resolved profile | CP-4 |
 | CP-6 | Sandbox per-profile opt-in | CP-4 |
