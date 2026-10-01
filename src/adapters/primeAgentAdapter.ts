@@ -25,7 +25,7 @@ import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, Run,
 
 import { probeVersion } from './versionProbe.ts';
 import { RpcClient, type RpcEvent } from './rpc/rpcClient.ts';
-import { EventTranslator, buildExtensionUiResponse } from './eventTranslation.ts';
+import { EventTranslator, buildExtensionUiResponse, SYNTHETIC_STATUS_TEXTS } from './eventTranslation.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 import { assertSafeSkillId, resolveContained } from '../skills/skillRegistry.ts';
 import { SKILL_ID as KNOWLEDGE_SKILL_ID , CONTEXT_FILE } from '../knowledge/materialize.ts';
@@ -43,7 +43,10 @@ const SESSION_PATH_FILE = '.mercury-session-path';
 function isSubstantive(ev: AgentEvent): boolean {
   if (ev.type === 'agent.message') {
     const text = (ev.payload as { text?: unknown }).text;
-    return typeof text === 'string' && text !== '' && !text.startsWith('[agent] ');
+    if (typeof text !== 'string' || text === '') return false;
+    // Exclude exactly the translator's synthetic status lines, not a prefix: a genuine assistant
+    // reply may legitimately start with '[agent] ' (#803 round 3).
+    return !SYNTHETIC_STATUS_TEXTS.has(text);
   }
   return /^(tool\.(started|completed|failed)|input\.(required|received)|goal\.)/.test(ev.type);
 }

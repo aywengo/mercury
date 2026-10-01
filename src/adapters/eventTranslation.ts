@@ -13,6 +13,16 @@
 import type { AgentEvent } from '../domain/types.ts';
 import { translateHarnessGoal, type HarnessGoalReport } from '../domain/goalEvents.ts';
 
+/** The exact synthetic agent.message texts the translator emits for the compaction and auto_retry
+ * status frames. The adapter's substantive-output check excludes THESE, not a '[agent] ' prefix
+ * (#803 round 3): a genuine assistant reply can legitimately start with that prefix. */
+export const SYNTHETIC_STATUS_TEXTS: ReadonlySet<string> = new Set([
+  '[agent] compaction_started',
+  '[agent] compaction_completed',
+  '[agent] auto_retry_started',
+  '[agent] auto_retry_completed',
+]);
+
 export interface RpcEvent {
   type: string;
   id?: string;
@@ -133,6 +143,9 @@ export class EventTranslator {
       case 'compaction_completed':
       case 'auto_retry_started':
       case 'auto_retry_completed': {
+        // Exactly these four synthetic status lines - exported so the adapter's substantive-
+        // output check can exclude precisely them without misclassifying a genuine assistant
+        // reply that merely STARTS with '[agent] ' (#803 round 3).
         return [{ type: 'agent.message', payload: { text: `[agent] ${ev.type}` } }];
       }
       default:

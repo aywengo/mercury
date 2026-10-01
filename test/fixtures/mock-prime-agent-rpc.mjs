@@ -83,6 +83,16 @@ function runPromptScript() {
     setTimeout(() => process.exit(1), 50);
     return;
   }
+  if (mode === 'agent-prefixed') {
+    // #803 round 3: a genuine assistant reply may START with '[agent] ' - only the four exact
+    // synthetic status lines are bookkeeping. This turn has real output -> COMPLETED.
+    send({ type: 'agent_start' });
+    send({ type: 'turn_start' });
+    send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '[agent] task complete' } });
+    send({ type: 'message_end' });
+    send({ type: 'agent_end', messages: [{ role: 'assistant', content: [{ type: 'text', text: '[agent] task complete' }], stopReason: 'stop' }] });
+    return;
+  }
   if (mode === 'silent-status') {
     // #803 round 2: a notify-only extension frame (setStatus) is discarded by the translator and
     // must NOT count as substantive output; the errored agent_end still fails the run.
