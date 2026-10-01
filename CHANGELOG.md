@@ -8,6 +8,64 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-01
+
+Patch release carrying the accumulated fixes from the first two weeks of the nightly self-development
+loop plus the credential-profiles feature slice. The headline fix is for the nightly host itself:
+**a Run whose agent dies on a provider error is now FAILED, not silently COMPLETED** — on the night of
+2026-09-30 the host's model server was down and all 17 nightly Runs were recorded green with zero
+output.
+
+### Fixed
+
+- **A zero-output agent turn no longer records a completed Run (#803, #804).** The PrimeAgent adapter
+  tracks whether the session produced any substantive event — assistant text (excluding exactly the
+  four synthetic `[agent] …` status lines the translator emits for compaction/auto-retry frames), a
+  tool execution, an input dialog, or a goal report — and on `agent_end` with code 0 but no substance
+  settles a failure whose message carries the provider's own error from
+  `agent_end.messages[*].errorMessage`. `start()` and `resume()` share one event handler; the per-turn
+  flag resets on resume. The worker records FAILED, so an outage reaches the morning digest instead of
+  a green nothing.
+- **Worktree builds from `localPath` when it is set (#791).** A workspace whose repository context
+  points at a local path no longer re-clones the URL — removes a long-standing nightly flake class
+  (#596).
+- **Nightly e2e installs its own dependencies (#796).** A clean worktree without `node_modules` ran
+  the suite against module-load failures and filed spurious defect issues; the e2e skill now runs
+  `npm ci` when dependencies are absent.
+- **E2E survives Docker 29's unhealthy-on-exit (#789, #790).** A container that exits before its first
+  health probe is marked `unhealthy` with zero probes on Docker 29; the dead-service scenario uses a
+  per-scenario startup check strategy so the intended death is not misreported.
+- **Nightly example templates carry a `repository` (#785, #786).** Runs without one died at workspace
+  setup on night one; the shipped example and its regression tests pin it down.
+
+### Added
+
+- **Credential profiles CP-2 (#784, #799).** The profile file schema at
+  `${XDG_CONFIG_HOME}/mercury/credential-profiles.json` (mode 0600 gate), repository-id
+  normalization, a strict loader that never prints values (malformed JSON, `git.httpsToken` and
+  repository-entry errors are value-free; userinfo is redacted), and
+  `mercury host credentials validate` with ok/FAIL lines and exit 1 on any FAIL.
+- **Nightly loop implements feature requests (#800, #801).** A new rung 2 selects `enhancement`
+  issues authored by @aywengo (or carrying a current `enhancement` label applied by @aywengo,
+  timeline-verified like `nightly:ready`), ordered by priority then age, and runs them through the
+  issue-fix-loop. Old rungs renumber (new unlabeled issues → 3, docs → proposals → 4).
+- **Stale-claim reset (#800, #801).** The promised §4.3 reset is implemented: an `nightly:in-progress`
+  claim whose label event predates the current night's local midnight is removed before selection, so
+  a deadline-stopped Run no longer blocks its issue forever. Claim ownership is verified through the
+  label timeline's final actor — GitHub's add-labels is idempotent, so the previously assumed
+  422-already-exists race signal never fires.
+
+### Changed
+
+- **`nightly-next` gets feature-sized room (#800, #801).** The example task's cap goes 80 min → 4 h
+  (five timeouts, including both credential-profile attempts; `notAfterAt` 06:00 still bounds every
+  Run at the window edge) and its skills list grows to `issue-fix-loop`, `planning`, `implementation`,
+  `testing`.
+- **Owner-transfer for a removed bot's Runs (#760, #780)** and **`host bot status` clears partial view
+  data when the API walk fails (#759, #782)**; the nightly blocking question rides on the issue body
+  when the nightly identity owns it (#770, #778) and the nightly skills share one helper module
+  (#769, #779).
+
 ## [0.2.0] - 2026-09-27
 
 Minor release. Two headline additions: **dispatcher bots** (the host schedules agent Runs from a
