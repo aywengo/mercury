@@ -5,7 +5,7 @@ export const HOST_PRODUCT = 'host';
  * Host SemVer. Must equal root `package.json` `"version"`.
  * `test/releaseHygiene.test.ts` asserts the two stay the same.
  */
-export const HOST_VERSION = '0.2.0';
+export const HOST_VERSION = '0.2.1';
 
 /**
  * Response-shape version of the routes Fleet depends on, reported as `api` on `GET /healthz`.
