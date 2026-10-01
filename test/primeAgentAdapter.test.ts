@@ -183,6 +183,27 @@ test('spawn failure: command not found -> exit 127, reason failed', async () => 
   assert.equal(events.length, 0);
 });
 
+test('silent agent death: agent_end with zero output -> exit 1, failed, explained (#803)', async () => {
+  const { context } = makeContext();
+  const adapter = new PrimeAgentAdapter(MOCK);
+  process.env.MOCK_RPC_MODE = 'silent';
+  try {
+    const handle = await adapter.start({ ...context, run: makeRun({ id: 'run_silent' }) });
+    const { events, exit } = await collectAll(handle);
+    assert.equal(exit.code, 1, 'a zero-output turn must not be recorded as a completed run');
+    assert.equal(exit.reason, 'failed');
+    assert.equal(exit.errorKind, 'agent');
+    assert.match(exit.message ?? '', /without any output/);
+    // The agent.end event still flowed (the worker sees the terminal signal), and no
+    // substantive events preceded it.
+    assert.ok(events.some((e) => e.type === 'agent.end'));
+    assert.equal(events.some((e) => e.type === 'agent.message' || e.type.startsWith('tool.')), false);
+  } finally {
+    delete process.env.MOCK_RPC_MODE;
+    adapter.cancel('run_silent').catch(() => {});
+  }
+});
+
 test('agent crash before agent_end -> exit with code, reason failed', async () => {
   const { context } = makeContext();
   const adapter = new PrimeAgentAdapter(MOCK);

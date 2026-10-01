@@ -32,6 +32,10 @@ import { SKILL_ID as KNOWLEDGE_SKILL_ID , CONTEXT_FILE } from '../knowledge/mate
 
 const SESSION_DIR_NAME = '.mercury-sessions';
 const SESSION_PATH_FILE = '.mercury-session-path';
+/** Events that prove the agent produced real work. agent.message covers assistant text AND the
+ * translator's own [agent] informational lines; tool.* covers any tool execution; input.required
+ * a human dialog; goal.* a goal report. */
+const SUBSTANTIVE_EVENT = /^(agent\.message|tool\.(started|completed|failed)|input\.(required|received)|goal\.)/;
 const OUTPUT_LOG = 'agent-output.log';
 
 export interface PrimeAgentAdapterOptions {
@@ -73,6 +77,11 @@ interface Session {
   waiters: ((ev: AgentEvent) => void)[];
   exitPromise: Promise<AgentExit>;
   exitResolve: (exit: AgentExit) => void;
+  /** Whether the session produced ANY substantive agent activity (assistant text, a tool call,
+   * an input dialog, a goal report). agent.end with code 0 and none of these is a silent agent
+   * death - typically the model provider failed before the first token (#803): without this
+   * check the worker records the run COMPLETED and a whole night can pass as silent green. */
+  sawSubstantiveOutput: boolean;
 }
 
 const DONE: AgentEvent = { type: '__done__', payload: {} };
@@ -186,6 +195,7 @@ export class PrimeAgentAdapter implements AgentAdapter {
       terminated: false,
       queue: [],
       waiters: [],
+      sawSubstantiveOutput: false,
         ...createExitGate(),
     };
     this.sessions.set(runId, session);
@@ -273,15 +283,36 @@ export class PrimeAgentAdapter implements AgentAdapter {
     });
     session.client = client;
 
-    client.onEvent((ev) => {
+client.onEvent((ev) => {
       for (const translated of this.translate(session, ev)) {
         push(session, translated);
+        if (SUBSTANTIVE_EVENT.test(translated.type)) {
+          // Assistant text, a tool call, an input dialog or a goal report: the model actually
+          // did something. The skill.* auto-selection events do NOT count - they are Mercury's
+          // own bookkeeping, not the agent's (#803).
+          session.sawSubstantiveOutput = true;
+        }
         if (translated.type === 'agent.end' && !session.exitSettled) {
           // Agent finished; resolve the exit promise (the RPC process may stay alive).
           // `done` is set under the same guard as before; settlement then goes through the shared
           // helper instead of repeating its first-writer-wins check inline (issue #148).
           session.done = true;
           const code = (translated.payload as { code?: number }).code ?? 0;
+          if (code === 0 && !session.sawSubstantiveOutput) {
+            // Silent agent death (#803): the supervisor reported a completed turn but the model
+            // never produced text, a tool call or a dialog - normally a provider failure before
+            // the first token. Recording COMPLETED here paints an outage green; fail instead,
+            // blaming the agent (a retryable infrastructure classification would re-burn the
+            // queue against a provider that is still down).
+            settleExit(session, {
+              code: 1,
+              signal: null,
+              reason: 'failed',
+              errorKind: 'agent',
+              message: 'Agent ended without any output (no assistant message, tool call, input request or goal report); the model provider likely failed before the first token',
+            });
+            continue;
+          }
           settleExit(session, { code, signal: null, reason: code === 0 ? 'completed' : 'failed' });
         }
       }

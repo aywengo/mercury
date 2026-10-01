@@ -7,6 +7,8 @@
 //   input  - prompt -> extension_ui_request (input dialog), waits for
 //            extension_ui_response, then agent_end
 //   fail   - prompt -> agent_start, then exit(1) without agent_end
+//   silent - prompt -> agent_start, turn_start, agent_end with NO message/tool events
+//            (provider died before the first token; the run must FAIL, #803)
 //   hang   - prompt -> agent_start, never agent_end (timeout path)
 //   ignore - never responds to any command (send-timeout path)
 //   goal   - prompt -> goal_update frames walking active -> paused -> budget_limited ->
@@ -79,6 +81,14 @@ function runPromptScript() {
   if (mode === 'fail') {
     send({ type: 'agent_start' });
     setTimeout(() => process.exit(1), 50);
+    return;
+  }
+  if (mode === 'silent') {
+    // #803: the supervisor reports a clean turn but the model never produced anything
+    // (provider down before the first token). agent_end, zero substantive events.
+    send({ type: 'agent_start' });
+    send({ type: 'turn_start' });
+    send({ type: 'agent_end', messages: [] });
     return;
   }
   if (mode === 'hang') {
