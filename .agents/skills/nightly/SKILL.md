@@ -69,8 +69,16 @@ Runs `npm run test:e2e` once (the host needs Docker), reruns each failure ONCE
 on its own file to separate flakes from defects, then:
 
 - **Real failure** — fingerprinted (sha-256 of test name + normalized error;
-  volatile ids, paths, durations and numbers stripped). Open issues are
-  searched for the hidden marker `<!-- nightly-e2e-fp:<hash> -->`: a match gets
+  volatile ids, paths, durations and numbers stripped). When a whole test FILE
+  fails, node's generic wrapper lines (`'test failed'`, `N subtest(s) failed`,
+  `test did not finish before its parent and was cancelled`) are skipped: the
+  fingerprint binds to the first SPECIFIC cause line instead (#806), so two
+  different defects in one file never merge. A failure whose block holds no
+  specific line at all (the cause is not even on stderr) is observed in the
+  report but not filed. Filed issues and comments also carry the failure's raw
+  detail block — bounded, secret-redacted — inside a collapsed `<details>`
+  section; the marker stays computed from the normalized error line only.
+  Open issues are searched for the hidden marker `<!-- nightly-e2e-fp:<hash> -->`: a match gets
   a comment with the night's date; no match files a new `origin:e2e` issue
   carrying the marker in the body. Later nights comment, never re-file.
 - **Flake** (passes on rerun) — listed in the report, never filed, until the

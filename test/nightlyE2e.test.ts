@@ -19,6 +19,8 @@ import {
   recordFlakeNight,
   runE2eSkill,
   ensureDependencies,
+  rawDetailsSection,
+  rawBlockOf,
   type E2eIo,
   type FlakeState,
 } from '../.agents/skills/nightly/e2e.ts';
@@ -673,6 +675,265 @@ test('a real failure fingerprints the RERUN error line when the rerun names the 
   } finally {
     cleanup();
   }
+});
+
+// ---- #806: generic wrapper lines must not become the fingerprint's error ----
+
+/** A file-level failure block: node prints the generic wrapper first, the cause (sometimes) later. */
+function fileFailureOutput(opts: {
+  file: string;
+  wrapper?: string;
+  causeLines?: string[];
+  stderr?: string;
+}): string {
+  const detail = [
+    '✖ failing tests:',
+    '',
+    `test at ${opts.file}:1:1`,
+    `✖ ${opts.file} (52.227ms)`,
+    '  ' + (opts.wrapper ?? "'test failed'"),
+    ...(opts.causeLines ?? []),
+  ];
+  return [...(opts.stderr ? [opts.stderr, ''] : []), 'ℹ fail 1', '', ...detail].join('\n');
+}
+
+test('a wrapper-first block fingerprints the specific cause, not the generic line (AC1)', () => {
+  const out = fileFailureOutput({
+    file: 'e2e/knowledge.test.ts',
+    stderr: "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from /tmp/ws/e2e/knowledge.test.ts",
+    causeLines: [
+      '  ',
+      'Error [ERR_MODULE_NOT_FOUND]: Cannot find package \'testcontainers\' imported from /tmp/ws/e2e/knowledge.test.ts',
+      '      at TestContext.<anonymous> (file:///repo/e2e/knowledge.test.ts:3:36)',
+    ],
+  });
+  const failures = parseFailures(out);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.error, "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from /tmp/ws/e2e/knowledge.test.ts");
+  assert.doesNotMatch(failures[0]!.error, /test failed/);
+});
+
+test('two same-file failures with different specific causes fingerprint differently (AC2)', async () => {
+  const causeA = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from /tmp/ws/e2e/knowledge.test.ts";
+  const causeB = 'Error [ERR_TEST_FAILURE]: atlas pack manifest missing field "notes"';
+  const outA = fileFailureOutput({ file: 'e2e/knowledge.test.ts', stderr: causeA, causeLines: ['  ', causeA] });
+  const outB = fileFailureOutput({ file: 'e2e/knowledge.test.ts', stderr: causeB, causeLines: ['  ', causeB] });
+  const [a] = parseFailures(outA);
+  const [b] = parseFailures(outB);
+  assert.notEqual(a!.error, b!.error);
+  const fpA = await fingerprintOf(a!.test, a!.error);
+  const fpB = await fingerprintOf(b!.test, b!.error);
+  assert.notEqual(fpA, fpB, 'distinct defects in one file must not merge into one issue');
+});
+
+test('a wrapper-only block (no cause anywhere) files nothing and is observed honestly (AC3)', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const out = fileFailureOutput({ file: 'e2e/mock-rpc.test.ts' });
+    let suite = 0;
+    const runs: string[][] = [];
+    const posts: { path: string; body: unknown }[] = [];
+    const io: E2eIo = {
+      async run(argv) {
+        runs.push(argv);
+        suite += 1;
+        if (suite === 1) return { code: 1, output: out };
+        return { code: 1, output: out }; // rerun fails the same wrapper-only way
+      },
+      async get() { return { body: [], status: 200 }; },
+      async post(path, body) { posts.push({ path, body }); return { body: { number: 1 }, status: 201 }; },
+    };
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-10-02' });
+    assert.equal(posts.length, 0, 'a wrapper-only failure must not file');
+    assert.equal(report.real.length, 1);
+    assert.equal(report.real[0]!.action, 'dry-run');
+    assert.equal(report.real[0]!.error, '');
+  } finally {
+    cleanup();
+  }
+});
+
+test('filed bodies and comments carry the bounded redacted raw block in <details> (AC4)', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const secretLine = '      authorization: Bearer ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456,';
+    const cause = 'Error: atlas pack harvest diverged from the outbox at /tmp/ws/e2e/knowledge.test.ts:9:9';
+    const out = [
+      '✖ failing tests:',
+      '',
+      'test at e2e/knowledge.test.ts:3:1',
+      '✖ atlas pack harvest matches the outbox (5.5ms)',
+      '  ' + cause,
+      secretLine,
+      '      at TestContext.<anonymous> (file:///repo/e2e/knowledge.test.ts:3:36)',
+    ].join('\n');
+    let suite = 0;
+    const posts: { path: string; body: unknown }[] = [];
+    const io: E2eIo = {
+      async run() {
+        suite += 1;
+        return { code: 1, output: out };
+      },
+      async get() { return { body: [], status: 200 }; },
+      async post(path, body) { posts.push({ path, body }); return { body: { number: 960 }, status: 201 }; },
+    };
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-10-02' });
+    assert.equal(report.real.length, 1);
+    assert.equal(report.real[0]!.action, 'filed');
+    assert.equal(posts.length, 1);
+    const body = String((posts[0]!.body as { body?: string }).body);
+    assert.match(body, /<details>/);
+    assert.match(body, /<summary>Raw failure block \(redacted\)<\/summary>/);
+    assert.match(body, /<\/details>/);
+    assert.match(body, /atlas pack harvest matches the outbox/, 'the raw block carries the failure name');
+    assert.doesNotMatch(body, /ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456/, 'the token shape must be redacted');
+    assert.match(body, /authorization: \[REDACTED\]/);
+    // The fingerprint and normalized error stay outside the details section, unchanged.
+    assert.match(body, /<!-- nightly-e2e-fp:/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('comments on an existing issue include the redacted raw block too (AC4)', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const cause = 'Error: socket hang up at e2e/system.test.ts:9:9';
+    const out = [
+      '✖ failing tests:',
+      '',
+      'test at e2e/system.test.ts:9:1',
+      '✖ system smoke (3.3ms)',
+      '  ' + cause,
+    ].join('\n');
+    let suite = 0;
+    const posts: { path: string; body: unknown }[] = [];
+    let gets = 0;
+    const io: E2eIo = {
+      async run() {
+        suite += 1;
+        return { code: 1, output: out };
+      },
+      async get() {
+        gets += 1;
+        return { body: [{ number: 800, body: `older issue\n${fpMarker(fp)}` }], status: 200 };
+      },
+      async post(path, body) { posts.push({ path, body }); return { body: {}, status: 201 }; },
+    };
+    const fp = await fingerprintOf('system smoke', cause); // the existing issue carries THIS failure's marker
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-10-02' });
+    assert.equal(gets, 1, 'the marker search runs once');
+    void gets;
+    // The marker search must have matched (commented, not filed):
+    assert.equal(report.real[0]!.action, 'commented');
+    assert.equal(report.real[0]!.issue, 800);
+    const comment = String((posts[0]!.body as { body?: string }).body);
+    assert.match(comment, /<details>/);
+    assert.match(comment, /socket hang up/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('the raw block is bounded at 60 lines / 6 kB and marked with an ellipsis', () => {
+  const many: string[] = [];
+  for (let i = 0; i < 100; i++) many.push('  line ' + i + ' of a very long stack trace');
+  const out = [
+    '✖ failing tests:',
+    '',
+    'test at e2e/system.test.ts:1:1',
+    '✖ bounded failure (1.0ms)',
+    "  'test failed'",
+    ...many,
+  ].join('\n');
+  const [f] = parseFailures(out);
+  assert.ok(f!.raw!.length <= 61, 'raw block bounded (60 lines + ellipsis), got ' + f!.raw!.length);
+  assert.equal(f!.raw!.at(-1), '…');
+});
+
+test("a 'test timed out after Nms' error line is NOT generic (a timeout is a specific signature)", () => {
+  const out = [
+    '✖ failing tests:',
+    '',
+    'test at e2e/system.test.ts:1:1',
+    '✖ slow recovery (504.042ms)',
+    "  'test timed out after 500ms'",
+  ].join('\n');
+  const [f] = parseFailures(out);
+  assert.equal(f!.error, "'test timed out after 500ms'");
+});
+
+test('existing fixtures with a specific first line keep their error and fingerprint (AC6)', async () => {
+  const out = [
+    '✖ alpha works (0.5ms)',
+    'ℹ pass 1',
+    'ℹ fail 1',
+    '',
+    '✖ failing tests:',
+    '',
+    'test at e2e/system.test.ts:42:1',
+    '✖ alpha works (0.5ms)',
+    '  AssertionError [ERR_ASSERTION]: numbers diverge',
+  ].join('\n');
+  const [f] = parseFailures(out);
+  assert.equal(f!.error, 'AssertionError [ERR_ASSERTION]: numbers diverge');
+  const fpNew = await fingerprintOf(f!.test, f!.error);
+  const fpOld = await fingerprintOf('alpha works', 'AssertionError [ERR_ASSERTION]: numbers diverge');
+  assert.equal(fpNew, fpOld);
+});
+
+test('the detail-block scan runs to the end of the block, not a fixed 12 lines', () => {
+  const filler: string[] = [];
+  for (let i = 0; i < 20; i++) filler.push('  padding line ' + i);
+  const cause = 'Error: the real cause after twenty filler lines';
+  const out = [
+    '✖ failing tests:',
+    '',
+    'test at e2e/system.test.ts:1:1',
+    '✖ deep failure (1.0ms)',
+    "  'test failed'",
+    ...filler,
+    '  ' + cause,
+  ].join('\n');
+  const [f] = parseFailures(out);
+  assert.equal(f!.error, cause);
+});
+
+test('rawDetailsSection on a failure without a block yields nothing', () => {
+  assert.deepEqual(rawDetailsSection({}), []);
+  assert.deepEqual(rawDetailsSection({ raw: [] }), []);
+});
+
+test('rawBlockOf stops at the next test-at or ✖ line (block boundaries)', () => {
+  const detail = [
+    'test at a.test.ts:1:1',
+    '✖ first (1.0ms)',
+    '  Error: first cause',
+    '',
+    'test at b.test.ts:1:1',
+    '✖ second (1.0ms)',
+    '  Error: second cause',
+  ];
+  const first = rawBlockOf(detail, 1);
+  // The trailing blank line inside the block is trimmed (the block ends before the next entry).
+  assert.deepEqual(first, ['  Error: first cause']);
+  const second = rawBlockOf(detail, 5);
+  assert.deepEqual(second, ['  Error: second cause']);
+});
+
+test('mutation guard: first-non-empty-line-wins parsing fails the wrapper fixture (AC5)', () => {
+  // Restore the OLD behavior in a local copy and show it picks the wrapper (this documents why
+  // the fixture above is a regression test: revert extractError to first-line-wins and AC1 fails).
+  const out = fileFailureOutput({
+    file: 'e2e/knowledge.test.ts',
+    causeLines: ['  ', "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers'"],
+  });
+  const [f] = parseFailures(out);
+  // Current behavior: the wrapper is skipped, the ERR_ line wins, and the wrapper is NOT the error.
+  assert.notEqual(f!.error, "'test failed'");
+  // The old parser would have set error to the first non-empty line: 'test failed'. The fixture
+  // pins the negative, so a mutation restoring first-line-wins fails this assertion.
+  assert.match(f!.error, /ERR_MODULE_NOT_FOUND/);
 });
 
 test('a failure with no extractable error line is observed, never filed (name-only fingerprints)', async () => {
