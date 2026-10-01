@@ -32,11 +32,21 @@ import { SKILL_ID as KNOWLEDGE_SKILL_ID , CONTEXT_FILE } from '../knowledge/mate
 
 const SESSION_DIR_NAME = '.mercury-sessions';
 const SESSION_PATH_FILE = '.mercury-session-path';
-/** Raw RPC frames that prove the model produced real work: a text delta, a tool execution, an
- * input dialog, a goal report. Deliberately NOT the auto_retry and compaction status frames (the
- * translator surfaces those as agent.message, but they are status chatter, not output - #803
- * round 1). */
-const SUBSTANTIVE_RPC_EVENT = /^(message_update|tool_execution_start|extension_ui_request|goal_update)$/;
+/**
+ * Whether a translated Mercury event proves the model produced real work (#803). Assistant text
+ * counts; the translator's own '[agent] ' agent.message lines for auto_retry/compaction status
+ * frames do NOT (a retry-exhausted provider failure emits those and then agent_end - counting
+ * them would recreate the silent-green failure this guard exists for). Tool executions, input
+ * dialogs and goal reports all validate in the translator before they are emitted, so a merely
+ * present-but-discarded raw frame (setStatus notify, empty message) never reaches here.
+ */
+function isSubstantive(ev: AgentEvent): boolean {
+  if (ev.type === 'agent.message') {
+    const text = (ev.payload as { text?: unknown }).text;
+    return typeof text === 'string' && text !== '' && !text.startsWith('[agent] ');
+  }
+  return /^(tool\.(started|completed|failed)|input\.(required|received)|goal\.)/.test(ev.type);
+}
 const OUTPUT_LOG = 'agent-output.log';
 
 export interface PrimeAgentAdapterOptions {
@@ -477,13 +487,17 @@ export class PrimeAgentAdapter implements AgentAdapter {
    */
   private wireEvents(session: Session, client: RpcClient): void {
     client.onEvent((ev) => {
-      // Substantive output is judged on the RAW RPC event, not the translated type: the
-      // translator maps informational compaction_*/auto_retry_* frames to agent.message too, and
-      // a provider failure that exhausts retries would then look like real work (#803 round 1).
-      // A text delta, a tool execution, an input dialog or a goal report is the model doing work.
-      if (SUBSTANTIVE_RPC_EVENT.test(ev.type ?? '')) session.sawSubstantiveOutput = true;
       for (const translated of this.translate(session, ev)) {
         push(session, translated);
+        if (isSubstantive(translated)) {
+          // Judged on the TRANSLATED Mercury event with its payload validated (#803 round 2):
+          // assistant text (but not the translator's own '[agent] ' status chatter for
+          // auto_retry/compaction frames, which would let a retry-exhausted failure masquerade
+          // as work), a real tool execution, an input dialog, or a goal report. Raw-frame
+          // matching would over-count (e.g. extension_ui_request with a discarded setStatus
+          // method, or an empty message_update).
+          session.sawSubstantiveOutput = true;
+        }
         if (translated.type === 'agent.end' && !session.exitSettled) {
           // Agent finished; resolve the exit promise (the RPC process may stay alive).
           // `done` is set under the same guard as before; settlement then goes through the shared

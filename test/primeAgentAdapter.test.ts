@@ -206,6 +206,24 @@ test('silent agent death: agent_end with zero output -> exit 1, failed, explaine
   }
 });
 
+test('a discarded notify frame does not make a zero-output run completed (#803 round 2)', async () => {
+  const { context } = makeContext();
+  const adapter = new PrimeAgentAdapter(MOCK);
+  process.env.MOCK_RPC_MODE = 'silent-status';
+  try {
+    const handle = await adapter.start({ ...context, run: makeRun({ id: 'run_silent_status' }) });
+    const { events, exit } = await collectAll(handle);
+    assert.equal(exit.code, 1, 'setStatus notify is not agent output');
+    assert.equal(exit.reason, 'failed');
+    assert.match(exit.message ?? '', /Connection error\./);
+    // The notify frame produced no Mercury event at all.
+    assert.equal(events.some((e) => e.type === 'input.required'), false);
+  } finally {
+    delete process.env.MOCK_RPC_MODE;
+    adapter.cancel('run_silent_status').catch(() => {});
+  }
+});
+
 test('agent crash before agent_end -> exit with code, reason failed', async () => {
   const { context } = makeContext();
   const adapter = new PrimeAgentAdapter(MOCK);

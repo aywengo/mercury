@@ -83,6 +83,15 @@ function runPromptScript() {
     setTimeout(() => process.exit(1), 50);
     return;
   }
+  if (mode === 'silent-status') {
+    // #803 round 2: a notify-only extension frame (setStatus) is discarded by the translator and
+    // must NOT count as substantive output; the errored agent_end still fails the run.
+    send({ type: 'agent_start' });
+    send({ type: 'turn_start' });
+    send({ type: 'extension_ui_request', id: 'st-1', method: 'setStatus', title: 'working...' });
+    send({ type: 'agent_end', messages: [{ role: 'assistant', content: [], stopReason: 'error', errorMessage: 'Connection error.' }] });
+    return;
+  }
   if (mode === 'silent') {
     // #803: the supervisor reports a clean turn but the model never produced anything
     // (provider down before the first token). agent_end carries the errored assistant
