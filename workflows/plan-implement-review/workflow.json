@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "plan-implement-review",
+  "version": "1.0.0",
+  "description": "Advisory three-step loop: a system architect plans the change, the Run's own agent implements it, a reviewer pass checks the result. Guidance only -- Mercury does not enforce the order; report each step with step events.",
+  "mode": "advisory",
+  "stages": [
+    {
+      "id": "plan",
+      "preset": {
+        "id": "system-architect"
+      },
+      "task": "Plan the change before touching code: read the relevant code paths end to end, state the mechanism, and write down the approach and its assumptions. Documents, not code."
+    },
+    {
+      "id": "implement",
+      "task": "Implement the plan from the previous step. Keep the change scoped to it, add or adjust tests so the behavior is covered, and record what you did."
+    },
+    {
+      "id": "review",
+      "preset": {
+        "id": "reviewer"
+      },
+      "task": "Review the implemented change for correctness, security and tests. Report findings; do not rewrite the tree beyond fixing what the review found."
+    }
+  ],
+  "maxStages": 3
+}
