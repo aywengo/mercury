@@ -1,9 +1,10 @@
 # Daemon-based agent sessions — design
 
-**Status:** proposal, with the current implementation assessed as **non-functional against the real
-daemon**. **Scope:** design plus verification; no implementation is included.
-**Verified against:** PrimeAgent 0.8.1, daemon protocol `prime-agent.daemon` version 7, schema
-`protocol-7-schema-22-4d515169dc6b`.
+**Status:** the proposed design is **implemented and shipped on `main`** (§13); the daemon adapter
+is protocol-verified against a real supervisor and RPC remains the default. Still unexercised: a
+supervisor restart mid-run and a loaded deployment (§10.1).
+**Verified against:** PrimeAgent 0.8.1 and re-verified against 0.9.1 (§3.1), daemon protocol
+`prime-agent.daemon` version 7, schema `protocol-7-schema-25-585ef1102921`.
 **Related:** [`agent-adapters.md`](agent-adapters.md) (Pattern B), issues #55 and #68,
 and [`status.md`](status.md#primeagent-daemon-mode).
 

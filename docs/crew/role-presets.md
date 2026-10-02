@@ -3,7 +3,13 @@
 Role Presets are the first Crew deliverable. One preset configures one ordinary
 Mercury Run. It does not create subagents, child Runs or a workflow.
 
-Status: **design only.**
+Status: **Milestone A implemented** (Phases 1–3: PRs #714, #716 and #718; AC 7
+closed by #721/PR #743, AC 8 by #722/PR #744, follow-ups #723–#725). The MVP
+sections below — manifest, resolution, snapshots, persistence, materialization,
+adapter contract, read API and dashboard — describe what ships; read them as the
+spec of shipped behavior, with `src/presets/`, `src/runs/presetStore.ts` and
+`docs/crew/roadmap.md` as the code-side companions. Git synchronization, owner
+drafts, the Preset Store, MCP and workflows remain design (§1).
 
 Related: [`README.md`](README.md), [`roadmap.md`](roadmap.md),
 [`ARCHITECTURE.md`](../../ARCHITECTURE.md).
@@ -234,24 +240,21 @@ The hash is SHA-256 over a canonical, code-unit-sorted sequence of relative file
 paths and UTF-8 content. It includes the resolved manifest and instruction.
 Runtime-only values such as absolute filesystem paths and secrets are excluded.
 
-### 4.1 Existing skill gap
+### 4.1 Existing skill gap (closed)
 
-`run_skills.snapshot_json` already stores complete skill snapshots. However, the
-worker currently calls `SkillRegistry.resolve()` again using only the stored
-ids before `writeSkills()`. This permits source changes between creation and
-execution to change the bytes used by a queued Run.
+At the time this document was written, `run_skills.snapshot_json` already
+stored complete skill snapshots, but the worker called `SkillRegistry.resolve()`
+again using only the stored ids before `writeSkills()`, so a source change
+between creation and execution could change the bytes a queued Run used.
 
-Before Role Presets ship:
-
-- `RunService.getSkills(runId)` must remain the source of the stored snapshots;
-- the worker must pass those snapshots directly to `writeSkills()`;
-- retrying unchanged configuration must copy the parent snapshots;
-- a regression test must mutate a skill after Run creation and assert that the
-  workspace receives the original bytes.
-
-Role Presets must not reproduce this defect. `writePreset()` receives a
-`ResolvedRolePreset` loaded from `run_presets.snapshot_json`, never a live
-registry result.
+Phase 0 closed the gap (recorded in
+[`../phase-0-issues.md`](../phase-0-issues.md)): the worker now materializes
+from the stored snapshots — `RunService.getSkills()` remains the source and
+`src/worker/worker.ts` passes its rows straight to `writeSkills()`, retry copies
+the parent snapshots, and a regression test mutates a skill after creation and
+asserts the original bytes. Role Presets did not reproduce the defect:
+`writePreset()` receives a `ResolvedRolePreset` loaded from
+`run_presets.snapshot_json`, never a live registry result.
 
 ## 5. Run creation
 

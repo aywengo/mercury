@@ -1,9 +1,12 @@
 # Dispatcher bots — host-resident scheduled and coordinated agents
 
-Status: **design; nothing is implemented.** This document specifies the feature and
-its roadmap. No command, config file or code described here exists yet; §17 records
-what a reader can treat as runnable today (nothing) so intent is never mistaken for
-shipped behaviour. §19 records what each design review changed and why.
+Status: **partly implemented — milestones B0 and B1 are shipped and running
+unattended; B2–B4 are design.** This document specifies the feature and its
+roadmap. B0 (#729–#734) and B1 (#735–#737) merged: the scheduler, dispatch,
+status, per-alias service install and the bot config schema live in
+`src/host/bots/`, and the nightly bot runs from `deploy/nightly-bot.json.example`
+(#774). §17 records what a reader can treat as runnable today; §19 records what
+each design review changed and why.
 
 ## 1. Summary
 
@@ -875,6 +878,16 @@ The bot feature is done when an operator can:
    `host bot service uninstall` prints this and offers
    `--reassign-runs <owner>` rather than leaving the operator to discover it.
 
+Runnable today (B0 + B1, issues #729–#737): items 1, 2, 3 and 7 hold for a
+brain-less bot — `src/host/bots/scheduler.ts` fires scheduled tasks on a wall
+clock with `singleFlight` and `onMiss`, `src/host/bots/dispatch.ts` and
+`status.ts` give the manual fire and the read-only view, `service.ts` installs
+and uninstalls the per-alias unit with the §17.7 teardown message (#760), and
+the nightly bot (`deploy/nightly-bot.json.example`, #774) has been running the
+§4.1 schedule of `nightly-self-development.md` unattended. Items 4 and 5 (the
+LLM brain and its budgets) wait for B3; item 6 (per-bot `host doctor`) waits
+for B4.
+
 ## 18. Roadmap
 
 Each milestone is independently shippable and leaves the host better than before.
@@ -1062,3 +1075,11 @@ corrections to the design itself.
 | §8.5 (new) | — | untrusted-context requirements | the design addressed egress and output shape but not attacker-reachable input |
 | §4.1 load policy | load-all, refuse-all | per-alias load for `bot run`; SKIP lines for multi-bot commands | refuse-all contradicted per-process crash isolation |
 | §3, §16 | — | cross-bot duplicate reactions stated as accepted | it was an unnoticed gap; now it is a decision |
+
+### 2026-10-02 — status brought in line with the tree (#783)
+
+B0 and B1 shipped without this document's header noticing. The header, §17 and
+this history now record what actually runs: B0 (#729–#734) and B1 (#735–#737)
+merged, #760 landed the §17.7 owner-transfer API, and the nightly bot config
+(#774) runs the schedule unattended. B2–B4 remain design. No design text
+changed; only status claims and their evidence.

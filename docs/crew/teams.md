@@ -1,11 +1,12 @@
 # Agent Teams — mixed-harness orchestration
 
-Status: **partly implemented.** The prerequisite in §10 Phase -1 is half done:
-`RunService.create()` honours an explicit `skills: []` (see the `#459` note there),
-so a caller who knows to send it gets a zero-skill Run. What is *not* done is the
-part that matters to a caller who does not know -- `skillSelector` still cannot
-return an empty list, and `HermesAgentAdapter` still forwards Mercury skill ids into
-Hermes's own namespace with `-s`. Both are issue **#507**.
+Status: **partly implemented.** The Phase -1 prerequisite is done: a Run can
+carry zero skills, and skill selection respects the target agent's namespace
+(#507, closed by PRs #519 and #520 — `SelectOptions.allowFallback` lets
+`skillSelector` return `[]`, and `RunService` skips selection entirely for a
+`nativeNames` backend instead of handing it Mercury ids). What is not built is
+Teams itself: Agent Templates, the bounded stage orchestration and Fleet
+placement below are still design.
 
 Refines [`workflows.md`](workflows.md) under one added requirement: a team is
 **heterogeneous on purpose**.
@@ -53,11 +54,13 @@ skill is. The team level must not name things inside a sub-team's namespace.
 
 This is not a stylistic preference. It is forced by a reproduced failure.
 
-Mercury auto-selects skills from **its own** registry and hands the resulting ids
-to whichever harness the Run targets. `skillSelector` ends with
+At the time of the failure, Mercury auto-selected skills from **its own**
+registry and handed the resulting ids to whichever harness the Run targeted.
+`skillSelector` then ended with
 `return picked.length > 0 ? picked : FALLBACK.filter(...)`, so a Run **always**
-carries at least one skill — a task that matches nothing still gets the fallback
-set. Verified: `"Say hello."` selects `planning, implementation, testing, git-pr`.
+carried at least one skill — a task that matched nothing still got the fallback
+set. Verified then: `"Say hello."` selected `planning, implementation, testing,
+git-pr`.
 
 Those ids then mean different things per harness:
 
@@ -76,18 +79,20 @@ agent.message  {"text": "Error: Unknown skill(s): git-pr, implementation"}
 run.failed     {"error": "Agent exited with code 1 (signal none)", "durationMs": 766}
 ```
 
-Because the selector falls back to a fixed set whenever `skills` is omitted, a
-caller who does not know to send `skills: []` still gets at least one Mercury
-skill id, and Hermes rejects the Run in under a second. That fallback is now
-suppressible -- `SelectOptions.allowFallback` returns `[]` instead of four ids the
-target backend cannot resolve -- and with it **Hermes does execute Runs through
-Mercury**, verified end to end against a real workspace
+Because the selector fell back to a fixed set whenever `skills` was omitted, a
+caller who did not know to send `skills: []` got at least one Mercury skill id,
+and Hermes rejected the Run in under a second. The fallback is now suppressible
+-- `SelectOptions.allowFallback` returns `[]` instead of four ids the target
+backend cannot resolve -- and for a `nativeNames` backend `RunService` skips
+selection entirely rather than risking any Mercury id (#507, PRs #519 and
+#520). With that, **Hermes does execute Runs through Mercury**, verified end to
+end against a real workspace
 ([`../phase-0-issues.md`](../phase-0-issues.md), acceptance 4).
 
 This sentence used to read "in practice Hermes cannot execute any Run through Mercury as it stands", which
-was true only while the fallback was unconditional. The narrower claim above is the one that is still true:
-omitting `skills` is still a trap for a Hermes Run, and sending `[]` is still what makes it work.
-PrimeAgent works only because Mercury materializes skills into the workspace and
+was true only while the fallback was unconditional, and the later narrower claim ("omitting `skills` is still
+a trap for a Hermes Run") stopped being true when #520 made selection skip `nativeNames` backends outright.
+PrimeAgent works because Mercury materializes skills into the workspace and
 passes paths, which happens to be the namespace PrimeAgent reads.
 
 So the boundary is:
@@ -105,10 +110,11 @@ Two consequences for the roadmap:
    Run records the *intent*, and each sub-team records what it resolved that
    intent to. This also makes the snapshot honest: today the snapshot stores
    Mercury skill ids that a foreign harness cannot dereference.
-2. A Run must be able to carry zero skills. An explicit `skills: []` is honoured
-   today; an *omitted* one still cannot resolve to empty, because the selector falls
-   back to a fixed set. That gap turns a namespace mismatch from a degraded run into
-   a guaranteed failure (issue **#507**).
+2. A Run must be able to carry zero skills. Done (#507, PRs #519 and #520):
+   an explicit `skills: []` is honoured, the selector can return `[]`, and an
+   *omitted* one on a `nativeNames` backend resolves to nothing rather than to
+   a fallback set. Before that fix the gap turned a namespace mismatch from a
+   degraded run into a guaranteed failure.
 
 ## 4. Do not rebuild Hermes kanban
 
@@ -297,18 +303,20 @@ Crew tables start after the current last migration, per `README.md` §6.
 
 ## 9. Phase order
 
-0. **Phase -1 — let a Run carry zero skills.** Half done. `RunService` *can* be
-   asked for no skills (explicit `[]`, see #459); `skillSelector` still cannot return
-   an empty list, so every harness with its own skill namespace fails on the fallback
-   set when the caller omits the field. See §3, #459 and issue **#507**.
+0. **Phase -1 — let a Run carry zero skills.** Done (#507, closed by PRs #519
+   and #520). `RunService` honours an explicit `[]` (see #459), `skillSelector`
+   returns `[]` when its fallback is suppressed (`SelectOptions.allowFallback`),
+   and an omitted `skills` field on a `nativeNames` backend resolves to nothing
+   instead of a fallback set Mercury ids the harness cannot resolve. See §3.
 1. **Phase 0 — per-Run capabilities** (`appendSystemPrompt`, `workspaceFiles`,
    `model`) on at least PrimeAgent and Hermes, proven by a real Run whose output
    depends on the persona. Everything else is inert without this.
 2. **Phase 1 — capability advertisement** on `/api/agents`, plus a version or
-   capability field on `/healthz`. Mostly landed: `/api/agents` already returns a
-   `capabilities` map and `/healthz` already returns `product` and `version`. What is
-   missing is an integer `api` schema version for Fleet to refuse an old host on, and
-   the vocabulary beyond `goals` -- **#510** and **#508**.
+   capability field on `/healthz`. Done: `/api/agents` returns a `capabilities`
+   map carrying the static vocabulary beyond `goals` (#508, in
+   `src/adapters/capabilities.ts` and `AgentStaticCapabilities`), and `/healthz`
+   returns an integer `api` schema version that Fleet refuses old hosts on
+   (#510, `fleet/probe.ts` `MIN_HOST_API`).
 3. **Phase 2 — Agent Templates** stored and snapshotted
    ([`agent-templates.md`](agent-templates.md)).
 4. **Phase 3 — Teams**: bounded stages, mixed harnesses, artifact handoff.
