@@ -1,0 +1,17 @@
+{
+  "task": "nightly-e2e 2026-10-02",
+  "recordedAt": "2026-10-02T02:07:43",
+  "command": "node .agents/skills/nightly/e2e.ts --repo aywengo/mercury",
+  "verification": [
+    "pass count 53 == static count of declared tests across all 7 e2e/*.test.ts files (includes Docker-backed system.test.ts=15, knowledge.test.ts=3, mock-rpc.test.ts=4)",
+    "docker events 02:04 local show mercury-e2e-knowledge-*/mercury-e2e-par-* compose projects running image mercury-e2e:local (healthcheck execs, sqlite knowledge_outbox queries)",
+    "no /tmp/mercury-e2e-* diagnostics dirs left (clean teardown)"
+  ],
+  "report": {
+    "pass": 53,
+    "fail": 0,
+    "real": [],
+    "flakes": []
+  },
+  "github": "green suite: no issues filed or commented, no flake-state writes"
+}
