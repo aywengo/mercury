@@ -4,7 +4,12 @@ Workflow Templates are a later product for bounded multi-stage work such as
 `implement → review → security review`. They are not Role Presets and are not
 part of the first Crew release.
 
-Status: **design only.**
+Status: **partly implemented.** The §4 schema and the builtin registry ship in
+advisory form (`src/workflows/`, issue #808): `mode: 'staged'` and the
+enforcement fields (`gate`, `carryForward`, `repositoryInput`) are refused, and
+a stage without `preset` is a step the Run's default agent performs (§3.1:
+one agent performs every step). Rendering a template into a Run, persistence
+and the API are still design only (§5-§16).
 
 Related: [`role-presets.md`](role-presets.md),
 [`roadmap.md`](roadmap.md), [`docs/fleet-design.md`](../fleet-design.md).
