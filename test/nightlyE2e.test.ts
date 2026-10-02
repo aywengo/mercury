@@ -19,6 +19,9 @@ import {
   recordFlakeNight,
   runE2eSkill,
   ensureDependencies,
+  rawDetailsSection,
+  RAW_BLOCK_MAX_LINES,
+  RAW_BLOCK_MAX_BYTES,
   type E2eIo,
   type FlakeState,
 } from '../.agents/skills/nightly/e2e.ts';
@@ -214,6 +217,86 @@ test('parseFailures does not bind a name-prefix failure to another block', () =>
   assert.equal(alpha.file, 'a.test.ts');
   assert.equal(works.error, 'Error: alpha works error');
   assert.equal(works.file, 'b.test.ts');
+});
+
+test('parseFailures skips the generic file-failure wrapper and picks the specific cause (#806)', () => {
+  // When a whole FILE fails, Node prints a generic wrapper line first and the specific cause
+  // after it. The old first-non-empty-line rule chose the wrapper, so the fingerprint collapsed
+  // to file name + "test failed" and distinct defects merged (#792/#793).
+  const out = [
+    '✖ e2e/knowledge.test.ts (1.2s)',
+    'ℹ tests 5',
+    'ℹ pass 3',
+    'ℹ fail 2',
+    '',
+    '✖ failing tests:',
+    '',
+    'test at e2e/knowledge.test.ts:1:1',
+    '✖ e2e/knowledge.test.ts (1.2s)',
+    "  'test failed'",
+    "  Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from /repo/e2e/knowledge.test.ts",
+  ].join('\n');
+  const failures = parseFailures(out);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.error, "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from /repo/e2e/knowledge.test.ts");
+  assert.equal(failures[0]!.file, 'e2e/knowledge.test.ts');
+});
+
+test('parseFailures sees past a wrapped generic error (Error [ERR_TEST_FAILURE]: …) and a subtests-failed count (#806)', () => {
+  const out = [
+    '✖ failing tests:',
+    '',
+    'test at e2e/mock-rpc.test.ts:2:1',
+    '✖ e2e/mock-rpc.test.ts (2.1s)',
+    "  Error [ERR_TEST_FAILURE]: '2 subtests failed'",
+    '  AssertionError [ERR_ASSERTION]: rpc handshake timed out',
+    '',
+    'test at e2e/timeout.test.ts:3:1',
+    '✖ e2e/timeout.test.ts (0.4s)',
+    "  'test did not finish before its parent and was cancelled'",
+    '  Error: child process exited with code 1',
+  ].join('\n');
+  const failures = parseFailures(out);
+  assert.deepEqual(failures.map((f) => f.error), [
+    'AssertionError [ERR_ASSERTION]: rpc handshake timed out',
+    'Error: child process exited with code 1',
+  ]);
+});
+
+test('two same-file failures with different specific causes fingerprint differently (#806)', async () => {
+  // The #792/#793 failure mode: both nights filed "file name + test failed" and would have
+  // merged into one issue. Distinct causes must give distinct fingerprints even in one file.
+  const block = (cause: string): string => [
+    '✖ failing tests:',
+    '',
+    'test at e2e/knowledge.test.ts:1:1',
+    '✖ e2e/knowledge.test.ts (1.2s)',
+    "  'test failed'",
+    `  ${cause}`,
+  ].join('\n');
+  const fpLoad = await fingerprintOf('e2e/knowledge.test.ts', parseFailures(block("Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers'"))[0]!.error);
+  const fpAssert = await fingerprintOf('e2e/knowledge.test.ts', parseFailures(block('AssertionError [ERR_ASSERTION]: knowledge base diverged'))[0]!.error);
+  assert.notEqual(fpLoad, fpAssert, 'distinct causes in one file stay distinct defects');
+});
+
+test('rawDetailsSection redacts like Mercury events and bounds the block (lines, then bytes) (#806)', () => {
+  const secret = 'mercury_test_token_9f2c7b';
+  const lines: string[] = [];
+  for (let i = 1; i <= RAW_BLOCK_MAX_LINES + 20; i++) lines.push(`raw detail line ${i} token=${secret}`);
+  const section = rawDetailsSection({ raw: lines });
+  assert.match(section, /<details>/);
+  assert.match(section, /<summary>Raw failure output \(redacted, bounded\)<\/summary>/);
+  assert.match(section, /raw detail line 10 /, 'early lines are kept');
+  assert.doesNotMatch(section, /raw detail line 70 /, 'the block is bounded to RAW_BLOCK_MAX_LINES');
+  assert.doesNotMatch(section, new RegExp(secret), 'token-shaped strings are redacted');
+  assert.match(section, /token= \[REDACTED\]/, 'labelled token shapes keep their label');
+  // The byte bound: 60 lines of 200 bytes would exceed 6 kB, so the section stays under it.
+  const wide: string[] = [];
+  for (let i = 1; i <= RAW_BLOCK_MAX_LINES; i++) wide.push('x'.repeat(199));
+  const wideSection = rawDetailsSection({ raw: wide });
+  assert.ok(Buffer.byteLength(wideSection.split('```')[1] ?? '', 'utf8') <= RAW_BLOCK_MAX_BYTES, 'the fenced block stays within the byte bound');
+  assert.equal(rawDetailsSection({ raw: [] }), '');
+  assert.equal(rawDetailsSection({}), '');
 });
 
 test('parseCounts reads the summary', () => {
@@ -708,6 +791,102 @@ test('a failure with no extractable error line is observed, never filed (name-on
     assert.equal(report.real.length, 1);
     assert.equal(report.real[0]!.action, 'dry-run');
     assert.equal(report.real[0]!.error, '');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a failure whose block holds only generic wrapper lines files nothing and reports the reason (#806)', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    // Whole-file failure: both the suite run and the rerun print only the generic wrapper —
+    // no specific cause exists, so no fingerprint can be computed and nothing may be filed.
+    const genericOnly = [
+      '✖ e2e/knowledge.test.ts (1.2s)',
+      'ℹ tests 5',
+      'ℹ pass 3',
+      'ℹ fail 2',
+      '',
+      '✖ failing tests:',
+      '',
+      'test at e2e/knowledge.test.ts:1:1',
+      '✖ e2e/knowledge.test.ts (1.2s)',
+      "  'test failed'",
+      'ℹ tests 5',
+      'ℹ fail 2',
+    ].join('\n');
+    const posts: { path: string; body: unknown }[] = [];
+    const io: E2eIo = {
+      async run() { return { code: 1, output: genericOnly }; },
+      async get() { return { body: [], status: 200 }; },
+      async post(path, body) { posts.push({ path, body }); return { body: { number: 1 }, status: 201 }; },
+    };
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-10-01' });
+    assert.equal(posts.length, 0, 'a wrapper-only block must never file');
+    assert.equal(report.real.length, 1);
+    assert.equal(report.real[0]!.action, 'dry-run');
+    assert.equal(report.real[0]!.fingerprint, '', 'no fingerprint from a generic wrapper');
+    assert.equal(report.real[0]!.error, "'test failed'", 'the report shows the reason');
+  } finally {
+    cleanup();
+  }
+});
+
+test('filed issue bodies and comments carry the bounded redacted raw block (#806)', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const secret = 'mercury_test_token_9f2c7b';
+    const block = [
+      "  'test failed'",
+      "  Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers'",
+      `      token: '${secret}'`,
+      '      at loadEsm (node:internal/modules/esm/loader:123:45)',
+    ];
+    const output = [
+      '✖ e2e/knowledge.test.ts (1.2s)',
+      'ℹ fail 1',
+      '',
+      '✖ failing tests:',
+      '',
+      'test at e2e/knowledge.test.ts:1:1',
+      '✖ e2e/knowledge.test.ts (1.2s)',
+      ...block,
+    ].join('\n');
+    const posts: { path: string; body: unknown }[] = [];
+    const io: E2eIo = {
+      async run() { return { code: 1, output }; },
+      async get() { return { body: [], status: 200 }; },
+      async post(path, body) { posts.push({ path, body }); return { body: { number: 806 }, status: 201 }; },
+    };
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-10-01' });
+    assert.equal(report.real[0]!.action, 'filed');
+    const issueBody = String((posts[0]!.body as { body?: string }).body);
+    assert.match(issueBody, /<details>/, 'the raw block rides in a collapsed details section');
+    assert.match(issueBody, /<summary>Raw failure output \(redacted, bounded\)<\/summary>/);
+    assert.match(issueBody, /Cannot find package 'testcontainers'/, 'the raw cause line is attached');
+    assert.match(issueBody, new RegExp(`nightly-e2e-fp:${report.real[0]!.fingerprint}`), 'the marker is unchanged');
+    assert.doesNotMatch(issueBody, new RegExp(secret), 'the secret never reaches GitHub');
+    assert.match(issueBody, /token: \[REDACTED\]/);
+    // The fingerprint is still computed from the normalized error line only.
+    const expected = await fingerprintOf('e2e/knowledge.test.ts', "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers'");
+    assert.equal(report.real[0]!.fingerprint, expected);
+
+    // Second night, same failure: the COMMENT carries the raw block too.
+    const fp = report.real[0]!.fingerprint;
+    const posts2: { path: string; body: unknown }[] = [];
+    const io2: E2eIo = {
+      async run() { return { code: 1, output }; },
+      async get() {
+        return { body: [{ number: 806, body: `existing\n<!-- nightly-e2e-fp:${fp} -->\n` }], status: 200 };
+      },
+      async post(path, body) { posts2.push({ path, body }); return { body: {}, status: 201 }; },
+    };
+    const report2 = await runE2eSkill(io2, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-10-02' });
+    assert.equal(report2.real[0]!.action, 'commented');
+    const comment = String((posts2[0]!.body as { body?: string }).body);
+    assert.match(comment, /<details>/, 'the comment carries the raw block too');
+    assert.match(comment, /Cannot find package 'testcontainers'/);
+    assert.doesNotMatch(comment, new RegExp(secret));
   } finally {
     cleanup();
   }

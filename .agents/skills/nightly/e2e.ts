@@ -31,6 +31,8 @@
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { REPO_RE, localDateString, ghToken, ghGet, ghPost, FETCH_TIMEOUT_MS } from './shared.ts';
+// The SAME redaction Mercury applies to event content (#806): one implementation, no drift.
+import { createRedactor } from '../../../src/domain/redact.ts';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -47,10 +49,14 @@ export { localDateString } from './shared.ts';
 export interface SuiteFailure {
   /** The failing test's full name from the spec reporter. */
   test: string;
-  /** First line of the error output, e.g. `AssertionError [ERR_ASSERTION]: numbers diverge`. */
+  /** The SPECIFIC error line, e.g. `AssertionError [ERR_ASSERTION]: numbers diverge`. Empty when
+   * the block held only Node's generic wrapper lines (nothing fingerprintable). */
   error: string;
   /** The test file the failure was reported at, when the output names one. */
   file?: string;
+  /** The failure's raw detail block (lines after the ✖ header to the next `test at`/`✖` line),
+   * for the bounded redacted attachment on filed issues and comments (#806). */
+  raw?: string[];
 }
 
 export interface RealOutcome {
@@ -113,6 +119,63 @@ export const fpMarker = (fp: string): string => `<!-- nightly-e2e-fp:${fp} -->`;
 // ---- parsing the spec reporter ----
 
 /**
+ * Node's generic wrapper error lines (#806): they say a test or file failed, never WHY. When a
+ * whole file fails, the spec reporter prints one of these FIRST and the specific cause (the load
+ * error, the first failing subtest's assertion) after it. Choosing one of these as the error
+ * makes the fingerprint file name + "test failed", which merges distinct defects in one file.
+ */
+const GENERIC_WRAPPER_LINES: readonly RegExp[] = [
+  /^'?test failed'?$/,
+  /^\d+ subtests? failed$/,
+  /^test did not finish before its parent and was cancelled$/,
+  /^Promise resolution is still pending but the event loop has already resolved$/,
+];
+
+/** An `Error`-family message line: `Error: boom`, `Error [ERR_X]: msg`, `AssertionError [...]`. */
+const ERROR_NAME_RE = /^[A-Za-z_$][\w$]*(?:\.[\w$]+)*Error(?:\s*\[[A-Z0-9_]+\])?:\s*(.*)$/;
+
+/** A `code: 'ERR_…'` line from the failure object dump. */
+const ERR_CODE_LINE_RE = /^code:\s*['"]ERR_[A-Z0-9_]+['"],?$/;
+
+/** True when the line is one of the generic wrappers, unwrapping an `Error […]:` prefix and
+ * quotes so `Error [ERR_TEST_FAILURE]: 'test failed'` still counts as generic. */
+function isGenericWrapperLine(s: string): boolean {
+  const body = (ERROR_NAME_RE.exec(s)?.[1] ?? s).trim().replace(/^['"]|['"]$/g, '').trim();
+  return GENERIC_WRAPPER_LINES.some((re) => re.test(body));
+}
+
+/**
+ * Choose the failure's error line from its detail block (#806): the first specific line,
+ * preferring, in order, an Error/AssertionError message line, a `code: 'ERR_…'` line, then the
+ * first line that is not a stack frame. Generic wrapper lines, reporter summary lines (`ℹ`),
+ * `test at`/`✖` headers and blank lines never win — a block holding only them yields '' (the
+ * caller treats that like the no-error case: no fingerprint, no filing).
+ */
+function chooseErrorLine(block: string[]): string {
+  const structural = (s: string): boolean =>
+    s === '' ||
+    s.startsWith('test at') ||
+    s.startsWith('✖') ||
+    s.startsWith('ℹ') ||
+    /^⎯+$/.test(s) ||
+    /^at\b/.test(s) || // stack frames (`at Test...`, `at async ...`)
+    isGenericWrapperLine(s);
+  for (const raw of block) {
+    const s = raw.trim();
+    if (!structural(s) && ERROR_NAME_RE.test(s)) return s;
+  }
+  for (const raw of block) {
+    const s = raw.trim();
+    if (!structural(s) && ERR_CODE_LINE_RE.test(s)) return s;
+  }
+  for (const raw of block) {
+    const s = raw.trim();
+    if (!structural(s)) return s;
+  }
+  return '';
+}
+
+/**
  * Extract failing tests from the default (spec) reporter output. The detail block after
  * `✖ failing tests:` prints, per failure, a `test at <file>:<line>:<col>` line followed by the
  * ✖ line with the test's name, then the error. Names are unique per suite run; the first ✖
@@ -148,13 +211,18 @@ export function parseFailures(output: string): SuiteFailure[] {
     // would bind 'alpha' to the block of 'alpha works' when one name prefixes another.
     const idx = detail.findIndex((l) => l.startsWith(`✖ ${f.test} (`) || l.trim() === `✖ ${f.test}`);
     if (idx === -1) continue; // no detail block line for this name: leave the error empty
-    for (let i = idx + 1; i < detail.length && i < idx + 12; i++) {
+    // The failure's detail block runs to the next `test at` or `✖` line (#806): not a fixed
+    // 12-line window, which could stop short of the specific cause after a generic wrapper.
+    const block: string[] = [];
+    for (let i = idx + 1; i < detail.length; i++) {
       const l = detail[i]!;
       const s = l.trim();
-      if (s === '' || s.startsWith('test at') || s.startsWith('✖')) continue;
-      f.error = s;
-      break;
+      if (s.startsWith('test at') || s.startsWith('✖')) break;
+      block.push(l);
     }
+    while (block.length > 0 && (block[block.length - 1]!.trim() === '' || block[block.length - 1]!.trim().startsWith('ℹ'))) block.pop();
+    f.raw = block;
+    f.error = chooseErrorLine(block);
   }
   return failures;
 }
@@ -231,6 +299,49 @@ export interface E2eIo {
   post(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
 }
 
+// ---- the bounded raw-block attachment (#806) ----
+
+/** Bounds for the raw detail block attached to filed issues and comments. */
+export const RAW_BLOCK_MAX_LINES = 60;
+export const RAW_BLOCK_MAX_BYTES = 6 * 1024;
+
+/**
+ * The failure's raw detail block as a collapsed `<details>` section: redacted with the same
+ * redactor Mercury applies to event content, then bounded (first 60 lines, max 6 kB). Empty when
+ * the failure has no block. The fingerprint is computed from the normalized error line only, so
+ * this section never changes how failures match existing issues.
+ */
+export function rawDetailsSection(failure: Pick<SuiteFailure, 'raw'>): string {
+  if (!failure.raw || failure.raw.length === 0) return '';
+  let text = createRedactor().redact(failure.raw.join('\n'));
+  let lines = text.split('\n').slice(0, RAW_BLOCK_MAX_LINES);
+  while (lines.length > 0 && Buffer.byteLength(lines.join('\n'), 'utf8') > RAW_BLOCK_MAX_BYTES) lines = lines.slice(0, -1);
+  text = lines.join('\n');
+  return [
+    '<details>',
+    '<summary>Raw failure output (redacted, bounded)</summary>',
+    '',
+    '```',
+    text,
+    '```',
+    '</details>',
+  ].join('\n');
+}
+
+/**
+ * Join issue-body parts, inserting the bounded raw-block section just before the fingerprint
+ * marker when the failure carries a detail block (#806). Empty-string parts are markdown blank
+ * lines and are preserved, never filtered.
+ */
+function joinWithRawBlock(parts: string[], marker: string, failure: SuiteFailure): string {
+  const raw = rawDetailsSection(failure);
+  if (!raw) return parts.join('\n');
+  const at = parts.indexOf(marker);
+  const out = parts.slice();
+  out.splice(at === -1 ? out.length : at, 0, raw, '');
+  return out.join('\n');
+}
+
 // ---- the pipeline ----
 
 /**
@@ -290,12 +401,18 @@ export async function runE2eSkill(
       // error line, THAT is the reproducible signature — fingerprint and file from the rerun.
       const rerunFailures = parseFailures(rerun.output);
       const same = rerunFailures.find((f) => f.test === failure.test);
-      if (same && same.error) failure.error = same.error;
+      if (same && same.error) {
+        failure.error = same.error;
+        if (same.raw && same.raw.length > 0) failure.raw = same.raw; // attach the reproducible run's block
+      }
     }
     if (!failure.error) {
-      // No error line could be extracted from either run: the fingerprint would collapse to the
-      // test name alone and could merge distinct defects. Observe honestly; skip filing.
-      report.real.push({ test: failure.test, error: '', fingerprint: '', action: 'dry-run' });
+      // No SPECIFIC error line could be extracted from either run (an empty block, or only
+      // Node's generic wrapper lines like 'test failed'): the fingerprint would collapse to the
+      // test name alone — or to the wrapper — and merge distinct defects. Observe honestly and
+      // skip filing; the first raw line (when any) is the reason the report can show.
+      const reason = (failure.raw ?? []).map((l) => l.trim()).find((s) => s !== '' && !/^at\b/.test(s)) ?? '';
+      report.real.push({ test: failure.test, error: reason, fingerprint: '', action: 'dry-run' });
       continue;
     }
     const fp = await fingerprintOf(failure.test, failure.error);
@@ -307,7 +424,7 @@ export async function runE2eSkill(
       // >= would re-file the same flaky-test issue on nights 4, 5, ... (no filed-marker state).
       if (nights === FLAKE_FILE_NIGHTS && !opts.dryRun) {
         const nightsList = state[fp]!.nights.join(', ');
-        const body = [
+        const body = joinWithRawBlock([
           `Flake filed by the nightly E2E skill (N1-2): the fingerprint below flaked on ${nights} distinct nights (${nightsList}).`,
           '',
           `**Test:** \`${failure.test}\``,
@@ -320,7 +437,7 @@ export async function runE2eSkill(
           fpMarker(fp),
           '',
           'Filed per docs/nightly-issues.md §N1-2: the same fingerprint flaked on three nights, so it is a defect worth a dedicated fix, not a report line.',
-        ].join('\n');
+        ], fpMarker(fp), failure);
         const res = await gatedIo.post(`/repos/${opts.repo}/issues`, { title: `Flaky test: ${failure.test}`, body, labels: ['origin:e2e'] });
         if (res.status >= 200 && res.status < 300) {
           const issue = (res.body as { number?: number })?.number;
@@ -358,7 +475,7 @@ export async function runE2eSkill(
       continue;
     }
     if (existing) {
-      const comment = [
+      const comment = joinWithRawBlock([
         `Reproduced on the night of ${opts.night}. The failure fingerprint matches this issue.`,
         '',
         '**Error (normalized):**',
@@ -367,7 +484,7 @@ export async function runE2eSkill(
         '```',
         '',
         marker,
-      ].join('\n');
+      ], marker, failure);
       const res = await gatedIo.post(`/repos/${opts.repo}/issues/${existing}/comments`, { body: comment });
       if (res.status >= 200 && res.status < 300) {
         report.real.push({ test: failure.test, error: failure.error, fingerprint: fp, issue: existing, action: 'commented' });
@@ -377,7 +494,7 @@ export async function runE2eSkill(
       }
       continue;
     }
-    const body = [
+    const body = joinWithRawBlock([
       `Filed by the nightly E2E skill (N1-2) on ${opts.night}: the suite failed and the failure reproduced on an immediate single rerun of the same file.`,
       '',
       `**Test:** \`${failure.test}\``,
@@ -390,7 +507,7 @@ export async function runE2eSkill(
       `The fingerprint below identifies this defect. Later nights COMMENT on this issue instead of filing duplicates; the marker is a hidden HTML comment, matched by exact string.`,
       '',
       marker,
-    ].join('\n');
+    ], marker, failure);
     const res = await gatedIo.post(`/repos/${opts.repo}/issues`, { title: `E2E failure: ${failure.test}`, body, labels: ['origin:e2e'] });
     if (res.status >= 200 && res.status < 300) {
       const issue = (res.body as { number?: number })?.number;

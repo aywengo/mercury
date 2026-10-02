@@ -68,6 +68,17 @@ touched — a green suite and `--dry-run` need no credentials.
 Runs `npm run test:e2e` once (the host needs Docker), reruns each failure ONCE
 on its own file to separate flakes from defects, then:
 
+- **Error choice (#806)** — the error line is the failure block's first SPECIFIC line (an
+  `Error`/`AssertionError` message, then a `code: 'ERR_…'` line, then the first non-stack-frame
+  line). Node's generic wrapper lines (`test failed`, `N subtests failed`, `test did not finish
+  …`, `Promise resolution is still pending …`) never win: a whole-file failure's real cause sits
+  after them, and fingerprinting the wrapper would merge every defect in one file. A block with
+  ONLY generic lines files nothing and is reported as a dry-run observation with the wrapper as
+  the reason. Filed issues and comments additionally carry the failure's raw block in a
+  collapsed `<details>` section — redacted with the same redactor Mercury applies to event
+  content and bounded (60 lines / 6 kB); the fingerprint stays computed from the normalized
+  error line only, so existing issues keep matching.
+
 - **Real failure** — fingerprinted (sha-256 of test name + normalized error;
   volatile ids, paths, durations and numbers stripped). Open issues are
   searched for the hidden marker `<!-- nightly-e2e-fp:<hash> -->`: a match gets
