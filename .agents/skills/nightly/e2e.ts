@@ -253,7 +253,7 @@ export function rawBlockOf(detail: string[], idx: number): string[] {
  * this failure's detail block. When it does not (a genuine wrapper-only block), `stderr` — the
  * output before the `✖ failing tests:` detail block — is searched as a fallback before giving up.
  */
-function extractError(detail: string[], idx: number, f: SuiteFailure, stderr: string): void {
+function extractError(detail: string[], idx: number, f: SuiteFailure, stderr: string, stderrIsReal = false): void {
   // Pick the cause from the COMPLETE detail block, not from the bounded attachment copy: a
   // wrapper followed by 60 diagnostic lines puts the real Error beyond RAW_BLOCK_MAX_LINES, and
   // picking from the bounded copy would fingerprint the first diagnostic line instead (#811 r3).
@@ -274,12 +274,15 @@ function extractError(detail: string[], idx: number, f: SuiteFailure, stderr: st
   // aborts that leave a wrapper-only block (#811 r3). Anything else stays empty: no cause, no
   // filing.
   const stderrLines = stderr.split('\n').map((l) => l.trim());
-  const errLine = stderrLines.find((s) =>
-    /^Error: (Cannot find module|Module not found)\b/.test(s) ||
-    // Node's coded form: `Error [ERR_MODULE_NOT_FOUND]: Cannot find package ...` and any other
-    // ERR_-coded crash Error — a crash-shaped cause, not ordinary stdout noise (#811 r4).
-    /^Error \[ERR_[A-Z_]+\]:/.test(s)
-  );
+  // REAL child stderr (captured separately by the runner) carries no stdout noise: any
+  // Error/AssertionError/SyntaxError line here is a genuine crash cause of a wrapper-only block
+  // (#811 r6). The DERIVED combined prefix can hold ordinary stdout Error-looking lines
+  // ('Error: recovered probe' from a passing probe), so it keeps the narrow crash/load-only
+  // guard from r3/r4: module-not-found Errors and ERR_-coded Errors only.
+  const realErrRe = /^(?:[A-Za-z]*Error|AssertionError|SyntaxError)\b|^Error \[ERR_[A-Z_]+\]:/;
+  const derivedErrRe =
+    /^Error: (Cannot find module|Module not found)\b|^Error \[ERR_[A-Z_]+\]:/;
+  const errLine = stderrLines.find((s) => (stderrIsReal ? realErrRe : derivedErrRe).test(s));
   if (errLine) {
     f.error = errLine;
     return;
@@ -363,7 +366,7 @@ export function parseFailures(output: string, realStderr?: string): SuiteFailure
     // would bind 'alpha' to the block of 'alpha works' when one name prefixes another.
     const idx = detail.findIndex((l) => l.startsWith(`✖ ${f.test} (`) || l.trim() === `✖ ${f.test}`);
     if (idx === -1) continue; // no detail block line for this name: leave the error empty
-    extractError(detail, idx, f, stderrBeforeDetail);
+    extractError(detail, idx, f, stderrBeforeDetail, realStderr !== undefined);
   }
   return failures;
 }

@@ -1210,3 +1210,22 @@ test('a separate stderr capture overrides the combined-output prefix for the fal
   const derived = parseFailures(combined);
   assert.equal(derived[0]!.error, '', 'derived-prefix guard still rejects ordinary stdout Errors');
 });
+
+test('REAL stderr accepts general crash Errors; the derived prefix keeps the narrow guard (#811 r6)', () => {
+  const combined = [
+    '✖ failing tests:', '',
+    'test at e2e/x.test.ts:3:1',
+    '✖ file-level (1.2ms)',
+    "  'test failed'",
+  ].join('\n');
+  // Real child stderr: a plain thrown Error IS a genuine crash cause.
+  const real = parseFailures(combined, 'Error: fixture setup failed\n');
+  assert.equal(real[0]!.error, 'Error: fixture setup failed');
+  const realSyntax = parseFailures(combined, 'SyntaxError: Unexpected token in config.ts\n');
+  assert.equal(realSyntax[0]!.error, 'SyntaxError: Unexpected token in config.ts');
+
+  // The SAME line in a derived combined prefix stays rejected (stdout noise).
+  const combinedNoise = ['Error: fixture setup failed', combined].join('\n');
+  const derived = parseFailures(combinedNoise);
+  assert.equal(derived[0]!.error, '');
+});
