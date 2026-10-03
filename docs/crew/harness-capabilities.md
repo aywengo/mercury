@@ -140,9 +140,12 @@ host layout and break the moment two operators differ.
   route — but it is still a compatibility change.
 - ~~There is **no version negotiation or capability handshake** between Fleet and a
   host today.~~ Shipped (#510): `/healthz` reports an integer `api` response-shape
-  version and Fleet refuses a host whose schema is below its own `MIN_HOST_API` at
-  registration (`fleet/probe.ts`), so a changed `/api/agents` shape fails at
-  registration time instead of at first use.
+  version and Fleet refuses a host whose REPORTED schema is below its own
+  `MIN_HOST_API` at registration (`fleet/probe.ts`), so a changed `/api/agents`
+  shape fails at registration time instead of at first use — for hosts that report
+  a numeric schema. A pre-schema host (no `api` field, `hostApi: null`) is treated
+  as compatible and can still fail later at first `/api/agents` use, which
+  registration does not screen.
 - Fleet stays HTTP/JSON. Capability discovery does not justify a transport change;
   it is one more small JSON read at roughly the existing 15s probe cadence.
 
