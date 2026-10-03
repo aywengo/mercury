@@ -135,7 +135,17 @@ function rawRedactor(): ReturnType<typeof createRedactor> {
   if (rawRedactorInstance === null) {
     rawRedactorInstance = createRedactor([
       ...(process.env.MERCURY_SECRETS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
-      ...forwardedCredentialValues(process.env, null),
+      // The configured sandbox allowlist, with the CLI's config semantics (src/config.ts):
+      // MERCURY_SANDBOX_ENV unset -> null (the built-in model-provider allowlist); set -> the
+      // operator's exact list (possibly empty = forward nothing but PATH). A custom forwarded
+      // variable like MY_PROVIDER_KEY must be redacted by VALUE even when its name matches no
+      // token shape (#811 r2).
+      ...forwardedCredentialValues(
+        process.env,
+        process.env.MERCURY_SANDBOX_ENV === undefined
+          ? null
+          : process.env.MERCURY_SANDBOX_ENV.split(',').map((v) => v.trim()).filter(Boolean),
+      ),
     ]);
   }
   return rawRedactorInstance;

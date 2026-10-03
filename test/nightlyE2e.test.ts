@@ -1088,3 +1088,19 @@ test('rawDetailsSection redacts operator-declared MERCURY_SECRETS, not only cred
     resetRawRedactorForTests();
   }
 });
+
+test('rawDetailsSection redacts the value of a custom MERCURY_SANDBOX_ENV forwarded variable (#811 r2)', () => {
+  const value = 'my-provider-secret-value-7f3a';
+  process.env.MY_PROVIDER_KEY = value;
+  process.env.MERCURY_SANDBOX_ENV = 'MY_PROVIDER_KEY';
+  resetRawRedactorForTests();
+  try {
+    // The value has no token shape and no label: only the configured allowlist layer redacts it.
+    const section = rawDetailsSection({ raw: [`MY_PROVIDER_KEY=${value}`] });
+    assert.ok(!section.join('\n').includes(value), 'the forwarded value must be redacted');
+  } finally {
+    delete process.env.MY_PROVIDER_KEY;
+    delete process.env.MERCURY_SANDBOX_ENV;
+    resetRawRedactorForTests();
+  }
+});
