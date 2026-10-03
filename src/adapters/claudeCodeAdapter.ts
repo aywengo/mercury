@@ -223,8 +223,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // (the knowledge pointer precedent), so the materialized instruction reaches the model as
       // prompt-reference. Discovery of .mercury-context.json by the harness itself is unverified
       // (section 10 keeps measured and assumed apart), which is why the prompt names it.
-      // per-run model: MERCURY_CLAUDE_MODEL is operator configuration; a per-Run model would be a
-      // new --model surface and is not declared until measured.
+      // per-run model (#827, measured against 2.1.260): context.model ?? opts.model is emitted
+      // as `--model`; the per-Run value wins over the operator default. Measurement evidence
+      // (real binary, model honoured + invalid-id negative control) lives in PR #834.
+      perRunModel: true,
       roleInstruction: 'prompt-reference',
       sandbox: true,
       mcp: 'none',
@@ -249,9 +251,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
    * Build argv. Only flags that exist in claude 1.0.3 are emitted; --verbose is unconditional
    * because stream-json hard-fails without it.
    */
-  private buildArgv(resumeId: string | null): string[] {
+  private buildArgv(resumeId: string | null, context?: RunContext): string[] {
     const argv = ['-p', '--output-format', 'stream-json', '--verbose'];
-    if (this.opts.model) argv.push('--model', this.opts.model);
+    // Per-Run model (#827): context.model wins over the operator default -- the Run's choice is
+    // the more specific instruction, exactly like presets override operator defaults elsewhere.
+    const model = context?.model ?? this.opts.model;
+    if (model) argv.push('--model', model);
     if (this.opts.allowedTools) argv.push('--allowedTools', this.opts.allowedTools);
     if (this.opts.disallowedTools) argv.push('--disallowedTools', this.opts.disallowedTools);
     if (this.opts.mcpConfig) argv.push('--mcp-config', this.opts.mcpConfig);
@@ -324,7 +329,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     writeContextFile(context.workspace.path, context);
 
     this.sessions.set(runId, session);
-    this.spawnProcess(session, this.buildArgv(null));
+    this.spawnProcess(session, this.buildArgv(null, session.context));
     return {
       runId,
       events: eventsGenerator(session),
@@ -618,7 +623,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // the preset line whenever session.context carries a preset. The role reference is therefore
     // repeated on resume by construction, not by a separate code path; asserted by the Claude
     // resume tests.
-    this.spawnProcess(session, this.buildArgv(session.sessionId));
+    this.spawnProcess(session, this.buildArgv(session.sessionId, session.context));
     return {
       runId,
       events: eventsGenerator(session),
