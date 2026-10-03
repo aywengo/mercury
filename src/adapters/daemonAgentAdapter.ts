@@ -201,6 +201,10 @@ export class DaemonAgentAdapter implements AgentAdapter {
       // should see the claim, not have to reconstruct it from an absence.
       roleInstruction: 'none',
       mcp: 'none',
+      // Per-run model (#828): create config.model from context.model, overriding the
+      // args-derived value (last-write in the create payload). The daemon create schema carries
+      // a model field (sessionConfigFromArgs already maps --model onto it).
+      perRunModel: true,
     },
   };
   private opts: DaemonAgentAdapterOptions;
@@ -328,9 +332,13 @@ export class DaemonAgentAdapter implements AgentAdapter {
         this.opts.logger?.warn('daemon mode ignored agent flags it cannot express as session config',
           { runId, ignored });
       }
+      // Per-Run model LAST (#828): context.model overrides the args-derived value -- the Run's
+      // choice is the more specific instruction, and the create config is the daemon's only
+      // per-session model surface (sessionConfigFromArgs maps --model onto config.model).
+      const model = context.model ?? (typeof argConfig.model === 'string' ? argConfig.model : undefined);
       const created = await this.command<{ activeSessionId?: string }>(session, {
         type: 'create', noSession: true,
-        config: { cwd: workspacePath, sessionDir: sessionDir, ...argConfig },
+        config: { cwd: workspacePath, sessionDir: sessionDir, ...argConfig, ...(model ? { model } : {}) },
       });
       const activeSessionId = created?.activeSessionId;
       if (typeof activeSessionId !== 'string' || activeSessionId === '') {

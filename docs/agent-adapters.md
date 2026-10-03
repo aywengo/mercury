@@ -41,6 +41,23 @@ session config, adapter-defined syntax documented in that adapter's section),
 and declares `perRunModel: true` in its static capabilities only after
 measuring real support.
 
+Measured per adapter (#828, prime-agent 0.9.7, 2026-10-03): **PrimeAgentAdapter
+(RPC)** appends `--model <context.model>` after `opts.args`; prime-agent applies
+last-flag-wins (verified with both flag orders against real CLI sessions, using
+the session file's `model_change` events as evidence). In RPC mode an id
+prime-agent cannot resolve is NOT an error — it silently falls back to the
+configured default; a provider-scoped id for an unconfigured provider fails the
+run (`No API key found for <provider>`). **DaemonAgentAdapter** sets
+`config.model` on the daemon `create` payload, overriding the args-derived
+value — measured against a real supervisor (probe Run `run_daemonmodel`,
+2026-10-03): a run with
+`omlx/GLM-5.3-Flash-oQ8e-mtp` completed; bare aliases for unconfigured providers
+(`GLM-5.3-Flash` → opencode, `sonnet`/`us.anthropic.claude-sonnet-5` →
+amazon-bedrock) were refused at the prompt with `No API key found for
+<provider>`, proving the daemon's model resolution consumes `config.model`.
+Both adapters declare `perRunModel: true`. **ClaudeCodeAdapter** (2.1.260):
+`--model <context.model ?? opts.model>` — see its section below.
+
 **Event translation** is the hard part. The worker consumes `AgentEvent`s and
 persists them as Hermes events (`tool.started`, `agent.message`, `input.required`,
 `git.commit`, …). The fidelity of the translation depends on what the agent's
