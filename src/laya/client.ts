@@ -135,7 +135,17 @@ export function buildLayaState(input: { task: string; template: string; reposito
 
 function basenameOf(repository: string): string {
   if (repository.length === 0) return repository;
-  const trimmed = repository.replace(/\/+$/, '');
+  // URL-like input (#837 r2): query and fragment must never reach the sidecar - a signed URL can
+  // carry credentials in its query. Parse and keep the pathname; a non-URL string fails the parse
+  // and is treated as a plain path.
+  let candidate = repository;
+  try {
+    const parsed = new URL(repository);
+    candidate = parsed.pathname;
+  } catch {
+    // not a URL - keep the raw string
+  }
+  const trimmed = candidate.replace(/\/+$/, '');
   const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
   return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
 }

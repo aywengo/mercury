@@ -174,6 +174,20 @@ test('REGRESSION: the redactor covers EVERY state field, not just task (#837 r1)
   assert.ok(sent.state.skills.every((s) => !s.includes('hush-hush')), `skills leaked: ${JSON.stringify(sent.state.skills)}`);
 });
 
+test('REGRESSION: a repository URL with query/fragment keeps only the pathname basename (#837 r2)', async () => {
+  const f = await withFake([{ json: validPick(['A', 'B', 'C']) }]);
+  const res = await client(f.url).ask(
+    { options: OPTIONS },
+    { ...STATE, repository: 'https://user:token@host/org/repo.git?sig=abc123#frag' },
+  );
+  assert.ok(res.ok, `expected ok, got ${JSON.stringify(res)}`);
+  const sent = (f.received[0].body as { state: { repository: string } }).state.repository;
+  assert.equal(sent, 'repo.git', `unexpected repository value: ${sent}`);
+  assert.ok(!sent.includes('sig='), 'query survived');
+  assert.ok(!sent.includes('token'), 'URL credentials survived');
+  assert.ok(!sent.includes('frag'), 'fragment survived');
+});
+
 test('redaction failure is a typed failure, not a throw past the caller', () => {
   const boom: Redactor = {
     redact: () => { throw new Error('redactor exploded'); },
