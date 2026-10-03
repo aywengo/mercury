@@ -1176,6 +1176,18 @@ test('ensureLayaCredentials: an array root or invalid JSON is REFUSED, secrets n
   }
 });
 
+test('ensureLayaCredentials: a PRESERVED key in a drifted 0644 file is still repaired (#840 r3)', () => {
+  const dir = tempDir('laya-creds-preserve-mode-');
+  const env = { XDG_CONFIG_HOME: dir };
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  const path = join(dir, 'mercury', 'bot-credentials.json');
+  writeFileSync(path, JSON.stringify({ laya: { api: 'existing-laya-key' } }), { mode: 0o644 });
+  const r = ensureLayaCredentials(env);
+  assert.equal(r.generated, false, 'the existing key is preserved');
+  assert.equal(r.key, 'existing-laya-key');
+  assert.equal((statSync(path).mode & 0o777).toString(8), '600', 'the drifted mode is repaired on the preserved path too');
+});
+
 test('ensureLayaCredentials: an EXISTING loose-mode file is repaired to 0600 (#840 r1)', () => {
   const dir = tempDir('laya-creds-mode-');
   const env = { XDG_CONFIG_HOME: dir };

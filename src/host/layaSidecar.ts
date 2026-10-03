@@ -214,6 +214,9 @@ export function ensureLayaCredentials(env: NodeJS.ProcessEnv = process.env, gen:
   }
   const entry = raw.laya;
   if (entry && typeof entry === 'object' && !Array.isArray(entry) && typeof (entry as Record<string, unknown>).api === 'string' && ((entry as Record<string, unknown>).api as string).trim() !== '') {
+    // The key is preserved but the FILE MODE is repaired unconditionally (Copilot #840 r3):
+    // a preserved key in a file that drifted to 0644 is exactly as exposed as a new one.
+    chmodSync(path, 0o600);
     return { key: (entry as Record<string, unknown>).api as string, generated: false };
   }
   const key = gen();
