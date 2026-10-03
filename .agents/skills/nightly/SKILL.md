@@ -1,6 +1,6 @@
 ---
 name: nightly
-version: 1.2.0
+version: 1.3.0
 description: Deterministic ladder selection for the unattended nightly loop — decides the next issue from GitHub metadata only (author, labels, timeline label actor), never issue text, then claims it with nightly:in-progress.
 capabilities: [nightly, ladder, selection, trust, claim, triage, github, issues]
 ---
@@ -89,15 +89,20 @@ node .agents/skills/nightly/next.ts finish --repo aywengo/mercury --issue <n>
 node .agents/skills/nightly/next.ts blocked --repo aywengo/mercury --issue <n> --reason "<question>"
 ```
 
-`run` executes the N1-1 ladder (rung 1 trusted bugs, rung 2 trusted enhancements, rung 3 new
-@aywengo issues, rung 4 docs → proposals) and claims the chosen issue `nightly:in-progress` (already done by the selector before
+`run` executes the N1-1 ladder (rung 0 resume, rung 1 trusted bugs, rung 2 trusted enhancements,
+rung 3 new @aywengo issues, rung 4 docs → proposals) and claims the chosen issue `nightly:in-progress` (already done by the selector before
 the report; `--dry-run` selects and reports WITHOUT claiming). The output's `action` is the Run's
 instruction:
 
-- **`fix-loop`** (rung 1–3): execute the `issue-fix-loop` procedure on the claimed issue — root
+- **`fix-loop`** (rung 0–3): execute the `issue-fix-loop` procedure on the claimed issue — root
   cause, scoped fix with a regression test, one PR, independent review. Feature requests (rung 2)
   run the same loop: analysis, scoped implementation with tests, one PR. This skill (the nightly
   Run) plays the implementer role the loop's procedure assigns.
+- **`fix-loop` on rung 0 (resume, #819)**: the claimed issue already has an open nightly PR
+  whose head carries Copilot findings. Do NOT open a new PR: address the findings on the existing
+  branch (fix-loop step 5, at most 2 rounds, one batched push). The Copilot re-request is the
+  host's relay's job — push, then `finish`. With two open PRs for one issue, continue the OLDER
+  one and state the supersession on the newer.
 - **`draft-proposals`** (rung 4): draft `nightly:proposed` issues from a roadmap section in the
   docs (§6) and NEVER implement — one night of latency buys a human decision.
 - **`no-op`** (rung `none`): end the Run without changes.

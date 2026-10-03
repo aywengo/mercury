@@ -47,6 +47,12 @@ import { basename } from 'node:path';
 import { REPO_RE, ghToken, ghGet as ghGetRaw, ghPost as ghPostRaw, ghDelete as ghDeleteRaw, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const TRUSTED_AUTHOR = 'aywengo';
+/** The hosted Copilot reviewer's exact login (aywengo/mercury reviews). Exact match everywhere:
+ * a prefix check admits lookalike accounts as reviewer identity (#820 r5). */
+const COPILOT_REVIEWER = 'copilot-pull-request-reviewer[bot]';
+/** The same reviewer's login as GraphQL reports thread authors (no [bot] suffix, verified live
+ * on #811). Exact-match set, never a prefix: lookalikes stay out (#820 r5/r6). */
+const COPILOT_THREAD_AUTHORS = new Set([COPILOT_REVIEWER, 'copilot-pull-request-reviewer']);
 /**
  * The nightly GitHub identity (docs/operations.md, "The nightly host's GitHub identity"). The
  * trust root must NOT be configurable from a Run's environment: an env override would let the
@@ -82,6 +88,23 @@ export interface Selection {
   rung: number | 'none';
   issue?: number;
   reason: string;
+}
+
+/**
+ * One open nightly PR with pending review remarks (#819): the resume rung's input. GitHub
+ * metadata only - number, head, branch, the last Copilot review's head and state - never PR
+ * body or comment text (the selector decides from metadata; remarks are the Run's work).
+ */
+export interface ResumeCandidate {
+  issue: number;
+  prNumber: number;
+  headSha: string;
+  /** 'findings' = a Copilot review exists on this head and its verdict is not approval-class;
+   *  the run resumes fix-loop step 5 on the issue. */
+  state: 'findings';
+  /** Older first: with two open PRs for one issue the OLDER one is continued (the acceptance
+   *  rule) and the newer must be superseded or closed by the Run. */
+  createdAt: string;
 }
 
 export function issueLabels(issue: GhIssue): string[] {
@@ -202,11 +225,46 @@ export interface Candidate {
  */
 export function selectLadder(
   candidates: Candidate[],
-  opts: { e2eRunTerminal: boolean },
+  opts: { e2eRunTerminal: boolean; resume?: ResumeCandidate[]; pendingReviewIssues?: Set<number> },
   /** Candidates seen before claims were dropped (a caller mutating the array passes this). */
   seenCount?: number,
 ): Selection {
-  const eligible = candidates.filter((c) => !isExcluded(c.issue) && isTrusted(c.issue, c.readyByTrusted, c.e2eByNightly, c.enhByTrusted));
+  // Rung 0 (resume, #819): finish what an earlier night opened before starting anything new.
+  // Metadata-only inputs: an open nightly PR whose branch maps to an open issue
+  // (fix/issue-<N>-*) with Copilot findings on its current head. Review-REQUEST fetching is
+  // the relay's job (a head without a review is skipped here - the relay will fetch one).
+  // Resume does NOT wait for tonight's e2e verdict: addressing review remarks on an existing
+  // PR is not new work racing the E2E window.
+  const resume = opts.resume ?? [];
+  if (resume.length > 0) {
+    const byNumber = new Map(candidates.map((c) => [c.issue.number, c] as const));
+    const byIssue = new Map<number, ResumeCandidate>();
+    for (const r of resume) {
+      // A candidate whose issue is excluded (nightly:blocked after hand-off, proposed) or
+      // absent from the open list cannot be claimed (#820 r1, blocker 1): the resume rung
+      // re-checks exclusion itself instead of trusting the caller's scan.
+      const cand = byNumber.get(r.issue);
+      if (cand === undefined || isExcluded(cand.issue)) continue;
+      const top = byIssue.get(r.issue);
+      if (top === undefined || r.createdAt < top.createdAt) byIssue.set(r.issue, r);
+    }
+    const ordered = [...byIssue.entries()].sort((a, b) => a[1].createdAt.localeCompare(b[1].createdAt));
+    if (ordered.length > 0) {
+      const [issue, r] = ordered[0]!;
+      return {
+        rung: 0,
+        issue,
+        reason: `resume: PR #${r.prNumber} (branch fix/issue-${issue}) has Copilot findings on its head to address (fix-loop step 5, at most 2 rounds); oldest-first${byIssue.size > 1 ? `; ${byIssue.size - 1} more PR(s) waiting` : ''}`,
+      };
+    }
+  }
+  // Issues with an open nightly PR awaiting review or merge are out of NEW work (rungs 1-3):
+  // claiming them again is exactly the duplicate-PR failure #819 exists to stop. Rung 0 does
+  // not consult this set (it uses the resume list, which already passed its own checks).
+  const pendingReviewIssues = opts.pendingReviewIssues ?? new Set<number>();
+  const eligible = candidates.filter((c) => !isExcluded(c.issue)
+    && !pendingReviewIssues.has(c.issue.number)
+    && isTrusted(c.issue, c.readyByTrusted, c.e2eByNightly, c.enhByTrusted));
 
   // Rung 1: origin:e2e or trusted nightly:ready, priority then age.
   if (opts.e2eRunTerminal) {
@@ -349,6 +407,10 @@ export async function runSelectorWith(
     get: (path: string) => Promise<unknown>;
     post: (path: string, body: unknown) => Promise<boolean>;
     del?: (path: string) => Promise<boolean>;
+    /** Generic JSON POST returning the response body (GraphQL for review-thread state).
+     *  Optional: ABSENT means the pending-findings check cannot run, so resume candidates
+     *  fail closed (no resume) while their issues stay reserved from new work. */
+    postJson?: (path: string, body: unknown) => Promise<{ body: unknown; status: number }>;
   },
   env: NodeJS.ProcessEnv,
   dryRun: boolean,
@@ -444,10 +506,157 @@ export async function runSelectorWith(
     candidates.push({ issue: effectiveIssue, readyByTrusted, e2eByNightly, enhByTrusted });
   }
   const e2eTerminal = await e2eRunTerminal(env);
+  // Resume candidates (#819): open PRs authored by the nightly identity whose branch names an
+  // open issue (fix/issue-<N>-*). Metadata only: head sha, branch, created_at, the LAST
+  // Copilot review's (head, state) on the PR, and the COUNT of Copilot review comments bound
+  // to the current head - inline comments are what the hosted reviewer posts when it has
+  // findings; an approval-recommended review has none (verified on #805/#816/#812). PR bodies,
+  // review bodies and comment text are never read (the selector decides from metadata).
+  // Bounded: up to 10 pages of open PRs; up to 5 pages of reviews per PR. A hit pagination cap
+  // fails the resume scan for this run (logged, no resume) instead of scanning partially -
+  // a partially-scanned list would hide exactly the stale PR the rung exists to resume (#820 r1).
+  const resume: ResumeCandidate[] = [];
+  /** Issues with an open nightly PR awaiting review or merge: excluded from rungs 1-3 so the
+   *  night cannot start duplicate work on them (#820 r1, blocker 2). */
+  const pendingReviewIssues = new Set<number>();
+  {
+    let prPath: string | null = `/repos/${repo}/pulls?state=open&per_page=30`;
+    let prPages = 0;
+    let prScanComplete = false;
+    const nightlyPrs: { number: number; head?: { sha?: string | null; ref?: string | null } | null; user?: { login?: string | null } | null; created_at?: string | null }[] = [];
+    try {
+      while (prPath && prPages < 10) {
+        const { body, link } = (await io.get(prPath)) as { body: typeof nightlyPrs; link?: string | null };
+        for (const pr of body ?? []) {
+          if (pr.user?.login === NIGHTLY_IDENTITY) nightlyPrs.push(pr);
+        }
+        prPages++;
+        const next = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1]?.replace('https://api.github.com', '') ?? null;
+        // Stay on this resource: a next-link for a different list (a hostile or confused
+        // transport) must not redirect the walk into re-reading another endpoint.
+        prPath = next !== null && next.startsWith('/repos/') && next.includes('/pulls?') ? next : null;
+      }
+      prScanComplete = !prPath;
+    } catch (e) {
+      console.error(`resume scan: PR list failed: ${String(e instanceof Error ? e.message : e)}`);
+    }
+    if (!prScanComplete) {
+      // A failed or capped scan means the nightly-PR state is UNKNOWN, not absent: treating it
+      // as absent would let the night double-claim an issue that already has a PR (#820 r2,
+      // blocker 1). Abort selection: nothing is claimed tonight; the next Run retries.
+      return { rung: 'none', reason: 'selection aborted: the open-nightly-PR scan is incomplete (pagination cap or transport failure); claiming new work now could duplicate an existing PR' };
+    }
+    {
+      const openIssues = new Map(candidates.map((c) => [c.issue.number, c]));
+      // Pass 1 - choose the OLDEST open nightly PR per mapped issue BEFORE any review state is
+      // read (#820 r3, blocker 3): otherwise an older PR awaiting a fresh review loses its turn
+      // to a newer duplicate that happens to carry findings, and the duplicate gets continued.
+      const chosen = new Map<number, { number: number; head: { sha?: string | null; ref?: string | null } | null; created_at?: string | null; supersededBy: number[] }>();
+      for (const pr of nightlyPrs) {
+        const branch = pr.head?.ref ?? '';
+        const m = branch.match(/^fix\/(issue)-(\d+)-/);
+        if (!m) continue;
+        const issue = Number(m[2]);
+        const issueCandidate = openIssues.get(issue);
+        if (!issueCandidate) continue;
+        const cur = chosen.get(issue);
+        if (cur === undefined) {
+          chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', supersededBy: [] });
+          continue;
+        }
+        const isNewer = (pr.created_at ?? '') > (cur.created_at ?? '')
+          || ((pr.created_at ?? '') === (cur.created_at ?? '') && pr.number > cur.number);
+        if (isNewer) {
+          cur.supersededBy.push(pr.number);
+        } else {
+          cur.supersededBy.push(cur.number);
+          chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', supersededBy: cur.supersededBy });
+        }
+      }
+      // Every chosen PR reserves its issue from rungs 1-3 - before any review read (#820 r2):
+      // unreviewed, approval-class-awaiting-merge and unreadable-review PRs all keep their
+      // issue out of new work, and the reservation is recomputed from the still-open PR each
+      // night, so it survives `finish` releasing the claim.
+      for (const issue of chosen.keys()) pendingReviewIssues.add(issue);
+      // Pass 2 - review state of the CHOSEN PR only.
+      for (const [issue, pr] of chosen) {
+        const issueCandidate = openIssues.get(issue)!;
+        const headSha = pr.head?.sha ?? '';
+        if (!headSha) continue;
+        // Last Copilot review on this PR.
+        let lastCopilot: { commit_id?: string | null; state?: string | null } | null = null;
+        let unresolvedOnPr = 0;
+        let rvPath: string | null = `/repos/${repo}/pulls/${pr.number}/reviews?per_page=50`;
+        let rvPages = 0;
+        let rvScanComplete = false;
+        try {
+          while (rvPath && rvPages < 5) {
+            const { body, link } = (await io.get(rvPath)) as { body: { user?: { login?: string | null }; commit_id?: string | null; state?: string | null }[]; link?: string | null };
+            for (const rv of body ?? []) {
+              // Exact login: a lookalike account (copilot-pull-request-reviewer-x) must neither
+              // replace the last review nor fake a verdict (#820 r5).
+              if (rv.user?.login !== COPILOT_REVIEWER) continue;
+              lastCopilot = rv; // pages are oldest-first; keep the last seen
+            }
+            rvPages++;
+            const rvNext = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1]?.replace('https://api.github.com', '') ?? null;
+            rvPath = rvNext !== null && rvNext.includes(`/pulls/${pr.number}/reviews?`) ? rvNext : null;
+          }
+          rvScanComplete = !rvPath;
+          // Pending findings: UNRESOLVED, NOT-OUTDATED review threads whose first comment is
+          // the Copilot reviewer's AND was authored against the CURRENT head (#820 r3,
+          // blocker 4): a clean current-head review must not inherit an older review's stale
+          // threads, an unrelated reviewer's thread must not count, and a thread from a
+          // previous review round (older commit) belongs to the resolved history.
+          if (io.postJson) {
+            const gql = {
+              query: `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){totalCount,pageInfo{hasNextPage},nodes{isResolved,isOutdated,comments(first:1){nodes{author{login},originalCommit{oid}}}}}}}}`,
+              variables: { owner: repo.split('/')[0] ?? '', name: repo.split('/')[1] ?? '', number: pr.number },
+            };
+            const res = await io.postJson('/graphql', gql);
+            if (res.status !== 200) {
+              console.error(`resume scan: PR #${pr.number} reviewThreads query -> ${res.status}`);
+              rvScanComplete = false;
+            } else {
+              const threads = (res.body as { data?: { repository?: { pullRequest?: { reviewThreads?: { totalCount?: number; pageInfo?: { hasNextPage?: boolean }; nodes?: { isResolved?: boolean; isOutdated?: boolean; comments?: { nodes?: { author?: { login?: string | null } | null; originalCommit?: { oid?: string | null } | null }[] } | null }[] } } } } }).data?.repository?.pullRequest?.reviewThreads;
+              if (!threads || threads.pageInfo?.hasNextPage) {
+                rvScanComplete = false; // capped query fails closed
+              } else {
+                unresolvedOnPr = (threads.nodes ?? []).filter((t) =>
+                  t.isResolved === false
+                  && t.isOutdated === false
+                  && COPILOT_THREAD_AUTHORS.has(t.comments?.nodes?.[0]?.author?.login ?? '')
+                  && t.comments?.nodes?.[0]?.originalCommit?.oid === headSha
+                ).length;
+              }
+            }
+          } else {
+            console.error('resume scan: io.postJson missing; cannot verify pending findings');
+            rvScanComplete = false;
+          }
+        } catch (e) {
+          console.error(`resume scan: PR #${pr.number} threads failed: ${String(e instanceof Error ? e.message : e)}`);
+          rvScanComplete = false;
+        }
+        if (!rvScanComplete) continue; // fail closed for THIS PR: no resume, but the issue stays reserved
+        const hasHeadReview = lastCopilot !== null && lastCopilot.commit_id === headSha;
+        if (!hasHeadReview || lastCopilot === null) continue; // relay fetches the review first
+        if (lastCopilot.state === 'APPROVED') continue; // awaiting merge; not resume work
+        if (unresolvedOnPr === 0) continue; // approval-class or fully addressed: awaits merge
+        // Excluded issues (nightly:blocked after hand-off, proposed) never resume (#820 r1,
+        // blocker 1): the review cannot re-open work a human must answer.
+        if (isExcluded(issueCandidate.issue)) continue;
+        resume.push({ issue, prNumber: pr.number, headSha, state: 'findings', createdAt: pr.created_at ?? '' });
+        if (pr.supersededBy.length > 0) {
+          console.error(`resume scan: PR #${pr.number} continues for issue #${issue}; newer duplicate(s) superseded: ${pr.supersededBy.map((n) => '#' + n).join(', ')}`);
+        }
+      }
+    }
+  }
   // A capped list walk means open items exist beyond page 10 (they may all be PRs or PR-like):
   // the ladder must report rung 3 rather than a false 'none'.
   const seen = candidates.length + (listCapped ? 1 : 0);
-  let selection = selectLadder(candidates, { e2eRunTerminal: e2eTerminal }, seen);
+  let selection = selectLadder(candidates, { e2eRunTerminal: e2eTerminal, resume, pendingReviewIssues }, seen);
   // Claim BEFORE returning: label nightly:in-progress, then VERIFY ownership through the same
   // primitive the trust rule uses - the label timeline's CURRENT actor (round-3 review on #801).
   // GitHub's add-labels endpoint is IDEMPOTENT (a duplicate POST returns 200 with the label
@@ -458,6 +667,9 @@ export async function runSelectorWith(
   // the candidate and re-select. Residual window: a claim that lands between our DELETE (stale
   // reset) and POST, or a manual claimant who never verifies - labels alone cannot exclude
   // those; singleFlight and the morning report are the mitigation (documented, not defended).
+  /** Issues whose claim failed verification: excluded from EVERY later retry (rung 0 and
+   *  rungs 1-3) so two broken claims cannot ping-pong forever (#820 r1, blocker 4). */
+  const failedIssues = new Set<number>();
   while (typeof selection.issue === 'number' && !dryRun) {
     const claimPath = `/repos/${repo}/issues/${selection.issue}/labels`;
     await io.post(claimPath, { labels: [L_IN_PROGRESS] });
@@ -478,10 +690,19 @@ export async function runSelectorWith(
       // The claim is ours: the contract is one claimed issue, returned.
       break;
     }
-    // A capped walk, a hidden actor, or a foreign current claim: not verifiably ours - drop the
-    // candidate and pick again; if everything is taken, the ladder reports rung 4.
-    candidates.splice(candidates.findIndex((c) => c.issue.number === selection.issue), 1);
-    selection = selectLadder(candidates, { e2eRunTerminal: e2eTerminal }, seen);
+    // A capped walk, a hidden actor, or a foreign current claim: not verifiably ours - record
+    // the failure and pick again with BOTH work pools filtered, so failed claims can never be
+    // re-selected (two mutually-rejecting claims would otherwise ping-pong). If everything is
+    // taken, the ladder reports rung 4.
+    const failed = selection.issue;
+    failedIssues.add(failed);
+    const ci = candidates.findIndex((c) => c.issue.number === failed);
+    if (ci !== -1) candidates.splice(ci, 1);
+    selection = selectLadder(candidates, {
+      e2eRunTerminal: e2eTerminal,
+      resume: resume.filter((r) => !failedIssues.has(r.issue)),
+      pendingReviewIssues: new Set([...pendingReviewIssues].filter((n) => !failedIssues.has(n))),
+    }, seen);
   }
   return selection;
 }
@@ -492,6 +713,7 @@ export async function runSelector(repo: string, env: NodeJS.ProcessEnv, dryRun: 
     {
       get: async (path) => await ghGet(path, token),
       post: (path, body) => ghPost(path, body, token),
+      postJson: async (path, body) => await ghPostRaw(path, body, token),
       del: async (path) => {
         const res = await ghDeleteRaw(path, token);
         if (res.status >= 200 && res.status < 300) return true;

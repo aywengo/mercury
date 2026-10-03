@@ -63,6 +63,9 @@ export interface NextIo {
   /** Issue body update (PATCH /issues/<n>). Optional: only the blocked exit uses it, and only
    * for issues the nightly identity filed (#770). */
   patch?(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
+  /** Generic JSON POST returning the response body (the selector's GraphQL review-thread query).
+   *  Optional; absent makes resume candidates fail closed (no resume, still reserved). */
+  postJson?(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
 }
 
 export interface NextSelection {
@@ -93,11 +96,19 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: 
       // The stale-claim reset (#800) deletes labels: forward the same DELETE transport the
       // finish/blocked exits use, or a pre-midnight claim would throw instead of reset.
       del: (path) => io.deleteLabel(path),
+      // The resume rung's pending-findings check (#819) queries GraphQL review threads; absent
+      // transport = the selector fails its resume candidates closed (still reserves their
+      // issues from new work).
+      postJson: io.postJson
+        ? async (path, body) => await io.postJson!(path, body)
+        : undefined,
     },
     { ...env, REPO: opts.repo },
     opts.dryRun,
   );
-  if (selection.rung === 1 || selection.rung === 2 || selection.rung === 3) {
+  if (selection.rung === 0 || selection.rung === 1 || selection.rung === 2 || selection.rung === 3) {
+    // Rung 0 (resume, #819) is fix-loop step 5: address the pending Copilot findings on the
+    // PR the earlier night opened, one batched push, then the relay fetches the fresh review.
     return { ...selection, action: 'fix-loop' };
   }
   if (selection.rung === 4) {
@@ -206,6 +217,9 @@ function realIo(env: NodeJS.ProcessEnv): NextIo {
   return {
     get: async (path) => await ghGet(path, token),
     post: async (path, body) => await ghPost(path, body, token),
+    // The resume rung's pending-findings check queries GraphQL review threads; without this the
+    // production entry point could never resume (postJson absent = resume fails closed).
+    postJson: async (path, body) => await ghPost(path, body, token),
     postLabel: async (path, body) => await ghPostLabel(path, body, token),
     deleteLabel: async (path) => await ghDelete(path, token),
     patch: async (path, body) => await ghPatch(path, body, token),

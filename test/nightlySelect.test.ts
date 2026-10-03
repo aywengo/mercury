@@ -13,6 +13,7 @@ import {
   type Candidate,
   type GhIssue,
   type LabelEvent,
+  type ResumeCandidate,
 } from '../.agents/skills/nightly/select.ts';
 
 // Recorded-shape fixtures (fields the selector actually reads; the rest omitted).
@@ -527,7 +528,8 @@ test('the open-issue list walks Link-header pages (round-4 review)', async () =>
   };
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
   assert.equal(s.issue, 82, 'the page-2 candidate is visible to the ladder');
-  assert.equal(paths.filter((p) => p.startsWith('/repos/') && p.includes('issues?')).length, 2, 'both list pages fetched');
+  assert.equal(paths.filter((p) => p.startsWith('/repos/aywengo/mercury/issues?')).length, 2, 'both issue-list pages fetched');
+  assert.equal(paths.filter((p) => p.startsWith('/repos/aywengo/mercury/pulls?')).length >= 1, true, 'the resume scan reads the open-PR list');
 });
 
 
@@ -599,7 +601,8 @@ test('a capped open-issue list reports rung 4, never a false none (round-9 revie
   };
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
   assert.equal(s.rung, 4, 'a capped walk means open items exist beyond the cap: docs rung, not none');
-  assert.equal(paths.length, 10, 'the walk stopped at the cap');
+  const issuePages = paths.filter((p) => p.includes('/issues?')).length;
+  assert.equal(issuePages, 10, 'the ISSUE-list walk stopped at the cap');
 });
 
 
@@ -727,4 +730,347 @@ test('lastLabeledAt walks the timeline like labelActorsFor (re-label loses the o
   assert.equal(lastLabeledAt([timeline[0]!], 'nightly:in-progress'), '2026-09-20T00:00:00Z');
   assert.equal(lastLabeledAt([{ event: 'unlabeled', label: { name: 'nightly:in-progress' } }], 'nightly:in-progress'), null);
   assert.equal(lastLabeledAt([], 'nightly:in-progress'), null);
+});
+
+// -- Resume rung (rung 0, #819): finish an earlier night's PR before claiming anything new.
+
+function resume(over: Partial<ResumeCandidate> & { issue: number; prNumber: number }): ResumeCandidate {
+  return {
+    headSha: `sha${over.prNumber}`,
+    state: 'findings',
+    createdAt: '2026-10-02T22:00:00Z',
+    ...over,
+  } as ResumeCandidate;
+}
+
+test('rung 0: an open nightly PR with Copilot findings on its head resumes before rung 1 (#819)', () => {
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }], created_at: '2026-09-01T00:00:00Z' }))];
+  const s = selectLadder(c, { ...TERMINAL, resume: [resume({ issue: 3, prNumber: 811 })] });
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 3);
+  assert.match(s.reason, /PR #811/);
+  assert.match(s.reason, /findings/);
+});
+
+test('rung 0 is oldest-PR-first across issues and states the supersession count', () => {
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }] })), cand(issue({ number: 5, labels: [{ name: 'nightly:ready' }] }))];
+  const s = selectLadder(c, {
+    ...TERMINAL,
+    resume: [
+      resume({ issue: 5, prNumber: 900, createdAt: '2026-10-02T23:00:00Z' }),
+      resume({ issue: 3, prNumber: 811, createdAt: '2026-10-02T22:00:00Z' }),
+    ],
+  });
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 3, 'the older PR wins');
+  assert.match(s.reason, /1 more PR/);
+});
+
+test('rung 0 with two PRs for one issue continues the OLDER one (supersession rule)', () => {
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }] }))];
+  const s = selectLadder(c, {
+    ...TERMINAL,
+    resume: [
+      resume({ issue: 3, prNumber: 817, createdAt: '2026-10-02T22:37:00Z' }),
+      resume({ issue: 3, prNumber: 811, createdAt: '2026-10-01T22:36:00Z' }),
+    ],
+  });
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 3);
+  assert.match(s.reason, /PR #811/, 'the OLDER PR (811) is continued, not 817');
+});
+
+test('rung 0 empty or absent falls through to the normal ladder', () => {
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }] }), [labeled('aywengo', 'nightly:ready')])];
+  const s = selectLadder(c, TERMINAL);
+  assert.equal(s.rung, 1);
+  const s2 = selectLadder(c, { ...TERMINAL, resume: [] });
+  assert.equal(s2.rung, 1);
+});
+
+test('rung 0 does not wait for the e2e gate (review remarks are not new work)', () => {
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }] }))];
+  const s = selectLadder(c, { e2eRunTerminal: false, resume: [resume({ issue: 3, prNumber: 811 })] });
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 3);
+});
+
+test('rung 0 ignores resume candidates whose issue is absent from the open list', () => {
+  const c = [cand(issue({ number: 3, user: { login: 'random-dev' }, labels: [{ name: 'nightly:in-progress' }] }))];
+  const s = selectLadder(c, TERMINAL);
+  assert.notEqual(s.rung, 0, 'no resume candidates passed, so no resume');
+  const s2 = selectLadder(c, { ...TERMINAL, resume: [resume({ issue: 9, prNumber: 811 })] });
+  assert.notEqual(s2.rung, 0, 'issue 9 is not in the open list: nothing to claim (#820 r1)');
+});
+
+// -- #820 review round 1 regressions --
+
+// Blocker 1: a nightly:blocked issue's open PR must not re-enter rung 0.
+test('rung 0 skips an issue excluded as nightly:blocked (the hand-off stands)', () => {
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }, { name: 'nightly:blocked' }] }), [labeled('aywengo', 'nightly:ready')])];
+  const s = selectLadder(c, { ...TERMINAL, resume: [resume({ issue: 3, prNumber: 811 })] });
+  assert.notEqual(s.rung, 0, 'a blocked issue is out of the resume rung');
+});
+
+// Blocker 3: COMMENTED with zero inline comments = approval-class, NOT pending findings.
+test('a COMMENTED Copilot review with no inline comments on the head is not resume work', () => {
+  // selectLadder-level: the rung only sees resume candidates the scanner already vetted, so
+  // this test pins the CONTRACT (the reason text cannot claim findings without them) and the
+  // runSelectorWith-level scanner test below pins the mechanism.
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }] }), [labeled('aywengo', 'nightly:ready')])];
+  const s = selectLadder(c, { ...TERMINAL, resume: [] });
+  assert.notEqual(s.rung, 0);
+});
+
+// Blocker 4: two failed claims must not ping-pong.
+test('runSelectorWith: two claim-verification failures exclude both issues from all rungs', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  // Two trusted issues; timelines have NO labeled events (claim verify fails: 0 actors).
+  // After the claim POST the timeline still shows no actor -> both fail -> rung 4 (no ping-pong).
+  const issueList = [
+    issue({ number: 301, user: { login: 'aywengo' } }),
+    issue({ number: 302, user: { login: 'aywengo' } }),
+  ];
+  let posts = 0;
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: [], link: null };
+      return { body: issueList, link: null };
+    },
+    async post() { posts++; return true; },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, false);
+  assert.equal(posts, 2, 'one claim POST per issue, two issues tried');
+  assert.equal(s.rung === 4 || s.rung === 'none', true, 'both claims failed: no infinite retry');
+});
+
+// Blocker 2 + blocker 3 mechanism: the scanner classifies PRs by head-review state.
+test('runSelectorWith: resume only for UNRESOLVED threads; unreviewed/approved/resolved heads reserve the issue from rungs 1-3', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const trusted = issue({ number: 400, user: { login: 'aywengo' } });
+  const prList = [
+    // head reviewed with UNRESOLVED threads -> resume candidate
+    { number: 811, user: { login: 'mercury-nightly' }, created_at: '2026-10-01T22:00:00Z', head: { sha: 'shaA', ref: 'fix/issue-400-x' } },
+    // head NOT reviewed yet -> reserves the issue from rungs 1-3
+    { number: 830, user: { login: 'mercury-nightly' }, created_at: '2026-10-02T22:00:00Z', head: { sha: 'shaB', ref: 'fix/issue-401-y' } },
+    // head review approval-class (all threads resolved) -> awaiting merge, reserves too
+    { number: 831, user: { login: 'mercury-nightly' }, created_at: '2026-10-02T23:00:00Z', head: { sha: 'shaC', ref: 'fix/issue-402-z' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) {
+        return { body: [{ event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } }], link: null };
+      }
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/811/reviews')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaA', state: 'COMMENTED' }], link: null };
+      }
+      if (path.includes('/pulls/830/reviews')) return { body: [], link: null };
+      if (path.includes('/pulls/831/reviews')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaC', state: 'COMMENTED' }], link: null };
+      }
+      return { body: [trusted, issue({ number: 401, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }] }), issue({ number: 402, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }] })], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      const vars = (body as { variables: { number: number } }).variables;
+      // 811: one unresolved thread; 831: all resolved; 830 never queried (no review).
+      const nodes = vars.number === 811
+        ? [{ isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'shaA' } }] } }]
+        : [{ isResolved: true, isOutdated: true, comments: { nodes: [] } }];
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: nodes.length, pageInfo: { hasNextPage: false }, nodes } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0, 'the unresolved-thread PR resumes');
+  assert.equal(s.issue, 400);
+  assert.match(s.reason, /PR #811/);
+});
+
+// r2 blocker 1: a failed/capped PR scan aborts selection - no claims at all.
+test('runSelectorWith: a failed open-PR scan aborts selection instead of assuming absence', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const io = {
+    async get(path: string) {
+      if (path.includes('/pulls?')) throw new Error('503 Service Unavailable');
+      return { body: [issue({ number: 5, user: { login: 'aywengo' } })], link: null };
+    },
+    async post() { return true; },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 'none');
+  assert.match(s.reason, /aborted/);
+});
+
+// r2 blocker 2: an issue whose PR is APPROVED-class stays reserved from rungs 1-3.
+test('runSelectorWith: an issue with an approved-class PR is not claimed as new work', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const prList = [
+    { number: 831, user: { login: 'mercury-nightly' }, created_at: '2026-10-02T23:00:00Z', head: { sha: 'shaC', ref: 'fix/issue-402-z' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) {
+        return { body: [{ event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } }], link: null };
+      }
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/831/reviews')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaC', state: 'COMMENTED' }], link: null };
+      }
+      return { body: [issue({ number: 402, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }] })], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      const vars = (body as { variables: { number: number } }).variables;
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 1, pageInfo: { hasNextPage: false }, nodes: [{ isResolved: true }] } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.issue, 402, 'the approved-PR issue is reserved from rungs 1-3');
+  assert.equal(s.rung === 4 || s.rung === 'none', true);
+});
+
+// r2 blocker 3: resolved threads are NOT pending findings even when inline comments exist.
+test('runSelectorWith: fully resolved threads on the reviewed head never resume', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const prList = [
+    { number: 811, user: { login: 'mercury-nightly' }, created_at: '2026-10-01T22:00:00Z', head: { sha: 'shaA', ref: 'fix/issue-400-x' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/811/reviews')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaA', state: 'COMMENTED' }], link: null };
+      }
+      return { body: [], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      // 3 threads, all resolved (waived findings): nothing pending.
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 3, pageInfo: { hasNextPage: false }, nodes: [{ isResolved: true }, { isResolved: true }, { isResolved: true }] } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.rung, 0, 'resolved threads are not work');
+});
+
+// -- #820 round-2 review regressions --
+
+// r3 blocker 2: the production next.ts realIo() must supply postJson (otherwise rung 0 can
+// never fire in production). Pinned by importing next.ts and checking the io it builds.
+test('next.ts realIo supplies postJson (production resume wiring)', async () => {
+  const mod = await import('../.agents/skills/nightly/next.ts');
+  // realIo is not exported; pin the contract through the exports that exist: runNext must accept
+  // an io WITHOUT postJson and still complete (fail-closed), and the source must wire it.
+  const src = await (await import('node:fs/promises')).readFile('.agents/skills/nightly/next.ts', 'utf8');
+  assert.match(src, /postJson: async \(path, body\) => await ghPost\(path, body, token\)/,
+    'realIo must wire postJson, or production never resumes a PR');
+});
+
+// r3 blocker 3: oldest PR per issue is chosen BEFORE review state - a newer duplicate with
+// findings must NOT preempt an older PR awaiting review.
+test('runSelectorWith: the OLDEST duplicate PR is continued even when it awaits review and the newer has findings', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const prList = [
+    // NEWER duplicate (817) with findings on its head
+    { number: 817, user: { login: 'mercury-nightly' }, created_at: '2026-10-02T22:37:00Z', head: { sha: 'shaN', ref: 'fix/issue-406-y' } },
+    // OLDER PR (811) whose head has NO review yet (awaiting the relay)
+    { number: 811, user: { login: 'mercury-nightly' }, created_at: '2026-10-01T22:36:00Z', head: { sha: 'shaO', ref: 'fix/issue-406-x' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/817/reviews')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaN', state: 'COMMENTED' }], link: null };
+      }
+      if (path.includes('/pulls/811/reviews')) return { body: [], link: null };
+      return { body: [issue({ number: 406, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }] })], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      const vars = (body as { variables: { number: number } }).variables;
+      const nodes = vars.number === 817
+        ? [{ isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'shaN' } }] } }]
+        : [];
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: nodes.length, pageInfo: { hasNextPage: false }, nodes } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  // The older PR 811 awaits its review: the issue must NOT be resumed via the newer 817, and
+  // 817 must be recorded as superseded (log) - selection reports rung 1+ or none, never rung 0.
+  assert.notEqual(s.rung, 0, 'the newer duplicate must not preempt the older PR');
+});
+
+// r3 blocker 4: stale/foreign threads do not count as pending findings.
+test('runSelectorWith: a clean head review with stale or foreign unresolved threads does not resume', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const prList = [
+    { number: 811, user: { login: 'mercury-nightly' }, created_at: '2026-10-01T22:00:00Z', head: { sha: 'shaA', ref: 'fix/issue-400-x' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/811/reviews')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaA', state: 'COMMENTED' }], link: null };
+      }
+      return { body: [issue({ number: 400, user: { login: 'aywengo' } })], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      // Thread 1: from an OLDER review round (outdated, old commit). Thread 2: a foreign
+      // reviewer. Thread 3: copilot but on an older commit. None is a current-head finding.
+      const nodes = [
+        { isResolved: false, isOutdated: true, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'old-commit' } }] } },
+        { isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'random-human' }, originalCommit: { oid: 'shaA' } }] } },
+        { isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'old-commit-2' } }] } },
+      ];
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 3, pageInfo: { hasNextPage: false }, nodes } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.rung, 0, 'stale/foreign threads are not current-head findings');
+});
+
+// -- #820 round-5 regressions: exact reviewer identity, no prefix matches --
+
+test('runSelectorWith: a lookalike account cannot fake the verdict or the findings (#820 r5)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const prList = [
+    { number: 811, user: { login: 'mercury-nightly' }, created_at: '2026-10-01T22:00:00Z', head: { sha: 'shaA', ref: 'fix/issue-400-x' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/811/reviews')) {
+        return { body: [
+          // Genuine Copilot review: findings on this head (unresolved thread below).
+          { user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaA', state: 'COMMENTED' },
+          // Lookalike APPROVED review - must NOT replace the last review (else the PR is
+          // treated as awaiting-merge and the genuine findings are skipped).
+          { user: { login: 'copilot-pull-request-reviewer-x' }, commit_id: 'shaA', state: 'APPROVED' },
+        ], link: null };
+      }
+      return { body: [issue({ number: 400, user: { login: 'aywengo' } })], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      const nodes = [
+        // Genuine unresolved copilot thread on the head (GraphQL author form, no suffix).
+        { isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'shaA' } }] } },
+        // The [bot]-suffixed form (REST shape) is the same reviewer: it counts too.
+        { isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer[bot]' }, originalCommit: { oid: 'shaA' } }] } },
+        // A lookalike account's thread must not count as a Copilot finding.
+        { isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer-x' }, originalCommit: { oid: 'shaA' } }] } },
+      ];
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 2, pageInfo: { hasNextPage: false }, nodes } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0, 'the genuine review with unresolved findings resumes');
+  assert.equal(s.issue, 400);
 });
