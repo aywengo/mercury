@@ -47,6 +47,9 @@ import { basename } from 'node:path';
 import { REPO_RE, ghToken, ghGet as ghGetRaw, ghPost as ghPostRaw, ghDelete as ghDeleteRaw, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const TRUSTED_AUTHOR = 'aywengo';
+/** The hosted Copilot reviewer's exact login (aywengo/mercury reviews). Exact match everywhere:
+ * a prefix check admits lookalike accounts as reviewer identity (#820 r5). */
+const COPILOT_REVIEWER = 'copilot-pull-request-reviewer[bot]';
 /**
  * The nightly GitHub identity (docs/operations.md, "The nightly host's GitHub identity"). The
  * trust root must NOT be configurable from a Run's environment: an env override would let the
@@ -587,7 +590,9 @@ export async function runSelectorWith(
           while (rvPath && rvPages < 5) {
             const { body, link } = (await io.get(rvPath)) as { body: { user?: { login?: string | null }; commit_id?: string | null; state?: string | null }[]; link?: string | null };
             for (const rv of body ?? []) {
-              if (!rv.user?.login?.startsWith('copilot-pull-request-reviewer')) continue;
+              // Exact login: a lookalike account (copilot-pull-request-reviewer-x) must neither
+              // replace the last review nor fake a verdict (#820 r5).
+              if (rv.user?.login !== COPILOT_REVIEWER) continue;
               lastCopilot = rv; // pages are oldest-first; keep the last seen
             }
             rvPages++;
@@ -617,7 +622,7 @@ export async function runSelectorWith(
                 unresolvedOnPr = (threads.nodes ?? []).filter((t) =>
                   t.isResolved === false
                   && t.isOutdated === false
-                  && (t.comments?.nodes?.[0]?.author?.login ?? '').startsWith('copilot-pull-request-reviewer')
+                  && t.comments?.nodes?.[0]?.author?.login === COPILOT_REVIEWER
                   && t.comments?.nodes?.[0]?.originalCommit?.oid === headSha
                 ).length;
               }

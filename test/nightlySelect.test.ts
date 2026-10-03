@@ -877,7 +877,7 @@ test('runSelectorWith: resume only for UNRESOLVED threads; unreviewed/approved/r
       const vars = (body as { variables: { number: number } }).variables;
       // 811: one unresolved thread; 831: all resolved; 830 never queried (no review).
       const nodes = vars.number === 811
-        ? [{ isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'shaA' } }] } }]
+        ? [{ isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer[bot]' }, originalCommit: { oid: 'shaA' } }] } }]
         : [{ isResolved: true, isOutdated: true, comments: { nodes: [] } }];
       return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: nodes.length, pageInfo: { hasNextPage: false }, nodes } } } } } };
     },
@@ -1033,4 +1033,42 @@ test('runSelectorWith: a clean head review with stale or foreign unresolved thre
   };
   const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
   assert.notEqual(s.rung, 0, 'stale/foreign threads are not current-head findings');
+});
+
+// -- #820 round-5 regressions: exact reviewer identity, no prefix matches --
+
+test('runSelectorWith: a lookalike account cannot fake the verdict or the findings (#820 r5)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const prList = [
+    { number: 811, user: { login: 'mercury-nightly' }, created_at: '2026-10-01T22:00:00Z', head: { sha: 'shaA', ref: 'fix/issue-400-x' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/811/reviews')) {
+        return { body: [
+          // Genuine Copilot review: findings on this head (unresolved thread below).
+          { user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaA', state: 'COMMENTED' },
+          // Lookalike APPROVED review - must NOT replace the last review (else the PR is
+          // treated as awaiting-merge and the genuine findings are skipped).
+          { user: { login: 'copilot-pull-request-reviewer-x' }, commit_id: 'shaA', state: 'APPROVED' },
+        ], link: null };
+      }
+      return { body: [issue({ number: 400, user: { login: 'aywengo' } })], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      const nodes = [
+        // Genuine unresolved copilot thread on the head -> the PR resumes.
+        { isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer[bot]' }, originalCommit: { oid: 'shaA' } }] } },
+        // A lookalike account's thread must not count as a Copilot finding.
+        { isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer-x' }, originalCommit: { oid: 'shaA' } }] } },
+      ];
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 2, pageInfo: { hasNextPage: false }, nodes } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0, 'the genuine review with unresolved findings resumes');
+  assert.equal(s.issue, 400);
 });
