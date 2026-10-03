@@ -19,6 +19,11 @@ import {
   recordFlakeNight,
   runE2eSkill,
   ensureDependencies,
+  rawDetailsSection,
+  rawBlockOf,
+  codeFence,
+  redactedErrorLine,
+  resetRawRedactorForTests,
   type E2eIo,
   type FlakeState,
 } from '../.agents/skills/nightly/e2e.ts';
@@ -675,6 +680,265 @@ test('a real failure fingerprints the RERUN error line when the rerun names the 
   }
 });
 
+// ---- #806: generic wrapper lines must not become the fingerprint's error ----
+
+/** A file-level failure block: node prints the generic wrapper first, the cause (sometimes) later. */
+function fileFailureOutput(opts: {
+  file: string;
+  wrapper?: string;
+  causeLines?: string[];
+  stderr?: string;
+}): string {
+  const detail = [
+    '✖ failing tests:',
+    '',
+    `test at ${opts.file}:1:1`,
+    `✖ ${opts.file} (52.227ms)`,
+    '  ' + (opts.wrapper ?? "'test failed'"),
+    ...(opts.causeLines ?? []),
+  ];
+  return [...(opts.stderr ? [opts.stderr, ''] : []), 'ℹ fail 1', '', ...detail].join('\n');
+}
+
+test('a wrapper-first block fingerprints the specific cause, not the generic line (AC1)', () => {
+  const out = fileFailureOutput({
+    file: 'e2e/knowledge.test.ts',
+    stderr: "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from /tmp/ws/e2e/knowledge.test.ts",
+    causeLines: [
+      '  ',
+      'Error [ERR_MODULE_NOT_FOUND]: Cannot find package \'testcontainers\' imported from /tmp/ws/e2e/knowledge.test.ts',
+      '      at TestContext.<anonymous> (file:///repo/e2e/knowledge.test.ts:3:36)',
+    ],
+  });
+  const failures = parseFailures(out);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.error, "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from /tmp/ws/e2e/knowledge.test.ts");
+  assert.doesNotMatch(failures[0]!.error, /test failed/);
+});
+
+test('two same-file failures with different specific causes fingerprint differently (AC2)', async () => {
+  const causeA = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from /tmp/ws/e2e/knowledge.test.ts";
+  const causeB = 'Error [ERR_TEST_FAILURE]: atlas pack manifest missing field "notes"';
+  const outA = fileFailureOutput({ file: 'e2e/knowledge.test.ts', stderr: causeA, causeLines: ['  ', causeA] });
+  const outB = fileFailureOutput({ file: 'e2e/knowledge.test.ts', stderr: causeB, causeLines: ['  ', causeB] });
+  const [a] = parseFailures(outA);
+  const [b] = parseFailures(outB);
+  assert.notEqual(a!.error, b!.error);
+  const fpA = await fingerprintOf(a!.test, a!.error);
+  const fpB = await fingerprintOf(b!.test, b!.error);
+  assert.notEqual(fpA, fpB, 'distinct defects in one file must not merge into one issue');
+});
+
+test('a wrapper-only block (no cause anywhere) files nothing and is observed honestly (AC3)', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const out = fileFailureOutput({ file: 'e2e/mock-rpc.test.ts' });
+    let suite = 0;
+    const runs: string[][] = [];
+    const posts: { path: string; body: unknown }[] = [];
+    const io: E2eIo = {
+      async run(argv) {
+        runs.push(argv);
+        suite += 1;
+        if (suite === 1) return { code: 1, output: out };
+        return { code: 1, output: out }; // rerun fails the same wrapper-only way
+      },
+      async get() { return { body: [], status: 200 }; },
+      async post(path, body) { posts.push({ path, body }); return { body: { number: 1 }, status: 201 }; },
+    };
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-10-02' });
+    assert.equal(posts.length, 0, 'a wrapper-only failure must not file');
+    assert.equal(report.real.length, 1);
+    assert.equal(report.real[0]!.action, 'dry-run');
+    assert.equal(report.real[0]!.error, '');
+  } finally {
+    cleanup();
+  }
+});
+
+test('filed bodies and comments carry the bounded redacted raw block in <details> (AC4)', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const secretLine = '      authorization: Bearer ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456,';
+    const cause = 'Error: atlas pack harvest diverged from the outbox at /tmp/ws/e2e/knowledge.test.ts:9:9';
+    const out = [
+      '✖ failing tests:',
+      '',
+      'test at e2e/knowledge.test.ts:3:1',
+      '✖ atlas pack harvest matches the outbox (5.5ms)',
+      '  ' + cause,
+      secretLine,
+      '      at TestContext.<anonymous> (file:///repo/e2e/knowledge.test.ts:3:36)',
+    ].join('\n');
+    let suite = 0;
+    const posts: { path: string; body: unknown }[] = [];
+    const io: E2eIo = {
+      async run() {
+        suite += 1;
+        return { code: 1, output: out };
+      },
+      async get() { return { body: [], status: 200 }; },
+      async post(path, body) { posts.push({ path, body }); return { body: { number: 960 }, status: 201 }; },
+    };
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-10-02' });
+    assert.equal(report.real.length, 1);
+    assert.equal(report.real[0]!.action, 'filed');
+    assert.equal(posts.length, 1);
+    const body = String((posts[0]!.body as { body?: string }).body);
+    assert.match(body, /<details>/);
+    assert.match(body, /<summary>Raw failure block \(redacted\)<\/summary>/);
+    assert.match(body, /<\/details>/);
+    assert.match(body, /atlas pack harvest matches the outbox/, 'the raw block carries the failure name');
+    assert.doesNotMatch(body, /ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456/, 'the token shape must be redacted');
+    assert.match(body, /authorization: \[REDACTED\]/);
+    // The fingerprint and normalized error stay outside the details section, unchanged.
+    assert.match(body, /<!-- nightly-e2e-fp:/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('comments on an existing issue include the redacted raw block too (AC4)', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const cause = 'Error: socket hang up at e2e/system.test.ts:9:9';
+    const out = [
+      '✖ failing tests:',
+      '',
+      'test at e2e/system.test.ts:9:1',
+      '✖ system smoke (3.3ms)',
+      '  ' + cause,
+    ].join('\n');
+    let suite = 0;
+    const posts: { path: string; body: unknown }[] = [];
+    let gets = 0;
+    const io: E2eIo = {
+      async run() {
+        suite += 1;
+        return { code: 1, output: out };
+      },
+      async get() {
+        gets += 1;
+        return { body: [{ number: 800, body: `older issue\n${fpMarker(fp)}` }], status: 200 };
+      },
+      async post(path, body) { posts.push({ path, body }); return { body: {}, status: 201 }; },
+    };
+    const fp = await fingerprintOf('system smoke', cause); // the existing issue carries THIS failure's marker
+    const report = await runE2eSkill(io, { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' }, { repo: 'aywengo/mercury', dryRun: false, night: '2026-10-02' });
+    assert.equal(gets, 1, 'the marker search runs once');
+    void gets;
+    // The marker search must have matched (commented, not filed):
+    assert.equal(report.real[0]!.action, 'commented');
+    assert.equal(report.real[0]!.issue, 800);
+    const comment = String((posts[0]!.body as { body?: string }).body);
+    assert.match(comment, /<details>/);
+    assert.match(comment, /socket hang up/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('the raw block is bounded at 60 lines / 6 kB and marked with an ellipsis', () => {
+  const many: string[] = [];
+  for (let i = 0; i < 100; i++) many.push('  line ' + i + ' of a very long stack trace');
+  const out = [
+    '✖ failing tests:',
+    '',
+    'test at e2e/system.test.ts:1:1',
+    '✖ bounded failure (1.0ms)',
+    "  'test failed'",
+    ...many,
+  ].join('\n');
+  const [f] = parseFailures(out);
+  assert.ok(f!.raw!.length <= 61, 'raw block bounded (60 lines + ellipsis), got ' + f!.raw!.length);
+  assert.equal(f!.raw!.at(-1), '…');
+});
+
+test("a 'test timed out after Nms' error line is NOT generic (a timeout is a specific signature)", () => {
+  const out = [
+    '✖ failing tests:',
+    '',
+    'test at e2e/system.test.ts:1:1',
+    '✖ slow recovery (504.042ms)',
+    "  'test timed out after 500ms'",
+  ].join('\n');
+  const [f] = parseFailures(out);
+  assert.equal(f!.error, "'test timed out after 500ms'");
+});
+
+test('existing fixtures with a specific first line keep their error and fingerprint (AC6)', async () => {
+  const out = [
+    '✖ alpha works (0.5ms)',
+    'ℹ pass 1',
+    'ℹ fail 1',
+    '',
+    '✖ failing tests:',
+    '',
+    'test at e2e/system.test.ts:42:1',
+    '✖ alpha works (0.5ms)',
+    '  AssertionError [ERR_ASSERTION]: numbers diverge',
+  ].join('\n');
+  const [f] = parseFailures(out);
+  assert.equal(f!.error, 'AssertionError [ERR_ASSERTION]: numbers diverge');
+  const fpNew = await fingerprintOf(f!.test, f!.error);
+  const fpOld = await fingerprintOf('alpha works', 'AssertionError [ERR_ASSERTION]: numbers diverge');
+  assert.equal(fpNew, fpOld);
+});
+
+test('the detail-block scan runs to the end of the block, not a fixed 12 lines', () => {
+  const filler: string[] = [];
+  for (let i = 0; i < 20; i++) filler.push('  padding line ' + i);
+  const cause = 'Error: the real cause after twenty filler lines';
+  const out = [
+    '✖ failing tests:',
+    '',
+    'test at e2e/system.test.ts:1:1',
+    '✖ deep failure (1.0ms)',
+    "  'test failed'",
+    ...filler,
+    '  ' + cause,
+  ].join('\n');
+  const [f] = parseFailures(out);
+  assert.equal(f!.error, cause);
+});
+
+test('rawDetailsSection on a failure without a block yields nothing', () => {
+  assert.deepEqual(rawDetailsSection({}), []);
+  assert.deepEqual(rawDetailsSection({ raw: [] }), []);
+});
+
+test('rawBlockOf stops at the next test-at or ✖ line (block boundaries)', () => {
+  const detail = [
+    'test at a.test.ts:1:1',
+    '✖ first (1.0ms)',
+    '  Error: first cause',
+    '',
+    'test at b.test.ts:1:1',
+    '✖ second (1.0ms)',
+    '  Error: second cause',
+  ];
+  const first = rawBlockOf(detail, 1);
+  // The trailing blank line inside the block is trimmed (the block ends before the next entry).
+  assert.deepEqual(first, ['  Error: first cause']);
+  const second = rawBlockOf(detail, 5);
+  assert.deepEqual(second, ['  Error: second cause']);
+});
+
+test('mutation guard: first-non-empty-line-wins parsing fails the wrapper fixture (AC5)', () => {
+  // Restore the OLD behavior in a local copy and show it picks the wrapper (this documents why
+  // the fixture above is a regression test: revert extractError to first-line-wins and AC1 fails).
+  const out = fileFailureOutput({
+    file: 'e2e/knowledge.test.ts',
+    causeLines: ['  ', "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers'"],
+  });
+  const [f] = parseFailures(out);
+  // Current behavior: the wrapper is skipped, the ERR_ line wins, and the wrapper is NOT the error.
+  assert.notEqual(f!.error, "'test failed'");
+  // The old parser would have set error to the first non-empty line: 'test failed'. The fixture
+  // pins the negative, so a mutation restoring first-line-wins fails this assertion.
+  assert.match(f!.error, /ERR_MODULE_NOT_FOUND/);
+});
+
 test('a failure with no extractable error line is observed, never filed (name-only fingerprints)', async () => {
   const { dir, cleanup } = tempStateDir();
   try {
@@ -775,5 +1039,230 @@ test('ensureDependencies throws when npm ci fails', async () => {
     assert.deepEqual(runs, [['npm', 'ci']], 'the failing command must still be the install attempt');
   } finally {
     cleanup();
+  }
+});
+
+// -- #811/#817 review regressions: fence escaping + error-line redaction --
+
+test('codeFence grows past the longest backtick run in the content', () => {
+  assert.equal(codeFence(['plain line']), '```');
+  assert.equal(codeFence(['has ``` inside']), '````');
+  assert.equal(codeFence(['x', '`````` deep', 'y']), '```````');
+  // The fence itself can never appear in the content: every run is shorter than the fence.
+  const content = ['some ``` block', 'and ```` too'];
+  const fence = codeFence(content);
+  for (const line of content) assert.ok(!line.includes(fence));
+});
+
+test('rawDetailsSection uses an adaptive fence: a ``` line cannot close the block early', () => {
+  const section = rawDetailsSection({ raw: ['before', 'the diff contains ``` quote', 'after'] });
+  const joined = section.join('\n');
+  // The first fence must be ```` (longer than the content's ``` run), so the content line does
+  // not close it; the details section stays balanced.
+  assert.ok(section.includes('````'), 'the adaptive fence is used');
+  const openFences = section.filter((l) => /^`{3,}$/.test(l)).length;
+  assert.equal(openFences, 2, 'exactly one open + one close fence');
+  assert.ok(section[section.length - 2] === '</details>');
+});
+
+test('redactedErrorLine runs the normalized error through the secret redactor (#817)', () => {
+  // A credential shape on the chosen Error line must not publish: the redactor strips
+  // token-bearing URLs before the line reaches the issue body.
+  const out = redactedErrorLine({ error: 'Error: cannot fetch https://user:ghp_abcdef0123456789@host.example/x failed' });
+  assert.ok(!out.includes('ghp_abcdef0123456789'), 'the credential value must not survive');
+});
+
+test('rawDetailsSection redacts operator-declared MERCURY_SECRETS, not only credential shapes (#817)', () => {
+  const secret = 'custom-secret-806';
+  process.env.MERCURY_SECRETS = secret;
+  resetRawRedactorForTests();
+  try {
+    // A BARE literal (no label, no known key shape) - the shape-only redactor passes it, the
+    // declared-secrets layer must redact it (the #817 finding's exact scenario).
+    const section = rawDetailsSection({ raw: [`Error: the configured value ${secret} appears in raw output`] });
+    const joined = section.join('\n');
+    assert.ok(!joined.includes(secret), 'the declared literal secret must be redacted');
+    assert.ok(joined.includes('[REDACTED]'));
+  } finally {
+    delete process.env.MERCURY_SECRETS;
+    resetRawRedactorForTests();
+  }
+});
+
+test('rawDetailsSection redacts the value of a custom MERCURY_SANDBOX_ENV forwarded variable (#811 r2)', () => {
+  const value = 'my-provider-secret-value-7f3a';
+  process.env.MY_PROVIDER_KEY = value;
+  process.env.MERCURY_SANDBOX_ENV = 'MY_PROVIDER_KEY';
+  resetRawRedactorForTests();
+  try {
+    // The value has no token shape and no label: only the configured allowlist layer redacts it.
+    const section = rawDetailsSection({ raw: [`MY_PROVIDER_KEY=${value}`] });
+    assert.ok(!section.join('\n').includes(value), 'the forwarded value must be redacted');
+  } finally {
+    delete process.env.MY_PROVIDER_KEY;
+    delete process.env.MERCURY_SANDBOX_ENV;
+    resetRawRedactorForTests();
+  }
+});
+
+// -- #811 r3 regressions --
+
+test('rawDetailsSection redacts across line boundaries: joined-block redaction (#811 r3)', () => {
+  // A credential whose registered value ends with a newline: the exact-value pattern exists
+  // only in the JOINED text; per-line redaction misses it.
+  const value = 'custom-provider-value-1234';
+  // Registered WITH a trailing newline (as env files carry); the split lines hold it without.
+  process.env.MY_KEY = value + '\n';
+  process.env.MERCURY_SANDBOX_ENV = 'MY_KEY';
+  resetRawRedactorForTests();
+  try {
+    const section = rawDetailsSection({ raw: [`the configured value ${value}`, ' continued on the next line'] });
+    assert.ok(!section.join('\n').includes(value), 'the value must not survive line splitting');
+  } finally {
+    delete process.env.MY_KEY;
+    delete process.env.MERCURY_SANDBOX_ENV;
+    resetRawRedactorForTests();
+  }
+});
+
+test('rawBlockOf enforces the 6 kB cap in UTF-8 bytes, not UTF-16 units (#811 r3)', () => {
+  // 2000 emoji: 4000 UTF-16 units (the old per-unit check would pass it) but ~8 kB in UTF-8.
+  const emoji = '\u{1F600}'.repeat(2000);
+  const detail = ['✖ failing tests:', '', '✖ t (1ms)', emoji, 'Error: after emoji'];
+  const raw = rawBlockOf(detail, 2);
+  const joined = raw.join('\n');
+  const utf8 = Buffer.byteLength(joined, 'utf8');
+  assert.ok(utf8 <= 6 * 1024 + 4, `the block must stay within the byte cap, got ${utf8}`);
+});
+
+test('the specific-cause scan reads the FULL detail block, not the bounded attachment (#811 r3)', () => {
+  // Wrapper line, then >RAW_BLOCK_MAX_LINES diagnostic lines, then the real Error: the cause
+  // sits beyond the attachment bound but must still be picked (and fingerprinted).
+  const filler = Array.from({ length: 70 }, (_, i) => `  diagnostic line ${i}`);
+  const detail = [
+    '✖ failing tests:', '',
+    `test at e2e/x.test.ts:3:1`,
+    "✖ file-level (1.2ms)",
+    "  'test failed'",
+    ...filler,
+    '  Error: actual cause after the bound',
+  ];
+  const failures = parseFailures(detail.join('\n'));
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.error, 'Error: actual cause after the bound');
+  // The attached raw copy is still bounded.
+  assert.ok(failures[0]!.raw!.includes('…'));
+});
+
+test('the stderr fallback only takes crash/load-shaped causes, not ordinary stdout Errors (#811 r3)', () => {
+  const out = [
+    'Error: recovered probe',           // ordinary stdout noise, NOT a load failure
+    '✖ failing tests:', '',
+    'test at e2e/x.test.ts:3:1',
+    '✖ file-level (1.2ms)',
+    "  'test failed'",
+  ].join('\n');
+  const failures = parseFailures(out);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.error, '', 'ordinary stdout Error lines must not become the cause');
+});
+
+test('a cause that appears ONLY in stderr is picked by the fallback (coded Error shape) (#811 r4)', () => {
+  const cause = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from /tmp/ws/e2e/knowledge.test.ts";
+  const out = fileFailureOutput({
+    file: 'e2e/knowledge.test.ts',
+    stderr: cause,
+    causeLines: ["  'test failed'"],  // block holds ONLY the generic wrapper
+  });
+  const failures = parseFailures(out);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.error, cause, 'the stderr-only load error must become the cause');
+});
+
+test('the stderr fallback does NOT take ordinary stdout Error lines (coded-shape guard) (#811 r4)', () => {
+  const out = [
+    'Error: recovered probe',           // ordinary stdout noise, NOT a load failure
+    '✖ failing tests:', '',
+    'test at e2e/x.test.ts:3:1',
+    '✖ file-level (1.2ms)',
+    "  'test failed'",
+  ].join('\n');
+  const failures = parseFailures(out);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.error, '', 'a plain stdout Error line must not become the cause');
+});
+
+test('a separate stderr capture overrides the combined-output prefix for the fallback (#811 r5)', () => {
+  const cause = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from /tmp/ws/e2e/x.test.ts";
+  const combined = [
+    'Error: recovered probe',           // ordinary stdout in the COMBINED stream
+    '✖ failing tests:', '',
+    'test at e2e/x.test.ts:3:1',
+    '✖ file-level (1.2ms)',
+    "  'test failed'",
+  ].join('\n');
+  // Real stderr holds ONLY the load crash.
+  const failures = parseFailures(combined, cause + '\n');
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.error, cause, 'the real stderr cause must win over the combined prefix');
+
+  // Without a separate capture the derived prefix is used (fixtures stay supported).
+  const derived = parseFailures(combined);
+  assert.equal(derived[0]!.error, '', 'derived-prefix guard still rejects ordinary stdout Errors');
+});
+
+test('REAL stderr accepts general crash Errors; the derived prefix keeps the narrow guard (#811 r6)', () => {
+  const combined = [
+    '✖ failing tests:', '',
+    'test at e2e/x.test.ts:3:1',
+    '✖ file-level (1.2ms)',
+    "  'test failed'",
+  ].join('\n');
+  // Real child stderr: a plain thrown Error IS a genuine crash cause.
+  const real = parseFailures(combined, 'Error: fixture setup failed\n');
+  assert.equal(real[0]!.error, 'Error: fixture setup failed');
+  const realSyntax = parseFailures(combined, 'SyntaxError: Unexpected token in config.ts\n');
+  assert.equal(realSyntax[0]!.error, 'SyntaxError: Unexpected token in config.ts');
+
+  // The SAME line in a derived combined prefix stays rejected (stdout noise).
+  const combinedNoise = ['Error: fixture setup failed', combined].join('\n');
+  const derived = parseFailures(combinedNoise);
+  assert.equal(derived[0]!.error, '');
+});
+
+test('redactedErrorLine redacts BEFORE normalizing: a numbered secret survives normalization (#811 r7)', () => {
+  const secret = 'custom-secret-806';
+  process.env.MERCURY_SECRETS = secret;
+  resetRawRedactorForTests();
+  try {
+    // The bare literal sits mid-line (no label, no shape) and ends in digits: normalizeErrorLine
+    // would rewrite 806 -> <n> and the exact-value pattern would no longer match.
+    const out = redactedErrorLine({ error: `Error: the configured value ${secret} was rejected with code 42 at /tmp/x.ts:9:9` });
+    assert.ok(!out.includes(secret), 'the literal secret must be redacted');
+    assert.ok(out.includes('[REDACTED]'));
+    // Normalization still applies to the non-secret remainder.
+    assert.ok(out.includes('code <n>') || out.includes(':<n>'), `normalization still runs, got: ${out}`);
+  } finally {
+    delete process.env.MERCURY_SECRETS;
+    resetRawRedactorForTests();
+  }
+});
+
+test('quoted generic wrapper lines are recognized for every alternative (#811 r8)', () => {
+  for (const wrapper of [
+    "'test failed'",
+    "'2 subtests failed'",
+    "'test did not finish before its parent and was cancelled'",
+    "'Promise resolution is still pending but the event loop has already resolved'",
+  ]) {
+    const detail = [
+      '✖ failing tests:', '',
+      'test at e2e/x.test.ts:3:1',
+      '✖ cancelled-one (1.2ms)',
+      `  ${wrapper}`,
+    ].join('\n');
+    const failures = parseFailures(detail);
+    assert.equal(failures.length, 1, wrapper);
+    assert.equal(failures[0]!.error, '', `a quoted generic wrapper must not become the cause: ${wrapper}`);
   }
 });
