@@ -682,6 +682,7 @@ is not optional.
 | `brain.maxResponseBytes` | no | default 65536 |
 | `brain.maxDispatchesPerHour` | no | default 12, counted from the API (§6.2) |
 | `brain.answers` | yes (if the brain answers inputs) | allowlist of answers the LLM may select, on the bot's own Runs only |
+| `schedule.tasks[].select.*` | reserved | accepted by the schema, refused `reserved: select is not supported before L1` (#826). Shape validated first (per Laya design §6.3/§10): `via: 'laya'`, `mode` in `shadow\|enforce`, `minConfidence` in (0,1) exclusive and required for `enforce`, 1–12 `candidates` each `{agent, model?, describe}` — a config written today loads unchanged once the refusal is lifted. |
 
 Unknown keys are rejected with a "did you mean" suggestion, the same rule the
 wizard's answers file follows (#649 §2).

@@ -31,8 +31,14 @@ const TOP_LEVEL_KEYS = [
 const API_KEYS = ['url', 'timeoutMs'] as const;
 
 const TASK_KEYS = [
-  'name', 'cron', 'tz', 'template', 'singleFlight', 'onMiss', 'maxCatchUp',
+  'name', 'cron', 'tz', 'template', 'singleFlight', 'onMiss', 'maxCatchUp', 'select',
 ] as const;
+
+/** `select` shape validation constants (docs/laya-integration-design.md §6.3, §10): 1-12
+ *  candidates, mode shadow|enforce, minConfidence in (0,1) exclusive. Validated BEFORE the
+ *  reserved refusal so a config written today is accepted by L1 unchanged (#826). */
+const SELECT_MODES = ['shadow', 'enforce'] as const;
+const MAX_SELECT_CANDIDATES = 12;
 
 /**
  * Nearest known key, for the unknown-key refusal. A small local levenshtein instead of an import:
@@ -161,6 +167,57 @@ function validateTask(path: string, raw: Record<string, unknown>, index: number,
       refuse(path, `${field}.maxCatchUp`, 'must be a non-negative integer');
     }
     maxCatchUp = raw.maxCatchUp as number;
+  }
+  // `select` is RESERVED before L1 (#826), but its SHAPE is validated first: a well-formed block
+  // gets the reserved message; a malformed one gets the shape error first, so a config written
+  // today is accepted by L1 unchanged once the refusal is lifted.
+  if (raw.select !== undefined) {
+    const select = checkObject(path, `${field}.select`, raw.select);
+    const selectKeys = ['via', 'mode', 'minConfidence', 'candidates'];
+    for (const key of Object.keys(select)) {
+      if (!selectKeys.includes(key)) refuseUnknown(path, `${field}.select`, key, selectKeys);
+    }
+    if (select.via !== 'laya') {
+      refuse(path, `${field}.select.via`, "must be 'laya' (the only v1 via)");
+    }
+    if (select.mode !== undefined && (typeof select.mode !== 'string' || !(SELECT_MODES as readonly string[]).includes(select.mode))) {
+      refuse(path, `${field}.select.mode`, `must be one of ${SELECT_MODES.join(', ')}`);
+    }
+    if (select.mode === 'enforce' && select.minConfidence === undefined) {
+      refuse(path, `${field}.select.minConfidence`, 'required when mode is enforce');
+    }
+    if (select.minConfidence !== undefined) {
+      const mc = select.minConfidence;
+      if (typeof mc !== 'number' || !Number.isFinite(mc) || mc <= 0 || mc >= 1) {
+        refuse(path, `${field}.select.minConfidence`, 'must be a number in (0, 1) exclusive');
+      }
+    }
+    if (!Array.isArray(select.candidates) || select.candidates.length === 0) {
+      refuse(path, `${field}.select.candidates`, `must be a non-empty array of 1-${MAX_SELECT_CANDIDATES} candidate objects`);
+    }
+    if (Array.isArray(select.candidates) && select.candidates.length > MAX_SELECT_CANDIDATES) {
+      refuse(path, `${field}.select.candidates`, `must have at most ${MAX_SELECT_CANDIDATES} candidates (§6.3: options share a fixed token budget)`);
+    }
+    if (Array.isArray(select.candidates)) {
+      select.candidates.forEach((cand, ci) => {
+        const cfield = `${field}.select.candidates[${ci}]`;
+        const candObj = checkObject(path, cfield, cand);
+        const candKeys = ['agent', 'model', 'describe'];
+        for (const key of Object.keys(candObj)) {
+          if (!candKeys.includes(key)) refuseUnknown(path, cfield, key, candKeys);
+        }
+        if (typeof candObj.agent !== 'string' || (candObj.agent as string).trim() === '') {
+          refuse(path, `${cfield}.agent`, 'must be a non-empty string');
+        }
+        if (candObj.model !== undefined && (typeof candObj.model !== 'string' || (candObj.model as string).trim() === '')) {
+          refuse(path, `${cfield}.model`, 'must be a non-empty string when present');
+        }
+        if (typeof candObj.describe !== 'string' || (candObj.describe as string).trim() === '') {
+          refuse(path, `${cfield}.describe`, 'must be a non-empty string');
+        }
+      });
+    }
+    refuse(path, `${field}.select`, 'reserved: select is not supported before L1');
   }
   return {
     name,

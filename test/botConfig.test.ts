@@ -96,6 +96,31 @@ test('fixture set: each malformed config is refused with a named field', () => {
     { label: 'bad api url', cfg: { ...OK_CFG, api: { url: 'ftp://x' } }, field: /api\.url/, message: /http/ },
     { label: 'fake http scheme', cfg: { ...OK_CFG, api: { url: 'httpx://x' } }, field: /api\.url/, message: /http/ },
     { label: 'bad timeout', cfg: { ...OK_CFG, api: { url: 'http://x', timeoutMs: 0 } }, field: /api\.timeoutMs/, message: /positive integer/ },
+    // #826: select shape errors come BEFORE the reserved refusal.
+    { label: 'select with a malformed candidate is refused with the shape error first', cfg: { schedule: { tasks: [
+      { name: 'a', cron: '* * * * *', template: { task: 'x' }, select: { via: 'laya', candidates: [{ agent: 'hermes' }] } },
+    ] } }, field: /select\.candidates\[0\]\.describe/, message: /non-empty/ },
+    { label: 'select via not laya', cfg: { schedule: { tasks: [
+      { name: 'a', cron: '* * * * *', template: { task: 'x' }, select: { via: 'brain', candidates: [{ agent: 'hermes', describe: 'x' }] } },
+    ] } }, field: /select\.via/, message: /must be 'laya'/ },
+    { label: 'select bad mode', cfg: { schedule: { tasks: [
+      { name: 'a', cron: '* * * * *', template: { task: 'x' }, select: { via: 'laya', mode: 'yolo', candidates: [{ agent: 'hermes', describe: 'x' }] } },
+    ] } }, field: /select\.mode/, message: /shadow, enforce/ },
+    { label: 'select enforce without minConfidence', cfg: { schedule: { tasks: [
+      { name: 'a', cron: '* * * * *', template: { task: 'x' }, select: { via: 'laya', mode: 'enforce', candidates: [{ agent: 'hermes', describe: 'x' }] } },
+    ] } }, field: /select\.minConfidence/, message: /required when mode is enforce/ },
+    { label: 'select minConfidence out of range', cfg: { schedule: { tasks: [
+      { name: 'a', cron: '* * * * *', template: { task: 'x' }, select: { via: 'laya', minConfidence: 1, candidates: [{ agent: 'hermes', describe: 'x' }] } },
+    ] } }, field: /select\.minConfidence/, message: /\(0, 1\)/ },
+    { label: 'select empty candidates', cfg: { schedule: { tasks: [
+      { name: 'a', cron: '* * * * *', template: { task: 'x' }, select: { via: 'laya', candidates: [] } },
+    ] } }, field: /select\.candidates/, message: /non-empty/ },
+    { label: 'select too many candidates', cfg: { schedule: { tasks: [
+      { name: 'a', cron: '* * * * *', template: { task: 'x' }, select: { via: 'laya', candidates: Array.from({ length: 13 }, (_, i) => ({ agent: 'hermes', describe: `c${i}` })) } },
+    ] } }, field: /select\.candidates/, message: /at most 12/ },
+    { label: 'select candidate with unknown key', cfg: { schedule: { tasks: [
+      { name: 'a', cron: '* * * * *', template: { task: 'x' }, select: { via: 'laya', candidates: [{ agent: 'hermes', describe: 'x', credential: 'tok-9' }] } },
+    ] } }, field: /select\.candidates\[0\]/, message: /unknown key 'credential'/ },
   ];
   for (const fx of fixtures) {
     const { env, cleanup } = withBots({ maint: fx.cfg as Record<string, unknown> });
@@ -113,6 +138,49 @@ test('fixture set: each malformed config is refused with a named field', () => {
     } finally {
       cleanup();
     }
+  }
+});
+
+test('select: a WELL-FORMED block is refused with the reserved message (#826, fails on base)', () => {
+  const cfg = JSON.parse(JSON.stringify(OK_CFG)) as Record<string, unknown>;
+  (cfg.schedule as Record<string, unknown>).tasks = [{
+    name: 'a', cron: '* * * * *', template: { task: 'x' },
+    select: {
+      via: 'laya', mode: 'shadow', minConfidence: 0.8,
+      candidates: [
+        { agent: 'claude', model: 'opus', describe: 'hard multi-file changes' },
+        { agent: 'hermes', describe: 'routine fixes' },
+      ],
+    },
+  }];
+  const { env, cleanup } = withBots({ maint: cfg });
+  try {
+    let err: Error | undefined;
+    try {
+      loadBotConfig('maint', env);
+    } catch (e) {
+      err = e as Error;
+    }
+    assert.ok(err, 'a well-formed select is still refused before L1');
+    assert.match(err!.message, /reserved: select is not supported before L1/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('select: an UNKOWN top-level key still refuses as unknown, not reserved (#826)', () => {
+  // Guards the shape-first ordering: a typo in the select block must not read as the reserved
+  // refusal (which would tell the operator to wait for L1 instead of fixing the key).
+  const cfg = JSON.parse(JSON.stringify(OK_CFG)) as Record<string, unknown>;
+  (cfg.schedule as Record<string, unknown>).tasks = [{
+    name: 'a', cron: '* * * * *', template: { task: 'x' },
+    select: { via: 'laya', candiates: [{ agent: 'hermes', describe: 'x' }] },
+  }];
+  const { env, cleanup } = withBots({ maint: cfg });
+  try {
+    assert.throws(() => loadBotConfig('maint', env), /unknown key 'candiates'/);
+  } finally {
+    cleanup();
   }
 });
 
