@@ -86,6 +86,20 @@ export interface CreateRunInput {
    * bytes its parent executed, not a re-resolution of whatever the registry holds now.
    */
   presetSnapshot?: ResolvedRolePreset;
+  /**
+   * Per-Run model override (docs/laya-integration-design.md §13 P-1, issue #823). `undefined`
+   * means "no caller model" and the Run behaves exactly as before. Resolution, one rule for both
+   * paths: caller.model → preset model → none. Refused fail-closed when the effective agent's
+   * static capabilities lack `perRunModel: true`, with the same unknown/undeclared/false wording
+   * the preset path uses.
+   */
+  model?: string;
+  /**
+   * Where `model` came from, when the caller already knows (retry, #832 r1). Retry copies the
+   * parent's model; recording it as 'caller' would rewrite the explainability record's origin.
+   * Only retry passes this; the HTTP surface does not expose it.
+   */
+  modelSource?: 'caller' | 'preset';
   idempotencyKey?: string;
 }
 
@@ -127,6 +141,26 @@ export interface RunServiceDeps {
   defaultMaxRetries: number;
   /** Optional secret redactor; input values are redacted at write time (issue #36). */
   redactor?: Redactor;
+}
+
+/**
+ * Model shape validation (#823, hardened in #832 r1): non-empty, <= 200 chars, no whitespace or
+ * control characters (C0 and C1, via \p{Cc}). Applied to the CALLER value and to the RESOLVED
+ * value - a preset-declared model must satisfy the same contract, because both reach argv or
+ * session config. `label` names the origin in the error so an operator can tell which field
+ * carried the bad value.
+ */
+export function validateModelShape(model: string, label: string): void {
+  if (typeof model !== 'string' || model.length === 0) {
+    throw new ValidationError(`${label} must be a non-empty string`);
+  }
+  if (model.length > 200) {
+    throw new ValidationError(`${label} must be at most 200 characters`);
+  }
+  // \p{Cc} covers C0 (U+0000-U+001F) AND C1 (U+007F-U+009F); \s covers unicode whitespace.
+  if (new RegExp('\\p{Cc}', 'u').test(model) || /\s/u.test(model)) {
+    throw new ValidationError(`${label} must not contain whitespace or control characters: ${JSON.stringify(model)}`);
+  }
 }
 
 export class RunService {
@@ -196,6 +230,13 @@ export class RunService {
       throw new ValidationError('task is required');
     }
     if (input.constraints) validateConstraints(input.constraints);
+    // Per-Run model shape validation (#823). It reaches argv/config in the adapters (P1-2/P1-3),
+    // so it must be a single shell-safe token: no whitespace or control characters, bounded
+    // length. An empty string is 'no model' vs an invalid value — refused rather than silently
+    // dropped, because a dropped override silently executes with the wrong model.
+    if (input.model !== undefined) {
+      validateModelShape(input.model, 'model');
+    }
     if (input.idempotencyKey) {
       const existing = this.findByIdempotencyKey(input.ownerId, input.idempotencyKey);
       if (existing) return existing;
@@ -224,7 +265,9 @@ export class RunService {
         loaded.manifest,
         {
           agent: input.agent,
-          model: undefined, // per-Run model override arrives with a caller surface that has one
+          // Caller surface exists now (#823): the caller's model wins unless the preset requires
+          // its own (modelRequired conflict stays enforced inside resolvePreset).
+          model: input.model,
           skills: input.skills,
           constraints: input.constraints,
         } satisfies PresetCallerInput,
@@ -316,6 +359,38 @@ export class RunService {
     const agent = input.agent ?? presetAgent ?? this.deps.defaultAgent;
     if (!this.deps.knownAgents.includes(agent)) {
       throw new ValidationError(`Unknown agent: ${agent} (known: ${this.deps.knownAgents.join(', ')})`);
+    }
+
+    // Per-Run model resolution (#823), ONE rule for both paths: caller.model → preset model →
+    // none. On the preset path resolvePreset already applied the same precedence (and enforced
+    // the modelRequired conflict); the snapshot's effectiveAgent.model IS the resolved preset
+    // model. On the no-preset path the caller's value is the only source.
+    //
+    // Fail closed on BOTH paths: an effective model on an agent whose static capabilities lack
+    // `perRunModel: true` is refused at creation, with the same three-way wording (unknown /
+    // undeclared / false) resolvePreset uses for the preset path. Today that refuses every real
+    // agent, which is correct until the adapters declare the capability (P1-2..P1-4).
+    const presetModel = presetSnapshot?.effectiveAgent.model;
+    const model = input.model ?? presetModel;
+    if (model !== undefined) {
+      // The RESOLVED model is validated too (#832 r1): a preset carrying `agent.model: "two
+      // words"` passes preset validation today, and only this check keeps the persisted value
+      // inside the same contract the caller surface has.
+      validateModelShape(model, 'model');
+      const stat = this.deps.agentCapabilities?.()[agent]?.static;
+      if (stat?.perRunModel !== true) {
+        const declared = stat === undefined
+          ? 'unknown -- the agent has no declared static capabilities'
+          : stat.perRunModel === undefined
+            ? "undeclared -- the agent's static block omits perRunModel"
+            : "false -- the agent's static block declares perRunModel: false";
+        const source = input.model !== undefined ? 'per-Run model' : 'preset model';
+        throw new ValidationError(
+          `the ${source} ${JSON.stringify(model)} was requested, but agent ${JSON.stringify(agent)}`
+          + ` cannot take a per-Run model (perRunModel: ${declared});`
+          + ' pick an agent that accepts a per-Run model, or drop the model',
+        );
+      }
     }
 
     // Goal admission. Everything about this block is fail-closed, because the failure mode
@@ -529,6 +604,7 @@ export class RunService {
       cancellationRequestedAt: null,
       finalCommits: [],
       prUrl: null,
+      model: model ?? null,
     };
 
     try {
@@ -546,6 +622,14 @@ export class RunService {
         }
         this.deps.events.append(run.id, 'run.created', { runId: run.id, agent, status: 'QUEUED' });
         this.deps.events.append(run.id, 'run.queued', { runId: run.id });
+        if (model !== undefined) {
+          // The explainability record L1 builds on (#823): which model, and where it came from.
+          // Not emitted for model-less Runs, so a Run created without `model` behaves
+          // byte-identically to base. Retry passes the parent's recorded source (#832 r1): the
+          // copied model was not chosen by a caller, and the record must not change origin.
+          const source = input.modelSource ?? (input.model !== undefined ? 'caller' : 'preset');
+          this.deps.events.append(run.id, 'run.model_resolved', { model, source });
+        }
         if (goalState) {
           // runId is only known here, so the row is built after the run id exists.
           this.deps.goals!.insert({ ...goalState, runId: run.id });
@@ -846,6 +930,12 @@ export class RunService {
     // version now undetectable -- create() rejects the retry with the reason rather than
     // producing an untracked retry that looks like the original.
     const originalGoal = this.deps.goals?.get(runId);
+    // The parent's recorded model origin (#832 r1): a preset-sourced parent must not become
+    // 'caller' on the retry, or the explainability record changes meaning across retries.
+    const parentModelSource = original.model
+      ? this.deps.events.list(runId).find((e) => e.type === 'run.model_resolved')
+        ?.payload as { source?: 'caller' | 'preset' } | undefined
+      : undefined;
 
     const created = this.create({
       ownerId: original.ownerId,
@@ -853,6 +943,10 @@ export class RunService {
       repository: { ...original.repository },
       repositories: original.repositories,
       agent: original.agent,
+      // Retry re-attempts the SAME work (#823): the model the parent carried is part of that
+      // work, exactly like the skill/preset snapshots. A parent WITHOUT a model stays without.
+      model: original.model ?? undefined,
+      ...(original.model && parentModelSource?.source ? { modelSource: parentModelSource.source } : {}),
       skillSnapshots,
       constraints: { ...original.constraints },
       // The parent's preset snapshot, verbatim (section 6): a retry is the SAME task

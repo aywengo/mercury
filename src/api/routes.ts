@@ -325,6 +325,10 @@ export function createRoutes(deps: RoutesDeps): Router {
         // Same seam, same lesson (docs/crew/role-presets.md section 5): the preset block is
         // forwarded unresolved so HTTP and in-process callers hit identical validation.
         preset: body.preset,
+        // Forwarded unresolved for the same reason as `preset` (#823): RunService owns the shape
+        // validation and the fail-closed capability check, so HTTP and in-process callers get
+        // identical rules from one implementation.
+        model: body.model,
         idempotencyKey: typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined,
       });
       res.status(201).json({ runId: run.id, status: run.status });

@@ -492,6 +492,7 @@ export class Worker {
 
       const context: RunContext = {
         run,
+        ...(run.model ? { model: run.model } : {}),
         repository: run.repository,
         repositories: run.repositories,
         workspace,

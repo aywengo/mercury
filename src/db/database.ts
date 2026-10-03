@@ -360,6 +360,15 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_run_presets_identity
     ON run_presets(preset_id, preset_version);
   `,
+  // v13: per-Run model override (issue #823, laya-integration-design §13 P-1).
+  //
+  // A Run had nowhere to carry a model: the only model slot was inside the preset snapshot, so a
+  // Run created without a preset could not take one. Nullable, and null means "no per-Run model"
+  // -- rows written before this column existed are NULL in exactly the same way, which is the
+  // truth rather than a sentinel to invent.
+  `
+  ALTER TABLE runs ADD COLUMN model TEXT;
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

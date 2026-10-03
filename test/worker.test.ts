@@ -1379,3 +1379,37 @@ test('a non-infrastructure attribution survives instead of being flattened to ag
     env.close();
   }
 });
+
+// -- #823: the worker hands the per-Run model to the adapter as context.model --
+
+test('the adapter receives context.model from the Run; absent when the Run has no model (#823)', async () => {
+  class ContextCapture extends ResumableFakeAdapter {
+    public contexts: (RunContext | undefined)[] = [];
+    // The same static declarations the real fake adapter carries (perRunModel: true), so the
+    // fail-closed admission sees a capable agent.
+    override readonly capabilities: AgentCapabilities = {
+      static: {
+        skills: 'none', humanInput: true, resume: true, toolEvents: 'structured',
+        roleInstruction: 'system', perRunModel: true, sandbox: true, mcp: 'none',
+      },
+    };
+    override async start(context: RunContext): Promise<AgentHandle> {
+      this.contexts.push(context);
+      return super.start(context);
+    }
+  }
+  const capture = new ContextCapture([{ event: { type: 'agent.message', payload: { text: 'ok' } } }, { event: { type: 'run.completed', payload: {} } }]);
+  const repo = tempDir('mercury-823-');
+  const env = makeEnv({ adapters: { fake: capture } });
+  try {
+    const withModel = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: 'GLM-5.3-Flash', repository: { localPath: repo } });
+    await waitFor(() => env.runs.get(withModel.id)!.status === 'COMPLETED', 10_000);
+    assert.equal(capture.contexts[0]!.model, 'GLM-5.3-Flash');
+
+    const without = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repo } });
+    await waitFor(() => env.runs.get(without.id)!.status === 'COMPLETED', 10_000);
+    assert.equal(capture.contexts[1]!.model, undefined, 'a model-less Run must not add the field');
+  } finally {
+    env.close();
+  }
+});

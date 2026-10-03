@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { NotFoundError } from '../src/domain/errors.ts';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDatabase } from '../src/db/database.ts';
-import { makeEnv, waitFor } from './helpers.ts';
-import type { RunConstraints } from '../src/domain/types.ts';
+import { makeEnv, tempDir, waitFor } from './helpers.ts';
+import type { AgentAdapter, RunConstraints } from '../src/domain/types.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import { FakeAgentAdapter } from '../src/adapters/fakeAgentAdapter.ts';
 
@@ -711,6 +711,224 @@ test('an explicit non-empty skill list is still honoured exactly (issue #459)', 
   try {
     const run = env.runService.create({ ownerId: 'alice', task: 'smoke', skills: ['testing'] });
     assert.deepEqual(env.runService.getSkills(run.id).map((s) => s.id), ['testing']);
+  } finally {
+    env.close();
+  }
+});
+
+// -- #823: per-Run model (P1-1) --
+
+test('model: accepted on a perRunModel-capable agent, persisted, and returned', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: 'GLM-5.3-Flash' });
+    assert.equal(run.model, 'GLM-5.3-Flash');
+    // The explainability event records which model and where it came from.
+    const events = env.events.list(run.id).map((e) => e.type);
+    assert.ok(events.includes('run.model_resolved'), `events: ${events.join(', ')}`);
+    const ev = env.events.list(run.id).find((e) => e.type === 'run.model_resolved');
+    assert.deepEqual(ev!.payload, { model: 'GLM-5.3-Flash', source: 'caller' });
+  } finally {
+    env.close();
+  }
+});
+
+test('model: refused on an agent whose static capabilities omit perRunModel (fail closed)', () => {
+  // An adapter that declares static capabilities but omits perRunModel: the 'undeclared' case.
+  const undeclared: AgentAdapter = {
+    capabilities: { static: { skills: 'none', roleInstruction: 'system', humanInput: false } },
+    start: async () => { throw new Error('not started'); },
+    sendInput: async () => {},
+    cancel: async () => {},
+  } as AgentAdapter;
+  const env = makeEnv({ workerEnabled: false, adapters: { undeclared } });
+  try {
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'undeclared', model: 'm1' }),
+      /perRunModel: undeclared/,
+    );
+    assert.equal(env.runs.list({ ownerId: 'alice', limit: 10 }).runs.length, 0, 'no Run row written');
+  } finally {
+    env.close();
+  }
+});
+
+test('model: shape validation - empty, overlong, whitespace', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    assert.throws(() => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: '' }), /non-empty/);
+    assert.throws(() => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: 'x'.repeat(201) }), /at most 200/);
+    assert.throws(() => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: 'two words' }), /whitespace or control/);
+    assert.throws(() => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: 'a\nb' }), /whitespace or control/);
+  } finally {
+    env.close();
+  }
+});
+
+test('model: a preset model resolves onto the Run; caller wins over a preset default; modelRequired conflict surfaces over the service', () => {
+  const presetsDir = tempDir('mercury-presets-823-');
+  const dir = join(presetsDir, 'modeled');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'preset.json'), JSON.stringify({
+    schemaVersion: 1, id: 'modeled', version: '1.0.0',
+    description: 'preset with a model default', role: 'Modeled role',
+    agent: { model: 'preset-model' },
+  }));
+  writeFileSync(join(dir, 'INSTRUCTION.md'), 'MODELED INSTRUCTION');
+  const env = makeEnv({ workerEnabled: false, presetsDir });
+  try {
+    // Preset default, no caller model.
+    const a = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', preset: { id: 'modeled' } });
+    assert.equal(a.model, 'preset-model');
+    const evA = env.events.list(a.id).find((e) => e.type === 'run.model_resolved');
+    assert.deepEqual(evA!.payload, { model: 'preset-model', source: 'preset' });
+    // Caller wins over the preset default.
+    const b = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', preset: { id: 'modeled' }, model: 'caller-model' });
+    assert.equal(b.model, 'caller-model');
+    const evB = env.events.list(b.id).find((e) => e.type === 'run.model_resolved');
+    assert.deepEqual(evB!.payload, { model: 'caller-model', source: 'caller' });
+  } finally {
+    env.close();
+  }
+});
+
+test('model: retry copies the model; retry of a model-less run stays model-less', () => {
+  const env = makeEnv({ workerEnabled: false, fakeScript: [{ fail: true }] });
+  try {
+    const parent = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: 'keep-me' });
+    // Force the run terminal so retry is allowed.
+    env.runService.cancel(parent.id, 'alice', false);
+    const retried = env.runService.retry(parent.id, 'alice', false);
+    assert.equal(retried.model, 'keep-me');
+
+    const parent2 = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runService.cancel(parent2.id, 'alice', false);
+    const retried2 = env.runService.retry(parent2.id, 'alice', false);
+    assert.equal(retried2.model ?? null, null);
+    assert.equal(env.events.list(retried2.id).some((e) => e.type === 'run.model_resolved'), false);
+  } finally {
+    env.close();
+  }
+});
+
+test('model: a Run created without model behaves byte-identically to base (no event, null column)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    assert.equal(run.model ?? null, null);
+    assert.equal(env.events.list(run.id).some((e) => e.type === 'run.model_resolved'), false);
+  } finally {
+    env.close();
+  }
+});
+
+// -- #832 r1: resolved-model validation, three-way wording on the preset path, retry source --
+
+test('model: a preset-declared model is held to the same shape contract as the caller field (#832 r1)', () => {
+  const presetsDir = tempDir('mercury-presets-832a-');
+  const dir = join(presetsDir, 'bad-model');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'preset.json'), JSON.stringify({
+    schemaVersion: 1, id: 'bad-model', version: '1.0.0',
+    description: 'preset with an invalid model', role: 'Bad-model role',
+    agent: { model: 'two words' },
+  }));
+  writeFileSync(join(dir, 'INSTRUCTION.md'), 'BAD-MODEL INSTRUCTION');
+  const env = makeEnv({ workerEnabled: false, presetsDir });
+  try {
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', preset: { id: 'bad-model' } }),
+      /must not contain whitespace or control characters/,
+      'a preset model with whitespace is refused at creation',
+    );
+    assert.equal(env.runs.list({ ownerId: 'alice', limit: 10 }).runs.length, 0, 'no Run row written');
+    // A C1 control (U+009F) is also caught - \p{Cc}, not just C0.
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: 'a\u009Fb' }),
+      /must not contain whitespace or control characters/,
+    );
+  } finally {
+    env.close();
+  }
+});
+
+test('model: the preset path refuses with the same unknown/undeclared/false wording (#832 r1)', () => {
+  const presetsDir = tempDir('mercury-presets-832b-');
+  const dir = join(presetsDir, 'modeled-2');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'preset.json'), JSON.stringify({
+    schemaVersion: 1, id: 'modeled-2', version: '1.0.0',
+    description: 'preset with a model on an incapable agent', role: 'Modeled role',
+    agent: { model: 'preset-model' },
+  }));
+  writeFileSync(join(dir, 'INSTRUCTION.md'), 'MODELED INSTRUCTION');
+  const undeclared: AgentAdapter = {
+    capabilities: { static: { skills: 'none', roleInstruction: 'system' } },
+    start: async () => { throw new Error('not started'); },
+    sendInput: async () => {},
+    cancel: async () => {},
+  } as AgentAdapter;
+  const env = makeEnv({ workerEnabled: false, presetsDir, adapters: { undeclared } });
+  try {
+    // The PRESET path: resolvePreset's own check fires with the reason-specific wording.
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'undeclared', preset: { id: 'modeled-2' } }),
+      /perRunModel: undeclared/,
+    );
+    assert.equal(env.runs.list({ ownerId: 'alice', limit: 10 }).runs.length, 0, 'no Run row written');
+  } finally {
+    env.close();
+  }
+});
+
+test('model: retry preserves the parent\'s recorded source (preset stays preset, caller stays caller) (#832 r1)', () => {
+  const presetsDir = tempDir('mercury-presets-832c-');
+  const dir = join(presetsDir, 'modeled-3');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'preset.json'), JSON.stringify({
+    schemaVersion: 1, id: 'modeled-3', version: '1.0.0',
+    description: 'preset with a model default', role: 'Modeled role',
+    agent: { model: 'preset-model' },
+  }));
+  writeFileSync(join(dir, 'INSTRUCTION.md'), 'MODELED INSTRUCTION');
+  const env = makeEnv({ workerEnabled: false, presetsDir, fakeScript: [{ fail: true }] });
+  try {
+    // Preset-sourced parent: the retry event must still say 'preset'.
+    const parent = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', preset: { id: 'modeled-3' } });
+    env.runService.cancel(parent.id, 'alice', false);
+    const retried = env.runService.retry(parent.id, 'alice', false);
+    const ev = env.events.list(retried.id).find((e) => e.type === 'run.model_resolved');
+    assert.ok(ev, 'the retry records the model');
+    assert.deepEqual(ev!.payload, { model: 'preset-model', source: 'preset' });
+
+    // Caller-sourced parent stays 'caller'.
+    const parent2 = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: 'caller-model' });
+    env.runService.cancel(parent2.id, 'alice', false);
+    const retried2 = env.runService.retry(parent2.id, 'alice', false);
+    const ev2 = env.events.list(retried2.id).find((e) => e.type === 'run.model_resolved');
+    assert.deepEqual(ev2!.payload, { model: 'caller-model', source: 'caller' });
+  } finally {
+    env.close();
+  }
+});
+
+test('model: a modelRequired preset refuses a conflicting caller model through the service (#832 r1)', () => {
+  const presetsDir = tempDir('mercury-presets-832d-');
+  const dir = join(presetsDir, 'required-model');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'preset.json'), JSON.stringify({
+    schemaVersion: 1, id: 'required-model', version: '1.0.0',
+    description: 'preset requiring its model', role: 'Required-model role',
+    agent: { model: 'the-only-model', modelRequired: true },
+  }));
+  writeFileSync(join(dir, 'INSTRUCTION.md'), 'REQUIRED-MODEL INSTRUCTION');
+  const env = makeEnv({ workerEnabled: false, presetsDir });
+  try {
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', preset: { id: 'required-model' }, model: 'caller-model' }),
+      /preset requires model "the-only-model"; caller asked for "caller-model"/,
+    );
+    assert.equal(env.runs.list({ ownerId: 'alice', limit: 10 }).runs.length, 0, 'no Run row written');
   } finally {
     env.close();
   }
