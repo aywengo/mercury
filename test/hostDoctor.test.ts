@@ -23,7 +23,9 @@ import {
   lanAddresses,
   runHostDoctor,
   schemeFor,
+  checkLaya,
 } from '../src/host/doctor.ts';
+import { startFakeLaya, validPick, type FakeLaya } from './support/fakeLaya.ts';
 import type { NetworkInterfaceInfo } from 'node:os';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -503,4 +505,175 @@ test('host doctor reads mercury.env for port and harnesses', async () => {
   assert.equal(code, 1);
   const parsed = JSON.parse(stdout) as { smoke: Array<{ harness: string }> };
   assert.deepEqual(parsed.smoke.map((s) => s.harness), ['primeagent']);
+});
+
+
+// ---------- the Laya probe line (#830) ----------
+
+const LAYA_FAKES: FakeLaya[] = [];
+
+async function layaFake(script: Parameters<typeof startFakeLaya>[0], apiKey = 'laya-key'): Promise<FakeLaya> {
+  const f = await startFakeLaya(script, { apiKey });
+  LAYA_FAKES.push(f);
+  return f;
+}
+
+function doctorEnvFile(extra: string): { cfg: string; cleanup: () => void } {
+  const dir = tempDir('doctor-laya-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=1\n${extra}`);
+  return { cfg, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test('checkLaya: ok probe reports checkpoint + latency (#830)', async () => {
+  const f = await layaFake([{ json: validPick(['probe']) }]);
+  try {
+    const r = await checkLaya(f.url, 'laya-key', 2000);
+    assert.equal(r.ok, true);
+    assert.match(r.detail, /checkpoint english/);
+    assert.equal(r.checkpoint, 'english');
+    assert.ok(typeof r.latencyMs === 'number');
+    assert.equal(f.received.length, 1, 'exactly ONE probe question');
+    const body = f.received[0]!.body as { questions: Record<string, { criteria: Record<string, string> }> };
+    const q = body.questions['mercury-dispatch'];
+    assert.deepEqual(Object.keys(q.criteria), ['probe'], 'the fixed probe option is the only criterion');
+    assert.equal(f.received[0]!.headers.authorization, 'Bearer laya-key', 'the credentials-file key is sent as Bearer');
+  } finally {
+    await f.close();
+  }
+});
+
+test('checkLaya: 401 names the auth failure, timeout names unreachable (#830)', async () => {
+  const bad = await layaFake([{ status: 401, json: { error: 'nope' } }]);
+  try {
+    const r = await checkLaya(bad.url, 'wrong-key', 2000);
+    assert.equal(r.ok, false);
+    assert.match(r.detail, /auth failed \(401\)/);
+  } finally {
+    await bad.close();
+  }
+  const slow = await layaFake([{ delayMs: 5000 }]);
+  try {
+    const r = await checkLaya(slow.url, 'laya-key', 80);
+    assert.equal(r.ok, false);
+    assert.match(r.detail, /unreachable/);
+  } finally {
+    await slow.close();
+  }
+});
+
+test('runHostDoctor: MERCURY_LAYA_URL set → laya line; unset → NO laya line at all (#830)', async () => {
+  const m = await mockServer();
+  try {
+    // Unset: no laya line, no laya in JSON (absence is the default, not a warning).
+    const dir0 = tempDir('doctor-laya-off-');
+    const cfg0 = join(dir0, 'cfg');
+    mkdirSync(join(cfg0, 'mercury'), { recursive: true });
+    writeFileSync(join(cfg0, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=primeagent\nMERCURY_ADMIN_TOKEN=tok-laya-off\n`);
+    try {
+      const out: string[] = [];
+      const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg0 } as NodeJS.ProcessEnv);
+      assert.equal(code, 0);
+      assert.ok(!out.join('').includes('laya:'), 'unset must print no laya line');
+      const jout: string[] = [];
+      await runHostDoctor(['--json'], { out: (s) => jout.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg0 } as NodeJS.ProcessEnv);
+      const parsed0 = JSON.parse(jout.join('')) as { laya?: unknown };
+      assert.equal(parsed0.laya, undefined, 'unset must leave laya absent from --json');
+    } finally {
+      rmSync(dir0, { recursive: true, force: true });
+    }
+    // Set + healthy: PASS line.
+    const f = await layaFake([{ json: validPick(['probe']) }]);
+    const dir1 = tempDir('doctor-laya-on-');
+    const cfg1 = join(dir1, 'cfg');
+    mkdirSync(join(cfg1, 'mercury'), { recursive: true });
+    const credDir = join(cfg1, 'mercury');
+    writeFileSync(join(credDir, 'bot-credentials.json'), JSON.stringify({ laya: { api: 'laya-key' } }), { mode: 0o600 });
+    writeFileSync(join(credDir, 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=primeagent\nMERCURY_ADMIN_TOKEN=tok-laya-on\nMERCURY_LAYA_URL=${f.url}\n`);
+    try {
+      const out: string[] = [];
+      const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg1 } as NodeJS.ProcessEnv);
+      assert.equal(code, 0, 'healthy laya must not fail the doctor');
+      assert.match(out.join(''), /laya: PASS — ok, checkpoint english/);
+      assert.match(out.join(''), /ms\)/, 'the one-question latency is on the line');
+    } finally {
+      await f.close();
+      rmSync(dir1, { recursive: true, force: true });
+    }
+  } finally {
+    await m.close();
+  }
+});
+
+test('runHostDoctor: invalid MERCURY_LAYA_TIMEOUT_MS is a named failure, not a silent default (#839 r1)', async () => {
+  const f = await layaFake([{ json: validPick(['probe']) }]);
+  const dir = tempDir('doctor-laya-tmo-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'laya-key' } }), { mode: 0o600 });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), 'MERCURY_PORT=1\n');
+  try {
+  // -1 (immediate timer) and 2147483648 (Node converts >2^31-1 to 1ms) are both named failures;
+  // the sidecar is never probed.
+  for (const bad of ['-1', '2147483648']) {
+    writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=1\nMERCURY_LAYA_URL=${f.url}\nMERCURY_LAYA_TIMEOUT_MS=${bad}\n`);
+    const out: string[] = [];
+    await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    assert.match(out.join(''), new RegExp(`laya: FAIL — invalid configuration: MERCURY_LAYA_TIMEOUT_MS.*got '${bad}'`), `timeout=${bad}`);
+    assert.ok(!/laya:.*unreachable/.test(out.join('')), `the sidecar must not be probed with timeout=${bad}`);
+  }
+  assert.equal(f.received.length, 0, 'no request leaves with an invalid timeout');
+  // The boundary itself is accepted: 2147483647 probes normally.
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=1\nMERCURY_LAYA_URL=${f.url}\nMERCURY_LAYA_TIMEOUT_MS=2147483647\n`);
+  const out2: string[] = [];
+  const code2 = await runHostDoctor([], { out: (s) => out2.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+  assert.match(out2.join(''), /laya: PASS/);
+  assert.equal(f.received.length, 1, 'the boundary value reaches the sidecar');
+  } finally {
+    await f.close();
+  }
+});
+
+test('runHostDoctor: a malformed credentials file never leaks token text into the laya line (#839 r1)', async () => {
+  const f = await layaFake([{ json: validPick(['probe']) }]);
+  const dir = tempDir('doctor-laya-leak-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  // Unquoted value whose excerpt would carry the secret if the raw parse error were printed
+  // (Node quotes ~26 chars around the unexpected token).
+  writeFileSync(join(cfg, 'mercury', 'bot-credentials.json'), '{"laya": {"api": sk-9f88-tok}}', { mode: 0o600 });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_LAYA_URL=${f.url}\n`);
+  try {
+    const out: string[] = [];
+    await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    assert.match(out.join(''), /laya: FAIL — auth cannot be checked: .*not valid JSON/);
+    assert.ok(!out.join('').includes('sk-9f88-tok'), 'the token excerpt must never reach the report');
+    assert.ok(!out.join('').includes('9f88'), 'not even a token fragment may reach the report');
+  } finally {
+    await f.close();
+  }
+});
+
+test('runHostDoctor: a set-but-broken laya sidecar FAILS the doctor with the reason named (#830)', async () => {
+  const m = await mockServer();
+  try {
+    const bad = await layaFake([{ status: 401, json: { error: 'nope' } }]);
+    const dir = tempDir('doctor-laya-bad-');
+    const cfg = join(dir, 'cfg');
+    mkdirSync(join(cfg, 'mercury'), { recursive: true });
+    writeFileSync(join(cfg, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'not-the-key' } }), { mode: 0o600 });
+    writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=primeagent\nMERCURY_LAYA_URL=${bad.url}\n`);
+    try {
+      const out: string[] = [];
+      const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+      assert.equal(code, 1, 'a configured sidecar that fails auth is a doctor failure');
+      assert.match(out.join(''), /laya: FAIL — auth failed \(401\)/);
+    } finally {
+      await bad.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    await m.close();
+  }
 });

@@ -54,7 +54,11 @@ export function readBotCredentials(alias: string, env: NodeJS.ProcessEnv = proce
   try {
     raw = JSON.parse(readFileSync(path, 'utf8'));
   } catch (err) {
-    throw new Error(`${path}: not valid JSON: ${(err as Error).message}`);
+    // The parse error carries a source excerpt (Node quotes the offending input); with a token
+    // near the malformation that excerpt would leak the secret through any caller that prints
+    // the message (the doctor's laya line, bot startup). Name the file and the failure, never
+    // the excerpt.
+    throw new Error(`${path}: not valid JSON (${(err as Error).name ?? 'SyntaxError'})`);
   }
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error(`${path}: must be a JSON object keyed by bot alias`);

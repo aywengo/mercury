@@ -87,6 +87,10 @@ export function layaNodeTransport(): LayaTransport {
           reject({ reason: 'over_cap', detail: `response exceeded ${req.maxResponseBytes} bytes` });
           return;
         }
+        // The body is complete; drop the socket instead of idling until the (possibly very
+        // long) deadline timer fires - a huge configured timeout must not hold the socket,
+        // the event loop, or the process open.
+        r.destroy();
         resolve({ status, body: Buffer.concat(chunks) });
       });
       res.on('error', () => {

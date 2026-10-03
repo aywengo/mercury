@@ -6,6 +6,8 @@
  *   1. **healthz** — the running host answers GET /healthz with ok:true and a version.
  *   2. **Smoke Run** — one Run per enabled harness (MERCURY_HARNESSES) using the real
  *      binary, created through the API and waited to a terminal state.
+ *   3. **Laya probe** (#830) — only when MERCURY_LAYA_URL is set: one fixed question through
+ *      the real client (auth, deadline, validation included). Unset → no line at all.
  *
  * (There is no Fleet check: Fleet is pull, not push — issue #645. The host never
  * contacts Fleet, so registration is verified from the Fleet side.)
@@ -27,6 +29,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
 import { join } from 'node:path';
+import { LayaClient } from '../laya/client.ts';
+import { readBotCredentials } from './bots/credentials.ts';
 
 /** Load mercury.env into a record (simple KEY=VALUE parser, no shell semantics). */
 export function loadEnvFile(path: string): Record<string, string> {
@@ -76,6 +80,9 @@ export interface DoctorResult {
   allSmokeSkipped: boolean;
   /** True when MERCURY_HARNESSES is set but empty/blank: nothing was configured to verify (#654). */
   noHarnesses: boolean;
+  /** Laya sidecar probe (#830, Laya design §5.3). Absent when MERCURY_LAYA_URL is unset —
+   *  absence is the default, not a warning. */
+  laya?: { ok: boolean; detail: string; latencyMs?: number; checkpoint?: string };
 }
 
 /** Bounded GET with a timeout. Returns { status, body } or an error detail. */
@@ -223,6 +230,34 @@ export function bindHealthzTarget(
 /** Run the doctor. Returns the process exit code. `opts.interfaces` injects an
  *  os.networkInterfaces() snapshot (tests only) so the 0.0.0.0 dial target is deterministic
  *  without binding or probing a real LAN socket (#674). */
+/** One fixed probe question, once, through the real client (#830): the doctor measures the same
+ *  call a dispatch would make — auth, validation and the configured deadline included. The probe
+ *  state is constant, so the report line is reproducible and carries no operator data. */
+export async function checkLaya(baseUrl: string, apiKey: string | undefined, timeoutMs: number): Promise<{ ok: boolean; detail: string; latencyMs?: number; checkpoint?: string }> {
+  const client = new LayaClient({
+    baseUrl,
+    // A missing key still probes: the sidecar's 401 is the honest "auth failure named" answer
+    // (it also detects a sidecar started WITHOUT a key while Mercury has one configured).
+    apiKey: apiKey ?? '',
+    timeoutMs,
+    secrets: apiKey ? [apiKey] : [],
+  });
+  const result = await client.ask(
+    { options: [{ key: 'probe', describe: 'doctor probe' }] },
+    { task: 'mercury host doctor probe', template: 'doctor', repository: '', skills: [] },
+  );
+  if (result.ok) {
+    return { ok: true, detail: `ok, checkpoint ${result.checkpoint}, 1 question answered`, latencyMs: Math.round(result.latencyMs), checkpoint: result.checkpoint };
+  }
+  if (result.reason === 'http_status' && (result.detail ?? '').includes('401')) {
+    return { ok: false, detail: `auth failed (401): the sidecar rejected the key${apiKey ? " from the 'laya' entry in bot-credentials.json" : ' (no key configured — expected when the sidecar has LAYA_API_KEY set)'}`, latencyMs: Math.round(result.latencyMs) };
+  }
+  if (result.reason === 'unreachable' || result.reason === 'timeout') {
+    return { ok: false, detail: `unreachable: ${result.detail ?? 'no detail'}`, latencyMs: Math.round(result.latencyMs) };
+  }
+  return { ok: false, detail: `${result.reason}: ${result.detail ?? 'no detail'}`, latencyMs: Math.round(result.latencyMs) };
+}
+
 export async function runHostDoctor(
   args: string[],
   io: { out: (s: string) => void; err: (s: string) => void } = {
@@ -277,11 +312,50 @@ export async function runHostDoctor(
   }
 
   const anySkipped = smoke.length > 0 && smoke.every((s) => s.skipped);
-  const result: DoctorResult = { healthz, bindHealthz, smoke, allSmokeSkipped: anySkipped, noHarnesses };
+  // Laya sidecar probe (#830): only when configured. Unset → no line at all (absence is the
+  // default, not a warning). The key lives in the same 0600 credentials file (design §5.1/§10);
+  // a missing or unreadable entry is a NAMED failure, never a token leak (the reader redacts
+  // values from errors).
+  const layaUrl = vars.MERCURY_LAYA_URL;
+  let laya: DoctorResult['laya'];
+  if (layaUrl !== undefined && layaUrl.trim() !== '') {
+    let apiKey: string | undefined;
+    let keyDetail: string | undefined;
+    try {
+      apiKey = readBotCredentials('laya', env).api;
+    } catch (err) {
+      keyDetail = (err as Error).message;
+    }
+    const rawTimeout = vars.MERCURY_LAYA_TIMEOUT_MS;
+    let timeoutMs = 500;
+    if (rawTimeout !== undefined && rawTimeout.trim() !== '') {
+      const parsed = Number(rawTimeout);
+      // A non-positive/non-finite deadline would make Node schedule the timer immediately (or
+      // never): a healthy sidecar would read as unreachable. Named failure, not a silent default.
+      // Node converts setTimeout delays above 2^31-1 ms to 1ms - a healthy sidecar would read
+      // as unreachable near-instantly. Cap at the timer limit; the client's per-call deadline
+      // uses the same bound.
+      if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0 || parsed > 2147483647) {
+        laya = { ok: false, detail: `invalid configuration: MERCURY_LAYA_TIMEOUT_MS must be a positive integer <= 2147483647, got '${rawTimeout}'` };
+      } else {
+        timeoutMs = parsed;
+      }
+    }
+    if (apiKey === undefined && laya === undefined) {
+      laya = { ok: false, detail: `auth cannot be checked: ${keyDetail ?? 'no laya credentials'}` };
+    }
+    if (laya === undefined) {
+      laya = await checkLaya(layaUrl.trim(), apiKey, timeoutMs);
+    }
+  }
+  const result: DoctorResult = { healthz, bindHealthz, smoke, allSmokeSkipped: anySkipped, noHarnesses, ...(laya !== undefined ? { laya } : {}) };
   if (json) {
     io.out(JSON.stringify(result, null, 2) + '\n');
   } else {
     io.out(`healthz: ${healthz.ok ? 'PASS' : 'FAIL'} — ${healthz.detail}\n`);
+    if (laya) {
+      io.out(`laya: ${laya.ok ? 'PASS' : 'FAIL'} — ${laya.detail}${laya.latencyMs !== undefined ? ` (${laya.latencyMs}ms)` : ''}\n`);
+    }
     if (bindHealthz) {
       const dialedPart = bindHealthz.dialed ? `, dialed ${bindHealthz.dialed}` : '';
       const verdict = bindHealthz.skipped ? 'SKIP' : bindHealthz.ok ? 'PASS' : 'FAIL';
@@ -313,6 +387,6 @@ export async function runHostDoctor(
   // skipped" verifies nothing while reading as success. Partial skips still pass.
   // The same class for #654: an empty MERCURY_HARNESSES verifies nothing by
   // configuration. It fails unless --allow-no-harnesses says the host runs none.
-  const allOk = healthz.ok && (bindHealthz ? bindHealthz.ok : true) && smoke.every((s) => s.ok || s.skipped) && !anySkipped && !(noHarnesses && !allowNoHarnesses);
+  const allOk = healthz.ok && (bindHealthz ? bindHealthz.ok : true) && smoke.every((s) => s.ok || s.skipped) && !anySkipped && !(noHarnesses && !allowNoHarnesses) && (laya === undefined || laya.ok);
   return allOk ? 0 : 1;
 }
