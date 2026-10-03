@@ -123,7 +123,13 @@ export class WorkflowRegistry {
   }
 
   private directoryIds(): string[] {
-    if (!exists(this.rootDir)) return [];
+    try {
+      if (!exists(this.rootDir)) return [];
+    } catch (err) {
+      // The root must be readable for any listing to make sense; a non-ENOENT stat failure
+      // is an environment problem (round-2 review, #812). Surface it, never an empty list.
+      throw new WorkflowLoadError('(registry root)', err, this.rootDir);
+    }
     return readdirSync(this.rootDir, { withFileTypes: true })
       .filter((d) => d.isDirectory())
       .map((d) => d.name)
@@ -158,7 +164,17 @@ export class WorkflowRegistry {
     assertNoSymlinkBelow(this.rootDir, dir);
     const manifestPath = join(dir, 'workflow.json');
     assertNoSymlinkBelow(this.rootDir, manifestPath);
-    if (!exists(manifestPath)) {
+    let manifestPresent: boolean;
+    try {
+      manifestPresent = exists(manifestPath);
+    } catch (err) {
+      // A stat failure other than ENOENT (EACCES on a parent, EIO) is a load problem, not a
+      // stray-directory signal: report it like every other read failure (round-2 review,
+      // #812 - exists() used to collapse it to absence, silently skipping the template in
+      // listAll() and misreporting it as not-found in get()).
+      throw new WorkflowLoadError(id, err, this.rootDir);
+    }
+    if (!manifestPresent) {
       // A directory without workflow.json is a STRAY directory, not a template: listing
       // skips it and get() reports not-found (the preset registry's stray-directory rule).
       throw new NotFoundError(`Workflow not found: ${JSON.stringify(id)}`);
@@ -234,7 +250,14 @@ export class WorkflowRegistry {
 
     const m = manifest as import('./types.ts').WorkflowTemplateManifest;
     const files: Record<string, string> = {};
-    collectFiles(dir, dir, files);
+    try {
+      collectFiles(dir, dir, files);
+    } catch (err) {
+      // An unreadable extra file (EACCES on notes.md, EIO) must not escape get() as a raw
+      // Node error embedding absolute host paths: listAll() sanitizes this via its catch,
+      // get() needs the same guarantee (round-2 review, #812).
+      throw new WorkflowLoadError(id, err, this.rootDir);
+    }
     // The files map keys are workflow-RELATIVE POSIX paths (the preset registry's rule).
     // path.relative anchors a RELATIVE `to` at process.cwd(), not at `from` (all keys are
     // absolute here today, but the BOM restore below can only ever add 'workflow.json' --
@@ -285,7 +308,7 @@ export class WorkflowRegistry {
  */
 class WorkflowLoadError extends Error {
   constructor(id: string, err: unknown, rootDir: string) {
-    super(`workflow.json could not be read: ${sanitizeLoadError(err, rootDir)}`);
+    super(`workflow ${JSON.stringify(id)} could not be read: ${sanitizeLoadError(err, rootDir)}`);
     this.name = 'WorkflowLoadError';
   }
 }
@@ -324,7 +347,14 @@ function exists(p: string): boolean {
     // One stat, two questions (the preset registry's single-stat rule).
     const st = statSync(p);
     return st.isFile() || st.isDirectory();
-  } catch {
-    return false;
+  } catch (err) {
+    // Only ENOENT means absence. A stat failure like EACCES on a parent directory is an
+    // environment problem, not a stray-directory signal: treating it as absence made
+    // listAll() silently skip a real template and get() report not-found instead of a
+    // load failure (round-2 review, #812). Rethrow; the caller's load-error path reports
+    // it as a sanitized WORKFLOW_LOAD_FAILED finding.
+    const code = (err as NodeJS.ErrnoException | null)?.code;
+    if (code === 'ENOENT') return false;
+    throw err;
   }
 }

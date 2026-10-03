@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { chmodSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from './helpers.ts';
 import { WorkflowRegistry, WorkflowValidationFailure, builtinWorkflowsDir } from '../src/workflows/workflowRegistry.ts';
@@ -544,5 +544,51 @@ test('WorkflowValidationFailure carries its findings for callers that branch on 
   } catch (err) {
     assert.ok(err instanceof WorkflowValidationFailure);
     assert.deepEqual((err as WorkflowValidationFailure).findings.map((f) => f.code), ['WORKFLOW_MODE_STAGED']);
+  }
+});
+
+// -- Round-2 review regressions (#812): stat/read failures must surface as sanitized load
+// failures, never silently collapse to absence or leak raw Node error text.
+
+test('a manifest under an unsearchable directory reports WORKFLOW_LOAD_FAILED, not stray/not-found', () => {
+  const root = tempDir('mercury-workflows-');
+  const dir = join(root, 'locked');
+  makeWorkflow(root, 'locked', validManifest('locked'));
+  const reg = new WorkflowRegistry(root, { presets: makePresetRegistry(root) });
+  // statSync(workflow.json) inside a 0o000 directory fails EACCES for a non-root process:
+  // absence semantics must not swallow it (round-2 review, #812).
+  chmodSync(dir, 0o000);
+  try {
+    const all = reg.listAll();
+    assert.equal(all.workflows.length, 0);
+    assert.deepEqual(codes(all.invalid[0]?.validation ?? []), ['WORKFLOW_LOAD_FAILED']);
+    assert.ok(!/\//.test(all.invalid[0].validation[0].message), 'no absolute path may leak');
+    assert.throws(() => reg.get('locked'), (err: unknown) => {
+      const e = err as { name?: string; message?: string };
+      return e.name === 'WorkflowLoadError' || /could not be read/.test(e.message ?? '');
+    });
+  } finally {
+    chmodSync(dir, 0o755);
+  }
+});
+
+test('an unreadable extra file fails get() with a sanitized message, no absolute paths', () => {
+  const root = tempDir('mercury-workflows-');
+  makeWorkflow(root, 'locked2', validManifest('locked2'));
+  const notes = join(root, 'locked2', 'notes.md');
+  writeFileSync(notes, 'internal notes');
+  chmodSync(notes, 0o000);
+  const reg = new WorkflowRegistry(root, { presets: makePresetRegistry(root) });
+  try {
+    const all = reg.listAll();
+    assert.deepEqual(codes(all.invalid[0]?.validation ?? []), ['WORKFLOW_LOAD_FAILED']);
+    const msg = all.invalid[0].validation[0].message;
+    assert.ok(!msg.includes(root), 'listAll must not leak the registry root path');
+    assert.throws(() => reg.get('locked2'), (err: unknown) => {
+      const e = err as { name?: string; message?: string };
+      return e.name === 'WorkflowLoadError' && !(e.message ?? '').includes(root);
+    }, 'get() must sanitize the same way listAll() does');
+  } finally {
+    chmodSync(notes, 0o644);
   }
 });
