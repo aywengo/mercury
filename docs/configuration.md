@@ -413,6 +413,15 @@ observer token once the owner's token is gone. Without `--yes` it prints the
 plan and writes nothing. `--reassign-runs <owner>` is refused until the
 owner-transfer API exists (#760).
 
+## Laya sidecar
+
+`MERCURY_LAYA_URL` is the gate for the Laya sidecar (docs/laya-integration-design.md §5.3): unset
+means the host has no sidecar and selection stays deterministic. The wizard
+(`mercury host setup`) writes it only when the operator opts in; the value is always a loopback
+URL (`http://127.0.0.1:8302`). The sidecar credential is never in this file — it lives in the
+0600 `bot-credentials.json` under the `laya` entry, and `mercury host doctor` probes the sidecar
+when the URL is set (#830). `MERCURY_LAYA_TIMEOUT_MS` (default 500) bounds each selection call.
+
 ## Host installer
 
 Variables written by `mercury host setup` (docs/host-installer.md M3). The wizard

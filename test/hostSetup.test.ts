@@ -30,6 +30,17 @@ import {
   KNOWN_HARNESSES,
   type HostSetupAnswers,
 } from '../src/host/setup.ts';
+import {
+  DEFAULT_PYTHON_CANDIDATES,
+  detectPython,
+  ensureLayaCredentials,
+  LAYA_SERVE_PIN,
+  layaStepActions,
+  parsePythonVersion,
+  planLayaSidecar,
+  renderLayaLaunchdPlist,
+  renderLayaSystemdUnit,
+} from '../src/host/layaSidecar.ts';
 import type { HarnessProbeResult } from '../src/host/probe.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -67,6 +78,7 @@ function answers(over: Partial<HostSetupAnswers> = {}): HostSetupAnswers {
     atlasProject: '',
     bindHost: '',
     harnesses: ['primeagent', 'hermes'],
+    layaEnabled: false,
     ...over,
   };
 }
@@ -1035,4 +1047,198 @@ test('re-run on a configured host refuses to overwrite without --yes (M5 gate)',
   // The file is untouched.
   const content = readFileSync(join(cfg, 'mercury', 'mercury.env'), 'utf8');
   assert.ok(content.includes('MERCURY_ATLAS_HOST_ID=old'));
+});
+
+
+// ---------- the opt-in Laya sidecar step (#831) ----------
+
+function okRun(argv: string[]): { ok: boolean; stdout: string; stderr: string } {
+  if (argv[0] === 'uv' && argv[1] === 'python') return { ok: true, stdout: '/Users/x/.uv/py3.10/bin/python3', stderr: '' };
+  if (argv[1] === '-V') return { ok: true, stdout: 'Python 3.10.12', stderr: '' };
+  return { ok: true, stdout: '', stderr: '' };
+}
+
+test('detectPython: uv-preferred, >= 3.10 ok (#831)', () => {
+  const det = detectPython(okRun, DEFAULT_PYTHON_CANDIDATES);
+  assert.equal(det.ok, true);
+  assert.match(det.bin ?? '', /uv run --python 3.10/, 'uv-managed interpreter wins');
+});
+
+test('detectPython: macOS system 3.9.6 is refused WITH the reason (#831)', () => {
+  const run = (argv: string[]) =>
+    argv[0] === 'uv'
+      ? { ok: false, stdout: '', stderr: 'no 3.10' }
+      : { ok: true, stdout: 'Python 3.9.6', stderr: '' };
+  const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES, 'darwin');
+  assert.equal(det.ok, false);
+  assert.match(det.reason ?? '', /system Python on macOS is too old \(Python 3\.9\.6\)/);
+  assert.match(det.reason ?? '', /need >= 3\.10/);
+});
+
+test('detectPython: a non-darwin 3.9 gets the plain too-old reason (#831)', () => {
+  const run = (argv: string[]) => ({ ok: true, stdout: 'Python 3.9.1', stderr: '' });
+  const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES.slice(1), 'linux');
+  assert.equal(det.ok, false);
+  assert.match(det.reason ?? '', /python too old/);
+  assert.ok(!/macOS/.test(det.reason ?? ''), 'the macOS wording is platform-specific');
+});
+
+test('parsePythonVersion: 3.9.6 / 3.10 / 3.12.4 (#831)', () => {
+  assert.equal(parsePythonVersion('Python 3.9.6'), 96);
+  assert.equal(parsePythonVersion('Python 3.10.0'), 100);
+  assert.equal(parsePythonVersion('Python 3.12.4'), 124);
+  assert.equal(parsePythonVersion('no version here'), null);
+});
+
+test('planLayaSidecar: user-scoped venv under the data dir + user-scoped unit (#831)', () => {
+  const plan = planLayaSidecar({ dataDir: '/data', pythonBin: 'python3', platform: 'darwin', env: { HOME: '/home/x' } });
+  assert.equal(plan.venvDir, '/data/laya-venv');
+  assert.equal(plan.envUrl, 'http://127.0.0.1:8302');
+  assert.match(plan.unitPath, /Library\/LaunchAgents\/com\.mercury\.laya\.plist$/);
+  const linux = planLayaSidecar({ dataDir: '/data', pythonBin: 'python3', platform: 'linux', env: { XDG_CONFIG_HOME: '/cfg' } });
+  assert.match(linux.unitPath, /systemd\/user\/com\.mercury\.laya\.service$/);
+});
+
+test('renderLayaLaunchdPlist / renderLayaSystemdUnit: loopback, preload, english, key; deterministic (#831)', () => {
+  const plan = planLayaSidecar({ dataDir: '/data', pythonBin: 'python3', platform: 'darwin', env: { HOME: '/home/x' } });
+  const plist = renderLayaLaunchdPlist(plan, 'key-1');
+  assert.ok(plist.includes('<key>LAYA_HOST</key><string>127.0.0.1</string>'), 'loopback bind');
+  assert.ok(plist.includes('<key>LAYA_PRELOAD</key><string>1</string>'));
+  assert.ok(plist.includes('<key>LAYA_MODELS</key><string>english</string>'));
+  assert.ok(plist.includes('<string>key-1</string>'));
+  assert.equal(renderLayaLaunchdPlist(plan, 'key-1'), plist, 'same plan → same bytes');
+  const linux = planLayaSidecar({ dataDir: '/data', pythonBin: 'python3', platform: 'linux', env: { XDG_CONFIG_HOME: '/cfg' } });
+  const unit = renderLayaSystemdUnit(linux, 'key-2');
+  assert.ok(unit.includes('Environment=LAYA_HOST=127.0.0.1'));
+  assert.ok(unit.includes(`Environment=LAYA_PORT=${linux.port}`));
+  assert.ok(unit.includes('Environment=LAYA_PRELOAD=1'));
+  assert.ok(unit.includes('Environment=LAYA_MODELS=english'));
+  assert.equal(renderLayaSystemdUnit(linux, 'key-2'), unit, 'same plan → same bytes');
+  assert.ok(layaStepActions(plan).some((a) => a.includes(`laya[serve]==${LAYA_SERVE_PIN}`)), 'the pinned version is in the plan');
+});
+
+test('ensureLayaCredentials: generates when absent, PRESERVES an existing key (#831)', () => {
+  const dir = tempDir('laya-creds-');
+  const env = { XDG_CONFIG_HOME: dir };
+  const first = ensureLayaCredentials(env);
+  assert.equal(first.generated, true);
+  assert.match(first.key, /^[0-9a-f]{64}$/);
+  const file = readFileSync(join(dir, 'mercury', 'bot-credentials.json'), 'utf8');
+  assert.equal((statSync(join(dir, 'mercury', 'bot-credentials.json')).mode & 0o777).toString(8), '600', '0600 on create');
+  const second = ensureLayaCredentials(env);
+  assert.equal(second.generated, false, 'a re-run preserves the key');
+  assert.equal(second.key, first.key);
+  // An existing entry with a DIFFERENT shape still counts as absent (api missing) and is
+  // filled in without touching the rest of the file.
+  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ maint: { api: 'tok-x' } }), { mode: 0o600 });
+  const third = ensureLayaCredentials(env);
+  assert.equal(third.generated, true);
+  const raw = JSON.parse(readFileSync(join(dir, 'mercury', 'bot-credentials.json'), 'utf8')) as { maint?: unknown };
+  assert.ok(raw.maint, 'the pre-existing alias entry survives');
+});
+
+test('runHostSetup: Laya OPT-OUT writes no MERCURY_LAYA_URL and nothing else changes (#831)', async () => {
+  const dir = tempDir('setup-laya-off-');
+  const out: string[] = [];
+  const code = await runHostSetup([], {
+    out: (s) => out.push(s),
+    err: () => {},
+    question: async () => '',
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0);
+  const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
+  assert.ok(!file.includes('MERCURY_LAYA_URL'), 'opt-out must not write the env key');
+  assert.ok(!existsSync(join(dir, 'mercury', 'bot-credentials.json')), 'opt-out must not write credentials');
+});
+
+test('runHostSetup: Laya OPT-IN writes MERCURY_LAYA_URL + credentials + unit (scripted exec) (#831)', async () => {
+  const dir = tempDir('setup-laya-on-');
+  const sidecarCalls: string[][] = [];
+  const out: string[] = [];
+  let answersMode = false;
+  const code = await runHostSetup([], {
+    out: (s) => out.push(s),
+    err: () => {},
+    question: async (q) => {
+      // Answer '' to every question except the laya one (default no) — flip it to yes.
+      if (q.includes('Laya sidecar')) return 'yes';
+      return '';
+    },
+    sidecarRun: (argv) => {
+      sidecarCalls.push(argv);
+      return okRun(argv);
+    },
+    sidecarDataDir: join(dir, 'data'),
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0, `setup failed: ${out.join('')}`);
+  const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
+  assert.ok(file.includes('MERCURY_LAYA_URL=http://127.0.0.1:8302'), 'the opt-in writes the env key');
+  assert.ok(sidecarCalls.some((a) => a.join(' ').includes('venv')), 'uv venv ran');
+  assert.ok(sidecarCalls.some((a) => a.join(' ').includes(`laya[serve]==${LAYA_SERVE_PIN}`)), 'the pinned install ran');
+  assert.ok(existsSync(join(dir, 'mercury', 'bot-credentials.json')), 'credentials written');
+  const creds = JSON.parse(readFileSync(join(dir, 'mercury', 'bot-credentials.json'), 'utf8')) as { laya?: { api?: string } };
+  assert.match(creds.laya?.api ?? '', /^[0-9a-f]{64}$/);
+  assert.ok(out.join('').includes('mercury host doctor'), 'the wizard points at the doctor line');
+});
+
+test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
+  const dir = tempDir('setup-laya-rerun-');
+  // First run: opt-in (establishes the key).
+  await runHostSetup([], {
+    out: () => {},
+    err: () => {},
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarRun: okRun,
+    sidecarDataDir: join(dir, 'data'),
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  const credsPath = join(dir, 'mercury', 'bot-credentials.json');
+  const firstKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
+  // Second run: env now carries MERCURY_LAYA_URL (default yes), re-run with --yes.
+  const out: string[] = [];
+  const code = await runHostSetup(['--yes'], {
+    out: (s) => out.push(s),
+    err: () => {},
+    question: async () => '',
+    sidecarRun: okRun,
+    sidecarDataDir: join(dir, 'data'),
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_URL: 'http://127.0.0.1:8302' });
+  assert.equal(code, 0, `re-run failed: ${out.join('')}`);
+  const secondKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
+  assert.equal(secondKey, firstKey, 'the re-run must NOT rotate the sidecar key');
+});
+
+test('runHostSetup: laya interpreter refusal fails the step AFTER mercury.env is written (#831)', async () => {
+  const dir = tempDir('setup-laya-oldpy-');
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = await runHostSetup([], {
+    out: (s) => out.push(s),
+    err: (s) => err.push(s),
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarRun: (argv) => (argv[0] === 'uv' ? { ok: false, stdout: '', stderr: 'no' } : { ok: true, stdout: 'Python 3.9.6', stderr: '' }),
+    sidecarDataDir: join(dir, 'data'),
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  assert.equal(code, 1);
+  assert.match(err.join(''), /system Python on macOS is too old/);
+  const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
+  assert.ok(file.includes('MERCURY_ADMIN_TOKEN'), 'mercury.env itself is written before the step fails');
+  assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'no venv is created when the interpreter is refused');
+});
+
+test('runHostSetup --dry-run: laya plan printed, nothing executed (#831)', async () => {
+  const dir = tempDir('setup-laya-dry-');
+  const out: string[] = [];
+  let execCalls = 0;
+  const code = await runHostSetup(['--dry-run'], {
+    out: (s) => out.push(s),
+    err: () => {},
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarRun: (argv) => { execCalls += 1; return okRun(argv); },
+    sidecarDataDir: join(dir, 'data'),
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  assert.equal(code, 0);
+  const text = out.join('');
+  assert.match(text, /Laya sidecar \(opt-in\) would:/);
+  assert.match(text, new RegExp(`laya\\[serve\\]==${LAYA_SERVE_PIN}`));
+  assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'dry-run creates no venv');
 });
