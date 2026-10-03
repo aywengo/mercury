@@ -212,7 +212,7 @@ export function redactedErrorLine(failure: { error: string }): string {
  * 'test timed out after …ms' is NOT generic: a timeout often IS the reproducible signature.
  */
 const GENERIC_ERROR_RE =
-  /^'?test failed'?$|^\d+ subtests? failed$|^test did not finish before its parent and was cancelled$|^Promise resolution is still pending but the event loop has already resolved$/;
+  /^'?test failed'?$|^'?\d+ subtests? failed'?$|^'?test did not finish before its parent and was cancelled'?$|^'?Promise resolution is still pending but the event loop has already resolved'?$/;
 
 /** A stack frame line ("    at TestContext.<anonymous> (file:///…)"), not a message. */
 const STACK_FRAME_RE = /^\s*at\s|^\s+at\s/;

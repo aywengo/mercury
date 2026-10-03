@@ -1247,3 +1247,22 @@ test('redactedErrorLine redacts BEFORE normalizing: a numbered secret survives n
     resetRawRedactorForTests();
   }
 });
+
+test('quoted generic wrapper lines are recognized for every alternative (#811 r8)', () => {
+  for (const wrapper of [
+    "'test failed'",
+    "'2 subtests failed'",
+    "'test did not finish before its parent and was cancelled'",
+    "'Promise resolution is still pending but the event loop has already resolved'",
+  ]) {
+    const detail = [
+      '✖ failing tests:', '',
+      'test at e2e/x.test.ts:3:1',
+      '✖ cancelled-one (1.2ms)',
+      `  ${wrapper}`,
+    ].join('\n');
+    const failures = parseFailures(detail);
+    assert.equal(failures.length, 1, wrapper);
+    assert.equal(failures[0]!.error, '', `a quoted generic wrapper must not become the cause: ${wrapper}`);
+  }
+});
