@@ -135,14 +135,27 @@ export async function fingerprintOf(test: string, error: string): Promise<string
  * test names.
  */
 export function normalizeTestName(name: string, repoRoot: string = process.cwd()): string {
-  let out = name.replace(/\\/g, '/');
-  // A Mercury worktree prefix anywhere in the path: …/worktrees/run_<hex>/…
-  const wt = /(^|.*\/)(?:[A-Za-z]:\/)?[^\s]*\/worktrees\/run_[0-9a-f]+\//.exec(out);
-  if (wt) out = out.slice(wt[0].length);
   const root = repoRoot.replace(/\\/g, '/').replace(/\/+$/, '');
-  if (out.startsWith(`${root}/`)) out = out.slice(root.length + 1);
-  else if (out === root) out = '';
-  return out;
+  // A Mercury worktree prefix anywhere in the path: …/worktrees/run_<hex>/… Take everything
+  // after the LAST `worktrees/run_<hex>/` segment; the match is whitespace-tolerant (a home dir
+  // like '/Users/John Doe/worktrees/...' must still normalize, #822 r1).
+  const wtIdx = name.lastIndexOf('/worktrees/');
+  if (wtIdx !== -1) {
+    const after = name.slice(wtIdx + '/worktrees/'.length);
+    const m = /^run_[0-9a-f]+\/(.*)$/.exec(after);
+    if (m?.[1]) return m[1].replace(/\\/g, '/');
+  }
+  // Only recognized ABSOLUTE paths are rewritten: a root-contained path becomes repo-relative
+  // (backslashes convert for Windows-shaped paths). Anything else — a subtest name, a relative
+  // name, a name that merely CONTAINS a Windows path — passes through byte-identical, so its
+  // existing fingerprint is untouched (#822 r1: 'handles C:\\tmp\\x' must not become
+  // 'handles C:/tmp/x').
+  const looksAbsolute = /^\//.test(name) || /^[A-Za-z]:[\\/]/.test(name);
+  if (!looksAbsolute) return name;
+  const asForward = name.replace(/\\/g, '/');
+  if (asForward.startsWith(`${root}/`)) return asForward.slice(root.length + 1);
+  if (asForward === root) return '';
+  return name;
 }
 
 /** The hidden marker an issue carries in its body; searches match on it, not on prose. */

@@ -1283,6 +1283,13 @@ test('normalizeTestName: worktree paths become repo-relative; subtest names pass
   // Plain subtest names pass through unchanged (fingerprints stay byte-identical).
   assert.equal(normalizeTestName('a subtest name > nested', '/repo'), 'a subtest name > nested');
   assert.equal(normalizeTestName('e2e/knowledge.test.ts', '/repo'), 'e2e/knowledge.test.ts');
+  // A name that merely CONTAINS a Windows path passes through byte-identical (#822 r1).
+  assert.equal(normalizeTestName('handles C:\\tmp\\x', '/repo'), 'handles C:\\tmp\\x');
+  // Whitespace-tolerant worktree match: a home directory with a space still normalizes (#822 r1).
+  assert.equal(
+    normalizeTestName('/Users/John Doe/worktrees/run_1111111111111111/e2e/x.test.ts', '/somewhere/else'),
+    'e2e/x.test.ts',
+  );
 });
 
 test('acceptance 1: the same file-level failure in two different worktrees fingerprints identically', async () => {
