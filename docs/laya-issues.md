@@ -14,7 +14,7 @@ terms of them; the Status table maps them to GitHub numbers.
 | Doc | Issue | Blocked by | PR | Merge |
 | --- | --- | --- | --- | --- |
 | P1-1 | #823 | — | #832 | `fc8c7ae` |
-| P1-2 | #827 | #823 | | |
+| P1-2 | #827 | #823 | #834 | `f538770` |
 | P1-3 | #828 | #823 | | |
 | P1-4 | #829 | #823 | | |
 | P1-5 | #824 | — | #833 | `3f2edbc` |
