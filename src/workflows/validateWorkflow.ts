@@ -155,6 +155,14 @@ export function validateWorkflowTemplate(
         add('WORKFLOW_STAGE_PRESET', `${field}.preset`, 'preset must be an object with an id');
       } else {
         const p = preset as Record<string, unknown>;
+        // Closed shape like the manifest and stage objects above: a typo such as `versoin`
+        // must fail loudly, not silently downgrade the step to "any version" -- the very
+        // version pin the author wrote would be dropped (round-1 review, #812).
+        for (const key of Object.keys(p)) {
+          if (key !== 'id' && key !== 'version') {
+            add('WORKFLOW_STAGE_PRESET', `${field}.preset.${key}`, `unknown preset key: ${JSON.stringify(key)}`);
+          }
+        }
         if (p.version !== undefined && (typeof p.version !== 'string' || p.version.length === 0)) {
           add('WORKFLOW_STAGE_PRESET', `${field}.preset.version`, 'preset.version must be a non-empty string when given');
         }
@@ -195,16 +203,19 @@ export function validateWorkflowTemplate(
     }
   });
 
-  // maxStages: the explicit step bound. It must be an integer between the stage count and
-  // the system cap; a value below the stage count would render more steps than promised.
-  if (m.maxStages !== undefined) {
-    const ms = m.maxStages;
-    if (typeof ms !== 'number' || !Number.isInteger(ms) || ms < 1) {
-      add('WORKFLOW_MAX_STAGES', 'maxStages', 'maxStages must be a positive integer');
-    } else if (Array.isArray(stages) && ms < stages.length) {
+  // maxStages: the explicit step bound, checked UNCONDITIONALLY (omission is a finding, not
+  // an implied bound -- the field is required and the rendered step count must be stated,
+  // not guessed). It must be an integer between the stage count and the system cap; a value
+  // below the stage count would render more steps than promised.
+  const ms = m.maxStages;
+  if (typeof ms !== 'number' || !Number.isInteger(ms) || ms < 1) {
+    add('WORKFLOW_MAX_STAGES', 'maxStages', 'maxStages must be a positive integer');
+  } else {
+    if (Array.isArray(stages) && ms < stages.length) {
       add('WORKFLOW_MAX_STAGES_LOW', 'maxStages',
         `maxStages ${ms} is below the ${stages.length} declared stages`);
-    } else if (ms > WORKFLOW_STAGE_SYSTEM_CAP) {
+    }
+    if (ms > WORKFLOW_STAGE_SYSTEM_CAP) {
       add('WORKFLOW_MAX_STAGES_CAP', 'maxStages',
         `maxStages ${ms} exceeds the system cap of ${WORKFLOW_STAGE_SYSTEM_CAP}`);
     }

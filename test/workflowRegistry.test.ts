@@ -174,6 +174,28 @@ test('maxStages must be an integer between the stage count and the system cap', 
   assert.deepEqual(codes(ok.findings), []);
 });
 
+test('an omitted maxStages is a finding, not an implied bound (the field is required)', () => {
+  const v = validateWorkflowTemplate('w', { ...validManifest('w'), maxStages: undefined }, presetLookupAll());
+  assert.deepEqual(codes(v.findings), ['WORKFLOW_MAX_STAGES']);
+  // An explicitly null or non-integer maxStages stays the same code.
+  for (const bad of [null, '3', 3.5]) {
+    const v2 = validateWorkflowTemplate('w', { ...validManifest('w'), maxStages: bad }, presetLookupAll());
+    assert.ok(codes(v2.findings).includes('WORKFLOW_MAX_STAGES'), JSON.stringify(bad));
+  }
+  // The two bounded checks are independent (LOW from the stage count, CAP from the system
+  // cap), so a manifest violating both is possible only with >16 stages plus maxStages below
+  // that count -- e.g. 20 stages, maxStages 20 is over the cap; maxStages 3 is BOTH.
+  // With >16 stages the list itself is over the cap and maxStages 3 is below that list --
+  // both bound findings fire against the declared list, alongside the list-limit finding.
+  const manyStages = Array.from({ length: 20 }, (_, i) => ({ id: `s${i}`, task: 'x' }));
+  const both = validateWorkflowTemplate('w', {
+    ...validManifest('w', { stages: manyStages }), maxStages: 3,
+  }, presetLookupAll());
+  assert.deepEqual(codes(both.findings).sort(),
+    ['WORKFLOW_MAX_STAGES_LOW', 'WORKFLOW_STAGES_LIMIT'],
+    'the bounded checks run against the declared stage list even when that list is itself over the cap');
+});
+
 // --- validation: preset references ---
 
 test('a stage preset referencing an unknown preset is invalid and names the preset id', () => {
@@ -207,6 +229,23 @@ test('a malformed preset block carries a shape code, not a missing-preset code',
     assert.ok(codes(v.findings).includes('WORKFLOW_STAGE_PRESET'), JSON.stringify(preset));
     assert.ok(!codes(v.findings).includes('WORKFLOW_STAGE_PRESET_MISSING'), JSON.stringify(preset));
   }
+});
+
+test('unknown keys inside a stage preset are refused (closed shape: no silent typo downgrade)', () => {
+  // The round-1 review case: a typo'd `versoin` key must fail loudly. Silently accepting it
+  // would drop the author's version pin and resolve ANY version of the preset instead.
+  const v = validateWorkflowTemplate('w', validManifest('w', {
+    stages: [{ id: 'a', preset: { id: 'reviewer', versoin: '9.9.9' }, task: 'x' }],
+  }), { presetLookup: () => ({ version: '1.1.0' }) });
+  assert.ok(v.findings.some((f) => f.code === 'WORKFLOW_STAGE_PRESET'
+    && f.field === 'stages[0].preset.versoin' && /versoin/.test(f.message)), JSON.stringify(v.findings));
+  // The typo must not ALSO be read as a version pin (no VERSION_MISSING finding).
+  assert.ok(!codes(v.findings).includes('WORKFLOW_STAGE_PRESET_VERSION_MISSING'), JSON.stringify(codes(v.findings)));
+  // A well-formed extra key is refused the same way; id/version stay the only legal keys.
+  const v2 = validateWorkflowTemplate('w', validManifest('w', {
+    stages: [{ id: 'a', preset: { id: 'reviewer', trust: 'builtin' }, task: 'x' }],
+  }), { presetLookup: () => ({ version: '1.1.0' }) });
+  assert.ok(v2.findings.some((f) => f.code === 'WORKFLOW_STAGE_PRESET' && f.field === 'stages[0].preset.trust'));
 });
 
 // --- registry behavior (modelled on the preset registry tests) ---
@@ -351,6 +390,45 @@ test('a symlinked workflow.json or file inside the workflow dir is refused befor
     && /symlink/i.test(i.validation[0]?.message ?? '')), JSON.stringify(allB.invalid));
 });
 
+test('a workflow.json that cannot be READ is a sanitized WORKFLOW_LOAD_FAILED, not an encoding finding', () => {
+  const root = tempDir('mercury-workflows-');
+  // Case 1: workflow.json is a DIRECTORY -- readFileSync throws EISDIR. The raw Node message
+  // embeds the absolute host path; the finding must not carry it.
+  const dirId = 'manifest-is-a-dir';
+  const dir = join(root, dirId);
+  mkdirSync(dir);
+  mkdirSync(join(dir, 'workflow.json'));
+  const reg = new WorkflowRegistry(root);
+  assert.deepEqual(reg.list().map((w) => w.id), []);
+  const all = reg.listAll();
+  const enc = all.invalid.find((i) => i.id === dirId);
+  assert.ok(enc, 'the unreadable manifest is reported');
+  const finding = enc.validation.find((f) => f.code === 'WORKFLOW_LOAD_FAILED');
+  assert.ok(finding, JSON.stringify(enc.validation));
+  // The sanitized message names the problem without the errno token or the host path.
+  assert.match(finding.message, /could not be read/);
+  assert.ok(!finding.message.includes(root), `no host path leak: ${finding.message}`);
+  // The same entry through get() keeps the structured failure contract.
+  try {
+    reg.get(dirId);
+    assert.fail('expected a load failure');
+  } catch (err) {
+    assert.match(String((err as Error).message), /could not be read/);
+    assert.ok(!String((err as Error).message).includes(root), 'no host path in the thrown message');
+  }
+
+  // Case 2: a directory entry that vanishes between readdir and read (ENOENT) is the same
+  // code -- and a genuine decoding failure is still WORKFLOW_MANIFEST_ENCODING, not LOAD_FAILED.
+  const binary = join(root, 'binary2');
+  mkdirSync(binary);
+  writeFileSync(join(binary, 'workflow.json'), Buffer.from([0xff, 0xfe, 0x00, 0x01]));
+  const all2 = new WorkflowRegistry(root).listAll();
+  assert.ok(all2.invalid.find((i) => i.id === 'binary2')
+    ?.validation.some((f) => f.code === 'WORKFLOW_MANIFEST_ENCODING'), 'decoding failures keep their own code');
+  assert.ok(all2.invalid.find((i) => i.id === 'binary2')
+    ?.validation.every((f) => f.code !== 'WORKFLOW_LOAD_FAILED'), 'decoding failures are not LOAD_FAILED');
+});
+
 test('a non-UTF-8 workflow.json is a structured finding, not U+FFFD bytes', () => {
   const root = tempDir('mercury-workflows-');
   const dir = join(root, 'binary');
@@ -360,6 +438,35 @@ test('a non-UTF-8 workflow.json is a structured finding, not U+FFFD bytes', () =
   assert.deepEqual(reg.list().map((w) => w.id), []);
   const all = reg.listAll();
   assert.ok(all.invalid[0].validation.some((f) => f.code === 'WORKFLOW_MANIFEST_ENCODING'));
+});
+
+test('a UTF-8 BOM stays in the snapshot: templateJson and files agree on the manifest bytes', () => {
+  // TextDecoder strips the BOM; collectFiles reads the raw bytes. Without the fix the
+  // verbatim templateJson and files['workflow.json'] differ, so the W-2 snapshot and the
+  // hashed content cover different bytes.
+  const root = tempDir('mercury-workflows-');
+  const dir = join(root, 'bombed');
+  mkdirSync(dir);
+  writeFileSync(join(dir, 'workflow.json'), Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify(validManifest('bombed')), 'utf8'),
+  ]));
+  const reg = new WorkflowRegistry(root, { presets: makePresetRegistry(root) });
+  // A BOM-prefixed template is judged by its content, not rejected as unparsable JSON.
+  assert.deepEqual(reg.list().map((w) => w.id), ['bombed']);
+  const w = reg.get('bombed');
+  assert.equal(w.id, 'bombed');
+  assert.equal(w.mode, 'advisory');
+  // The two views of the manifest are byte-identical again.
+  assert.equal(w.templateJson, w.files['workflow.json']);
+  assert.equal(w.templateJson.charCodeAt(0), 0xfeff, 'the BOM stays in both views');
+  assert.equal(w.contentHash, WorkflowRegistry.contentHash(w.files));
+  // The parsed manifest is the BOM-free view.
+  assert.equal(w.manifest.id, 'bombed');
+  // And the no-BOM path is unchanged.
+  const plain = tempDir('mercury-workflows-');
+  makeWorkflow(plain, 'plain', validManifest('plain'));
+  const w2 = new WorkflowRegistry(plain, { presets: makePresetRegistry(plain) }).get('plain');
+  assert.equal(w2.templateJson, w2.files['workflow.json']);
 });
 
 test('a template whose referenced preset is disabled does not resolve', () => {

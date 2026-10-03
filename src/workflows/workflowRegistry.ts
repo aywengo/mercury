@@ -8,7 +8,7 @@
 // additionally returns invalid entries with their findings for diagnostic callers.
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { dataPath } from '../paths.ts';
 import { NotFoundError, ValidationError } from '../domain/errors.ts';
 import { assertNoSymlinkBelow, compareSkillIds, resolveContained } from '../skills/skillRegistry.ts';
@@ -16,6 +16,9 @@ import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import { PresetRegistry } from '../presets/presetRegistry.ts';
 import { validateWorkflowTemplate, type ValidateWorkflowDeps } from './validateWorkflow.ts';
 import type { InvalidWorkflow, LoadedWorkflow, WorkflowFinding } from './types.ts';
+
+/** The UTF-8 byte-order mark: legal in a JSON file, stripped by TextDecoder, kept on disk. */
+const BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 
 /** Where the shipped workflows live (package root, like presets/). */
 export function builtinWorkflowsDir(): string {
@@ -83,6 +86,15 @@ export class WorkflowRegistry {
         // A directory without workflow.json is a STRAY, not an invalid template: listings
         // skip it entirely, for the same reason the preset registry skips stray directories.
         if (err instanceof NotFoundError) continue;
+        if (err instanceof WorkflowLoadError) {
+          // Already sanitized at the throw site (the only place that knows both the root and
+          // the raw error); report it verbatim instead of sanitizing a second time, which
+          // would strip the message down to its last path-like fragment.
+          invalid.push({ id, validation: [{
+            code: 'WORKFLOW_LOAD_FAILED', field: '', message: err.message,
+          }] });
+          continue;
+        }
         invalid.push({ id, validation: err instanceof WorkflowValidationFailure ? err.findings : [{
           code: 'WORKFLOW_LOAD_FAILED', field: '', message: sanitizeLoadError(err, this.rootDir),
         }] });
@@ -151,23 +163,42 @@ export class WorkflowRegistry {
       // skips it and get() reports not-found (the preset registry's stray-directory rule).
       throw new NotFoundError(`Workflow not found: ${JSON.stringify(id)}`);
     }
+    // Read as bytes FIRST, outside the decoding catch: an I/O failure (unreadable file, a
+    // manifest path that is a directory, permissions) is a WORKFLOW_LOAD_FAILED with a
+    // sanitized message, not a decoding problem, and its raw Node message must never reach
+    // the diagnostics surface via listAll() (listAll reports WorkflowValidationFailure
+    // findings verbatim, which is correct for validation but leaks paths for read errors).
+    // WorkflowLoadError is deliberately NOT a WorkflowValidationFailure: listAll() catches
+    // it and re-reports it as WORKFLOW_LOAD_FAILED through sanitizeLoadError -- the only
+    // place that maps raw load errors to findings.
+    let bytes: Buffer;
+    try {
+      bytes = readFileSync(manifestPath);
+    } catch (err) {
+      throw new WorkflowLoadError(id, err, this.rootDir);
+    }
+    // Decode with fatal: true so a template that is not UTF-8 fails with a structured finding
+    // instead of silently producing U+FFFD replacement characters (the preset registry's
+    // instruction-decoding rule). TextDecoder strips a leading UTF-8 BOM (WHATWG decoding);
+    // templateJson must stay the VERBATIM file text, so put the BOM back when it was there --
+    // the snapshot contract (LoadedWorkflow.templateJson) and the files map must agree.
     let templateJson: string;
     try {
-      // Read as bytes first, then decode with fatal: true so a template that is not UTF-8
-      // fails with a structured finding instead of silently producing U+FFFD replacement
-      // characters (the preset registry's instruction-decoding rule).
-      const bytes = readFileSync(manifestPath);
-      templateJson = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    } catch (err) {
+      templateJson = (bytes.subarray(0, 3).equals(BOM) ? BOM : Buffer.alloc(0))
+        + new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
       throw new WorkflowValidationFailure(id, [{
         code: 'WORKFLOW_MANIFEST_ENCODING', field: 'workflow.json',
-        message: `workflow.json could not be read as UTF-8: ${err instanceof Error ? err.message : String(err)}`,
+        message: 'workflow.json is not valid UTF-8',
       }]);
     }
 
     let manifest: unknown;
     try {
-      manifest = JSON.parse(templateJson);
+      // Parse the BOM-STRIPPED text: JSON.parse refuses a leading BOM (V8 throws
+      // "Unexpected token '\ufeff'"), and a BOM-prefixed template must be judged by its
+      // content, not rejected as unparsable.
+      manifest = JSON.parse(templateJson.replace(/^\uFEFF/, ''));
     } catch (err) {
       const finding: WorkflowFinding = {
         code: 'WORKFLOW_MANIFEST_PARSE', field: 'workflow.json',
@@ -205,10 +236,26 @@ export class WorkflowRegistry {
     const files: Record<string, string> = {};
     collectFiles(dir, dir, files);
     // The files map keys are workflow-RELATIVE POSIX paths (the preset registry's rule).
+    // path.relative anchors a RELATIVE `to` at process.cwd(), not at `from` (all keys are
+    // absolute here today, but the BOM restore below can only ever add 'workflow.json' --
+    // anchor every `to` at `dir` explicitly so a relative key can never silently become a
+    // cwd-relative path on a future edit).
     for (const [absPath, content] of Object.entries({ ...files })) {
-      const rel = relative(dir, absPath).split(sep).join('/');
+      const rel = relative(dir, isAbsolute(absPath) ? absPath : resolve(dir, absPath)).split(sep).join('/');
       delete files[absPath];
       files[rel] = content;
+    }
+    // The manifest entry keeps the exact on-disk bytes (BOM included): templateJson (decoded
+    // above, BOM restored) and files['workflow.json'] (raw read) must be the same string,
+    // because the W-2 snapshot stores templateJson verbatim while the hash covers the files
+    // map -- a mismatch would make the promised snapshot and the hashed content diverge
+    // (round-1 review, #812: a BOM'd manifest produced exactly that divergence). Fail loudly
+    // rather than snapshot a subtly different manifest.
+    if (files['workflow.json'] !== templateJson) {
+      throw new WorkflowValidationFailure(id, [{
+        code: 'WORKFLOW_LOAD_FAILED', field: 'workflow.json',
+        message: 'workflow.json could not be read consistently (decoded text differs from the file bytes)',
+      }]);
     }
 
     return {
@@ -226,6 +273,20 @@ export class WorkflowRegistry {
       trust: 'builtin',
       source: { kind: 'builtin', relativePath: `workflows/${id}/workflow.json` },
     };
+  }
+}
+
+/**
+ * A workflow.json that could not be READ (I/O error, or the manifest path is a directory).
+ * Thrown as a class so listAll() reports a sanitized WORKFLOW_LOAD_FAILED finding here, at
+ * the one place that knows the registry root -- Node I/O messages embed absolute host paths
+ * (e.g. "ENOENT: no such file or directory, open '/Users/.../workflow.json'") and must not
+ * reach the diagnostics surface verbatim (the preset registry's sanitizeLoadError rule).
+ */
+class WorkflowLoadError extends Error {
+  constructor(id: string, err: unknown, rootDir: string) {
+    super(`workflow.json could not be read: ${sanitizeLoadError(err, rootDir)}`);
+    this.name = 'WorkflowLoadError';
   }
 }
 
