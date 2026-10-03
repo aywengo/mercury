@@ -839,7 +839,7 @@ export async function runHostSetup(
     if (!det.ok) {
       io.err(`\nlaya: not installed — ${det.reason}\n`);
       io.err('laya: the sidecar needs uv (recommended) or Python >= 3.10. Install one first:\n');
-      io.err('  macOS:   brew install uv   (or: brew install python@3.12)\n');
+      io.err('  macOS:   brew install uv   (or: brew install python@3.12 — setup finds python3.12 on PATH)\n');
       io.err('  Linux:   install uv (curl -LsSf https://astral.sh/uv/install.sh | sh) or the distro python3\n');
       io.err('laya: then re-run `mercury host setup --yes`, or answer no to the sidecar prompt.\n');
       return 1;

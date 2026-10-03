@@ -36,9 +36,16 @@ export interface PythonCandidate {
   bin: string;
 }
 
-/** uv first (design: "uv-managed interpreter preferred"), then the plain python3s. */
+/** uv first (design: "uv-managed interpreter preferred"), then Homebrew's versioned
+ *  interpreters (the plain `python3` shim on macOS stays the old system one while
+ *  `python3.12`/`python3.11` are on PATH after `brew install python@3.12` — Copilot #840 r6),
+ *  then the plain python3s. */
 export const DEFAULT_PYTHON_CANDIDATES: PythonCandidate[] = [
   { argv: ['uv', 'python', 'find', '3.10'], bin: 'uv run --python 3.10 python3' },
+  { argv: ['python3.13', '-V'], bin: 'python3.13' },
+  { argv: ['python3.12', '-V'], bin: 'python3.12' },
+  { argv: ['python3.11', '-V'], bin: 'python3.11' },
+  { argv: ['python3.10', '-V'], bin: 'python3.10' },
   { argv: ['python3', '-V'], bin: 'python3' },
 ];
 

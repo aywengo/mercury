@@ -1091,6 +1091,21 @@ test('parsePythonVersion: tuple semantics — 3.9.10 must NOT read as 3.10 (#840
   assert.equal(parsePythonVersion('no version here'), null);
 });
 
+test('detectPython: Homebrew versioned interpreters are probed before the plain python3 (#840 r6)', () => {
+  // The stock-macOS recovery path: brew python@3.12 exposes python3.12 on PATH while the
+  // unversioned python3 shim stays 3.9.6. Detection must find python3.12, not the shim.
+  const run = (argv: string[]) => {
+    if (argv[0] === 'uv') return { ok: false, stdout: '', stderr: 'no uv' };
+    if (argv[0] === 'python3.12') return { ok: true, stdout: 'Python 3.12.2', stderr: '' };
+    if (argv[1] === '-V') return { ok: true, stdout: 'Python 3.9.6', stderr: '' };
+    return { ok: false, stdout: '', stderr: 'no' };
+  };
+  const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES);
+  assert.equal(det.ok, true);
+  assert.equal(det.bin, 'python3.12', 'the versioned Homebrew interpreter wins over the old shim');
+  assert.equal(det.version, '3.12.2');
+});
+
 test('detectPython: uv python find output (an interpreter PATH) is verified with -V, not parsed (#840 r5)', () => {
   // A uv-only host whose resolved path has no '3.10' component: parse-the-path would read
   // version null and reject a valid install. The python3 fallback answers 3.9 (too old), so
