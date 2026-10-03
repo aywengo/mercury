@@ -95,7 +95,13 @@ export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKe
     url: `http://127.0.0.1:${addr.port}`,
     port: addr.port,
     received,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    // closeIdleConnections first: the doctor's client destroys its request socket after the
+    // response (huge-deadline calls must not hold sockets open), and a keep-alive socket in
+    // any odd state would otherwise keep server.close() waiting indefinitely.
+    close: () => new Promise<void>((resolve) => {
+      server.closeIdleConnections?.();
+      server.close(() => resolve());
+    }),
   };
 }
 

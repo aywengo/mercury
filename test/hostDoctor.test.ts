@@ -612,13 +612,24 @@ test('runHostDoctor: invalid MERCURY_LAYA_TIMEOUT_MS is a named failure, not a s
   const cfg = join(dir, 'cfg');
   mkdirSync(join(cfg, 'mercury'), { recursive: true });
   writeFileSync(join(cfg, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'laya-key' } }), { mode: 0o600 });
-  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_LAYA_URL=${f.url}\nMERCURY_LAYA_TIMEOUT_MS=-1\n`);
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), 'MERCURY_PORT=1\n');
   try {
+  // -1 (immediate timer) and 2147483648 (Node converts >2^31-1 to 1ms) are both named failures;
+  // the sidecar is never probed.
+  for (const bad of ['-1', '2147483648']) {
+    writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=1\nMERCURY_LAYA_URL=${f.url}\nMERCURY_LAYA_TIMEOUT_MS=${bad}\n`);
     const out: string[] = [];
     await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
-    assert.match(out.join(''), /laya: FAIL — invalid configuration: MERCURY_LAYA_TIMEOUT_MS/);
-    assert.ok(!out.join('').includes('unreachable'), 'the sidecar must not be probed with a broken deadline');
-    assert.equal(f.received.length, 0, 'no request leaves with an invalid timeout');
+    assert.match(out.join(''), new RegExp(`laya: FAIL — invalid configuration: MERCURY_LAYA_TIMEOUT_MS.*got '${bad}'`), `timeout=${bad}`);
+    assert.ok(!/laya:.*unreachable/.test(out.join('')), `the sidecar must not be probed with timeout=${bad}`);
+  }
+  assert.equal(f.received.length, 0, 'no request leaves with an invalid timeout');
+  // The boundary itself is accepted: 2147483647 probes normally.
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=1\nMERCURY_LAYA_URL=${f.url}\nMERCURY_LAYA_TIMEOUT_MS=2147483647\n`);
+  const out2: string[] = [];
+  const code2 = await runHostDoctor([], { out: (s) => out2.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+  assert.match(out2.join(''), /laya: PASS/);
+  assert.equal(f.received.length, 1, 'the boundary value reaches the sidecar');
   } finally {
     await f.close();
   }

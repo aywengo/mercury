@@ -332,8 +332,11 @@ export async function runHostDoctor(
       const parsed = Number(rawTimeout);
       // A non-positive/non-finite deadline would make Node schedule the timer immediately (or
       // never): a healthy sidecar would read as unreachable. Named failure, not a silent default.
-      if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
-        laya = { ok: false, detail: `invalid configuration: MERCURY_LAYA_TIMEOUT_MS must be a positive integer, got '${rawTimeout}'` };
+      // Node converts setTimeout delays above 2^31-1 ms to 1ms - a healthy sidecar would read
+      // as unreachable near-instantly. Cap at the timer limit; the client's per-call deadline
+      // uses the same bound.
+      if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0 || parsed > 2147483647) {
+        laya = { ok: false, detail: `invalid configuration: MERCURY_LAYA_TIMEOUT_MS must be a positive integer <= 2147483647, got '${rawTimeout}'` };
       } else {
         timeoutMs = parsed;
       }
