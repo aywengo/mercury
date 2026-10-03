@@ -164,6 +164,49 @@ test('a context with no skills produces no -s flags (issue #459)', async () => {
   assert.ok(argv.includes('--in'), 'the rest of argv must still be built normally');
 });
 
+test('per-Run model: -m <context.model> reaches argv and wins over the operator default (#829)', async () => {
+  const argvFile = tempFile('hermes-argv', 'json');
+  const { context } = makeContext();
+  context.model = 'GLM-5.3-Flash-oQ8e-mtp';
+  const a = adapter({
+    model: 'operator-default',
+    env: { MOCK_HERMES_ARGV_FILE: argvFile },
+  });
+  const handle = await a.start(context);
+  await collectAll(handle);
+  const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+  const m = argv.indexOf('-m');
+  assert.ok(m > -1, '-m present');
+  assert.equal(argv[m + 1], 'GLM-5.3-Flash-oQ8e-mtp', 'per-Run model wins over the operator default');
+  a.dispose(context.run.id);
+});
+
+test('per-Run model: no -m when neither context.model nor operator default exists (#829)', async () => {
+  const argvFile = tempFile('hermes-argv', 'json');
+  const { context } = makeContext();
+  const a = adapter({ env: { MOCK_HERMES_ARGV_FILE: argvFile } });
+  const handle = await a.start(context);
+  await collectAll(handle);
+  const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+  assert.ok(!argv.includes('-m'), 'model-less Run keeps argv byte-identical to base');
+  a.dispose(context.run.id);
+});
+
+test('per-Run model: resume re-emits -m from the session context (#829)', async () => {
+  const argvFile = tempFile('hermes-resume-model', 'json');
+  const { context } = makeContext();
+  context.model = 'GLM-5.3-Flash-oQ8e-mtp';
+  const a = adapter({ env: { MOCK_HERMES_SESSION: 'sess-model1', MOCK_HERMES_ARGV_FILE: argvFile } });
+  const handle = await a.start(context);
+  await collectAll(handle);
+  const h2 = await a.resume(handle.runId);
+  await collectAll(h2);
+  const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+  assert.ok(argv.includes('--resume'), 'resume spawn captured');
+  assert.equal(argv[argv.indexOf('-m') + 1], 'GLM-5.3-Flash-oQ8e-mtp', 'resume carries the per-Run model');
+  a.dispose(context.run.id);
+});
+
 test('session id captured from stderr for resume', async () => {
   const { context } = makeContext();
   const a = adapter({ env: { MOCK_HERMES_SESSION: 'sess-abc123' } });

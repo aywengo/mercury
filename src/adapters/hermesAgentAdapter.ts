@@ -37,6 +37,8 @@ export interface HermesAgentAdapterOptions {
   workerId?: string;
   /** --max-turns N (default: leave unset = hermes default). */
   maxTurns?: number;
+  /** -m <model> operator default (per-Run context.model wins, #829). */
+  model?: string;
   /** --run-budget SECONDS (default: leave unset = off). */
   runBudgetSeconds?: number;
   /** --yolo: bypass dangerous command approval prompts. */
@@ -143,6 +145,9 @@ export class HermesAgentAdapter implements AgentAdapter {
       roleInstruction: 'none',
       sandbox: true,
       mcp: 'none',
+      // Per-run model (#829, measured on 0.21.2): `-m` is per-invocation and survives `--resume`
+      // (the session pins the first turn's model). Evidence in PR #836.
+      perRunModel: true,
     },
   };
   /** `hermes --version` prints "Hermes Agent v0.21.2 (2026.9.11) · upstream …", so the
@@ -163,6 +168,11 @@ export class HermesAgentAdapter implements AgentAdapter {
   private buildArgv(context: RunContext, resumeId: string | null): string[] {
     const argv = ['chat', '-Q', '--query-file', '-'];
     if (resumeId) argv.push('--resume', resumeId);
+    // Per-Run model (#829, measured on 0.21.2): `-m` is a per-invocation flag whose value is
+    // pinned into the session, so `--resume` keeps it (a resumed turn does not reset to the
+    // configured default). Per-Run wins over the operator default.
+    const model = context.model ?? this.opts.model;
+    if (model) argv.push('-m', model);
     if (this.opts.maxTurns !== undefined) argv.push('--max-turns', String(this.opts.maxTurns));
     if (this.opts.runBudgetSeconds !== undefined) argv.push('--run-budget', String(this.opts.runBudgetSeconds));
     // No `-s` for Mercury skills, ever (#507).
