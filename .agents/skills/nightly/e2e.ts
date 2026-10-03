@@ -274,7 +274,12 @@ function extractError(detail: string[], idx: number, f: SuiteFailure, stderr: st
   // aborts that leave a wrapper-only block (#811 r3). Anything else stays empty: no cause, no
   // filing.
   const stderrLines = stderr.split('\n').map((l) => l.trim());
-  const errLine = stderrLines.find((s) => /^Error: (Cannot find module|Module not found)\b/.test(s));
+  const errLine = stderrLines.find((s) =>
+    /^Error: (Cannot find module|Module not found)\b/.test(s) ||
+    // Node's coded form: `Error [ERR_MODULE_NOT_FOUND]: Cannot find package ...` and any other
+    // ERR_-coded crash Error — a crash-shaped cause, not ordinary stdout noise (#811 r4).
+    /^Error \[ERR_[A-Z_]+\]:/.test(s)
+  );
   if (errLine) {
     f.error = errLine;
     return;

@@ -1166,3 +1166,28 @@ test('the stderr fallback only takes crash/load-shaped causes, not ordinary stdo
   assert.equal(failures.length, 1);
   assert.equal(failures[0]!.error, '', 'ordinary stdout Error lines must not become the cause');
 });
+
+test('a cause that appears ONLY in stderr is picked by the fallback (coded Error shape) (#811 r4)', () => {
+  const cause = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from /tmp/ws/e2e/knowledge.test.ts";
+  const out = fileFailureOutput({
+    file: 'e2e/knowledge.test.ts',
+    stderr: cause,
+    causeLines: ["  'test failed'"],  // block holds ONLY the generic wrapper
+  });
+  const failures = parseFailures(out);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.error, cause, 'the stderr-only load error must become the cause');
+});
+
+test('the stderr fallback does NOT take ordinary stdout Error lines (coded-shape guard) (#811 r4)', () => {
+  const out = [
+    'Error: recovered probe',           // ordinary stdout noise, NOT a load failure
+    '✖ failing tests:', '',
+    'test at e2e/x.test.ts:3:1',
+    '✖ file-level (1.2ms)',
+    "  'test failed'",
+  ].join('\n');
+  const failures = parseFailures(out);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.error, '', 'a plain stdout Error line must not become the cause');
+});
