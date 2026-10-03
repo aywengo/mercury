@@ -1017,7 +1017,7 @@ test('runSelectorWith: a clean head review with stale or foreign unresolved thre
       if (path.includes('/pulls/811/reviews')) {
         return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaA', state: 'COMMENTED' }], link: null };
       }
-      return { body: [], link: null };
+      return { body: [issue({ number: 400, user: { login: 'aywengo' } })], link: null };
     },
     async post() { return true; },
     async postJson(_path: string, body: unknown) {
