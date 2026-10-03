@@ -50,6 +50,9 @@ const TRUSTED_AUTHOR = 'aywengo';
 /** The hosted Copilot reviewer's exact login (aywengo/mercury reviews). Exact match everywhere:
  * a prefix check admits lookalike accounts as reviewer identity (#820 r5). */
 const COPILOT_REVIEWER = 'copilot-pull-request-reviewer[bot]';
+/** The same reviewer's login as GraphQL reports thread authors (no [bot] suffix, verified live
+ * on #811). Exact-match set, never a prefix: lookalikes stay out (#820 r5/r6). */
+const COPILOT_THREAD_AUTHORS = new Set([COPILOT_REVIEWER, 'copilot-pull-request-reviewer']);
 /**
  * The nightly GitHub identity (docs/operations.md, "The nightly host's GitHub identity"). The
  * trust root must NOT be configurable from a Run's environment: an env override would let the
@@ -622,7 +625,7 @@ export async function runSelectorWith(
                 unresolvedOnPr = (threads.nodes ?? []).filter((t) =>
                   t.isResolved === false
                   && t.isOutdated === false
-                  && t.comments?.nodes?.[0]?.author?.login === COPILOT_REVIEWER
+                  && COPILOT_THREAD_AUTHORS.has(t.comments?.nodes?.[0]?.author?.login ?? '')
                   && t.comments?.nodes?.[0]?.originalCommit?.oid === headSha
                 ).length;
               }

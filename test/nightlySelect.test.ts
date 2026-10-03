@@ -877,7 +877,7 @@ test('runSelectorWith: resume only for UNRESOLVED threads; unreviewed/approved/r
       const vars = (body as { variables: { number: number } }).variables;
       // 811: one unresolved thread; 831: all resolved; 830 never queried (no review).
       const nodes = vars.number === 811
-        ? [{ isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer[bot]' }, originalCommit: { oid: 'shaA' } }] } }]
+        ? [{ isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'shaA' } }] } }]
         : [{ isResolved: true, isOutdated: true, comments: { nodes: [] } }];
       return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: nodes.length, pageInfo: { hasNextPage: false }, nodes } } } } } };
     },
@@ -1060,7 +1060,9 @@ test('runSelectorWith: a lookalike account cannot fake the verdict or the findin
     async post() { return true; },
     async postJson(_path: string, body: unknown) {
       const nodes = [
-        // Genuine unresolved copilot thread on the head -> the PR resumes.
+        // Genuine unresolved copilot thread on the head (GraphQL author form, no suffix).
+        { isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'shaA' } }] } },
+        // The [bot]-suffixed form (REST shape) is the same reviewer: it counts too.
         { isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer[bot]' }, originalCommit: { oid: 'shaA' } }] } },
         // A lookalike account's thread must not count as a Copilot finding.
         { isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer-x' }, originalCommit: { oid: 'shaA' } }] } },
