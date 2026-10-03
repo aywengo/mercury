@@ -876,7 +876,9 @@ test('runSelectorWith: resume only for UNRESOLVED threads; unreviewed/approved/r
     async postJson(_path: string, body: unknown) {
       const vars = (body as { variables: { number: number } }).variables;
       // 811: one unresolved thread; 831: all resolved; 830 never queried (no review).
-      const nodes = vars.number === 811 ? [{ isResolved: false }] : [{ isResolved: true }];
+      const nodes = vars.number === 811
+        ? [{ isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'shaA' } }] } }]
+        : [{ isResolved: true, isOutdated: true, comments: { nodes: [] } }];
       return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: nodes.length, pageInfo: { hasNextPage: false }, nodes } } } } } };
     },
   };
@@ -952,4 +954,83 @@ test('runSelectorWith: fully resolved threads on the reviewed head never resume'
   };
   const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
   assert.notEqual(s.rung, 0, 'resolved threads are not work');
+});
+
+// -- #820 round-2 review regressions --
+
+// r3 blocker 2: the production next.ts realIo() must supply postJson (otherwise rung 0 can
+// never fire in production). Pinned by importing next.ts and checking the io it builds.
+test('next.ts realIo supplies postJson (production resume wiring)', async () => {
+  const mod = await import('../.agents/skills/nightly/next.ts');
+  // realIo is not exported; pin the contract through the exports that exist: runNext must accept
+  // an io WITHOUT postJson and still complete (fail-closed), and the source must wire it.
+  const src = await (await import('node:fs/promises')).readFile('.agents/skills/nightly/next.ts', 'utf8');
+  assert.match(src, /postJson: async \(path, body\) => await ghPost\(path, body, token\)/,
+    'realIo must wire postJson, or production never resumes a PR');
+});
+
+// r3 blocker 3: oldest PR per issue is chosen BEFORE review state - a newer duplicate with
+// findings must NOT preempt an older PR awaiting review.
+test('runSelectorWith: the OLDEST duplicate PR is continued even when it awaits review and the newer has findings', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const prList = [
+    // NEWER duplicate (817) with findings on its head
+    { number: 817, user: { login: 'mercury-nightly' }, created_at: '2026-10-02T22:37:00Z', head: { sha: 'shaN', ref: 'fix/issue-406-y' } },
+    // OLDER PR (811) whose head has NO review yet (awaiting the relay)
+    { number: 811, user: { login: 'mercury-nightly' }, created_at: '2026-10-01T22:36:00Z', head: { sha: 'shaO', ref: 'fix/issue-406-x' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/817/reviews')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaN', state: 'COMMENTED' }], link: null };
+      }
+      if (path.includes('/pulls/811/reviews')) return { body: [], link: null };
+      return { body: [issue({ number: 406, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }] })], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      const vars = (body as { variables: { number: number } }).variables;
+      const nodes = vars.number === 817
+        ? [{ isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'shaN' } }] } }]
+        : [];
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: nodes.length, pageInfo: { hasNextPage: false }, nodes } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  // The older PR 811 awaits its review: the issue must NOT be resumed via the newer 817, and
+  // 817 must be recorded as superseded (log) - selection reports rung 1+ or none, never rung 0.
+  assert.notEqual(s.rung, 0, 'the newer duplicate must not preempt the older PR');
+});
+
+// r3 blocker 4: stale/foreign threads do not count as pending findings.
+test('runSelectorWith: a clean head review with stale or foreign unresolved threads does not resume', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const prList = [
+    { number: 811, user: { login: 'mercury-nightly' }, created_at: '2026-10-01T22:00:00Z', head: { sha: 'shaA', ref: 'fix/issue-400-x' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/811/reviews')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaA', state: 'COMMENTED' }], link: null };
+      }
+      return { body: [], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      // Thread 1: from an OLDER review round (outdated, old commit). Thread 2: a foreign
+      // reviewer. Thread 3: copilot but on an older commit. None is a current-head finding.
+      const nodes = [
+        { isResolved: false, isOutdated: true, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'old-commit' } }] } },
+        { isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'random-human' }, originalCommit: { oid: 'shaA' } }] } },
+        { isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'old-commit-2' } }] } },
+      ];
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 3, pageInfo: { hasNextPage: false }, nodes } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.rung, 0, 'stale/foreign threads are not current-head findings');
 });

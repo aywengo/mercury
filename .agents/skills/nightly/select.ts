@@ -542,22 +542,42 @@ export async function runSelectorWith(
     }
     {
       const openIssues = new Map(candidates.map((c) => [c.issue.number, c]));
+      // Pass 1 - choose the OLDEST open nightly PR per mapped issue BEFORE any review state is
+      // read (#820 r3, blocker 3): otherwise an older PR awaiting a fresh review loses its turn
+      // to a newer duplicate that happens to carry findings, and the duplicate gets continued.
+      const chosen = new Map<number, { number: number; head: { sha?: string | null; ref?: string | null } | null; created_at?: string | null; supersededBy: number[] }>();
       for (const pr of nightlyPrs) {
         const branch = pr.head?.ref ?? '';
-        const m = branch.match(/^fix\/issue-(\d+)-/);
+        const m = branch.match(/^fix\/(issue)-(\d+)-/);
         if (!m) continue;
-        const issue = Number(m[1]);
+        const issue = Number(m[2]);
         const issueCandidate = openIssues.get(issue);
         if (!issueCandidate) continue;
+        const cur = chosen.get(issue);
+        if (cur === undefined) {
+          chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', supersededBy: [] });
+          continue;
+        }
+        const isNewer = (pr.created_at ?? '') > (cur.created_at ?? '')
+          || ((pr.created_at ?? '') === (cur.created_at ?? '') && pr.number > cur.number);
+        if (isNewer) {
+          cur.supersededBy.push(pr.number);
+        } else {
+          cur.supersededBy.push(cur.number);
+          chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', supersededBy: cur.supersededBy });
+        }
+      }
+      // Every chosen PR reserves its issue from rungs 1-3 - before any review read (#820 r2):
+      // unreviewed, approval-class-awaiting-merge and unreadable-review PRs all keep their
+      // issue out of new work, and the reservation is recomputed from the still-open PR each
+      // night, so it survives `finish` releasing the claim.
+      for (const issue of chosen.keys()) pendingReviewIssues.add(issue);
+      // Pass 2 - review state of the CHOSEN PR only.
+      for (const [issue, pr] of chosen) {
+        const issueCandidate = openIssues.get(issue)!;
         const headSha = pr.head?.sha ?? '';
         if (!headSha) continue;
-        // Reserve NOW, before any review read: whether the PR turns out to be unreviewed,
-        // approval-class-awaiting-merge, or unreadable, its issue must not re-enter rungs 1-3
-        // while a nightly PR is open on it (#820 r2, blocker 2). Rung 0 eligibility is decided
-        // further down; reservation is about NEW work, and it survives `finish` releasing the
-        // claim because it is recomputed from the still-open PR every night.
-        pendingReviewIssues.add(issue);
-        // Last Copilot review + its inline-comment count on THIS head.
+        // Last Copilot review on this PR.
         let lastCopilot: { commit_id?: string | null; state?: string | null } | null = null;
         let unresolvedOnPr = 0;
         let rvPath: string | null = `/repos/${repo}/pulls/${pr.number}/reviews?per_page=50`;
@@ -575,13 +595,14 @@ export async function runSelectorWith(
             rvPath = rvNext !== null && rvNext.includes(`/pulls/${pr.number}/reviews?`) ? rvNext : null;
           }
           rvScanComplete = !rvPath;
-          // Pending findings: UNRESOLVED review threads (GraphQL), not inline-comment counts -
-          // resolved/waived threads must not count, and a later clean COMMENTED review on the
-          // same head must not inherit stale comments (#820 r2, blocker 3). Scoped to the
-          // PR's threads; thread resolution is the review loop's own state, not text.
+          // Pending findings: UNRESOLVED, NOT-OUTDATED review threads whose first comment is
+          // the Copilot reviewer's AND was authored against the CURRENT head (#820 r3,
+          // blocker 4): a clean current-head review must not inherit an older review's stale
+          // threads, an unrelated reviewer's thread must not count, and a thread from a
+          // previous review round (older commit) belongs to the resolved history.
           if (io.postJson) {
             const gql = {
-              query: `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){totalCount,pageInfo{hasNextPage},nodes{isResolved,isOutdated}}}}}`,
+              query: `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){totalCount,pageInfo{hasNextPage},nodes{isResolved,isOutdated,comments(first:1){nodes{author{login},originalCommit{oid}}}}}}}}`,
               variables: { owner: repo.split('/')[0] ?? '', name: repo.split('/')[1] ?? '', number: pr.number },
             };
             const res = await io.postJson('/graphql', gql);
@@ -589,14 +610,21 @@ export async function runSelectorWith(
               console.error(`resume scan: PR #${pr.number} reviewThreads query -> ${res.status}`);
               rvScanComplete = false;
             } else {
-              const threads = (res.body as { data?: { repository?: { pullRequest?: { reviewThreads?: { totalCount?: number; pageInfo?: { hasNextPage?: boolean }; nodes?: { isResolved?: boolean; isOutdated?: boolean }[] } } } } }).data?.repository?.pullRequest?.reviewThreads;
+              const threads = (res.body as { data?: { repository?: { pullRequest?: { reviewThreads?: { totalCount?: number; pageInfo?: { hasNextPage?: boolean }; nodes?: { isResolved?: boolean; isOutdated?: boolean; comments?: { nodes?: { author?: { login?: string | null } | null; originalCommit?: { oid?: string | null } | null }[] } | null }[] } } } } }).data?.repository?.pullRequest?.reviewThreads;
               if (!threads || threads.pageInfo?.hasNextPage) {
-                // >100 threads is not a real state for this loop; a capped query fails closed.
-                rvScanComplete = false;
+                rvScanComplete = false; // capped query fails closed
               } else {
-                unresolvedOnPr = (threads.nodes ?? []).filter((t) => t.isResolved === false).length;
+                unresolvedOnPr = (threads.nodes ?? []).filter((t) =>
+                  t.isResolved === false
+                  && t.isOutdated === false
+                  && (t.comments?.nodes?.[0]?.author?.login ?? '').startsWith('copilot-pull-request-reviewer')
+                  && t.comments?.nodes?.[0]?.originalCommit?.oid === headSha
+                ).length;
               }
             }
+          } else {
+            console.error('resume scan: io.postJson missing; cannot verify pending findings');
+            rvScanComplete = false;
           }
         } catch (e) {
           console.error(`resume scan: PR #${pr.number} threads failed: ${String(e instanceof Error ? e.message : e)}`);
@@ -606,13 +634,14 @@ export async function runSelectorWith(
         const hasHeadReview = lastCopilot !== null && lastCopilot.commit_id === headSha;
         if (!hasHeadReview || lastCopilot === null) continue; // relay fetches the review first
         if (lastCopilot.state === 'APPROVED') continue; // awaiting merge; not resume work
-        // Pending findings = UNRESOLVED threads (>0). Zero unresolved threads = the review is
-        // approval-class or fully addressed: the PR awaits merge, no resume.
-        if (unresolvedOnPr === 0) continue;
+        if (unresolvedOnPr === 0) continue; // approval-class or fully addressed: awaits merge
         // Excluded issues (nightly:blocked after hand-off, proposed) never resume (#820 r1,
         // blocker 1): the review cannot re-open work a human must answer.
         if (isExcluded(issueCandidate.issue)) continue;
         resume.push({ issue, prNumber: pr.number, headSha, state: 'findings', createdAt: pr.created_at ?? '' });
+        if (pr.supersededBy.length > 0) {
+          console.error(`resume scan: PR #${pr.number} continues for issue #${issue}; newer duplicate(s) superseded: ${pr.supersededBy.map((n) => '#' + n).join(', ')}`);
+        }
       }
     }
   }

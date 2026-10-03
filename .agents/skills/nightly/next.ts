@@ -217,6 +217,9 @@ function realIo(env: NodeJS.ProcessEnv): NextIo {
   return {
     get: async (path) => await ghGet(path, token),
     post: async (path, body) => await ghPost(path, body, token),
+    // The resume rung's pending-findings check queries GraphQL review threads; without this the
+    // production entry point could never resume (postJson absent = resume fails closed).
+    postJson: async (path, body) => await ghPost(path, body, token),
     postLabel: async (path, body) => await ghPostLabel(path, body, token),
     deleteLabel: async (path) => await ghDelete(path, token),
     patch: async (path, body) => await ghPatch(path, body, token),
