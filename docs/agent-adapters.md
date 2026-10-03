@@ -325,6 +325,13 @@ via stdin (nothing shell-interpreted).
 - Human input: Hermes has `--yolo`/`--accept-hooks`; a real `input.required`
   bridge needs their approval/hook surface — defer to Phase 7.
 - Resume: `--resume <SESSION_ID>`; capture the id from `-Q` output.
+- Per-Run model (#829, measured on 0.21.2): the adapter emits
+  `-m <context.model ?? opts.model>` — the Run's model wins over the operator
+  default. `-m` is a per-invocation flag whose value is pinned into the session,
+  so `--resume` keeps it (verified: a resumed turn stayed on the per-Run model
+  while the configured default was a different id). `perRunModel: true` is
+  declared. An id the provider cannot resolve is provider-defined: the local
+  omlx endpoint serves permissively, a rejecting provider fails the run.
 
 **Effort:** S–M (adapter + text parser + mock fixture + ~6 tests).
 
