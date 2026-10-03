@@ -1126,6 +1126,13 @@ test('renderLayaLaunchdPlist / renderLayaSystemdUnit: loopback, preload, english
   assert.ok(unit.includes('Environment=LAYA_MODELS=english'));
   assert.equal(renderLayaSystemdUnit(linux, 'key-2'), unit, 'same plan → same bytes');
   assert.ok(layaStepActions(plan).some((a) => a.includes(`laya[serve]==${LAYA_SERVE_PIN}`)), 'the pinned version is in the plan');
+  // The printed plan mirrors EXECUTION (Copilot #840 r2): env write first, then the venv with
+  // the actual tool, then install, then the unit.
+  const actions = layaStepActions(plan);
+  assert.ok(actions[0]!.startsWith('write env:'), 'mercury.env is written first');
+  assert.match(actions[1]!, /uv venv .* --seed/, 'the uv path seeds pip');
+  const pyActions = layaStepActions(plan, 'python3');
+  assert.match(pyActions[1]!, /python3 -m venv/, 'the fallback path prints the fallback tool');
 });
 
 test('ensureLayaCredentials: generates when absent, PRESERVES an existing key (#831)', () => {
@@ -1146,6 +1153,27 @@ test('ensureLayaCredentials: generates when absent, PRESERVES an existing key (#
   assert.equal(third.generated, true);
   const raw = JSON.parse(readFileSync(join(dir, 'mercury', 'bot-credentials.json'), 'utf8')) as { maint?: unknown };
   assert.ok(raw.maint, 'the pre-existing alias entry survives');
+});
+
+test('ensureLayaCredentials: an array root or invalid JSON is REFUSED, secrets never leak (#840 r2)', () => {
+  const dir = tempDir('laya-creds-shape-');
+  const env = { XDG_CONFIG_HOME: dir };
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  const path = join(dir, 'mercury', 'bot-credentials.json');
+  // A valid-JSON array would swallow the .laya assignment and setup would report success
+  // while the key was never persisted.
+  writeFileSync(path, '[]', { mode: 0o600 });
+  assert.throws(() => ensureLayaCredentials(env), /must be a JSON object keyed by bot alias/);
+  // An invalid JSON file whose excerpt would carry a planted secret: the error names the
+  // failure, never the content.
+  writeFileSync(path, '{"laya": {"api": sk-9f88-tok}}', { mode: 0o600 });
+  try {
+    ensureLayaCredentials(env);
+    assert.fail('invalid JSON must refuse');
+  } catch (e) {
+    assert.match((e as Error).message, /not valid JSON/);
+    assert.ok(!/9f88/.test((e as Error).message), 'the parse-error excerpt must not carry the secret');
+  }
 });
 
 test('ensureLayaCredentials: an EXISTING loose-mode file is repaired to 0600 (#840 r1)', () => {
@@ -1251,10 +1279,14 @@ test('runHostSetup: laya interpreter refusal fails the step AFTER mercury.env is
 });
 
 test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repaired to 0600 (#840 r1)', async () => {
-  // The unit embeds the API key; the re-run must not leave it world-readable.
+  // The unit embeds the API key; the re-run must not leave it world-readable. The unit path is
+  // platform-specific (launchd plist vs systemd user unit) — build it with the plan's own
+  // rule so the Ubuntu CI job seeds and asserts the SAME file setup writes.
   const dir = tempDir('setup-laya-unitmode-');
-  const unitPath = join(dir, 'Library', 'LaunchAgents', 'com.mercury.laya.plist');
-  mkdirSync(join(dir, 'Library', 'LaunchAgents'), { recursive: true });
+  const unitPath = process.platform === 'darwin'
+    ? join(dir, 'Library', 'LaunchAgents', 'com.mercury.laya.plist')
+    : join(dir, 'systemd', 'user', 'com.mercury.laya.service');
+  mkdirSync(join(unitPath, '..'), { recursive: true });
   writeFileSync(unitPath, 'stale', { mode: 0o644 });
   await runHostSetup([], {
     out: () => {},

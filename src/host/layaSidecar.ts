@@ -172,13 +172,18 @@ WantedBy=default.target
 `;
 }
 
-/** The steps the wizard sequences, in order, for --dry-run and the real run. */
-export function layaStepActions(plan: LayaPlan): string[] {
+/** The steps the wizard sequences, in EXECUTION order, for --dry-run and the real run.
+ *  venvTool mirrors the real step: uv when the detector picked uv (with --seed), else
+ *  `python3 -m venv` (Copilot #840 r2: the printed plan must match what runs). */
+export function layaStepActions(plan: LayaPlan, venvTool: 'uv' | 'python3' = 'uv'): string[] {
+  const venvLine = venvTool === 'uv'
+    ? `create venv: uv venv ${plan.venvDir} --seed (python >= 3.10)`
+    : `create venv: python3 -m venv ${plan.venvDir} (python >= 3.10)`;
   return [
-    `create venv: uv venv ${plan.venvDir} (python >= 3.10)`,
-    `install pinned sidecar: pip install 'laya[serve]==${LAYA_SERVE_PIN}'`,
+    `write env: MERCURY_LAYA_URL=${plan.envUrl} (mercury.env; the LAYA_API_KEY goes to bot-credentials.json, key 'laya')`,
+    venvLine,
+    `install pinned sidecar: pip install 'laya[serve]==${LAYA_SERVE_PIN}' into ${plan.venvDir}`,
     `write unit: ${plan.unitPath} (bind 127.0.0.1, LAYA_PRELOAD=1, LAYA_MODELS=english)`,
-    `write env: MERCURY_LAYA_URL=${plan.envUrl} (+ the LAYA_API_KEY in bot-credentials.json, key 'laya')`,
     `verify with: mercury host doctor (the laya: line, #830)`,
   ];
 }
@@ -190,7 +195,22 @@ export function ensureLayaCredentials(env: NodeJS.ProcessEnv = process.env, gen:
   const path = join(xdg, 'mercury', 'bot-credentials.json');
   let raw: Record<string, unknown> = {};
   if (existsSync(path)) {
-    raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(path, 'utf8'));
+    } catch (err) {
+      // The parse error quotes ~26 source chars; with a secret near the malformation that
+      // excerpt would leak through the setup output. Name the failure, never the content
+      // (same rule as readBotCredentials and the answers file).
+      throw new Error(`${path}: not valid JSON (${(err as Error).name ?? 'SyntaxError'})`);
+    }
+    // Root-shape gate (Copilot #840 r2): a valid-JSON array would swallow the assignment —
+    // JSON.stringify([]) ignores .laya — and setup would report success while the key was
+    // never persisted. Require a non-array object before mutating.
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`${path}: must be a JSON object keyed by bot alias`);
+    }
+    raw = parsed as Record<string, unknown>;
   }
   const entry = raw.laya;
   if (entry && typeof entry === 'object' && !Array.isArray(entry) && typeof (entry as Record<string, unknown>).api === 'string' && ((entry as Record<string, unknown>).api as string).trim() !== '') {
