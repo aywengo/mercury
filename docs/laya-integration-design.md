@@ -362,6 +362,10 @@ wire shape against the pinned upstream version.
 
 ## 13. Milestones
 
+Issue set for P-1 and L0: [`laya-issues.md`](laya-issues.md). Reading the tree for it
+showed P-1 is larger than sketched here: a Run has no model field at all outside the
+preset snapshot, and no adapter reads `preset.model` (see that document, "Findings").
+
 ### P-1 — per-Run model (prerequisite for the model half; server work)
 
 - `model` on `POST /api/runs`, forwarded to `resolvePreset` as `caller.model`
@@ -411,6 +415,12 @@ without a recorded comparison.
 - [`host-installer.md`](host-installer.md)
 
 ## 15. Revision history
+
+### 2026-10-03 — issue set drafted
+
+P-1 and L0 issues written to `laya-issues.md`. P-1 now includes Run-level model
+persistence and a top-level `RunContext.model`; Fleet needs no code change (body is
+forwarded verbatim), only a pinning test.
 
 ### 2026-09-26 — initial design
 
