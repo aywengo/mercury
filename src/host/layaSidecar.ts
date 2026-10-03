@@ -147,6 +147,7 @@ export function renderLayaLaunchdPlist(plan: LayaPlan, apiKey: string): string {
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
 </dict>
 </plist>
 `;
@@ -166,6 +167,9 @@ Environment=LAYA_API_KEY=${apiKey}
 Environment=LAYA_PRELOAD=1
 Environment=LAYA_MODELS=english
 Restart=on-failure
+# Same backoff as the host and bot units: a preload/startup failure must not loop tightly.
+RestartSec=5
+TimeoutStopSec=15
 
 [Install]
 WantedBy=default.target
@@ -213,11 +217,22 @@ export function ensureLayaCredentials(env: NodeJS.ProcessEnv = process.env, gen:
     raw = parsed as Record<string, unknown>;
   }
   const entry = raw.laya;
-  if (entry && typeof entry === 'object' && !Array.isArray(entry) && typeof (entry as Record<string, unknown>).api === 'string' && ((entry as Record<string, unknown>).api as string).trim() !== '') {
+  if (entry && typeof entry === 'object' && !Array.isArray(entry) && typeof (entry as Record<string, unknown>).api === 'string') {
+    const preserved = (entry as Record<string, unknown>).api as string;
+    // The preserved value must satisfy the SAME rules the shared reader enforces
+    // (readBotCredentials): non-empty, unpadded. A padded key would pass setup and then fail
+    // every doctor/doctor-adjacent read afterwards — refuse at setup time, value never named.
+    if (preserved.trim() === '') throw new Error(`${path}: entry 'laya.api' must be a non-empty string`);
+    if (preserved !== preserved.trim()) throw new Error(`${path}: entry 'laya.api' has leading or trailing whitespace; remove it (the file is read verbatim, not trimmed)`);
     // The key is preserved but the FILE MODE is repaired unconditionally (Copilot #840 r3):
     // a preserved key in a file that drifted to 0644 is exactly as exposed as a new one.
     chmodSync(path, 0o600);
-    return { key: (entry as Record<string, unknown>).api as string, generated: false };
+    return { key: preserved, generated: false };
+  }
+  // A malformed entry (api missing/wrong type/empty) is an operator-visible refusal, not a
+  // silent overwrite: the file is shared and something wrote a broken 'laya' entry.
+  if (entry !== undefined) {
+    throw new Error(`${path}: entry 'laya' must be an object with a non-empty string 'api' field`);
   }
   const key = gen();
   raw.laya = { api: key };

@@ -1110,6 +1110,37 @@ test('planLayaSidecar: user-scoped venv under the data dir + user-scoped unit (#
   assert.match(linux.unitPath, /systemd\/user\/com\.mercury\.laya\.service$/);
 });
 
+test('laya units carry the same restart backoff as the host and bot units (#840 r4)', () => {
+  const plan = planLayaSidecar({ dataDir: '/data', pythonBin: 'python3', platform: 'linux', env: { XDG_CONFIG_HOME: '/cfg' } });
+  const unit = renderLayaSystemdUnit(plan, 'k');
+  assert.match(unit, /Restart=on-failure[\s\S]{0,120}RestartSec=5[\s\S]{0,60}TimeoutStopSec=15/, 'no tight failure loop');
+  const darwin = planLayaSidecar({ dataDir: '/data', pythonBin: 'python3', platform: 'darwin', env: { HOME: '/home/x' } });
+  assert.match(renderLayaLaunchdPlist(darwin, 'k'), /<key>ThrottleInterval<\/key><integer>5<\/integer>/);
+});
+
+test('ensureLayaCredentials: a padded or empty preserved api is refused at setup time (#840 r4)', () => {
+  const dir = tempDir('laya-creds-padded-');
+  const env = { XDG_CONFIG_HOME: dir };
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  const path = join(dir, 'mercury', 'bot-credentials.json');
+  // Padded: readBotCredentials would reject it AFTER setup claimed success — refuse now.
+  writeFileSync(path, JSON.stringify({ laya: { api: ' key ' } }), { mode: 0o600 });
+  let msg = '';
+  try {
+    ensureLayaCredentials(env);
+  } catch (e) {
+    msg = (e as Error).message;
+  }
+  assert.match(msg, /leading or trailing whitespace/);
+  assert.ok(!msg.includes('key'), 'the value is never included in the error');
+  // Empty: same refusal class.
+  writeFileSync(path, JSON.stringify({ laya: { api: '  ' } }), { mode: 0o600 });
+  assert.throws(() => ensureLayaCredentials(env), /must be a non-empty string/);
+  // Malformed entry shape: refused, never silently overwritten.
+  writeFileSync(path, JSON.stringify({ laya: 'nope' }), { mode: 0o600 });
+  assert.throws(() => ensureLayaCredentials(env), /must be an object with a non-empty string 'api'/);
+});
+
 test('renderLayaLaunchdPlist / renderLayaSystemdUnit: loopback, preload, english, key; deterministic (#831)', () => {
   const plan = planLayaSidecar({ dataDir: '/data', pythonBin: 'python3', platform: 'darwin', env: { HOME: '/home/x' } });
   const plist = renderLayaLaunchdPlist(plan, 'key-1');
