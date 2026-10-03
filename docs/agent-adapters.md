@@ -180,6 +180,11 @@ claude --model <model>                           # model override
 | `stream_event` (error) | `error` |
 
 **Notes:**
+- Per-Run model (#827, measured on 2.1.260): the adapter emits
+  `--model <context.model ?? opts.model>` — the Run's model wins over the
+  operator default; with neither, no `--model` is emitted. Resume (`-r`)
+  re-emits the same per-Run model. `perRunModel: true` is declared. Adapters
+  read `context.model`, never `preset.model`.
 - `--permission-mode` is the human-in-the-loop knob: `acceptEdits`/`auto` for
   unattended runs, `bypassPermissions` only inside the sandbox.
 - `--allowedTools` maps from `RunContext.skills` capabilities (e.g. git-pr →

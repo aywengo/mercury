@@ -153,6 +153,58 @@ test('configured flags reach argv', async () => {
   assert.ok(argv.includes('--dangerously-skip-permissions'));
 });
 
+test('per-Run model: context.model wins over the operator default (#827)', async () => {
+  const argvFile = tempFile('claude-argv-', '.json');
+  const a = adapter({
+    model: 'operator-default',
+    env: { MOCK_CLAUDE_MODE: 'argv', MOCK_CLAUDE_ARGV_FILE: argvFile },
+  });
+  const ctx = makeContext();
+  ctx.model = 'run-model';
+  await drain(await a.start(ctx));
+  a.dispose(ctx.run.id);
+  const argv = readSpawns(argvFile)[0];
+  const after = (flag: string) => argv[argv.indexOf(flag) + 1];
+  assert.equal(after('--model'), 'run-model', 'the per-Run model wins over the operator default');
+  // And without an operator default the per-Run model alone reaches argv.
+  const argvFile2 = tempFile('claude-argv-', '.json');
+  const a2 = adapter({ env: { MOCK_CLAUDE_MODE: 'argv', MOCK_CLAUDE_ARGV_FILE: argvFile2 } });
+  const ctx2 = makeContext();
+  ctx2.model = 'run-model';
+  await drain(await a2.start(ctx2));
+  a2.dispose(ctx2.run.id);
+  const argv2 = readSpawns(argvFile2)[0];
+  assert.equal(argv2[argv2.indexOf('--model') + 1], 'run-model');
+});
+
+test('per-Run model: no --model when neither context.model nor operator default exists (#827)', async () => {
+  const argvFile = tempFile('claude-argv-', '.json');
+  const a = adapter({ env: { MOCK_CLAUDE_MODE: 'argv', MOCK_CLAUDE_ARGV_FILE: argvFile } });
+  const ctx = makeContext();
+  await drain(await a.start(ctx));
+  a.dispose(ctx.run.id);
+  const argv = readSpawns(argvFile)[0];
+  assert.ok(!argv.includes('--model'), 'model-less Run keeps the argv shape byte-identical to base');
+});
+
+test('per-Run model: resume re-emits --model from the session context (#827)', async () => {
+  // A resumed session (claude -r) must carry the same per-Run model, or a retry drifts to the
+  // operator default (or claude's own default) mid-task.
+  const argvFile = tempFile('claude-argv-', '.json');
+  const a = adapter({ env: { MOCK_CLAUDE_MODE: 'resume', MOCK_CLAUDE_ARGV_FILE: argvFile } });
+  const ctx = makeContext();
+  ctx.model = 'run-model';
+  await drain(await a.start(ctx));
+  const h = await a.resume(ctx.run.id, ctx);
+  await drain(h);
+  a.dispose(ctx.run.id);
+  const spawns = readSpawns(argvFile);
+  assert.equal(spawns.length, 2, 'start + resume spawns');
+  for (const argv of spawns) {
+    assert.equal(argv[argv.indexOf('--model') + 1], 'run-model', `resume keeps the per-Run model: ${argv.join(' ')}`);
+  }
+});
+
 test('skipPermissions is OFF by default: the sandbox-only knob is never implicit', async () => {
   const argvFile = tempFile('claude-argv-', '.json');
   const a = adapter({ env: { MOCK_CLAUDE_MODE: 'argv', MOCK_CLAUDE_ARGV_FILE: argvFile } });
