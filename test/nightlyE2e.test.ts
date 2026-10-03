@@ -21,6 +21,9 @@ import {
   ensureDependencies,
   rawDetailsSection,
   rawBlockOf,
+  codeFence,
+  redactedErrorLine,
+  resetRawRedactorForTests,
   type E2eIo,
   type FlakeState,
 } from '../.agents/skills/nightly/e2e.ts';
@@ -1036,5 +1039,52 @@ test('ensureDependencies throws when npm ci fails', async () => {
     assert.deepEqual(runs, [['npm', 'ci']], 'the failing command must still be the install attempt');
   } finally {
     cleanup();
+  }
+});
+
+// -- #811/#817 review regressions: fence escaping + error-line redaction --
+
+test('codeFence grows past the longest backtick run in the content', () => {
+  assert.equal(codeFence(['plain line']), '```');
+  assert.equal(codeFence(['has ``` inside']), '````');
+  assert.equal(codeFence(['x', '`````` deep', 'y']), '```````');
+  // The fence itself can never appear in the content: every run is shorter than the fence.
+  const content = ['some ``` block', 'and ```` too'];
+  const fence = codeFence(content);
+  for (const line of content) assert.ok(!line.includes(fence));
+});
+
+test('rawDetailsSection uses an adaptive fence: a ``` line cannot close the block early', () => {
+  const section = rawDetailsSection({ raw: ['before', 'the diff contains ``` quote', 'after'] });
+  const joined = section.join('\n');
+  // The first fence must be ```` (longer than the content's ``` run), so the content line does
+  // not close it; the details section stays balanced.
+  assert.ok(section.includes('````'), 'the adaptive fence is used');
+  const openFences = section.filter((l) => /^`{3,}$/.test(l)).length;
+  assert.equal(openFences, 2, 'exactly one open + one close fence');
+  assert.ok(section[section.length - 2] === '</details>');
+});
+
+test('redactedErrorLine runs the normalized error through the secret redactor (#817)', () => {
+  // A credential shape on the chosen Error line must not publish: the redactor strips
+  // token-bearing URLs before the line reaches the issue body.
+  const out = redactedErrorLine({ error: 'Error: cannot fetch https://user:ghp_abcdef0123456789@host.example/x failed' });
+  assert.ok(!out.includes('ghp_abcdef0123456789'), 'the credential value must not survive');
+});
+
+test('rawDetailsSection redacts operator-declared MERCURY_SECRETS, not only credential shapes (#817)', () => {
+  const secret = 'custom-secret-806';
+  process.env.MERCURY_SECRETS = secret;
+  resetRawRedactorForTests();
+  try {
+    // A BARE literal (no label, no known key shape) - the shape-only redactor passes it, the
+    // declared-secrets layer must redact it (the #817 finding's exact scenario).
+    const section = rawDetailsSection({ raw: [`Error: the configured value ${secret} appears in raw output`] });
+    const joined = section.join('\n');
+    assert.ok(!joined.includes(secret), 'the declared literal secret must be redacted');
+    assert.ok(joined.includes('[REDACTED]'));
+  } finally {
+    delete process.env.MERCURY_SECRETS;
+    resetRawRedactorForTests();
   }
 });

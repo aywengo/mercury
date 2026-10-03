@@ -35,6 +35,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createRedactor } from '../../../src/domain/redact.ts';
+import { forwardedCredentialValues } from '../../../src/sandbox/sandboxManager.ts';
 
 // REPO_RE comes from shared.ts (#769): one strict regex everywhere.
 /** A flake is filed as a defect only after the same fingerprint flaked on 3 distinct nights. */
@@ -117,7 +118,33 @@ export async function fingerprintOf(test: string, error: string): Promise<string
 /** The hidden marker an issue carries in its body; searches match on it, not on prose. */
 export const fpMarker = (fp: string): string => `<!-- nightly-e2e-fp:${fp} -->`;
 
-const rawRedactor = createRedactor();
+// Two redaction layers, matching the CLI's event redactor (src/cli.ts): the operator's declared
+// MERCURY_SECRETS plus the exact values of forwarded provider credentials. The e2e skill posts
+// failure output to GitHub - a credential that reaches an agent can reach the issue body unless
+// redaction tracks forwarding (#817 review: the shape-only redactor let a literal secret through).
+let rawRedactorInstance: ReturnType<typeof createRedactor> | null = null;
+
+/**
+ * The redactor, built on FIRST USE rather than at module load: the skill reads MERCURY_SECRETS
+ * and forwarded credential values from its own process env, and tests (which set env per-case)
+ * must see the current values, not whatever the import-time environment had. Layers match the
+ * CLI's event redactor: operator-declared MERCURY_SECRETS + exact forwarded credential values
+ * (#817 review: shape-only redaction let a declared literal secret through).
+ */
+function rawRedactor(): ReturnType<typeof createRedactor> {
+  if (rawRedactorInstance === null) {
+    rawRedactorInstance = createRedactor([
+      ...(process.env.MERCURY_SECRETS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+      ...forwardedCredentialValues(process.env, null),
+    ]);
+  }
+  return rawRedactorInstance;
+}
+
+/** Test hook: drop the memoized redactor so a later call re-reads the environment. */
+export function resetRawRedactorForTests(): void {
+  rawRedactorInstance = null;
+}
 
 /**
  * The failure's RAW detail block, redacted with the same secret shapes Mercury applies to event
@@ -128,8 +155,33 @@ const rawRedactor = createRedactor();
 export function rawDetailsSection(failure: { raw?: string[] }): string[] {
   const raw = failure.raw ?? [];
   if (raw.length === 0) return [];
-  const redacted = raw.map((l) => rawRedactor.redact(l));
-  return ['', '<details>', '<summary>Raw failure block (redacted)</summary>', '', '```', ...redacted, '```', '', '</details>', ''];
+  const redacted = raw.map((l) => rawRedactor().redact(l));
+  const fence = codeFence(redacted);
+  return ['', '<details>', '<summary>Raw failure block (redacted)</summary>', '', fence, ...redacted, fence, '', '</details>', ''];
+}
+
+/**
+ * A fenced-code fence LONGER than the longest backtick run in the content: a fixed ``` fence
+ * closes early when a failure prints Markdown (an assertion diff with a ``` block), which breaks
+ * the collapsed <details> section and swallows the issue text after it (#811/#817 review). Four
+ * backticks is the common case (content containing ```); grow to fit so the fence can never
+ * appear in the content.
+ */
+export function codeFence(contentLines: string[]): string {
+  let longest = 0;
+  for (const line of contentLines) {
+    for (const run of line.match(/`+/g) ?? []) {
+      if (run.length > longest) longest = run.length;
+    }
+  }
+  return '`'.repeat(Math.max(3, longest + 1));
+}
+
+/** The normalized error line, redacted with the same secret shapes as the raw block: the error
+ *  can carry credential shapes too (a URL with an embedded token, for example), and it posts
+ *  OUTSIDE the collapsed section (#817 review). */
+export function redactedErrorLine(failure: { error: string }): string {
+  return rawRedactor().redact(normalizeErrorLine(failure.error));
 }
 
 // ---- parsing the spec reporter ----
@@ -430,15 +482,16 @@ export async function runE2eSkill(
       // >= would re-file the same flaky-test issue on nights 4, 5, ... (no filed-marker state).
       if (nights === FLAKE_FILE_NIGHTS && !opts.dryRun) {
         const nightsList = state[fp]!.nights.join(', ');
+        const fenceErr = codeFence([normalizeErrorLine(failure.error)]);
         const body = [
           `Flake filed by the nightly E2E skill (N1-2): the fingerprint below flaked on ${nights} distinct nights (${nightsList}).`,
           '',
           `**Test:** \`${failure.test}\``,
           '',
           '**Error (normalized on filing):**',
-          '```',
-          normalizeErrorLine(failure.error),
-          '```',
+          fenceErr,
+          redactedErrorLine(failure),
+          fenceErr,
           ...rawDetailsSection(failure),
           fpMarker(fp),
           '',
@@ -481,13 +534,14 @@ export async function runE2eSkill(
       continue;
     }
     if (existing) {
+      const fenceErr = codeFence([normalizeErrorLine(failure.error)]);
       const comment = [
         `Reproduced on the night of ${opts.night}. The failure fingerprint matches this issue.`,
         '',
         '**Error (normalized):**',
-        '```',
-        normalizeErrorLine(failure.error),
-        '```',
+        fenceErr,
+        redactedErrorLine(failure),
+        fenceErr,
         ...rawDetailsSection(failure),
         marker,
       ].join('\n');
@@ -500,15 +554,16 @@ export async function runE2eSkill(
       }
       continue;
     }
+    const fenceErr = codeFence([normalizeErrorLine(failure.error)]);
     const body = [
       `Filed by the nightly E2E skill (N1-2) on ${opts.night}: the suite failed and the failure reproduced on an immediate single rerun of the same file.`,
       '',
       `**Test:** \`${failure.test}\``,
       '',
       '**Error (normalized on filing):**',
-      '```',
-      normalizeErrorLine(failure.error),
-      '```',
+      fenceErr,
+      redactedErrorLine(failure),
+      fenceErr,
       ...rawDetailsSection(failure),
       `The fingerprint below identifies this defect. Later nights COMMENT on this issue instead of filing duplicates; the marker is a hidden HTML comment, matched by exact string.`,
       '',
