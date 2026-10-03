@@ -23,6 +23,8 @@ interface ChildBehaviour {
  */
 async function fakeChild(behaviour: ChildBehaviour = {}): Promise<{
   url: string; created: { key: string | undefined; runId: string }[]; authSeen: string[];
+  /** The JSON body of every POST /api/runs, in arrival order (#824): the pin for forwarded fields. */
+  bodies: unknown[];
   close: () => Promise<void>; setStatus: (s: string) => void;
 }> {
   const runs = new Map<string, { id: string; status: string }>();

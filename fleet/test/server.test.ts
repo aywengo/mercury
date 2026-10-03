@@ -790,8 +790,8 @@ test('the caller body reaches the child with `model` intact (#824)', async () =>
        VALUES ('live-child', ?, 'lan-ref', 1, '{}', '[]', '["fake"]', ?, 0)`,
     ).run(`http://127.0.0.1:${port}`, new Date().toISOString());
     const r = await s.call('POST', '/fleet/runs', {
-      token: CALLER_TOKEN, host: 'live-child',
-      body: { task: 'x', model: 'GLM-5.3-Flash' },
+      token: CALLER_TOKEN,
+      body: { task: 'x', model: 'GLM-5.3-Flash', host: 'live-child' },
     });
     assert.equal(r.status, 201, JSON.stringify(r.json));
     assert.equal(bodies.length, 1, 'the child received exactly one submission');

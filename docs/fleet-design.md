@@ -65,9 +65,9 @@ Verified against `src/api/routes.ts` and `src/api/server.ts` at the time of writ
 **Forwarded fields.** The submit path forwards the caller's body to the chosen
 child verbatim minus `host` and `idempotency` (the routing decision may replace
 `repository`). That includes `task`, `agent`, `skills`, `constraints`, `goal`,
-`knowledge`, `preset`, and — since #823/#824 — `model`. A test pins `model`
-specifically because a future allowlist would drop it silently rather than
-fail loudly.
+`knowledge`, `preset`, and `model` (#824 pins the forwarding with a test; #823
+gives `model` its child-side semantics). A future allowlist would drop a field
+silently rather than fail loudly, which is why `model` is pinned.
 
 Two properties matter more than the endpoints themselves:
 
