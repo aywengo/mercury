@@ -846,15 +846,15 @@ test('runSelectorWith: two claim-verification failures exclude both issues from 
 });
 
 // Blocker 2 + blocker 3 mechanism: the scanner classifies PRs by head-review state.
-test('runSelectorWith: resume only for head-bound findings; unreviewed/approved heads reserve the issue from rungs 1-3', async () => {
+test('runSelectorWith: resume only for UNRESOLVED threads; unreviewed/approved/resolved heads reserve the issue from rungs 1-3', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const trusted = issue({ number: 400, user: { login: 'aywengo' } });
   const prList = [
-    // head reviewed WITH inline findings on that head -> resume candidate
+    // head reviewed with UNRESOLVED threads -> resume candidate
     { number: 811, user: { login: 'mercury-nightly' }, created_at: '2026-10-01T22:00:00Z', head: { sha: 'shaA', ref: 'fix/issue-400-x' } },
     // head NOT reviewed yet -> reserves the issue from rungs 1-3
     { number: 830, user: { login: 'mercury-nightly' }, created_at: '2026-10-02T22:00:00Z', head: { sha: 'shaB', ref: 'fix/issue-401-y' } },
-    // head review approval-class (COMMENTED, no inline on head) -> awaiting merge, reserves too
+    // head review approval-class (all threads resolved) -> awaiting merge, reserves too
     { number: 831, user: { login: 'mercury-nightly' }, created_at: '2026-10-02T23:00:00Z', head: { sha: 'shaC', ref: 'fix/issue-402-z' } },
   ];
   const io = {
@@ -870,16 +870,86 @@ test('runSelectorWith: resume only for head-bound findings; unreviewed/approved 
       if (path.includes('/pulls/831/reviews')) {
         return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaC', state: 'COMMENTED' }], link: null };
       }
-      if (path.includes('/pulls/811/comments')) {
-        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaA' }], link: null };
-      }
-      if (path.includes('/pulls/830/comments') || path.includes('/pulls/831/comments')) return { body: [], link: null };
       return { body: [trusted, issue({ number: 401, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }] }), issue({ number: 402, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }] })], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      const vars = (body as { variables: { number: number } }).variables;
+      // 811: one unresolved thread; 831: all resolved; 830 never queried (no review).
+      const nodes = vars.number === 811 ? [{ isResolved: false }] : [{ isResolved: true }];
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: nodes.length, pageInfo: { hasNextPage: false }, nodes } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0, 'the unresolved-thread PR resumes');
+  assert.equal(s.issue, 400);
+  assert.match(s.reason, /PR #811/);
+});
+
+// r2 blocker 1: a failed/capped PR scan aborts selection - no claims at all.
+test('runSelectorWith: a failed open-PR scan aborts selection instead of assuming absence', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const io = {
+    async get(path: string) {
+      if (path.includes('/pulls?')) throw new Error('503 Service Unavailable');
+      return { body: [issue({ number: 5, user: { login: 'aywengo' } })], link: null };
     },
     async post() { return true; },
   };
   const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
-  assert.equal(s.rung, 0, 'the findings PR resumes');
-  assert.equal(s.issue, 400);
-  assert.match(s.reason, /PR #811/);
+  assert.equal(s.rung, 'none');
+  assert.match(s.reason, /aborted/);
+});
+
+// r2 blocker 2: an issue whose PR is APPROVED-class stays reserved from rungs 1-3.
+test('runSelectorWith: an issue with an approved-class PR is not claimed as new work', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const prList = [
+    { number: 831, user: { login: 'mercury-nightly' }, created_at: '2026-10-02T23:00:00Z', head: { sha: 'shaC', ref: 'fix/issue-402-z' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) {
+        return { body: [{ event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } }], link: null };
+      }
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/831/reviews')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaC', state: 'COMMENTED' }], link: null };
+      }
+      return { body: [issue({ number: 402, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }] })], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      const vars = (body as { variables: { number: number } }).variables;
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 1, pageInfo: { hasNextPage: false }, nodes: [{ isResolved: true }] } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.issue, 402, 'the approved-PR issue is reserved from rungs 1-3');
+  assert.equal(s.rung === 4 || s.rung === 'none', true);
+});
+
+// r2 blocker 3: resolved threads are NOT pending findings even when inline comments exist.
+test('runSelectorWith: fully resolved threads on the reviewed head never resume', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const prList = [
+    { number: 811, user: { login: 'mercury-nightly' }, created_at: '2026-10-01T22:00:00Z', head: { sha: 'shaA', ref: 'fix/issue-400-x' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/811/reviews')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaA', state: 'COMMENTED' }], link: null };
+      }
+      return { body: [], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      // 3 threads, all resolved (waived findings): nothing pending.
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 3, pageInfo: { hasNextPage: false }, nodes: [{ isResolved: true }, { isResolved: true }, { isResolved: true }] } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.rung, 0, 'resolved threads are not work');
 });

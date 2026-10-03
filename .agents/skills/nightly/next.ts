@@ -63,6 +63,9 @@ export interface NextIo {
   /** Issue body update (PATCH /issues/<n>). Optional: only the blocked exit uses it, and only
    * for issues the nightly identity filed (#770). */
   patch?(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
+  /** Generic JSON POST returning the response body (the selector's GraphQL review-thread query).
+   *  Optional; absent makes resume candidates fail closed (no resume, still reserved). */
+  postJson?(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
 }
 
 export interface NextSelection {
@@ -93,6 +96,12 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: 
       // The stale-claim reset (#800) deletes labels: forward the same DELETE transport the
       // finish/blocked exits use, or a pre-midnight claim would throw instead of reset.
       del: (path) => io.deleteLabel(path),
+      // The resume rung's pending-findings check (#819) queries GraphQL review threads; absent
+      // transport = the selector fails its resume candidates closed (still reserves their
+      // issues from new work).
+      postJson: io.postJson
+        ? async (path, body) => await io.postJson!(path, body)
+        : undefined,
     },
     { ...env, REPO: opts.repo },
     opts.dryRun,

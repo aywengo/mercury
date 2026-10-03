@@ -401,6 +401,10 @@ export async function runSelectorWith(
     get: (path: string) => Promise<unknown>;
     post: (path: string, body: unknown) => Promise<boolean>;
     del?: (path: string) => Promise<boolean>;
+    /** Generic JSON POST returning the response body (GraphQL for review-thread state).
+     *  Optional: ABSENT means the pending-findings check cannot run, so resume candidates
+     *  fail closed (no resume) while their issues stay reserved from new work. */
+    postJson?: (path: string, body: unknown) => Promise<{ body: unknown; status: number }>;
   },
   env: NodeJS.ProcessEnv,
   dryRun: boolean,
@@ -530,10 +534,13 @@ export async function runSelectorWith(
     } catch (e) {
       console.error(`resume scan: PR list failed: ${String(e instanceof Error ? e.message : e)}`);
     }
-    if (!prScanComplete && prPath) {
-      console.error('resume scan: open-PR pagination hit the 10-page cap; resume rung skipped this night');
+    if (!prScanComplete) {
+      // A failed or capped scan means the nightly-PR state is UNKNOWN, not absent: treating it
+      // as absent would let the night double-claim an issue that already has a PR (#820 r2,
+      // blocker 1). Abort selection: nothing is claimed tonight; the next Run retries.
+      return { rung: 'none', reason: 'selection aborted: the open-nightly-PR scan is incomplete (pagination cap or transport failure); claiming new work now could duplicate an existing PR' };
     }
-    if (prScanComplete) {
+    {
       const openIssues = new Map(candidates.map((c) => [c.issue.number, c]));
       for (const pr of nightlyPrs) {
         const branch = pr.head?.ref ?? '';
@@ -544,9 +551,15 @@ export async function runSelectorWith(
         if (!issueCandidate) continue;
         const headSha = pr.head?.sha ?? '';
         if (!headSha) continue;
+        // Reserve NOW, before any review read: whether the PR turns out to be unreviewed,
+        // approval-class-awaiting-merge, or unreadable, its issue must not re-enter rungs 1-3
+        // while a nightly PR is open on it (#820 r2, blocker 2). Rung 0 eligibility is decided
+        // further down; reservation is about NEW work, and it survives `finish` releasing the
+        // claim because it is recomputed from the still-open PR every night.
+        pendingReviewIssues.add(issue);
         // Last Copilot review + its inline-comment count on THIS head.
         let lastCopilot: { commit_id?: string | null; state?: string | null } | null = null;
-        let inlineOnHead = 0;
+        let unresolvedOnPr = 0;
         let rvPath: string | null = `/repos/${repo}/pulls/${pr.number}/reviews?per_page=50`;
         let rvPages = 0;
         let rvScanComplete = false;
@@ -562,35 +575,40 @@ export async function runSelectorWith(
             rvPath = rvNext !== null && rvNext.includes(`/pulls/${pr.number}/reviews?`) ? rvNext : null;
           }
           rvScanComplete = !rvPath;
-          // Inline review comments bound to the current head (one page is far beyond the
-          // loop's 2-round finding budget; a cap fails this PR's scan, not the run).
-          if (rvScanComplete) {
-            let cmPath: string | null = `/repos/${repo}/pulls/${pr.number}/comments?per_page=100`;
-            let cmPages = 0;
-            while (cmPath && cmPages < 3) {
-              const { body, link } = (await io.get(cmPath)) as { body: { user?: { login?: string | null }; commit_id?: string | null }[]; link?: string | null };
-              for (const cm of body ?? []) {
-                if (cm.user?.login?.startsWith('copilot-pull-request-reviewer') && cm.commit_id === headSha) inlineOnHead++;
+          // Pending findings: UNRESOLVED review threads (GraphQL), not inline-comment counts -
+          // resolved/waived threads must not count, and a later clean COMMENTED review on the
+          // same head must not inherit stale comments (#820 r2, blocker 3). Scoped to the
+          // PR's threads; thread resolution is the review loop's own state, not text.
+          if (io.postJson) {
+            const gql = {
+              query: `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){totalCount,pageInfo{hasNextPage},nodes{isResolved,isOutdated}}}}}`,
+              variables: { owner: repo.split('/')[0] ?? '', name: repo.split('/')[1] ?? '', number: pr.number },
+            };
+            const res = await io.postJson('/graphql', gql);
+            if (res.status !== 200) {
+              console.error(`resume scan: PR #${pr.number} reviewThreads query -> ${res.status}`);
+              rvScanComplete = false;
+            } else {
+              const threads = (res.body as { data?: { repository?: { pullRequest?: { reviewThreads?: { totalCount?: number; pageInfo?: { hasNextPage?: boolean }; nodes?: { isResolved?: boolean; isOutdated?: boolean }[] } } } } }).data?.repository?.pullRequest?.reviewThreads;
+              if (!threads || threads.pageInfo?.hasNextPage) {
+                // >100 threads is not a real state for this loop; a capped query fails closed.
+                rvScanComplete = false;
+              } else {
+                unresolvedOnPr = (threads.nodes ?? []).filter((t) => t.isResolved === false).length;
               }
-              cmPages++;
-              const cmNext = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1]?.replace('https://api.github.com', '') ?? null;
-              cmPath = cmNext !== null && cmNext.includes(`/pulls/${pr.number}/comments?`) ? cmNext : null;
             }
-            if (cmPath) { rvScanComplete = false; }
           }
         } catch (e) {
-          console.error(`resume scan: PR #${pr.number} reviews failed: ${String(e instanceof Error ? e.message : e)}`);
+          console.error(`resume scan: PR #${pr.number} threads failed: ${String(e instanceof Error ? e.message : e)}`);
+          rvScanComplete = false;
         }
-        if (!rvScanComplete) continue; // fail closed for THIS PR: no resume, no duplicate claim
-        // No Copilot review on this head: the relay must fetch one first. The issue stays
-        // reserved (below) so the night cannot double-claim it as new work.
+        if (!rvScanComplete) continue; // fail closed for THIS PR: no resume, but the issue stays reserved
         const hasHeadReview = lastCopilot !== null && lastCopilot.commit_id === headSha;
-        if (!hasHeadReview || lastCopilot === null) { pendingReviewIssues.add(issue); continue; }
+        if (!hasHeadReview || lastCopilot === null) continue; // relay fetches the review first
         if (lastCopilot.state === 'APPROVED') continue; // awaiting merge; not resume work
-        // Findings = the reviewer left inline comments on this head. COMMENTED-state reviews
-        // with zero inline comments are approval-class ('Approval recommended', #816) and are
-        // NOT actionable (#820 r1, blocker 3).
-        if (inlineOnHead === 0) continue; // approval-recommended: the PR awaits merge
+        // Pending findings = UNRESOLVED threads (>0). Zero unresolved threads = the review is
+        // approval-class or fully addressed: the PR awaits merge, no resume.
+        if (unresolvedOnPr === 0) continue;
         // Excluded issues (nightly:blocked after hand-off, proposed) never resume (#820 r1,
         // blocker 1): the review cannot re-open work a human must answer.
         if (isExcluded(issueCandidate.issue)) continue;
@@ -658,6 +676,7 @@ export async function runSelector(repo: string, env: NodeJS.ProcessEnv, dryRun: 
     {
       get: async (path) => await ghGet(path, token),
       post: (path, body) => ghPost(path, body, token),
+      postJson: async (path, body) => await ghPostRaw(path, body, token),
       del: async (path) => {
         const res = await ghDeleteRaw(path, token);
         if (res.status >= 200 && res.status < 300) return true;
