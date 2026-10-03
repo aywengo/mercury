@@ -49,7 +49,8 @@ prime-agent cannot resolve is NOT an error — it silently falls back to the
 configured default; a provider-scoped id for an unconfigured provider fails the
 run (`No API key found for <provider>`). **DaemonAgentAdapter** sets
 `config.model` on the daemon `create` payload, overriding the args-derived
-value — measured against a real supervisor: a run with
+value — measured against a real supervisor (probe Run `run_daemonmodel`,
+2026-10-03): a run with
 `omlx/GLM-5.3-Flash-oQ8e-mtp` completed; bare aliases for unconfigured providers
 (`GLM-5.3-Flash` → opencode, `sonnet`/`us.anthropic.claude-sonnet-5` →
 amazon-bedrock) were refused at the prompt with `No API key found for
