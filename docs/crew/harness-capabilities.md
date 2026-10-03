@@ -15,7 +15,7 @@ capability (§4): Fleet still cannot rank a host by what its harnesses can do.
 | `GET /api/agents` exposes a `capabilities` map alongside the names | shipped | `src/api/routes.ts`, `RunService.listAgentCapabilities()` |
 | Harness version recorded on each Run | shipped | migration v7, `docs/goals.md` §13.1 |
 | `capabilities` vocabulary beyond goals (`skills`, `personaAppend`, `roleInstruction`, `perRunModel`, `sandbox`, `mcp`, `humanInput`, `resume`, `knowledge`, `toolEvents`) | shipped | issue **#508** (closed); `AgentStaticCapabilities` in `src/domain/types.ts`, resolved fail-closed in `src/adapters/capabilities.ts` |
-| `api` schema version on `/healthz`; Fleet rejects a registration only when the probe reports a numeric schema below `MIN_HOST_API` (a missing `api` field is compatible, `hostApi: null`) | shipped | issue **#510** (closed); `API_SCHEMA_VERSION` in `src/api/server.ts`, `MIN_HOST_API` in `fleet/probe.ts` |
+| `api` schema version on `/healthz`; Fleet rejects a registration only when the probe reports a numeric schema below `MIN_HOST_API` (a missing `api` field is compatible, `hostApi: null`) — such a host can still fail later at first `/api/agents` use, which registration does not screen | shipped | issue **#510** (closed); `API_SCHEMA_VERSION` in `src/api/server.ts`, `MIN_HOST_API` in `fleet/probe.ts` |
 | Skill namespace declared per adapter, so Hermes stops receiving Mercury ids | shipped | issue **#507** (closed, PRs #519 and #520); `skills: 'nativeNames'` on `HermesAgentAdapter` |
 | Affinity descriptor and Fleet placement by capability + affinity (§3–§4) | **not built** | this document §3; no Fleet consumer of `/api/agents` |
 

@@ -886,7 +886,10 @@ clock with `singleFlight` and `onMiss`, `src/host/bots/dispatch.ts` and
 `status.ts` give the manual fire and the read-only view, `service.ts` installs
 and uninstalls the per-alias unit with the §17.7 teardown message (#760), and
 the nightly bot (`deploy/nightly-bot.json.example`, #774) has been running the
-§4.1 schedule of `nightly-self-development.md` unattended. Items 4 and 5 (the
+§4.1 schedule of `nightly-self-development.md` unattended — the operational
+evidence is the morning digests (e.g. closed
+[#798](https://github.com/aywengo/mercury/issues/798)) and the nightly-authored
+merged PRs #791 and #796. Items 4 and 5 (the
 LLM brain and its budgets) wait for B3; item 6 (per-bot `host doctor`) waits
 for B4.
 
@@ -1083,5 +1086,6 @@ corrections to the design itself.
 B0 and B1 shipped without this document's header noticing. The header, §17 and
 this history now record what actually runs: B0 (#729–#734) and B1 (#735–#737)
 merged, #760 landed the §17.7 owner-transfer API, and the nightly bot config
-(#774) runs the schedule unattended. B2–B4 remain design. No design text
+(#774) runs the schedule unattended (evidence: closed digest #798, nightly-
+authored merged PRs #791 and #796). B2–B4 remain design. No design text
 changed; only status claims and their evidence.
