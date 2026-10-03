@@ -1,7 +1,9 @@
 # Dispatcher bots — host-resident scheduled and coordinated agents
 
-Status: **partly implemented — milestones B0 and B1 are shipped and running
-unattended; B2–B4 are design.** This document specifies the feature and its
+Status: **partly implemented — milestones B0 and B1 are shipped, and the nightly
+bot runs unattended (operational evidence: the morning digests, e.g. closed
+[#798](https://github.com/aywengo/mercury/issues/798), and nightly-authored merged
+PRs #791 and #796); B2–B4 are design.** This document specifies the feature and its
 roadmap. B0 (#729–#734) and B1 (#735–#737) merged: the scheduler, dispatch,
 status, per-alias service install and the bot config schema live in
 `src/host/bots/`, and the nightly bot runs from `deploy/nightly-bot.json.example`

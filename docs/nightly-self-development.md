@@ -1,7 +1,9 @@
 # Nightly self-development — Mercury working on Mercury
 
 Status: **running — N0 and N1 are done, the dispatcher bot (B0–B1) is
-installed, and the nightly loop runs unattended; N2 is in its acceptance
+installed, and the nightly loop runs unattended (operational evidence: the
+morning digests, e.g. closed [#798](https://github.com/aywengo/mercury/issues/798),
+and nightly-authored merged PRs #791 and #796); N2 is in its acceptance
 window.** See §8.1 for the per-milestone status. This document specifies how a
 Mercury host, driven by a dispatcher bot (`dispatcher-bot-design.md`), works on
 the `aywengo/mercury` repository unattended between 00:00 and 06:00 local
@@ -213,9 +215,10 @@ only after the previous one has produced evidence that it can be trusted.
 1. **First night (N1 → N2).** Owner steps done 2026-09-26 (approvals = 1,
    identity `mercury-nightly`); the token goes into the host harness
    environment with the #742 checklist. Agent work done: #739–#741 (closed by
-   PRs #766, #767, #768) and the bot config #774. Since then: walk the #742
-   checklist, `host bot service install --alias nightly`, and record three
-   clean nights on #742.
+   PRs #766, #767, #768) and the bot config #774. Done since then: the #742
+   checklist walked and `host bot service install --alias nightly` run — the
+   bot is installed and operating. Still outstanding: recording three clean
+   nights on #742.
 2. **Prove it (N2 acceptance, no new code).** Run nightly until the N2
    acceptance holds (seven consecutive nights) and the §9 metrics have a
    baseline. Defects the nights reveal become ordinary issues, and the ladder

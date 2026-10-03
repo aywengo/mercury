@@ -1,8 +1,9 @@
 # Daemon-based agent sessions — design
 
-**Status:** the proposed design is **implemented and shipped on `main`** (§13); the daemon adapter
-is protocol-verified against a real supervisor and RPC remains the default. Still unexercised: a
-supervisor restart mid-run and a loaded deployment (§10.1).
+**Status:** the CORE adapter is **implemented and shipped on `main`** (§13) and protocol-verified
+against a real supervisor; RPC remains the default. Still design-only: snapshot fallback (§7.4),
+reattach (§11.1), session reuse, multi-tenancy and supervisor provisioning (§13). Still
+unexercised: a supervisor restart mid-run and a loaded deployment (§10.1).
 **Verified against:** PrimeAgent 0.8.1 and re-verified against 0.9.1 (§3.1), daemon protocol
 `prime-agent.daemon` version 7, schema `protocol-7-schema-25-585ef1102921`.
 **Related:** [`agent-adapters.md`](agent-adapters.md) (Pattern B), issues #55 and #68,
