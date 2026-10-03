@@ -315,8 +315,9 @@ Crew tables start after the current last migration, per `README.md` §6.
    capability field on `/healthz`. Done: `/api/agents` returns a `capabilities`
    map carrying the static vocabulary beyond `goals` (#508, in
    `src/adapters/capabilities.ts` and `AgentStaticCapabilities`), and `/healthz`
-   returns an integer `api` schema version that Fleet refuses old hosts on
-   (#510, `fleet/probe.ts` `MIN_HOST_API`).
+   returns an integer `api` schema version that Fleet refuses a REPORTED schema
+   below `MIN_HOST_API` on (#510, `fleet/probe.ts`) — a pre-schema host with no
+   `api` field registers as compatible and can fail later at first use.
 3. **Phase 2 — Agent Templates** stored and snapshotted
    ([`agent-templates.md`](agent-templates.md)).
 4. **Phase 3 — Teams**: bounded stages, mixed harnesses, artifact handoff.
