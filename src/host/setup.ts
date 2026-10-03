@@ -796,7 +796,7 @@ export async function runHostSetup(
       // does not change the plan, and the plan comes from the VALIDATED answers, not the old
       // env file (Copilot #840 r1).
       const plan = planLayaSidecar({ dataDir: io.sidecarDataDir ?? answers.dataDir.trim(), pythonBin: 'python3', env });
-      io.out('\nLaya sidecar (opt-in) would:\n' + layaStepActions(plan).map((a) => `  - ${a}`).join('\n') + '\n');
+      io.out('\nLaya sidecar (opt-in) would:\n' + layaStepActions(plan, 'both').map((a) => `  - ${a}`).join('\n') + '\n');
     }
     if (alreadyConfigured) {
       const diff = envDiff(readFileSync(path, 'utf8'), content);
@@ -838,7 +838,10 @@ export async function runHostSetup(
     const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES);
     if (!det.ok) {
       io.err(`\nlaya: not installed — ${det.reason}\n`);
-      io.err('laya: fix the interpreter and re-run `mercury host setup --yes`, or answer no to the sidecar prompt.\n');
+      io.err('laya: the sidecar needs uv (recommended) or Python >= 3.10. Install one first:\n');
+      io.err('  macOS:   brew install uv   (or: brew install python@3.12)\n');
+      io.err('  Linux:   install uv (curl -LsSf https://astral.sh/uv/install.sh | sh) or the distro python3\n');
+      io.err('laya: then re-run `mercury host setup --yes`, or answer no to the sidecar prompt.\n');
       return 1;
     }
     const plan: LayaPlan = planLayaSidecar({ dataDir, pythonBin: det.bin!, env });

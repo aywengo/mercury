@@ -81,18 +81,34 @@ export function detectPython(
       failures.push(`${cand.argv[0]}: not usable`);
       continue;
     }
-    const v = parsePythonVersion(`${r.stdout}\n${r.stderr}`);
+    // `uv python find 3.10` prints an interpreter PATH, not "Python X.Y" (Copilot #840 r5):
+    // parsing that path as a version would reject a valid uv-only install. Verify by asking
+    // the located interpreter directly; on failure treat the candidate as unusable.
+    let versionOut = `${r.stdout}\n${r.stderr}`;
+    if (cand.argv[0] === 'uv') {
+      const located = r.stdout.trim().split('\n')[0] ?? '';
+      const verify = run([located, '-V'], 10_000);
+      if (!verify.ok) {
+        failures.push('uv: the located interpreter could not be run');
+        continue;
+      }
+      versionOut = `${verify.stdout}\n${verify.stderr}`;
+    }
+    const v = parsePythonVersion(versionOut);
     if (v === null) {
       failures.push(`${cand.argv[0]}: no parsable version`);
       continue;
     }
     if (!atLeast310(v)) {
       // The acceptance wording: the macOS SYSTEM python is the 3.9 case. Name the platform
-      // and the found version; do not silently fall through to a worse interpreter.
+      // and the verified version (NOT the raw candidate output — for uv that is a PATH, and
+      // quoting it would read like a version), never the key material. Do not silently fall
+      // through to a worse interpreter.
+      const shown = versionOut.trim().split('\n')[0] ?? '';
       failures.push(
         platform === 'darwin'
-          ? `the system Python on macOS is too old (${r.stdout.trim() || r.stderr.trim()}); need >= 3.10 (uv preferred)`
-          : `python too old (${r.stdout.trim() || r.stderr.trim()}); need >= 3.10`,
+          ? `the system Python on macOS is too old (${shown}); need >= 3.10 (uv preferred)`
+          : `python too old (${shown}); need >= 3.10`,
       );
       continue;
     }
@@ -178,15 +194,23 @@ WantedBy=default.target
 
 /** The steps the wizard sequences, in EXECUTION order, for --dry-run and the real run.
  *  venvTool mirrors the real step: uv when the detector picked uv (with --seed), else
- *  `python3 -m venv` (Copilot #840 r2: the printed plan must match what runs). */
-export function layaStepActions(plan: LayaPlan, venvTool: 'uv' | 'python3' = 'uv'): string[] {
+ *  `python3 -m venv` (Copilot #840 r2). 'both' is the non-executing dry-run form: it names
+ *  BOTH possible venv branches (which one runs depends on the interpreter detection, which
+ *  must not exec during --dry-run) and the credential step explicitly (Copilot #840 r5). */
+export function layaStepActions(plan: LayaPlan, venvTool: 'uv' | 'python3' | 'both' = 'uv'): string[] {
   const venvLine = venvTool === 'uv'
     ? `create venv: uv venv ${plan.venvDir} --seed (python >= 3.10)`
-    : `create venv: python3 -m venv ${plan.venvDir} (python >= 3.10)`;
+    : venvTool === 'python3'
+      ? `create venv: python3 -m venv ${plan.venvDir} (python >= 3.10)`
+      : `create venv: uv venv ${plan.venvDir} --seed (when uv is present) OR python3 -m venv ${plan.venvDir} (fallback)`;
+  const credsLine = venvTool === 'both'
+    ? `write credentials: generate/keep LAYA_API_KEY in bot-credentials.json (key 'laya', 0600)`
+    : `write credentials: generate/keep LAYA_API_KEY in bot-credentials.json (key 'laya', 0600)`;
   return [
     `write env: MERCURY_LAYA_URL=${plan.envUrl} (mercury.env; the LAYA_API_KEY goes to bot-credentials.json, key 'laya')`,
     venvLine,
     `install pinned sidecar: pip install 'laya[serve]==${LAYA_SERVE_PIN}' into ${plan.venvDir}`,
+    credsLine,
     `write unit: ${plan.unitPath} (bind 127.0.0.1, LAYA_PRELOAD=1, LAYA_MODELS=english)`,
     `verify with: mercury host doctor (the laya: line, #830)`,
   ];
@@ -224,6 +248,16 @@ export function ensureLayaCredentials(env: NodeJS.ProcessEnv = process.env, gen:
     // every doctor/doctor-adjacent read afterwards — refuse at setup time, value never named.
     if (preserved.trim() === '') throw new Error(`${path}: entry 'laya.api' must be a non-empty string`);
     if (preserved !== preserved.trim()) throw new Error(`${path}: entry 'laya.api' has leading or trailing whitespace; remove it (the file is read verbatim, not trimmed)`);
+    // The key is embedded in a launchd plist (XML) and a systemd unit — an existing key with
+    // whitespace, quotes, ampersands or newlines would inject a directive or corrupt the file
+    // (Copilot #840 r5). Wizard-generated keys are hex; anything outside the inert charset is
+    // refused with the fix named, never the value.
+    if (!/^[A-Za-z0-9._~@:+/=-]+$/.test(preserved)) {
+      throw new Error(
+        `${path}: entry 'laya.api' contains characters that cannot be embedded in the service unit; ` +
+        'use a key of [A-Za-z0-9._~@:+/=-] only (the wizard generates 64 hex chars)',
+      );
+    }
     // The key is preserved but the FILE MODE is repaired unconditionally (Copilot #840 r3):
     // a preserved key in a file that drifted to 0644 is exactly as exposed as a new one.
     chmodSync(path, 0o600);

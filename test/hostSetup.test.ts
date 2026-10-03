@@ -1091,6 +1091,36 @@ test('parsePythonVersion: tuple semantics — 3.9.10 must NOT read as 3.10 (#840
   assert.equal(parsePythonVersion('no version here'), null);
 });
 
+test('detectPython: uv python find output (an interpreter PATH) is verified with -V, not parsed (#840 r5)', () => {
+  // A uv-only host whose resolved path has no '3.10' component: parse-the-path would read
+  // version null and reject a valid install. The python3 fallback answers 3.9 (too old), so
+  // ONLY a correct uv verify can make this succeed.
+  const run = (argv: string[]) => {
+    if (argv[0] === 'uv') return { ok: true, stdout: '/opt/python/bin/python3', stderr: '' };
+    if (argv[0] === '/opt/python/bin/python3' && argv[1] === '-V') return { ok: true, stdout: 'Python 3.10.4', stderr: '' };
+    if (argv[1] === '-V') return { ok: true, stdout: 'Python 3.9.6', stderr: '' };
+    return { ok: false, stdout: '', stderr: '' };
+  };
+  const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES);
+  assert.equal(det.ok, true, 'the located interpreter is verified by running it with -V');
+  assert.equal(det.bin, 'uv run --python 3.10 python3', 'the uv candidate won');
+  assert.equal(det.version, '3.10.4');
+});
+
+test('detectPython: a uv-located interpreter that cannot run is not silently accepted (#840 r5)', () => {
+  // No usable fallback (system python 3.9.6): the uv path must NOT parse the find output as a
+  // version (the old bug accepted the candidate by reading '3' patterns out of the path).
+  const run = (argv: string[]) => {
+    if (argv[0] === 'uv') return { ok: true, stdout: '/opt/python3.10/bin/python3', stderr: '' };
+    if (argv[1] === '-V') return { ok: true, stdout: 'Python 3.9.6', stderr: '' };
+    return { ok: false, stdout: '', stderr: 'no' };
+  };
+  const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES);
+  assert.equal(det.ok, false, 'a uv locate whose interpreter cannot be run must fail (no path parsing)');
+  assert.ok(!det.reason?.includes('/opt/python3.10/bin'), 'the found PATH must not be quoted as a version');
+  assert.match(det.reason ?? '', /too old/);
+});
+
 test('detectPython: 3.9.10 (two-digit patch) is REFUSED — order-preserving compare (#840 r1)', () => {
   const run = (argv: string[]) =>
     argv[0] === 'uv'
@@ -1205,6 +1235,30 @@ test('ensureLayaCredentials: an array root or invalid JSON is REFUSED, secrets n
     assert.match((e as Error).message, /not valid JSON/);
     assert.ok(!/9f88/.test((e as Error).message), 'the parse-error excerpt must not carry the secret');
   }
+});
+
+test('ensureLayaCredentials: keys that cannot be embedded in a unit are REFUSED (#840 r5)', () => {
+  const dir = tempDir('laya-creds-charset-');
+  const env = { XDG_CONFIG_HOME: dir };
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  const path = join(dir, 'mercury', 'bot-credentials.json');
+  for (const bad of ['a&b', 'a b', 'a\nb', 'a"b', 'a b; c']) {
+    writeFileSync(path, JSON.stringify({ laya: { api: bad } }), { mode: 0o600 });
+    let msg = '';
+    try {
+      ensureLayaCredentials(env);
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    assert.match(msg, /cannot be embedded in the service unit/, `key ${JSON.stringify(bad)} refused`);
+    assert.ok(!msg.includes(bad), 'the value is never echoed');
+    assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'no unit write happens after a refusal');
+  }
+  // Hex keys — the wizard-generated shape — always pass.
+  writeFileSync(path, JSON.stringify({ laya: { api: 'a'.repeat(64) } }), { mode: 0o600 });
+  const r = ensureLayaCredentials(env);
+  assert.equal(r.generated, false);
+  assert.equal(r.key, 'a'.repeat(64));
 });
 
 test('ensureLayaCredentials: a PRESERVED key in a drifted 0644 file is still repaired (#840 r3)', () => {
@@ -1377,5 +1431,8 @@ test('runHostSetup --dry-run: laya plan printed, nothing executed (#831)', async
   const text = out.join('');
   assert.match(text, /Laya sidecar \(opt-in\) would:/);
   assert.match(text, new RegExp(`laya\\[serve\\]==${LAYA_SERVE_PIN}`));
+  // The non-executing plan names BOTH venv branches and the credentials step (Copilot r5).
+  assert.match(text, /when uv is present\) OR python3 -m venv/);
+  assert.match(text, /generate\/keep LAYA_API_KEY/);
   assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'dry-run creates no venv');
 });
