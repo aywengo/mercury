@@ -6,8 +6,22 @@ Drafted 2026-10-03 against `main` at `422a106`, for
 L1 depends on what P-1 measures, L2 is blocked on harness affinity, L3 on data.
 
 Each issue follows the `issue-fix-loop` contract: mechanism, choke point, a
-regression test that fails on base, one PR. Numbers are placeholders (`P1-n`,
-`L0-n`) until filed.
+regression test that fails on base, one PR. Labels `P1-n`/`L0-n` are kept below because the dependency graph is written in
+terms of them; the Status table maps them to GitHub numbers.
+
+## Status — filed 2026-10-03
+
+| Doc | Issue | Blocked by | PR | Merge |
+| --- | --- | --- | --- | --- |
+| P1-1 | #823 | — | | |
+| P1-2 | #827 | #823 | | |
+| P1-3 | #828 | #823 | | |
+| P1-4 | #829 | #823 | | |
+| P1-5 | #824 | — | | |
+| L0-1 | #825 | — | | |
+| L0-2 | #826 | — | | |
+| L0-3 | #830 | #825 | | |
+| L0-4 | #831 | #825, #830 | | |
 
 ## Findings that changed the design's P-1 sketch
 
