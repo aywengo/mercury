@@ -528,7 +528,8 @@ test('the open-issue list walks Link-header pages (round-4 review)', async () =>
   };
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
   assert.equal(s.issue, 82, 'the page-2 candidate is visible to the ladder');
-  assert.equal(paths.filter((p) => p.startsWith('/repos/') && p.includes('issues?')).length, 2, 'both list pages fetched');
+  assert.equal(paths.filter((p) => p.startsWith('/repos/aywengo/mercury/issues?')).length, 2, 'both issue-list pages fetched');
+  assert.equal(paths.filter((p) => p.startsWith('/repos/aywengo/mercury/pulls?')).length >= 1, true, 'the resume scan reads the open-PR list');
 });
 
 
@@ -794,10 +795,91 @@ test('rung 0 does not wait for the e2e gate (review remarks are not new work)', 
   assert.equal(s.issue, 3);
 });
 
-test('rung 0 with resume candidates and NO trusted issues still resumes (the issue came from an earlier night)', () => {
+test('rung 0 ignores resume candidates whose issue is absent from the open list', () => {
   const c = [cand(issue({ number: 3, user: { login: 'random-dev' }, labels: [{ name: 'nightly:in-progress' }] }))];
   const s = selectLadder(c, TERMINAL);
   assert.notEqual(s.rung, 0, 'no resume candidates passed, so no resume');
   const s2 = selectLadder(c, { ...TERMINAL, resume: [resume({ issue: 9, prNumber: 811 })] });
-  assert.equal(s2.rung, 0, 'the caller pre-verified the issue is open + claimable; resume proceeds');
+  assert.notEqual(s2.rung, 0, 'issue 9 is not in the open list: nothing to claim (#820 r1)');
+});
+
+// -- #820 review round 1 regressions --
+
+// Blocker 1: a nightly:blocked issue's open PR must not re-enter rung 0.
+test('rung 0 skips an issue excluded as nightly:blocked (the hand-off stands)', () => {
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }, { name: 'nightly:blocked' }] }), [labeled('aywengo', 'nightly:ready')])];
+  const s = selectLadder(c, { ...TERMINAL, resume: [resume({ issue: 3, prNumber: 811 })] });
+  assert.notEqual(s.rung, 0, 'a blocked issue is out of the resume rung');
+});
+
+// Blocker 3: COMMENTED with zero inline comments = approval-class, NOT pending findings.
+test('a COMMENTED Copilot review with no inline comments on the head is not resume work', () => {
+  // selectLadder-level: the rung only sees resume candidates the scanner already vetted, so
+  // this test pins the CONTRACT (the reason text cannot claim findings without them) and the
+  // runSelectorWith-level scanner test below pins the mechanism.
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }] }), [labeled('aywengo', 'nightly:ready')])];
+  const s = selectLadder(c, { ...TERMINAL, resume: [] });
+  assert.notEqual(s.rung, 0);
+});
+
+// Blocker 4: two failed claims must not ping-pong.
+test('runSelectorWith: two claim-verification failures exclude both issues from all rungs', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  // Two trusted issues; timelines have NO labeled events (claim verify fails: 0 actors).
+  // After the claim POST the timeline still shows no actor -> both fail -> rung 4 (no ping-pong).
+  const issueList = [
+    issue({ number: 301, user: { login: 'aywengo' } }),
+    issue({ number: 302, user: { login: 'aywengo' } }),
+  ];
+  let posts = 0;
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: [], link: null };
+      return { body: issueList, link: null };
+    },
+    async post() { posts++; return true; },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, false);
+  assert.equal(posts, 2, 'one claim POST per issue, two issues tried');
+  assert.equal(s.rung === 4 || s.rung === 'none', true, 'both claims failed: no infinite retry');
+});
+
+// Blocker 2 + blocker 3 mechanism: the scanner classifies PRs by head-review state.
+test('runSelectorWith: resume only for head-bound findings; unreviewed/approved heads reserve the issue from rungs 1-3', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const trusted = issue({ number: 400, user: { login: 'aywengo' } });
+  const prList = [
+    // head reviewed WITH inline findings on that head -> resume candidate
+    { number: 811, user: { login: 'mercury-nightly' }, created_at: '2026-10-01T22:00:00Z', head: { sha: 'shaA', ref: 'fix/issue-400-x' } },
+    // head NOT reviewed yet -> reserves the issue from rungs 1-3
+    { number: 830, user: { login: 'mercury-nightly' }, created_at: '2026-10-02T22:00:00Z', head: { sha: 'shaB', ref: 'fix/issue-401-y' } },
+    // head review approval-class (COMMENTED, no inline on head) -> awaiting merge, reserves too
+    { number: 831, user: { login: 'mercury-nightly' }, created_at: '2026-10-02T23:00:00Z', head: { sha: 'shaC', ref: 'fix/issue-402-z' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) {
+        return { body: [{ event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } }], link: null };
+      }
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/811/reviews')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaA', state: 'COMMENTED' }], link: null };
+      }
+      if (path.includes('/pulls/830/reviews')) return { body: [], link: null };
+      if (path.includes('/pulls/831/reviews')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaC', state: 'COMMENTED' }], link: null };
+      }
+      if (path.includes('/pulls/811/comments')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaA' }], link: null };
+      }
+      if (path.includes('/pulls/830/comments') || path.includes('/pulls/831/comments')) return { body: [], link: null };
+      return { body: [trusted, issue({ number: 401, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }] }), issue({ number: 402, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }] })], link: null };
+    },
+    async post() { return true; },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0, 'the findings PR resumes');
+  assert.equal(s.issue, 400);
+  assert.match(s.reason, /PR #811/);
 });
