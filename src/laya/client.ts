@@ -150,39 +150,57 @@ function basenameOf(repository: string): string {
   return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
 }
 
-/** Validate a parsed response body against the OFFERED options, fail-closed (§5.2). */
+/** Validate a Jev-shaped response body against the OFFERED options, fail-closed (§5.2).
+ *
+ *  Real `laya-serve` shape (#837 r4): `answers` is an object keyed by question id, each choice
+ *  answer carrying `choice` + `answer_confidence`; the checkpoint id sits under `routing.model`.
+ *  Mercury sends exactly ONE question, so every question key in `answers` must project onto the
+ *  same offered set; rows are projected onto Mercury's `{key, choice, probability}` form where
+ *  `key`/`choice` are the option key and `probability` is `answer_confidence`.
+ */
 export function validateLayaBody(body: unknown, offeredKeys: Set<string>): { ok: true; answers: LayaAnswer[]; checkpoint: string } | { ok: false; reason: LayaFailureReason; detail: string } {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
     return { ok: false, reason: 'malformed', detail: 'response is not a JSON object' };
   }
   const b = body as Record<string, unknown>;
-  if (typeof b.checkpoint !== 'string' || b.checkpoint.length === 0) {
-    return { ok: false, reason: 'malformed', detail: 'checkpoint missing or not a string' };
+  const routing = (typeof b.routing === 'object' && b.routing !== null && !Array.isArray(b.routing))
+    ? b.routing as Record<string, unknown>
+    : undefined;
+  if (!routing || typeof routing.model !== 'string' || routing.model.length === 0) {
+    return { ok: false, reason: 'malformed', detail: 'routing.model (checkpoint id) missing or not a string' };
   }
-  if (!Array.isArray(b.answers)) {
-    return { ok: false, reason: 'malformed', detail: 'answers missing or not an array' };
+  if (typeof b.answers !== 'object' || b.answers === null || Array.isArray(b.answers)) {
+    return { ok: false, reason: 'malformed', detail: 'answers missing or not an object keyed by question id' };
   }
-  if (b.answers.length === 0) {
-    return { ok: false, reason: 'empty_answers', detail: 'answers array is empty' };
+  const byQuestion = Object.entries(b.answers as Record<string, unknown>);
+  if (byQuestion.length === 0) {
+    return { ok: false, reason: 'empty_answers', detail: 'answers object is empty' };
   }
   const answers: LayaAnswer[] = [];
-  for (const raw of b.answers) {
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-      return { ok: false, reason: 'malformed', detail: 'answer is not an object' };
+  for (const [questionId, rowsRaw] of byQuestion) {
+    if (!Array.isArray(rowsRaw)) {
+      return { ok: false, reason: 'malformed', detail: `answers[${JSON.stringify(questionId)}] is not an array` };
     }
-    const a = raw as Record<string, unknown>;
-    if (typeof a.key !== 'string' || !offeredKeys.has(a.key)) {
-      return { ok: false, reason: 'unknown_answer_key', detail: `answer key ${JSON.stringify(a.key)} was not offered` };
+    if (rowsRaw.length === 0) {
+      return { ok: false, reason: 'empty_answers', detail: `answers[${JSON.stringify(questionId)}] is empty` };
     }
-    if (typeof a.choice !== 'string' || !offeredKeys.has(a.choice)) {
-      return { ok: false, reason: 'choice_not_offered', detail: `choice ${JSON.stringify(a.choice)} is not among the offered keys` };
+    for (const raw of rowsRaw) {
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+        return { ok: false, reason: 'malformed', detail: `answers[${JSON.stringify(questionId)}] row is not an object` };
+      }
+      const a = raw as Record<string, unknown>;
+      if (typeof a.choice !== 'string' || !offeredKeys.has(a.choice)) {
+        return { ok: false, reason: 'choice_not_offered', detail: `answers[${JSON.stringify(questionId)}] choice ${JSON.stringify(a.choice)} is not among the offered keys` };
+      }
+      const probability = a.answer_confidence;
+      if (typeof probability !== 'number' || !Number.isFinite(probability)) {
+        return { ok: false, reason: 'non_finite_probability', detail: `answers[${JSON.stringify(questionId)}] answer_confidence ${JSON.stringify(probability)} is not finite` };
+      }
+      // Mercury's projected row: the choice IS the option key it names (opaque keys, §6.3).
+      answers.push({ key: a.choice, choice: a.choice, probability });
     }
-    if (typeof a.probability !== 'number' || !Number.isFinite(a.probability)) {
-      return { ok: false, reason: 'non_finite_probability', detail: `probability ${JSON.stringify(a.probability)} is not finite` };
-    }
-    answers.push({ key: a.key, choice: a.choice, probability: a.probability });
   }
-  return { ok: true, answers, checkpoint: b.checkpoint };
+  return { ok: true, answers, checkpoint: routing.model };
 }
 
 export class LayaClient {

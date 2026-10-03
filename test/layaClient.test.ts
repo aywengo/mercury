@@ -55,20 +55,20 @@ test('valid pick: ok:true carries answers, checkpoint, latencyMs', async () => {
 test('below-threshold is the CALLER\'s decision: the client reports the pick, not a verdict', async () => {
   // §6.4 gates on answer_confidence at the dispatcher layer; the client's job is honest transport.
   // A low-but-finite probability is still a valid answer (0 is finite).
-  const f = await withFake([{ json: { checkpoint: 'english', answers: [{ key: 'B', choice: 'B', probability: 0 }] } }]);
+  const f = await withFake([{ json: { routing: { model: 'english' }, answers: { q1: [{ choice: 'B', answer_confidence: 0 }] } } }]);
   const res = await client(f.url).ask({ options: OPTIONS }, STATE);
   assert.ok(res.ok);
   if (res.ok) assert.equal(res.answers[0].probability, 0);
 });
 
-test('unoffered answer key -> ok:false reason unknown_answer_key', async () => {
-  const f = await withFake([{ json: { checkpoint: 'english', answers: [{ key: 'Z', choice: 'A', probability: 0.9 }] } }]);
+test('unoffered answer key -> ok:false reason choice_not_offered (§11 option key not offered)', async () => {
+  const f = await withFake([{ json: { routing: { model: 'english' }, answers: { q1: [{ choice: 'Z', answer_confidence: 0.9 }] } } }]);
   const res = await client(f.url).ask({ options: OPTIONS }, STATE);
-  assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'unknown_answer_key' });
+  assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'choice_not_offered' });
 });
 
 test('choice not among the offered keys -> ok:false reason choice_not_offered', async () => {
-  const f = await withFake([{ json: { checkpoint: 'english', answers: [{ key: 'A', choice: 'nope', probability: 0.9 }] } }]);
+  const f = await withFake([{ json: { routing: { model: 'english' }, answers: { q1: [{ choice: 'nope', answer_confidence: 0.9 }] } } }]);
   const res = await client(f.url).ask({ options: OPTIONS }, STATE);
   assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'choice_not_offered' });
 });
@@ -78,14 +78,14 @@ test('non-finite probability (NaN) -> ok:false reason non_finite_probability', a
   // (non-standard) or from the validator itself; assert the validator contract directly, and the
   // Infinity test below covers the over-the-wire path JSON CAN carry.
   const v = validateLayaBody(
-    { checkpoint: 'english', answers: [{ key: 'A', choice: 'A', probability: NaN }] },
+    { routing: { model: 'english' }, answers: { q1: [{ choice: 'A', answer_confidence: NaN }] } },
     new Set(['A']),
   );
   assert.deepEqual({ ok: v.ok, reason: v.ok ? null : v.reason }, { ok: false, reason: 'non_finite_probability' });
 });
 
 test('Infinity probability -> ok:false reason non_finite_probability', async () => {
-  const f = await withFake([{ rawBody: '{"checkpoint":"english","answers":[{"key":"A","choice":"A","probability":1e999}]}' }]);
+  const f = await withFake([{ rawBody: '{"routing":{"model":"english"},"answers":{"q1":[{"choice":"A","answer_confidence":1e999}]}}' }]);
   const res = await client(f.url).ask({ options: OPTIONS }, STATE);
   assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'non_finite_probability' });
 });
@@ -131,7 +131,7 @@ test('connection refused -> ok:false reason unreachable', async () => {
 });
 
 test('empty answers array -> ok:false reason empty_answers', async () => {
-  const f = await withFake([{ json: { checkpoint: 'english', answers: [] } }]);
+  const f = await withFake([{ json: { routing: { model: 'english' }, answers: {} } }]);
   const res = await client(f.url).ask({ options: OPTIONS }, STATE);
   assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'empty_answers' });
 });

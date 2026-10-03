@@ -34,16 +34,23 @@ export interface LayaRequest {
   state: LayaState;
 }
 
-/** One answer row: which option was picked (by key), the reported choice text, and the calibrated
- *  probability of that answer (`answer_confidence`, §6.4). */
+/** One answer row, in MERCURY's projected form: the option key it names, the choice text echoed by
+ *  the sidecar, and the calibrated probability of that answer (upstream `answer_confidence`, §6.4). */
 export interface LayaAnswer {
   key: string;
   choice: string;
   probability: number;
 }
 
-/** A valid response body (before the client's own validation): answers plus the checkpoint id
- *  that produced them (recorded in the `selection` attribution row, §6.5). */
+/** The RAW Jev-shaped response body from `laya-serve` (§5.1): `answers` keyed by question id, each
+ *  answer carrying `choice` + `answer_confidence`; the checkpoint id under `routing.model`. */
+export interface LayaRawResponse {
+  routing?: { model?: unknown };
+  answers?: Record<string, unknown>;
+}
+
+/** A validated response, projected onto Mercury's shape: answers plus the checkpoint id that
+ *  produced them (recorded in the `selection` attribution row, §6.5). */
 export interface LayaResponse {
   answers: LayaAnswer[];
   checkpoint: string;
@@ -57,7 +64,6 @@ export type LayaFailureReason =
   | 'http_status'
   | 'over_cap'
   | 'malformed'
-  | 'unknown_answer_key'
   | 'choice_not_offered'
   | 'non_finite_probability'
   | 'empty_answers'

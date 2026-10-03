@@ -9,7 +9,7 @@
 
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { LayaRequest, LayaResponse } from '../../src/laya/types.ts';
+import type { LayaRawResponse, LayaRequest } from '../../src/laya/types.ts';
 
 /** What one request to the fake looked like. */
 export interface FakeLayaReceived {
@@ -95,11 +95,15 @@ export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKe
   };
 }
 
-/** A valid response body for the given offered keys (equiprobable over the keys, first key picked). */
-export function validPick(keys: string[], checkpoint = 'english'): LayaResponse {
+/** A valid Jev-shaped response body for the given offered keys (equiprobable over the keys, first
+ *  key picked). The shape is the real `laya-serve` one (#837 r4): `answers` keyed by question id,
+ *  rows carrying `choice` + `answer_confidence`, checkpoint under `routing.model`. */
+export function validPick(keys: string[], checkpoint = 'english'): LayaRawResponse {
   const p = 1 / keys.length;
   return {
-    checkpoint,
-    answers: keys.map((key, i) => ({ key, choice: key, probability: i === 0 ? 1 - p * (keys.length - 1) : p })),
+    routing: { model: checkpoint },
+    answers: {
+      q1: keys.map((key, i) => ({ choice: key, answer_confidence: i === 0 ? 1 - p * (keys.length - 1) : p })),
+    },
   };
 }
