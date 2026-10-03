@@ -62,6 +62,13 @@ Verified against `src/api/routes.ts` and `src/api/server.ts` at the time of writ
 | `GET /healthz/workers` | `{ workers: [{ workerId, activeRuns, oldestLeaseExpiresAt }], queueDepth }`. Public. **Live capacity and backlog — the scheduler input.** Fields are camelCase: `activeLeases()` maps the SQL's snake_case row aliases into `ActiveLease` (`runQueue.ts`), so the wire shape is not the column shape. Returns `503 { error: "queue not configured" }` when no queue is wired — a probe must treat 503 as "reachable but not serving", not as down. |
 | `GET /metrics` | Prometheus text, behind `requireAuth`. Note: mounted at the root, **not** under `/api`. Fleet scrapes and aggregates across hosts. |
 
+**Forwarded fields.** The submit path forwards the caller's body to the chosen
+child verbatim minus `host` and `idempotency` (the routing decision may replace
+`repository`). That includes `task`, `agent`, `skills`, `constraints`, `goal`,
+`knowledge`, `preset`, and — since #823/#824 — `model`. A test pins `model`
+specifically because a future allowlist would drop it silently rather than
+fail loudly.
+
 Two properties matter more than the endpoints themselves:
 
 - **Run IDs are UUID-derived** (`newRunId()` = `run_` + 16 hex chars). Aggregating many hosts into one

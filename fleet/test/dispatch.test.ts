@@ -29,6 +29,7 @@ async function fakeChild(behaviour: ChildBehaviour = {}): Promise<{
   const byKey = new Map<string, string>();
   const created: { key: string | undefined; runId: string }[] = [];
   const authSeen: string[] = [];
+  const bodies: unknown[] = [];
   let status = 'QUEUED';
   let counter = 0;
   const server: Server = createServer((req, res) => {
@@ -49,6 +50,7 @@ async function fakeChild(behaviour: ChildBehaviour = {}): Promise<{
         runs.set(id, { id, status });
         if (key) byKey.set(key, id);
         created.push({ key, runId: id });
+        try { bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { bodies.push(null); }
         if (behaviour.dropResponse) {
           // The Run exists. The client will never learn its id from this attempt.
           res.destroy();
@@ -85,7 +87,7 @@ async function fakeChild(behaviour: ChildBehaviour = {}): Promise<{
   const port = (server.address() as AddressInfo).port;
   return {
     url: behaviour.unreachable ? 'http://127.0.0.1:1' : `http://127.0.0.1:${port}`,
-    created, authSeen,
+    created, authSeen, bodies,
     setStatus: (s: string) => { status = s; for (const r of runs.values()) r.status = s; },
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
@@ -327,4 +329,25 @@ test('list carries cached state through the join, not a query per row', async ()
     assert.equal(queries, 1, 'listing must prepare exactly one statement');
     assert.equal(h.bindings.list([]).length, 0, 'an empty allowlist sees nothing, not everything');
   } finally { await h.child.close(); h.db.close(); }
+});
+
+// -- #824 (P1-5): Fleet forwards `model` to the child verbatim --
+
+test('the forwarded body carries `model` to the child unchanged (#824)', async () => {
+  const h = await harness();
+  try {
+    const out = await submitRun(h.dispatch, {
+      hostId: 'studio', ownerId: 'alice',
+      requested: { task: 'x', model: 'GLM-5.3-Flash', repository: { url: 'https://github.com/acme/app' } },
+    });
+    assert.equal(out.pending, false);
+    assert.equal(h.bindings.state(out.binding.fleetRunId)!.status, 'QUEUED');
+    assert.equal(h.child.bodies.length, 1, 'one child POST');
+    const body = h.child.bodies[0] as Record<string, unknown>;
+    assert.equal(body.model, 'GLM-5.3-Flash', 'the model must survive forwarding untouched');
+    assert.equal(body.task, 'x');
+  } finally {
+    await h.child.close();
+    h.db.close();
+  }
 });

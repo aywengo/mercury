@@ -759,3 +759,48 @@ test('an Atlas that will not answer degrades to 200 with state, never a 5xx', as
     assert.ok(typeof r.json.reason === 'string' && r.json.reason.length > 0, 'the reason must be shown');
   } finally { await s.close(); }
 });
+
+// -- #824 (P1-5): Fleet forwards the caller's `model` field to the child --
+
+test('the caller body reaches the child with `model` intact (#824)', async () => {
+  // A live fake child (the seedHost default URL is unreachable by design); the body it receives
+  // is the pin: a future allowlist in the submit path would silently drop `model` and this fails.
+  const bodies: unknown[] = [];
+  const child = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c as Buffer));
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/api/runs') {
+        try { bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { bodies.push(null); }
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ runId: 'run_1', status: 'QUEUED' }));
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'nope' }));
+    });
+  });
+  await new Promise<void>((r) => child.listen(0, '127.0.0.1', r));
+  const port = (child.address() as AddressInfo).port;
+  const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*` });
+  try {
+    // Seed the host pointing at the live fake child, with the credential Fleet resolves.
+    s.db.prepare(
+      `INSERT INTO hosts (id, base_url, credential_ref, enabled, labels, local_paths, agents_cache, added_at, mirror_bodies)
+       VALUES ('live-child', ?, 'lan-ref', 1, '{}', '[]', '["fake"]', ?, 0)`,
+    ).run(`http://127.0.0.1:${port}`, new Date().toISOString());
+    const r = await s.call('POST', '/fleet/runs', {
+      token: CALLER_TOKEN, host: 'live-child',
+      body: { task: 'x', model: 'GLM-5.3-Flash' },
+    });
+    assert.equal(r.status, 201, JSON.stringify(r.json));
+    assert.equal(bodies.length, 1, 'the child received exactly one submission');
+    const body = bodies[0] as Record<string, unknown>;
+    assert.equal(body.model, 'GLM-5.3-Flash', 'model must survive the forwarding path untouched');
+    assert.equal(body.task, 'x');
+    assert.equal((body as any).host, undefined, 'fleet-internal fields stay out');
+  } finally {
+    await s.close();
+    await new Promise<void>((r) => child.close(() => r()));
+  }
+});
