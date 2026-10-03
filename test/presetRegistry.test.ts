@@ -245,4 +245,7 @@ test('the shipped builtin presets all load with the real skill registry', async 
   }
   const linux = reg.get('linux');
   assert.equal(linux.manifest.requires?.sandbox, true);
+  // A NEW preset that fails validation is silently excluded from list(), so the id list
+  // above can pass while a shipped preset is broken. The invalid list must be empty.
+  assert.deepEqual(reg.listAll().invalid.map((i) => i.id), []);
 });

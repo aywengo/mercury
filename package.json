@@ -35,6 +35,7 @@
     "!client/test/",
     "ui/",
     ".agents/skills/",
+    "workflows/",
     "presets/",
     "local-agents/",
     "remote-agents/",
