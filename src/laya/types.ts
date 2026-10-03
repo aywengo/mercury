@@ -2,9 +2,10 @@
  * Wire types for the Laya sidecar contract (docs/laya-integration-design.md §5.2, §6.3).
  *
  * The sidecar exposes upstream's Jev-compatible `POST /v1/systemone` route. Mercury never imports
- * Python and never loads weights; this module is the whole integration surface, shared by the host
- * (dispatcher selection, L1) and Fleet (task-affinity classification, L2) — hence `src/laya/`, not
- * under `host/` (issue #825 open decision, resolved: Fleet imports it too).
+ * Python and never loads weights; this module is the host's whole integration surface (dispatcher
+ * selection, L1). It lives in `src/laya/`, not under `host/` (issue #825 open decision): it is
+ * generic client code, not installer logic. Fleet reuse (L2) would need the coupling contract
+ * revised deliberately — `fleet/` never imports `src/` today, so Fleet gets its own client then.
  *
  * Fail-closed vocabulary: every invalid response carries a stable `reason` the caller can record
  * (`docs/…` §6.4 decision rule). The client returns a discriminated union, so a Laya failure is a

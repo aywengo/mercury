@@ -95,7 +95,7 @@ unbounded wait has cost more wall-clock time here than any actual bug in this re
 | `src/metrics/` | `/metrics` projection: SQL aggregates over runs/events + Prometheus text format |
 | `src/presets/` | Role presets (Crew): registry, resolution, validation |
 | `src/knowledge/` | Atlas client side: knowledge packs materialized into workspaces, note harvest |
-| `src/laya/` | Laya sidecar client (shared by host + Fleet, never `host/`): typed fail-closed `/v1/systemone` contract |
+| `src/laya/` | Laya sidecar client (host-side; a Fleet-local client is an L2 decision — Fleet never imports `src/`): typed fail-closed `/v1/systemone` contract |
 | `src/host/` | Host installer: setup wizard, service install, doctor, dispatcher bots |
 | `.agents/skills/` | The skill library (one `SKILL.md` per skill; no credentials) |
 | `presets/` | Built-in role presets (`preset.json` + `INSTRUCTION.md`) |
