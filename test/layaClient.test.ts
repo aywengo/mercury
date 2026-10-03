@@ -38,37 +38,45 @@ test('valid pick: ok:true carries answers, checkpoint, latencyMs', async () => {
   assert.ok(res.ok, `expected ok, got ${JSON.stringify(res)}`);
   if (res.ok) {
     assert.equal(res.checkpoint, 'english');
-    assert.equal(res.answers.length, 3);
+    assert.equal(res.answers.length, 1, 'the sidecar answers the question with ONE choice row');
     assert.equal(res.answers[0].key, 'A');
+    assert.equal(res.answers[0].choice, 'A');
+    assert.ok(res.answers[0].probability > 0, 'the calibrated answer_confidence is projected');
     assert.equal(typeof res.latencyMs, 'number');
     assert.ok(res.latencyMs >= 0);
   }
-  // The request the fake received: allowlist fields only, bearer auth, the /v1/systemone path.
+  // The request the fake received: the 0.3.25 wire shape (state + questions), bearer auth,
+  // the /v1/systemone path. The §6.3 allowlist fields ride in the question's instructions.
   assert.equal(f.received.length, 1);
-  const body = f.received[0].body as { question: { options: unknown[] }; state: Record<string, unknown> };
-  assert.deepEqual(Object.keys(body), ['question', 'state'], 'request carries only question+state');
-  assert.deepEqual(Object.keys(body.state).sort(), ['repository', 'skills', 'task', 'template'], 'state is the §6.3 allowlist');
-  assert.equal(body.state.repository, 'repo', 'repository is the basename only');
+  const body = f.received[0].body as { state: string; questions: Record<string, { type: string; instructions: string; criteria: Record<string, string> }> };
+  assert.deepEqual(Object.keys(body).sort(), ['questions', 'state'], 'request carries only state+questions');
+  const q = body.questions['mercury-dispatch'];
+  assert.ok(q, 'the single keyed question is present');
+  assert.equal(q.type, 'choice');
+  assert.deepEqual(q.criteria, { A: 'hard multi-file changes', B: 'routine bug fixes', C: 'cheap mechanical edits' });
+  assert.ok(q.instructions.includes('template=nightly'), 'template rides in instructions');
+  assert.ok(q.instructions.includes('repository=repo'), 'repository basename rides in instructions');
+  assert.ok(q.instructions.includes('skills=git-pr'), 'skills ride in instructions');
   assert.ok(f.received[0].headers.authorization === 'Bearer laya-key');
 });
 
 test('below-threshold is the CALLER\'s decision: the client reports the pick, not a verdict', async () => {
   // §6.4 gates on answer_confidence at the dispatcher layer; the client's job is honest transport.
   // A low-but-finite probability is still a valid answer (0 is finite).
-  const f = await withFake([{ json: { routing: { model: 'english' }, answers: { q1: [{ choice: 'B', answer_confidence: 0 }] } } }]);
+  const f = await withFake([{ json: { model: 'english', answers: { 'mercury-dispatch': { type: 'choice', choice: 'B', probabilities: { A: 0, B: 0, C: 1 }, confidence: 0.1, answer_confidence: 0 } } } }]);
   const res = await client(f.url).ask({ options: OPTIONS }, STATE);
   assert.ok(res.ok);
   if (res.ok) assert.equal(res.answers[0].probability, 0);
 });
 
 test('unoffered answer key -> ok:false reason choice_not_offered (§11 option key not offered)', async () => {
-  const f = await withFake([{ json: { routing: { model: 'english' }, answers: { q1: [{ choice: 'Z', answer_confidence: 0.9 }] } } }]);
+  const f = await withFake([{ json: { model: 'english', answers: { 'mercury-dispatch': { type: 'choice', choice: 'Z', probabilities: {}, confidence: 0.9, answer_confidence: 0.9 } } } }]);
   const res = await client(f.url).ask({ options: OPTIONS }, STATE);
   assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'choice_not_offered' });
 });
 
 test('choice not among the offered keys -> ok:false reason choice_not_offered', async () => {
-  const f = await withFake([{ json: { routing: { model: 'english' }, answers: { q1: [{ choice: 'nope', answer_confidence: 0.9 }] } } }]);
+  const f = await withFake([{ json: { model: 'english', answers: { 'mercury-dispatch': { type: 'choice', choice: 'nope', probabilities: {}, confidence: 0.9, answer_confidence: 0.9 } } } }]);
   const res = await client(f.url).ask({ options: OPTIONS }, STATE);
   assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'choice_not_offered' });
 });
@@ -78,14 +86,14 @@ test('non-finite probability (NaN) -> ok:false reason non_finite_probability', a
   // (non-standard) or from the validator itself; assert the validator contract directly, and the
   // Infinity test below covers the over-the-wire path JSON CAN carry.
   const v = validateLayaBody(
-    { routing: { model: 'english' }, answers: { q1: [{ choice: 'A', answer_confidence: NaN }] } },
+    { model: 'english', answers: { 'mercury-dispatch': { type: 'choice', choice: 'A', answer_confidence: NaN } } },
     new Set(['A']),
   );
   assert.deepEqual({ ok: v.ok, reason: v.ok ? null : v.reason }, { ok: false, reason: 'non_finite_probability' });
 });
 
 test('Infinity probability -> ok:false reason non_finite_probability', async () => {
-  const f = await withFake([{ rawBody: '{"routing":{"model":"english"},"answers":{"q1":[{"choice":"A","answer_confidence":1e999}]}}' }]);
+  const f = await withFake([{ rawBody: '{"model":"english","answers":{"mercury-dispatch":{"type":"choice","choice":"A","answer_confidence":1e999}}}' }]);
   const res = await client(f.url).ask({ options: OPTIONS }, STATE);
   assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'non_finite_probability' });
 });
@@ -130,10 +138,30 @@ test('connection refused -> ok:false reason unreachable', async () => {
   assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'unreachable' });
 });
 
-test('empty answers array -> ok:false reason empty_answers', async () => {
-  const f = await withFake([{ json: { routing: { model: 'english' }, answers: {} } }]);
+test('empty answers object -> ok:false reason unknown_answer_key (the question was not answered)', async () => {
+  const f = await withFake([{ json: { model: 'english', answers: {} } }]);
   const res = await client(f.url).ask({ options: OPTIONS }, STATE);
-  assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'empty_answers' });
+  assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'unknown_answer_key' });
+});
+
+test('a response answering a DIFFERENT question id -> ok:false reason unknown_answer_key (#837 r5)', async () => {
+  const f = await withFake([{ json: { model: 'english', answers: { 'some-other-question': { type: 'choice', choice: 'A', answer_confidence: 0.9 } } } }]);
+  const res = await client(f.url).ask({ options: OPTIONS }, STATE);
+  assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'unknown_answer_key' });
+});
+
+test('an answers row that is an ARRAY (not the 0.3.25 object shape) -> ok:false reason malformed', async () => {
+  // Pins the r4/r5 fix: the earlier draft accepted array rows; a real laya-serve answer is an
+  // object. The mutation check (accepting arrays again) fails this test.
+  const f = await withFake([{ json: { model: 'english', answers: { 'mercury-dispatch': [{ type: 'choice', choice: 'A', answer_confidence: 0.9 }] } } }]);
+  const res = await client(f.url).ask({ options: OPTIONS }, STATE);
+  assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'malformed' });
+});
+
+test('a non-choice answer type -> ok:false reason malformed', async () => {
+  const f = await withFake([{ json: { model: 'english', answers: { 'mercury-dispatch': { type: 'noul', noul: 0.6 } } } }]);
+  const res = await client(f.url).ask({ options: OPTIONS }, STATE);
+  assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'malformed' });
 });
 
 test('more than 12 options -> refused locally, no request leaves the process', async () => {
@@ -151,7 +179,7 @@ test('REGRESSION: a secret planted in the task never reaches the sidecar (fails 
     { ...STATE, task: 'token is hush-hush inside this task text' },
   );
   assert.ok(res.ok, `expected ok, got ${JSON.stringify(res)}`);
-  const sent = (f.received[0].body as { state: { task: string } }).state.task;
+  const sent = String((f.received[0].body as { state: string }).state);
   assert.ok(!sent.includes('hush-hush'), `secret leaked to the sidecar: ${sent}`);
   assert.ok(sent.includes('[REDACTED]'), `expected the redacted form, got: ${sent}`);
 });
@@ -168,10 +196,10 @@ test('REGRESSION: the redactor covers EVERY state field, not just task (#837 r1)
     },
   );
   assert.ok(res.ok, `expected ok, got ${JSON.stringify(res)}`);
-  const sent = f.received[0].body as { state: { template: string; repository: string; skills: string[] } };
-  assert.ok(!sent.state.template.includes('hush-hush'), `template leaked: ${sent.state.template}`);
-  assert.ok(!sent.state.repository.includes('hush-hush'), `repository leaked: ${sent.state.repository}`);
-  assert.ok(sent.state.skills.every((s) => !s.includes('hush-hush')), `skills leaked: ${JSON.stringify(sent.state.skills)}`);
+  const body = f.received[0].body as { state: string; questions: Record<string, { instructions: string }> };
+  const instructions = body.questions['mercury-dispatch']?.instructions ?? '';
+  assert.ok(!instructions.includes('hush-hush'), `template/skills leaked via instructions: ${instructions}`);
+  assert.ok(!body.state.includes('hush-hush'), `state leaked: ${body.state}`);
 });
 
 test('REGRESSION: a repository URL with query/fragment keeps only the pathname basename (#837 r2)', async () => {
@@ -181,11 +209,14 @@ test('REGRESSION: a repository URL with query/fragment keeps only the pathname b
     { ...STATE, repository: 'https://user:token@host/org/repo.git?sig=abc123#frag' },
   );
   assert.ok(res.ok, `expected ok, got ${JSON.stringify(res)}`);
-  const sent = (f.received[0].body as { state: { repository: string } }).state.repository;
-  assert.equal(sent, 'repo.git', `unexpected repository value: ${sent}`);
-  assert.ok(!sent.includes('sig='), 'query survived');
-  assert.ok(!sent.includes('token'), 'URL credentials survived');
-  assert.ok(!sent.includes('frag'), 'fragment survived');
+  const body = f.received[0].body as { state: string; questions: Record<string, { instructions: string }> };
+  const instructions = body.questions['mercury-dispatch']?.instructions ?? '';
+  const sentRepo = instructions.match(/repository=(\S+)/)?.[1] ?? '';
+  assert.equal(sentRepo, 'repo.git', `unexpected repository value: ${sentRepo}`);
+  assert.ok(!sentRepo.includes('sig='), 'query survived');
+  assert.ok(!sentRepo.includes('token'), 'URL credentials survived');
+  assert.ok(!sentRepo.includes('frag'), 'fragment survived');
+  assert.ok(!body.state.includes('sig=') && !body.state.includes('token'), 'nothing URL-ish in the state text');
 });
 
 test('REGRESSION: option objects are rebuilt from key+describe only - extra caller fields never leave (#837 r3)', async () => {

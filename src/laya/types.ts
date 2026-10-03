@@ -11,7 +11,8 @@
  * value, never an exception past the caller.
  */
 
-/** One offered option: opaque key + the operator's description (§6.3). */
+/** One offered option: opaque key + the operator's description (§6.3). Becomes one `criteria`
+ *  entry on the wire. */
 export interface LayaOption {
   key: string;
   describe: string;
@@ -26,26 +27,36 @@ export interface LayaState {
   skills: string[];
 }
 
-/** The request body: one `choice` question over the offered options plus the state block. */
+/** The raw request body, in the `laya-serve` (0.3.25) wire shape: `state` is the task text,
+ *  `questions` carries the ONE choice question keyed by id, its options under `criteria`
+ *  ({key: describe}). `instructions` names what the decision is about; `task` names the
+ *  checkpoint task head Mercury uses. */
 export interface LayaRequest {
-  question: {
-    options: LayaOption[];
-  };
-  state: LayaState;
+  state: string;
+  task?: string;
+  questions: Record<string, {
+    type: 'choice';
+    instructions: string;
+    criteria: Record<string, string>;
+  }>;
 }
 
 /** One answer row, in MERCURY's projected form: the option key it names, the choice text echoed by
- *  the sidecar, and the calibrated probability of that answer (upstream `answer_confidence`, §6.4). */
+ *  the sidecar, and the calibrated probability of that answer (upstream `answer_confidence`,
+ *  §6.4 — `max(p)`, the quantity the min_confidence gate is defined against). */
 export interface LayaAnswer {
   key: string;
   choice: string;
   probability: number;
 }
 
-/** The RAW Jev-shaped response body from `laya-serve` (§5.1): `answers` keyed by question id, each
- *  answer carrying `choice` + `answer_confidence`; the checkpoint id under `routing.model`. */
+/** The RAW response body from `laya-serve` (0.3.25): `answers` keyed by question id, each answer
+ *  an object with `type: 'choice'`, `choice`, `probabilities`, `confidence` (normalized-entropy
+ *  score) and the calibrated `answer_confidence`; the checkpoint id at root `model` and the
+ *  routing report under `routing`. Only `answers[qid]` rows are validated; the rest is ignored. */
 export interface LayaRawResponse {
-  routing?: { model?: unknown };
+  model?: unknown;
+  routing?: unknown;
   answers?: Record<string, unknown>;
 }
 
@@ -64,6 +75,7 @@ export type LayaFailureReason =
   | 'http_status'
   | 'over_cap'
   | 'malformed'
+  | 'unknown_answer_key'
   | 'choice_not_offered'
   | 'non_finite_probability'
   | 'empty_answers'

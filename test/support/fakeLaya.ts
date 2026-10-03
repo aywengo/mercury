@@ -95,15 +95,22 @@ export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKe
   };
 }
 
-/** A valid Jev-shaped response body for the given offered keys (equiprobable over the keys, first
- *  key picked). The shape is the real `laya-serve` one (#837 r4): `answers` keyed by question id,
- *  rows carrying `choice` + `answer_confidence`, checkpoint under `routing.model`. */
+/** A valid `laya-serve` (0.3.25) response body for the given offered keys (equiprobable over the
+ *  keys, first key picked): `answers` keyed by question id, each answer an OBJECT with `choice`,
+ *  per-key `probabilities`, `confidence` and the calibrated `answer_confidence`; checkpoint at
+ *  root `model`. The question id matches the client's LAYA_QUESTION_ID. */
 export function validPick(keys: string[], checkpoint = 'english'): LayaRawResponse {
   const p = 1 / keys.length;
   return {
-    routing: { model: checkpoint },
+    model: checkpoint,
     answers: {
-      q1: keys.map((key, i) => ({ choice: key, answer_confidence: i === 0 ? 1 - p * (keys.length - 1) : p })),
+      'mercury-dispatch': {
+        type: 'choice',
+        choice: keys[0],
+        probabilities: Object.fromEntries(keys.map((key, i) => [key, i === 0 ? 1 - p * (keys.length - 1) : p])),
+        confidence: 0.5,
+        answer_confidence: 1 - p * (keys.length - 1),
+      },
     },
   };
 }

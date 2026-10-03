@@ -150,57 +150,57 @@ function basenameOf(repository: string): string {
   return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
 }
 
-/** Validate a Jev-shaped response body against the OFFERED options, fail-closed (§5.2).
+/** Validate a `laya-serve` (0.3.25) response body against the OFFERED options, fail-closed (§5.2).
  *
- *  Real `laya-serve` shape (#837 r4): `answers` is an object keyed by question id, each choice
- *  answer carrying `choice` + `answer_confidence`; the checkpoint id sits under `routing.model`.
- *  Mercury sends exactly ONE question, so every question key in `answers` must project onto the
- *  same offered set; rows are projected onto Mercury's `{key, choice, probability}` form where
- *  `key`/`choice` are the option key and `probability` is `answer_confidence`.
+ *  Real shape (measured from the 0.3.25 wheel): `answers` is an object keyed by question id, each
+ *  answer an OBJECT `{type: 'choice', choice, probabilities, confidence, answer_confidence, action}`;
+ *  the checkpoint id sits at root `model`. Mercury sends exactly ONE question id
+ *  (`LAYA_QUESTION_ID`), the response must contain it and nothing else, and rows are projected onto
+ *  Mercury's `{key, choice, probability}` form where `probability` is the calibrated
+ *  `answer_confidence` (§6.4 — `max(p)`, the quantity the min_confidence gate is defined against).
  */
+export const LAYA_QUESTION_ID = 'mercury-dispatch';
+
 export function validateLayaBody(body: unknown, offeredKeys: Set<string>): { ok: true; answers: LayaAnswer[]; checkpoint: string } | { ok: false; reason: LayaFailureReason; detail: string } {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
     return { ok: false, reason: 'malformed', detail: 'response is not a JSON object' };
   }
   const b = body as Record<string, unknown>;
-  const routing = (typeof b.routing === 'object' && b.routing !== null && !Array.isArray(b.routing))
-    ? b.routing as Record<string, unknown>
-    : undefined;
-  if (!routing || typeof routing.model !== 'string' || routing.model.length === 0) {
-    return { ok: false, reason: 'malformed', detail: 'routing.model (checkpoint id) missing or not a string' };
+  if (typeof b.model !== 'string' || b.model.length === 0) {
+    return { ok: false, reason: 'malformed', detail: 'model (checkpoint id) missing or not a string' };
   }
   if (typeof b.answers !== 'object' || b.answers === null || Array.isArray(b.answers)) {
     return { ok: false, reason: 'malformed', detail: 'answers missing or not an object keyed by question id' };
   }
   const byQuestion = Object.entries(b.answers as Record<string, unknown>);
-  if (byQuestion.length === 0) {
-    return { ok: false, reason: 'empty_answers', detail: 'answers object is empty' };
+  // Fail closed on question ids Mercury did not send (#837 r5): a response answering a question
+  // nobody asked is not a usable selection.
+  if (!byQuestion.some(([qid]) => qid === LAYA_QUESTION_ID)) {
+    return { ok: false, reason: 'unknown_answer_key', detail: `answers carries no row for ${JSON.stringify(LAYA_QUESTION_ID)}` };
   }
   const answers: LayaAnswer[] = [];
-  for (const [questionId, rowsRaw] of byQuestion) {
-    if (!Array.isArray(rowsRaw)) {
-      return { ok: false, reason: 'malformed', detail: `answers[${JSON.stringify(questionId)}] is not an array` };
+  for (const [questionId, answerRaw] of byQuestion) {
+    if (questionId !== LAYA_QUESTION_ID) {
+      return { ok: false, reason: 'unknown_answer_key', detail: `answers carries unexpected question ${JSON.stringify(questionId)}` };
     }
-    if (rowsRaw.length === 0) {
-      return { ok: false, reason: 'empty_answers', detail: `answers[${JSON.stringify(questionId)}] is empty` };
+    if (typeof answerRaw !== 'object' || answerRaw === null || Array.isArray(answerRaw)) {
+      return { ok: false, reason: 'malformed', detail: `answers[${JSON.stringify(questionId)}] is not an object` };
     }
-    for (const raw of rowsRaw) {
-      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-        return { ok: false, reason: 'malformed', detail: `answers[${JSON.stringify(questionId)}] row is not an object` };
-      }
-      const a = raw as Record<string, unknown>;
-      if (typeof a.choice !== 'string' || !offeredKeys.has(a.choice)) {
-        return { ok: false, reason: 'choice_not_offered', detail: `answers[${JSON.stringify(questionId)}] choice ${JSON.stringify(a.choice)} is not among the offered keys` };
-      }
-      const probability = a.answer_confidence;
-      if (typeof probability !== 'number' || !Number.isFinite(probability)) {
-        return { ok: false, reason: 'non_finite_probability', detail: `answers[${JSON.stringify(questionId)}] answer_confidence ${JSON.stringify(probability)} is not finite` };
-      }
-      // Mercury's projected row: the choice IS the option key it names (opaque keys, §6.3).
-      answers.push({ key: a.choice, choice: a.choice, probability });
+    const a = answerRaw as Record<string, unknown>;
+    if (a.type !== undefined && a.type !== 'choice') {
+      return { ok: false, reason: 'malformed', detail: `answers[${JSON.stringify(questionId)}].type ${JSON.stringify(a.type)} is not 'choice'` };
     }
+    const choice = a.choice;
+    if (typeof choice !== 'string' || !offeredKeys.has(choice)) {
+      return { ok: false, reason: 'choice_not_offered', detail: `answers[${JSON.stringify(questionId)}].choice ${JSON.stringify(choice)} is not among the offered keys` };
+    }
+    const probability = a.answer_confidence;
+    if (typeof probability !== 'number' || !Number.isFinite(probability)) {
+      return { ok: false, reason: 'non_finite_probability', detail: `answers[${JSON.stringify(questionId)}].answer_confidence ${JSON.stringify(probability)} is not finite` };
+    }
+    answers.push({ key: choice, choice, probability });
   }
-  return { ok: true, answers, checkpoint: routing.model };
+  return { ok: true, answers, checkpoint: b.model };
 }
 
 export class LayaClient {
@@ -236,9 +236,25 @@ export class LayaClient {
     }
     // Rebuild each option from its allowlisted fields (#837 r3): structural typing would forward
     // whatever extra fields the caller's objects carry (agent, model, credential...), and the
-    // request allowlist (§6.3) is the boundary, not the caller's type.
-    const options = question.options.map((o) => ({ key: o.key, describe: o.describe }));
-    const body: LayaRequest = { question: { options }, state: built.state };
+    // request allowlist (§6.3) is the boundary, not the caller's type. On the wire the options are
+    // the question's `criteria` ({key: describe}), per the 0.3.25 contract.
+    const criteria: Record<string, string> = {};
+    for (const o of question.options) {
+      criteria[o.key] = o.describe;
+    }
+    const body: LayaRequest = {
+      // The state IS the (redacted) task text on the wire; the remaining allowlist fields ride in
+      // the question's instructions so the checkpoint sees what the decision is about without
+      // Mercury adding fields the contract does not name.
+      state: built.state.task,
+      questions: {
+        [LAYA_QUESTION_ID]: {
+          type: 'choice',
+          instructions: `template=${built.state.template} repository=${built.state.repository} skills=${built.state.skills.join(',')}`,
+          criteria,
+        },
+      },
+    };
     const offeredKeys = new Set(question.options.map((o) => o.key));
     const url = `${this.baseUrl}/v1/systemone`;
     let reply: { status: number; body: Buffer };
