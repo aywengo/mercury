@@ -41,6 +41,17 @@ session config, adapter-defined syntax documented in that adapter's section),
 and declares `perRunModel: true` in its static capabilities only after
 measuring real support.
 
+Measured per adapter (#828, prime-agent 0.9.7, 2026-10-03): **PrimeAgentAdapter
+(RPC)** appends `--model <context.model>` after `opts.args`; prime-agent applies
+last-flag-wins (verified with both flag orders against real sessions, using the
+session file's `model_change` events as evidence). An id prime-agent cannot
+resolve is NOT an error — it silently falls back to the configured default; a
+provider-scoped id for an unconfigured provider fails the run (`No API key found
+for <provider>`). **DaemonAgentAdapter** sets `config.model` on the daemon
+`create` payload, overriding the args-derived value. Both declare
+`perRunModel: true`. **ClaudeCodeAdapter** (2.1.260): `--model
+<context.model ?? opts.model>` — see its section below.
+
 **Event translation** is the hard part. The worker consumes `AgentEvent`s and
 persists them as Hermes events (`tool.started`, `agent.message`, `input.required`,
 `git.commit`, …). The fidelity of the translation depends on what the agent's

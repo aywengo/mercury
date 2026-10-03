@@ -417,6 +417,37 @@ test('provider and model flags reach the create config instead of being dropped'
   } finally { await mock.close(); }
 });
 
+test('per-Run model: context.model overrides the args-derived create config model (#828)', async () => {
+  const tx = newTx();
+  const mock = await startMock({ MOCK_DAEMON_TRANSCRIPT: tx });
+  try {
+    const adapter = adapterFor(mock, { args: ['--model', 'operator-default'] });
+    const ctx = makeContext();
+    ctx.model = 'GLM-5.3-Flash';
+    const handle = await adapter.start(ctx);
+    await withDeadline('collect', 8_000, collectAll(handle));
+    const create = transcript(tx).find((l) => (l.command as any).type === 'create')!.command as any;
+    assert.equal(create.config.model, 'GLM-5.3-Flash', 'the per-Run model wins over the args-derived value');
+  } finally { await mock.close(); }
+});
+
+test('per-Run model: args-derived model still applies when the Run has none (#828)', async () => {
+  const tx = newTx();
+  const mock = await startMock({ MOCK_DAEMON_TRANSCRIPT: tx });
+  try {
+    const adapter = adapterFor(mock, { args: ['--model', 'operator-default'] });
+    const handle = await adapter.start(makeContext());
+    await withDeadline('collect', 8_000, collectAll(handle));
+    const create = transcript(tx).find((l) => (l.command as any).type === 'create')!.command as any;
+    assert.equal(create.config.model, 'operator-default', 'model-less Run keeps the operator default');
+  } finally { await mock.close(); }
+});
+
+test('per-Run model: daemon capabilities declare perRunModel (#828)', () => {
+  const adapter = new DaemonAgentAdapter('prime-agent');
+  assert.equal(adapter.capabilities.static?.perRunModel, true);
+});
+
 test('sessionConfigFromArgs reports what it could not place', () => {
   const { config, ignored } = sessionConfigFromArgs(['--model', 'm', '--offline', 'stray']);
   assert.deepEqual(config, { model: 'm' });

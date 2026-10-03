@@ -307,6 +307,71 @@ test('resume: respawns with --resume <sessionFile>', async () => {
   }
 });
 
+test('per-Run model: --model <context.model> is appended AFTER opts.args (#828)', async () => {
+  const { context, workspacePath } = makeContext();
+  context.model = 'GLM-5.3-Flash';
+  const argvFile = join(workspacePath, 'argv-model.json');
+  // Operator default --model BEFORE the per-Run one: last-flag-wins (measured on 0.9.7) means the
+  // appended value overrides without stripping the operator's arg.
+  const adapter = new PrimeAgentAdapter(MOCK, { args: ['--model', 'operator-default'] });
+  try {
+    process.env.MOCK_RPC_ARGV_FILE = argvFile;
+    const handle = await adapter.start(context);
+    await collectAll(handle);
+    delete process.env.MOCK_RPC_ARGV_FILE;
+    const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+    const first = argv.indexOf('--model');
+    assert.ok(first > -1, 'operator --model present');
+    const second = argv.indexOf('--model', first + 1);
+    assert.ok(second > first, 'per-Run --model appended after the operator flag');
+    assert.equal(argv[second + 1], 'GLM-5.3-Flash');
+    assert.ok(argv.indexOf('GLM-5.3-Flash') > argv.indexOf('operator-default'));
+  } finally {
+    delete process.env.MOCK_RPC_ARGV_FILE;
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});
+
+test('per-Run model: no --model appended when the Run has none (#828)', async () => {
+  const { context, workspacePath } = makeContext();
+  const argvFile = join(workspacePath, 'argv-nomodel.json');
+  const adapter = new PrimeAgentAdapter(MOCK);
+  try {
+    process.env.MOCK_RPC_ARGV_FILE = argvFile;
+    const handle = await adapter.start(context);
+    await collectAll(handle);
+    delete process.env.MOCK_RPC_ARGV_FILE;
+    const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+    assert.ok(!argv.includes('--model'), 'model-less Run keeps argv byte-identical to base');
+  } finally {
+    delete process.env.MOCK_RPC_ARGV_FILE;
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});
+
+test('per-Run model: resume re-emits --model from the retry context (#828)', async () => {
+  const { context, workspacePath } = makeContext();
+  context.model = 'GLM-5.3-Flash';
+  const adapter = new PrimeAgentAdapter(MOCK);
+  const argvFile = join(workspacePath, 'argv-resume-model.json');
+  try {
+    const handle = await adapter.start(context);
+    await collectAll(handle);
+    await adapter.cancel(context.run.id).catch(() => {});
+    process.env.MOCK_RPC_ARGV_FILE = argvFile;
+    await adapter.resume(context.run.id, context);
+    delete process.env.MOCK_RPC_ARGV_FILE;
+    const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+    const m = argv.indexOf('--model');
+    assert.ok(m > -1, 'resume carries the per-Run model');
+    assert.equal(argv[m + 1], 'GLM-5.3-Flash');
+    await adapter.cancel(context.run.id).catch(() => {});
+  } finally {
+    delete process.env.MOCK_RPC_ARGV_FILE;
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});
+
 const PRESET = {
   id: 'reviewer',
   version: '1.0.0',

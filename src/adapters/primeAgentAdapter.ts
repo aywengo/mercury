@@ -126,8 +126,11 @@ export class PrimeAgentAdapter implements AgentAdapter {
       resume: true,
       // Role Presets (docs/crew/role-presets.md §8): the prompt already names workspace files the
       // agent should read (.mercury-context.json), so the materialized instruction reaches the
-      // agent the same way -- prompt-reference. No per-run model argv exists; a preset that sets
-      // one fails closed instead of silently ignored.
+      // agent the same way -- prompt-reference.
+      // Per-run model (#828, measured 2026-10-03 on prime-agent 0.9.7): `--model <context.model>`
+      // is appended AFTER opts.args and prime-agent applies last-flag-wins (verified both orders,
+      // session model_change events as evidence). perRunModel: true.
+      perRunModel: true,
       roleInstruction: 'prompt-reference',
       sandbox: true,
       mcp: 'none',
@@ -281,6 +284,9 @@ export class PrimeAgentAdapter implements AgentAdapter {
       ...skillArgs,
       ...this.goalArgs(context),
       ...(this.opts.args ?? []),
+      // Per-Run model LAST (#828): prime-agent applies last-flag-wins (measured), so appending
+      // after the operator's args overrides an operator --model without stripping it.
+      ...(context.model ? ['--model', context.model] : []),
     ]);
     const client = new RpcClient({
       cmd: spawnCmd.cmd,
@@ -416,6 +422,9 @@ export class PrimeAgentAdapter implements AgentAdapter {
     // attempts, a pack materialized after a crash). Adopt the retry context's pointers the same
     // way createSession() would have (#722).
     if (context?.preset) session.preset = context.preset;
+    // Per-Run model on resume (#828): a retry's context.model (or the parent's carried model)
+    // replaces the first attempt's; in-process resumes without a context keep what start() set.
+    const sessionModel = context?.model ?? session.run.model ?? undefined;
     // A retry runs in a fresh workspace; without this rewrite the resume prompt names a context
     // file that is not there. In-process resumes pass no context and keep the file start() wrote.
     // The file is written into the workspace the resumed process runs in (session.workspacePath),
@@ -433,6 +442,10 @@ export class PrimeAgentAdapter implements AgentAdapter {
       // goal it was started with. The preset line IS re-sent, but in the resume one-liner below,
       // not here: see the prompt call after client.start().
       ...(this.opts.args ?? []),
+      // Per-Run model LAST (#828): same last-flag-wins precedence as start(); a retry keeps the
+      // Run's model instead of drifting to the operator default. session.model is set in
+      // start() (see below) and refreshed here when a context arrives.
+      ...(sessionModel ? ['--model', sessionModel] : []),
     ]);
     const client = new RpcClient({
       cmd: spawnCmd.cmd,
