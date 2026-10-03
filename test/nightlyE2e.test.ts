@@ -1191,3 +1191,22 @@ test('the stderr fallback does NOT take ordinary stdout Error lines (coded-shape
   assert.equal(failures.length, 1);
   assert.equal(failures[0]!.error, '', 'a plain stdout Error line must not become the cause');
 });
+
+test('a separate stderr capture overrides the combined-output prefix for the fallback (#811 r5)', () => {
+  const cause = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from /tmp/ws/e2e/x.test.ts";
+  const combined = [
+    'Error: recovered probe',           // ordinary stdout in the COMBINED stream
+    '✖ failing tests:', '',
+    'test at e2e/x.test.ts:3:1',
+    '✖ file-level (1.2ms)',
+    "  'test failed'",
+  ].join('\n');
+  // Real stderr holds ONLY the load crash.
+  const failures = parseFailures(combined, cause + '\n');
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.error, cause, 'the real stderr cause must win over the combined prefix');
+
+  // Without a separate capture the derived prefix is used (fixtures stay supported).
+  const derived = parseFailures(combined);
+  assert.equal(derived[0]!.error, '', 'derived-prefix guard still rejects ordinary stdout Errors');
+});

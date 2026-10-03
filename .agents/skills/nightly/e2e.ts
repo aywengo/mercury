@@ -324,14 +324,19 @@ function pickSpecificLine(trimmed: string[]): string | null {
  * wrappers are skipped, so the fingerprint binds to the SPECIFIC cause (a file with two
  * different defects fingerprints differently) and the raw block is kept for the issue body.
  */
-export function parseFailures(output: string): SuiteFailure[] {
+export function parseFailures(output: string, realStderr?: string): SuiteFailure[] {
   const lines = output.split('\n');
   const detailStart = lines.findIndex((l) => l.includes('failing tests:'));
   const detail = detailStart >= 0 ? lines.slice(detailStart) : lines;
-  // Everything BEFORE the detail block: for a file-level failure this is the child's stderr
-  // (the load error / crash that wrapper lines summarize). The stderr fallback in extractError
-  // reads it only when the block itself holds no specific line.
-  const stderrBeforeDetail = detailStart > 0 ? lines.slice(0, detailStart).join('\n') : '';
+  // The fallback's cause pool. When the runner reports the child's stderr SEPARATELY, use it —
+  // the combined prefix can hold ordinary stdout lines that are not crash causes (#811 r3/r5).
+  // Otherwise derive a prefix from the combined output (fixtures and older callers).
+  const stderrBeforeDetail =
+    realStderr !== undefined
+      ? realStderr
+      : detailStart > 0
+        ? lines.slice(0, detailStart).join('\n')
+        : '';
   const failures: SuiteFailure[] = [];
   let pendingFile: string | undefined;
   for (const l of detail) {
@@ -429,8 +434,10 @@ export function recordFlakeNight(state: FlakeState, fp: string, test: string, er
 
 /** The injected I/O surface: the suite runner and the GitHub calls. Tests pass fakes. */
 export interface E2eIo {
-  /** Run the suite (or a rerun of one file). Returns the COMBINED output and exit code. */
-  run(argv: string[], opts: { timeoutMs: number }): Promise<{ code: number; output: string }>;
+  /** Run the suite (or a rerun of one file). Returns the COMBINED output and exit code.
+   *  `stderr` (the child's stderr alone) is optional: fixtures may omit it, and then the
+   *  fallback derives a prefix from the combined output. */
+  run(argv: string[], opts: { timeoutMs: number }): Promise<{ code: number; output: string; stderr?: string }>;
   get(path: string): Promise<{ body: unknown; status: number }>;
   post(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
 }
@@ -456,7 +463,7 @@ export async function runE2eSkill(
   const report: E2eReport = { ...counts, real: [], flakes: [] };
   if (first.code === 0) return report;
 
-  const failures = parseFailures(first.output);
+  const failures = parseFailures(first.output, first.stderr);
   if (failures.length === 0) {
     // The suite failed but the reporter output yielded no parseable failures (format drift,
     // harness crash). Never file blind: one honest observation, no GitHub actions.
@@ -492,7 +499,7 @@ export async function runE2eSkill(
     if (rerun.code !== 0) {
       // The rerun is the confirmation run: when it names the same test with a different primary
       // error line, THAT is the reproducible signature — fingerprint and file from the rerun.
-      const rerunFailures = parseFailures(rerun.output);
+      const rerunFailures = parseFailures(rerun.output, rerun.stderr);
       const same = rerunFailures.find((f) => f.test === failure.test);
       if (same && same.error) {
         failure.error = same.error;
@@ -671,19 +678,20 @@ if (isMain) {
   const env = { ...process.env, ...(stateArg ? { XDG_STATE_HOME: stateArg } : {}) };
   const { spawn } = await import('node:child_process');
   const cwd = process.cwd();
-  const run = (argv: string[], o: { timeoutMs: number }): Promise<{ code: number; output: string }> =>
+  const run = (argv: string[], o: { timeoutMs: number }): Promise<{ code: number; output: string; stderr: string }> =>
     new Promise((resolve) => {
       const child = spawn(argv[0]!, argv.slice(1), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
       let output = '';
+      let stderr = '';
       child.stdout.setEncoding('utf8');
       child.stderr.setEncoding('utf8');
       child.stdout.on('data', (d: string) => { output += d; });
-      child.stderr.on('data', (d: string) => { output += d; });
+      child.stderr.on('data', (d: string) => { output += d; stderr += d; });
       const killer = setTimeout(() => child.kill('SIGKILL'), o.timeoutMs);
       // 'close', not 'exit': exit can fire before stdout/stderr are fully drained, truncating the
       // output the parser and fingerprints depend on.
-      child.on('close', (code) => { clearTimeout(killer); resolve({ code: code ?? 1, output }); });
-      child.on('error', () => { clearTimeout(killer); resolve({ code: 1, output }); });
+      child.on('close', (code) => { clearTimeout(killer); resolve({ code: code ?? 1, output, stderr }); });
+      child.on('error', () => { clearTimeout(killer); resolve({ code: 1, output, stderr }); });
     });
   // A fresh Run workspace has no node_modules (the workspace manager installs nothing).
   // Without the suite's dependencies the suite would fail to load (ERR_MODULE_NOT_FOUND)
