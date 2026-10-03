@@ -307,6 +307,23 @@ Omitting `agent` selects `MERCURY_DEFAULT_AGENT` (default `fake`). Send an
 explicit id such as `"agent": "primeagent"` for a real coding Run. `GET
 /api/agents` returns `{ "agents": ["fake", "primeagent", ...], "defaultAgent": "fake" }`.
 
+### Per-Run model
+
+`model` (optional, string) is a per-Run model override for the agent's harness:
+
+- Resolution: `model` (the caller) → the preset's model → none. A preset that
+  declares `modelRequired` still refuses a conflicting caller model.
+- Fail-closed: an effective model on an agent whose static capabilities lack
+  `perRunModel: true` is refused at creation (`400` naming the agent and the
+  reason: `unknown` / `undeclared` / `false`). Until adapters declare the
+  capability, only agents that measured support accept a model.
+- Shape: non-empty, at most 200 characters, no whitespace or control
+  characters (the value reaches the agent's argv or session config).
+- A Run created with a model emits `run.model_resolved` with
+  `{ model, source: "caller" | "preset" }`; `GET /api/runs/:runId` returns the
+  model as `run.model`. Retries inherit it. A Run created without `model`
+  behaves exactly as before (no event, null field).
+
 ### Repository fields
 
 `repository` is the primary repository:

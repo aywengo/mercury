@@ -31,6 +31,16 @@ interface AgentHandle {
 The worker only ever talks to `AgentAdapter`. Adding an agent = adding one class
 + one mock fixture + tests. Nothing else changes.
 
+**Per-Run model** (issue #823): `RunContext.model` carries the Run's model
+override when it has one — resolution happens at creation
+(`caller.model` → preset model → none, refused when the agent's static
+capabilities lack `perRunModel: true`). **Adapters read `context.model`, never
+`preset.model`**: the preset snapshot's model field stays for provenance only.
+An adapter that honours it forwards the value to its harness (argv flag or
+session config, adapter-defined syntax documented in that adapter's section),
+and declares `perRunModel: true` in its static capabilities only after
+measuring real support.
+
 **Event translation** is the hard part. The worker consumes `AgentEvent`s and
 persists them as Hermes events (`tool.started`, `agent.message`, `input.required`,
 `git.commit`, …). The fidelity of the translation depends on what the agent's

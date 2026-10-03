@@ -84,6 +84,16 @@ export interface Run {
   finalCommits: string[];
   prUrl: string | null;
   /**
+   * Per-Run model override (docs/laya-integration-design.md §13 P-1, issue #823). Null when the
+   * caller supplied none and no preset supplied one. Resolution happens at creation with one
+   * rule: caller.model → preset model → none, refused fail-closed when the effective agent's
+   * static capabilities lack `perRunModel: true`.
+   *
+   * Optional-with-null (not omitted) because rows written before the column existed are NULL in
+   * exactly the same way, and both render as "no per-Run model".
+   */
+  model?: string | null;
+  /**
    * The harness version that actually executed this Run, and the raw string it printed
    * (docs/goals.md 13.1). Recorded once at claim time, from the same probe the capability
    * registry cached, so the Run keeps the answer even after the server restarts or the operator
@@ -180,6 +190,12 @@ export interface Workspace {
 
 export interface RunContext {
   run: Run;
+  /**
+   * The per-Run model override, when this Run carries one (#823). Adapters read `context.model`,
+   * NEVER `context.preset.model`: the preset field stays for provenance. Absent when the Run has
+   * no model so existing argv/config shapes are unchanged.
+   */
+  model?: string;
   repository: RepositoryContext;
   /** Additional repositories (roadmap #6). */
   repositories?: RepositoryContext[];
@@ -699,6 +715,11 @@ export const EVENT_TYPES = new Set([
   // notAfter passed while it sat in the queue: the Run goes STARTING -> FAILED without starting,
   // and this event is the operator-visible record of WHY, ahead of the generic run.failed.
   'run.deadline_missed',
+  // Per-Run model resolution (issue #823, laya-integration-design §13 P-1). Appended in the
+  // Run-creation transaction by RunService.create ONLY when a model is effective, payload
+  // { model, source: 'caller' | 'preset' } -- the explainability record the L1 candidate list
+  // builds on. A Run created without `model` emits nothing, exactly as before.
+  'run.model_resolved',
 ]);
 
 /**

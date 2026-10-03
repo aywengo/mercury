@@ -10,6 +10,7 @@ import { expectStatus, makeEnv, sleep, tempDir, waitFor } from './helpers.ts';
 import { createLogger } from '../src/logger.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import type { Express } from 'express';
+import type { AgentAdapter } from '../src/domain/types.ts';
 
 function makeApi(env: ReturnType<typeof makeEnv>, tokens: [string, string][] = [['tok-alice', 'alice']], admin?: string) {
   const stream = new EventStream(env.db, env.events, 10);
@@ -1663,6 +1664,87 @@ test('POST /api/runs rejects a malformed goal with a 400, not a 500', async () =
         });
         assert.equal(res.status, 400, `goal ${JSON.stringify(goal)} -> ${res.status}`);
       }
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+// -- #823: per-Run model over HTTP (P1-1) --
+
+test('POST /api/runs forwards model; GET returns it; a model-less POST behaves as before (#823)', async () => {
+  // The route-level seam: on base, `model` is dropped at the route and the GET assertion fails --
+  // the same shape of defect the `knowledge` forwarding comment in routes.ts warns about.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const res = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake', model: 'GLM-5.3-Flash' }),
+      });
+      assert.equal(res.status, 201);
+      const { runId } = (await res.json()) as { runId: string };
+      const got = await fetch(`${base}/api/runs/${runId}`, { headers: { authorization: 'Bearer tok-alice' } });
+      const body = (await got.json()) as { run: { model?: string | null } };
+      assert.equal(body.run.model, 'GLM-5.3-Flash');
+      // The explainability event is stored.
+      const evs = env.events.list(runId).map((e) => e.type);
+      assert.ok(evs.includes('run.model_resolved'), `events: ${evs.join(', ')}`);
+
+      // A model-less POST stays byte-identical: no event, null column.
+      const res2 = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake' }),
+      });
+      assert.equal(res2.status, 201);
+      const { runId: id2 } = (await res2.json()) as { runId: string };
+      const got2 = await fetch(`${base}/api/runs/${id2}`, { headers: { authorization: 'Bearer tok-alice' } });
+      const body2 = (await got2.json()) as { run: { model?: string | null } };
+      assert.equal(body2.run.model ?? null, null);
+      assert.equal(env.events.list(id2).some((e) => e.type === 'run.model_resolved'), false);
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('POST /api/runs with model on an agent without perRunModel returns 400 naming the reason; no Run row (#823)', async () => {
+  const undeclared: AgentAdapter = {
+    capabilities: { static: { skills: 'none', roleInstruction: 'system' } },
+    start: async () => { throw new Error('not started'); },
+    sendInput: async () => {},
+    cancel: async () => {},
+  } as AgentAdapter;
+  const env = makeEnv({ workerEnabled: false, adapters: { undeclared }, probeCapabilities: true });
+  try {
+    await env.agentCapabilities.settle();
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const res = await fetch(`${base}/api/runs`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer tok-alice', 'content-type': 'application/json' },
+        body: JSON.stringify({ task: 'x', agent: 'undeclared', model: 'm1' }),
+      });
+      assert.equal(res.status, 400, `expected 400, got ${res.status}`);
+      const body = (await res.json()) as { error?: string };
+      assert.match(body.error ?? '', /perRunModel: undeclared/, JSON.stringify(body));
+      assert.match(body.error ?? '', /"undeclared"/, 'the refusal names the agent');
+      // No Run row was written.
+      const list = await fetch(`${base}/api/runs?limit=10`, { headers: { authorization: 'Bearer tok-alice' } });
+      const runs = (await list.json()) as { runs: unknown[] };
+      assert.equal(runs.runs.length, 0, 'a rejected model left a Run behind');
     } finally {
       await srv.close();
       closeStream();
