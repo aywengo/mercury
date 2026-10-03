@@ -130,7 +130,15 @@ export class WorkflowRegistry {
       // is an environment problem (round-2 review, #812). Surface it, never an empty list.
       throw new WorkflowLoadError('(registry root)', err, this.rootDir);
     }
-    return readdirSync(this.rootDir, { withFileTypes: true })
+    // A stat-able but unreadable root (EACCES on the root itself) fails here; sanitize it
+    // the same way - a raw Node error would embed the absolute root path (round-2 review).
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = readdirSync(this.rootDir, { withFileTypes: true });
+    } catch (err) {
+      throw new WorkflowLoadError('(registry root)', err, this.rootDir);
+    }
+    return entries
       .filter((d) => d.isDirectory())
       .map((d) => d.name)
       // Skip names that cannot be workflow ids: one stray directory must not make every

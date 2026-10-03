@@ -175,7 +175,12 @@ export function validateWorkflowTemplate(
           const version = typeof p.version === 'string' ? p.version : undefined;
           const resolved = deps.presetLookup?.(p.id, version) ?? null;
           if (resolved === null) {
-            if (version !== undefined) {
+            // An unknown or disabled preset is MISSING whatever the pin says: the version
+            // code is only for a preset that resolves un-pinned but not at the pinned
+            // version, so callers can tell a dead reference from a version conflict
+            // (round-2 review, #812).
+            const unpinned = version !== undefined && (deps.presetLookup?.(p.id) ?? null) !== null;
+            if (unpinned) {
               add('WORKFLOW_STAGE_PRESET_VERSION_MISSING', `${field}.preset`,
                 `preset ${JSON.stringify(p.id)} does not resolve at version ${JSON.stringify(version)}`);
             } else {

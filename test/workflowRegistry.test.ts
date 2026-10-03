@@ -592,3 +592,40 @@ test('an unreadable extra file fails get() with a sanitized message, no absolute
     chmodSync(notes, 0o644);
   }
 });
+
+test('an unreadable registry root fails listAll/list with a sanitized error, not raw EACCES', () => {
+  const root = tempDir('mercury-workflows-');
+  // A directory itself 0o000: stat(root) may succeed (parent searchable) but readdir fails.
+  mkdirSync(root, { recursive: true });
+  const reg = new WorkflowRegistry(root, { presets: undefined });
+  chmodSync(root, 0o000);
+  try {
+    assert.throws(() => reg.listAll(), (err: unknown) => {
+      const e = err as { name?: string; message?: string };
+      return e.name === 'WorkflowLoadError' && !(e.message ?? '').includes(root);
+    });
+    assert.throws(() => reg.list(), (err: unknown) => {
+      const e = err as { name?: string; message?: string };
+      return e.name === 'WorkflowLoadError';
+    });
+  } finally {
+    chmodSync(root, 0o755);
+  }
+});
+
+test('an unknown preset reports MISSING even when a version pin is present; version code only for a real version conflict', () => {
+  const root = tempDir('mercury-workflows-');
+  const reg = new WorkflowRegistry(root, { presets: makePresetRegistry(root) });
+  // 'retired' does not exist at all -> MISSING with or without a version pin.
+  makeWorkflow(root, 'dead', validManifest('dead', {
+    stages: [{ id: 'only', preset: { id: 'retired', version: '9.9.9' }, task: 'x' }],
+  }));
+  const all = reg.listAll();
+  assert.deepEqual(codes(all.invalid.find((w) => w.id === 'dead')!.validation), ['WORKFLOW_STAGE_PRESET_MISSING']);
+  // 'reviewer' exists (registry helper pins 1.0.0); pinning 9.9.9 is a real version conflict.
+  makeWorkflow(root, 'conflict', validManifest('conflict', {
+    stages: [{ id: 'only', preset: { id: 'reviewer', version: '9.9.9' }, task: 'x' }],
+  }));
+  const all2 = reg.listAll();
+  assert.deepEqual(codes(all2.invalid.find((w) => w.id === 'conflict')!.validation), ['WORKFLOW_STAGE_PRESET_VERSION_MISSING']);
+});
