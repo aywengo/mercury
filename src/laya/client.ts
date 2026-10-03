@@ -173,6 +173,12 @@ export function validateLayaBody(body: unknown, offeredKeys: Set<string>): { ok:
     return { ok: false, reason: 'malformed', detail: 'answers missing or not an object keyed by question id' };
   }
   const byQuestion = Object.entries(b.answers as Record<string, unknown>);
+  // The documented vocabulary keeps empty_answers reachable (#837 r6): an empty answers object
+  // means the sidecar answered nothing at all, which is a different fact from answering a
+  // question Mercury did not send.
+  if (byQuestion.length === 0) {
+    return { ok: false, reason: 'empty_answers', detail: 'answers object is empty' };
+  }
   // Fail closed on question ids Mercury did not send (#837 r5): a response answering a question
   // nobody asked is not a usable selection.
   if (!byQuestion.some(([qid]) => qid === LAYA_QUESTION_ID)) {
@@ -187,7 +193,10 @@ export function validateLayaBody(body: unknown, offeredKeys: Set<string>): { ok:
       return { ok: false, reason: 'malformed', detail: `answers[${JSON.stringify(questionId)}] is not an object` };
     }
     const a = answerRaw as Record<string, unknown>;
-    if (a.type !== undefined && a.type !== 'choice') {
+    // The discriminator is REQUIRED and exact (#837 r6): a row without `type` fails closed -
+    // the documented wire shape carries `type: 'choice'`, and a row that merely happens to carry
+    // choice/answer_confidence fields is not evidence it answered a choice question.
+    if (a.type !== 'choice') {
       return { ok: false, reason: 'malformed', detail: `answers[${JSON.stringify(questionId)}].type ${JSON.stringify(a.type)} is not 'choice'` };
     }
     const choice = a.choice;

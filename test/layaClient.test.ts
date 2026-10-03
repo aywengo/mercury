@@ -138,10 +138,16 @@ test('connection refused -> ok:false reason unreachable', async () => {
   assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'unreachable' });
 });
 
-test('empty answers object -> ok:false reason unknown_answer_key (the question was not answered)', async () => {
+test('empty answers object -> ok:false reason empty_answers (#837 r6: the reason stays reachable)', async () => {
   const f = await withFake([{ json: { model: 'english', answers: {} } }]);
   const res = await client(f.url).ask({ options: OPTIONS }, STATE);
-  assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'unknown_answer_key' });
+  assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'empty_answers' });
+});
+
+test('a row WITHOUT the type discriminator -> ok:false reason malformed (#837 r6)', async () => {
+  const f = await withFake([{ json: { model: 'english', answers: { 'mercury-dispatch': { choice: 'A', answer_confidence: 0.9 } } } }]);
+  const res = await client(f.url).ask({ options: OPTIONS }, STATE);
+  assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'malformed' });
 });
 
 test('a response answering a DIFFERENT question id -> ok:false reason unknown_answer_key (#837 r5)', async () => {
