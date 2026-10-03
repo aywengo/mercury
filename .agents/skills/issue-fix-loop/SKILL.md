@@ -47,9 +47,7 @@ as a `blocked by` note rather than leaving it in prose.
 3. **Open a PR** — branch `fix/issue-<N>-<slug>`, description links the issue with `Fixes #N`
    and contains the assumptions list. Keep the diff scoped to the issue.
 4. **Independent review** — two parts, both required.
-   - **Request the Copilot reviewer on the PR — always, mechanically, not a choice.** (The
-     display name `Copilot` works; the lowercase slug `copilot-pull-request-reviewer[bot]`
-     returns 422 "not a collaborator".) Before the
+   - **Request the Copilot reviewer on the PR — always, mechanically, not a choice.** Before the
      loop may leave this step (and after every push, see step 5):
      `POST /repos/{owner}/{repo}/pulls/<n>/requested_reviewers` with
      `{"reviewers": ["copilot-pull-request-reviewer[bot]"]}`. The display name `Copilot` also
