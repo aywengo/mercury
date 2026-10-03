@@ -216,7 +216,11 @@ export class LayaClient {
     if (!built.ok) {
       return { ok: false, reason: built.reason, detail: built.detail, latencyMs: this.now() - started };
     }
-    const body: LayaRequest = { question: { options: question.options }, state: built.state };
+    // Rebuild each option from its allowlisted fields (#837 r3): structural typing would forward
+    // whatever extra fields the caller's objects carry (agent, model, credential...), and the
+    // request allowlist (§6.3) is the boundary, not the caller's type.
+    const options = question.options.map((o) => ({ key: o.key, describe: o.describe }));
+    const body: LayaRequest = { question: { options }, state: built.state };
     const offeredKeys = new Set(question.options.map((o) => o.key));
     const url = `${this.baseUrl}/v1/systemone`;
     let reply: { status: number; body: Buffer };

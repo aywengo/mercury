@@ -188,6 +188,22 @@ test('REGRESSION: a repository URL with query/fragment keeps only the pathname b
   assert.ok(!sent.includes('frag'), 'fragment survived');
 });
 
+test('REGRESSION: option objects are rebuilt from key+describe only - extra caller fields never leave (#837 r3)', async () => {
+  const f = await withFake([{ json: validPick(['A', 'B', 'C']) }]);
+  const leaky = [
+    { key: 'A', describe: 'hard multi-file changes', agent: 'claude', model: 'opus', credential: 'super-secret-credential' },
+    { key: 'B', describe: 'routine bug fixes', credential: 'another-secret' },
+    { key: 'C', describe: 'cheap mechanical edits' },
+  ] as unknown as typeof OPTIONS;
+  const res = await client(f.url).ask({ options: leaky }, STATE);
+  assert.ok(res.ok, `expected ok, got ${JSON.stringify(res)}`);
+  const sent = JSON.stringify(f.received[0].body);
+  assert.ok(!sent.includes('claude'), 'agent field leaked');
+  assert.ok(!sent.includes('opus'), 'model field leaked');
+  assert.ok(!sent.includes('super-secret-credential'), 'credential leaked');
+  assert.ok(!sent.includes('another-secret'), 'second credential leaked');
+});
+
 test('redaction failure is a typed failure, not a throw past the caller', () => {
   const boom: Redactor = {
     redact: () => { throw new Error('redactor exploded'); },
