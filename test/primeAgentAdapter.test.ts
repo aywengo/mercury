@@ -372,6 +372,31 @@ test('per-Run model: resume re-emits --model from the retry context (#828)', asy
   }
 });
 
+test('per-Run model: context-less in-process resume keeps the model start() used (#835 r1)', async () => {
+  const { context, workspacePath } = makeContext();
+  context.model = 'GLM-5.3-Flash';
+  const adapter = new PrimeAgentAdapter(MOCK);
+  const argvFile = join(workspacePath, 'argv-resume-nocx-model.json');
+  try {
+    const handle = await adapter.start(context);
+    await collectAll(handle);
+    await adapter.cancel(context.run.id).catch(() => {});
+    process.env.MOCK_RPC_ARGV_FILE = argvFile;
+    // NO context: the in-process resume must use the model persisted on the session, not re-derive
+    // it from run.model (which is absent here).
+    await adapter.resume(context.run.id);
+    delete process.env.MOCK_RPC_ARGV_FILE;
+    const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+    const m = argv.indexOf('--model');
+    assert.ok(m > -1, 'context-less resume still carries the per-Run model');
+    assert.equal(argv[m + 1], 'GLM-5.3-Flash');
+    await adapter.cancel(context.run.id).catch(() => {});
+  } finally {
+    delete process.env.MOCK_RPC_ARGV_FILE;
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});
+
 const PRESET = {
   id: 'reviewer',
   version: '1.0.0',
