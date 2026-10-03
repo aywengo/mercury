@@ -1,6 +1,6 @@
 ---
 name: nightly
-version: 1.3.0
+version: 1.3.1
 description: Deterministic ladder selection for the unattended nightly loop — decides the next issue from GitHub metadata only (author, labels, timeline label actor), never issue text, then claims it with nightly:in-progress.
 capabilities: [nightly, ladder, selection, trust, claim, triage, github, issues]
 ---
