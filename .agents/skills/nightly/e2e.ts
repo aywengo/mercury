@@ -110,9 +110,54 @@ export function normalizeErrorLine(line: string): string {
     .trim();
 }
 
-/** The fingerprint: sha-256 over test name + normalized error, first 16 hex chars. */
+/**
+ * The fingerprint: sha-256 over test name + normalized error, first 16 hex chars. The test name
+ * is normalized (#821): a file-level failure is named by the file's ABSOLUTE path in the Run's
+ * worktree, so hashing it raw would bind the fingerprint to the per-Run path + Run id and the
+ * flake clock could never reach three nights.
+ */
 export async function fingerprintOf(test: string, error: string): Promise<string> {
-  return createHash('sha256').update(`${test}\n${normalizeErrorLine(error)}`).digest('hex').slice(0, 16);
+  return createHash('sha256').update(`${normalizeTestName(test)}\n${normalizeErrorLine(error)}`).digest('hex').slice(0, 16);
+}
+
+/**
+ * Normalize a test NAME for fingerprinting and display (#821). A file-level failure is named by
+ * the file's absolute path inside the per-Run worktree (`…/worktrees/run_<hex>/e2e/x.test.ts`),
+ * which would make fingerprints Run-specific and leak machine paths into issue titles. The
+ * normalization:
+ *   - strips any `…/worktrees/run_<hex>/` prefix, even when it is not the current working tree
+ *     (robust if the suite is started from a subdirectory);
+ *   - makes a path inside the Run's working tree (`repoRoot`, default `process.cwd()`)
+ *     repo-relative with forward slashes, keeping directories (a basename alone could collide);
+ *   - passes plain subtest names through unchanged, so existing subtest-level fingerprints and
+ *     markers keep matching.
+ * NOT normalizeErrorLine: that collapses numbers/durations, which can legitimately distinguish
+ * test names.
+ */
+export function normalizeTestName(name: string, repoRoot: string = process.cwd()): string {
+  const root = repoRoot.replace(/\\/g, '/').replace(/\/+$/, '');
+  // ONLY a name that is itself a recognized ABSOLUTE path is rewritten at all: a subtest name
+  // that merely CONTAINS a path-like substring ('handles /tmp/worktrees/run_deadbeef/e2e/x.ts')
+  // must pass through byte-identical, or its existing fingerprint would change (#822 r2).
+  const looksAbsolute = /^\//.test(name) || /^[A-Za-z]:[\\/]/.test(name);
+  if (!looksAbsolute) return name;
+  const asForward = name.replace(/\\/g, '/');
+  // A Mercury worktree prefix: …/worktrees/run_<hex>/… Take everything after the LAST
+  // `worktrees/run_<hex>/` segment. The search is on the slash-normalized absolute path and
+  // whitespace-tolerant (a home dir like '/Users/John Doe/worktrees/...' still normalizes,
+  // #822 r1) — robust even when the prefix is not the current repo root.
+  const wtIdx = asForward.lastIndexOf('/worktrees/');
+  if (wtIdx !== -1) {
+    const after = asForward.slice(wtIdx + '/worktrees/'.length);
+    const m = /^run_[0-9a-f]+\/(.*)$/.exec(after);
+    if (m?.[1]) return m[1];
+  }
+  // Otherwise: a root-contained path becomes repo-relative (directories kept — a basename alone
+  // could collide). A name that is absolute but neither worktree-shaped nor root-contained is
+  // left as-is: rewriting it would invent a repo-relative claim we cannot verify.
+  if (asForward.startsWith(`${root}/`)) return asForward.slice(root.length + 1);
+  if (asForward === root) return '';
+  return name;
 }
 
 /** The hidden marker an issue carries in its body; searches match on it, not on prose. */
@@ -471,6 +516,10 @@ export async function runE2eSkill(
   if (first.code === 0) return report;
 
   const failures = parseFailures(first.output, first.stderr);
+  // File-level failures are NAMED by the file's absolute worktree path (#821): normalize in
+  // place so the flake state, fingerprints, issue titles and report lines all carry the
+  // repo-relative name. fingerprintOf normalizes too — idempotent for plain subtest names.
+  for (const failure of failures) failure.test = normalizeTestName(failure.test);
   if (failures.length === 0) {
     // The suite failed but the reporter output yielded no parseable failures (format drift,
     // harness crash). Never file blind: one honest observation, no GitHub actions.
@@ -507,6 +556,7 @@ export async function runE2eSkill(
       // The rerun is the confirmation run: when it names the same test with a different primary
       // error line, THAT is the reproducible signature — fingerprint and file from the rerun.
       const rerunFailures = parseFailures(rerun.output, rerun.stderr);
+  for (const failure of rerunFailures) failure.test = normalizeTestName(failure.test);
       const same = rerunFailures.find((f) => f.test === failure.test);
       if (same && same.error) {
         failure.error = same.error;

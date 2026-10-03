@@ -24,6 +24,7 @@ import {
   codeFence,
   redactedErrorLine,
   resetRawRedactorForTests,
+  normalizeTestName,
   type E2eIo,
   type FlakeState,
 } from '../.agents/skills/nightly/e2e.ts';
@@ -1264,5 +1265,127 @@ test('quoted generic wrapper lines are recognized for every alternative (#811 r8
     const failures = parseFailures(detail);
     assert.equal(failures.length, 1, wrapper);
     assert.equal(failures[0]!.error, '', `a quoted generic wrapper must not become the cause: ${wrapper}`);
+  }
+});
+
+// -- #821 regressions: test-name normalization for fingerprints and display --
+
+test('normalizeTestName: worktree paths become repo-relative; subtest names pass through', () => {
+  assert.equal(
+    normalizeTestName('/Users/roman/mercury-workspaces/worktrees/run_dab0bc9b41f54f27/e2e/knowledge.test.ts', '/Users/roman/mercury-workspaces/worktrees/run_dab0bc9b41f54f27'),
+    'e2e/knowledge.test.ts',
+  );
+  // A worktree prefix is stripped even when it is NOT the repo root (suite started from a
+  // subdirectory or a different root).
+  assert.equal(normalizeTestName('/a/worktrees/run_1111111111111111/e2e/knowledge.test.ts', '/b/worktrees/run_2222222222222222'), 'e2e/knowledge.test.ts');
+  // A plain path inside the root becomes repo-relative, directories kept.
+  assert.equal(normalizeTestName('/repo/e2e/mock-rpc.test.ts', '/repo'), 'e2e/mock-rpc.test.ts');
+  // Plain subtest names pass through unchanged (fingerprints stay byte-identical).
+  assert.equal(normalizeTestName('a subtest name > nested', '/repo'), 'a subtest name > nested');
+  assert.equal(normalizeTestName('e2e/knowledge.test.ts', '/repo'), 'e2e/knowledge.test.ts');
+  // A name that merely CONTAINS a Windows path passes through byte-identical (#822 r1).
+  assert.equal(normalizeTestName('handles C:\\tmp\\x', '/repo'), 'handles C:\\tmp\\x');
+  // Whitespace-tolerant worktree match: a home directory with a space still normalizes (#822 r1).
+  assert.equal(
+    normalizeTestName('/Users/John Doe/worktrees/run_1111111111111111/e2e/x.test.ts', '/somewhere/else'),
+    'e2e/x.test.ts',
+  );
+  // A PLAIN subtest name that merely CONTAINS a worktree-shaped substring passes through
+  // byte-identical: only a name that IS an absolute path is rewritten (#822 r2).
+  assert.equal(
+    normalizeTestName('handles /tmp/worktrees/run_deadbeef/e2e/x.test.ts', '/repo'),
+    'handles /tmp/worktrees/run_deadbeef/e2e/x.test.ts',
+  );
+});
+
+test('acceptance 1: the same file-level failure in two different worktrees fingerprints identically', async () => {
+  const error = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from e2e/knowledge.test.ts";
+  const fpA = await fingerprintOf('/a/worktrees/run_1111111111111111/e2e/knowledge.test.ts', error);
+  const fpB = await fingerprintOf('/b/worktrees/run_2222222222222222/e2e/knowledge.test.ts', error);
+  assert.equal(fpA, fpB);
+});
+
+test('acceptance 2: different files keep different fingerprints', async () => {
+  const error = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'x'";
+  const fpA = await fingerprintOf('/r/worktrees/run_1111111111111111/e2e/knowledge.test.ts', error);
+  const fpB = await fingerprintOf('/r/worktrees/run_1111111111111111/e2e/mock-rpc.test.ts', error);
+  assert.notEqual(fpA, fpB);
+});
+
+test('acceptance 3: a plain subtest name fingerprints byte-identically to the raw hash (pinned)', async () => {
+  const error = 'Error: atlas pack harvest diverged at e2e/knowledge.test.ts:9:9';
+  // "Today's" hash for a plain name: raw test name + normalizeErrorLine(error).
+  const raw = (await import('node:crypto')).createHash('sha256')
+    .update(`a subtest name\n${normalizeErrorLine(error)}`).digest('hex').slice(0, 16);
+  assert.equal(await fingerprintOf('a subtest name', error), raw);
+  // Pinned value: any change to the plain-name path breaks existing subtest markers.
+  assert.equal(await fingerprintOf('a subtest name', error), '45ad49f6898a98a5');
+});
+
+test('acceptance 4: the same file-level flake in three different worktrees reaches the filing threshold', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const state: FlakeState = {};
+    const error = 'Error: suite load failed';
+    const n1 = await recordFlakeNight(state, await fingerprintOf('/a/worktrees/run_1111111111111111/e2e/knowledge.test.ts', error), 'e2e/knowledge.test.ts', error, '2026-10-01');
+    const n2 = await recordFlakeNight(state, await fingerprintOf('/b/worktrees/run_2222222222222222/e2e/knowledge.test.ts', error), 'e2e/knowledge.test.ts', error, '2026-10-02');
+    const n3 = await recordFlakeNight(state, await fingerprintOf('/c/worktrees/run_3333333333333333/e2e/knowledge.test.ts', error), 'e2e/knowledge.test.ts', error, '2026-10-03');
+    assert.deepEqual([n1, n2, n3], [1, 2, 3]);
+    assert.equal(n3, 3, 'FLAKE_FILE_NIGHTS reached despite different worktree paths');
+    assert.equal(Object.keys(state).length, 1, 'one fingerprint, not three orphans');
+  } finally {
+    cleanup();
+  }
+});
+
+test('acceptance 5: filed issue titles and report lines carry the repo-relative name, never a worktree path', async () => {
+  const { dir, cleanup } = tempStateDir();
+  try {
+    const worktree = '/Users/roman/mercury-workspaces/worktrees/run_dab0bc9b41f54f27';
+    const cause = `Error ${''}[ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from ${worktree}/e2e/knowledge.test.ts`;
+    // The reporter names a whole-file failure by its absolute worktree path; the failing detail
+    // carries a generic wrapper so the stderr fallback supplies the cause.
+    const out = [
+      `Error ${''}[ERR_MODULE_NOT_FOUND]: Cannot find package 'testcontainers' imported from ${worktree}/e2e/knowledge.test.ts`,
+      '✖ failing tests:', '',
+      `test at ${worktree}/e2e/knowledge.test.ts:3:1`,
+      `✖ ${worktree}/e2e/knowledge.test.ts (1.2ms)`,
+      "  'test failed'",
+    ].join('\n');
+    const stateFile = `${dir}/mercury/nightly/e2e-flakes.json`;
+    mkdirSync(`${dir}/mercury/nightly`, { recursive: true });
+    writeFileSync(stateFile, JSON.stringify({}));
+    const posts: { path: string; body: unknown }[] = [];
+    let suite = 0;
+    const io: E2eIo = {
+      async run() {
+        suite += 1;
+        return suite === 1 ? { code: 1, output: out } : { code: 0, output: 'ℹ pass 12\nℹ fail 0' };
+      },
+      async get(path) {
+        if (path.startsWith('/search/issues')) return { body: { total_count: 0, items: [] }, status: 200 };
+        return { body: [], status: 200 };
+      },
+      async post(path, body) { posts.push({ path, body }); return { body: { number: 901 }, status: 201 }; },
+    };
+    // Seed the state so this failure is at the filing threshold.
+    const seeded: FlakeState = {};
+    const fp = await fingerprintOf(`${worktree}/e2e/knowledge.test.ts`, cause);
+    seeded[fp] = { test: 'e2e/knowledge.test.ts', error: cause, nights: ['2026-10-01', '2026-10-02'] };
+    writeFileSync(stateFile, JSON.stringify(seeded));
+    const env = { XDG_STATE_HOME: dir, GH_TOKEN: 'test-token' };
+    const report = await runE2eSkill(io, env, { repo: 'aywengo/mercury', dryRun: false, night: '2026-10-03' });
+    const filed = posts.find((p) => p.path === '/repos/aywengo/mercury/issues');
+    assert.ok(filed, 'the flake is filed on the threshold night');
+    const title = (filed!.body as { title: string }).title;
+    assert.ok(!title.includes(worktree), `title must not carry the worktree path: ${title}`);
+    assert.ok(!title.includes('run_'), 'title must not carry the Run id');
+    assert.ok(title.includes('e2e/knowledge.test.ts'), `title shows the repo-relative name: ${title}`);
+    // The report line is repo-relative too.
+    const line = report.flakes.find((f) => f.fingerprint === fp) ?? report.real.find((f) => f.fingerprint === fp);
+    assert.ok(line, 'the report carries the failure');
+    assert.ok(!('test' in line! && String((line as { test: string }).test).includes(worktree)), 'report test name is repo-relative');
+  } finally {
+    cleanup();
   }
 });
