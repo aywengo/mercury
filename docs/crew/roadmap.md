@@ -302,6 +302,21 @@ Estimate: **3–4 days**. Depends on Phase 2. Completes Milestone A.
 Observe whether users repeatedly select roles and whether instruction-only
 presets improve task outcomes. If not, stop before MCP and Store complexity.
 
+**Measure** (added 2026-10-03; thresholds are a proposal for the owner to adjust):
+
+- *Data source:* `preset.selected` events (`src/runs/runService.ts`) joined with Run
+  terminal status, over a window of **14 consecutive days** of normal use.
+  Bot-dispatched Runs are reported separately from human ones.
+- *Adoption:* the share of Runs created with a preset. Proposed bar: **≥ 20 %** of
+  human-created Runs.
+- *Reuse:* how many presets are each used **≥ 3 times** by the same owner. Proposed
+  bar: **at least two**.
+- *Outcome:* the completion rate of preset Runs vs Runs without a preset on comparable
+  tasks. Proposed bar: not worse.
+
+Phase 8 (advisory workflows) is not behind this gate, because it adds no MCP or Store
+surface. Phases 4–7 are.
+
 ## 8. Phase 4 — per-run MCP foundation
 
 Estimate: **5–8 days**. Depends on Phase 2.

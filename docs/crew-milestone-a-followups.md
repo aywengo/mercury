@@ -7,6 +7,21 @@ each issue gives the mechanism with file evidence, the choke point, acceptance c
 test that fails on base, and one PR. Filed 2026-09-23 as #720 (C-0), #721 (C-1), #722 (C-2), #723 (C-3),
 #724 (C-4) and #725 (C-5); each heading below carries its number.
 
+Status: **complete.** Every item is merged and Milestone A was re-stamped complete in #748
+(`8fb3dde`), with every role-presets §12 criterion holding.
+
+| Item | Issue | Merged as |
+| --- | --- | --- |
+| C-0 un-stamp "complete" | #720 | PR #726 |
+| C-1 fail-closed capability checks (AC 7) | #721 | PR #743 |
+| C-2 resume parity (AC 8) | #722 | PR #744 |
+| C-3 ceilings and validator cross-checks | #723 | PR #745 |
+| C-4 skill semantics (decided 1A + 2A) | #724 | PR #746 |
+| C-5 resource-limit format validation | #725 | PR #747 |
+| Re-stamp Milestone A complete | — | PR #748 |
+
+The rest of this document is the issue set as drafted, kept for its evidence.
+
 ## Summary
 
 The core of Milestone A holds:
@@ -342,7 +357,10 @@ A malformed value is a 400 at creation, and a registry finding at load. Valid va
 ## Not in this set
 
 - **Per-Run model on a caller surface.** `RunService.create` passes `model: undefined` on purpose, and
-  no API field exists. This is new scope, not a gap.
+  no API field exists. This is new scope, not a gap. *Update 2026-10-03:* it is now a prerequisite of
+  the Laya integration, in which the dispatcher chooses a `harness:model` pair per dispatch. See
+  [`laya-integration-design.md`](laya-integration-design.md) §4, which records that no real harness
+  takes a per-Run model today.
 - **`preset.selected`/`preset.materialized` payload shape.** It matches §10. No change.
 - **Roles page behavior for disabled presets.** Listing them with `includeDisabled` and rendering them
   as visible but unrunnable is a reasonable reading of §9. No change.

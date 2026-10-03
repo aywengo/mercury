@@ -68,6 +68,39 @@ Mercury does not enforce step order or gates in advisory mode. The UI labels
 the plan “agent-reported.” Advisory mode is prompt guidance, not durable
 multi-run orchestration.
 
+### 3.1.1 Resolution when one Run names several presets
+
+Role Preset precedence (`role-presets.md` §3) is defined for one preset per Run.
+An advisory Run can name a different preset on every stage, so it resolves as
+follows (decided 2026-10-03, before #809):
+
+1. **Agent.** If any stage preset has `agent.required: true`, every such stage must
+   require the **same** agent. That agent is used, and a caller naming a different one
+   is a validation error (role-presets §3.1 rules 1–2). Two different required agents
+   make the template unusable in advisory mode, since one agent performs every step:
+   creation fails with a stable finding. Otherwise the caller's agent wins, and
+   otherwise Mercury's create-Run default applies. **Non-required stage agent
+   preferences are ignored**: no stage gets to pick the agent for all the others.
+2. **Model.** The same agreement rule as for the agent: if any stage preset sets
+   `modelRequired: true`, every such stage must require the same model, and different
+   required models make creation fail. Otherwise the caller's model, otherwise the host
+   default. Non-required stage model preferences are ignored. (No real harness takes a
+   per-Run model yet; see `laya-integration-design.md` §4.)
+3. **Constraints.** The role-presets §3.3 formula, with `presetCeiling` the **narrowest**
+   ceiling across all stage presets: the minimum for scalar limits, and the most
+   restrictive `networkMode` (`none` beats `bridge`). Defaults come from the caller, otherwise the system default, never from
+   a stage preset, and are always clipped by that narrowest ceiling.
+4. **Skills.** The union of the stage presets' `skills.required`, de-duplicated, then
+   role-presets §3.2 (decision 1A + 2A) for auto-selection. If the union exceeds the
+   cap, creation fails with a finding naming the stages; nothing is dropped silently.
+5. **Instructions.** Each stage preset's instruction is rendered as guidance for its
+   own step only (§5), never as a Run-wide instruction.
+6. **Snapshot.** Every stage preset is snapshotted with the Run, as for a single
+   preset (role-presets §4), so later edits change nothing.
+
+The rule is deliberately conservative: a multi-stage plan can never get a wider
+ceiling, an extra agent or more skills than its strictest stage allows.
+
 ### 3.2 Staged
 
 A staged template creates one ordinary Run per stage. A coordinator advances
@@ -93,9 +126,9 @@ interface WorkflowTemplate {
 
 interface WorkflowStage {
   id: string;
-  preset: {
-    id: string;
-    version?: string;
+  preset?: {          // optional in advisory mode: a stage without one is
+    id: string;       // performed by the Run's agent with no preset guidance;
+    version?: string; // staged mode (Phase 9) requires it
   };
   task: string;
   repositoryInput?: 'initial' | 'previous-head';

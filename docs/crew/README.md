@@ -8,9 +8,12 @@ skill set, agent preference and constraints.
 Status: **Milestone A implemented.** The Role Preset path described in
 [`role-presets.md`](role-presets.md) — manifest registry, validation, Run
 resolution and snapshots, workspace materialization, read API and dashboard —
-is implemented (docs/crew/roadmap.md Phases 1-3). Everything else in this
-directory (per-run MCP, Preset Store, teams, workflows) remains design-only
-unless a section explicitly says otherwise.
+is implemented (docs/crew/roadmap.md Phases 1-3). Workflow Templates are partly
+implemented: the advisory schema and builtin registry ship (Phase 8 W-1, #808),
+and rendering, API and UI are in progress (#809, #810); see
+[`workflows.md`](workflows.md). Everything else in this directory (per-run MCP,
+Preset Store, teams, staged workflows) remains design-only unless a section
+explicitly says otherwise.
 
 This directory supersedes the original all-in-one `docs/crew-design.md`, which
 was removed as superseded. Its content is history, available from git history at
@@ -47,8 +50,12 @@ These terms are normative across the Crew documents:
   policy. It is not an arbitrary agent argument list.
 - **Preset Store** — distribution and authoring for Role Presets: builtin
   content, a Git mirror and owner-scoped drafts.
-- **Workflow Template** — a bounded sequence of ordinary Runs with explicit
-  handoff and gate rules.
+- **Workflow Template** — a bounded, ordered plan of stages, each optionally
+  naming a Role Preset. In **advisory** mode it renders into one ordinary Run
+  whose agent performs every stage and reports progress itself; Mercury enforces
+  nothing. In **staged** mode (later) it becomes a group of ordinary Runs with
+  explicit handoff and gate rules that Mercury enforces. See
+  [`workflows.md`](workflows.md) §3.
 - **Crew** — the umbrella product name only. APIs and schemas use the precise
   terms above.
 
