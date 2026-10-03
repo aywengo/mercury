@@ -606,6 +606,44 @@ test('runHostDoctor: MERCURY_LAYA_URL set → laya line; unset → NO laya line 
   }
 });
 
+test('runHostDoctor: invalid MERCURY_LAYA_TIMEOUT_MS is a named failure, not a silent default (#839 r1)', async () => {
+  const f = await layaFake([{ json: validPick(['probe']) }]);
+  const dir = tempDir('doctor-laya-tmo-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'laya-key' } }), { mode: 0o600 });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_LAYA_URL=${f.url}\nMERCURY_LAYA_TIMEOUT_MS=-1\n`);
+  try {
+    const out: string[] = [];
+    await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    assert.match(out.join(''), /laya: FAIL — invalid configuration: MERCURY_LAYA_TIMEOUT_MS/);
+    assert.ok(!out.join('').includes('unreachable'), 'the sidecar must not be probed with a broken deadline');
+    assert.equal(f.received.length, 0, 'no request leaves with an invalid timeout');
+  } finally {
+    await f.close();
+  }
+});
+
+test('runHostDoctor: a malformed credentials file never leaks token text into the laya line (#839 r1)', async () => {
+  const f = await layaFake([{ json: validPick(['probe']) }]);
+  const dir = tempDir('doctor-laya-leak-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  // Unquoted value whose excerpt would carry the secret if the raw parse error were printed
+  // (Node quotes ~26 chars around the unexpected token).
+  writeFileSync(join(cfg, 'mercury', 'bot-credentials.json'), '{"laya": {"api": sk-9f88-tok}}', { mode: 0o600 });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_LAYA_URL=${f.url}\n`);
+  try {
+    const out: string[] = [];
+    await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    assert.match(out.join(''), /laya: FAIL — auth cannot be checked: .*not valid JSON/);
+    assert.ok(!out.join('').includes('sk-9f88-tok'), 'the token excerpt must never reach the report');
+    assert.ok(!out.join('').includes('9f88'), 'not even a token fragment may reach the report');
+  } finally {
+    await f.close();
+  }
+});
+
 test('runHostDoctor: a set-but-broken laya sidecar FAILS the doctor with the reason named (#830)', async () => {
   const m = await mockServer();
   try {

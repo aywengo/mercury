@@ -326,10 +326,22 @@ export async function runHostDoctor(
     } catch (err) {
       keyDetail = (err as Error).message;
     }
-    const timeoutMs = Number(vars.MERCURY_LAYA_TIMEOUT_MS ?? '') || 500;
-    if (apiKey === undefined) {
+    const rawTimeout = vars.MERCURY_LAYA_TIMEOUT_MS;
+    let timeoutMs = 500;
+    if (rawTimeout !== undefined && rawTimeout.trim() !== '') {
+      const parsed = Number(rawTimeout);
+      // A non-positive/non-finite deadline would make Node schedule the timer immediately (or
+      // never): a healthy sidecar would read as unreachable. Named failure, not a silent default.
+      if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
+        laya = { ok: false, detail: `invalid configuration: MERCURY_LAYA_TIMEOUT_MS must be a positive integer, got '${rawTimeout}'` };
+      } else {
+        timeoutMs = parsed;
+      }
+    }
+    if (apiKey === undefined && laya === undefined) {
       laya = { ok: false, detail: `auth cannot be checked: ${keyDetail ?? 'no laya credentials'}` };
-    } else {
+    }
+    if (laya === undefined) {
       laya = await checkLaya(layaUrl.trim(), apiKey, timeoutMs);
     }
   }
