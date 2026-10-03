@@ -94,6 +94,12 @@ export interface CreateRunInput {
    * the preset path uses.
    */
   model?: string;
+  /**
+   * Where `model` came from, when the caller already knows (retry, #832 r1). Retry copies the
+   * parent's model; recording it as 'caller' would rewrite the explainability record's origin.
+   * Only retry passes this; the HTTP surface does not expose it.
+   */
+  modelSource?: 'caller' | 'preset';
   idempotencyKey?: string;
 }
 
@@ -135,6 +141,26 @@ export interface RunServiceDeps {
   defaultMaxRetries: number;
   /** Optional secret redactor; input values are redacted at write time (issue #36). */
   redactor?: Redactor;
+}
+
+/**
+ * Model shape validation (#823, hardened in #832 r1): non-empty, <= 200 chars, no whitespace or
+ * control characters (C0 and C1, via \p{Cc}). Applied to the CALLER value and to the RESOLVED
+ * value - a preset-declared model must satisfy the same contract, because both reach argv or
+ * session config. `label` names the origin in the error so an operator can tell which field
+ * carried the bad value.
+ */
+export function validateModelShape(model: string, label: string): void {
+  if (typeof model !== 'string' || model.length === 0) {
+    throw new ValidationError(`${label} must be a non-empty string`);
+  }
+  if (model.length > 200) {
+    throw new ValidationError(`${label} must be at most 200 characters`);
+  }
+  // \p{Cc} covers C0 (U+0000-U+001F) AND C1 (U+007F-U+009F); \s covers unicode whitespace.
+  if (new RegExp('\\p{Cc}', 'u').test(model) || /\s/u.test(model)) {
+    throw new ValidationError(`${label} must not contain whitespace or control characters: ${JSON.stringify(model)}`);
+  }
 }
 
 export class RunService {
@@ -209,15 +235,7 @@ export class RunService {
     // length. An empty string is 'no model' vs an invalid value — refused rather than silently
     // dropped, because a dropped override silently executes with the wrong model.
     if (input.model !== undefined) {
-      if (typeof input.model !== 'string' || input.model.length === 0) {
-        throw new ValidationError('model must be a non-empty string');
-      }
-      if (input.model.length > 200) {
-        throw new ValidationError('model must be at most 200 characters');
-      }
-      if (/[\s\u0000-\u001f\u007f]/.test(input.model)) {
-        throw new ValidationError(`model must not contain whitespace or control characters: ${JSON.stringify(input.model)}`);
-      }
+      validateModelShape(input.model, 'model');
     }
     if (input.idempotencyKey) {
       const existing = this.findByIdempotencyKey(input.ownerId, input.idempotencyKey);
@@ -355,6 +373,10 @@ export class RunService {
     const presetModel = presetSnapshot?.effectiveAgent.model;
     const model = input.model ?? presetModel;
     if (model !== undefined) {
+      // The RESOLVED model is validated too (#832 r1): a preset carrying `agent.model: "two
+      // words"` passes preset validation today, and only this check keeps the persisted value
+      // inside the same contract the caller surface has.
+      validateModelShape(model, 'model');
       const stat = this.deps.agentCapabilities?.()[agent]?.static;
       if (stat?.perRunModel !== true) {
         const declared = stat === undefined
@@ -603,11 +625,10 @@ export class RunService {
         if (model !== undefined) {
           // The explainability record L1 builds on (#823): which model, and where it came from.
           // Not emitted for model-less Runs, so a Run created without `model` behaves
-          // byte-identically to base.
-          this.deps.events.append(run.id, 'run.model_resolved', {
-            model,
-            source: input.model !== undefined ? 'caller' : 'preset',
-          });
+          // byte-identically to base. Retry passes the parent's recorded source (#832 r1): the
+          // copied model was not chosen by a caller, and the record must not change origin.
+          const source = input.modelSource ?? (input.model !== undefined ? 'caller' : 'preset');
+          this.deps.events.append(run.id, 'run.model_resolved', { model, source });
         }
         if (goalState) {
           // runId is only known here, so the row is built after the run id exists.
@@ -909,6 +930,12 @@ export class RunService {
     // version now undetectable -- create() rejects the retry with the reason rather than
     // producing an untracked retry that looks like the original.
     const originalGoal = this.deps.goals?.get(runId);
+    // The parent's recorded model origin (#832 r1): a preset-sourced parent must not become
+    // 'caller' on the retry, or the explainability record changes meaning across retries.
+    const parentModelSource = original.model
+      ? this.deps.events.list(runId).find((e) => e.type === 'run.model_resolved')
+        ?.payload as { source?: 'caller' | 'preset' } | undefined
+      : undefined;
 
     const created = this.create({
       ownerId: original.ownerId,
@@ -919,6 +946,7 @@ export class RunService {
       // Retry re-attempts the SAME work (#823): the model the parent carried is part of that
       // work, exactly like the skill/preset snapshots. A parent WITHOUT a model stays without.
       model: original.model ?? undefined,
+      ...(original.model && parentModelSource?.source ? { modelSource: parentModelSource.source } : {}),
       skillSnapshots,
       constraints: { ...original.constraints },
       // The parent's preset snapshot, verbatim (section 6): a retry is the SAME task

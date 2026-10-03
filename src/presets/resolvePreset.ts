@@ -165,8 +165,17 @@ function resolveAgent(
   }
   if (model !== undefined && stat.perRunModel !== true) {
     // stat is non-undefined here: the role-instruction check above threw otherwise.
+    // Three distinct reasons, three distinct wordings (#832 r1): an operator fixing this needs to
+    // know whether the adapter was never measured ('unknown'), omits the field ('undeclared'),
+    // or measured 'false'. Same contract the RunService no-preset path enforces, so the refusal
+    // reads identically on both paths.
+    const declared = stat.perRunModel === undefined
+      ? "undeclared -- the agent's static block omits perRunModel"
+      : "false -- the agent's static block declares perRunModel: false";
     throw new ValidationError(
-      `preset sets a model but agent ${JSON.stringify(id)} cannot take a per-Run model`,
+      `the preset model ${JSON.stringify(model)} was requested, but agent ${JSON.stringify(id)}`
+      + ` cannot take a per-Run model (perRunModel: ${declared});`
+      + ' pick an agent that accepts a per-Run model, or drop the model',
     );
   }
   return { id, ...(model !== undefined ? { model } : {}) };
