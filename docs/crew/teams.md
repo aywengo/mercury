@@ -307,7 +307,7 @@ Crew tables start after the current last migration, per `README.md` §6.
    and #520). `RunService` honours an explicit `[]` (see #459), `skillSelector`
    returns `[]` when its fallback is suppressed (`SelectOptions.allowFallback`),
    and an omitted `skills` field on a `nativeNames` backend resolves to nothing
-   instead of a fallback set Mercury ids the harness cannot resolve. See §3.
+   instead of a fallback set of Mercury ids the harness cannot resolve. See §3.
 1. **Phase 0 — per-Run capabilities** (`appendSystemPrompt`, `workspaceFiles`,
    `model`) on at least PrimeAgent and Hermes, proven by a real Run whose output
    depends on the persona. Everything else is inert without this.
@@ -315,9 +315,10 @@ Crew tables start after the current last migration, per `README.md` §6.
    capability field on `/healthz`. Done: `/api/agents` returns a `capabilities`
    map carrying the static vocabulary beyond `goals` (#508, in
    `src/adapters/capabilities.ts` and `AgentStaticCapabilities`), and `/healthz`
-   returns an integer `api` schema version that Fleet refuses a REPORTED schema
-   below `MIN_HOST_API` on (#510, `fleet/probe.ts`) — a pre-schema host with no
-   `api` field registers as compatible and can fail later at first use.
+   returns an integer `api` schema version on which Fleet refuses a host whose
+   REPORTED schema is below `MIN_HOST_API` (#510, `fleet/probe.ts`) — a
+   pre-schema host with no `api` field registers as compatible and can fail
+   later at first use.
 3. **Phase 2 — Agent Templates** stored and snapshotted
    ([`agent-templates.md`](agent-templates.md)).
 4. **Phase 3 — Teams**: bounded stages, mixed harnesses, artifact handoff.
