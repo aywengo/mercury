@@ -1,7 +1,10 @@
 # Harness capabilities and best-fit placement
 
-Status: **partly implemented.** The capability plumbing exists and ships; the
-vocabulary it carries is goals-only, and that is the gap this document is about.
+Status: **partly implemented.** The capability plumbing exists and ships, and
+the static vocabulary (#508), the `/healthz` api schema version (#510) and the
+per-adapter skill namespace (#507) have all landed since this document was
+written. What remains design is the affinity half of §3 and Fleet placement by
+capability (§4): Fleet still cannot rank a host by what its harnesses can do.
 
 **What exists today** (verified against `main`, not against this document):
 
@@ -11,9 +14,10 @@ vocabulary it carries is goals-only, and that is the gap this document is about.
 | Detached harness version probe (`--version`, never blocks boot) | shipped | [`src/adapters/versionProbe.ts`](../../src/adapters/versionProbe.ts) |
 | `GET /api/agents` exposes a `capabilities` map alongside the names | shipped | `src/api/routes.ts`, `RunService.listAgentCapabilities()` |
 | Harness version recorded on each Run | shipped | migration v7, `docs/goals.md` §13.1 |
-| `capabilities` vocabulary beyond goals (`skills`, `persona`, `humanInput`, `resume`, `knowledge`) | **not built** | this document §3; issue **#508** |
-| `api` schema version on `/healthz`, Fleet rejecting an old host at registration | **not built** | issue **#510** |
-| Skill namespace declared per adapter, so Hermes stops receiving Mercury ids | **not built** | issue **#507** |
+| `capabilities` vocabulary beyond goals (`skills`, `personaAppend`, `roleInstruction`, `perRunModel`, `sandbox`, `mcp`, `humanInput`, `resume`, `knowledge`, `toolEvents`) | shipped | issue **#508** (closed); `AgentStaticCapabilities` in `src/domain/types.ts`, resolved fail-closed in `src/adapters/capabilities.ts` |
+| `api` schema version on `/healthz`; Fleet rejects a registration only when the probe reports a numeric schema below `MIN_HOST_API` (a missing `api` field is compatible, `hostApi: null`) — such a host can still fail later at first `/api/agents` use, which registration does not screen | shipped | issue **#510** (closed); `API_SCHEMA_VERSION` in `src/api/server.ts`, `MIN_HOST_API` in `fleet/probe.ts` |
+| Skill namespace declared per adapter, so Hermes stops receiving Mercury ids | shipped | issue **#507** (closed, PRs #519 and #520); `skills: 'nativeNames'` on `HermesAgentAdapter` |
+| Affinity descriptor and Fleet placement by capability + affinity (§3–§4) | **not built** | this document §3; no Fleet consumer of `/api/agents` |
 
 This document exists because the point of Crew plus Fleet is **heterogeneous**:
 PrimeAgent, Hermes, Pi, Oh my Pi and Claude on one fleet, each used where it is
@@ -61,11 +65,13 @@ Names **plus** a per-agent capability map. `version` is `null` in a snapshot tak
 before the detached `--version` probe has returned; that is the documented
 first-moment behaviour in `docs/goals.md` §13.3, not a failure.
 
-What is still missing is the vocabulary, not the plumbing: `goals` is the only
-dimension the map carries. The `description`, `input.enabled` and `resume.enabled`
-that the registry already holds are not exposed, and there is no notion of strengths
-anywhere. Fleet therefore cannot place work by best fit; it can only match a name
-a caller typed. Every statement about "use Hermes for ops and PrimeAgent for code"
+The vocabulary is no longer the missing part: each summary carries a `static`
+block (`AgentCapabilitySummary.static`) with the per-adapter declarations, so a
+caller can already tell a `nativeNames` backend from a `workspacePaths` one,
+whether a mid-Run human input is accepted, or whether tool calls are observable
+at all. What is still missing is the affinity half (§3) and a Fleet consumer:
+Fleet cannot place work by best fit; it can only match a name a caller typed.
+Every statement about "use Hermes for ops and PrimeAgent for code"
 is currently unenforceable, because nothing on the wire says which is which.
 
 ## 3. Design: a declared capability and affinity descriptor
@@ -132,10 +138,14 @@ host layout and break the moment two operators differ.
 - `/api/agents` needs a richer response. It is inside the existing
   `fleet/src/child.js` allowlist, so this is a response-shape change, not a new
   route — but it is still a compatibility change.
-- There is **no version negotiation or capability handshake** between Fleet and a
-  host today. Fleet identifies a host only by whether `/healthz` answers. A
-  changed `/api/agents` shape therefore fails at first use against an old host.
-  Add a version or capability field to `/healthz` as part of this work, not after.
+- ~~There is **no version negotiation or capability handshake** between Fleet and a
+  host today.~~ Shipped (#510): `/healthz` reports an integer `api` response-shape
+  version and Fleet refuses a host whose REPORTED schema is below its own
+  `MIN_HOST_API` at registration (`fleet/probe.ts`), so a changed `/api/agents`
+  shape fails at registration time instead of at first use — for hosts that report
+  a numeric schema. A pre-schema host (no `api` field, `hostApi: null`) is treated
+  as compatible and can still fail later at first `/api/agents` use, which
+  registration does not screen.
 - Fleet stays HTTP/JSON. Capability discovery does not justify a transport change;
   it is one more small JSON read at roughly the existing 15s probe cadence.
 

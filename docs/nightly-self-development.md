@@ -1,10 +1,13 @@
 # Nightly self-development — Mercury working on Mercury
 
-Status: **in progress — N0 done, N1 partly done, dispatcher B0–B1 done;
-nothing runs unattended yet.** See §8.1 for the per-milestone status. This
-document specifies how a Mercury host, driven by a dispatcher bot
-(`dispatcher-bot-design.md`), works on the `aywengo/mercury` repository
-unattended between 00:00 and 06:00 local time.
+Status: **running — N0 and N1 are done, the dispatcher bot (B0–B1) is
+installed, and the nightly loop runs unattended (operational evidence: the
+morning digests, e.g. closed [#798](https://github.com/aywengo/mercury/issues/798),
+and nightly-authored merged PRs #791 and #796); N2 is in its acceptance
+window.** See §8.1 for the per-milestone status. This document specifies how a
+Mercury host, driven by a dispatcher bot (`dispatcher-bot-design.md`), works on
+the `aywengo/mercury` repository unattended between 00:00 and 06:00 local
+time.
 
 ## 1. Summary
 
@@ -187,21 +190,22 @@ Role presets (Crew Milestone A): tester, fixer, planner.
 The issue set for N0, N1 and dispatcher B0–B1 is
 [`nightly-issues.md`](nightly-issues.md).
 
-### 8.1 Status (2026-09-26)
+### 8.1 Status (2026-10-02)
 
 | Milestone | Status | Issues |
 | --- | --- | --- |
 | N0 guardrails | **done** — identity `mercury-nightly`, approvals = 1 | #727, #728 |
 | Dispatcher B0 | **done** | #729–#734 |
 | Dispatcher B1 | **done** | #735–#737 |
-| N1 skills | **in progress** — selector done | #738 done; #739, #740, #741 open |
-| N2 unattended | **not started** — bot config + first nights | #742 |
-| N3 docs → proposals | not started — needs nights, no new issues | (rung 3 in #740) |
+| N1 skills | **done** — selector, e2e, next, report shipped (#766, #767, #768); skills under `.agents/skills/nightly/` | #738–#741 all closed |
+| N2 unattended | **in progress** — bot config shipped (PR #774, squash `d5360e8`); acceptance 4 (three consecutive nights) recording on the issue | #742 |
+| N3 docs → proposals | not started — needs nights, no new issues | (rung 4 in #740) |
 | N4 reactive | **not filed** — waits for evidence (§8.2 stage 4) | — |
 | N5 brain | **not filed** — waits for evidence (§8.2 stage 5) | — |
 
-Non-blocking follow-ups from B1: #759 (`host bot status` partial data on API
-failure), #760 (owner-transfer API for `--reassign-runs`).
+Non-blocking follow-ups from B1, both closed: #759 (`host bot status` partial
+data on API failure, PR #782) and #760 (owner-transfer API for
+`--reassign-runs`).
 
 ### 8.2 Stages
 
@@ -210,9 +214,11 @@ only after the previous one has produced evidence that it can be trusted.
 
 1. **First night (N1 → N2).** Owner steps done 2026-09-26 (approvals = 1,
    identity `mercury-nightly`); the token goes into the host harness
-   environment with the #742 checklist. Agent work: #739–#741, then #742. Then walk
-   the #742 checklist, `host bot service install --alias nightly`, and record
-   three clean nights on #742.
+   environment with the #742 checklist. Agent work done: #739–#741 (closed by
+   PRs #766, #767, #768) and the bot config #774. Done since then: the #742
+   checklist walked and `host bot service install --alias nightly` run — the
+   bot is installed and operating. Still outstanding: recording three clean
+   nights on #742.
 2. **Prove it (N2 acceptance, no new code).** Run nightly until the N2
    acceptance holds (seven consecutive nights) and the §9 metrics have a
    baseline. Defects the nights reveal become ordinary issues, and the ladder
@@ -238,7 +244,7 @@ version, budgets decided.
 fixture test (issues by other authors, and labels applied by other actors, are
 excluded).
 
-### N1 — nightly skills — in progress
+### N1 — nightly skills — done
 
 `nightly-e2e`, `nightly-next`, `nightly-report`, and the selector they share.
 Originally they were to be run by hand before the bot existed. B1 landed first,
@@ -248,11 +254,14 @@ so they are exercised through `host bot dispatch` instead.
 run, not filed twice; `nightly-next` picks the right rung on seeded GitHub
 states; a Run that would need input ends with `nightly:blocked` instead.
 
-### N2 — unattended (dispatcher B0 + B1) — not started
+### N2 — unattended (dispatcher B0 + B1) — in progress
 
 The nightly bot config with the §4.1 schedule and the first-night checklist
-(#742). B0 prerequisites (idempotency replay, owner-id form) and the Run
-deadline (§4.3) are done.
+(#742): the config shipped as PR #774 (`deploy/nightly-bot.json.example`,
+pinned by `test/nightlyBotConfig.test.ts`) and the checklist lives in
+`docs/operations.md`, section "Running the nightly bot". B0 prerequisites
+(idempotency replay, owner-id form) and the Run deadline (§4.3) are done.
+Acceptance 4 — three consecutive nights recorded on #742 — is what remains.
 
 *Acceptance*: seven consecutive nights with no double fires, every Run
 attributable to the bot, nothing running after 06:00, a report every morning.
@@ -312,3 +321,9 @@ landed first, and the launchd stopgap is replaced by the bot config (#742).
 ### 2026-09-23 — initial roadmap
 
 First draft, derived from `dispatcher-bot-design.md` §18.
+
+### 2026-10-02 — status brought in line with the tree (#783)
+
+N1 closed (#739–#741 via PRs #766, #767, #768) and the bot config shipped
+(#774), so §8.1, §8.2 and the N1/N2 headings now say that; the old table still
+listed #739–#741 as open. No design text changed.
