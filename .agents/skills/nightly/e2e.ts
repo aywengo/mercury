@@ -165,7 +165,11 @@ export function resetRawRedactorForTests(): void {
 export function rawDetailsSection(failure: { raw?: string[] }): string[] {
   const raw = failure.raw ?? [];
   if (raw.length === 0) return [];
-  const redacted = raw.map((l) => rawRedactor().redact(l));
+  // Redact the JOINED block, not each split line: a credential value can span a line boundary
+  // (a trailing newline inside a quoted env value), and the exact-value pattern registered from
+  // the forwarded credential then matches only across the original text (#811 r3, high).
+  const redactedText = rawRedactor().redact(raw.join('\n'));
+  const redacted = redactedText.split('\n');
   const fence = codeFence(redacted);
   return ['', '<details>', '<summary>Raw failure block (redacted)</summary>', '', fence, ...redacted, fence, '', '</details>', ''];
 }
@@ -224,12 +228,15 @@ export function rawBlockOf(detail: string[], idx: number): string[] {
     const l = detail[i]!;
     const s = l.trim();
     if (s.startsWith('test at') || s.startsWith('✖')) break;
-    if (raw.length >= RAW_BLOCK_MAX_LINES || bytes + l.length + 1 > RAW_BLOCK_MAX_BYTES) {
+    // Count real UTF-8 bytes (the promise in the doc comment): a astral-heavy line (emoji) is
+    // 2 UTF-16 units per glyph but 3-4 bytes each (#811 r3).
+    const lineBytes = Buffer.byteLength(l, 'utf8');
+    if (raw.length >= RAW_BLOCK_MAX_LINES || bytes + lineBytes + 1 > RAW_BLOCK_MAX_BYTES) {
       raw.push('…');
       break;
     }
     raw.push(l.replace(/\s+$/, ''));
-    bytes += l.length + 1;
+    bytes += lineBytes + 1;
   }
   while (raw.length > 0 && raw[raw.length - 1]!.trim() === '') raw.pop();
   return raw;
@@ -247,17 +254,27 @@ export function rawBlockOf(detail: string[], idx: number): string[] {
  * output before the `✖ failing tests:` detail block — is searched as a fallback before giving up.
  */
 function extractError(detail: string[], idx: number, f: SuiteFailure, stderr: string): void {
+  // Pick the cause from the COMPLETE detail block, not from the bounded attachment copy: a
+  // wrapper followed by 60 diagnostic lines puts the real Error beyond RAW_BLOCK_MAX_LINES, and
+  // picking from the bounded copy would fingerprint the first diagnostic line instead (#811 r3).
+  // The attached f.raw stays bounded independently.
+  const blockEnd = detail.findIndex((l, i) => i > idx && (/^\s*test at /.test(l.trim()) || l.trim().startsWith('✖')));
+  const fullBlock = (blockEnd === -1 ? detail.slice(idx + 1) : detail.slice(idx + 1, blockEnd)).filter((l) => l.trim() !== '…');
   f.raw = rawBlockOf(detail, idx);
-  const picked = pickSpecificLine(f.raw.map((l) => l.trim()));
+  const picked = pickSpecificLine(fullBlock.map((l) => l.trim()));
   if (picked !== null) {
     f.error = picked;
     return;
   }
   // Wrapper-only block: the cause lives on stderr, before the detail block (the runner combines
-  // stdout+stderr, so a load error that aborted the file appears there). Prefer its first
-  // Error-shaped line, then its first ERR_ code, then give up and stay empty.
+  // stdout+stderr, so a load error that aborted the file appears there). The combined prefix can
+  // also hold ORDINARY stdout with Error-looking lines ('Error: recovered probe' printed by a
+  // passing probe), so a bare Error-shaped line is NOT enough: restrict the fallback to
+  // CRASH/LOAD-shaped causes — a module-not-found Error or an ERR_ code — which are exactly the
+  // aborts that leave a wrapper-only block (#811 r3). Anything else stays empty: no cause, no
+  // filing.
   const stderrLines = stderr.split('\n').map((l) => l.trim());
-  const errLine = stderrLines.find((s) => /^[A-Za-z]*Error\b/.test(s));
+  const errLine = stderrLines.find((s) => /^Error: (Cannot find module|Module not found)\b/.test(s));
   if (errLine) {
     f.error = errLine;
     return;

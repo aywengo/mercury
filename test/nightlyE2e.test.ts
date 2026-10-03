@@ -1104,3 +1104,65 @@ test('rawDetailsSection redacts the value of a custom MERCURY_SANDBOX_ENV forwar
     resetRawRedactorForTests();
   }
 });
+
+// -- #811 r3 regressions --
+
+test('rawDetailsSection redacts across line boundaries: joined-block redaction (#811 r3)', () => {
+  // A credential whose registered value ends with a newline: the exact-value pattern exists
+  // only in the JOINED text; per-line redaction misses it.
+  const value = 'custom-provider-value-1234';
+  // Registered WITH a trailing newline (as env files carry); the split lines hold it without.
+  process.env.MY_KEY = value + '\n';
+  process.env.MERCURY_SANDBOX_ENV = 'MY_KEY';
+  resetRawRedactorForTests();
+  try {
+    const section = rawDetailsSection({ raw: [`the configured value ${value}`, ' continued on the next line'] });
+    assert.ok(!section.join('\n').includes(value), 'the value must not survive line splitting');
+  } finally {
+    delete process.env.MY_KEY;
+    delete process.env.MERCURY_SANDBOX_ENV;
+    resetRawRedactorForTests();
+  }
+});
+
+test('rawBlockOf enforces the 6 kB cap in UTF-8 bytes, not UTF-16 units (#811 r3)', () => {
+  // 2000 emoji: 4000 UTF-16 units (the old per-unit check would pass it) but ~8 kB in UTF-8.
+  const emoji = '\u{1F600}'.repeat(2000);
+  const detail = ['✖ failing tests:', '', '✖ t (1ms)', emoji, 'Error: after emoji'];
+  const raw = rawBlockOf(detail, 2);
+  const joined = raw.join('\n');
+  const utf8 = Buffer.byteLength(joined, 'utf8');
+  assert.ok(utf8 <= 6 * 1024 + 4, `the block must stay within the byte cap, got ${utf8}`);
+});
+
+test('the specific-cause scan reads the FULL detail block, not the bounded attachment (#811 r3)', () => {
+  // Wrapper line, then >RAW_BLOCK_MAX_LINES diagnostic lines, then the real Error: the cause
+  // sits beyond the attachment bound but must still be picked (and fingerprinted).
+  const filler = Array.from({ length: 70 }, (_, i) => `  diagnostic line ${i}`);
+  const detail = [
+    '✖ failing tests:', '',
+    `test at e2e/x.test.ts:3:1`,
+    "✖ file-level (1.2ms)",
+    "  'test failed'",
+    ...filler,
+    '  Error: actual cause after the bound',
+  ];
+  const failures = parseFailures(detail.join('\n'));
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.error, 'Error: actual cause after the bound');
+  // The attached raw copy is still bounded.
+  assert.ok(failures[0]!.raw!.includes('…'));
+});
+
+test('the stderr fallback only takes crash/load-shaped causes, not ordinary stdout Errors (#811 r3)', () => {
+  const out = [
+    'Error: recovered probe',           // ordinary stdout noise, NOT a load failure
+    '✖ failing tests:', '',
+    'test at e2e/x.test.ts:3:1',
+    '✖ file-level (1.2ms)',
+    "  'test failed'",
+  ].join('\n');
+  const failures = parseFailures(out);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.error, '', 'ordinary stdout Error lines must not become the cause');
+});
