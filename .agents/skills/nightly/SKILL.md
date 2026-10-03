@@ -69,7 +69,11 @@ Runs `npm run test:e2e` once (the host needs Docker), reruns each failure ONCE
 on its own file to separate flakes from defects, then:
 
 - **Real failure** — fingerprinted (sha-256 of test name + normalized error;
-  volatile ids, paths, durations and numbers stripped). When a whole test FILE
+  volatile ids, paths, durations and numbers stripped; the TEST NAME is
+  normalized too: a file-level failure is named by the file's absolute
+  worktree path, and `normalizeTestName` makes it repo-relative
+  (`e2e/knowledge.test.ts`) so the fingerprint is Run-independent and issue
+  titles never carry a machine path — #821). When a whole test FILE
   fails, node's generic wrapper lines (`'test failed'`, `N subtest(s) failed`,
   `test did not finish before its parent and was cancelled`) are skipped: the
   fingerprint binds to the first SPECIFIC cause line instead (#806), so two
