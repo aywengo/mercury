@@ -1083,11 +1083,22 @@ test('detectPython: a non-darwin 3.9 gets the plain too-old reason (#831)', () =
   assert.ok(!/macOS/.test(det.reason ?? ''), 'the macOS wording is platform-specific');
 });
 
-test('parsePythonVersion: 3.9.6 / 3.10 / 3.12.4 (#831)', () => {
-  assert.equal(parsePythonVersion('Python 3.9.6'), 96);
-  assert.equal(parsePythonVersion('Python 3.10.0'), 100);
-  assert.equal(parsePythonVersion('Python 3.12.4'), 124);
+test('parsePythonVersion: tuple semantics — 3.9.10 must NOT read as 3.10 (#840 r1)', () => {
+  assert.deepEqual(parsePythonVersion('Python 3.9.6'), [9, 6]);
+  assert.deepEqual(parsePythonVersion('Python 3.9.10'), [9, 10], 'two-digit patch stays on 3.9');
+  assert.deepEqual(parsePythonVersion('Python 3.10.0'), [10, 0]);
+  assert.deepEqual(parsePythonVersion('Python 3.12.4'), [12, 4]);
   assert.equal(parsePythonVersion('no version here'), null);
+});
+
+test('detectPython: 3.9.10 (two-digit patch) is REFUSED — order-preserving compare (#840 r1)', () => {
+  const run = (argv: string[]) =>
+    argv[0] === 'uv'
+      ? { ok: false, stdout: '', stderr: 'no' }
+      : { ok: true, stdout: 'Python 3.9.10', stderr: '' };
+  const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES.slice(1), 'linux');
+  assert.equal(det.ok, false, '3.9.10 packs to the same number as 3.10 under minor*10+patch');
+  assert.match(det.reason ?? '', /too old/);
 });
 
 test('planLayaSidecar: user-scoped venv under the data dir + user-scoped unit (#831)', () => {
@@ -1135,6 +1146,17 @@ test('ensureLayaCredentials: generates when absent, PRESERVES an existing key (#
   assert.equal(third.generated, true);
   const raw = JSON.parse(readFileSync(join(dir, 'mercury', 'bot-credentials.json'), 'utf8')) as { maint?: unknown };
   assert.ok(raw.maint, 'the pre-existing alias entry survives');
+});
+
+test('ensureLayaCredentials: an EXISTING loose-mode file is repaired to 0600 (#840 r1)', () => {
+  const dir = tempDir('laya-creds-mode-');
+  const env = { XDG_CONFIG_HOME: dir };
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  const path = join(dir, 'mercury', 'bot-credentials.json');
+  writeFileSync(path, JSON.stringify({ maint: { api: 'tok-x' } }), { mode: 0o644 });
+  const r = ensureLayaCredentials(env);
+  assert.equal(r.generated, true);
+  assert.equal((statSync(path).mode & 0o777).toString(8), '600', 'the key must never land in a world-readable file');
 });
 
 test('runHostSetup: Laya OPT-OUT writes no MERCURY_LAYA_URL and nothing else changes (#831)', async () => {
@@ -1219,10 +1241,50 @@ test('runHostSetup: laya interpreter refusal fails the step AFTER mercury.env is
     sidecarDataDir: join(dir, 'data'),
   }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
   assert.equal(code, 1);
-  assert.match(err.join(''), /system Python on macOS is too old/);
+  // Wording is platform-specific by design (the acceptance names the macOS system python);
+  // the darwin-specific wording is pinned separately in the detectPython tests, which inject
+  // the platform. Here accept either so the suite runs on the Ubuntu CI jobs too.
+  assert.match(err.join(''), /(system Python on macOS is too old|python too old)/);
   const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
   assert.ok(file.includes('MERCURY_ADMIN_TOKEN'), 'mercury.env itself is written before the step fails');
   assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'no venv is created when the interpreter is refused');
+});
+
+test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repaired to 0600 (#840 r1)', async () => {
+  // The unit embeds the API key; the re-run must not leave it world-readable.
+  const dir = tempDir('setup-laya-unitmode-');
+  const unitPath = join(dir, 'Library', 'LaunchAgents', 'com.mercury.laya.plist');
+  mkdirSync(join(dir, 'Library', 'LaunchAgents'), { recursive: true });
+  writeFileSync(unitPath, 'stale', { mode: 0o644 });
+  await runHostSetup([], {
+    out: () => {},
+    err: () => {},
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarRun: okRun,
+    sidecarDataDir: join(dir, 'data'),
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+  assert.equal((statSync(unitPath).mode & 0o777).toString(8), '600', 'the rewritten unit must be 0600');
+});
+
+test('defaultAnswers: MERCURY_LAYA_URL in the EXISTING mercury.env keeps the sidecar enabled (#840 r1)', () => {
+  const dir = tempDir('laya-default-');
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  writeFileSync(join(dir, 'mercury', 'mercury.env'), 'MERCURY_LAYA_URL=http://127.0.0.1:8302\n');
+  const base = defaultAnswers({ ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  assert.equal(base.layaEnabled, true, 'a re-run from a plain shell must not silently disable the sidecar');
+  const fresh = defaultAnswers({ ...probeStubEnv(), XDG_CONFIG_HOME: tempDir('laya-fresh-') });
+  assert.equal(fresh.layaEnabled, false, 'a fresh host defaults to NO');
+});
+
+test('answers file: layaEnabled must be a boolean, not a truthy string (#840 r1)', () => {
+  const dir = tempDir('laya-answers-');
+  const p = join(dir, 'answers.json');
+  writeFileSync(p, JSON.stringify({ harnesses: ['primeagent'], layaEnabled: 'false' }));
+  // The REAL path: readAnswersFile feeds validateAnswers (as runHostSetup does), so a truthy
+  // string must fail validation before anything is written.
+  const answers = readAnswersFile(p, probeStubEnv());
+  const errors = validateAnswers(answers);
+  assert.ok(errors.some((e) => e.includes('layaEnabled must be a boolean')), `got: ${errors.join('; ')}`);
 });
 
 test('runHostSetup --dry-run: laya plan printed, nothing executed (#831)', async () => {

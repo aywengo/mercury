@@ -170,6 +170,8 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
       return typeof value === 'number' && Number.isFinite(value) && value > 0 ? null : 'retention must be a positive number of days';
     case 'atlasEnabled':
       return typeof value === 'boolean' ? null : 'atlasEnabled must be a boolean';
+    case 'layaEnabled':
+      return typeof value === 'boolean' ? null : 'layaEnabled must be a boolean';
     case 'atlasUrl': {
       if (typeof value !== 'string') return 'Atlas URL must be a string';
       if (value.trim() === '') return null;
@@ -429,9 +431,11 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     // prompt must not silently un-expose the API.
     bindHost: env.MERCURY_BIND_HOST?.trim() || existingVar('MERCURY_BIND_HOST', env),
     harnesses: detected.filter((h) => (KNOWN_HARNESSES as readonly string[]).includes(h)),
-    // Opt-in continuity (#831): a re-run keeps the sidecar enabled when the env already has
-    // MERCURY_LAYA_URL; a fresh host defaults to NO (the sidecar is never a silent default).
-    layaEnabled: Boolean(env.MERCURY_LAYA_URL?.trim()),
+    // Opt-in continuity (#831): a re-run keeps the sidecar enabled when the host already has
+    // MERCURY_LAYA_URL — in the process env OR the written mercury.env (bindHost solves the
+    // same problem with existingVar). A fresh host defaults to NO: the sidecar is never a
+    // silent default.
+    layaEnabled: Boolean(env.MERCURY_LAYA_URL?.trim() || existingVar('MERCURY_LAYA_URL', env)),
   };
 }
 
@@ -788,9 +792,10 @@ export async function runHostSetup(
     io.out('mercury host setup --dry-run\n');
     io.out(redactedSummary(answers, preservedNames) + '\n');
     if (answers.layaEnabled) {
-      const dataDir = io.sidecarDataDir ?? dirname(loadEnvFile(envFilePath(env)).MERCURY_DB ?? join(homedir(), '.local', 'state', 'mercury', 'mercury.db'));
-      const det = detectPython(io.sidecarRun ?? sidecarExec, DEFAULT_PYTHON_CANDIDATES);
-      const plan = planLayaSidecar({ dataDir, pythonBin: det.bin ?? 'python3', env });
+      // --dry-run touches nothing (M1/M3 rule): no interpreter probing, no exec — pythonBin
+      // does not change the plan, and the plan comes from the VALIDATED answers, not the old
+      // env file (Copilot #840 r1).
+      const plan = planLayaSidecar({ dataDir: io.sidecarDataDir ?? answers.dataDir.trim(), pythonBin: 'python3', env });
       io.out('\nLaya sidecar (opt-in) would:\n' + layaStepActions(plan).map((a) => `  - ${a}`).join('\n') + '\n');
     }
     if (alreadyConfigured) {
@@ -837,12 +842,21 @@ export async function runHostSetup(
       return 1;
     }
     const plan: LayaPlan = planLayaSidecar({ dataDir, pythonBin: det.bin!, env });
+    // The detector must tell us HOW it found the interpreter: `uv venv` without seed has no
+    // pip, and a plain-python fallback has no uv at all (Copilot #840 r1). Replay the winning
+    // candidate's own venv command and install through the venv's pip (seeded for uv).
+    const venvStep = det.argv![0] === 'uv'
+      ? () => {
+          const r = run(['uv', 'venv', plan.venvDir, '--python', `3.${det.version!.split('.')[1]}`, '--seed'], 120_000);
+          if (!r.ok) throw new Error(`uv venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
+        }
+      : () => {
+          const pyBin = det.bin!.split(' ')[0]!;
+          const r = run([pyBin, '-m', 'venv', plan.venvDir], 120_000);
+          if (!r.ok) throw new Error(`python -m venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
+        };
     const steps: Array<[string, () => void]> = [
-      ['venv', () => {
-        mkdirSync(dataDir, { recursive: true });
-        const r = run(['uv', 'venv', plan.venvDir, '--python', '3.10'], 120_000);
-        if (!r.ok) throw new Error(`uv venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
-      }],
+      ['venv', venvStep],
       ['install', () => {
         const r = run([join(plan.venvDir, 'bin', 'python3'), '-m', 'pip', 'install', `laya[serve]==${LAYA_SERVE_PIN}`], 300_000);
         if (!r.ok) throw new Error(`pip install laya[serve]==${LAYA_SERVE_PIN} failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
@@ -855,6 +869,9 @@ export async function runHostSetup(
         mkdirSync(dirname(plan.unitPath), { recursive: true });
         const text = process.platform === 'darwin' ? renderLayaLaunchdPlist(plan, creds.key) : renderLayaSystemdUnit(plan, creds.key);
         writeFileSync(plan.unitPath, text, { mode: 0o600 });
+        // mode applies at creation only: a re-run over a pre-existing 0644 unit (it embeds the
+        // key) must be repaired, not left world-readable (Copilot #840 r1).
+        chmodSync(plan.unitPath, 0o600);
       }],
     ];
     try {

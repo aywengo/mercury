@@ -19,7 +19,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,17 +48,25 @@ export interface PythonDetection {
   ok: boolean;
   /** The interpreter the plan will use (candidate.bin). */
   bin?: string;
+  /** The winning candidate's detection argv — the venv step replays THIS tool (uv vs python3). */
+  argv?: string[];
   version?: string;
   /** When not ok: the named reason (acceptance: "system 3.9.6 on macOS is refused with the reason"). */
   reason?: string;
 }
 
-/** Minimal "3.10" / "3.9.6" parser → comparable number (minor*10+patch: 3.9.6 → 96,
- *  3.10.0 → 100, 3.12.4 → 124; a bare "3.10" → 100). */
-export function parsePythonVersion(out: string): number | null {
+/** Minimal "3.10" / "3.9.6" parser → [minor, patch] or null. A TUPLE, not a packed number:
+ *  minor*10+patch breaks at 3.9.10 (= 100, indistinguishable from 3.10.0) and would accept an
+ *  unsupported 3.9 interpreter. */
+export function parsePythonVersion(out: string): [number, number] | null {
   const m = out.match(/3\.(\d+)(?:\.(\d+))?/);
   if (!m) return null;
-  return Number(m[1]) * 10 + Number(m[2] ?? 0);
+  return [Number(m[1]), Number(m[2] ?? 0)];
+}
+
+/** 3.minor.patch >= 3.10 in tuple order. */
+function atLeast310(v: [number, number]): boolean {
+  return v[0] > 10 || (v[0] === 10 && v[1] >= 0);
 }
 
 export function detectPython(
@@ -78,7 +86,7 @@ export function detectPython(
       failures.push(`${cand.argv[0]}: no parsable version`);
       continue;
     }
-    if (v < 100) {
+    if (!atLeast310(v)) {
       // The acceptance wording: the macOS SYSTEM python is the 3.9 case. Name the platform
       // and the found version; do not silently fall through to a worse interpreter.
       failures.push(
@@ -88,7 +96,7 @@ export function detectPython(
       );
       continue;
     }
-    return { ok: true, bin: cand.bin, version: `3.${Math.floor(v / 10)}.${v % 10}` };
+    return { ok: true, bin: cand.bin, argv: cand.argv, version: `3.${v[0]}.${v[1]}` };
   }
   return { ok: false, reason: failures.join('; ') };
 }
@@ -191,7 +199,9 @@ export function ensureLayaCredentials(env: NodeJS.ProcessEnv = process.env, gen:
   const key = gen();
   raw.laya = { api: key };
   mkdirSync(join(xdg, 'mercury'), { recursive: true });
-  const mode = existsSync(path) ? undefined : 0o600;
-  writeFileSync(path, JSON.stringify(raw, null, 2) + '\n', mode !== undefined ? { mode } : undefined);
+  writeFileSync(path, JSON.stringify(raw, null, 2) + '\n', { mode: 0o600 });
+  // mode only applies at creation: an EXISTING 0644 file would keep its bits and the new key
+  // would be world-readable (Copilot #840 r1). Repair explicitly, like bots/service.ts does.
+  chmodSync(path, 0o600);
   return { key, generated: true };
 }
