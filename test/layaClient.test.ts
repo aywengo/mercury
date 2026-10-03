@@ -48,6 +48,9 @@ test('valid pick: ok:true carries answers, checkpoint, latencyMs', async () => {
   // The request the fake received: the 0.3.25 wire shape (state + questions), bearer auth,
   // the /v1/systemone path. The §6.3 allowlist fields ride in the question's instructions.
   assert.equal(f.received.length, 1);
+  // The endpoint contract itself: POST to /v1/systemone (not just any request with the right body).
+  assert.equal(f.received[0].method, 'POST');
+  assert.equal(f.received[0].url, '/v1/systemone');
   const body = f.received[0].body as { state: string; questions: Record<string, { type: string; instructions: string; criteria: Record<string, string> }> };
   assert.deepEqual(Object.keys(body).sort(), ['questions', 'state'], 'request carries only state+questions');
   const q = body.questions['mercury-dispatch'];
@@ -90,6 +93,17 @@ test('non-finite probability (NaN) -> ok:false reason non_finite_probability', a
     new Set(['A']),
   );
   assert.deepEqual({ ok: v.ok, reason: v.ok ? null : v.reason }, { ok: false, reason: 'non_finite_probability' });
+});
+
+test('probability outside [0,1] -> ok:false reason malformed (#837 r7)', async () => {
+  // answer_confidence: 2 would read as maximally trustworthy at the §6.4 gate.
+  const f = await withFake([{ rawBody: '{"model":"english","answers":{"mercury-dispatch":{"type":"choice","choice":"A","answer_confidence":2}}}' }]);
+  const res = await client(f.url).ask({ options: OPTIONS }, STATE);
+  assert.deepEqual({ ok: res.ok, reason: res.ok ? null : res.reason }, { ok: false, reason: 'malformed' });
+  // Negative side too.
+  const f2 = await withFake([{ rawBody: '{"model":"english","answers":{"mercury-dispatch":{"type":"choice","choice":"A","answer_confidence":-0.5}}}' }]);
+  const res2 = await client(f2.url).ask({ options: OPTIONS }, STATE);
+  assert.deepEqual({ ok: res2.ok, reason: res2.ok ? null : res2.reason }, { ok: false, reason: 'malformed' });
 });
 
 test('Infinity probability -> ok:false reason non_finite_probability', async () => {

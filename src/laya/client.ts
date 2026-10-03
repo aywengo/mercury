@@ -207,6 +207,12 @@ export function validateLayaBody(body: unknown, offeredKeys: Set<string>): { ok:
     if (typeof probability !== 'number' || !Number.isFinite(probability)) {
       return { ok: false, reason: 'non_finite_probability', detail: `answers[${JSON.stringify(questionId)}].answer_confidence ${JSON.stringify(probability)} is not finite` };
     }
+    // A probability outside [0, 1] is not a calibration, it is a malformed row (#837 r7): the
+    // §6.4 gate would read `answer_confidence: 2` as maximally trustworthy and could ENFORCE the
+    // selection. Fail closed.
+    if (probability < 0 || probability > 1) {
+      return { ok: false, reason: 'malformed', detail: `answers[${JSON.stringify(questionId)}].answer_confidence ${JSON.stringify(probability)} is outside [0, 1]` };
+    }
     answers.push({ key: choice, choice, probability });
   }
   return { ok: true, answers, checkpoint: b.model };
@@ -228,7 +234,9 @@ export class LayaClient {
     this.maxResponseBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
     this.transport = opts.transport ?? layaNodeTransport();
     this.redactor = opts.redactor ?? createRedactor(opts.secrets ?? []);
-    this.now = opts.now ?? Date.now;
+    // performance.now() is the monotonic clock the option promises (#837 r7): Date.now can jump
+    // backward with the system clock and make latencyMs negative.
+    this.now = opts.now ?? (() => performance.now());
   }
 
   /** Ask the sidecar one `choice` question. Never throws for a Laya failure (§5.2). */

@@ -13,6 +13,10 @@ import type { LayaRawResponse, LayaRequest } from '../../src/laya/types.ts';
 
 /** What one request to the fake looked like. */
 export interface FakeLayaReceived {
+  /** HTTP method. */
+  method: string;
+  /** Request URL (path + query) as received. */
+  url: string;
   /** Raw request body bytes. */
   raw: Buffer;
   /** The parsed request body (as far as JSON parsing goes; null when not JSON). */
@@ -53,7 +57,7 @@ export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKe
       const raw = Buffer.concat(chunks);
       let body: unknown = null;
       try { body = raw.length > 0 ? JSON.parse(raw.toString('utf8')) : null; } catch { /* not JSON */ }
-      received.push({ raw, body, headers: req.headers });
+      received.push({ method: req.method ?? '', url: req.url ?? '', raw, body, headers: req.headers });
 
       const auth = opts.apiKey !== undefined;
       const header = req.headers.authorization ?? '';
