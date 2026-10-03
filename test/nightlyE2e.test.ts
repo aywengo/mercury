@@ -1229,3 +1229,21 @@ test('REAL stderr accepts general crash Errors; the derived prefix keeps the nar
   const derived = parseFailures(combinedNoise);
   assert.equal(derived[0]!.error, '');
 });
+
+test('redactedErrorLine redacts BEFORE normalizing: a numbered secret survives normalization (#811 r7)', () => {
+  const secret = 'custom-secret-806';
+  process.env.MERCURY_SECRETS = secret;
+  resetRawRedactorForTests();
+  try {
+    // The bare literal sits mid-line (no label, no shape) and ends in digits: normalizeErrorLine
+    // would rewrite 806 -> <n> and the exact-value pattern would no longer match.
+    const out = redactedErrorLine({ error: `Error: the configured value ${secret} was rejected with code 42 at /tmp/x.ts:9:9` });
+    assert.ok(!out.includes(secret), 'the literal secret must be redacted');
+    assert.ok(out.includes('[REDACTED]'));
+    // Normalization still applies to the non-secret remainder.
+    assert.ok(out.includes('code <n>') || out.includes(':<n>'), `normalization still runs, got: ${out}`);
+  } finally {
+    delete process.env.MERCURY_SECRETS;
+    resetRawRedactorForTests();
+  }
+});

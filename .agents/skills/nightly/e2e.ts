@@ -195,7 +195,11 @@ export function codeFence(contentLines: string[]): string {
  *  can carry credential shapes too (a URL with an embedded token, for example), and it posts
  *  OUTSIDE the collapsed section (#817 review). */
 export function redactedErrorLine(failure: { error: string }): string {
-  return rawRedactor().redact(normalizeErrorLine(failure.error));
+  // Redact FIRST, then normalize: normalizeErrorLine rewrites numbers/paths/hex (`<n>`), which
+  // can mutate a registered exact-value secret before the redactor's literal pattern could match
+  // it — `custom-secret-806` became `custom-secret-<n>` and posted publicly (#811 r7, high).
+  // Normalizing the ALREADY-redacted text is safe: '[REDACTED]' contains no digits/paths to rewrite.
+  return normalizeErrorLine(rawRedactor().redact(failure.error));
 }
 
 // ---- parsing the spec reporter ----
