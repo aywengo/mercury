@@ -156,6 +156,24 @@ test('REGRESSION: a secret planted in the task never reaches the sidecar (fails 
   assert.ok(sent.includes('[REDACTED]'), `expected the redacted form, got: ${sent}`);
 });
 
+test('REGRESSION: the redactor covers EVERY state field, not just task (#837 r1)', async () => {
+  const f = await withFake([{ json: validPick(['A', 'B', 'C']) }]);
+  const res = await client(f.url).ask(
+    { options: OPTIONS },
+    {
+      task: 'clean task',
+      template: 'deploy-hush-hush',
+      repository: '/repos/hush-hush',
+      skills: ['deploy-hush-hush'],
+    },
+  );
+  assert.ok(res.ok, `expected ok, got ${JSON.stringify(res)}`);
+  const sent = f.received[0].body as { state: { template: string; repository: string; skills: string[] } };
+  assert.ok(!sent.state.template.includes('hush-hush'), `template leaked: ${sent.state.template}`);
+  assert.ok(!sent.state.repository.includes('hush-hush'), `repository leaked: ${sent.state.repository}`);
+  assert.ok(sent.state.skills.every((s) => !s.includes('hush-hush')), `skills leaked: ${JSON.stringify(sent.state.skills)}`);
+});
+
 test('redaction failure is a typed failure, not a throw past the caller', () => {
   const boom: Redactor = {
     redact: () => { throw new Error('redactor exploded'); },

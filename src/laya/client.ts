@@ -118,12 +118,14 @@ export function layaNodeTransport(): LayaTransport {
 export function buildLayaState(input: { task: string; template: string; repository: string; skills: string[] }, redactor: Redactor): { ok: true; state: LayaState } | { ok: false; reason: LayaFailureReason; detail: string } {
   try {
     const state: LayaState = {
-      // §6.3 allowlist, in this order, nothing else.
+      // §6.3 allowlist, in this order, nothing else. EVERY string field passes the redactor
+      // (#837 r1): the boundary must not depend on where a secret appears -- a declared secret
+      // inside a template name, a repository basename or a skill id leaves otherwise.
       task: redactor.redact(input.task),
-      template: input.template,
+      template: redactor.redact(input.template),
       // URL or path basename only (§6.3).
-      repository: basenameOf(input.repository),
-      skills: input.skills.slice(),
+      repository: redactor.redact(basenameOf(input.repository)),
+      skills: input.skills.map((s) => redactor.redact(s)),
     };
     return { ok: true, state };
   } catch (err) {
