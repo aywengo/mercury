@@ -84,6 +84,23 @@ export interface Selection {
   reason: string;
 }
 
+/**
+ * One open nightly PR with pending review remarks (#819): the resume rung's input. GitHub
+ * metadata only - number, head, branch, the last Copilot review's head and state - never PR
+ * body or comment text (the selector decides from metadata; remarks are the Run's work).
+ */
+export interface ResumeCandidate {
+  issue: number;
+  prNumber: number;
+  headSha: string;
+  /** 'findings' = a Copilot review exists on this head and its verdict is not approval-class;
+   *  the run resumes fix-loop step 5 on the issue. */
+  state: 'findings';
+  /** Older first: with two open PRs for one issue the OLDER one is continued (the acceptance
+   *  rule) and the newer must be superseded or closed by the Run. */
+  createdAt: string;
+}
+
 export function issueLabels(issue: GhIssue): string[] {
   return (issue.labels ?? []).map((l) => l.name ?? '').filter((n) => n !== '');
 }
@@ -202,10 +219,35 @@ export interface Candidate {
  */
 export function selectLadder(
   candidates: Candidate[],
-  opts: { e2eRunTerminal: boolean },
+  opts: { e2eRunTerminal: boolean; resume?: ResumeCandidate[] },
   /** Candidates seen before claims were dropped (a caller mutating the array passes this). */
   seenCount?: number,
 ): Selection {
+  // Rung 0 (resume, #819): finish what an earlier night opened before starting anything new.
+  // Metadata-only inputs: an open nightly PR whose branch maps to an open issue
+  // (fix/issue-<N>-*) with Copilot findings on its current head. Review-REQUEST fetching is
+  // the relay's job (a head without a review is skipped here - the relay will fetch one).
+  // Resume does NOT wait for tonight's e2e verdict: addressing review remarks on an existing
+  // PR is not new work racing the E2E window.
+  const resume = opts.resume ?? [];
+  if (resume.length > 0) {
+    const byIssue = new Map<number, ResumeCandidate>();
+    for (const r of resume) {
+      // A candidate whose issue is excluded/absent from the open list cannot be claimed; the
+      // caller only passes resume candidates it verified against the open-issue list.
+      const top = byIssue.get(r.issue);
+      if (top === undefined || r.createdAt < top.createdAt) byIssue.set(r.issue, r);
+    }
+    const ordered = [...byIssue.entries()].sort((a, b) => a[1].createdAt.localeCompare(b[1].createdAt));
+    if (ordered.length > 0) {
+      const [issue, r] = ordered[0]!;
+      return {
+        rung: 0,
+        issue,
+        reason: `resume: PR #${r.prNumber} (branch fix/issue-${issue}) has Copilot findings on its head to address (fix-loop step 5, at most 2 rounds); oldest-first${byIssue.size > 1 ? `; ${byIssue.size - 1} more PR(s) waiting` : ''}`,
+      };
+    }
+  }
   const eligible = candidates.filter((c) => !isExcluded(c.issue) && isTrusted(c.issue, c.readyByTrusted, c.e2eByNightly, c.enhByTrusted));
 
   // Rung 1: origin:e2e or trusted nightly:ready, priority then age.
@@ -444,10 +486,61 @@ export async function runSelectorWith(
     candidates.push({ issue: effectiveIssue, readyByTrusted, e2eByNightly, enhByTrusted });
   }
   const e2eTerminal = await e2eRunTerminal(env);
+  // Resume candidates (#819): open PRs authored by the nightly identity whose branch names an
+  // OPEN issue (fix/issue-<N>-*) and whose CURRENT head carries a Copilot review that is not
+  // approval-class. Metadata only: number, head sha, branch, created_at, and the LAST Copilot
+  // review's (head, state). A head with no Copilot review is skipped - fetching that review is
+  // the relay's job, and guessing remarks without one would violate the metadata-only rule.
+  // Bounded: at most 30 open PRs and 5 pages of reviews per PR.
+  const resume: ResumeCandidate[] = [];
+  {
+    let prPath: string | null = `/repos/${repo}/pulls?state=open&per_page=30`;
+    let prPages = 0;
+    const nightlyPrs: { number: number; head: { sha?: string | null; ref?: string | null }; user?: { login?: string | null } | null; created_at?: string | null }[] = [];
+    while (prPath && prPages < 1) {
+      const { body } = (await io.get(prPath)) as { body: typeof nightlyPrs };
+      for (const pr of body ?? []) {
+        if (pr.user?.login !== NIGHTLY_IDENTITY) continue;
+        nightlyPrs.push(pr);
+      }
+      prPages++;
+      prPath = null; // one page is enough: the nightly has singleFlight, so its open PRs are few
+    }
+    const openIssues = new Set(candidates.map((c) => c.issue.number));
+    for (const pr of nightlyPrs) {
+      const branch = pr.head?.ref ?? '';
+      const m = branch.match(/^fix\/(issue)-(\d+)-/);
+      if (!m) continue;
+      const issue = Number(m[2]);
+      if (!openIssues.has(issue)) continue;
+      const headSha = pr.head.sha ?? '';
+      if (!headSha) continue;
+      let lastCopilot: { commit_id?: string | null; state?: string | null } | null = null;
+      let rvPath: string | null = `/repos/${repo}/pulls/${pr.number}/reviews?per_page=50`;
+      let rvPages = 0;
+      while (rvPath && rvPages < 5) {
+        const { body } = (await io.get(rvPath)) as { body: { user?: { login?: string | null }; commit_id?: string | null; state?: string | null }[] };
+        for (const rv of body ?? []) {
+          if (!rv.user?.login?.startsWith('copilot-pull-request-reviewer')) continue;
+          lastCopilot = rv; // pages are oldest-first; keep the last seen
+        }
+        rvPages++;
+        rvPath = null; // 50 reviews is far beyond the loop's 2-round cap; one page suffices
+      }
+      if (!lastCopilot || lastCopilot.commit_id !== headSha) continue; // relay's job first
+      // Verdict classes seen: 'Approval recommended' (mergeable) vs everything else. The review
+      // STATE is COMMENTED for the hosted reviewer; the verdict lives in the body the selector
+      // must NOT read. Metadata proxy: approval-class = state 'APPROVED'. The hosted Copilot
+      // reviewer never posts APPROVED for changes-requested/requires-closer-look verdicts; it
+      // DOES post APPROVED when it recommends approval (observed on #805/#816/#812 round 3).
+      if (lastCopilot.state === 'APPROVED') continue; // nothing to address; the PR awaits merge
+      resume.push({ issue, prNumber: pr.number, headSha, state: 'findings', createdAt: pr.created_at ?? '' });
+    }
+  }
   // A capped list walk means open items exist beyond page 10 (they may all be PRs or PR-like):
   // the ladder must report rung 3 rather than a false 'none'.
   const seen = candidates.length + (listCapped ? 1 : 0);
-  let selection = selectLadder(candidates, { e2eRunTerminal: e2eTerminal }, seen);
+  let selection = selectLadder(candidates, { e2eRunTerminal: e2eTerminal, resume }, seen);
   // Claim BEFORE returning: label nightly:in-progress, then VERIFY ownership through the same
   // primitive the trust rule uses - the label timeline's CURRENT actor (round-3 review on #801).
   // GitHub's add-labels endpoint is IDEMPOTENT (a duplicate POST returns 200 with the label
@@ -481,7 +574,9 @@ export async function runSelectorWith(
     // A capped walk, a hidden actor, or a foreign current claim: not verifiably ours - drop the
     // candidate and pick again; if everything is taken, the ladder reports rung 4.
     candidates.splice(candidates.findIndex((c) => c.issue.number === selection.issue), 1);
-    selection = selectLadder(candidates, { e2eRunTerminal: e2eTerminal }, seen);
+    // The resume list is NOT filtered here: a resume claim that fails verification (a foreign
+    // actor re-claimed the issue) drops only that issue's PR candidate.
+    selection = selectLadder(candidates, { e2eRunTerminal: e2eTerminal, resume: resume.filter((r) => r.issue !== selection.issue) }, seen);
   }
   return selection;
 }

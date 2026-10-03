@@ -97,7 +97,9 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: 
     { ...env, REPO: opts.repo },
     opts.dryRun,
   );
-  if (selection.rung === 1 || selection.rung === 2 || selection.rung === 3) {
+  if (selection.rung === 0 || selection.rung === 1 || selection.rung === 2 || selection.rung === 3) {
+    // Rung 0 (resume, #819) is fix-loop step 5: address the pending Copilot findings on the
+    // PR the earlier night opened, one batched push, then the relay fetches the fresh review.
     return { ...selection, action: 'fix-loop' };
   }
   if (selection.rung === 4) {

@@ -13,6 +13,7 @@ import {
   type Candidate,
   type GhIssue,
   type LabelEvent,
+  type ResumeCandidate,
 } from '../.agents/skills/nightly/select.ts';
 
 // Recorded-shape fixtures (fields the selector actually reads; the rest omitted).
@@ -599,7 +600,8 @@ test('a capped open-issue list reports rung 4, never a false none (round-9 revie
   };
   const s = await runSelectorWith(io, { REPO: 'aywengo/mercury' }, false);
   assert.equal(s.rung, 4, 'a capped walk means open items exist beyond the cap: docs rung, not none');
-  assert.equal(paths.length, 10, 'the walk stopped at the cap');
+  const issuePages = paths.filter((p) => p.includes('/issues?')).length;
+  assert.equal(issuePages, 10, 'the ISSUE-list walk stopped at the cap');
 });
 
 
@@ -727,4 +729,75 @@ test('lastLabeledAt walks the timeline like labelActorsFor (re-label loses the o
   assert.equal(lastLabeledAt([timeline[0]!], 'nightly:in-progress'), '2026-09-20T00:00:00Z');
   assert.equal(lastLabeledAt([{ event: 'unlabeled', label: { name: 'nightly:in-progress' } }], 'nightly:in-progress'), null);
   assert.equal(lastLabeledAt([], 'nightly:in-progress'), null);
+});
+
+// -- Resume rung (rung 0, #819): finish an earlier night's PR before claiming anything new.
+
+function resume(over: Partial<ResumeCandidate> & { issue: number; prNumber: number }): ResumeCandidate {
+  return {
+    headSha: `sha${over.prNumber}`,
+    state: 'findings',
+    createdAt: '2026-10-02T22:00:00Z',
+    ...over,
+  } as ResumeCandidate;
+}
+
+test('rung 0: an open nightly PR with Copilot findings on its head resumes before rung 1 (#819)', () => {
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }], created_at: '2026-09-01T00:00:00Z' }))];
+  const s = selectLadder(c, { ...TERMINAL, resume: [resume({ issue: 3, prNumber: 811 })] });
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 3);
+  assert.match(s.reason, /PR #811/);
+  assert.match(s.reason, /findings/);
+});
+
+test('rung 0 is oldest-PR-first across issues and states the supersession count', () => {
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }] })), cand(issue({ number: 5, labels: [{ name: 'nightly:ready' }] }))];
+  const s = selectLadder(c, {
+    ...TERMINAL,
+    resume: [
+      resume({ issue: 5, prNumber: 900, createdAt: '2026-10-02T23:00:00Z' }),
+      resume({ issue: 3, prNumber: 811, createdAt: '2026-10-02T22:00:00Z' }),
+    ],
+  });
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 3, 'the older PR wins');
+  assert.match(s.reason, /1 more PR/);
+});
+
+test('rung 0 with two PRs for one issue continues the OLDER one (supersession rule)', () => {
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }] }))];
+  const s = selectLadder(c, {
+    ...TERMINAL,
+    resume: [
+      resume({ issue: 3, prNumber: 817, createdAt: '2026-10-02T22:37:00Z' }),
+      resume({ issue: 3, prNumber: 811, createdAt: '2026-10-01T22:36:00Z' }),
+    ],
+  });
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 3);
+  assert.match(s.reason, /PR #811/, 'the OLDER PR (811) is continued, not 817');
+});
+
+test('rung 0 empty or absent falls through to the normal ladder', () => {
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }] }), [labeled('aywengo', 'nightly:ready')])];
+  const s = selectLadder(c, TERMINAL);
+  assert.equal(s.rung, 1);
+  const s2 = selectLadder(c, { ...TERMINAL, resume: [] });
+  assert.equal(s2.rung, 1);
+});
+
+test('rung 0 does not wait for the e2e gate (review remarks are not new work)', () => {
+  const c = [cand(issue({ number: 3, labels: [{ name: 'nightly:ready' }] }))];
+  const s = selectLadder(c, { e2eRunTerminal: false, resume: [resume({ issue: 3, prNumber: 811 })] });
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 3);
+});
+
+test('rung 0 with resume candidates and NO trusted issues still resumes (the issue came from an earlier night)', () => {
+  const c = [cand(issue({ number: 3, user: { login: 'random-dev' }, labels: [{ name: 'nightly:in-progress' }] }))];
+  const s = selectLadder(c, TERMINAL);
+  assert.notEqual(s.rung, 0, 'no resume candidates passed, so no resume');
+  const s2 = selectLadder(c, { ...TERMINAL, resume: [resume({ issue: 9, prNumber: 811 })] });
+  assert.equal(s2.rung, 0, 'the caller pre-verified the issue is open + claimable; resume proceeds');
 });
