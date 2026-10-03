@@ -1290,6 +1290,12 @@ test('normalizeTestName: worktree paths become repo-relative; subtest names pass
     normalizeTestName('/Users/John Doe/worktrees/run_1111111111111111/e2e/x.test.ts', '/somewhere/else'),
     'e2e/x.test.ts',
   );
+  // A PLAIN subtest name that merely CONTAINS a worktree-shaped substring passes through
+  // byte-identical: only a name that IS an absolute path is rewritten (#822 r2).
+  assert.equal(
+    normalizeTestName('handles /tmp/worktrees/run_deadbeef/e2e/x.test.ts', '/repo'),
+    'handles /tmp/worktrees/run_deadbeef/e2e/x.test.ts',
+  );
 });
 
 test('acceptance 1: the same file-level failure in two different worktrees fingerprints identically', async () => {

@@ -136,23 +136,25 @@ export async function fingerprintOf(test: string, error: string): Promise<string
  */
 export function normalizeTestName(name: string, repoRoot: string = process.cwd()): string {
   const root = repoRoot.replace(/\\/g, '/').replace(/\/+$/, '');
-  // A Mercury worktree prefix anywhere in the path: …/worktrees/run_<hex>/… Take everything
-  // after the LAST `worktrees/run_<hex>/` segment; the match is whitespace-tolerant (a home dir
-  // like '/Users/John Doe/worktrees/...' must still normalize, #822 r1).
-  const wtIdx = name.lastIndexOf('/worktrees/');
-  if (wtIdx !== -1) {
-    const after = name.slice(wtIdx + '/worktrees/'.length);
-    const m = /^run_[0-9a-f]+\/(.*)$/.exec(after);
-    if (m?.[1]) return m[1].replace(/\\/g, '/');
-  }
-  // Only recognized ABSOLUTE paths are rewritten: a root-contained path becomes repo-relative
-  // (backslashes convert for Windows-shaped paths). Anything else — a subtest name, a relative
-  // name, a name that merely CONTAINS a Windows path — passes through byte-identical, so its
-  // existing fingerprint is untouched (#822 r1: 'handles C:\\tmp\\x' must not become
-  // 'handles C:/tmp/x').
+  // ONLY a name that is itself a recognized ABSOLUTE path is rewritten at all: a subtest name
+  // that merely CONTAINS a path-like substring ('handles /tmp/worktrees/run_deadbeef/e2e/x.ts')
+  // must pass through byte-identical, or its existing fingerprint would change (#822 r2).
   const looksAbsolute = /^\//.test(name) || /^[A-Za-z]:[\\/]/.test(name);
   if (!looksAbsolute) return name;
   const asForward = name.replace(/\\/g, '/');
+  // A Mercury worktree prefix: …/worktrees/run_<hex>/… Take everything after the LAST
+  // `worktrees/run_<hex>/` segment. The search is on the slash-normalized absolute path and
+  // whitespace-tolerant (a home dir like '/Users/John Doe/worktrees/...' still normalizes,
+  // #822 r1) — robust even when the prefix is not the current repo root.
+  const wtIdx = asForward.lastIndexOf('/worktrees/');
+  if (wtIdx !== -1) {
+    const after = asForward.slice(wtIdx + '/worktrees/'.length);
+    const m = /^run_[0-9a-f]+\/(.*)$/.exec(after);
+    if (m?.[1]) return m[1];
+  }
+  // Otherwise: a root-contained path becomes repo-relative (directories kept — a basename alone
+  // could collide). A name that is absolute but neither worktree-shaped nor root-contained is
+  // left as-is: rewriting it would invent a repo-relative claim we cannot verify.
   if (asForward.startsWith(`${root}/`)) return asForward.slice(root.length + 1);
   if (asForward === root) return '';
   return name;
