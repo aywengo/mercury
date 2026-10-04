@@ -22,6 +22,7 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { readBotCredentials } from './bots/credentials.ts';
 
 /** The upstream laya[serve] version the client contract was verified against (#825). */
 export const LAYA_SERVE_PIN = '0.3.25';
@@ -250,24 +251,26 @@ export function ensureLayaCredentials(env: NodeJS.ProcessEnv = process.env, gen:
   const entry = raw.laya;
   if (entry && typeof entry === 'object' && !Array.isArray(entry) && typeof (entry as Record<string, unknown>).api === 'string') {
     const preserved = (entry as Record<string, unknown>).api as string;
-    // The preserved value must satisfy the SAME rules the shared reader enforces
-    // (readBotCredentials): non-empty, unpadded. A padded key would pass setup and then fail
-    // every doctor/doctor-adjacent read afterwards — refuse at setup time, value never named.
-    if (preserved.trim() === '') throw new Error(`${path}: entry 'laya.api' must be a non-empty string`);
-    if (preserved !== preserved.trim()) throw new Error(`${path}: entry 'laya.api' has leading or trailing whitespace; remove it (the file is read verbatim, not trimmed)`);
-    // The key is embedded in a launchd plist (XML) and a systemd unit — an existing key with
-    // whitespace, quotes, ampersands or newlines would inject a directive or corrupt the file
-    // (Copilot #840 r5). Wizard-generated keys are hex; anything outside the inert charset is
-    // refused with the fix named, never the value.
+    // The key is preserved but the FILE MODE is repaired unconditionally (Copilot #840 r3):
+    // a preserved key in a file that drifted to 0644 is exactly as exposed as a new one.
+    // Repair BEFORE the shared read so the reader's own 0600 gate passes on the same file.
+    chmodSync(path, 0o600);
+    // The doctor reads this SAME entry through readBotCredentials, which validates the WHOLE
+    // entry: unknown keys refused ('token' gets a did-you-mean), every value a non-empty
+    // unpadded string. Validating only 'api' here let { laya: { api, token } } pass setup and
+    // then fail every later read (Copilot #840 r7). Run the shared reader itself — the schema
+    // cannot drift and its errors name the field, never the value.
+    readBotCredentials('laya', env);
+    // The api key is embedded in a launchd plist (XML) and a systemd unit — an existing key
+    // with whitespace, quotes, ampersands or newlines would inject a directive or corrupt the
+    // file (Copilot #840 r5). Wizard-generated keys are hex; anything outside the inert charset
+    // is refused with the fix named, never the value.
     if (!/^[A-Za-z0-9._~@:+/=-]+$/.test(preserved)) {
       throw new Error(
         `${path}: entry 'laya.api' contains characters that cannot be embedded in the service unit; ` +
         'use a key of [A-Za-z0-9._~@:+/=-] only (the wizard generates 64 hex chars)',
       );
     }
-    // The key is preserved but the FILE MODE is repaired unconditionally (Copilot #840 r3):
-    // a preserved key in a file that drifted to 0644 is exactly as exposed as a new one.
-    chmodSync(path, 0o600);
     return { key: preserved, generated: false };
   }
   // A malformed entry (api missing/wrong type/empty) is an operator-visible refusal, not a

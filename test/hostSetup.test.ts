@@ -1163,6 +1163,46 @@ test('laya units carry the same restart backoff as the host and bot units (#840 
   assert.match(renderLayaLaunchdPlist(darwin, 'k'), /<key>ThrottleInterval<\/key><integer>5<\/integer>/);
 });
 
+test('ensureLayaCredentials: the WHOLE preserved entry is validated against the shared schema (#840 r7)', () => {
+  // The doctor reads this entry through readBotCredentials (unknown keys, non-empty/unpadded
+  // values for api AND llm). Setup must refuse what the reader would refuse — not write the
+  // unit, report success, and leave doctor failing (Copilot #840 r7).
+  const dir = tempDir('laya-creds-schema-');
+  const env = { XDG_CONFIG_HOME: dir };
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  const path = join(dir, 'mercury', 'bot-credentials.json');
+  for (const [label, entry] of [
+    ['unknown key', { api: 'a'.repeat(64), token: 'stale' }],
+    ['bad llm type', { api: 'a'.repeat(64), llm: 42 }],
+  ] as const) {
+    writeFileSync(path, JSON.stringify({ laya: entry }), { mode: 0o600 });
+    let msg = '';
+    try {
+      ensureLayaCredentials(env);
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    assert.ok(msg, `${label}: refused`);
+    assert.match(msg, /bot-credentials\.json/, 'the file is named');
+    assert.ok(!msg.includes('stale') && !msg.includes('a'.repeat(64)), 'no value is echoed');
+    assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), `no unit write after a ${label} refusal`);
+  }
+  // The did-you-mean hint survives (same wording the reader has always used).
+  writeFileSync(path, JSON.stringify({ laya: { api: 'a'.repeat(64), token: 'stale' } }), { mode: 0o600 });
+  let msg2 = '';
+  try {
+    ensureLayaCredentials(env);
+  } catch (e) {
+    msg2 = (e as Error).message;
+  }
+  assert.match(msg2, /unknown key 'token' \(did you mean 'api'\?\)/);
+  // A VALID preserved entry (api + llm) still passes and is preserved untouched.
+  writeFileSync(path, JSON.stringify({ laya: { api: 'b'.repeat(64), llm: 'c'.repeat(32) } }), { mode: 0o600 });
+  const r = ensureLayaCredentials(env);
+  assert.equal(r.generated, false);
+  assert.equal(r.key, 'b'.repeat(64));
+});
+
 test('ensureLayaCredentials: a padded or empty preserved api is refused at setup time (#840 r4)', () => {
   const dir = tempDir('laya-creds-padded-');
   const env = { XDG_CONFIG_HOME: dir };
