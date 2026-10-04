@@ -43,6 +43,7 @@ import { dirname, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
 import { suggestionFor } from '../adapters/configSchema.ts';
 import { checkLaya, loadEnvFile, parseLayaTimeoutMs, schemeFor } from './doctor.ts';
+import { readBotCredentials } from './bots/credentials.ts';
 import { DEFAULT_PYTHON_CANDIDATES, detectPython, ensureLayaCredentials, LAYA_DEFAULT_PORT, LAYA_SERVE_PIN, layaStepActions, planLayaSidecar, renderLayaLaunchdPlist, renderLayaSystemdUnit, type LayaPlan, type RunFn } from './layaSidecar.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
 
@@ -182,7 +183,21 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
     case 'layaUrl': {
       if (typeof value !== 'string') return 'layaUrl must be a string';
       if (value.trim() === '') return null;
-      if (!/^http:\/\//.test(value.trim())) return 'layaUrl must start with http:// (the sidecar is loopback-only)';
+      // A BASE URL, not an endpoint route: LayaClient appends /v1/systemone itself, so a
+      // stored route would double it (r22). Loopback-only contract: the sidecar binds
+      // 127.0.0.1 — a non-loopback host would send the bearer credential over the network.
+      let u: URL;
+      try {
+        u = new URL(value.trim());
+      } catch {
+        return 'layaUrl must be an absolute URL (e.g. http://127.0.0.1:8302)';
+      }
+      if (u.protocol !== 'http:') return 'layaUrl must use http:// (the sidecar is loopback-only)';
+      if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost' && u.hostname !== '::1') {
+        return `layaUrl must be a loopback host (127.0.0.1/localhost/::1), got '${u.hostname}'`;
+      }
+      if (u.pathname !== '/' && u.pathname !== '') return `layaUrl must be a base URL without a route path (the client appends /v1/systemone), got '${u.pathname}'`;
+      if (u.search || u.hash) return 'layaUrl must not carry a query or fragment';
       return charsetErr('layaUrl', value.trim());
     }
     case 'atlasUrl': {
@@ -829,8 +844,15 @@ export async function runHostSetup(
       // --dry-run touches nothing (M1/M3 rule): no interpreter probing, no exec — pythonBin
       // does not change the plan, and the plan comes from the VALIDATED answers, not the old
       // env file (Copilot #840 r1).
-      const plan = planLayaSidecar({ dataDir: io.sidecarDataDir ?? answers.dataDir.trim(), pythonBin: 'python3', env });
-      io.out('\nLaya sidecar (opt-in) would:\n' + layaStepActions(plan, 'both').map((a) => `  - ${a}`).join('\n') + '\n');
+      // r22: an external URL is PRESERVED, not installed — the plan must mirror what a
+      // confirmed run actually does (verify only), not list local-install actions that would
+      // be skipped.
+      if (answers.layaUrl.trim() !== '' && answers.layaUrl.trim() !== `http://127.0.0.1:${LAYA_DEFAULT_PORT}`) {
+        io.out(`\nLaya sidecar (external): preserve MERCURY_LAYA_URL=${answers.layaUrl.trim()} and verify it with the doctor probe (no local install)\n`);
+      } else {
+        const plan = planLayaSidecar({ dataDir: io.sidecarDataDir ?? answers.dataDir.trim(), pythonBin: 'python3', env });
+        io.out('\nLaya sidecar (opt-in) would:\n' + layaStepActions(plan, 'both').map((a) => `  - ${a}`).join('\n') + '\n');
+      }
     }
     if (alreadyConfigured) {
       const diff = envDiff(readFileSync(path, 'utf8'), content);
@@ -879,8 +901,17 @@ export async function runHostSetup(
         io.err(`\nlaya: ${timeout0.detail}\n`);
         return 1;
       }
+      // The doctor's own credential resolution (runHostDoctor): read the 'laya' entry and use
+      // its api key; an unreadable/missing entry degrades to a key-less probe (same 401
+      // handling) instead of failing here (r22).
+      let apiKey: string | undefined;
+      try {
+        apiKey = readBotCredentials('laya', env).api;
+      } catch {
+        apiKey = undefined;
+      }
       io.out(`laya: external endpoint ${answers.layaUrl.trim()} preserved — verifying with the doctor probe (no local install)\n`);
-      const probe = await checkLaya(answers.layaUrl.trim(), undefined, timeout0.timeoutMs);
+      const probe = await checkLaya(answers.layaUrl.trim(), apiKey, timeout0.timeoutMs);
       if (!probe.ok) {
         io.err(`\nlaya: the preserved endpoint failed the doctor probe: ${probe.detail}\n`);
         io.err('laya: fix the external sidecar, or point MERCURY_LAYA_URL at a local install and re-run setup.\n');

@@ -1468,7 +1468,7 @@ test('runHostSetup: Laya OPT-IN writes MERCURY_LAYA_URL + credentials + unit (sc
     sidecarDataDir: join(dir, 'data'),
     // The fake answers immediately; shrink the readiness window (r11 knob).
     sidecarReadinessBudgetMs: 30_000,
-      sidecarProbeUrl: `${fake.url}/v1/systemone`,
+      sidecarProbeUrl: `${fake.url}`,
   }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
   assert.equal(code, 0, `setup failed: ${out.join('')}`);
   const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
@@ -1507,7 +1507,7 @@ test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
       sidecarReadinessBudgetMs: 30_000,
-    sidecarProbeUrl: `${fake.url}/v1/systemone`,
+    sidecarProbeUrl: `${fake.url}`,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
     const credsPath = join(dir, 'mercury', 'bot-credentials.json');
     const firstKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
@@ -1520,7 +1520,7 @@ test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
       sidecarReadinessBudgetMs: 30_000,
-    sidecarProbeUrl: `${fake.url}/v1/systemone`,
+    sidecarProbeUrl: `${fake.url}`,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_URL: 'http://127.0.0.1:8302' });
     assert.equal(code, 0, `re-run failed: ${out.join('')}`);
     const secondKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
@@ -1545,7 +1545,7 @@ test('runHostSetup: an invalid MERCURY_LAYA_TIMEOUT_MS refuses with the doctor w
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
       sidecarReadinessBudgetMs: 30_000,
-    sidecarProbeUrl: `${fake.url}/v1/systemone`,
+    sidecarProbeUrl: `${fake.url}`,
       sidecarReadinessGapMs: 10,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
     const envPath = envFilePath({ XDG_CONFIG_HOME: dir });
@@ -1557,7 +1557,7 @@ test('runHostSetup: an invalid MERCURY_LAYA_TIMEOUT_MS refuses with the doctor w
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
       sidecarReadinessBudgetMs: 30_000,
-    sidecarProbeUrl: `${fake.url}/v1/systemone`,
+    sidecarProbeUrl: `${fake.url}`,
       sidecarReadinessGapMs: 10,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
     assert.equal(code, 1);
@@ -1591,7 +1591,7 @@ test('runHostSetup: the venv step uses the EXACT located interpreter (spaces inc
       },
       sidecarDataDir: join(dir, 'data'),
       sidecarReadinessBudgetMs: 30_000,
-        sidecarProbeUrl: `${fake.url}/v1/systemone`,
+        sidecarProbeUrl: `${fake.url}`,
       sidecarReadinessGapMs: 10,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, PATH: `${join(dir, 'Jane Doe', 'bin')}:${process.env.PATH ?? ''}` });
     assert.equal(code, 0);
@@ -1616,18 +1616,87 @@ test('runHostSetup: an EXTERNAL MERCURY_LAYA_URL is preserved and verified, not 
       question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
-      sidecarProbeUrl: `${fake.url}/v1/systemone`,
+      sidecarProbeUrl: `${fake.url}`,
       sidecarReadinessBudgetMs: 10_000,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_URL: `${fake.url}/v1/systemone` });
-    assert.equal(code, 0);
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_URL: `${fake.url}` });
+    assert.equal(code, 0, `setup failed: ${errx.join('')} | out: ${outx.join('')}`);
     const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
-    assert.ok(file.includes(`MERCURY_LAYA_URL=${fake.url}/v1/systemone`), 'the external URL survives verbatim');
+    assert.ok(file.includes(`MERCURY_LAYA_URL=${fake.url}`), 'the external URL survives verbatim');
     assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'no local sidecar is installed over an external endpoint');
     assert.ok(!existsSync(join(dir, 'Library', 'LaunchAgents', 'com.mercury.laya.plist')), 'no unit is written (darwin check)');
     assert.ok(outx.join('').includes('external endpoint'), `the operator is told: ${outx.join('')}`);
   } finally {
     await fake.close();
   }
+});
+
+test('validateAnswer: layaUrl must be a loopback BASE URL without a route (#840 r22)', () => {
+  const bad: Array<[string, string]> = [
+    ['http://', 'absolute URL'],
+    ['http://192.168.1.20:8302', 'loopback host'],
+    ['http://host:8302/v1/systemone', 'route path'],
+    ['https://127.0.0.1:8302', 'http scheme'],
+    ['http://127.0.0.1:8302/x?y=1', 'query'],
+  ];
+  for (const [url, why] of bad) {
+    const err = validateAnswer('layaUrl', url);
+    assert.ok(err, `${url} refused (${why})`);
+  }
+  assert.match(validateAnswer('layaUrl', 'http://') ?? '', /absolute URL/);
+  assert.match(validateAnswer('layaUrl', 'http://192.168.1.20:8302') ?? '', /loopback host/);
+  assert.match(validateAnswer('layaUrl', 'http://host:8302/v1/systemone') ?? '', /(loopback host|without a route path)/);
+  assert.equal(validateAnswer('layaUrl', 'http://127.0.0.1:8302'), null);
+  assert.equal(validateAnswer('layaUrl', 'http://localhost:9000'), null);
+  assert.equal(validateAnswer('layaUrl', ''), null);
+});
+
+test('runHostSetup: the external probe uses the laya credential, exactly like the doctor (#840 r22)', () => {
+  // The fake requires the REAL key; setup must read it from the seeded credentials file (the
+  // doctor's resolution) — a key-less probe would 401 and fail the run.
+  const dir = tempDir('setup-laya-extauth-');
+  const fake = startFakeLaya([{ json: validPick(['probe']) }], { apiKey: 'k'.repeat(32) });
+  // seed credentials BEFORE the run so setup resolves the same key the doctor would.
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
+  const outx: string[] = [];
+  const errx: string[] = [];
+  return fake.then(async (f) => {
+    try {
+      const code = await runHostSetup([], {
+        out: (s) => outx.push(s),
+        err: (s) => errx.push(s),
+        question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+        sidecarRun: okRun,
+        sidecarDataDir: join(dir, 'data'),
+        sidecarProbeUrl: `${f.url}`,
+        sidecarReadinessBudgetMs: 10_000,
+      }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_URL: `${f.url}` });
+      assert.equal(code, 0, `authed external probe: ${errx.join('')}`);
+      assert.ok(f.received.length >= 1);
+      assert.ok(f.received[0]!.headers.authorization === `Bearer ${'k'.repeat(32)}`, 'the probe carries the credential');
+    } finally {
+      await f.close();
+    }
+  });
+});
+
+test('runHostSetup --dry-run: an external URL prints preserve/verify only, no install actions (#840 r22)', async () => {
+  const dir = tempDir('setup-laya-dryext-');
+  const out: string[] = [];
+  let execCalls = 0;
+  const code = await runHostSetup(['--dry-run'], {
+    out: (s) => out.push(s),
+    err: () => {},
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarRun: (argv) => { execCalls += 1; return okRun(argv); },
+    sidecarDataDir: join(dir, 'data'),
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_URL: 'http://127.0.0.1:9000' });
+  assert.equal(code, 0);
+  const text = out.join('');
+  assert.match(text, /external.*preserve MERCURY_LAYA_URL=http:\/\/127\.0\.0\.1:9000.*verify it with the doctor probe/s, `external plan: ${text}`);
+  assert.ok(!text.includes('create venv'), 'no venv action for an external endpoint');
+  assert.ok(!text.includes('write unit'), 'no unit action for an external endpoint');
+  assert.equal(execCalls, 0, 'dry-run executes nothing');
 });
 
 test('runHostSetup: the readiness gate REQUIRES auth — an open sidecar on the port is refused (#840 r21)', async () => {
@@ -1643,7 +1712,7 @@ test('runHostSetup: the readiness gate REQUIRES auth — an open sidecar on the 
       question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
-      sidecarProbeUrl: `${fake.url}/v1/systemone`,
+      sidecarProbeUrl: `${fake.url}`,
       sidecarReadinessBudgetMs: 10_000,
       sidecarReadinessGapMs: 10,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
@@ -1667,7 +1736,7 @@ test('runHostSetup: the readiness budget bounds a huge MERCURY_LAYA_TIMEOUT_MS (
       question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
-      sidecarProbeUrl: `${fake.url}/v1/systemone`,
+      sidecarProbeUrl: `${fake.url}`,
       sidecarReadinessBudgetMs: 2_000,
       sidecarReadinessGapMs: 10,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_TIMEOUT_MS: '600000' });
@@ -1693,7 +1762,7 @@ test('runHostSetup: the readiness window retries until the sidecar answers (#840
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
       sidecarReadinessBudgetMs: 30_000,
-    sidecarProbeUrl: `${fake.url}/v1/systemone`,
+    sidecarProbeUrl: `${fake.url}`,
       sidecarReadinessGapMs: 20,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
     assert.equal(code, 0, `setup failed: ${out.join('')}`);
@@ -1746,7 +1815,7 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
       sidecarReadinessBudgetMs: 30_000,
-  sidecarProbeUrl: `${fake.url}/v1/systemone`,
+  sidecarProbeUrl: `${fake.url}`,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
   } finally {
     await fake.close();
@@ -1773,7 +1842,7 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
         },
         sidecarDataDir: join(dir, 'data'),
         sidecarReadinessBudgetMs: 30_000,
-        sidecarProbeUrl: `${fake2.url}/v1/systemone`,
+        sidecarProbeUrl: `${fake2.url}`,
       }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
     } finally {
       await fake2.close();
@@ -1792,7 +1861,7 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
           : okRun(argv),
       sidecarDataDir: join(dir, 'data'),
       sidecarReadinessBudgetMs: 30_000,
-      sidecarProbeUrl: `${fake2.url}/v1/systemone`,
+      sidecarProbeUrl: `${fake2.url}`,
       sidecarReadinessGapMs: 10,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
     assert.equal(code2, 1, 'a failed enable exits 1');
