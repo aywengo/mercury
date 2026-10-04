@@ -1828,9 +1828,12 @@ test('ensureLayaCredentials: a predictable PID-shaped temp is never reused (#840
 test('runHostSetup: the unit temp file is created exclusively at 0600 (#840 r52)', async () => {
   // A stale `.<label>.tmp-<pid>` at 0644 must not be reused when the PID is reused.
   const dir = tempDir('setup-laya-unit-tmp-');
-  const unitDir = join(dir, 'Library', 'LaunchAgents');
+  // The unit path is platform-specific: launchd plist (darwin, $HOME) vs systemd user unit.
+  const unitDir = process.platform === 'darwin'
+    ? join(dir, 'Library', 'LaunchAgents')
+    : join(dir, '.config', 'systemd', 'user');
   mkdirSync(unitDir, { recursive: true });
-  const stale = join(unitDir, '.com.mercury.laya.tmp-999999');
+  const stale = join(unitDir, `.com.mercury.laya.tmp-999999`);
   writeFileSync(stale, 'STALE-UNIT\n', { mode: 0o644 });
   const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
   try {
@@ -1855,7 +1858,9 @@ test('runHostSetup: the unit temp file is created exclusively at 0600 (#840 r52)
       sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
     assert.equal(code, 0, `wizard failed: ${err.join('')}`);
-    const unit = join(unitDir, 'com.mercury.laya.plist');
+    const unit = process.platform === 'darwin'
+      ? join(unitDir, 'com.mercury.laya.plist')
+      : join(unitDir, 'com.mercury.laya.service');
     assert.ok(existsSync(unit), 'the unit was written');
     assert.equal(statSync(unit).mode & 0o777, 0o600, 'the unit is 0600');
     assert.ok(readFileSync(stale, 'utf8').includes('STALE-UNIT'), 'the stale unit temp was not reused');
