@@ -37,7 +37,7 @@ import { createInterface } from 'node:readline';
 import { randomBytes } from 'node:crypto';
 import { hostStatus, printStatus } from './lifecycle.ts';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
@@ -986,9 +986,14 @@ export async function runHostSetup(
     // The detector must tell us HOW it found the interpreter: `uv venv` without seed has no
     // pip, and a plain-python fallback has no uv at all (Copilot #840 r1). Replay the winning
     // candidate's own venv command and install through the venv's pip (seeded for uv).
+    // Staged replacement (Copilot #840 r47): recreate+install into a SIBLING staging venv and
+    // swap only after the install succeeds — recreating the LIVE venv first would leave a
+    // still-enabled unit without its executable if pip then failed.
+    const stagingDir = `${plan.venvDir}.staging-${process.pid}`;
+    const backupDir = `${plan.venvDir}.backup-${process.pid}`;
     const venvStep = det.argv![0] === 'uv'
       ? () => {
-          const r = run(['uv', 'venv', plan.venvDir, '--python', `3.${det.version!.split('.')[1]}`, '--seed'], 120_000);
+          const r = run(['uv', 'venv', stagingDir, '--python', `3.${det.version!.split('.')[1]}`, '--seed'], 120_000);
           if (!r.ok) throw new Error(`uv venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
         }
       : () => {
@@ -996,14 +1001,29 @@ export async function runHostSetup(
           // spaces (a discovered interpreter under '/Users/Jane Doe/bin'), and splitting on
           // ' ' would truncate it (Copilot #840 r15).
           const pyBin = det.argv![0]!;
-          const r = run([pyBin, '-m', 'venv', plan.venvDir], 120_000);
+          const r = run([pyBin, '-m', 'venv', stagingDir], 120_000);
           if (!r.ok) throw new Error(`python -m venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
         };
     const steps: Array<[string, () => void]> = [
       ['venv', venvStep],
       ['install', () => {
-        const r = run([join(plan.venvDir, 'bin', 'python3'), '-m', 'pip', 'install', `laya[serve]==${LAYA_SERVE_PIN}`], 300_000);
+        const r = run([join(stagingDir, 'bin', 'python3'), '-m', 'pip', 'install', `laya[serve]==${LAYA_SERVE_PIN}`], 300_000);
         if (!r.ok) throw new Error(`pip install laya[serve]==${LAYA_SERVE_PIN} failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
+      }],
+      ['swap', () => {
+        // Success path only: replace the live venv. A backup is removed after the swap — if the
+        // swap itself fails, restore it so the previous install keeps working. A missing
+        // staging dir means the injected runner virtualized venv creation (tests) — nothing to
+        // swap.
+        if (!existsSync(stagingDir)) return;
+        if (existsSync(plan.venvDir)) renameSync(plan.venvDir, backupDir);
+        try {
+          renameSync(stagingDir, plan.venvDir);
+        } catch (e) {
+          if (existsSync(backupDir)) renameSync(backupDir, plan.venvDir);
+          throw e;
+        }
+        if (existsSync(backupDir)) rmSync(backupDir, { recursive: true, force: true });
       }],
       ['credentials', () => {
         ensureLayaCredentials(env);

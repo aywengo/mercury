@@ -9,8 +9,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
 import { startFakeLaya, validPick } from './support/fakeLaya.ts';
@@ -1661,6 +1661,66 @@ test('sidecarExec: the timeout holds even when the child ignores SIGTERM (#840 r
   const elapsed = Date.now() - t0;
   assert.equal(r.ok, false);
   assert.ok(elapsed < 5_000, `the bound holds: ${elapsed} ms`);
+});
+
+test('runHostSetup: the venv is replaced via staging; a failed install leaves it intact (#840 r47)', async () => {
+  // Scripted runner that REALLY creates the venv dirs so the swap's renames execute.
+  const dir = tempDir('setup-laya-stage-');
+  const live = join(dir, 'data', 'laya-venv');
+  const priorMarker = join(live, 'bin', 'python3');
+  let failInstall = false;
+  const sidecarRun = (argv: string[]) => {
+    if (argv[0] === 'uv' && argv[1] === 'venv') {
+      const target = argv[2]!;
+      // `uv venv` REPLACES an existing venv — emulate that so the staging discipline is
+      // observable (a recreate-in-place wipes the previous install's files).
+      rmSync(target, { recursive: true, force: true });
+      mkdirSync(join(target, 'bin'), { recursive: true });
+      writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\n', { mode: 0o755 });
+    } else if (argv.includes('pip')) {
+      if (failInstall) return { ok: false, stdout: '', stderr: 'boom' };
+      // pip installs into the venv that invoked it (the staging dir pre-swap). argv[0] is
+      // <venv>/bin/python3 — the bin dir is its dirname.
+      const venvBin = dirname(argv[0]!);
+      mkdirSync(venvBin, { recursive: true });
+      writeFileSync(join(venvBin, '.laya-installed'), 'ok\n');
+    }
+    return okRun(argv);
+  };
+  const err: string[] = [];
+  // First run: healthy install → live venv exists, no staging/backup leftovers.
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
+  try {
+    const code = await runHostSetup([], {
+      out: () => {}, err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+    assert.equal(code, 0, `install: ${err.join('')}`);
+    assert.ok(existsSync(live), 'the live venv exists after the swap');
+    assert.ok(existsSync(join(live, 'bin', '.laya-installed')), 'the install landed in the live venv');
+    assert.ok(!existsSync(`${live}.staging-${process.pid}`) || readdirSync(join(dir, 'data')).every((e) => !e.includes('.staging-')), 'no staging leftover');
+    assert.ok(!readdirSync(join(dir, 'data')).some((e) => e.includes('.backup-')), 'no backup leftover');
+    // Second run with a FAILING install: the previous live venv must survive untouched.
+    failInstall = true;
+    err.length = 0;
+    const out2: string[] = [];
+    const code2 = await runHostSetup(['--yes'], {
+      out: (s) => out2.push(s), err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+    assert.equal(code2, 1);
+    console.error('DBG-ERR2:', JSON.stringify(err.join('').slice(-400)));
+    assert.match(err.join(''), /pip install laya\[serve\]==[^ ]+ failed/);
+    assert.ok(existsSync(priorMarker), 'the previous live venv is intact after a failed install');
+    // The INSTALLED marker survives: a recreate-before-install would have wiped it.
+    assert.ok(existsSync(join(live, 'bin', '.laya-installed')), 'the installed environment survives');
+  } finally {
+    await fake.close();
+  }
 });
 
 test('runHostSetup: a PADDED MERCURY_LAYA_URL is refused like loadConfig/doctor (#840 r37)', async () => {
