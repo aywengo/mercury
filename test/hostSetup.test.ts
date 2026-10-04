@@ -1672,6 +1672,7 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
       await runHostSetup(['--yes'], {
         out: () => {},
         err: () => {},
+        question: async () => '',
         sidecarRun: (argv: string[]) => {
           calls.push(argv);
           return okRun(argv);
