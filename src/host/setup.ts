@@ -686,6 +686,24 @@ function ttyAvailable(): boolean {
 
 /** Run the wizard. Returns the process exit code. */
 /**
+ * The owner ('bot-laya') a MERCURY_API_TOKENS value registers for `apiKey`, or null when the
+ * token is unregistered. Both halves are trimmed — parseTokens parity (Copilot #840 r54): a
+ * hand-written 'tok: bot-laya' is a valid registration and must not slip past the registry
+ * gate. Malformed entries (not exactly one colon) are skipped, mirroring the strict parser's
+ * shape check without failing unrelated entries.
+ */
+export function registeredLayaOwner(registryText: string, apiKey: string): string | null {
+  for (const entry of registryText.split(',').map((e) => e.trim())) {
+    if (entry === '') continue;
+    const parts = entry.split(':');
+    if (parts.length !== 2) continue;
+    const [token, owner] = parts as [string, string];
+    if (token.trim() === apiKey && owner.trim() !== '') return owner.trim();
+  }
+  return null;
+}
+
+/**
  * Every on-disk shape that proves a bot named 'laya' pre-dates the sidecar reservation
  * (Copilot #840 r33/r41/r43/r48). The config file alone misses a bot whose config was
  * moved/lost; a remaining STATE FILE proves an interrupted uninstall (new provisioning cannot
@@ -927,12 +945,7 @@ export async function runHostSetup(
       // No laya entry (or no file): the local-cred path's ensureLayaCredentials owns that case.
     }
     if (layaApi && registryText) {
-      const registered = registryText.split(',').map((e) => e.trim()).filter((e) => e !== '');
-      const isBotRegistered = registered.some((entry) => {
-        const parts = entry.split(':');
-        return parts.length === 2 && parts[0] === layaApi && parts[1] === `bot-laya`;
-      });
-      if (isBotRegistered) {
+      if (registeredLayaOwner(registryText, layaApi) === 'bot-laya') {
         io.err(`\nlaya: the existing laya credential is still registered as a MERCURY bot token (bot-laya in MERCURY_API_TOKENS) — an earlier bot uninstall was interrupted.\n`);
         io.err('laya: finish the uninstall (re-run `mercury host bot service uninstall --alias laya --yes` after restoring its unit, or remove the bot-laya entry from MERCURY_API_TOKENS by hand), then re-run setup.\n');
         return 1;

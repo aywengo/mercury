@@ -26,6 +26,7 @@ import {
   defaultAnswers,
   layaCollisionEvidence,
   readAnswersFile,
+  registeredLayaOwner,
   runHostSetup,
   generateAdminToken,
   sidecarExec,
@@ -1871,6 +1872,16 @@ test('runHostSetup: the unit temp file is created exclusively at 0600 (#840 r52)
   }
 });
 
+test('registeredLayaOwner: trims both halves and skips malformed entries (#840 r54)', () => {
+  assert.equal(registeredLayaOwner('tok-legacy-laya: bot-laya', 'tok-legacy-laya'), 'bot-laya');
+  assert.equal(registeredLayaOwner('tok-legacy-laya :bot-laya', 'tok-legacy-laya'), 'bot-laya');
+  assert.equal(registeredLayaOwner('a:alice,tok-legacy-laya:bot-laya', 'tok-legacy-laya'), 'bot-laya');
+  assert.equal(registeredLayaOwner('tok-legacy-laya:alice', 'tok-legacy-laya'), 'alice');
+  assert.equal(registeredLayaOwner('malformed-entry', 'tok-legacy-laya'), null);
+  assert.equal(registeredLayaOwner('other:bot-laya', 'tok-legacy-laya'), null);
+  assert.equal(registeredLayaOwner('', 'tok-legacy-laya'), null);
+});
+
 test('runHostSetup: a laya credential still registered as bot-laya in MERCURY_API_TOKENS refuses (interrupted uninstall, #840 r51)', async () => {
   // The interrupted-uninstall window: unit/state/config already removed, but the credential
   // entry AND the token:bot-laya registration survive. Preserving that value as the sidecar
@@ -1888,6 +1899,25 @@ test('runHostSetup: a laya credential still registered as bot-laya in MERCURY_AP
   assert.equal(code, 1);
   assert.match(err.join(''), /interrupted/);
   assert.match(err.join(''), /bot-laya in MERCURY_API_TOKENS/);
+  // r54: whitespace around either half of the entry is a valid registration (parseTokens trims)
+  // — the gate must stay fail-closed for the hand-written shape too.
+  const dirWs = tempDir('setup-laya-reg-ws-');
+  mkdirSync(join(dirWs, 'mercury'), { recursive: true });
+  writeFileSync(join(dirWs, 'mercury', 'mercury.env'), 'MERCURY_PORT=3999\nMERCURY_API_TOKENS=tok-legacy-laya: bot-laya\n');
+  writeFileSync(join(dirWs, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'tok-legacy-laya' } }), { mode: 0o600 });
+  const errWs: string[] = [];
+  // Setup refuses the spaced entry at the safe-charset gate (a space is outside the value
+  // charset — it throws before anything is written) — fail-closed either way; the registry
+  // comparison itself also trims (parseTokens parity) so the gate cannot be slipped by a
+  // differently-sourced registry.
+  await assert.rejects(
+    () => runHostSetup([], {
+      out: () => {}, err: (s) => errWs.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarReadinessBudgetMs: 2_000, sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone',
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dirWs, XDG_STATE_HOME: dirWs, HOME: dirWs }),
+    /safe charset/,
+  );
   // A sidecar key that is NOT bot-registered does not trip the gate (the normal re-run path).
   const dir2 = tempDir('setup-laya-reg2-');
   mkdirSync(join(dir2, 'mercury'), { recursive: true });
