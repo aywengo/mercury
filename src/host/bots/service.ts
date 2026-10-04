@@ -408,19 +408,21 @@ export function uninstallBotService(
   const stateFile = botStateFile(alias, env);
   const configFile = botConfigFile(alias, env);
   const envFile = envFilePath(env);
-  // Reserved-alias guard (Copilot #840 r39): 'laya' keys the SIDECAR's credential. Uninstalling
-  // a bot that does not exist must not delete that entry — doctor would fail and a setup re-run
-  // would rotate the key existing clients hold. A LEGACY pre-reservation bot keeps its recovery
-  // path: its config file or service unit proves bot ownership.
-  if (RESERVED_BOT_ALIASES.has(alias) && !existsSync(configFile) && !existsSync(plist) && !existsSync(unitPath)) {
-    // Interrupted-uninstall recovery (Copilot #840 r44/r46): teardown may have already removed
-    // the config and unit but crashed before the rest. A remaining STATE FILE — which new
-    // provisioning cannot create for a service that never ran — proves a legacy bot; a token
-    // registration does not (normal provisioning creates one). Without it the entry is the
-    // SIDECAR's key.
+  // Reserved-alias guard (Copilot #840 r39/r49): 'laya' keys the SIDECAR's credential.
+  // Uninstalling a bot that does not exist must not delete that entry — doctor would fail and a
+  // setup re-run would rotate the key existing clients hold. Only SERVICE/STATE artifacts prove
+  // a legacy bot: the installed unit/plist, or a remaining STATE FILE from an interrupted
+  // teardown (which new provisioning cannot create for a service that never ran — r44/r46). A
+  // config-only bots/<alias>.json is NOT evidence: normal new-bot provisioning creates one
+  // (r45/r46), so a config-only entry must keep the refusal and PRESERVE the sidecar key.
+  const homePlist = join(env.HOME?.trim() || homedir(), 'Library', 'LaunchAgents', `${botLaunchdLabel(alias)}.plist`);
+  if (RESERVED_BOT_ALIASES.has(alias) && !existsSync(plist) && !existsSync(unitPath) && !existsSync(homePlist)) {
     if (!existsSync(stateFile)) {
       io.err(`host bot service uninstall: '${alias}' is a reserved host alias (the Laya sidecar credential) and no bot named '${alias}' exists — nothing to uninstall.\n`);
       io.err('host bot service uninstall: the sidecar credential is managed by `mercury host setup`/`host doctor`, not the bot lifecycle.\n');
+      if (existsSync(configFile)) {
+        io.err(`host bot service uninstall: ${configFile} alone is not legacy evidence (normal bot provisioning creates it); remove it manually if it is stale.\n`);
+      }
       io.err(`host bot service uninstall: if a legacy bot left its token behind, remove the entry from ${envFile} manually.\n`);
       return 1;
     }
