@@ -19,7 +19,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readBotCredentials } from './bots/credentials.ts';
@@ -37,12 +37,45 @@ export interface PythonCandidate {
   bin: string;
 }
 
+/**
+ * Discover `python3.N` interpreters on PATH with NO fixed upper bound (Copilot #840 r8): the
+ * static list cannot name future versions, so anything matching `python3.<N>` with N >= 10 that
+ * the static list does not already probe is appended, newest first. Purely lexical discovery
+ * (a readdir, not an exec) — the version gate itself stays with the -V probe.
+ */
+export function discoverVersionedPythons(env: NodeJS.ProcessEnv = process.env, known: PythonCandidate[] = DEFAULT_PYTHON_CANDIDATES): PythonCandidate[] {
+  const seen = new Set(known.map((k) => k.argv[0]));
+  const found = new Map<number, string>();
+  for (const dir of (env.PATH ?? '').split(':')) {
+    if (dir === '') continue;
+    let names: string[] = [];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue; // unreadable/absent PATH entry — skip silently, this is best-effort discovery
+    }
+    for (const name of names) {
+      const m = /^python3\.(\d+)$/.exec(name);
+      const minor = m ? Number(m[1]) : NaN;
+      if (!m || !(minor >= 10) || seen.has(name) || found.has(minor)) continue;
+      found.set(minor, join(dir, name));
+    }
+  }
+  return [...found.entries()]
+    .sort((a, b) => b[0] - a[0])
+    .map(([minor, full]) => ({ argv: [full, '-V'], bin: full }));
+}
+
 /** uv first (design: "uv-managed interpreter preferred"), then Homebrew's versioned
  *  interpreters (the plain `python3` shim on macOS stays the old system one while
  *  `python3.12`/`python3.11` are on PATH after `brew install python@3.12` — Copilot #840 r6),
  *  then the plain python3s. */
 export const DEFAULT_PYTHON_CANDIDATES: PythonCandidate[] = [
-  { argv: ['uv', 'python', 'find', '3.10'], bin: 'uv run --python 3.10 python3' },
+  // `uv python find '>=3.10'` resolves ANY installed interpreter at or above the gate (r8) —
+  // pinning the 3.10 series rejected hosts whose only uv-managed Python is newer.
+  { argv: ['uv', 'python', 'find', '>=3.10'], bin: 'uv run --python >=3.10 python3' },
+  { argv: ['python3.15', '-V'], bin: 'python3.15' },
+  { argv: ['python3.14', '-V'], bin: 'python3.14' },
   { argv: ['python3.13', '-V'], bin: 'python3.13' },
   { argv: ['python3.12', '-V'], bin: 'python3.12' },
   { argv: ['python3.11', '-V'], bin: 'python3.11' },
@@ -81,9 +114,10 @@ export function detectPython(
   run: RunFn,
   candidates: PythonCandidate[] = DEFAULT_PYTHON_CANDIDATES,
   platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
 ): PythonDetection {
   const failures: string[] = [];
-  for (const cand of candidates) {
+  for (const cand of [...candidates, ...discoverVersionedPythons(env, candidates)]) {
     const r = run(cand.argv, 10_000);
     if (!r.ok) {
       failures.push(`${cand.argv[0]}: not usable`);

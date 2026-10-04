@@ -33,6 +33,7 @@ import {
 import {
   DEFAULT_PYTHON_CANDIDATES,
   detectPython,
+  discoverVersionedPythons,
   ensureLayaCredentials,
   LAYA_SERVE_PIN,
   layaStepActions,
@@ -1061,7 +1062,7 @@ function okRun(argv: string[]): { ok: boolean; stdout: string; stderr: string } 
 test('detectPython: uv-preferred, >= 3.10 ok (#831)', () => {
   const det = detectPython(okRun, DEFAULT_PYTHON_CANDIDATES);
   assert.equal(det.ok, true);
-  assert.match(det.bin ?? '', /uv run --python 3.10/, 'uv-managed interpreter wins');
+  assert.match(det.bin ?? '', /uv run --python >=3\.10/, 'uv-managed interpreter wins');
 });
 
 test('detectPython: macOS system 3.9.6 is refused WITH the reason (#831)', () => {
@@ -1091,6 +1092,55 @@ test('parsePythonVersion: tuple semantics — 3.9.10 must NOT read as 3.10 (#840
   assert.equal(parsePythonVersion('no version here'), null);
 });
 
+test('detectPython: a python3.14-only Homebrew host passes the >= 3.10 gate (#840 r8)', () => {
+  // macOS: no uv, stock python3 3.9.6, Homebrew python3.14 — the advertised gate is >= 3.10,
+  // not a pinned series, so this host must be accepted.
+  const run = (argv: string[]) => {
+    if (argv[0] === 'uv') return { ok: false, stdout: '', stderr: 'no uv' };
+    if (argv[0] === 'python3.14') return { ok: true, stdout: 'Python 3.14.0', stderr: '' };
+    if (argv[1] === '-V') return { ok: true, stdout: 'Python 3.9.6', stderr: '' };
+    return { ok: false, stdout: '', stderr: 'no' };
+  };
+  const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES);
+  assert.equal(det.ok, true);
+  assert.equal(det.bin, 'python3.14');
+  assert.equal(det.version, '3.14.0');
+});
+
+test('discoverVersionedPythons: unbounded PATH discovery appends python3.N (N >= 10), newest first (#840 r8)', () => {
+  const dir = tempDir('laya-pydisc-');
+  mkdirSync(join(dir, 'bin'), { recursive: true });
+  for (const name of ['python3.9', 'python3.99', 'python3.12', 'python3.10', 'python3']) {
+    writeFileSync(join(dir, 'bin', name), '#!/bin/sh\n', { mode: 0o755 });
+  }
+  const env = { PATH: `/nope:${dir}/bin` };
+  const found = discoverVersionedPythons(env, DEFAULT_PYTHON_CANDIDATES);
+  assert.deepEqual(found.map((c) => c.argv[0]), [join(dir, 'bin', 'python3.99')], 'python3.99 is discovered (no upper bound); python3.12/3.10 are already probed; python3.9 and bare python3 are below the gate');
+  assert.equal(found[0]!.bin, join(dir, 'bin', 'python3.99'));
+  // A PATH entry that does not exist is skipped, and an empty PATH yields nothing.
+  assert.deepEqual(discoverVersionedPythons({ PATH: '' }, DEFAULT_PYTHON_CANDIDATES), []);
+});
+
+test('detectPython: a discovered out-of-list interpreter wins over the old system shim (#840 r8)', () => {
+  const dir = tempDir('laya-pydet-');
+  mkdirSync(join(dir, 'bin'), { recursive: true });
+  // python3.16 is deliberately NOT in the static list — discovery must pick it up.
+  writeFileSync(join(dir, 'bin', 'python3.16'), '#!/bin/sh\n', { mode: 0o755 });
+  const located = join(dir, 'bin', 'python3.16');
+  const run = (argv: string[]) => {
+    if (argv[0] === 'uv') return { ok: false, stdout: '', stderr: 'no uv' };
+    if (argv[0] === located) return { ok: true, stdout: 'Python 3.14.1', stderr: '' };
+    if (argv[1] === '-V') return { ok: true, stdout: 'Python 3.9.6', stderr: '' };
+    return { ok: false, stdout: '', stderr: 'no' };
+  };
+  const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES, 'darwin', { PATH: `${dir}/bin` });
+  assert.equal(det.ok, true);
+  assert.equal(det.bin, located, 'the discovered interpreter is probed through the same run fn');
+  assert.equal(det.version, '3.14.1');
+  // The uv bin label carries the >=3.10 request now (r8).
+  assert.equal(detectPython((a) => (a[0] === 'uv' ? { ok: true, stdout: located, stderr: '' } : { ok: true, stdout: 'Python 3.14.0', stderr: '' }), DEFAULT_PYTHON_CANDIDATES).bin, 'uv run --python >=3.10 python3');
+});
+
 test('detectPython: Homebrew versioned interpreters are probed before the plain python3 (#840 r6)', () => {
   // The stock-macOS recovery path: brew python@3.12 exposes python3.12 on PATH while the
   // unversioned python3 shim stays 3.9.6. Detection must find python3.12, not the shim.
@@ -1118,7 +1168,7 @@ test('detectPython: uv python find output (an interpreter PATH) is verified with
   };
   const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES);
   assert.equal(det.ok, true, 'the located interpreter is verified by running it with -V');
-  assert.equal(det.bin, 'uv run --python 3.10 python3', 'the uv candidate won');
+  assert.equal(det.bin, 'uv run --python >=3.10 python3', 'the uv candidate won');
   assert.equal(det.version, '3.10.4');
 });
 
