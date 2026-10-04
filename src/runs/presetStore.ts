@@ -83,4 +83,32 @@ export class PresetStore {
       .get(runId) as PresetDbRow | undefined;
     return row ? rowToSnapshot(row) : null;
   }
+
+  /**
+   * Every preset row a Run carries, in insertion order.
+   *
+   * A Run normally has at most one preset, but a workflow Run (issue #809) snapshots one preset
+   * per referenced stage into the same table. `get()` keeps its single-row contract; this
+   * listing is for callers that need the whole set.
+   */
+  list(runId: string): { presetId: string; presetVersion: string; role: string; trust: string; contentHash: string }[] {
+    const rows = this.db
+      .prepare('SELECT preset_id, preset_version, role, trust, content_hash FROM run_presets WHERE run_id = ? ORDER BY rowid')
+      .all(runId) as { preset_id: string; preset_version: string; role: string; trust: string; content_hash: string }[];
+    return rows.map((r) => ({
+      presetId: r.preset_id,
+      presetVersion: r.preset_version,
+      role: r.role,
+      trust: r.trust,
+      contentHash: r.content_hash,
+    }));
+  }
+
+  /** Every preset row a Run carries, as full snapshots, in insertion order. */
+  listSnapshots(runId: string): { presetId: string; snapshot: ResolvedRolePreset }[] {
+    const rows = this.db
+      .prepare('SELECT * FROM run_presets WHERE run_id = ? ORDER BY rowid')
+      .all(runId) as unknown as PresetDbRow[];
+    return rows.map((r) => ({ presetId: r.preset_id, snapshot: rowToSnapshot(r) }));
+  }
 }

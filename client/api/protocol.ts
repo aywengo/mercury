@@ -279,6 +279,12 @@ export interface RetryRunResponse { runId: string; status: RunStatus; retryOf: s
 export interface CreateRunRequest {
   task: string;
   /**
+   * Advisory Workflow Template selection (docs/crew/workflows.md §3.1, issue #809), forwarded
+   * verbatim for the server's workflow resolution to validate. The client does not pre-validate
+   * the id: the server owns the registry, the version pin and the W-1 finding codes.
+   */
+  workflow?: { id: string; version?: string };
+  /**
    * Optional goal spec, forwarded verbatim for the server's resolveGoalSpec to validate
    * (docs/goals.md §3). The client does not pre-validate the spec's internals: the server owns
    * the vocabulary (objective/contract/gates/tokenBudget/maxTurns) and its error messages name
@@ -631,7 +637,7 @@ export function validateCreateRunRequest(value: unknown): CreateRunRequest {
   const task = reqString(o.task, 'task', 'create request');
   if (task.trim() === '') throw new UsageError('create request: task must not be blank');
 
-  const known = new Set(['task', 'repository', 'repositories', 'agent', 'skills', 'constraints', 'goal']);
+  const known = new Set(['task', 'repository', 'repositories', 'agent', 'skills', 'constraints', 'goal', 'workflow']);
   const unknown = Object.keys(o).filter((k) => !known.has(k));
   if (unknown.length > 0) {
     throw new UsageError(
@@ -653,6 +659,22 @@ export function validateCreateRunRequest(value: unknown): CreateRunRequest {
       .map((s, i) => reqString(s, `skills[${i}]`, 'create request'));
   }
   if (o.constraints !== undefined) request.constraints = validateConstraints(o.constraints);
+  if (o.workflow !== undefined) {
+    // Same object check the goal field applies: the server resolves the id, but a string or
+    // array here would read as a confusing 400 rather than a fixable client mistake.
+    if (o.workflow === null || typeof o.workflow !== 'object' || Array.isArray(o.workflow)) {
+      throw new UsageError('create request: workflow must be an object like {"id": "plan-implement-review"}');
+    }
+    const wf = o.workflow as Record<string, unknown>;
+    const wfId = wf.id;
+    if (typeof wfId !== 'string' || wfId.trim() === '') {
+      throw new UsageError('create request: workflow.id must be a non-empty string');
+    }
+    if (wf.version !== undefined && (typeof wf.version !== 'string' || wf.version.length === 0)) {
+      throw new UsageError('create request: workflow.version must be a non-empty string when given');
+    }
+    request.workflow = { id: wfId, ...(wf.version !== undefined ? { version: wf.version as string } : {}) };
+  }
   if (o.goal !== undefined) {
     // An object check, not a deep validation: the server's resolveGoalSpec owns the spec
     // vocabulary and rejects unknown fields with a message that names them (docs/goals.md §3).

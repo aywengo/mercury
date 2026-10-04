@@ -325,6 +325,11 @@ export function createRoutes(deps: RoutesDeps): Router {
         // Same seam, same lesson (docs/crew/role-presets.md section 5): the preset block is
         // forwarded unresolved so HTTP and in-process callers hit identical validation.
         preset: body.preset,
+        // Same seam, same lesson (docs/crew/workflows.md section 3.1, issue #809): the
+        // workflow block is forwarded unresolved so RunService owns resolution and the
+        // W-1 finding codes. No HTTP endpoint documents this yet (W-3 #810 adds the API
+        // surface); forwarding keeps the service contract reachable over HTTP unchanged.
+        workflow: body.workflow,
         // Forwarded unresolved for the same reason as `preset` (#823): RunService owns the shape
         // validation and the fail-closed capability check, so HTTP and in-process callers get
         // identical rules from one implementation.

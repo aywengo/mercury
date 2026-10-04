@@ -18,6 +18,7 @@ import { GoalStore } from '../src/runs/goalStore.ts';
 import { settleGoalOnTerminal } from '../src/runs/goalSettlement.ts';
 import { SkillRegistry } from '../src/skills/skillRegistry.ts';
 import { PresetRegistry } from '../src/presets/presetRegistry.ts';
+import { WorkflowRegistry } from '../src/workflows/workflowRegistry.ts';
 import { createSkillSelector } from '../src/skills/skillSelector.ts';
 import { WorkspaceManager } from '../src/workspace/workspaceManager.ts';
 import { FakeAgentAdapter, type FakeAgentConfig } from '../src/adapters/fakeAgentAdapter.ts';
@@ -81,6 +82,12 @@ export function makeEnv(opts: {
    */
   presetsDir?: string;
   /**
+   * Workflow registry root (default: this repo's `workflows/`). Same rule as presetsDir:
+   * tests that create malformed templates point this at a temp dir instead of editing the
+   * shipped catalog.
+   */
+  workflowsDir?: string;
+  /**
    * Knowledge selection deps for the RunService, mirroring src/cli.ts.
    *
    * Optional and spread rather than always set, so a test that does not ask for knowledge gets a
@@ -133,6 +140,12 @@ export function makeEnv(opts: {
     skills,
     knownAgents: Object.keys(adapters),
   });
+  // Workflows mirror presets: the shipped catalog by default, a temp dir when a test mutates
+  // definitions. The registry sees the SAME preset registry Run creation resolves against,
+  // so reference validation cannot approve a preset the create path would reject.
+  const workflows = new WorkflowRegistry(opts.workflowsDir ?? join(import.meta.dirname, '..', 'workflows'), {
+    presets,
+  });
   const runService = new RunService({
     db,
     runs,
@@ -140,6 +153,7 @@ export function makeEnv(opts: {
     skills,
     selector: createSkillSelector(),
     presets,
+    workflows,
     knownAgents: Object.keys(adapters),
     agentCapabilities: () => agentCapabilities.snapshot(),
     goals,
