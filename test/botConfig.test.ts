@@ -272,3 +272,8 @@ test('two-copy agreement: drifted copies are reported, agreeing copies resolve t
   assert.throws(() => registeredOwnerForToken('tok-1', 'tok-1:'), /entry 0 must be exactly 'token:owner'.*empty owner half/);
   assert.throws(() => registeredOwnerForToken('tok-1', 'a:b:c'), /entry 0 must be exactly 'token:owner'.*2 colons/);
 });
+
+test("the bot alias 'laya' is reserved for the sidecar credential (#840 r31)", () => {
+  assert.throws(() => botConfigPath('laya'), /reserved for the host/);
+});
+

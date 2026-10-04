@@ -27,13 +27,11 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSy
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { envFilePath, resolveMercuryBin } from '../service.ts';
-import { BOT_ALIAS_RE } from './config.ts';
+import { assertBotAlias } from './config.ts';
 
 /** The §4.1 alias contract is also a path-safety contract: unit names and file paths are built from it. */
 function assertAlias(alias: string): void {
-  if (!BOT_ALIAS_RE.test(alias)) {
-    throw new Error(`bot alias must match ${BOT_ALIAS_RE.source}, got '${alias}'`);
-  }
+  assertBotAlias(alias);
 }
 
 /** The launchd label for one bot (macOS). */

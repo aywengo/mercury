@@ -308,6 +308,13 @@ export function ensureLayaCredentials(env: NodeJS.ProcessEnv = process.env, gen:
     }
     raw = parsed as Record<string, unknown>;
   }
+  // Alias reservation (Copilot #840 r31): a bot named 'laya' keeps its Mercury API token in
+  // this same entry — preserving it as the sidecar key would hand the sidecar a Mercury
+  // token, and `host bot uninstall --alias laya` would later delete the sidecar's credential.
+  // The bot alias is now reserved (assertBotAlias), so refuse loudly if one already exists.
+  if (existsSync(join(xdg, 'mercury', 'bots', 'laya.json'))) {
+    throw new Error(`${path}: a bot named 'laya' exists (bots/laya.json); the alias is reserved for the sidecar credential — uninstall the bot or move its config`);
+  }
   const entry = raw.laya;
   if (entry && typeof entry === 'object' && !Array.isArray(entry) && typeof (entry as Record<string, unknown>).api === 'string') {
     const preserved = (entry as Record<string, unknown>).api as string;

@@ -1745,6 +1745,33 @@ test('validateAnswers: a NON-STRING dataDir with the Laya sidecar enabled is rep
   assert.ok(errs.some((e) => e.startsWith('dataDir:') && e.includes('path must not be empty')), `type error reported: ${errs.join(' | ')}`);
 });
 
+test('ensureLayaCredentials: a bot named laya refuses the sidecar credential write (#840 r31)', async () => {
+  const dir = tempDir('setup-laya-alias-');
+  // An existing bot 'laya' holds its MERCURY API token in the shared entry; setup must not
+  // repurpose it as the sidecar key (and uninstall would later delete it).
+  mkdirSync(join(dir, 'mercury', 'bots'), { recursive: true });
+  writeFileSync(join(dir, 'mercury', 'bots', 'laya.json'), JSON.stringify({ alias: 'laya', api: {}, tasks: [] }));
+  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
+  const err: string[] = [];
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], {});
+  try {
+    const code = await runHostSetup([], {
+      out: () => {},
+      err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`,
+      sidecarReadinessBudgetMs: 10_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+    assert.equal(code, 1);
+    assert.match(err.join(''), /reserved for the sidecar credential/);
+    assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'nothing installed');
+  } finally {
+    await fake.close();
+  }
+});
+
 test('validateAnswers: a relative dataDir with the Laya sidecar enabled is refused (#840 r25)', () => {
   // systemd ExecStart rejects relative executables; the unit embeds venv/serve paths derived
   // from the data dir, so an opt-in Laya requires an absolute data dir.
@@ -1752,6 +1779,8 @@ test('validateAnswers: a relative dataDir with the Laya sidecar enabled is refus
   const errs = validateAnswers(a);
   assert.ok(errs.some((e) => e.includes('dataDir') && e.includes('absolute path')), `relative dataDir refused: ${errs.join(' | ')}`);
   assert.equal(validateAnswers(answers({ layaEnabled: true, dataDir: '/var/lib/mercury' })).length, 0, 'absolute passes');
+  // r31: an external URL installs nothing — a relative dataDir stays valid for the host.
+  assert.equal(validateAnswers(answers({ layaEnabled: true, dataDir: 'data', layaUrl: 'http://localhost:9000' })).length, 0, 'external + relative passes');
 });
 
 test('runHostSetup --dry-run: an external URL prints preserve/verify only, no install actions (#840 r22)', async () => {

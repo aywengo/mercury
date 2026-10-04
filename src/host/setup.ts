@@ -277,11 +277,15 @@ export function validateAnswers(
     if (err) errors.push(`${key}: ${err}`);
   }
   // The sidecar's unit embeds ABSOLUTE paths (systemd ExecStart rejects relative
-  // executables, Copilot #840 r25): an opt-in Laya requires an absolute data dir. A
-  // non-string dataDir is already reported by validateAnswer above — guard the type so the
-  // cross-field check itself cannot throw (Copilot #840 r29).
+  // executables, Copilot #840 r25): a WIZARD-MANAGED local install requires an absolute data
+  // dir. A preserved external URL installs no venv or unit and never uses dataDir, so a
+  // relative data dir stays valid for the host itself (Copilot #840 r31). A non-string
+  // dataDir is already reported by validateAnswer above — guard the type so the cross-field
+  // check itself cannot throw (Copilot #840 r29).
   const dataDirStr = typeof a.dataDir === 'string' ? a.dataDir.trim() : '';
-  if (a.layaEnabled && !isAbsolute(dataDirStr)) {
+  const layaUrlStr = typeof a.layaUrl === 'string' ? a.layaUrl.trim() : '';
+  const externalLaya = layaUrlStr !== '' && layaUrlStr !== `http://127.0.0.1:${LAYA_DEFAULT_PORT}`;
+  if (a.layaEnabled && !externalLaya && !isAbsolute(dataDirStr)) {
     errors.push(`dataDir: must be an absolute path when the Laya sidecar is enabled (got '${dataDirStr || String(a.dataDir)}')`);
   }
   // Atlas on requires URL + token + project (mirrors the startup check).
