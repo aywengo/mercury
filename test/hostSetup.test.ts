@@ -26,6 +26,7 @@ import {
   readAnswersFile,
   runHostSetup,
   generateAdminToken,
+  sidecarExec,
   WIZARD_VARIABLES,
   KNOWN_HARNESSES,
   type HostSetupAnswers,
@@ -1274,6 +1275,14 @@ test('ensureLayaCredentials: a padded or empty preserved api is refused at setup
   // Malformed entry shape: refused, never silently overwritten.
   writeFileSync(path, JSON.stringify({ laya: 'nope' }), { mode: 0o600 });
   assert.throws(() => ensureLayaCredentials(env), /must be an object with a non-empty string 'api'/);
+});
+
+test('sidecarExec: a timed-out command with empty stderr keeps the ETIMEDOUT diagnosis (#840 r9)', () => {
+  // spawnSync sets r.error but leaves stderr '' on timeout; the old `stderr ?? error` collapsed
+  // that into 'no output' and a hung uv/pip looked like silence.
+  const r = sidecarExec(['sleep', '5'], 150);
+  assert.equal(r.ok, false);
+  assert.match(r.stderr, /ETIMEDOUT|timed? ?out/i, `the timeout is diagnosed: ${r.stderr}`);
 });
 
 test('renderLayaLaunchdPlist / renderLayaSystemdUnit: loopback, preload, english, key; deterministic (#831)', () => {

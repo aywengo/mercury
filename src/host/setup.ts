@@ -597,7 +597,11 @@ export type ProbeFn = () => Promise<HarnessProbeResult[]>;
  *  failure with a readable message, not a hang (the installer's bound-everything rule). */
 export const sidecarExec: RunFn = (argv, timeoutMs) => {
   const r = spawnSync(argv[0]!, argv.slice(1), { encoding: 'utf8', timeout: timeoutMs });
-  return { ok: !r.error && r.status === 0, stdout: r.stdout ?? '', stderr: r.stderr ?? (r.error?.message ?? '') };
+  // A timed-out command keeps stderr '' while r.error carries ETIMEDOUT (Copilot #840 r9):
+  // `stderr ?? error` would discard the timeout and the step would report only 'no output'.
+  // Prefer NON-EMPTY stderr, then the spawn error, then ''.
+  const stderr = (r.stderr && r.stderr.trim() !== '' ? r.stderr : r.error?.message) ?? '';
+  return { ok: !r.error && r.status === 0, stdout: r.stdout ?? '', stderr };
 };
 
 export async function runSetupProbe(env: NodeJS.ProcessEnv = process.env): Promise<HarnessProbeResult[]> {
