@@ -1049,11 +1049,15 @@ export async function runHostSetup(
           throw e;
         }
         if (existsSync(backupDir)) rmSync(backupDir, { recursive: true, force: true });
-        // Sweep stale siblings from crashed runs (any PID), not just this run's pair.
+        // Sweep stale siblings from crashed runs — ONLY the exact generated shape
+        // '<venv>.staging-<pid>' / '<venv>.backup-<pid>' with a NUMERIC pid (Copilot #840
+        // r50): an operator's 'laya-venv.backup-manual' must never be touched.
+        const venvBase = basename(plan.venvDir);
         for (const entry of readdirSync(dirname(plan.venvDir))) {
-          if (entry.startsWith(`${basename(plan.venvDir)}.staging-`) || entry.startsWith(`${basename(plan.venvDir)}.backup-`)) {
-            rmSync(join(dirname(plan.venvDir), entry), { recursive: true, force: true });
-          }
+          const m = entry.startsWith(`${venvBase}.staging-`) || entry.startsWith(`${venvBase}.backup-`)
+            ? /^\.(staging|backup)-(\d+)$/.exec(entry.slice(venvBase.length))
+            : null;
+          if (m) rmSync(join(dirname(plan.venvDir), entry), { recursive: true, force: true });
         }
       }],
       ['credentials', () => {

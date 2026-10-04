@@ -1689,6 +1689,11 @@ test('runHostSetup: the venv is replaced via staging; a failed install leaves it
     return okRun(argv);
   };
   const err: string[] = [];
+  // Operator data beside the venv (NOT installer naming) and a crashed run's leftover.
+  mkdirSync(join(dir, 'data', 'laya-venv.backup-manual'), { recursive: true });
+  writeFileSync(join(dir, 'data', 'laya-venv.backup-manual', 'keep.txt'), 'operator data\n');
+  mkdirSync(join(dir, 'data', 'laya-venv.backup-weird.pid'), { recursive: true });
+  mkdirSync(join(dir, 'data', 'laya-venv.staging-999999'), { recursive: true });
   // First run: healthy install → live venv exists, no staging/backup leftovers.
   const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
   try {
@@ -1702,7 +1707,9 @@ test('runHostSetup: the venv is replaced via staging; a failed install leaves it
     assert.ok(existsSync(live), 'the live venv exists after the swap');
     assert.ok(existsSync(join(live, 'bin', '.laya-installed')), 'the install landed in the live venv');
     assert.ok(!existsSync(`${live}.staging-${process.pid}`) || readdirSync(join(dir, 'data')).every((e) => !e.includes('.staging-')), 'no staging leftover');
-    assert.ok(!readdirSync(join(dir, 'data')).some((e) => e.includes('.backup-')), 'no backup leftover');
+    assert.ok(!readdirSync(join(dir, 'data')).some((e) => /^laya-venv\.(staging|backup)-\d+$/.test(e)), 'no numerically-shaped staging/backup leftover');
+    assert.ok(existsSync(join(dir, 'data', 'laya-venv.backup-manual', 'keep.txt')), 'operator data sharing the prefix survives');
+    assert.ok(existsSync(join(dir, 'data', 'laya-venv.backup-weird.pid')), 'a non-generated suffix (dot in the tail) survives');
     // Second run with a FAILING install: the previous live venv must survive untouched.
     failInstall = true;
     err.length = 0;
