@@ -844,7 +844,8 @@ export async function runHostSetup(
   if (answers.layaEnabled) {
     const dataDir = io.sidecarDataDir ?? dirname(loadEnvFile(path).MERCURY_DB ?? join(homedir(), '.local', 'state', 'mercury', 'mercury.db'));
     const run = io.sidecarRun ?? sidecarExec;
-    const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES);
+    // env flows in so PATH discovery sees the operator's PATH (r15: spaced interpreter dirs).
+    const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES, process.platform, env);
     if (!det.ok) {
       io.err(`\nlaya: not installed — ${det.reason}\n`);
       io.err('laya: the sidecar needs uv (recommended) or Python >= 3.10. Install one first:\n');
@@ -863,7 +864,10 @@ export async function runHostSetup(
           if (!r.ok) throw new Error(`uv venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
         }
       : () => {
-          const pyBin = det.bin!.split(' ')[0]!;
+          // The executable is det.argv[0] — the exact path that passed -V. det.bin can contain
+          // spaces (a discovered interpreter under '/Users/Jane Doe/bin'), and splitting on
+          // ' ' would truncate it (Copilot #840 r15).
+          const pyBin = det.argv![0]!;
           const r = run([pyBin, '-m', 'venv', plan.venvDir], 120_000);
           if (!r.ok) throw new Error(`python -m venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
         };
@@ -880,9 +884,19 @@ export async function runHostSetup(
         const creds = ensureLayaCredentials(env);
         mkdirSync(dirname(plan.unitPath), { recursive: true });
         const text = process.platform === 'darwin' ? renderLayaLaunchdPlist(plan, creds.key) : renderLayaSystemdUnit(plan, creds.key);
-        writeFileSync(plan.unitPath, text, { mode: 0o600 });
-        // mode applies at creation only: a re-run over a pre-existing 0644 unit (it embeds the
-        // key) must be repaired, not left world-readable (Copilot #840 r1).
+        // The unit embeds the API key: secret-bearing bytes must never land in a loose file
+        // (Copilot #840 r15). Atomic 0600 temp + fsync + rename, then enforce 0600 — the same
+        // pattern as writeEnvFile; a re-run over a pre-existing 0644 unit therefore never
+        // exposes the key at any instant (r1's trailing chmod alone is too late).
+        const tmpUnit = join(dirname(plan.unitPath), `.${plan.unitLabel}.tmp-${process.pid}`);
+        writeFileSync(tmpUnit, text, { mode: 0o600 });
+        const fd = openSync(tmpUnit, 'r');
+        try {
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+        renameSync(tmpUnit, plan.unitPath);
         chmodSync(plan.unitPath, 0o600);
       }],
     ];

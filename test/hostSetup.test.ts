@@ -1553,6 +1553,40 @@ test('runHostSetup: an invalid MERCURY_LAYA_TIMEOUT_MS refuses with the doctor w
   }
 });
 
+test('runHostSetup: the venv step uses the EXACT located interpreter (spaces included) (#840 r15)', async () => {
+  // A discovered interpreter under a directory with a space: splitting det.bin would truncate
+  // the path; the step must replay det.argv[0] verbatim.
+  const dir = tempDir('laya-pyspace-');
+  // python3.16: deliberately NOT in the static list, so only PATH discovery can find it.
+  const spacedBin = join(dir, 'Jane Doe', 'bin', 'python3.16');
+  mkdirSync(join(dir, 'Jane Doe', 'bin'), { recursive: true });
+  writeFileSync(spacedBin, '#!/bin/sh\n', { mode: 0o755 });
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { port: 8302 });
+  const venvArgv: string[][] = [];
+  try {
+    const code = await runHostSetup([], {
+      out: () => {},
+      err: (s) => process.stderr.write(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: (argv: string[]) => {
+        if (argv[1] === '-m' && argv[2] === 'venv') venvArgv.push(argv);
+        if (argv[0] === 'uv') return { ok: false, stdout: '', stderr: 'no uv' };
+        if (argv[0] === spacedBin && argv[1] === '-V') return { ok: true, stdout: 'Python 3.16.0', stderr: '' };
+        if (argv[1] === '-V') return { ok: true, stdout: 'Python 3.9.6', stderr: '' };
+        return okRun(argv);
+      },
+      sidecarDataDir: join(dir, 'data'),
+      sidecarReadinessAttempts: 2,
+      sidecarReadinessGapMs: 10,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, PATH: `${join(dir, 'Jane Doe', 'bin')}:${process.env.PATH ?? ''}` });
+    assert.equal(code, 0);
+    assert.ok(venvArgv.length >= 1, 'the venv step ran');
+    assert.equal(venvArgv[0]![0], spacedBin, `the exact spaced path is used: ${venvArgv[0]?.join(' ')}`);
+  } finally {
+    await fake.close();
+  }
+});
+
 test('runHostSetup: the readiness window retries until the sidecar answers (#840 r11)', async () => {
   // A fresh sidecar downloads the English checkpoint first; the first probes legitimately
   // fail. The wizard must keep probing within its bounded window, not exit 1.
@@ -1624,6 +1658,9 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
     await fake.close();
   }
   assert.equal((statSync(unitPath).mode & 0o777).toString(8), '600', 'the rewritten unit must be 0600');
+  // r15: the secret-bearing unit goes through 0600 temp + rename — no temp file may remain.
+  const leftovers = readdirSync(join(unitPath, '..')).filter((n) => n.includes('.tmp-'));
+  assert.deepEqual(leftovers, [], `no unit temp file remains: ${leftovers.join(', ')}`);
   // Linux r11: after enable --now the unit is RESTARTED so a rewritten unit/key takes effect.
   // (Darwin runs kickstart instead; the restart branch is exercised on the Ubuntu CI job.)
   if (process.platform === 'linux') {
