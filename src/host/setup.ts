@@ -654,7 +654,10 @@ export type ProbeFn = () => Promise<HarnessProbeResult[]>;
 /** Bounded sidecar exec default (#831): spawnSync with a hard timeout — a hung uv/pip is a
  *  failure with a readable message, not a hang (the installer's bound-everything rule). */
 export const sidecarExec: RunFn = (argv, timeoutMs) => {
-  const r = spawnSync(argv[0]!, argv.slice(1), { encoding: 'utf8', timeout: timeoutMs });
+  // killSignal SIGKILL (Copilot #840 r40): spawnSync's default SIGTERM is catchable — a
+  // uv/pip child that traps it keeps spawnSync waiting forever after timeoutMs, breaking the
+  // installer's bounded-command guarantee. SIGKILL is uncatchable, so the bound always holds.
+  const r = spawnSync(argv[0]!, argv.slice(1), { encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL' });
   // A timed-out command keeps stderr '' while r.error carries ETIMEDOUT (Copilot #840 r9):
   // `stderr ?? error` would discard the timeout and the step would report only 'no output'.
   // Prefer NON-EMPTY stderr, then the spawn error, then ''.

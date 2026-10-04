@@ -1620,6 +1620,16 @@ test('runHostSetup: a PADDED layaUrl in an existing mercury.env is refused on re
   assert.match(readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8'), /MERCURY_LAYA_URL= http/, 'the file is untouched');
 });
 
+test('sidecarExec: the timeout holds even when the child ignores SIGTERM (#840 r40)', () => {
+  // spawnSync's default SIGTERM is catchable: a child trapping it would hang the installer past
+  // the bound. SIGKILL is uncatchable — the run must return within ~2 s of the 300 ms timeout.
+  const t0 = Date.now();
+  const r = sidecarExec([process.execPath, '-e', `process.on('SIGTERM', () => {}); setInterval(() => {}, 100);`], 300);
+  const elapsed = Date.now() - t0;
+  assert.equal(r.ok, false);
+  assert.ok(elapsed < 5_000, `the bound holds: ${elapsed} ms`);
+});
+
 test('runHostSetup: a PADDED MERCURY_LAYA_URL is refused like loadConfig/doctor (#840 r37)', async () => {
   // The env value reaches validateAnswers RAW: trimming in defaultAnswers would let setup
   // accept (and rewrite) a value the config loader and doctor refuse.
