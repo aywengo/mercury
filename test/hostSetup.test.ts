@@ -1602,6 +1602,21 @@ test('runHostSetup: the venv step uses the EXACT located interpreter (spaces inc
   }
 });
 
+test('runHostSetup: a PADDED MERCURY_LAYA_URL is refused like loadConfig/doctor (#840 r37)', async () => {
+  // The env value reaches validateAnswers RAW: trimming in defaultAnswers would let setup
+  // accept (and rewrite) a value the config loader and doctor refuse.
+  const dir = tempDir('setup-laya-padded-');
+  const err: string[] = [];
+  const code = await runHostSetup([], {
+    out: () => {},
+    err: (s) => err.push(s),
+    question: async () => '',
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir, MERCURY_LAYA_URL: ' http://127.0.0.1:8302 ' });
+  assert.equal(code, 1);
+  assert.match(err.join(''), /must not have leading or trailing whitespace/);
+  assert.ok(!existsSync(join(dir, 'mercury', 'mercury.env')), 'nothing written');
+});
+
 test('runHostSetup: an EXTERNAL MERCURY_LAYA_URL is preserved and verified, not replaced (#840 r21)', async () => {
   const dir = tempDir('setup-laya-ext-');
   // External endpoint with a READABLE credential (r27: a missing/unreadable entry is a named

@@ -469,7 +469,13 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     layaEnabled: Boolean(env.MERCURY_LAYA_URL?.trim() || existingVar('MERCURY_LAYA_URL', env)),
     // Continuity (r21): a hand-set URL is preserved verbatim; '' only on a fresh host (the
     // wizard-managed local default is applied at render time).
-    layaUrl: env.MERCURY_LAYA_URL?.trim() || existingVar('MERCURY_LAYA_URL', env) || '',
+    // RAW value through to validateAnswers (Copilot #840 r37): trimming here would let a
+    // padded env value pass setup while loadConfig/doctor refuse it. Only absent-and-unset-in-
+    // file falls back to ''. (layaEnabled keeps the trim: presence, not value, decides the
+    // default.)
+    layaUrl: env.MERCURY_LAYA_URL !== undefined
+      ? env.MERCURY_LAYA_URL
+      : (existingVar('MERCURY_LAYA_URL', env) || ''),
   };
 }
 
