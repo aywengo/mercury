@@ -918,14 +918,31 @@ export async function runHostSetup(
         return 1;
       }
     } else {
+      // Reload the user manager FIRST (Copilot #840 r13): a freshly written unit is invisible
+      // to `enable --now` until daemon-reload ("Unit ... not found") — the same order the host
+      // and bot installers use (src/host/service.ts, src/host/bots/service.ts). Any systemctl
+      // failure returns immediately: waiting through the readiness window against a service
+      // that was never started only produces a confusing 'unreachable'.
+      const reload = run(['systemctl', '--user', 'daemon-reload'], 15_000);
+      if (!reload.ok) {
+        io.err(`\nlaya: systemctl --user daemon-reload failed: ${(reload.stderr.trim() || reload.stdout.trim() || 'no output').split('\n')[0]}\n`);
+        return 1;
+      }
       const loadCmd = ['systemctl', '--user', 'enable', '--now', plan.unitLabel];
       io.out(`laya: loading — ${loadCmd.join(' ')}`);
       const loaded = run(loadCmd, 15_000);
+      if (!loaded.ok) {
+        io.err(`\nlaya: systemctl enable failed: ${(loaded.stderr.trim() || loaded.stdout.trim() || 'no output').split('\n')[0]}\n`);
+        return 1;
+      }
       // enable --now does NOT restart an active unit (Copilot #840 r11): a re-run that rewrote
       // the unit or rotated the key would leave the OLD process serving. Restart explicitly —
       // idempotent for a first load, mandatory for a re-run.
       const restarted = run(['systemctl', '--user', 'restart', plan.unitLabel], 15_000);
-      if (!restarted.ok) io.err(`laya: restart failed: ${(restarted.stderr.trim() || restarted.stdout.trim() || 'no output').split('\n')[0]}\n`);
+      if (!restarted.ok) {
+        io.err(`\nlaya: systemctl restart failed: ${(restarted.stderr.trim() || restarted.stdout.trim() || 'no output').split('\n')[0]}\n`);
+        return 1;
+      }
     }
     const written = loadEnvFile(path);
     const baseUrl = written.MERCURY_LAYA_URL ?? `http://127.0.0.1:${plan.port}/v1/systemone`;

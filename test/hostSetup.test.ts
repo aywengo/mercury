@@ -1605,7 +1605,8 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
   // Linux r11: after enable --now the unit is RESTARTED so a rewritten unit/key takes effect.
   // (Darwin runs kickstart instead; the restart branch is exercised on the Ubuntu CI job.)
   if (process.platform === 'linux') {
-    // re-run the setup once more to prove the restart happens on the re-run path
+    // re-run the setup once more to prove the FULL systemctl order (r13): daemon-reload first
+    // (a fresh unit is invisible to enable until then), then enable, then restart.
     const calls: string[][] = [];
     const fake2 = await startFakeLaya([{ json: validPick(['probe']) }], { port: 8302 });
     try {
@@ -1622,7 +1623,23 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
     } finally {
       await fake2.close();
     }
-    assert.ok(calls.some((a) => a[0] === 'systemctl' && a[1] === '--user' && a[2] === 'restart'), `restart ran: ${calls.map((c) => c.join(' ')).join(' | ')}`);
+    const sys = calls.filter((a) => a[0] === 'systemctl').map((a) => a[2]);
+    assert.deepEqual(sys, ['daemon-reload', 'enable', 'restart'], `systemctl order: ${calls.map((c) => c.join(' ')).join(' | ')}`);
+    // A failed enable must exit 1 IMMEDIATELY, not wait through the readiness window.
+    const err2: string[] = [];
+    const code2 = await runHostSetup(['--yes'], {
+      out: () => {},
+      err: (s) => err2.push(s),
+      sidecarRun: (argv: string[]) =>
+        argv[0] === 'systemctl' && argv[2] === 'enable'
+          ? { ok: false, stdout: '', stderr: 'Unit com.mercury.laya.service not found' }
+          : okRun(argv),
+      sidecarDataDir: join(dir, 'data'),
+      sidecarReadinessAttempts: 3,
+      sidecarReadinessGapMs: 10,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+    assert.equal(code2, 1, 'a failed enable exits 1');
+    assert.ok(err2.join('').includes('systemctl enable failed'), `named failure: ${err2.join('')}`);
   }
 });
 
