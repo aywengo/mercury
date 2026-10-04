@@ -161,6 +161,9 @@ export function detectPython(
 
 export interface LayaPlan {
   venvDir: string;
+  /** Hugging Face cache root inside the Mercury data dir (design §5.3: weights cached there) —
+   *  the unit pins HF_HOME so the ~843 MB checkpoint never lands in the user's global cache. */
+  hfHome: string;
   serveCmd: string;
   port: number;
   envUrl: string;
@@ -176,12 +179,13 @@ export function planLayaSidecar(opts: { dataDir: string; pythonBin: string; port
   const env = opts.env ?? process.env;
   const port = opts.port ?? LAYA_DEFAULT_PORT;
   const venvDir = join(opts.dataDir, 'laya-venv');
+  const hfHome = join(opts.dataDir, 'laya-hf');
   const serveCmd = `${join(venvDir, 'bin', 'laya-serve')}`;
   const unitLabel = 'com.mercury.laya';
   const unitPath = platform === 'darwin'
     ? join(env.HOME?.trim() || homedir(), 'Library', 'LaunchAgents', `${unitLabel}.plist`)
     : join(env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config'), 'systemd', 'user', `${unitLabel}.service`);
-  return { venvDir, serveCmd, port, envUrl: `http://127.0.0.1:${port}`, unitPath, unitLabel };
+  return { venvDir, hfHome, serveCmd, port, envUrl: `http://127.0.0.1:${port}`, unitPath, unitLabel };
 }
 
 /** launchd plist (macOS), deterministic: same plan → same bytes (test-pinned). */
@@ -202,6 +206,7 @@ export function renderLayaLaunchdPlist(plan: LayaPlan, apiKey: string): string {
     <key>LAYA_API_KEY</key><string>${apiKey}</string>
     <key>LAYA_PRELOAD</key><string>1</string>
     <key>LAYA_MODELS</key><string>english</string>
+    <key>HF_HOME</key><string>${plan.hfHome}</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -224,6 +229,7 @@ Environment=LAYA_PORT=${plan.port}
 Environment=LAYA_API_KEY=${apiKey}
 Environment=LAYA_PRELOAD=1
 Environment=LAYA_MODELS=english
+Environment=HF_HOME=${plan.hfHome}
 Restart=on-failure
 # Same backoff as the host and bot units: a preload/startup failure must not loop tightly.
 RestartSec=5

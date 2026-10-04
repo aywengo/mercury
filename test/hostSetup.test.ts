@@ -1314,6 +1314,9 @@ test('renderLayaLaunchdPlist / renderLayaSystemdUnit: loopback, preload, english
   assert.ok(plist.includes('<key>LAYA_HOST</key><string>127.0.0.1</string>'), 'loopback bind');
   assert.ok(plist.includes('<key>LAYA_PRELOAD</key><string>1</string>'));
   assert.ok(plist.includes('<key>LAYA_MODELS</key><string>english</string>'));
+  // Design §5.3 "weights cached there": HF_HOME is pinned INSIDE the Mercury data dir (r16) —
+  // without it the ~843 MB checkpoint lands in the user's global cache.
+  assert.ok(plist.includes(`<key>HF_HOME</key><string>/data/laya-hf</string>`), `HF_HOME pinned: ${plist.includes('HF_HOME')}`);
   assert.ok(plist.includes('<string>key-1</string>'));
   assert.equal(renderLayaLaunchdPlist(plan, 'key-1'), plist, 'same plan → same bytes');
   const linux = planLayaSidecar({ dataDir: '/data', pythonBin: 'python3', platform: 'linux', env: { XDG_CONFIG_HOME: '/cfg' } });
@@ -1322,6 +1325,7 @@ test('renderLayaLaunchdPlist / renderLayaSystemdUnit: loopback, preload, english
   assert.ok(unit.includes(`Environment=LAYA_PORT=${linux.port}`));
   assert.ok(unit.includes('Environment=LAYA_PRELOAD=1'));
   assert.ok(unit.includes('Environment=LAYA_MODELS=english'));
+  assert.ok(unit.includes(`Environment=HF_HOME=/data/laya-hf`), 'HF_HOME pinned under the data dir (r16)');
   assert.equal(renderLayaSystemdUnit(linux, 'key-2'), unit, 'same plan → same bytes');
   assert.ok(layaStepActions(plan).some((a) => a.includes(`laya[serve]==${LAYA_SERVE_PIN}`)), 'the pinned version is in the plan');
   // The printed plan mirrors EXECUTION (Copilot #840 r2): env write first, then the venv with
