@@ -701,13 +701,13 @@ export function layaCollisionEvidence(env: NodeJS.ProcessEnv): string[] {
     join(cfgBase, 'mercury', 'bots', 'laya.json'),
     join(stateBase, 'mercury', 'bots', 'laya.state.json'),
   ];
-  if (process.platform === 'darwin') {
-    const label = 'com.mercury.bot.laya.plist';
-    candidates.push(join(env.HOME?.trim() || homedir(), 'Library', 'LaunchAgents', label));
-    candidates.push(join(homedir(), 'Library', 'LaunchAgents', label));
-  } else {
-    candidates.push(join(cfgBase, 'systemd', 'user', 'mercury-bot-laya.service'));
-  }
+  // Check BOTH service shapes on every platform: each check is an existsSync probe, the
+  // wrong-platform path simply cannot exist, and the evidence list stays testable on any
+  // host (a darwin-only branch made the homedir() case untestable on CI — Copilot #840 r48).
+  const label = 'com.mercury.bot.laya.plist';
+  candidates.push(join(env.HOME?.trim() || homedir(), 'Library', 'LaunchAgents', label));
+  candidates.push(join(homedir(), 'Library', 'LaunchAgents', label));
+  candidates.push(join(cfgBase, 'systemd', 'user', 'mercury-bot-laya.service'));
   return candidates.filter((p) => existsSync(p));
 }
 
