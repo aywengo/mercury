@@ -1648,6 +1648,11 @@ test('validateAnswer: layaUrl must be a loopback BASE URL without a route (#840 
   assert.equal(validateAnswer('layaUrl', 'http://127.0.0.1:8302'), null);
   assert.equal(validateAnswer('layaUrl', 'http://localhost:9000'), null);
   assert.equal(validateAnswer('layaUrl', ''), null);
+  // r23: URL-only contract — an embedded user:password would be written to the env file and
+  // printed by the external/dry-run paths.
+  const userinfo = validateAnswer('layaUrl', 'http://user:secret@127.0.0.1:8302');
+  assert.match(userinfo ?? '', /must not contain a username or password/);
+  assert.ok(!(userinfo ?? '').includes('secret'), 'the credential is never echoed');
 });
 
 test('runHostSetup: the external probe uses the laya credential, exactly like the doctor (#840 r22)', () => {
@@ -1678,6 +1683,25 @@ test('runHostSetup: the external probe uses the laya credential, exactly like th
       await f.close();
     }
   });
+});
+
+test('runHostSetup: an INVALID layaUrl in the answers file is rejected, not defaulted (#840 r23)', async () => {
+  const dir = tempDir('setup-laya-badurl-');
+  const answersFile = join(dir, 'answers.json');
+  // A number where the URL belongs: normalizing it to the wizard default would install a local
+  // sidecar over the operator's malformed endpoint instead of refusing.
+  writeFileSync(answersFile, JSON.stringify({ layaEnabled: true, layaUrl: 8302 }));
+  const err: string[] = [];
+  const code = await runHostSetup(['--non-interactive', '--yes', '--answers', answersFile], {
+    out: () => {},
+    err: (s) => err.push(s),
+    question: async () => '',
+    sidecarRun: okRun,
+    sidecarDataDir: join(dir, 'data'),
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  assert.equal(code, 1);
+  assert.match(err.join(''), /layaUrl: layaUrl must be a string/);
+  assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'nothing installed');
 });
 
 test('runHostSetup --dry-run: an external URL prints preserve/verify only, no install actions (#840 r22)', async () => {

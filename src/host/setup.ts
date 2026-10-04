@@ -198,6 +198,9 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
       }
       if (u.pathname !== '/' && u.pathname !== '') return `layaUrl must be a base URL without a route path (the client appends /v1/systemone), got '${u.pathname}'`;
       if (u.search || u.hash) return 'layaUrl must not carry a query or fragment';
+      // URL-only contract: an embedded user:password would be written to the env file and
+      // printed by the external/dry-run paths — a credential smuggled into a 'plain URL'.
+      if (u.username || u.password) return 'layaUrl must not contain a username or password (the key lives in bot-credentials.json)';
       return charsetErr('layaUrl', value.trim());
     }
     case 'atlasUrl': {
@@ -526,8 +529,11 @@ export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.e
   return {
     hostName: parsed.hostName ?? base.hostName,
     // File-settable (r21): an answers file may pin an external URL; continuity still applies
-    // when absent (base carries the preserved env value).
-    layaUrl: typeof parsed.layaUrl === 'string' ? parsed.layaUrl : base.layaUrl,
+    // when absent (base carries the preserved env value). A non-null INVALID value passes
+    // through untouched so validateAnswers reports the type error (same rule as atlasUrl) —
+    // normalizing it to the default would install a local sidecar over a malformed endpoint
+    // instead of refusing (Copilot #840 r23).
+    layaUrl: parsed.layaUrl ?? base.layaUrl,
     dataDir: parsed.dataDir ?? base.dataDir,
     workspaceDir: parsed.workspaceDir ?? base.workspaceDir,
     // 'loopback' is a prompt spelling, never a file value (#665 review) — normalized
