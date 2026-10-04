@@ -46,7 +46,7 @@ import { checkLaya, loadEnvFile, parseLayaTimeoutMs, schemeFor } from './doctor.
 import { readBotCredentials } from './bots/credentials.ts';
 import { DEFAULT_PYTHON_CANDIDATES, detectPython, ensureLayaCredentials, LAYA_DEFAULT_PORT, LAYA_SERVE_PIN, layaStepActions, planLayaSidecar, renderLayaLaunchdPlist, renderLayaSystemdUnit, type LayaPlan, type RunFn } from './layaSidecar.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
-import { validateLayaBaseUrl } from '../laya/layaUrl.ts';
+import { isWizardManagedLayaDefault, validateLayaBaseUrl } from '../laya/layaUrl.ts';
 
 /** The wizard's answers, before validation. Every field maps to a MERCURY_* variable. */
 export interface HostSetupAnswers {
@@ -261,7 +261,7 @@ export function validateAnswers(
   // check itself cannot throw (Copilot #840 r29).
   const dataDirStr = typeof a.dataDir === 'string' ? a.dataDir.trim() : '';
   const layaUrlStr = typeof a.layaUrl === 'string' ? a.layaUrl.trim() : '';
-  const externalLaya = layaUrlStr !== '' && layaUrlStr !== `http://127.0.0.1:${LAYA_DEFAULT_PORT}`;
+  const externalLaya = layaUrlStr !== '' && !isWizardManagedLayaDefault(layaUrlStr, LAYA_DEFAULT_PORT);
   if (a.layaEnabled && !externalLaya && !isAbsolute(dataDirStr)) {
     errors.push(`dataDir: must be an absolute path when the Laya sidecar is enabled (got '${dataDirStr || String(a.dataDir)}')`);
   }
@@ -892,7 +892,7 @@ export async function runHostSetup(
       // r22: an external URL is PRESERVED, not installed — the plan must mirror what a
       // confirmed run actually does (verify only), not list local-install actions that would
       // be skipped.
-      if (answers.layaUrl.trim() !== '' && answers.layaUrl.trim() !== `http://127.0.0.1:${LAYA_DEFAULT_PORT}`) {
+      if (answers.layaUrl.trim() !== '' && !isWizardManagedLayaDefault(answers.layaUrl, LAYA_DEFAULT_PORT)) {
         io.out(`\nLaya sidecar (external): preserve MERCURY_LAYA_URL=${answers.layaUrl.trim()} and verify it with the doctor probe (no local install)\n`);
       } else {
         const plan = planLayaSidecar({ dataDir: io.sidecarDataDir ?? answers.dataDir.trim(), pythonBin: 'python3', env });
@@ -936,7 +936,7 @@ export async function runHostSetup(
   if (answers.layaEnabled) {
       // r21: an EXTERNALLY configured URL (preserved from the old env) is verified, never
     // replaced: installing/restarting a local sidecar would silently take over the endpoint.
-    const externalLaya = answers.layaUrl.trim() !== '' && answers.layaUrl.trim() !== `http://127.0.0.1:${LAYA_DEFAULT_PORT}`;
+    const externalLaya = answers.layaUrl.trim() !== '' && !isWizardManagedLayaDefault(answers.layaUrl, LAYA_DEFAULT_PORT);
     const dataDir = io.sidecarDataDir ?? dirname(loadEnvFile(path).MERCURY_DB ?? join(homedir(), '.local', 'state', 'mercury', 'mercury.db'));
     const run = io.sidecarRun ?? sidecarExec;
     if (externalLaya) {

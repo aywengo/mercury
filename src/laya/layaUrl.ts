@@ -35,6 +35,10 @@ export function validateLayaBaseUrl(value: unknown, varName = 'MERCURY_LAYA_URL'
   }
   if (u.pathname !== '/' && u.pathname !== '') return `${varName} must be a base URL without a route path (the client appends /v1/systemone), got '${u.pathname}'`;
   if (u.search || u.hash) return `${varName} must not carry a query or fragment`;
+  // Bare delimiters parse away ('http://h:p?' → search '') but still change the request the
+  // client builds — reject the literal characters too (Copilot #840 r44).
+  if (value.includes('?')) return `${varName} must not carry a query or fragment`;
+  if (value.includes('#')) return `${varName} must not carry a query or fragment`;
   // Padded URLs would pass the trimmed parse and then fail wherever the ORIGINAL value is
   // checked (renderEnv charset) — refuse at the boundary.
   if (value !== value.trim()) return `${varName} must not have leading or trailing whitespace`;
@@ -42,4 +46,21 @@ export function validateLayaBaseUrl(value: unknown, varName = 'MERCURY_LAYA_URL'
   // by the external/dry-run paths — a credential smuggled into a 'plain URL' (Copilot #840 r23).
   if (u.username || u.password) return `${varName} must not contain a username or password (the key lives in bot-credentials.json)`;
   return null;
+}
+
+/** True when the value is the wizard-managed local default endpoint, compared CANONICALLY
+ *  (parsed host/port/root path) so `http://127.0.0.1:8302/` classifies the same as the bare
+ *  form (Copilot #840 r44). Only call on values that passed validateLayaBaseUrl. */
+export function isWizardManagedLayaDefault(value: string, defaultPort: number): boolean {
+  try {
+    const u = new URL(value.trim());
+    return u.protocol === 'http:'
+      && (u.hostname === '127.0.0.1' || u.hostname === 'localhost')
+      && (u.port === '' ? 80 : Number(u.port)) === defaultPort
+      && (u.pathname === '/' || u.pathname === '')
+      && !u.search && !u.hash && !u.username && !u.password
+      && !value.includes('?') && !value.includes('#');
+  } catch {
+    return false;
+  }
 }

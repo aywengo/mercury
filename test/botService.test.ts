@@ -496,3 +496,19 @@ test("install --alias laya with a LEGACY config repairs the service (reservation
   assert.match(err.join(''), /reserved for the host/);
 });
 
+test("uninstall --alias laya --yes resumes an interrupted legacy uninstall (token registered) (#840 r44)", () => {
+  // Teardown removed the config and unit but crashed before credential cleanup: the bot-laya
+  // registration in MERCURY_API_TOKENS proves a legacy bot — teardown finishes.
+  const dir = tempDir('bot-svc-uninst-laya-resume-');
+  const env = setupBot(dir);
+  const envFile = join(env.XDG_CONFIG_HOME!, 'mercury', 'mercury.env');
+  writeFileSync(envFile, 'MERCURY_PORT=3999\nMERCURY_API_TOKENS=tok-alice:alice, tok-legacy:bot-laya\n');
+  writeFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'tok-legacy-laya' } }), { mode: 0o600 });
+  const out: string[] = [];
+  const code = uninstallBotService(process.platform, 'laya', { out: (s) => out.push(s), err: () => {} }, env, { yes: true, keepEnv: false, reassignOwner: null });
+  assert.equal(code, 0, `resume teardown: ${out.join('')}`);
+  const creds = JSON.parse(readFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), 'utf8')) as Record<string, unknown>;
+  assert.ok(!('laya' in creds), 'the legacy credential is removed');
+  assert.match(readFileSync(envFile, 'utf8'), /MERCURY_API_TOKENS=tok-alice:alice/, 'the bot token entry is removed, alice kept');
+});
+

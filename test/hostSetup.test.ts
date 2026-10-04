@@ -1738,11 +1738,19 @@ test('validateAnswer: layaUrl must be a loopback BASE URL without a route (#840 
     ['http://host:8302/v1/systemone', 'route path'],
     ['https://127.0.0.1:8302', 'http scheme'],
     ['http://127.0.0.1:8302/x?y=1', 'query'],
+    ['http://127.0.0.1:8302?', 'bare query delimiter (#840 r44)'],
+    ['http://127.0.0.1:8302#', 'bare fragment delimiter (#840 r44)'],
   ];
   for (const [url, why] of bad) {
     const err = validateAnswer('layaUrl', url);
     assert.ok(err, `${url} refused (${why})`);
   }
+  // r44: bare delimiters are NAMED as query/fragment by the shared validator, not refused by a
+  // charset accident (mutation: includes-check removed -> these fail).
+  assert.match(validateAnswer('layaUrl', 'http://127.0.0.1:8302?') ?? '', /query or fragment/);
+  assert.match(validateAnswer('layaUrl', 'http://127.0.0.1:8302#') ?? '', /query or fragment/);
+  // r44: the root-path form IS valid (the wizard-managed default classifies canonically).
+  assert.equal(validateAnswer('layaUrl', 'http://127.0.0.1:8302/'), null);
   assert.match(validateAnswer('layaUrl', 'http://') ?? '', /absolute URL/);
   assert.match(validateAnswer('layaUrl', 'http://192.168.1.20:8302') ?? '', /loopback host/);
   assert.match(validateAnswer('layaUrl', 'http://host:8302/v1/systemone') ?? '', /(loopback host|without a route path)/);
@@ -1907,6 +1915,13 @@ test('ensureLayaCredentials: a bot named laya refuses the sidecar credential wri
   } finally {
     await fake.close();
   }
+});
+
+test('validateAnswers: the ROOT-PATH default URL is wizard-managed, not external (#840 r44)', () => {
+  // 'http://127.0.0.1:8302/' parses to the local default; a relative dataDir must still be
+  // refused (the raw-string compare classified it external and skipped the gate).
+  const errs = validateAnswers(answers({ layaEnabled: true, dataDir: 'data', layaUrl: 'http://127.0.0.1:8302/' }));
+  assert.ok(errs.some((e) => e.includes('absolute path')), `root-path form is local: ${errs.join(' | ')}`);
 });
 
 test('validateAnswers: a relative dataDir with the Laya sidecar enabled is refused (#840 r25)', () => {

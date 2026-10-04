@@ -405,9 +405,29 @@ export function uninstallBotService(
   // would rotate the key existing clients hold. A LEGACY pre-reservation bot keeps its recovery
   // path: its config file or service unit proves bot ownership.
   if (RESERVED_BOT_ALIASES.has(alias) && !existsSync(configFile) && !existsSync(plist) && !existsSync(unitPath)) {
-    io.err(`host bot service uninstall: '${alias}' is a reserved host alias (the Laya sidecar credential) and no bot named '${alias}' exists — nothing to uninstall.\n`);
-    io.err('host bot service uninstall: the sidecar credential is managed by `mercury host setup`/`host doctor`, not the bot lifecycle.\n');
-    return 1;
+    // Interrupted-uninstall recovery (Copilot #840 r44): teardown may have already removed the
+    // config and unit but crashed before the credential cleanup. A credential registered to
+    // `bot-<alias>` in MERCURY_API_TOKENS (or a remaining state file) proves a LEGACY BOT —
+    // let teardown finish. Without that registration the entry is the SIDECAR's key.
+    const stateLeft = existsSync(stateFile);
+    const botRegistered = existsSync(envFile) && readFileSync(envFile, 'utf8')
+      .split('\n')
+      .some((line) => {
+        const m = /^MERCURY_API_TOKENS=(.*)$/.exec(line);
+        if (!m) return false;
+        // An entry 'token:bot-laya' registers a BOT credential; the sidecar key is never in
+        // MERCURY_API_TOKENS.
+        return m[1]!.split(',').some((e) => {
+          const parts = e.trim().split(':');
+          return parts.length === 2 && parts[1]!.trim() === `bot-${alias}`;
+        });
+      });
+    if (!stateLeft && !botRegistered) {
+      io.err(`host bot service uninstall: '${alias}' is a reserved host alias (the Laya sidecar credential) and no bot named '${alias}' exists — nothing to uninstall.\n`);
+      io.err('host bot service uninstall: the sidecar credential is managed by `mercury host setup`/`host doctor`, not the bot lifecycle.\n');
+      return 1;
+    }
+    io.out(`Resuming the interrupted uninstall of the legacy bot '${alias}'.\n`);
   }
   io.out(`Plan: remove ${platform === 'darwin' ? `${plist} (and its wrapper)` : unitPath}, ${stateFile}, ${configFile},` +
     ` the '${alias}' entry in the shared bot credentials file,` +
