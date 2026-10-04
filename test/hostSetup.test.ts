@@ -1817,6 +1817,10 @@ test('runHostSetup: a transient anonymous-probe failure is retried, not read as 
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
     assert.equal(code, 0, `setup must recover: ${err.join('')} | ${out.join('')}`);
     assert.ok(out.join('').includes('doctor ok'), `success reported: ${out.join('')}`);
+    // r30: the success line reports the AUTHENTICATED probe's detail, not a stale anon blip.
+    const okLine = out.join('').split('\n').find((l) => l.includes('doctor ok')) ?? '';
+    assert.doesNotMatch(okLine, /503/, `no stale anon detail: ${okLine}`);
+    assert.match(okLine, /doctor ok — ok, checkpoint/, `authed detail printed: ${okLine}`);
   } finally {
     await fake.close();
   }

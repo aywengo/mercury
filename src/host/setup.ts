@@ -1128,11 +1128,13 @@ export async function runHostSetup(
           }
           if ((anon.detail ?? '').includes('401')) break; // auth proven
           // Inconclusive (timeout/unreachable/5xx): retry after the gap, like the main loop.
+          // Recorded only for the FAILURE paths — the success line keeps the AUTHENTICATED
+          // probe's detail (printing a stale anon blip under 'doctor ok' misled, Copilot #840 r30).
           last = anon.detail;
           const sleepMs = Math.min(gapMs, budgetMs - (Date.now() - started));
           if (sleepMs > 0) await new Promise((res) => setTimeout(res, sleepMs));
         }
-        io.out(`laya: doctor ok — ${last}\n`);
+        io.out(`laya: doctor ok — ${probe.detail}\n`);
         break;
       }
       if (attempts === 1) io.out('laya: waiting for the sidecar — first start downloads the English checkpoint (~843 MB)\n');
