@@ -37,9 +37,9 @@ import { createInterface } from 'node:readline';
 import { randomBytes } from 'node:crypto';
 import { hostStatus, printStatus } from './lifecycle.ts';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
 import { suggestionFor } from '../adapters/configSchema.ts';
 import { checkLaya, loadEnvFile, parseLayaTimeoutMs, schemeFor } from './doctor.ts';
@@ -685,6 +685,32 @@ function ttyAvailable(): boolean {
 }
 
 /** Run the wizard. Returns the process exit code. */
+/**
+ * Every on-disk shape that proves a bot named 'laya' pre-dates the sidecar reservation
+ * (Copilot #840 r33/r41/r43/r48). The config file alone misses a bot whose config was
+ * moved/lost; a remaining STATE FILE proves an interrupted uninstall (new provisioning cannot
+ * create one for a service that never ran); the service unit/plist proves an installed bot.
+ * macOS unit candidates cover BOTH resolutions: the lifecycle WRITES under homedir()
+ * (botPlistPath ignores $HOME) while launchd itself follows $HOME — a mismatch between them
+ * must not hide the real unit. Returns the existing paths (empty when no bot state exists).
+ */
+export function layaCollisionEvidence(env: NodeJS.ProcessEnv): string[] {
+  const cfgBase = env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config');
+  const stateBase = env.XDG_STATE_HOME?.trim() || join(homedir(), '.local', 'state');
+  const candidates = [
+    join(cfgBase, 'mercury', 'bots', 'laya.json'),
+    join(stateBase, 'mercury', 'bots', 'laya.state.json'),
+  ];
+  if (process.platform === 'darwin') {
+    const label = 'com.mercury.bot.laya.plist';
+    candidates.push(join(env.HOME?.trim() || homedir(), 'Library', 'LaunchAgents', label));
+    candidates.push(join(homedir(), 'Library', 'LaunchAgents', label));
+  } else {
+    candidates.push(join(cfgBase, 'systemd', 'user', 'mercury-bot-laya.service'));
+  }
+  return candidates.filter((p) => existsSync(p));
+}
+
 export async function runHostSetup(
   args: string[],
   io: {
@@ -870,15 +896,9 @@ export async function runHostSetup(
   // is written. Config file AND service unit/plist are evidence: a config-only check misses a
   // bot whose config was moved/lost while its unit and registered token remain — exactly the
   // recovery the old message advised.
-  const layaBotsPath = join(env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim() !== '' ? env.XDG_CONFIG_HOME : join(homedir(), '.config'), 'mercury', 'bots', 'laya.json');
-  // Same resolution the units actually use: launchd follows $HOME (planLayaSidecar rule),
-  // systemd follows XDG_CONFIG_HOME. botPlistPath/botUnitPath read homedir(), which ignores the
-  // wizard's env — replicate the resolution here instead (Copilot #840 r43).
-  const layaLegacyUnit = process.platform === 'darwin'
-    ? join(env.HOME?.trim() || homedir(), 'Library', 'LaunchAgents', 'com.mercury.bot.laya.plist')
-    : join(env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config'), 'systemd', 'user', 'mercury-bot-laya.service');
-  if (answers.layaEnabled && (existsSync(layaBotsPath) || existsSync(layaLegacyUnit))) {
-    io.err(`\nlaya: a bot named 'laya' exists (${existsSync(layaBotsPath) ? layaBotsPath : layaLegacyUnit}); the alias is reserved for the sidecar credential — uninstall the bot or move its config, then re-run setup.\n`);
+  const layaEvidence = layaCollisionEvidence(env);
+  if (answers.layaEnabled && layaEvidence.length > 0) {
+    io.err(`\nlaya: a bot named 'laya' exists (${layaEvidence[0]}); the alias is reserved for the sidecar credential — uninstall the bot or move its config, then re-run setup.\n`);
     return 1;
   }
 
@@ -1005,6 +1025,11 @@ export async function runHostSetup(
           if (!r.ok) throw new Error(`python -m venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
         };
     const steps: Array<[string, () => void]> = [
+      ['clear', () => {
+        // A stale staging dir from a dead run (same PID reused) must not overlay packages
+        // into the fresh environment (Copilot #840 r48).
+        rmSync(stagingDir, { recursive: true, force: true });
+      }],
       ['venv', venvStep],
       ['install', () => {
         const r = run([join(stagingDir, 'bin', 'python3'), '-m', 'pip', 'install', `laya[serve]==${LAYA_SERVE_PIN}`], 300_000);
@@ -1024,6 +1049,12 @@ export async function runHostSetup(
           throw e;
         }
         if (existsSync(backupDir)) rmSync(backupDir, { recursive: true, force: true });
+        // Sweep stale siblings from crashed runs (any PID), not just this run's pair.
+        for (const entry of readdirSync(dirname(plan.venvDir))) {
+          if (entry.startsWith(`${basename(plan.venvDir)}.staging-`) || entry.startsWith(`${basename(plan.venvDir)}.backup-`)) {
+            rmSync(join(dirname(plan.venvDir), entry), { recursive: true, force: true });
+          }
+        }
       }],
       ['credentials', () => {
         ensureLayaCredentials(env);
@@ -1055,6 +1086,9 @@ export async function runHostSetup(
       }
       io.out(`laya: unit written at ${plan.unitPath}\n`);
     } catch (e) {
+      // Pre-swap failure: never leak the staging venv (Copilot #840 r48). After a successful
+      // swap the staging dir no longer exists, so this is a no-op there.
+      rmSync(stagingDir, { recursive: true, force: true });
       io.err(`\nlaya: not installed — ${(e as Error).message}\n`);
       io.err('laya: mercury.env was written; the sidecar can be finished later by re-running `mercury host setup --yes`.\n');
       return 1;

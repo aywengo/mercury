@@ -24,6 +24,7 @@ import {
   writeEnvFile,
   redactedSummary,
   defaultAnswers,
+  layaCollisionEvidence,
   readAnswersFile,
   runHostSetup,
   generateAdminToken,
@@ -1716,12 +1717,54 @@ test('runHostSetup: the venv is replaced via staging; a failed install leaves it
     console.error('DBG-ERR2:', JSON.stringify(err.join('').slice(-400)));
     assert.match(err.join(''), /pip install laya\[serve\]==[^ ]+ failed/);
     assert.ok(existsSync(priorMarker), 'the previous live venv is intact after a failed install');
+    // The staging venv is cleaned up on a pre-swap failure (Copilot #840 r48).
+    assert.ok(!readdirSync(join(dir, 'data')).some((e) => e.includes('.staging-')), 'no staging venv leaks after a failed install');
     // The INSTALLED marker survives: a recreate-before-install would have wiped it.
     assert.ok(existsSync(join(live, 'bin', '.laya-installed')), 'the installed environment survives');
   } finally {
     await fake.close();
   }
 });
+
+test('runHostSetup: a leftover laya.state.json (interrupted uninstall) is collision evidence (#840 r48)', async () => {
+  // UninstallBotService treats a remaining state file as proof of an interrupted uninstall —
+  // setup must refuse the alias for that shape too, BEFORE preserving the old token as the
+  // sidecar key.
+  const dir = tempDir('setup-laya-state-');
+  mkdirSync(join(dir, 'mercury', 'bots'), { recursive: true });
+  writeFileSync(join(dir, 'mercury', 'bots', 'laya.state.json'), '{}');
+  const err: string[] = [];
+  // A tiny readiness budget + dead probe URL keep the test FAST if the collision gate is ever
+  // removed: the run then reaches the install path and fails in seconds instead of hanging.
+  const code = await runHostSetup([], {
+    out: () => {}, err: (s) => err.push(s),
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarReadinessBudgetMs: 2_000, sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone',
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+  assert.equal(code, 1);
+  assert.match(err.join(''), /reserved for the sidecar credential/);
+  assert.match(err.join(''), /laya\.state\.json/);
+});
+
+test('runHostSetup: collision evidence covers the lifecycle homedir() unit resolution (#840 r48)', () => {
+  // botPlistPath WRITES under homedir() while the wizard's env may carry a different $HOME —
+  // both resolutions must be checked so neither shape hides the real unit.
+  const dir = tempDir('setup-laya-bots-');
+  const proc = join(dir, 'proc-home');
+  const ioHome = join(dir, 'io-home');
+  mkdirSync(join(proc, 'Library', 'LaunchAgents'), { recursive: true });
+  writeFileSync(join(proc, 'Library', 'LaunchAgents', 'com.mercury.bot.laya.plist'), 'x');
+  const oldHome = process.env.HOME;
+  process.env.HOME = proc; // os.homedir() follows $HOME on POSIX
+  try {
+    const evidence = layaCollisionEvidence({ HOME: ioHome, XDG_CONFIG_HOME: join(dir, 'cfg') });
+    assert.ok(evidence.some((p) => p.startsWith(proc)), `the homedir()-resolved plist is evidence: ${JSON.stringify(evidence)}`);
+    assert.ok(evidence.every((p) => !p.startsWith(ioHome)), 'the (absent) $HOME-resolved plist is not claimed');
+  } finally {
+    process.env.HOME = oldHome;
+  }
+});
+
 
 test('runHostSetup: a PADDED MERCURY_LAYA_URL is refused like loadConfig/doctor (#840 r37)', async () => {
   // The env value reaches validateAnswers RAW: trimming in defaultAnswers would let setup
