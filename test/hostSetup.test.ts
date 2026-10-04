@@ -1602,6 +1602,38 @@ test('runHostSetup: the venv step uses the EXACT located interpreter (spaces inc
   }
 });
 
+test('runHostSetup: an EMPTY process MERCURY_LAYA_URL keeps the configured endpoint (#840 r42)', async () => {
+  // The invoking shell carries MERCURY_LAYA_URL=''; the configured external endpoint in
+  // mercury.env must keep its continuity — not be rewritten to the local default and installed
+  // over.
+  const dir = tempDir('setup-laya-emptyenv-');
+  const KEY = 'k'.repeat(32);
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: KEY });
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  // The CONFIGURED state: a previous setup wrote the external endpoint into mercury.env.
+  writeFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), `MERCURY_LAYA_URL=${fake.url}\n`);
+  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: KEY } }), { mode: 0o600 });
+  const outx: string[] = [];
+  const errx: string[] = [];
+  try {
+    const code = await runHostSetup(['--yes'], {
+      out: (s) => outx.push(s),
+      err: (s) => errx.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`,
+      sidecarReadinessBudgetMs: 10_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir, MERCURY_LAYA_URL: '' });
+    assert.equal(code, 0, `continuity run: ${errx.join('')} | ${outx.join('')}`);
+    const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
+    assert.ok(file.includes(`MERCURY_LAYA_URL=${fake.url}`), 'the configured endpoint survives');
+    assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'no local sidecar installed over the external endpoint');
+  } finally {
+    await fake.close();
+  }
+});
+
 test('runHostSetup: a PADDED layaUrl in an existing mercury.env is refused on re-run (#840 r38)', async () => {
   // existingVar trimmed the persisted value, silently normalizing (or dropping) what
   // loadConfig and the doctor refuse. The file value reaches validation raw.

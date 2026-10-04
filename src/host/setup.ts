@@ -480,10 +480,12 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     // Continuity (r21): a hand-set URL is preserved verbatim; '' only on a fresh host (the
     // wizard-managed local default is applied at render time).
     // RAW value through to validateAnswers (Copilot #840 r37): trimming here would let a
-    // padded env value pass setup while loadConfig/doctor refuse it. Only absent-and-unset-in-
-    // file falls back to ''. (layaEnabled keeps the trim: presence, not value, decides the
-    // default.)
-    layaUrl: env.MERCURY_LAYA_URL !== undefined
+    // padded env value pass setup while loadConfig/doctor refuse it. An exactly-EMPTY process
+    // value counts as absent so the configured endpoint keeps its continuity (r42) — only
+    // absent-empty-everywhere falls back to ''. Non-empty padded values still pass through raw
+    // and are refused at validation. (layaEnabled keeps the trim: presence, not value, decides
+    // the default.)
+    layaUrl: env.MERCURY_LAYA_URL !== undefined && env.MERCURY_LAYA_URL !== ''
       ? env.MERCURY_LAYA_URL
       : (existingVarRaw('MERCURY_LAYA_URL', env) || ''),
   };
