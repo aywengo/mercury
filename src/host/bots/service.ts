@@ -168,25 +168,16 @@ export function installBotService(
   env: NodeJS.ProcessEnv = process.env,
   dryRun = false,
 ): number {
-  // A pre-reservation bot must stay repairable — but a config file alone is NOT evidence:
-  // bots/<alias>.json is the normal input for a NEW install, so an operator could create one
-  // and bypass the reservation (Copilot #840 r45). Ownership evidence = an existing service
-  // unit/plist OR a bot-<alias> token registration in MERCURY_API_TOKENS. Otherwise the
-  // reservation applies (new bot).
+  // A pre-reservation bot must stay repairable — but a config file or a token registration is
+  // NOT evidence: bots/<alias>.json and a `bot-<alias>` MERCURY_API_TOKENS entry are both part
+  // of normal NEW-bot provisioning (Copilot #840 r45/r46). Only an already-installed service
+  // unit proves a pre-reservation bot; everything else enforces the reservation.
   // Same resolution the units actually use (launchd follows $HOME, systemd follows
   // XDG_CONFIG_HOME) — botPlistPath/botUnitPath read homedir() and ignore the env.
   const legacyUnitPath = platform === 'darwin'
     ? join(env.HOME?.trim() || homedir(), 'Library', 'LaunchAgents', `${botLaunchdLabel(alias)}.plist`)
     : botUnitPath(alias, env);
-  const legacyEvidence = existsSync(legacyUnitPath) ||
-    (existsSync(envFilePath(env)) && readFileSync(envFilePath(env), 'utf8').split('\n').some((line) => {
-      const m = /^MERCURY_API_TOKENS=(.*)$/.exec(line);
-      if (!m) return false;
-      return m[1]!.split(',').some((e) => {
-        const parts = e.trim().split(':');
-        return parts.length === 2 && parts[1]!.trim() === `bot-${alias}`;
-      });
-    }));
+  const legacyEvidence = existsSync(legacyUnitPath);
   try {
     if (legacyEvidence) {
       assertAliasSyntax(alias);
@@ -422,26 +413,15 @@ export function uninstallBotService(
   // would rotate the key existing clients hold. A LEGACY pre-reservation bot keeps its recovery
   // path: its config file or service unit proves bot ownership.
   if (RESERVED_BOT_ALIASES.has(alias) && !existsSync(configFile) && !existsSync(plist) && !existsSync(unitPath)) {
-    // Interrupted-uninstall recovery (Copilot #840 r44): teardown may have already removed the
-    // config and unit but crashed before the credential cleanup. A credential registered to
-    // `bot-<alias>` in MERCURY_API_TOKENS (or a remaining state file) proves a LEGACY BOT —
-    // let teardown finish. Without that registration the entry is the SIDECAR's key.
-    const stateLeft = existsSync(stateFile);
-    const botRegistered = existsSync(envFile) && readFileSync(envFile, 'utf8')
-      .split('\n')
-      .some((line) => {
-        const m = /^MERCURY_API_TOKENS=(.*)$/.exec(line);
-        if (!m) return false;
-        // An entry 'token:bot-laya' registers a BOT credential; the sidecar key is never in
-        // MERCURY_API_TOKENS.
-        return m[1]!.split(',').some((e) => {
-          const parts = e.trim().split(':');
-          return parts.length === 2 && parts[1]!.trim() === `bot-${alias}`;
-        });
-      });
-    if (!stateLeft && !botRegistered) {
+    // Interrupted-uninstall recovery (Copilot #840 r44/r46): teardown may have already removed
+    // the config and unit but crashed before the rest. A remaining STATE FILE — which new
+    // provisioning cannot create for a service that never ran — proves a legacy bot; a token
+    // registration does not (normal provisioning creates one). Without it the entry is the
+    // SIDECAR's key.
+    if (!existsSync(stateFile)) {
       io.err(`host bot service uninstall: '${alias}' is a reserved host alias (the Laya sidecar credential) and no bot named '${alias}' exists — nothing to uninstall.\n`);
       io.err('host bot service uninstall: the sidecar credential is managed by `mercury host setup`/`host doctor`, not the bot lifecycle.\n');
+      io.err(`host bot service uninstall: if a legacy bot left its token behind, remove the entry from ${envFile} manually.\n`);
       return 1;
     }
     io.out(`Resuming the interrupted uninstall of the legacy bot '${alias}'.\n`);
