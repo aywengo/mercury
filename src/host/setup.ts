@@ -945,16 +945,19 @@ export async function runHostSetup(
         io.err(`\nlaya: systemctl --user daemon-reload failed: ${(reload.stderr.trim() || reload.stdout.trim() || 'no output').split('\n')[0]}\n`);
         return 1;
       }
-      const loadCmd = ['systemctl', '--user', 'enable', '--now', plan.unitLabel];
+      // enable WITHOUT --now (r18): --now starts the unit and the restart below would kill the
+      // first process mid-preload (the ~843 MB checkpoint download) and start over. A plain
+      // enable registers the unit; the single `restart` then STARTS an inactive unit and
+      // RESTARTS an active one — exactly one startup on both the fresh and the re-run path.
+      const loadCmd = ['systemctl', '--user', 'enable', plan.unitLabel];
       io.out(`laya: loading — ${loadCmd.join(' ')}`);
       const loaded = run(loadCmd, 15_000);
       if (!loaded.ok) {
         io.err(`\nlaya: systemctl enable failed: ${(loaded.stderr.trim() || loaded.stdout.trim() || 'no output').split('\n')[0]}\n`);
         return 1;
       }
-      // enable --now does NOT restart an active unit (Copilot #840 r11): a re-run that rewrote
-      // the unit or rotated the key would leave the OLD process serving. Restart explicitly —
-      // idempotent for a first load, mandatory for a re-run.
+      // A re-run that rewrote the unit or rotated the key must not leave the OLD process
+      // serving (Copilot #840 r11) — restart unconditionally.
       const restarted = run(['systemctl', '--user', 'restart', plan.unitLabel], 15_000);
       if (!restarted.ok) {
         io.err(`\nlaya: systemctl restart failed: ${(restarted.stderr.trim() || restarted.stdout.trim() || 'no output').split('\n')[0]}\n`);
