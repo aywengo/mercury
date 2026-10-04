@@ -407,6 +407,20 @@ test('reassignBotRuns: POSTs the transfer with the admin token and the bot-confi
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('reassignBotRuns: a pre-existing bot with the reserved alias stays reassignable (#840 r33)', async () => {
+  // reassign is part of the uninstall recovery flow: a 'laya' bot predating the r31
+  // reservation must reach the transfer, not die at the alias check.
+  const dir = tempDir('bot-svc-reassign-laya-');
+  const env = setupBot(dir);
+  env.MERCURY_ADMIN_TOKEN = 'tok-admin-9';
+  let errBuf = '';
+  const io = { out: (s: string) => {}, err: (s: string) => { errBuf += s; } };
+  const rc = await reassignBotRuns('laya', 'alice', io, env, async (url, init) => {
+    return { ok: true, status: 200, json: async () => ({}) } as Response;
+  });
+  assert.equal(rc, 0, `reassign must pass the alias check: ${errBuf}`);
+});
+
 test('reassignBotRuns: no admin token, or a failed transfer, aborts with exit 1 and a message', async () => {
   const dir = tempDir('bot-svc-reassign2-');
   const env = setupBot(dir);

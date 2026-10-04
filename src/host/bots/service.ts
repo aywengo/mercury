@@ -506,7 +506,9 @@ export async function reassignBotRuns(
   post: (url: string, init: { headers: Record<string, string>; body: string; signal: AbortSignal }) =>
     Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> = (url, init) => fetch(url, init) as ReturnType<typeof fetch>,
 ): Promise<number> {
-  assertAlias(alias);
+  // Part of the uninstall recovery flow (Copilot #840 r33): a pre-existing bot with a now
+  // reserved alias must stay reassignable — syntax-only, like uninstall itself.
+  assertAliasSyntax(alias);
   const owner = toOwner.trim();
   if (owner === '') {
     io.err('host bot service uninstall: --reassign-runs requires an owner value.\n');

@@ -917,6 +917,15 @@ export async function runHostSetup(
   // Opt-in Laya sidecar (#831): interpreter gate → venv → pinned install → credentials →
   // unit. Every command is bounded; the injected runner keeps tests off the real uv/pip.
   if (answers.layaEnabled) {
+    // Alias collision FIRST (Copilot #840 r33): a pre-existing bot named 'laya' holds a
+    // MERCURY API token in the shared bot-credentials.json entry. The external path reads
+    // that entry as the sidecar key (sending a Mercury token to the sidecar), and the local
+    // path discovers the collision only after creating the venv. Refuse before branching.
+    const layaBotsPath = join(env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim() !== '' ? env.XDG_CONFIG_HOME : join(homedir(), '.config'), 'mercury', 'bots', 'laya.json');
+    if (existsSync(layaBotsPath)) {
+      io.err(`\nlaya: a bot named 'laya' exists (${layaBotsPath}); the alias is reserved for the sidecar credential — uninstall the bot or move its config, then re-run setup.\n`);
+      return 1;
+    }
     // r21: an EXTERNALLY configured URL (preserved from the old env) is verified, never
     // replaced: installing/restarting a local sidecar would silently take over the endpoint.
     const externalLaya = answers.layaUrl.trim() !== '' && answers.layaUrl.trim() !== `http://127.0.0.1:${LAYA_DEFAULT_PORT}`;

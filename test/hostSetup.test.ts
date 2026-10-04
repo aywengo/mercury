@@ -1745,6 +1745,35 @@ test('validateAnswers: a NON-STRING dataDir with the Laya sidecar enabled is rep
   assert.ok(errs.some((e) => e.startsWith('dataDir:') && e.includes('path must not be empty')), `type error reported: ${errs.join(' | ')}`);
 });
 
+test('runHostSetup: an EXTERNAL url with a pre-existing laya bot is refused before probing (#840 r33)', async () => {
+  // The external path reads the shared credential entry as the sidecar key; with a pre-existing
+  // bot 'laya' that entry is a MERCURY token. The collision must be refused before any branch —
+  // no probe, no venv.
+  const dir = tempDir('setup-laya-extbot-');
+  mkdirSync(join(dir, 'mercury', 'bots'), { recursive: true });
+  writeFileSync(join(dir, 'mercury', 'bots', 'laya.json'), JSON.stringify({ alias: 'laya', api: {}, tasks: [] }));
+  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
+  const err: string[] = [];
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: 'k'.repeat(32) });
+  try {
+    const code = await runHostSetup([], {
+      out: () => {},
+      err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`,
+      sidecarReadinessBudgetMs: 10_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir, MERCURY_LAYA_URL: `${fake.url}` });
+    assert.equal(code, 1);
+    assert.match(err.join(''), /reserved for the sidecar credential/);
+    assert.equal(fake.received.length, 0, 'no probe carries the bot token');
+    assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'nothing installed');
+  } finally {
+    await fake.close();
+  }
+});
+
 test('ensureLayaCredentials: a bot named laya refuses the sidecar credential write (#840 r31)', async () => {
   const dir = tempDir('setup-laya-alias-');
   // An existing bot 'laya' holds its MERCURY API token in the shared entry; setup must not
