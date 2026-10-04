@@ -1521,7 +1521,7 @@ test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
       sidecarDataDir: join(dir, 'data'),
       sidecarReadinessBudgetMs: 30_000,
     sidecarProbeUrl: `${fake.url}`,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_URL: 'http://127.0.0.1:8302' });
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir, MERCURY_LAYA_URL: 'http://127.0.0.1:8302' });
     assert.equal(code, 0, `re-run failed: ${out.join('')}`);
     const secondKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
     assert.equal(secondKey, firstKey, 'the re-run must NOT rotate the sidecar key');
@@ -1593,7 +1593,7 @@ test('runHostSetup: the venv step uses the EXACT located interpreter (spaces inc
       sidecarReadinessBudgetMs: 30_000,
         sidecarProbeUrl: `${fake.url}`,
       sidecarReadinessGapMs: 10,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, PATH: `${join(dir, 'Jane Doe', 'bin')}:${process.env.PATH ?? ''}` });
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir, PATH: `${join(dir, 'Jane Doe', 'bin')}:${process.env.PATH ?? ''}` });
     assert.equal(code, 0);
     assert.ok(venvArgv.length >= 1, 'the venv step ran');
     assert.equal(venvArgv[0]![0], spacedBin, `the exact spaced path is used: ${venvArgv[0]?.join(' ')}`);
@@ -1927,7 +1927,7 @@ test('runHostSetup: the readiness budget bounds a huge MERCURY_LAYA_TIMEOUT_MS (
       sidecarProbeUrl: `${fake.url}`,
       sidecarReadinessBudgetMs: 2_000,
       sidecarReadinessGapMs: 10,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_TIMEOUT_MS: '600000' });
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir, MERCURY_LAYA_TIMEOUT_MS: '600000' });
     const elapsed = Date.now() - t0;
     assert.equal(code, 1);
     assert.ok(elapsed < 15_000, `the budget bounds the wait: ${elapsed} ms`);
