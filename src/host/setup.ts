@@ -923,13 +923,21 @@ export async function runHostSetup(
         return 1;
       }
       // The doctor's own credential resolution (runHostDoctor): read the 'laya' entry and use
-      // its api key; an unreadable/missing entry degrades to a key-less probe (same 401
-      // handling) instead of failing here (r22).
+      // its api key. A missing/unreadable entry is a NAMED FAILURE exactly as the doctor
+      // reports it ("auth cannot be checked") — probing key-less would let an auth-disabled
+      // endpoint answer 200 and print `doctor ok` for a config the doctor immediately rejects
+      // (Copilot #840 r27).
       let apiKey: string | undefined;
+      let keyDetail: string | undefined;
       try {
         apiKey = readBotCredentials('laya', env).api;
-      } catch {
-        apiKey = undefined;
+      } catch (err) {
+        keyDetail = (err as Error).message;
+      }
+      if (apiKey === undefined) {
+        io.err(`\nlaya: auth cannot be checked: ${keyDetail ?? 'no laya credentials'}\n`);
+        io.err('laya: write the laya bot-credentials entry (or unset MERCURY_LAYA_URL to let setup manage a local sidecar), then re-run.\n');
+        return 1;
       }
       io.out(`laya: external endpoint ${answers.layaUrl.trim()} preserved — verifying with the doctor probe (no local install)\n`);
       const probe = await checkLaya(answers.layaUrl.trim(), apiKey, timeout0.timeoutMs);

@@ -1604,9 +1604,12 @@ test('runHostSetup: the venv step uses the EXACT located interpreter (spaces inc
 
 test('runHostSetup: an EXTERNAL MERCURY_LAYA_URL is preserved and verified, not replaced (#840 r21)', async () => {
   const dir = tempDir('setup-laya-ext-');
-  // External endpoint: setup holds no key for it (the doctor probes with an empty key too),
-  // so the fake runs auth-off — reachability is the gate here, not ownership.
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], {});
+  // External endpoint with a READABLE credential (r27: a missing/unreadable entry is a named
+  // failure, doctor parity) — the fake requires exactly that bearer key.
+  const KEY = 'k'.repeat(32);
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: KEY } }), { mode: 0o600 });
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: KEY });
   const outx: string[] = [];
   const errx: string[] = [];
   try {
@@ -1625,6 +1628,29 @@ test('runHostSetup: an EXTERNAL MERCURY_LAYA_URL is preserved and verified, not 
     assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'no local sidecar is installed over an external endpoint');
     assert.ok(!existsSync(join(dir, 'Library', 'LaunchAgents', 'com.mercury.laya.plist')), 'no unit is written (darwin check)');
     assert.ok(outx.join('').includes('external endpoint'), `the operator is told: ${outx.join('')}`);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('runHostSetup: an external URL WITHOUT laya credentials fails like the doctor (auth cannot be checked) (#840 r27)', async () => {
+  const dir = tempDir('setup-laya-nokey-');
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], {}); // auth-off: a key-less probe would 200
+  const outx: string[] = [];
+  const errx: string[] = [];
+  try {
+    const code = await runHostSetup([], {
+      out: (s) => outx.push(s),
+      err: (s) => errx.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_URL: `${fake.url}` });
+    assert.equal(code, 1, `must refuse: ${outx.join('')} | ${errx.join('')}`);
+    assert.match(errx.join(''), /auth cannot be checked/);
+    assert.equal(fake.received.length, 0, 'no probe is sent without a key');
+    assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'nothing installed');
   } finally {
     await fake.close();
   }
