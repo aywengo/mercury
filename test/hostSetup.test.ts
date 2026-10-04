@@ -1831,7 +1831,7 @@ test('runHostSetup: the unit temp file is created exclusively at 0600 (#840 r52)
   // The unit path is platform-specific: launchd plist (darwin, $HOME) vs systemd user unit.
   const unitDir = process.platform === 'darwin'
     ? join(dir, 'Library', 'LaunchAgents')
-    : join(dir, '.config', 'systemd', 'user');
+    : join(dir, 'systemd', 'user'); // XDG_CONFIG_HOME is already the base
   mkdirSync(unitDir, { recursive: true });
   const stale = join(unitDir, `.com.mercury.laya.tmp-999999`);
   writeFileSync(stale, 'STALE-UNIT\n', { mode: 0o644 });
