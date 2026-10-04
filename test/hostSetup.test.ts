@@ -1469,7 +1469,7 @@ test('runHostSetup: Laya OPT-IN writes MERCURY_LAYA_URL + credentials + unit (sc
     // The fake answers immediately; shrink the readiness window (r11 knob).
     sidecarReadinessBudgetMs: 30_000,
       sidecarProbeUrl: `${fake.url}`,
-  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
   assert.equal(code, 0, `setup failed: ${out.join('')}`);
   const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
   assert.ok(file.includes('MERCURY_LAYA_URL=http://127.0.0.1:8302'), 'the opt-in writes the env key');
@@ -1508,7 +1508,7 @@ test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
       sidecarDataDir: join(dir, 'data'),
       sidecarReadinessBudgetMs: 30_000,
     sidecarProbeUrl: `${fake.url}`,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
     const credsPath = join(dir, 'mercury', 'bot-credentials.json');
     const firstKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
     // Second run: env now carries MERCURY_LAYA_URL (default yes), re-run with --yes.
@@ -1547,7 +1547,7 @@ test('runHostSetup: an invalid MERCURY_LAYA_TIMEOUT_MS refuses with the doctor w
       sidecarReadinessBudgetMs: 30_000,
     sidecarProbeUrl: `${fake.url}`,
       sidecarReadinessGapMs: 10,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
     const envPath = envFilePath({ XDG_CONFIG_HOME: dir });
     writeFileSync(envPath, readFileSync(envPath, 'utf8') + 'MERCURY_LAYA_TIMEOUT_MS=0\n');
     const code = await runHostSetup(['--yes'], {
@@ -1559,7 +1559,7 @@ test('runHostSetup: an invalid MERCURY_LAYA_TIMEOUT_MS refuses with the doctor w
       sidecarReadinessBudgetMs: 30_000,
     sidecarProbeUrl: `${fake.url}`,
       sidecarReadinessGapMs: 10,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
     assert.equal(code, 1);
     assert.ok(err.join('').includes('MERCURY_LAYA_TIMEOUT_MS must be a positive integer'), `doctor wording: ${err.join('')}`);
   } finally {
@@ -1647,6 +1647,9 @@ test('validateAnswer: layaUrl must be a loopback BASE URL without a route (#840 
   assert.match(validateAnswer('layaUrl', 'http://host:8302/v1/systemone') ?? '', /(loopback host|without a route path)/);
   assert.equal(validateAnswer('layaUrl', 'http://127.0.0.1:8302'), null);
   assert.equal(validateAnswer('layaUrl', 'http://localhost:9000'), null);
+  // r24: '::1' is NOT accepted — the bracketed literal fails the charset gate later, so the
+  // message must not advertise it.
+  assert.match(validateAnswer('layaUrl', 'http://[::1]:8302') ?? '', /loopback host \(127\.0\.0\.1 or localhost\)/);
   assert.equal(validateAnswer('layaUrl', ''), null);
   // r23: URL-only contract — an embedded user:password would be written to the env file and
   // printed by the external/dry-run paths.
@@ -1739,7 +1742,7 @@ test('runHostSetup: the readiness gate REQUIRES auth — an open sidecar on the 
       sidecarProbeUrl: `${fake.url}`,
       sidecarReadinessBudgetMs: 10_000,
       sidecarReadinessGapMs: 10,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
     assert.equal(code, 1);
     assert.ok(err.join('').includes('answers WITHOUT a key'), `named failure: ${err.join('')}`);
   } finally {
@@ -1788,7 +1791,7 @@ test('runHostSetup: the readiness window retries until the sidecar answers (#840
       sidecarReadinessBudgetMs: 30_000,
     sidecarProbeUrl: `${fake.url}`,
       sidecarReadinessGapMs: 20,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
     assert.equal(code, 0, `setup failed: ${out.join('')}`);
     assert.ok(out.join('').includes('laya: doctor ok'), `probe eventually green: ${out.join('')}`);
     assert.ok(fake.received.length >= 2, `retried after the first refusal (${fake.received.length} probes)`);

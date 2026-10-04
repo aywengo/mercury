@@ -193,8 +193,11 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
         return 'layaUrl must be an absolute URL (e.g. http://127.0.0.1:8302)';
       }
       if (u.protocol !== 'http:') return 'layaUrl must use http:// (the sidecar is loopback-only)';
-      if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost' && u.hostname !== '::1') {
-        return `layaUrl must be a loopback host (127.0.0.1/localhost/::1), got '${u.hostname}'`;
+      // NOTE: not ::1 — Node's URL host for a bracketed IPv6 literal is '[::1]', which
+      // SAFE_VALUE_RE then rejects; advertising it would promise an input that can never pass
+      // (Copilot #840 r24). The sidecar binds 127.0.0.1 anyway.
+      if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') {
+        return `layaUrl must be a loopback host (127.0.0.1 or localhost), got '${u.hostname}'`;
       }
       if (u.pathname !== '/' && u.pathname !== '') return `layaUrl must be a base URL without a route path (the client appends /v1/systemone), got '${u.pathname}'`;
       if (u.search || u.hash) return 'layaUrl must not carry a query or fragment';
