@@ -948,7 +948,13 @@ export async function runHostSetup(
       // ANY registry match is refused (Copilot #840 r55): a token shared with ANY bot owner
       // (not just bot-laya) would authorize one secret for both the Mercury API and Laya.
       const owner = registryText ? registeredLayaOwner(registryText, layaApi) : null;
-      const adminMatch = layaApi !== '' && layaApi === existingVars.MERCURY_ADMIN_TOKEN;
+      // Compare against every resolved admin-token source (Copilot #840 r56): the old env file
+      // value AND the resolved answer (which may come from the process environment or an
+      // answers file and differ from the file's old value).
+      const adminCandidates = [existingVars.MERCURY_ADMIN_TOKEN, answers.adminToken]
+        .map((v) => (typeof v === 'string' ? v.trim() : ''))
+        .filter((v) => v !== '');
+      const adminMatch = layaApi !== '' && adminCandidates.includes(layaApi);
       if (owner !== null) {
         io.err(`\nlaya: the existing laya credential is still registered as a MERCURY token (owner '${owner}' in MERCURY_API_TOKENS) — reusing it as the sidecar key would let one secret authorize both services.\n`);
         io.err('laya: if this came from an interrupted bot uninstall, finish it (re-run `mercury host bot service uninstall --alias laya --yes` after restoring its unit, or remove the entry from MERCURY_API_TOKENS by hand), then re-run setup.\n');
@@ -1100,21 +1106,6 @@ export async function runHostSetup(
         const r = run([join(plan.venvDir, 'bin', 'python3'), '-m', 'pip', 'install', `laya[serve]==${LAYA_SERVE_PIN}`], 300_000);
         if (!r.ok) throw new Error(`pip install laya[serve]==${LAYA_SERVE_PIN} failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
       }],
-      ['commit', () => {
-        // The new environment is complete — the old one is no longer needed. Sweep stale
-        // siblings from crashed runs — ONLY the exact generated shape '<venv>.backup-<pid>'
-        // with a NUMERIC pid (Copilot #840 r50): an operator's 'laya-venv.backup-manual' must
-        // never be touched.
-        if (existsSync(backupDir)) rmSync(backupDir, { recursive: true, force: true });
-        const venvBase = basename(plan.venvDir);
-        const venvParent = dirname(plan.venvDir);
-        for (const entry of existsSync(venvParent) ? readdirSync(venvParent) : []) {
-          const m = entry.startsWith(`${venvBase}.backup-`)
-            ? /^\.backup-(\d+)$/.exec(entry.slice(venvBase.length))
-            : null;
-          if (m) rmSync(join(dirname(plan.venvDir), entry), { recursive: true, force: true });
-        }
-      }],
       ['credentials', () => {
         ensureLayaCredentials(env);
       }],
@@ -1149,6 +1140,20 @@ export async function runHostSetup(
         io.out(`laya: ${name} ok\n`);
       }
       io.out(`laya: unit written at ${plan.unitPath}\n`);
+      // The venv, credentials and unit all succeeded — the old environment is no longer needed
+      // (Copilot #840 r56: the backup must OUTLIVE every fallible credential/unit write so a
+      // late failure can still roll back). Sweep stale siblings from crashed runs — ONLY the
+      // exact generated shape '<venv>.backup-<pid>' with a NUMERIC pid (Copilot #840 r50): an
+      // operator's 'laya-venv.backup-manual' must never be touched.
+      if (existsSync(backupDir)) rmSync(backupDir, { recursive: true, force: true });
+      const venvBase = basename(plan.venvDir);
+      const venvParent = dirname(plan.venvDir);
+      for (const entry of existsSync(venvParent) ? readdirSync(venvParent) : []) {
+        const m = entry.startsWith(`${venvBase}.backup-`)
+          ? /^\.backup-(\d+)$/.exec(entry.slice(venvBase.length))
+          : null;
+        if (m) rmSync(join(dirname(plan.venvDir), entry), { recursive: true, force: true });
+      }
     } catch (e) {
       // Rollback (Copilot #840 r55): any failure after the backup step removes the possibly
       // broken new venv and restores the previous environment, so a still-enabled unit keeps a

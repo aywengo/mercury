@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, chmodSync, readFileSync, rmSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
@@ -1890,6 +1890,77 @@ test('runHostSetup: a laya credential shared with ANY bot owner or the admin tok
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
     assert.equal(code, 1, `${label}: must refuse (${err.join('')})`);
     assert.match(err.join(''), /one secret authorize both services|hand the admin credential/);
+  }
+});
+
+test('runHostSetup: the laya credential equal to the process-env admin token refuses (#840 r56)', async () => {
+  // The resolved admin token can come from the process environment (not the old env file) —
+  // the gate must compare the RESOLVED answer, not just the file's old value.
+  const dir = tempDir('setup-laya-admenv-');
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'tok-admin-env' } }), { mode: 0o600 });
+  const err: string[] = [];
+  const code = await runHostSetup([], {
+    out: () => {}, err: (s) => err.push(s),
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarReadinessBudgetMs: 2_000, sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone',
+  }, { ...probeStubEnv(), MERCURY_ADMIN_TOKEN: 'tok-admin-env', XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+  assert.equal(code, 1, `process-env admin match must refuse (${err.join('')})`);
+  assert.match(err.join(''), /equals MERCURY_ADMIN_TOKEN/);
+});
+
+test('runHostSetup: the backup survives a unit-write failure and rolls back (#840 r56)', async () => {
+  const dir = tempDir('setup-laya-unitfail-');
+  const live = join(dir, 'data', 'laya-venv');
+  const installedMarker = join(live, 'bin', '.laya-installed');
+  const sidecarRun = (argv: string[]) => {
+    if (argv[0] === 'uv' && argv[1] === 'venv') {
+      rmSync(argv[2]!, { recursive: true, force: true });
+      mkdirSync(join(argv[2]!, 'bin'), { recursive: true });
+      writeFileSync(join(argv[2]!, 'bin', 'python3'), '#!/bin/sh\n', { mode: 0o755 });
+    } else if (argv.includes('pip')) {
+      const venvBin = dirname(argv[0]!);
+      mkdirSync(venvBin, { recursive: true });
+      writeFileSync(join(venvBin, '.laya-installed'), 'ok\n');
+    }
+    return okRun(argv);
+  };
+  // Healthy install first so a live venv exists; then make the UNIT dir read-only.
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
+  try {
+    const code = await runHostSetup([], {
+      out: () => {}, err: () => {},
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+    assert.equal(code, 0, 'first install failed');
+    assert.ok(existsSync(installedMarker), 'marker installed');
+    // Make the macOS unit dir read-only so the unit temp write fails AFTER the venv rebuild.
+    const unitDir = process.platform === 'darwin'
+      ? join(dir, 'Library', 'LaunchAgents')
+      : join(dir, 'systemd', 'user');
+    mkdirSync(unitDir, { recursive: true });
+    chmodSync(unitDir, 0o555);
+    const err: string[] = [];
+    try {
+      const code2 = await runHostSetup(['--yes'], {
+        out: () => {}, err: (s) => err.push(s),
+        question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+        sidecarRun, sidecarDataDir: join(dir, 'data'),
+        sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
+      }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+      assert.equal(code2, 1, `unit-write failure must fail the run: ${err.join('')}`);
+      assert.match(err.join(''), /not installed/);
+      // Rollback restored the previous environment: the installed marker is intact.
+      assert.ok(existsSync(installedMarker), 'the previous install survives a unit-write failure');
+      // And no generated backup venv leaks after the rollback.
+      assert.ok(!readdirSync(join(dir, 'data')).some((e) => /^laya-venv\.backup-\d+$/.test(e)), 'no backup leak');
+    } finally {
+      chmodSync(unitDir, 0o755);
+    }
+  } finally {
+    await fake.close();
   }
 });
 
