@@ -1349,10 +1349,18 @@ export class Worker {
       }
       return { ok: true };
     } catch (err) {
-      // Unreadable or malformed file at claim time: an error, never "no profile" (§9).
+      // Unreadable or malformed file at claim time: an error, never "no profile" (§9). The
+      // detail (absolute path, mode, schema field) stays in the SERVER log; the persisted
+      // run.error and events carry only the generic reason, because a Run owner can read
+      // run.error and must not learn host configuration from it (Copilot review round 1 on
+      // #841).
+      this.deps.logger.warn(
+        { runId: run.id, error: String(err instanceof Error ? err.message : err) },
+        'credential profile file could not be read at claim time',
+      );
       return {
         ok: false,
-        message: `credential profile changed since creation (the profile file could not be read: ${(err as Error).message})`,
+        message: 'credential profile changed since creation (the profile file could not be read or validated)',
         created: createdName,
         now: 'unreadable',
       };

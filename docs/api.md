@@ -324,7 +324,13 @@ file paths) never appear on the Run, its row, or its events.
 - Claim/resume parity: if the re-resolved result at claim time differs from the stored name
   (profile removed, owner dropped, repository re-bound, or the file unreadable), the Run goes
   terminal `FAILED` with `credential profile changed since creation` — it is never driven
-  under a different identity.
+  under a different identity. The persisted reason is generic: a load failure's diagnostic
+  (absolute path, mode, schema field) stays in the server log, never in `run.error` or events.
+- Resolution reads the REDACTED repository references that are stored on the Run, so creation
+  and the claim-time re-read always resolve the same bytes. A repository reference whose
+  redacted form is not a valid `host/owner/name` id has no id on either side and consistently
+  matches no profile. Owner-wide patterns (`host/owner/*`) in a profile match exact
+  repository ids under that owner.
 - Retry parity: retrying a Run after its profile changed refuses the retry with the same
   reason; create a new Run instead of resuming under a changed identity.
 

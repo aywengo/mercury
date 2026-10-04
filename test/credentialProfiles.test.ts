@@ -17,6 +17,7 @@ import {
 } from '../src/host/credentials-profiles.ts';
 import { ForbiddenError } from '../src/domain/errors.ts';
 import { makeEnv, makeGitRepo, tempDir, waitFor } from './helpers.ts';
+import { createRedactor } from '../src/domain/redact.ts';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -286,6 +287,52 @@ test('a credential-bearing repository URL is never echoed in normalization error
 // CP-3 (issue #807): resolveProfile — the pure §5.3 table
 // ---------------------------------------------------------------------------
 
+test('wildcard owner patterns match exact repository ids, both owner outcomes (review round 1 on #841)', () => {
+  const wildcard = [P('nightly', ['github.com/aywengo/*'], ['bot-nightly'])];
+  // Allowed owner: the wildcard profile resolves, exactly like an exact claim would.
+  assert.deepEqual(resolveProfile(wildcard, 'bot-nightly', [U('https://GitHub.com/Aywengo/Mercury.git')]),
+    { outcome: 'profile', name: 'nightly' });
+  // Same wildcard, a DIFFERENT repository under the same owner: still claimed.
+  assert.deepEqual(resolveProfile(wildcard, 'bot-nightly', [U('git@github.com:aywengo/other.git')]),
+    { outcome: 'profile', name: 'nightly' });
+  // Disallowed owner: the wildcard's owner restriction is NOT bypassed by the wildcard.
+  const denied = resolveProfile(wildcard, 'mallory', [U('github.com/aywengo/mercury')]);
+  assert.equal(denied.outcome, 'refused');
+  assert.equal((denied as { reason: string }).reason, 'owner-not-allowed');
+  assert.deepEqual((denied as { profiles: string[] }).profiles, ['nightly']);
+  // A repository under a DIFFERENT owner does not match the wildcard.
+  assert.deepEqual(resolveProfile(wildcard, 'bot-nightly', [U('github.com/other/repo')]), { outcome: 'none' });
+  // The wildcard id itself (a Run url of 'host/owner/*') is a pattern shape that normalizes
+  // deterministically, so exact equality against the profile's own entry matches — the same
+  // answer on both parity sides.
+  assert.deepEqual(resolveProfile(wildcard, 'mallory', [U('github.com/aywengo/*')]),
+    { outcome: 'refused', reason: 'owner-not-allowed', profiles: ['nightly'], message: (resolveProfile(wildcard, 'mallory', [U('github.com/aywengo/*')]) as { message: string }).message });
+});
+
+test('standard SSH URI form (ssh://git@host/path) normalizes like the SCP form (review round 1 on #841)', () => {
+  assert.equal(normalizeRepositoryId('ssh://git@github.com/aywengo/mercury.git'), 'github.com/aywengo/mercury');
+  assert.equal(normalizeRepositoryId('ssh://git@GitHub.com/Aywengo/Mercury/'), 'github.com/aywengo/mercury');
+  // Resolution over the URI form finds the same profile the SCP form finds.
+  assert.deepEqual(resolveProfile(TWO, 'bot-nightly', [U('ssh://git@github.com/aywengo/mercury.git')]),
+    { outcome: 'profile', name: 'nightly' });
+  // A user:password SSH URI still refuses (credential rejection preserved) and never echoes it.
+  const secret = 'ghp_SUPERSECRET0123456789';
+  try {
+    normalizeRepositoryId(`ssh://user:${secret}@github.com/a/b`);
+    assert.fail('expected a refusal');
+  } catch (err) {
+    assert.ok(!(err as Error).message.includes(secret));
+  }
+});
+
+test('an unnormalizable repository url has no id: skipped identically on both sides (review round 1 on #841)', () => {
+  // A redacted or malformed url used to throw; it must resolve to none so creation and the
+  // claim-time re-read (which resolve the SAME stored bytes) can never disagree about it.
+  assert.deepEqual(resolveProfile(TWO, 'bot-nightly', [U('https://github.com/aywengo/[REDACTED].git')]),
+    { outcome: 'none' });
+  assert.deepEqual(resolveProfile(TWO, 'bot-nightly', [U('ftp://github.com/a/b')]), { outcome: 'none' });
+});
+
 const P = (name: string, repositories: string[], owners: string[]) =>
   ({ name, repositories, owners, env: {}, sandbox: false });
 const U = (url: string) => ({ url });
@@ -540,6 +587,42 @@ test('claim-time parity: editing the file between creation and claim fails the R
   }
 });
 
+test('claim-time parity: an unreadable file persists only the generic reason, detail stays in the log (review round 1 on #841)', async () => {
+  const dir = tempDir('cp3-parity-unreadable-');
+  const cfg = join(dir, 'cfg', 'mercury');
+  mkdirSync(cfg, { recursive: true });
+  const filePath = join(cfg, 'credential-profiles.json');
+  writeFileSync(filePath, JSON.stringify(CP));
+  chmodSync(filePath, 0o600);
+  const logs: string[] = [];
+  const env = makeEnv({
+    credentialProfiles: () => loadCredentialProfiles({ XDG_CONFIG_HOME: join(dir, 'cfg') } as never),
+    logCapture: (_l: string, _m: string, f: Record<string, unknown>) => logs.push(JSON.stringify(f)),
+  } as never);
+  try {
+    const run = env.runService.create({
+      ownerId: 'bot-nightly', task: 'x', agent: 'fake',
+      repository: { url: 'https://github.com/aywengo/mercury.git' },
+    });
+    assert.equal(run.credentialProfile, 'nightly');
+    // The file becomes world-readable before the claim: the loader refusal names the absolute
+    // path, which must reach the SERVER log but never run.error or the events.
+    chmodSync(filePath, 0o644);
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    const row = env.runs.get(run.id)!;
+    assert.equal(row.status, 'FAILED');
+    assert.match(row.error ?? '', /credential profile changed since creation/);
+    assert.ok(!row.error!.includes(dir), 'the absolute file path must not reach run.error');
+    const errEvents = env.events.list(run.id).filter((e) => e.type === 'error');
+    for (const e of errEvents) assert.ok(!JSON.stringify(e.payload).includes(dir));
+    assert.ok(logs.some((l) => l.includes(dir)), 'the detailed diagnostic stays in the server log');
+  } finally {
+    env.worker.stop();
+    env.close();
+  }
+});
+
 test('claim-time parity is silent when the file did not change (the mutation check, acceptance 4)', async () => {
   const dir = tempDir('cp3-parity-ok-');
   const cfg = join(dir, 'cfg', 'mercury');
@@ -587,10 +670,9 @@ test('retry parity: a changed profile refuses the retry (acceptance 5)', async (
     // The profile's owners no longer include the Run's owner.
     const rebound = { profiles: [{ ...CP.profiles[0], owners: ['someone-else'] }] };
     (env.runService as unknown as { deps: { credentialProfiles: () => unknown } }).deps.credentialProfiles = () => rebound;
-    // The retry's own fresh resolution hits the owner-not-allowed refusal first (the profile
-    // still claims the repository, so resolution is refused rather than "none") — a refusal is
-    // also a parity refusal: the retry is never created and the parent's identity is never
-    // silently replaced by "none".
+    // The retry re-resolves inside create() against the owner-not-allowed refusal — a refusal
+    // is also a parity refusal: the retry is never created and the parent's identity is never
+    // silently replaced.
     assert.throws(
       () => env.runService.retry(original.id, 'bot-nightly', true),
       (err: unknown) => err instanceof ForbiddenError
@@ -604,6 +686,71 @@ test('retry parity: a changed profile refuses the retry (acceptance 5)', async (
       () => env.runService.retry(original.id, 'bot-nightly', true),
       (err: unknown) => err instanceof Error && /credential profile changed since creation/.test(err.message),
     );
+  } finally {
+    env.close();
+  }
+});
+
+test('retry parity has no window between the parity read and the persisted value (review round 1 on #841)', async () => {
+  // A loader that returns profile 'a' on the parity read and 'b' on create()'s read used to
+  // slip through a guard-then-create pair: the guard compared against 'a' and create() stored
+  // 'b' (or none). The expectation now rides INTO create(), which compares against the SAME
+  // read it persists from — the divergent loader refuses the retry outright.
+  const dir = tempDir('cp3-retry-race-');
+  const repo = makeGitRepo(join(dir, 'repo'));
+  const A = [P('a', ['github.com/aywengo/mercury'], ['bot-nightly'])];
+  const B = [P('b', ['github.com/aywengo/mercury'], ['bot-nightly'])];
+  let call = 0;
+  const env = makeEnv({
+    workerEnabled: false,
+    credentialProfiles: () => (call++ === 0 ? { profiles: A } : { profiles: B }) as never,
+  } as never);
+  try {
+    const original = env.runService.create({
+      ownerId: 'bot-nightly', task: 'x', agent: 'fake',
+      repository: { url: 'https://github.com/aywengo/mercury.git', localPath: repo },
+      constraints: { maxDurationMs: 60_000, maxRetries: 2 },
+    });
+    assert.equal(original.credentialProfile, 'a');
+    env.runService.cancel(original.id, 'bot-nightly', true);
+    call = 1; // the retry's parity read inside create() sees 'b', not 'a'
+    assert.throws(
+      () => env.runService.retry(original.id, 'bot-nightly', true),
+      (err: unknown) => err instanceof Error && /credential profile changed since creation/.test(err.message),
+    );
+    // Nothing was created: no retry Run row exists beyond the original.
+    const rows = env.db.prepare('SELECT id FROM runs').all() as { id: string }[];
+    assert.equal(rows.length, 1, 'a divergent read must not persist a Run under a changed identity');
+  } finally {
+    env.close();
+  }
+});
+
+test('a redaction that mangles the repository url resolves identically at creation and claim (review round 1 on #841)', async () => {
+  // With a redactor that rewrites part of the URL, creation must resolve the REDACTED bytes it
+  // stores (not the raw caller bytes): otherwise the stored row and the claim-time re-read
+  // disagree and an unchanged file looks like a parity violation. The mangled url has no id on
+  // either side, so the Run consistently carries no profile.
+  const dir = tempDir('cp3-redactor-');
+  const repo = makeGitRepo(join(dir, 'repo'));
+  const env = makeEnv({
+    workerEnabled: false,
+    ...profilesDeps([CP.profiles[0]]),
+    redactor: createRedactor(['mercury']), // 'mercury' is a secret word on this host
+  } as never);
+  try {
+    const run = env.runService.create({
+      ownerId: 'bot-nightly', task: 'x', agent: 'fake',
+      repository: { url: 'https://github.com/aywengo/mercury.git', localPath: repo },
+    });
+    const stored = env.runs.get(run.id)!;
+    assert.ok((stored.repository.url ?? '').includes('[REDACTED]'), 'the stored url is the redacted one');
+    assert.equal(stored.credentialProfile, null, 'the mangled id matches nothing, consistently');
+    // The claim-time re-read over the SAME stored bytes agrees — no parity refusal.
+    const parity = (env.worker as unknown as {
+      checkCredentialProfileParity(run: unknown): { ok: boolean };
+    }).checkCredentialProfileParity(stored);
+    assert.equal(parity.ok, true);
   } finally {
     env.close();
   }

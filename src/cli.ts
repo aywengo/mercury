@@ -71,7 +71,7 @@ import { runBot, makeBotClient } from './host/bots/process.ts';
 import { dispatchTask } from './host/bots/dispatch.ts';
 import { statusView, renderStatus } from './host/bots/status.ts';
 import { botCredentialsPath, readBotCredentials, registeredOwnerForToken } from './host/bots/credentials.ts';
-import { validateCredentialProfiles, loadCredentialProfiles, resolveProfile } from './host/credentials-profiles.ts';
+import { validateCredentialProfiles, loadCredentialProfiles, resolveProfile, normalizeRepositoryId } from './host/credentials-profiles.ts';
 import { botOwnerId } from './host/bots/keys.ts';
 import { hostStatus, printStatus, upgradeHost, uninstallHost } from './host/lifecycle.ts';
 import { HOST_VERSION } from './version.ts';
@@ -287,6 +287,18 @@ async function main(): Promise<void> {
       }
       try {
         const { profiles } = loadCredentialProfiles();
+        // An operator typo'd --repo must be an error, not a silent "none": validate each
+        // argument normalizes before resolution (the API path skips unnormalizable ids on
+        // purpose — creation must not start failing for shapes pre-CP-3 accepted).
+        for (const url of repos) {
+          try {
+            normalizeRepositoryId(url);
+          } catch {
+            process.stderr.write(`host credentials resolve: '${url}' is not a repository id (host/owner/name)\n`);
+            process.exitCode = 1;
+            return;
+          }
+        }
         const resolution = resolveProfile(profiles, owner, repos.map((url) => ({ url })));
         // The profile name or the refusal reason — never a value (§5.1): no env entries, no
         // token names, no file paths from the profile appear here.

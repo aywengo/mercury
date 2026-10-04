@@ -76,7 +76,12 @@ export function normalizeRepositoryId(raw: string): string {
   const original = redactUserInfo(raw);
   let s = raw.trim();
   if (s === '') throw new Error('repository id is empty');
-  const scp = /^(?:ssh:\/\/)?git@([^/:]+):(.+?)$/i.exec(s);
+  // SCP form (git@host:path) AND the standard SSH URI form (ssh://git@host/path, and the bare
+  // git@host/path written after ssh:// has been stripped). One regex covers both: after
+  // 'ssh://' is removed, 'git@host/path' has the same shape as the colon form with '/' as the
+  // separator. A user:password authority never matches git@, so credential-bearing URLs still
+  // fall through to the shape errors (with the userinfo redacted in `original`).
+  const scp = /^(?:ssh:\/\/)?git@([^/:]+)[:\/](.+?)$/i.exec(s);
   if (scp) s = `${scp[1]}/${scp[2]}`;
   else s = s.replace(/^(?:https|ssh):\/\//i, '');
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) throw new Error(`unsupported repository URL scheme in '${original}'`);
@@ -349,13 +354,28 @@ export type ProfileResolution =
   | { outcome: 'refused'; reason: 'multiple-profiles' | 'owner-not-allowed'; profiles: string[]; message: string };
 
 /**
+ * Does this profile claim the id: an exact normalized match, or an owner-wide pattern
+ * (`host/owner/*`, the only wildcard form §5.2 allows) whose prefix the id sits under.
+ * Overlapping claims ACROSS profiles are refused at load, so a claimed id still maps to exactly
+ * one profile.
+ */
+function profileClaims(profile: CredentialProfile, id: string): boolean {
+  for (const repo of profile.repositories) {
+    if (repo === id) return true;
+    if (repo.endsWith('/*') && id.startsWith(repo.slice(0, -1)) && !id.endsWith('/*')) return true;
+  }
+  return false;
+}
+
+/**
  * Which profile a Run uses, per design §5.3. `repositories` holds the Run's primary repository
  * plus every entry of `repositories[]`; entries with no `url` (localPath-only, or empty) have no
  * id and match nothing, so a Run can carry a public dependency checkout alongside a claimed repo.
  *
- * A malformed `url` throws (normalizeRepositoryId): a Run that cannot state its repository id
- * must not be resolved by guessing. With no profile file loaded this function is never called —
- * a host without profiles behaves exactly as before CP-3.
+ * A `url` that does not normalize (malformed shape, or a redaction that replaced part of it) has
+ * no id and matches nothing — the same answer as pre-CP-3 — rather than refusing a Run that
+ * created fine before profiles existed. With no profile file loaded this function is never
+ * called — a host without profiles behaves exactly as before CP-3.
  *
  * The owner is compared case-insensitively (GitHub logins are case-insensitive; repository ids
  * are already lowercased by normalizeRepositoryId). Profile `owners` are stored as written.
@@ -371,9 +391,19 @@ export function resolveProfile(
   const matched = new Map<string, string>(); // profile name -> one redacted id that matched it
   for (const repo of repositories) {
     if (typeof repo.url !== 'string' || repo.url.trim() === '') continue; // no id, matches nothing
-    const id = normalizeRepositoryId(repo.url);
+    // An id that does not normalize (a redacted or malformed URL, a scheme shape the §5.2 table
+    // does not know) has NO id: it matches nothing and is skipped. Both sides of the parity
+    // check (creation and claim) resolve the SAME stored bytes, so a skipped id is skipped
+    // identically on both sides — refusing here instead would turn a Run that pre-CP-3 created
+    // fine into a 500 whenever any profile exists, even on an unrelated repository.
+    let id: string;
+    try {
+      id = normalizeRepositoryId(repo.url);
+    } catch {
+      continue;
+    }
     for (const profile of profiles) {
-      if (!profile.repositories.includes(id)) continue;
+      if (!profileClaims(profile, id)) continue;
       // Overlapping patterns were refused at load (§5.2/§9), so an id can only ever match ONE
       // profile; the first sighting names the refusal. The other ids are still inspected so a
       // Run matching two DIFFERENT profiles reports the broader multiple-profiles refusal.

@@ -63,6 +63,15 @@ export interface CreateRunInput {
   skillSnapshots?: ResolvedSkill[];
   constraints?: Partial<RunConstraints>;
   /**
+   * INTERNAL — retry only, never accepted from HTTP (the route forwards named fields only).
+   * The parent Run's stored credential profile: the retry's OWN resolution inside create() must
+   * equal it, checked against the SAME file read that decides the retry's stored value. That
+   * closes the two-reads window (Copilot review round 1 on #841): a guard that read the file in
+   * retry() and again in create() could pass on read 1 and persist a changed profile from
+   * read 2, letting the parent's work resume under a different identity.
+   */
+  retryCredentialProfile?: string | null;
+  /**
    * Optional objective for the Run (docs/goals.md). `undefined` means no goal and the Run
    * behaves exactly as before. Validated and resolved against `task` in create(); an
    * omitted objective defaults to the task text.
@@ -584,15 +593,22 @@ export class RunService {
     // settled (the primary is the first list entry when only the list form is given), BEFORE
     // anything is written: a refusal must leave no Run row, no event, no skill snapshot.
     //
-    // Resolved against the REDACTED repository objects that are about to be stored, so creation
-    // and the claim-time re-check (worker.ts) read the same bytes and can never disagree about
-    // an id because of redaction. Refusals carry the profile NAME and the reason (§5.4) — never
-    // the file's contents, env names or file paths: a caller who may not use a profile learns
-    // nothing about it.
+    // Resolved against the REDACTED repository objects that are about to be stored, computed
+    // HERE so resolution and persistence read the same bytes: the claim-time re-check
+    // (worker.ts) re-resolves the stored objects, so resolving the raw URLs at creation and
+    // redacted ones at claim could make an unchanged file look like a parity violation
+    // (Copilot review round 1 on #841). A redaction that mangles a URL into an unnormalizable
+    // shape yields no id on BOTH sides (resolveProfile skips it), so the Run consistently
+    // resolves to no profile rather than flapping. Refusals carry the profile NAME and the
+    // reason (§5.4) — never the file's contents, env names or file paths: a caller who may not
+    // use a profile learns nothing about it.
+    const safeTask = this.deps.redactor ? this.deps.redactor.redact(input.task) : input.task;
+    const safeRepository = this.deps.redactor ? this.deps.redactor.redactJson(repository) as RepositoryContext : repository;
+    const safeRepositories = this.deps.redactor && repositories ? this.deps.redactor.redactJson(repositories) as RepositoryContext[] : repositories;
     let credentialProfile: string | null = null;
     if (this.deps.credentialProfiles) {
       const resolution = this.resolveCredentialProfile(
-        [repository, ...(repositories ?? [])],
+        [safeRepository, ...(safeRepositories ?? [])],
         input.ownerId,
       );
       if (resolution.outcome === 'refused') {
@@ -600,6 +616,16 @@ export class RunService {
       }
       if (resolution.outcome === 'profile') {
         credentialProfile = resolution.name;
+      }
+      // Resume parity against the SAME read that produced `credentialProfile` (retry only):
+      // the retry must never persist a profile other than what the parent was created under.
+      if (input.retryCredentialProfile !== undefined && credentialProfile !== input.retryCredentialProfile) {
+        throw new ConflictError(
+          'credential profile changed since creation'
+          + ` (created under ${input.retryCredentialProfile ? `'${input.retryCredentialProfile}'` : 'no profile'},`
+          + ` now ${credentialProfile ? `'${credentialProfile}'` : 'no profile'});`
+          + ' create a new Run instead of retrying under a changed identity',
+        );
       }
     }
 
@@ -628,10 +654,8 @@ export class RunService {
     let knowledgeSelection: PackSelection | null = null;
 
     const now = new Date().toISOString();
-    // Task text and repo URLs can embed secrets (issue #43); redact at write time.
-    const safeTask = this.deps.redactor ? this.deps.redactor.redact(input.task) : input.task;
-    const safeRepository = this.deps.redactor ? this.deps.redactor.redactJson(repository) as RepositoryContext : repository;
-    const safeRepositories = this.deps.redactor && repositories ? this.deps.redactor.redactJson(repositories) as RepositoryContext[] : repositories;
+    // safeTask/safeRepository/safeRepositories were computed above, before credential-profile
+    // resolution (CP-3): resolution must read the same redacted bytes that are stored here.
     const run: Run = {
       id: newRunId(),
       ownerId: input.ownerId,
@@ -996,18 +1020,14 @@ export class RunService {
     // credentials" (or under a different identity) — the Crew resume-parity rule (#722) forbids
     // exactly that. The caller creates a FRESH Run instead: a new identity decision belongs to a
     // new Run, not to a resumed one.
-    const parentRepositories = [original.repository, ...(original.repositories ?? [])];
-    const freshResolution = this.resolveCredentialProfile(parentRepositories, original.ownerId);
-    if (freshResolution.outcome === 'refused') throw new ForbiddenError(freshResolution.message);
-    const freshName = freshResolution.outcome === 'profile' ? freshResolution.name : null;
-    if (freshName !== (original.credentialProfile ?? null)) {
-      throw new ConflictError(
-        `credential profile changed since creation`
-        + ` (created under ${original.credentialProfile ? `'${original.credentialProfile}'` : 'no profile'},`
-        + ` now ${freshName ? `'${freshName}'` : 'no profile'});`
-        + ' create a new Run instead of retrying under a changed identity',
-      );
-    }
+    // CP-3 resume parity (issue #807, design §5.4, acceptance 5): the parent's stored profile is
+    // passed into create() as `retryCredentialProfile`, which re-resolves against the CURRENT
+    // file and compares the result with what it will PERSIST — one file read, no window between
+    // a guard here and the write inside create() (Copilot review round 1 on #841). A profile
+    // removed, an owner dropped or a repository re-bound between the parent and this retry
+    // refuses the retry: the parent's work is never resumed under "no credentials" or under a
+    // different identity (the Crew resume-parity rule, #722).
+    const retryCredentialProfile = original.credentialProfile ?? null;
     // The parent's recorded model origin (#832 r1): a preset-sourced parent must not become
     // 'caller' on the retry, or the explainability record changes meaning across retries.
     const parentModelSource = original.model
@@ -1021,6 +1041,8 @@ export class RunService {
       repository: { ...original.repository },
       repositories: original.repositories,
       agent: original.agent,
+      // CP-3 resume parity, checked inside create() against the same read it persists from.
+      retryCredentialProfile: retryCredentialProfile,
       // Retry re-attempts the SAME work (#823): the model the parent carried is part of that
       // work, exactly like the skill/preset snapshots. A parent WITHOUT a model stays without.
       model: original.model ?? undefined,
