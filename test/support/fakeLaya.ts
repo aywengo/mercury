@@ -89,7 +89,15 @@ export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKe
       }
     });
   });
-  await new Promise<void>((resolve) => server.listen(opts.port ?? 0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve, reject) => {
+    // A bind failure (e.g. the fixed port already owned by a real sidecar) must reject the
+    // await, not escape as an unhandled 'error' event that aborts the test process (r16).
+    server.once('error', reject);
+    server.listen(opts.port ?? 0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
   const addr = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${addr.port}`,

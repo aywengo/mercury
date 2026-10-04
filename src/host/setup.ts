@@ -642,6 +642,9 @@ export async function runHostSetup(
     sidecarReadinessAttempts?: number;
     /** Gap between readiness probes; default 5 000 ms. Tests shrink this. */
     sidecarReadinessGapMs?: number;
+    /** Probe base URL override (r16): tests point it at an ephemeral-port fake so they never
+     *  bind 127.0.0.1:8302 — the fixed port a real sidecar may already own on a dev host. */
+    sidecarProbeUrl?: string;
   } = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) },
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
@@ -959,7 +962,9 @@ export async function runHostSetup(
       }
     }
     const written = loadEnvFile(path);
-    const baseUrl = written.MERCURY_LAYA_URL ?? `http://127.0.0.1:${plan.port}/v1/systemone`;
+    // Tests inject the probe URL (r16) so they never bind the fixed port a real sidecar may
+    // already own on a development host.
+    const baseUrl = io.sidecarProbeUrl ?? written.MERCURY_LAYA_URL ?? `http://127.0.0.1:${plan.port}/v1/systemone`;
     const creds = ensureLayaCredentials(env);
     // The success gate is the doctor's own check: the SAME timeout parsing/deadline doctor will
     // use (MERCURY_LAYA_TIMEOUT_MS, default 500 — Copilot #840 r12). An invalid value refuses
