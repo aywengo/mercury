@@ -59,6 +59,66 @@ function snapshotOf(wf: {
   return wf as unknown as ResolvedWorkflow;
 }
 
+// --- review-round fixes (#842 r2) ---
+
+test('a resource ceiling conflicts with a differing caller value instead of keeping it (#842 r2)', () => {
+  const presetsDir = tempDir('mercury-wf-presets-');
+  makePreset(presetsDir, 'memcap', {
+    constraints: { ceilings: { resourceLimits: { memory: '1g' } } },
+  });
+  const skills = new SkillRegistry(tempDir('mercury-wf-skills-'));
+  const presets = new PresetRegistry(presetsDir, { skills, knownAgents: ['fake'] });
+  const stages = [{ id: 'a', preset: { id: 'memcap' } }];
+  // The caller asks 100g against a stage ceiling of 1g: kept unchanged, the Run would admit
+  // past its sandbox policy -- so creation must fail, not narrow-or-keep.
+  assert.throws(
+    () => resolveWorkflowStages(
+      { id: 'wf', stages },
+      { constraints: { resourceLimits: { memory: '100g' } } },
+      SYSTEM, CAPS, resolvePreset, (id) => presets.get(id),
+    ),
+    (err: unknown) => err instanceof WorkflowPresetResolutionError
+      && err.code === 'WORKFLOW_STAGE_RESOURCE_CONFLICT',
+  );
+  // The same refusal for two stages with incompatible ceilings and no caller value.
+  makePreset(presetsDir, 'memcap-2g', {
+    constraints: { ceilings: { resourceLimits: { memory: '2g' } } },
+  });
+  const stages2 = [
+    { id: 'a', preset: { id: 'memcap' } },
+    { id: 'b', preset: { id: 'memcap-2g' } },
+  ];
+  assert.throws(
+    () => resolveWorkflowStages({ id: 'wf2', stages: stages2 }, {}, SYSTEM, CAPS, resolvePreset, (id) => presets.get(id)),
+    (err: unknown) => err instanceof WorkflowPresetResolutionError
+      && err.code === 'WORKFLOW_STAGE_RESOURCE_CONFLICT',
+  );
+  // Equal values stay legal: caller == ceiling, and two stages naming the same ceiling.
+  const stagesEq = [{ id: 'a', preset: { id: 'memcap' } }];
+  const sel = resolveWorkflowStages(
+    { id: 'wf3', stages: stagesEq },
+    { constraints: { resourceLimits: { memory: '1g' } } },
+    SYSTEM, CAPS, resolvePreset, (id) => presets.get(id),
+  );
+  assert.equal(sel.effectiveConstraints.resourceLimits?.memory, '1g');
+});
+
+test('the plan cap holds for multibyte UTF-8 templates (#842 r2)', () => {
+  // 20,000 emoji (~4 bytes each) before the first newline: code-unit truncation left this
+  // plan at ~80 KB against a 65,536-byte cap.
+  const stages = [{ id: 'big', task: '\u{1F680}'.repeat(20_000) }];
+  const snap = snapshotOf({
+    id: 'emoji', version: '1.0.0', description: 'emoji', mode: 'advisory',
+    stages, maxStages: 1,
+    templateJson: '{}', files: {}, contentHash: 'a'.repeat(64),
+    trust: 'builtin', source: { kind: 'builtin', relativePath: 'workflows/emoji/workflow.json' },
+  } as never);
+  const plan = renderPlan(snap, 'fake', {});
+  assert.ok(isTruncated(plan));
+  assert.ok(Buffer.byteLength(plan, 'utf8') <= PLAN_MAX_BYTES, 'the byte cap holds for multibyte text');
+  assert.ok(plan.endsWith(TRUNCATION_MARKER));
+});
+
 // --- resolution: section 3.1.1 ---
 
 function resolutionEnv(): { presetsDir: string; presets: PresetRegistry } {
@@ -511,6 +571,100 @@ test('the builtin template renders through the real registry without error', () 
   try {
     const wf = env.runService['deps'].workflows;
     assert.ok(wf, 'workflows are wired in test env when the dir exists');
+  } finally {
+    env.close();
+  }
+});
+
+test('stage preset rows are distinguishable from the Run-wide preset: get() excludes them (#842 r2)', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const workflowsDir = tempDir('mercury-wf-dir-');
+  const presetsDir = tempDir('mercury-wf-presets-');
+  makePreset(presetsDir, 'planner', {}, 'PLAN LIKE AN ARCHITECT');
+  makeWorkflowDir(workflowsDir, 'grow', twoStageManifest('grow'));
+  const env = makeEnv({
+    workspaceMode: 'copy',
+    repoDir: repo,
+    workflowsDir,
+    presetsDir,
+    workerEnabled: false,
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'Run the plan',
+      repository: { localPath: repo },
+      workflow: { id: 'grow' },
+    });
+    // Even a ONE-preset workflow must not look like a Run-wide preset: the stage instruction
+    // guides only its own step, so `preset` in Run detail / the worker's .mercury/preset
+    // materialization must stay null.
+    assert.equal(env.runService.getPreset(run.id), null,
+      'a stage preset row must never surface as the Run-wide preset');
+    // The stage listing still sees the row, with its stage index recorded.
+    const stages = env.runService.getWorkflowStagePresetSnapshots(run.id);
+    assert.equal(stages.length, 1);
+    assert.equal(stages[0]!.stageIndex, 0);
+    assert.equal(stages[0]!.snapshot.instruction, 'PLAN LIKE AN ARCHITECT');
+    // The column itself distinguishes the shapes at the storage layer.
+    const row = env.db.prepare('SELECT stage_index FROM run_presets WHERE run_id = ?').get(run.id) as { stage_index: number | null };
+    assert.equal(row.stage_index, 0);
+    // A plain preset Run keeps the Run-wide shape: stage_index NULL and get() finds it.
+    makePreset(presetsDir, 'plain');
+    const presetRun = env.runService.create({
+      ownerId: 'alice',
+      task: 'Plain preset run',
+      repository: { localPath: repo },
+      preset: { id: 'plain' },
+    });
+    const prow = env.db.prepare('SELECT stage_index FROM run_presets WHERE run_id = ?').get(presetRun.id) as { stage_index: number | null };
+    assert.equal(prow.stage_index, null);
+    assert.equal(env.runService.getPreset(presetRun.id)!.id, 'plain');
+  } finally {
+    env.close();
+  }
+});
+
+test('retry carries the parent workflow: snapshot rows, stage presets, skills, and events (#842 r2)', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const workflowsDir = tempDir('mercury-wf-dir-');
+  const presetsDir = tempDir('mercury-wf-presets-');
+  makePreset(presetsDir, 'planner', {}, 'PLAN LIKE AN ARCHITECT');
+  makeWorkflowDir(workflowsDir, 'grow', twoStageManifest('grow'));
+  const env = makeEnv({
+    workspaceMode: 'copy',
+    repoDir: repo,
+    workflowsDir,
+    presetsDir,
+    maxRetries: 2,
+    retryBackoffMs: 0,
+    fakeScript: [{ fail: true }],
+  });
+  try {
+    const parent = env.runService.create({
+      ownerId: 'alice',
+      task: 'Run the plan',
+      repository: { localPath: repo },
+      workflow: { id: 'grow' },
+    });
+    await waitFor(() => env.runs.get(parent.id)!.status === 'FAILED', 10_000);
+    const retried = env.runService.retry(parent.id, 'alice', false);
+    // The retry IS a workflow Run: same template bytes, same stage preset snapshots.
+    assert.deepEqual(env.runService.getWorkflow(retried.id), env.runService.getWorkflow(parent.id));
+    assert.deepEqual(env.runService.getWorkflowStagePresetSnapshots(retried.id),
+      env.runService.getWorkflowStagePresetSnapshots(parent.id));
+    const skillRows = env.db.prepare('SELECT COUNT(*) AS n FROM run_skills WHERE run_id = ?').get(retried.id) as { n: number };
+    assert.equal(skillRows.n,
+      (env.db.prepare('SELECT COUNT(*) AS n FROM run_skills WHERE run_id = ?').get(parent.id) as { n: number }).n,
+      'the workflow skill union rides the retry too');
+    // The workflow event trail exists on the retry, not just on the parent.
+    assert.ok(env.events.list(retried.id).some((e) => e.type === 'workflow.selected'));
+    // And a retry of a PLAIN run stays plain: no workflow row invented.
+    const plain = env.runService.create({ ownerId: 'alice', task: 'plain', repository: { localPath: repo } });
+    env.runs.transition(plain.id, 'STARTING');
+    env.runs.transition(plain.id, 'FAILED', { completedAt: new Date().toISOString() });
+    const plainRetry = env.runService.retry(plain.id, 'alice', false);
+    assert.equal(env.runService.getWorkflow(plainRetry.id), null);
   } finally {
     env.close();
   }

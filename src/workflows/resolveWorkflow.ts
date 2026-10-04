@@ -302,9 +302,22 @@ function narrowestConstraints(
         const ceiling = ceilings.resourceLimits[key];
         if (ceiling === undefined) continue;
         const value = rl[key];
-        // "Narrower" is not measurable for a string limit (the resolvePreset rule): a ceiling
-        // is applied only when the field is unset.
-        if (value === undefined) rl[key] = ceiling;
+        // "Narrower" is not measurable for a string limit (the resolvePreset rule, section
+        // 3.3): a ceiling is applied only when the field is unset, and a value that is ALREADY
+        // set must equal the ceiling or creation fails -- a caller value above a stage ceiling
+        // would admit a Run past the sandbox policy, and two stage presets with incompatible
+        // ceilings have no honest intersection (#842 review). Equality is fine, in both cases.
+        if (value === undefined) {
+          rl[key] = ceiling;
+        } else if (value !== ceiling) {
+          throw new WorkflowPresetResolutionError(
+            'WORKFLOW_STAGE_RESOURCE_CONFLICT',
+            `constraints.resourceLimits.${key}`,
+            `resourceLimits.${key} = ${JSON.stringify(value)} conflicts with stage preset`
+            + ` ${JSON.stringify(stage.preset.id)}'s ceiling ${JSON.stringify(ceiling)};`
+            + ' narrower cannot be measured, so differing values are refused, not kept',
+          );
+        }
       }
       if (rl.cpu !== undefined || rl.memory !== undefined || rl.disk !== undefined) {
         effective.resourceLimits = rl;

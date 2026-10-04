@@ -73,12 +73,17 @@ export function renderPlan(
   // Cap the WHOLE plan (section 5: "The whole rendered plan has a cap, and truncation is
   // marked, never silent"). Truncate on a line boundary so a step heading is never cut in
   // half, then append the marker.
-  if (Buffer.byteLength(body, 'utf8') <= PLAN_MAX_BYTES) return body;
-  const marker = TRUNCATION_MARKER;
-  let cut = PLAN_MAX_BYTES - Buffer.byteLength(marker, 'utf8') - 1;
+  // Truncate in BYTES, not code units: the cap is a byte cap, and a JS string index counts
+  // UTF-16 code units, so a multibyte template could render past the promised bound (#842
+  // review). The buffer is the unit of measure on both sides -- search and slice stay in
+  // bytes, then the decode happens once, at the end.
+  const buf = Buffer.from(body, 'utf8');
+  if (buf.length <= PLAN_MAX_BYTES) return body;
+  const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, 'utf8');
+  let cut = PLAN_MAX_BYTES - markerBytes - 1;
   // Walk back to the start of the line that crosses the budget.
-  while (cut > 0 && body[cut] !== '\n') cut--;
-  return body.slice(0, cut) + '\n' + marker;
+  while (cut > 0 && buf[cut] !== 0x0a) cut--;
+  return buf.subarray(0, cut).toString('utf8') + '\n' + TRUNCATION_MARKER;
 }
 
 /** True when a rendered plan was truncated (the worker records it on the materialized event). */

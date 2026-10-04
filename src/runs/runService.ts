@@ -102,6 +102,16 @@ export interface CreateRunInput {
    */
   workflow?: { id: string; version?: string };
   /**
+   * A workflow snapshot to store verbatim instead of resolving `workflow` against the registry.
+   * Only retry uses this, exactly like `presetSnapshot` and `skillSnapshots`: a retried Run
+   * must execute the SAME template bytes and stage guidance its parent executed (#842 review).
+   */
+  workflowSnapshot?: {
+    workflow: ResolvedWorkflow;
+    stagePresets: { stageIndex: number; snapshot: ResolvedRolePreset }[];
+    skills: ResolvedSkill[];
+  };
+  /**
    * Per-Run model override (docs/laya-integration-design.md §13 P-1, issue #823). `undefined`
    * means "no caller model" and the Run behaves exactly as before. Resolution, one rule for both
    * paths: caller.model → preset model → none. Refused fail-closed when the effective agent's
@@ -476,7 +486,39 @@ export class RunService {
       skills: import('../domain/types.ts').ResolvedSkill[];
       constraints: RunConstraints;
     } | null = null;
-    if (input.workflow !== undefined) {
+    if (input.workflowSnapshot !== undefined) {
+      // Internal retry path (#842 review): the parent's stored snapshot rows, verbatim. No
+      // registry read at all -- the template may have been deleted or rewritten since the
+      // parent ran, and the retry must execute the parent's bytes, not a re-resolution. The
+      // Run row's constraints ARE the parent's effective set (retry copies original.constraints),
+      // which is exactly the set resolution would have produced.
+      const wfSnap = input.workflowSnapshot.workflow;
+      if (input.workflow !== undefined) {
+        throw new ValidationError('workflow and workflowSnapshot are mutually exclusive');
+      }
+      resolvedWorkflow = {
+        snapshot: wfSnap,
+        stagePresets: input.workflowSnapshot.stagePresets.map((sp) => ({
+          stageIndex: sp.stageIndex,
+          presetId: sp.snapshot.id,
+          snapshot: sp.snapshot,
+        })),
+        stageInstructions: Object.fromEntries(
+          input.workflowSnapshot.stagePresets.map((sp) => [sp.stageIndex, sp.snapshot.instruction]),
+        ),
+        skills: input.workflowSnapshot.skills,
+        constraints: {
+          maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
+          maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
+          notAfter: input.constraints?.notAfter,
+          botTask: input.constraints?.botTask,
+          budgetTokens: input.constraints?.budgetTokens,
+          budgetCost: input.constraints?.budgetCost,
+          resourceLimits: input.constraints?.resourceLimits,
+          allowedNetworks: input.constraints?.allowedNetworks,
+        },
+      };
+    } else if (input.workflow !== undefined) {
       if (input.workflow === null || typeof input.workflow !== 'object' || Array.isArray(input.workflow)) {
         throw new ValidationError('workflow must be an object with an id');
       }
@@ -864,6 +906,7 @@ export class RunService {
               sourceKind: stage.snapshot.source.kind,
               sourceCommit: stage.snapshot.source.commit ?? null,
               sourcePath: stage.snapshot.source.relativePath,
+              stageIndex: stage.stageIndex,
               snapshot: stage.snapshot,
             };
             this.presetStore()!.insert(stageRow);
@@ -1222,6 +1265,18 @@ export class RunService {
     // live registry, so a retried Run would execute skill bytes its parent never saw -- and if a
     // skill had been deleted, create() would throw and the retry could not be attempted at all.
     const skillSnapshots = this.getSkills(runId);
+    // The parent's workflow snapshot, verbatim (#842 review): template bytes, stage preset
+    // snapshots and the skill rows, the same trio create() writes for a workflow Run. Without
+    // this a retried workflow Run silently executes as a plain Run -- no run_workflows row, no
+    // stage guidance, no plan -- the exact failure the snapshot rule exists to prevent.
+    const parentWorkflow = this.getWorkflow(runId);
+    const workflowSnapshot = parentWorkflow
+      ? {
+          workflow: parentWorkflow,
+          stagePresets: this.getWorkflowStagePresetSnapshots(runId),
+          skills: skillSnapshots,
+        }
+      : undefined;
     // original.repository carries the pinned base commit (set when the original
     // workspace was created); a fresh resolve happens only when the original
     // never got a base commit (setup failed before workspace creation).
@@ -1254,6 +1309,7 @@ export class RunService {
       model: original.model ?? undefined,
       ...(original.model && parentModelSource?.source ? { modelSource: parentModelSource.source } : {}),
       skillSnapshots,
+      ...(workflowSnapshot ? { workflowSnapshot } : {}),
       constraints: { ...original.constraints },
       // The parent's preset snapshot, verbatim (section 6): a retry is the SAME task
       // configuration, so it must not re-resolve "latest" -- a preset edited between the

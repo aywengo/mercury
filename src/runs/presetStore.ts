@@ -17,11 +17,18 @@ export interface RunPresetRow {
   sourceKind: string;
   sourceCommit: string | null;
   sourcePath: string;
+  /**
+   * Stage index for a workflow's per-stage snapshot row (issue #809); undefined for the
+   * Run-wide preset row. The two shapes share the table, and this is what keeps `get()` from
+   * handing a stage row to callers that expect the Run-wide preset (#842 review).
+   */
+  stageIndex?: number;
   /** The full ResolvedRolePreset, JSON-encoded. The materialization source of truth. */
   snapshot: ResolvedRolePreset;
 }
 
 interface PresetDbRow {
+  stage_index: number | null;
   run_id: string;
   preset_id: string;
   preset_version: string;
@@ -68,18 +75,25 @@ export class PresetStore {
     this.db.prepare(`
       INSERT INTO run_presets (
         run_id, preset_id, preset_version, role, trust, content_hash,
-        source_kind, source_commit, source_path, snapshot_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_kind, source_commit, source_path, stage_index, snapshot_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.runId, row.presetId, row.presetVersion, row.role, row.trust, row.contentHash,
-      row.sourceKind, row.sourceCommit, row.sourcePath, JSON.stringify(row.snapshot),
+      row.sourceKind, row.sourceCommit, row.sourcePath, row.stageIndex ?? null,
+      JSON.stringify(row.snapshot),
     );
   }
 
-  /** The Run's preset snapshot, or null when the Run has no preset. */
+  /**
+   * The Run's Run-WIDE preset snapshot, or null when the Run has none.
+   *
+   * Stage rows (a workflow Run's per-stage snapshots, #809) are excluded: their instruction
+   * guides only their own step, and reading one here would materialize it into
+   * `.mercury/preset` -- Run-wide behavior the stage contract forbids (#842 review).
+   */
   get(runId: string): ResolvedRolePreset | null {
     const row = this.db
-      .prepare('SELECT * FROM run_presets WHERE run_id = ?')
+      .prepare('SELECT * FROM run_presets WHERE run_id = ? AND stage_index IS NULL')
       .get(runId) as PresetDbRow | undefined;
     return row ? rowToSnapshot(row) : null;
   }

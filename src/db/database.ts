@@ -393,6 +393,18 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_run_workflows_identity
     ON run_workflows(workflow_id, workflow_version);
   `,
+  // v15: distinguish workflow stage preset rows from the Run-wide preset row (#842 review).
+  //
+  // run_presets gained a second writer in #809: a workflow Run snapshots one preset per
+  // referenced stage into the same table. The row carried no marker, so PresetStore.get() --
+  // the single-Run-wide-preset reader -- could pick up a STAGE row and materialize its
+  // instruction into .mercury/preset, adding stage guidance to every adapter prompt. Nullable,
+  // and NULL keeps the original meaning: a Run-wide preset row. Every row the #809 path wrote
+  // after this migration carries its stage index; rows written before it were written by the
+  // single-preset path and are therefore NULL by construction.
+  `
+  ALTER TABLE run_presets ADD COLUMN stage_index INTEGER;
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;
