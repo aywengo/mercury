@@ -144,5 +144,10 @@ test('MERCURY_LAYA_URL: the config boundary refuses non-loopback/routed/userinfo
     assert.equal(cfg.layaUrl, good);
   }
   assert.equal(loadConfig({}).layaUrl, null, 'unset = not configured');
+  assert.equal(loadConfig({ MERCURY_LAYA_URL: '' }).layaUrl, null, 'exactly empty = not configured');
+  // r35: the RAW value is validated — padding and whitespace-only are errors, not silent
+  // defaults, and startup agrees with the doctor.
+  assert.throws(() => loadConfig({ MERCURY_LAYA_URL: ' http://127.0.0.1:8302 ' }), /must not have leading or trailing whitespace/);
+  assert.throws(() => loadConfig({ MERCURY_LAYA_URL: '   ' }), /must not have leading or trailing whitespace/);
 });
 

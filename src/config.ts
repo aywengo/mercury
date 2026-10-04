@@ -329,8 +329,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // service-provided env files bypass the wizard, and doctor would otherwise send the
     // bearer key to any URL this line accepts (Copilot #840 r34).
     layaUrl: (() => {
-      const raw = env.MERCURY_LAYA_URL?.trim() || null;
-      if (raw === null) return null;
+      // The RAW value goes through the shared validator: only an ABSENT or exactly-empty
+      // variable means unconfigured; a padded/whitespace value is the padding error, not a
+      // silent default (Copilot #840 r35) — startup and the doctor must see the same thing.
+      const raw = env.MERCURY_LAYA_URL;
+      if (raw === undefined || raw === '') return null;
       const err = validateLayaBaseUrl(raw);
       if (err) throw new Error(`invalid configuration: ${err} (docs/configuration.md, 'Laya sidecar')`);
       return raw;

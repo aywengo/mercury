@@ -701,3 +701,22 @@ test('runHostDoctor: a non-loopback MERCURY_LAYA_URL is refused before the crede
   }
 });
 
+test("runHostDoctor: a whitespace-only MERCURY_LAYA_URL is the padding error, not unset (#840 r35)", async () => {
+  const dir = tempDir('doctor-laya-blank-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), 'MERCURY_HARNESSES=primeagent\nMERCURY_LAYA_URL=   \n');
+  try {
+    const out: string[] = [];
+    const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    assert.equal(code, 1);
+    assert.match(out.join(''), /must not have leading or trailing whitespace/, `named failure: ${out.join('')}`);
+    const jout: string[] = [];
+    await runHostDoctor(['--json'], { out: (s) => jout.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    const parsed = JSON.parse(jout.join('')) as { laya?: { ok: boolean; detail: string } };
+    assert.equal(parsed.laya?.ok, false, 'present-but-blank is a failure the JSON exposes');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+

@@ -336,37 +336,36 @@ export async function runHostDoctor(
   // values from errors).
   const layaUrl = vars.MERCURY_LAYA_URL;
   let laya: DoctorResult['laya'];
-  if (layaUrl !== undefined && layaUrl.trim() !== '') {
+  // Every PRESENT value reaches the validator — only undefined is 'not configured' (the
+  // doctor's absence rule, #830). Exactly '' also counts as unconfigured; a whitespace-only or
+  // padded value is the validator's padding error, not a silent skip (Copilot #840 r35).
+  if (layaUrl !== undefined && layaUrl !== '') {
     // Shape BEFORE credentials (Copilot #840 r34): a non-loopback/routed URL must be refused
-    // here, not probed with the sidecar key attached.
+    // here, not probed with the sidecar key attached. When the shape fails, `laya` is set and
+    // both the credential read and the probe below are skipped.
     const shapeErr = validateLayaBaseUrl(layaUrl);
-    if (shapeErr) {
+    if (shapeErr !== null) {
+      // No credential read on a malformed URL: nothing about the value is trusted yet.
       laya = { ok: false, detail: shapeErr };
-      const result: DoctorResult = { healthz, bindHealthz, smoke, allSmokeSkipped: anySkipped, noHarnesses, ...(laya !== undefined ? { laya } : {}) };
-      if (json) {
-        io.out(JSON.stringify(result, null, 2) + '\n');
-      } else {
-        io.out(`laya: ${shapeErr}\n`);
+    } else {
+      let apiKey: string | undefined;
+      let keyDetail: string | undefined;
+      try {
+        apiKey = readBotCredentials('laya', env).api;
+      } catch (err) {
+        keyDetail = (err as Error).message;
       }
-      return json ? 0 : 1;
-    }
-    let apiKey: string | undefined;
-    let keyDetail: string | undefined;
-    try {
-      apiKey = readBotCredentials('laya', env).api;
-    } catch (err) {
-      keyDetail = (err as Error).message;
-    }
-    const timeout = parseLayaTimeoutMs(vars);
-    if (!timeout.ok) {
-      laya = { ok: false, detail: timeout.detail };
-    }
-    const timeoutMs = timeout.ok ? timeout.timeoutMs : 500;
-    if (apiKey === undefined && laya === undefined) {
-      laya = { ok: false, detail: `auth cannot be checked: ${keyDetail ?? 'no laya credentials'}` };
-    }
-    if (laya === undefined) {
-      laya = await checkLaya(layaUrl.trim(), apiKey, timeoutMs);
+      const timeout = parseLayaTimeoutMs(vars);
+      if (!timeout.ok) {
+        laya = { ok: false, detail: timeout.detail };
+      }
+      const timeoutMs = timeout.ok ? timeout.timeoutMs : 500;
+      if (apiKey === undefined && laya === undefined) {
+        laya = { ok: false, detail: `auth cannot be checked: ${keyDetail ?? 'no laya credentials'}` };
+      }
+      if (laya === undefined) {
+        laya = await checkLaya(layaUrl.trim(), apiKey, timeoutMs);
+      }
     }
   }
   const result: DoctorResult = { healthz, bindHealthz, smoke, allSmokeSkipped: anySkipped, noHarnesses, ...(laya !== undefined ? { laya } : {}) };
