@@ -277,9 +277,12 @@ export function validateAnswers(
     if (err) errors.push(`${key}: ${err}`);
   }
   // The sidecar's unit embeds ABSOLUTE paths (systemd ExecStart rejects relative
-  // executables, Copilot #840 r25): an opt-in Laya requires an absolute data dir.
-  if (a.layaEnabled && !isAbsolute(a.dataDir.trim())) {
-    errors.push(`dataDir: must be an absolute path when the Laya sidecar is enabled (got '${a.dataDir.trim()}')`);
+  // executables, Copilot #840 r25): an opt-in Laya requires an absolute data dir. A
+  // non-string dataDir is already reported by validateAnswer above — guard the type so the
+  // cross-field check itself cannot throw (Copilot #840 r29).
+  const dataDirStr = typeof a.dataDir === 'string' ? a.dataDir.trim() : '';
+  if (a.layaEnabled && !isAbsolute(dataDirStr)) {
+    errors.push(`dataDir: must be an absolute path when the Laya sidecar is enabled (got '${dataDirStr || String(a.dataDir)}')`);
   }
   // Atlas on requires URL + token + project (mirrors the startup check).
   if (a.atlasEnabled) {

@@ -1737,6 +1737,14 @@ test('runHostSetup: an INVALID layaUrl in the answers file is rejected, not defa
   assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'nothing installed');
 });
 
+test('validateAnswers: a NON-STRING dataDir with the Laya sidecar enabled is reported, not thrown (#840 r29)', () => {
+  // The cross-field absolute-path check must not .trim() a non-string: validateAnswer already
+  // reports the type error and the run must exit 1 normally, not crash.
+  const a = answers({ layaEnabled: true, dataDir: 123 as unknown as string });
+  const errs = validateAnswers(a);
+  assert.ok(errs.some((e) => e.startsWith('dataDir:') && e.includes('path must not be empty')), `type error reported: ${errs.join(' | ')}`);
+});
+
 test('validateAnswers: a relative dataDir with the Laya sidecar enabled is refused (#840 r25)', () => {
   // systemd ExecStart rejects relative executables; the unit embeds venv/serve paths derived
   // from the data dir, so an opt-in Laya requires an absolute data dir.
