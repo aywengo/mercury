@@ -42,7 +42,7 @@ import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
 import { suggestionFor } from '../adapters/configSchema.ts';
-import { loadEnvFile, schemeFor } from './doctor.ts';
+import { checkLaya, loadEnvFile, schemeFor } from './doctor.ts';
 import { DEFAULT_PYTHON_CANDIDATES, detectPython, ensureLayaCredentials, LAYA_DEFAULT_PORT, LAYA_SERVE_PIN, layaStepActions, planLayaSidecar, renderLayaLaunchdPlist, renderLayaSystemdUnit, type LayaPlan, type RunFn } from './layaSidecar.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
 
@@ -886,13 +886,45 @@ export async function runHostSetup(
         step();
         io.out(`laya: ${name} ok\n`);
       }
-      io.out(`laya: unit written — load it with launchctl bootstrap gui/$UID ${plan.unitPath} (macOS)` +
-        ` or systemctl --user enable --now ${plan.unitLabel} (Linux).\n`);
-      io.out('laya: verify with `mercury host doctor` (the laya: line).\n');
+      io.out(`laya: unit written at ${plan.unitPath}\n`);
     } catch (e) {
       io.err(`\nlaya: not installed — ${(e as Error).message}\n`);
       io.err('laya: mercury.env was written; the sidecar can be finished later by re-running `mercury host setup --yes`.\n');
       return 1;
+    }
+    // Load the agent idempotently and verify with the doctor's own probe (#831 acceptance:
+    // the run finishes with doctor `laya: ok` — an unloaded agent makes that probe unreachable,
+    // Copilot #840 r10). Bounded, injected through the same run fn as every other step.
+    const uid = `gui/${process.getuid?.() ?? 501}`;
+    const loadCmd = process.platform === 'darwin'
+      ? ['launchctl', 'bootstrap', uid, plan.unitPath]
+      : ['systemctl', '--user', 'enable', '--now', plan.unitLabel];
+    io.out(`laya: loading — ${loadCmd.join(' ')}`);
+    const loaded = run(loadCmd, 15_000);
+    if (!loaded.ok && process.platform === 'darwin') {
+      // launchctl refuses an ALREADY-loaded label; kickstart restarts it instead. A genuine
+      // failure surfaces through the doctor probe below.
+      const kick = run(['launchctl', 'kickstart', '-k', `${uid}/${plan.unitLabel}`], 15_000);
+      if (!kick.ok) io.err(`laya: kickstart failed: ${(kick.stderr.trim() || kick.stdout.trim() || 'no output').split('\n')[0]}\n`);
+    }
+    const written = loadEnvFile(path);
+    const baseUrl = written.MERCURY_LAYA_URL ?? `http://127.0.0.1:${plan.port}/v1/systemone`;
+    const creds = ensureLayaCredentials(env);
+    let last = '';
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      // The probe is the doctor's #830 line, not a new check: same client, same deadline.
+      const probe = await checkLaya(baseUrl, creds.key, 4_000);
+      last = probe.detail;
+      if (probe.ok) {
+        io.out(`laya: doctor ok — ${last}\n`);
+        break;
+      }
+      if (attempt === 5) {
+        io.err(`\nlaya: loaded but the doctor probe failed: ${last}\n`);
+        io.err(`laya: inspect with \`launchctl print ${uid}/${plan.unitLabel}\` (macOS) or \`journalctl --user -u ${plan.unitLabel}\` (Linux), then re-run setup.\n`);
+        return 1;
+      }
+      await new Promise((res) => setTimeout(res, 1_000));
     }
   }
   // The Fleet hand-off is the wizard's output contract on EVERY successful write, not

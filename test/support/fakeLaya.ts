@@ -48,7 +48,7 @@ export interface FakeLaya {
 /** Start a fake sidecar scripted per request: the Nth request gets script[N] (the LAST entry
  *  repeats for any request beyond the script). Auth: when apiKey is set, requests without the
  *  matching bearer get 401 and are still recorded. */
-export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKey?: string } = {}): Promise<FakeLaya> {
+export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKey?: string; port?: number } = {}): Promise<FakeLaya> {
   const received: FakeLayaReceived[] = [];
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -89,7 +89,7 @@ export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKe
       }
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve) => server.listen(opts.port ?? 0, '127.0.0.1', resolve));
   const addr = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${addr.port}`,

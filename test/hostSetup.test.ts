@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
+import { startFakeLaya, validPick } from './support/fakeLaya.ts';
 import {
   parseHostSetupArgs,
   envDiff,
@@ -1414,9 +1415,13 @@ test('runHostSetup: Laya OPT-OUT writes no MERCURY_LAYA_URL and nothing else cha
 
 test('runHostSetup: Laya OPT-IN writes MERCURY_LAYA_URL + credentials + unit (scripted exec) (#831)', async () => {
   const dir = tempDir('setup-laya-on-');
+  // The wizard loads the unit and verifies with the doctor's probe (r10): a fake sidecar on the
+  // wizard's fixed port answers it. Auth off — the generated key is not known up front.
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { port: 8302 });
   const sidecarCalls: string[][] = [];
   const out: string[] = [];
   let answersMode = false;
+  try {
   const code = await runHostSetup([], {
     out: (s) => out.push(s),
     err: () => {},
@@ -1440,32 +1445,43 @@ test('runHostSetup: Laya OPT-IN writes MERCURY_LAYA_URL + credentials + unit (sc
   const creds = JSON.parse(readFileSync(join(dir, 'mercury', 'bot-credentials.json'), 'utf8')) as { laya?: { api?: string } };
   assert.match(creds.laya?.api ?? '', /^[0-9a-f]{64}$/);
   assert.ok(out.join('').includes('mercury host doctor'), 'the wizard points at the doctor line');
+  assert.ok(out.join('').includes('laya: doctor ok'), 'the run finishes with the doctor probe green (r10)');
+  assert.ok(fake.received.length >= 1, 'the probe reached the sidecar');
+  } finally {
+    await fake.close();
+  }
 });
 
 test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
   const dir = tempDir('setup-laya-rerun-');
-  // First run: opt-in (establishes the key).
-  await runHostSetup([], {
-    out: () => {},
-    err: () => {},
-    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-    sidecarRun: okRun,
-    sidecarDataDir: join(dir, 'data'),
-  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
-  const credsPath = join(dir, 'mercury', 'bot-credentials.json');
-  const firstKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
-  // Second run: env now carries MERCURY_LAYA_URL (default yes), re-run with --yes.
-  const out: string[] = [];
-  const code = await runHostSetup(['--yes'], {
-    out: (s) => out.push(s),
-    err: () => {},
-    question: async () => '',
-    sidecarRun: okRun,
-    sidecarDataDir: join(dir, 'data'),
-  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_URL: 'http://127.0.0.1:8302' });
-  assert.equal(code, 0, `re-run failed: ${out.join('')}`);
-  const secondKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
-  assert.equal(secondKey, firstKey, 'the re-run must NOT rotate the sidecar key');
+  // Both runs verify through the doctor probe (r10) — a fake sidecar on the fixed port answers.
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { port: 8302 });
+  try {
+    // First run: opt-in (establishes the key).
+    await runHostSetup([], {
+      out: () => {},
+      err: () => {},
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+    const credsPath = join(dir, 'mercury', 'bot-credentials.json');
+    const firstKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
+    // Second run: env now carries MERCURY_LAYA_URL (default yes), re-run with --yes.
+    const out: string[] = [];
+    const code = await runHostSetup(['--yes'], {
+      out: (s) => out.push(s),
+      err: () => {},
+      question: async () => '',
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_URL: 'http://127.0.0.1:8302' });
+    assert.equal(code, 0, `re-run failed: ${out.join('')}`);
+    const secondKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
+    assert.equal(secondKey, firstKey, 'the re-run must NOT rotate the sidecar key');
+  } finally {
+    await fake.close();
+  }
 });
 
 test('runHostSetup: laya interpreter refusal fails the step AFTER mercury.env is written (#831)', async () => {
