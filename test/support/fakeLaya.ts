@@ -59,9 +59,13 @@ export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKe
       try { body = raw.length > 0 ? JSON.parse(raw.toString('utf8')) : null; } catch { /* not JSON */ }
       received.push({ method: req.method ?? '', url: req.url ?? '', raw, body, headers: req.headers });
 
-      const auth = opts.apiKey !== undefined;
       const header = req.headers.authorization ?? '';
-      if (auth && header !== `Bearer ${opts.apiKey}`) {
+      // apiKey '*' = "auth enabled, any non-empty bearer accepted" (r21): the setup tests
+      // cannot know the wizard-generated key up front, but the readiness auth check requires
+      // that an EMPTY/missing bearer gets 401 while a real one passes.
+      const anyNonEmpty = opts.apiKey === '*';
+      const auth = opts.apiKey !== undefined;
+      if (auth && (anyNonEmpty ? !/^Bearer \S/.test(header) : header !== `Bearer ${opts.apiKey}`)) {
         res.statusCode = 401;
         res.end(JSON.stringify({ error: 'unauthorized' }));
         return;

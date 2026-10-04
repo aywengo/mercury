@@ -74,6 +74,13 @@ export interface HostSetupAnswers {
   harnesses: string[];
   /** Opt-in Laya sidecar (#831, Laya design §5.3). Default FALSE — opt-out writes nothing. */
   layaEnabled: boolean;
+  /**
+   * The MERCURY_LAYA_URL to write. '' = wizard-managed local install (the 127.0.0.1:8302
+   * default). A NON-EMPTY value is an EXTERNALLY configured endpoint preserved from the
+   * existing env (r21): setup keeps it verbatim and verifies it with the doctor probe instead
+   * of installing/restarting a sidecar that would silently replace the working endpoint.
+   */
+  layaUrl: string;
 }
 
 /** The MERCURY_* names the wizard may emit. The CI test asserts every one of these
@@ -172,6 +179,12 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
       return typeof value === 'boolean' ? null : 'atlasEnabled must be a boolean';
     case 'layaEnabled':
       return typeof value === 'boolean' ? null : 'layaEnabled must be a boolean';
+    case 'layaUrl': {
+      if (typeof value !== 'string') return 'layaUrl must be a string';
+      if (value.trim() === '') return null;
+      if (!/^http:\/\//.test(value.trim())) return 'layaUrl must start with http:// (the sidecar is loopback-only)';
+      return charsetErr('layaUrl', value.trim());
+    }
     case 'atlasUrl': {
       if (typeof value !== 'string') return 'Atlas URL must be a string';
       if (value.trim() === '') return null;
@@ -279,7 +292,7 @@ export function renderEnv(a: HostSetupAnswers, preserve: Record<string, string> 
       : []),
     // MERCURY_LAYA_URL is a plain URL (no credential): the laya KEY lives in the 0600
     // bot-credentials.json (#831, design §5.1), so it never passes through the env file.
-    ...(a.layaEnabled ? ([['layaUrl', `http://127.0.0.1:${LAYA_DEFAULT_PORT}`]] as [string, string][]) : []),
+    ...(a.layaEnabled ? ([['layaUrl', a.layaUrl || `http://127.0.0.1:${LAYA_DEFAULT_PORT}`]] as [string, string][]) : []),
   ];
   for (const [k, v] of checked) {
     const err = unsafeValueError(k, v);
@@ -299,7 +312,8 @@ export function renderEnv(a: HostSetupAnswers, preserve: Record<string, string> 
     lines.push(`MERCURY_ATLAS_TOKEN=${a.atlasToken.trim()}`);
     lines.push(`MERCURY_ATLAS_PROJECT=${a.atlasProject.trim()}`);
   }
-  if (a.layaEnabled) lines.push(`MERCURY_LAYA_URL=http://127.0.0.1:${LAYA_DEFAULT_PORT}`);
+  // r21: a preserved EXTERNAL URL is written verbatim; '' = wizard-managed local default.
+  if (a.layaEnabled) lines.push(`MERCURY_LAYA_URL=${a.layaUrl || `http://127.0.0.1:${LAYA_DEFAULT_PORT}`}`);
   lines.push(`MERCURY_HARNESSES=${a.harnesses.join(',')}`);
   lines.push(`MERCURY_DEFAULT_AGENT=${a.harnesses[0]}`);
   for (const [k, v] of Object.entries(preserve)) lines.push(`${k}=${v}`);
@@ -436,11 +450,15 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     // same problem with existingVar). A fresh host defaults to NO: the sidecar is never a
     // silent default.
     layaEnabled: Boolean(env.MERCURY_LAYA_URL?.trim() || existingVar('MERCURY_LAYA_URL', env)),
+    // Continuity (r21): a hand-set URL is preserved verbatim; '' only on a fresh host (the
+    // wizard-managed local default is applied at render time).
+    layaUrl: env.MERCURY_LAYA_URL?.trim() || existingVar('MERCURY_LAYA_URL', env) || '',
   };
 }
 
 /** The keys an answers file may set (issue #649 §2, decision 10). */
 const ANSWERS_FILE_KEYS = [
+  'layaUrl',
   'hostName',
   'dataDir',
   'workspaceDir',
@@ -492,6 +510,9 @@ export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.e
   const base = defaultAnswers(env);
   return {
     hostName: parsed.hostName ?? base.hostName,
+    // File-settable (r21): an answers file may pin an external URL; continuity still applies
+    // when absent (base carries the preserved env value).
+    layaUrl: typeof parsed.layaUrl === 'string' ? parsed.layaUrl : base.layaUrl,
     dataDir: parsed.dataDir ?? base.dataDir,
     workspaceDir: parsed.workspaceDir ?? base.workspaceDir,
     // 'loopback' is a prompt spelling, never a file value (#665 review) — normalized
@@ -574,6 +595,7 @@ export async function promptAnswers(io: {
   const layaEnabled = layaOn === 'yes' || layaOn === 'y';
   return {
     hostName,
+    layaUrl: base.layaUrl,
     dataDir,
     workspaceDir,
     bindHost,
@@ -637,9 +659,9 @@ export async function runHostSetup(
     sidecarRun?: RunFn;
     /** Injected sidecar data dir override (tests). Default: the answers' dataDir. */
     sidecarDataDir?: string;
-    /** Readiness probes after load (r11): default 120 (~18 min) — a fresh sidecar downloads
+    /** Overall readiness budget in ms (r11/r21): default 18 min — a fresh sidecar downloads
      *  the ~843 MB English checkpoint before it answers. Tests shrink this. */
-    sidecarReadinessAttempts?: number;
+    sidecarReadinessBudgetMs?: number;
     /** Gap between readiness probes; default 5 000 ms. Tests shrink this. */
     sidecarReadinessGapMs?: number;
     /** Probe base URL override (r16): tests point it at an ephemeral-port fake so they never
@@ -845,8 +867,27 @@ export async function runHostSetup(
   // Opt-in Laya sidecar (#831): interpreter gate → venv → pinned install → credentials →
   // unit. Every command is bounded; the injected runner keeps tests off the real uv/pip.
   if (answers.layaEnabled) {
+    // r21: an EXTERNALLY configured URL (preserved from the old env) is verified, never
+    // replaced: installing/restarting a local sidecar would silently take over the endpoint.
+    const externalLaya = answers.layaUrl.trim() !== '' && answers.layaUrl.trim() !== `http://127.0.0.1:${LAYA_DEFAULT_PORT}`;
     const dataDir = io.sidecarDataDir ?? dirname(loadEnvFile(path).MERCURY_DB ?? join(homedir(), '.local', 'state', 'mercury', 'mercury.db'));
     const run = io.sidecarRun ?? sidecarExec;
+    if (externalLaya) {
+      const written0 = loadEnvFile(path);
+      const timeout0 = parseLayaTimeoutMs(written0);
+      if (!timeout0.ok) {
+        io.err(`\nlaya: ${timeout0.detail}\n`);
+        return 1;
+      }
+      io.out(`laya: external endpoint ${answers.layaUrl.trim()} preserved — verifying with the doctor probe (no local install)\n`);
+      const probe = await checkLaya(answers.layaUrl.trim(), undefined, timeout0.timeoutMs);
+      if (!probe.ok) {
+        io.err(`\nlaya: the preserved endpoint failed the doctor probe: ${probe.detail}\n`);
+        io.err('laya: fix the external sidecar, or point MERCURY_LAYA_URL at a local install and re-run setup.\n');
+        return 1;
+      }
+      io.out(`laya: doctor ok — ${probe.detail}\n`);
+    } else {
     // env flows in so PATH discovery sees the operator's PATH (r15: spaced interpreter dirs).
     const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES, process.platform, env);
     if (!det.ok) {
@@ -979,24 +1020,43 @@ export async function runHostSetup(
     }
     // A FRESH sidecar preloads the English checkpoint (~843 MB) before it answers — the
     // readiness window must cover that first download, not a few seconds (Copilot #840 r11).
-    // Default: 120 probes x (deadline + 5 s gap) — bounded; tests shrink both.
-    const maxAttempts = io.sidecarReadinessAttempts ?? 120;
+    // The window is an ELAPSED-TIME budget (default 18 min), not an attempt count: a large
+    // MERCURY_LAYA_TIMEOUT_MS must not stretch setup to hours (Copilot #840 r21). Each probe
+    // and sleep is capped to the remaining budget, so the loop is hard-bounded.
+    const budgetMs = io.sidecarReadinessBudgetMs ?? 18 * 60_000;
+    const gapMs = io.sidecarReadinessGapMs ?? 5_000;
+    const started = Date.now();
     let last = '';
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      // The probe is the doctor's #830 line, not a new check: same client, same deadline.
-      const probe = await checkLaya(baseUrl, creds.key, timeout.timeoutMs);
-      last = probe.detail;
-      if (probe.ok) {
-        io.out(`laya: doctor ok — ${last}\n`);
-        break;
-      }
-      if (attempt === maxAttempts) {
-        io.err(`\nlaya: loaded but the doctor probe failed after ${maxAttempts} attempts: ${last}\n`);
+    let attempts = 0;
+    for (;;) {
+      const remaining = budgetMs - (Date.now() - started);
+      if (remaining <= 0) {
+        io.err(`\nlaya: loaded but the doctor probe failed within ${Math.round(budgetMs / 60_000)} min (${attempts} attempts): ${last}\n`);
         io.err(`laya: inspect with \`launchctl print ${uid}/${plan.unitLabel}\` (macOS) or \`journalctl --user -u ${plan.unitLabel}\` (Linux), then re-run setup.\n`);
         return 1;
       }
-      if (attempt === 1) io.out('laya: waiting for the sidecar — first start downloads the English checkpoint (~843 MB)\n');
-      await new Promise((res) => setTimeout(res, io.sidecarReadinessGapMs ?? 5_000));
+      attempts += 1;
+      // The probe is the doctor's #830 line, not a new check: same client, same deadline
+      // (capped to the remaining budget).
+      const probe = await checkLaya(baseUrl, creds.key, Math.min(timeout.timeoutMs, remaining));
+      last = probe.detail;
+      if (probe.ok) {
+        // A successful AUTHENTICATED probe does not prove auth is ON: laya-serve answers
+        // every request when LAYA_API_KEY is unset, so an UNAUTHENTICATED sidecar that already
+        // owns the port would read as healthy (Copilot #840 r21). Require a key-less probe to
+        // get 401 — the unit embeds the key, so the answering service must be ours.
+        const anon = await checkLaya(baseUrl, '', Math.min(timeout.timeoutMs, budgetMs - (Date.now() - started)));
+        if (anon.ok || !(anon.detail ?? '').includes('401')) {
+          io.err(`\nlaya: the sidecar at ${baseUrl} answers WITHOUT a key — that is not the unit setup installed (LAYA_API_KEY unset), so the port is owned by another service.\n`);
+          return 1;
+        }
+        io.out(`laya: doctor ok — ${last}\n`);
+        break;
+      }
+      if (attempts === 1) io.out('laya: waiting for the sidecar — first start downloads the English checkpoint (~843 MB)\n');
+      const sleepMs = Math.min(gapMs, budgetMs - (Date.now() - started));
+      if (sleepMs > 0) await new Promise((res) => setTimeout(res, sleepMs));
+    }
     }
   }
   // The Fleet hand-off is the wizard's output contract on EVERY successful write, not

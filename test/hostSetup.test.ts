@@ -82,6 +82,7 @@ function answers(over: Partial<HostSetupAnswers> = {}): HostSetupAnswers {
     bindHost: '',
     harnesses: ['primeagent', 'hermes'],
     layaEnabled: false,
+    layaUrl: '',
     ...over,
   };
 }
@@ -1447,7 +1448,7 @@ test('runHostSetup: Laya OPT-IN writes MERCURY_LAYA_URL + credentials + unit (sc
   const dir = tempDir('setup-laya-on-');
   // The wizard loads the unit and verifies with the doctor's probe (r10): a fake sidecar on the
   // wizard's fixed port answers it. Auth off — the generated key is not known up front.
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], {});
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
   const sidecarCalls: string[][] = [];
   const out: string[] = [];
   let answersMode = false;
@@ -1466,7 +1467,7 @@ test('runHostSetup: Laya OPT-IN writes MERCURY_LAYA_URL + credentials + unit (sc
     },
     sidecarDataDir: join(dir, 'data'),
     // The fake answers immediately; shrink the readiness window (r11 knob).
-    sidecarReadinessAttempts: 3,
+    sidecarReadinessBudgetMs: 30_000,
       sidecarProbeUrl: `${fake.url}/v1/systemone`,
   }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
   assert.equal(code, 0, `setup failed: ${out.join('')}`);
@@ -1496,7 +1497,7 @@ test('runHostSetup: Laya OPT-IN writes MERCURY_LAYA_URL + credentials + unit (sc
 test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
   const dir = tempDir('setup-laya-rerun-');
   // Both runs verify through the doctor probe (r10) — a fake sidecar on the fixed port answers.
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], {});
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
   try {
     // First run: opt-in (establishes the key).
     await runHostSetup([], {
@@ -1505,7 +1506,7 @@ test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
       question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
-      sidecarReadinessAttempts: 3,
+      sidecarReadinessBudgetMs: 30_000,
     sidecarProbeUrl: `${fake.url}/v1/systemone`,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
     const credsPath = join(dir, 'mercury', 'bot-credentials.json');
@@ -1518,7 +1519,7 @@ test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
       question: async () => '',
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
-      sidecarReadinessAttempts: 3,
+      sidecarReadinessBudgetMs: 30_000,
     sidecarProbeUrl: `${fake.url}/v1/systemone`,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_URL: 'http://127.0.0.1:8302' });
     assert.equal(code, 0, `re-run failed: ${out.join('')}`);
@@ -1533,7 +1534,7 @@ test('runHostSetup: an invalid MERCURY_LAYA_TIMEOUT_MS refuses with the doctor w
   // The success gate claims to be the doctor check — it must fail exactly where the doctor
   // would, including the timeout configuration the doctor rejects.
   const dir = tempDir('setup-laya-badtimeout-');
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], {});
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
   const err: string[] = [];
   try {
     // Pre-seed the env file with an invalid timeout: first run writes mercury.env, so run twice.
@@ -1543,7 +1544,7 @@ test('runHostSetup: an invalid MERCURY_LAYA_TIMEOUT_MS refuses with the doctor w
       question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
-      sidecarReadinessAttempts: 2,
+      sidecarReadinessBudgetMs: 30_000,
     sidecarProbeUrl: `${fake.url}/v1/systemone`,
       sidecarReadinessGapMs: 10,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
@@ -1555,7 +1556,7 @@ test('runHostSetup: an invalid MERCURY_LAYA_TIMEOUT_MS refuses with the doctor w
       question: async () => '',
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
-      sidecarReadinessAttempts: 2,
+      sidecarReadinessBudgetMs: 30_000,
     sidecarProbeUrl: `${fake.url}/v1/systemone`,
       sidecarReadinessGapMs: 10,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
@@ -1574,7 +1575,7 @@ test('runHostSetup: the venv step uses the EXACT located interpreter (spaces inc
   const spacedBin = join(dir, 'Jane Doe', 'bin', 'python3.16');
   mkdirSync(join(dir, 'Jane Doe', 'bin'), { recursive: true });
   writeFileSync(spacedBin, '#!/bin/sh\n', { mode: 0o755 });
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], {});
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
   const venvArgv: string[][] = [];
   try {
     const code = await runHostSetup([], {
@@ -1589,7 +1590,7 @@ test('runHostSetup: the venv step uses the EXACT located interpreter (spaces inc
         return okRun(argv);
       },
       sidecarDataDir: join(dir, 'data'),
-      sidecarReadinessAttempts: 2,
+      sidecarReadinessBudgetMs: 30_000,
         sidecarProbeUrl: `${fake.url}/v1/systemone`,
       sidecarReadinessGapMs: 10,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, PATH: `${join(dir, 'Jane Doe', 'bin')}:${process.env.PATH ?? ''}` });
@@ -1601,11 +1602,88 @@ test('runHostSetup: the venv step uses the EXACT located interpreter (spaces inc
   }
 });
 
+test('runHostSetup: an EXTERNAL MERCURY_LAYA_URL is preserved and verified, not replaced (#840 r21)', async () => {
+  const dir = tempDir('setup-laya-ext-');
+  // External endpoint: setup holds no key for it (the doctor probes with an empty key too),
+  // so the fake runs auth-off — reachability is the gate here, not ownership.
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], {});
+  const outx: string[] = [];
+  const errx: string[] = [];
+  try {
+    const code = await runHostSetup([], {
+      out: (s) => outx.push(s),
+      err: (s) => errx.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}/v1/systemone`,
+      sidecarReadinessBudgetMs: 10_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_URL: `${fake.url}/v1/systemone` });
+    assert.equal(code, 0);
+    const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
+    assert.ok(file.includes(`MERCURY_LAYA_URL=${fake.url}/v1/systemone`), 'the external URL survives verbatim');
+    assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'no local sidecar is installed over an external endpoint');
+    assert.ok(!existsSync(join(dir, 'Library', 'LaunchAgents', 'com.mercury.laya.plist')), 'no unit is written (darwin check)');
+    assert.ok(outx.join('').includes('external endpoint'), `the operator is told: ${outx.join('')}`);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('runHostSetup: the readiness gate REQUIRES auth — an open sidecar on the port is refused (#840 r21)', async () => {
+  const dir = tempDir('setup-laya-open-');
+  // auth OFF: the fake answers every request. The unit embeds a key, so an answering-but-open
+  // port means ANOTHER service owns it — setup must refuse, not report ok.
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], {});
+  const err: string[] = [];
+  try {
+    const code = await runHostSetup([], {
+      out: () => {},
+      err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}/v1/systemone`,
+      sidecarReadinessBudgetMs: 10_000,
+      sidecarReadinessGapMs: 10,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+    assert.equal(code, 1);
+    assert.ok(err.join('').includes('answers WITHOUT a key'), `named failure: ${err.join('')}`);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('runHostSetup: the readiness budget bounds a huge MERCURY_LAYA_TIMEOUT_MS (#840 r21)', async () => {
+  const dir = tempDir('setup-laya-budget-');
+  const fake = await startFakeLaya([{ hang: true }], { apiKey: '*' });
+  const t0 = Date.now();
+  try {
+    // timeout 600000 (10 min/probe) + budget 2 s: the probe deadline must cap to the remaining
+    // budget — setup exits ~2 s in, not 20 hours.
+    const code = await runHostSetup([], {
+      out: () => {},
+      err: () => {},
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}/v1/systemone`,
+      sidecarReadinessBudgetMs: 2_000,
+      sidecarReadinessGapMs: 10,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_TIMEOUT_MS: '600000' });
+    const elapsed = Date.now() - t0;
+    assert.equal(code, 1);
+    assert.ok(elapsed < 15_000, `the budget bounds the wait: ${elapsed} ms`);
+  } finally {
+    await fake.close();
+  }
+});
+
 test('runHostSetup: the readiness window retries until the sidecar answers (#840 r11)', async () => {
   // A fresh sidecar downloads the English checkpoint first; the first probes legitimately
   // fail. The wizard must keep probing within its bounded window, not exit 1.
   const dir = tempDir('setup-laya-ready-');
-  const fake = await startFakeLaya([{ hang: true }, { json: validPick(['probe']) }], {});
+  const fake = await startFakeLaya([{ hang: true }, { json: validPick(['probe']) }], { apiKey: '*' });
   const out: string[] = [];
   try {
     const code = await runHostSetup([], {
@@ -1614,7 +1692,7 @@ test('runHostSetup: the readiness window retries until the sidecar answers (#840
       question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
-      sidecarReadinessAttempts: 5,
+      sidecarReadinessBudgetMs: 30_000,
     sidecarProbeUrl: `${fake.url}/v1/systemone`,
       sidecarReadinessGapMs: 20,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
@@ -1659,7 +1737,7 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
   writeFileSync(unitPath, 'stale', { mode: 0o644 });
   // The run now LOADS the unit and probes it (r10/r11): a fake sidecar answers on the fixed
   // port; the readiness window is shrunk to keep the test fast.
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], {});
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
   try {
     await runHostSetup([], {
       out: () => {},
@@ -1667,7 +1745,7 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
       question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
-      sidecarReadinessAttempts: 3,
+      sidecarReadinessBudgetMs: 30_000,
   sidecarProbeUrl: `${fake.url}/v1/systemone`,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
   } finally {
@@ -1683,7 +1761,7 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
     // re-run the setup once more to prove the FULL systemctl order (r13): daemon-reload first
     // (a fresh unit is invisible to enable until then), then enable, then restart.
     const calls: string[][] = [];
-    const fake2 = await startFakeLaya([{ json: validPick(['probe']) }], {});
+    const fake2 = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
     try {
       await runHostSetup(['--yes'], {
         out: () => {},
@@ -1694,7 +1772,7 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
           return okRun(argv);
         },
         sidecarDataDir: join(dir, 'data'),
-        sidecarReadinessAttempts: 3,
+        sidecarReadinessBudgetMs: 30_000,
         sidecarProbeUrl: `${fake2.url}/v1/systemone`,
       }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
     } finally {
@@ -1713,7 +1791,7 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
           ? { ok: false, stdout: '', stderr: 'Unit com.mercury.laya.service not found' }
           : okRun(argv),
       sidecarDataDir: join(dir, 'data'),
-      sidecarReadinessAttempts: 3,
+      sidecarReadinessBudgetMs: 30_000,
       sidecarProbeUrl: `${fake2.url}/v1/systemone`,
       sidecarReadinessGapMs: 10,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
