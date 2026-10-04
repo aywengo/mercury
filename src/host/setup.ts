@@ -1105,10 +1105,29 @@ export async function runHostSetup(
         // every request when LAYA_API_KEY is unset, so an UNAUTHENTICATED sidecar that already
         // owns the port would read as healthy (Copilot #840 r21). Require a key-less probe to
         // get 401 — the unit embeds the key, so the answering service must be ours.
-        const anon = await checkLaya(baseUrl, '', Math.min(timeout.timeoutMs, budgetMs - (Date.now() - started)));
-        if (anon.ok || !(anon.detail ?? '').includes('401')) {
-          io.err(`\nlaya: the sidecar at ${baseUrl} answers WITHOUT a key — that is not the unit setup installed (LAYA_API_KEY unset), so the port is owned by another service.\n`);
-          return 1;
+        // A timed-out or transiently-failing anonymous probe is INCONCLUSIVE — it must not be
+        // read as "answers without a key" (Copilot #840 r28): a healthy sidecar mid-request or
+        // a 5xx blip would fail the install. Only a successful anonymous response proves the
+        // endpoint is open; a definitive 401 proves auth is on. Everything else retries within
+        // the remaining budget. The anon timeout is at least 1 ms and bounded by what is left,
+        // so a long first probe can never push the second past the budget.
+        for (;;) {
+          const anonLeft = budgetMs - (Date.now() - started);
+          if (anonLeft <= 0) {
+            io.err(`\nlaya: the readiness budget ran out while proving auth on ${baseUrl} (${attempts} attempts) — last probe: ${last}\n`);
+            io.err(`laya: inspect with \`launchctl print ${uid}/${plan.unitLabel}\` (macOS) or \`journalctl --user -u ${plan.unitLabel}\` (Linux), then re-run setup.\n`);
+            return 1;
+          }
+          const anon = await checkLaya(baseUrl, '', Math.max(1, Math.min(timeout.timeoutMs, anonLeft)));
+          if (anon.ok) {
+            io.err(`\nlaya: the sidecar at ${baseUrl} answers WITHOUT a key — that is not the unit setup installed (LAYA_API_KEY unset), so the port is owned by another service.\n`);
+            return 1;
+          }
+          if ((anon.detail ?? '').includes('401')) break; // auth proven
+          // Inconclusive (timeout/unreachable/5xx): retry after the gap, like the main loop.
+          last = anon.detail;
+          const sleepMs = Math.min(gapMs, budgetMs - (Date.now() - started));
+          if (sleepMs > 0) await new Promise((res) => setTimeout(res, sleepMs));
         }
         io.out(`laya: doctor ok — ${last}\n`);
         break;

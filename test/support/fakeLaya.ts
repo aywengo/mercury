@@ -48,7 +48,8 @@ export interface FakeLaya {
 /** Start a fake sidecar scripted per request: the Nth request gets script[N] (the LAST entry
  *  repeats for any request beyond the script). Auth: when apiKey is set, requests without the
  *  matching bearer get 401 and are still recorded. */
-export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKey?: string; port?: number } = {}): Promise<FakeLaya> {
+export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKey?: string; port?: number; /** Script for bearer-LESS requests INSTEAD of the auto-401 gate (r28: transient anon failures). */ anonScript?: FakeLayaScriptEntry[] } = {}): Promise<FakeLaya> {
+  let anonCount = 0;
   const received: FakeLayaReceived[] = [];
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -65,6 +66,16 @@ export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKe
       // that an EMPTY/missing bearer gets 401 while a real one passes.
       const anyNonEmpty = opts.apiKey === '*';
       const auth = opts.apiKey !== undefined;
+      const bearerless = !/^Bearer \S/.test(header);
+      if (bearerless && opts.anonScript) {
+        // r28: anon requests follow their own script (default would be a flat 401).
+        const entry = opts.anonScript[Math.min(anonCount, opts.anonScript.length - 1)] ?? {};
+        anonCount += 1;
+        res.statusCode = entry.status ?? 200;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify(entry.json ?? {}));
+        return;
+      }
       if (auth && (anyNonEmpty ? !/^Bearer \S/.test(header) : header !== `Bearer ${opts.apiKey}`)) {
         res.statusCode = 401;
         res.end(JSON.stringify({ error: 'unauthorized' }));

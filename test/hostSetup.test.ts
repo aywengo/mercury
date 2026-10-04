@@ -1789,6 +1789,31 @@ test('runHostSetup: the readiness gate REQUIRES auth — an open sidecar on the 
   }
 });
 
+test('runHostSetup: a transient anonymous-probe failure is retried, not read as open auth (#840 r28)', async () => {
+  // Authed probe 200 (auth on), anon probe 503 (inconclusive blip), retry → 401 → proven.
+  // Before r28 the 503 was read as "answers WITHOUT a key" and killed a healthy install.
+  const dir = tempDir('setup-laya-anon503-');
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*', anonScript: [{ status: 503, json: { error: 'overloaded' } }, { status: 401, json: { error: 'unauthorized' } }] });
+  const out: string[] = [];
+  const err: string[] = [];
+  try {
+    const code = await runHostSetup([], {
+      out: (s) => out.push(s),
+      err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`,
+      sidecarReadinessBudgetMs: 10_000,
+      sidecarReadinessGapMs: 10,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+    assert.equal(code, 0, `setup must recover: ${err.join('')} | ${out.join('')}`);
+    assert.ok(out.join('').includes('doctor ok'), `success reported: ${out.join('')}`);
+  } finally {
+    await fake.close();
+  }
+});
+
 test('runHostSetup: the readiness budget bounds a huge MERCURY_LAYA_TIMEOUT_MS (#840 r21)', async () => {
   const dir = tempDir('setup-laya-budget-');
   const fake = await startFakeLaya([{ hang: true }], { apiKey: '*' });
