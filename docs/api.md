@@ -307,6 +307,27 @@ Omitting `agent` selects `MERCURY_DEFAULT_AGENT` (default `fake`). Send an
 explicit id such as `"agent": "primeagent"` for a real coding Run. `GET
 /api/agents` returns `{ "agents": ["fake", "primeagent", ...], "defaultAgent": "fake" }`.
 
+### Credential profile
+
+`credentialProfile` (optional, nullable, read-only) names the credential profile the Run
+resolved to at creation, or `null` when no profile matched — which is every Run on a host
+without a profile file ([credential-profiles-design.md](credential-profiles-design.md) §5.3,
+§5.4, CP-3 #807). It is a NAME only: profile contents (env values, token names, git identity,
+file paths) never appear on the Run, its row, or its events.
+
+- Resolution: the profile file is read per decision — at creation, at claim, and at retry —
+  so an operator edit takes effect without a restart.
+- Refusal at creation: a Run whose repository is claimed by a profile that does not list the
+  caller's owner answers `403` naming the profile and the reason; repositories matching two
+  different profiles answer `403` the same way. The body never carries profile contents, env
+  names, or file paths.
+- Claim/resume parity: if the re-resolved result at claim time differs from the stored name
+  (profile removed, owner dropped, repository re-bound, or the file unreadable), the Run goes
+  terminal `FAILED` with `credential profile changed since creation` — it is never driven
+  under a different identity.
+- Retry parity: retrying a Run after its profile changed refuses the retry with the same
+  reason; create a new Run instead of resuming under a changed identity.
+
 ### Per-Run model
 
 `model` (optional, string) is a per-Run model override for the agent's harness:
