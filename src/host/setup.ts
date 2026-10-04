@@ -944,10 +944,19 @@ export async function runHostSetup(
       }
       // No laya entry (or no file): the local-cred path's ensureLayaCredentials owns that case.
     }
-    if (layaApi && registryText) {
-      if (registeredLayaOwner(registryText, layaApi) === 'bot-laya') {
-        io.err(`\nlaya: the existing laya credential is still registered as a MERCURY bot token (bot-laya in MERCURY_API_TOKENS) — an earlier bot uninstall was interrupted.\n`);
-        io.err('laya: finish the uninstall (re-run `mercury host bot service uninstall --alias laya --yes` after restoring its unit, or remove the bot-laya entry from MERCURY_API_TOKENS by hand), then re-run setup.\n');
+    if (layaApi) {
+      // ANY registry match is refused (Copilot #840 r55): a token shared with ANY bot owner
+      // (not just bot-laya) would authorize one secret for both the Mercury API and Laya.
+      const owner = registryText ? registeredLayaOwner(registryText, layaApi) : null;
+      const adminMatch = layaApi !== '' && layaApi === existingVars.MERCURY_ADMIN_TOKEN;
+      if (owner !== null) {
+        io.err(`\nlaya: the existing laya credential is still registered as a MERCURY token (owner '${owner}' in MERCURY_API_TOKENS) — reusing it as the sidecar key would let one secret authorize both services.\n`);
+        io.err('laya: if this came from an interrupted bot uninstall, finish it (re-run `mercury host bot service uninstall --alias laya --yes` after restoring its unit, or remove the entry from MERCURY_API_TOKENS by hand), then re-run setup.\n');
+        return 1;
+      }
+      if (adminMatch) {
+        io.err(`\nlaya: the existing laya credential equals MERCURY_ADMIN_TOKEN — reusing it as the sidecar key would hand the admin credential to the sidecar process.\n`);
+        io.err('laya: rotate one of the two secrets (the sidecar key lives in the laya entry of bot-credentials.json), then re-run setup.\n');
         return 1;
       }
     }
@@ -1057,56 +1066,51 @@ export async function runHostSetup(
     // The detector must tell us HOW it found the interpreter: `uv venv` without seed has no
     // pip, and a plain-python fallback has no uv at all (Copilot #840 r1). Replay the winning
     // candidate's own venv command and install through the venv's pip (seeded for uv).
-    // Staged replacement (Copilot #840 r47): recreate+install into a SIBLING staging venv and
-    // swap only after the install succeeds — recreating the LIVE venv first would leave a
-    // still-enabled unit without its executable if pip then failed.
-    const stagingDir = `${plan.venvDir}.staging-${process.pid}`;
+    // Rebuild at the FINAL path with rollback (Copilot #840 r55): a venv cannot be promoted by
+    // renaming — pip writes absolute shebangs into bin/ scripts, so a staged-then-renamed venv
+    // would run with a dead interpreter. Instead: move the live venv aside first, create and
+    // install at the final path, and only then delete the backup; ANY failure rolls the
+    // previous environment back into place, so a still-enabled unit is never left without a
+    // working venv (r47's original guarantee, without the rename).
     const backupDir = `${plan.venvDir}.backup-${process.pid}`;
-    const venvStep = det.argv![0] === 'uv'
-      ? () => {
-          const r = run(['uv', 'venv', stagingDir, '--python', `3.${det.version!.split('.')[1]}`, '--seed'], 120_000);
-          if (!r.ok) throw new Error(`uv venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
-        }
-      : () => {
-          // The executable is det.argv[0] — the exact path that passed -V. det.bin can contain
-          // spaces (a discovered interpreter under '/Users/Jane Doe/bin'), and splitting on
-          // ' ' would truncate it (Copilot #840 r15).
-          const pyBin = det.argv![0]!;
-          const r = run([pyBin, '-m', 'venv', stagingDir], 120_000);
-          if (!r.ok) throw new Error(`python -m venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
-        };
+    let backedUp = false;
     const steps: Array<[string, () => void]> = [
-      ['clear', () => {
-        // A stale staging dir from a dead run (same PID reused) must not overlay packages
-        // into the fresh environment (Copilot #840 r48).
-        rmSync(stagingDir, { recursive: true, force: true });
+      ['backup', () => {
+        if (existsSync(plan.venvDir)) {
+          // A stale backup from a dead run (same PID reused) must not be adopted.
+          rmSync(backupDir, { recursive: true, force: true });
+          renameSync(plan.venvDir, backupDir);
+        }
+        backedUp = true;
       }],
-      ['venv', venvStep],
+      ['venv', det.argv![0] === 'uv'
+        ? () => {
+            const r = run(['uv', 'venv', plan.venvDir, '--python', `3.${det.version!.split('.')[1]}`, '--seed'], 120_000);
+            if (!r.ok) throw new Error(`uv venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
+          }
+        : () => {
+            // The executable is det.argv[0] — the exact path that passed -V. det.bin can contain
+            // spaces (a discovered interpreter under '/Users/Jane Doe/bin'), and splitting on
+            // ' ' would truncate it (Copilot #840 r15).
+            const pyBin = det.argv![0]!;
+            const r = run([pyBin, '-m', 'venv', plan.venvDir], 120_000);
+            if (!r.ok) throw new Error(`python -m venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
+          }],
       ['install', () => {
-        const r = run([join(stagingDir, 'bin', 'python3'), '-m', 'pip', 'install', `laya[serve]==${LAYA_SERVE_PIN}`], 300_000);
+        const r = run([join(plan.venvDir, 'bin', 'python3'), '-m', 'pip', 'install', `laya[serve]==${LAYA_SERVE_PIN}`], 300_000);
         if (!r.ok) throw new Error(`pip install laya[serve]==${LAYA_SERVE_PIN} failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
       }],
-      ['swap', () => {
-        // Success path only: replace the live venv. A backup is removed after the swap — if the
-        // swap itself fails, restore it so the previous install keeps working. A missing
-        // staging dir means the injected runner virtualized venv creation (tests) — nothing to
-        // swap.
-        if (!existsSync(stagingDir)) return;
-        if (existsSync(plan.venvDir)) renameSync(plan.venvDir, backupDir);
-        try {
-          renameSync(stagingDir, plan.venvDir);
-        } catch (e) {
-          if (existsSync(backupDir)) renameSync(backupDir, plan.venvDir);
-          throw e;
-        }
+      ['commit', () => {
+        // The new environment is complete — the old one is no longer needed. Sweep stale
+        // siblings from crashed runs — ONLY the exact generated shape '<venv>.backup-<pid>'
+        // with a NUMERIC pid (Copilot #840 r50): an operator's 'laya-venv.backup-manual' must
+        // never be touched.
         if (existsSync(backupDir)) rmSync(backupDir, { recursive: true, force: true });
-        // Sweep stale siblings from crashed runs — ONLY the exact generated shape
-        // '<venv>.staging-<pid>' / '<venv>.backup-<pid>' with a NUMERIC pid (Copilot #840
-        // r50): an operator's 'laya-venv.backup-manual' must never be touched.
         const venvBase = basename(plan.venvDir);
-        for (const entry of readdirSync(dirname(plan.venvDir))) {
-          const m = entry.startsWith(`${venvBase}.staging-`) || entry.startsWith(`${venvBase}.backup-`)
-            ? /^\.(staging|backup)-(\d+)$/.exec(entry.slice(venvBase.length))
+        const venvParent = dirname(plan.venvDir);
+        for (const entry of existsSync(venvParent) ? readdirSync(venvParent) : []) {
+          const m = entry.startsWith(`${venvBase}.backup-`)
+            ? /^\.backup-(\d+)$/.exec(entry.slice(venvBase.length))
             : null;
           if (m) rmSync(join(dirname(plan.venvDir), entry), { recursive: true, force: true });
         }
@@ -1146,9 +1150,13 @@ export async function runHostSetup(
       }
       io.out(`laya: unit written at ${plan.unitPath}\n`);
     } catch (e) {
-      // Pre-swap failure: never leak the staging venv (Copilot #840 r48). After a successful
-      // swap the staging dir no longer exists, so this is a no-op there.
-      rmSync(stagingDir, { recursive: true, force: true });
+      // Rollback (Copilot #840 r55): any failure after the backup step removes the possibly
+      // broken new venv and restores the previous environment, so a still-enabled unit keeps a
+      // working interpreter.
+      if (backedUp) {
+        rmSync(plan.venvDir, { recursive: true, force: true });
+        if (existsSync(backupDir)) renameSync(backupDir, plan.venvDir);
+      }
       io.err(`\nlaya: not installed — ${(e as Error).message}\n`);
       io.err('laya: mercury.env was written; the sidecar can be finished later by re-running `mercury host setup --yes`.\n');
       return 1;

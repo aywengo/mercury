@@ -1665,25 +1665,27 @@ test('sidecarExec: the timeout holds even when the child ignores SIGTERM (#840 r
   assert.ok(elapsed < 5_000, `the bound holds: ${elapsed} ms`);
 });
 
-test('runHostSetup: the venv is replaced via staging; a failed install leaves it intact (#840 r47)', async () => {
-  // Scripted runner that REALLY creates the venv dirs so the swap's renames execute.
+test('runHostSetup: the venv is rebuilt at its final path; a failed install rolls back (#840 r47/r55)', async () => {
+  // Scripted runner that REALLY creates the venv dir so the rebuild works on the real fs.
   const dir = tempDir('setup-laya-stage-');
   const live = join(dir, 'data', 'laya-venv');
-  const priorMarker = join(live, 'bin', 'python3');
+  const installedMarker = join(live, 'bin', '.laya-installed');
   let failInstall = false;
   const sidecarRun = (argv: string[]) => {
     if (argv[0] === 'uv' && argv[1] === 'venv') {
       const target = argv[2]!;
-      // `uv venv` REPLACES an existing venv — emulate that so the staging discipline is
-      // observable (a recreate-in-place wipes the previous install's files).
+      // `uv venv` REPLACES an existing venv — emulate that so the rollback discipline is
+      // observable (a recreate wipes the previous install's files).
       rmSync(target, { recursive: true, force: true });
       mkdirSync(join(target, 'bin'), { recursive: true });
       writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\n', { mode: 0o755 });
     } else if (argv.includes('pip')) {
       if (failInstall) return { ok: false, stdout: '', stderr: 'boom' };
-      // pip installs into the venv that invoked it (the staging dir pre-swap). argv[0] is
-      // <venv>/bin/python3 — the bin dir is its dirname.
+      // pip installs into the venv that invoked it — always the FINAL path now (r55: a venv
+      // cannot be promoted by renaming; pip writes absolute shebangs).
+      assert.ok(!argv[0]!.includes('.staging-'), `pip must run from the final venv path, got ${argv[0]}`);
       const venvBin = dirname(argv[0]!);
+      assert.equal(venvBin, join(live, 'bin'), 'pip targets the live venv');
       mkdirSync(venvBin, { recursive: true });
       writeFileSync(join(venvBin, '.laya-installed'), 'ok\n');
     }
@@ -1694,8 +1696,8 @@ test('runHostSetup: the venv is replaced via staging; a failed install leaves it
   mkdirSync(join(dir, 'data', 'laya-venv.backup-manual'), { recursive: true });
   writeFileSync(join(dir, 'data', 'laya-venv.backup-manual', 'keep.txt'), 'operator data\n');
   mkdirSync(join(dir, 'data', 'laya-venv.backup-weird.pid'), { recursive: true });
-  mkdirSync(join(dir, 'data', 'laya-venv.staging-999999'), { recursive: true });
-  // First run: healthy install → live venv exists, no staging/backup leftovers.
+  mkdirSync(join(dir, 'data', 'laya-venv.backup-999999'), { recursive: true });
+  // First run: healthy install → live venv exists, no backup leftovers.
   const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
   try {
     const code = await runHostSetup([], {
@@ -1705,13 +1707,12 @@ test('runHostSetup: the venv is replaced via staging; a failed install leaves it
       sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
     assert.equal(code, 0, `install: ${err.join('')}`);
-    assert.ok(existsSync(live), 'the live venv exists after the swap');
-    assert.ok(existsSync(join(live, 'bin', '.laya-installed')), 'the install landed in the live venv');
-    assert.ok(!existsSync(`${live}.staging-${process.pid}`) || readdirSync(join(dir, 'data')).every((e) => !e.includes('.staging-')), 'no staging leftover');
-    assert.ok(!readdirSync(join(dir, 'data')).some((e) => /^laya-venv\.(staging|backup)-\d+$/.test(e)), 'no numerically-shaped staging/backup leftover');
+    assert.ok(existsSync(live), 'the live venv exists after the rebuild');
+    assert.ok(existsSync(installedMarker), 'the install landed in the live venv');
+    assert.ok(!readdirSync(join(dir, 'data')).some((e) => /^laya-venv\.(staging|backup)-\d+$/.test(e)), 'no numerically-shaped backup leftover');
     assert.ok(existsSync(join(dir, 'data', 'laya-venv.backup-manual', 'keep.txt')), 'operator data sharing the prefix survives');
     assert.ok(existsSync(join(dir, 'data', 'laya-venv.backup-weird.pid')), 'a non-generated suffix (dot in the tail) survives');
-    // Second run with a FAILING install: the previous live venv must survive untouched.
+    // Second run with a FAILING install: rollback restores the previous environment.
     failInstall = true;
     err.length = 0;
     const out2: string[] = [];
@@ -1721,14 +1722,12 @@ test('runHostSetup: the venv is replaced via staging; a failed install leaves it
       sidecarRun, sidecarDataDir: join(dir, 'data'),
       sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
-    assert.equal(code2, 1);
-    console.error('DBG-ERR2:', JSON.stringify(err.join('').slice(-400)));
+    assert.equal(code2, 1, `failing reinstall: ${err.join('')} | ${out2.join('')}`);
     assert.match(err.join(''), /pip install laya\[serve\]==[^ ]+ failed/);
-    assert.ok(existsSync(priorMarker), 'the previous live venv is intact after a failed install');
+    assert.ok(existsSync(installedMarker), 'the previous install survives the failed rebuild (rolled back)');
     // The staging venv is cleaned up on a pre-swap failure (Copilot #840 r48).
     assert.ok(!readdirSync(join(dir, 'data')).some((e) => e.includes('.staging-')), 'no staging venv leaks after a failed install');
-    // The INSTALLED marker survives: a recreate-before-install would have wiped it.
-    assert.ok(existsSync(join(live, 'bin', '.laya-installed')), 'the installed environment survives');
+    assert.ok(!readdirSync(join(dir, 'data')).some((e) => /^laya-venv\.backup-\d+$/.test(e)), 'no generated backup venv leaks after a failed install');
   } finally {
     await fake.close();
   }
@@ -1872,6 +1871,28 @@ test('runHostSetup: the unit temp file is created exclusively at 0600 (#840 r52)
   }
 });
 
+test('runHostSetup: a laya credential shared with ANY bot owner or the admin token refuses (#840 r55)', async () => {
+  // A shared token authorized for BOTH Mercury and Laya is the collision the gate exists for —
+  // regardless of WHICH owner the registry lists.
+  for (const [label, envLine, apiValue] of [
+    ['shared bot owner', 'MERCURY_PORT=3999\nMERCURY_API_TOKENS=tok-shared:alice\n', 'tok-shared'],
+    ['admin token', 'MERCURY_PORT=3999\nMERCURY_ADMIN_TOKEN=tok-admin-shared\n', 'tok-admin-shared'],
+  ] as const) {
+    const dir = tempDir(`setup-laya-share-${label.includes('admin') ? 'adm' : 'bot'}-`);
+    mkdirSync(join(dir, 'mercury'), { recursive: true });
+    writeFileSync(join(dir, 'mercury', 'mercury.env'), envLine);
+    writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: apiValue } }), { mode: 0o600 });
+    const err: string[] = [];
+    const code = await runHostSetup([], {
+      out: () => {}, err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarReadinessBudgetMs: 2_000, sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone',
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+    assert.equal(code, 1, `${label}: must refuse (${err.join('')})`);
+    assert.match(err.join(''), /one secret authorize both services|hand the admin credential/);
+  }
+});
+
 test('registeredLayaOwner: trims both halves and skips malformed entries (#840 r54)', () => {
   assert.equal(registeredLayaOwner('tok-legacy-laya: bot-laya', 'tok-legacy-laya'), 'bot-laya');
   assert.equal(registeredLayaOwner('tok-legacy-laya :bot-laya', 'tok-legacy-laya'), 'bot-laya');
@@ -1898,7 +1919,7 @@ test('runHostSetup: a laya credential still registered as bot-laya in MERCURY_AP
   }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
   assert.equal(code, 1);
   assert.match(err.join(''), /interrupted/);
-  assert.match(err.join(''), /bot-laya in MERCURY_API_TOKENS/);
+  assert.match(err.join(''), /owner 'bot-laya' in MERCURY_API_TOKENS/);
   // r54: whitespace around either half of the entry is a valid registration (parseTokens trims)
   // — the gate must stay fail-closed for the hand-written shape too.
   const dirWs = tempDir('setup-laya-reg-ws-');
