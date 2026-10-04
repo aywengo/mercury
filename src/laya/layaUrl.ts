@@ -54,8 +54,10 @@ export function validateLayaBaseUrl(value: unknown, varName = 'MERCURY_LAYA_URL'
 export function isWizardManagedLayaDefault(value: string, defaultPort: number): boolean {
   try {
     const u = new URL(value.trim());
+    // Only the NUMERIC loopback the wizard emits/binds: localhost is a documented EXTERNAL
+    // form — classifying it wizard-managed would install a competing unit over it (r45).
     return u.protocol === 'http:'
-      && (u.hostname === '127.0.0.1' || u.hostname === 'localhost')
+      && u.hostname === '127.0.0.1'
       && (u.port === '' ? 80 : Number(u.port)) === defaultPort
       && (u.pathname === '/' || u.pathname === '')
       && !u.search && !u.hash && !u.username && !u.password

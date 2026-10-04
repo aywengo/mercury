@@ -168,10 +168,27 @@ export function installBotService(
   env: NodeJS.ProcessEnv = process.env,
   dryRun = false,
 ): number {
-  // A pre-reservation bot must stay repairable: when its config already proves ownership, the
-  // syntax check suffices (the reservation applies to NEW bots only, Copilot #840 r43).
+  // A pre-reservation bot must stay repairable — but a config file alone is NOT evidence:
+  // bots/<alias>.json is the normal input for a NEW install, so an operator could create one
+  // and bypass the reservation (Copilot #840 r45). Ownership evidence = an existing service
+  // unit/plist OR a bot-<alias> token registration in MERCURY_API_TOKENS. Otherwise the
+  // reservation applies (new bot).
+  // Same resolution the units actually use (launchd follows $HOME, systemd follows
+  // XDG_CONFIG_HOME) — botPlistPath/botUnitPath read homedir() and ignore the env.
+  const legacyUnitPath = platform === 'darwin'
+    ? join(env.HOME?.trim() || homedir(), 'Library', 'LaunchAgents', `${botLaunchdLabel(alias)}.plist`)
+    : botUnitPath(alias, env);
+  const legacyEvidence = existsSync(legacyUnitPath) ||
+    (existsSync(envFilePath(env)) && readFileSync(envFilePath(env), 'utf8').split('\n').some((line) => {
+      const m = /^MERCURY_API_TOKENS=(.*)$/.exec(line);
+      if (!m) return false;
+      return m[1]!.split(',').some((e) => {
+        const parts = e.trim().split(':');
+        return parts.length === 2 && parts[1]!.trim() === `bot-${alias}`;
+      });
+    }));
   try {
-    if (existsSync(botConfigFile(alias, env))) {
+    if (legacyEvidence) {
       assertAliasSyntax(alias);
     } else {
       assertAlias(alias);

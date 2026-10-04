@@ -32,6 +32,7 @@ import {
   KNOWN_HARNESSES,
   type HostSetupAnswers,
 } from '../src/host/setup.ts';
+import { isWizardManagedLayaDefault } from '../src/laya/layaUrl.ts';
 import {
   DEFAULT_PYTHON_CANDIDATES,
   detectPython,
@@ -1751,6 +1752,10 @@ test('validateAnswer: layaUrl must be a loopback BASE URL without a route (#840 
   assert.match(validateAnswer('layaUrl', 'http://127.0.0.1:8302#') ?? '', /query or fragment/);
   // r44: the root-path form IS valid (the wizard-managed default classifies canonically).
   assert.equal(validateAnswer('layaUrl', 'http://127.0.0.1:8302/'), null);
+  // r45: localhost is a documented EXTERNAL form — accepted, but never wizard-managed.
+  assert.equal(validateAnswer('layaUrl', 'http://localhost:8302'), null);
+  assert.equal(isWizardManagedLayaDefault('http://localhost:8302', 8302), false, 'localhost = external');
+  assert.equal(isWizardManagedLayaDefault('http://127.0.0.1:8302/', 8302), true, 'numeric root-path = wizard-managed');
   assert.match(validateAnswer('layaUrl', 'http://') ?? '', /absolute URL/);
   assert.match(validateAnswer('layaUrl', 'http://192.168.1.20:8302') ?? '', /loopback host/);
   assert.match(validateAnswer('layaUrl', 'http://host:8302/v1/systemone') ?? '', /(loopback host|without a route path)/);
