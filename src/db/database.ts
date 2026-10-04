@@ -369,6 +369,30 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE runs ADD COLUMN model TEXT;
   `,
+  // v14: the advisory Workflow Template snapshot (docs/crew/workflows.md section 5, issue #809).
+  //
+  // One row per Run, written inside the Run-creation transaction next to run_skills and
+  // run_presets: the exact template bytes, every template file, their canonical hash and the
+  // resolved version. A template or preset edit after creation cannot change what this Run
+  // renders -- the worker renders from these bytes, never from the live registry.
+  `
+  CREATE TABLE IF NOT EXISTS run_workflows (
+    run_id          TEXT PRIMARY KEY,
+    workflow_id     TEXT NOT NULL,
+    workflow_version TEXT NOT NULL,
+    mode            TEXT NOT NULL,
+    trust           TEXT NOT NULL,
+    content_hash    TEXT NOT NULL,
+    source_kind     TEXT NOT NULL,
+    source_path     TEXT NOT NULL,
+    template_json   TEXT NOT NULL,
+    files_json      TEXT NOT NULL,
+    snapshot_json   TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_run_workflows_identity
+    ON run_workflows(workflow_id, workflow_version);
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

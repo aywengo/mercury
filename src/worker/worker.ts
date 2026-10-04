@@ -16,6 +16,8 @@ import type {
   AgentCapabilitySummary, AgentEvent, AgentExit, AgentHandle, AgentInput, ErrorKind, Run, RunContext, ResolvedSkill,
 } from '../domain/types.ts';
 import type { ResolvedRolePreset } from '../presets/types.ts';
+import type { ResolvedWorkflow as ResolvedWorkflowSnapshot } from '../runs/workflowStore.ts';
+import { renderPlan, isTruncated } from '../workflows/renderPlan.ts';
 import type { EventStore } from '../events/eventStore.ts';
 import type { Logger } from '../logger.ts';
 import { RunQueue, LEASE_EXPIRED_ERROR } from '../queue/runQueue.ts';
@@ -324,6 +326,9 @@ export class Worker {
     // process running and a run that threw on a state transition unwound past any cleanup,
     // leaving a live agent writing into a workspace nobody was watching.
     let handle: AgentHandle | null = null;
+    // The rendered advisory plan (issue #809), captured before the prompt is assembled. Null
+    // when the Run was not created from a template, so the prompt stays byte-identical.
+    let renderedWorkflowPlan: string | null = null;
 
     try {
       // notAfter claim-time refusal (#731): a Run whose absolute deadline passed while it sat
@@ -411,6 +416,30 @@ export class Worker {
           byteCount: materialized.byteCount,
           instructionHash: createHash('sha256').update(presetSnapshot.instruction).digest('hex'),
         });
+      }
+
+      // Advisory workflow materialization (docs/crew/workflows.md section 5, issue #809): from
+      // the stored snapshot bytes, never a live registry read -- the snapshot is the source of
+      // truth and a template or preset edit after creation must not change what this Run
+      // renders. The rendered plan is prepended to the task prompt; steps stay agent-reported.
+      const workflowSnapshot = this.deps.runService.getWorkflow(run.id);
+      let workflowContext: RunContext['workflow'];
+      if (workflowSnapshot) {
+        const materialized = writeWorkflow(workspace.path, workflowSnapshot);
+        workflowContext = materialized.context;
+        // Stage guidance comes from the SNAPSHOTTED stage preset rows (section 3.1.1 rule 6),
+        // not from the live registry -- the same rule as the template itself.
+        const plan = renderPlan(workflowSnapshot, run.agent, materialized.stageInstructions);
+        this.deps.events.append(run.id, 'workflow.materialized', {
+          workflowId: workflowSnapshot.id,
+          version: workflowSnapshot.version,
+          fileCount: Object.keys(workflowSnapshot.files).length,
+          byteCount: materialized.byteCount,
+          planHash: createHash('sha256').update(plan).digest('hex'),
+          stages: workflowSnapshot.stages.length,
+          truncated: isTruncated(plan),
+        });
+        renderedWorkflowPlan = plan;
       }
 
       // Exclude every generated path from the git view (section 9.4), for EVERY Run, not only pack
@@ -503,6 +532,8 @@ export class Worker {
         goal: this.deps.goals?.get(run.id) ?? undefined,
         ...(knowledgePointer ? { knowledge: knowledgePointer } : {}),
         ...(presetContext ? { preset: presetContext } : {}),
+        ...(workflowContext ? { workflow: workflowContext } : {}),
+        ...(renderedWorkflowPlan ? { workflowPlan: renderedWorkflowPlan } : {}),
       };
 
       // Resume wiring (roadmap p11): a retry run resumes the parent's agent
@@ -1526,6 +1557,69 @@ export function writePreset(
     instruction: snapshot.instruction,
     ...(snapshot.effectiveAgent.model !== undefined ? { model: snapshot.effectiveAgent.model } : {}),
     byteCount,
+  };
+}
+
+/**
+ * Materialize a Run's advisory Workflow Template from its STORED snapshot
+ * (docs/crew/workflows.md section 5, issue #809):
+ *
+ *   workspace/.mercury/workflow/workflow.json     (the verbatim template bytes)
+ *   workspace/.mercury/workflow/<relative files>  (every template file)
+ *   workspace/.mercury/workflow/PROVENANCE.json
+ *
+ * Exported for tests: the write side of the snapshot contract, next to writeSkills and
+ * writePreset. Every destination is contained (issue #58's write-side rule) and the snapshot's
+ * files map is the only input -- the live registry is never consulted here, because a template
+ * edit between creation and execution must not change the plan a queued Run renders.
+ *
+ * The return value carries the identity block the RunContext gets and each stage's guidance
+ * text as read from the workspace snapshot rows the caller resolved (kept here so the
+ * instruction extraction lives with the materialization).
+ */
+export function writeWorkflow(
+  workspacePath: string,
+  snapshot: ResolvedWorkflowSnapshot,
+  stageInstructions: Record<number, string | undefined> = {},
+): {
+  context: NonNullable<RunContext['workflow']>;
+  byteCount: number;
+  stageInstructions: Record<number, string | undefined>;
+} {
+  const workflowRoot = join(workspacePath, '.mercury', 'workflow');
+  let byteCount = 0;
+  for (const [rel, content] of Object.entries(snapshot.files)) {
+    // Contained on both halves, like writeSkills and writePreset. Snapshot keys are
+    // workflow-relative POSIX paths produced by the registry, but this is the write side and
+    // must not depend on that.
+    const dest = resolveContained(workflowRoot, rel);
+    mkdirSync(join(dest, '..'), { recursive: true });
+    writeFileSync(dest, content);
+    byteCount += Buffer.byteLength(content, 'utf8');
+  }
+  const provenance = {
+    workflowId: snapshot.id,
+    version: snapshot.version,
+    mode: snapshot.mode,
+    trust: snapshot.trust,
+    contentHash: snapshot.contentHash,
+    source: snapshot.source,
+    stages: snapshot.stages.length,
+  };
+  const provDest = resolveContained(workflowRoot, 'PROVENANCE.json');
+  writeFileSync(provDest, JSON.stringify(provenance, null, 2));
+  byteCount += Buffer.byteLength(JSON.stringify(provenance, null, 2), 'utf8');
+  return {
+    context: {
+      id: snapshot.id,
+      version: snapshot.version,
+      mode: snapshot.mode,
+      trust: snapshot.trust,
+      contentHash: snapshot.contentHash,
+      stages: snapshot.stages.length,
+    },
+    byteCount,
+    stageInstructions,
   };
 }
 
