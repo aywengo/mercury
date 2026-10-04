@@ -1317,6 +1317,10 @@ test('renderLayaLaunchdPlist / renderLayaSystemdUnit: loopback, preload, english
   // Design §5.3 "weights cached there": HF_HOME is pinned INSIDE the Mercury data dir (r16) —
   // without it the ~843 MB checkpoint lands in the user's global cache.
   assert.ok(plist.includes(`<key>HF_HOME</key><string>/data/laya-hf</string>`), `HF_HOME pinned: ${plist.includes('HF_HOME')}`);
+  // r20: stdout/stderr are captured beside the venv — a preload failure's Python error must
+  // not be lost (the failure hint points the operator at launchctl print, not the log file).
+  assert.ok(plist.includes('<key>StandardOutPath</key><string>/data/laya-sidecar.log</string>'));
+  assert.ok(plist.includes('<key>StandardErrorPath</key><string>/data/laya-sidecar.log</string>'));
   assert.ok(plist.includes('<string>key-1</string>'));
   assert.equal(renderLayaLaunchdPlist(plan, 'key-1'), plist, 'same plan → same bytes');
   const linux = planLayaSidecar({ dataDir: '/data', pythonBin: 'python3', platform: 'linux', env: { XDG_CONFIG_HOME: '/cfg' } });

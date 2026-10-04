@@ -164,6 +164,8 @@ export interface LayaPlan {
   /** Hugging Face cache root inside the Mercury data dir (design §5.3: weights cached there) —
    *  the unit pins HF_HOME so the ~843 MB checkpoint never lands in the user's global cache. */
   hfHome: string;
+  /** launchd stdout/stderr capture (systemd captures to the journal by default). */
+  logPath: string;
   serveCmd: string;
   port: number;
   envUrl: string;
@@ -180,12 +182,15 @@ export function planLayaSidecar(opts: { dataDir: string; pythonBin: string; port
   const port = opts.port ?? LAYA_DEFAULT_PORT;
   const venvDir = join(opts.dataDir, 'laya-venv');
   const hfHome = join(opts.dataDir, 'laya-hf');
+  // Preload failures (a failed checkpoint download) print to stdout/stderr — capture them like
+  // the host LaunchAgent does (src/host/service.ts) or the error is lost (r20).
+  const logPath = join(opts.dataDir, 'laya-sidecar.log');
   const serveCmd = `${join(venvDir, 'bin', 'laya-serve')}`;
   const unitLabel = 'com.mercury.laya';
   const unitPath = platform === 'darwin'
     ? join(env.HOME?.trim() || homedir(), 'Library', 'LaunchAgents', `${unitLabel}.plist`)
     : join(env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config'), 'systemd', 'user', `${unitLabel}.service`);
-  return { venvDir, hfHome, serveCmd, port, envUrl: `http://127.0.0.1:${port}`, unitPath, unitLabel };
+  return { venvDir, hfHome, logPath, serveCmd, port, envUrl: `http://127.0.0.1:${port}`, unitPath, unitLabel };
 }
 
 /** launchd plist (macOS), deterministic: same plan → same bytes (test-pinned). */
@@ -208,6 +213,8 @@ export function renderLayaLaunchdPlist(plan: LayaPlan, apiKey: string): string {
     <key>LAYA_MODELS</key><string>english</string>
     <key>HF_HOME</key><string>${plan.hfHome}</string>
   </dict>
+  <key>StandardOutPath</key><string>${plan.logPath}</string>
+  <key>StandardErrorPath</key><string>${plan.logPath}</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>5</integer>
