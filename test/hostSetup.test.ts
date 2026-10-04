@@ -1753,6 +1753,45 @@ test('runHostSetup: a leftover laya.state.json (interrupted uninstall) is collis
   assert.match(err.join(''), /laya\.state\.json/);
 });
 
+test('runHostSetup: a laya credential still registered as bot-laya in MERCURY_API_TOKENS refuses (interrupted uninstall, #840 r51)', async () => {
+  // The interrupted-uninstall window: unit/state/config already removed, but the credential
+  // entry AND the token:bot-laya registration survive. Preserving that value as the sidecar
+  // key would authorize one secret for both the Mercury API and Laya — refuse instead.
+  const dir = tempDir('setup-laya-reg-');
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  writeFileSync(join(dir, 'mercury', 'mercury.env'), 'MERCURY_PORT=3999\nMERCURY_API_TOKENS=tok-alice:alice,tok-legacy-laya:bot-laya\n');
+  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'tok-legacy-laya' } }), { mode: 0o600 });
+  const err: string[] = [];
+  const code = await runHostSetup([], {
+    out: () => {}, err: (s) => err.push(s),
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarReadinessBudgetMs: 2_000, sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone',
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+  assert.equal(code, 1);
+  assert.match(err.join(''), /interrupted/);
+  assert.match(err.join(''), /bot-laya in MERCURY_API_TOKENS/);
+  // A sidecar key that is NOT bot-registered does not trip the gate (the normal re-run path).
+  const dir2 = tempDir('setup-laya-reg2-');
+  mkdirSync(join(dir2, 'mercury'), { recursive: true });
+  writeFileSync(join(dir2, 'mercury', 'mercury.env'), 'MERCURY_PORT=3999\nMERCURY_API_TOKENS=tok-alice:alice\n');
+  writeFileSync(join(dir2, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
+  try {
+    const err2: string[] = [];
+    const out2: string[] = [];
+    const code2 = await runHostSetup(['--yes'], {
+      out: (s) => out2.push(s), err: (s) => err2.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarDataDir: join(dir2, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir2, XDG_STATE_HOME: dir2, HOME: dir2 });
+    assert.equal(code2, 0, `unregistered sidecar key passes: ERR=${JSON.stringify(err2.join(''))} OUT=${JSON.stringify(out2.join('').slice(-300))}`);
+    assert.ok(!err2.join('').includes('bot-laya'), 'the gate does not fire for an unregistered key');
+  } finally {
+    await fake.close();
+  }
+});
+
 test('runHostSetup: collision evidence covers the lifecycle homedir() unit resolution (#840 r48)', () => {
   // botPlistPath WRITES under homedir() while the wizard's env may carry a different $HOME —
   // both resolutions must be checked so neither shape hides the real unit.

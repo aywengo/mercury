@@ -43,7 +43,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
 import { suggestionFor } from '../adapters/configSchema.ts';
 import { checkLaya, loadEnvFile, parseLayaTimeoutMs, schemeFor } from './doctor.ts';
-import { readBotCredentials } from './bots/credentials.ts';
+import { botCredentialsPath, readBotCredentials } from './bots/credentials.ts';
 import { DEFAULT_PYTHON_CANDIDATES, detectPython, ensureLayaCredentials, LAYA_DEFAULT_PORT, LAYA_SERVE_PIN, layaStepActions, planLayaSidecar, renderLayaLaunchdPlist, renderLayaSystemdUnit, type LayaPlan, type RunFn } from './layaSidecar.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
 import { isWizardManagedLayaDefault, validateLayaBaseUrl } from '../laya/layaUrl.ts';
@@ -900,6 +900,36 @@ export async function runHostSetup(
   if (answers.layaEnabled && layaEvidence.length > 0) {
     io.err(`\nlaya: a bot named 'laya' exists (${layaEvidence[0]}); the alias is reserved for the sidecar credential — uninstall the bot or move its config, then re-run setup.\n`);
     return 1;
+  }
+  // Registry gate (Copilot #840 r51): an interrupted uninstall can have removed the unit, state
+  // and config but crashed before the credential/registry cleanup. The surviving `laya` entry
+  // then still holds a MERCURY bot token — also registered as `token:bot-laya` in
+  // MERCURY_API_TOKENS. Setup must not preserve that value as the sidecar key: one secret would
+  // be authorized for both the Mercury API and Laya. Refuse while the registration exists.
+  if (answers.layaEnabled && existsSync(botCredentialsPath(env))) {
+    let registryText = '';
+    for (const [k, v] of Object.entries(existingVars)) {
+      if (k === 'MERCURY_API_TOKENS') registryText = v;
+    }
+    let layaApi: string | undefined;
+    try {
+      layaApi = readBotCredentials('laya', env).api;
+    } catch {
+      // No laya entry (or unreadable file): the local-cred path's ensureLayaCredentials owns
+      // that refusal; nothing to check here.
+    }
+    if (layaApi && registryText) {
+      const registered = registryText.split(',').map((e) => e.trim()).filter((e) => e !== '');
+      const isBotRegistered = registered.some((entry) => {
+        const parts = entry.split(':');
+        return parts.length === 2 && parts[0] === layaApi && parts[1] === `bot-laya`;
+      });
+      if (isBotRegistered) {
+        io.err(`\nlaya: the existing laya credential is still registered as a MERCURY bot token (bot-laya in MERCURY_API_TOKENS) — an earlier bot uninstall was interrupted.\n`);
+        io.err('laya: finish the uninstall (re-run `mercury host bot service uninstall --alias laya --yes` after restoring its unit, or remove the bot-laya entry from MERCURY_API_TOKENS by hand), then re-run setup.\n');
+        return 1;
+      }
+    }
   }
 
   if (opts.dryRun) {
