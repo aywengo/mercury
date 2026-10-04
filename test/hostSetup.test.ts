@@ -1449,6 +1449,14 @@ test('runHostSetup: Laya OPT-IN writes MERCURY_LAYA_URL + credentials + unit (sc
   assert.ok(out.join('').includes('mercury host doctor'), 'the wizard points at the doctor line');
   assert.ok(out.join('').includes('laya: doctor ok'), 'the run finishes with the doctor probe green (r10)');
   assert.ok(fake.received.length >= 1, 'the probe reached the sidecar');
+  // macOS r12: bootout the loaded job, then bootstrap the NEW plist (kickstart would serve the
+  // cached job definition). Asserted where launchctl exists (darwin; CI's ubuntu job skips).
+  if (process.platform === 'darwin') {
+    const sub = sidecarCalls.map((a) => a[1] ?? '');
+    assert.ok(sub.includes('bootout'), `bootout before bootstrap: ${sidecarCalls.map((c) => c.join(' ')).join(' | ')}`);
+    assert.ok(sub.includes('bootstrap'), 'bootstrap runs');
+    assert.ok(sub.indexOf('bootout') < sub.indexOf('bootstrap'), 'bootout precedes bootstrap');
+  }
   } finally {
     await fake.close();
   }
@@ -1483,6 +1491,41 @@ test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
     assert.equal(code, 0, `re-run failed: ${out.join('')}`);
     const secondKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
     assert.equal(secondKey, firstKey, 'the re-run must NOT rotate the sidecar key');
+  } finally {
+    await fake.close();
+  }
+});
+
+test('runHostSetup: an invalid MERCURY_LAYA_TIMEOUT_MS refuses with the doctor wording (#840 r12)', async () => {
+  // The success gate claims to be the doctor check — it must fail exactly where the doctor
+  // would, including the timeout configuration the doctor rejects.
+  const dir = tempDir('setup-laya-badtimeout-');
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { port: 8302 });
+  const err: string[] = [];
+  try {
+    // Pre-seed the env file with an invalid timeout: first run writes mercury.env, so run twice.
+    await runHostSetup([], {
+      out: () => {},
+      err: () => {},
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarReadinessAttempts: 2,
+      sidecarReadinessGapMs: 10,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+    const envPath = envFilePath({ XDG_CONFIG_HOME: dir });
+    writeFileSync(envPath, readFileSync(envPath, 'utf8') + 'MERCURY_LAYA_TIMEOUT_MS=0\n');
+    const code = await runHostSetup(['--yes'], {
+      out: () => {},
+      err: (s) => err.push(s),
+      question: async () => '',
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarReadinessAttempts: 2,
+      sidecarReadinessGapMs: 10,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+    assert.equal(code, 1);
+    assert.ok(err.join('').includes('MERCURY_LAYA_TIMEOUT_MS must be a positive integer'), `doctor wording: ${err.join('')}`);
   } finally {
     await fake.close();
   }

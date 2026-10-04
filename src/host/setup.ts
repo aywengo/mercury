@@ -42,7 +42,7 @@ import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
 import { suggestionFor } from '../adapters/configSchema.ts';
-import { checkLaya, loadEnvFile, schemeFor } from './doctor.ts';
+import { checkLaya, loadEnvFile, parseLayaTimeoutMs, schemeFor } from './doctor.ts';
 import { DEFAULT_PYTHON_CANDIDATES, detectPython, ensureLayaCredentials, LAYA_DEFAULT_PORT, LAYA_SERVE_PIN, layaStepActions, planLayaSidecar, renderLayaLaunchdPlist, renderLayaSystemdUnit, type LayaPlan, type RunFn } from './layaSidecar.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
 
@@ -901,40 +901,58 @@ export async function runHostSetup(
     // the run finishes with doctor `laya: ok` — an unloaded agent makes that probe unreachable,
     // Copilot #840 r10). Bounded, injected through the same run fn as every other step.
     const uid = `gui/${process.getuid?.() ?? 501}`;
-    const loadCmd = process.platform === 'darwin'
-      ? ['launchctl', 'bootstrap', uid, plan.unitPath]
-      : ['systemctl', '--user', 'enable', '--now', plan.unitLabel];
-    io.out(`laya: loading — ${loadCmd.join(' ')}`);
-    const loaded = run(loadCmd, 15_000);
-    if (!loaded.ok && process.platform === 'darwin') {
-      // launchctl refuses an ALREADY-loaded label; kickstart restarts it instead. A genuine
-      // failure surfaces through the doctor probe below.
-      const kick = run(['launchctl', 'kickstart', '-k', `${uid}/${plan.unitLabel}`], 15_000);
-      if (!kick.ok) io.err(`laya: kickstart failed: ${(kick.stderr.trim() || kick.stdout.trim() || 'no output').split('\n')[0]}\n`);
-    } else if (process.platform === 'linux') {
+    if (process.platform === 'darwin') {
+      // Same choreography as `mercury host service install` (src/host/service.ts, issue #650):
+      // kick out the LOADED job first, then bootstrap the NEW plist. kickstart alone would
+      // restart launchd's cached job and never pick up the rewritten plist (Copilot #840 r12) —
+      // e.g. a re-run that moved the data dir would keep serving the OLD venv path.
+      const target = `${uid}/${plan.unitLabel}`;
+      const printR = run(['launchctl', 'print', target], 10_000);
+      if (printR.ok) {
+        const bootout = run(['launchctl', 'bootout', target], 10_000);
+        if (!bootout.ok) io.err(`laya: bootout failed (continuing): ${(bootout.stderr.trim() || bootout.stdout.trim() || 'no output').split('\n')[0]}\n`);
+      }
+      const bootstrap = run(['launchctl', 'bootstrap', uid, plan.unitPath], 15_000);
+      if (!bootstrap.ok) {
+        io.err(`\nlaya: launchctl bootstrap failed: ${(bootstrap.stderr.trim() || bootstrap.stdout.trim() || 'no output').split('\n')[0]}\n`);
+        return 1;
+      }
+    } else {
+      const loadCmd = ['systemctl', '--user', 'enable', '--now', plan.unitLabel];
+      io.out(`laya: loading — ${loadCmd.join(' ')}`);
+      const loaded = run(loadCmd, 15_000);
       // enable --now does NOT restart an active unit (Copilot #840 r11): a re-run that rewrote
       // the unit or rotated the key would leave the OLD process serving. Restart explicitly —
       // idempotent for a first load, mandatory for a re-run.
-      run(['systemctl', '--user', 'restart', plan.unitLabel], 15_000);
+      const restarted = run(['systemctl', '--user', 'restart', plan.unitLabel], 15_000);
+      if (!restarted.ok) io.err(`laya: restart failed: ${(restarted.stderr.trim() || restarted.stdout.trim() || 'no output').split('\n')[0]}\n`);
     }
     const written = loadEnvFile(path);
     const baseUrl = written.MERCURY_LAYA_URL ?? `http://127.0.0.1:${plan.port}/v1/systemone`;
     const creds = ensureLayaCredentials(env);
+    // The success gate is the doctor's own check: the SAME timeout parsing/deadline doctor will
+    // use (MERCURY_LAYA_TIMEOUT_MS, default 500 — Copilot #840 r12). An invalid value refuses
+    // here with the doctor's wording instead of reporting ok against a deadline doctor rejects.
+    const timeout = parseLayaTimeoutMs(written);
+    if (!timeout.ok) {
+      io.err(`\nlaya: ${timeout.detail}\n`);
+      return 1;
+    }
     // A FRESH sidecar preloads the English checkpoint (~843 MB) before it answers — the
     // readiness window must cover that first download, not a few seconds (Copilot #840 r11).
-    // Default: 120 probes x (4 s deadline + 5 s gap) ≈ 18 min bounded; tests shrink it.
+    // Default: 120 probes x (deadline + 5 s gap) — bounded; tests shrink both.
     const maxAttempts = io.sidecarReadinessAttempts ?? 120;
     let last = '';
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       // The probe is the doctor's #830 line, not a new check: same client, same deadline.
-      const probe = await checkLaya(baseUrl, creds.key, 4_000);
+      const probe = await checkLaya(baseUrl, creds.key, timeout.timeoutMs);
       last = probe.detail;
       if (probe.ok) {
         io.out(`laya: doctor ok — ${last}\n`);
         break;
       }
       if (attempt === maxAttempts) {
-        io.err(`\nlaya: loaded but the doctor probe failed after ${maxAttempts} attempts (${Math.round(maxAttempts * 9 / 60)} min): ${last}\n`);
+        io.err(`\nlaya: loaded but the doctor probe failed after ${maxAttempts} attempts: ${last}\n`);
         io.err(`laya: inspect with \`launchctl print ${uid}/${plan.unitLabel}\` (macOS) or \`journalctl --user -u ${plan.unitLabel}\` (Linux), then re-run setup.\n`);
         return 1;
       }
