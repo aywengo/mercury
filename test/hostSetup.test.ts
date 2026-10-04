@@ -1602,6 +1602,24 @@ test('runHostSetup: the venv step uses the EXACT located interpreter (spaces inc
   }
 });
 
+test('runHostSetup: a PADDED layaUrl in an existing mercury.env is refused on re-run (#840 r38)', async () => {
+  // existingVar trimmed the persisted value, silently normalizing (or dropping) what
+  // loadConfig and the doctor refuse. The file value reaches validation raw.
+  const dir = tempDir('setup-laya-filepad-');
+  const cfgDir = join(dir, 'mercury');
+  mkdirSync(cfgDir, { recursive: true });
+  writeFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'MERCURY_LAYA_URL= http://127.0.0.1:8302 \n');
+  const err: string[] = [];
+  const code = await runHostSetup([], {
+    out: () => {},
+    err: (s) => err.push(s),
+    question: async () => '',
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+  assert.equal(code, 1);
+  assert.match(err.join(''), /must not have leading or trailing whitespace/);
+  assert.match(readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8'), /MERCURY_LAYA_URL= http/, 'the file is untouched');
+});
+
 test('runHostSetup: a PADDED MERCURY_LAYA_URL is refused like loadConfig/doctor (#840 r37)', async () => {
   // The env value reaches validateAnswers RAW: trimming in defaultAnswers would let setup
   // accept (and rewrite) a value the config loader and doctor refuse.

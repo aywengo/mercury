@@ -437,6 +437,16 @@ export function existingVar(name: string, env: NodeJS.ProcessEnv = process.env):
   return line ? line.slice(name.length + 1).trim() : '';
 }
 
+/** Same read WITHOUT trimming (Copilot #840 r38): a persisted padded value must reach
+ *  validateAnswers unchanged so the shared URL contract rejects it — trimming here would
+ *  silently normalize what loadConfig and the doctor refuse. */
+export function existingVarRaw(name: string, env: NodeJS.ProcessEnv = process.env): string {
+  const file = envFilePath(env);
+  if (!existsSync(file)) return '';
+  const line = readFileSync(file, 'utf8').split('\n').find((l) => l.startsWith(`${name}=`));
+  return line ? line.slice(name.length + 1) : '';
+}
+
 /** Default answers from the environment (non-interactive without an answers file). */
 export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupAnswers {
   // Trim entries like parseHarnesses does (review #653): 'primeagent, claude' must not
@@ -475,7 +485,7 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     // default.)
     layaUrl: env.MERCURY_LAYA_URL !== undefined
       ? env.MERCURY_LAYA_URL
-      : (existingVar('MERCURY_LAYA_URL', env) || ''),
+      : (existingVarRaw('MERCURY_LAYA_URL', env) || ''),
   };
 }
 
