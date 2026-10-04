@@ -2081,10 +2081,23 @@ test('readiness: an anon probe TIMEOUT whose detail contains 401 is not auth pro
   const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*', anonScript: [{ delayMs: 3_000 }] });
   try {
     const err: string[] = [];
+    // Scripted sidecar exec (same shape as the r47 staging test) — CI has no real uv/python.
+    const sidecarRun = (argv: string[]) => {
+      if (argv[0] === 'uv' && argv[1] === 'venv') {
+        rmSync(argv[2]!, { recursive: true, force: true });
+        mkdirSync(join(argv[2]!, 'bin'), { recursive: true });
+        writeFileSync(join(argv[2]!, 'bin', 'python3'), '#!/bin/sh\n', { mode: 0o755 });
+      } else if (argv.includes('pip')) {
+        const venvBin = dirname(argv[0]!);
+        mkdirSync(venvBin, { recursive: true });
+        writeFileSync(join(venvBin, '.laya-installed'), 'ok\n');
+      }
+      return okRun(argv);
+    };
     const code = await runHostSetup(['--yes'], {
       out: () => {}, err: (s) => err.push(s),
       question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-      sidecarDataDir: join(dir, 'data'),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
       sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 4_000, sidecarReadinessGapMs: 50,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
     assert.equal(code, 1, `a 401-shaped timeout must not pass: ${err.join('')}`);
