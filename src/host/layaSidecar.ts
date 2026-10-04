@@ -19,9 +19,9 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { readBotCredentials } from './bots/credentials.ts';
 
 /** The upstream laya[serve] version the client contract was verified against (#825). */
@@ -314,10 +314,20 @@ export function ensureLayaCredentials(env: NodeJS.ProcessEnv = process.env, gen:
   }
   const key = gen();
   raw.laya = { api: key };
-  mkdirSync(join(xdg, 'mercury'), { recursive: true });
-  writeFileSync(path, JSON.stringify(raw, null, 2) + '\n', { mode: 0o600 });
-  // mode only applies at creation: an EXISTING 0644 file would keep its bits and the new key
-  // would be world-readable (Copilot #840 r1). Repair explicitly, like bots/service.ts does.
+  mkdirSync(dirname(path), { recursive: true });
+  // Atomic replace, same pattern as setup's writeEnvFile (Copilot #840 r14): a truncate-in-place
+  // that dies mid-write loses EVERY bot's credentials (the file is shared), and on an existing
+  // loose-mode file the new key would be readable until the trailing chmod. Write a 0600 temp
+  // file in the same directory, fsync, rename over the destination, then enforce 0600.
+  const tmp = join(dirname(path), `.bot-credentials.json.tmp-${process.pid}`);
+  writeFileSync(tmp, JSON.stringify(raw, null, 2) + '\n', { mode: 0o600 });
+  const fd = openSync(tmp, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, path);
   chmodSync(path, 0o600);
   return { key, generated: true };
 }

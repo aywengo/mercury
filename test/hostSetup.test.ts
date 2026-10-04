@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
@@ -1213,6 +1213,28 @@ test('laya units carry the same restart backoff as the host and bot units (#840 
   assert.match(unit, /Restart=on-failure[\s\S]{0,120}RestartSec=5[\s\S]{0,60}TimeoutStopSec=15/, 'no tight failure loop');
   const darwin = planLayaSidecar({ dataDir: '/data', pythonBin: 'python3', platform: 'darwin', env: { HOME: '/home/x' } });
   assert.match(renderLayaLaunchdPlist(darwin, 'k'), /<key>ThrottleInterval<\/key><integer>5<\/integer>/);
+});
+
+test('ensureLayaCredentials: generation REPLACES the file atomically (#840 r14)', () => {
+  // The file is shared across bots: a truncate-in-place that dies mid-write would lose every
+  // credential, and a loose-mode file would expose the new key until the trailing chmod. The
+  // generation path must write 0600 temp + fsync + rename and leave NO temp behind.
+  const dir = tempDir('laya-creds-atomic-');
+  const env = { XDG_CONFIG_HOME: dir };
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  const path = join(dir, 'mercury', 'bot-credentials.json');
+  // An existing loose-mode file with ANOTHER bot's entry: the other entry must survive and the
+  // mode must end at 0600.
+  writeFileSync(path, JSON.stringify({ maint: { api: 'm'.repeat(64) } }), { mode: 0o644 });
+  const r = ensureLayaCredentials(env);
+  assert.equal(r.generated, true);
+  assert.match(r.key, /^[0-9a-f]{64}$/);
+  const written = JSON.parse(readFileSync(path, 'utf8')) as { maint?: { api?: string }; laya?: { api?: string } };
+  assert.equal(written.maint?.api, 'm'.repeat(64), 'the other bot entry survives');
+  assert.equal(written.laya?.api, r.key);
+  assert.equal((statSync(path).mode & 0o777).toString(8), '600', 'the replaced file is 0600');
+  const leftovers = readdirSync(join(dir, 'mercury')).filter((n) => n.includes('.tmp-'));
+  assert.deepEqual(leftovers, [], `no temp file remains: ${leftovers.join(', ')}`);
 });
 
 test('ensureLayaCredentials: the WHOLE preserved entry is validated against the shared schema (#840 r7)', () => {
