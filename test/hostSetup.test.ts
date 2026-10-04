@@ -1839,6 +1839,9 @@ test('ensureLayaCredentials: a bot named laya refuses the sidecar credential wri
     assert.equal(code, 1);
     assert.match(err.join(''), /reserved for the sidecar credential/);
     assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'nothing installed');
+    // r41: the refusal happens BEFORE mercury.env is written — a persisted MERCURY_LAYA_URL
+    // would make doctor send the bot's Mercury token to the port owner.
+    assert.ok(!existsSync(envFilePath({ XDG_CONFIG_HOME: dir })), 'no env file written before the refusal');
   } finally {
     await fake.close();
   }
