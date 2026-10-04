@@ -101,6 +101,7 @@ export function resolveWorkflowStages(
   const requiredSkillIds: string[] = [];
   const seenSkills = new Set<string>();
   const autoSelectStages: { stageIndex: number; presetId: string }[] = [];
+  const sandboxStages: number[] = [];
 
   workflow.stages.forEach((stage, stageIndex) => {
     if (!stage.preset) return;
@@ -129,6 +130,11 @@ export function resolveWorkflowStages(
     // fold must only narrow -- the caller's scalar value survives the fold unless a stage
     // ceiling is lower (decided in workflows.md 3.1.1 rule 3, not a per-stage refusal).
     const stageSelection = resolvePreset(loaded.manifest, { ...caller, constraints: undefined }, system, caps);
+    // A sandbox-required stage must not lose its demand in the fold (rule 3, #842 review r2):
+    // resolvePreset encodes `requires.sandbox` as the empty-resourceLimits sentinel, because
+    // that is exactly what SandboxManager.requiresSandbox keys on. Record the stage indexes
+    // that demanded isolation; the constraint fold below applies the sentinel.
+    if (loaded.manifest.requires?.sandbox === true) sandboxStages.push(stageIndex);
 
     // Rule 1 -- agent: required beats preference; preferences are ignored, never resolved.
     const manifestAgent = loaded.manifest.agent;
@@ -252,7 +258,7 @@ export function resolveWorkflowStages(
   // Rule 3 -- constraints: the narrowest ceiling across all stage presets (scalar minimums,
   // the most restrictive networkMode), applied to the CALLER's constraints; defaults come
   // from the caller, otherwise the system default, never from a stage preset.
-  const effectiveConstraints = narrowestConstraints(workflow, caller, system, getPreset);
+  const effectiveConstraints = narrowestConstraints(workflow, caller, system, getPreset, sandboxStages);
 
   return {
     effectiveAgent: { id: agent, ...(model !== undefined ? { model } : {}) },
@@ -274,6 +280,7 @@ function narrowestConstraints(
   caller: WorkflowCallerInput,
   system: WorkflowSystemPolicy,
   getPreset: (id: string) => LoadedPreset,
+  sandboxStages: readonly number[],
 ): RunConstraints {
   const effective: RunConstraints = {
     maxDurationMs: caller.constraints?.maxDurationMs ?? system.defaultMaxDurationMs,
@@ -286,8 +293,13 @@ function narrowestConstraints(
     resourceLimits: caller.constraints?.resourceLimits,
     allowedNetworks: caller.constraints?.allowedNetworks,
   };
-  for (const stage of workflow.stages) {
+  for (const [stageIdx, stage] of workflow.stages.entries()) {
     if (!stage.preset) continue;
+    // Isolation applies before the ceilings guard: a stage can demand sandboxing without
+    // naming any ceiling (#842 review r2).
+    if (sandboxStages.includes(stageIdx)) {
+      effective.resourceLimits = {};
+    }
     const ceilings = getPreset(stage.preset.id).manifest.constraints?.ceilings;
     if (!ceilings) continue;
     if (ceilings.maxDurationMs !== undefined) {

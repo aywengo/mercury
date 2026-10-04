@@ -434,50 +434,16 @@ export class RunService {
       };
     }
 
-    const presetAgent = presetSnapshot?.effectiveAgent.id;
-    const agent = input.agent ?? presetAgent ?? this.deps.defaultAgent;
-    if (!this.deps.knownAgents.includes(agent)) {
-      throw new ValidationError(`Unknown agent: ${agent} (known: ${this.deps.knownAgents.join(', ')})`);
-    }
-
-    // Per-Run model resolution (#823), ONE rule for both paths: caller.model → preset model →
-    // none. On the preset path resolvePreset already applied the same precedence (and enforced
-    // the modelRequired conflict); the snapshot's effectiveAgent.model IS the resolved preset
-    // model. On the no-preset path the caller's value is the only source.
-    //
-    // Fail closed on BOTH paths: an effective model on an agent whose static capabilities lack
-    // `perRunModel: true` is refused at creation, with the same three-way wording (unknown /
-    // undeclared / false) resolvePreset uses for the preset path. Today that refuses every real
-    // agent, which is correct until the adapters declare the capability (P1-2..P1-4).
-    const presetModel = presetSnapshot?.effectiveAgent.model;
-    const model = input.model ?? presetModel;
-    if (model !== undefined) {
-      // The RESOLVED model is validated too (#832 r1): a preset carrying `agent.model: "two
-      // words"` passes preset validation today, and only this check keeps the persisted value
-      // inside the same contract the caller surface has.
-      validateModelShape(model, 'model');
-      const stat = this.deps.agentCapabilities?.()[agent]?.static;
-      if (stat?.perRunModel !== true) {
-        const declared = stat === undefined
-          ? 'unknown -- the agent has no declared static capabilities'
-          : stat.perRunModel === undefined
-            ? "undeclared -- the agent's static block omits perRunModel"
-            : "false -- the agent's static block declares perRunModel: false";
-        const source = input.model !== undefined ? 'per-Run model' : 'preset model';
-        throw new ValidationError(
-          `the ${source} ${JSON.stringify(model)} was requested, but agent ${JSON.stringify(agent)}`
-          + ` cannot take a per-Run model (perRunModel: ${declared});`
-          + ' pick an agent that accepts a per-Run model, or drop the model',
-        );
-      }
-    }
-
     // Advisory Workflow Template resolution (docs/crew/workflows.md section 3.1, issue #809).
     // BEFORE skills/constraints like the preset block: the stage presets act as demands the
     // caller cannot ignore and ceilings the caller cannot widen (section 3.1.1). Fail-closed
     // like every other admission block: a template or preset reference that cannot resolve is
     // a refused creation, never a Run that silently runs without its plan.
     let resolvedWorkflow: {
+      /** The workflow resolution's effective agent (section 3.1.1 rules 1-2) -- the agent and
+       * model the Run row must carry (#842 review r2: discarding these ran a template whose
+       * stage required `hermes` on the system default agent instead). */
+      effectiveAgent: { id: string; model?: string };
       snapshot: ResolvedWorkflow;
       /** Each referenced stage preset's snapshot (section 3.1.1 rule 6), in stage order. */
       stagePresets: { stageIndex: number; presetId: string; snapshot: ResolvedRolePreset }[];
@@ -497,6 +463,9 @@ export class RunService {
         throw new ValidationError('workflow and workflowSnapshot are mutually exclusive');
       }
       resolvedWorkflow = {
+        // Retry passes the parent's agent/model explicitly, so this is not consulted -- the
+        // parent's values are the resolution's output, already persisted on its Run row.
+        effectiveAgent: { id: input.agent ?? this.deps.defaultAgent },
         snapshot: wfSnap,
         stagePresets: input.workflowSnapshot.stagePresets.map((sp) => ({
           stageIndex: sp.stageIndex,
@@ -624,6 +593,7 @@ export class RunService {
         snapshot: this.stagePresetSnapshot(s.preset, stageSelection.effectiveAgent.id),
       }));
       resolvedWorkflow = {
+        effectiveAgent: stageSelection.effectiveAgent,
         snapshot: this.workflowSnapshot(loaded),
         stagePresets: stagePresetSnapshots,
         stageInstructions: Object.fromEntries(
@@ -632,6 +602,47 @@ export class RunService {
         skills: resolvedWorkflowSkills,
         constraints: stageSelection.effectiveConstraints,
       };
+    }
+
+    // The workflow resolution's effective agent wins over caller/system fallbacks: it already
+    // applied the caller -> required-stage -> default precedence (section 3.1.1 rules 1-2), and
+    // persisting anything else executes the template on an agent no stage asked for (#842 r2).
+    const presetAgent = presetSnapshot?.effectiveAgent.id;
+    const agent = resolvedWorkflow?.effectiveAgent.id ?? input.agent ?? presetAgent ?? this.deps.defaultAgent;
+    if (!this.deps.knownAgents.includes(agent)) {
+      throw new ValidationError(`Unknown agent: ${agent} (known: ${this.deps.knownAgents.join(', ')})`);
+    }
+
+    // Per-Run model resolution (#823), ONE rule for both paths: caller.model → preset model →
+    // none. On the preset path resolvePreset already applied the same precedence (and enforced
+    // the modelRequired conflict); the snapshot's effectiveAgent.model IS the resolved preset
+    // model. On the no-preset path the caller's value is the only source.
+    //
+    // Fail closed on BOTH paths: an effective model on an agent whose static capabilities lack
+    // `perRunModel: true` is refused at creation, with the same three-way wording (unknown /
+    // undeclared / false) resolvePreset uses for the preset path. Today that refuses every real
+    // agent, which is correct until the adapters declare the capability (P1-2..P1-4).
+    const presetModel = presetSnapshot?.effectiveAgent.model;
+    const model = input.model ?? resolvedWorkflow?.effectiveAgent.model ?? presetModel;
+    if (model !== undefined) {
+      // The RESOLVED model is validated too (#832 r1): a preset carrying `agent.model: "two
+      // words"` passes preset validation today, and only this check keeps the persisted value
+      // inside the same contract the caller surface has.
+      validateModelShape(model, 'model');
+      const stat = this.deps.agentCapabilities?.()[agent]?.static;
+      if (stat?.perRunModel !== true) {
+        const declared = stat === undefined
+          ? 'unknown -- the agent has no declared static capabilities'
+          : stat.perRunModel === undefined
+            ? "undeclared -- the agent's static block omits perRunModel"
+            : "false -- the agent's static block declares perRunModel: false";
+        const source = input.model !== undefined ? 'per-Run model' : 'preset model';
+        throw new ValidationError(
+          `the ${source} ${JSON.stringify(model)} was requested, but agent ${JSON.stringify(agent)}`
+          + ` cannot take a per-Run model (perRunModel: ${declared});`
+          + ' pick an agent that accepts a per-Run model, or drop the model',
+        );
+      }
     }
 
     // Goal admission. Everything about this block is fail-closed, because the failure mode

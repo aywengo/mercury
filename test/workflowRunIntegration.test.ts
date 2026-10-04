@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeEnv, makeGitRepo, tempDir, waitFor } from './helpers.ts';
 import { WorkflowRegistry } from '../src/workflows/workflowRegistry.ts';
+import { FakeAgentAdapter } from '../src/adapters/fakeAgentAdapter.ts';
 import { renderPlan, isTruncated, PLAN_MAX_BYTES, TRUNCATION_MARKER } from '../src/workflows/renderPlan.ts';
 import { resolveWorkflowStages, WorkflowPresetResolutionError, WorkflowSkillCapError } from '../src/workflows/resolveWorkflow.ts';
 import { resolvePreset } from '../src/presets/resolvePreset.ts';
@@ -665,6 +666,103 @@ test('retry carries the parent workflow: snapshot rows, stage presets, skills, a
     env.runs.transition(plain.id, 'FAILED', { completedAt: new Date().toISOString() });
     const plainRetry = env.runService.retry(plain.id, 'alice', false);
     assert.equal(env.runService.getWorkflow(plainRetry.id), null);
+  } finally {
+    env.close();
+  }
+});
+
+test('a template with preset-bearing stages on TWO stages creates one row per stage (#842 r2)', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const workflowsDir = tempDir('mercury-wf-dir-');
+  const presetsDir = tempDir('mercury-wf-presets-');
+  makePreset(presetsDir, 'planner', {}, 'PLAN INSTRUCTION');
+  makePreset(presetsDir, 'reviewer', {}, 'REVIEW INSTRUCTION');
+  // Two preset-bearing stages: the shipped plan-implement-review shape. PK (run_id) alone
+  // failed the second stage insert with UNIQUE constraint failed: run_presets.run_id.
+  const manifest = {
+    schemaVersion: 1, id: 'plan-review', version: '1.0.0',
+    description: 'plan then review', mode: 'advisory',
+    stages: [
+      { id: 'plan', preset: { id: 'planner' }, task: 'Plan it.' },
+      { id: 'review', preset: { id: 'reviewer' }, task: 'Review it.' },
+    ],
+    maxStages: 2,
+  };
+  makeWorkflowDir(workflowsDir, 'plan-review', manifest);
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workflowsDir, presetsDir, workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'Plan and review', repository: { localPath: repo },
+      workflow: { id: 'plan-review' },
+    });
+    const rows = (env.db.prepare('SELECT preset_id, stage_index FROM run_presets WHERE run_id = ? ORDER BY stage_index').all(run.id) as { preset_id: string; stage_index: number | null }[])
+      .map((r) => ({ preset_id: r.preset_id, stage_index: r.stage_index }));
+    assert.deepEqual(rows, [
+      { preset_id: 'planner', stage_index: 0 },
+      { preset_id: 'reviewer', stage_index: 1 },
+    ]);
+    assert.equal(env.runService.getPreset(run.id), null, 'still no Run-wide preset');
+    // A second run-wide preset row stays impossible even after the rebuild.
+    env.db.prepare(
+      "INSERT INTO run_presets (run_id, preset_id, preset_version, role, trust, content_hash, source_kind, source_commit, source_path, stage_index, snapshot_json) VALUES (?, 'x', '1', 'r', 'builtin', 'h', 'builtin', NULL, 'p', NULL, '{}')",
+    ).run(run.id);
+    assert.throws(() => env.db.prepare(
+      "INSERT INTO run_presets (run_id, preset_id, preset_version, role, trust, content_hash, source_kind, source_commit, source_path, stage_index, snapshot_json) VALUES (?, 'y', '1', 'r', 'builtin', 'h', 'builtin', NULL, 'p', NULL, '{}')",
+    ).run(run.id), /UNIQUE/);
+  } finally {
+    env.close();
+  }
+});
+
+test('the workflow resolution carries its effective agent and model reach the Run row (#842 r2)', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const workflowsDir = tempDir('mercury-wf-dir-');
+  const presetsDir = tempDir('mercury-wf-presets-');
+  // A stage REQUIRING a non-default agent with no caller agent: resolution demands that agent,
+  // and the Run row must carry it, not the system default.
+  makePreset(presetsDir, 'other-required', { agent: { id: 'other', required: true } });
+  const manifest = {
+    schemaVersion: 1, id: 'needs-other', version: '1.0.0',
+    description: 'requires other', mode: 'advisory',
+    stages: [{ id: 'work', preset: { id: 'other-required' }, task: 'Do it on other.' }],
+    maxStages: 1,
+  };
+  makeWorkflowDir(workflowsDir, 'needs-other', manifest);
+  const env = makeEnv({
+    workspaceMode: 'copy', repoDir: repo, workflowsDir, presetsDir, workerEnabled: false,
+    adapters: { other: new FakeAgentAdapter({ script: [] }) },
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'Run on other', repository: { localPath: repo },
+      workflow: { id: 'needs-other' },
+    });
+    assert.equal(run.agent, 'other', 'the required stage agent is the Run agent, not the default');
+  } finally {
+    env.close();
+  }
+});
+
+test('a sandbox-required stage preset keeps its isolation demand in the effective constraints (#842 r2)', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const workflowsDir = tempDir('mercury-wf-dir-');
+  const presetsDir = tempDir('mercury-wf-presets-');
+  makePreset(presetsDir, 'isolated', { requires: { sandbox: true } });
+  makeWorkflowDir(workflowsDir, 'iso-wf', {
+    schemaVersion: 1, id: 'iso-wf', version: '1.0.0',
+    description: 'sandboxed stage', mode: 'advisory',
+    stages: [{ id: 'work', preset: { id: 'isolated' }, task: 'Do it isolated.' }],
+    maxStages: 1,
+  });
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workflowsDir, presetsDir, workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'Run isolated', repository: { localPath: repo },
+      workflow: { id: 'iso-wf' },
+    });
+    // The empty-resourceLimits sentinel is what SandboxManager.requiresSandbox keys on.
+    assert.deepEqual(run.constraints.resourceLimits, {},
+      'a sandbox-required stage must not fold into an unsandboxed Run');
   } finally {
     env.close();
   }
