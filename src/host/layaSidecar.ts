@@ -19,7 +19,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { readBotCredentials } from './bots/credentials.ts';
@@ -352,8 +352,12 @@ export function ensureLayaCredentials(env: NodeJS.ProcessEnv = process.env, gen:
   // that dies mid-write loses EVERY bot's credentials (the file is shared), and on an existing
   // loose-mode file the new key would be readable until the trailing chmod. Write a 0600 temp
   // file in the same directory, fsync, rename over the destination, then enforce 0600.
-  const tmp = join(dirname(path), `.bot-credentials.json.tmp-${process.pid}`);
-  writeFileSync(tmp, JSON.stringify(raw, null, 2) + '\n', { mode: 0o600 });
+  // Unique O_EXCL temp (Copilot #840 r52): `mode` is only applied at CREATION — a crashed
+  // run's leftover `.tmp-<pid>` file would be silently reused at its old (possibly 0644) mode
+  // when the PID is later reused, exposing every bot's credentials. 'wx' creates exclusively;
+  // a random suffix makes the name unguessable, so a stale file can never be hit.
+  const tmp = join(dirname(path), `.bot-credentials.json.tmp-${process.pid}-${randomBytes(6).toString('hex')}`);
+  writeFileSync(tmp, JSON.stringify(raw, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
   const fd = openSync(tmp, 'r');
   try {
     fsyncSync(fd);
@@ -362,5 +366,7 @@ export function ensureLayaCredentials(env: NodeJS.ProcessEnv = process.env, gen:
   }
   renameSync(tmp, path);
   chmodSync(path, 0o600);
+  // Best-effort cleanup of a crashed run's predictable temp (same pid) — ours to remove.
+  rmSync(join(dirname(path), `.bot-credentials.json.tmp-${process.pid}`), { recursive: true, force: true });
   return { key, generated: true };
 }

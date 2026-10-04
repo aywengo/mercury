@@ -914,9 +914,17 @@ export async function runHostSetup(
     let layaApi: string | undefined;
     try {
       layaApi = readBotCredentials('laya', env).api;
-    } catch {
-      // No laya entry (or unreadable file): the local-cred path's ensureLayaCredentials owns
-      // that refusal; nothing to check here.
+    } catch (e) {
+      const msg = (e as Error).message ?? '';
+      if (!/no entry for alias/.test(msg) && !/cannot stat/.test(msg)) {
+        // A loose-mode or corrupt credentials file must NOT bypass this gate (Copilot #840
+        // r52): ensureLayaCredentials would repair the mode and preserve the (possibly
+        // bot-registered) key. Fail closed; the message names the file, never the content.
+        io.err(`\nlaya: cannot check the sidecar credential registry gate: ${msg}\n`);
+        io.err('laya: fix bot-credentials.json (chmod 600 / repair its JSON), then re-run setup.\n');
+        return 1;
+      }
+      // No laya entry (or no file): the local-cred path's ensureLayaCredentials owns that case.
     }
     if (layaApi && registryText) {
       const registered = registryText.split(',').map((e) => e.trim()).filter((e) => e !== '');
@@ -1101,8 +1109,11 @@ export async function runHostSetup(
         // (Copilot #840 r15). Atomic 0600 temp + fsync + rename, then enforce 0600 — the same
         // pattern as writeEnvFile; a re-run over a pre-existing 0644 unit therefore never
         // exposes the key at any instant (r1's trailing chmod alone is too late).
-        const tmpUnit = join(dirname(plan.unitPath), `.${plan.unitLabel}.tmp-${process.pid}`);
-        writeFileSync(tmpUnit, text, { mode: 0o600 });
+        // Unique O_EXCL temp (Copilot #840 r52): a crashed run's leftover `.<label>.tmp-<pid>`
+        // keeps its old mode when the PID is reused — `mode` only applies at creation. 'wx' +
+        // a random suffix guarantees a fresh 0600 file.
+        const tmpUnit = join(dirname(plan.unitPath), `.${plan.unitLabel}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`);
+        writeFileSync(tmpUnit, text, { flag: 'wx', mode: 0o600 });
         const fd = openSync(tmpUnit, 'r');
         try {
           fsyncSync(fd);
@@ -1111,6 +1122,8 @@ export async function runHostSetup(
         }
         renameSync(tmpUnit, plan.unitPath);
         chmodSync(plan.unitPath, 0o600);
+        // Best-effort cleanup of a crashed run's predictable temp (same pid) — ours to remove.
+        rmSync(join(dirname(plan.unitPath), `.${plan.unitLabel}.tmp-${process.pid}`), { recursive: true, force: true });
       }],
     ];
     try {

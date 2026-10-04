@@ -1753,6 +1753,119 @@ test('runHostSetup: a leftover laya.state.json (interrupted uninstall) is collis
   assert.match(err.join(''), /laya\.state\.json/);
 });
 
+test('ensureLayaCredentials: a loose-mode credentials file is fail-closed for the registry gate (#840 r52)', async () => {
+  // 0644 + a bot-registered key: readBotCredentials refuses; the gate must fail closed instead
+  // of letting ensureLayaCredentials repair the mode and preserve the Mercury token.
+  const dir = tempDir('setup-laya-loose-');
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  writeFileSync(join(dir, 'mercury', 'mercury.env'), 'MERCURY_PORT=3999\nMERCURY_API_TOKENS=tok-legacy-laya:bot-laya\n');
+  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'tok-legacy-laya' } }), { mode: 0o644 });
+  const err: string[] = [];
+  const code = await runHostSetup([], {
+    out: () => {}, err: (s) => err.push(s),
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarReadinessBudgetMs: 2_000, sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone',
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+  assert.equal(code, 1);
+  assert.match(err.join(''), /registry gate/);
+  assert.match(err.join(''), /chmod 600/);
+});
+
+test('ensureLayaCredentials: a stale PID-named temp file is never reused (#840 r52)', () => {
+  const dir = tempDir('setup-laya-tmp-reuse-');
+  const credsPath = join(dir, 'mercury', 'bot-credentials.json');
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  // A crashed run's leftover temp at 0644 with ANOTHER pid — must never be picked up.
+  const stale = join(dir, 'mercury', '.bot-credentials.json.tmp-999999');
+  writeFileSync(stale, '{"laya":{"api":"stale"}}\n', { mode: 0o644 });
+  // The exposure window test: make the final rename FAIL (destination is a directory) so the
+  // just-written temp file stays behind. `mode` only applies at CREATION — code that reuses a
+  // predictable existing temp writes the fresh key through the STALE 0644 file; O_EXCL code
+  // always writes through a fresh 0600 file.
+  const samePid = join(dir, 'mercury', `.bot-credentials.json.tmp-${process.pid}`);
+  writeFileSync(samePid, '{"x":1}\n', { mode: 0o644 });
+  mkdirSync(credsPath); // rename over a directory fails
+  const gen = () => 'a'.repeat(64);
+  let threw = false;
+  try {
+    ensureLayaCredentials({ XDG_CONFIG_HOME: dir, HOME: dir } as NodeJS.ProcessEnv, gen);
+  } catch {
+    threw = true; // renameSync over a directory must fail — expected
+  }
+  assert.ok(threw, 'the write did not silently succeed over a directory');
+  for (const entry of readdirSync(join(dir, 'mercury'))) {
+    const p = join(dir, 'mercury', entry);
+    if (!statSync(p).isFile()) continue;
+    const content = readFileSync(p, 'utf8');
+    if (!content.includes('a'.repeat(64))) continue;
+    const mode = statSync(p).mode & 0o777;
+    assert.equal(mode, 0o600, `${entry} carries the fresh key at mode ${mode.toString(8)} (must be 0600)`);
+  }
+});
+
+test('ensureLayaCredentials: a predictable PID-shaped temp is never reused (#840 r52)', () => {
+  const dir = tempDir('setup-laya-tmp-clean-');
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  // A crashed run's leftover occupying the predictable temp path — as a 0644 DIRECTORY for a
+  // deterministic signal: the old code would collide (EISDIR on write, or write THROUGH an
+  // existing file without re-applying the mode); O_EXCL creation with a unique name must not
+  // collide at all.
+  const samePid = join(dir, 'mercury', `.bot-credentials.json.tmp-${process.pid}`);
+  mkdirSync(samePid, { recursive: true });
+  writeFileSync(join(samePid, 'junk'), 'x\n', { mode: 0o644 });
+  const stale = join(dir, 'mercury', '.bot-credentials.json.tmp-999999');
+  writeFileSync(stale, '{"laya":{"api":"stale"}}\n', { mode: 0o644 });
+  const r = ensureLayaCredentials({ XDG_CONFIG_HOME: dir, HOME: dir } as NodeJS.ProcessEnv, () => 'a'.repeat(64));
+  assert.equal(r.key, 'a'.repeat(64));
+  const credsPath = join(dir, 'mercury', 'bot-credentials.json');
+  assert.equal(statSync(credsPath).mode & 0o777, 0o600, 'the credentials file is 0600');
+  assert.equal(readFileSync(credsPath, 'utf8').includes('a'.repeat(64)), true, 'the fresh key landed');
+  // The collision is swept after the fresh-file success (our own naming shape, recursive).
+  assert.equal(existsSync(samePid), false, 'our pid-shaped stale temp is cleaned up');
+  assert.equal(readFileSync(stale, 'utf8').includes('stale'), true, "another pid's temp is untouched");
+});
+
+test('runHostSetup: the unit temp file is created exclusively at 0600 (#840 r52)', async () => {
+  // A stale `.<label>.tmp-<pid>` at 0644 must not be reused when the PID is reused.
+  const dir = tempDir('setup-laya-unit-tmp-');
+  const unitDir = join(dir, 'Library', 'LaunchAgents');
+  mkdirSync(unitDir, { recursive: true });
+  const stale = join(unitDir, '.com.mercury.laya.tmp-999999');
+  writeFileSync(stale, 'STALE-UNIT\n', { mode: 0o644 });
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
+  try {
+    const live2 = join(dir, 'data', 'laya-venv');
+    const sidecarRun = (argv: string[]) => {
+      if (argv[0] === 'uv' && argv[1] === 'venv') {
+        rmSync(argv[2]!, { recursive: true, force: true });
+        mkdirSync(join(argv[2]!, 'bin'), { recursive: true });
+        writeFileSync(join(argv[2]!, 'bin', 'python3'), '#!/bin/sh\n', { mode: 0o755 });
+      } else if (argv.includes('pip')) {
+        const venvBin = dirname(argv[0]!);
+        mkdirSync(venvBin, { recursive: true });
+        writeFileSync(join(venvBin, '.laya-installed'), 'ok\n');
+      }
+      return okRun(argv);
+    };
+    const err: string[] = [];
+    const code = await runHostSetup(['--yes'], {
+      out: () => {}, err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+    assert.equal(code, 0, `wizard failed: ${err.join('')}`);
+    const unit = join(unitDir, 'com.mercury.laya.plist');
+    assert.ok(existsSync(unit), 'the unit was written');
+    assert.equal(statSync(unit).mode & 0o777, 0o600, 'the unit is 0600');
+    assert.ok(readFileSync(stale, 'utf8').includes('STALE-UNIT'), 'the stale unit temp was not reused');
+    assert.equal(existsSync(join(unitDir, `.com.mercury.laya.tmp-${process.pid}`)), false, 'our pid-shaped unit temp is cleaned');
+    assert.equal(readdirSync(unitDir).filter((e) => e.includes('.tmp-') && e !== '.com.mercury.laya.tmp-999999').length, 0, 'no unit temp leftovers from this run');
+  } finally {
+    await fake.close();
+  }
+});
+
 test('runHostSetup: a laya credential still registered as bot-laya in MERCURY_API_TOKENS refuses (interrupted uninstall, #840 r51)', async () => {
   // The interrupted-uninstall window: unit/state/config already removed, but the credential
   // entry AND the token:bot-laya registration survive. Preserving that value as the sidecar
