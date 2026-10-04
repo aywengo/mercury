@@ -24,6 +24,7 @@ import { resolvePreset, type PresetCallerInput } from '../presets/resolvePreset.
 import type { ReplicaStore } from '../knowledge/replica.ts';
 import type { WorkflowRegistry } from '../workflows/workflowRegistry.ts';
 import type { LoadedWorkflow } from '../workflows/types.ts';
+import type { LoadedPreset } from '../presets/types.ts';
 import { resolveWorkflowStages, WorkflowPresetResolutionError } from '../workflows/resolveWorkflow.ts';
 import { renderPlan } from '../workflows/renderPlan.ts';
 import type { ResolvedWorkflow } from './workflowStore.ts';
@@ -208,16 +209,46 @@ export class RunService {
     return new WorkflowStore(this.deps.db);
   }
 
-  /**
-   * The constraints the workflow resolution itself computed for the Run (section 3.1.1 rule 3).
-   * Stage preset snapshots record their own contribution as the identity value: a stage preset
-   * does not set Run constraints, and the JSON must stay truthful about that rather than
-   * inventing per-stage sets that nothing read.
-   */
-  private effectiveWorkflowConstraints(input: CreateRunInput): import('../domain/types.ts').RunConstraints {
+  /** The immutable workflow snapshot a Run stores (workflows.md section 5). */
+  private workflowSnapshot(loaded: LoadedWorkflow): ResolvedWorkflow {
     return {
-      maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
-      maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
+      schemaVersion: 1,
+      id: loaded.id,
+      version: loaded.version,
+      description: loaded.description,
+      mode: loaded.mode,
+      stages: loaded.stages,
+      maxStages: loaded.maxStages,
+      trust: loaded.trust,
+      source: { kind: loaded.source.kind, relativePath: loaded.source.relativePath },
+      templateJson: loaded.templateJson,
+      files: loaded.files,
+      contentHash: loaded.contentHash,
+    };
+  }
+
+  /**
+   * One stage preset's snapshot (section 3.1.1 rule 6). The stage preset does not set Run
+   * constraints -- the workflow resolution already produced the narrowest set, and THAT set
+   * is what the worker applies and the run row carries -- so the per-stage snapshot records
+   * the resolved Run set rather than inventing a per-stage one. `effectiveSkills` is empty for
+   * the same reason: the Run's skills are the union row set, not per-stage lists.
+   */
+  private stagePresetSnapshot(preset: LoadedPreset, agentId: string): ResolvedRolePreset {
+    return {
+      schemaVersion: 1,
+      id: preset.id,
+      version: preset.version,
+      role: preset.role,
+      description: preset.description,
+      trust: preset.trust,
+      instruction: preset.instruction,
+      effectiveAgent: { id: agentId },
+      effectiveSkills: [],
+      effectiveConstraints: { maxDurationMs: 0, maxRetries: 0 },
+      source: { kind: preset.source.kind, relativePath: preset.source.relativePath },
+      files: preset.files,
+      contentHash: preset.contentHash,
     };
   }
 
@@ -436,9 +467,15 @@ export class RunService {
     // caller cannot ignore and ceilings the caller cannot widen (section 3.1.1). Fail-closed
     // like every other admission block: a template or preset reference that cannot resolve is
     // a refused creation, never a Run that silently runs without its plan.
-    let workflowSnapshot: ResolvedWorkflow | null = null;
-    let workflowStageInstructions: { stageIndex: number; presetId: string; instruction: string }[] = [];
-    let workflowConstraints: RunConstraints | undefined;
+    let resolvedWorkflow: {
+      snapshot: ResolvedWorkflow;
+      /** Each referenced stage preset's snapshot (section 3.1.1 rule 6), in stage order. */
+      stagePresets: { stageIndex: number; presetId: string; snapshot: ResolvedRolePreset }[];
+      /** Stage index -> that stage preset's instruction text, for the plan renderer. */
+      stageInstructions: Record<number, string>;
+      skills: import('../domain/types.ts').ResolvedSkill[];
+      constraints: RunConstraints;
+    } | null = null;
     if (input.workflow !== undefined) {
       if (input.workflow === null || typeof input.workflow !== 'object' || Array.isArray(input.workflow)) {
         throw new ValidationError('workflow must be an object with an id');
@@ -537,55 +574,22 @@ export class RunService {
         );
       }
       const resolvedWorkflowSkills = this.deps.skills.resolve(skillIds);
-      workflowConstraints = stageSelection.effectiveConstraints;
       // Stage preset instructions ride the SNAPSHOT: each stage preset is snapshotted with the
       // Run (section 3.1.1 rule 6), so a later preset edit cannot change this Run's plan.
-      const stagePresetSnapshots = stageSelection.stagePresets.map((s) => {
-        const m = s.preset.manifest;
-        const snapshot: ResolvedRolePreset = {
-          schemaVersion: 1,
-          id: s.preset.id,
-          version: s.preset.version,
-          role: s.preset.role,
-          description: s.preset.description,
-          trust: s.preset.trust,
-          instruction: s.preset.instruction,
-          effectiveAgent: { id: stageSelection.effectiveAgent.id },
-          effectiveSkills: [],
-          // The stage preset does not set Run constraints; the workflow's own resolution
-          // already produced the narrowest set. Snapshotted as the identity value so the
-          // JSON stays truthful about what the stage contributed.
-          effectiveConstraints: this.effectiveWorkflowConstraints(input),
-          source: { kind: s.preset.source.kind, relativePath: s.preset.source.relativePath },
-          files: s.preset.files,
-          contentHash: s.preset.contentHash,
-        };
-        void m;
-        return { stageIndex: s.stageIndex, presetId: s.presetId, snapshot };
-      });
-      workflowStageInstructions = stagePresetSnapshots.map((s) => ({
+      const stagePresetSnapshots = stageSelection.stagePresets.map((s) => ({
         stageIndex: s.stageIndex,
         presetId: s.presetId,
-        instruction: s.snapshot.instruction,
+        snapshot: this.stagePresetSnapshot(s.preset, stageSelection.effectiveAgent.id),
       }));
-      workflowSnapshot = {
-        schemaVersion: 1,
-        id: loaded.id,
-        version: loaded.version,
-        description: loaded.description,
-        mode: loaded.mode,
-        stages: loaded.stages,
-        maxStages: loaded.maxStages,
-        trust: loaded.trust,
-        source: { kind: loaded.source.kind, relativePath: loaded.source.relativePath },
-        templateJson: loaded.templateJson,
-        files: loaded.files,
-        contentHash: loaded.contentHash,
+      resolvedWorkflow = {
+        snapshot: this.workflowSnapshot(loaded),
+        stagePresets: stagePresetSnapshots,
+        stageInstructions: Object.fromEntries(
+          stagePresetSnapshots.map((s) => [s.stageIndex, s.snapshot.instruction]),
+        ),
+        skills: resolvedWorkflowSkills,
+        constraints: stageSelection.effectiveConstraints,
       };
-      // The stage preset snapshots and the resolved skills travel with the Run row through the
-      // same variables the preset path uses below, so the transaction below needs no new shape.
-      (input as { __workflowStagePresets?: typeof stagePresetSnapshots }).__workflowStagePresets = stagePresetSnapshots;
-      (input as { __workflowSkills?: import('../domain/types.ts').ResolvedSkill[] }).__workflowSkills = resolvedWorkflowSkills;
     }
 
     // Goal admission. Everything about this block is fail-closed, because the failure mode
@@ -687,9 +691,7 @@ export class RunService {
     // A preset owns skill selection when it is present: the snapshot's effectiveSkills ARE the
     // resolved list (autoSelect already applied above). A snapshot (retry) carries the parent's
     // exact skill rows. Only a Run without a preset follows the original path.
-    const workflowStagePresets = (input as { __workflowStagePresets?: { stageIndex: number; presetId: string; snapshot: ResolvedRolePreset }[] }).__workflowStagePresets;
-    const workflowSkills = (input as { __workflowSkills?: import('../domain/types.ts').ResolvedSkill[] }).__workflowSkills;
-    const resolved = workflowSkills ?? (presetSnapshot
+    const resolved = resolvedWorkflow?.skills ?? (presetSnapshot
       ? presetSnapshot.effectiveSkills
       : input.skillSnapshots ?? this.deps.skills.resolve(
           input.skills === undefined || input.skills === null
@@ -726,8 +728,8 @@ export class RunService {
     // already merged the caller input with preset ceilings/defaults and system policy, and the
     // executed Run must match what the snapshot records (otherwise the snapshot documents
     // limits the worker never applies). The legacy path below is the no-preset behavior.
-    const constraints: RunConstraints = workflowSnapshot
-      ? workflowConstraints!
+    const constraints: RunConstraints = resolvedWorkflow
+      ? resolvedWorkflow.constraints
       : presetSnapshot
       ? presetSnapshot.effectiveConstraints
       : {
@@ -824,33 +826,34 @@ export class RunService {
         // The workflow snapshot lands in the SAME transaction as the Run row (workflows.md
         // section 5): a failure before commit leaves no partial Run or snapshot row, and a
         // committed Run always renders from the exact bytes it was created with.
-        if (workflowSnapshot) {
+        if (resolvedWorkflow) {
+          const wfSnap = resolvedWorkflow.snapshot;
           const row: RunWorkflowRow = {
             runId: run.id,
-            workflowId: workflowSnapshot.id,
-            workflowVersion: workflowSnapshot.version,
-            mode: workflowSnapshot.mode,
-            trust: workflowSnapshot.trust,
-            contentHash: workflowSnapshot.contentHash,
-            sourceKind: workflowSnapshot.source.kind,
-            sourcePath: workflowSnapshot.source.relativePath,
-            templateJson: workflowSnapshot.templateJson,
-            filesJson: JSON.stringify(workflowSnapshot.files),
-            snapshot: workflowSnapshot,
+            workflowId: wfSnap.id,
+            workflowVersion: wfSnap.version,
+            mode: wfSnap.mode,
+            trust: wfSnap.trust,
+            contentHash: wfSnap.contentHash,
+            sourceKind: wfSnap.source.kind,
+            sourcePath: wfSnap.source.relativePath,
+            templateJson: wfSnap.templateJson,
+            filesJson: JSON.stringify(wfSnap.files),
+            snapshot: wfSnap,
           };
           this.workflowStore().insert(row);
           this.deps.events.append(run.id, 'workflow.selected', {
-            workflowId: workflowSnapshot.id,
-            version: workflowSnapshot.version,
-            mode: workflowSnapshot.mode,
-            trust: workflowSnapshot.trust,
-            hash: workflowSnapshot.contentHash,
-            stages: workflowSnapshot.stages.length,
-            sourceKind: workflowSnapshot.source.kind,
+            workflowId: wfSnap.id,
+            version: wfSnap.version,
+            mode: wfSnap.mode,
+            trust: wfSnap.trust,
+            hash: wfSnap.contentHash,
+            stages: wfSnap.stages.length,
+            sourceKind: wfSnap.source.kind,
           });
           // Every stage preset referenced by the template is snapshotted with the Run
           // (section 3.1.1 rule 6), so later preset edits change nothing.
-          for (const stage of workflowStagePresets ?? []) {
+          for (const stage of resolvedWorkflow.stagePresets) {
             const stageRow: RunPresetRow = {
               runId: run.id,
               presetId: stage.snapshot.id,
