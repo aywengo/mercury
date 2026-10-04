@@ -1653,6 +1653,10 @@ test('validateAnswer: layaUrl must be a loopback BASE URL without a route (#840 
   assert.equal(validateAnswer('layaUrl', ''), null);
   // r23: URL-only contract — an embedded user:password would be written to the env file and
   // printed by the external/dry-run paths.
+  // r25: whitespace-only is not the empty sentinel, and padded URLs fail at render time —
+  // both are refused at the gate.
+  assert.match(validateAnswer('layaUrl', '   ') ?? '', /must not have leading or trailing whitespace/);
+  assert.match(validateAnswer('layaUrl', '  http://127.0.0.1:9000  ') ?? '', /must not have leading or trailing whitespace/);
   const userinfo = validateAnswer('layaUrl', 'http://user:secret@127.0.0.1:8302');
   assert.match(userinfo ?? '', /must not contain a username or password/);
   assert.ok(!(userinfo ?? '').includes('secret'), 'the credential is never echoed');
@@ -1705,6 +1709,15 @@ test('runHostSetup: an INVALID layaUrl in the answers file is rejected, not defa
   assert.equal(code, 1);
   assert.match(err.join(''), /layaUrl: layaUrl must be a string/);
   assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'nothing installed');
+});
+
+test('validateAnswers: a relative dataDir with the Laya sidecar enabled is refused (#840 r25)', () => {
+  // systemd ExecStart rejects relative executables; the unit embeds venv/serve paths derived
+  // from the data dir, so an opt-in Laya requires an absolute data dir.
+  const a = answers({ layaEnabled: true, dataDir: 'data' });
+  const errs = validateAnswers(a);
+  assert.ok(errs.some((e) => e.includes('dataDir') && e.includes('absolute path')), `relative dataDir refused: ${errs.join(' | ')}`);
+  assert.equal(validateAnswers(answers({ layaEnabled: true, dataDir: '/var/lib/mercury' })).length, 0, 'absolute passes');
 });
 
 test('runHostSetup --dry-run: an external URL prints preserve/verify only, no install actions (#840 r22)', async () => {

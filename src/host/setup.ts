@@ -39,7 +39,7 @@ import { hostStatus, printStatus } from './lifecycle.ts';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
 import { suggestionFor } from '../adapters/configSchema.ts';
 import { checkLaya, loadEnvFile, parseLayaTimeoutMs, schemeFor } from './doctor.ts';
@@ -182,7 +182,11 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
       return typeof value === 'boolean' ? null : 'layaEnabled must be a boolean';
     case 'layaUrl': {
       if (typeof value !== 'string') return 'layaUrl must be a string';
-      if (value.trim() === '') return null;
+      if (value.trim() === '') {
+        // Whitespace-only is NOT the empty sentinel: renderEnv would see the padded string and
+        // throw while rendering (Copilot #840 r25). Only '' means "wizard-managed default".
+        return value === '' ? null : 'layaUrl must not have leading or trailing whitespace';
+      }
       // A BASE URL, not an endpoint route: LayaClient appends /v1/systemone itself, so a
       // stored route would double it (r22). Loopback-only contract: the sidecar binds
       // 127.0.0.1 — a non-loopback host would send the bearer credential over the network.
@@ -201,6 +205,9 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
       }
       if (u.pathname !== '/' && u.pathname !== '') return `layaUrl must be a base URL without a route path (the client appends /v1/systemone), got '${u.pathname}'`;
       if (u.search || u.hash) return 'layaUrl must not carry a query or fragment';
+      // Padded URLs would pass here (we parse the trimmed value) and then fail during
+      // rendering, which validates the ORIGINAL value — refuse them at the gate.
+      if (value !== value.trim()) return 'layaUrl must not have leading or trailing whitespace';
       // URL-only contract: an embedded user:password would be written to the env file and
       // printed by the external/dry-run paths — a credential smuggled into a 'plain URL'.
       if (u.username || u.password) return 'layaUrl must not contain a username or password (the key lives in bot-credentials.json)';
@@ -268,6 +275,11 @@ export function validateAnswers(
   for (const key of Object.keys(a) as (keyof HostSetupAnswers)[]) {
     const err = validateAnswer(key, a[key]);
     if (err) errors.push(`${key}: ${err}`);
+  }
+  // The sidecar's unit embeds ABSOLUTE paths (systemd ExecStart rejects relative
+  // executables, Copilot #840 r25): an opt-in Laya requires an absolute data dir.
+  if (a.layaEnabled && !isAbsolute(a.dataDir.trim())) {
+    errors.push(`dataDir: must be an absolute path when the Laya sidecar is enabled (got '${a.dataDir.trim()}')`);
   }
   // Atlas on requires URL + token + project (mirrors the startup check).
   if (a.atlasEnabled) {
