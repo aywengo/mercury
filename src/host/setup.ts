@@ -703,6 +703,26 @@ export function registeredLayaOwner(registryText: string, apiKey: string): strin
   return null;
 }
 
+/** Marker written when a venv rebuild completed successfully: distinguishes a complete
+ *  re-run environment from an interrupted rebuild's partial tree (Copilot #840 r59). */
+const INSTALL_OK_MARKER = '.laya-install-ok';
+
+/**
+ * Restore the previous unit bytes (best effort) after a rollback: the unit file was already
+ * overwritten when the failure happened, so the restored venv must be referenced by the OLD
+ * unit too (Copilot #840 r59). A null backup leaves the current unit in place.
+ */
+function restoreLayaUnit(unitPath: string, backupText: string | null): void {
+  if (backupText === null) return;
+  try {
+    const tmpUnit = join(dirname(unitPath), `.${basename(unitPath)}.rollback-${process.pid}`);
+    writeFileSync(tmpUnit, backupText, { flag: 'wx', mode: 0o600 });
+    renameSync(tmpUnit, unitPath);
+  } catch {
+    // Best effort: the operator is already looking at an error message.
+  }
+}
+
 /**
  * The first existing '<venvBase>.backup-<pid>' sibling (numeric pid — the exact shape setup
  * generates), or null. Used to recover the previous run's working venv after a crash between
@@ -1093,22 +1113,32 @@ export async function runHostSetup(
     // working venv (r47's original guarantee, without the rename).
     const backupDir = `${plan.venvDir}.backup-${process.pid}`;
     let backedUp = false;
+    let unitBackupText: string | null = null;
     const steps: Array<[string, () => void]> = [
       ['backup', () => {
-        if (existsSync(plan.venvDir)) {
-          // A stale backup from a dead run (same PID reused) must not be adopted.
+        const liveIsComplete = existsSync(plan.venvDir) && existsSync(join(plan.venvDir, INSTALL_OK_MARKER));
+        if (liveIsComplete) {
+          // Normal re-run: the current venv is the last known-good environment.
           rmSync(backupDir, { recursive: true, force: true });
           renameSync(plan.venvDir, backupDir);
+          backedUp = true;
         } else {
-          // Crash recovery (Copilot #840 r58): a previous run may have crashed AFTER moving the
-          // live venv aside (backup-<old pid>) but before completing — the live path is absent
-          // while the last WORKING environment sits under a numeric backup. Adopt it as THIS
-          // run's backup so a failed rebuild rolls it back into place instead of leaving the
-          // enabled unit without an executable.
+          // No live venv, or a PARTIAL one from an interrupted rebuild (no completion marker —
+          // Copilot #840 r59): the last GOOD environment is a stale numeric backup from a
+          // crashed run; adopt it as THIS run's rollback source and discard the partial tree.
           const stale = findNumericVenvBackup(dirname(plan.venvDir), basename(plan.venvDir));
-          if (stale) renameSync(stale, backupDir);
+          if (stale) {
+            rmSync(plan.venvDir, { recursive: true, force: true });
+            renameSync(stale, backupDir);
+            backedUp = true;
+          }
         }
-        backedUp = true;
+        // Preserve the OLD unit bytes for rollback: the unit is overwritten before the service
+        // is reloaded, so a failed activation must be able to restore the previous unit
+        // (Copilot #840 r56/r59).
+        if (backedUp && existsSync(plan.unitPath)) {
+          unitBackupText = readFileSync(plan.unitPath, 'utf8');
+        }
       }],
       ['venv', det.argv![0] === 'uv'
         ? () => {
@@ -1126,6 +1156,14 @@ export async function runHostSetup(
       ['install', () => {
         const r = run([join(plan.venvDir, 'bin', 'python3'), '-m', 'pip', 'install', `laya[serve]==${LAYA_SERVE_PIN}`], 300_000);
         if (!r.ok) throw new Error(`pip install laya[serve]==${LAYA_SERVE_PIN} failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
+        // Completion marker (Copilot #840 r59): a crash AFTER this point leaves a COMPLETE
+        // environment; a crash before it leaves a partial tree the next run must not trust.
+        // Best effort: injected/virtualized runners may not create a real venv (tests).
+        try {
+          writeFileSync(join(plan.venvDir, INSTALL_OK_MARKER), `${new Date().toISOString()}\n`, { mode: 0o644 });
+        } catch {
+          // A missing marker on a REAL install only downgrades the next run's crash recovery.
+        }
       }],
       ['credentials', () => {
         ensureLayaCredentials(env);
@@ -1155,33 +1193,40 @@ export async function runHostSetup(
         rmSync(join(dirname(plan.unitPath), `.${plan.unitLabel}.tmp-${process.pid}`), { recursive: true, force: true });
       }],
     ];
+    // Roll the service back to the previous environment when activation or the readiness gate
+    // fails (Copilot #840 r59): restore the backup venv, restore the OLD unit bytes, reload,
+    // then report the failure. Best effort — the original error is what the operator sees.
+    const rollbackLaya = () => {
+      if (!backedUp || !existsSync(backupDir)) return;
+      try {
+        rmSync(plan.venvDir, { recursive: true, force: true });
+        renameSync(backupDir, plan.venvDir);
+        restoreLayaUnit(plan.unitPath, unitBackupText);
+        if (process.platform === 'darwin') {
+          run(['launchctl', 'bootout', `${uid}/${plan.unitLabel}`], 10_000);
+          run(['launchctl', 'bootstrap', uid, plan.unitPath], 15_000);
+        } else {
+          run(['systemctl', '--user', 'daemon-reload'], 15_000);
+          run(['systemctl', '--user', 'restart', plan.unitLabel], 15_000);
+        }
+      } catch {
+        // Best effort — the original error is what the operator sees.
+      }
+    };
     try {
       for (const [name, step] of steps) {
         step();
         io.out(`laya: ${name} ok\n`);
       }
       io.out(`laya: unit written at ${plan.unitPath}\n`);
-      // The venv, credentials and unit all succeeded — the old environment is no longer needed
-      // (Copilot #840 r56: the backup must OUTLIVE every fallible credential/unit write so a
-      // late failure can still roll back). Sweep stale siblings from crashed runs — ONLY the
-      // exact generated shape '<venv>.backup-<pid>' with a NUMERIC pid (Copilot #840 r50): an
-      // operator's 'laya-venv.backup-manual' must never be touched.
-      if (existsSync(backupDir)) rmSync(backupDir, { recursive: true, force: true });
-      const venvBase = basename(plan.venvDir);
-      const venvParent = dirname(plan.venvDir);
-      for (const entry of existsSync(venvParent) ? readdirSync(venvParent) : []) {
-        const m = entry.startsWith(`${venvBase}.backup-`)
-          ? /^\.backup-(\d+)$/.exec(entry.slice(venvBase.length))
-          : null;
-        if (m) rmSync(join(dirname(plan.venvDir), entry), { recursive: true, force: true });
-      }
     } catch (e) {
-      // Rollback (Copilot #840 r55): any failure after the backup step removes the possibly
-      // broken new venv and restores the previous environment, so a still-enabled unit keeps a
-      // working interpreter.
+      // Rollback (Copilot #840 r55/r59): any failure after the backup step removes the possibly
+      // broken new venv, restores the previous environment AND its unit bytes, so a
+      // still-enabled unit keeps a working interpreter and its old configuration.
       if (backedUp) {
         rmSync(plan.venvDir, { recursive: true, force: true });
         if (existsSync(backupDir)) renameSync(backupDir, plan.venvDir);
+        restoreLayaUnit(plan.unitPath, unitBackupText);
       }
       io.err(`\nlaya: not installed — ${(e as Error).message}\n`);
       io.err('laya: mercury.env was written; the sidecar can be finished later by re-running `mercury host setup --yes`.\n');
@@ -1205,6 +1250,7 @@ export async function runHostSetup(
       const bootstrap = run(['launchctl', 'bootstrap', uid, plan.unitPath], 15_000);
       if (!bootstrap.ok) {
         io.err(`\nlaya: launchctl bootstrap failed: ${(bootstrap.stderr.trim() || bootstrap.stdout.trim() || 'no output').split('\n')[0]}\n`);
+        rollbackLaya();
         return 1;
       }
     } else {
@@ -1216,6 +1262,7 @@ export async function runHostSetup(
       const reload = run(['systemctl', '--user', 'daemon-reload'], 15_000);
       if (!reload.ok) {
         io.err(`\nlaya: systemctl --user daemon-reload failed: ${(reload.stderr.trim() || reload.stdout.trim() || 'no output').split('\n')[0]}\n`);
+        rollbackLaya();
         return 1;
       }
       // enable WITHOUT --now (r18): --now starts the unit and the restart below would kill the
@@ -1227,6 +1274,7 @@ export async function runHostSetup(
       const loaded = run(loadCmd, 15_000);
       if (!loaded.ok) {
         io.err(`\nlaya: systemctl enable failed: ${(loaded.stderr.trim() || loaded.stdout.trim() || 'no output').split('\n')[0]}\n`);
+        rollbackLaya();
         return 1;
       }
       // A re-run that rewrote the unit or rotated the key must not leave the OLD process
@@ -1234,6 +1282,7 @@ export async function runHostSetup(
       const restarted = run(['systemctl', '--user', 'restart', plan.unitLabel], 15_000);
       if (!restarted.ok) {
         io.err(`\nlaya: systemctl restart failed: ${(restarted.stderr.trim() || restarted.stdout.trim() || 'no output').split('\n')[0]}\n`);
+        rollbackLaya();
         return 1;
       }
     }
@@ -1265,6 +1314,7 @@ export async function runHostSetup(
       if (remaining <= 0) {
         io.err(`\nlaya: loaded but the doctor probe failed within ${Math.round(budgetMs / 60_000)} min (${attempts} attempts): ${last}\n`);
         io.err(`laya: inspect with \`launchctl print ${uid}/${plan.unitLabel}\` (macOS) or \`journalctl --user -u ${plan.unitLabel}\` (Linux), then re-run setup.\n`);
+        rollbackLaya();
         return 1;
       }
       attempts += 1;
@@ -1288,6 +1338,7 @@ export async function runHostSetup(
           if (anonLeft <= 0) {
             io.err(`\nlaya: the readiness budget ran out while proving auth on ${baseUrl} (${attempts} attempts) — last probe: ${last}\n`);
             io.err(`laya: inspect with \`launchctl print ${uid}/${plan.unitLabel}\` (macOS) or \`journalctl --user -u ${plan.unitLabel}\` (Linux), then re-run setup.\n`);
+            rollbackLaya();
             return 1;
           }
           const anon = await checkLaya(baseUrl, '', Math.max(1, Math.min(timeout.timeoutMs, anonLeft)));
@@ -1313,11 +1364,25 @@ export async function runHostSetup(
       if (probe.ok === false && isLayaAuthRejected(probe.detail)) {
         io.err(`\nlaya: the sidecar at ${baseUrl} rejected the configured key (401) while the unit is not yet serving — another auth-enabled sidecar owns the port.\n`);
         io.err(`laya: stop that service or set MERCURY_LAYA_URL to its URL, then re-run setup.\n`);
+        rollbackLaya();
         return 1;
       }
       if (attempts === 1) io.out('laya: waiting for the sidecar — first start downloads the English checkpoint (~843 MB)\n');
       const sleepMs = Math.min(gapMs, budgetMs - (Date.now() - started));
       if (sleepMs > 0) await new Promise((res) => setTimeout(res, sleepMs));
+    }
+    // Readiness proven — the previous environment is no longer needed (Copilot #840 r59: the
+    // backup must outlive activation AND the doctor/readiness gate). Sweep stale siblings from
+    // crashed runs — ONLY the exact generated shape '<venv>.backup-<pid>' with a NUMERIC pid
+    // (Copilot #840 r50): an operator's 'laya-venv.backup-manual' must never be touched.
+    if (backedUp && existsSync(backupDir)) rmSync(backupDir, { recursive: true, force: true });
+    const venvBase = basename(plan.venvDir);
+    const venvParent = dirname(plan.venvDir);
+    for (const entry of existsSync(venvParent) ? readdirSync(venvParent) : []) {
+      const m = entry.startsWith(`${venvBase}.backup-`)
+        ? /^\.backup-(\d+)$/.exec(entry.slice(venvBase.length))
+        : null;
+      if (m) rmSync(join(dirname(plan.venvDir), entry), { recursive: true, force: true });
     }
     }
   }

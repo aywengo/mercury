@@ -1734,6 +1734,10 @@ test('runHostSetup: the venv is rebuilt at its final path; a failed install roll
     // without an executable.
     const crashedBackup = join(dir, 'data', 'laya-venv.backup-424242');
     renameSync(live, crashedBackup);
+    // r59 shape: the crashed run had ALSO created a partial live venv before dying — the next
+    // run must prefer the WORKING numeric backup over the partial tree.
+    mkdirSync(join(live, 'bin'), { recursive: true });
+    writeFileSync(join(live, 'bin', 'python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     err.length = 0;
     const code3 = await runHostSetup(['--yes'], {
       out: () => {}, err: (s) => err.push(s),
@@ -1742,8 +1746,58 @@ test('runHostSetup: the venv is rebuilt at its final path; a failed install roll
       sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
     assert.equal(code3, 1, `crashed-backup rebuild must fail cleanly: ${err.join('')}`);
+    assert.match(err.join(''), /pip install laya\[serve\]==[^ ]+ failed/, 'the rebuild failed at the install step');
     assert.ok(existsSync(installedMarker), 'the adopted backup was rolled back into the live path');
     assert.ok(!existsSync(crashedBackup), 'the adopted backup no longer sits under its old name');
+  } finally {
+    await fake.close();
+  }
+});
+
+test('runHostSetup: a readiness failure rolls the previous venv back into place (#840 r59)', async () => {
+  const dir = tempDir('setup-laya-rr-');
+  const out: string[] = [];
+  const err: string[] = [];
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
+  let failInstall = false;
+  const sidecarRun = (argv: string[]) => {
+    if (failInstall && argv.join(' ').includes('pip install')) return { ok: false, stdout: '', stderr: 'boom' };
+    // Real-filesystem emulation: uv-replace semantics.
+    if (argv[0] === 'uv' && argv[1] === 'venv') {
+      const target = argv[2];
+      rmSync(target, { recursive: true, force: true });
+      mkdirSync(join(target, 'bin'), { recursive: true });
+      writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    if (argv.join(' ').includes('pip install')) {
+      writeFileSync(join(dirname(argv[0]), '.laya-installed'), 'y\n');
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    return okRun(argv);
+  };
+  try {
+    const code1 = await runHostSetup([], {
+      out: (s) => out.push(s), err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 30_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+    assert.equal(code1, 0, `first install: ${err.join('')} | ${out.join('')}`);
+    const live = join(dir, 'data', 'laya-venv');
+    const installedMarker = join(live, 'bin', '.laya-installed');
+    assert.ok(existsSync(installedMarker), 'run 1 installed the venv');
+    // Run 2: the probe URL points at a closed port with a tiny budget → readiness exhausts →
+    // the previous environment must be restored (Copilot #840 r59).
+    const code2 = await runHostSetup(['--yes'], {
+      out: (s) => out.push(s), err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone', sidecarReadinessBudgetMs: 3_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+    assert.equal(code2, 1, 'a readiness failure fails the run');
+    assert.ok(existsSync(installedMarker), 'the previous venv is restored after the readiness failure');
+    assert.deepEqual(readdirSync(join(dir, 'data')).filter((e) => /^laya-venv\.backup-\d+$/.test(e)), [], 'no backup leaks after the readiness rollback');
   } finally {
     await fake.close();
   }
