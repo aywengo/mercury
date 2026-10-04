@@ -27,10 +27,19 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSy
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { envFilePath, resolveMercuryBin } from '../service.ts';
-import { assertBotAlias } from './config.ts';
+import { assertBotAlias, BOT_ALIAS_RE } from './config.ts';
 
-/** The §4.1 alias contract is also a path-safety contract: unit names and file paths are built from it. */
+/** Syntax-only form (Copilot #840 r32): existing/read/uninstall paths must accept aliases that
+ *  predate a reservation — uninstall is the recovery path setup advises. */
+function assertAliasSyntax(alias: string): void {
+  if (!BOT_ALIAS_RE.test(alias)) {
+    throw new Error(`bot alias must match ${BOT_ALIAS_RE.source}, got '${alias}'`);
+  }
+}
+
+/** New-bot creation: syntax + reservation. */
 function assertAlias(alias: string): void {
+  assertAliasSyntax(alias);
   assertBotAlias(alias);
 }
 
@@ -373,7 +382,7 @@ export function uninstallBotService(
   env: NodeJS.ProcessEnv = process.env,
   opts: BotServiceUninstallOptions = { yes: false, keepEnv: false, reassignOwner: null },
 ): number {
-  assertAlias(alias);
+  assertAliasSyntax(alias);
   const plist = botPlistPath(alias, env);
   const unitPath = botUnitPath(alias, env);
   const wrapper = botWrapperPath(alias, env);

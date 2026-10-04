@@ -1141,6 +1141,15 @@ export async function runHostSetup(
         io.out(`laya: doctor ok — ${probe.detail}\n`);
         break;
       }
+      // A 401 on the AUTHENTICATED probe is definitive, not startup noise: our unit either
+      // holds the port (the embedded key matches → 200) or has not bound yet (unreachable →
+      // retry). A sidecar that is UP and rejecting our key is ANOTHER auth-enabled service
+      // that got there first — retrying would just burn the budget (Copilot #840 r32).
+      if (probe.ok === false && (probe.detail ?? '').includes('401')) {
+        io.err(`\nlaya: the sidecar at ${baseUrl} rejected the configured key (401) while the unit is not yet serving — another auth-enabled sidecar owns the port.\n`);
+        io.err(`laya: stop that service or set MERCURY_LAYA_URL to its URL, then re-run setup.\n`);
+        return 1;
+      }
       if (attempts === 1) io.out('laya: waiting for the sidecar — first start downloads the English checkpoint (~843 MB)\n');
       const sleepMs = Math.min(gapMs, budgetMs - (Date.now() - started));
       if (sleepMs > 0) await new Promise((res) => setTimeout(res, sleepMs));

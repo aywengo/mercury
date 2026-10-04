@@ -1826,6 +1826,33 @@ test('runHostSetup: the readiness gate REQUIRES auth — an open sidecar on the 
   }
 });
 
+test('runHostSetup: an authed 401 during readiness is a port conflict, not a retry (#840 r32)', async () => {
+  // Another auth-enabled sidecar (fixed key ≠ the wizard's) owns 8302: the authed probe gets a
+  // definitive 401 — setup must fail immediately with the conflict, not retry for the budget.
+  const dir = tempDir('setup-laya-conflict-');
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: 'other-service-key'.padEnd(32, 'x') });
+  const err: string[] = [];
+  const t0 = Date.now();
+  try {
+    const code = await runHostSetup([], {
+      out: () => {},
+      err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`,
+      sidecarReadinessBudgetMs: 20_000,
+      sidecarReadinessGapMs: 10,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+    const elapsed = Date.now() - t0;
+    assert.equal(code, 1);
+    assert.match(err.join(''), /another auth-enabled sidecar owns the port/, `named conflict: ${err.join('')}`);
+    assert.ok(elapsed < 10_000, `fails fast: ${elapsed} ms`);
+  } finally {
+    await fake.close();
+  }
+});
+
 test('runHostSetup: a transient anonymous-probe failure is retried, not read as open auth (#840 r28)', async () => {
   // Authed probe 200 (auth on), anon probe 503 (inconclusive blip), retry → 401 → proven.
   // Before r28 the 503 was read as "answers WITHOUT a key" and killed a healthy install.
