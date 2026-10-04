@@ -715,7 +715,7 @@ const INSTALL_OK_MARKER = '.laya-install-ok';
 function restoreLayaUnit(unitPath: string, backupText: string | null): void {
   if (backupText === null) return;
   try {
-    const tmpUnit = join(dirname(unitPath), `.${basename(unitPath)}.rollback-${process.pid}`);
+    const tmpUnit = join(dirname(unitPath), `.${basename(unitPath)}.rollback-${process.pid}-${randomBytes(6).toString('hex')}`);
     writeFileSync(tmpUnit, backupText, { flag: 'wx', mode: 0o600 });
     renameSync(tmpUnit, unitPath);
   } catch {
@@ -1130,6 +1130,15 @@ export async function runHostSetup(
           if (stale) {
             rmSync(plan.venvDir, { recursive: true, force: true });
             renameSync(stale, backupDir);
+            backedUp = true;
+          } else if (existsSync(plan.venvDir)) {
+            // A marker-less live tree with NO numeric backup: a venv installed before the marker
+            // existed, a marker write that failed, or the leftover of a failed FRESH install.
+            // It is still the best rollback source there is, and the venv path must be empty
+            // before rebuilding -- `uv venv` refuses an existing directory ('A directory
+            // already exists', uv 0.8), so leaving it in place wedges every later re-run.
+            rmSync(backupDir, { recursive: true, force: true });
+            renameSync(plan.venvDir, backupDir);
             backedUp = true;
           }
         }

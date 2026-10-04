@@ -1754,6 +1754,69 @@ test('runHostSetup: the venv is rebuilt at its final path; a failed install roll
   }
 });
 
+test('runHostSetup: a marker-less live venv with no backup does not wedge re-runs under real uv semantics (#840 r60)', async () => {
+  const dir = tempDir('setup-laya-nomark-');
+  const err: string[] = [];
+  const out: string[] = [];
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
+  let failInstall = false;
+  // REAL uv semantics (uv 0.8): `uv venv` on an existing directory fails instead of replacing
+  // it. The other tests emulate replace semantics, which is why this wedge went unseen.
+  const sidecarRun = (argv: string[]) => {
+    if (argv[0] === 'uv' && argv[1] === 'venv') {
+      const target = argv[2]!;
+      if (existsSync(target)) {
+        return { ok: false, stdout: '', stderr: `error: Failed to create virtual environment\n  Caused by: A directory already exists at: ${target}` };
+      }
+      mkdirSync(join(target, 'bin'), { recursive: true });
+      writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    if (argv.join(' ').includes('pip install')) {
+      if (failInstall) return { ok: false, stdout: '', stderr: 'boom' };
+      writeFileSync(join(dirname(argv[0]!), '.laya-installed'), 'y\n');
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    return okRun(argv);
+  };
+  const runOnce = (args: string[], probeUrl: string) => runHostSetup(args, {
+    out: (s) => out.push(s), err: (s) => err.push(s),
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarRun, sidecarDataDir: join(dir, 'data'),
+    sidecarProbeUrl: probeUrl, sidecarReadinessBudgetMs: 10_000,
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+  const live = join(dir, 'data', 'laya-venv');
+  try {
+    // Shape 1: a FRESH install whose pip step fails leaves a partial live tree, no marker,
+    // no backup. The next run must rebuild, not fail at `uv venv` forever.
+    failInstall = true;
+    assert.equal(await runOnce([], fake.url), 1, 'the failing fresh install fails');
+    assert.ok(existsSync(live), 'precondition: the partial tree is left at the live path');
+    assert.ok(!existsSync(join(live, '.laya-install-ok')), 'precondition: no completion marker');
+    failInstall = false;
+    err.length = 0;
+    assert.equal(await runOnce(['--yes'], fake.url), 0, `the re-run after a failed fresh install: ${err.join('')}`);
+    assert.ok(existsSync(join(live, 'bin', '.laya-installed')), 'the re-run installed into the live path');
+
+    // Shape 2: a COMPLETE venv from before the marker existed (or a failed marker write).
+    rmSync(join(live, '.laya-install-ok'), { force: true });
+    err.length = 0;
+    assert.equal(await runOnce(['--yes'], fake.url), 0, `the re-run over a marker-less complete venv: ${err.join('')}`);
+    assert.ok(existsSync(join(live, '.laya-install-ok')), 'the rebuilt venv carries the completion marker');
+    assert.deepEqual(readdirSync(join(dir, 'data')).filter((e) => /^laya-venv\.backup-\d+$/.test(e)), [], 'no backup leaks after success');
+
+    // Shape 3: the marker-less venv is still the rollback source when the rebuild fails.
+    rmSync(join(live, '.laya-install-ok'), { force: true });
+    failInstall = true;
+    err.length = 0;
+    assert.equal(await runOnce(['--yes'], fake.url), 1, 'the failing rebuild fails');
+    assert.match(err.join(''), /pip install laya\[serve\]==[^ ]+ failed/, 'it failed at install, not at `uv venv`');
+    assert.ok(existsSync(join(live, 'bin', '.laya-installed')), 'the marker-less previous venv was rolled back into place');
+  } finally {
+    await fake.close();
+  }
+});
+
 test('runHostSetup: a readiness failure rolls the previous venv back into place (#840 r59)', async () => {
   const dir = tempDir('setup-laya-rr-');
   const out: string[] = [];
