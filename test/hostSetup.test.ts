@@ -1817,6 +1817,74 @@ test('runHostSetup: a marker-less live venv with no backup does not wedge re-run
   }
 });
 
+test('runHostSetup: rebuild-transaction gaps from the r61 review (#840 r61)', async () => {
+  const dir = tempDir('setup-laya-r61-');
+  const err: string[] = [];
+  const out: string[] = [];
+  const calls: string[] = [];
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
+  // Real uv semantics, as in r60.
+  const sidecarRun = (argv: string[]) => {
+    calls.push(argv.join(' '));
+    if (argv[0] === 'uv' && argv[1] === 'venv') {
+      const target = argv[2]!;
+      if (existsSync(target)) return { ok: false, stdout: '', stderr: `A directory already exists at: ${target}` };
+      mkdirSync(join(target, 'bin'), { recursive: true });
+      writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    if (argv.join(' ').includes('pip install')) {
+      writeFileSync(join(dirname(argv[0]!), '.laya-installed'), 'y\n');
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    return okRun(argv);
+  };
+  const env = { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir };
+  const runOnce = (args: string[], dataDir: string, probeUrl: string, budgetMs = 10_000) => runHostSetup(args, {
+    out: (s) => out.push(s), err: (s) => err.push(s),
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarRun, sidecarDataDir: dataDir,
+    sidecarProbeUrl: probeUrl, sidecarReadinessBudgetMs: budgetMs,
+  }, env);
+  const dataA = join(dir, 'dataA');
+  const dataB = join(dir, 'dataB');
+  const unitPath = process.platform === 'darwin'
+    ? join(dir, 'Library', 'LaunchAgents', 'com.mercury.laya.plist')
+    : join(dir, 'systemd', 'user', 'com.mercury.laya.service');
+  try {
+    // (c) The marker means VERIFIED: a fresh install that fails readiness leaves no marker,
+    // so a later run does not prefer that unverified tree over a verified backup.
+    assert.equal(await runOnce([], dataA, 'http://127.0.0.1:1/v1/systemone', 2_000), 1, 'fresh install, readiness fails');
+    assert.ok(existsSync(join(dataA, 'laya-venv', 'bin', '.laya-installed')), 'precondition: pip ran');
+    assert.ok(!existsSync(join(dataA, 'laya-venv', '.laya-install-ok')), 'an unverified venv carries no marker');
+    err.length = 0;
+    assert.equal(await runOnce(['--yes'], dataA, fake.url), 0, `verified install: ${err.join('')}`);
+    assert.ok(existsSync(join(dataA, 'laya-venv', '.laya-install-ok')), 'the marker lands after the doctor probe');
+    const unitA = readFileSync(unitPath, 'utf8');
+    assert.ok(unitA.includes(join(dataA, 'laya-venv')), 'precondition: the unit points at dataA');
+
+    // (b) A re-run that changes dataDir and fails readiness restores the PREVIOUS unit, which
+    // still points at the working venv under dataA.
+    err.length = 0;
+    assert.equal(await runOnce(['--yes'], dataB, 'http://127.0.0.1:1/v1/systemone', 2_000), 1, 'dataDir change, readiness fails');
+    assert.equal(readFileSync(unitPath, 'utf8'), unitA, 'the previous unit is restored byte-for-byte');
+    assert.ok(existsSync(join(dataA, 'laya-venv', '.laya-install-ok')), 'the old verified venv is untouched');
+
+    // (a) An invalid MERCURY_LAYA_TIMEOUT_MS refuses BEFORE anything is moved or rebuilt.
+    const envPath = envFilePath({ XDG_CONFIG_HOME: dir });
+    writeFileSync(envPath, `${readFileSync(envPath, 'utf8')}MERCURY_LAYA_TIMEOUT_MS=0\n`);
+    calls.length = 0;
+    err.length = 0;
+    assert.equal(await runOnce(['--yes'], dataA, fake.url), 1, 'invalid timeout refuses');
+    assert.match(err.join(''), /MERCURY_LAYA_TIMEOUT_MS/, 'the refusal names the variable');
+    assert.ok(!calls.some((c) => c.startsWith('uv venv') || c.includes('pip install')), 'nothing was rebuilt');
+    assert.ok(existsSync(join(dataA, 'laya-venv', '.laya-install-ok')), 'the live venv stays in place');
+    assert.deepEqual(readdirSync(dataA).filter((e) => /^laya-venv\.backup-\d+$/.test(e)), [], 'no backup venv is left behind');
+  } finally {
+    await fake.close();
+  }
+});
+
 test('runHostSetup: a readiness failure rolls the previous venv back into place (#840 r59)', async () => {
   const dir = tempDir('setup-laya-rr-');
   const out: string[] = [];
