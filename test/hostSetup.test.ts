@@ -1757,5 +1757,9 @@ test('runHostSetup --dry-run: laya plan printed, nothing executed (#831)', async
   // The non-executing plan names BOTH venv branches and the credentials step (Copilot r5).
   assert.match(text, /when uv is present\) OR python3 -m venv/);
   assert.match(text, /generate\/keep LAYA_API_KEY/);
+  // r18: the plan warns the operator that setup LOADS the agent (platform-specific command)
+  // and waits for readiness before the doctor verification.
+  assert.match(text, /load agent: (launchctl print\/bootout|systemctl --user daemon-reload)/, `load step in the plan: ${text}`);
+  assert.match(text, /wait for readiness: probe the doctor's laya line/);
   assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'dry-run creates no venv');
 });

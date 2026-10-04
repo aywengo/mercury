@@ -254,12 +254,25 @@ export function layaStepActions(plan: LayaPlan, venvTool: 'uv' | 'python3' | 'bo
   const credsLine = venvTool === 'both'
     ? `write credentials: generate/keep LAYA_API_KEY in bot-credentials.json (key 'laya', 0600)`
     : `write credentials: generate/keep LAYA_API_KEY in bot-credentials.json (key 'laya', 0600)`;
+  const loadLines = process.platform === 'darwin'
+    ? [
+        // Same choreography the real run performs (r10-r12): bootout the loaded job, bootstrap
+        // the new plist, then the doctor-probe readiness window.
+        `load agent: launchctl print/bootout gui/$UID/${plan.unitLabel} if loaded, then launchctl bootstrap gui/$UID ${plan.unitPath}`,
+        `wait for readiness: probe the doctor's laya line (first start downloads the ~843 MB checkpoint)`,
+      ]
+    : [
+        `load agent: systemctl --user daemon-reload && systemctl --user enable ${plan.unitLabel}`,
+        `start/restart: systemctl --user restart ${plan.unitLabel} (exactly one startup, fresh or re-run)`,
+        `wait for readiness: probe the doctor's laya line (first start downloads the ~843 MB checkpoint)`,
+      ];
   return [
     `write env: MERCURY_LAYA_URL=${plan.envUrl} (mercury.env; the LAYA_API_KEY goes to bot-credentials.json, key 'laya')`,
     venvLine,
     `install pinned sidecar: pip install 'laya[serve]==${LAYA_SERVE_PIN}' into ${plan.venvDir}`,
     credsLine,
-    `write unit: ${plan.unitPath} (bind 127.0.0.1, LAYA_PRELOAD=1, LAYA_MODELS=english)`,
+    `write unit: ${plan.unitPath} (bind 127.0.0.1, LAYA_PRELOAD=1, LAYA_MODELS=english, HF_HOME=${plan.hfHome})`,
+    ...loadLines,
     `verify with: mercury host doctor (the laya: line, #830)`,
   ];
 }
