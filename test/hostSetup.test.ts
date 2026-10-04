@@ -1435,6 +1435,8 @@ test('runHostSetup: Laya OPT-IN writes MERCURY_LAYA_URL + credentials + unit (sc
       return okRun(argv);
     },
     sidecarDataDir: join(dir, 'data'),
+    // The fake answers immediately; shrink the readiness window (r11 knob).
+    sidecarReadinessAttempts: 3,
   }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
   assert.equal(code, 0, `setup failed: ${out.join('')}`);
   const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
@@ -1464,6 +1466,7 @@ test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
       question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
+      sidecarReadinessAttempts: 3,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
     const credsPath = join(dir, 'mercury', 'bot-credentials.json');
     const firstKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
@@ -1475,10 +1478,35 @@ test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
       question: async () => '',
       sidecarRun: okRun,
       sidecarDataDir: join(dir, 'data'),
+      sidecarReadinessAttempts: 3,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, MERCURY_LAYA_URL: 'http://127.0.0.1:8302' });
     assert.equal(code, 0, `re-run failed: ${out.join('')}`);
     const secondKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
     assert.equal(secondKey, firstKey, 'the re-run must NOT rotate the sidecar key');
+  } finally {
+    await fake.close();
+  }
+});
+
+test('runHostSetup: the readiness window retries until the sidecar answers (#840 r11)', async () => {
+  // A fresh sidecar downloads the English checkpoint first; the first probes legitimately
+  // fail. The wizard must keep probing within its bounded window, not exit 1.
+  const dir = tempDir('setup-laya-ready-');
+  const fake = await startFakeLaya([{ hang: true }, { json: validPick(['probe']) }], { port: 8302 });
+  const out: string[] = [];
+  try {
+    const code = await runHostSetup([], {
+      out: (s) => out.push(s),
+      err: () => {},
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarReadinessAttempts: 5,
+      sidecarReadinessGapMs: 20,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir });
+    assert.equal(code, 0, `setup failed: ${out.join('')}`);
+    assert.ok(out.join('').includes('laya: doctor ok'), `probe eventually green: ${out.join('')}`);
+    assert.ok(fake.received.length >= 2, `retried after the first refusal (${fake.received.length} probes)`);
   } finally {
     await fake.close();
   }
@@ -1515,14 +1543,44 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
     : join(dir, 'systemd', 'user', 'com.mercury.laya.service');
   mkdirSync(join(unitPath, '..'), { recursive: true });
   writeFileSync(unitPath, 'stale', { mode: 0o644 });
-  await runHostSetup([], {
-    out: () => {},
-    err: () => {},
-    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-    sidecarRun: okRun,
-    sidecarDataDir: join(dir, 'data'),
-  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+  // The run now LOADS the unit and probes it (r10/r11): a fake sidecar answers on the fixed
+  // port; the readiness window is shrunk to keep the test fast.
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { port: 8302 });
+  try {
+    await runHostSetup([], {
+      out: () => {},
+      err: () => {},
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarReadinessAttempts: 3,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+  } finally {
+    await fake.close();
+  }
   assert.equal((statSync(unitPath).mode & 0o777).toString(8), '600', 'the rewritten unit must be 0600');
+  // Linux r11: after enable --now the unit is RESTARTED so a rewritten unit/key takes effect.
+  // (Darwin runs kickstart instead; the restart branch is exercised on the Ubuntu CI job.)
+  if (process.platform === 'linux') {
+    // re-run the setup once more to prove the restart happens on the re-run path
+    const calls: string[][] = [];
+    const fake2 = await startFakeLaya([{ json: validPick(['probe']) }], { port: 8302 });
+    try {
+      await runHostSetup(['--yes'], {
+        out: () => {},
+        err: () => {},
+        sidecarRun: (argv: string[]) => {
+          calls.push(argv);
+          return okRun(argv);
+        },
+        sidecarDataDir: join(dir, 'data'),
+        sidecarReadinessAttempts: 3,
+      }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+    } finally {
+      await fake2.close();
+    }
+    assert.ok(calls.some((a) => a[0] === 'systemctl' && a[1] === '--user' && a[2] === 'restart'), `restart ran: ${calls.map((c) => c.join(' ')).join(' | ')}`);
+  }
 });
 
 test('defaultAnswers: MERCURY_LAYA_URL in the EXISTING mercury.env keeps the sidecar enabled (#840 r1)', () => {

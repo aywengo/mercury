@@ -637,6 +637,11 @@ export async function runHostSetup(
     sidecarRun?: RunFn;
     /** Injected sidecar data dir override (tests). Default: the answers' dataDir. */
     sidecarDataDir?: string;
+    /** Readiness probes after load (r11): default 120 (~18 min) — a fresh sidecar downloads
+     *  the ~843 MB English checkpoint before it answers. Tests shrink this. */
+    sidecarReadinessAttempts?: number;
+    /** Gap between readiness probes; default 5 000 ms. Tests shrink this. */
+    sidecarReadinessGapMs?: number;
   } = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) },
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
@@ -906,12 +911,21 @@ export async function runHostSetup(
       // failure surfaces through the doctor probe below.
       const kick = run(['launchctl', 'kickstart', '-k', `${uid}/${plan.unitLabel}`], 15_000);
       if (!kick.ok) io.err(`laya: kickstart failed: ${(kick.stderr.trim() || kick.stdout.trim() || 'no output').split('\n')[0]}\n`);
+    } else if (process.platform === 'linux') {
+      // enable --now does NOT restart an active unit (Copilot #840 r11): a re-run that rewrote
+      // the unit or rotated the key would leave the OLD process serving. Restart explicitly —
+      // idempotent for a first load, mandatory for a re-run.
+      run(['systemctl', '--user', 'restart', plan.unitLabel], 15_000);
     }
     const written = loadEnvFile(path);
     const baseUrl = written.MERCURY_LAYA_URL ?? `http://127.0.0.1:${plan.port}/v1/systemone`;
     const creds = ensureLayaCredentials(env);
+    // A FRESH sidecar preloads the English checkpoint (~843 MB) before it answers — the
+    // readiness window must cover that first download, not a few seconds (Copilot #840 r11).
+    // Default: 120 probes x (4 s deadline + 5 s gap) ≈ 18 min bounded; tests shrink it.
+    const maxAttempts = io.sidecarReadinessAttempts ?? 120;
     let last = '';
-    for (let attempt = 1; attempt <= 5; attempt++) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       // The probe is the doctor's #830 line, not a new check: same client, same deadline.
       const probe = await checkLaya(baseUrl, creds.key, 4_000);
       last = probe.detail;
@@ -919,12 +933,13 @@ export async function runHostSetup(
         io.out(`laya: doctor ok — ${last}\n`);
         break;
       }
-      if (attempt === 5) {
-        io.err(`\nlaya: loaded but the doctor probe failed: ${last}\n`);
+      if (attempt === maxAttempts) {
+        io.err(`\nlaya: loaded but the doctor probe failed after ${maxAttempts} attempts (${Math.round(maxAttempts * 9 / 60)} min): ${last}\n`);
         io.err(`laya: inspect with \`launchctl print ${uid}/${plan.unitLabel}\` (macOS) or \`journalctl --user -u ${plan.unitLabel}\` (Linux), then re-run setup.\n`);
         return 1;
       }
-      await new Promise((res) => setTimeout(res, 1_000));
+      if (attempt === 1) io.out('laya: waiting for the sidecar — first start downloads the English checkpoint (~843 MB)\n');
+      await new Promise((res) => setTimeout(res, io.sidecarReadinessGapMs ?? 5_000));
     }
   }
   // The Fleet hand-off is the wizard's output contract on EVERY successful write, not
