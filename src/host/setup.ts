@@ -46,6 +46,7 @@ import { checkLaya, loadEnvFile, parseLayaTimeoutMs, schemeFor } from './doctor.
 import { readBotCredentials } from './bots/credentials.ts';
 import { DEFAULT_PYTHON_CANDIDATES, detectPython, ensureLayaCredentials, LAYA_DEFAULT_PORT, LAYA_SERVE_PIN, layaStepActions, planLayaSidecar, renderLayaLaunchdPlist, renderLayaSystemdUnit, type LayaPlan, type RunFn } from './layaSidecar.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
+import { validateLayaBaseUrl } from '../laya/layaUrl.ts';
 
 /** The wizard's answers, before validation. Every field maps to a MERCURY_* variable. */
 export interface HostSetupAnswers {
@@ -181,39 +182,15 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
     case 'layaEnabled':
       return typeof value === 'boolean' ? null : 'layaEnabled must be a boolean';
     case 'layaUrl': {
-      if (typeof value !== 'string') return 'layaUrl must be a string';
-      if (value.trim() === '') {
-        // Whitespace-only is NOT the empty sentinel: renderEnv would see the padded string and
-        // throw while rendering (Copilot #840 r25). Only '' means "wizard-managed default".
-        return value === '' ? null : 'layaUrl must not have leading or trailing whitespace';
-      }
-      // A BASE URL, not an endpoint route: LayaClient appends /v1/systemone itself, so a
-      // stored route would double it (r22). Loopback-only contract: the sidecar binds
-      // 127.0.0.1 — a non-loopback host would send the bearer credential over the network.
-      let u: URL;
-      try {
-        u = new URL(value.trim());
-      } catch {
-        return 'layaUrl must be an absolute URL (e.g. http://127.0.0.1:8302)';
-      }
-      if (u.protocol !== 'http:') return 'layaUrl must use http:// (the sidecar is loopback-only)';
-      // NOTE: not ::1 — Node's URL host for a bracketed IPv6 literal is '[::1]', which
-      // SAFE_VALUE_RE then rejects; advertising it would promise an input that can never pass
-      // (Copilot #840 r24). The sidecar binds 127.0.0.1 anyway.
-      if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') {
-        return `layaUrl must be a loopback host (127.0.0.1 or localhost), got '${u.hostname}'`;
-      }
-      if (u.pathname !== '/' && u.pathname !== '') return `layaUrl must be a base URL without a route path (the client appends /v1/systemone), got '${u.pathname}'`;
-      if (u.search || u.hash) return 'layaUrl must not carry a query or fragment';
-      // Padded URLs would pass here (we parse the trimmed value) and then fail during
-      // rendering, which validates the ORIGINAL value — refuse them at the gate.
-      if (value !== value.trim()) return 'layaUrl must not have leading or trailing whitespace';
-      // URL-only contract: an embedded user:password would be written to the env file and
-      // printed by the external/dry-run paths — a credential smuggled into a 'plain URL'.
-      if (u.username || u.password) return 'layaUrl must not contain a username or password (the key lives in bot-credentials.json)';
-      return charsetErr('layaUrl', value.trim());
+      // The shape contract lives in ONE validator (src/laya/layaUrl.ts) shared with loadConfig
+      // and the doctor (Copilot #840 r34): the wizard cannot be the only gate when hand-written
+      // env files bypass it.
+      const err = validateLayaBaseUrl(value, 'layaUrl');
+      if (err !== null) return err;
+      // The validator proved value is a string (its typeof branch returned otherwise).
+      return charsetErr('layaUrl', (value as string).trim());
     }
-    case 'atlasUrl': {
+case 'atlasUrl': {
       if (typeof value !== 'string') return 'Atlas URL must be a string';
       if (value.trim() === '') return null;
       if (!/^https?:\/\//.test(value.trim())) return 'Atlas URL must start with http:// or https://';

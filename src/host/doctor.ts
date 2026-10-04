@@ -30,6 +30,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
 import { join } from 'node:path';
 import { LayaClient } from '../laya/client.ts';
+import { validateLayaBaseUrl } from '../laya/layaUrl.ts';
 import { readBotCredentials } from './bots/credentials.ts';
 
 /** Load mercury.env into a record (simple KEY=VALUE parser, no shell semantics). */
@@ -336,6 +337,19 @@ export async function runHostDoctor(
   const layaUrl = vars.MERCURY_LAYA_URL;
   let laya: DoctorResult['laya'];
   if (layaUrl !== undefined && layaUrl.trim() !== '') {
+    // Shape BEFORE credentials (Copilot #840 r34): a non-loopback/routed URL must be refused
+    // here, not probed with the sidecar key attached.
+    const shapeErr = validateLayaBaseUrl(layaUrl);
+    if (shapeErr) {
+      laya = { ok: false, detail: shapeErr };
+      const result: DoctorResult = { healthz, bindHealthz, smoke, allSmokeSkipped: anySkipped, noHarnesses, ...(laya !== undefined ? { laya } : {}) };
+      if (json) {
+        io.out(JSON.stringify(result, null, 2) + '\n');
+      } else {
+        io.out(`laya: ${shapeErr}\n`);
+      }
+      return json ? 0 : 1;
+    }
     let apiKey: string | undefined;
     let keyDetail: string | undefined;
     try {

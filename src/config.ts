@@ -3,6 +3,7 @@
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { DEFAULT_BOUNDS, type KnowledgeBounds } from './knowledge/validation.ts';
+import { validateLayaBaseUrl } from './laya/layaUrl.ts';
 
 export interface Config {
   dbPath: string;
@@ -324,8 +325,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     knowledge: loadKnowledgeConfig(env),
     // The Laya sidecar (#830/#831): a plain loopback URL, never a credential (the sidecar key
     // lives in the 0600 bot-credentials.json, `laya` entry). Null = not configured = the
-    // feature does not exist on this host.
-    layaUrl: env.MERCURY_LAYA_URL?.trim() || null,
+    // feature does not exist on this host. The SHAPE is validated here — hand-written or
+    // service-provided env files bypass the wizard, and doctor would otherwise send the
+    // bearer key to any URL this line accepts (Copilot #840 r34).
+    layaUrl: (() => {
+      const raw = env.MERCURY_LAYA_URL?.trim() || null;
+      if (raw === null) return null;
+      const err = validateLayaBaseUrl(raw);
+      if (err) throw new Error(`invalid configuration: ${err} (docs/configuration.md, 'Laya sidecar')`);
+      return raw;
+    })(),
   };
 }
 

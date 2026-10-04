@@ -677,3 +677,27 @@ test('runHostDoctor: a set-but-broken laya sidecar FAILS the doctor with the rea
     await m.close();
   }
 });
+
+test('runHostDoctor: a non-loopback MERCURY_LAYA_URL is refused before the credential is read (#840 r34)', async () => {
+  // A hand-edited env can point the doctor at ANY host; the shape gate must fire BEFORE
+  // readBotCredentials so the sidecar key is never attached to an off-host request.
+  const dir = tempDir('doctor-laya-nonloop-');
+  const cfg = join(dir, 'cfg');
+  mkdirSync(join(cfg, 'mercury'), { recursive: true });
+  writeFileSync(join(cfg, 'mercury', 'mercury.env'), 'MERCURY_HARNESSES=primeagent\nMERCURY_LAYA_URL=http://example.com:8302\n');
+  writeFileSync(join(cfg, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
+  try {
+    const out: string[] = [];
+    const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    assert.equal(code, 1);
+    assert.match(out.join(''), /loopback host/, `named refusal: ${out.join('')}`);
+    const jout: string[] = [];
+    await runHostDoctor(['--json'], { out: (s) => jout.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);
+    const parsed = JSON.parse(jout.join('')) as { laya?: { ok: boolean; detail: string } };
+    assert.equal(parsed.laya?.ok, false);
+    assert.match(parsed.laya?.detail ?? '', /loopback host/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+

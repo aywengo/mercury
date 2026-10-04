@@ -131,3 +131,18 @@ test('MERCURY_DEFAULT_AGENT defaults to fake', () => {
   assert.equal(loadConfig({ MERCURY_DEFAULT_AGENT: '   ' }).defaultAgent, 'fake');
   assert.equal(loadConfig({ MERCURY_DEFAULT_AGENT: 'primeagent' }).defaultAgent, 'primeagent');
 });
+
+test('MERCURY_LAYA_URL: the config boundary refuses non-loopback/routed/userinfo URLs (#840 r34)', () => {
+  // Hand-written and service-provided env files bypass the wizard; the shared loader must
+  // enforce the same loopback-only shape or doctor sends the bearer key off-host.
+  for (const bad of ['http://example.com:8302', 'http://192.168.1.20:8302', 'http://127.0.0.1:8302/v1/systemone', 'http://user:pw@127.0.0.1:8302', 'ftp://127.0.0.1:8302']) {
+    assert.throws(() => loadConfig({ MERCURY_LAYA_URL: bad }), /invalid configuration: MERCURY_LAYA_URL/, `${bad} refused`);
+  }
+  // Valid forms load.
+  for (const good of ['http://127.0.0.1:8302', 'http://localhost:9000']) {
+    const cfg = loadConfig({ MERCURY_LAYA_URL: good });
+    assert.equal(cfg.layaUrl, good);
+  }
+  assert.equal(loadConfig({}).layaUrl, null, 'unset = not configured');
+});
+
