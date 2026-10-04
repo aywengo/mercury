@@ -1779,10 +1779,27 @@ test('runHostSetup: a laya credential still registered as bot-laya in MERCURY_AP
   try {
     const err2: string[] = [];
     const out2: string[] = [];
+    // Scripted sidecar exec (same shape as the r47 staging test) — no real uv/systemd on CI.
+    const live2 = join(dir2, 'data', 'laya-venv');
+    const sidecarRun2 = (argv: string[]) => {
+      if (argv[0] === 'uv' && argv[1] === 'venv') {
+        rmSync(argv[2]!, { recursive: true, force: true });
+        mkdirSync(join(argv[2]!, 'bin'), { recursive: true });
+        writeFileSync(join(argv[2]!, 'bin', 'python3'), '#!/bin/sh\n', { mode: 0o755 });
+      } else if (argv.includes('pip')) {
+        const venvBin = dirname(argv[0]!);
+        mkdirSync(venvBin, { recursive: true });
+        writeFileSync(join(venvBin, '.laya-installed'), 'ok\n');
+      } else if (argv[0] === 'systemctl') {
+        // Emulate enable/restart success: the unit file must exist by then.
+        mkdirSync(dirname(live2), { recursive: true });
+      }
+      return okRun(argv);
+    };
     const code2 = await runHostSetup(['--yes'], {
       out: (s) => out2.push(s), err: (s) => err2.push(s),
       question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-      sidecarDataDir: join(dir2, 'data'),
+      sidecarRun: sidecarRun2, sidecarDataDir: join(dir2, 'data'),
       sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir2, XDG_STATE_HOME: dir2, HOME: dir2 });
     assert.equal(code2, 0, `unregistered sidecar key passes: ERR=${JSON.stringify(err2.join(''))} OUT=${JSON.stringify(out2.join('').slice(-300))}`);
