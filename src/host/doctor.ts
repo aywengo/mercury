@@ -233,6 +233,23 @@ export function bindHealthzTarget(
 /** One fixed probe question, once, through the real client (#830): the doctor measures the same
  *  call a dispatch would make — auth, validation and the configured deadline included. The probe
  *  state is constant, so the report line is reproducible and carries no operator data. */
+/**
+ * The doctor's laya probe deadline from the env file: MERCURY_LAYA_TIMEOUT_MS, default 500 ms.
+ * A non-positive/non-finite deadline would make Node schedule the timer immediately (or never):
+ * a healthy sidecar would read as unreachable. Node converts setTimeout delays above 2^31-1 ms
+ * to 1ms - a healthy sidecar would read as unreachable near-instantly. Cap at the timer limit.
+ * Exported so setup's success probe (r12) uses the SAME deadline the doctor will use.
+ */
+export function parseLayaTimeoutMs(vars: Record<string, string | undefined>): { ok: true; timeoutMs: number } | { ok: false; detail: string } {
+  const rawTimeout = vars.MERCURY_LAYA_TIMEOUT_MS;
+  if (rawTimeout === undefined || rawTimeout.trim() === '') return { ok: true, timeoutMs: 500 };
+  const parsed = Number(rawTimeout);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0 || parsed > 2147483647) {
+    return { ok: false, detail: `invalid configuration: MERCURY_LAYA_TIMEOUT_MS must be a positive integer <= 2147483647, got '${rawTimeout}'` };
+  }
+  return { ok: true, timeoutMs: parsed };
+}
+
 export async function checkLaya(baseUrl: string, apiKey: string | undefined, timeoutMs: number): Promise<{ ok: boolean; detail: string; latencyMs?: number; checkpoint?: string }> {
   const client = new LayaClient({
     baseUrl,
@@ -326,21 +343,11 @@ export async function runHostDoctor(
     } catch (err) {
       keyDetail = (err as Error).message;
     }
-    const rawTimeout = vars.MERCURY_LAYA_TIMEOUT_MS;
-    let timeoutMs = 500;
-    if (rawTimeout !== undefined && rawTimeout.trim() !== '') {
-      const parsed = Number(rawTimeout);
-      // A non-positive/non-finite deadline would make Node schedule the timer immediately (or
-      // never): a healthy sidecar would read as unreachable. Named failure, not a silent default.
-      // Node converts setTimeout delays above 2^31-1 ms to 1ms - a healthy sidecar would read
-      // as unreachable near-instantly. Cap at the timer limit; the client's per-call deadline
-      // uses the same bound.
-      if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0 || parsed > 2147483647) {
-        laya = { ok: false, detail: `invalid configuration: MERCURY_LAYA_TIMEOUT_MS must be a positive integer <= 2147483647, got '${rawTimeout}'` };
-      } else {
-        timeoutMs = parsed;
-      }
+    const timeout = parseLayaTimeoutMs(vars);
+    if (!timeout.ok) {
+      laya = { ok: false, detail: timeout.detail };
     }
+    const timeoutMs = timeout.ok ? timeout.timeoutMs : 500;
     if (apiKey === undefined && laya === undefined) {
       laya = { ok: false, detail: `auth cannot be checked: ${keyDetail ?? 'no laya credentials'}` };
     }

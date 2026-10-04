@@ -36,12 +36,14 @@
 import { createInterface } from 'node:readline';
 import { randomBytes } from 'node:crypto';
 import { hostStatus, printStatus } from './lifecycle.ts';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
 import { suggestionFor } from '../adapters/configSchema.ts';
-import { loadEnvFile, schemeFor } from './doctor.ts';
+import { checkLaya, loadEnvFile, parseLayaTimeoutMs, schemeFor } from './doctor.ts';
+import { DEFAULT_PYTHON_CANDIDATES, detectPython, ensureLayaCredentials, LAYA_DEFAULT_PORT, LAYA_SERVE_PIN, layaStepActions, planLayaSidecar, renderLayaLaunchdPlist, renderLayaSystemdUnit, type LayaPlan, type RunFn } from './layaSidecar.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
 
 /** The wizard's answers, before validation. Every field maps to a MERCURY_* variable. */
@@ -70,6 +72,8 @@ export interface HostSetupAnswers {
   atlasProject: string;
   /** Enabled harness ids, e.g. ['primeagent', 'hermes']. */
   harnesses: string[];
+  /** Opt-in Laya sidecar (#831, Laya design §5.3). Default FALSE — opt-out writes nothing. */
+  layaEnabled: boolean;
 }
 
 /** The MERCURY_* names the wizard may emit. The CI test asserts every one of these
@@ -86,6 +90,7 @@ export const WIZARD_VARIABLES = [
   'MERCURY_ATLAS_PROJECT',
   'MERCURY_HARNESSES',
   'MERCURY_DEFAULT_AGENT',
+  'MERCURY_LAYA_URL',
 ] as const;
 
 /** Known harness ids the wizard can enable: the shipped host harnesses (single source:
@@ -165,6 +170,8 @@ export function validateAnswer(key: keyof HostSetupAnswers, value: unknown): str
       return typeof value === 'number' && Number.isFinite(value) && value > 0 ? null : 'retention must be a positive number of days';
     case 'atlasEnabled':
       return typeof value === 'boolean' ? null : 'atlasEnabled must be a boolean';
+    case 'layaEnabled':
+      return typeof value === 'boolean' ? null : 'layaEnabled must be a boolean';
     case 'atlasUrl': {
       if (typeof value !== 'string') return 'Atlas URL must be a string';
       if (value.trim() === '') return null;
@@ -270,6 +277,9 @@ export function renderEnv(a: HostSetupAnswers, preserve: Record<string, string> 
           ['atlasProject', a.atlasProject.trim()],
         ] as [string, string][])
       : []),
+    // MERCURY_LAYA_URL is a plain URL (no credential): the laya KEY lives in the 0600
+    // bot-credentials.json (#831, design §5.1), so it never passes through the env file.
+    ...(a.layaEnabled ? ([['layaUrl', `http://127.0.0.1:${LAYA_DEFAULT_PORT}`]] as [string, string][]) : []),
   ];
   for (const [k, v] of checked) {
     const err = unsafeValueError(k, v);
@@ -289,6 +299,7 @@ export function renderEnv(a: HostSetupAnswers, preserve: Record<string, string> 
     lines.push(`MERCURY_ATLAS_TOKEN=${a.atlasToken.trim()}`);
     lines.push(`MERCURY_ATLAS_PROJECT=${a.atlasProject.trim()}`);
   }
+  if (a.layaEnabled) lines.push(`MERCURY_LAYA_URL=http://127.0.0.1:${LAYA_DEFAULT_PORT}`);
   lines.push(`MERCURY_HARNESSES=${a.harnesses.join(',')}`);
   lines.push(`MERCURY_DEFAULT_AGENT=${a.harnesses[0]}`);
   for (const [k, v] of Object.entries(preserve)) lines.push(`${k}=${v}`);
@@ -420,6 +431,11 @@ export function defaultAnswers(env: NodeJS.ProcessEnv = process.env): HostSetupA
     // prompt must not silently un-expose the API.
     bindHost: env.MERCURY_BIND_HOST?.trim() || existingVar('MERCURY_BIND_HOST', env),
     harnesses: detected.filter((h) => (KNOWN_HARNESSES as readonly string[]).includes(h)),
+    // Opt-in continuity (#831): a re-run keeps the sidecar enabled when the host already has
+    // MERCURY_LAYA_URL — in the process env OR the written mercury.env (bindHost solves the
+    // same problem with existingVar). A fresh host defaults to NO: the sidecar is never a
+    // silent default.
+    layaEnabled: Boolean(env.MERCURY_LAYA_URL?.trim() || existingVar('MERCURY_LAYA_URL', env)),
   };
 }
 
@@ -436,6 +452,7 @@ const ANSWERS_FILE_KEYS = [
   'atlasToken',
   'atlasProject',
   'harnesses',
+  'layaEnabled',
 ] as const satisfies readonly (keyof HostSetupAnswers)[];
 
 /** Read answers from a JSON file. Unknown keys are REJECTED (issue #649 §2, decision 10):
@@ -490,6 +507,7 @@ export function readAnswersFile(path: string, env: NodeJS.ProcessEnv = process.e
     atlasToken: parsed.atlasToken ?? base.atlasToken,
     atlasProject: parsed.atlasProject ?? base.atlasProject,
     harnesses: parsed.harnesses ?? base.harnesses,
+    layaEnabled: parsed.layaEnabled ?? base.layaEnabled,
   };
 }
 
@@ -549,6 +567,11 @@ export async function promptAnswers(io: {
   // 'loopback' is a prompt spelling, never a file value: normalized to '' so the written
   // env omits MERCURY_BIND_HOST and src/config.ts keeps the secure default (#665 review).
   const bindHost = bindRaw === 'loopback' || bindRaw === '' ? '' : bindRaw;
+  // Opt-in Laya sidecar (#831): default NO — pressing enter installs nothing. A re-run on a
+  // host that already has MERCURY_LAYA_URL defaults to yes so an enter-press doesn't silently
+  // disable a configured sidecar (same continuity rule as the admin token/bind).
+  const layaOn = (await q('Install the Laya sidecar? (yes/no; selection support, opt-in)', base.layaEnabled ? 'yes' : 'no')).toLowerCase();
+  const layaEnabled = layaOn === 'yes' || layaOn === 'y';
   return {
     hostName,
     dataDir,
@@ -563,11 +586,23 @@ export async function promptAnswers(io: {
     atlasToken,
     atlasProject,
     harnesses,
+    layaEnabled,
   };
 }
 
 /** Run the M2 probe over the shipped harnesses (#647). Injectable for tests. */
 export type ProbeFn = () => Promise<HarnessProbeResult[]>;
+
+/** Bounded sidecar exec default (#831): spawnSync with a hard timeout — a hung uv/pip is a
+ *  failure with a readable message, not a hang (the installer's bound-everything rule). */
+export const sidecarExec: RunFn = (argv, timeoutMs) => {
+  const r = spawnSync(argv[0]!, argv.slice(1), { encoding: 'utf8', timeout: timeoutMs });
+  // A timed-out command keeps stderr '' while r.error carries ETIMEDOUT (Copilot #840 r9):
+  // `stderr ?? error` would discard the timeout and the step would report only 'no output'.
+  // Prefer NON-EMPTY stderr, then the spawn error, then ''.
+  const stderr = (r.stderr && r.stderr.trim() !== '' ? r.stderr : r.error?.message) ?? '';
+  return { ok: !r.error && r.status === 0, stdout: r.stdout ?? '', stderr };
+};
 
 export async function runSetupProbe(env: NodeJS.ProcessEnv = process.env): Promise<HarnessProbeResult[]> {
   return Promise.all(harnessSpecs(env).map(probeHarness));
@@ -598,6 +633,15 @@ export async function runHostSetup(
     secretQuestion?: (q: string) => Promise<string>;
     /** Injected probe (tests). Default: probe the real binaries once, bounded. */
     probe?: ProbeFn;
+    /** Injected sidecar exec (tests, #831): the bounded runner for uv/venv/pip. Default runFn. */
+    sidecarRun?: RunFn;
+    /** Injected sidecar data dir override (tests). Default: the answers' dataDir. */
+    sidecarDataDir?: string;
+    /** Readiness probes after load (r11): default 120 (~18 min) — a fresh sidecar downloads
+     *  the ~843 MB English checkpoint before it answers. Tests shrink this. */
+    sidecarReadinessAttempts?: number;
+    /** Gap between readiness probes; default 5 000 ms. Tests shrink this. */
+    sidecarReadinessGapMs?: number;
   } = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) },
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
@@ -756,6 +800,13 @@ export async function runHostSetup(
   if (opts.dryRun) {
     io.out('mercury host setup --dry-run\n');
     io.out(redactedSummary(answers, preservedNames) + '\n');
+    if (answers.layaEnabled) {
+      // --dry-run touches nothing (M1/M3 rule): no interpreter probing, no exec — pythonBin
+      // does not change the plan, and the plan comes from the VALIDATED answers, not the old
+      // env file (Copilot #840 r1).
+      const plan = planLayaSidecar({ dataDir: io.sidecarDataDir ?? answers.dataDir.trim(), pythonBin: 'python3', env });
+      io.out('\nLaya sidecar (opt-in) would:\n' + layaStepActions(plan, 'both').map((a) => `  - ${a}`).join('\n') + '\n');
+    }
     if (alreadyConfigured) {
       const diff = envDiff(readFileSync(path, 'utf8'), content);
       if (diff) io.out(`\n--dry-run would OVERWRITE ${path}. Proposed diff (secrets redacted):\n${diff}`);
@@ -788,6 +839,158 @@ export async function runHostSetup(
   io.out('mercury host setup\n');
   io.out(redactedSummary(answers, preservedNames) + '\n');
   io.out(`\nWrote ${path} (mode 0600). Start the host with \`mercury host doctor\` (M4).\n`);
+  // Opt-in Laya sidecar (#831): interpreter gate → venv → pinned install → credentials →
+  // unit. Every command is bounded; the injected runner keeps tests off the real uv/pip.
+  if (answers.layaEnabled) {
+    const dataDir = io.sidecarDataDir ?? dirname(loadEnvFile(path).MERCURY_DB ?? join(homedir(), '.local', 'state', 'mercury', 'mercury.db'));
+    const run = io.sidecarRun ?? sidecarExec;
+    // env flows in so PATH discovery sees the operator's PATH (r15: spaced interpreter dirs).
+    const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES, process.platform, env);
+    if (!det.ok) {
+      io.err(`\nlaya: not installed — ${det.reason}\n`);
+      io.err('laya: the sidecar needs uv (recommended) or Python >= 3.10. Install one first:\n');
+      io.err('  macOS:   brew install uv   (or: brew install python@3.12 — setup finds python3.12 on PATH)\n');
+      io.err('  Linux:   install uv (curl -LsSf https://astral.sh/uv/install.sh | sh) or the distro python3\n');
+      io.err('laya: then re-run `mercury host setup --yes`, or answer no to the sidecar prompt.\n');
+      return 1;
+    }
+    const plan: LayaPlan = planLayaSidecar({ dataDir, pythonBin: det.bin!, env });
+    // The detector must tell us HOW it found the interpreter: `uv venv` without seed has no
+    // pip, and a plain-python fallback has no uv at all (Copilot #840 r1). Replay the winning
+    // candidate's own venv command and install through the venv's pip (seeded for uv).
+    const venvStep = det.argv![0] === 'uv'
+      ? () => {
+          const r = run(['uv', 'venv', plan.venvDir, '--python', `3.${det.version!.split('.')[1]}`, '--seed'], 120_000);
+          if (!r.ok) throw new Error(`uv venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
+        }
+      : () => {
+          // The executable is det.argv[0] — the exact path that passed -V. det.bin can contain
+          // spaces (a discovered interpreter under '/Users/Jane Doe/bin'), and splitting on
+          // ' ' would truncate it (Copilot #840 r15).
+          const pyBin = det.argv![0]!;
+          const r = run([pyBin, '-m', 'venv', plan.venvDir], 120_000);
+          if (!r.ok) throw new Error(`python -m venv failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
+        };
+    const steps: Array<[string, () => void]> = [
+      ['venv', venvStep],
+      ['install', () => {
+        const r = run([join(plan.venvDir, 'bin', 'python3'), '-m', 'pip', 'install', `laya[serve]==${LAYA_SERVE_PIN}`], 300_000);
+        if (!r.ok) throw new Error(`pip install laya[serve]==${LAYA_SERVE_PIN} failed: ${r.stderr.trim() || r.stdout.trim() || 'no output'}`);
+      }],
+      ['credentials', () => {
+        ensureLayaCredentials(env);
+      }],
+      ['unit', () => {
+        const creds = ensureLayaCredentials(env);
+        mkdirSync(dirname(plan.unitPath), { recursive: true });
+        const text = process.platform === 'darwin' ? renderLayaLaunchdPlist(plan, creds.key) : renderLayaSystemdUnit(plan, creds.key);
+        // The unit embeds the API key: secret-bearing bytes must never land in a loose file
+        // (Copilot #840 r15). Atomic 0600 temp + fsync + rename, then enforce 0600 — the same
+        // pattern as writeEnvFile; a re-run over a pre-existing 0644 unit therefore never
+        // exposes the key at any instant (r1's trailing chmod alone is too late).
+        const tmpUnit = join(dirname(plan.unitPath), `.${plan.unitLabel}.tmp-${process.pid}`);
+        writeFileSync(tmpUnit, text, { mode: 0o600 });
+        const fd = openSync(tmpUnit, 'r');
+        try {
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+        renameSync(tmpUnit, plan.unitPath);
+        chmodSync(plan.unitPath, 0o600);
+      }],
+    ];
+    try {
+      for (const [name, step] of steps) {
+        step();
+        io.out(`laya: ${name} ok\n`);
+      }
+      io.out(`laya: unit written at ${plan.unitPath}\n`);
+    } catch (e) {
+      io.err(`\nlaya: not installed — ${(e as Error).message}\n`);
+      io.err('laya: mercury.env was written; the sidecar can be finished later by re-running `mercury host setup --yes`.\n');
+      return 1;
+    }
+    // Load the agent idempotently and verify with the doctor's own probe (#831 acceptance:
+    // the run finishes with doctor `laya: ok` — an unloaded agent makes that probe unreachable,
+    // Copilot #840 r10). Bounded, injected through the same run fn as every other step.
+    const uid = `gui/${process.getuid?.() ?? 501}`;
+    if (process.platform === 'darwin') {
+      // Same choreography as `mercury host service install` (src/host/service.ts, issue #650):
+      // kick out the LOADED job first, then bootstrap the NEW plist. kickstart alone would
+      // restart launchd's cached job and never pick up the rewritten plist (Copilot #840 r12) —
+      // e.g. a re-run that moved the data dir would keep serving the OLD venv path.
+      const target = `${uid}/${plan.unitLabel}`;
+      const printR = run(['launchctl', 'print', target], 10_000);
+      if (printR.ok) {
+        const bootout = run(['launchctl', 'bootout', target], 10_000);
+        if (!bootout.ok) io.err(`laya: bootout failed (continuing): ${(bootout.stderr.trim() || bootout.stdout.trim() || 'no output').split('\n')[0]}\n`);
+      }
+      const bootstrap = run(['launchctl', 'bootstrap', uid, plan.unitPath], 15_000);
+      if (!bootstrap.ok) {
+        io.err(`\nlaya: launchctl bootstrap failed: ${(bootstrap.stderr.trim() || bootstrap.stdout.trim() || 'no output').split('\n')[0]}\n`);
+        return 1;
+      }
+    } else {
+      // Reload the user manager FIRST (Copilot #840 r13): a freshly written unit is invisible
+      // to `enable --now` until daemon-reload ("Unit ... not found") — the same order the host
+      // and bot installers use (src/host/service.ts, src/host/bots/service.ts). Any systemctl
+      // failure returns immediately: waiting through the readiness window against a service
+      // that was never started only produces a confusing 'unreachable'.
+      const reload = run(['systemctl', '--user', 'daemon-reload'], 15_000);
+      if (!reload.ok) {
+        io.err(`\nlaya: systemctl --user daemon-reload failed: ${(reload.stderr.trim() || reload.stdout.trim() || 'no output').split('\n')[0]}\n`);
+        return 1;
+      }
+      const loadCmd = ['systemctl', '--user', 'enable', '--now', plan.unitLabel];
+      io.out(`laya: loading — ${loadCmd.join(' ')}`);
+      const loaded = run(loadCmd, 15_000);
+      if (!loaded.ok) {
+        io.err(`\nlaya: systemctl enable failed: ${(loaded.stderr.trim() || loaded.stdout.trim() || 'no output').split('\n')[0]}\n`);
+        return 1;
+      }
+      // enable --now does NOT restart an active unit (Copilot #840 r11): a re-run that rewrote
+      // the unit or rotated the key would leave the OLD process serving. Restart explicitly —
+      // idempotent for a first load, mandatory for a re-run.
+      const restarted = run(['systemctl', '--user', 'restart', plan.unitLabel], 15_000);
+      if (!restarted.ok) {
+        io.err(`\nlaya: systemctl restart failed: ${(restarted.stderr.trim() || restarted.stdout.trim() || 'no output').split('\n')[0]}\n`);
+        return 1;
+      }
+    }
+    const written = loadEnvFile(path);
+    const baseUrl = written.MERCURY_LAYA_URL ?? `http://127.0.0.1:${plan.port}/v1/systemone`;
+    const creds = ensureLayaCredentials(env);
+    // The success gate is the doctor's own check: the SAME timeout parsing/deadline doctor will
+    // use (MERCURY_LAYA_TIMEOUT_MS, default 500 — Copilot #840 r12). An invalid value refuses
+    // here with the doctor's wording instead of reporting ok against a deadline doctor rejects.
+    const timeout = parseLayaTimeoutMs(written);
+    if (!timeout.ok) {
+      io.err(`\nlaya: ${timeout.detail}\n`);
+      return 1;
+    }
+    // A FRESH sidecar preloads the English checkpoint (~843 MB) before it answers — the
+    // readiness window must cover that first download, not a few seconds (Copilot #840 r11).
+    // Default: 120 probes x (deadline + 5 s gap) — bounded; tests shrink both.
+    const maxAttempts = io.sidecarReadinessAttempts ?? 120;
+    let last = '';
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // The probe is the doctor's #830 line, not a new check: same client, same deadline.
+      const probe = await checkLaya(baseUrl, creds.key, timeout.timeoutMs);
+      last = probe.detail;
+      if (probe.ok) {
+        io.out(`laya: doctor ok — ${last}\n`);
+        break;
+      }
+      if (attempt === maxAttempts) {
+        io.err(`\nlaya: loaded but the doctor probe failed after ${maxAttempts} attempts: ${last}\n`);
+        io.err(`laya: inspect with \`launchctl print ${uid}/${plan.unitLabel}\` (macOS) or \`journalctl --user -u ${plan.unitLabel}\` (Linux), then re-run setup.\n`);
+        return 1;
+      }
+      if (attempt === 1) io.out('laya: waiting for the sidecar — first start downloads the English checkpoint (~843 MB)\n');
+      await new Promise((res) => setTimeout(res, io.sidecarReadinessGapMs ?? 5_000));
+    }
+  }
   // The Fleet hand-off is the wizard's output contract on EVERY successful write, not
   // only when a token is generated (#672): the loopback branch advises re-running with a
   // bind address, and that re-run (token preserved since #648) must still print the URL

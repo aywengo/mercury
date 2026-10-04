@@ -116,6 +116,13 @@ export interface Config {
    * events emitted, and `POST /api/runs` rejects a `knowledge` block with 400.
    */
   knowledge: KnowledgeConfig;
+  /**
+   * The Laya sidecar base URL (#830/#831, Laya design §5.3/§10). Null = not configured:
+   * no sidecar exists, selection stays deterministic (L1 will consult this). The wizard
+   * writes it only on opt-in; the value is a loopback URL, never a credential — the sidecar
+   * key lives in the 0600 bot-credentials.json under the `laya` entry.
+   */
+  layaUrl: string | null;
 }
 
 /** Where this host's notes go, and how it authenticates (section 8.4). */
@@ -315,6 +322,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     })(),
     logLevel: (env.MERCURY_LOG_LEVEL as Config['logLevel']) ?? 'info',
     knowledge: loadKnowledgeConfig(env),
+    // The Laya sidecar (#830/#831): a plain loopback URL, never a credential (the sidecar key
+    // lives in the 0600 bot-credentials.json, `laya` entry). Null = not configured = the
+    // feature does not exist on this host.
+    layaUrl: env.MERCURY_LAYA_URL?.trim() || null,
   };
 }
 
