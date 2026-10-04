@@ -1689,6 +1689,7 @@ test('ensureLayaCredentials + unit write: a pre-existing loose unit file is repa
     const code2 = await runHostSetup(['--yes'], {
       out: () => {},
       err: (s) => err2.push(s),
+      question: async () => '',
       sidecarRun: (argv: string[]) =>
         argv[0] === 'systemctl' && argv[2] === 'enable'
           ? { ok: false, stdout: '', stderr: 'Unit com.mercury.laya.service not found' }
