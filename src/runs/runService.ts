@@ -1143,20 +1143,41 @@ export class RunService {
    * rows in insertion order.
    */
   getWorkflowStagePresets(runId: string): { stageIndex: number; presetId: string; presetVersion: string; contentHash: string }[] {
+    return this.getWorkflowStagePresetSnapshots(runId).map((s) => ({
+      stageIndex: s.stageIndex,
+      presetId: s.snapshot.id,
+      presetVersion: s.snapshot.version,
+      contentHash: s.snapshot.contentHash,
+    }));
+  }
+
+  /**
+   * The workflow's stage preset snapshots, keyed by stage index.
+   *
+   * A workflow Run writes one run_presets row per referenced stage (section 3.1.1 rule 6), so
+   * the listing crosses the snapshot's stage order with the store's rows. Both are
+   * deterministic: the stage order comes from the stored workflow snapshot and the store
+   * returns rows in insertion order. This is what the WORKER renders stage guidance from --
+   * the snapshot bytes, never the live registry.
+   */
+  getWorkflowStagePresetSnapshots(runId: string): { stageIndex: number; snapshot: ResolvedRolePreset }[] {
     const wf = this.getWorkflow(runId);
     if (!wf) return [];
-    const rows = this.presetStore()?.list(runId) ?? [];
-    const byPreset = new Map(rows.map((r) => [r.presetId, r]));
-    const out: { stageIndex: number; presetId: string; presetVersion: string; contentHash: string }[] = [];
+    const rows = this.presetStore()?.listSnapshots(runId) ?? [];
+    const byPreset = new Map(rows.map((r) => [r.presetId, r.snapshot]));
+    const out: { stageIndex: number; snapshot: ResolvedRolePreset }[] = [];
     wf.stages.forEach((stage, i) => {
       if (!stage.preset) return;
-      const row = byPreset.get(stage.preset.id);
-      out.push({
-        stageIndex: i,
-        presetId: stage.preset.id,
-        presetVersion: row?.presetVersion ?? '',
-        contentHash: row?.contentHash ?? '',
-      });
+      const snapshot = byPreset.get(stage.preset.id);
+      if (!snapshot) {
+        // A committed workflow row whose stage rows are missing means the creation write was
+        // corrupted (or the rows were deleted outside the product). Fail the read loudly
+        // rather than rendering guidance from nowhere (the read-side truth rule).
+        throw new Error(
+          `workflow stage preset row missing: run ${runId}, stage ${i} (${JSON.stringify(stage.preset.id)})`,
+        );
+      }
+      out.push({ stageIndex: i, snapshot });
     });
     return out;
   }

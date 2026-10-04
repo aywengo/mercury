@@ -103,4 +103,12 @@ export class PresetStore {
       contentHash: r.content_hash,
     }));
   }
+
+  /** Every preset row a Run carries, as full snapshots, in insertion order. */
+  listSnapshots(runId: string): { presetId: string; snapshot: ResolvedRolePreset }[] {
+    const rows = this.db
+      .prepare('SELECT * FROM run_presets WHERE run_id = ? ORDER BY rowid')
+      .all(runId) as unknown as PresetDbRow[];
+    return rows.map((r) => ({ presetId: r.preset_id, snapshot: rowToSnapshot(r) }));
+  }
 }

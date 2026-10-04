@@ -472,6 +472,40 @@ test('the whole rendered plan has a cap and truncation is marked, never silent',
   assert.ok(Buffer.byteLength(plan, 'utf8') <= PLAN_MAX_BYTES + TRUNCATION_MARKER.length);
 });
 
+test('the worker renders stage guidance from the snapshot rows, not the live registry', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const workflowsDir = tempDir('mercury-wf-dir-');
+  const presetsDir = tempDir('mercury-wf-presets-');
+  makePreset(presetsDir, 'planner', {}, 'PLAN LIKE AN ARCHITECT');
+  makeWorkflowDir(workflowsDir, 'grow', twoStageManifest('grow'));
+  const env = makeEnv({
+    workspaceMode: 'copy',
+    repoDir: repo,
+    workflowsDir,
+    presetsDir,
+    fakeScript: [{ event: { type: 'run.completed', payload: {} } }],
+  });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'Run the plan',
+      repository: { localPath: repo },
+      workflow: { id: 'grow' },
+    });
+    // Capture the plan the worker rendered, via the materialized event's planHash.
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 10_000);
+    // Edit the preset AFTER completion; the snapshot row (and any re-render) is unchanged.
+    const snapshots = env.runService.getWorkflowStagePresetSnapshots(run.id);
+    assert.equal(snapshots.length, 1);
+    assert.equal(snapshots[0]!.snapshot.instruction, 'PLAN LIKE AN ARCHITECT');
+    makePreset(presetsDir, 'planner', {}, 'CHANGED AFTER THE RUN');
+    assert.equal(env.runService.getWorkflowStagePresetSnapshots(run.id)[0]!.snapshot.instruction,
+      'PLAN LIKE AN ARCHITECT', 'stage guidance is read from the snapshot rows');
+  } finally {
+    env.close();
+  }
+});
+
 test('the builtin template renders through the real registry without error', () => {
   const env = makeEnv({ workerEnabled: false });
   try {

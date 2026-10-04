@@ -429,7 +429,11 @@ export class Worker {
         workflowContext = materialized.context;
         // Stage guidance comes from the SNAPSHOTTED stage preset rows (section 3.1.1 rule 6),
         // not from the live registry -- the same rule as the template itself.
-        const plan = renderPlan(workflowSnapshot, run.agent, materialized.stageInstructions);
+        const stageInstructions: Record<number, string | undefined> = {};
+        for (const stage of this.deps.runService.getWorkflowStagePresetSnapshots(run.id)) {
+          stageInstructions[stage.stageIndex] = stage.snapshot.instruction;
+        }
+        const plan = renderPlan(workflowSnapshot, run.agent, stageInstructions);
         this.deps.events.append(run.id, 'workflow.materialized', {
           workflowId: workflowSnapshot.id,
           version: workflowSnapshot.version,
@@ -1580,11 +1584,9 @@ export function writePreset(
 export function writeWorkflow(
   workspacePath: string,
   snapshot: ResolvedWorkflowSnapshot,
-  stageInstructions: Record<number, string | undefined> = {},
 ): {
   context: NonNullable<RunContext['workflow']>;
   byteCount: number;
-  stageInstructions: Record<number, string | undefined>;
 } {
   const workflowRoot = join(workspacePath, '.mercury', 'workflow');
   let byteCount = 0;
@@ -1619,7 +1621,6 @@ export function writeWorkflow(
       stages: snapshot.stages.length,
     },
     byteCount,
-    stageInstructions,
   };
 }
 
