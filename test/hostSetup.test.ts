@@ -1849,6 +1849,36 @@ test('runHostSetup: an EXTERNAL url with a pre-existing laya bot is refused befo
   }
 });
 
+test('runHostSetup: a legacy laya SERVICE UNIT (config moved) is collision evidence too (#840 r43)', async () => {
+  const dir = tempDir('setup-laya-unitbot-');
+  if (process.platform !== 'darwin') {
+    // The unit evidence path is darwin-launchd here; linux systemd evidence is exercised in CI.
+    return;
+  }
+  mkdirSync(join(dir, 'Library', 'LaunchAgents'), { recursive: true });
+  writeFileSync(join(dir, 'Library', 'LaunchAgents', 'com.mercury.bot.laya.plist'), '<plist/>');
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
+  const err: string[] = [];
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: 'k'.repeat(32) });
+  try {
+    const code = await runHostSetup([], {
+      out: () => {},
+      err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun: okRun,
+      sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`,
+      sidecarReadinessBudgetMs: 10_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir, MERCURY_LAYA_URL: `${fake.url}` });
+    assert.equal(code, 1);
+    assert.match(err.join(''), /reserved for the sidecar credential/);
+    assert.equal(fake.received.length, 0, 'no probe carries the bot token');
+  } finally {
+    await fake.close();
+  }
+});
+
 test('ensureLayaCredentials: a bot named laya refuses the sidecar credential write (#840 r31)', async () => {
   const dir = tempDir('setup-laya-alias-');
   // An existing bot 'laya' holds its MERCURY API token in the shared entry; setup must not

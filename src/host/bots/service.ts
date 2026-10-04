@@ -168,7 +168,18 @@ export function installBotService(
   env: NodeJS.ProcessEnv = process.env,
   dryRun = false,
 ): number {
-  assertAlias(alias);
+  // A pre-reservation bot must stay repairable: when its config already proves ownership, the
+  // syntax check suffices (the reservation applies to NEW bots only, Copilot #840 r43).
+  try {
+    if (existsSync(botConfigFile(alias, env))) {
+      assertAliasSyntax(alias);
+    } else {
+      assertAlias(alias);
+    }
+  } catch (e) {
+    io.err(`host bot service: ${(e as Error).message}\n`);
+    return 1;
+  }
   let bin: string;
   try {
     bin = resolveMercuryBin(env);

@@ -863,14 +863,22 @@ export async function runHostSetup(
   const content = renderEnv(answers, preserved);
   const path = envFilePath(env);
   const alreadyConfigured = existsSync(path);
-  // Alias collision BEFORE ANY WRITE (Copilot #840 r33/r41): a pre-existing bot named 'laya'
-  // holds a MERCURY API token in the shared bot-credentials.json entry. The external path reads
-  // that entry as the sidecar key (sending a Mercury token to the sidecar), and the local path
-  // discovers the collision only after creating the venv. Refuse before mercury.env is written
-  // — a persisted MERCURY_LAYA_URL would make doctor send that bot token to the port owner.
+  // Alias collision BEFORE ANY WRITE (Copilot #840 r33/r41/r43): a pre-existing bot named
+  // 'laya' holds a MERCURY API token in the shared bot-credentials.json entry. The external
+  // path reads that entry as the sidecar key (sending a Mercury token to the sidecar), and the
+  // local path discovers the collision only after creating the venv. Refuse before mercury.env
+  // is written. Config file AND service unit/plist are evidence: a config-only check misses a
+  // bot whose config was moved/lost while its unit and registered token remain — exactly the
+  // recovery the old message advised.
   const layaBotsPath = join(env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim() !== '' ? env.XDG_CONFIG_HOME : join(homedir(), '.config'), 'mercury', 'bots', 'laya.json');
-  if (answers.layaEnabled && existsSync(layaBotsPath)) {
-    io.err(`\nlaya: a bot named 'laya' exists (${layaBotsPath}); the alias is reserved for the sidecar credential — uninstall the bot or move its config, then re-run setup.\n`);
+  // Same resolution the units actually use: launchd follows $HOME (planLayaSidecar rule),
+  // systemd follows XDG_CONFIG_HOME. botPlistPath/botUnitPath read homedir(), which ignores the
+  // wizard's env — replicate the resolution here instead (Copilot #840 r43).
+  const layaLegacyUnit = process.platform === 'darwin'
+    ? join(env.HOME?.trim() || homedir(), 'Library', 'LaunchAgents', 'com.mercury.bot.laya.plist')
+    : join(env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config'), 'systemd', 'user', 'mercury-bot-laya.service');
+  if (answers.layaEnabled && (existsSync(layaBotsPath) || existsSync(layaLegacyUnit))) {
+    io.err(`\nlaya: a bot named 'laya' exists (${existsSync(layaBotsPath) ? layaBotsPath : layaLegacyUnit}); the alias is reserved for the sidecar credential — uninstall the bot or move its config, then re-run setup.\n`);
     return 1;
   }
 

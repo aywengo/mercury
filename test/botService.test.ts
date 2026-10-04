@@ -367,8 +367,13 @@ test('subprocess smoke: `host bot service install --alias x --dry-run` exits 0',
 test('install/uninstall refuse an alias that violates the §4.1 contract (path safety)', () => {
   const dir = tempDir('bot-svc-alias-');
   const env = { XDG_CONFIG_HOME: join(dir, 'cfg'), XDG_STATE_HOME: join(dir, 'state'), HOME: join(dir, 'home') } as NodeJS.ProcessEnv;
-  const io = { out: () => {}, err: () => {} };
-  assert.throws(() => installBotService('linux', '../escape', io, env, false), /bot alias must match/);
+  const errI: string[] = [];
+  const io = { out: () => {}, err: (s: string) => errI.push(s) };
+  // r40: install reports the alias error as a graceful exit 1 (a reserved NEW bot is refused,
+  // not an exception).
+  const rc = installBotService('linux', '../escape', io, env, false);
+  assert.equal(rc, 1);
+  assert.match(errI.join(''), /bot alias must match/);
   assert.throws(() => uninstallBotService('linux', 'UPPER', io, env, { yes: true, keepEnv: false, reassignOwner: null }), /bot alias must match/);
   assert.ok(!existsSync(join(dir, 'cfg', 'systemd')), 'nothing written for an invalid alias');
   rmSync(dir, { recursive: true, force: true });
@@ -472,5 +477,22 @@ test("uninstall --alias laya --yes with a LEGACY bot still recovers (#840 r39)",
   assert.equal(code, 0, `legacy recovery: ${out.join('')}`);
   const creds = JSON.parse(readFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), 'utf8')) as Record<string, unknown>;
   assert.ok(!('laya' in creds), 'the legacy bot credential is removed');
+});
+
+test("install --alias laya with a LEGACY config repairs the service (reservation is new-bots only) (#840 r43)", () => {
+  const dir = tempDir('bot-svc-inst-laya-legacy-');
+  const env = setupBot(dir);
+  mkdirSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bots'), { recursive: true });
+  writeFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bots', 'laya.json'), JSON.stringify({ api: { url: 'http://127.0.0.1:3000' }, schedule: { tasks: [] } }));
+  const out: string[] = [];
+  const code = installBotService(process.platform, 'laya', { out: (s) => out.push(s), err: () => {} }, env, true);
+  assert.equal(code, 0, `legacy reinstall passes the alias gate: ${out.join('')}`);
+  // A NEW bot named laya (no config) is still refused.
+  const dir2 = tempDir('bot-svc-inst-laya-new-');
+  const env2 = setupBot(dir2);
+  const err: string[] = [];
+  const code2 = installBotService(process.platform, 'laya', { out: () => {}, err: (s) => err.push(s) }, env2, true);
+  assert.equal(code2, 1);
+  assert.match(err.join(''), /reserved for the host/);
 });
 
