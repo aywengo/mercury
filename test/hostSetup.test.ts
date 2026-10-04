@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, chmodSync, readFileSync, rmSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, chmodSync, readFileSync, renameSync, rmSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
@@ -1728,6 +1728,22 @@ test('runHostSetup: the venv is rebuilt at its final path; a failed install roll
     // The staging venv is cleaned up on a pre-swap failure (Copilot #840 r48).
     assert.ok(!readdirSync(join(dir, 'data')).some((e) => e.includes('.staging-')), 'no staging venv leaks after a failed install');
     assert.ok(!readdirSync(join(dir, 'data')).some((e) => /^laya-venv\.backup-\d+$/.test(e)), 'no generated backup venv leaks after a failed install');
+    // Crash recovery (Copilot #840 r58): a crash between the backup rename and a completed
+    // rebuild leaves the working venv under backup-<old pid> with NO live venv. The next run
+    // must ADOPT that backup so a failed rebuild rolls it back instead of leaving the unit
+    // without an executable.
+    const crashedBackup = join(dir, 'data', 'laya-venv.backup-424242');
+    renameSync(live, crashedBackup);
+    err.length = 0;
+    const code3 = await runHostSetup(['--yes'], {
+      out: () => {}, err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+    assert.equal(code3, 1, `crashed-backup rebuild must fail cleanly: ${err.join('')}`);
+    assert.ok(existsSync(installedMarker), 'the adopted backup was rolled back into the live path');
+    assert.ok(!existsSync(crashedBackup), 'the adopted backup no longer sits under its old name');
   } finally {
     await fake.close();
   }

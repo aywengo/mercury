@@ -704,6 +704,19 @@ export function registeredLayaOwner(registryText: string, apiKey: string): strin
 }
 
 /**
+ * The first existing '<venvBase>.backup-<pid>' sibling (numeric pid — the exact shape setup
+ * generates), or null. Used to recover the previous run's working venv after a crash between
+ * the backup rename and a completed rebuild (Copilot #840 r58).
+ */
+export function findNumericVenvBackup(parentDir: string, venvBase: string): string | null {
+  for (const entry of existsSync(parentDir) ? readdirSync(parentDir) : []) {
+    if (!entry.startsWith(`${venvBase}.backup-`)) continue;
+    if (/^\.backup-(\d+)$/.test(entry.slice(venvBase.length))) return join(parentDir, entry);
+  }
+  return null;
+}
+
+/**
  * Every on-disk shape that proves a bot named 'laya' pre-dates the sidecar reservation
  * (Copilot #840 r33/r41/r43/r48). The config file alone misses a bot whose config was
  * moved/lost; a remaining STATE FILE proves an interrupted uninstall (new provisioning cannot
@@ -1086,6 +1099,14 @@ export async function runHostSetup(
           // A stale backup from a dead run (same PID reused) must not be adopted.
           rmSync(backupDir, { recursive: true, force: true });
           renameSync(plan.venvDir, backupDir);
+        } else {
+          // Crash recovery (Copilot #840 r58): a previous run may have crashed AFTER moving the
+          // live venv aside (backup-<old pid>) but before completing — the live path is absent
+          // while the last WORKING environment sits under a numeric backup. Adopt it as THIS
+          // run's backup so a failed rebuild rolls it back into place instead of leaving the
+          // enabled unit without an executable.
+          const stale = findNumericVenvBackup(dirname(plan.venvDir), basename(plan.venvDir));
+          if (stale) renameSync(stale, backupDir);
         }
         backedUp = true;
       }],
