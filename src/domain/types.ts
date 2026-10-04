@@ -111,6 +111,17 @@ export interface Run {
    */
   agentVersion?: string | null;
   agentVersionRaw?: string | null;
+  /**
+   * The credential profile this Run resolved to at creation (CP-3, issue #807, design §5.4);
+   * null when no profile matched, which is every Run on a host without a profile file.
+   * The NAME only — profile contents (env values, token names, git identity) never reach the
+   * Run row or its events. Re-checked at claim time against the current file; a different
+   * result fails the Run instead of driving it under a changed identity.
+   *
+   * Optional-with-null (not omitted) because rows written before the column existed are NULL in
+   * exactly the same way, and both render as "no profile".
+   */
+  credentialProfile?: string | null;
 }
 
 export interface ResolvedSkill {
@@ -720,6 +731,14 @@ export const EVENT_TYPES = new Set([
   // { model, source: 'caller' | 'preset' } -- the explainability record the L1 candidate list
   // builds on. A Run created without `model` emits nothing, exactly as before.
   'run.model_resolved',
+  // Credential profile resolution (CP-3, issue #807, design §5.4). `run.credential_profile_resolved`
+  // is appended in the Run-creation transaction ONLY when a profile resolved, payload
+  // { profile: <name> } — the identity record, never the contents. `run.credential_profile_changed`
+  // is appended by the worker's claim-time parity check when the re-resolved result differs from
+  // what the Run was created under, payload { createdAtResolution, claimTimeResolution }; the Run
+  // then fails with 'credential profile changed since creation'.
+  'run.credential_profile_resolved',
+  'run.credential_profile_changed',
 ]);
 
 /**

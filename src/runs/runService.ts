@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { tx } from '../db/database.ts';
 import { isTerminal } from '../domain/stateMachine.ts';
 import { TERMINAL_GOAL_STATUSES } from '../domain/goalEvents.ts';
-import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.ts';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../domain/errors.ts';
 import type { Redactor } from '../domain/redact.ts';
 import type { AgentCapabilitySummary, GoalState, GoalStatus, GoalSummary, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
 import { goalCapabilityMessage, goalFieldCapabilityMessage } from '../domain/goalSupport.ts';
@@ -24,6 +24,7 @@ import type { ReplicaStore } from '../knowledge/replica.ts';
 import { selectPack, type PackSelection } from '../knowledge/pack.ts';
 import { KnowledgeRequestError, knowledgeCapabilityMessage, parseKnowledgeRequest } from '../knowledge/request.ts';
 import type { KnowledgeRequest } from '../knowledge/types.ts';
+import { resolveProfile, type CredentialProfiles } from '../host/credentials-profiles.ts';
 
 export interface KnowledgeSelectionDeps {
   /** The Atlas project this host contributes to and reads (section 5). */
@@ -141,6 +142,17 @@ export interface RunServiceDeps {
   defaultMaxRetries: number;
   /** Optional secret redactor; input values are redacted at write time (issue #36). */
   redactor?: Redactor;
+  /**
+   * Credential profiles (CP-3, issue #807). Optional: absent means credential profiles are not
+   * wired (test fakes and callers that predate the feature) and every Run resolves to no profile
+   * without touching the filesystem — the composition root always wires the real loader.
+   *
+   * A function, not a value, because design §5.4/§9 make the FILE the authority at every
+   * decision: the file is re-read at creation, claim and retry so an operator edit takes effect
+   * without a restart. Caching a snapshot here would freeze the host's identity decisions at
+   * boot, which is exactly the staleness the parity check exists to catch.
+   */
+  credentialProfiles?: () => CredentialProfiles;
 }
 
 /**
@@ -223,6 +235,22 @@ export class RunService {
   /** Agent id used when create input omits `agent`. */
   defaultAgent(): string {
     return this.deps.defaultAgent;
+  }
+
+  /**
+   * The credential profile a Run with this owner and repositories would use, resolved against
+   * the CURRENT file (CP-3, issue #807): one fresh read per call (§5.4 — the file is the
+   * authority at every decision), never a cached snapshot.
+   *
+   * Absent deps (test fakes, callers that predate the feature) resolve to no profile without
+   * touching the filesystem. A loaded-but-broken file THROWS (§9): the caller turns that into
+   * the right refusal per surface (creation 500, claim-time Run failure) instead of treating
+   * it as "no profile".
+   */
+  resolveCredentialProfile(repositories: ReadonlyArray<RepositoryContext>, ownerId: string): ReturnType<typeof resolveProfile> {
+    if (!this.deps.credentialProfiles) return { outcome: 'none' };
+    const { profiles } = this.deps.credentialProfiles();
+    return resolveProfile(profiles, ownerId, repositories);
   }
 
   create(input: CreateRunInput): Run {
@@ -552,6 +580,29 @@ export class RunService {
       : undefined;
     const repository = input.repository ?? (repositories?.[0] ?? {});
 
+    // Credential profile resolution (CP-3, issue #807, design §5.4). AFTER `repository` is
+    // settled (the primary is the first list entry when only the list form is given), BEFORE
+    // anything is written: a refusal must leave no Run row, no event, no skill snapshot.
+    //
+    // Resolved against the REDACTED repository objects that are about to be stored, so creation
+    // and the claim-time re-check (worker.ts) read the same bytes and can never disagree about
+    // an id because of redaction. Refusals carry the profile NAME and the reason (§5.4) — never
+    // the file's contents, env names or file paths: a caller who may not use a profile learns
+    // nothing about it.
+    let credentialProfile: string | null = null;
+    if (this.deps.credentialProfiles) {
+      const resolution = this.resolveCredentialProfile(
+        [repository, ...(repositories ?? [])],
+        input.ownerId,
+      );
+      if (resolution.outcome === 'refused') {
+        throw new ForbiddenError(resolution.message);
+      }
+      if (resolution.outcome === 'profile') {
+        credentialProfile = resolution.name;
+      }
+    }
+
     // Whether this Run gets a pack, and whether asking for one is even possible on this agent.
     //
     // The asymmetry is deliberate and comes from section 7.4. Ingest fails OPEN: an agent whose ability
@@ -605,6 +656,7 @@ export class RunService {
       finalCommits: [],
       prUrl: null,
       model: model ?? null,
+      credentialProfile,
     };
 
     try {
@@ -622,6 +674,13 @@ export class RunService {
         }
         this.deps.events.append(run.id, 'run.created', { runId: run.id, agent, status: 'QUEUED' });
         this.deps.events.append(run.id, 'run.queued', { runId: run.id });
+        if (credentialProfile !== null) {
+          // The resolved identity, as an event (design §5.4: "credentialProfile appears in Run
+          // detail and events"). Deliberately NOT emitted for the no-profile case: a host
+          // without a profile file produces byte-identical Runs to pre-CP-3 (issue #807
+          // acceptance 3), and the name is stored on the row either way.
+          this.deps.events.append(run.id, 'run.credential_profile_resolved', { profile: credentialProfile });
+        }
         if (model !== undefined) {
           // The explainability record L1 builds on (#823): which model, and where it came from.
           // Not emitted for model-less Runs, so a Run created without `model` behaves
@@ -930,6 +989,25 @@ export class RunService {
     // version now undetectable -- create() rejects the retry with the reason rather than
     // producing an untracked retry that looks like the original.
     const originalGoal = this.deps.goals?.get(runId);
+    // Resume parity (CP-3, issue #807, design §5.4 / issue #807 acceptance 5): the retry
+    // re-resolves against the CURRENT file inside create(), and that result must equal what the
+    // parent was created under. A profile removed, an owner dropped or a repository re-bound
+    // between the parent and this retry would otherwise resume the parent's work under "no
+    // credentials" (or under a different identity) — the Crew resume-parity rule (#722) forbids
+    // exactly that. The caller creates a FRESH Run instead: a new identity decision belongs to a
+    // new Run, not to a resumed one.
+    const parentRepositories = [original.repository, ...(original.repositories ?? [])];
+    const freshResolution = this.resolveCredentialProfile(parentRepositories, original.ownerId);
+    if (freshResolution.outcome === 'refused') throw new ForbiddenError(freshResolution.message);
+    const freshName = freshResolution.outcome === 'profile' ? freshResolution.name : null;
+    if (freshName !== (original.credentialProfile ?? null)) {
+      throw new ConflictError(
+        `credential profile changed since creation`
+        + ` (created under ${original.credentialProfile ? `'${original.credentialProfile}'` : 'no profile'},`
+        + ` now ${freshName ? `'${freshName}'` : 'no profile'});`
+        + ' create a new Run instead of retrying under a changed identity',
+      );
+    }
     // The parent's recorded model origin (#832 r1): a preset-sourced parent must not become
     // 'caller' on the retry, or the explainability record changes meaning across retries.
     const parentModelSource = original.model

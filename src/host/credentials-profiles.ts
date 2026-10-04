@@ -337,3 +337,70 @@ export function validateCredentialProfiles(env: NodeJS.ProcessEnv = process.env)
   lines.push({ ok: true, message: `${profiles.length} profile(s) valid` });
   return lines;
 }
+
+// ---------------------------------------------------------------------------
+// Resolution (CP-3, issue #807; design §5.3)
+// ---------------------------------------------------------------------------
+
+/** The four §5.3 outcomes for one Run. */
+export type ProfileResolution =
+  | { outcome: 'none' }
+  | { outcome: 'profile'; name: string }
+  | { outcome: 'refused'; reason: 'multiple-profiles' | 'owner-not-allowed'; profiles: string[]; message: string };
+
+/**
+ * Which profile a Run uses, per design §5.3. `repositories` holds the Run's primary repository
+ * plus every entry of `repositories[]`; entries with no `url` (localPath-only, or empty) have no
+ * id and match nothing, so a Run can carry a public dependency checkout alongside a claimed repo.
+ *
+ * A malformed `url` throws (normalizeRepositoryId): a Run that cannot state its repository id
+ * must not be resolved by guessing. With no profile file loaded this function is never called —
+ * a host without profiles behaves exactly as before CP-3.
+ *
+ * The owner is compared case-insensitively (GitHub logins are case-insensitive; repository ids
+ * are already lowercased by normalizeRepositoryId). Profile `owners` are stored as written.
+ */
+export function resolveProfile(
+  profiles: ReadonlyArray<CredentialProfile>,
+  ownerId: string,
+  repositories: ReadonlyArray<{ url?: string; localPath?: string }>,
+): ProfileResolution {
+  if (profiles.length === 0) return { outcome: 'none' };
+  // The matched ids, kept for the owner-not-allowed message (normalizeRepositoryId redacts
+  // userinfo before an id can reach any message — never-print-values, §9).
+  const matched = new Map<string, string>(); // profile name -> one redacted id that matched it
+  for (const repo of repositories) {
+    if (typeof repo.url !== 'string' || repo.url.trim() === '') continue; // no id, matches nothing
+    const id = normalizeRepositoryId(repo.url);
+    for (const profile of profiles) {
+      if (!profile.repositories.includes(id)) continue;
+      // Overlapping patterns were refused at load (§5.2/§9), so an id can only ever match ONE
+      // profile; the first sighting names the refusal. The other ids are still inspected so a
+      // Run matching two DIFFERENT profiles reports the broader multiple-profiles refusal.
+      if (!matched.has(profile.name)) matched.set(profile.name, id);
+    }
+  }
+  if (matched.size === 0) return { outcome: 'none' };
+  if (matched.size > 1) {
+    const names = [...matched.keys()].sort();
+    return {
+      outcome: 'refused',
+      reason: 'multiple-profiles',
+      profiles: names,
+      message: `the Run's repositories match two different credential profiles (${names.map((n) => `'${n}'`).join(' and ')}); one Run, one identity`,
+    };
+  }
+  const [name] = matched.keys();
+  const profile = profiles.find((p) => p.name === name)!;
+  const owner = profile.owners.find((o) => o.toLowerCase() === ownerId.toLowerCase());
+  if (owner === undefined) {
+    const id = matched.get(name)!;
+    return {
+      outcome: 'refused',
+      reason: 'owner-not-allowed',
+      profiles: [name],
+      message: `credential profile '${name}' does not allow owner '${ownerId}' (repository ${id} is claimed by that profile)`,
+    };
+  }
+  return { outcome: 'profile', name };
+}

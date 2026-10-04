@@ -71,7 +71,7 @@ import { runBot, makeBotClient } from './host/bots/process.ts';
 import { dispatchTask } from './host/bots/dispatch.ts';
 import { statusView, renderStatus } from './host/bots/status.ts';
 import { botCredentialsPath, readBotCredentials, registeredOwnerForToken } from './host/bots/credentials.ts';
-import { validateCredentialProfiles } from './host/credentials-profiles.ts';
+import { validateCredentialProfiles, loadCredentialProfiles, resolveProfile } from './host/credentials-profiles.ts';
 import { botOwnerId } from './host/bots/keys.ts';
 import { hostStatus, printStatus, upgradeHost, uninstallHost } from './host/lifecycle.ts';
 import { HOST_VERSION } from './version.ts';
@@ -252,10 +252,66 @@ async function main(): Promise<void> {
   // other host commands: the bot's own config is the thing under inspection, and a host whose
   // mercury.env is broken must still be able to diagnose its bots.
   if (cmd === 'host' && args[0] === 'credentials') {
-    // CP-2 (issue #784): offline check of the credential-profiles file. No profile resolution, no
-    // Run behaviour change - the surface prints what a human needs to fix the file, never a value.
-    if (args[1] !== undefined && args[1] !== 'validate') {
-      process.stderr.write("host credentials: unknown subcommand '" + args[1] + "'. Expected validate.\n");
+    const sub = args[1];
+    // CP-3 (issue #807): `resolve` answers which profile the rules WOULD select for a Run —
+    // offline, no database, no Run created (design §10). An operator wiring a bot or debugging a
+    // refusal runs this before pointing anything at the host.
+    if (sub === 'resolve') {
+      const rest = args.slice(2);
+      let owner: string | undefined;
+      const repos: string[] = [];
+      let usage = false;
+      for (let i = 0; i < rest.length; i++) {
+        const a = rest[i]!;
+        if (a === '--owner') {
+          owner = rest[++i];
+          if (owner === undefined) usage = true;
+        } else if (a.startsWith('--owner=')) {
+          owner = a.slice('--owner='.length);
+        } else if (a === '--repo') {
+          const v = rest[++i];
+          if (v === undefined) usage = true;
+          else repos.push(v);
+        } else if (a.startsWith('--repo=')) {
+          repos.push(a.slice('--repo='.length));
+        } else {
+          process.stderr.write(`host credentials resolve: unknown argument '${a}'.\n`);
+          process.exitCode = 2;
+          return;
+        }
+      }
+      if (usage || !owner || repos.length === 0) {
+        process.stderr.write('usage: mercury host credentials resolve --owner <o> --repo <url> [--repo ...]\n');
+        process.exitCode = 2;
+        return;
+      }
+      try {
+        const { profiles } = loadCredentialProfiles();
+        const resolution = resolveProfile(profiles, owner, repos.map((url) => ({ url })));
+        // The profile name or the refusal reason — never a value (§5.1): no env entries, no
+        // token names, no file paths from the profile appear here.
+        if (resolution.outcome === 'profile') {
+          process.stdout.write(`profile ${resolution.name}\n`);
+          return;
+        }
+        if (resolution.outcome === 'none') {
+          process.stdout.write('none\n');
+          return;
+        }
+        process.stdout.write(`refused: ${resolution.message}\n`);
+        process.exitCode = 1;
+        return;
+      } catch (err) {
+        // A file that exists but cannot be read/validated is a hard refusal (§9), exit 1.
+        process.stdout.write(`refused: ${(err as Error).message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    // CP-2 (issue #784): offline check of the credential-profiles file. The surface prints what a
+    // human needs to fix the file, never a value.
+    if (sub !== undefined && sub !== 'validate') {
+      process.stderr.write("host credentials: unknown subcommand '" + sub + "'. Expected validate or resolve.\n");
       process.exitCode = 1;
       return;
     }
@@ -895,6 +951,9 @@ async function main(): Promise<void> {
     defaultMaxDurationMs: 60 * 60 * 1000,
     defaultMaxRetries: config.maxRetries,
     redactor,
+    // CP-3 (issue #807): the file is re-read at every creation, claim and retry (§5.4), so the
+    // loader is passed as a function, never as a snapshot taken at boot.
+    credentialProfiles: () => loadCredentialProfiles(),
   });
 
   // The logger matters here: EventStream.poll() logs the two failures it can observe -- a failed
@@ -1014,6 +1073,8 @@ async function main(): Promise<void> {
           }
         : undefined,
       knowledgeOutbox: config.knowledge.atlas ? new OutboxStore(db) : undefined,
+      // CP-3 (issue #807): claim-time parity re-reads the file, same rule as the RunService dep.
+      credentialProfiles: () => loadCredentialProfiles(),
     });
     if (config.eventWakeupSocket) {
       // Registered on the existing append hook rather than at the ~20 append call sites: one seam, and

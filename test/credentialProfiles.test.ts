@@ -1,10 +1,10 @@
 // Credential profiles CP-2 (issue #784, docs/credential-profiles-design.md §5.1, §5.2, §9, §10):
-// the profile FILE only - schema, loader, permission and overlap checks, offline validate. Nothing
-// reads profiles for Run behaviour yet (CP-3/CP-4).
+// the profile FILE - schema, loader, permission and overlap checks, offline validate - and CP-3
+// (issue #807, §5.3/§5.4): per-Run resolution, creation-time refusal, claim/retry parity.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -12,9 +12,13 @@ import {
   credentialProfilesPath,
   loadCredentialProfiles,
   normalizeRepositoryId,
+  resolveProfile,
   validateCredentialProfiles,
 } from '../src/host/credentials-profiles.ts';
-import { tempDir } from './helpers.ts';
+import { ForbiddenError } from '../src/domain/errors.ts';
+import { makeEnv, makeGitRepo, tempDir, waitFor } from './helpers.ts';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 function envWith(dir: string): NodeJS.ProcessEnv {
   return { XDG_CONFIG_HOME: join(dir, 'cfg') } as NodeJS.ProcessEnv;
@@ -277,4 +281,395 @@ test('a credential-bearing repository URL is never echoed in normalization error
     const message = (err as Error).message;
     assert.ok(!message.includes(secret), 'SSH-form secrets are redacted too');
   }
+});
+// ---------------------------------------------------------------------------
+// CP-3 (issue #807): resolveProfile — the pure §5.3 table
+// ---------------------------------------------------------------------------
+
+const P = (name: string, repositories: string[], owners: string[]) =>
+  ({ name, repositories, owners, env: {}, sandbox: false });
+const U = (url: string) => ({ url });
+const TWO = [P('nightly', ['github.com/aywengo/mercury'], ['bot-nightly', 'Aywengo']), P('docs', ['github.com/aywengo/docs'], ['aywengo'])];
+
+test('resolution table: all four §5.3 outcomes, SSH/HTTPS/.git/case variants, mixed repositories (§5.3)', () => {
+  // Case 1: no id matches any profile -> none. Also: an EMPTY profile list (no file) is none
+  // without ever normalizing a repository — a host without profiles must not start refusing
+  // repository shapes it accepted before CP-3.
+  assert.deepEqual(resolveProfile([], 'alice', [U('not a repository shape')]), { outcome: 'none' });
+  assert.deepEqual(resolveProfile(TWO, 'alice', [U('github.com/other/repo')]), { outcome: 'none' });
+  // No id at all (localPath-only or empty contexts) matches nothing (§5.3: localPath has no id).
+  assert.deepEqual(resolveProfile(TWO, 'alice', [{ localPath: '/srv/repo' }, {}]), { outcome: 'none' });
+
+  // Case 2: every matched id matches exactly one profile and the owner is in its owners;
+  // unmatched ids alongside are allowed (a public dependency checkout).
+  assert.deepEqual(resolveProfile(TWO, 'bot-nightly', [U('https://GitHub.com/Aywengo/Mercury.git')]),
+    { outcome: 'profile', name: 'nightly' });
+  // SSH form, .git suffix and case fold to the same id (§5.2):
+  assert.deepEqual(resolveProfile(TWO, 'bot-nightly', [U('git@github.com:aywengo/mercury.git')]),
+    { outcome: 'profile', name: 'nightly' });
+  // Unmatched id alongside a matched one is fine:
+  assert.deepEqual(
+    resolveProfile(TWO, 'bot-nightly', [U('github.com/aywengo/mercury'), U('github.com/public/dep')]),
+    { outcome: 'profile', name: 'nightly' },
+  );
+  // localPath alongside a matched one is fine too:
+  assert.deepEqual(
+    resolveProfile(TWO, 'bot-nightly', [{ localPath: '/srv/dep' }, U('github.com/aywengo/mercury')]),
+    { outcome: 'profile', name: 'nightly' },
+  );
+  // Owner match is case-insensitive (GitHub logins are); the profile's owner list is stored as written.
+  assert.deepEqual(resolveProfile(TWO, 'BOT-NIGHTLY', [U('github.com/aywengo/mercury')]),
+    { outcome: 'profile', name: 'nightly' });
+
+  // Case 3: the ids match two different profiles -> refused, multiple-profiles.
+  const multi = resolveProfile(TWO, 'aywengo', [U('github.com/aywengo/mercury'), U('github.com/aywengo/docs')]);
+  assert.equal(multi.outcome, 'refused');
+  assert.equal((multi as { reason: string }).reason, 'multiple-profiles');
+  assert.deepEqual((multi as { profiles: string[] }).profiles.sort(), ['docs', 'nightly']);
+
+  // Case 4: an id matches a profile whose owners lack the Run's owner -> refused, owner-not-allowed.
+  const denied = resolveProfile(TWO, 'mallory', [U('github.com/aywengo/docs')]);
+  assert.equal(denied.outcome, 'refused');
+  assert.equal((denied as { reason: string }).reason, 'owner-not-allowed');
+  assert.deepEqual((denied as { profiles: string[] }).profiles, ['docs']);
+  assert.match((denied as { message: string }).message, /credential profile 'docs' does not allow owner 'mallory'/);
+});
+
+test('resolution errors never quote a credential-bearing repository URL (never-print-values, §5.1)', () => {
+  const secret = 'ghp_SUPERSECRET0123456789';
+  const profiles = [P('n', ['github.com/a/b'], ['o'])];
+  // A MATCHED id carries no authority component by construction (normalizeRepositoryId output),
+  // so a refusal message built from it cannot leak a URL credential. Cover it end to end:
+  const denied = resolveProfile(profiles, 'other', [U('github.com/a/b')]);
+  assert.equal(denied.outcome, 'refused');
+  assert.ok(!JSON.stringify(denied).includes(secret));
+  // A URL whose userinfo carries a credential cannot normalize to an id at all: resolveProfile
+  // throws (a Run that cannot state its repository id is never resolved by guessing), and the
+  // thrown error redacts the userinfo in place.
+  try {
+    resolveProfile(profiles, 'other', [U(`https://user:${secret}@github.com/a/b`)] as never);
+    assert.fail('expected a throw');
+  } catch (err) {
+    // Shape errors deliberately never quote the input at all (the operator has the file); the
+    // requirement here is only that the secret cannot appear.
+    assert.ok(!(err as Error).message.includes(secret), 'userinfo must not reach the error');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CP-3: creation-time resolution through RunService
+// ---------------------------------------------------------------------------
+
+/** A loaded profile set that ignores the filesystem entirely (injected, per-decision reads). */
+function profilesDeps(profiles: unknown[]): { credentialProfiles: () => { profiles: unknown[] } } {
+  return { credentialProfiles: () => ({ profiles }) as never };
+}
+
+const CP = { profiles: [{
+  name: 'nightly',
+  repositories: ['github.com/aywengo/mercury'],
+  owners: ['bot-nightly'],
+  env: { GH_TOKEN: { file: '/run/secrets/nightly.pat' } },
+}] };
+
+test('creation: a disallowed owner is refused BEFORE anything is stored (§5.4)', () => {
+  const env = makeEnv({ workerEnabled: false, ...profilesDeps(CP.profiles) } as never);
+  try {
+    assert.throws(
+      () => env.runService.create({
+        ownerId: 'mallory',
+        task: 'x',
+        agent: 'fake',
+        repository: { url: 'https://github.com/aywengo/mercury.git' },
+      }),
+      (err: unknown) => err instanceof ForbiddenError
+        && /credential profile 'nightly' does not allow owner 'mallory'/.test(err.message)
+        && !/GH_TOKEN|secrets|\.pat/.test(err.message),
+    );
+    const rows = (env.db.prepare('SELECT id FROM runs').all() as { id: string }[]);
+    assert.equal(rows.length, 0, 'a refused Run must leave no row');
+  } finally {
+    env.close();
+  }
+});
+
+test('creation: two profiles matched -> refused (multiple-profiles), one Run one identity', () => {
+  const both = { profiles: [
+    ...CP.profiles,
+    { name: 'mirror', repositories: ['github.com/aywengo/docs'], owners: ['bot-nightly'], env: {} },
+  ] };
+  const env = makeEnv({ workerEnabled: false, ...profilesDeps(both.profiles) } as never);
+  try {
+    assert.throws(
+      () => env.runService.create({
+        ownerId: 'bot-nightly',
+        task: 'x',
+        repository: { url: 'github.com/aywengo/mercury' },
+        repositories: [{ url: 'github.com/aywengo/docs' }],
+      }),
+      (err: unknown) => err instanceof ForbiddenError && /two different credential profiles/.test(err.message),
+    );
+  } finally {
+    env.close();
+  }
+});
+
+test('creation: a matched Run stores the profile name; no-profile Runs stay byte-identical (acceptance 3)', () => {
+  const env = makeEnv({ workerEnabled: false, ...profilesDeps(CP.profiles) } as never);
+  try {
+    const run = env.runService.create({
+      ownerId: 'bot-nightly',
+      task: 'x',
+      agent: 'fake',
+      repository: { url: 'https://github.com/aywengo/mercury.git' },
+    });
+    assert.equal(run.credentialProfile, 'nightly');
+    const row = env.db.prepare('SELECT credential_profile FROM runs WHERE id = ?').get(run.id) as { credential_profile: string | null };
+    assert.equal(row.credential_profile, 'nightly');
+    const types = env.events.list(run.id).map((e) => e.type);
+    assert.ok(types.includes('run.credential_profile_resolved'), 'the resolved identity is an event');
+    const payload = (env.events.list(run.id).find((e) => e.type === 'run.credential_profile_resolved')!.payload) as { profile?: string };
+    assert.equal(payload.profile, 'nightly');
+
+    // An allowed owner whose repositories match NOTHING resolves to no profile: null, no event.
+    const plain = env.runService.create({ ownerId: 'bot-nightly', task: 'y', agent: 'fake', repository: { localPath: '/tmp/whatever' } });
+    assert.equal(plain.credentialProfile, null);
+    const plainTypes = env.events.list(plain.id).map((e) => e.type);
+    assert.ok(!plainTypes.includes('run.credential_profile_resolved'), 'the no-profile case emits no event');
+    const plainRow = env.db.prepare('SELECT credential_profile FROM runs WHERE id = ?').get(plain.id) as { credential_profile: string | null };
+    assert.equal(plainRow.credential_profile, null);
+  } finally {
+    env.close();
+  }
+});
+
+test('no profiles wired (deps absent): every Run resolves to null and nothing normalizes', () => {
+  // makeEnv without credentialProfiles: the pre-CP-3 shape. A repository URL that
+  // resolveProfile would throw on must sail through — profiles are not wired, so nothing
+  // normalizes: behavior before CP-3 is unchanged (acceptance 3).
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { url: 'https://github.com/aywengo/mercury' } });
+    assert.equal(run.credentialProfile, null);
+  } finally {
+    env.close();
+  }
+});
+
+test('creation: an invalid profile file fails creation with a clear error, never "no profile" (§9, acceptance 6)', () => {
+  const dir = tempDir('cp3-badfile-');
+  const env = makeEnv({
+    workerEnabled: false,
+    // The real loader over a file that exists but is group-readable.
+    credentialProfiles: () => loadCredentialProfiles({ XDG_CONFIG_HOME: join(dir, 'cfg') } as never),
+  } as never);
+  try {
+    const cfg = join(dir, 'cfg', 'mercury');
+    mkdirSync(cfg, { recursive: true });
+    writeFileSync(join(cfg, 'credential-profiles.json'), JSON.stringify(CP));
+    chmodSync(join(cfg, 'credential-profiles.json'), 0o644);
+    assert.throws(
+      () => env.runService.create({ ownerId: 'bot-nightly', task: 'x', repository: { url: 'github.com/aywengo/mercury' } }),
+      /readable by group or others/,
+    );
+  } finally {
+    env.close();
+  }
+});
+
+test('a resolved Run stores no profile contents: the row and events carry the name only (§5.4)', () => {
+  const env = makeEnv({ workerEnabled: false, ...profilesDeps(CP.profiles) } as never);
+  try {
+    const run = env.runService.create({
+      ownerId: 'bot-nightly', task: 'x', agent: 'fake',
+      repository: { url: 'github.com/aywengo/mercury' },
+    });
+    const rowJson = JSON.stringify(env.db.prepare('SELECT * FROM runs WHERE id = ?').get(run.id));
+    assert.ok(!rowJson.includes('GH_TOKEN'), 'the env NAME never reaches the row either');
+    assert.ok(!rowJson.includes('.pat'), 'no file path from the profile');
+    for (const e of env.events.list(run.id)) {
+      const text = JSON.stringify(e.payload);
+      assert.ok(!text.includes('GH_TOKEN'), `event ${e.type} carries no profile contents`);
+      assert.ok(!text.includes('/run/secrets'), `event ${e.type} carries no profile file path`);
+    }
+  } finally {
+    env.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CP-3: claim-time parity (§5.4, acceptance 4) and retry parity (acceptance 5)
+// ---------------------------------------------------------------------------
+
+test('claim-time parity: editing the file between creation and claim fails the Run (acceptance 4)', async () => {
+  // The real loader against a real file the test rewrites between create() and claim.
+  const dir = tempDir('cp3-parity-');
+  const cfg = join(dir, 'cfg', 'mercury');
+  mkdirSync(cfg, { recursive: true });
+  const filePath = join(cfg, 'credential-profiles.json');
+  const write = (owners: string[]): void => {
+    writeFileSync(filePath, JSON.stringify({ profiles: [{ ...CP.profiles[0], owners }] }));
+    chmodSync(filePath, 0o600);
+  };
+  write(['bot-nightly']);
+  const env = makeEnv({
+    credentialProfiles: () => loadCredentialProfiles({ XDG_CONFIG_HOME: join(dir, 'cfg') } as never),
+  } as never);
+  try {
+    const run = env.runService.create({
+      ownerId: 'bot-nightly', task: 'x', agent: 'fake',
+      repository: { url: 'https://github.com/aywengo/mercury.git' },
+    });
+    assert.equal(run.credentialProfile, 'nightly');
+    // The operator drops the owner from the profile before the claim.
+    write(['someone-else']);
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    const row = env.runs.get(run.id)!;
+    assert.equal(row.status, 'FAILED');
+    assert.match(row.error ?? '', /credential profile changed since creation/);
+    assert.equal(row.errorKind, 'infrastructure');
+    const types = env.events.list(run.id).map((e) => e.type);
+    assert.ok(types.includes('run.credential_profile_changed'), 'the parity refusal is an event');
+    assert.ok(!types.includes('run.started'), 'the Run never starts under the changed identity');
+    const failed = env.events.list(run.id).find((e) => e.type === 'run.failed');
+    assert.equal((failed!.payload as { kind?: string }).kind, 'infrastructure');
+  } finally {
+    env.worker.stop();
+    env.close();
+  }
+});
+
+test('claim-time parity is silent when the file did not change (the mutation check, acceptance 4)', async () => {
+  const dir = tempDir('cp3-parity-ok-');
+  const cfg = join(dir, 'cfg', 'mercury');
+  const repo = makeGitRepo(join(dir, 'repo')); // the workspace needs a real local git repo
+  mkdirSync(cfg, { recursive: true });
+  writeFileSync(join(cfg, 'credential-profiles.json'), JSON.stringify(CP));
+  chmodSync(join(cfg, 'credential-profiles.json'), 0o600);
+  const env = makeEnv({
+    credentialProfiles: () => loadCredentialProfiles({ XDG_CONFIG_HOME: join(dir, 'cfg') } as never),
+  } as never);
+  try {
+    const run = env.runService.create({
+      ownerId: 'bot-nightly', task: 'x', agent: 'fake',
+      // localPath (the real local git repo) drives the workspace — no network; url is the
+      // identity that resolution reads and normalizes to the profile's repository id. A
+      // macOS temp path cannot itself be a repository id (host regex allows no '_'), which is
+      // exactly why the identity rides on url and the checkout source on localPath.
+      repository: { url: 'https://github.com/aywengo/mercury.git', localPath: repo },
+    });
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 10_000);
+    const types = env.events.list(run.id).map((e) => e.type);
+    assert.ok(types.includes('run.started'), 'an unchanged file must not block the claim');
+    assert.ok(!types.includes('run.credential_profile_changed'));
+  } finally {
+    env.worker.stop();
+    env.close();
+  }
+});
+
+test('retry parity: a changed profile refuses the retry (acceptance 5)', async () => {
+  const dir = tempDir('cp3-retry-');
+  const repo = makeGitRepo(join(dir, 'repo')); // the workspace needs a real local git repo
+  const env = makeEnv({ workerEnabled: false, ...profilesDeps([CP.profiles[0]]) } as never);
+  try {
+    const original = env.runService.create({
+      ownerId: 'bot-nightly', task: 'x', agent: 'fake',
+      // Same split as the parity-ok test: localPath drives the workspace, url is the identity.
+      repository: { url: 'https://github.com/aywengo/mercury.git', localPath: repo },
+      constraints: { maxDurationMs: 60_000, maxRetries: 2 },
+    });
+    // Cancel the QUEUED Run so retry() is reachable (a terminal state), with the profile
+    // still intact — the parity refusal below is caused ONLY by the re-bound profile.
+    env.runService.cancel(original.id, 'bot-nightly', true);
+    // The profile's owners no longer include the Run's owner.
+    const rebound = { profiles: [{ ...CP.profiles[0], owners: ['someone-else'] }] };
+    (env.runService as unknown as { deps: { credentialProfiles: () => unknown } }).deps.credentialProfiles = () => rebound;
+    // The retry's own fresh resolution hits the owner-not-allowed refusal first (the profile
+    // still claims the repository, so resolution is refused rather than "none") — a refusal is
+    // also a parity refusal: the retry is never created and the parent's identity is never
+    // silently replaced by "none".
+    assert.throws(
+      () => env.runService.retry(original.id, 'bot-nightly', true),
+      (err: unknown) => err instanceof ForbiddenError
+        && /does not allow owner 'bot-nightly'/.test(err.message),
+    );
+    // And when the profile releases the repository entirely (re-bound away), the fresh
+    // resolution is "none" while the parent was created under 'nightly' — the §5.4 reason.
+    const released = { profiles: [] };
+    (env.runService as unknown as { deps: { credentialProfiles: () => unknown } }).deps.credentialProfiles = () => released;
+    assert.throws(
+      () => env.runService.retry(original.id, 'bot-nightly', true),
+      (err: unknown) => err instanceof Error && /credential profile changed since creation/.test(err.message),
+    );
+  } finally {
+    env.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CP-3: the `host credentials resolve` surface (§10)
+// ---------------------------------------------------------------------------
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+function cli(args: string[], envExtra: Record<string, string>): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((res, rej) => {
+    const child = spawn(process.execPath, [join(ROOT, 'src', 'cli.ts'), ...args], {
+      cwd: ROOT,
+      env: { ...process.env, ...envExtra },
+    });
+    let stdout = ''; let stderr = '';
+    const killer = setTimeout(() => child.kill('SIGKILL'), 30_000);
+    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (c: string) => { stdout += c; });
+    child.stderr.on('data', (c: string) => { stderr += c; });
+    child.on('error', rej);
+    child.on('close', (code) => { clearTimeout(killer); res({ code, stdout, stderr }); });
+  });
+}
+
+test('host credentials resolve prints the profile name or the refusal reason, never values (§10)', async () => {
+  const dir = tempDir('cp3-resolve-');
+  const cfg = join(dir, 'cfg', 'mercury');
+  mkdirSync(cfg, { recursive: true });
+  writeFileSync(join(cfg, 'credential-profiles.json'), JSON.stringify({
+    profiles: [{
+      name: 'nightly', repositories: ['github.com/aywengo/mercury'], owners: ['bot-nightly'],
+      env: { GH_TOKEN: { file: '/run/secrets/nightly.pat' }, INLINE: { value: 'super-secret-value' } },
+    }],
+  }));
+  chmodSync(join(cfg, 'credential-profiles.json'), 0o600);
+  const envVar = { XDG_CONFIG_HOME: join(dir, 'cfg') };
+
+  const hit = await cli(['host', 'credentials', 'resolve', '--owner', 'bot-nightly', '--repo', 'https://github.com/aywengo/mercury.git'], envVar);
+  assert.equal(hit.code, 0);
+  assert.equal(hit.stdout, 'profile nightly\n');
+
+  const none = await cli(['host', 'credentials', 'resolve', '--owner', 'bot-nightly', '--repo', 'github.com/other/repo'], envVar);
+  assert.equal(none.code, 0);
+  assert.equal(none.stdout, 'none\n');
+
+  const denied = await cli(['host', 'credentials', 'resolve', '--owner', 'mallory', '--repo', 'github.com/aywengo/mercury'], envVar);
+  assert.equal(denied.code, 1);
+  assert.match(denied.stdout, /refused: credential profile 'nightly' does not allow owner 'mallory'/);
+  assert.ok(!denied.stdout.includes('super-secret-value'), 'values never reach the surface');
+  assert.ok(!denied.stdout.includes('GH_TOKEN') && !denied.stdout.includes('.pat'), 'env names and file paths stay off the surface');
+
+  const usage = await cli(['host', 'credentials', 'resolve', '--owner', 'x'], envVar);
+  assert.equal(usage.code, 2, 'a missing --repo is a usage error');
+  assert.ok(usage.stderr.includes('usage:'), 'usage goes to stderr, stdout stays parseable');
+});
+
+test('host credentials resolve: a broken file is a refusal, never "none" (§9)', async () => {
+  const dir = tempDir('cp3-resolve-bad-');
+  const cfg = join(dir, 'cfg', 'mercury');
+  mkdirSync(cfg, { recursive: true });
+  writeFileSync(join(cfg, 'credential-profiles.json'), '{"profiles": [ broken');
+  chmodSync(join(cfg, 'credential-profiles.json'), 0o600);
+  const r = await cli(['host', 'credentials', 'resolve', '--owner', 'o', '--repo', 'github.com/a/b'], { XDG_CONFIG_HOME: join(dir, 'cfg') });
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /refused: .*malformed JSON/);
 });

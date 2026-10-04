@@ -1116,19 +1116,21 @@ test('failure bookkeeping is all-or-nothing, not four independent writes (issue 
   }
 });
 
-test('every failure-bookkeeping site is wrapped in a transaction (issue #106, #731)', () => {
+test('every failure-bookkeeping site is wrapped in a transaction (issue #106, #731, #807)', () => {
   // The behavioural test above covers finalize()'s agent-failure branch, which is reachable through
   // the fake adapter. The execute() catch branch (infrastructure failure) needs the drive loop to
   // throw rather than the agent to fail, which no adapter script produces -- so this pins the
   // structure instead. Weaker than the behavioural test, and deliberately honest about it: it
-  // proves the wrap exists, not that it commits atomically. Three sites exist: the finalize
-  // agent-failure branch, the execute() catch branch, and the claim-time notAfter refusal (#731).
+  // proves the wrap exists, not that it commits atomically. Four sites exist: the finalize
+  // agent-failure branch, the execute() catch branch, the claim-time notAfter refusal (#731), and
+  // the claim-time credential-profile parity refusal (#807) — which deliberately follows the
+  // notAfter pattern: transition, setError, events, terminal transition, one tx().
   const src = readFileSync(join(import.meta.dirname, '..', 'src', 'worker', 'worker.ts'), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '');
   const wrapped = src.match(/tx\(this\.deps\.db, \(\) => \{[\s\S]*?setError[\s\S]*?'run\.failed'[\s\S]*?transition[\s\S]*?\}\)/g) ?? [];
-  assert.equal(wrapped.length, 3,
-    `expected all three failure paths wrapped in tx(), found ${wrapped.length}`);
+  assert.equal(wrapped.length, 4,
+    `expected all four failure paths wrapped in tx(), found ${wrapped.length}`);
   // maybeAutoRetry must stay OUTSIDE each transaction: it is async, tx() is sync, and a retry run
   // must not be rolled back together with the failure record that caused it. Checked per-block --
   // scanning the whole file would also match the legitimate call on the line AFTER the block.

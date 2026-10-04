@@ -97,6 +97,12 @@ export function makeEnv(opts: {
   /** Run the detached harness version probes at construction. Off by default because they
    *  spawn real subprocesses; tests asserting a detected version opt in. */
   probeCapabilities?: boolean;
+  /**
+   * Credential profile loader (CP-3, issue #807) wired into BOTH the RunService and the worker,
+   * mirroring src/cli.ts. Absent means the feature is off: resolution never touches the
+   * filesystem and every Run carries `credentialProfile: null`.
+   */
+  credentialProfiles?: () => import('../src/host/credentials-profiles.ts').CredentialProfiles;
 } = {}): TestEnv {
   const dir = mkdtempSync(join(tmpdir(), 'mercury-test-'));
   const db = openDatabase(join(dir, 'test.db'));
@@ -148,6 +154,10 @@ export function makeEnv(opts: {
     defaultMaxDurationMs: 60_000,
     defaultMaxRetries: opts.maxRetries ?? 2,
     redactor: opts.redactor,
+    // CP-3 (issue #807): set only when a test asks, so every other test gets a RunService with
+    // profiles genuinely absent (not "empty file") — the state that must not touch the
+    // filesystem at all.
+    ...(opts.credentialProfiles ? { credentialProfiles: opts.credentialProfiles } : {}),
   });
   const logger = opts.logger ? createLogger(createRedactor([]), 'debug') : nullLogger;
   // A capturing Logger must forward child() or the worker's per-run logger drops the capture.
@@ -203,6 +213,10 @@ export function makeEnv(opts: {
     // knowledge, so every other test runs a worker that reads no knowledge table at all.
     ...(opts.knowledgeProject ? { knowledgeProject: opts.knowledgeProject } : {}),
     ...(opts.knowledgeHarvest ? { knowledgeHarvest: opts.knowledgeHarvest, knowledgeOutbox: opts.knowledgeOutbox } : {}),
+    // Mirrors production: the worker runs the claim-time credential profile parity check (CP-3,
+    // issue #807) against the same loader the RunService resolves with. Set only when a test
+    // asks, like the RunService dep above.
+    ...(opts.credentialProfiles ? { credentialProfiles: opts.credentialProfiles } : {}),
   });
   if (opts.workerEnabled !== false) worker.start();
 
