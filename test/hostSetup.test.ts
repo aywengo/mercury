@@ -2060,6 +2060,41 @@ test('validateAnswer: layaUrl must be a loopback BASE URL without a route (#840 
   assert.ok(!(userinfo ?? '').includes('secret'), 'the credential is never echoed');
 });
 
+test('validateLayaBaseUrl: a route-path error does not echo the pathname (#840 r53)', () => {
+  // URL paths commonly carry credential-looking segments; the rejection must name the rule,
+  // never copy the value into setup/doctor/startup output.
+  const err = validateAnswer('layaUrl', 'http://127.0.0.1:8302/secret-token-123') ?? '';
+  assert.match(err, /without a route path/);
+  assert.ok(!err.includes('secret-token-123'), `the pathname leaked: ${err}`);
+});
+
+test('readiness: an anon probe TIMEOUT whose detail contains 401 is not auth proof (#840 r53)', async () => {
+  // MERCURY_LAYA_TIMEOUT_MS=401 (an allowed value): a slow anon probe yields
+  // 'unreachable: deadline 401ms exceeded' — the old 'detail.includes("401")' check took that
+  // as auth proven. Only the normalized 'auth failed (401)' verdict proves auth.
+  const dir = tempDir('setup-laya-t401-');
+  mkdirSync(join(dir, 'mercury'), { recursive: true });
+  writeFileSync(join(dir, 'mercury', 'mercury.env'), 'MERCURY_PORT=3999\nMERCURY_LAYA_TIMEOUT_MS=401\n');
+  // Anon (bearer-less) requests never answer inside the 401 ms deadline; the AUTHENTICATED
+  // probe answers fine (the wizard's key matches) — so the flow reaches the anon auth-proof
+  // loop, where a hanging probe must stay INCONCLUSIVE.
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*', anonScript: [{ delayMs: 3_000 }] });
+  try {
+    const err: string[] = [];
+    const code = await runHostSetup(['--yes'], {
+      out: () => {}, err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 4_000, sidecarReadinessGapMs: 50,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+    assert.equal(code, 1, `a 401-shaped timeout must not pass: ${err.join('')}`);
+    assert.match(err.join(''), /readiness budget ran out while proving auth/);
+    assert.match(err.join(''), /deadline \d+ms exceeded/);
+  } finally {
+    await fake.close();
+  }
+});
+
 test('runHostSetup: the external probe uses the laya credential, exactly like the doctor (#840 r22)', () => {
   // The fake requires the REAL key; setup must read it from the seeded credentials file (the
   // doctor's resolution) — a key-less probe would 401 and fail the run.

@@ -251,6 +251,12 @@ export function parseLayaTimeoutMs(vars: Record<string, string | undefined>): { 
   return { ok: true, timeoutMs: parsed };
 }
 
+/** True when a checkLaya detail is the normalized auth-rejection verdict (not a timeout
+ *  whose message merely contains '401' — e.g. 'deadline 401ms exceeded', Copilot #840 r53). */
+export function isLayaAuthRejected(detail: string | undefined): boolean {
+  return (detail ?? '').startsWith('auth failed (401)');
+}
+
 export async function checkLaya(baseUrl: string, apiKey: string | undefined, timeoutMs: number): Promise<{ ok: boolean; detail: string; latencyMs?: number; checkpoint?: string }> {
   const client = new LayaClient({
     baseUrl,

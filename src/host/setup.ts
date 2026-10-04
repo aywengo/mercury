@@ -42,7 +42,7 @@ import { homedir, hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
 import { suggestionFor } from '../adapters/configSchema.ts';
-import { checkLaya, loadEnvFile, parseLayaTimeoutMs, schemeFor } from './doctor.ts';
+import { checkLaya, isLayaAuthRejected, loadEnvFile, parseLayaTimeoutMs, schemeFor } from './doctor.ts';
 import { botCredentialsPath, readBotCredentials } from './bots/credentials.ts';
 import { DEFAULT_PYTHON_CANDIDATES, detectPython, ensureLayaCredentials, LAYA_DEFAULT_PORT, LAYA_SERVE_PIN, layaStepActions, planLayaSidecar, renderLayaLaunchdPlist, renderLayaSystemdUnit, type LayaPlan, type RunFn } from './layaSidecar.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
@@ -1248,7 +1248,7 @@ export async function runHostSetup(
             io.err(`\nlaya: the sidecar at ${baseUrl} answers WITHOUT a key — that is not the unit setup installed (LAYA_API_KEY unset), so the port is owned by another service.\n`);
             return 1;
           }
-          if ((anon.detail ?? '').includes('401')) break; // auth proven
+          if (isLayaAuthRejected(anon.detail)) break; // auth proven (normalized verdict, not a '401' substring)
           // Inconclusive (timeout/unreachable/5xx): retry after the gap, like the main loop.
           // Recorded only for the FAILURE paths — the success line keeps the AUTHENTICATED
           // probe's detail (printing a stale anon blip under 'doctor ok' misled, Copilot #840 r30).
@@ -1263,7 +1263,7 @@ export async function runHostSetup(
       // holds the port (the embedded key matches → 200) or has not bound yet (unreachable →
       // retry). A sidecar that is UP and rejecting our key is ANOTHER auth-enabled service
       // that got there first — retrying would just burn the budget (Copilot #840 r32).
-      if (probe.ok === false && (probe.detail ?? '').includes('401')) {
+      if (probe.ok === false && isLayaAuthRejected(probe.detail)) {
         io.err(`\nlaya: the sidecar at ${baseUrl} rejected the configured key (401) while the unit is not yet serving — another auth-enabled sidecar owns the port.\n`);
         io.err(`laya: stop that service or set MERCURY_LAYA_URL to its URL, then re-run setup.\n`);
         return 1;

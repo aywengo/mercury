@@ -33,7 +33,9 @@ export function validateLayaBaseUrl(value: unknown, varName = 'MERCURY_LAYA_URL'
   if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') {
     return `${varName} must be a loopback host (127.0.0.1 or localhost), got '${u.hostname}'`;
   }
-  if (u.pathname !== '/' && u.pathname !== '') return `${varName} must be a base URL without a route path (the client appends /v1/systemone), got '${u.pathname}'`;
+  // No pathname echo (Copilot #840 r53): URL paths commonly carry credential-looking
+  // segments — reject the route without copying its value into setup/doctor/startup output.
+  if (u.pathname !== '/' && u.pathname !== '') return `${varName} must be a base URL without a route path (the client appends /v1/systemone)`;
   if (u.search || u.hash) return `${varName} must not carry a query or fragment`;
   // Bare delimiters parse away ('http://h:p?' → search '') but still change the request the
   // client builds — reject the literal characters too (Copilot #840 r44).

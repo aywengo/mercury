@@ -71,9 +71,18 @@ export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKe
         // r28: anon requests follow their own script (default would be a flat 401).
         const entry = opts.anonScript[Math.min(anonCount, opts.anonScript.length - 1)] ?? {};
         anonCount += 1;
-        res.statusCode = entry.status ?? 200;
-        res.setHeader('content-type', 'application/json');
-        res.end(JSON.stringify(entry.json ?? {}));
+        const respondAnon = () => {
+          res.statusCode = entry.status ?? 200;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify(entry.json ?? {}));
+        };
+        // delayMs is honored here too (r53): an anon probe that answers SLOWLY exercises the
+        // client's deadline path inside the auth-proof loop.
+        if (entry.delayMs) {
+          setTimeout(respondAnon, entry.delayMs);
+          return;
+        }
+        respondAnon();
         return;
       }
       if (auth && (anyNonEmpty ? !/^Bearer \S/.test(header) : header !== `Bearer ${opts.apiKey}`)) {
