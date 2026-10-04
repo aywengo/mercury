@@ -445,3 +445,32 @@ test('reassignBotRuns: no admin token, or a failed transfer, aborts with exit 1 
   rmSync(dir, { recursive: true, force: true });
   rmSync(dir + 'b', { recursive: true, force: true });
 });
+
+test("uninstall --alias laya --yes with no legacy bot refuses and keeps the sidecar credential (#840 r39)", () => {
+  const dir = tempDir('bot-svc-uninst-laya-');
+  const env = setupBot(dir);
+  // No bots/laya.json, no laya unit — the reserved entry is the SIDECAR's credential.
+  writeFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
+  const err: string[] = [];
+  const out: string[] = [];
+  const code = uninstallBotService(process.platform, 'laya', { out: (s) => out.push(s), err: (s) => err.push(s) }, env, { yes: true, keepEnv: false, reassignOwner: null });
+  assert.equal(code, 1, `refused: ${err.join('')}`);
+  assert.match(err.join(''), /reserved host alias/);
+  const creds = JSON.parse(readFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), 'utf8')) as Record<string, unknown>;
+  assert.ok(creds.laya, 'the sidecar credential survives');
+});
+
+test("uninstall --alias laya --yes with a LEGACY bot still recovers (#840 r39)", () => {
+  // A pre-reservation bot: its config file proves ownership — the teardown proceeds.
+  const dir = tempDir('bot-svc-uninst-laya-legacy-');
+  const env = setupBot(dir);
+  mkdirSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bots'), { recursive: true });
+  writeFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bots', 'laya.json'), JSON.stringify({ api: { url: 'http://127.0.0.1:3000' }, schedule: { tasks: [] } }));
+  writeFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'tok-legacy-laya' } }), { mode: 0o600 });
+  const out: string[] = [];
+  const code = uninstallBotService(process.platform, 'laya', { out: (s) => out.push(s), err: () => {} }, env, { yes: true, keepEnv: false, reassignOwner: null });
+  assert.equal(code, 0, `legacy recovery: ${out.join('')}`);
+  const creds = JSON.parse(readFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), 'utf8')) as Record<string, unknown>;
+  assert.ok(!('laya' in creds), 'the legacy bot credential is removed');
+});
+

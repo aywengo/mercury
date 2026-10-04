@@ -27,7 +27,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSy
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { envFilePath, resolveMercuryBin } from '../service.ts';
-import { assertBotAlias, BOT_ALIAS_RE } from './config.ts';
+import { assertBotAlias, BOT_ALIAS_RE, RESERVED_BOT_ALIASES } from './config.ts';
 
 /** Syntax-only form (Copilot #840 r32): existing/read/uninstall paths must accept aliases that
  *  predate a reservation — uninstall is the recovery path setup advises. */
@@ -389,6 +389,15 @@ export function uninstallBotService(
   const stateFile = botStateFile(alias, env);
   const configFile = botConfigFile(alias, env);
   const envFile = envFilePath(env);
+  // Reserved-alias guard (Copilot #840 r39): 'laya' keys the SIDECAR's credential. Uninstalling
+  // a bot that does not exist must not delete that entry — doctor would fail and a setup re-run
+  // would rotate the key existing clients hold. A LEGACY pre-reservation bot keeps its recovery
+  // path: its config file or service unit proves bot ownership.
+  if (RESERVED_BOT_ALIASES.has(alias) && !existsSync(configFile) && !existsSync(plist) && !existsSync(unitPath)) {
+    io.err(`host bot service uninstall: '${alias}' is a reserved host alias (the Laya sidecar credential) and no bot named '${alias}' exists — nothing to uninstall.\n`);
+    io.err('host bot service uninstall: the sidecar credential is managed by `mercury host setup`/`host doctor`, not the bot lifecycle.\n');
+    return 1;
+  }
   io.out(`Plan: remove ${platform === 'darwin' ? `${plist} (and its wrapper)` : unitPath}, ${stateFile}, ${configFile},` +
     ` the '${alias}' entry in the shared bot credentials file,` +
     `${opts.keepEnv ? '' : ` the bot-${alias} entry in MERCURY_API_TOKENS,`} then print the §17.7 consequence.\n`);
