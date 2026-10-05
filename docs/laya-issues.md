@@ -304,3 +304,7 @@ nothing installed, no env keys written; re-run preserves an existing key.
 
 **Blocked by** L0-1, L0-3. **Likely files.** `install.sh`, `src/host/setup.ts`,
 `src/host/install.ts`, `docs/host-installer.md`.
+
+**Status (2026-10-05):** merged — #840 (`7f1d300`). Follow-up #845 files the
+versioned-venv-directories redesign that replaces the in-place rebuild transaction
+the #840 review rounds converged on.
