@@ -1094,9 +1094,17 @@ export async function runHostSetup(
           } else {
             const stoppedR = run(['systemctl', '--user', 'disable', '--now', plan.unitLabel], 15_000);
             stopped = stoppedR.ok;
-            if (stopped) run(['systemctl', '--user', 'daemon-reload'], 15_000);
           }
-          if (stopped) rmSync(plan.unitPath, { force: true });
+          if (stopped) {
+            rmSync(plan.unitPath, { force: true });
+            // Reload AFTER the unit file is gone: a reload before the removal leaves the removed
+            // unit cached with its ExecStart pointing into the deleted build dir (Copilot
+            // #846 r10). The rollback is complete only when the post-removal reload succeeds.
+            if (process.platform !== 'darwin') {
+              const reload = run(['systemctl', '--user', 'daemon-reload'], 15_000);
+              stopped = reload.ok;
+            }
+          }
           unitSafe = stopped && !existsSync(plan.unitPath);
         } else {
           const restored = restoreLayaUnit(plan.unitPath, unitBackupText);
