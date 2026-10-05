@@ -37,7 +37,7 @@ import { createInterface } from 'node:readline';
 import { randomBytes } from 'node:crypto';
 import { hostStatus, printStatus } from './lifecycle.ts';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, lstatSync, readdirSync, renameSync, statSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
@@ -690,14 +690,16 @@ function ttyAvailable(): boolean {
  * overwritten when the failure happened, so the restored venv must be referenced by the OLD
  * unit too (Copilot #840 r59). A null backup leaves the current unit in place.
  */
-function restoreLayaUnit(unitPath: string, backupText: string | null): void {
-  if (backupText === null) return;
+function restoreLayaUnit(unitPath: string, backupText: string | null): boolean {
+  if (backupText === null) return true; // nothing to restore: the unit still is the previous one
   try {
     const tmpUnit = join(dirname(unitPath), `.${basename(unitPath)}.rollback-${process.pid}-${randomBytes(6).toString('hex')}`);
     writeFileSync(tmpUnit, backupText, { flag: 'wx', mode: 0o600 });
     renameSync(tmpUnit, unitPath);
+    return true;
   } catch {
-    // Best effort: the operator is already looking at an error message.
+    // The caller decides what a failed restore means for the build directory (#845 r2).
+    return false;
   }
 }
 
@@ -1087,8 +1089,17 @@ export async function runHostSetup(
         // Best effort — the original error is what the operator sees.
       }
       // The build directory is not live unless readiness proved it; after any post-commit
-      // failure it is garbage (best effort: injected runners may not have created it).
-      rmSync(plan.venvDir, { recursive: true, force: true });
+      // failure it is garbage (best effort: injected runners may not have created it). EXCEPT
+      // when the unit restore FAILED and the enabled unit still references it — then keep the
+      // directory so the service keeps a working executable (Copilot #846 r2).
+      const restored = (() => {
+        try {
+          return unitBackupText === null || readFileSync(plan.unitPath, 'utf8') === unitBackupText;
+        } catch {
+          return false;
+        }
+      })();
+      if (restored) rmSync(plan.venvDir, { recursive: true, force: true });
     };
     try {
       for (const [name, step] of steps) {
@@ -1251,19 +1262,27 @@ export async function runHostSetup(
       const sleepMs = Math.min(gapMs, budgetMs - (Date.now() - started));
       if (sleepMs > 0) await new Promise((res) => setTimeout(res, sleepMs));
     }
-    // Readiness proven — the new venv is live. Sweep (#845): remove every 'laya-venv*' sibling
-    // the (new) unit does not reference, EXCEPT the single previous generation the OLD unit
-    // pointed at (one rollback generation). Best effort: a leftover directory is disk space,
-    // never a correctness problem. The legacy '<dataDir>/laya-venv' from a #840-era install is
-    // kept here as prevVenv, then swept by the FOLLOWING successful run.
+    // Readiness proven — the new venv is live. Sweep (#845): remove installer-owned venv
+    // directories the new unit does not reference, keeping exactly one previous generation
+    // (the one the previous unit pointed at). Installer-owned means the exact legacy name
+    // 'laya-venv' or a generated 'laya-venv-<pin>-<ts>-<rand>' — an operator's
+    // 'laya-venv-notes' or 'laya-venv.backup-manual' is never touched (Copilot #846 r2).
+    // Per-entry try/catch: cleanup is best effort — a dangling symlink or an unreadable entry
+    // is disk space, never a reason to fail a finished install (Copilot #846 r2).
     {
+      const gen = new RegExp(`^laya-venv-${LAYA_SERVE_PIN}-\\d{14}-[0-9a-f]{8}$`);
       const keep = new Set([plan.venvDir, prevVenv]);
       for (const entry of existsSync(dataDir) ? readdirSync(dataDir) : []) {
-        if (!entry.startsWith('laya-venv')) continue;
+        const owned = entry === 'laya-venv' || gen.test(entry);
+        if (!owned) continue;
         const full = join(dataDir, entry);
-        if (!statSync(full).isDirectory?.()) continue;
         if (keep.has(full)) continue;
-        rmSync(full, { recursive: true, force: true });
+        try {
+          if (lstatSync(full).isDirectory()) rmSync(full, { recursive: true, force: true });
+          else unlinkSync(full); // a file or dangling symlink with an installer-owned name
+        } catch {
+          // Best effort: leave it — disk space, not a correctness problem.
+        }
       }
     }
     }
