@@ -1336,12 +1336,17 @@ export async function runHostSetup(
       // parent (Copilot #846 r12).
       const markerPath = join(dirname(envFilePath(env)), '.laya-venv-prev');
       const oldPrev = (() => {
-        try {
-          const p = readFileSync(markerPath, 'utf8').trim();
-          return p === '' ? null : p;
-        } catch {
-          return null;
+        // The config-dir marker is authoritative; a co-located marker next to the retained
+        // generation covers configs that moved (Copilot #846 r13).
+        for (const candidate of [markerPath, join(dirname(prevVenv), '.laya-venv-prev')]) {
+          try {
+            const p = readFileSync(candidate, 'utf8').trim();
+            if (p !== '') return p;
+          } catch {
+            // try the next candidate
+          }
         }
+        return null;
       })();
       const sweepParents = new Set([dataDir, dirname(prevVenv)]);
       if (oldPrev !== null && oldPrev !== prevVenv && dirname(oldPrev) !== dataDir) {
@@ -1367,16 +1372,20 @@ export async function runHostSetup(
           }
         }
       }
-      // Record this run's retained rollback generation for the next sweep (best effort).
-      try {
-        mkdirSync(dirname(markerPath), { recursive: true });
-        writeFileSync(markerPath, `${prevVenv}\n`, { flag: 'wx', mode: 0o600 });
-      } catch {
+      // Record this run's retained rollback generation for the next sweep (best effort): in
+      // the config dir AND next to the retained generation (covers config-dir moves, Copilot
+      // #846 r13).
+      for (const target of [markerPath, join(dirname(prevVenv), '.laya-venv-prev')]) {
         try {
-          rmSync(markerPath, { force: true });
-          writeFileSync(markerPath, `${prevVenv}\n`, { mode: 0o600 });
+          mkdirSync(dirname(target), { recursive: true });
+          writeFileSync(target, `${prevVenv}\n`, { flag: 'wx', mode: 0o600 });
         } catch {
-          // Best effort: without the marker the next run may retain one extra generation.
+          try {
+            rmSync(target, { force: true });
+            writeFileSync(target, `${prevVenv}\n`, { mode: 0o600 });
+          } catch {
+            // Best effort: without the marker the next run may retain one extra generation.
+          }
         }
       }
     }
