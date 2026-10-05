@@ -1005,7 +1005,9 @@ export async function runHostSetup(
       if (prevUnitText === null) return join(dataDir, 'laya-venv');
       const m = /<string>([^<]*\/bin\/laya-serve)<\/string>/.exec(prevUnitText) ?? /ExecStart=([^\s]+)/.exec(prevUnitText);
       const serve = m?.[1];
-      return serve && serve.startsWith(dataDir) ? dirname(dirname(serve)) : join(dataDir, 'laya-venv');
+      // May live under a PREVIOUS dataDir after a migration — it must stay reachable so the
+      // sweep can retire the old generations there too (Copilot #846 r9).
+      return serve ? dirname(dirname(serve)) : join(dataDir, 'laya-venv');
     })();
     const buildDir = join(dataDir, `laya-venv-${LAYA_SERVE_PIN}-${new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)}-${randomBytes(4).toString('hex')}`);
     const plan: LayaPlan = planLayaSidecar({ dataDir, pythonBin: det.bin!, venvDir: buildDir, env });
@@ -1318,22 +1320,28 @@ export async function runHostSetup(
       const keep = new Set([plan.venvDir, prevVenv]);
       // The WHOLE sweep is best effort: enumeration failures (EACCES/EIO, a concurrent
       // directory change) mean 'nothing swept now', never a failed install (Copilot #846 r8).
-      let entries: string[] = [];
-      try {
-        entries = existsSync(dataDir) ? readdirSync(dataDir) : [];
-      } catch {
-        entries = [];
-      }
-      for (const entry of entries) {
-        const owned = entry === 'laya-venv' || gen.test(entry);
-        if (!owned) continue;
-        const full = join(dataDir, entry);
-        if (keep.has(full)) continue;
+      // A dataDir migration keeps its rollback generation under the OLD parent — sweep the
+      // installer-owned siblings THERE too, so the two-generation budget holds across
+      // migrations (Copilot #846 r9).
+      const sweepParents = new Set([dataDir, dirname(prevVenv)]);
+      for (const sweepParent of sweepParents) {
+        let entries: string[] = [];
         try {
-          if (lstatSync(full).isDirectory()) rmSync(full, { recursive: true, force: true });
-          else unlinkSync(full); // a file or dangling symlink with an installer-owned name
+          entries = existsSync(sweepParent) ? readdirSync(sweepParent) : [];
         } catch {
-          // Best effort: leave it — disk space, not a correctness problem.
+          entries = [];
+        }
+        for (const entry of entries) {
+          const owned = entry === 'laya-venv' || gen.test(entry);
+          if (!owned) continue;
+          const full = join(sweepParent, entry);
+          if (keep.has(full)) continue;
+          try {
+            if (lstatSync(full).isDirectory()) rmSync(full, { recursive: true, force: true });
+            else unlinkSync(full); // a file or dangling symlink with an installer-owned name
+          } catch {
+            // Best effort: leave it — disk space, not a correctness problem.
+          }
         }
       }
     }

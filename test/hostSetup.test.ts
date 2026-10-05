@@ -1894,12 +1894,28 @@ test('runHostSetup (#845): a re-run after success keeps exactly one previous gen
     // An operator-named sibling is NEVER touched (Copilot #846 r2).
     assert.ok(existsSync(join(dir, 'data', 'laya-venv.backup-manual')), 'operator-named siblings are untouched');
     assert.ok(existsSync(join(dir, 'data', 'laya-venv-notes')), 'operator-named siblings are untouched');
+  // DataDir migration (Copilot #846 r9): run 3 moves to a NEW data dir. The old parent's
+  // generations must be swept down to the single rollback generation the previous unit
+  // referenced, and the new dir gets exactly the new generation.
+  const dataDirB = join(dir, 'data-b');
+  const xdgB = join(dir, 'xdg-b');
+  mkdirSync(xdgB, { recursive: true });
+  const code3 = await runHostSetup(['--yes'], {
+    out: (s) => out.push(s), err: (s) => err.push(s),
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarRun, sidecarDataDir: dataDirB,
+    sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 30_000,
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: xdgB, XDG_STATE_HOME: dir, HOME: dir });
+  assert.equal(code3, 0, `migration run: ${err.join('')} | ${out.join('')}`);
+  const ownedRe = new RegExp(`^laya-venv(-${LAYA_SERVE_PIN}-\\d{14}-[0-9a-f]{8})?$`);
+  const dirsA = readdirSync(join(dir, 'data')).filter((e) => ownedRe.test(e)).sort();
+  const dirsB = readdirSync(dataDirB).filter((e) => e.startsWith('laya-venv')).sort();
+  assert.equal(dirsB.length, 1, `the new data dir holds exactly the new generation: ${dirsB.join(', ')}`);
+  assert.ok(dirsA.length >= 1 && dirsA.length <= 2, `the old parent keeps at most the rollback generation(s): ${dirsA.join(', ')}`);
   } finally {
     await fake.close();
   }
 });
-
-
 test('ensureLayaCredentials: a stale PID-named temp file is never reused (#840 r52)', () => {
   const dir = tempDir('setup-laya-tmp-reuse-');
   const credsPath = join(dir, 'mercury', 'laya-credentials.json');
