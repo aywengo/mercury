@@ -1745,6 +1745,8 @@ test('runHostSetup (#845): a unit-write failure keeps the previous unit and venv
       const after = statSync(prevVenv);
       assert.equal(after.ino, prevStat.ino, 'the previous venv was never replaced');
       assert.equal(after.mtimeMs, prevStat.mtimeMs, 'the previous venv was never modified');
+      const owned = readdirSync(join(dir, 'data')).filter((e) => e.startsWith('laya-venv'));
+      assert.deepEqual(owned, [basename(prevVenv)], `the failed build directory is removed: ${owned.join(', ')}`);
     } finally {
       chmodSync(unitParent, 0o755);
     }

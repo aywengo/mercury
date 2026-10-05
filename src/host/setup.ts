@@ -1090,11 +1090,14 @@ export async function runHostSetup(
       }
       // The build directory is not live unless readiness proved it; after any post-commit
       // failure it is garbage (best effort: injected runners may not have created it). EXCEPT
-      // when the unit restore FAILED and the enabled unit still references it — then keep the
-      // directory so the service keeps a working executable (Copilot #846 r2).
+      // when the enabled unit still references it: for a re-run that means the restore FAILED
+      // (the on-disk unit is not the previous bytes); for a fresh install it means the unit
+      // could not be removed. Either way keep the directory so the unit keeps a working
+      // executable (Copilot #846 r2/r3).
       const restored = (() => {
         try {
-          return unitBackupText === null || readFileSync(plan.unitPath, 'utf8') === unitBackupText;
+          if (unitBackupText === null) return !existsSync(plan.unitPath);
+          return existsSync(plan.unitPath) && readFileSync(plan.unitPath, 'utf8') === unitBackupText;
         } catch {
           return false;
         }
@@ -1110,9 +1113,19 @@ export async function runHostSetup(
     } catch (e) {
       // Rollback (#845): a failure during build/install/unit leaves the previous unit and venv
       // untouched (the unit rename is the commit point) — only the partial build directory must
-      // go. If the unit WAS already renamed, restore the previous bytes.
+      // go. If the unit WAS already renamed, restore the previous bytes — and delete the build
+      // directory only if the enabled unit no longer references it (a failed restore would
+      // otherwise leave the unit pointing at a deleted tree, Copilot #846 r3).
       restoreLayaUnit(plan.unitPath, unitBackupText);
-      rmSync(plan.venvDir, { recursive: true, force: true });
+      const restored = (() => {
+        try {
+          if (unitBackupText === null) return !existsSync(plan.unitPath);
+          return existsSync(plan.unitPath) && readFileSync(plan.unitPath, 'utf8') === unitBackupText;
+        } catch {
+          return false;
+        }
+      })();
+      if (restored) rmSync(plan.venvDir, { recursive: true, force: true });
       io.err(`\nlaya: not installed — ${(e as Error).message}\n`);
       io.err('laya: mercury.env was written; the sidecar can be finished later by re-running `mercury host setup --yes`.\n');
       return 1;
@@ -1270,7 +1283,9 @@ export async function runHostSetup(
     // Per-entry try/catch: cleanup is best effort — a dangling symlink or an unreadable entry
     // is disk space, never a reason to fail a finished install (Copilot #846 r2).
     {
-      const gen = new RegExp(`^laya-venv-${LAYA_SERVE_PIN}-\\d{14}-[0-9a-f]{8}$`);
+      // Pin-independent: after a pin upgrade the previous pin's generated dirs must still be
+      // swept (Copilot #846 r3).
+      const gen = /^laya-venv-\d+\.\d+\.\d+-\d{14}-[0-9a-f]{8}$/;
       const keep = new Set([plan.venvDir, prevVenv]);
       for (const entry of existsSync(dataDir) ? readdirSync(dataDir) : []) {
         const owned = entry === 'laya-venv' || gen.test(entry);
