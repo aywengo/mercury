@@ -10,7 +10,7 @@
  *   does not exist),
  * - loopback host only — the sidecar binds 127.0.0.1 and the bearer must not leave the host,
  * - BASE URL without a route path (LayaClient appends `/v1/systemone` itself),
- * - no query or fragment, no embedded user:password (the key lives in bot-credentials.json),
+ * - no query or fragment, no embedded user:password (the key lives in laya-credentials.json),
  * - no surrounding whitespace (only the empty string means "wizard-managed default").
  */
 
@@ -46,7 +46,7 @@ export function validateLayaBaseUrl(value: unknown, varName = 'MERCURY_LAYA_URL'
   if (value !== value.trim()) return `${varName} must not have leading or trailing whitespace`;
   // URL-only contract: an embedded user:password would be written to the env file and printed
   // by the external/dry-run paths — a credential smuggled into a 'plain URL' (Copilot #840 r23).
-  if (u.username || u.password) return `${varName} must not contain a username or password (the key lives in bot-credentials.json)`;
+  if (u.username || u.password) return `${varName} must not contain a username or password (the key lives in laya-credentials.json)`;
   return null;
 }
 

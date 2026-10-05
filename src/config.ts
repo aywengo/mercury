@@ -121,7 +121,7 @@ export interface Config {
    * The Laya sidecar base URL (#830/#831, Laya design §5.3/§10). Null = not configured:
    * no sidecar exists, selection stays deterministic (L1 will consult this). The wizard
    * writes it only on opt-in; the value is a loopback URL, never a credential — the sidecar
-   * key lives in the 0600 bot-credentials.json under the `laya` entry.
+   * key lives in the 0600 laya-credentials.json.
    */
   layaUrl: string | null;
 }
@@ -324,7 +324,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     logLevel: (env.MERCURY_LOG_LEVEL as Config['logLevel']) ?? 'info',
     knowledge: loadKnowledgeConfig(env),
     // The Laya sidecar (#830/#831): a plain loopback URL, never a credential (the sidecar key
-    // lives in the 0600 bot-credentials.json, `laya` entry). Null = not configured = the
+    // lives in the 0600 laya-credentials.json). Null = not configured = the
     // feature does not exist on this host. The SHAPE is validated here — hand-written or
     // service-provided env files bypass the wizard, and doctor would otherwise send the
     // bearer key to any URL this line accepts (Copilot #840 r34).

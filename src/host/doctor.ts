@@ -31,7 +31,7 @@ import { homedir, networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
 import { join } from 'node:path';
 import { LayaClient } from '../laya/client.ts';
 import { validateLayaBaseUrl } from '../laya/layaUrl.ts';
-import { readBotCredentials } from './bots/credentials.ts';
+import { readLayaCredentials } from './layaCredentials.ts';
 
 /** Load mercury.env into a record (simple KEY=VALUE parser, no shell semantics). */
 export function loadEnvFile(path: string): Record<string, string> {
@@ -274,7 +274,7 @@ export async function checkLaya(baseUrl: string, apiKey: string | undefined, tim
     return { ok: true, detail: `ok, checkpoint ${result.checkpoint}, 1 question answered`, latencyMs: Math.round(result.latencyMs), checkpoint: result.checkpoint };
   }
   if (result.reason === 'http_status' && (result.detail ?? '').includes('401')) {
-    return { ok: false, detail: `auth failed (401): the sidecar rejected the key${apiKey ? " from the 'laya' entry in bot-credentials.json" : ' (no key configured — expected when the sidecar has LAYA_API_KEY set)'}`, latencyMs: Math.round(result.latencyMs) };
+    return { ok: false, detail: `auth failed (401): the sidecar rejected the key${apiKey ? ' from laya-credentials.json' : ' (no key configured — expected when the sidecar has LAYA_API_KEY set)'}`, latencyMs: Math.round(result.latencyMs) };
   }
   if (result.reason === 'unreachable' || result.reason === 'timeout') {
     return { ok: false, detail: `unreachable: ${result.detail ?? 'no detail'}`, latencyMs: Math.round(result.latencyMs) };
@@ -337,7 +337,7 @@ export async function runHostDoctor(
 
   const anySkipped = smoke.length > 0 && smoke.every((s) => s.skipped);
   // Laya sidecar probe (#830): only when configured. Unset → no line at all (absence is the
-  // default, not a warning). The key lives in the same 0600 credentials file (design §5.1/§10);
+  // default, not a warning). The key lives in its own 0600 laya-credentials.json (design §5.1/§10);
   // a missing or unreadable entry is a NAMED failure, never a token leak (the reader redacts
   // values from errors).
   const layaUrl = vars.MERCURY_LAYA_URL;
@@ -357,7 +357,7 @@ export async function runHostDoctor(
       let apiKey: string | undefined;
       let keyDetail: string | undefined;
       try {
-        apiKey = readBotCredentials('laya', env).api;
+        apiKey = readLayaCredentials(env).api;
       } catch (err) {
         keyDetail = (err as Error).message;
       }

@@ -43,7 +43,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
 import { suggestionFor } from '../adapters/configSchema.ts';
 import { checkLaya, isLayaAuthRejected, loadEnvFile, parseLayaTimeoutMs, schemeFor } from './doctor.ts';
-import { botCredentialsPath, readBotCredentials } from './bots/credentials.ts';
+import { readLayaCredentials } from './layaCredentials.ts';
 import { DEFAULT_PYTHON_CANDIDATES, detectPython, ensureLayaCredentials, LAYA_DEFAULT_PORT, LAYA_SERVE_PIN, layaStepActions, planLayaSidecar, renderLayaLaunchdPlist, renderLayaSystemdUnit, type LayaPlan, type RunFn } from './layaSidecar.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
 import { isWizardManagedLayaDefault, validateLayaBaseUrl } from '../laya/layaUrl.ts';
@@ -308,7 +308,7 @@ export function renderEnv(a: HostSetupAnswers, preserve: Record<string, string> 
         ] as [string, string][])
       : []),
     // MERCURY_LAYA_URL is a plain URL (no credential): the laya KEY lives in the 0600
-    // bot-credentials.json (#831, design §5.1), so it never passes through the env file.
+    // laya-credentials.json (#831, design §5.1), so it never passes through the env file.
     ...(a.layaEnabled ? ([['layaUrl', a.layaUrl || `http://127.0.0.1:${LAYA_DEFAULT_PORT}`]] as [string, string][]) : []),
   ];
   for (const [k, v] of checked) {
@@ -685,24 +685,6 @@ function ttyAvailable(): boolean {
 }
 
 /** Run the wizard. Returns the process exit code. */
-/**
- * The owner ('bot-laya') a MERCURY_API_TOKENS value registers for `apiKey`, or null when the
- * token is unregistered. Both halves are trimmed — parseTokens parity (Copilot #840 r54): a
- * hand-written 'tok: bot-laya' is a valid registration and must not slip past the registry
- * gate. Malformed entries (not exactly one colon) are skipped, mirroring the strict parser's
- * shape check without failing unrelated entries.
- */
-export function registeredLayaOwner(registryText: string, apiKey: string): string | null {
-  for (const entry of registryText.split(',').map((e) => e.trim())) {
-    if (entry === '') continue;
-    const parts = entry.split(':');
-    if (parts.length !== 2) continue;
-    const [token, owner] = parts as [string, string];
-    if (token.trim() === apiKey && owner.trim() !== '') return owner.trim();
-  }
-  return null;
-}
-
 /** Marker written once a rebuilt venv has passed the doctor readiness probe: distinguishes a
  *  VERIFIED environment from an interrupted or unverified rebuild (Copilot #840 r59/r61). */
 const INSTALL_OK_MARKER = '.laya-install-ok';
@@ -734,32 +716,6 @@ export function findNumericVenvBackup(parentDir: string, venvBase: string): stri
     if (/^\.backup-(\d+)$/.test(entry.slice(venvBase.length))) return join(parentDir, entry);
   }
   return null;
-}
-
-/**
- * Every on-disk shape that proves a bot named 'laya' pre-dates the sidecar reservation
- * (Copilot #840 r33/r41/r43/r48). The config file alone misses a bot whose config was
- * moved/lost; a remaining STATE FILE proves an interrupted uninstall (new provisioning cannot
- * create one for a service that never ran); the service unit/plist proves an installed bot.
- * macOS unit candidates cover BOTH resolutions: the lifecycle WRITES under homedir()
- * (botPlistPath ignores $HOME) while launchd itself follows $HOME — a mismatch between them
- * must not hide the real unit. Returns the existing paths (empty when no bot state exists).
- */
-export function layaCollisionEvidence(env: NodeJS.ProcessEnv): string[] {
-  const cfgBase = env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config');
-  const stateBase = env.XDG_STATE_HOME?.trim() || join(homedir(), '.local', 'state');
-  const candidates = [
-    join(cfgBase, 'mercury', 'bots', 'laya.json'),
-    join(stateBase, 'mercury', 'bots', 'laya.state.json'),
-  ];
-  // Check BOTH service shapes on every platform: each check is an existsSync probe, the
-  // wrong-platform path simply cannot exist, and the evidence list stays testable on any
-  // host (a darwin-only branch made the homedir() case untestable on CI — Copilot #840 r48).
-  const label = 'com.mercury.bot.laya.plist';
-  candidates.push(join(env.HOME?.trim() || homedir(), 'Library', 'LaunchAgents', label));
-  candidates.push(join(homedir(), 'Library', 'LaunchAgents', label));
-  candidates.push(join(cfgBase, 'systemd', 'user', 'mercury-bot-laya.service'));
-  return candidates.filter((p) => existsSync(p));
 }
 
 export async function runHostSetup(
@@ -940,67 +896,6 @@ export async function runHostSetup(
   const content = renderEnv(answers, preserved);
   const path = envFilePath(env);
   const alreadyConfigured = existsSync(path);
-  // Alias collision BEFORE ANY WRITE (Copilot #840 r33/r41/r43): a pre-existing bot named
-  // 'laya' holds a MERCURY API token in the shared bot-credentials.json entry. The external
-  // path reads that entry as the sidecar key (sending a Mercury token to the sidecar), and the
-  // local path discovers the collision only after creating the venv. Refuse before mercury.env
-  // is written. Config file AND service unit/plist are evidence: a config-only check misses a
-  // bot whose config was moved/lost while its unit and registered token remain — exactly the
-  // recovery the old message advised.
-  const layaEvidence = layaCollisionEvidence(env);
-  if (answers.layaEnabled && layaEvidence.length > 0) {
-    io.err(`\nlaya: a bot named 'laya' exists (${layaEvidence[0]}); the alias is reserved for the sidecar credential — uninstall the bot or move its config, then re-run setup.\n`);
-    return 1;
-  }
-  // Registry gate (Copilot #840 r51): an interrupted uninstall can have removed the unit, state
-  // and config but crashed before the credential/registry cleanup. The surviving `laya` entry
-  // then still holds a MERCURY bot token — also registered as `token:bot-laya` in
-  // MERCURY_API_TOKENS. Setup must not preserve that value as the sidecar key: one secret would
-  // be authorized for both the Mercury API and Laya. Refuse while the registration exists.
-  if (answers.layaEnabled && existsSync(botCredentialsPath(env))) {
-    let registryText = '';
-    for (const [k, v] of Object.entries(existingVars)) {
-      if (k === 'MERCURY_API_TOKENS') registryText = v;
-    }
-    let layaApi: string | undefined;
-    try {
-      layaApi = readBotCredentials('laya', env).api;
-    } catch (e) {
-      const msg = (e as Error).message ?? '';
-      if (!/no entry for alias/.test(msg) && !/cannot stat/.test(msg)) {
-        // A loose-mode or corrupt credentials file must NOT bypass this gate (Copilot #840
-        // r52): ensureLayaCredentials would repair the mode and preserve the (possibly
-        // bot-registered) key. Fail closed; the message names the file, never the content.
-        io.err(`\nlaya: cannot check the sidecar credential registry gate: ${msg}\n`);
-        io.err('laya: fix bot-credentials.json (chmod 600 / repair its JSON), then re-run setup.\n');
-        return 1;
-      }
-      // No laya entry (or no file): the local-cred path's ensureLayaCredentials owns that case.
-    }
-    if (layaApi) {
-      // ANY registry match is refused (Copilot #840 r55): a token shared with ANY bot owner
-      // (not just bot-laya) would authorize one secret for both the Mercury API and Laya.
-      const owner = registryText ? registeredLayaOwner(registryText, layaApi) : null;
-      // Compare against every resolved admin-token source (Copilot #840 r56): the old env file
-      // value AND the resolved answer (which may come from the process environment or an
-      // answers file and differ from the file's old value).
-      const adminCandidates = [existingVars.MERCURY_ADMIN_TOKEN, answers.adminToken]
-        .map((v) => (typeof v === 'string' ? v.trim() : ''))
-        .filter((v) => v !== '');
-      const adminMatch = layaApi !== '' && adminCandidates.includes(layaApi);
-      if (owner !== null) {
-        io.err(`\nlaya: the existing laya credential is still registered as a MERCURY token (owner '${owner}' in MERCURY_API_TOKENS) — reusing it as the sidecar key would let one secret authorize both services.\n`);
-        io.err('laya: if this came from an interrupted bot uninstall, finish it (re-run `mercury host bot service uninstall --alias laya --yes` after restoring its unit, or remove the entry from MERCURY_API_TOKENS by hand), then re-run setup.\n');
-        return 1;
-      }
-      if (adminMatch) {
-        io.err(`\nlaya: the existing laya credential equals MERCURY_ADMIN_TOKEN — reusing it as the sidecar key would hand the admin credential to the sidecar process.\n`);
-        io.err('laya: rotate one of the two secrets (the sidecar key lives in the laya entry of bot-credentials.json), then re-run setup.\n');
-        return 1;
-      }
-    }
-  }
-
   if (opts.dryRun) {
     io.out('mercury host setup --dry-run\n');
     io.out(redactedSummary(answers, preservedNames) + '\n');
@@ -1065,21 +960,21 @@ export async function runHostSetup(
         io.err(`\nlaya: ${timeout0.detail}\n`);
         return 1;
       }
-      // The doctor's own credential resolution (runHostDoctor): read the 'laya' entry and use
-      // its api key. A missing/unreadable entry is a NAMED FAILURE exactly as the doctor
+      // The doctor's own credential resolution (runHostDoctor): read laya-credentials.json and
+      // use its api key. A missing/unreadable entry is a NAMED FAILURE exactly as the doctor
       // reports it ("auth cannot be checked") — probing key-less would let an auth-disabled
       // endpoint answer 200 and print `doctor ok` for a config the doctor immediately rejects
       // (Copilot #840 r27).
       let apiKey: string | undefined;
       let keyDetail: string | undefined;
       try {
-        apiKey = readBotCredentials('laya', env).api;
+        apiKey = readLayaCredentials(env).api;
       } catch (err) {
         keyDetail = (err as Error).message;
       }
       if (apiKey === undefined) {
         io.err(`\nlaya: auth cannot be checked: ${keyDetail ?? 'no laya credentials'}\n`);
-        io.err('laya: write the laya bot-credentials entry (or unset MERCURY_LAYA_URL to let setup manage a local sidecar), then re-run.\n');
+        io.err('laya: write laya-credentials.json ({"api": "<key>"}, mode 0600) — or unset MERCURY_LAYA_URL to let setup manage a local sidecar — then re-run.\n');
         return 1;
       }
       io.out(`laya: external endpoint ${answers.layaUrl.trim()} preserved — verifying with the doctor probe (no local install)\n`);

@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, chmodSync, readFileSync, renameSync, rmSync, rea
 import { dirname, join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
+import { readLayaCredentials } from '../src/host/layaCredentials.ts';
 import { startFakeLaya, validPick } from './support/fakeLaya.ts';
 import {
   parseHostSetupArgs,
@@ -24,9 +25,7 @@ import {
   writeEnvFile,
   redactedSummary,
   defaultAnswers,
-  layaCollisionEvidence,
   readAnswersFile,
-  registeredLayaOwner,
   runHostSetup,
   generateAdminToken,
   sidecarExec,
@@ -38,7 +37,6 @@ import { isWizardManagedLayaDefault } from '../src/laya/layaUrl.ts';
 import {
   DEFAULT_PYTHON_CANDIDATES,
   detectPython,
-  discoverVersionedPythons,
   ensureLayaCredentials,
   LAYA_SERVE_PIN,
   layaStepActions,
@@ -1113,40 +1111,6 @@ test('detectPython: a python3.14-only Homebrew host passes the >= 3.10 gate (#84
   assert.equal(det.version, '3.14.0');
 });
 
-test('discoverVersionedPythons: unbounded PATH discovery appends python3.N (N >= 10), newest first (#840 r8)', () => {
-  const dir = tempDir('laya-pydisc-');
-  mkdirSync(join(dir, 'bin'), { recursive: true });
-  for (const name of ['python3.9', 'python3.99', 'python3.12', 'python3.10', 'python3']) {
-    writeFileSync(join(dir, 'bin', name), '#!/bin/sh\n', { mode: 0o755 });
-  }
-  const env = { PATH: `/nope:${dir}/bin` };
-  const found = discoverVersionedPythons(env, DEFAULT_PYTHON_CANDIDATES);
-  assert.deepEqual(found.map((c) => c.argv[0]), [join(dir, 'bin', 'python3.99')], 'python3.99 is discovered (no upper bound); python3.12/3.10 are already probed; python3.9 and bare python3 are below the gate');
-  assert.equal(found[0]!.bin, join(dir, 'bin', 'python3.99'));
-  // A PATH entry that does not exist is skipped, and an empty PATH yields nothing.
-  assert.deepEqual(discoverVersionedPythons({ PATH: '' }, DEFAULT_PYTHON_CANDIDATES), []);
-});
-
-test('detectPython: a discovered out-of-list interpreter wins over the old system shim (#840 r8)', () => {
-  const dir = tempDir('laya-pydet-');
-  mkdirSync(join(dir, 'bin'), { recursive: true });
-  // python3.16 is deliberately NOT in the static list — discovery must pick it up.
-  writeFileSync(join(dir, 'bin', 'python3.16'), '#!/bin/sh\n', { mode: 0o755 });
-  const located = join(dir, 'bin', 'python3.16');
-  const run = (argv: string[]) => {
-    if (argv[0] === 'uv') return { ok: false, stdout: '', stderr: 'no uv' };
-    if (argv[0] === located) return { ok: true, stdout: 'Python 3.14.1', stderr: '' };
-    if (argv[1] === '-V') return { ok: true, stdout: 'Python 3.9.6', stderr: '' };
-    return { ok: false, stdout: '', stderr: 'no' };
-  };
-  const det = detectPython(run, DEFAULT_PYTHON_CANDIDATES, 'darwin', { PATH: `${dir}/bin` });
-  assert.equal(det.ok, true);
-  assert.equal(det.bin, located, 'the discovered interpreter is probed through the same run fn');
-  assert.equal(det.version, '3.14.1');
-  // The uv bin label carries the >=3.10 request now (r8).
-  assert.equal(detectPython((a) => (a[0] === 'uv' ? { ok: true, stdout: located, stderr: '' } : { ok: true, stdout: 'Python 3.14.0', stderr: '' }), DEFAULT_PYTHON_CANDIDATES).bin, 'uv run --python >=3.10 python3');
-});
-
 test('detectPython: Homebrew versioned interpreters are probed before the plain python3 (#840 r6)', () => {
   // The stock-macOS recovery path: brew python@3.12 exposes python3.12 on PATH while the
   // unversioned python3 shim stays 3.9.6. Detection must find python3.12, not the shim.
@@ -1219,41 +1183,40 @@ test('laya units carry the same restart backoff as the host and bot units (#840 
   assert.match(renderLayaLaunchdPlist(darwin, 'k'), /<key>ThrottleInterval<\/key><integer>5<\/integer>/);
 });
 
-test('ensureLayaCredentials: generation REPLACES the file atomically (#840 r14)', () => {
-  // The file is shared across bots: a truncate-in-place that dies mid-write would lose every
-  // credential, and a loose-mode file would expose the new key until the trailing chmod. The
-  // generation path must write 0600 temp + fsync + rename and leave NO temp behind.
+test('ensureLayaCredentials: generation creates its OWN 0600 file atomically and never touches bot-credentials.json (#840 r14/r62)', () => {
   const dir = tempDir('laya-creds-atomic-');
   const env = { XDG_CONFIG_HOME: dir };
   mkdirSync(join(dir, 'mercury'), { recursive: true });
-  const path = join(dir, 'mercury', 'bot-credentials.json');
-  // An existing loose-mode file with ANOTHER bot's entry: the other entry must survive and the
-  // mode must end at 0600.
-  writeFileSync(path, JSON.stringify({ maint: { api: 'm'.repeat(64) } }), { mode: 0o644 });
+  // The shared bot file, loose on purpose: setup must neither read, rewrite nor chmod it.
+  const botPath = join(dir, 'mercury', 'bot-credentials.json');
+  const botBytes = JSON.stringify({ laya: { api: 'm'.repeat(64) } });
+  writeFileSync(botPath, botBytes, { mode: 0o644 });
   const r = ensureLayaCredentials(env);
   assert.equal(r.generated, true);
   assert.match(r.key, /^[0-9a-f]{64}$/);
-  const written = JSON.parse(readFileSync(path, 'utf8')) as { maint?: { api?: string }; laya?: { api?: string } };
-  assert.equal(written.maint?.api, 'm'.repeat(64), 'the other bot entry survives');
-  assert.equal(written.laya?.api, r.key);
-  assert.equal((statSync(path).mode & 0o777).toString(8), '600', 'the replaced file is 0600');
+  const path = join(dir, 'mercury', 'laya-credentials.json');
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { api: r.key });
+  assert.equal((statSync(path).mode & 0o777).toString(8), '600', 'the new file is 0600');
+  assert.equal(readFileSync(botPath, 'utf8'), botBytes, 'a bot named laya keeps its entry byte-for-byte');
+  assert.equal((statSync(botPath).mode & 0o777).toString(8), '644', 'the bot file mode is not ours to change');
+  assert.notEqual(r.key, 'm'.repeat(64), 'a bot token is never adopted as the sidecar key');
   const leftovers = readdirSync(join(dir, 'mercury')).filter((n) => n.includes('.tmp-'));
   assert.deepEqual(leftovers, [], `no temp file remains: ${leftovers.join(', ')}`);
 });
 
-test('ensureLayaCredentials: the WHOLE preserved entry is validated against the shared schema (#840 r7)', () => {
-  // The doctor reads this entry through readBotCredentials (unknown keys, non-empty/unpadded
-  // values for api AND llm). Setup must refuse what the reader would refuse — not write the
-  // unit, report success, and leave doctor failing (Copilot #840 r7).
+test('ensureLayaCredentials: the preserved file is validated against the reader schema (#840 r7/r62)', () => {
+  // The doctor reads this file through readLayaCredentials. Setup must refuse what the reader
+  // refuses, not write the unit, report success, and leave doctor failing (Copilot #840 r7).
   const dir = tempDir('laya-creds-schema-');
   const env = { XDG_CONFIG_HOME: dir };
   mkdirSync(join(dir, 'mercury'), { recursive: true });
-  const path = join(dir, 'mercury', 'bot-credentials.json');
+  const path = join(dir, 'mercury', 'laya-credentials.json');
   for (const [label, entry] of [
     ['unknown key', { api: 'a'.repeat(64), token: 'stale' }],
-    ['bad llm type', { api: 'a'.repeat(64), llm: 42 }],
+    ['bot-shaped llm field', { api: 'a'.repeat(64), llm: 'c'.repeat(32) }],
+    ['missing api', {}],
   ] as const) {
-    writeFileSync(path, JSON.stringify({ laya: entry }), { mode: 0o600 });
+    writeFileSync(path, JSON.stringify(entry), { mode: 0o600 });
     let msg = '';
     try {
       ensureLayaCredentials(env);
@@ -1261,33 +1224,26 @@ test('ensureLayaCredentials: the WHOLE preserved entry is validated against the 
       msg = (e as Error).message;
     }
     assert.ok(msg, `${label}: refused`);
-    assert.match(msg, /bot-credentials\.json/, 'the file is named');
+    assert.match(msg, /laya-credentials\.json/, 'the file is named');
     assert.ok(!msg.includes('stale') && !msg.includes('a'.repeat(64)), 'no value is echoed');
-    assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), `no unit write after a ${label} refusal`);
   }
-  // The did-you-mean hint survives (same wording the reader has always used).
-  writeFileSync(path, JSON.stringify({ laya: { api: 'a'.repeat(64), token: 'stale' } }), { mode: 0o600 });
-  let msg2 = '';
-  try {
-    ensureLayaCredentials(env);
-  } catch (e) {
-    msg2 = (e as Error).message;
-  }
-  assert.match(msg2, /unknown key 'token' \(did you mean 'api'\?\)/);
-  // A VALID preserved entry (api + llm) still passes and is preserved untouched.
-  writeFileSync(path, JSON.stringify({ laya: { api: 'b'.repeat(64), llm: 'c'.repeat(32) } }), { mode: 0o600 });
+  writeFileSync(path, JSON.stringify({ api: 'a'.repeat(64), token: 'stale' }), { mode: 0o600 });
+  assert.throws(() => ensureLayaCredentials(env), /unknown key 'token' \(did you mean 'api'\?\)/);
+  // A valid file is preserved untouched.
+  writeFileSync(path, JSON.stringify({ api: 'b'.repeat(64) }), { mode: 0o600 });
   const r = ensureLayaCredentials(env);
   assert.equal(r.generated, false);
   assert.equal(r.key, 'b'.repeat(64));
+  assert.equal(readLayaCredentials(env).api, 'b'.repeat(64), 'setup and the reader agree');
 });
 
 test('ensureLayaCredentials: a padded or empty preserved api is refused at setup time (#840 r4)', () => {
   const dir = tempDir('laya-creds-padded-');
   const env = { XDG_CONFIG_HOME: dir };
   mkdirSync(join(dir, 'mercury'), { recursive: true });
-  const path = join(dir, 'mercury', 'bot-credentials.json');
-  // Padded: readBotCredentials would reject it AFTER setup claimed success — refuse now.
-  writeFileSync(path, JSON.stringify({ laya: { api: ' key ' } }), { mode: 0o600 });
+  const path = join(dir, 'mercury', 'laya-credentials.json');
+  // Padded: readLayaCredentials would reject it AFTER setup claimed success — refuse now.
+  writeFileSync(path, JSON.stringify({ api: ' key ' }), { mode: 0o600 });
   let msg = '';
   try {
     ensureLayaCredentials(env);
@@ -1297,11 +1253,11 @@ test('ensureLayaCredentials: a padded or empty preserved api is refused at setup
   assert.match(msg, /leading or trailing whitespace/);
   assert.ok(!msg.includes('key'), 'the value is never included in the error');
   // Empty: same refusal class.
-  writeFileSync(path, JSON.stringify({ laya: { api: '  ' } }), { mode: 0o600 });
+  writeFileSync(path, JSON.stringify({ api: '  ' }), { mode: 0o600 });
   assert.throws(() => ensureLayaCredentials(env), /must be a non-empty string/);
   // Malformed entry shape: refused, never silently overwritten.
-  writeFileSync(path, JSON.stringify({ laya: 'nope' }), { mode: 0o600 });
-  assert.throws(() => ensureLayaCredentials(env), /must be an object with a non-empty string 'api'/);
+  writeFileSync(path, JSON.stringify('nope'), { mode: 0o600 });
+  assert.throws(() => ensureLayaCredentials(env), /must be a JSON object/);
 });
 
 test('sidecarExec: a timed-out command with empty stderr keeps the ETIMEDOUT diagnosis (#840 r9)', () => {
@@ -1345,38 +1301,45 @@ test('renderLayaLaunchdPlist / renderLayaSystemdUnit: loopback, preload, english
   assert.match(pyActions[1]!, /python3 -m venv/, 'the fallback path prints the fallback tool');
 });
 
+test('laya sidecar and a bot named laya coexist: no shared credential namespace (#840 r62)', async () => {
+  // r29-r62 reserved the alias because both lived in bot-credentials.json. With the key in its
+  // own file, a bot's config, unit, state file and registered token are irrelevant to setup.
+  const dir = tempDir('laya-creds-coexist-');
+  const env = { XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir };
+  mkdirSync(join(dir, 'mercury', 'bots'), { recursive: true });
+  writeFileSync(join(dir, 'mercury', 'bots', 'laya.json'), '{}');
+  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'tok-bot-laya' } }), { mode: 0o600 });
+  const r = ensureLayaCredentials(env);
+  assert.equal(r.generated, true, 'the sidecar gets its own key');
+  assert.notEqual(r.key, 'tok-bot-laya');
+  assert.equal(readLayaCredentials(env).api, r.key);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mercury', 'bot-credentials.json'), 'utf8')), { laya: { api: 'tok-bot-laya' } }, 'the bot keeps its token');
+});
+
 test('ensureLayaCredentials: generates when absent, PRESERVES an existing key (#831)', () => {
   const dir = tempDir('laya-creds-');
   const env = { XDG_CONFIG_HOME: dir };
   const first = ensureLayaCredentials(env);
   assert.equal(first.generated, true);
   assert.match(first.key, /^[0-9a-f]{64}$/);
-  const file = readFileSync(join(dir, 'mercury', 'bot-credentials.json'), 'utf8');
-  assert.equal((statSync(join(dir, 'mercury', 'bot-credentials.json')).mode & 0o777).toString(8), '600', '0600 on create');
+  assert.equal((statSync(join(dir, 'mercury', 'laya-credentials.json')).mode & 0o777).toString(8), '600', '0600 on create');
   const second = ensureLayaCredentials(env);
   assert.equal(second.generated, false, 'a re-run preserves the key');
   assert.equal(second.key, first.key);
-  // An existing entry with a DIFFERENT shape still counts as absent (api missing) and is
-  // filled in without touching the rest of the file.
-  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ maint: { api: 'tok-x' } }), { mode: 0o600 });
-  const third = ensureLayaCredentials(env);
-  assert.equal(third.generated, true);
-  const raw = JSON.parse(readFileSync(join(dir, 'mercury', 'bot-credentials.json'), 'utf8')) as { maint?: unknown };
-  assert.ok(raw.maint, 'the pre-existing alias entry survives');
+  assert.ok(!existsSync(join(dir, 'mercury', 'bot-credentials.json')), 'the bot credentials file is never created');
 });
 
 test('ensureLayaCredentials: an array root or invalid JSON is REFUSED, secrets never leak (#840 r2)', () => {
   const dir = tempDir('laya-creds-shape-');
   const env = { XDG_CONFIG_HOME: dir };
   mkdirSync(join(dir, 'mercury'), { recursive: true });
-  const path = join(dir, 'mercury', 'bot-credentials.json');
-  // A valid-JSON array would swallow the .laya assignment and setup would report success
-  // while the key was never persisted.
+  const path = join(dir, 'mercury', 'laya-credentials.json');
+  // A valid-JSON array (or any non-object root) is refused, never overwritten.
   writeFileSync(path, '[]', { mode: 0o600 });
-  assert.throws(() => ensureLayaCredentials(env), /must be a JSON object keyed by bot alias/);
+  assert.throws(() => ensureLayaCredentials(env), /must be a JSON object/);
   // An invalid JSON file whose excerpt would carry a planted secret: the error names the
   // failure, never the content.
-  writeFileSync(path, '{"laya": {"api": sk-9f88-tok}}', { mode: 0o600 });
+  writeFileSync(path, '{"api": sk-9f88-tok}', { mode: 0o600 });
   try {
     ensureLayaCredentials(env);
     assert.fail('invalid JSON must refuse');
@@ -1390,9 +1353,9 @@ test('ensureLayaCredentials: keys that cannot be embedded in a unit are REFUSED 
   const dir = tempDir('laya-creds-charset-');
   const env = { XDG_CONFIG_HOME: dir };
   mkdirSync(join(dir, 'mercury'), { recursive: true });
-  const path = join(dir, 'mercury', 'bot-credentials.json');
+  const path = join(dir, 'mercury', 'laya-credentials.json');
   for (const bad of ['a&b', 'a b', 'a\nb', 'a"b', 'a b; c']) {
-    writeFileSync(path, JSON.stringify({ laya: { api: bad } }), { mode: 0o600 });
+    writeFileSync(path, JSON.stringify({ api: bad }), { mode: 0o600 });
     let msg = '';
     try {
       ensureLayaCredentials(env);
@@ -1404,7 +1367,7 @@ test('ensureLayaCredentials: keys that cannot be embedded in a unit are REFUSED 
     assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'no unit write happens after a refusal');
   }
   // Hex keys — the wizard-generated shape — always pass.
-  writeFileSync(path, JSON.stringify({ laya: { api: 'a'.repeat(64) } }), { mode: 0o600 });
+  writeFileSync(path, JSON.stringify({ api: 'a'.repeat(64) }), { mode: 0o600 });
   const r = ensureLayaCredentials(env);
   assert.equal(r.generated, false);
   assert.equal(r.key, 'a'.repeat(64));
@@ -1414,23 +1377,12 @@ test('ensureLayaCredentials: a PRESERVED key in a drifted 0644 file is still rep
   const dir = tempDir('laya-creds-preserve-mode-');
   const env = { XDG_CONFIG_HOME: dir };
   mkdirSync(join(dir, 'mercury'), { recursive: true });
-  const path = join(dir, 'mercury', 'bot-credentials.json');
-  writeFileSync(path, JSON.stringify({ laya: { api: 'existing-laya-key' } }), { mode: 0o644 });
+  const path = join(dir, 'mercury', 'laya-credentials.json');
+  writeFileSync(path, JSON.stringify({ api: 'existing-laya-key' }), { mode: 0o644 });
   const r = ensureLayaCredentials(env);
   assert.equal(r.generated, false, 'the existing key is preserved');
   assert.equal(r.key, 'existing-laya-key');
   assert.equal((statSync(path).mode & 0o777).toString(8), '600', 'the drifted mode is repaired on the preserved path too');
-});
-
-test('ensureLayaCredentials: an EXISTING loose-mode file is repaired to 0600 (#840 r1)', () => {
-  const dir = tempDir('laya-creds-mode-');
-  const env = { XDG_CONFIG_HOME: dir };
-  mkdirSync(join(dir, 'mercury'), { recursive: true });
-  const path = join(dir, 'mercury', 'bot-credentials.json');
-  writeFileSync(path, JSON.stringify({ maint: { api: 'tok-x' } }), { mode: 0o644 });
-  const r = ensureLayaCredentials(env);
-  assert.equal(r.generated, true);
-  assert.equal((statSync(path).mode & 0o777).toString(8), '600', 'the key must never land in a world-readable file');
 });
 
 test('runHostSetup: Laya OPT-OUT writes no MERCURY_LAYA_URL and nothing else changes (#831)', async () => {
@@ -1444,7 +1396,7 @@ test('runHostSetup: Laya OPT-OUT writes no MERCURY_LAYA_URL and nothing else cha
   assert.equal(code, 0);
   const file = readFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), 'utf8');
   assert.ok(!file.includes('MERCURY_LAYA_URL'), 'opt-out must not write the env key');
-  assert.ok(!existsSync(join(dir, 'mercury', 'bot-credentials.json')), 'opt-out must not write credentials');
+  assert.ok(!existsSync(join(dir, 'mercury', 'laya-credentials.json')), 'opt-out must not write credentials');
 });
 
 test('runHostSetup: Laya OPT-IN writes MERCURY_LAYA_URL + credentials + unit (scripted exec) (#831)', async () => {
@@ -1478,9 +1430,9 @@ test('runHostSetup: Laya OPT-IN writes MERCURY_LAYA_URL + credentials + unit (sc
   assert.ok(file.includes('MERCURY_LAYA_URL=http://127.0.0.1:8302'), 'the opt-in writes the env key');
   assert.ok(sidecarCalls.some((a) => a.join(' ').includes('venv')), 'uv venv ran');
   assert.ok(sidecarCalls.some((a) => a.join(' ').includes(`laya[serve]==${LAYA_SERVE_PIN}`)), 'the pinned install ran');
-  assert.ok(existsSync(join(dir, 'mercury', 'bot-credentials.json')), 'credentials written');
-  const creds = JSON.parse(readFileSync(join(dir, 'mercury', 'bot-credentials.json'), 'utf8')) as { laya?: { api?: string } };
-  assert.match(creds.laya?.api ?? '', /^[0-9a-f]{64}$/);
+  assert.ok(existsSync(join(dir, 'mercury', 'laya-credentials.json')), 'credentials written');
+  const creds = JSON.parse(readFileSync(join(dir, 'mercury', 'laya-credentials.json'), 'utf8')) as { api?: string };
+  assert.match(creds.api ?? '', /^[0-9a-f]{64}$/);
   assert.ok(out.join('').includes('mercury host doctor'), 'the wizard points at the doctor line');
   assert.ok(out.join('').includes('laya: doctor ok'), 'the run finishes with the doctor probe green (r10)');
   assert.ok(fake.received.length >= 1, 'the probe reached the sidecar');
@@ -1512,8 +1464,8 @@ test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
       sidecarReadinessBudgetMs: 30_000,
     sidecarProbeUrl: `${fake.url}`,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
-    const credsPath = join(dir, 'mercury', 'bot-credentials.json');
-    const firstKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
+    const credsPath = join(dir, 'mercury', 'laya-credentials.json');
+    const firstKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { api: string }).api;
     // Second run: env now carries MERCURY_LAYA_URL (default yes), re-run with --yes.
     const out: string[] = [];
     const code = await runHostSetup(['--yes'], {
@@ -1526,7 +1478,7 @@ test('runHostSetup: Laya re-run preserves an existing key (#831)', async () => {
     sidecarProbeUrl: `${fake.url}`,
     }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir, MERCURY_LAYA_URL: 'http://127.0.0.1:8302' });
     assert.equal(code, 0, `re-run failed: ${out.join('')}`);
-    const secondKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { laya: { api: string } }).laya.api;
+    const secondKey = (JSON.parse(readFileSync(credsPath, 'utf8')) as { api: string }).api;
     assert.equal(secondKey, firstKey, 'the re-run must NOT rotate the sidecar key');
   } finally {
     await fake.close();
@@ -1570,41 +1522,6 @@ test('runHostSetup: an invalid MERCURY_LAYA_TIMEOUT_MS refuses with the doctor w
   }
 });
 
-test('runHostSetup: the venv step uses the EXACT located interpreter (spaces included) (#840 r15)', async () => {
-  // A discovered interpreter under a directory with a space: splitting det.bin would truncate
-  // the path; the step must replay det.argv[0] verbatim.
-  const dir = tempDir('laya-pyspace-');
-  // python3.16: deliberately NOT in the static list, so only PATH discovery can find it.
-  const spacedBin = join(dir, 'Jane Doe', 'bin', 'python3.16');
-  mkdirSync(join(dir, 'Jane Doe', 'bin'), { recursive: true });
-  writeFileSync(spacedBin, '#!/bin/sh\n', { mode: 0o755 });
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
-  const venvArgv: string[][] = [];
-  try {
-    const code = await runHostSetup([], {
-      out: () => {},
-      err: (s) => process.stderr.write(s),
-      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-      sidecarRun: (argv: string[]) => {
-        if (argv[1] === '-m' && argv[2] === 'venv') venvArgv.push(argv);
-        if (argv[0] === 'uv') return { ok: false, stdout: '', stderr: 'no uv' };
-        if (argv[0] === spacedBin && argv[1] === '-V') return { ok: true, stdout: 'Python 3.16.0', stderr: '' };
-        if (argv[1] === '-V') return { ok: true, stdout: 'Python 3.9.6', stderr: '' };
-        return okRun(argv);
-      },
-      sidecarDataDir: join(dir, 'data'),
-      sidecarReadinessBudgetMs: 30_000,
-        sidecarProbeUrl: `${fake.url}`,
-      sidecarReadinessGapMs: 10,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir, PATH: `${join(dir, 'Jane Doe', 'bin')}:${process.env.PATH ?? ''}` });
-    assert.equal(code, 0);
-    assert.ok(venvArgv.length >= 1, 'the venv step ran');
-    assert.equal(venvArgv[0]![0], spacedBin, `the exact spaced path is used: ${venvArgv[0]?.join(' ')}`);
-  } finally {
-    await fake.close();
-  }
-});
-
 test('runHostSetup: an EMPTY process MERCURY_LAYA_URL keeps the configured endpoint (#840 r42)', async () => {
   // The invoking shell carries MERCURY_LAYA_URL=''; the configured external endpoint in
   // mercury.env must keep its continuity — not be rewritten to the local default and installed
@@ -1615,7 +1532,7 @@ test('runHostSetup: an EMPTY process MERCURY_LAYA_URL keeps the configured endpo
   mkdirSync(join(dir, 'mercury'), { recursive: true });
   // The CONFIGURED state: a previous setup wrote the external endpoint into mercury.env.
   writeFileSync(envFilePath({ XDG_CONFIG_HOME: dir }), `MERCURY_LAYA_URL=${fake.url}\n`);
-  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: KEY } }), { mode: 0o600 });
+  writeFileSync(join(dir, 'mercury', 'laya-credentials.json'), JSON.stringify({ api: KEY }), { mode: 0o600 });
   const outx: string[] = [];
   const errx: string[] = [];
   try {
@@ -1934,56 +1851,18 @@ test('runHostSetup: a readiness failure rolls the previous venv back into place 
   }
 });
 
-test('runHostSetup: a leftover laya.state.json (interrupted uninstall) is collision evidence (#840 r48)', async () => {
-  // UninstallBotService treats a remaining state file as proof of an interrupted uninstall —
-  // setup must refuse the alias for that shape too, BEFORE preserving the old token as the
-  // sidecar key.
-  const dir = tempDir('setup-laya-state-');
-  mkdirSync(join(dir, 'mercury', 'bots'), { recursive: true });
-  writeFileSync(join(dir, 'mercury', 'bots', 'laya.state.json'), '{}');
-  const err: string[] = [];
-  // A tiny readiness budget + dead probe URL keep the test FAST if the collision gate is ever
-  // removed: the run then reaches the install path and fails in seconds instead of hanging.
-  const code = await runHostSetup([], {
-    out: () => {}, err: (s) => err.push(s),
-    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-    sidecarReadinessBudgetMs: 2_000, sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone',
-  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
-  assert.equal(code, 1);
-  assert.match(err.join(''), /reserved for the sidecar credential/);
-  assert.match(err.join(''), /laya\.state\.json/);
-});
-
-test('ensureLayaCredentials: a loose-mode credentials file is fail-closed for the registry gate (#840 r52)', async () => {
-  // 0644 + a bot-registered key: readBotCredentials refuses; the gate must fail closed instead
-  // of letting ensureLayaCredentials repair the mode and preserve the Mercury token.
-  const dir = tempDir('setup-laya-loose-');
-  mkdirSync(join(dir, 'mercury'), { recursive: true });
-  writeFileSync(join(dir, 'mercury', 'mercury.env'), 'MERCURY_PORT=3999\nMERCURY_API_TOKENS=tok-legacy-laya:bot-laya\n');
-  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'tok-legacy-laya' } }), { mode: 0o644 });
-  const err: string[] = [];
-  const code = await runHostSetup([], {
-    out: () => {}, err: (s) => err.push(s),
-    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-    sidecarReadinessBudgetMs: 2_000, sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone',
-  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
-  assert.equal(code, 1);
-  assert.match(err.join(''), /registry gate/);
-  assert.match(err.join(''), /chmod 600/);
-});
-
 test('ensureLayaCredentials: a stale PID-named temp file is never reused (#840 r52)', () => {
   const dir = tempDir('setup-laya-tmp-reuse-');
-  const credsPath = join(dir, 'mercury', 'bot-credentials.json');
+  const credsPath = join(dir, 'mercury', 'laya-credentials.json');
   mkdirSync(join(dir, 'mercury'), { recursive: true });
   // A crashed run's leftover temp at 0644 with ANOTHER pid — must never be picked up.
-  const stale = join(dir, 'mercury', '.bot-credentials.json.tmp-999999');
+  const stale = join(dir, 'mercury', '.laya-credentials.json.tmp-999999');
   writeFileSync(stale, '{"laya":{"api":"stale"}}\n', { mode: 0o644 });
   // The exposure window test: make the final rename FAIL (destination is a directory) so the
   // just-written temp file stays behind. `mode` only applies at CREATION — code that reuses a
   // predictable existing temp writes the fresh key through the STALE 0644 file; O_EXCL code
   // always writes through a fresh 0600 file.
-  const samePid = join(dir, 'mercury', `.bot-credentials.json.tmp-${process.pid}`);
+  const samePid = join(dir, 'mercury', `.laya-credentials.json.tmp-${process.pid}`);
   writeFileSync(samePid, '{"x":1}\n', { mode: 0o644 });
   mkdirSync(credsPath); // rename over a directory fails
   const gen = () => 'a'.repeat(64);
@@ -2011,14 +1890,14 @@ test('ensureLayaCredentials: a predictable PID-shaped temp is never reused (#840
   // deterministic signal: the old code would collide (EISDIR on write, or write THROUGH an
   // existing file without re-applying the mode); O_EXCL creation with a unique name must not
   // collide at all.
-  const samePid = join(dir, 'mercury', `.bot-credentials.json.tmp-${process.pid}`);
+  const samePid = join(dir, 'mercury', `.laya-credentials.json.tmp-${process.pid}`);
   mkdirSync(samePid, { recursive: true });
   writeFileSync(join(samePid, 'junk'), 'x\n', { mode: 0o644 });
-  const stale = join(dir, 'mercury', '.bot-credentials.json.tmp-999999');
+  const stale = join(dir, 'mercury', '.laya-credentials.json.tmp-999999');
   writeFileSync(stale, '{"laya":{"api":"stale"}}\n', { mode: 0o644 });
   const r = ensureLayaCredentials({ XDG_CONFIG_HOME: dir, HOME: dir } as NodeJS.ProcessEnv, () => 'a'.repeat(64));
   assert.equal(r.key, 'a'.repeat(64));
-  const credsPath = join(dir, 'mercury', 'bot-credentials.json');
+  const credsPath = join(dir, 'mercury', 'laya-credentials.json');
   assert.equal(statSync(credsPath).mode & 0o777, 0o600, 'the credentials file is 0600');
   assert.equal(readFileSync(credsPath, 'utf8').includes('a'.repeat(64)), true, 'the fresh key landed');
   // The collision is swept after the fresh-file success (our own naming shape, recursive).
@@ -2070,44 +1949,6 @@ test('runHostSetup: the unit temp file is created exclusively at 0600 (#840 r52)
   } finally {
     await fake.close();
   }
-});
-
-test('runHostSetup: a laya credential shared with ANY bot owner or the admin token refuses (#840 r55)', async () => {
-  // A shared token authorized for BOTH Mercury and Laya is the collision the gate exists for —
-  // regardless of WHICH owner the registry lists.
-  for (const [label, envLine, apiValue] of [
-    ['shared bot owner', 'MERCURY_PORT=3999\nMERCURY_API_TOKENS=tok-shared:alice\n', 'tok-shared'],
-    ['admin token', 'MERCURY_PORT=3999\nMERCURY_ADMIN_TOKEN=tok-admin-shared\n', 'tok-admin-shared'],
-  ] as const) {
-    const dir = tempDir(`setup-laya-share-${label.includes('admin') ? 'adm' : 'bot'}-`);
-    mkdirSync(join(dir, 'mercury'), { recursive: true });
-    writeFileSync(join(dir, 'mercury', 'mercury.env'), envLine);
-    writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: apiValue } }), { mode: 0o600 });
-    const err: string[] = [];
-    const code = await runHostSetup([], {
-      out: () => {}, err: (s) => err.push(s),
-      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-      sidecarReadinessBudgetMs: 2_000, sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone',
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
-    assert.equal(code, 1, `${label}: must refuse (${err.join('')})`);
-    assert.match(err.join(''), /one secret authorize both services|hand the admin credential/);
-  }
-});
-
-test('runHostSetup: the laya credential equal to the process-env admin token refuses (#840 r56)', async () => {
-  // The resolved admin token can come from the process environment (not the old env file) —
-  // the gate must compare the RESOLVED answer, not just the file's old value.
-  const dir = tempDir('setup-laya-admenv-');
-  mkdirSync(join(dir, 'mercury'), { recursive: true });
-  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'tok-admin-env' } }), { mode: 0o600 });
-  const err: string[] = [];
-  const code = await runHostSetup([], {
-    out: () => {}, err: (s) => err.push(s),
-    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-    sidecarReadinessBudgetMs: 2_000, sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone',
-  }, { ...probeStubEnv(), MERCURY_ADMIN_TOKEN: 'tok-admin-env', XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
-  assert.equal(code, 1, `process-env admin match must refuse (${err.join('')})`);
-  assert.match(err.join(''), /equals MERCURY_ADMIN_TOKEN/);
 });
 
 test('runHostSetup: the backup survives a unit-write failure and rolls back (#840 r56)', async () => {
@@ -2165,111 +2006,6 @@ test('runHostSetup: the backup survives a unit-write failure and rolls back (#84
   }
 });
 
-test('registeredLayaOwner: trims both halves and skips malformed entries (#840 r54)', () => {
-  assert.equal(registeredLayaOwner('tok-legacy-laya: bot-laya', 'tok-legacy-laya'), 'bot-laya');
-  assert.equal(registeredLayaOwner('tok-legacy-laya :bot-laya', 'tok-legacy-laya'), 'bot-laya');
-  assert.equal(registeredLayaOwner('a:alice,tok-legacy-laya:bot-laya', 'tok-legacy-laya'), 'bot-laya');
-  assert.equal(registeredLayaOwner('tok-legacy-laya:alice', 'tok-legacy-laya'), 'alice');
-  assert.equal(registeredLayaOwner('malformed-entry', 'tok-legacy-laya'), null);
-  assert.equal(registeredLayaOwner('other:bot-laya', 'tok-legacy-laya'), null);
-  assert.equal(registeredLayaOwner('', 'tok-legacy-laya'), null);
-});
-
-test('runHostSetup: a laya credential still registered as bot-laya in MERCURY_API_TOKENS refuses (interrupted uninstall, #840 r51)', async () => {
-  // The interrupted-uninstall window: unit/state/config already removed, but the credential
-  // entry AND the token:bot-laya registration survive. Preserving that value as the sidecar
-  // key would authorize one secret for both the Mercury API and Laya — refuse instead.
-  const dir = tempDir('setup-laya-reg-');
-  mkdirSync(join(dir, 'mercury'), { recursive: true });
-  writeFileSync(join(dir, 'mercury', 'mercury.env'), 'MERCURY_PORT=3999\nMERCURY_API_TOKENS=tok-alice:alice,tok-legacy-laya:bot-laya\n');
-  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'tok-legacy-laya' } }), { mode: 0o600 });
-  const err: string[] = [];
-  const code = await runHostSetup([], {
-    out: () => {}, err: (s) => err.push(s),
-    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-    sidecarReadinessBudgetMs: 2_000, sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone',
-  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
-  assert.equal(code, 1);
-  assert.match(err.join(''), /interrupted/);
-  assert.match(err.join(''), /owner 'bot-laya' in MERCURY_API_TOKENS/);
-  // r54: whitespace around either half of the entry is a valid registration (parseTokens trims)
-  // — the gate must stay fail-closed for the hand-written shape too.
-  const dirWs = tempDir('setup-laya-reg-ws-');
-  mkdirSync(join(dirWs, 'mercury'), { recursive: true });
-  writeFileSync(join(dirWs, 'mercury', 'mercury.env'), 'MERCURY_PORT=3999\nMERCURY_API_TOKENS=tok-legacy-laya: bot-laya\n');
-  writeFileSync(join(dirWs, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'tok-legacy-laya' } }), { mode: 0o600 });
-  const errWs: string[] = [];
-  // Setup refuses the spaced entry at the safe-charset gate (a space is outside the value
-  // charset — it throws before anything is written) — fail-closed either way; the registry
-  // comparison itself also trims (parseTokens parity) so the gate cannot be slipped by a
-  // differently-sourced registry.
-  await assert.rejects(
-    () => runHostSetup([], {
-      out: () => {}, err: (s) => errWs.push(s),
-      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-      sidecarReadinessBudgetMs: 2_000, sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone',
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dirWs, XDG_STATE_HOME: dirWs, HOME: dirWs }),
-    /safe charset/,
-  );
-  // A sidecar key that is NOT bot-registered does not trip the gate (the normal re-run path).
-  const dir2 = tempDir('setup-laya-reg2-');
-  mkdirSync(join(dir2, 'mercury'), { recursive: true });
-  writeFileSync(join(dir2, 'mercury', 'mercury.env'), 'MERCURY_PORT=3999\nMERCURY_API_TOKENS=tok-alice:alice\n');
-  writeFileSync(join(dir2, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
-  try {
-    const err2: string[] = [];
-    const out2: string[] = [];
-    // Scripted sidecar exec (same shape as the r47 staging test) — no real uv/systemd on CI.
-    const live2 = join(dir2, 'data', 'laya-venv');
-    const sidecarRun2 = (argv: string[]) => {
-      if (argv[0] === 'uv' && argv[1] === 'venv') {
-        rmSync(argv[2]!, { recursive: true, force: true });
-        mkdirSync(join(argv[2]!, 'bin'), { recursive: true });
-        writeFileSync(join(argv[2]!, 'bin', 'python3'), '#!/bin/sh\n', { mode: 0o755 });
-      } else if (argv.includes('pip')) {
-        const venvBin = dirname(argv[0]!);
-        mkdirSync(venvBin, { recursive: true });
-        writeFileSync(join(venvBin, '.laya-installed'), 'ok\n');
-      } else if (argv[0] === 'systemctl') {
-        // Emulate enable/restart success: the unit file must exist by then.
-        mkdirSync(dirname(live2), { recursive: true });
-      }
-      return okRun(argv);
-    };
-    const code2 = await runHostSetup(['--yes'], {
-      out: (s) => out2.push(s), err: (s) => err2.push(s),
-      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-      sidecarRun: sidecarRun2, sidecarDataDir: join(dir2, 'data'),
-      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir2, XDG_STATE_HOME: dir2, HOME: dir2 });
-    assert.equal(code2, 0, `unregistered sidecar key passes: ERR=${JSON.stringify(err2.join(''))} OUT=${JSON.stringify(out2.join('').slice(-300))}`);
-    assert.ok(!err2.join('').includes('bot-laya'), 'the gate does not fire for an unregistered key');
-  } finally {
-    await fake.close();
-  }
-});
-
-test('runHostSetup: collision evidence covers the lifecycle homedir() unit resolution (#840 r48)', () => {
-  // botPlistPath WRITES under homedir() while the wizard's env may carry a different $HOME —
-  // both resolutions must be checked so neither shape hides the real unit.
-  const dir = tempDir('setup-laya-bots-');
-  const proc = join(dir, 'proc-home');
-  const ioHome = join(dir, 'io-home');
-  mkdirSync(join(proc, 'Library', 'LaunchAgents'), { recursive: true });
-  writeFileSync(join(proc, 'Library', 'LaunchAgents', 'com.mercury.bot.laya.plist'), 'x');
-  const oldHome = process.env.HOME;
-  process.env.HOME = proc; // os.homedir() follows $HOME on POSIX
-  try {
-    const evidence = layaCollisionEvidence({ HOME: ioHome, XDG_CONFIG_HOME: join(dir, 'cfg') });
-    assert.ok(evidence.some((p) => p.startsWith(proc)), `the homedir()-resolved plist is evidence: ${JSON.stringify(evidence)}`);
-    assert.ok(evidence.every((p) => !p.startsWith(ioHome)), 'the (absent) $HOME-resolved plist is not claimed');
-  } finally {
-    process.env.HOME = oldHome;
-  }
-});
-
-
 test('runHostSetup: a PADDED MERCURY_LAYA_URL is refused like loadConfig/doctor (#840 r37)', async () => {
   // The env value reaches validateAnswers RAW: trimming in defaultAnswers would let setup
   // accept (and rewrite) a value the config loader and doctor refuse.
@@ -2291,7 +2027,7 @@ test('runHostSetup: an EXTERNAL MERCURY_LAYA_URL is preserved and verified, not 
   // failure, doctor parity) — the fake requires exactly that bearer key.
   const KEY = 'k'.repeat(32);
   mkdirSync(join(dir, 'mercury'), { recursive: true });
-  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: KEY } }), { mode: 0o600 });
+  writeFileSync(join(dir, 'mercury', 'laya-credentials.json'), JSON.stringify({ api: KEY }), { mode: 0o600 });
   const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: KEY });
   const outx: string[] = [];
   const errx: string[] = [];
@@ -2438,7 +2174,7 @@ test('runHostSetup: the external probe uses the laya credential, exactly like th
   const fake = startFakeLaya([{ json: validPick(['probe']) }], { apiKey: 'k'.repeat(32) });
   // seed credentials BEFORE the run so setup resolves the same key the doctor would.
   mkdirSync(join(dir, 'mercury'), { recursive: true });
-  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
+  writeFileSync(join(dir, 'mercury', 'laya-credentials.json'), JSON.stringify({ api: 'k'.repeat(32) }), { mode: 0o600 });
   const outx: string[] = [];
   const errx: string[] = [];
   return fake.then(async (f) => {
@@ -2486,95 +2222,6 @@ test('validateAnswers: a NON-STRING dataDir with the Laya sidecar enabled is rep
   const a = answers({ layaEnabled: true, dataDir: 123 as unknown as string });
   const errs = validateAnswers(a);
   assert.ok(errs.some((e) => e.startsWith('dataDir:') && e.includes('path must not be empty')), `type error reported: ${errs.join(' | ')}`);
-});
-
-test('runHostSetup: an EXTERNAL url with a pre-existing laya bot is refused before probing (#840 r33)', async () => {
-  // The external path reads the shared credential entry as the sidecar key; with a pre-existing
-  // bot 'laya' that entry is a MERCURY token. The collision must be refused before any branch —
-  // no probe, no venv.
-  const dir = tempDir('setup-laya-extbot-');
-  mkdirSync(join(dir, 'mercury', 'bots'), { recursive: true });
-  writeFileSync(join(dir, 'mercury', 'bots', 'laya.json'), JSON.stringify({ alias: 'laya', api: {}, tasks: [] }));
-  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
-  const err: string[] = [];
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: 'k'.repeat(32) });
-  try {
-    const code = await runHostSetup([], {
-      out: () => {},
-      err: (s) => err.push(s),
-      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-      sidecarRun: okRun,
-      sidecarDataDir: join(dir, 'data'),
-      sidecarProbeUrl: `${fake.url}`,
-      sidecarReadinessBudgetMs: 10_000,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir, MERCURY_LAYA_URL: `${fake.url}` });
-    assert.equal(code, 1);
-    assert.match(err.join(''), /reserved for the sidecar credential/);
-    assert.equal(fake.received.length, 0, 'no probe carries the bot token');
-    assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'nothing installed');
-  } finally {
-    await fake.close();
-  }
-});
-
-test('runHostSetup: a legacy laya SERVICE UNIT (config moved) is collision evidence too (#840 r43)', async () => {
-  const dir = tempDir('setup-laya-unitbot-');
-  if (process.platform !== 'darwin') {
-    // The unit evidence path is darwin-launchd here; linux systemd evidence is exercised in CI.
-    return;
-  }
-  mkdirSync(join(dir, 'Library', 'LaunchAgents'), { recursive: true });
-  writeFileSync(join(dir, 'Library', 'LaunchAgents', 'com.mercury.bot.laya.plist'), '<plist/>');
-  mkdirSync(join(dir, 'mercury'), { recursive: true });
-  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
-  const err: string[] = [];
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: 'k'.repeat(32) });
-  try {
-    const code = await runHostSetup([], {
-      out: () => {},
-      err: (s) => err.push(s),
-      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-      sidecarRun: okRun,
-      sidecarDataDir: join(dir, 'data'),
-      sidecarProbeUrl: `${fake.url}`,
-      sidecarReadinessBudgetMs: 10_000,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir, MERCURY_LAYA_URL: `${fake.url}` });
-    assert.equal(code, 1);
-    assert.match(err.join(''), /reserved for the sidecar credential/);
-    assert.equal(fake.received.length, 0, 'no probe carries the bot token');
-  } finally {
-    await fake.close();
-  }
-});
-
-test('ensureLayaCredentials: a bot named laya refuses the sidecar credential write (#840 r31)', async () => {
-  const dir = tempDir('setup-laya-alias-');
-  // An existing bot 'laya' holds its MERCURY API token in the shared entry; setup must not
-  // repurpose it as the sidecar key (and uninstall would later delete it).
-  mkdirSync(join(dir, 'mercury', 'bots'), { recursive: true });
-  writeFileSync(join(dir, 'mercury', 'bots', 'laya.json'), JSON.stringify({ alias: 'laya', api: {}, tasks: [] }));
-  writeFileSync(join(dir, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
-  const err: string[] = [];
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], {});
-  try {
-    const code = await runHostSetup([], {
-      out: () => {},
-      err: (s) => err.push(s),
-      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-      sidecarRun: okRun,
-      sidecarDataDir: join(dir, 'data'),
-      sidecarProbeUrl: `${fake.url}`,
-      sidecarReadinessBudgetMs: 10_000,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
-    assert.equal(code, 1);
-    assert.match(err.join(''), /reserved for the sidecar credential/);
-    assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'nothing installed');
-    // r41: the refusal happens BEFORE mercury.env is written — a persisted MERCURY_LAYA_URL
-    // would make doctor send the bot's Mercury token to the port owner.
-    assert.ok(!existsSync(envFilePath({ XDG_CONFIG_HOME: dir })), 'no env file written before the refusal');
-  } finally {
-    await fake.close();
-  }
 });
 
 test('validateAnswers: the ROOT-PATH default URL is wizard-managed, not external (#840 r44)', () => {

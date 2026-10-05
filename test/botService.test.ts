@@ -367,13 +367,8 @@ test('subprocess smoke: `host bot service install --alias x --dry-run` exits 0',
 test('install/uninstall refuse an alias that violates the §4.1 contract (path safety)', () => {
   const dir = tempDir('bot-svc-alias-');
   const env = { XDG_CONFIG_HOME: join(dir, 'cfg'), XDG_STATE_HOME: join(dir, 'state'), HOME: join(dir, 'home') } as NodeJS.ProcessEnv;
-  const errI: string[] = [];
-  const io = { out: () => {}, err: (s: string) => errI.push(s) };
-  // r40: install reports the alias error as a graceful exit 1 (a reserved NEW bot is refused,
-  // not an exception).
-  const rc = installBotService('linux', '../escape', io, env, false);
-  assert.equal(rc, 1);
-  assert.match(errI.join(''), /bot alias must match/);
+  const io = { out: () => {}, err: () => {} };
+  assert.throws(() => installBotService('linux', '../escape', io, env, false), /bot alias must match/);
   assert.throws(() => uninstallBotService('linux', 'UPPER', io, env, { yes: true, keepEnv: false, reassignOwner: null }), /bot alias must match/);
   assert.ok(!existsSync(join(dir, 'cfg', 'systemd')), 'nothing written for an invalid alias');
   rmSync(dir, { recursive: true, force: true });
@@ -412,20 +407,6 @@ test('reassignBotRuns: POSTs the transfer with the admin token and the bot-confi
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('reassignBotRuns: a pre-existing bot with the reserved alias stays reassignable (#840 r33)', async () => {
-  // reassign is part of the uninstall recovery flow: a 'laya' bot predating the r31
-  // reservation must reach the transfer, not die at the alias check.
-  const dir = tempDir('bot-svc-reassign-laya-');
-  const env = setupBot(dir);
-  env.MERCURY_ADMIN_TOKEN = 'tok-admin-9';
-  let errBuf = '';
-  const io = { out: (s: string) => {}, err: (s: string) => { errBuf += s; } };
-  const rc = await reassignBotRuns('laya', 'alice', io, env, async (url, init) => {
-    return { ok: true, status: 200, json: async () => ({}) } as Response;
-  });
-  assert.equal(rc, 0, `reassign must pass the alias check: ${errBuf}`);
-});
-
 test('reassignBotRuns: no admin token, or a failed transfer, aborts with exit 1 and a message', async () => {
   const dir = tempDir('bot-svc-reassign2-');
   const env = setupBot(dir);
@@ -450,120 +431,3 @@ test('reassignBotRuns: no admin token, or a failed transfer, aborts with exit 1 
   rmSync(dir, { recursive: true, force: true });
   rmSync(dir + 'b', { recursive: true, force: true });
 });
-
-test("uninstall --alias laya --yes with no legacy bot refuses and keeps the sidecar credential (#840 r39)", () => {
-  const dir = tempDir('bot-svc-uninst-laya-');
-  const env = setupBot(dir);
-  // No bots/laya.json, no laya unit — the reserved entry is the SIDECAR's credential.
-  writeFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
-  const err: string[] = [];
-  const out: string[] = [];
-  const code = uninstallBotService(process.platform, 'laya', { out: (s) => out.push(s), err: (s) => err.push(s) }, env, { yes: true, keepEnv: false, reassignOwner: null });
-  assert.equal(code, 1, `refused: ${err.join('')}`);
-  assert.match(err.join(''), /reserved host alias/);
-  const creds = JSON.parse(readFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), 'utf8')) as Record<string, unknown>;
-  assert.ok(creds.laya, 'the sidecar credential survives');
-});
-
-test("uninstall --alias laya --yes with a config-only entry refuses and PRESERVES the credential (#840 r49)", () => {
-  // A config-only bots/laya.json is NOT legacy evidence (normal new-bot provisioning creates
-  // one — r45/r46): the reserved-alias refusal must hold and the sidecar key must survive.
-  const dir = tempDir('bot-svc-uninst-laya-cfgonly-');
-  const env = setupBot(dir);
-  mkdirSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bots'), { recursive: true });
-  writeFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bots', 'laya.json'), JSON.stringify({ api: { url: 'http://127.0.0.1:3000' }, schedule: { tasks: [] } }));
-  writeFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
-  const err: string[] = [];
-  const code = uninstallBotService(process.platform, 'laya', { out: () => {}, err: (s) => err.push(s) }, env, { yes: true, keepEnv: false, reassignOwner: null });
-  assert.equal(code, 1, `config-only must refuse: ${err.join('')}`);
-  assert.match(err.join(''), /reserved host alias/);
-  assert.match(err.join(''), /not legacy evidence/);
-  const creds = JSON.parse(readFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), 'utf8')) as Record<string, unknown>;
-  assert.ok(creds.laya, 'the sidecar credential survives a config-only uninstall');
-});
-
-test("uninstall --alias laya --yes with a LEGACY bot still recovers (#840 r39/r49)", () => {
-  // A pre-reservation bot: the installed SERVICE UNIT proves ownership — the teardown proceeds.
-  const dir = tempDir('bot-svc-uninst-laya-legacy-');
-  const env = setupBot(dir);
-  mkdirSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bots'), { recursive: true });
-  writeFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bots', 'laya.json'), JSON.stringify({ api: { url: 'http://127.0.0.1:3000' }, schedule: { tasks: [] } }));
-  writeFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'tok-legacy-laya' } }), { mode: 0o600 });
-  if (process.platform === 'darwin') {
-    mkdirSync(join(env.HOME!, 'Library', 'LaunchAgents'), { recursive: true });
-    writeFileSync(join(env.HOME!, 'Library', 'LaunchAgents', 'com.mercury.bot.laya.plist'), '<plist/>');
-  } else {
-    const unitDir = join(env.XDG_CONFIG_HOME!, 'systemd', 'user');
-    mkdirSync(unitDir, { recursive: true });
-    writeFileSync(join(unitDir, 'mercury-bot-laya.service'), '[Unit]\n');
-  }
-  const out: string[] = [];
-  const code = uninstallBotService(process.platform, 'laya', { out: (s) => out.push(s), err: () => {} }, env, { yes: true, keepEnv: false, reassignOwner: null });
-  assert.equal(code, 0, `legacy recovery: ${out.join('')}`);
-  const creds = JSON.parse(readFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), 'utf8')) as Record<string, unknown>;
-  assert.ok(!('laya' in creds), 'the legacy bot credential is removed');
-});
-
-test("install --alias laya with LEGACY unit evidence repairs the service (#840 r43/r45)", () => {
-  const dir = tempDir('bot-svc-inst-laya-legacy-');
-  const env = setupBot(dir);
-  mkdirSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bots'), { recursive: true });
-  writeFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bots', 'laya.json'), JSON.stringify({ api: { url: 'http://127.0.0.1:3000' }, schedule: { tasks: [] } }));
-  // Ownership evidence: the existing service unit (darwin plist / linux unit).
-  if (process.platform === 'darwin') {
-    mkdirSync(join(env.HOME!, 'Library', 'LaunchAgents'), { recursive: true });
-    writeFileSync(join(env.HOME!, 'Library', 'LaunchAgents', 'com.mercury.bot.laya.plist'), '<plist/>');
-  } else {
-    const unitDir = join(env.XDG_CONFIG_HOME!, 'systemd', 'user');
-    mkdirSync(unitDir, { recursive: true });
-    writeFileSync(join(unitDir, 'mercury-bot-laya.service'), '[Unit]\n');
-  }
-  const out: string[] = [];
-  const code = installBotService(process.platform, 'laya', { out: (s) => out.push(s), err: () => {} }, env, true);
-  assert.equal(code, 0, `legacy reinstall passes the alias gate: ${out.join('')}`);
-  // r46: a token registration is NORMAL new-bot provisioning — it is NOT legacy evidence.
-  const dir3 = tempDir('bot-svc-inst-laya-tok-');
-  const env3 = setupBot(dir3);
-  mkdirSync(join(env3.XDG_CONFIG_HOME!, 'mercury', 'bots'), { recursive: true });
-  writeFileSync(join(env3.XDG_CONFIG_HOME!, 'mercury', 'bots', 'laya.json'), JSON.stringify({ api: { url: 'http://127.0.0.1:3000' }, schedule: { tasks: [] } }));
-  writeFileSync(join(env3.XDG_CONFIG_HOME!, 'mercury', 'mercury.env'), 'MERCURY_API_TOKENS=tok-legacy:bot-laya\n');
-  const err3: string[] = [];
-  const code3 = installBotService(process.platform, 'laya', { out: () => {}, err: (s) => err3.push(s) }, env3, true);
-  assert.equal(code3, 1, `registration alone is not evidence: ${err3.join('')}`);
-  assert.match(err3.join(''), /reserved for the host/);
-  // Config ONLY (no unit, no registration) is a NEW bot — the reservation applies.
-  const dir2 = tempDir('bot-svc-inst-laya-new-');
-  const env2 = setupBot(dir2);
-  mkdirSync(join(env2.XDG_CONFIG_HOME!, 'mercury', 'bots'), { recursive: true });
-  writeFileSync(join(env2.XDG_CONFIG_HOME!, 'mercury', 'bots', 'laya.json'), JSON.stringify({ api: { url: 'http://127.0.0.1:3000' }, schedule: { tasks: [] } }));
-  const err: string[] = [];
-  const code2 = installBotService(process.platform, 'laya', { out: () => {}, err: (s) => err.push(s) }, env2, true);
-  assert.equal(code2, 1);
-  assert.match(err.join(''), /reserved for the host/);
-  // A brand-new laya bot (no config at all) is refused too.
-  const dir4 = tempDir('bot-svc-inst-laya-new2-');
-  const env4 = setupBot(dir4);
-  const err4: string[] = [];
-  const code4 = installBotService(process.platform, 'laya', { out: () => {}, err: (s) => err4.push(s) }, env4, true);
-  assert.equal(code4, 1);
-  assert.match(err4.join(''), /reserved for the host/);
-});
-
-test("uninstall --alias laya --yes resumes an interrupted legacy uninstall (state file remains) (#840 r44/r46)", () => {
-  // Teardown removed the config and unit but crashed before the credential/state cleanup: the
-  // remaining state file proves a legacy bot (new provisioning cannot create it) — teardown
-  // finishes. A token registration alone would NOT be evidence (r46).
-  const dir = tempDir('bot-svc-uninst-laya-resume-');
-  const env = setupBot(dir);
-  const envFile = join(env.XDG_CONFIG_HOME!, 'mercury', 'mercury.env');
-  writeFileSync(envFile, 'MERCURY_PORT=3999\nMERCURY_API_TOKENS=tok-alice:alice, tok-legacy:bot-laya\n');
-  writeFileSync(join(env.XDG_STATE_HOME!, 'mercury', 'bots', 'laya.state.json'), JSON.stringify({ lastTickMs: 1 }));
-  writeFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'tok-legacy-laya' } }), { mode: 0o600 });
-  const out: string[] = [];
-  const code = uninstallBotService(process.platform, 'laya', { out: (s) => out.push(s), err: () => {} }, env, { yes: true, keepEnv: false, reassignOwner: null });
-  assert.equal(code, 0, `resume teardown: ${out.join('')}`);
-  const creds = JSON.parse(readFileSync(join(env.XDG_CONFIG_HOME!, 'mercury', 'bot-credentials.json'), 'utf8')) as Record<string, unknown>;
-  assert.ok(!('laya' in creds), 'the legacy credential is removed');
-  assert.match(readFileSync(envFile, 'utf8'), /MERCURY_API_TOKENS=tok-alice:alice/, 'the bot token entry is removed, alice kept');
-});
-

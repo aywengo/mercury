@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from './helpers.ts';
-import { loadBotConfig, botConfigPath, assertBotAlias } from '../src/host/bots/config.ts';
+import { loadBotConfig, botConfigPath } from '../src/host/bots/config.ts';
 import { botOwnerId } from '../src/host/bots/keys.ts';
 import { botCredentialsPath, readBotCredentials, registeredOwnerForToken } from '../src/host/bots/credentials.ts';
 
@@ -272,13 +272,3 @@ test('two-copy agreement: drifted copies are reported, agreeing copies resolve t
   assert.throws(() => registeredOwnerForToken('tok-1', 'tok-1:'), /entry 0 must be exactly 'token:owner'.*empty owner half/);
   assert.throws(() => registeredOwnerForToken('tok-1', 'a:b:c'), /entry 0 must be exactly 'token:owner'.*2 colons/);
 });
-
-test("the bot alias 'laya' is reserved for NEW bots only (#840 r31/r32)", () => {
-  // Creation paths refuse the reserved alias…
-  assert.throws(() => assertBotAlias('laya'), /reserved for the host/);
-  assert.throws(() => assertBotAlias('laya'), /sidecar credential/);
-  // …while existing-bot paths stay syntax-only: an upgrade that introduced the reservation
-  // must not brick a pre-existing bot's config resolution (read/uninstall recovery).
-  assert.doesNotThrow(() => botConfigPath('laya'));
-});
-

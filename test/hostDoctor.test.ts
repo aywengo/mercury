@@ -589,7 +589,7 @@ test('runHostDoctor: MERCURY_LAYA_URL set → laya line; unset → NO laya line 
     const cfg1 = join(dir1, 'cfg');
     mkdirSync(join(cfg1, 'mercury'), { recursive: true });
     const credDir = join(cfg1, 'mercury');
-    writeFileSync(join(credDir, 'bot-credentials.json'), JSON.stringify({ laya: { api: 'laya-key' } }), { mode: 0o600 });
+    writeFileSync(join(credDir, 'laya-credentials.json'), JSON.stringify({ api: 'laya-key' }), { mode: 0o600 });
     writeFileSync(join(credDir, 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=primeagent\nMERCURY_ADMIN_TOKEN=tok-laya-on\nMERCURY_LAYA_URL=${f.url}\n`);
     try {
       const out: string[] = [];
@@ -611,7 +611,7 @@ test('runHostDoctor: invalid MERCURY_LAYA_TIMEOUT_MS is a named failure, not a s
   const dir = tempDir('doctor-laya-tmo-');
   const cfg = join(dir, 'cfg');
   mkdirSync(join(cfg, 'mercury'), { recursive: true });
-  writeFileSync(join(cfg, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'laya-key' } }), { mode: 0o600 });
+  writeFileSync(join(cfg, 'mercury', 'laya-credentials.json'), JSON.stringify({ api: 'laya-key' }), { mode: 0o600 });
   writeFileSync(join(cfg, 'mercury', 'mercury.env'), 'MERCURY_PORT=1\n');
   try {
   // -1 (immediate timer) and 2147483648 (Node converts >2^31-1 to 1ms) are both named failures;
@@ -642,7 +642,7 @@ test('runHostDoctor: a malformed credentials file never leaks token text into th
   mkdirSync(join(cfg, 'mercury'), { recursive: true });
   // Unquoted value whose excerpt would carry the secret if the raw parse error were printed
   // (Node quotes ~26 chars around the unexpected token).
-  writeFileSync(join(cfg, 'mercury', 'bot-credentials.json'), '{"laya": {"api": sk-9f88-tok}}', { mode: 0o600 });
+  writeFileSync(join(cfg, 'mercury', 'laya-credentials.json'), '{"api": sk-9f88-tok}', { mode: 0o600 });
   writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_LAYA_URL=${f.url}\n`);
   try {
     const out: string[] = [];
@@ -662,7 +662,7 @@ test('runHostDoctor: a set-but-broken laya sidecar FAILS the doctor with the rea
     const dir = tempDir('doctor-laya-bad-');
     const cfg = join(dir, 'cfg');
     mkdirSync(join(cfg, 'mercury'), { recursive: true });
-    writeFileSync(join(cfg, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'not-the-key' } }), { mode: 0o600 });
+    writeFileSync(join(cfg, 'mercury', 'laya-credentials.json'), JSON.stringify({ api: 'not-the-key' }), { mode: 0o600 });
     writeFileSync(join(cfg, 'mercury', 'mercury.env'), `MERCURY_PORT=${new URL(m.url).port}\nMERCURY_HARNESSES=primeagent\nMERCURY_LAYA_URL=${bad.url}\n`);
     try {
       const out: string[] = [];
@@ -680,12 +680,12 @@ test('runHostDoctor: a set-but-broken laya sidecar FAILS the doctor with the rea
 
 test('runHostDoctor: a non-loopback MERCURY_LAYA_URL is refused before the credential is read (#840 r34)', async () => {
   // A hand-edited env can point the doctor at ANY host; the shape gate must fire BEFORE
-  // readBotCredentials so the sidecar key is never attached to an off-host request.
+  // readLayaCredentials so the sidecar key is never attached to an off-host request.
   const dir = tempDir('doctor-laya-nonloop-');
   const cfg = join(dir, 'cfg');
   mkdirSync(join(cfg, 'mercury'), { recursive: true });
   writeFileSync(join(cfg, 'mercury', 'mercury.env'), 'MERCURY_HARNESSES=primeagent\nMERCURY_LAYA_URL=http://example.com:8302\n');
-  writeFileSync(join(cfg, 'mercury', 'bot-credentials.json'), JSON.stringify({ laya: { api: 'k'.repeat(32) } }), { mode: 0o600 });
+  writeFileSync(join(cfg, 'mercury', 'laya-credentials.json'), JSON.stringify({ api: 'k'.repeat(32) }), { mode: 0o600 });
   try {
     const out: string[] = [];
     const code = await runHostDoctor([], { out: (s) => out.push(s), err: () => {} }, { XDG_CONFIG_HOME: cfg } as NodeJS.ProcessEnv);

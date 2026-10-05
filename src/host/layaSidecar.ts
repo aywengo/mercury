@@ -11,7 +11,7 @@
  *
  * 1. **Opt-in, default no.** Opt-out writes NOTHING: no env keys, no venv, no unit, no
  *    credentials entry (the acceptance criterion).
- * 2. **A re-run preserves an existing key.** The `laya` entry in bot-credentials.json is
+ * 2. **A re-run preserves an existing key.** laya-credentials.json (layaCredentials.ts) is
  *    only generated when absent — rotating a sidecar key on a re-run would break the bots
  *    already configured against it.
  * 3. **Python ≥ 3.10, uv preferred.** The macOS system Python (3.9.6) is refused with the
@@ -22,7 +22,6 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { readBotCredentials } from './bots/credentials.ts';
 
 /** The upstream laya[serve] version the client contract was verified against (#825). */
 export const LAYA_SERVE_PIN = '0.3.25';
@@ -35,35 +34,6 @@ export interface PythonCandidate {
   argv: string[];
   /** How the plan should refer to this interpreter in the unit's ProgramArguments. */
   bin: string;
-}
-
-/**
- * Discover `python3.N` interpreters on PATH with NO fixed upper bound (Copilot #840 r8): the
- * static list cannot name future versions, so anything matching `python3.<N>` with N >= 10 that
- * the static list does not already probe is appended, newest first. Purely lexical discovery
- * (a readdir, not an exec) — the version gate itself stays with the -V probe.
- */
-export function discoverVersionedPythons(env: NodeJS.ProcessEnv = process.env, known: PythonCandidate[] = DEFAULT_PYTHON_CANDIDATES): PythonCandidate[] {
-  const seen = new Set(known.map((k) => k.argv[0]));
-  const found = new Map<number, string>();
-  for (const dir of (env.PATH ?? '').split(':')) {
-    if (dir === '') continue;
-    let names: string[] = [];
-    try {
-      names = readdirSync(dir);
-    } catch {
-      continue; // unreadable/absent PATH entry — skip silently, this is best-effort discovery
-    }
-    for (const name of names) {
-      const m = /^python3\.(\d+)$/.exec(name);
-      const minor = m ? Number(m[1]) : NaN;
-      if (!m || !(minor >= 10) || seen.has(name) || found.has(minor)) continue;
-      found.set(minor, join(dir, name));
-    }
-  }
-  return [...found.entries()]
-    .sort((a, b) => b[0] - a[0])
-    .map(([minor, full]) => ({ argv: [full, '-V'], bin: full }));
 }
 
 /** uv first (design: "uv-managed interpreter preferred"), then Homebrew's versioned
@@ -117,7 +87,7 @@ export function detectPython(
   env: NodeJS.ProcessEnv = process.env,
 ): PythonDetection {
   const failures: string[] = [];
-  for (const cand of [...candidates, ...discoverVersionedPythons(env, candidates)]) {
+  for (const cand of candidates) {
     const r = run(cand.argv, 10_000);
     if (!r.ok) {
       failures.push(`${cand.argv[0]}: not usable`);
@@ -259,8 +229,8 @@ export function layaStepActions(plan: LayaPlan, venvTool: 'uv' | 'python3' | 'bo
       ? `create venv: python3 -m venv ${plan.venvDir} (python >= 3.10)`
       : `create venv: uv venv ${plan.venvDir} --seed (when uv is present) OR python3 -m venv ${plan.venvDir} (fallback)`;
   const credsLine = venvTool === 'both'
-    ? `write credentials: generate/keep LAYA_API_KEY in bot-credentials.json (key 'laya', 0600)`
-    : `write credentials: generate/keep LAYA_API_KEY in bot-credentials.json (key 'laya', 0600)`;
+    ? `write credentials: generate/keep LAYA_API_KEY in laya-credentials.json (0600)`
+    : `write credentials: generate/keep LAYA_API_KEY in laya-credentials.json (0600)`;
   const loadLines = process.platform === 'darwin'
     ? [
         // Same choreography the real run performs (r10-r12): bootout the loaded job, bootstrap
@@ -274,7 +244,7 @@ export function layaStepActions(plan: LayaPlan, venvTool: 'uv' | 'python3' | 'bo
         `wait for readiness: probe the doctor's laya line (first start downloads the ~843 MB checkpoint)`,
       ];
   return [
-    `write env: MERCURY_LAYA_URL=${plan.envUrl} (mercury.env; the LAYA_API_KEY goes to bot-credentials.json, key 'laya')`,
+    `write env: MERCURY_LAYA_URL=${plan.envUrl} (mercury.env; the LAYA_API_KEY goes to laya-credentials.json)`,
     venvLine,
     `install pinned sidecar: pip install 'laya[serve]==${LAYA_SERVE_PIN}' into ${plan.venvDir}`,
     credsLine,
@@ -284,89 +254,6 @@ export function layaStepActions(plan: LayaPlan, venvTool: 'uv' | 'python3' | 'bo
   ];
 }
 
-/** The `laya` credential entry in bot-credentials.json (#831): PRESERVE an existing key on a
- *  re-run (acceptance), generate one (32 hex) when absent. Returns {key, generated}. */
-export function ensureLayaCredentials(env: NodeJS.ProcessEnv = process.env, gen: () => string = () => randomBytes(32).toString('hex')): { key: string; generated: boolean } {
-  const xdg = env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim() !== '' ? env.XDG_CONFIG_HOME : join(homedir(), '.config');
-  const path = join(xdg, 'mercury', 'bot-credentials.json');
-  let raw: Record<string, unknown> = {};
-  if (existsSync(path)) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(readFileSync(path, 'utf8'));
-    } catch (err) {
-      // The parse error quotes ~26 source chars; with a secret near the malformation that
-      // excerpt would leak through the setup output. Name the failure, never the content
-      // (same rule as readBotCredentials and the answers file).
-      throw new Error(`${path}: not valid JSON (${(err as Error).name ?? 'SyntaxError'})`);
-    }
-    // Root-shape gate (Copilot #840 r2): a valid-JSON array would swallow the assignment —
-    // JSON.stringify([]) ignores .laya — and setup would report success while the key was
-    // never persisted. Require a non-array object before mutating.
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error(`${path}: must be a JSON object keyed by bot alias`);
-    }
-    raw = parsed as Record<string, unknown>;
-  }
-  // Alias reservation (Copilot #840 r31): a bot named 'laya' keeps its Mercury API token in
-  // this same entry — preserving it as the sidecar key would hand the sidecar a Mercury
-  // token, and `host bot uninstall --alias laya` would later delete the sidecar's credential.
-  // The bot alias is now reserved (assertBotAlias), so refuse loudly if one already exists.
-  if (existsSync(join(xdg, 'mercury', 'bots', 'laya.json'))) {
-    throw new Error(`${path}: a bot named 'laya' exists (bots/laya.json); the alias is reserved for the sidecar credential — uninstall the bot or move its config`);
-  }
-  const entry = raw.laya;
-  if (entry && typeof entry === 'object' && !Array.isArray(entry) && typeof (entry as Record<string, unknown>).api === 'string') {
-    const preserved = (entry as Record<string, unknown>).api as string;
-    // The key is preserved but the FILE MODE is repaired unconditionally (Copilot #840 r3):
-    // a preserved key in a file that drifted to 0644 is exactly as exposed as a new one.
-    // Repair BEFORE the shared read so the reader's own 0600 gate passes on the same file.
-    chmodSync(path, 0o600);
-    // The doctor reads this SAME entry through readBotCredentials, which validates the WHOLE
-    // entry: unknown keys refused ('token' gets a did-you-mean), every value a non-empty
-    // unpadded string. Validating only 'api' here let { laya: { api, token } } pass setup and
-    // then fail every later read (Copilot #840 r7). Run the shared reader itself — the schema
-    // cannot drift and its errors name the field, never the value.
-    readBotCredentials('laya', env);
-    // The api key is embedded in a launchd plist (XML) and a systemd unit — an existing key
-    // with whitespace, quotes, ampersands or newlines would inject a directive or corrupt the
-    // file (Copilot #840 r5). Wizard-generated keys are hex; anything outside the inert charset
-    // is refused with the fix named, never the value.
-    if (!/^[A-Za-z0-9._~@:+/=-]+$/.test(preserved)) {
-      throw new Error(
-        `${path}: entry 'laya.api' contains characters that cannot be embedded in the service unit; ` +
-        'use a key of [A-Za-z0-9._~@:+/=-] only (the wizard generates 64 hex chars)',
-      );
-    }
-    return { key: preserved, generated: false };
-  }
-  // A malformed entry (api missing/wrong type/empty) is an operator-visible refusal, not a
-  // silent overwrite: the file is shared and something wrote a broken 'laya' entry.
-  if (entry !== undefined) {
-    throw new Error(`${path}: entry 'laya' must be an object with a non-empty string 'api' field`);
-  }
-  const key = gen();
-  raw.laya = { api: key };
-  mkdirSync(dirname(path), { recursive: true });
-  // Atomic replace, same pattern as setup's writeEnvFile (Copilot #840 r14): a truncate-in-place
-  // that dies mid-write loses EVERY bot's credentials (the file is shared), and on an existing
-  // loose-mode file the new key would be readable until the trailing chmod. Write a 0600 temp
-  // file in the same directory, fsync, rename over the destination, then enforce 0600.
-  // Unique O_EXCL temp (Copilot #840 r52): `mode` is only applied at CREATION — a crashed
-  // run's leftover `.tmp-<pid>` file would be silently reused at its old (possibly 0644) mode
-  // when the PID is later reused, exposing every bot's credentials. 'wx' creates exclusively;
-  // a random suffix makes the name unguessable, so a stale file can never be hit.
-  const tmp = join(dirname(path), `.bot-credentials.json.tmp-${process.pid}-${randomBytes(6).toString('hex')}`);
-  writeFileSync(tmp, JSON.stringify(raw, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
-  const fd = openSync(tmp, 'r');
-  try {
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(tmp, path);
-  chmodSync(path, 0o600);
-  // Best-effort cleanup of a crashed run's predictable temp (same pid) — ours to remove.
-  rmSync(join(dirname(path), `.bot-credentials.json.tmp-${process.pid}`), { recursive: true, force: true });
-  return { key, generated: true };
-}
+/** The sidecar key lives in its own file (layaCredentials.ts, #840 r62). Re-exported so the
+ *  installer's pieces stay importable from one place. */
+export { ensureLayaCredentials } from './layaCredentials.ts';

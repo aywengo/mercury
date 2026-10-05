@@ -427,8 +427,8 @@ means the host has no sidecar and selection stays deterministic. Two supported f
   the doctor probe (which requires the `laya` credential to be readable). Non-loopback hosts,
   userinfo URLs, and route paths are refused.
 
-The sidecar credential is never in this file — it lives in the
-0600 `bot-credentials.json` under the `laya` entry, and `mercury host doctor` probes the sidecar
+The sidecar credential is never in this file — it lives in its own
+0600 `laya-credentials.json` (`{"api": "<key>"}`), and `mercury host doctor` probes the sidecar
 when the URL is set (#830). `MERCURY_LAYA_TIMEOUT_MS` (default 500) bounds each selection call.
 
 ## Host installer

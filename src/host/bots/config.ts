@@ -18,12 +18,6 @@ import { parseCron, parseTz } from './cron.ts';
 /** The alias regex (§4.1): filesystem-safe, systemd-unit-safe, stable in log lines and owner ids. */
 export const BOT_ALIAS_RE = /^[a-z][a-z0-9-]{0,31}$/;
 
-/** Aliases the host reserves for non-bot credentials. `laya` keys the sidecar's shared
- *  bot-credentials.json entry (#831); a bot with that alias would have its Mercury API token
- *  read as the sidecar key, and `host bot uninstall --alias laya` would delete the sidecar's
- *  credential out from under a configured sidecar (Copilot #840 r31). */
-export const RESERVED_BOT_ALIASES: ReadonlySet<string> = new Set(['laya']);
-
 /** Task names appear in derived idempotency keys (colon-delimited) and log lines. */
 const TASK_NAME_RE = /^[a-z0-9-]+$/;
 
@@ -116,25 +110,10 @@ export function botsDir(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 export function botConfigPath(alias: string, env: NodeJS.ProcessEnv = process.env): string {
-  // SYNTAX ONLY: this path builder is used by read/uninstall/recovery paths for bots that may
-  // predate a reservation (Copilot #840 r32) — an existing bot must stay loadable and
-  // uninstallable. New-bot creation checks the reservation separately (assertBotAlias).
   if (!BOT_ALIAS_RE.test(alias)) {
     throw new Error(`bot alias must match ${BOT_ALIAS_RE.source}, got '${alias}'`);
   }
   return join(botsDir(env), `${alias}.json`);
-}
-
-/** The §4.1 alias contract plus the host's reserved names. For NEW bot creation only —
- *  existing/read/uninstall paths use the syntax check so an upgrade that introduced a
- *  reservation cannot brick a pre-existing bot. */
-export function assertBotAlias(alias: string): void {
-  if (!BOT_ALIAS_RE.test(alias)) {
-    throw new Error(`bot alias must match ${BOT_ALIAS_RE.source}, got '${alias}'`);
-  }
-  if (RESERVED_BOT_ALIASES.has(alias)) {
-    throw new Error(`bot alias '${alias}' is reserved for the host (the Laya sidecar credential entry); pick another name`);
-  }
 }
 
 function checkObject(path: string, field: string, value: unknown): Record<string, unknown> {
