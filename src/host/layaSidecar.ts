@@ -153,9 +153,10 @@ export function planLayaSidecar(opts: { dataDir: string; pythonBin: string; venv
   // #845: the venv path is the caller's choice — setup builds into a versioned directory
   // (`laya-venv-<pin>-<ts>-<rand>`); the deterministic default stays the #840 layout for
   // doctor/plan consumers.
-  // No legacy default: a plan without an explicit venvDir is a DISPLAY plan (dry-run) and
-  // shows the versioned pattern a real install generates (#845/#846 r8).
-  const venvDir = opts.venvDir ?? join(opts.dataDir, `laya-venv-${LAYA_SERVE_PIN}-<UTC timestamp>-<random>`);
+  // Deterministic default (#846 r11): a placeholder like '<UTC timestamp>' would render as
+  // malformed plist XML / a broken ExecStart if a plan were fed to a renderer. The dry-run
+  // caller passes its own display pattern explicitly.
+  const venvDir = opts.venvDir ?? join(opts.dataDir, 'laya-venv');
   const hfHome = join(opts.dataDir, 'laya-hf');
   // Preload failures (a failed checkpoint download) print to stdout/stderr — capture them like
   // the host LaunchAgent does (src/host/service.ts) or the error is lost (r20).
