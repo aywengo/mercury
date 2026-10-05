@@ -1331,8 +1331,10 @@ export async function runHostSetup(
       // parent joins the sweep once it is no longer the current rollback generation (Copilot
       // #846 r12).
       // Dot-prefixed so the 'laya-venv*' generation filters (and operator eyeballs) see
-      // only venv directories.
-      const markerPath = join(dataDir, '.laya-venv-prev');
+      // only venv directories. The marker lives in the CONFIG dir, not the data dir: it must
+      // survive a dataDir migration, where the retained generation stays behind in the old
+      // parent (Copilot #846 r12).
+      const markerPath = join(dirname(envFilePath(env)), '.laya-venv-prev');
       const oldPrev = (() => {
         try {
           const p = readFileSync(markerPath, 'utf8').trim();
@@ -1367,6 +1369,7 @@ export async function runHostSetup(
       }
       // Record this run's retained rollback generation for the next sweep (best effort).
       try {
+        mkdirSync(dirname(markerPath), { recursive: true });
         writeFileSync(markerPath, `${prevVenv}\n`, { flag: 'wx', mode: 0o600 });
       } catch {
         try {
