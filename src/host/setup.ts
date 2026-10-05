@@ -894,7 +894,12 @@ export async function runHostSetup(
       if (answers.layaUrl.trim() !== '' && !isWizardManagedLayaDefault(answers.layaUrl, LAYA_DEFAULT_PORT)) {
         io.out(`\nLaya sidecar (external): preserve MERCURY_LAYA_URL=${answers.layaUrl.trim()} and verify it with the doctor probe (no local install)\n`);
       } else {
-        const plan = planLayaSidecar({ dataDir: io.sidecarDataDir ?? answers.dataDir.trim(), pythonBin: 'python3', env });
+        // #845: mirror the real run — a versioned build directory, not the legacy path.
+        const dryDataDir = io.sidecarDataDir ?? answers.dataDir.trim();
+        const plan = planLayaSidecar({
+          dataDir: dryDataDir, pythonBin: 'python3', env,
+          venvDir: join(dryDataDir, `laya-venv-${LAYA_SERVE_PIN}-<UTC timestamp>-<random>`),
+        });
         io.out('\nLaya sidecar (opt-in) would:\n' + layaStepActions(plan, 'both').map((a) => `  - ${a}`).join('\n') + '\n');
       }
     }
