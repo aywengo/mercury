@@ -573,6 +573,77 @@ export async function runSelectorWith(
           chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', supersededBy: cur.supersededBy });
         }
       }
+      // Unmapped nightly PRs (#847): a nightly-authored open PR whose branch does NOT name its
+      // issue (a run deviated from `fix/issue-<N>-<slug>`) must still be resumed and must still
+      // reserve its issue - otherwise the next night duplicates the work (#841/#807, 2026-10-05).
+      // The mapping comes from GitHub-computed structured metadata: the PR's closing issue
+      // references (`closingIssuesReferences`, one batched GraphQL query). PR bodies are never
+      // read directly; the closing reference is GitHub's own projection of that text and the
+      // body's author is the trusted nightly identity. Fail-closed: if the query is impossible
+      // (no postJson) or fails while unmapped nightly PRs exist, selection ABORTS - starting new
+      // work without knowing what those PRs reserve could duplicate an existing PR (the same
+      // discipline as the incomplete open-PR scan above).
+      const unmapped = nightlyPrs.filter((pr) =>
+        typeof pr.head?.ref === 'string' && pr.head.ref !== '' // PR-shaped; issue-list fixtures have no head
+        && !/^fix\/(issue)-(\d+)-/.test(pr.head.ref));
+      if (unmapped.length > 0) {
+        if (!io.postJson) {
+          console.error(`resume scan: ${unmapped.length} nightly PR(s) have an unmapped branch and postJson is missing; aborting selection (#847)`);
+          return { rung: 'none', reason: 'selection aborted: nightly PRs with an unmapped branch exist and the closing-reference query is unavailable; claiming new work now could duplicate an existing PR' };
+        }
+        const aliases = unmapped
+          .map((pr, idx) => `p${idx}: pullRequest(number: ${pr.number}) { closingIssuesReferences(first: 5) { pageInfo { hasNextPage } nodes { number state } } }`)
+          .join('\n');
+        const gql = {
+          query: `query { repository(owner: "${repo.split('/')[0] ?? ''}", name: "${repo.split('/')[1] ?? ''}") {\n${aliases}\n} }`,
+        };
+        let mapped = false;
+        try {
+          const res = await io.postJson('/graphql', gql);
+          if (res.status !== 200) {
+            console.error(`resume scan: closing-references query -> ${res.status}`);
+          } else {
+            const data = (res.body as { data?: { repository?: Record<string, { closingIssuesReferences?: { pageInfo?: { hasNextPage?: boolean } | null; nodes?: { number?: number; state?: string }[] } | null } | null> | null } }).data?.repository;
+            if (!data) {
+              console.error('resume scan: closing-references query returned no data');
+            } else {
+              // A capped connection hides references beyond the first page: fail closed for the
+              // whole mapping (#847 r1) - a hidden open reference could leave its issue
+              // unreserved and selected as duplicate work.
+              const cappedConn = unmapped.some((_pr, idx) => data[`p${idx}`]?.closingIssuesReferences?.pageInfo?.hasNextPage === true);
+              if (cappedConn) {
+                console.error('resume scan: a closingIssuesReferences connection is capped (>5)');
+              } else {
+              for (let idx = 0; idx < unmapped.length; idx++) {
+                const node = data[`p${idx}`];
+                const ref = node?.closingIssuesReferences?.nodes?.find((n) => n.state === 'OPEN' && Number.isInteger(n.number));
+                const issue = ref?.number;
+                if (!issue || !openIssues.has(issue)) continue;
+                const pr = unmapped[idx]!;
+                const cur = chosen.get(issue);
+                if (cur === undefined) {
+                  chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', supersededBy: [] });
+                } else {
+                  const isNewer = (pr.created_at ?? '') > (cur.created_at ?? '')
+                    || ((pr.created_at ?? '') === (cur.created_at ?? '') && pr.number > cur.number);
+                  if (isNewer) cur.supersededBy.push(pr.number);
+                  else {
+                    cur.supersededBy.push(cur.number);
+                    chosen.set(issue, { number: pr.number, head: pr.head ?? null, created_at: pr.created_at ?? '', supersededBy: cur.supersededBy });
+                  }
+                }
+              }
+              mapped = true;
+              }
+            }
+          }
+        } catch (e) {
+          console.error(`resume scan: closing-references query failed: ${String(e instanceof Error ? e.message : e)}`);
+        }
+        if (!mapped) {
+          return { rung: 'none', reason: 'selection aborted: the closing-reference mapping for nightly PRs with unmapped branches failed; claiming new work now could duplicate an existing PR' };
+        }
+      }
       // Every chosen PR reserves its issue from rungs 1-3 - before any review read (#820 r2):
       // unreviewed, approval-class-awaiting-merge and unreadable-review PRs all keep their
       // issue out of new work, and the reservation is recomputed from the still-open PR each
