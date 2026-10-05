@@ -3,6 +3,7 @@
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { DEFAULT_BOUNDS, type KnowledgeBounds } from './knowledge/validation.ts';
+import { validateLayaBaseUrl } from './laya/layaUrl.ts';
 
 export interface Config {
   dbPath: string;
@@ -116,6 +117,13 @@ export interface Config {
    * events emitted, and `POST /api/runs` rejects a `knowledge` block with 400.
    */
   knowledge: KnowledgeConfig;
+  /**
+   * The Laya sidecar base URL (#830/#831, Laya design §5.3/§10). Null = not configured:
+   * no sidecar exists, selection stays deterministic (L1 will consult this). The wizard
+   * writes it only on opt-in; the value is a loopback URL, never a credential — the sidecar
+   * key lives in the 0600 laya-credentials.json.
+   */
+  layaUrl: string | null;
 }
 
 /** Where this host's notes go, and how it authenticates (section 8.4). */
@@ -315,6 +323,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     })(),
     logLevel: (env.MERCURY_LOG_LEVEL as Config['logLevel']) ?? 'info',
     knowledge: loadKnowledgeConfig(env),
+    // The Laya sidecar (#830/#831): a plain loopback URL, never a credential (the sidecar key
+    // lives in the 0600 laya-credentials.json). Null = not configured = the
+    // feature does not exist on this host. The SHAPE is validated here — hand-written or
+    // service-provided env files bypass the wizard, and doctor would otherwise send the
+    // bearer key to any URL this line accepts (Copilot #840 r34).
+    layaUrl: (() => {
+      // The RAW value goes through the shared validator: only an ABSENT or exactly-empty
+      // variable means unconfigured; a padded/whitespace value is the padding error, not a
+      // silent default (Copilot #840 r35) — startup and the doctor must see the same thing.
+      const raw = env.MERCURY_LAYA_URL;
+      if (raw === undefined || raw === '') return null;
+      const err = validateLayaBaseUrl(raw);
+      if (err) throw new Error(`invalid configuration: ${err} (docs/configuration.md, 'Laya sidecar')`);
+      return raw;
+    })(),
   };
 }
 

@@ -30,7 +30,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
 import { join } from 'node:path';
 import { LayaClient } from '../laya/client.ts';
-import { readBotCredentials } from './bots/credentials.ts';
+import { validateLayaBaseUrl } from '../laya/layaUrl.ts';
+import { readLayaCredentials } from './layaCredentials.ts';
 
 /** Load mercury.env into a record (simple KEY=VALUE parser, no shell semantics). */
 export function loadEnvFile(path: string): Record<string, string> {
@@ -233,6 +234,29 @@ export function bindHealthzTarget(
 /** One fixed probe question, once, through the real client (#830): the doctor measures the same
  *  call a dispatch would make — auth, validation and the configured deadline included. The probe
  *  state is constant, so the report line is reproducible and carries no operator data. */
+/**
+ * The doctor's laya probe deadline from the env file: MERCURY_LAYA_TIMEOUT_MS, default 500 ms.
+ * A non-positive/non-finite deadline would make Node schedule the timer immediately (or never):
+ * a healthy sidecar would read as unreachable. Node converts setTimeout delays above 2^31-1 ms
+ * to 1ms - a healthy sidecar would read as unreachable near-instantly. Cap at the timer limit.
+ * Exported so setup's success probe (r12) uses the SAME deadline the doctor will use.
+ */
+export function parseLayaTimeoutMs(vars: Record<string, string | undefined>): { ok: true; timeoutMs: number } | { ok: false; detail: string } {
+  const rawTimeout = vars.MERCURY_LAYA_TIMEOUT_MS;
+  if (rawTimeout === undefined || rawTimeout.trim() === '') return { ok: true, timeoutMs: 500 };
+  const parsed = Number(rawTimeout);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0 || parsed > 2147483647) {
+    return { ok: false, detail: `invalid configuration: MERCURY_LAYA_TIMEOUT_MS must be a positive integer <= 2147483647, got '${rawTimeout}'` };
+  }
+  return { ok: true, timeoutMs: parsed };
+}
+
+/** True when a checkLaya detail is the normalized auth-rejection verdict (not a timeout
+ *  whose message merely contains '401' — e.g. 'deadline 401ms exceeded', Copilot #840 r53). */
+export function isLayaAuthRejected(detail: string | undefined): boolean {
+  return (detail ?? '').startsWith('auth failed (401)');
+}
+
 export async function checkLaya(baseUrl: string, apiKey: string | undefined, timeoutMs: number): Promise<{ ok: boolean; detail: string; latencyMs?: number; checkpoint?: string }> {
   const client = new LayaClient({
     baseUrl,
@@ -250,7 +274,7 @@ export async function checkLaya(baseUrl: string, apiKey: string | undefined, tim
     return { ok: true, detail: `ok, checkpoint ${result.checkpoint}, 1 question answered`, latencyMs: Math.round(result.latencyMs), checkpoint: result.checkpoint };
   }
   if (result.reason === 'http_status' && (result.detail ?? '').includes('401')) {
-    return { ok: false, detail: `auth failed (401): the sidecar rejected the key${apiKey ? " from the 'laya' entry in bot-credentials.json" : ' (no key configured — expected when the sidecar has LAYA_API_KEY set)'}`, latencyMs: Math.round(result.latencyMs) };
+    return { ok: false, detail: `auth failed (401): the sidecar rejected the key${apiKey ? ' from laya-credentials.json' : ' (no key configured — expected when the sidecar has LAYA_API_KEY set)'}`, latencyMs: Math.round(result.latencyMs) };
   }
   if (result.reason === 'unreachable' || result.reason === 'timeout') {
     return { ok: false, detail: `unreachable: ${result.detail ?? 'no detail'}`, latencyMs: Math.round(result.latencyMs) };
@@ -313,39 +337,41 @@ export async function runHostDoctor(
 
   const anySkipped = smoke.length > 0 && smoke.every((s) => s.skipped);
   // Laya sidecar probe (#830): only when configured. Unset → no line at all (absence is the
-  // default, not a warning). The key lives in the same 0600 credentials file (design §5.1/§10);
+  // default, not a warning). The key lives in its own 0600 laya-credentials.json (design §5.1/§10);
   // a missing or unreadable entry is a NAMED failure, never a token leak (the reader redacts
   // values from errors).
   const layaUrl = vars.MERCURY_LAYA_URL;
   let laya: DoctorResult['laya'];
-  if (layaUrl !== undefined && layaUrl.trim() !== '') {
-    let apiKey: string | undefined;
-    let keyDetail: string | undefined;
-    try {
-      apiKey = readBotCredentials('laya', env).api;
-    } catch (err) {
-      keyDetail = (err as Error).message;
-    }
-    const rawTimeout = vars.MERCURY_LAYA_TIMEOUT_MS;
-    let timeoutMs = 500;
-    if (rawTimeout !== undefined && rawTimeout.trim() !== '') {
-      const parsed = Number(rawTimeout);
-      // A non-positive/non-finite deadline would make Node schedule the timer immediately (or
-      // never): a healthy sidecar would read as unreachable. Named failure, not a silent default.
-      // Node converts setTimeout delays above 2^31-1 ms to 1ms - a healthy sidecar would read
-      // as unreachable near-instantly. Cap at the timer limit; the client's per-call deadline
-      // uses the same bound.
-      if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0 || parsed > 2147483647) {
-        laya = { ok: false, detail: `invalid configuration: MERCURY_LAYA_TIMEOUT_MS must be a positive integer <= 2147483647, got '${rawTimeout}'` };
-      } else {
-        timeoutMs = parsed;
+  // Every PRESENT value reaches the validator — only undefined is 'not configured' (the
+  // doctor's absence rule, #830). Exactly '' also counts as unconfigured; a whitespace-only or
+  // padded value is the validator's padding error, not a silent skip (Copilot #840 r35).
+  if (layaUrl !== undefined && layaUrl !== '') {
+    // Shape BEFORE credentials (Copilot #840 r34): a non-loopback/routed URL must be refused
+    // here, not probed with the sidecar key attached. When the shape fails, `laya` is set and
+    // both the credential read and the probe below are skipped.
+    const shapeErr = validateLayaBaseUrl(layaUrl);
+    if (shapeErr !== null) {
+      // No credential read on a malformed URL: nothing about the value is trusted yet.
+      laya = { ok: false, detail: shapeErr };
+    } else {
+      let apiKey: string | undefined;
+      let keyDetail: string | undefined;
+      try {
+        apiKey = readLayaCredentials(env).api;
+      } catch (err) {
+        keyDetail = (err as Error).message;
       }
-    }
-    if (apiKey === undefined && laya === undefined) {
-      laya = { ok: false, detail: `auth cannot be checked: ${keyDetail ?? 'no laya credentials'}` };
-    }
-    if (laya === undefined) {
-      laya = await checkLaya(layaUrl.trim(), apiKey, timeoutMs);
+      const timeout = parseLayaTimeoutMs(vars);
+      if (!timeout.ok) {
+        laya = { ok: false, detail: timeout.detail };
+      }
+      const timeoutMs = timeout.ok ? timeout.timeoutMs : 500;
+      if (apiKey === undefined && laya === undefined) {
+        laya = { ok: false, detail: `auth cannot be checked: ${keyDetail ?? 'no laya credentials'}` };
+      }
+      if (laya === undefined) {
+        laya = await checkLaya(layaUrl.trim(), apiKey, timeoutMs);
+      }
     }
   }
   const result: DoctorResult = { healthz, bindHealthz, smoke, allSmokeSkipped: anySkipped, noHarnesses, ...(laya !== undefined ? { laya } : {}) };
