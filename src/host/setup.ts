@@ -1105,9 +1105,23 @@ export async function runHostSetup(
     // then report the failure. Best effort — the original error is what the operator sees.
     const rollbackLaya = () => {
       const venvRestorable = backedUp && existsSync(backupDir);
-      // Nothing to go back to: a fresh install (no previous unit, no previous venv).
-      if (!venvRestorable && unitBackupText === null) return;
       try {
+        if (unitBackupText === null) {
+          // No previous unit (a fresh install): there is nothing to go back TO, but the new unit
+          // is already enabled/bootstrapped. Leaving it would keep a failed sidecar in a restart
+          // loop (Copilot #840 r63). Stop and unregister it, remove the unit file, and drop the
+          // unverified venv (or put a pre-existing one back) so the host is as before setup.
+          if (process.platform === 'darwin') {
+            run(['launchctl', 'bootout', `${uid}/${plan.unitLabel}`], 10_000);
+          } else {
+            run(['systemctl', '--user', 'disable', '--now', plan.unitLabel], 15_000);
+          }
+          rmSync(plan.unitPath, { force: true });
+          if (process.platform !== 'darwin') run(['systemctl', '--user', 'daemon-reload'], 15_000);
+          rmSync(plan.venvDir, { recursive: true, force: true });
+          if (venvRestorable) renameSync(backupDir, plan.venvDir);
+          return;
+        }
         if (venvRestorable) {
           rmSync(plan.venvDir, { recursive: true, force: true });
           renameSync(backupDir, plan.venvDir);
@@ -1209,7 +1223,10 @@ export async function runHostSetup(
     // here with the doctor's wording instead of reporting ok against a deadline doctor rejects.
     const timeout = parseLayaTimeoutMs(written);
     if (!timeout.ok) {
+      // Unreachable in practice (validated before the rebuild, r61) — but this is after
+      // activation, so it must still roll back (Copilot #840 r63).
       io.err(`\nlaya: ${timeout.detail}\n`);
+      rollbackLaya();
       return 1;
     }
     // A FRESH sidecar preloads the English checkpoint (~843 MB) before it answers — the
@@ -1257,6 +1274,9 @@ export async function runHostSetup(
           const anon = await checkLaya(baseUrl, '', Math.max(1, Math.min(timeout.timeoutMs, anonLeft)));
           if (anon.ok) {
             io.err(`\nlaya: the sidecar at ${baseUrl} answers WITHOUT a key — that is not the unit setup installed (LAYA_API_KEY unset), so the port is owned by another service.\n`);
+            // The new unit is already active: route through the transaction like every other
+            // post-activation failure (Copilot #840 r63).
+            rollbackLaya();
             return 1;
           }
           if (isLayaAuthRejected(anon.detail)) break; // auth proven (normalized verdict, not a '401' substring)

@@ -1741,8 +1741,14 @@ test('runHostSetup: rebuild-transaction gaps from the r61 review (#840 r61)', as
   const calls: string[] = [];
   const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
   // Real uv semantics, as in r60.
+  // crashAtActivation simulates a process death between install and readiness: the runner
+  // THROWS at the activation command, so nothing after it (rollback included) runs.
+  let crashAtActivation = false;
   const sidecarRun = (argv: string[]) => {
     calls.push(argv.join(' '));
+    if (crashAtActivation && (argv.join(' ').startsWith('launchctl bootstrap') || argv.join(' ').startsWith('systemctl --user restart'))) {
+      throw new Error('simulated crash at activation');
+    }
     if (argv[0] === 'uv' && argv[1] === 'venv') {
       const target = argv[2]!;
       if (existsSync(target)) return { ok: false, stdout: '', stderr: `A directory already exists at: ${target}` };
@@ -1771,8 +1777,12 @@ test('runHostSetup: rebuild-transaction gaps from the r61 review (#840 r61)', as
   try {
     // (c) The marker means VERIFIED: a fresh install that fails readiness leaves no marker,
     // so a later run does not prefer that unverified tree over a verified backup.
-    assert.equal(await runOnce([], dataA, 'http://127.0.0.1:1/v1/systemone', 2_000), 1, 'fresh install, readiness fails');
-    assert.ok(existsSync(join(dataA, 'laya-venv', 'bin', '.laya-installed')), 'precondition: pip ran');
+    // (A readiness FAILURE on a fresh install now removes the venv entirely — r63 — so the
+    // marker's position is only observable across a crash.)
+    crashAtActivation = true;
+    await assert.rejects(runOnce([], dataA, 'http://127.0.0.1:1/v1/systemone', 2_000), /simulated crash/);
+    crashAtActivation = false;
+    assert.ok(existsSync(join(dataA, 'laya-venv', 'bin', '.laya-installed')), 'precondition: pip ran before the crash');
     assert.ok(!existsSync(join(dataA, 'laya-venv', '.laya-install-ok')), 'an unverified venv carries no marker');
     err.length = 0;
     assert.equal(await runOnce(['--yes'], dataA, fake.url), 0, `verified install: ${err.join('')}`);
@@ -1799,6 +1809,62 @@ test('runHostSetup: rebuild-transaction gaps from the r61 review (#840 r61)', as
     assert.deepEqual(readdirSync(dataA).filter((e) => /^laya-venv\.backup-\d+$/.test(e)), [], 'no backup venv is left behind');
   } finally {
     await fake.close();
+  }
+});
+
+test('runHostSetup: an anonymously-open probe target rolls back, re-run and fresh install alike (#840 r63)', async () => {
+  const dir = tempDir('setup-laya-open-');
+  const err: string[] = [];
+  const calls: string[] = [];
+  const authed = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
+  const open = await startFakeLaya([{ json: validPick(['probe']) }]); // no apiKey: answers anyone
+  const sidecarRun = (argv: string[]) => {
+    calls.push(argv.join(' '));
+    if (argv[0] === 'uv' && argv[1] === 'venv') {
+      const target = argv[2]!;
+      if (existsSync(target)) return { ok: false, stdout: '', stderr: `A directory already exists at: ${target}` };
+      mkdirSync(join(target, 'bin'), { recursive: true });
+      writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    if (argv.join(' ').includes('pip install')) {
+      writeFileSync(join(dirname(argv[0]!), '.laya-installed'), 'y\n');
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    return okRun(argv);
+  };
+  const env = { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir };
+  const runOnce = (args: string[], dataDir: string, probeUrl: string) => runHostSetup(args, {
+    out: () => {}, err: (s) => err.push(s),
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarRun, sidecarDataDir: dataDir,
+    sidecarProbeUrl: probeUrl, sidecarReadinessBudgetMs: 10_000, sidecarReadinessGapMs: 10,
+  }, env);
+  const unitPath = process.platform === 'darwin'
+    ? join(dir, 'Library', 'LaunchAgents', 'com.mercury.laya.plist')
+    : join(dir, 'systemd', 'user', 'com.mercury.laya.service');
+  try {
+    // Fresh install against an open endpoint: the new unit must not stay enabled.
+    const dataF = join(dir, 'dataF');
+    assert.equal(await runOnce([], dataF, open.url), 1, 'fresh install refuses the open endpoint');
+    assert.match(err.join(''), /answers WITHOUT a key/);
+    assert.ok(!existsSync(unitPath), 'the fresh unit file is removed');
+    assert.ok(calls.some((c) => c.startsWith('launchctl bootout') || c.startsWith('systemctl --user disable --now')), 'the fresh unit is stopped and unregistered');
+    assert.ok(!existsSync(join(dataF, 'laya-venv')), 'the unverified venv is removed');
+
+    // Healthy install, then a re-run whose probe target answers anonymously: everything rolls back.
+    const dataA = join(dir, 'dataA');
+    err.length = 0;
+    assert.equal(await runOnce(['--yes'], dataA, authed.url), 0, `healthy install: ${err.join('')}`);
+    const unitBefore = readFileSync(unitPath, 'utf8');
+    err.length = 0;
+    assert.equal(await runOnce(['--yes'], dataA, open.url), 1, 're-run refuses the open endpoint');
+    assert.equal(readFileSync(unitPath, 'utf8'), unitBefore, 'the previous unit is restored');
+    assert.ok(existsSync(join(dataA, 'laya-venv', '.laya-install-ok')), 'the verified venv is back at the live path');
+    assert.deepEqual(readdirSync(dataA).filter((e) => /^laya-venv\.backup-\d+$/.test(e)), [], 'no backup is stranded');
+  } finally {
+    await authed.close();
+    await open.close();
   }
 });
 
