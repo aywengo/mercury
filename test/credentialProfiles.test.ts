@@ -810,6 +810,31 @@ test('host credentials resolve prints the profile name or the refusal reason, ne
   assert.ok(usage.stderr.includes('usage:'), 'usage goes to stderr, stdout stays parseable');
 });
 
+
+// Copilot review round 2 on #841: CLI diagnostics must never echo credential-bearing input.
+// A token in the userinfo of a --repo/--repos value must not appear on stdout or stderr through
+// the normalization-failure diagnostic or the unknown-argument echo.
+test('host credentials resolve diagnostics never echo credentials embedded in arguments', async () => {
+  const token = 'ghp_subprocess-secret-token-1234';
+  const url = `https://user:${token}@github.com/a/b`;
+  const envVar = { XDG_CONFIG_HOME: '/nonexistent-mercury-cp3' };
+
+  // The normalization failure diagnostic.
+  const bad = await cli(['host', 'credentials', 'resolve', '--owner', 'o', '--repo', url], envVar);
+  assert.equal(bad.code, 1);
+  assert.ok(!bad.stdout.includes(token), 'normalization failure must not leak the token on stdout');
+  assert.ok(!bad.stderr.includes(token), 'normalization failure must not leak the token on stderr');
+  assert.ok(bad.stderr.includes('[REDACTED]'), 'the redacted form identifies the bad value');
+
+  // The unknown-argument diagnostic: a --repos typo (plural) is echoed verbatim.
+  const typo = await cli(['host', 'credentials', 'resolve', '--owner', 'o', `--repos=${url}`], envVar);
+  assert.equal(typo.code, 2);
+  assert.ok(!typo.stdout.includes(token), 'unknown-argument echo must not leak the token on stdout');
+  assert.ok(!typo.stderr.includes(token), 'unknown-argument echo must not leak the token on stderr');
+  assert.ok(typo.stderr.includes('[REDACTED]'), 'the redacted form identifies the bad flag');
+});
+
+
 test('host credentials resolve: a broken file is a refusal, never "none" (§9)', async () => {
   const dir = tempDir('cp3-resolve-bad-');
   const cfg = join(dir, 'cfg', 'mercury');

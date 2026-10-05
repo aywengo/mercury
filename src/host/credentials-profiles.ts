@@ -65,8 +65,10 @@ const PROFILE_FIELDS: ReadonlySet<string> = new Set(['name', 'repositories', 'ow
  * `/*` after the owner is the org/user pattern. `localPath` repositories have no id and never
  * match a profile; they are not normalized here.
  */
-/** Redact the whole authority userinfo (with or without a password) before input reaches an error. */
-function redactUserInfo(s: string): string {
+/** Redact the whole authority userinfo (with or without a password) before input reaches an error.
+ * Exported for the CLI's argument diagnostics: `--repo`/`--repos` values can embed a credential in
+ * the userinfo, and `unknown argument '...'` echoes the raw flag text. */
+export function redactUserInfo(s: string): string {
   // '//<anything>@' -> '//[REDACTED]@': a bare token in the username slot (ftp://ghp_...@host)
   // must be covered too, not only user:password forms.
   return s.replace(/(\/\/)[^@\s/]+@/g, '$1[REDACTED]@');

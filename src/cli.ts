@@ -71,7 +71,7 @@ import { runBot, makeBotClient } from './host/bots/process.ts';
 import { dispatchTask } from './host/bots/dispatch.ts';
 import { statusView, renderStatus } from './host/bots/status.ts';
 import { botCredentialsPath, readBotCredentials, registeredOwnerForToken } from './host/bots/credentials.ts';
-import { validateCredentialProfiles, loadCredentialProfiles, resolveProfile, normalizeRepositoryId } from './host/credentials-profiles.ts';
+import { validateCredentialProfiles, loadCredentialProfiles, resolveProfile, normalizeRepositoryId, redactUserInfo } from './host/credentials-profiles.ts';
 import { botOwnerId } from './host/bots/keys.ts';
 import { hostStatus, printStatus, upgradeHost, uninstallHost } from './host/lifecycle.ts';
 import { HOST_VERSION } from './version.ts';
@@ -275,7 +275,7 @@ async function main(): Promise<void> {
         } else if (a.startsWith('--repo=')) {
           repos.push(a.slice('--repo='.length));
         } else {
-          process.stderr.write(`host credentials resolve: unknown argument '${a}'.\n`);
+          process.stderr.write(`host credentials resolve: unknown argument '${redactUserInfo(a)}'.\n`);
           process.exitCode = 2;
           return;
         }
@@ -294,7 +294,7 @@ async function main(): Promise<void> {
           try {
             normalizeRepositoryId(url);
           } catch {
-            process.stderr.write(`host credentials resolve: '${url}' is not a repository id (host/owner/name)\n`);
+            process.stderr.write(`host credentials resolve: '${redactUserInfo(url)}' is not a repository id (host/owner/name)\n`);
             process.exitCode = 1;
             return;
           }
@@ -350,7 +350,7 @@ async function main(): Promise<void> {
       } else if (rest[i]?.startsWith('--alias=')) {
         alias = rest[i]!.slice('--alias='.length);
       } else {
-        process.stderr.write(`host bot validate: unknown argument '${rest[i]}'.\n`);
+        process.stderr.write(`host bot validate: unknown argument '${redactUserInfo(rest[i])}'.\n`);
         process.exitCode = 1;
         return;
       }
@@ -430,7 +430,7 @@ async function main(): Promise<void> {
       } else if (rest[i] === '--once') {
         once = true;
       } else {
-        process.stderr.write(`host bot run: unknown argument '${rest[i]}'.\n`);
+        process.stderr.write(`host bot run: unknown argument '${redactUserInfo(rest[i])}'.\n`);
         process.exitCode = 1;
         return;
       }
@@ -466,7 +466,7 @@ async function main(): Promise<void> {
       else if (rest[i] === '--yes') yes = true;
       else if (rest[i] === '--dry-run') dryRun = true;
       else {
-        process.stderr.write(`host bot dispatch: unknown argument '${rest[i]}'.\n`);
+        process.stderr.write(`host bot dispatch: unknown argument '${redactUserInfo(rest[i])}'.\n`);
         process.exitCode = 1;
         return;
       }
@@ -509,7 +509,7 @@ async function main(): Promise<void> {
       if (rest[i] === '--alias') { alias = rest[i + 1]; i++; }
       else if (rest[i]?.startsWith('--alias=')) alias = rest[i]!.slice('--alias='.length);
       else {
-        process.stderr.write(`host bot status: unknown argument '${rest[i]}'.\n`);
+        process.stderr.write(`host bot status: unknown argument '${redactUserInfo(rest[i])}'.\n`);
         process.exitCode = 1;
         return;
       }
