@@ -1062,47 +1062,51 @@ export async function runHostSetup(
     // directory. The previous venv was never moved, so there is nothing else to restore.
     // Best effort — the original error is what the operator sees.
     const rollbackLaya = () => {
+      // Whether the enabled unit no longer references the (unverified) build directory: the
+      // unit bytes are restored AND the service manager accepted the rollback (Copilot #846
+      // r5) — a manager that still caches the new ExecStart must keep the executable tree.
+      let unitSafe = false;
       try {
         if (unitBackupText === null) {
           // No previous unit (a fresh install): there is nothing to go back TO, but the new unit
           // is already enabled/bootstrapped. Leaving it would keep a failed sidecar in a restart
           // loop (Copilot #840 r63). Stop and unregister it, remove the unit file, and delete
           // the unverified build directory so the host is as before setup.
+          let stopped = true;
           if (process.platform === 'darwin') {
-            run(['launchctl', 'bootout', `${uid}/${plan.unitLabel}`], 10_000);
+            const bootout = run(['launchctl', 'bootout', `${uid}/${plan.unitLabel}`], 10_000);
+            stopped = bootout.ok;
           } else {
-            run(['systemctl', '--user', 'disable', '--now', plan.unitLabel], 15_000);
+            const stoppedR = run(['systemctl', '--user', 'disable', '--now', plan.unitLabel], 15_000);
+            stopped = stoppedR.ok;
+            if (stopped) run(['systemctl', '--user', 'daemon-reload'], 15_000);
           }
-          rmSync(plan.unitPath, { force: true });
-          if (process.platform !== 'darwin') run(['systemctl', '--user', 'daemon-reload'], 15_000);
+          if (stopped) rmSync(plan.unitPath, { force: true });
+          unitSafe = stopped && !existsSync(plan.unitPath);
         } else {
-          restoreLayaUnit(plan.unitPath, unitBackupText);
-          if (process.platform === 'darwin') {
-            run(['launchctl', 'bootout', `${uid}/${plan.unitLabel}`], 10_000);
-            run(['launchctl', 'bootstrap', uid, plan.unitPath], 15_000);
-          } else {
-            run(['systemctl', '--user', 'daemon-reload'], 15_000);
-            run(['systemctl', '--user', 'restart', plan.unitLabel], 15_000);
+          const restored = restoreLayaUnit(plan.unitPath, unitBackupText);
+          let reloaded = false;
+          if (restored) {
+            if (process.platform === 'darwin') {
+              run(['launchctl', 'bootout', `${uid}/${plan.unitLabel}`], 10_000);
+              reloaded = run(['launchctl', 'bootstrap', uid, plan.unitPath], 15_000).ok;
+            } else {
+              const reload = run(['systemctl', '--user', 'daemon-reload'], 15_000);
+              reloaded = reload.ok && run(['systemctl', '--user', 'restart', plan.unitLabel], 15_000).ok;
+            }
           }
+          // The unit bytes on disk are the previous ones; the manager accepted them only if the
+          // reload/restart succeeded.
+          unitSafe = restored && reloaded
+            && (() => { try { return readFileSync(plan.unitPath, 'utf8') === unitBackupText; } catch { return false; } })();
         }
       } catch {
         // Best effort — the original error is what the operator sees.
       }
       // The build directory is not live unless readiness proved it; after any post-commit
-      // failure it is garbage (best effort: injected runners may not have created it). EXCEPT
-      // when the enabled unit still references it: for a re-run that means the restore FAILED
-      // (the on-disk unit is not the previous bytes); for a fresh install it means the unit
-      // could not be removed. Either way keep the directory so the unit keeps a working
-      // executable (Copilot #846 r2/r3).
-      const restored = (() => {
-        try {
-          if (unitBackupText === null) return !existsSync(plan.unitPath);
-          return existsSync(plan.unitPath) && readFileSync(plan.unitPath, 'utf8') === unitBackupText;
-        } catch {
-          return false;
-        }
-      })();
-      if (restored) rmSync(plan.venvDir, { recursive: true, force: true });
+      // failure it is garbage (best effort: injected runners may not have created it). Keep it
+      // whenever the enabled unit might still reference it (Copilot #846 r2/r3/r5).
+      if (unitSafe) rmSync(plan.venvDir, { recursive: true, force: true });
     };
     try {
       for (const [name, step] of steps) {
