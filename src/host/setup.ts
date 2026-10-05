@@ -1322,16 +1322,29 @@ export async function runHostSetup(
     {
       // Pin-independent: after a pin upgrade the previous pin's generated dirs must still be
       // swept (Copilot #846 r3).
-      // Pin-independent: after a pin upgrade the previous pin's generated dirs must still be
-      // swept (Copilot #846 r3).
       const gen = /^laya-venv-\d+\.\d+\.\d+-\d{14}-[0-9a-f]{8}$/;
       const keep = new Set([plan.venvDir, prevVenv]);
-      // The WHOLE sweep is best effort: enumeration failures (EACCES/EIO, a concurrent
-      // directory change) mean 'nothing swept now', never a failed install (Copilot #846 r8).
       // A dataDir migration keeps its rollback generation under the OLD parent — sweep the
       // installer-owned siblings THERE too, so the two-generation budget holds across
-      // migrations (Copilot #846 r9).
+      // migrations (Copilot #846 r9). A SECOND re-run after the migration retires the old
+      // parent entirely: the marker records the previous run's retained generation, whose
+      // parent joins the sweep once it is no longer the current rollback generation (Copilot
+      // #846 r12).
+      // Dot-prefixed so the 'laya-venv*' generation filters (and operator eyeballs) see
+      // only venv directories.
+      const markerPath = join(dataDir, '.laya-venv-prev');
+      const oldPrev = (() => {
+        try {
+          const p = readFileSync(markerPath, 'utf8').trim();
+          return p === '' ? null : p;
+        } catch {
+          return null;
+        }
+      })();
       const sweepParents = new Set([dataDir, dirname(prevVenv)]);
+      if (oldPrev !== null && oldPrev !== prevVenv && dirname(oldPrev) !== dataDir) {
+        sweepParents.add(dirname(oldPrev));
+      }
       for (const sweepParent of sweepParents) {
         let entries: string[] = [];
         try {
@@ -1350,6 +1363,17 @@ export async function runHostSetup(
           } catch {
             // Best effort: leave it — disk space, not a correctness problem.
           }
+        }
+      }
+      // Record this run's retained rollback generation for the next sweep (best effort).
+      try {
+        writeFileSync(markerPath, `${prevVenv}\n`, { flag: 'wx', mode: 0o600 });
+      } catch {
+        try {
+          rmSync(markerPath, { force: true });
+          writeFileSync(markerPath, `${prevVenv}\n`, { mode: 0o600 });
+        } catch {
+          // Best effort: without the marker the next run may retain one extra generation.
         }
       }
     }

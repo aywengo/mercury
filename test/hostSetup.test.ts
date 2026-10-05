@@ -1893,6 +1893,7 @@ test('runHostSetup (#845): a re-run after success keeps exactly one previous gen
     // An operator-named sibling is NEVER touched (Copilot #846 r2).
     assert.ok(existsSync(join(dir, 'data', 'laya-venv.backup-manual')), 'operator-named siblings are untouched');
     assert.ok(existsSync(join(dir, 'data', 'laya-venv-notes')), 'operator-named siblings are untouched');
+
   // DataDir migration (Copilot #846 r9): run 3 moves to a NEW data dir. The old parent's
   // generations must be swept down to the single rollback generation the previous unit
   // referenced, and the new dir gets exactly the new generation.
@@ -1911,6 +1912,17 @@ test('runHostSetup (#845): a re-run after success keeps exactly one previous gen
   const dirsB = readdirSync(dataDirB).filter((e) => e.startsWith('laya-venv')).sort();
   assert.equal(dirsB.length, 1, `the new data dir holds exactly the new generation: ${dirsB.join(', ')}`);
   assert.ok(dirsA.length >= 1 && dirsA.length <= 2, `the old parent keeps at most the rollback generation(s): ${dirsA.join(', ')}`);
+  // Migration rerun (Copilot #846 r12): run 4 stays in B — the generation retained in A after
+  // the migration must now be retired, so no generation leaks in the old parent.
+  const code4 = await runHostSetup(['--yes'], {
+    out: (s) => out.push(s), err: (s) => err.push(s),
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarRun, sidecarDataDir: dataDirB,
+    sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 30_000,
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: xdgB, XDG_STATE_HOME: dir, HOME: dir });
+  assert.equal(code4, 0, `migration rerun: ${err.join('')} | ${out.join('')}`);
+  const dirsA4 = readdirSync(join(dir, 'data')).filter((e) => ownedRe.test(e)).sort();
+  assert.deepEqual(dirsA4, [], `the old parent is fully retired after the migration rerun: ${dirsA4.join(', ')}`);
   } finally {
     await fake.close();
   }
