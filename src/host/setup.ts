@@ -1116,6 +1116,16 @@ export async function runHostSetup(
       // go. If the unit WAS already renamed, restore the previous bytes — and delete the build
       // directory only if the enabled unit no longer references it (a failed restore would
       // otherwise leave the unit pointing at a deleted tree, Copilot #846 r3).
+      if (unitBackupText === null && existsSync(plan.unitPath)) {
+        // A fresh install that failed AFTER the commit rename (a throwing chmod/cleanup): the
+        // new unit references the unverified build dir and must go (Copilot #846 r4).
+        try {
+          rmSync(plan.unitPath, { force: true });
+          if (process.platform !== 'darwin') run(['systemctl', '--user', 'daemon-reload'], 15_000);
+        } catch {
+          // Kept below: a failed removal keeps the build dir for the enabled unit.
+        }
+      }
       restoreLayaUnit(plan.unitPath, unitBackupText);
       const restored = (() => {
         try {
