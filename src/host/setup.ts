@@ -1074,8 +1074,13 @@ export async function runHostSetup(
           // the unverified build directory so the host is as before setup.
           let stopped = true;
           if (process.platform === 'darwin') {
-            const bootout = run(['launchctl', 'bootout', `${uid}/${plan.unitLabel}`], 10_000);
-            stopped = bootout.ok;
+            // A fresh install whose bootstrap itself failed never registered the job — bootout
+            // would answer 'not loaded' and read as a failure (Copilot #846 r6). Ask the
+            // manager first: not loaded = stopped.
+            const printR = run(['launchctl', 'print', `${uid}/${plan.unitLabel}`], 10_000);
+            stopped = printR.ok
+              ? run(['launchctl', 'bootout', `${uid}/${plan.unitLabel}`], 10_000).ok
+              : true;
           } else {
             const stoppedR = run(['systemctl', '--user', 'disable', '--now', plan.unitLabel], 15_000);
             stopped = stoppedR.ok;
