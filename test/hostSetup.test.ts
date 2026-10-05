@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, chmodSync, readFileSync, renameSync, rmSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, basename, join, resolve } from 'node:path';
 
 import { tempDir } from './helpers.ts';
 import { readLayaCredentials } from '../src/host/layaCredentials.ts';
@@ -1582,173 +1582,14 @@ test('sidecarExec: the timeout holds even when the child ignores SIGTERM (#840 r
   assert.ok(elapsed < 5_000, `the bound holds: ${elapsed} ms`);
 });
 
-test('runHostSetup: the venv is rebuilt at its final path; a failed install rolls back (#840 r47/r55)', async () => {
-  // Scripted runner that REALLY creates the venv dir so the rebuild works on the real fs.
-  const dir = tempDir('setup-laya-stage-');
-  const live = join(dir, 'data', 'laya-venv');
-  const installedMarker = join(live, 'bin', '.laya-installed');
-  let failInstall = false;
-  const sidecarRun = (argv: string[]) => {
-    if (argv[0] === 'uv' && argv[1] === 'venv') {
-      const target = argv[2]!;
-      // `uv venv` REPLACES an existing venv — emulate that so the rollback discipline is
-      // observable (a recreate wipes the previous install's files).
-      rmSync(target, { recursive: true, force: true });
-      mkdirSync(join(target, 'bin'), { recursive: true });
-      writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\n', { mode: 0o755 });
-    } else if (argv.includes('pip')) {
-      if (failInstall) return { ok: false, stdout: '', stderr: 'boom' };
-      // pip installs into the venv that invoked it — always the FINAL path now (r55: a venv
-      // cannot be promoted by renaming; pip writes absolute shebangs).
-      assert.ok(!argv[0]!.includes('.staging-'), `pip must run from the final venv path, got ${argv[0]}`);
-      const venvBin = dirname(argv[0]!);
-      assert.equal(venvBin, join(live, 'bin'), 'pip targets the live venv');
-      mkdirSync(venvBin, { recursive: true });
-      writeFileSync(join(venvBin, '.laya-installed'), 'ok\n');
-    }
-    return okRun(argv);
-  };
-  const err: string[] = [];
-  // Operator data beside the venv (NOT installer naming) and a crashed run's leftover.
-  mkdirSync(join(dir, 'data', 'laya-venv.backup-manual'), { recursive: true });
-  writeFileSync(join(dir, 'data', 'laya-venv.backup-manual', 'keep.txt'), 'operator data\n');
-  mkdirSync(join(dir, 'data', 'laya-venv.backup-weird.pid'), { recursive: true });
-  mkdirSync(join(dir, 'data', 'laya-venv.backup-999999'), { recursive: true });
-  // First run: healthy install → live venv exists, no backup leftovers.
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
-  try {
-    const code = await runHostSetup([], {
-      out: () => {}, err: (s) => err.push(s),
-      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-      sidecarRun, sidecarDataDir: join(dir, 'data'),
-      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
-    assert.equal(code, 0, `install: ${err.join('')}`);
-    assert.ok(existsSync(live), 'the live venv exists after the rebuild');
-    assert.ok(existsSync(installedMarker), 'the install landed in the live venv');
-    assert.ok(!readdirSync(join(dir, 'data')).some((e) => /^laya-venv\.(staging|backup)-\d+$/.test(e)), 'no numerically-shaped backup leftover');
-    assert.ok(existsSync(join(dir, 'data', 'laya-venv.backup-manual', 'keep.txt')), 'operator data sharing the prefix survives');
-    assert.ok(existsSync(join(dir, 'data', 'laya-venv.backup-weird.pid')), 'a non-generated suffix (dot in the tail) survives');
-    // Second run with a FAILING install: rollback restores the previous environment.
-    failInstall = true;
-    err.length = 0;
-    const out2: string[] = [];
-    const code2 = await runHostSetup(['--yes'], {
-      out: (s) => out2.push(s), err: (s) => err.push(s),
-      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-      sidecarRun, sidecarDataDir: join(dir, 'data'),
-      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
-    assert.equal(code2, 1, `failing reinstall: ${err.join('')} | ${out2.join('')}`);
-    assert.match(err.join(''), /pip install laya\[serve\]==[^ ]+ failed/);
-    assert.ok(existsSync(installedMarker), 'the previous install survives the failed rebuild (rolled back)');
-    // The staging venv is cleaned up on a pre-swap failure (Copilot #840 r48).
-    assert.ok(!readdirSync(join(dir, 'data')).some((e) => e.includes('.staging-')), 'no staging venv leaks after a failed install');
-    assert.ok(!readdirSync(join(dir, 'data')).some((e) => /^laya-venv\.backup-\d+$/.test(e)), 'no generated backup venv leaks after a failed install');
-    // Crash recovery (Copilot #840 r58): a crash between the backup rename and a completed
-    // rebuild leaves the working venv under backup-<old pid> with NO live venv. The next run
-    // must ADOPT that backup so a failed rebuild rolls it back instead of leaving the unit
-    // without an executable.
-    const crashedBackup = join(dir, 'data', 'laya-venv.backup-424242');
-    renameSync(live, crashedBackup);
-    // r59 shape: the crashed run had ALSO created a partial live venv before dying — the next
-    // run must prefer the WORKING numeric backup over the partial tree.
-    mkdirSync(join(live, 'bin'), { recursive: true });
-    writeFileSync(join(live, 'bin', 'python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-    err.length = 0;
-    const code3 = await runHostSetup(['--yes'], {
-      out: () => {}, err: (s) => err.push(s),
-      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-      sidecarRun, sidecarDataDir: join(dir, 'data'),
-      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
-    assert.equal(code3, 1, `crashed-backup rebuild must fail cleanly: ${err.join('')}`);
-    assert.match(err.join(''), /pip install laya\[serve\]==[^ ]+ failed/, 'the rebuild failed at the install step');
-    assert.ok(existsSync(installedMarker), 'the adopted backup was rolled back into the live path');
-    assert.ok(!existsSync(crashedBackup), 'the adopted backup no longer sits under its old name');
-  } finally {
-    await fake.close();
-  }
-});
-
-test('runHostSetup: a marker-less live venv with no backup does not wedge re-runs under real uv semantics (#840 r60)', async () => {
-  const dir = tempDir('setup-laya-nomark-');
+test('runHostSetup (#845): a failed install leaves the previous venv byte-identical and removes the build dir', async () => {
+  const dir = tempDir('setup-laya-v845-');
   const err: string[] = [];
   const out: string[] = [];
   const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
   let failInstall = false;
-  // REAL uv semantics (uv 0.8): `uv venv` on an existing directory fails instead of replacing
-  // it. The other tests emulate replace semantics, which is why this wedge went unseen.
   const sidecarRun = (argv: string[]) => {
-    if (argv[0] === 'uv' && argv[1] === 'venv') {
-      const target = argv[2]!;
-      if (existsSync(target)) {
-        return { ok: false, stdout: '', stderr: `error: Failed to create virtual environment\n  Caused by: A directory already exists at: ${target}` };
-      }
-      mkdirSync(join(target, 'bin'), { recursive: true });
-      writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-      return { ok: true, stdout: '', stderr: '' };
-    }
-    if (argv.join(' ').includes('pip install')) {
-      if (failInstall) return { ok: false, stdout: '', stderr: 'boom' };
-      writeFileSync(join(dirname(argv[0]!), '.laya-installed'), 'y\n');
-      return { ok: true, stdout: '', stderr: '' };
-    }
-    return okRun(argv);
-  };
-  const runOnce = (args: string[], probeUrl: string) => runHostSetup(args, {
-    out: (s) => out.push(s), err: (s) => err.push(s),
-    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-    sidecarRun, sidecarDataDir: join(dir, 'data'),
-    sidecarProbeUrl: probeUrl, sidecarReadinessBudgetMs: 10_000,
-  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
-  const live = join(dir, 'data', 'laya-venv');
-  try {
-    // Shape 1: a FRESH install whose pip step fails leaves a partial live tree, no marker,
-    // no backup. The next run must rebuild, not fail at `uv venv` forever.
-    failInstall = true;
-    assert.equal(await runOnce([], fake.url), 1, 'the failing fresh install fails');
-    assert.ok(existsSync(live), 'precondition: the partial tree is left at the live path');
-    assert.ok(!existsSync(join(live, '.laya-install-ok')), 'precondition: no completion marker');
-    failInstall = false;
-    err.length = 0;
-    assert.equal(await runOnce(['--yes'], fake.url), 0, `the re-run after a failed fresh install: ${err.join('')}`);
-    assert.ok(existsSync(join(live, 'bin', '.laya-installed')), 'the re-run installed into the live path');
-
-    // Shape 2: a COMPLETE venv from before the marker existed (or a failed marker write).
-    rmSync(join(live, '.laya-install-ok'), { force: true });
-    err.length = 0;
-    assert.equal(await runOnce(['--yes'], fake.url), 0, `the re-run over a marker-less complete venv: ${err.join('')}`);
-    assert.ok(existsSync(join(live, '.laya-install-ok')), 'the rebuilt venv carries the completion marker');
-    assert.deepEqual(readdirSync(join(dir, 'data')).filter((e) => /^laya-venv\.backup-\d+$/.test(e)), [], 'no backup leaks after success');
-
-    // Shape 3: the marker-less venv is still the rollback source when the rebuild fails.
-    rmSync(join(live, '.laya-install-ok'), { force: true });
-    failInstall = true;
-    err.length = 0;
-    assert.equal(await runOnce(['--yes'], fake.url), 1, 'the failing rebuild fails');
-    assert.match(err.join(''), /pip install laya\[serve\]==[^ ]+ failed/, 'it failed at install, not at `uv venv`');
-    assert.ok(existsSync(join(live, 'bin', '.laya-installed')), 'the marker-less previous venv was rolled back into place');
-  } finally {
-    await fake.close();
-  }
-});
-
-test('runHostSetup: rebuild-transaction gaps from the r61 review (#840 r61)', async () => {
-  const dir = tempDir('setup-laya-r61-');
-  const err: string[] = [];
-  const out: string[] = [];
-  const calls: string[] = [];
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
-  // Real uv semantics, as in r60.
-  // crashAtActivation simulates a process death between install and readiness: the runner
-  // THROWS at the activation command, so nothing after it (rollback included) runs.
-  let crashAtActivation = false;
-  const sidecarRun = (argv: string[]) => {
-    calls.push(argv.join(' '));
-    if (crashAtActivation && (argv.join(' ').startsWith('launchctl bootstrap') || argv.join(' ').startsWith('systemctl --user restart'))) {
-      throw new Error('simulated crash at activation');
-    }
+    // REAL uv semantics: `uv venv` refuses an existing directory (#840 r60).
     if (argv[0] === 'uv' && argv[1] === 'venv') {
       const target = argv[2]!;
       if (existsSync(target)) return { ok: false, stdout: '', stderr: `A directory already exists at: ${target}` };
@@ -1757,135 +1598,8 @@ test('runHostSetup: rebuild-transaction gaps from the r61 review (#840 r61)', as
       return { ok: true, stdout: '', stderr: '' };
     }
     if (argv.join(' ').includes('pip install')) {
+      if (failInstall) return { ok: false, stdout: '', stderr: 'boom' };
       writeFileSync(join(dirname(argv[0]!), '.laya-installed'), 'y\n');
-      return { ok: true, stdout: '', stderr: '' };
-    }
-    return okRun(argv);
-  };
-  const env = { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir };
-  const runOnce = (args: string[], dataDir: string, probeUrl: string, budgetMs = 10_000) => runHostSetup(args, {
-    out: (s) => out.push(s), err: (s) => err.push(s),
-    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-    sidecarRun, sidecarDataDir: dataDir,
-    sidecarProbeUrl: probeUrl, sidecarReadinessBudgetMs: budgetMs,
-  }, env);
-  const dataA = join(dir, 'dataA');
-  const dataB = join(dir, 'dataB');
-  const unitPath = process.platform === 'darwin'
-    ? join(dir, 'Library', 'LaunchAgents', 'com.mercury.laya.plist')
-    : join(dir, 'systemd', 'user', 'com.mercury.laya.service');
-  try {
-    // (c) The marker means VERIFIED: a fresh install that fails readiness leaves no marker,
-    // so a later run does not prefer that unverified tree over a verified backup.
-    // (A readiness FAILURE on a fresh install now removes the venv entirely — r63 — so the
-    // marker's position is only observable across a crash.)
-    crashAtActivation = true;
-    await assert.rejects(runOnce([], dataA, 'http://127.0.0.1:1/v1/systemone', 2_000), /simulated crash/);
-    crashAtActivation = false;
-    assert.ok(existsSync(join(dataA, 'laya-venv', 'bin', '.laya-installed')), 'precondition: pip ran before the crash');
-    assert.ok(!existsSync(join(dataA, 'laya-venv', '.laya-install-ok')), 'an unverified venv carries no marker');
-    err.length = 0;
-    assert.equal(await runOnce(['--yes'], dataA, fake.url), 0, `verified install: ${err.join('')}`);
-    assert.ok(existsSync(join(dataA, 'laya-venv', '.laya-install-ok')), 'the marker lands after the doctor probe');
-    const unitA = readFileSync(unitPath, 'utf8');
-    assert.ok(unitA.includes(join(dataA, 'laya-venv')), 'precondition: the unit points at dataA');
-
-    // (b) A re-run that changes dataDir and fails readiness restores the PREVIOUS unit, which
-    // still points at the working venv under dataA.
-    err.length = 0;
-    assert.equal(await runOnce(['--yes'], dataB, 'http://127.0.0.1:1/v1/systemone', 2_000), 1, 'dataDir change, readiness fails');
-    assert.equal(readFileSync(unitPath, 'utf8'), unitA, 'the previous unit is restored byte-for-byte');
-    assert.ok(existsSync(join(dataA, 'laya-venv', '.laya-install-ok')), 'the old verified venv is untouched');
-
-    // (a) An invalid MERCURY_LAYA_TIMEOUT_MS refuses BEFORE anything is moved or rebuilt.
-    const envPath = envFilePath({ XDG_CONFIG_HOME: dir });
-    writeFileSync(envPath, `${readFileSync(envPath, 'utf8')}MERCURY_LAYA_TIMEOUT_MS=0\n`);
-    calls.length = 0;
-    err.length = 0;
-    assert.equal(await runOnce(['--yes'], dataA, fake.url), 1, 'invalid timeout refuses');
-    assert.match(err.join(''), /MERCURY_LAYA_TIMEOUT_MS/, 'the refusal names the variable');
-    assert.ok(!calls.some((c) => c.startsWith('uv venv') || c.includes('pip install')), 'nothing was rebuilt');
-    assert.ok(existsSync(join(dataA, 'laya-venv', '.laya-install-ok')), 'the live venv stays in place');
-    assert.deepEqual(readdirSync(dataA).filter((e) => /^laya-venv\.backup-\d+$/.test(e)), [], 'no backup venv is left behind');
-  } finally {
-    await fake.close();
-  }
-});
-
-test('runHostSetup: an anonymously-open probe target rolls back, re-run and fresh install alike (#840 r63)', async () => {
-  const dir = tempDir('setup-laya-open-');
-  const err: string[] = [];
-  const calls: string[] = [];
-  const authed = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
-  const open = await startFakeLaya([{ json: validPick(['probe']) }]); // no apiKey: answers anyone
-  const sidecarRun = (argv: string[]) => {
-    calls.push(argv.join(' '));
-    if (argv[0] === 'uv' && argv[1] === 'venv') {
-      const target = argv[2]!;
-      if (existsSync(target)) return { ok: false, stdout: '', stderr: `A directory already exists at: ${target}` };
-      mkdirSync(join(target, 'bin'), { recursive: true });
-      writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-      return { ok: true, stdout: '', stderr: '' };
-    }
-    if (argv.join(' ').includes('pip install')) {
-      writeFileSync(join(dirname(argv[0]!), '.laya-installed'), 'y\n');
-      return { ok: true, stdout: '', stderr: '' };
-    }
-    return okRun(argv);
-  };
-  const env = { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir };
-  const runOnce = (args: string[], dataDir: string, probeUrl: string) => runHostSetup(args, {
-    out: () => {}, err: (s) => err.push(s),
-    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-    sidecarRun, sidecarDataDir: dataDir,
-    sidecarProbeUrl: probeUrl, sidecarReadinessBudgetMs: 10_000, sidecarReadinessGapMs: 10,
-  }, env);
-  const unitPath = process.platform === 'darwin'
-    ? join(dir, 'Library', 'LaunchAgents', 'com.mercury.laya.plist')
-    : join(dir, 'systemd', 'user', 'com.mercury.laya.service');
-  try {
-    // Fresh install against an open endpoint: the new unit must not stay enabled.
-    const dataF = join(dir, 'dataF');
-    assert.equal(await runOnce([], dataF, open.url), 1, 'fresh install refuses the open endpoint');
-    assert.match(err.join(''), /answers WITHOUT a key/);
-    assert.ok(!existsSync(unitPath), 'the fresh unit file is removed');
-    assert.ok(calls.some((c) => c.startsWith('launchctl bootout') || c.startsWith('systemctl --user disable --now')), 'the fresh unit is stopped and unregistered');
-    assert.ok(!existsSync(join(dataF, 'laya-venv')), 'the unverified venv is removed');
-
-    // Healthy install, then a re-run whose probe target answers anonymously: everything rolls back.
-    const dataA = join(dir, 'dataA');
-    err.length = 0;
-    assert.equal(await runOnce(['--yes'], dataA, authed.url), 0, `healthy install: ${err.join('')}`);
-    const unitBefore = readFileSync(unitPath, 'utf8');
-    err.length = 0;
-    assert.equal(await runOnce(['--yes'], dataA, open.url), 1, 're-run refuses the open endpoint');
-    assert.equal(readFileSync(unitPath, 'utf8'), unitBefore, 'the previous unit is restored');
-    assert.ok(existsSync(join(dataA, 'laya-venv', '.laya-install-ok')), 'the verified venv is back at the live path');
-    assert.deepEqual(readdirSync(dataA).filter((e) => /^laya-venv\.backup-\d+$/.test(e)), [], 'no backup is stranded');
-  } finally {
-    await authed.close();
-    await open.close();
-  }
-});
-
-test('runHostSetup: a readiness failure rolls the previous venv back into place (#840 r59)', async () => {
-  const dir = tempDir('setup-laya-rr-');
-  const out: string[] = [];
-  const err: string[] = [];
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
-  let failInstall = false;
-  const sidecarRun = (argv: string[]) => {
-    if (failInstall && argv.join(' ').includes('pip install')) return { ok: false, stdout: '', stderr: 'boom' };
-    // Real-filesystem emulation: uv-replace semantics.
-    if (argv[0] === 'uv' && argv[1] === 'venv') {
-      const target = argv[2];
-      rmSync(target, { recursive: true, force: true });
-      mkdirSync(join(target, 'bin'), { recursive: true });
-      writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-      return { ok: true, stdout: '', stderr: '' };
-    }
-    if (argv.join(' ').includes('pip install')) {
-      writeFileSync(join(dirname(argv[0]), '.laya-installed'), 'y\n');
       return { ok: true, stdout: '', stderr: '' };
     }
     return okRun(argv);
@@ -1896,26 +1610,230 @@ test('runHostSetup: a readiness failure rolls the previous venv back into place 
       question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
       sidecarRun, sidecarDataDir: join(dir, 'data'),
       sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 30_000,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
     assert.equal(code1, 0, `first install: ${err.join('')} | ${out.join('')}`);
-    const live = join(dir, 'data', 'laya-venv');
-    const installedMarker = join(live, 'bin', '.laya-installed');
-    assert.ok(existsSync(installedMarker), 'run 1 installed the venv');
-    // Run 2: the probe URL points at a closed port with a tiny budget → readiness exhausts →
-    // the previous environment must be restored (Copilot #840 r59).
+    // Run 1 built a VERSIONED directory, not the legacy path.
+    const venvDirs = readdirSync(join(dir, 'data')).filter((e) => e.startsWith('laya-venv'));
+    assert.equal(venvDirs.length, 1, `exactly one venv generation after run 1: ${venvDirs.join(', ')}`);
+    assert.match(venvDirs[0]!, new RegExp(`^laya-venv-${LAYA_SERVE_PIN}-\\d{14}-[0-9a-f]+$`), 'the build dir is versioned');
+    const live = join(dir, 'data', venvDirs[0]!);
+    const prevStat = statSync(live);
+    const prevMtimeMs = prevStat.mtimeMs;
+    // Run 2: pip fails. The previous generation must be untouched and the partial build removed.
+    failInstall = true;
+    err.length = 0;
+    const code2 = await runHostSetup(['--yes'], {
+      out: (s) => out.push(s), err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 30_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+    assert.equal(code2, 1, 'the failed install fails the run');
+    const after = statSync(live);
+    assert.equal(after.ino, prevStat.ino, 'the previous venv directory was never replaced (inode unchanged)');
+    assert.equal(after.mtimeMs, prevMtimeMs, 'the previous venv was never modified (mtime unchanged)');
+    const dirs2 = readdirSync(join(dir, 'data')).filter((e) => e.startsWith('laya-venv'));
+    assert.deepEqual(dirs2, [basename(live)], `only the previous generation remains: ${dirs2.join(', ')}`);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('runHostSetup (#845): a readiness failure restores the previous unit and deletes the new directory', async () => {
+  const dir = tempDir('setup-laya-v845rr-');
+  const out: string[] = [];
+  const err: string[] = [];
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
+  const sidecarRun = (argv: string[]) => {
+    if (argv[0] === 'uv' && argv[1] === 'venv') {
+      const target = argv[2]!;
+      if (existsSync(target)) return { ok: false, stdout: '', stderr: `A directory already exists at: ${target}` };
+      mkdirSync(join(target, 'bin'), { recursive: true });
+      writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    if (argv.join(' ').includes('pip install')) {
+      writeFileSync(join(dirname(argv[0]!), '.laya-installed'), 'y\n');
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    return okRun(argv);
+  };
+  try {
+    const code1 = await runHostSetup([], {
+      out: (s) => out.push(s), err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 30_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+    assert.equal(code1, 0, `first install: ${err.join('')} | ${out.join('')}`);
+    const unitPath = process.platform === 'darwin'
+      ? join(dir, 'Library', 'LaunchAgents', 'com.mercury.laya.plist')
+      : join(dir, '.config', 'systemd', 'user', 'com.mercury.laya.service');
+    const prevUnit = readFileSync(unitPath, 'utf8');
+    const venvDirs = readdirSync(join(dir, 'data')).filter((e) => e.startsWith('laya-venv'));
+    const prevVenv = join(dir, 'data', venvDirs[0]!);
+    const prevStat = statSync(prevVenv);
+    // Run 2: the probe target is a CLOSED port with a tiny budget → readiness fails → the
+    // previous unit bytes are restored, the service reloaded, and the new dir deleted. The
+    // previous venv was never moved or modified (inode + mtime, not just existence).
     const code2 = await runHostSetup(['--yes'], {
       out: (s) => out.push(s), err: (s) => err.push(s),
       question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
       sidecarRun, sidecarDataDir: join(dir, 'data'),
       sidecarProbeUrl: 'http://127.0.0.1:1/v1/systemone', sidecarReadinessBudgetMs: 3_000,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, HOME: dir });
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
     assert.equal(code2, 1, 'a readiness failure fails the run');
-    assert.ok(existsSync(installedMarker), 'the previous venv is restored after the readiness failure');
-    assert.deepEqual(readdirSync(join(dir, 'data')).filter((e) => /^laya-venv\.backup-\d+$/.test(e)), [], 'no backup leaks after the readiness rollback');
+    const afterStat = statSync(prevVenv);
+    assert.equal(afterStat.ino, prevStat.ino, 'the previous venv was never renamed or replaced');
+    assert.equal(afterStat.mtimeMs, prevStat.mtimeMs, 'the previous venv was never modified');
+    assert.equal(readFileSync(unitPath, 'utf8'), prevUnit, 'the previous unit bytes were restored');
+    const dirs2 = readdirSync(join(dir, 'data')).filter((e) => e.startsWith('laya-venv'));
+    assert.deepEqual(dirs2, [basename(prevVenv)], `the failed build dir is gone: ${dirs2.join(', ')}`);
   } finally {
     await fake.close();
   }
 });
+
+test('runHostSetup (#845): crash simulation at every step boundary is recovered by a clean re-run', async () => {
+  // Acceptance 3: crash after build, after pip, after unit write, after activation, before
+  // sweep — each boundary, then a re-run with exit 0 whose unit points at a complete venv.
+  const dir = tempDir('setup-laya-v845crash-');
+  const out: string[] = [];
+  const err: string[] = [];
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
+  // The runner emulates a crash by THROWING at the named boundary (a thrown error from the
+  // injected runner aborts the run the way a process death would).
+  let crashAt: 'build' | 'pip' | 'unit' | 'activation' | null = null;
+  const sidecarRun = (argv: string[]) => {
+    if (argv[0] === 'uv' && argv[1] === 'venv') {
+      if (crashAt === 'build') throw new Error('simulated crash after build');
+      const target = argv[2]!;
+      if (existsSync(target)) return { ok: false, stdout: '', stderr: `A directory already exists at: ${target}` };
+      mkdirSync(join(target, 'bin'), { recursive: true });
+      writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    if (argv.join(' ').includes('pip install')) {
+      if (crashAt === 'pip') throw new Error('simulated crash after pip');
+      writeFileSync(join(dirname(argv[0]!), '.laya-installed'), 'y\n');
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    // Crash AFTER the unit write: the first activation command is the boundary ('unit' = the
+    // pre-flight launchctl print / daemon-reload, i.e. immediately after the commit rename;
+    // 'activation' = at the bootstrap/restart itself).
+    if ((argv[0] === 'launchctl' && argv[1] === 'print') || (argv[0] === 'systemctl' && argv[2] === 'daemon-reload')) {
+      if (crashAt === 'unit') throw new Error('simulated crash after unit write');
+    }
+    if ((argv[0] === 'launchctl' && argv[1] === 'bootstrap') || (argv[0] === 'systemctl' && argv[2] === 'restart')) {
+      if (crashAt === 'activation') throw new Error('simulated crash after activation');
+    }
+    return okRun(argv);
+  };
+  const base = {
+    question: async (q: string) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarRun, sidecarDataDir: join(dir, 'data'),
+    sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 30_000,
+  } as const;
+  const env = { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir };
+  try {
+    // Healthy install first: a previous generation exists (except for the 'build' boundary,
+    // which crashes the FIRST install — re-run must still succeed from nothing).
+    let first = true;
+    for (const boundary of ['build', 'pip', 'unit', 'activation'] as const) {
+      crashAt = boundary;
+      const dataDir = join(dir, `d-${boundary}`);
+      const xdg = join(dir, `xdg-${boundary}`);
+      mkdirSync(xdg, { recursive: true });
+      // A simulated process death surfaces either as exit 1 (a handled failure) or as an
+      // uncaught throw from the runner (an unhandled crash, like a real kill would be).
+      let code = 1;
+      try {
+        code = await runHostSetup(['--yes'], {
+          out: (s) => out.push(s), err: (s) => err.push(s), ...base, sidecarDataDir: dataDir,
+        }, { ...env, XDG_CONFIG_HOME: xdg, XDG_STATE_HOME: dir, HOME: dir });
+      } catch (crash) {
+        if (!(crash instanceof Error) || !String(crash.message).includes('simulated crash')) throw crash;
+      }
+      if (code !== 1) throw new Error(`boundary ${boundary}: code=${code} err=${err.slice(-4).join('')} out=${out.slice(-6).join('')}`);
+      // A crash BEFORE the unit rename leaves no unit; AFTER it leaves the new unit pointing at
+      // a COMPLETE venv. Either way, a re-run must reach exit 0.
+      crashAt = null;
+      const code2 = await runHostSetup(['--yes'], {
+        out: (s) => out.push(s), err: (s) => err.push(s), ...base, sidecarDataDir: dataDir,
+      }, { ...env, XDG_CONFIG_HOME: xdg, XDG_STATE_HOME: dir, HOME: dir });
+      assert.equal(code2, 0, `re-run after a ${boundary}-boundary crash: ${err.join('')} | ${out.join('')}`);
+      first = false;
+    }
+    // 'before sweep': crash right after readiness, before the success sweep — emulate by
+    // leaving an EXTRA venv-like directory and verifying the next successful run sweeps it
+    // while keeping the previous generation.
+    const dataDir = join(dir, 'd-sweep');
+    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(join(dataDir, 'laya-venv-orphan'), { recursive: true });
+    const code = await runHostSetup([], { out: (s) => out.push(s), err: (s) => err.push(s), ...base, sidecarDataDir: dataDir },
+      { ...env, XDG_CONFIG_HOME: join(dir, 'xdg-sweep'), XDG_STATE_HOME: dir, HOME: dir });
+    assert.equal(code, 0, `clean install: ${err.join('')} | ${out.join('')}`);
+    assert.ok(!existsSync(join(dataDir, 'laya-venv-orphan')), `the success sweep removed the orphan: ${readdirSync(dataDir).join(', ')}`);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('runHostSetup (#845): a re-run after success keeps exactly one previous generation (#831 migration)', async () => {
+  const dir = tempDir('setup-laya-v845mig-');
+  const out: string[] = [];
+  const err: string[] = [];
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
+  const sidecarRun = (argv: string[]) => {
+    if (argv[0] === 'uv' && argv[1] === 'venv') {
+      const target = argv[2]!;
+      if (existsSync(target)) return { ok: false, stdout: '', stderr: `A directory already exists at: ${target}` };
+      mkdirSync(join(target, 'bin'), { recursive: true });
+      writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    if (argv.join(' ').includes('pip install')) {
+      writeFileSync(join(dirname(argv[0]!), '.laya-installed'), 'y\n');
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    return okRun(argv);
+  };
+  try {
+    // Migration: a #840-era '<dataDir>/laya-venv' with a unit referencing it is the previous
+    // generation. Run 1 (the #845 upgrade) must succeed and KEEP it.
+    const legacy = join(dir, 'data', 'laya-venv');
+    mkdirSync(join(legacy, 'bin'), { recursive: true });
+    writeFileSync(join(legacy, 'bin', 'laya-serve'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const code1 = await runHostSetup([], {
+      out: (s) => out.push(s), err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 30_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+    assert.equal(code1, 0, `upgrade run: ${err.join('')} | ${out.join('')}`);
+    assert.ok(existsSync(legacy), 'the #840-era venv is kept as the previous generation');
+    // Run 2 succeeds: the OLD generation is kept (one rollback generation), older/orphan dirs
+    // are gone, and the new unit points at the newest versioned dir.
+    mkdirSync(join(dir, 'data', 'laya-venv-orphan'), { recursive: true });
+    const code2 = await runHostSetup(['--yes'], {
+      out: (s) => out.push(s), err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 30_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+    assert.equal(code2, 0, `re-run: ${err.join('')} | ${out.join('')}`);
+    const dirs = readdirSync(join(dir, 'data')).filter((e) => e.startsWith('laya-venv')).sort();
+    assert.equal(dirs.length, 2, `exactly one previous generation + the new one: ${dirs.join(', ')}`);
+    // The kept generation is the one the PREVIOUS unit referenced — run 1's versioned dir.
+    // The #840-era 'laya-venv' was prevVenv only for run 1; run 2's sweep retires it (the
+    // design keeps ONE generation: the previous unit's).
+    assert.ok(dirs.some((e) => new RegExp(`^laya-venv-${LAYA_SERVE_PIN}-\\d{14}-[0-9a-f]+$`).test(e)), 'a versioned generation is kept');
+    assert.ok(!dirs.includes('laya-venv-orphan'), 'orphans are swept');
+  } finally {
+    await fake.close();
+  }
+});
+
 
 test('ensureLayaCredentials: a stale PID-named temp file is never reused (#840 r52)', () => {
   const dir = tempDir('setup-laya-tmp-reuse-');
@@ -2016,62 +1934,6 @@ test('runHostSetup: the unit temp file is created exclusively at 0600 (#840 r52)
     await fake.close();
   }
 });
-
-test('runHostSetup: the backup survives a unit-write failure and rolls back (#840 r56)', async () => {
-  const dir = tempDir('setup-laya-unitfail-');
-  const live = join(dir, 'data', 'laya-venv');
-  const installedMarker = join(live, 'bin', '.laya-installed');
-  const sidecarRun = (argv: string[]) => {
-    if (argv[0] === 'uv' && argv[1] === 'venv') {
-      rmSync(argv[2]!, { recursive: true, force: true });
-      mkdirSync(join(argv[2]!, 'bin'), { recursive: true });
-      writeFileSync(join(argv[2]!, 'bin', 'python3'), '#!/bin/sh\n', { mode: 0o755 });
-    } else if (argv.includes('pip')) {
-      const venvBin = dirname(argv[0]!);
-      mkdirSync(venvBin, { recursive: true });
-      writeFileSync(join(venvBin, '.laya-installed'), 'ok\n');
-    }
-    return okRun(argv);
-  };
-  // Healthy install first so a live venv exists; then make the UNIT dir read-only.
-  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
-  try {
-    const code = await runHostSetup([], {
-      out: () => {}, err: () => {},
-      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-      sidecarRun, sidecarDataDir: join(dir, 'data'),
-      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
-    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
-    assert.equal(code, 0, 'first install failed');
-    assert.ok(existsSync(installedMarker), 'marker installed');
-    // Make the macOS unit dir read-only so the unit temp write fails AFTER the venv rebuild.
-    const unitDir = process.platform === 'darwin'
-      ? join(dir, 'Library', 'LaunchAgents')
-      : join(dir, 'systemd', 'user');
-    mkdirSync(unitDir, { recursive: true });
-    chmodSync(unitDir, 0o555);
-    const err: string[] = [];
-    try {
-      const code2 = await runHostSetup(['--yes'], {
-        out: () => {}, err: (s) => err.push(s),
-        question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-        sidecarRun, sidecarDataDir: join(dir, 'data'),
-        sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 10_000,
-      }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
-      assert.equal(code2, 1, `unit-write failure must fail the run: ${err.join('')}`);
-      assert.match(err.join(''), /not installed/);
-      // Rollback restored the previous environment: the installed marker is intact.
-      assert.ok(existsSync(installedMarker), 'the previous install survives a unit-write failure');
-      // And no generated backup venv leaks after the rollback.
-      assert.ok(!readdirSync(join(dir, 'data')).some((e) => /^laya-venv\.backup-\d+$/.test(e)), 'no backup leak');
-    } finally {
-      chmodSync(unitDir, 0o755);
-    }
-  } finally {
-    await fake.close();
-  }
-});
-
 test('runHostSetup: a PADDED MERCURY_LAYA_URL is refused like loadConfig/doctor (#840 r37)', async () => {
   // The env value reaches validateAnswers RAW: trimming in defaultAnswers would let setup
   // accept (and rewrite) a value the config loader and doctor refuse.

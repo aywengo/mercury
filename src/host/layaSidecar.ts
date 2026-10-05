@@ -146,11 +146,14 @@ export interface LayaPlan {
 
 /** The sidecar layout: user-scoped venv under the Mercury data dir, user-scoped unit next to
  *  Mercury's (design §5.3). Deterministic: same inputs → same plan. */
-export function planLayaSidecar(opts: { dataDir: string; pythonBin: string; port?: number; platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv }): LayaPlan {
+export function planLayaSidecar(opts: { dataDir: string; pythonBin: string; venvDir?: string; port?: number; platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv }): LayaPlan {
   const platform = opts.platform ?? process.platform;
   const env = opts.env ?? process.env;
   const port = opts.port ?? LAYA_DEFAULT_PORT;
-  const venvDir = join(opts.dataDir, 'laya-venv');
+  // #845: the venv path is the caller's choice — setup builds into a versioned directory
+  // (`laya-venv-<pin>-<ts>-<rand>`); the deterministic default stays the #840 layout for
+  // doctor/plan consumers.
+  const venvDir = opts.venvDir ?? join(opts.dataDir, 'laya-venv');
   const hfHome = join(opts.dataDir, 'laya-hf');
   // Preload failures (a failed checkpoint download) print to stdout/stderr — capture them like
   // the host LaunchAgent does (src/host/service.ts) or the error is lost (r20).

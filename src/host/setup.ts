@@ -37,7 +37,7 @@ import { createInterface } from 'node:readline';
 import { randomBytes } from 'node:crypto';
 import { hostStatus, printStatus } from './lifecycle.ts';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { HOST_HARNESSES } from '../config.ts';
@@ -685,10 +685,6 @@ function ttyAvailable(): boolean {
 }
 
 /** Run the wizard. Returns the process exit code. */
-/** Marker written once a rebuilt venv has passed the doctor readiness probe: distinguishes a
- *  VERIFIED environment from an interrupted or unverified rebuild (Copilot #840 r59/r61). */
-const INSTALL_OK_MARKER = '.laya-install-ok';
-
 /**
  * Restore the previous unit bytes (best effort) after a rollback: the unit file was already
  * overwritten when the failure happened, so the restored venv must be referenced by the OLD
@@ -703,19 +699,6 @@ function restoreLayaUnit(unitPath: string, backupText: string | null): void {
   } catch {
     // Best effort: the operator is already looking at an error message.
   }
-}
-
-/**
- * The first existing '<venvBase>.backup-<pid>' sibling (numeric pid — the exact shape setup
- * generates), or null. Used to recover the previous run's working venv after a crash between
- * the backup rename and a completed rebuild (Copilot #840 r58).
- */
-export function findNumericVenvBackup(parentDir: string, venvBase: string): string | null {
-  for (const entry of existsSync(parentDir) ? readdirSync(parentDir) : []) {
-    if (!entry.startsWith(`${venvBase}.backup-`)) continue;
-    if (/^\.backup-(\d+)$/.test(entry.slice(venvBase.length))) return join(parentDir, entry);
-  }
-  return null;
 }
 
 export async function runHostSetup(
@@ -1004,57 +987,29 @@ export async function runHostSetup(
       io.err('laya: then re-run `mercury host setup --yes`, or answer no to the sidecar prompt.\n');
       return 1;
     }
-    const plan: LayaPlan = planLayaSidecar({ dataDir, pythonBin: det.bin!, env });
+    // #845: build into a versioned directory a previous run can never have used; the unit is
+    // the only commit point. The previous generation (whatever the CURRENT unit references, or
+    // the #840-era '<dataDir>/laya-venv') is never touched until the sweep after readiness.
+    const unitPlan = planLayaSidecar({ dataDir, pythonBin: det.bin!, env });
+    const prevUnitText = existsSync(unitPlan.unitPath) ? readFileSync(unitPlan.unitPath, 'utf8') : null;
+    // The previous generation's venv directory: the unit's own laya-serve path (versioned
+    // dirs, #845) or the legacy '<dataDir>/laya-venv' for a #840-era unit / fresh host.
+    const prevVenv = (() => {
+      if (prevUnitText === null) return join(dataDir, 'laya-venv');
+      const m = /<string>([^<]*\/bin\/laya-serve)<\/string>/.exec(prevUnitText) ?? /ExecStart=([^\s]+)/.exec(prevUnitText);
+      const serve = m?.[1];
+      return serve && serve.startsWith(dataDir) ? dirname(dirname(serve)) : join(dataDir, 'laya-venv');
+    })();
+    const buildDir = join(dataDir, `laya-venv-${LAYA_SERVE_PIN}-${new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)}-${randomBytes(4).toString('hex')}`);
+    const plan: LayaPlan = planLayaSidecar({ dataDir, pythonBin: det.bin!, venvDir: buildDir, env });
     // The detector must tell us HOW it found the interpreter: `uv venv` without seed has no
     // pip, and a plain-python fallback has no uv at all (Copilot #840 r1). Replay the winning
     // candidate's own venv command and install through the venv's pip (seeded for uv).
-    // Rebuild at the FINAL path with rollback (Copilot #840 r55): a venv cannot be promoted by
-    // renaming — pip writes absolute shebangs into bin/ scripts, so a staged-then-renamed venv
-    // would run with a dead interpreter. Instead: move the live venv aside first, create and
-    // install at the final path, and only then delete the backup; ANY failure rolls the
-    // previous environment back into place, so a still-enabled unit is never left without a
-    // working venv (r47's original guarantee, without the rename).
-    const backupDir = `${plan.venvDir}.backup-${process.pid}`;
-    let backedUp = false;
-    let unitBackupText: string | null = null;
+    // Snapshot the OLD unit bytes for rollback (#845/#840 r56/r61): the unit is overwritten
+    // before the service is reloaded, so a failed activation must be able to restore both the
+    // previous unit and the generation it references.
+    let unitBackupText: string | null = prevUnitText;
     const steps: Array<[string, () => void]> = [
-      ['backup', () => {
-        const liveIsComplete = existsSync(plan.venvDir) && existsSync(join(plan.venvDir, INSTALL_OK_MARKER));
-        if (liveIsComplete) {
-          // Normal re-run: the current venv is the last known-good environment.
-          rmSync(backupDir, { recursive: true, force: true });
-          renameSync(plan.venvDir, backupDir);
-          backedUp = true;
-        } else {
-          // No live venv, or a PARTIAL one from an interrupted rebuild (no completion marker —
-          // Copilot #840 r59): the last GOOD environment is a stale numeric backup from a
-          // crashed run; adopt it as THIS run's rollback source and discard the partial tree.
-          const stale = findNumericVenvBackup(dirname(plan.venvDir), basename(plan.venvDir));
-          if (stale) {
-            rmSync(plan.venvDir, { recursive: true, force: true });
-            renameSync(stale, backupDir);
-            backedUp = true;
-          } else if (existsSync(plan.venvDir)) {
-            // A marker-less live tree with NO numeric backup: a venv installed before the marker
-            // existed, a marker write that failed, or the leftover of a failed FRESH install.
-            // It is still the best rollback source there is, and the venv path must be empty
-            // before rebuilding -- `uv venv` refuses an existing directory ('A directory
-            // already exists', uv 0.8), so leaving it in place wedges every later re-run.
-            rmSync(backupDir, { recursive: true, force: true });
-            renameSync(plan.venvDir, backupDir);
-            backedUp = true;
-          }
-        }
-        // Preserve the OLD unit bytes for rollback: the unit is overwritten before the service
-        // is reloaded, so a failed activation must be able to restore the previous unit
-        // (Copilot #840 r56/r59).
-        // Snapshot the unit WHENEVER one exists, not only alongside a same-path venv backup: a
-        // re-run that changes dataDir has no live venv at the new path, yet the old unit still
-        // points at a working venv under the previous data dir (Copilot #840 r61).
-        if (existsSync(plan.unitPath)) {
-          unitBackupText = readFileSync(plan.unitPath, 'utf8');
-        }
-      }],
       ['venv', det.argv![0] === 'uv'
         ? () => {
             const r = run(['uv', 'venv', plan.venvDir, '--python', `3.${det.version!.split('.')[1]}`, '--seed'], 120_000);
@@ -1101,16 +1056,16 @@ export async function runHostSetup(
       }],
     ];
     // Roll the service back to the previous environment when activation or the readiness gate
-    // fails (Copilot #840 r59): restore the backup venv, restore the OLD unit bytes, reload,
-    // then report the failure. Best effort — the original error is what the operator sees.
+    // fails (#845): restore the previous UNIT bytes, reload, and delete the unverified build
+    // directory. The previous venv was never moved, so there is nothing else to restore.
+    // Best effort — the original error is what the operator sees.
     const rollbackLaya = () => {
-      const venvRestorable = backedUp && existsSync(backupDir);
       try {
         if (unitBackupText === null) {
           // No previous unit (a fresh install): there is nothing to go back TO, but the new unit
           // is already enabled/bootstrapped. Leaving it would keep a failed sidecar in a restart
-          // loop (Copilot #840 r63). Stop and unregister it, remove the unit file, and drop the
-          // unverified venv (or put a pre-existing one back) so the host is as before setup.
+          // loop (Copilot #840 r63). Stop and unregister it, remove the unit file, and delete
+          // the unverified build directory so the host is as before setup.
           if (process.platform === 'darwin') {
             run(['launchctl', 'bootout', `${uid}/${plan.unitLabel}`], 10_000);
           } else {
@@ -1118,27 +1073,22 @@ export async function runHostSetup(
           }
           rmSync(plan.unitPath, { force: true });
           if (process.platform !== 'darwin') run(['systemctl', '--user', 'daemon-reload'], 15_000);
-          rmSync(plan.venvDir, { recursive: true, force: true });
-          if (venvRestorable) renameSync(backupDir, plan.venvDir);
-          return;
-        }
-        if (venvRestorable) {
-          rmSync(plan.venvDir, { recursive: true, force: true });
-          renameSync(backupDir, plan.venvDir);
-        }
-        // Restore the previous unit even without a same-path venv backup: after a dataDir
-        // change it points at the old, still-present venv (Copilot #840 r61).
-        restoreLayaUnit(plan.unitPath, unitBackupText);
-        if (process.platform === 'darwin') {
-          run(['launchctl', 'bootout', `${uid}/${plan.unitLabel}`], 10_000);
-          run(['launchctl', 'bootstrap', uid, plan.unitPath], 15_000);
         } else {
-          run(['systemctl', '--user', 'daemon-reload'], 15_000);
-          run(['systemctl', '--user', 'restart', plan.unitLabel], 15_000);
+          restoreLayaUnit(plan.unitPath, unitBackupText);
+          if (process.platform === 'darwin') {
+            run(['launchctl', 'bootout', `${uid}/${plan.unitLabel}`], 10_000);
+            run(['launchctl', 'bootstrap', uid, plan.unitPath], 15_000);
+          } else {
+            run(['systemctl', '--user', 'daemon-reload'], 15_000);
+            run(['systemctl', '--user', 'restart', plan.unitLabel], 15_000);
+          }
         }
       } catch {
         // Best effort — the original error is what the operator sees.
       }
+      // The build directory is not live unless readiness proved it; after any post-commit
+      // failure it is garbage (best effort: injected runners may not have created it).
+      rmSync(plan.venvDir, { recursive: true, force: true });
     };
     try {
       for (const [name, step] of steps) {
@@ -1147,14 +1097,11 @@ export async function runHostSetup(
       }
       io.out(`laya: unit written at ${plan.unitPath}\n`);
     } catch (e) {
-      // Rollback (Copilot #840 r55/r59): any failure after the backup step removes the possibly
-      // broken new venv, restores the previous environment AND its unit bytes, so a
-      // still-enabled unit keeps a working interpreter and its old configuration.
-      if (backedUp) {
-        rmSync(plan.venvDir, { recursive: true, force: true });
-        if (existsSync(backupDir)) renameSync(backupDir, plan.venvDir);
-      }
+      // Rollback (#845): a failure during build/install/unit leaves the previous unit and venv
+      // untouched (the unit rename is the commit point) — only the partial build directory must
+      // go. If the unit WAS already renamed, restore the previous bytes.
       restoreLayaUnit(plan.unitPath, unitBackupText);
+      rmSync(plan.venvDir, { recursive: true, force: true });
       io.err(`\nlaya: not installed — ${(e as Error).message}\n`);
       io.err('laya: mercury.env was written; the sidecar can be finished later by re-running `mercury host setup --yes`.\n');
       return 1;
@@ -1304,27 +1251,20 @@ export async function runHostSetup(
       const sleepMs = Math.min(gapMs, budgetMs - (Date.now() - started));
       if (sleepMs > 0) await new Promise((res) => setTimeout(res, sleepMs));
     }
-    // Readiness proven — the previous environment is no longer needed (Copilot #840 r59: the
-    // backup must outlive activation AND the doctor/readiness gate). Sweep stale siblings from
-    // crashed runs — ONLY the exact generated shape '<venv>.backup-<pid>' with a NUMERIC pid
-    // (Copilot #840 r50): an operator's 'laya-venv.backup-manual' must never be touched.
-    // Mark the venv known-good only NOW, after the doctor probe (Copilot #840 r61): a marker
-    // written when pip finished let a crash between install and readiness leave a "trusted"
-    // unverified tree that the next run preferred over the last verified backup. Without the
-    // marker that tree is treated as untrusted and an existing numeric backup wins.
-    try {
-      writeFileSync(join(plan.venvDir, INSTALL_OK_MARKER), `${new Date().toISOString()}\n`, { mode: 0o644 });
-    } catch {
-      // Best effort: injected/virtualized runners may not create a real venv (tests).
-    }
-    if (backedUp && existsSync(backupDir)) rmSync(backupDir, { recursive: true, force: true });
-    const venvBase = basename(plan.venvDir);
-    const venvParent = dirname(plan.venvDir);
-    for (const entry of existsSync(venvParent) ? readdirSync(venvParent) : []) {
-      const m = entry.startsWith(`${venvBase}.backup-`)
-        ? /^\.backup-(\d+)$/.exec(entry.slice(venvBase.length))
-        : null;
-      if (m) rmSync(join(dirname(plan.venvDir), entry), { recursive: true, force: true });
+    // Readiness proven — the new venv is live. Sweep (#845): remove every 'laya-venv*' sibling
+    // the (new) unit does not reference, EXCEPT the single previous generation the OLD unit
+    // pointed at (one rollback generation). Best effort: a leftover directory is disk space,
+    // never a correctness problem. The legacy '<dataDir>/laya-venv' from a #840-era install is
+    // kept here as prevVenv, then swept by the FOLLOWING successful run.
+    {
+      const keep = new Set([plan.venvDir, prevVenv]);
+      for (const entry of existsSync(dataDir) ? readdirSync(dataDir) : []) {
+        if (!entry.startsWith('laya-venv')) continue;
+        const full = join(dataDir, entry);
+        if (!statSync(full).isDirectory?.()) continue;
+        if (keep.has(full)) continue;
+        rmSync(full, { recursive: true, force: true });
+      }
     }
     }
   }
