@@ -592,7 +592,7 @@ export async function runSelectorWith(
           return { rung: 'none', reason: 'selection aborted: nightly PRs with an unmapped branch exist and the closing-reference query is unavailable; claiming new work now could duplicate an existing PR' };
         }
         const aliases = unmapped
-          .map((pr, idx) => `p${idx}: pullRequest(number: ${pr.number}) { closingIssuesReferences(first: 5) { nodes { number state } } }`)
+          .map((pr, idx) => `p${idx}: pullRequest(number: ${pr.number}) { closingIssuesReferences(first: 5) { pageInfo { hasNextPage } nodes { number state } } }`)
           .join('\n');
         const gql = {
           query: `query { repository(owner: "${repo.split('/')[0] ?? ''}", name: "${repo.split('/')[1] ?? ''}") {\n${aliases}\n} }`,
@@ -603,10 +603,17 @@ export async function runSelectorWith(
           if (res.status !== 200) {
             console.error(`resume scan: closing-references query -> ${res.status}`);
           } else {
-            const data = (res.body as { data?: { repository?: Record<string, { closingIssuesReferences?: { nodes?: { number?: number; state?: string }[] } | null } | null> | null } }).data?.repository;
+            const data = (res.body as { data?: { repository?: Record<string, { closingIssuesReferences?: { pageInfo?: { hasNextPage?: boolean } | null; nodes?: { number?: number; state?: string }[] } | null } | null> | null } }).data?.repository;
             if (!data) {
               console.error('resume scan: closing-references query returned no data');
             } else {
+              // A capped connection hides references beyond the first page: fail closed for the
+              // whole mapping (#847 r1) - a hidden open reference could leave its issue
+              // unreserved and selected as duplicate work.
+              const cappedConn = unmapped.some((_pr, idx) => data[`p${idx}`]?.closingIssuesReferences?.pageInfo?.hasNextPage === true);
+              if (cappedConn) {
+                console.error('resume scan: a closingIssuesReferences connection is capped (>5)');
+              } else {
               for (let idx = 0; idx < unmapped.length; idx++) {
                 const node = data[`p${idx}`];
                 const ref = node?.closingIssuesReferences?.nodes?.find((n) => n.state === 'OPEN' && Number.isInteger(n.number));
@@ -627,6 +634,7 @@ export async function runSelectorWith(
                 }
               }
               mapped = true;
+              }
             }
           }
         } catch (e) {

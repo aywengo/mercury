@@ -955,6 +955,31 @@ test('runSelectorWith: an unmapped-branch nightly PR reserves its issue from run
   assert.equal(s.rung === 4 || s.rung === 'none', true);
 });
 
+test('runSelectorWith: a capped closingIssuesReferences connection aborts selection (#847 r1)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const prList = [
+    { number: 903, user: { login: 'mercury-nightly' }, created_at: '2026-10-04T00:52:00Z', head: { sha: 'shaC1', ref: 'agent/run_ghi' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      return { body: [issue({ number: 530, user: { login: 'aywengo' } })], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      const q = (body as { query: string }).query;
+      if (q.includes('closingIssuesReferences')) {
+        return { status: 200, body: { data: { repository: { p0: { closingIssuesReferences: { pageInfo: { hasNextPage: true }, nodes: [] } } } } } };
+      }
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 0, pageInfo: { hasNextPage: false }, nodes: [] } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 'none', 'a capped reference connection hides possible open issues: fail closed');
+  assert.match(s.reason, /aborted/);
+});
+
 test('runSelectorWith: a failed closing-reference mapping aborts selection instead of duplicating work (#847)', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
   const prList = [
