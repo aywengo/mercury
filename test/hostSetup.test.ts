@@ -1668,7 +1668,7 @@ test('runHostSetup (#845): a readiness failure restores the previous unit and de
     assert.equal(code1, 0, `first install: ${err.join('')} | ${out.join('')}`);
     const unitPath = process.platform === 'darwin'
       ? join(dir, 'Library', 'LaunchAgents', 'com.mercury.laya.plist')
-      : join(dir, '.config', 'systemd', 'user', 'com.mercury.laya.service');
+      : join(dir, 'systemd', 'user', 'com.mercury.laya.service'); // XDG_CONFIG_HOME=dir
     const prevUnit = readFileSync(unitPath, 'utf8');
     const venvDirs = readdirSync(join(dir, 'data')).filter((e) => e.startsWith('laya-venv'));
     const prevVenv = join(dir, 'data', venvDirs[0]!);
