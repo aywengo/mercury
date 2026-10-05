@@ -888,6 +888,92 @@ test('runSelectorWith: resume only for UNRESOLVED threads; unreviewed/approved/r
   assert.match(s.reason, /PR #811/);
 });
 
+// #847: a nightly PR whose branch does not name its issue (agent/run_*) is still mapped through
+// its structured closing reference: resumed at rung 0 when the head has findings, and its issue
+// stays reserved from rungs 1-3 either way.
+test('runSelectorWith: a nightly PR with an unmapped branch maps via closingIssuesReferences and resumes (#847)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const trusted = issue({ number: 500, user: { login: 'aywengo' } });
+  const prList = [
+    // The #841 shape: nightly-authored, branch does NOT match fix/issue-N-*.
+    { number: 900, user: { login: 'mercury-nightly' }, created_at: '2026-10-04T00:52:00Z', head: { sha: 'shaX', ref: 'agent/run_6e079f501ad344cd' } },
+  ];
+  let gqlQueries = 0;
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) {
+        return { body: [{ event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } }], link: null };
+      }
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/900/reviews')) {
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: 'shaX', state: 'COMMENTED' }], link: null };
+      }
+      return { body: [trusted], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      const q = (body as { query: string }).query;
+      if (q.includes('closingIssuesReferences')) {
+        gqlQueries++;
+        return { status: 200, body: { data: { repository: { p0: { closingIssuesReferences: { nodes: [{ number: 500, state: 'OPEN' }] } } } } } };
+      }
+      // reviewThreads for PR 900: one unresolved Copilot thread on the head.
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 1, pageInfo: { hasNextPage: false }, nodes: [{ isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'shaX' } }] } }] } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(gqlQueries, 1, 'exactly one batched closing-reference query');
+  assert.equal(s.rung, 0, 'the unmapped-branch PR with findings resumes');
+  assert.equal(s.issue, 500);
+  assert.match(s.reason, /PR #900/);
+});
+
+test('runSelectorWith: an unmapped-branch nightly PR reserves its issue from rungs 1-3 (#847)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const trusted = issue({ number: 510, user: { login: 'aywengo' } });
+  const prList = [
+    { number: 901, user: { login: 'mercury-nightly' }, created_at: '2026-10-04T00:52:00Z', head: { sha: 'shaY', ref: 'agent/run_abc' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/901/reviews')) return { body: [], link: null };
+      return { body: [trusted], link: null };
+    },
+    async post() { return true; },
+    async postJson(_path: string, body: unknown) {
+      const q = (body as { query: string }).query;
+      if (q.includes('closingIssuesReferences')) {
+        return { status: 200, body: { data: { repository: { p0: { closingIssuesReferences: { nodes: [{ number: 510, state: 'OPEN' }] } } } } } };
+      }
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 0, pageInfo: { hasNextPage: false }, nodes: [] } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.issue, 510, 'the mapped issue is reserved even though the PR awaits its first review');
+  assert.equal(s.rung === 4 || s.rung === 'none', true);
+});
+
+test('runSelectorWith: a failed closing-reference mapping aborts selection instead of duplicating work (#847)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const prList = [
+    { number: 902, user: { login: 'mercury-nightly' }, created_at: '2026-10-04T00:52:00Z', head: { sha: 'shaZ', ref: 'agent/run_def' } },
+  ];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      return { body: [issue({ number: 520, user: { login: 'aywengo' } })], link: null };
+    },
+    async post() { return true; },
+    async postJson() { return { status: 500, body: {} }; },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 'none', 'fail closed: no new work when the leftover PR cannot be mapped');
+  assert.match(s.reason, /aborted/);
+});
+
 // r2 blocker 1: a failed/capped PR scan aborts selection - no claims at all.
 test('runSelectorWith: a failed open-PR scan aborts selection instead of assuming absence', async () => {
   const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
