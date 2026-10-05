@@ -1909,7 +1909,7 @@ test('runHostSetup (#845): a re-run after success keeps exactly one previous gen
   const dirsA = readdirSync(join(dir, 'data')).filter((e) => ownedRe.test(e)).sort();
   const dirsB = readdirSync(dataDirB).filter((e) => e.startsWith('laya-venv')).sort();
   assert.equal(dirsB.length, 1, `the new data dir holds exactly the new generation: ${dirsB.join(', ')}`);
-  assert.ok(dirsA.length >= 1 && dirsA.length <= 2, `the old parent keeps at most the rollback generation(s): ${dirsA.join(', ')}`);
+  assert.equal(dirsA.length, 1, `the old parent keeps exactly the generation the previous unit referenced: ${dirsA.join(', ')}`);
   // Migration rerun (Copilot #846 r12): run 4 stays in B — the generation retained in A after
   // the migration must now be retired, so no generation leaks in the old parent.
   const code4 = await runHostSetup(['--yes'], {
