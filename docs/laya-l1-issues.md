@@ -38,6 +38,7 @@ are identical to a build without L1, and that every such Run carries a selection
 
 ```
 L1-0 (label rule, doc only)          — blocks L3, not L1 code; lands first on purpose
+#852 (real-host sidecar verification) — gates L1-4 only
 L1-1 (server: selection record) ──┐
 L1-2 (hard filter, pure) ─────────┼── L1-4 (wire into both dispatch paths, lift shadow refusal)
 L1-3 (question + decision, pure) ─┘
@@ -227,7 +228,7 @@ Run bodies without consulting it.
 **Regression test.** Acceptance 1 against the fake server. It fails on base, because the
 config is refused.
 
-**Blocked by** L1-1, L1-2, L1-3 (and L1-0 merged first). **Likely files.**
+**Blocked by** L1-1, L1-2, L1-3, and #852 (first real-host sidecar run), with L1-0 merged first. **Likely files.**
 `src/host/bots/config.ts`, `src/host/bots/scheduler.ts`, `src/host/bots/dispatch.ts`,
 `src/host/bots/process.ts`, `src/host/bots/select.ts`, `docs/dispatcher-bot-design.md` §12,
 tests.
