@@ -1,8 +1,11 @@
 # Laya integration — System-1 selection on Host and Fleet
 
-Status: **design; nothing is implemented.** No config key, command or code described
-here exists yet. §4 records what the tree provides today (verified against `main`
-at `415f8cd`, 2026-09-26) so intent is never mistaken for shipped behaviour.
+Status (2026-10-05): **P-1 and L0 are implemented; L1–L3 are design.** Per-Run model
+selection works end to end on every real harness, and the sidecar has an opt-in installer,
+a client contract and a doctor line. Nothing selects a harness or model yet: `select` is
+accepted in bot configs but refused until L1. The status table in §13 maps each milestone to
+its merges. §4 is the **historical** snapshot the design started from (`415f8cd`,
+2026-09-26) and is kept as written so the reasons for P-1 stay legible.
 
 ## 1. Summary
 
@@ -53,7 +56,7 @@ supplied. A hostile task text can at worst move the pick to a different
 - **Replacing the B3 brain.** Laya is System 1; the brain remains System 2 (§6.6).
 - **Running Python inside the Mercury process.**
 
-## 4. What exists today (verified 2026-09-26)
+## 4. What existed when this was designed (verified 2026-09-26; historical)
 
 | Fact | Where | Consequence |
 | --- | --- | --- |
@@ -364,6 +367,20 @@ wire shape against the pinned upstream version.
 
 ## 13. Milestones
 
+| Milestone | Status | Issues → merges |
+| --- | --- | --- |
+| P-1 per-Run model | **done** | #823 → `fc8c7ae` (API, persistence, retry, `run.model_resolved`); #824 → `3f2edbc` (Fleet pass-through) |
+| P-1 adapters | **done** — `perRunModel: true` measured on all three | #827 → `f538770` (Claude `--model`); #828 → `e884e59` (PrimeAgent RPC last-flag-wins, daemon `create` config); #829 → `2d70d2d` (Hermes `-m`, per invocation, survives `--resume`, 0.21.2) |
+| L0 sidecar contract | **done** | #825 → `accc654` (client + fake, `src/laya/`); #826 → `5b79b0e` (`select` reserved); #830 → `e48c86a` (doctor line) |
+| L0-4 installer | **done** | #831 → `7f1d300` via #840; #845 → `fcdcbae` via #846 (versioned venv directories) |
+| L1 dispatcher `select`, shadow | next — unblocked | issue set: [`laya-l1-issues.md`](laya-l1-issues.md) |
+| L2 Fleet task-domain signal | blocked on harness affinity (not in `src/` or `fleet/`) | — |
+| L3 fine-tune and enforce | blocked on L1 shadow data | — |
+
+Two decisions recorded during implementation that differ from the sketches below: the
+sidecar key lives in its own `laya-credentials.json` (§5.1, revised on #840), and a re-run
+builds a new versioned venv instead of rebuilding in place (§5.3, #845).
+
 Issue set for P-1 and L0: [`laya-issues.md`](laya-issues.md). Reading the tree for it
 showed P-1 is larger than sketched here: a Run has no model field at all outside the
 preset snapshot, and no adapter reads `preset.model` (see that document, "Findings").
@@ -417,6 +434,11 @@ without a recorded comparison.
 - [`host-installer.md`](host-installer.md)
 
 ## 15. Revision history
+
+### 2026-10-05 — status: P-1 and L0 done
+
+Status line and §13 table updated after the first wave merged; §4 marked historical. Next is
+L1 (shadow selection), drafted in `laya-l1-issues.md`.
 
 ### 2026-10-05 — sidecar key moved to its own file
 
