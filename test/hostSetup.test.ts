@@ -1168,7 +1168,8 @@ test('detectPython: 3.9.10 (two-digit patch) is REFUSED — order-preserving com
 
 test('planLayaSidecar: user-scoped venv under the data dir + user-scoped unit (#831)', () => {
   const plan = planLayaSidecar({ dataDir: '/data', pythonBin: 'python3', platform: 'darwin', env: { HOME: '/home/x' } });
-  assert.equal(plan.venvDir, '/data/laya-venv');
+  // No legacy default (#846 r8): a plan without an explicit venvDir shows the versioned pattern.
+  assert.equal(plan.venvDir, `/data/laya-venv-${LAYA_SERVE_PIN}-<UTC timestamp>-<random>`);
   assert.equal(plan.envUrl, 'http://127.0.0.1:8302');
   assert.match(plan.unitPath, /Library\/LaunchAgents\/com\.mercury\.laya\.plist$/);
   const linux = planLayaSidecar({ dataDir: '/data', pythonBin: 'python3', platform: 'linux', env: { XDG_CONFIG_HOME: '/cfg' } });

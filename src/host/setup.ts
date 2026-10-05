@@ -1081,11 +1081,14 @@ export async function runHostSetup(
           if (process.platform === 'darwin') {
             // A fresh install whose bootstrap itself failed never registered the job — bootout
             // would answer 'not loaded' and read as a failure (Copilot #846 r6). Ask the
-            // manager first: not loaded = stopped.
+            // manager first, but treat ONLY the explicit not-loaded verdict as stopped: a
+            // print timeout/comms error proves nothing (Copilot #846 r8) — keep the unit and
+            // the build directory so a possibly-running job keeps its executable.
             const printR = run(['launchctl', 'print', `${uid}/${plan.unitLabel}`], 10_000);
+            const notLoaded = !printR.ok && /service not loaded|could not find service|"com\.mercury\.laya" is not loaded/i.test(`${printR.stderr}\n${printR.stdout}`);
             stopped = printR.ok
               ? run(['launchctl', 'bootout', `${uid}/${plan.unitLabel}`], 10_000).ok
-              : true;
+              : notLoaded;
           } else {
             const stoppedR = run(['systemctl', '--user', 'disable', '--now', plan.unitLabel], 15_000);
             stopped = stoppedR.ok;
@@ -1309,9 +1312,19 @@ export async function runHostSetup(
     {
       // Pin-independent: after a pin upgrade the previous pin's generated dirs must still be
       // swept (Copilot #846 r3).
+      // Pin-independent: after a pin upgrade the previous pin's generated dirs must still be
+      // swept (Copilot #846 r3).
       const gen = /^laya-venv-\d+\.\d+\.\d+-\d{14}-[0-9a-f]{8}$/;
       const keep = new Set([plan.venvDir, prevVenv]);
-      for (const entry of existsSync(dataDir) ? readdirSync(dataDir) : []) {
+      // The WHOLE sweep is best effort: enumeration failures (EACCES/EIO, a concurrent
+      // directory change) mean 'nothing swept now', never a failed install (Copilot #846 r8).
+      let entries: string[] = [];
+      try {
+        entries = existsSync(dataDir) ? readdirSync(dataDir) : [];
+      } catch {
+        entries = [];
+      }
+      for (const entry of entries) {
         const owned = entry === 'laya-venv' || gen.test(entry);
         if (!owned) continue;
         const full = join(dataDir, entry);
