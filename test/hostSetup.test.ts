@@ -1921,6 +1921,22 @@ test('runHostSetup (#845): a re-run after success keeps exactly one previous gen
   assert.equal(code4, 0, `migration rerun: ${err.join('')} | ${out.join('')}`);
   const dirsA4 = readdirSync(join(dir, 'data')).filter((e) => ownedRe.test(e)).sort();
   assert.deepEqual(dirsA4, [], `the old parent is fully retired after the migration rerun: ${dirsA4.join(', ')}`);
+  // Consecutive migrations (Copilot #846 r13): A → B → C. Each hop retires the previous
+  // parent; no generation may leak in A or B.
+  const dataDirC = join(dir, 'data-c');
+  const code5 = await runHostSetup(['--yes'], {
+    out: (s) => out.push(s), err: (s) => err.push(s),
+    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+    sidecarRun, sidecarDataDir: dataDirC,
+    sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 30_000,
+  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+  assert.equal(code5, 0, `second migration run: ${err.join('')} | ${out.join('')}`);
+  const dirsA5 = readdirSync(join(dir, 'data')).filter((e) => ownedRe.test(e)).sort();
+  const dirsB5 = readdirSync(dataDirB).filter((e) => ownedRe.test(e)).sort();
+  const dirsC5 = readdirSync(dataDirC).filter((e) => e.startsWith('laya-venv')).sort();
+  assert.equal(dirsC5.length, 1, `C holds exactly the new generation: ${dirsC5.join(', ')}`);
+  assert.equal(dirsB5.length, 1, `B keeps exactly the rollback generation: ${dirsB5.join(', ')}`);
+  assert.deepEqual(dirsA5, [], `A stays retired: ${dirsA5.join(', ')}`);
   } finally {
     await fake.close();
   }
@@ -2550,20 +2566,4 @@ test('runHostSetup --dry-run: laya plan printed, nothing executed (#831)', async
   assert.match(text, /wait for readiness: probe the doctor's laya line/);
   assert.ok(!existsSync(join(dir, 'data', 'laya-venv')), 'dry-run creates no venv');
 
-  // Consecutive migrations (Copilot #846 r13): A → B → C. Each hop retires the previous
-  // parent; no generation may leak in A or B.
-  const dataDirC = join(dir, 'data-c');
-  const code5 = await runHostSetup(['--yes'], {
-    out: (s) => out.push(s), err: (s) => err.push(s),
-    question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
-    sidecarRun, sidecarDataDir: dataDirC,
-    sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 30_000,
-  }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
-  assert.equal(code5, 0, `second migration run: ${err.join('')} | ${out.join('')}`);
-  const dirsA5 = readdirSync(join(dir, 'data')).filter((e) => ownedRe.test(e)).sort();
-  const dirsB5 = readdirSync(dataDirB).filter((e) => ownedRe.test(e)).sort();
-  const dirsC5 = readdirSync(dataDirC).filter((e) => e.startsWith('laya-venv')).sort();
-  assert.equal(dirsC5.length, 1, `C holds exactly the new generation: ${dirsC5.join(', ')}`);
-  assert.deepEqual(dirsB5, [], `B is fully retired: ${dirsB5.join(', ')}`);
-  assert.deepEqual(dirsA5, [], `A stays retired: ${dirsA5.join(', ')}`);
 });
