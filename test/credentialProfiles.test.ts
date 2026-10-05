@@ -287,6 +287,25 @@ test('a credential-bearing repository URL is never echoed in normalization error
 // CP-3 (issue #807): resolveProfile — the pure §5.3 table
 // ---------------------------------------------------------------------------
 
+// Copilot review round 3 on #841: an explicit DEFAULT SSH port must not change the id.
+test('ssh:// with explicit default port :22 normalizes like the portless form, both owner outcomes (review round 3 on #841)', () => {
+  // Normalization parity.
+  assert.equal(normalizeRepositoryId('ssh://git@github.com:22/aywengo/mercury.git'), 'github.com/aywengo/mercury');
+  assert.equal(normalizeRepositoryId('git@github.com:22/aywengo/mercury.git'), 'github.com/aywengo/mercury');
+  // A NON-default port is a different endpoint: it must not silently rewrite to the portless id.
+  assert.throws(() => normalizeRepositoryId('ssh://git@github.com:2222/aywengo/mercury.git'));
+
+  const profiles = [{
+    name: 'nightly', repositories: ['github.com/aywengo/mercury'], owners: ['bot-nightly'],
+    env: { GH_TOKEN: { file: '/run/secrets/nightly.pat' } }, sandbox: false,
+  }];
+  const allowed = resolveProfile(profiles, 'bot-nightly', [{ url: 'ssh://git@github.com:22/aywengo/mercury.git' }]);
+  assert.deepEqual(allowed, { outcome: 'profile', name: 'nightly' });
+  const denied = resolveProfile(profiles, 'mallory', [{ url: 'ssh://git@github.com:22/aywengo/mercury.git' }]);
+  assert.equal(denied.outcome, 'refused');
+  if (denied.outcome === 'refused') assert.equal(denied.reason, 'owner-not-allowed');
+});
+
 test('wildcard owner patterns match exact repository ids, both owner outcomes (review round 1 on #841)', () => {
   const wildcard = [P('nightly', ['github.com/aywengo/*'], ['bot-nightly'])];
   // Allowed owner: the wildcard profile resolves, exactly like an exact claim would.

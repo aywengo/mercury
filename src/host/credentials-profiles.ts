@@ -83,7 +83,11 @@ export function normalizeRepositoryId(raw: string): string {
   // 'ssh://' is removed, 'git@host/path' has the same shape as the colon form with '/' as the
   // separator. A user:password authority never matches git@, so credential-bearing URLs still
   // fall through to the shape errors (with the userinfo redacted in `original`).
-  const scp = /^(?:ssh:\/\/)?git@([^/:]+)[:\/](.+?)$/i.exec(s);
+  // An explicit DEFAULT SSH port ('ssh://git@host:22/owner/name') is the same endpoint as the
+  // portless form: normalize it away so a profile cannot be bypassed (or a valid URL wrongly
+  // skipped) by writing ':22'. A NON-default port is a different endpoint and must not silently
+  // rewrite to the portless id - it keeps failing the shape/host checks.
+  const scp = /^(?:ssh:\/\/)?git@([^/:]+?)(?::22)?[:\/](.+?)$/i.exec(s);
   if (scp) s = `${scp[1]}/${scp[2]}`;
   else s = s.replace(/^(?:https|ssh):\/\//i, '');
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) throw new Error(`unsupported repository URL scheme in '${original}'`);
