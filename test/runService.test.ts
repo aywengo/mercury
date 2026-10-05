@@ -8,6 +8,7 @@ import { makeEnv, tempDir, waitFor } from './helpers.ts';
 import type { AgentAdapter, RunConstraints } from '../src/domain/types.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import { FakeAgentAdapter } from '../src/adapters/fakeAgentAdapter.ts';
+import { validateModelShape } from '../src/runs/runService.ts';
 
 test('omitting agent selects fake', () => {
   const env = makeEnv({ workerEnabled: false });
@@ -760,6 +761,15 @@ test('model: shape validation - empty, overlong, whitespace', () => {
     assert.throws(() => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: 'x'.repeat(201) }), /at most 200/);
     assert.throws(() => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: 'two words' }), /whitespace or control/);
     assert.throws(() => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: 'a\nb' }), /whitespace or control/);
+    // #849: a leading dash would reach argv parsers as a flag-shaped value.
+    for (const bad of ['-x', '--dangerously-skip-permissions']) {
+      assert.throws(() => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: bad }), /must not start with '-'/, bad);
+    }
+    assert.equal(env.runs.list({ ownerId: 'alice', limit: 10 }).runs.length, 0, 'no Run row written');
+    // Real ids still pass, including provider-prefixed and tagged ones.
+    for (const ok of ['claude-sonnet-4-5', 'zai/glm-5.3-flash', 'deepseek-v4-flash', 'qwen3.8:32b']) {
+      assert.doesNotThrow(() => validateModelShape(ok, 'model'), ok);
+    }
   } finally {
     env.close();
   }
