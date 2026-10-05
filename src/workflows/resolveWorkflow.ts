@@ -296,8 +296,10 @@ function narrowestConstraints(
   for (const [stageIdx, stage] of workflow.stages.entries()) {
     if (!stage.preset) continue;
     // Isolation applies before the ceilings guard: a stage can demand sandboxing without
-    // naming any ceiling (#842 review r2).
-    if (sandboxStages.includes(stageIdx)) {
+    // naming any ceiling (#842 review r2). The sentinel is injected only when nothing already
+    // requests isolation (#842 review r3): the caller's own limits are isolation requests too,
+    // and overwriting them WIDENS the effective policy (a 512m caller limit would be lost).
+    if (sandboxStages.includes(stageIdx) && effective.resourceLimits === undefined) {
       effective.resourceLimits = {};
     }
     const ceilings = getPreset(stage.preset.id).manifest.constraints?.ceilings;

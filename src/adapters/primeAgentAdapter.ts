@@ -138,6 +138,8 @@ export class PrimeAgentAdapter implements AgentAdapter {
       roleInstruction: 'prompt-reference',
       sandbox: true,
       mcp: 'none',
+      // Measured: buildPrompt() injects context.workflowPlan into the RPC payload (issue #809).
+      workflowPlan: true,
       // RPC mode carries tool callbacks, and the shared translator maps them to tool.started /
       // tool.completed / tool.failed (eventTranslation.ts). Observed on real Runs, not inferred:
       // `run_933c68e4684a498d` recorded 47 events including tool calls. The contrast with Hermes

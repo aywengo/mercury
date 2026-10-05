@@ -200,6 +200,10 @@ export class RpcAgentAdapter implements AgentAdapter {
     const stat: AgentStaticCapabilities = {
       ...(this.cfg.capabilities ?? {}),
       roleInstruction: this.cfg.capabilities?.roleInstruction ?? 'prompt-reference',
+      // buildPrompt() renders the workflow-plan block unconditionally for every config (issue
+      // #809), the same adapter-level fact roleInstruction encodes. A config may still override
+      // it for a backend whose prompts would ignore the plan.
+      workflowPlan: this.cfg.capabilities?.workflowPlan ?? true,
     };
     // An EMPTY block is omitted rather than surfaced as `static: {}`. An empty object reads as "this
     // backend declares nothing" -- the same claim an absent key makes, but one that was never made.

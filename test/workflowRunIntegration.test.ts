@@ -767,3 +767,102 @@ test('a sandbox-required stage preset keeps its isolation demand in the effectiv
     env.close();
   }
 });
+
+
+// --- review-round 3 fixes (#842 r3) ---
+
+test('a sandbox-required stage does not erase the caller resource limits (#842 r3)', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const workflowsDir = tempDir('mercury-wf-dir-');
+  const presetsDir = tempDir('mercury-wf-presets-');
+  makePreset(presetsDir, 'isolated-limits', { requires: { sandbox: true } });
+  makeWorkflowDir(workflowsDir, 'iso-limits-wf', {
+    schemaVersion: 1, id: 'iso-limits-wf', version: '1.0.0',
+    description: 'sandboxed stage with caller limits', mode: 'advisory',
+    stages: [{ id: 'work', preset: { id: 'isolated-limits' }, task: 'Do it isolated.' }],
+    maxStages: 1,
+  });
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workflowsDir, presetsDir, workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'Run isolated with limits', repository: { localPath: repo },
+      workflow: { id: 'iso-limits-wf' },
+      constraints: { resourceLimits: { memory: '512m' } },
+    });
+    // The caller's limits are themselves an isolation request; the sentinel must only fill the
+    // ABSENT case, never overwrite a narrower caller policy with runtime defaults.
+    assert.deepEqual(run.constraints.resourceLimits, { memory: '512m' },
+      'a sandbox demand must not widen the caller resource limits away');
+  } finally {
+    env.close();
+  }
+});
+
+test('a workflow Run on an adapter without a workflow-plan channel fails creation (#842 r3)', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const workflowsDir = tempDir('mercury-wf-dir-');
+  // The base double declares workflowPlan: true; this instance drops the declaration to model
+  // an adapter with no plan channel, and the runService check must refuse it.
+  const noPlanFake = new FakeAgentAdapter({ script: [] });
+  {
+    const caps = noPlanFake.capabilities;
+    const stat = { ...caps.static } as Record<string, unknown>;
+    delete stat.workflowPlan;
+    Object.defineProperty(noPlanFake, 'capabilities', {
+      value: { ...caps, static: stat },
+    });
+  }
+  const env = makeEnv({
+    adapters: { fake: noPlanFake },
+    workspaceMode: 'copy', repoDir: repo, workflowsDir, workerEnabled: false,
+  });
+  try {
+    makeWorkflowDir(workflowsDir, 'plain-wf', {
+      schemaVersion: 1, id: 'plain-wf', version: '1.0.0',
+      description: 'no presets at all', mode: 'advisory',
+      stages: [{ id: 'work', task: 'Do it.' }],
+      maxStages: 1,
+    });
+    assert.throws(
+      () => env.runService.create({
+        ownerId: 'alice', task: 'Run planned', repository: { localPath: repo },
+        workflow: { id: 'plain-wf' },
+      }),
+      (err: unknown) => err instanceof Error && /workflow-plan prompt channel/.test(err.message),
+    );
+  } finally {
+    env.close();
+  }
+});
+
+test('a workflow Run on an adapter WITH a workflow-plan channel is admitted (#842 r3)', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const workflowsDir = tempDir('mercury-wf-dir-');
+  const planFake = new FakeAgentAdapter({ script: [] });
+  Object.defineProperty(planFake, 'capabilities', {
+    value: {
+      ...planFake.capabilities,
+      static: { ...planFake.capabilities.static, workflowPlan: true },
+    },
+  });
+  const env = makeEnv({
+    workspaceMode: 'copy', repoDir: repo, workflowsDir, workerEnabled: false,
+    adapters: { planfake: planFake },
+    defaultAgent: 'planfake',
+  });
+  try {
+    makeWorkflowDir(workflowsDir, 'plain-wf', {
+      schemaVersion: 1, id: 'plain-wf', version: '1.0.0',
+      description: 'no presets at all', mode: 'advisory',
+      stages: [{ id: 'work', task: 'Do it.' }],
+      maxStages: 1,
+    });
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'Run planned', repository: { localPath: repo },
+      workflow: { id: 'plain-wf' },
+    });
+    assert.equal(run.agent, 'planfake');
+  } finally {
+    env.close();
+  }
+});

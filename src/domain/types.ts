@@ -503,6 +503,13 @@ export interface AgentStaticCapabilities {
   roleInstruction?: 'system' | 'prompt-reference' | 'none';
   /** The adapter accepts a structured per-Run model override (never argv). */
   perRunModel?: boolean;
+  /**
+   * The adapter injects a Run's advisory workflow plan into its prompt (issue #809).
+   * Absent means unverified, which fails closed for a workflow Run: a template admitted on
+   * an adapter without a plan channel would execute with no step guidance at all -- every
+   * planned step silently omitted, exactly the failure the advisory contract exists to avoid.
+   */
+  workflowPlan?: boolean;
   /** The adapter can execute this Run inside the sandbox manager's container. */
   sandbox?: boolean;
   /** Per-run MCP server support. 'none' until an adapter implements it (Phase 4+). */

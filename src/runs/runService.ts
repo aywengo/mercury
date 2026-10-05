@@ -613,6 +613,27 @@ export class RunService {
       throw new ValidationError(`Unknown agent: ${agent} (known: ${this.deps.knownAgents.join(', ')})`);
     }
 
+    // Fail closed on the plan channel (#842 review r3): a workflow Run's steps are guidance the
+    // adapter must actually deliver. Only the Prime/RPC/Claude adapters inject `workflowPlan`
+    // into their prompts; an adapter that never received it would execute the template with
+    // every planned step silently omitted. The check keys on the workflow paths ONLY -- the
+    // retry path re-uses the parent's agent, which already passed this gate at its creation.
+    if (resolvedWorkflow) {
+      const stat = this.deps.agentCapabilities?.()[agent]?.static;
+      if (stat?.workflowPlan !== true) {
+        const declared = stat === undefined
+          ? 'unknown -- the agent has no declared static capabilities'
+          : stat.workflowPlan === undefined
+            ? "undeclared -- the agent's static block omits workflowPlan"
+            : "false -- the agent's static block declares workflowPlan: false";
+        throw new ValidationError(
+          `workflow ${JSON.stringify(resolvedWorkflow?.snapshot.id)} renders an advisory plan,`
+          + ` but agent ${JSON.stringify(agent)} has no workflow-plan prompt channel`
+          + ` (workflowPlan: ${declared}); pick an adapter that carries the plan`,
+        );
+      }
+    }
+
     // Per-Run model resolution (#823), ONE rule for both paths: caller.model → preset model →
     // none. On the preset path resolvePreset already applied the same precedence (and enforced
     // the modelRequired conflict); the snapshot's effectiveAgent.model IS the resolved preset

@@ -248,6 +248,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       roleInstruction: 'prompt-reference',
       sandbox: true,
       mcp: 'none',
+      // Measured: the persona/context block injects context.workflowPlan verbatim (issue #809).
+      workflowPlan: true,
     },
   };
   /** `claude --version` prints "2.1.260 (Claude Code)", so the default leading-dotted-number
