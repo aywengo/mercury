@@ -1,11 +1,21 @@
 # Mercury — Laya L1 issue set (dispatcher `select`, shadow only)
 
-**Draft — not filed.** Written 2026-10-05 against `main` at `98c553d`, for
+**Filed 2026-10-05** (see Status). Written 2026-10-05 against `main` at `98c553d`, for
 [`laya-integration-design.md`](laya-integration-design.md) §6 and §13 milestone **L1**.
 P-1 and L0 are merged (see the design's §13 table), so nothing upstream blocks L1.
 
 Each issue follows the `issue-fix-loop` contract: mechanism, choke point, a
-regression test that fails on base, one PR. `L1-n` labels are placeholders until filed.
+regression test that fails on base, one PR. `L1-n` labels are kept below; the Status table maps them to GitHub numbers.
+
+## Status — filed 2026-10-05
+
+| Doc | Issue | Blocked by | PR | Merge |
+| --- | --- | --- | --- | --- |
+| L1-0 | #853 | — | | |
+| L1-1 | #854 | — | | |
+| L1-2 | #855 | — | | |
+| L1-3 | #856 | — | | |
+| L1-4 | #857 | #853, #854, #855, #856, #852 | | |
 
 ## Scope
 

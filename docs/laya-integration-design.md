@@ -373,7 +373,7 @@ wire shape against the pinned upstream version.
 | P-1 adapters | **done** — `perRunModel: true` measured on all three | #827 → `f538770` (Claude `--model`); #828 → `e884e59` (PrimeAgent RPC last-flag-wins, daemon `create` config); #829 → `2d70d2d` (Hermes `-m`, per invocation, survives `--resume`, 0.21.2) |
 | L0 sidecar contract | **done** | #825 → `accc654` (client + fake, `src/laya/`); #826 → `5b79b0e` (`select` reserved); #830 → `e48c86a` (doctor line) |
 | L0-4 installer | **done** | #831 → `7f1d300` via #840; #845 → `fcdcbae` via #846 (versioned venv directories) |
-| L1 dispatcher `select`, shadow | next — unblocked | issue set: [`laya-l1-issues.md`](laya-l1-issues.md) |
+| L1 dispatcher `select`, shadow | filed — next | #853–#857 ([`laya-l1-issues.md`](laya-l1-issues.md)); L1-4 also gated on #852 |
 | L2 Fleet task-domain signal | blocked on harness affinity (not in `src/` or `fleet/`) | — |
 | L3 fine-tune and enforce | blocked on L1 shadow data | — |
 
