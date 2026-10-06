@@ -14,7 +14,7 @@ import type { RunConstraints } from '../domain/types.ts';
 import type { AgentStaticCapabilities } from '../domain/types.ts';
 import type { ResolvedSkill } from '../domain/types.ts';
 import type { LoadedPreset } from '../presets/types.ts';
-import { SKILL_SYSTEM_CAP } from '../presets/resolvePreset.ts';
+import { SKILL_SYSTEM_CAP, resolveSkillIds } from '../presets/resolvePreset.ts';
 
 /** The caller surface for a workflow create (docs/crew/workflows.md section 5, issue #809). */
 export interface WorkflowCallerInput {
@@ -82,17 +82,21 @@ export class WorkflowPresetResolutionError extends ValidationError {
 /**
  * Resolve a Run that names one preset per stage (section 3.1.1).
  *
- * `resolvePreset` takes the caller, system and capability inputs this function forwards; the
- * per-stage preset gets the caller input EXACTLY as a single-preset Run would, so the same
- * conflict rules (required agent/model, ceiling refusal) apply inside a stage too. The
- * stage-by-stage results then combine under the agreement rules.
+ * Stages contribute DEMANDS only -- a required agent, a required model, a sandbox
+ * requirement, ceilings, required skills -- read straight from each stage manifest. A stage's
+ * non-required agent or model preference is ignored (rules 1-2), so it is never resolved and
+ * never capability-checked: an advisory Run is performed by ONE agent, and the only agent
+ * whose capabilities matter is that final one (#842 review r4). Single-preset resolution per
+ * stage got both directions wrong: it refused Runs over agents no stage required (an
+ * unregistered or role-instruction-less preference) and checked the stage's agent instead of
+ * the final one (a sandbox demand slipped past a `sandbox: false` final agent). It also
+ * pre-empted the W-2 conflict codes with the single-preset wording.
  */
 export function resolveWorkflowStages(
   workflow: { id: string; stages: { id: string; preset?: { id: string; version?: string } }[] },
   caller: WorkflowCallerInput,
   system: WorkflowSystemPolicy,
   caps: WorkflowCapabilityLookup,
-  resolvePreset: typeof import('../presets/resolvePreset.ts').resolvePreset,
   getPreset: (id: string) => LoadedPreset,
 ): ResolvedWorkflowSelection {
   const stagePresets: ResolvedWorkflowSelection['stagePresets'] = [];
@@ -120,45 +124,27 @@ export function resolveWorkflowStages(
     }
     stagePresets.push({ stageIndex, presetId: loaded.id, preset: loaded });
 
-    // The stage preset resolves with the caller input a single-preset Run would carry, so its
-    // own required-agent/required-model/ceiling refusals apply per stage. The per-stage result's
-    // agent preference feeds the agreement vote below; its constraints feed the narrowest-ceiling
-    // fold; its required skills feed the union.
-    // Constraints are folded separately below (rule 3: the narrowest ceiling across stages),
-    // so the per-stage call receives no caller constraints: resolvePreset's ceiling-refusal
-    // rule is a single-preset rule ("the caller asked past MY ceiling"), while a workflow
-    // fold must only narrow -- the caller's scalar value survives the fold unless a stage
-    // ceiling is lower (decided in workflows.md 3.1.1 rule 3, not a per-stage refusal).
-    const stageSelection = resolvePreset(loaded.manifest, { ...caller, constraints: undefined }, system, caps);
     // A sandbox-required stage must not lose its demand in the fold (rule 3, #842 review r2):
-    // resolvePreset encodes `requires.sandbox` as the empty-resourceLimits sentinel, because
-    // that is exactly what SandboxManager.requiresSandbox keys on. Record the stage indexes
-    // that demanded isolation; the constraint fold below applies the sentinel.
+    // the constraint fold below applies the empty-resourceLimits sentinel for these stages,
+    // and the final agent is checked against the demand once the agent is known.
     if (loaded.manifest.requires?.sandbox === true) sandboxStages.push(stageIndex);
 
-    // Rule 1 -- agent: required beats preference; preferences are ignored, never resolved.
+    // Rule 1 -- agent: only a REQUIRED agent is a demand. A preference is ignored: no vote,
+    // no resolution, no capability check (#842 review r4).
     const manifestAgent = loaded.manifest.agent;
-    if (manifestAgent?.required === true && manifestAgent.id) {
-      const vote = agentVotes.get(manifestAgent.id);
-      if (!vote || !vote.required) agentVotes.set(manifestAgent.id, { stageIndex, required: true });
-    } else if (stageSelection.effectiveAgent.id !== caller.agent
-      && stageSelection.effectiveAgent.id !== system.defaultAgent) {
-      // A preset DEFAULT (non-required) reached only through the preset, not through the caller:
-      // a preference, which rule 1 says is ignored.
-      const presetDefault = manifestAgent?.id;
-      if (presetDefault && presetDefault !== caller.agent) {
-        const vote = agentVotes.get(presetDefault);
-        if (!vote) agentVotes.set(presetDefault, { stageIndex, required: false });
+    if (manifestAgent?.required === true) {
+      if (!manifestAgent.id) {
+        throw new ValidationError(`stages[${stageIndex}].preset ${JSON.stringify(loaded.id)} requires an agent but declares none`);
       }
+      if (!agentVotes.has(manifestAgent.id)) agentVotes.set(manifestAgent.id, { stageIndex, required: true });
     }
 
-    // Rule 2 -- model: same agreement rule as the agent.
-    if (manifestAgent?.modelRequired === true && manifestAgent.model) {
-      const vote = modelVotes.get(manifestAgent.model);
-      if (!vote || !vote.required) modelVotes.set(manifestAgent.model, { stageIndex, required: true });
-    } else if (loaded.manifest.agent?.model && loaded.manifest.agent.model !== caller.model) {
-      const vote = modelVotes.get(loaded.manifest.agent.model);
-      if (!vote) modelVotes.set(loaded.manifest.agent.model, { stageIndex, required: false });
+    // Rule 2 -- model: the same agreement rule; a non-required model is ignored.
+    if (manifestAgent?.modelRequired === true) {
+      if (!manifestAgent.model) {
+        throw new ValidationError(`stages[${stageIndex}].preset ${JSON.stringify(loaded.id)} requires a model but declares none`);
+      }
+      if (!modelVotes.has(manifestAgent.model)) modelVotes.set(manifestAgent.model, { stageIndex, required: true });
     }
 
     // Rule 4 -- skills: the union of the stages' REQUIRED skills, de-duplicated by first
@@ -174,7 +160,9 @@ export function resolveWorkflowStages(
     // a stage whose preset resolves empty runs the deterministic selector, exactly like a
     // single-preset Run would. Stage DEFAULT skills stay stage-local -- they are the soft
     // start list that rule feeds, not part of the Run-wide union.
-    if (stageSelection.autoSelect) {
+    // The single-preset skill rule (role-presets section 3.2), shared rather than copied, with
+    // the caller's skill list -- the only caller input skill precedence consumes.
+    if (resolveSkillIds(loaded.manifest, { skills: caller.skills }).autoSelect) {
       autoSelectStages.push({ stageIndex, presetId: loaded.id });
     }
   });
@@ -254,6 +242,21 @@ export function resolveWorkflowStages(
     throw new ValidationError(`Unknown agent: ${agent} (known: ${caps.knownAgents.join(', ')})`);
   }
   const model = requiredModel ?? caller.model;
+
+  // Capabilities are checked ONCE, against the agent that performs every step (#842 review r4).
+  // The plan channel (workflowPlan) and the per-Run model (perRunModel) are enforced by
+  // RunService on this same final agent; the sandbox demand is checked here because only this
+  // function knows which stages made it. Role instructions are NOT required: advisory stage
+  // instructions travel inside the plan, never as a Run-wide role instruction (section 5).
+  if (sandboxStages.length > 0 && caps.staticCapabilities?.(agent)?.sandbox === false) {
+    const named = sandboxStages.map((i) => `stages[${i}]`).join(', ');
+    throw new WorkflowPresetResolutionError(
+      'WORKFLOW_STAGE_SANDBOX_CONFLICT',
+      'agent',
+      `${named} require${sandboxStages.length === 1 ? 's' : ''} sandboxed execution, but agent`
+      + ` ${JSON.stringify(agent)} declares sandbox: false; pick an agent that runs sandboxed`,
+    );
+  }
 
   // Rule 3 -- constraints: the narrowest ceiling across all stage presets (scalar minimums,
   // the most restrictive networkMode), applied to the CALLER's constraints; defaults come

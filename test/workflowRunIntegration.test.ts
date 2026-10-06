@@ -7,7 +7,6 @@ import { WorkflowRegistry } from '../src/workflows/workflowRegistry.ts';
 import { FakeAgentAdapter } from '../src/adapters/fakeAgentAdapter.ts';
 import { renderPlan, isTruncated, PLAN_MAX_BYTES, TRUNCATION_MARKER } from '../src/workflows/renderPlan.ts';
 import { resolveWorkflowStages, WorkflowPresetResolutionError, WorkflowSkillCapError } from '../src/workflows/resolveWorkflow.ts';
-import { resolvePreset } from '../src/presets/resolvePreset.ts';
 import { PresetRegistry } from '../src/presets/presetRegistry.ts';
 import { SkillRegistry } from '../src/skills/skillRegistry.ts';
 import type { ResolvedWorkflow } from '../src/runs/workflowStore.ts';
@@ -76,7 +75,7 @@ test('a resource ceiling conflicts with a differing caller value instead of keep
     () => resolveWorkflowStages(
       { id: 'wf', stages },
       { constraints: { resourceLimits: { memory: '100g' } } },
-      SYSTEM, CAPS, resolvePreset, (id) => presets.get(id),
+      SYSTEM, CAPS, (id) => presets.get(id),
     ),
     (err: unknown) => err instanceof WorkflowPresetResolutionError
       && err.code === 'WORKFLOW_STAGE_RESOURCE_CONFLICT',
@@ -90,7 +89,7 @@ test('a resource ceiling conflicts with a differing caller value instead of keep
     { id: 'b', preset: { id: 'memcap-2g' } },
   ];
   assert.throws(
-    () => resolveWorkflowStages({ id: 'wf2', stages: stages2 }, {}, SYSTEM, CAPS, resolvePreset, (id) => presets.get(id)),
+    () => resolveWorkflowStages({ id: 'wf2', stages: stages2 }, {}, SYSTEM, CAPS, (id) => presets.get(id)),
     (err: unknown) => err instanceof WorkflowPresetResolutionError
       && err.code === 'WORKFLOW_STAGE_RESOURCE_CONFLICT',
   );
@@ -99,7 +98,7 @@ test('a resource ceiling conflicts with a differing caller value instead of keep
   const sel = resolveWorkflowStages(
     { id: 'wf3', stages: stagesEq },
     { constraints: { resourceLimits: { memory: '1g' } } },
-    SYSTEM, CAPS, resolvePreset, (id) => presets.get(id),
+    SYSTEM, CAPS, (id) => presets.get(id),
   );
   assert.equal(sel.effectiveConstraints.resourceLimits?.memory, '1g');
 });
@@ -164,7 +163,7 @@ test('two stages requiring different agents fail creation (section 3.1.1 rule 1)
   ];
   assert.throws(
     () => resolveWorkflowStages(
-      { id: 'wf', stages }, { }, SYSTEM, CAPS, resolvePreset, (id) => presets.get(id),
+      { id: 'wf', stages }, { }, SYSTEM, CAPS, (id) => presets.get(id),
     ),
     (err: unknown) => err instanceof WorkflowPresetResolutionError
       && err.code === 'WORKFLOW_STAGE_AGENT_CONFLICT',
@@ -176,9 +175,9 @@ test('a non-required stage agent never overrides the caller or the default (rule
   const stages = [
     { id: 'a', preset: { id: 'planner-soft' } }, // preset default agent: fake
   ];
-  const sel = resolveWorkflowStages({ id: 'wf', stages }, { agent: 'hermes' }, SYSTEM, CAPS, resolvePreset, (id) => presets.get(id));
+  const sel = resolveWorkflowStages({ id: 'wf', stages }, { agent: 'hermes' }, SYSTEM, CAPS, (id) => presets.get(id));
   assert.equal(sel.effectiveAgent.id, 'hermes', 'the caller wins over a stage preference');
-  const sel2 = resolveWorkflowStages({ id: 'wf', stages }, {}, SYSTEM, CAPS, resolvePreset, (id) => presets.get(id));
+  const sel2 = resolveWorkflowStages({ id: 'wf', stages }, {}, SYSTEM, CAPS, (id) => presets.get(id));
   assert.equal(sel2.effectiveAgent.id, 'fake', 'caller absent -> system default, not the stage preference');
 });
 
@@ -191,7 +190,7 @@ test('the effective ceiling is the narrowest across stages: networkMode none win
   const sel = resolveWorkflowStages(
     { id: 'wf', stages },
     { constraints: { maxDurationMs: 30_000 } },
-    SYSTEM, CAPS, resolvePreset, (id) => presets.get(id),
+    SYSTEM, CAPS, (id) => presets.get(id),
   );
   assert.equal(sel.effectiveConstraints.maxDurationMs, 5_000, 'the narrowest scalar ceiling applies');
   assert.deepEqual(sel.effectiveConstraints.allowedNetworks, [], 'none beats bridge (empty list)');
@@ -205,7 +204,7 @@ test('a skills union over the cap fails with a finding naming the stages (rule 4
   ];
   // skillheavy requires 4 skills (a,b,c,d), planner requires 1 (planning): union 5 > cap 4.
   assert.throws(
-    () => resolveWorkflowStages({ id: 'wf', stages }, {}, SYSTEM, CAPS, resolvePreset, (id) => presets.get(id)),
+    () => resolveWorkflowStages({ id: 'wf', stages }, {}, SYSTEM, CAPS, (id) => presets.get(id)),
     (err: unknown) => {
       if (!(err instanceof WorkflowSkillCapError)) return false;
       assert.match(err.message, /skillheavy/);
@@ -220,7 +219,7 @@ test('an unknown stage preset fails with the W-1 code (acceptance 5)', () => {
   assert.throws(
     () => resolveWorkflowStages(
       { id: 'wf', stages: [{ id: 'a', preset: { id: 'missing' } }] },
-      {}, SYSTEM, CAPS, resolvePreset, (id) => presets.get(id),
+      {}, SYSTEM, CAPS, (id) => presets.get(id),
     ),
     (err: unknown) => err instanceof WorkflowPresetResolutionError
       && err.code === 'WORKFLOW_STAGE_PRESET_MISSING',
@@ -369,6 +368,114 @@ test('exactly one Run row is created; the only new table is the snapshot table (
     }
     assert.ok(!tables.includes('workflow_groups'), 'no group tables');
     assert.ok(!tables.includes('run_stages'), 'no stage tables');
+  } finally {
+    env.close();
+  }
+});
+
+// --- #842 review r4: stage DEMANDS only; capabilities checked once, on the final agent ---
+
+/** Two agents with DIFFERENT capabilities -- the shared STATIC table above made every per-stage
+ *  check against the wrong agent pass, which is how the r4 defects stayed invisible. */
+const SPLIT_CAPS = {
+  knownAgents: ['fake', 'hermes'],
+  staticCapabilities: (agent: string) => (agent === 'fake'
+    ? { skills: 'none' as const, roleInstruction: 'system' as const, perRunModel: true, humanInput: true, sandbox: true }
+    : { skills: 'none' as const, roleInstruction: 'none' as const, perRunModel: false, humanInput: true, sandbox: false }),
+};
+
+function r4Env(): PresetRegistry {
+  const presetsDir = tempDir('mercury-wf-r4-presets-');
+  makePreset(presetsDir, 'req-fake', { agent: { id: 'fake', required: true } });
+  makePreset(presetsDir, 'soft-hermes', { agent: { id: 'hermes' } });
+  makePreset(presetsDir, 'soft-model', { agent: { model: 'm-soft' } });
+  makePreset(presetsDir, 'req-model', { agent: { model: 'm-req', modelRequired: true } });
+  makePreset(presetsDir, 'sandboxed-soft-fake', { agent: { id: 'fake' }, requires: { sandbox: true } });
+  const skills = new SkillRegistry(tempDir('mercury-wf-r4-skills-'));
+  return new PresetRegistry(presetsDir, { skills, knownAgents: ['fake', 'hermes'] });
+}
+
+test('workflow resolution: a stage PREFERENCE is ignored, never resolved or capability-checked (#842 r4, cases 1-2)', () => {
+  const presets = r4Env();
+  // Case 1: a stage prefers hermes (roleInstruction: none). The preference is ignored (rule 1),
+  // the default agent performs every step, and advisory instructions travel in the plan -- so
+  // no role-instruction check applies to hermes at all.
+  const one = resolveWorkflowStages(
+    { id: 'wf', stages: [{ id: 'a', preset: { id: 'soft-hermes' } }] }, {}, SYSTEM, SPLIT_CAPS, (id) => presets.get(id),
+  );
+  assert.equal(one.effectiveAgent.id, 'fake', 'case 1: the default agent, not the stage preference');
+
+  // Case 2: a stage prefers a model; the caller's agent (hermes) has no per-Run model. Rule 2
+  // ignores the preference, so nothing asks hermes for a model and creation succeeds.
+  const two = resolveWorkflowStages(
+    { id: 'wf', stages: [{ id: 'a', preset: { id: 'soft-model' } }] }, { agent: 'hermes' }, SYSTEM, SPLIT_CAPS, (id) => presets.get(id),
+  );
+  assert.equal(two.effectiveAgent.id, 'hermes', 'case 2: the caller agent');
+  assert.equal(two.effectiveAgent.model, undefined, 'case 2: the stage model preference is ignored');
+});
+
+test('workflow resolution: caller conflicts with a REQUIRED stage agent/model carry the W-2 codes (#842 r4, cases 3-4)', () => {
+  const presets = r4Env();
+  // Case 3: before r4 the per-stage single-preset call threw its generic wording first and the
+  // WORKFLOW_STAGE_AGENT_CONFLICT caller branch was unreachable.
+  assert.throws(
+    () => resolveWorkflowStages(
+      { id: 'wf', stages: [{ id: 'a', preset: { id: 'req-fake' } }] }, { agent: 'hermes' }, SYSTEM, SPLIT_CAPS, (id) => presets.get(id),
+    ),
+    (err: unknown) => err instanceof WorkflowPresetResolutionError && err.code === 'WORKFLOW_STAGE_AGENT_CONFLICT' && err.field === 'agent',
+  );
+  // Case 4: the same for the model.
+  assert.throws(
+    () => resolveWorkflowStages(
+      { id: 'wf', stages: [{ id: 'a', preset: { id: 'req-model' } }] }, { agent: 'fake', model: 'm-other' }, SYSTEM, SPLIT_CAPS, (id) => presets.get(id),
+    ),
+    (err: unknown) => err instanceof WorkflowPresetResolutionError && err.code === 'WORKFLOW_STAGE_MODEL_CONFLICT' && err.field === 'model',
+  );
+});
+
+test('workflow resolution: a sandbox demand is checked against the FINAL agent (#842 r4, case 5)', () => {
+  const presets = r4Env();
+  // The stage prefers fake (sandbox: true) and requires sandboxing; the preference is ignored,
+  // so the system default hermes (sandbox: false) performs the step. Before r4 the demand was
+  // checked against fake and the Run was admitted onto an agent that cannot run sandboxed.
+  const system = { ...SYSTEM, defaultAgent: 'hermes' };
+  assert.throws(
+    () => resolveWorkflowStages(
+      { id: 'wf', stages: [{ id: 'a', preset: { id: 'sandboxed-soft-fake' } }] }, {}, system, SPLIT_CAPS, (id) => presets.get(id),
+    ),
+    (err: unknown) => err instanceof WorkflowPresetResolutionError && err.code === 'WORKFLOW_STAGE_SANDBOX_CONFLICT'
+      && /stages\[0\] requires sandboxed execution/.test((err as Error).message),
+  );
+  // The same template on an agent that does run sandboxed is admitted, with the sentinel.
+  const ok = resolveWorkflowStages(
+    { id: 'wf', stages: [{ id: 'a', preset: { id: 'sandboxed-soft-fake' } }] }, { agent: 'fake' }, system, SPLIT_CAPS, (id) => presets.get(id),
+  );
+  assert.equal(ok.effectiveAgent.id, 'fake');
+  assert.ok(ok.effectiveConstraints.resourceLimits !== undefined, 'the sandbox sentinel survives the fold');
+});
+
+test('the workflow block is a closed shape: an unknown key is refused, never ignored (#842 r4)', () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const workflowsDir = tempDir('mercury-wf-dir-');
+  makeWorkflowDir(workflowsDir, 'closed', {
+    schemaVersion: 1, id: 'closed', version: '1.0.0', description: 'closed shape',
+    mode: 'advisory', stages: [{ id: 'a', task: 'x' }], maxStages: 1,
+  });
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workflowsDir, workerEnabled: false });
+  try {
+    // A misspelled pin would otherwise run the CURRENT template -- the downgrade the pin exists for.
+    assert.throws(
+      () => env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, workflow: { id: 'closed', versoin: '0.9.0' } as never }),
+      /workflow has unknown key "versoin" \(did you mean 'version'\?\); allowed keys: id, version/,
+    );
+    assert.throws(
+      () => env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, workflow: { id: 'closed', stages: [] } as never }),
+      /workflow has unknown key "stages"/,
+    );
+    assert.equal(env.runs.list({ ownerId: 'a', limit: 10 }).runs.length, 0, 'no Run row written');
+    // The two allowed keys still work.
+    const run = env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, workflow: { id: 'closed', version: '1.0.0' } });
+    assert.ok(run.id);
   } finally {
     env.close();
   }

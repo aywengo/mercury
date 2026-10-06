@@ -148,6 +148,17 @@ Running a task with a role is `POST /api/runs` with a `preset: { id, version? }`
 block ([role-presets.md](crew/role-presets.md) section 9); omitting the block
 keeps the Run payload exactly as it was before presets existed.
 
+An advisory workflow Run is `POST /api/runs` with a `workflow: { id, version? }`
+block ([workflows.md](crew/workflows.md) section 3.1). The block is a closed shape:
+any key other than `id` and `version` is a `400`, so a misspelled `version` can never
+drop the pin silently. `workflow` and `preset` are mutually exclusive. Stage presets
+contribute only their *required* agent, model, sandbox demand, ceilings and required
+skills (section 3.1.1); capabilities are checked once, against the agent that performs
+every step. Refusals carry stable codes, including `WORKFLOW_NOT_FOUND`,
+`WORKFLOW_STAGE_PRESET_MISSING`, `WORKFLOW_STAGE_AGENT_CONFLICT`,
+`WORKFLOW_STAGE_MODEL_CONFLICT`, `WORKFLOW_STAGE_RESOURCE_CONFLICT` and
+`WORKFLOW_STAGE_SANDBOX_CONFLICT`.
+
 ## Knowledge endpoints
 
 These endpoints are served only by processes that have `knowledgeStatus` or `knowledgeNotes`

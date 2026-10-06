@@ -491,6 +491,15 @@ export class RunService {
       if (input.workflow === null || typeof input.workflow !== 'object' || Array.isArray(input.workflow)) {
         throw new ValidationError('workflow must be an object with an id');
       }
+      // Closed shape (#842 review r4): an unknown key is refused, never ignored. A typo such as
+      // `versoin` would otherwise drop the version pin silently and run the current template --
+      // the exact downgrade the pin exists to catch.
+      for (const key of Object.keys(input.workflow as object)) {
+        if (key !== 'id' && key !== 'version') {
+          const hint = /^v/i.test(key) ? " (did you mean 'version'?)" : /^i/i.test(key) ? " (did you mean 'id'?)" : '';
+          throw new ValidationError(`workflow has unknown key ${JSON.stringify(key)}${hint}; allowed keys: id, version`);
+        }
+      }
       const wf = input.workflow as { id?: unknown; version?: unknown };
       if (typeof wf.id !== 'string' || wf.id.length === 0) {
         throw new ValidationError('workflow.id must be a non-empty string');
@@ -550,7 +559,6 @@ export class RunService {
           knownAgents: this.deps.knownAgents,
           staticCapabilities: (agentId) => this.deps.agentCapabilities?.()[agentId]?.static,
         },
-        resolvePreset,
         (id) => this.deps.presets!.get(id),
       );
       // Skill resolution (section 3.1.1 rule 4): the union of the stages' required skills,
