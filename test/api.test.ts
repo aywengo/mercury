@@ -1751,5 +1751,102 @@ test('POST /api/runs with model on an agent without perRunModel returns 400 nami
     }
   } finally {
     env.close();
+  }});
+
+// -- #854: optional `selection` record over HTTP (L1-1) --
+
+test('POST /api/runs stores a valid selection; GET returns it; the event appears once; a selection-less POST behaves as before (#854)', async () => {
+  // The route-level seam: on base, `selection` is dropped at the route and the GET assertion
+  // fails -- the same shape of defect the `knowledge` forwarding comment in routes.ts warns about.
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const selection = {
+        via: 'laya',
+        mode: 'shadow',
+        chosen: { agent: 'fake' },
+        laya: { agent: 'fake', model: 'GLM-5.3-Flash' },
+        answerConfidence: 0.87,
+        distribution: { 'fake': 0.7, 'primeagent': 0.3 },
+        candidatesOffered: 3,
+        candidatesFiltered: 2,
+        checkpoint: 'gate-1',
+        latencyMs: 42,
+        reason: 'shadow',
+      };
+      const res = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake', selection }),
+      });
+      assert.equal(res.status, 201);
+      const { runId } = (await res.json()) as { runId: string };
+      const got = await fetch(`${base}/api/runs/${runId}`, { headers: { authorization: 'Bearer tok-alice' } });
+      const body = (await got.json()) as { selection?: Record<string, unknown> | null };
+      assert.deepEqual(body.selection, selection, 'GET returns the record verbatim');
+      // The event is stored exactly once, in the creation transaction.
+      const evs = env.events.list(runId).filter((e) => e.type === 'run.selection_recorded');
+      assert.equal(evs.length, 1);
+      assert.deepEqual(evs[0].payload, selection);
+
+      // A selection-less POST stays byte-identical: no event, no selection in GET.
+      const res2 = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers, body: JSON.stringify({ task: 'x', agent: 'fake' }),
+      });
+      assert.equal(res2.status, 201);
+      const { runId: id2 } = (await res2.json()) as { runId: string };
+      const got2 = await fetch(`${base}/api/runs/${id2}`, { headers: { authorization: 'Bearer tok-alice' } });
+      const body2 = (await got2.json()) as { selection?: Record<string, unknown> | null };
+      assert.equal(body2.selection ?? null, null);
+      assert.equal(env.events.list(id2).some((e) => e.type === 'run.selection_recorded'), false);
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('POST /api/runs refuses malformed selection with 400 and no Run row (#854)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const valid = { via: 'laya', mode: 'shadow', chosen: { agent: 'fake' }, laya: { agent: 'fake' }, reason: 'shadow' };
+      const bad = [
+        'yes', // not an object
+        { ...valid, extra: 1 }, // unknown key
+        { ...valid, via: 'other' }, // wrong via
+        { ...valid, mode: 'pilot' }, // wrong mode
+        { ...valid, chosen: { agent: 'primeagent' } }, // chosen.agent != request agent
+        { ...valid, reason: 'vibes' }, // reason outside the closed enum
+        { ...valid, answerConfidence: 1.5 }, // non-finite-bounded probability
+        { ...valid, distribution: Object.fromEntries(Array.from({ length: 13 }, (_, i) => [`k${i}`, 0.5])) }, // >12 entries
+        { ...valid, chosen: { agent: 'fake', model: 'm1' } }, // chosen.model, but no run model
+        { ...valid, via: 'laya', mode: 'shadow', chosen: { agent: 'fake' }, laya: { agent: 'fake' }, reason: 'shadow', task: 'x'.repeat(9000) }, // oversize
+      ];
+      for (const selection of bad) {
+        const res = await fetch(`${base}/api/runs`, {
+          method: 'POST', headers, body: JSON.stringify({ task: 't', agent: 'fake', selection }),
+        });
+        assert.equal(res.status, 400, `selection ${JSON.stringify(selection).slice(0, 80)} -> ${res.status}`);
+      }
+      // No Run row was written by any of the refusals.
+      const list = await fetch(`${base}/api/runs?limit=50`, { headers: { authorization: 'Bearer tok-alice' } });
+      const runs = (await list.json()) as { runs: unknown[] };
+      assert.equal(runs.runs.length, 0, 'a rejected selection left a Run behind');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
   }
 });
