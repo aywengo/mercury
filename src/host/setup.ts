@@ -44,7 +44,7 @@ import { HOST_HARNESSES } from '../config.ts';
 import { suggestionFor } from '../adapters/configSchema.ts';
 import { checkLaya, isLayaAuthRejected, loadEnvFile, parseLayaTimeoutMs, schemeFor } from './doctor.ts';
 import { readLayaCredentials } from './layaCredentials.ts';
-import { DEFAULT_PYTHON_CANDIDATES, detectPython, ensureLayaCredentials, LAYA_DEFAULT_PORT, LAYA_SERVE_PIN, layaStepActions, planLayaSidecar, renderLayaLaunchdPlist, renderLayaSystemdUnit, type LayaPlan, type RunFn } from './layaSidecar.ts';
+import { DEFAULT_PYTHON_CANDIDATES, detectPython, ensureLayaCredentials, isLaunchdNotLoaded, LAYA_DEFAULT_PORT, LAYA_SERVE_PIN, layaStepActions, planLayaSidecar, renderLayaLaunchdPlist, renderLayaSystemdUnit, type LayaPlan, type RunFn } from './layaSidecar.ts';
 import { harnessSpecs, probeHarness, type HarnessProbeResult } from './probe.ts';
 import { isWizardManagedLayaDefault, validateLayaBaseUrl } from '../laya/layaUrl.ts';
 
@@ -1087,7 +1087,7 @@ export async function runHostSetup(
             // print timeout/comms error proves nothing (Copilot #846 r8) — keep the unit and
             // the build directory so a possibly-running job keeps its executable.
             const printR = run(['launchctl', 'print', `${uid}/${plan.unitLabel}`], 10_000);
-            const notLoaded = !printR.ok && /service not loaded|could not find service|"com\.mercury\.laya" is not loaded/i.test(`${printR.stderr}\n${printR.stdout}`);
+            const notLoaded = !printR.ok && isLaunchdNotLoaded(`${printR.stderr}\n${printR.stdout}`, plan.unitLabel);
             stopped = printR.ok
               ? run(['launchctl', 'bootout', `${uid}/${plan.unitLabel}`], 10_000).ok
               : notLoaded;
@@ -1348,9 +1348,33 @@ export async function runHostSetup(
         }
         return null;
       })();
+      // #851: the marker is trusted only when its parent is a directory the installer has
+      // already used as a data dir (the current one, or the previous venv's parent). A marker
+      // pointing elsewhere ($HOME after a hand edit, a restored backup, a home move) is
+      // ignored for sweeping — the retained generation stays, one log line, no new trust
+      // source. Those two parents are already in sweepParents, so a trusted marker adds
+      // nothing new.
       const sweepParents = new Set([dataDir, dirname(prevVenv)]);
-      if (oldPrev !== null && oldPrev !== prevVenv && dirname(oldPrev) !== dataDir) {
-        sweepParents.add(dirname(oldPrev));
+      // #851: a marker-derived parent is swept only when it is a directory the installer has
+      // used as a data dir: the current dataDir, the previous venv's parent — or a parent the
+      // installer itself corroborated by writing a co-located marker there naming the same
+      // path (a data-dir migration's old parent, Copilot #846 r12). A config-dir marker that
+      // points at some other directory — hand-edited, from a restored backup, after a home
+      // move — has no such corroboration: it is ignored for sweeping (the retained generation
+      // stays) and one line is logged. No new trust source: only marker files the installer
+      // already writes are consulted.
+      const markerCorroborates = (p: string): boolean => {
+        const parent = dirname(p);
+        if (sweepParents.has(parent)) return true;
+        try {
+          return readFileSync(join(parent, '.laya-venv-prev'), 'utf8').trim() === p;
+        } catch {
+          return false;
+        }
+      };
+      if (oldPrev !== null && oldPrev !== prevVenv && !sweepParents.has(dirname(oldPrev))) {
+        if (markerCorroborates(oldPrev)) sweepParents.add(dirname(oldPrev));
+        else io.out(`laya: ignored stale prev-venv marker outside the installer data dirs: ${dirname(oldPrev)}\n`);
       }
       for (const sweepParent of sweepParents) {
         let entries: string[] = [];

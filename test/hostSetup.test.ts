@@ -36,6 +36,7 @@ import {
 import { isWizardManagedLayaDefault } from '../src/laya/layaUrl.ts';
 import {
   DEFAULT_PYTHON_CANDIDATES,
+  isLaunchdNotLoaded,
   detectPython,
   ensureLayaCredentials,
   LAYA_SERVE_PIN,
@@ -87,6 +88,25 @@ function answers(over: Partial<HostSetupAnswers> = {}): HostSetupAnswers {
     ...over,
   };
 }
+
+
+// ---------- #851: label-agnostic launchd not-loaded matcher ----------
+
+test('isLaunchdNotLoaded (#851): a non-default label is matched from its own name', () => {
+  assert.equal(isLaunchdNotLoaded('gui/501/com.other.laya: not initialized\n"com.other.laya" is not loaded', 'com.other.laya'), true);
+  assert.equal(isLaunchdNotLoaded('gui/501/com.mercury.laya: service not loaded', 'com.other.laya'), true);
+  assert.equal(isLaunchdNotLoaded('gui/501/com.other.laya: could not find service', 'com.other.laya'), true);
+});
+
+test('isLaunchdNotLoaded (#851): the default label still matches, regex chars are escaped', () => {
+  assert.equal(isLaunchdNotLoaded('"com.mercury.laya" is not loaded', 'com.mercury.laya'), true);
+  assert.equal(isLaunchdNotLoaded('service not loaded', 'com.mercury.laya'), true);
+  assert.equal(isLaunchdNotLoaded('COULD NOT FIND SERVICE', 'com.mercury.laya'), true);
+  // A running job, or label chars treated literally: never a not-loaded verdict.
+  assert.equal(isLaunchdNotLoaded('pid = 4711\nstate = running', 'com.mercury.laya'), false);
+  assert.equal(isLaunchdNotLoaded('"comXmercuryXlaya" is not loaded', 'com.mercury.laya'), false);
+  assert.equal(isLaunchdNotLoaded('', 'com.mercury.laya'), false);
+});
 
 // ---------- argument parsing ----------
 
@@ -1941,6 +1961,61 @@ test('runHostSetup (#845): a re-run after success keeps exactly one previous gen
     await fake.close();
   }
 });
+
+test('runHostSetup (#851): a prev-venv marker outside the installer data dirs is ignored for sweeping', async () => {
+  const dir = tempDir('setup-laya-v851sweep-');
+  const out: string[] = [];
+  const err: string[] = [];
+  const fake = await startFakeLaya([{ json: validPick(['probe']) }], { apiKey: '*' });
+  const sidecarRun = (argv: string[]) => {
+    if (argv[0] === 'uv' && argv[1] === 'venv') {
+      const target = argv[2]!;
+      if (existsSync(target)) return { ok: false, stdout: '', stderr: `A directory already exists at: ${target}` };
+      mkdirSync(join(target, 'bin'), { recursive: true });
+      writeFileSync(join(target, 'bin', 'python3'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    if (argv.join(' ').includes('pip install')) {
+      writeFileSync(join(dirname(argv[0]!), '.laya-installed'), 'y\n');
+      return { ok: true, stdout: '', stderr: '' };
+    }
+    if (argv[0] === 'uv' && argv[1] === 'python') return { ok: true, stdout: '/tmp/py310/bin/python3', stderr: '' };
+    if (argv[1] === '-V') return { ok: true, stdout: 'Python 3.10.12', stderr: '' };
+    return { ok: true, stdout: '', stderr: '' };
+  };
+  try {
+    // A configured host with a legacy venv the unit references — the setup that the
+    // re-run sweeps around (the #831/#845 migration shape).
+    const legacy = join(dir, 'data', 'laya-venv');
+    mkdirSync(join(legacy, 'bin'), { recursive: true });
+    writeFileSync(join(legacy, 'bin', 'laya-serve'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const code1 = await runHostSetup([], {
+      out: (s) => out.push(s), err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 30_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+    assert.equal(code1, 0, `first run: ${err.join('')} | ${out.join('')}`);
+    // A hand-edited / restored / moved marker: it names a directory OUTSIDE every
+    // installer data dir, and that directory contains an installer-named venv.
+    const elsewhere = join(dir, 'elsewhere');
+    const foreign = join(elsewhere, `laya-venv-0.3.25-20260101000000-deadbeef`);
+    mkdirSync(foreign, { recursive: true });
+    writeFileSync(join(dir, 'mercury', '.laya-venv-prev'), `${foreign}\n`);
+    const code2 = await runHostSetup(['--yes'], {
+      out: (s) => out.push(s), err: (s) => err.push(s),
+      question: async (q) => (q.includes('Laya sidecar') ? 'yes' : ''),
+      sidecarRun, sidecarDataDir: join(dir, 'data'),
+      sidecarProbeUrl: `${fake.url}`, sidecarReadinessBudgetMs: 30_000,
+    }, { ...probeStubEnv(), XDG_CONFIG_HOME: dir, XDG_STATE_HOME: dir, HOME: dir });
+    assert.equal(code2, 0, `re-run: ${err.join('')} | ${out.join('')}`);
+    assert.ok(existsSync(foreign), 'the marker-named directory outside the data dirs is never swept');
+    assert.ok(out.some((l) => l.includes('ignored stale prev-venv marker')), 'one log line explains the ignored marker');
+  } finally {
+    await fake.close();
+  }
+});
+
 test('ensureLayaCredentials: a stale PID-named temp file is never reused (#840 r52)', () => {
   const dir = tempDir('setup-laya-tmp-reuse-');
   const credsPath = join(dir, 'mercury', 'laya-credentials.json');
