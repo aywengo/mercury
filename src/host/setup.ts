@@ -1348,12 +1348,6 @@ export async function runHostSetup(
         }
         return null;
       })();
-      // #851: the marker is trusted only when its parent is a directory the installer has
-      // already used as a data dir (the current one, or the previous venv's parent). A marker
-      // pointing elsewhere ($HOME after a hand edit, a restored backup, a home move) is
-      // ignored for sweeping — the retained generation stays, one log line, no new trust
-      // source. Those two parents are already in sweepParents, so a trusted marker adds
-      // nothing new.
       const sweepParents = new Set([dataDir, dirname(prevVenv)]);
       // #851: a marker-derived parent is swept only when it is a directory the installer has
       // used as a data dir: the current dataDir, the previous venv's parent — or a parent the
