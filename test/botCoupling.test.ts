@@ -62,6 +62,12 @@ const ALLOWED_SRC = [
   // Type-only shape of the `GET /api/agents` capabilities payload (AgentCapabilitySummary,
   // #855): the filter keys on the wire field, so it shares the interface, not server logic.
   'src/domain/types.ts',
+  // Type-only Laya wire contract (#856, L1-3): the question/decision layer types its inputs and
+  // outputs with the SAME union the client returns (LayaOption, LayaResult, LayaFailureReason),
+  // so a decision-reason drift from the client contract is a type error. src/laya/types.ts is
+  // the shared contract module (no I/O; the client lives beside it but is NOT allowlisted --
+  // bot code asks through the injected DecideClient surface, never imports the client).
+  'src/laya/types.ts',
 ];
 
 test('the bots directory is non-empty and actually being scanned', () => {
