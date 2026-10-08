@@ -561,27 +561,44 @@ export class RunService {
         },
         (id) => this.deps.presets!.get(id),
       );
-      // Skill resolution (section 3.1.1 rule 4): the union of the stages' required skills,
-      // then the per-stage deterministic selector picks, deduped, then the cap. Exceeding the
-      // cap FAILS with a finding naming the stages -- nothing is dropped.
-      let skillIds = [...stageSelection.requiredSkillIds];
-      const seenSkill = new Set(skillIds);
-      for (const stage of stageSelection.autoSelectStages) {
-        const preset = stageSelection.stagePresets.find((s) => s.stageIndex === stage.stageIndex)?.preset;
-        if (!preset) continue;
-        const skillDeliveryForStage = this.deps.agentCapabilities?.()[stageSelection.effectiveAgent.id]?.static?.skills;
-        if (skillDeliveryForStage === 'nativeNames') continue; // guarded again below, on the merged list
-        const picks = this.deps.selector.select(
-          // The stage's own task: selection guidance is per step, never the whole plan.
-          loaded.stages[stage.stageIndex]?.task ?? input.task,
-          this.deps.skills.list(),
-          Math.max(0, stageSelection.skillCap - seenSkill.size),
-        );
-        for (const id of picks) {
-          if (seenSkill.has(id)) continue;
-          seenSkill.add(id);
-          skillIds.push(id);
+      // Skill resolution (section 3.1.1 rule 4, deferring to role-presets section 3.2): the
+      // caller's list when PROVIDED (an explicit [] means "no skills" and suppresses
+      // auto-selection), otherwise the per-stage selector picks; then the union of the stages'
+      // REQUIRED skills appended, deduped by first occurrence; then the strictest stage's cap.
+      // Exceeding it FAILS -- nothing is dropped (#842 review r5: caller skills were discarded).
+      const skillCap = stageSelection.skillCap;
+      const requiredSkills = stageSelection.requiredSkillIds;
+      const skillIds: string[] = [];
+      const seenSkill = new Set<string>();
+      const pushSkill = (id: string): void => {
+        if (seenSkill.has(id)) return;
+        seenSkill.add(id);
+        skillIds.push(id);
+      };
+      if (input.skills !== undefined) {
+        for (const id of input.skills) pushSkill(id);
+      } else {
+        for (const stage of stageSelection.autoSelectStages) {
+          const preset = stageSelection.stagePresets.find((s) => s.stageIndex === stage.stageIndex)?.preset;
+          if (!preset) continue;
+          const skillDeliveryForStage = this.deps.agentCapabilities?.()[stageSelection.effectiveAgent.id]?.static?.skills;
+          if (skillDeliveryForStage === 'nativeNames') continue; // guarded again below, on the merged list
+          const picks = this.deps.selector.select(
+            // The stage's own task: selection guidance is per step, never the whole plan.
+            loaded.stages[stage.stageIndex]?.task ?? input.task,
+            this.deps.skills.list(),
+            // Budget = cap - required (decision 2A): the required skills are appended after.
+            Math.max(0, skillCap - requiredSkills.length - skillIds.length),
+          );
+          for (const id of picks) pushSkill(id);
         }
+      }
+      for (const id of requiredSkills) pushSkill(id);
+      if (skillIds.length > skillCap) {
+        throw new ValidationError(
+          `workflow ${JSON.stringify(loaded.id)} resolves to ${skillIds.length} skills (caller list plus`
+          + ` stage-required skills); the effective maximum is ${skillCap}, the strictest stage's cap`,
+        );
       }
       if (skillIds.length > 0
         && this.deps.agentCapabilities?.()[stageSelection.effectiveAgent.id]?.static?.skills === 'nativeNames') {
@@ -1215,6 +1232,13 @@ export class RunService {
    */
   getWorkflow(runId: string): ResolvedWorkflow | null {
     return this.workflowStore().get(runId);
+  }
+
+  /** The Run-detail view of a workflow Run (#809 acceptance 4): identity only, from the snapshot. */
+  getWorkflowIdentity(runId: string): { id: string; version: string; contentHash: string; mode: 'advisory'; stages: number } | null {
+    const wf = this.workflowStore().get(runId);
+    if (!wf) return null;
+    return { id: wf.id, version: wf.version, contentHash: wf.contentHash, mode: wf.mode, stages: wf.stages.length };
   }
 
   /**

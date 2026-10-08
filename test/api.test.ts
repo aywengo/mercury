@@ -1753,3 +1753,24 @@ test('POST /api/runs with model on an agent without perRunModel returns 400 nami
     env.close();
   }
 });
+
+test('GET /api/runs/:runId carries the workflow identity sibling (null for a Run without one) (#809 acc. 4; #842 r5)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env);
+    const srv = await listen(app);
+    try {
+      const run = env.runService.create({ ownerId: 'alice', task: 'plain' });
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${run.id}`, { headers: { Authorization: 'Bearer tok-alice' } });
+      assert.equal(res.status, 200);
+      const body = await res.json() as Record<string, unknown>;
+      assert.ok('workflow' in body, 'the sibling is present on the wire');
+      assert.equal(body.workflow, null);
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});

@@ -88,5 +88,8 @@ export function renderPlan(
 
 /** True when a rendered plan was truncated (the worker records it on the materialized event). */
 export function isTruncated(plan: string): boolean {
-  return plan.includes(TRUNCATION_MARKER);
+  // Suffix, not substring (#842 review r5): the renderer appends the marker only at the very
+  // end (an untruncated plan ends with a newline), and task or preset text may legitimately
+  // contain the marker string.
+  return plan.endsWith(TRUNCATION_MARKER);
 }

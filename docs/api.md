@@ -159,6 +159,11 @@ every step. Refusals carry stable codes, including `WORKFLOW_NOT_FOUND`,
 `WORKFLOW_STAGE_MODEL_CONFLICT`, `WORKFLOW_STAGE_RESOURCE_CONFLICT` and
 `WORKFLOW_STAGE_SANDBOX_CONFLICT`.
 
+`GET /api/runs/:runId` returns a `workflow` sibling for every Run: the identity
+`{ id, version, contentHash, mode, stages }` read from the Run's snapshot, or `null`
+for a Run created without a workflow. Workflow stage snapshots are not preset Runs:
+`mercury_runs_by_preset` counts Run-wide presets only.
+
 ## Knowledge endpoints
 
 These endpoints are served only by processes that have `knowledgeStatus` or `knowledgeNotes`

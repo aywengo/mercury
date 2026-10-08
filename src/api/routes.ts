@@ -383,6 +383,10 @@ export function createRoutes(deps: RoutesDeps): Router {
       // Sibling rather than a field on `run`, for the same reason `goal` is: the pack is a snapshot with
       // its own lifecycle, and folding it in would make `GET /api/runs` carry a blob nobody lists.
       knowledge: deps.runService.getKnowledge(run.id),
+      // Sibling, same reason as `preset` (#809 acceptance 4, #842 review r5): the workflow
+      // identity a Run was created from -- never the template bytes, which stay in the
+      // workspace -- or null for a Run without a workflow.
+      workflow: deps.runService.getWorkflowIdentity(run.id),
     });
   });
 

@@ -103,6 +103,9 @@ export function resolveWorkflowStages(
   const agentVotes = new Map<string, { stageIndex: number; required: boolean }>();
   const modelVotes = new Map<string, { stageIndex: number; required: boolean }>();
   const requiredSkillIds: string[] = [];
+  // Rule 4 + "never more skills than its strictest stage allows" (section 3.1.1): the Run-wide
+  // cap is the MINIMUM effective cap across stage presets, not the system cap (#842 review r5).
+  let skillCap = SKILL_SYSTEM_CAP;
   const seenSkills = new Set<string>();
   const autoSelectStages: { stageIndex: number; presetId: string }[] = [];
   const sandboxStages: number[] = [];
@@ -162,7 +165,11 @@ export function resolveWorkflowStages(
     // start list that rule feeds, not part of the Run-wide union.
     // The single-preset skill rule (role-presets section 3.2), shared rather than copied, with
     // the caller's skill list -- the only caller input skill precedence consumes.
-    if (resolveSkillIds(loaded.manifest, { skills: caller.skills }).autoSelect) {
+    skillCap = Math.min(skillCap, loaded.manifest.skills?.max ?? SKILL_SYSTEM_CAP);
+    // Asked only when the caller gave no list: a provided list (even []) suppresses
+    // auto-selection by the same rule, and evaluating the stage's single-preset cap against the
+    // caller's list here would refuse with single-preset wording before the Run-wide check.
+    if (caller.skills === undefined && resolveSkillIds(loaded.manifest, {}).autoSelect) {
       autoSelectStages.push({ stageIndex, presetId: loaded.id });
     }
   });
@@ -170,11 +177,11 @@ export function resolveWorkflowStages(
   // Rule 4 verdict: the union over the cap fails with a finding naming the stages (nothing
   // is dropped). Selector picks are merged later by the caller; the REQUIRED union alone
   // failing the cap is a template defect, so it is refused here at resolution time.
-  if (requiredSkillIds.length > SKILL_SYSTEM_CAP) {
+  if (requiredSkillIds.length > skillCap) {
     const demands = stagePresets
       .filter((s) => (s.preset.manifest.skills?.required ?? []).length > 0)
       .map((s) => `stages[${s.stageIndex}] (${s.presetId})`);
-    throw new WorkflowSkillCapError(requiredSkillIds.length, SKILL_SYSTEM_CAP, {
+    throw new WorkflowSkillCapError(requiredSkillIds.length, skillCap, {
       stages: demands,
       skills: [...seenSkills],
     });
@@ -268,7 +275,7 @@ export function resolveWorkflowStages(
     effectiveConstraints,
     requiredSkillIds,
     autoSelectStages,
-    skillCap: SKILL_SYSTEM_CAP,
+    skillCap,
     stagePresets,
   };
 }

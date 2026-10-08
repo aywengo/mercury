@@ -10,6 +10,8 @@ import { resolveWorkflowStages, WorkflowPresetResolutionError, WorkflowSkillCapE
 import { PresetRegistry } from '../src/presets/presetRegistry.ts';
 import { SkillRegistry } from '../src/skills/skillRegistry.ts';
 import type { ResolvedWorkflow } from '../src/runs/workflowStore.ts';
+import { validateCreateRunRequest, parseRunDetailResponse } from '../client/api/protocol.ts';
+import { collectMetrics } from '../src/metrics/collect.ts';
 
 // docs/crew/workflows.md sections 3.1 and 5, issue #809: one ordinary advisory Run from a
 // template -- service-level resolution (section 3.1.1), a snapshot written in the creation
@@ -476,6 +478,92 @@ test('the workflow block is a closed shape: an unknown key is refused, never ign
     // The two allowed keys still work.
     const run = env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, workflow: { id: 'closed', version: '1.0.0' } });
     assert.ok(run.id);
+  } finally {
+    env.close();
+  }
+});
+
+// --- #842 review r5 (findings on unchanged code) ---
+
+function r5Skills(ids: string[]): string {
+  const dir = tempDir('mercury-wf-r5-skills-');
+  for (const id of ids) {
+    mkdirSync(join(dir, id), { recursive: true });
+    writeFileSync(join(dir, id, 'SKILL.md'), `---\nname: ${id}\nversion: 1.0.0\ndescription: fixture skill.\ncapabilities: [testing]\n---\n\nbody.\n`);
+  }
+  return dir;
+}
+
+test('client --file: an unknown workflow key is refused, not dropped into an unpinned request (#842 r5)', () => {
+  assert.throws(
+    () => validateCreateRunRequest({ task: 't', workflow: { id: 'plan', versoin: '1.0.0' } }),
+    /workflow has unknown key "versoin" \(did you mean 'version'\?\)/,
+  );
+  const ok = validateCreateRunRequest({ task: 't', workflow: { id: 'plan', version: '1.0.0' } });
+  assert.deepEqual(ok.workflow, { id: 'plan', version: '1.0.0' });
+});
+
+test('workflow Runs keep explicit caller skills, then stage-required ones (role-presets 3.2; #842 r5)', () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const workflowsDir = tempDir('mercury-wf-dir-');
+  makeWorkflowDir(workflowsDir, 'grow', twoStageManifest('grow'));
+  const presetsDir = tempDir('mercury-wf-presets-');
+  makePreset(presetsDir, 'planner', { skills: { required: ['planning'] } });
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workflowsDir, presetsDir, skillsDir: r5Skills(['planning', 'testing']), workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, workflow: { id: 'grow' }, skills: ['testing'] });
+    assert.deepEqual(env.runService.getSkills(run.id).map((sk) => sk.id).sort(), ['planning', 'testing'], 'the caller skill is kept, the stage-required one added');
+    // An explicit [] still means "no caller skills" (no auto-select) but required stays.
+    const none = env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, workflow: { id: 'grow' }, skills: [] });
+    assert.deepEqual(env.runService.getSkills(none.id).map((sk) => sk.id), ['planning']);
+  } finally {
+    env.close();
+  }
+});
+
+test('the Run-wide skills cap is the strictest stage preset cap, not the system cap (#842 r5)', () => {
+  const presetsDir = tempDir('mercury-wf-r5-presets-');
+  makePreset(presetsDir, 'one-max', { skills: { required: ['a'], max: 1 } });
+  makePreset(presetsDir, 'four-max', { skills: { required: ['b'], max: 4 } });
+  const presets = new PresetRegistry(presetsDir, { skills: new SkillRegistry(r5Skills(['a', 'b'])), knownAgents: ['fake', 'hermes'] });
+  const stages = [{ id: 'x', preset: { id: 'one-max' } }, { id: 'y', preset: { id: 'four-max' } }];
+  assert.throws(
+    () => resolveWorkflowStages({ id: 'wf', stages }, {}, SYSTEM, CAPS, (id) => presets.get(id)),
+    (err: unknown) => err instanceof WorkflowSkillCapError && /effective maximum is 1/.test((err as Error).message),
+  );
+  const single = resolveWorkflowStages({ id: 'wf', stages: [stages[1]!] }, {}, SYSTEM, CAPS, (id) => presets.get(id));
+  assert.equal(single.skillCap, 4);
+});
+
+test('isTruncated checks the suffix: a plan that merely mentions the marker is not truncated (#842 r5)', () => {
+  const untruncated = `step text that quotes ${TRUNCATION_MARKER} verbatim\n`;
+  assert.equal(isTruncated(untruncated), false);
+  assert.equal(isTruncated(`plan\n${TRUNCATION_MARKER}`), true);
+});
+
+test('Run detail and metrics: workflow identity is exposed; stage snapshots are not preset Runs (#809 acc. 4; #842 r5)', () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const workflowsDir = tempDir('mercury-wf-dir-');
+  makeWorkflowDir(workflowsDir, 'twice', {
+    schemaVersion: 1, id: 'twice', version: '3.1.0', description: 'one preset, two stages', mode: 'advisory',
+    stages: [{ id: 'a', preset: { id: 'planner' }, task: 'x' }, { id: 'b', preset: { id: 'planner' }, task: 'y' }], maxStages: 2,
+  });
+  const presetsDir = tempDir('mercury-wf-presets-');
+  makePreset(presetsDir, 'planner');
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workflowsDir, presetsDir, workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, workflow: { id: 'twice' } });
+    const identity = env.runService.getWorkflowIdentity(run.id)!;
+    assert.deepEqual({ ...identity, contentHash: typeof identity.contentHash }, { id: 'twice', version: '3.1.0', contentHash: 'string', mode: 'advisory', stages: 2 });
+    // The client parser accepts it, and keeps the three states apart.
+    const parsed = parseRunDetailResponse({ run: env.runs.get(run.id), skills: [], workflow: identity });
+    assert.deepEqual(parsed.workflow, identity);
+    assert.equal(parseRunDetailResponse({ run: env.runs.get(run.id), skills: [], workflow: null }).workflow, null);
+    assert.equal('workflow' in parseRunDetailResponse({ run: env.runs.get(run.id), skills: [] }), false);
+    // Two stage snapshots of the same preset are NOT two preset Runs.
+    assert.equal(collectMetrics(env.db).runsByPreset['planner'], undefined);
+    env.runService.create({ ownerId: 'a', task: 'single', preset: { id: 'planner' } });
+    assert.equal(collectMetrics(env.db).runsByPreset['planner'], 1);
   } finally {
     env.close();
   }
