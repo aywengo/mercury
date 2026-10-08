@@ -577,7 +577,7 @@ export class RunService {
     // checked against what actually resolved. Fail-closed: a record that cannot be trusted to
     // describe what ran is refused, never partially stored. It is attribution only -- nothing
     // here changes execution -- so the accepted set is a strict v1 schema, not a grab-bag.
-    const selection = input.selection !== undefined && input.selection !== null
+    const selection = input.selection !== undefined
       ? validateSelection(input.selection, agent, model)
       : undefined;
 

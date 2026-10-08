@@ -921,6 +921,20 @@ test('selection: replay returns the original Run and record; the new body select
   }
 });
 
+test('selection: null is rejected, not treated as omitted (#866 review finding)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    // A present `selection: null` bypasses nothing: the documented schema requires a present
+    // `selection` to be an object, so it must fail closed with the ordinary validation error.
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', selection: null }),
+      /selection must be an object/,
+    );
+  } finally {
+    env.close();
+  }
+});
+
 test('selection: a Run created without selection behaves byte-identically to base (no event)', () => {
   const env = makeEnv({ workerEnabled: false });
   try {
