@@ -868,6 +868,36 @@ test('selection: a valid record is stored as run.selection_recorded in the creat
   }
 });
 
+test('selection: no-pick reasons carry no laya; pick reasons require it (#866 review)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const base = { via: 'laya', mode: 'shadow', chosen: { agent: 'fake' } };
+    // A failure dispatch must be recordable: the L1-3 decision rule emits exactly this shape.
+    for (const reason of ['sidecar_unavailable', 'invalid_response', 'single_candidate']) {
+      const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', selection: { ...base, reason } });
+      assert.equal((env.runService.getSelection(run.id) as { reason: string }).reason, reason);
+      // ...and must not invent a pick.
+      for (const extra of [{ laya: { agent: 'fake' } }, { answerConfidence: 0.5 }, { distribution: { A: 1 } }]) {
+        assert.throws(
+          () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', selection: { ...base, reason, ...extra } }),
+          /must be absent when reason is/,
+          `${reason} + ${Object.keys(extra)[0]}`,
+        );
+      }
+    }
+    // Reasons where Laya answered still require its pick.
+    for (const reason of ['shadow', 'below_threshold', 'selected']) {
+      assert.throws(
+        () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', selection: { ...base, reason } }),
+        /selection\.laya must be an object/,
+        reason,
+      );
+    }
+  } finally {
+    env.close();
+  }
+});
+
 test('selection: replay returns the original Run and record; the new body selection is ignored', () => {
   const env = makeEnv({ workerEnabled: false });
   try {
