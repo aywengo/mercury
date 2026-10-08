@@ -166,7 +166,11 @@ The rung where an autonomous loop is most likely to drift gets a human gate.
 Nightly reads the docs (via Atlas, as dogfooding), finds the next
 unimplemented item in a document's roadmap section, and **only drafts the issue
 set**, labeled `nightly:proposed` — the same pattern as
-`atlas-phase-5-6-issues.md`. Implementation starts on a later night, after
+`atlas-phase-5-6-issues.md`. Every draft carries a `## Source` section with a
+hidden `<!-- nightly-source: <doc-path#anchor> -->` marker and is filed only
+through `next.ts propose`, which refuses to create an issue when an open OR
+closed issue with the same source key or title exists (#881) — dedupe is
+mechanical, not agent recall, and a failed dedupe check files nothing. Implementation starts on a later night, after
 @aywengo relabels an item `nightly:ready`. One night of latency buys a human
 decision on *what* gets built.
 
@@ -271,7 +275,8 @@ attributable to the bot, nothing running after 06:00, a report every morning.
 
 *Acceptance*: proposals are drafted only from documents with a roadmap section;
 nothing labeled `nightly:proposed` is implemented without the `nightly:ready`
-relabel.
+relabel; every draft carries a `nightly-source` marker and a proposal for an
+already-proposed (open or closed) source key or title is never re-filed (#881).
 
 ### N4 — reactive (dispatcher B2) — not filed
 

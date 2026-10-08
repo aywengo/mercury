@@ -124,6 +124,89 @@ export async function finishIssue(io: NextIo, opts: { repo: string; issue: numbe
   return { removed };
 }
 
+/**
+ * The rung-4 (docs → proposals, #6) filing exit (#881): the ONLY way a nightly Run files a
+ * `nightly:proposed` issue. Dedupe is mechanical, not recalled: before creating anything the
+ * exit searches open AND closed issues for
+ *
+ *   1. the source marker `<!-- nightly-source: <key> -->` in the body (the `## Source` section
+ *      that rung-4 drafts carry), and
+ *   2. an exact-title match in any state (pre-marker drafts such as #867 still block).
+ *
+ * A match creates nothing: the exit returns `{ created: false, existing: N }` (or `checkRan:
+ * false` when the search failed or was capped) and the caller decides - the report lists the
+ * existing number under "already proposed". FAIL CLOSED: a failed or capped search never files
+ * a duplicate, it reports that the dedupe check could not run.
+ */
+export const SOURCE_MARKER_RE = /<!--\s*nightly-source:\s*(\S[^\n]*?)\s*-->/;
+export function sourceMarker(key: string): string {
+  return `<!-- nightly-source: ${key} -->`;
+}
+
+/** Bounded dedupe search: at most SEARCH_CAP_PAGES pages of issues in ANY state. `null` means
+ * the check could not run (non-2xx page, unparsable payload, or the cap was reached before the
+ * list ended) - the caller must treat that as "cannot prove absence" and file nothing. */
+const PROPOSE_SEARCH_CAP_PAGES = 10;
+export async function findExistingProposal(
+  io: NextIo,
+  repo: string,
+  opts: { source: string; title: string },
+): Promise<{ number: number; matched: 'source' | 'title' }[] | null> {
+  const key = opts.source.trim();
+  if (!key) throw new Error('propose needs a non-empty --source key (the doc path + heading anchor)');
+  const title = opts.title.trim();
+  if (!title) throw new Error('propose needs a non-empty --title');
+  const matches: { number: number; matched: 'source' | 'title' }[] = [];
+  for (let page = 1; page <= PROPOSE_SEARCH_CAP_PAGES; page++) {
+    const path = `/repos/${repo}/issues?state=all&per_page=100&page=${page}`;
+    let res: Awaited<ReturnType<NextIo['get']>>;
+    try {
+      res = await io.get(path);
+    } catch {
+      return null; // transport failure: fail closed
+    }
+    if (res.status < 200 || res.status >= 300) return null;
+    const all = res.body as { number?: number; title?: string; pull_request?: unknown; body?: string }[] | null;
+    if (!Array.isArray(all)) return null; // unparsable payload is not zero issues
+    for (const cand of all) {
+      if (cand.number === undefined || cand.pull_request !== undefined) continue;
+      const body = typeof cand.body === 'string' ? cand.body : '';
+      const m = SOURCE_MARKER_RE.exec(body);
+      if (m && m[1].trim() === key) {
+        matches.push({ number: cand.number, matched: 'source' });
+        continue;
+      }
+      if ((cand.title ?? '').trim() === title) matches.push({ number: cand.number, matched: 'title' });
+    }
+    if (all.length < 100) return matches; // list ended inside the cap: the check ran fully
+  }
+  return null; // the cap was reached: the search is incomplete, fail closed
+}
+
+/** File a rung-4 proposal with a mechanical dedupe check (#881). Returns `created: false` with
+ * either the existing issue number(s) or `checkRan: false` when the dedupe search failed. */
+export async function proposeIssue(
+  io: NextIo,
+  opts: { repo: string; source: string; title: string; body: string },
+): Promise<{ created: boolean; number?: number; existing?: { number: number; matched: 'source' | 'title' }[]; checkRan: boolean }> {
+  assertRepo(opts.repo);
+  const title = opts.title.trim();
+  if (!title) throw new Error('propose needs a non-empty --title');
+  const body = opts.body.endsWith('\n') ? opts.body : `${opts.body}\n`;
+  if (!SOURCE_MARKER_RE.test(body)) {
+    throw new Error('the proposal body must carry the `## Source` section with a `<!-- nightly-source: <key> -->` marker (#881)');
+  }
+  const existing = await findExistingProposal(io, opts.repo, { source: opts.source, title });
+  if (existing === null) return { created: false, checkRan: false };
+  if (existing.length > 0) return { created: false, checkRan: true, existing };
+  const res = await io.post(`/repos/${opts.repo}/issues`, { title, body, labels: ['nightly:proposed'] });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`propose failed: issue creation was not accepted (POST returned ${res.status})`);
+  }
+  const created = res.body as { number?: number } | null;
+  return { created: true, number: created?.number, checkRan: true };
+}
+
 /** The never-asks exit path: hand the question to a human via GitHub, remove the claim, finish. */
 export async function blockIssue(io: NextIo, opts: { repo: string; issue: number; reason: string }): Promise<{ removed: boolean; newlyLabeled: boolean; commented: boolean }> {
   assertRepo(opts.repo);
@@ -246,13 +329,24 @@ if (isMain) {
       if (!repo || !Number.isInteger(issue) || issue <= 0) throw new Error('usage: next.ts finish --repo <owner/name> --issue <n>');
       return await finishIssue(realIo(process.env), { repo, issue });
     }
+    if (cmd === 'propose') {
+      const source = flag('--source') ?? '';
+      const title = flag('--title') ?? '';
+      const bodyFile = flag('--body-file') ?? '';
+      if (!repo || !source || !title || !bodyFile) {
+        throw new Error('usage: next.ts propose --repo <owner/name> --source <doc-path#anchor> --title "<title>" --body-file <file>');
+      }
+      const { readFileSync } = await import('node:fs');
+      const body = readFileSync(bodyFile, 'utf8');
+      return await proposeIssue(realIo(process.env), { repo, source, title, body });
+    }
     if (cmd === 'blocked') {
       const issue = Number(flag('--issue'));
       const reason = flag('--reason') ?? '';
       if (!repo || !Number.isInteger(issue) || issue <= 0) throw new Error('usage: next.ts blocked --repo <owner/name> --issue <n> --reason "<question>"');
       return await blockIssue(realIo(process.env), { repo, issue, reason });
     }
-    throw new Error('usage: next.ts run|finish|blocked --repo <owner/name> [--dry-run] [--issue <n>] [--reason "..."]');
+    throw new Error('usage: next.ts run|finish|blocked|propose --repo <owner/name> [--dry-run] [--issue <n>] [--reason "..."] [--source <key>] [--title "<t>"] [--body-file <f>]');
   })();
   work
     .then((out) => { process.stdout.write(JSON.stringify(out) + '\n'); })
