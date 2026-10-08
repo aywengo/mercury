@@ -361,6 +361,8 @@ Actual SRE policies, HTTP transport and user-provided MCP definitions.
 
 ## 9. Phase 5 — reviewed read-only MCP
 
+**Status: filed** — proposal #870 (operator policy registries in use, enforced tool allowlists, sandbox image, first SRE preset), awaiting `nightly:ready`.
+
 Estimate: **4–6 days**. Depends on Phase 4. Completes Milestone B.
 
 ### Scope
@@ -388,6 +390,8 @@ Require a concrete SRE use case and an operator-owned MCP server policy. Do not
 build generic upload-driven MCP first.
 
 ## 10. Phase 6 — read-only Git mirror
+
+**Status: filed** — proposal #873 (bounded sync, immutable commit directories, atomic pointer, commit-captured Run resolution), awaiting `nightly:ready`.
 
 Estimate: **4–6 days**. Depends on Phases 3 and 5 when mirrored presets may use
 MCP.
@@ -423,6 +427,8 @@ MCP.
 User drafts, archives and publishing.
 
 ## 11. Phase 7 — owner drafts and publishing
+
+**Status: filed** — proposal #874 (namespaced drafts, quotas, try-draft untrusted Runs, hash-pinned publish PRs), awaiting `nightly:ready`.
 
 Estimate: **5–8 days**. Depends on Phase 6. Completes Milestone C.
 
@@ -479,6 +485,8 @@ produce clear value over one well-instructed Run.
 
 ## 13. Phase 9 — linear staged workflows
 
+**Status: filed** — proposal #871 (coordinator, commit handoff, `run-completed` gate, group API), awaiting `nightly:ready`.
+
 Estimate: **8–12 days**. Depends on Phases 5 and 8.
 
 ### Scope
@@ -506,6 +514,8 @@ Estimate: **8–12 days**. Depends on Phases 5 and 8.
 Parallel DAGs, loops, automatic summarization and subjective approval gates.
 
 ## 14. Phase 10 — advanced gates and bounded loops
+
+**Status: filed** — proposal #872 (`tests-pass` and `manual-approval` gates, bounded sequential loops), awaiting `nightly:ready`.
 
 Estimate: **5–8 days**. Depends on Phase 9. Completes Milestone D.
 
