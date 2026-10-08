@@ -336,7 +336,11 @@ sibling (next to the model explainability data). A Run created without
 Schema v1 (strict — unknown keys are refused with `400` and no Run row):
 
 - `via: "laya"`, `mode: "shadow" | "enforce"` (both required);
-- `chosen` and `laya`: each `{agent, model?}` (both required);
+- `chosen`: `{agent, model?}` (required);
+- `laya`: `{agent, model?}` — Laya's pick. Required when `reason` is `shadow`,
+  `below_threshold` or `selected`; **must be absent** (with `answerConfidence` and
+  `distribution`) when `reason` is `sidecar_unavailable`, `invalid_response` or
+  `single_candidate`, because Laya gave no pick;
 - `answerConfidence` — probability in [0, 1];
 - `distribution` — option key → probability, at most 12 entries;
 - `candidatesOffered`, `candidatesFiltered` — non-negative integers;

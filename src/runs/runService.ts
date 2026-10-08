@@ -168,6 +168,14 @@ const SELECTION_REASONS = [
   'single_candidate',
   'selected',
 ] as const;
+/**
+ * Reasons that carry NO Laya pick (#866 review): the sidecar was not asked (single candidate)
+ * or gave no usable answer (unavailable, invalid). For these the record must not contain
+ * `laya`, `answerConfidence` or `distribution` -- inventing a pick would misreport, and
+ * requiring one made every failure dispatch unrecordable. Every other reason means Laya
+ * answered, so `laya` is required.
+ */
+const SELECTION_NO_PICK_REASONS = new Set(['sidecar_unavailable', 'invalid_response', 'single_candidate']);
 const SELECTION_KEYS = new Set([
   'via',
   'mode',
@@ -242,8 +250,19 @@ export function validateSelection(
   if (s.mode !== 'shadow' && s.mode !== 'enforce') {
     throw new ValidationError('selection.mode must be "shadow" or "enforce"');
   }
+  if (s.reason === undefined || !SELECTION_REASONS.includes(s.reason as (typeof SELECTION_REASONS)[number])) {
+    throw new ValidationError(`selection.reason must be one of: ${SELECTION_REASONS.join(', ')}`);
+  }
   validateSelectionActor(s.chosen, 'chosen');
-  validateSelectionActor(s.laya, 'laya');
+  if (SELECTION_NO_PICK_REASONS.has(s.reason as string)) {
+    for (const k of ['laya', 'answerConfidence', 'distribution'] as const) {
+      if (s[k] !== undefined) {
+        throw new ValidationError(`selection.${k} must be absent when reason is "${String(s.reason)}" (no Laya pick)`);
+      }
+    }
+  } else {
+    validateSelectionActor(s.laya, 'laya');
+  }
   // `chosen` must match the request's effective agent and model (#854): a record that
   // disagrees with what actually ran is refused, so the record can never misreport.
   const chosen = s.chosen as { agent: string; model?: string };
@@ -289,9 +308,6 @@ export function validateSelection(
   if (s.latencyMs !== undefined
     && (typeof s.latencyMs !== 'number' || !Number.isFinite(s.latencyMs) || (s.latencyMs as number) < 0)) {
     throw new ValidationError('selection.latencyMs must be a non-negative finite number');
-  }
-  if (s.reason === undefined || !SELECTION_REASONS.includes(s.reason as (typeof SELECTION_REASONS)[number])) {
-    throw new ValidationError(`selection.reason must be one of: ${SELECTION_REASONS.join(', ')}`);
   }
   return s;
 }
