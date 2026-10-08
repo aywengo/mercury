@@ -283,6 +283,35 @@ test('a credential-bearing repository URL is never echoed in normalization error
     assert.ok(!message.includes(secret), 'SSH-form secrets are redacted too');
   }
 });
+// #841 review round 4: SCP has no port; HTTPS :443 is the default port.
+test('SCP numeric owner is an owner, not a port; HTTPS :443 normalizes like the portless URL; both owner outcomes (#841 r4)', () => {
+  // SCP: '22' is the repository owner.
+  assert.equal(normalizeRepositoryId('git@github.com:22/repo.git'), 'github.com/22/repo');
+  assert.equal(normalizeRepositoryId('git@github.com:1234/tools'), 'github.com/1234/tools');
+  // SSH URI keeps the round-3 behaviour: default port stripped, non-default refused.
+  assert.equal(normalizeRepositoryId('ssh://git@github.com:22/aywengo/mercury.git'), 'github.com/aywengo/mercury');
+  assert.throws(() => normalizeRepositoryId('ssh://git@github.com:2222/aywengo/mercury.git'));
+  // HTTPS: :443 is the same endpoint; another port is not silently rewritten.
+  assert.equal(normalizeRepositoryId('https://github.com:443/aywengo/mercury.git'), 'github.com/aywengo/mercury');
+  assert.throws(() => normalizeRepositoryId('https://github.com:8443/aywengo/mercury.git'));
+
+  const numeric = [{
+    name: 'numeric', repositories: ['github.com/22/repo'], owners: ['bot-a'],
+    env: { GH_TOKEN: { value: 'x' } }, sandbox: false,
+  }];
+  assert.deepEqual(resolveProfile(numeric, 'bot-a', [{ url: 'git@github.com:22/repo.git' }]), { outcome: 'profile', name: 'numeric' });
+  assert.equal(resolveProfile(numeric, 'mallory', [{ url: 'git@github.com:22/repo.git' }]).outcome, 'refused',
+    'a disallowed owner is refused, not resolved to none');
+
+  const https = [{
+    name: 'nightly', repositories: ['github.com/aywengo/mercury'], owners: ['bot-nightly'],
+    env: { GH_TOKEN: { file: '/run/secrets/nightly.pat' } }, sandbox: false,
+  }];
+  assert.deepEqual(resolveProfile(https, 'bot-nightly', [{ url: 'https://github.com:443/aywengo/mercury.git' }]), { outcome: 'profile', name: 'nightly' });
+  assert.equal(resolveProfile(https, 'mallory', [{ url: 'https://github.com:443/aywengo/mercury.git' }]).outcome, 'refused',
+    'the :443 spelling cannot bypass the owner restriction');
+});
+
 // ---------------------------------------------------------------------------
 // CP-3 (issue #807): resolveProfile — the pure §5.3 table
 // ---------------------------------------------------------------------------
@@ -291,7 +320,9 @@ test('a credential-bearing repository URL is never echoed in normalization error
 test('ssh:// with explicit default port :22 normalizes like the portless form, both owner outcomes (review round 3 on #841)', () => {
   // Normalization parity.
   assert.equal(normalizeRepositoryId('ssh://git@github.com:22/aywengo/mercury.git'), 'github.com/aywengo/mercury');
-  assert.equal(normalizeRepositoryId('git@github.com:22/aywengo/mercury.git'), 'github.com/aywengo/mercury');
+  // SCP has no port field (#841 review round 4): ':22/' there is an OWNER segment, so this is
+  // a malformed three-segment path, never the portless id.
+  assert.throws(() => normalizeRepositoryId('git@github.com:22/aywengo/mercury.git'));
   // A NON-default port is a different endpoint: it must not silently rewrite to the portless id.
   assert.throws(() => normalizeRepositoryId('ssh://git@github.com:2222/aywengo/mercury.git'));
 

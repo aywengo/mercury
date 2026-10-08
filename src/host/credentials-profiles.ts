@@ -78,18 +78,29 @@ export function normalizeRepositoryId(raw: string): string {
   const original = redactUserInfo(raw);
   let s = raw.trim();
   if (s === '') throw new Error('repository id is empty');
-  // SCP form (git@host:path) AND the standard SSH URI form (ssh://git@host/path, and the bare
-  // git@host/path written after ssh:// has been stripped). One regex covers both: after
-  // 'ssh://' is removed, 'git@host/path' has the same shape as the colon form with '/' as the
-  // separator. A user:password authority never matches git@, so credential-bearing URLs still
-  // fall through to the shape errors (with the userinfo redacted in `original`).
-  // An explicit DEFAULT SSH port ('ssh://git@host:22/owner/name') is the same endpoint as the
-  // portless form: normalize it away so a profile cannot be bypassed (or a valid URL wrongly
-  // skipped) by writing ':22'. A NON-default port is a different endpoint and must not silently
-  // rewrite to the portless id - it keeps failing the shape/host checks.
-  const scp = /^(?:ssh:\/\/)?git@([^/:]+?)(?::22)?[:\/](.+?)$/i.exec(s);
-  if (scp) s = `${scp[1]}/${scp[2]}`;
-  else s = s.replace(/^(?:https|ssh):\/\//i, '');
+  // Three SSH spellings, parsed SEPARATELY because only one of them can carry a port (#841
+  // review round 4):
+  // - SSH URI 'ssh://git@host[:port]/owner/name': an explicit DEFAULT port ':22' is the same
+  //   endpoint as the portless form and is normalized away, so ':22' can neither bypass a
+  //   profile nor get a valid URL skipped. A NON-default port is a different endpoint and is
+  //   left in place, so it keeps failing the shape/host checks.
+  // - SCP 'git@host:owner/name': the colon is the PATH separator and there is NO port field.
+  //   In 'git@github.com:22/repo.git' the '22' is the owner; it must never be eaten as a port.
+  // - Bare 'git@host/owner/name' (an SSH URI with 'ssh://' already dropped): no port either.
+  // A user:password authority never matches git@, so credential-bearing URLs still fall through
+  // to the shape errors (with the userinfo redacted in `original`).
+  const sshUri = /^ssh:\/\/git@([^/:]+?)(?::22)?\/(.+)$/i.exec(s);
+  const scp = sshUri ? null : /^git@([^/:]+?)[:\/](.+)$/i.exec(s);
+  if (sshUri) s = `${sshUri[1]}/${sshUri[2]}`;
+  else if (scp) s = `${scp[1]}/${scp[2]}`;
+  else {
+    // HTTPS: an explicit DEFAULT port ':443' is the same endpoint as the portless URL -- the
+    // same rule as ':22' above, so 'https://github.com:443/owner/name' cannot skip a profile's
+    // owner restriction (#841 review round 4). Only for https, only the default port, and only
+    // when the authority has no userinfo (those keep failing the shape checks, redacted).
+    s = s.replace(/^(https:\/\/[^/@:]+):443(?=\/|$)/i, '$1');
+    s = s.replace(/^(?:https|ssh):\/\//i, '');
+  }
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) throw new Error(`unsupported repository URL scheme in '${original}'`);
   s = s.replace(/\.git\/?$/i, '');
   s = s.replace(/^www\./i, '');
