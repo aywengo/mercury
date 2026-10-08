@@ -554,7 +554,9 @@ export class RunService {
     // checked against what actually resolved. Fail-closed: a record that cannot be trusted to
     // describe what ran is refused, never partially stored. It is attribution only -- nothing
     // here changes execution -- so the accepted set is a strict v1 schema, not a grab-bag.
-    const selection = input.selection !== undefined && input.selection !== null
+    // Only `undefined` counts as omitted: an explicit `null` fails the object check (Copilot
+    // review of #865) -- a documented object field may not smuggle a null past validation.
+    const selection = input.selection !== undefined
       ? validateSelection(input.selection, agent, model)
       : undefined;
 
