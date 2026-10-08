@@ -319,6 +319,9 @@ surface. Phases 4–7 are.
 
 ## 8. Phase 4 — per-run MCP foundation
 
+**Status: proposed** — nightly rung 4 filed #875 (the phase as one cohesive
+issue); it awaits the operator's `nightly:ready` relabel.
+
 Estimate: **5–8 days**. Depends on Phase 2.
 
 ### Scope
