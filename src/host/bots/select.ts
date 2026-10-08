@@ -192,19 +192,20 @@ export async function decide(
     candidatesFiltered: 0,
   };
   if (admitted.length === 1) {
-    // No call (§6.4): the only admissible pair runs. `chosen` names it, so the #854
-    // `chosen`-must-match check passes against the dispatch that actually used it.
+    // No call (§6.4). Two corrections against the first L1-3 draft (#866 review):
+    // - SHADOW never changes what runs, so the template default stays `chosen` even when the
+    //   only admissible pair differs from it; only `enforce` runs the single candidate. (The
+    //   draft said "that candidate is chosen", which contradicted the shadow property.)
+    // - Laya was not asked, so the record carries NO `laya` (#854 no-pick rule): a pick that
+    //   never happened must not be recorded as one.
     const only = { agent: admitted[0]!.agent, ...(admitted[0]!.model !== undefined ? { model: admitted[0]!.model } : {}) };
+    const chosen = cfg.mode === 'shadow' ? (base.chosen as TemplateDefault) : only;
     return {
-      chosen: only,
-      record: {
-        ...base,
-        chosen: only,
-        laya: only,
-        reason: 'single_candidate',
-      },
+      chosen,
+      record: { ...base, chosen, reason: 'single_candidate' },
     };
   }
+
   const question = buildSelectQuestion(admitted, ctx);
   const result = await client.ask({ options: question.options }, ctx);
   const latencyMs = Math.round(Math.max(0, result.latencyMs));

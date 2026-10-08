@@ -163,12 +163,49 @@ const SHADOW: SelectConfig = { mode: 'shadow' };
 const ENFORCE: SelectConfig = { mode: 'enforce', minConfidence: 0.8 };
 const DEFAULT = { agent: 'claude', model: 'sonnet' };
 
-test('decide: one admitted candidate is chosen without any client call (§6.4 no-call)', async () => {
+test('decide: one admitted candidate makes no client call; shadow keeps the default, enforce runs it (§6.4 no-call, #866 review)', async () => {
   const client = fakeClient([okResult()]);
-  const out = await decide([TWO[0]!], client, SHADOW, DEFAULT, CTX);
+  const shadow = await decide([TWO[0]!], client, SHADOW, DEFAULT, CTX);
   assert.equal(client.calls, 0);
-  assert.deepEqual(out.chosen, { agent: 'claude', model: 'opus' });
-  assert.equal(out.record.reason, 'single_candidate');
+  assert.deepEqual(shadow.chosen, DEFAULT, 'shadow never changes what runs, even with one candidate');
+  assert.deepEqual(shadow.record.chosen, DEFAULT);
+  assert.equal(shadow.record.reason, 'single_candidate');
+  const enforce = await decide([TWO[0]!], client, ENFORCE, DEFAULT, CTX);
+  assert.equal(client.calls, 0);
+  assert.deepEqual(enforce.chosen, { agent: 'claude', model: 'opus' });
+  assert.deepEqual(enforce.record.chosen, enforce.chosen, 'the record names what runs (#854 chosen-must-match)');
+});
+
+/** The #854 schema contract (docs/api.md, selection schema v1, as amended on #865 f6412b4):
+ *  a no-pick reason carries no laya / answerConfidence / distribution; a pick reason carries
+ *  laya. Mirrored here because validateSelection is not on main until #865 merges -- the
+ *  direct round-trip test belongs to L1-4 (#857), where both sides meet. */
+const NO_PICK = new Set(['sidecar_unavailable', 'invalid_response', 'single_candidate']);
+function assertSchemaContract(record: Record<string, unknown>, label: string): void {
+  if (NO_PICK.has(record.reason as string)) {
+    for (const k of ['laya', 'answerConfidence', 'distribution']) {
+      assert.equal(record[k], undefined, `${label}: ${k} must be absent for ${String(record.reason)}`);
+    }
+  } else {
+    assert.ok(record.laya && typeof record.laya === 'object', `${label}: laya required for ${String(record.reason)}`);
+  }
+}
+
+test('decide: every record satisfies the #854 no-pick / pick contract (#866 review)', async () => {
+  const cases: Array<[string, SelectCandidate[], LayaResult[], SelectConfig]> = [
+    ['single', [TWO[0]!], [], SHADOW],
+    ['unreachable', TWO, [{ ok: false, reason: 'unreachable', latencyMs: 1 }], SHADOW],
+    ['timeout', TWO, [{ ok: false, reason: 'timeout', latencyMs: 1 }], ENFORCE],
+    ['invalid', TWO, [{ ok: false, reason: 'malformed', latencyMs: 1 }], SHADOW],
+    ['shadow pick', TWO, [okResult()], SHADOW],
+    ['below threshold', TWO, [okResult({ answers: [{ key: 'A', choice: 'A', probability: 0.3 }] })], ENFORCE],
+    ['selected', TWO, [okResult()], ENFORCE],
+  ];
+  for (const [label, admitted, results, cfg] of cases) {
+    const out = await decide(admitted, fakeClient(results), cfg, DEFAULT, CTX);
+    assertSchemaContract(out.record, label);
+    assert.deepEqual(out.record.chosen, out.chosen, `${label}: the record names what runs`);
+  }
 });
 
 test('decide: zero admitted candidates throws — the dispatch fails as a literal template would', async () => {
