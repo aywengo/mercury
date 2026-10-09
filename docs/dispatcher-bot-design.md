@@ -1025,7 +1025,10 @@ allowlist, an `input` action naming another owner's Run, an over-cap response,
 and nothing at all — the bot skips or drops, logs, and stays inside its budgets.
 The §15.3 injection case produces no action.
 
-### Milestone B4 — setup integration and hardening
+### Milestone B4 — setup integration and hardening — proposed #915 (nightly rung 4, 2026-10-10)
+
+*Issue set:* #915 (the whole milestone: `host setup` bots step, `host doctor` bots section, the §14 bounds review, operator docs). Filed last in the B-set because it installs what B0–B3 build; an operator may hold it until B2 (#906–#909) and B3 (#912) land. Drafted only; nothing starts until an operator relabels it `nightly:ready`.
+
 
 - `host setup` bots step (writing both token copies in one step, and stating the
   §8.5 blast-radius sentence before enabling observer + brain);
