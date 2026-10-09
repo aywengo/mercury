@@ -1011,7 +1011,9 @@ owners and every write verb on a Run it does not own answers 404, `POST input`
 on NEEDS_INPUT included; a deliberately self-feeding trigger chain terminates at
 `maxChainDepth`; the dispatch cap holds across a state file deletion.
 
-### Milestone B3 — the LLM brain
+### Milestone B3 — the LLM brain — proposed #912 (nightly rung 4, 2026-10-09)
+
+*Issue:* #912 (`LLMConnection`, closed action vocabulary, budgets, the scripted-brain test double, the doctor probe). Drafted only; nothing starts until an operator relabels it `nightly:ready`.
 
 - `LLMConnection` (bounded transport, 64 KiB cap, no retry), context gatherer
   with field allowlist, untrusted-context wrapping, redact-before-egress, action
