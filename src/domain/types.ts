@@ -242,6 +242,30 @@ export interface RunContext {
     instruction: string;
     model?: string;
   };
+  /**
+   * The advisory workflow this Run was created from, when it has one (docs/crew/workflows.md
+   * section 3.1, issue #809). Identity + the workspace-relative snapshot path only: the plan
+   * itself is prompt text the worker renders from the stored snapshot bytes.
+   */
+  workflow?: {
+    id: string;
+    /** Definition version this snapshot resolved from. */
+    version: string;
+    /** 'advisory' in this release; staged is Phase 9. */
+    mode: 'advisory';
+    /** Registry-assigned trust of the template definition. */
+    trust: 'builtin';
+    /** SHA-256 over the template files the snapshot pinned. */
+    contentHash: string;
+    /** Number of steps the plan carries (the stated bound). */
+    stages: number;
+  };
+  /**
+   * The deterministic rendered plan text (issue #809), present only when the Run was created
+   * from a template. The worker renders it from the stored snapshot; adapters embed it in the
+   * prompt they hand the harness.
+   */
+  workflowPlan?: string;
 }
 
 /**
@@ -479,6 +503,13 @@ export interface AgentStaticCapabilities {
   roleInstruction?: 'system' | 'prompt-reference' | 'none';
   /** The adapter accepts a structured per-Run model override (never argv). */
   perRunModel?: boolean;
+  /**
+   * The adapter injects a Run's advisory workflow plan into its prompt (issue #809).
+   * Absent means unverified, which fails closed for a workflow Run: a template admitted on
+   * an adapter without a plan channel would execute with no step guidance at all -- every
+   * planned step silently omitted, exactly the failure the advisory contract exists to avoid.
+   */
+  workflowPlan?: boolean;
   /** The adapter can execute this Run inside the sandbox manager's container. */
   sandbox?: boolean;
   /** Per-run MCP server support. 'none' until an adapter implements it (Phase 4+). */
@@ -671,6 +702,11 @@ export const EVENT_TYPES = new Set([
   // Owner transfer for a removed bot's Runs (dispatcher-bot-design §17.7, #760): appended by
   // RunService.reassignRuns, payload { fromOwner, toOwner } - no secret material.
   'run.owner_reassigned',
+  // Advisory workflow lifecycle (docs/crew/workflows.md section 3.1, issue #809). The
+  // template is snapshotted and rendered into one Run's prompt; the events record what was
+  // chosen and what was materialized, never that Mercury enforced anything.
+  'workflow.selected',
+  'workflow.materialized',
   // Goal lifecycle (docs/goals.md section 6). Appended by the worker and by adapters that
   // can observe a goal; NEVER by anything that judges whether the work was done. Mercury
   // records what the harness reported -- `goal.unmet` is the sole exception and it asserts

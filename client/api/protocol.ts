@@ -262,6 +262,35 @@ export interface RunDetailResponse {
    * same lie as rendering an undetected capability as "unsupported".
    */
   goal?: GoalState | null;
+  /**
+   * Workflow identity (#809 acceptance 4). Same three states as `goal`: an identity, null (the
+   * Run has no workflow) or undefined (the server predates workflows).
+   */
+  workflow?: WorkflowIdentity | null;
+}
+
+export interface WorkflowIdentity {
+  id: string;
+  version: string;
+  contentHash: string;
+  mode: 'advisory';
+  stages: number;
+}
+
+export function parseWorkflowIdentity(value: unknown): WorkflowIdentity {
+  const o = asObject(value, 'workflow');
+  const mode = reqString(o.mode, 'workflow.mode', 'workflow');
+  if (mode !== 'advisory') throw new ProtocolError(`unknown workflow mode "${mode}"`);
+  if (typeof o.stages !== 'number' || !Number.isInteger(o.stages) || o.stages < 1) {
+    throw new ProtocolError('workflow.stages must be a positive integer');
+  }
+  return {
+    id: reqString(o.id, 'workflow.id', 'workflow'),
+    version: reqString(o.version, 'workflow.version', 'workflow'),
+    contentHash: reqString(o.contentHash, 'workflow.contentHash', 'workflow'),
+    mode: 'advisory',
+    stages: o.stages,
+  };
 }
 
 export interface EventPage {
@@ -278,6 +307,12 @@ export interface RetryRunResponse { runId: string; status: RunStatus; retryOf: s
 
 export interface CreateRunRequest {
   task: string;
+  /**
+   * Advisory Workflow Template selection (docs/crew/workflows.md §3.1, issue #809), forwarded
+   * verbatim for the server's workflow resolution to validate. The client does not pre-validate
+   * the id: the server owns the registry, the version pin and the W-1 finding codes.
+   */
+  workflow?: { id: string; version?: string };
   /**
    * Optional goal spec, forwarded verbatim for the server's resolveGoalSpec to validate
    * (docs/goals.md §3). The client does not pre-validate the spec's internals: the server owns
@@ -493,6 +528,7 @@ export function parseRunDetailResponse(value: unknown): RunDetailResponse {
       return { ...(so as unknown as ResolvedSkill), id: reqString(so.id, 'id', 'skill') };
     }),
     ...(goal === undefined ? {} : { goal }),
+    ...(o.workflow === undefined ? {} : { workflow: o.workflow === null ? null : parseWorkflowIdentity(o.workflow) }),
   };
 }
 
@@ -631,7 +667,7 @@ export function validateCreateRunRequest(value: unknown): CreateRunRequest {
   const task = reqString(o.task, 'task', 'create request');
   if (task.trim() === '') throw new UsageError('create request: task must not be blank');
 
-  const known = new Set(['task', 'repository', 'repositories', 'agent', 'skills', 'constraints', 'goal']);
+  const known = new Set(['task', 'repository', 'repositories', 'agent', 'skills', 'constraints', 'goal', 'workflow']);
   const unknown = Object.keys(o).filter((k) => !known.has(k));
   if (unknown.length > 0) {
     throw new UsageError(
@@ -653,6 +689,31 @@ export function validateCreateRunRequest(value: unknown): CreateRunRequest {
       .map((s, i) => reqString(s, `skills[${i}]`, 'create request'));
   }
   if (o.constraints !== undefined) request.constraints = validateConstraints(o.constraints);
+  if (o.workflow !== undefined) {
+    // Same object check the goal field applies: the server resolves the id, but a string or
+    // array here would read as a confusing 400 rather than a fixable client mistake.
+    if (o.workflow === null || typeof o.workflow !== 'object' || Array.isArray(o.workflow)) {
+      throw new UsageError('create request: workflow must be an object like {"id": "plan-implement-review"}');
+    }
+    const wf = o.workflow as Record<string, unknown>;
+    // Closed shape, same rule as the server (#842 review r4/r5): rebuilding the object from
+    // id/version alone would DROP a misspelled `versoin` and send an unpinned request, so the
+    // server's own closed-shape check would never see the typo.
+    for (const key of Object.keys(wf)) {
+      if (key !== 'id' && key !== 'version') {
+        const hint = /^v/i.test(key) ? " (did you mean 'version'?)" : /^i/i.test(key) ? " (did you mean 'id'?)" : '';
+        throw new UsageError(`create request: workflow has unknown key ${JSON.stringify(key)}${hint}; allowed keys: id, version`);
+      }
+    }
+    const wfId = wf.id;
+    if (typeof wfId !== 'string' || wfId.trim() === '') {
+      throw new UsageError('create request: workflow.id must be a non-empty string');
+    }
+    if (wf.version !== undefined && (typeof wf.version !== 'string' || wf.version.length === 0)) {
+      throw new UsageError('create request: workflow.version must be a non-empty string when given');
+    }
+    request.workflow = { id: wfId, ...(wf.version !== undefined ? { version: wf.version as string } : {}) };
+  }
   if (o.goal !== undefined) {
     // An object check, not a deep validation: the server's resolveGoalSpec owns the spec
     // vocabulary and rejects unknown fields with a message that names them (docs/goals.md §3).

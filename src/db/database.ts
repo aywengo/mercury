@@ -369,6 +369,82 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE runs ADD COLUMN model TEXT;
   `,
+  // v14: the advisory Workflow Template snapshot (docs/crew/workflows.md section 5, issue #809).
+  //
+  // One row per Run, written inside the Run-creation transaction next to run_skills and
+  // run_presets: the exact template bytes, every template file, their canonical hash and the
+  // resolved version. A template or preset edit after creation cannot change what this Run
+  // renders -- the worker renders from these bytes, never from the live registry.
+  `
+  CREATE TABLE IF NOT EXISTS run_workflows (
+    run_id          TEXT PRIMARY KEY,
+    workflow_id     TEXT NOT NULL,
+    workflow_version TEXT NOT NULL,
+    mode            TEXT NOT NULL,
+    trust           TEXT NOT NULL,
+    content_hash    TEXT NOT NULL,
+    source_kind     TEXT NOT NULL,
+    source_path     TEXT NOT NULL,
+    template_json   TEXT NOT NULL,
+    files_json      TEXT NOT NULL,
+    snapshot_json   TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_run_workflows_identity
+    ON run_workflows(workflow_id, workflow_version);
+  `,
+  // v15: distinguish workflow stage preset rows from the Run-wide preset row (#842 review).
+  //
+  // run_presets gained a second writer in #809: a workflow Run snapshots one preset per
+  // referenced stage into the same table. The row carried no marker, so PresetStore.get() --
+  // the single-Run-wide-preset reader -- could pick up a STAGE row and materialize its
+  // instruction into .mercury/preset, adding stage guidance to every adapter prompt. Nullable,
+  // and NULL keeps the original meaning: a Run-wide preset row. Every row the #809 path wrote
+  // after this migration carries its stage index; rows written before it were written by the
+  // single-preset path and are therefore NULL by construction.
+  `
+  ALTER TABLE run_presets ADD COLUMN stage_index INTEGER;
+  `,
+  // v16: run_presets keyed per stage, not per Run (#842 review r2).
+  //
+  // The v12 table kept PRIMARY KEY (run_id), so a workflow whose template references presets
+  // on TWO stages failed the second stage snapshot insert with UNIQUE constraint failed:
+  // run_presets.run_id -- the shipped plan-implement-review template could not create a Run at
+  // all. Rebuild with a per-(Run, stage) key. The Run-wide slot stays at most one row via a
+  // partial unique index: SQLite treats NULLs as distinct in a unique key, so the PK alone
+  // would admit two run-wide rows; the index over `stage_index IS NULL` does not. Rows written
+  // before v15 have stage_index NULL and are exactly the run-wide rows, so the copy preserves
+  // both shapes.
+  `
+  CREATE TABLE run_presets_v16 (
+    run_id          TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    preset_id       TEXT NOT NULL,
+    preset_version  TEXT NOT NULL,
+    role            TEXT NOT NULL,
+    trust           TEXT NOT NULL,
+    content_hash    TEXT NOT NULL,
+    source_kind     TEXT NOT NULL,
+    source_commit   TEXT,
+    source_path     TEXT NOT NULL,
+    stage_index     INTEGER,
+    snapshot_json   TEXT NOT NULL,
+    PRIMARY KEY (run_id, stage_index)
+  );
+
+  INSERT INTO run_presets_v16
+    SELECT run_id, preset_id, preset_version, role, trust, content_hash,
+           source_kind, source_commit, source_path, stage_index, snapshot_json
+    FROM run_presets;
+
+  DROP TABLE run_presets;
+  ALTER TABLE run_presets_v16 RENAME TO run_presets;
+
+  CREATE INDEX IF NOT EXISTS idx_run_presets_identity
+    ON run_presets(preset_id, preset_version);
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_run_presets_runwide
+    ON run_presets(run_id) WHERE stage_index IS NULL;
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

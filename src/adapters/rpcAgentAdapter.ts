@@ -200,6 +200,10 @@ export class RpcAgentAdapter implements AgentAdapter {
     const stat: AgentStaticCapabilities = {
       ...(this.cfg.capabilities ?? {}),
       roleInstruction: this.cfg.capabilities?.roleInstruction ?? 'prompt-reference',
+      // buildPrompt() renders the workflow-plan block unconditionally for every config (issue
+      // #809), the same adapter-level fact roleInstruction encodes. A config may still override
+      // it for a backend whose prompts would ignore the plan.
+      workflowPlan: this.cfg.capabilities?.workflowPlan ?? true,
     };
     // An EMPTY block is omitted rather than surfaced as `static: {}`. An empty object reads as "this
     // backend declares nothing" -- the same claim an absent key makes, but one that was never made.
@@ -523,10 +527,25 @@ export function buildPrompt(context: RunContext): string {
     // Role Preset (docs/crew/role-presets.md section 8): prompt-reference. Omitted when the Run
     // has no preset, so preset-less prompts stay byte-identical.
     ...(context.preset ? [presetLine(context.preset)] : []),
+    // Advisory workflow plan (docs/crew/workflows.md section 3.1, issue #809): the rendered
+    // plan is prompt guidance for the whole Run. Omitted when the Run was not created from a
+    // template, so workflow-less prompts stay byte-identical.
+    ...(context.workflowPlan ? [workflowPlanBlock(context.workflowPlan)] : []),
     '',
     `Work in this workspace (${workspace.path}). Make focused commits with clear messages as you make progress.`,
     'When the task is complete, reply with a concise summary of what you changed and why.',
   ].join('\n');
+}
+
+/**
+ * The advisory workflow plan block (issue #809). The plan text is the worker's deterministic
+ * render; this wrapper only frames it with the advisory label and the context-file pointer so
+ * a harness that reads either channel gets the same story.
+ */
+function workflowPlanBlock(plan: string): string {
+  return 'This Run carries an ADVISORY workflow plan (mode: advisory). Mercury does not enforce'
+    + ' its steps -- they are guidance you report against with step events. The plan:\n\n'
+    + plan;
 }
 
 /**
@@ -571,6 +590,18 @@ function writeContextFile(workspacePath: string, context: RunContext): void {
         trust: context.preset.trust,
         contentHash: context.preset.contentHash,
         instructionPath: context.preset.instructionPath,
+      },
+    } : {}),
+    // Advisory workflow identity (docs/crew/workflows.md section 5, issue #809): id, version,
+    // hash and mode, so the agent sees which template bytes the plan was rendered from.
+    // Omitted when the Run has no workflow, keeping the file byte-identical otherwise.
+    ...(context.workflow ? {
+      workflow: {
+        id: context.workflow.id,
+        version: context.workflow.version,
+        mode: context.workflow.mode,
+        contentHash: context.workflow.contentHash,
+        stages: context.workflow.stages,
       },
     } : {}),
   }, null, 2));

@@ -19,10 +19,17 @@ import type { SkillSelector } from '../skills/skillSelector.ts';
 import { parseByteLimit, parseCpuLimit } from '../sandbox/resourceLimits.ts';
 import { RunStore, newRunId } from './runStore.ts';
 import { PresetStore, type RunPresetRow } from './presetStore.ts';
+import { WorkflowStore, type RunWorkflowRow } from './workflowStore.ts';
 import type { PresetRegistry } from '../presets/presetRegistry.ts';
 import type { ResolvedRolePreset } from '../presets/types.ts';
 import { resolvePreset, type PresetCallerInput } from '../presets/resolvePreset.ts';
 import type { ReplicaStore } from '../knowledge/replica.ts';
+import type { WorkflowRegistry } from '../workflows/workflowRegistry.ts';
+import type { LoadedWorkflow } from '../workflows/types.ts';
+import type { LoadedPreset } from '../presets/types.ts';
+import { resolveWorkflowStages, WorkflowPresetResolutionError } from '../workflows/resolveWorkflow.ts';
+import { renderPlan } from '../workflows/renderPlan.ts';
+import type { ResolvedWorkflow } from './workflowStore.ts';
 import { selectPack, type PackSelection } from '../knowledge/pack.ts';
 import { KnowledgeRequestError, knowledgeCapabilityMessage, parseKnowledgeRequest } from '../knowledge/request.ts';
 import type { KnowledgeRequest } from '../knowledge/types.ts';
@@ -89,6 +96,24 @@ export interface CreateRunInput {
    */
   presetSnapshot?: ResolvedRolePreset;
   /**
+   * Advisory Workflow Template selection (docs/crew/workflows.md section 3.1, issue #809).
+   * `undefined` means no workflow and the Run behaves exactly as before. Resolved in create()
+   * against the builtin registry; a caller-supplied `version` is the same optimistic guard the
+   * `preset` block uses. There is no HTTP endpoint for this yet (W-3 #810); the service-level
+   * and CLI paths land here.
+   */
+  workflow?: { id: string; version?: string };
+  /**
+   * A workflow snapshot to store verbatim instead of resolving `workflow` against the registry.
+   * Only retry uses this, exactly like `presetSnapshot` and `skillSnapshots`: a retried Run
+   * must execute the SAME template bytes and stage guidance its parent executed (#842 review).
+   */
+  workflowSnapshot?: {
+    workflow: ResolvedWorkflow;
+    stagePresets: { stageIndex: number; snapshot: ResolvedRolePreset }[];
+    skills: ResolvedSkill[];
+  };
+  /**
    * Per-Run model override (docs/laya-integration-design.md §13 P-1, issue #823). `undefined`
    * means "no caller model" and the Run behaves exactly as before. Resolution, one rule for both
    * paths: caller.model → preset model → none. Refused fail-closed when the effective agent's
@@ -126,6 +151,12 @@ export interface RunServiceDeps {
    * rejected rather than ignored (section 8.4 vocabulary, same shape as knowledge/goals).
    */
   presets?: PresetRegistry;
+  /**
+   * Builtin workflow registry (docs/crew/workflows.md section 3.1, issue #809). Absent means
+   * workflows are off: a `workflow` block on a Run is rejected rather than ignored, the same
+   * rule the `preset` block follows.
+   */
+  workflows?: WorkflowRegistry;
   /**
    * Per-agent capability snapshot, resolved from what each adapter declares plus the
    * harness version detected at startup. Optional: absent means nothing is known, which
@@ -332,6 +363,54 @@ export class RunService {
     return new PresetStore(this.deps.db);
   }
 
+  /** Per-Run workflow snapshots (workflows.md section 5, issue #809). */
+  private workflowStore(): WorkflowStore {
+    return new WorkflowStore(this.deps.db);
+  }
+
+  /** The immutable workflow snapshot a Run stores (workflows.md section 5). */
+  private workflowSnapshot(loaded: LoadedWorkflow): ResolvedWorkflow {
+    return {
+      schemaVersion: 1,
+      id: loaded.id,
+      version: loaded.version,
+      description: loaded.description,
+      mode: loaded.mode,
+      stages: loaded.stages,
+      maxStages: loaded.maxStages,
+      trust: loaded.trust,
+      source: { kind: loaded.source.kind, relativePath: loaded.source.relativePath },
+      templateJson: loaded.templateJson,
+      files: loaded.files,
+      contentHash: loaded.contentHash,
+    };
+  }
+
+  /**
+   * One stage preset's snapshot (section 3.1.1 rule 6). The stage preset does not set Run
+   * constraints -- the workflow resolution already produced the narrowest set, and THAT set
+   * is what the worker applies and the run row carries -- so the per-stage snapshot records
+   * the resolved Run set rather than inventing a per-stage one. `effectiveSkills` is empty for
+   * the same reason: the Run's skills are the union row set, not per-stage lists.
+   */
+  private stagePresetSnapshot(preset: LoadedPreset, agentId: string): ResolvedRolePreset {
+    return {
+      schemaVersion: 1,
+      id: preset.id,
+      version: preset.version,
+      role: preset.role,
+      description: preset.description,
+      trust: preset.trust,
+      instruction: preset.instruction,
+      effectiveAgent: { id: agentId },
+      effectiveSkills: [],
+      effectiveConstraints: { maxDurationMs: 0, maxRetries: 0 },
+      source: { kind: preset.source.kind, relativePath: preset.source.relativePath },
+      files: preset.files,
+      contentHash: preset.contentHash,
+    };
+  }
+
   /** Registered agent ids (the adapters wired at startup). */
   listAgents(): string[] {
     return [...this.deps.knownAgents];
@@ -510,10 +589,229 @@ export class RunService {
       };
     }
 
+    // Advisory Workflow Template resolution (docs/crew/workflows.md section 3.1, issue #809).
+    // BEFORE skills/constraints like the preset block: the stage presets act as demands the
+    // caller cannot ignore and ceilings the caller cannot widen (section 3.1.1). Fail-closed
+    // like every other admission block: a template or preset reference that cannot resolve is
+    // a refused creation, never a Run that silently runs without its plan.
+    let resolvedWorkflow: {
+      /** The workflow resolution's effective agent (section 3.1.1 rules 1-2) -- the agent and
+       * model the Run row must carry (#842 review r2: discarding these ran a template whose
+       * stage required `hermes` on the system default agent instead). */
+      effectiveAgent: { id: string; model?: string };
+      snapshot: ResolvedWorkflow;
+      /** Each referenced stage preset's snapshot (section 3.1.1 rule 6), in stage order. */
+      stagePresets: { stageIndex: number; presetId: string; snapshot: ResolvedRolePreset }[];
+      /** Stage index -> that stage preset's instruction text, for the plan renderer. */
+      stageInstructions: Record<number, string>;
+      skills: import('../domain/types.ts').ResolvedSkill[];
+      constraints: RunConstraints;
+    } | null = null;
+    if (input.workflowSnapshot !== undefined) {
+      // Internal retry path (#842 review): the parent's stored snapshot rows, verbatim. No
+      // registry read at all -- the template may have been deleted or rewritten since the
+      // parent ran, and the retry must execute the parent's bytes, not a re-resolution. The
+      // Run row's constraints ARE the parent's effective set (retry copies original.constraints),
+      // which is exactly the set resolution would have produced.
+      const wfSnap = input.workflowSnapshot.workflow;
+      if (input.workflow !== undefined) {
+        throw new ValidationError('workflow and workflowSnapshot are mutually exclusive');
+      }
+      resolvedWorkflow = {
+        // Retry passes the parent's agent/model explicitly, so this is not consulted -- the
+        // parent's values are the resolution's output, already persisted on its Run row.
+        effectiveAgent: { id: input.agent ?? this.deps.defaultAgent },
+        snapshot: wfSnap,
+        stagePresets: input.workflowSnapshot.stagePresets.map((sp) => ({
+          stageIndex: sp.stageIndex,
+          presetId: sp.snapshot.id,
+          snapshot: sp.snapshot,
+        })),
+        stageInstructions: Object.fromEntries(
+          input.workflowSnapshot.stagePresets.map((sp) => [sp.stageIndex, sp.snapshot.instruction]),
+        ),
+        skills: input.workflowSnapshot.skills,
+        constraints: {
+          maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
+          maxRetries: input.constraints?.maxRetries ?? this.deps.defaultMaxRetries,
+          notAfter: input.constraints?.notAfter,
+          botTask: input.constraints?.botTask,
+          budgetTokens: input.constraints?.budgetTokens,
+          budgetCost: input.constraints?.budgetCost,
+          resourceLimits: input.constraints?.resourceLimits,
+          allowedNetworks: input.constraints?.allowedNetworks,
+        },
+      };
+    } else if (input.workflow !== undefined) {
+      if (input.workflow === null || typeof input.workflow !== 'object' || Array.isArray(input.workflow)) {
+        throw new ValidationError('workflow must be an object with an id');
+      }
+      // Closed shape (#842 review r4): an unknown key is refused, never ignored. A typo such as
+      // `versoin` would otherwise drop the version pin silently and run the current template --
+      // the exact downgrade the pin exists to catch.
+      for (const key of Object.keys(input.workflow as object)) {
+        if (key !== 'id' && key !== 'version') {
+          const hint = /^v/i.test(key) ? " (did you mean 'version'?)" : /^i/i.test(key) ? " (did you mean 'id'?)" : '';
+          throw new ValidationError(`workflow has unknown key ${JSON.stringify(key)}${hint}; allowed keys: id, version`);
+        }
+      }
+      const wf = input.workflow as { id?: unknown; version?: unknown };
+      if (typeof wf.id !== 'string' || wf.id.length === 0) {
+        throw new ValidationError('workflow.id must be a non-empty string');
+      }
+      if (wf.version !== undefined && (typeof wf.version !== 'string' || wf.version.length === 0)) {
+        throw new ValidationError('workflow.version must be a non-empty string when given');
+      }
+      if (input.preset !== undefined) {
+        throw new ValidationError(
+          'preset and workflow are mutually exclusive: an advisory workflow renders per-stage'
+          + ' preset guidance for its own steps, so a Run-wide preset has no place in it',
+        );
+      }
+      if (!this.deps.workflows) {
+        throw new ValidationError('workflows are not enabled on this server; remove the workflow block');
+      }
+      // Version pin = optimistic guard, the same rule the preset block applies: a pinned
+      // version that does not resolve is refused rather than silently re-resolved.
+      let loaded: LoadedWorkflow;
+      try {
+        loaded = this.deps.workflows.get(wf.id);
+      } catch (err) {
+        if (err instanceof NotFoundError) {
+          // Unknown template -> the W-1 code vocabulary (issue #809 acceptance 5): the
+          // registry's NotFoundError becomes a validation error carrying the code, so service
+          // callers branch on codes, not prose. An INVALID template is not rewritten: its
+          // WorkflowValidationFailure already carries the W-1 findings.
+          throw new WorkflowPresetResolutionError('WORKFLOW_NOT_FOUND', 'workflow.id',
+            `workflow ${JSON.stringify(wf.id)} does not resolve in the workflow registry`);
+        }
+        throw err;
+      }
+      if (wf.version !== undefined && loaded.version !== wf.version) {
+        throw new ValidationError(
+          `workflow ${JSON.stringify(loaded.id)} is version ${loaded.version}, not the requested ${wf.version}`,
+        );
+      }
+      if (!this.deps.presets) {
+        throw new ValidationError(
+          'workflows resolve stage presets, so presets must be enabled on this server',
+        );
+      }
+      const stageSelection = resolveWorkflowStages(
+        loaded,
+        {
+          agent: input.agent,
+          model: input.model,
+          skills: input.skills,
+          constraints: input.constraints,
+        },
+        {
+          defaultAgent: this.deps.defaultAgent,
+          defaultMaxDurationMs: this.deps.defaultMaxDurationMs,
+          defaultMaxRetries: this.deps.defaultMaxRetries,
+        },
+        {
+          knownAgents: this.deps.knownAgents,
+          staticCapabilities: (agentId) => this.deps.agentCapabilities?.()[agentId]?.static,
+        },
+        (id) => this.deps.presets!.get(id),
+      );
+      // Skill resolution (section 3.1.1 rule 4, deferring to role-presets section 3.2): the
+      // caller's list when PROVIDED (an explicit [] means "no skills" and suppresses
+      // auto-selection), otherwise the per-stage selector picks; then the union of the stages'
+      // REQUIRED skills appended, deduped by first occurrence; then the strictest stage's cap.
+      // Exceeding it FAILS -- nothing is dropped (#842 review r5: caller skills were discarded).
+      const skillCap = stageSelection.skillCap;
+      const requiredSkills = stageSelection.requiredSkillIds;
+      const skillIds: string[] = [];
+      const seenSkill = new Set<string>();
+      const pushSkill = (id: string): void => {
+        if (seenSkill.has(id)) return;
+        seenSkill.add(id);
+        skillIds.push(id);
+      };
+      if (input.skills !== undefined) {
+        for (const id of input.skills) pushSkill(id);
+      } else {
+        for (const stage of stageSelection.autoSelectStages) {
+          const preset = stageSelection.stagePresets.find((s) => s.stageIndex === stage.stageIndex)?.preset;
+          if (!preset) continue;
+          const skillDeliveryForStage = this.deps.agentCapabilities?.()[stageSelection.effectiveAgent.id]?.static?.skills;
+          if (skillDeliveryForStage === 'nativeNames') continue; // guarded again below, on the merged list
+          const picks = this.deps.selector.select(
+            // The stage's own task: selection guidance is per step, never the whole plan.
+            loaded.stages[stage.stageIndex]?.task ?? input.task,
+            this.deps.skills.list(),
+            // Budget = cap - required (decision 2A): the required skills are appended after.
+            Math.max(0, skillCap - requiredSkills.length - skillIds.length),
+          );
+          for (const id of picks) pushSkill(id);
+        }
+      }
+      for (const id of requiredSkills) pushSkill(id);
+      if (skillIds.length > skillCap) {
+        throw new ValidationError(
+          `workflow ${JSON.stringify(loaded.id)} resolves to ${skillIds.length} skills (caller list plus`
+          + ` stage-required skills); the effective maximum is ${skillCap}, the strictest stage's cap`,
+        );
+      }
+      if (skillIds.length > 0
+        && this.deps.agentCapabilities?.()[stageSelection.effectiveAgent.id]?.static?.skills === 'nativeNames') {
+        throw new ValidationError(
+          `workflow ${JSON.stringify(loaded.id)} resolves skills, but agent`
+          + ` ${JSON.stringify(stageSelection.effectiveAgent.id)} resolves skill names in its own`
+          + ' store; a missing one is a fatal exit. Run this workflow on an agent that reads'
+          + ' workspace skills.',
+        );
+      }
+      const resolvedWorkflowSkills = this.deps.skills.resolve(skillIds);
+      // Stage preset instructions ride the SNAPSHOT: each stage preset is snapshotted with the
+      // Run (section 3.1.1 rule 6), so a later preset edit cannot change this Run's plan.
+      const stagePresetSnapshots = stageSelection.stagePresets.map((s) => ({
+        stageIndex: s.stageIndex,
+        presetId: s.presetId,
+        snapshot: this.stagePresetSnapshot(s.preset, stageSelection.effectiveAgent.id),
+      }));
+      resolvedWorkflow = {
+        effectiveAgent: stageSelection.effectiveAgent,
+        snapshot: this.workflowSnapshot(loaded),
+        stagePresets: stagePresetSnapshots,
+        stageInstructions: Object.fromEntries(
+          stagePresetSnapshots.map((s) => [s.stageIndex, s.snapshot.instruction]),
+        ),
+        skills: resolvedWorkflowSkills,
+        constraints: stageSelection.effectiveConstraints,
+      };
+    }
+
+    // The workflow resolution's effective agent wins over caller/system fallbacks: it already
+    // applied the caller -> required-stage -> default precedence (section 3.1.1 rules 1-2), and
+    // persisting anything else executes the template on an agent no stage asked for (#842 r2).
     const presetAgent = presetSnapshot?.effectiveAgent.id;
-    const agent = input.agent ?? presetAgent ?? this.deps.defaultAgent;
+    const agent = resolvedWorkflow?.effectiveAgent.id ?? input.agent ?? presetAgent ?? this.deps.defaultAgent;
     if (!this.deps.knownAgents.includes(agent)) {
       throw new ValidationError(`Unknown agent: ${agent} (known: ${this.deps.knownAgents.join(', ')})`);
+    }
+
+    // Fail closed on the plan channel (#842 review r3): a workflow Run's steps are guidance the
+    // adapter must actually deliver. Only the Prime/RPC/Claude adapters inject `workflowPlan`
+    // into their prompts; an adapter that never received it would execute the template with
+    // every planned step silently omitted. The check keys on the workflow paths ONLY -- the
+    // retry path re-uses the parent's agent, which already passed this gate at its creation.
+    if (resolvedWorkflow) {
+      const stat = this.deps.agentCapabilities?.()[agent]?.static;
+      if (stat?.workflowPlan !== true) {
+        const declared = stat === undefined
+          ? 'unknown -- the agent has no declared static capabilities'
+          : stat.workflowPlan === undefined
+            ? "undeclared -- the agent's static block omits workflowPlan"
+            : "false -- the agent's static block declares workflowPlan: false";
+        throw new ValidationError(
+          `workflow ${JSON.stringify(resolvedWorkflow?.snapshot.id)} renders an advisory plan,`
+          + ` but agent ${JSON.stringify(agent)} has no workflow-plan prompt channel`
+          + ` (workflowPlan: ${declared}); pick an adapter that carries the plan`,
+        );
+      }
     }
 
     // Per-Run model resolution (#823), ONE rule for both paths: caller.model → preset model →
@@ -526,7 +824,7 @@ export class RunService {
     // undeclared / false) resolvePreset uses for the preset path. Today that refuses every real
     // agent, which is correct until the adapters declare the capability (P1-2..P1-4).
     const presetModel = presetSnapshot?.effectiveAgent.model;
-    const model = input.model ?? presetModel;
+    const model = input.model ?? resolvedWorkflow?.effectiveAgent.model ?? presetModel;
     if (model !== undefined) {
       // The RESOLVED model is validated too (#832 r1): a preset carrying `agent.model: "two
       // words"` passes preset validation today, and only this check keeps the persisted value
@@ -659,7 +957,7 @@ export class RunService {
     // A preset owns skill selection when it is present: the snapshot's effectiveSkills ARE the
     // resolved list (autoSelect already applied above). A snapshot (retry) carries the parent's
     // exact skill rows. Only a Run without a preset follows the original path.
-    const resolved = presetSnapshot
+    const resolved = resolvedWorkflow?.skills ?? (presetSnapshot
       ? presetSnapshot.effectiveSkills
       : input.skillSnapshots ?? this.deps.skills.resolve(
           input.skills === undefined || input.skills === null
@@ -670,7 +968,7 @@ export class RunService {
               ? this.deps.selector.select(input.task, available, 4)
               : []
             : input.skills,
-        );
+        ));
 
     // Knowledge admission, validated before anything is written -- the same shape goal admission uses,
     // for the same reason: a block that is accepted and then quietly ignored leaves the caller believing
@@ -696,7 +994,9 @@ export class RunService {
     // already merged the caller input with preset ceilings/defaults and system policy, and the
     // executed Run must match what the snapshot records (otherwise the snapshot documents
     // limits the worker never applies). The legacy path below is the no-preset behavior.
-    const constraints: RunConstraints = presetSnapshot
+    const constraints: RunConstraints = resolvedWorkflow
+      ? resolvedWorkflow.constraints
+      : presetSnapshot
       ? presetSnapshot.effectiveConstraints
       : {
         maxDurationMs: input.constraints?.maxDurationMs ?? this.deps.defaultMaxDurationMs,
@@ -789,6 +1089,53 @@ export class RunService {
         }
         this.deps.events.append(run.id, 'run.created', { runId: run.id, agent, status: 'QUEUED' });
         this.deps.events.append(run.id, 'run.queued', { runId: run.id });
+        // The workflow snapshot lands in the SAME transaction as the Run row (workflows.md
+        // section 5): a failure before commit leaves no partial Run or snapshot row, and a
+        // committed Run always renders from the exact bytes it was created with.
+        if (resolvedWorkflow) {
+          const wfSnap = resolvedWorkflow.snapshot;
+          const row: RunWorkflowRow = {
+            runId: run.id,
+            workflowId: wfSnap.id,
+            workflowVersion: wfSnap.version,
+            mode: wfSnap.mode,
+            trust: wfSnap.trust,
+            contentHash: wfSnap.contentHash,
+            sourceKind: wfSnap.source.kind,
+            sourcePath: wfSnap.source.relativePath,
+            templateJson: wfSnap.templateJson,
+            filesJson: JSON.stringify(wfSnap.files),
+            snapshot: wfSnap,
+          };
+          this.workflowStore().insert(row);
+          this.deps.events.append(run.id, 'workflow.selected', {
+            workflowId: wfSnap.id,
+            version: wfSnap.version,
+            mode: wfSnap.mode,
+            trust: wfSnap.trust,
+            hash: wfSnap.contentHash,
+            stages: wfSnap.stages.length,
+            sourceKind: wfSnap.source.kind,
+          });
+          // Every stage preset referenced by the template is snapshotted with the Run
+          // (section 3.1.1 rule 6), so later preset edits change nothing.
+          for (const stage of resolvedWorkflow.stagePresets) {
+            const stageRow: RunPresetRow = {
+              runId: run.id,
+              presetId: stage.snapshot.id,
+              presetVersion: stage.snapshot.version,
+              role: stage.snapshot.role,
+              trust: stage.snapshot.trust,
+              contentHash: stage.snapshot.contentHash,
+              sourceKind: stage.snapshot.source.kind,
+              sourceCommit: stage.snapshot.source.commit ?? null,
+              sourcePath: stage.snapshot.source.relativePath,
+              stageIndex: stage.stageIndex,
+              snapshot: stage.snapshot,
+            };
+            this.presetStore()!.insert(stageRow);
+          }
+        }
         if (model !== undefined) {
           // The explainability record L1 builds on (#823): which model, and where it came from.
           // Not emitted for model-less Runs, so a Run created without `model` behaves
@@ -1048,6 +1395,72 @@ export class RunService {
     return this.deps.presets ?? null;
   }
 
+  /**
+   * The workflow snapshot a Run was created from, or null.
+   *
+   * Read from `run_workflows`, never re-derived from the registry -- the same rule as
+   * getSkills and getPreset: templates get revised, and a read that re-resolved would
+   * silently rewrite what a past Run was told to do.
+   */
+  getWorkflow(runId: string): ResolvedWorkflow | null {
+    return this.workflowStore().get(runId);
+  }
+
+  /** The Run-detail view of a workflow Run (#809 acceptance 4): identity only, from the snapshot. */
+  getWorkflowIdentity(runId: string): { id: string; version: string; contentHash: string; mode: 'advisory'; stages: number } | null {
+    const wf = this.workflowStore().get(runId);
+    if (!wf) return null;
+    return { id: wf.id, version: wf.version, contentHash: wf.contentHash, mode: wf.mode, stages: wf.stages.length };
+  }
+
+  /**
+   * The workflow's stage preset snapshots, keyed by stage index.
+   *
+   * A workflow Run writes one run_presets row per referenced stage (section 3.1.1 rule 6), so
+   * the listing crosses the stage order with the store's insertion order. Both are
+   * deterministic: the stage order comes from the snapshot's manifest and the store returns
+   * rows in insertion order.
+   */
+  getWorkflowStagePresets(runId: string): { stageIndex: number; presetId: string; presetVersion: string; contentHash: string }[] {
+    return this.getWorkflowStagePresetSnapshots(runId).map((s) => ({
+      stageIndex: s.stageIndex,
+      presetId: s.snapshot.id,
+      presetVersion: s.snapshot.version,
+      contentHash: s.snapshot.contentHash,
+    }));
+  }
+
+  /**
+   * The workflow's stage preset snapshots, keyed by stage index.
+   *
+   * A workflow Run writes one run_presets row per referenced stage (section 3.1.1 rule 6), so
+   * the listing crosses the snapshot's stage order with the store's rows. Both are
+   * deterministic: the stage order comes from the stored workflow snapshot and the store
+   * returns rows in insertion order. This is what the WORKER renders stage guidance from --
+   * the snapshot bytes, never the live registry.
+   */
+  getWorkflowStagePresetSnapshots(runId: string): { stageIndex: number; snapshot: ResolvedRolePreset }[] {
+    const wf = this.getWorkflow(runId);
+    if (!wf) return [];
+    const rows = this.presetStore()?.listSnapshots(runId) ?? [];
+    const byPreset = new Map(rows.map((r) => [r.presetId, r.snapshot]));
+    const out: { stageIndex: number; snapshot: ResolvedRolePreset }[] = [];
+    wf.stages.forEach((stage, i) => {
+      if (!stage.preset) return;
+      const snapshot = byPreset.get(stage.preset.id);
+      if (!snapshot) {
+        // A committed workflow row whose stage rows are missing means the creation write was
+        // corrupted (or the rows were deleted outside the product). Fail the read loudly
+        // rather than rendering guidance from nowhere (the read-side truth rule).
+        throw new Error(
+          `workflow stage preset row missing: run ${runId}, stage ${i} (${JSON.stringify(stage.preset.id)})`,
+        );
+      }
+      out.push({ stageIndex: i, snapshot });
+    });
+    return out;
+  }
+
   submitInput(runId: string, ownerId: string, isAdmin: boolean, value: unknown): void {
     const run = this.get(runId, ownerId, isAdmin);
     if (!run) throw new NotFoundError('run not found');
@@ -1088,6 +1501,18 @@ export class RunService {
     // live registry, so a retried Run would execute skill bytes its parent never saw -- and if a
     // skill had been deleted, create() would throw and the retry could not be attempted at all.
     const skillSnapshots = this.getSkills(runId);
+    // The parent's workflow snapshot, verbatim (#842 review): template bytes, stage preset
+    // snapshots and the skill rows, the same trio create() writes for a workflow Run. Without
+    // this a retried workflow Run silently executes as a plain Run -- no run_workflows row, no
+    // stage guidance, no plan -- the exact failure the snapshot rule exists to prevent.
+    const parentWorkflow = this.getWorkflow(runId);
+    const workflowSnapshot = parentWorkflow
+      ? {
+          workflow: parentWorkflow,
+          stagePresets: this.getWorkflowStagePresetSnapshots(runId),
+          skills: skillSnapshots,
+        }
+      : undefined;
     // original.repository carries the pinned base commit (set when the original
     // workspace was created); a fresh resolve happens only when the original
     // never got a base commit (setup failed before workspace creation).
@@ -1120,6 +1545,7 @@ export class RunService {
       model: original.model ?? undefined,
       ...(original.model && parentModelSource?.source ? { modelSource: parentModelSource.source } : {}),
       skillSnapshots,
+      ...(workflowSnapshot ? { workflowSnapshot } : {}),
       constraints: { ...original.constraints },
       // The parent's preset snapshot, verbatim (section 6): a retry is the SAME task
       // configuration, so it must not re-resolve "latest" -- a preset edited between the

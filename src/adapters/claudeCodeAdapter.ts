@@ -166,6 +166,18 @@ function writeContextFile(workspacePath: string, context: RunContext): void {
         instructionPath: context.preset.instructionPath,
       },
     } : {}),
+    // Advisory workflow identity (docs/crew/workflows.md section 5, issue #809): id, version,
+    // hash and mode, so the agent sees which template bytes the plan was rendered from.
+    // Omitted when the Run has no workflow, keeping the file byte-identical otherwise.
+    ...(context.workflow ? {
+      workflow: {
+        id: context.workflow.id,
+        version: context.workflow.version,
+        mode: context.workflow.mode,
+        contentHash: context.workflow.contentHash,
+        stages: context.workflow.stages,
+      },
+    } : {}),
   }, null, 2));
 }
 
@@ -198,8 +210,14 @@ function taskText(session: Session): string {
   const preset = session.context.preset
     ? `\n(You are filling the role: ${session.context.preset.role}. Your role instructions are in ${session.context.preset.instructionPath} in the workspace -- read them before starting and follow them.)\n`
     : '';
-  if (!session.knowledgeDegraded) return `${base}${preset}`;
-  return `${base}\n(Project knowledge for this task is in ${NOTES_FILE} in the workspace.)\n${preset}`;
+  // Advisory workflow plan (docs/crew/workflows.md section 3.1, issue #809): the worker's
+  // deterministic render, framed with the advisory label. Omitted when the Run was not
+  // created from a template, so the task text stays byte-identical otherwise.
+  const workflow = session.context.workflowPlan
+    ? `\n(This Run carries an ADVISORY workflow plan (mode: advisory). Mercury does not enforce its steps -- they are guidance you report against with step events. The plan:\n\n${session.context.workflowPlan}\n)\n`
+    : '';
+  if (!session.knowledgeDegraded) return `${base}${preset}${workflow}`;
+  return `${base}\n(Project knowledge for this task is in ${NOTES_FILE} in the workspace.)\n${preset}${workflow}`;
 }
 
 const DONE: AgentEvent = { type: '__done__', payload: {} };
@@ -230,6 +248,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       roleInstruction: 'prompt-reference',
       sandbox: true,
       mcp: 'none',
+      // Measured: the persona/context block injects context.workflowPlan verbatim (issue #809).
+      workflowPlan: true,
     },
   };
   /** `claude --version` prints "2.1.260 (Claude Code)", so the default leading-dotted-number

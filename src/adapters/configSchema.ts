@@ -95,6 +95,9 @@ export const CAPABILITIES_SCHEMA = object({
   perRunModel: leaf,
   sandbox: leaf,
   mcp: leaf,
+  // Advisory workflow plan channel (issue #809). buildPrompt() renders the block for every
+  // config, so the adapter declares it as a default the config can override to false.
+  workflowPlan: leaf,
 });
 
 /** The three ways a backend can receive skills. Mirrors AgentSkillDelivery in domain/types.ts. */
@@ -122,7 +125,8 @@ export const MCP_MODES = ['none', 'per-run'] as const;
 export function assertCapabilities(
   capabilities: { skills?: unknown; personaAppend?: unknown; personaFiles?: unknown;
     humanInput?: unknown; resume?: unknown; knowledge?: unknown;
-    roleInstruction?: unknown; perRunModel?: unknown; sandbox?: unknown; mcp?: unknown } | undefined,
+    roleInstruction?: unknown; perRunModel?: unknown; sandbox?: unknown; mcp?: unknown;
+    workflowPlan?: unknown } | undefined,
   label: string,
 ): void {
   if (capabilities === undefined) return;
@@ -131,7 +135,7 @@ export function assertCapabilities(
   }
   const bad = (msg: string): never => { throw new Error(`${label}: ${msg}`); };
   const { skills, personaAppend, personaFiles, humanInput, resume, knowledge,
-    roleInstruction, perRunModel, sandbox, mcp } = capabilities;
+    roleInstruction, perRunModel, sandbox, mcp, workflowPlan } = capabilities;
   if (skills !== undefined
     && !(typeof skills === 'string' && (SKILL_DELIVERY_MODES as readonly string[]).includes(skills))) {
     bad(`capabilities.skills must be one of ${SKILL_DELIVERY_MODES.join(' | ')}, got ${JSON.stringify(skills)}`);
@@ -148,7 +152,8 @@ export function assertCapabilities(
   }
   for (const [name, val] of [['personaAppend', personaAppend], ['humanInput', humanInput],
                              ['resume', resume], ['knowledge', knowledge],
-                             ['perRunModel', perRunModel], ['sandbox', sandbox]] as const) {
+                             ['perRunModel', perRunModel], ['sandbox', sandbox],
+                             ['workflowPlan', workflowPlan]] as const) {
     if (val !== undefined && typeof val !== 'boolean') {
       bad(`capabilities.${name} must be a boolean, got ${JSON.stringify(val)}`);
     }

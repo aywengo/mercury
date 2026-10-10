@@ -325,6 +325,11 @@ export function createRoutes(deps: RoutesDeps): Router {
         // Same seam, same lesson (docs/crew/role-presets.md section 5): the preset block is
         // forwarded unresolved so HTTP and in-process callers hit identical validation.
         preset: body.preset,
+        // Same seam, same lesson (docs/crew/workflows.md section 3.1, issue #809): the
+        // workflow block is forwarded unresolved so RunService owns resolution and the
+        // W-1 finding codes. No HTTP endpoint documents this yet (W-3 #810 adds the API
+        // surface); forwarding keeps the service contract reachable over HTTP unchanged.
+        workflow: body.workflow,
         // Forwarded unresolved for the same reason as `preset` (#823): RunService owns the shape
         // validation and the fail-closed capability check, so HTTP and in-process callers get
         // identical rules from one implementation.
@@ -381,6 +386,10 @@ export function createRoutes(deps: RoutesDeps): Router {
       // Sibling rather than a field on `run`, for the same reason `goal` is: the pack is a snapshot with
       // its own lifecycle, and folding it in would make `GET /api/runs` carry a blob nobody lists.
       knowledge: deps.runService.getKnowledge(run.id),
+      // Sibling, same reason as `preset` (#809 acceptance 4, #842 review r5): the workflow
+      // identity a Run was created from -- never the template bytes, which stay in the
+      // workspace -- or null for a Run without a workflow.
+      workflow: deps.runService.getWorkflowIdentity(run.id),
       // Sibling rather than a field on `run` (#854): attribution with its own write path (the
       // creation transaction), read back next to the model explainability data it complements.
       selection: deps.runService.getSelection(run.id),
