@@ -1,9 +1,10 @@
 # Laya integration — System-1 selection on Host and Fleet
 
-Status (2026-10-05): **P-1 and L0 are implemented; L1–L3 are design.** Per-Run model
-selection works end to end on every real harness, and the sidecar has an opt-in installer,
-a client contract and a doctor line. Nothing selects a harness or model yet: `select` is
-accepted in bot configs but refused until L1. The status table in §13 maps each milestone to
+Status (2026-10-10): **P-1 and L0 are implemented; L1 is in progress; L2–L3 are design.**
+Per-Run model selection works end to end on every real harness, and the sidecar has an
+opt-in installer, a client contract and a doctor line. L1's server record (L1-1) and hard
+filter (L1-2) are merged. Nothing selects a harness or model yet: `select` is accepted in
+bot configs but refused until L1-4. The status table in §13 maps each milestone to
 its merges. §4 is the **historical** snapshot the design started from (`415f8cd`,
 2026-09-26) and is kept as written so the reasons for P-1 stay legible.
 
@@ -369,12 +370,12 @@ wire shape against the pinned upstream version.
 
 | Milestone | Status | Issues → merges |
 | --- | --- | --- |
-| P-1 per-Run model | **done** | #823 → `fc8c7ae` (API, persistence, retry, `run.model_resolved`); #824 → `3f2edbc` (Fleet pass-through) |
+| P-1 per-Run model | **done** | #823 → `fc8c7ae` (API, persistence, retry, `run.model_resolved`); #824 → `3f2edbc` (Fleet pass-through); #849 → `dd3743b` via #850 (a leading `-` is refused) |
 | P-1 adapters | **done** — `perRunModel: true` measured on all three | #827 → `f538770` (Claude `--model`); #828 → `e884e59` (PrimeAgent RPC last-flag-wins, daemon `create` config); #829 → `2d70d2d` (Hermes `-m`, per invocation, survives `--resume`, 0.21.2) |
 | L0 sidecar contract | **done** | #825 → `accc654` (client + fake, `src/laya/`); #826 → `5b79b0e` (`select` reserved); #830 → `e48c86a` (doctor line) |
-| L0-4 installer | **done** | #831 → `7f1d300` via #840; #845 → `fcdcbae` via #846 (versioned venv directories) |
-| L1 dispatcher `select`, shadow | filed — next | #853–#857 ([`laya-l1-issues.md`](laya-l1-issues.md)); L1-4 also gated on #852 |
-| L2 Fleet task-domain signal | blocked on harness affinity (not in `src/` or `fleet/`) | — |
+| L0-4 installer | **done** | #831 → `7f1d300` via #840; #845 → `fcdcbae` via #846 (versioned venv directories); #851 → `375e38a` via #862 (label-agnostic launchd check, bounded sweep). Real-host verification: #852, open |
+| L1 dispatcher `select`, shadow | **in progress** | L1-1 #854 → `500c2f4` via #865 (`selection` record; no-pick reasons omit `laya`); L1-2 #855 → `d8940bd` via #861 (hard filter); L1-3 #856 open (PR #866); L1-0 #853 open (label rule, operator); L1-4 #857 blocked on #853, #856 and #852 ([`laya-l1-issues.md`](laya-l1-issues.md)) |
+| L2 Fleet task-domain signal | proposed — blocked on harness affinity (not in `src/` or `fleet/`) | #904 (`nightly:proposed`), gated on the affinity descriptor proposal #864 |
 | L3 fine-tune and enforce | blocked on L1 shadow data | — |
 
 Two decisions recorded during implementation that differ from the sketches below: the
@@ -410,9 +411,10 @@ documented outcome; no bot behaviour changes.
 *Acceptance*: nightly dispatches carry a `selection` record; Run `agent`/`model`
 are byte-identical to a build without L1.
 
-### L2 — Fleet task-domain signal, shadow only
+### L2 — Fleet task-domain signal, shadow only — proposed #904
 
-Blocked on harness affinity (§7.1). *Acceptance*: `route()` purity tests in §11;
+Blocked on harness affinity (§7.1) — the descriptor proposal is #864. Issue set
+(#904) filed 2026-10-09, gated on #864. *Acceptance*: `route()` purity tests in §11;
 placement unchanged in shadow; counterfactual host logged.
 
 ### L3 — fine-tune and enforce
@@ -434,6 +436,11 @@ without a recorded comparison.
 - [`host-installer.md`](host-installer.md)
 
 ## 15. Revision history
+
+### 2026-10-10 — status: L1 in progress
+
+§13 table: L1-1 (#865) and L1-2 (#861) merged, L1-3 in review (#866), L1-0 and L1-4 open;
+#849 and #851 recorded under P-1 and L0-4; L2 recorded as proposal #904, gated on #864.
 
 ### 2026-10-05 — status: P-1 and L0 done
 

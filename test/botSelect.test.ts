@@ -112,6 +112,7 @@ test('filterCandidates: the perRunModel drop fails on base (regression proof)', 
 // -- L1-3 (#856): buildSelectQuestion + decide (§6.3, §6.4, §11) --
 
 import { buildSelectQuestion, decide, optionKey, type DecideClient, type SelectConfig } from '../src/host/bots/select.ts';
+import { validateSelection } from '../src/runs/runService.ts';
 import { LayaClient } from '../src/laya/client.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import type { LayaResult } from '../src/laya/types.ts';
@@ -178,8 +179,7 @@ test('decide: one admitted candidate makes no client call; shadow keeps the defa
 
 /** The #854 schema contract (docs/api.md, selection schema v1, as amended on #865 f6412b4):
  *  a no-pick reason carries no laya / answerConfidence / distribution; a pick reason carries
- *  laya. Mirrored here because validateSelection is not on main until #865 merges -- the
- *  direct round-trip test belongs to L1-4 (#857), where both sides meet. */
+ *  laya. Checked twice: the mirrored rule below, and the real server validator. */
 const NO_PICK = new Set(['sidecar_unavailable', 'invalid_response', 'single_candidate']);
 function assertSchemaContract(record: Record<string, unknown>, label: string): void {
   if (NO_PICK.has(record.reason as string)) {
@@ -204,6 +204,9 @@ test('decide: every record satisfies the #854 no-pick / pick contract (#866 revi
   for (const [label, admitted, results, cfg] of cases) {
     const out = await decide(admitted, fakeClient(results), cfg, DEFAULT, CTX);
     assertSchemaContract(out.record, label);
+    // The real server validator, now that L1-1 (#865) is on main: every record decide() emits is
+    // accepted for the Run it would ride on (the chosen-must-match check included).
+    assert.doesNotThrow(() => validateSelection(out.record, out.chosen.agent, out.chosen.model), label);
     assert.deepEqual(out.record.chosen, out.chosen, `${label}: the record names what runs`);
   }
 });
