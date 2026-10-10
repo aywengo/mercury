@@ -8,7 +8,7 @@ import { PresetValidationFailure } from '../presets/presetRegistry.ts';
 import type { RunStatus } from '../domain/types.ts';
 import { isTerminal } from '../domain/stateMachine.ts';
 import { requireAuth } from './auth.ts';
-import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.ts';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../domain/errors.ts';
 import type { Logger } from '../logger.ts';
 
 import type { KnowledgeStatus } from '../knowledge/status.ts';
@@ -49,6 +49,10 @@ export interface RoutesDeps {
  * internals, whereas the previous `catch { 400 + err.message }` leaked by default.
  */
 export function sendError(res: Response, err: unknown, logger?: Logger): void {
+  if (err instanceof ForbiddenError) {
+    res.status(403).json({ error: err.message });
+    return;
+  }
   if (err instanceof NotFoundError) {
     res.status(404).json({ error: err.message });
     return;
