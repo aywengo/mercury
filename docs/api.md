@@ -324,6 +324,37 @@ explicit id such as `"agent": "primeagent"` for a real coding Run. `GET
   model as `run.model`. Retries inherit it. A Run created without `model`
   behaves exactly as before (no event, null field).
 
+### Selection record (#854, L1-1)
+
+`selection` (optional, object) records Laya's pick and its distribution "on the
+Run". It is attribution only: nothing in it changes execution. It is validated
+fail-closed and stored as the `run.selection_recorded` event in the same
+transaction as the Run row; `GET /api/runs/:runId` returns it as the `selection`
+sibling (next to the model explainability data). A Run created without
+`selection` behaves exactly as before (no event).
+
+Schema v1 (strict — unknown keys are refused with `400` and no Run row):
+
+- `via: "laya"`, `mode: "shadow" | "enforce"` (both required);
+- `chosen`: `{agent, model?}` (required);
+- `laya`: `{agent, model?}` — Laya's pick. Required when `reason` is `shadow`,
+  `below_threshold` or `selected`; **must be absent** (with `answerConfidence` and
+  `distribution`) when `reason` is `sidecar_unavailable`, `invalid_response` or
+  `single_candidate`, because Laya gave no pick;
+- `answerConfidence` — probability in [0, 1];
+- `distribution` — option key → probability, at most 12 entries;
+- `candidatesOffered`, `candidatesFiltered` — non-negative integers;
+- `checkpoint` — string, at most 256 characters;
+- `latencyMs` — non-negative finite number;
+- `reason` — one of `shadow`, `below_threshold`, `sidecar_unavailable`,
+  `invalid_response`, `single_candidate`, `selected`.
+
+The whole object must serialize to at most 8 KiB. `chosen` must equal the
+request's effective `agent` and `model` — a record that disagrees with what
+actually ran is refused, so the record can never misreport. Replays
+(`Idempotency-Key`) return the original Run and its original record; the new
+body's `selection` is ignored.
+
 ### Repository fields
 
 `repository` is the primary repository:
