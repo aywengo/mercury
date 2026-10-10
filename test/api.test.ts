@@ -1802,6 +1802,17 @@ test('POST /api/runs stores a valid selection; GET returns it; the event appears
       const body2 = (await got2.json()) as { selection?: Record<string, unknown> | null };
       assert.equal(body2.selection ?? null, null);
       assert.equal(env.events.list(id2).some((e) => e.type === 'run.selection_recorded'), false);
+
+      // An explicit `selection: null` is NOT omitted: the field is a documented object, so
+      // a null must fail closed with 400 (Copilot review of #865), not slip through as no record.
+      const res3 = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ task: 'x', agent: 'fake', selection: null }),
+      });
+      assert.equal(res3.status, 400);
+      const list3 = await fetch(`${base}/api/runs?limit=10`, { headers: { authorization: 'Bearer tok-alice' } });
+      const runs3 = (await list3.json()) as { runs: unknown[] };
+      assert.equal(runs3.runs.length, 2, 'a rejected null selection left a Run behind');
     } finally {
       await srv.close();
       closeStream();

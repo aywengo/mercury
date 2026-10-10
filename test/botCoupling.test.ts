@@ -54,6 +54,14 @@ const ALLOWED_SRC = [
   // as `host service` (§10: "by the same machinery host service install uses").
   'src/host/service.ts',
   'src/domain/redact.ts', // the documented redactor exception (§15 item 4)
+  // Shared no-I/O model-shape check (#855, L1-2): the candidate hard filter imports the SAME
+  // validateModelShape the server applies, so the bot and the server cannot drift. Pinned in
+  // src/domain/ like the redactor; the exception stays honest via botSelect.test.ts, which
+  // exercises the check through the bot's own module.
+  'src/domain/modelShape.ts',
+  // Type-only shape of the `GET /api/agents` capabilities payload (AgentCapabilitySummary,
+  // #855): the filter keys on the wire field, so it shares the interface, not server logic.
+  'src/domain/types.ts',
 ];
 
 test('the bots directory is non-empty and actually being scanned', () => {
