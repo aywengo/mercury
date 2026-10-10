@@ -832,6 +832,120 @@ test('model: a Run created without model behaves byte-identically to base (no ev
   }
 });
 
+// -- #854: optional `selection` record (L1-1) --
+
+test('selection: a valid record is stored as run.selection_recorded in the creation transaction; chosen must match the effective agent/model', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const selection = {
+      via: 'laya', mode: 'enforce',
+      chosen: { agent: 'fake', model: 'm1' },
+      laya: { agent: 'fake', model: 'm1' },
+      reason: 'selected',
+    };
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake', model: 'm1', selection,
+    });
+    const evs = env.events.list(run.id).filter((e) => e.type === 'run.selection_recorded');
+    assert.equal(evs.length, 1);
+    assert.deepEqual(evs[0].payload, selection);
+    assert.deepEqual(env.runService.getSelection(run.id), selection);
+    // A mismatching `chosen` is refused; nothing is stored.
+    for (const bad of [
+      { ...selection, chosen: { agent: 'other', model: 'm1' } },
+      { ...selection, chosen: { agent: 'fake', model: 'm2' } },
+    ]) {
+      assert.throws(() => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', model: 'm1', selection: bad }));
+    }
+    // A record that omits `chosen.model` while the run HAS a model is refused too: either half
+    // of the disagreement would let the record misreport what ran.
+    assert.throws(() => env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake', model: 'm1',
+      selection: { ...selection, chosen: { agent: 'fake' } },
+    }), /missing, but the run has a model/);
+  } finally {
+    env.close();
+  }
+});
+
+test('selection: no-pick reasons carry no laya; pick reasons require it (#866 review)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const base = { via: 'laya', mode: 'shadow', chosen: { agent: 'fake' } };
+    // A failure dispatch must be recordable: the L1-3 decision rule emits exactly this shape.
+    for (const reason of ['sidecar_unavailable', 'invalid_response', 'single_candidate']) {
+      const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', selection: { ...base, reason } });
+      assert.equal((env.runService.getSelection(run.id) as { reason: string }).reason, reason);
+      // ...and must not invent a pick.
+      for (const extra of [{ laya: { agent: 'fake' } }, { answerConfidence: 0.5 }, { distribution: { A: 1 } }]) {
+        assert.throws(
+          () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', selection: { ...base, reason, ...extra } }),
+          /must be absent when reason is/,
+          `${reason} + ${Object.keys(extra)[0]}`,
+        );
+      }
+    }
+    // Reasons where Laya answered still require its pick.
+    for (const reason of ['shadow', 'below_threshold', 'selected']) {
+      assert.throws(
+        () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', selection: { ...base, reason } }),
+        /selection\.laya must be an object/,
+        reason,
+      );
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('selection: replay returns the original Run and record; the new body selection is ignored', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const first = {
+      via: 'laya', mode: 'shadow',
+      chosen: { agent: 'fake' }, laya: { agent: 'fake' }, reason: 'shadow',
+    };
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake', idempotencyKey: 'sel-1', selection: first,
+    });
+    // Replay with a body whose selection is INVALID: the replay check fires first, so the
+    // original Run and its original record come back and nothing is re-validated.
+    const replayed = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake', idempotencyKey: 'sel-1',
+      selection: { nope: true },
+    });
+    assert.equal(replayed.id, run.id);
+    assert.deepEqual(env.runService.getSelection(run.id), first);
+  } finally {
+    env.close();
+  }
+});
+
+test('selection: null is rejected, not treated as omitted (#866 review finding)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    // A present `selection: null` bypasses nothing: the documented schema requires a present
+    // `selection` to be an object, so it must fail closed with the ordinary validation error.
+    assert.throws(
+      () => env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', selection: null }),
+      /selection must be an object/,
+    );
+  } finally {
+    env.close();
+  }
+});
+
+test('selection: a Run created without selection behaves byte-identically to base (no event)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    assert.equal(env.runService.getSelection(run.id), null);
+    assert.equal(env.events.list(run.id).some((e) => e.type === 'run.selection_recorded'), false);
+  } finally {
+    env.close();
+  }
+});
+
 // -- #832 r1: resolved-model validation, three-way wording on the preset path, retry source --
 
 test('model: a preset-declared model is held to the same shape contract as the caller field (#832 r1)', () => {

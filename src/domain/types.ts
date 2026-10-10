@@ -756,6 +756,11 @@ export const EVENT_TYPES = new Set([
   // { model, source: 'caller' | 'preset' } -- the explainability record the L1 candidate list
   // builds on. A Run created without `model` emits nothing, exactly as before.
   'run.model_resolved',
+  // Laya selection record (issue #854, laya-integration-design §6.5, §13 L1-1). Appended in the
+  // Run-creation transaction by RunService.create ONLY when the request carries a valid
+  // `selection`; payload is the validated record itself. A Run created without `selection`
+  // emits nothing, exactly as before.
+  'run.selection_recorded',
 ]);
 
 /**
