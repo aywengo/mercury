@@ -4,9 +4,11 @@ Status: **partly implemented.** The Phase -1 prerequisite is done: a Run can
 carry zero skills, and skill selection respects the target agent's namespace
 (#507, closed by PRs #519 and #520 — `SelectOptions.allowFallback` lets
 `skillSelector` return `[]`, and `RunService` skips selection entirely for a
-`nativeNames` backend instead of handing it Mercury ids). What is not built is
-Teams itself: Agent Templates, the bounded stage orchestration and Fleet
-placement below are still design.
+`nativeNames` backend instead of handing it Mercury ids). Phase 3 is drafted as
+proposal #918 and Phase 4 (kanban delegation) as #922 — the §4/§5 decision
+recorded there is its gate; both await an operator's `nightly:ready`. What is
+not built is Teams itself: Agent Templates, the bounded stage orchestration and
+Fleet placement below are still design.
 
 Refines [`workflows.md`](workflows.md) under one added requirement: a team is
 **heterogeneous on purpose**.

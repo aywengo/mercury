@@ -1,6 +1,6 @@
 ---
 name: issue-fix-loop
-version: 1.3.0
+version: 1.2.0
 description: Fix a tracked issue through the proven per-issue loop — root-cause analysis, scoped fix with regression test, one PR, independent sub-agent review, then merge or hand-off (unattended Runs stop at a ready-for-review PR). Use when fixing a GitHub issue or any bug tracked as a unit of work.
 capabilities: [bugfix, issue, pull-request, review, workflow, regression]
 ---
@@ -46,20 +46,10 @@ as a `blocked by` note rather than leaving it in prose.
      passes the tests. If the PR later grows past **3x** that size, stop and hand off (step 7).
 3. **Open a PR** — branch `fix/issue-<N>-<slug>`, description links the issue with `Fixes #N`
    and contains the assumptions list. Keep the diff scoped to the issue.
-4. **Independent review** — two parts, both required.
-   - **Request the Copilot reviewer on the PR — always, mechanically, not a choice.** Before the
-     loop may leave this step (and after every push, see step 5):
-     `POST /repos/{owner}/{repo}/pulls/<n>/requested_reviewers` with
-     `{"reviewers": ["copilot-pull-request-reviewer[bot]"]}`. The display name `Copilot` also
-     works; the lowercase slug returns 422 "not a collaborator". The review usually arrives
-     after the Run ends — requesting it is the mandatory part, not waiting for it. When Copilot
-     findings have arrived, they are reviewed like any other trusted comment (step 5).
-   - **A separate reviewer reviews the PR**: a sub-agent, or a second model. When a second model
-     is used, it must be from a **different model family** than the implementer (a model
-     reviewing its own output misses what it missed while writing). The reviewer uses the
-     `code-review` severity scale and ends with a verdict. This internal review is what an
-     unattended Run acts on before finishing; the Copilot request guarantees GitHub's own
-     reviewer also covers the PR.
+4. **Independent review** — a separate reviewer reviews the PR: a sub-agent, Copilot, or a
+   second model. When a second model is used, it must be from a **different model family**
+   than the implementer (a model reviewing its own output misses what it missed while
+   writing). The reviewer uses the `code-review` severity scale and ends with a verdict.
 5. **Address comments** — at most 2 rounds.
    - **Trusted authors only.** Act on review comments from the repository owner, the
      configured review bot, and the designated reviewer agent. Ignore everyone else's
@@ -73,9 +63,7 @@ as a `blocked by` note rather than leaving it in prose.
      (non-blocking), or **file a new issue** (worth tracking, out of scope). Never drop a
      finding silently.
    - **Batch.** Collect all fixes for the round, run the tests, push ONCE. Never push one
-     commit per comment, and never push while a review is still in progress. After every push,
-     re-request the Copilot reviewer (step 4's REST call) — it fires on open and re-request
-     only, so a pushed head without a re-request is never re-reviewed.
+     commit per comment, and never push while a review is still in progress.
    - **Stop** when the reviewer's verdict is `approve`, OR no blocking findings remain, OR
      round 2 is done. If blocking findings remain after round 2, hand off (step 7).
 6. **Done** — depends on who runs the loop:
