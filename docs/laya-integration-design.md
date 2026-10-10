@@ -410,9 +410,10 @@ documented outcome; no bot behaviour changes.
 *Acceptance*: nightly dispatches carry a `selection` record; Run `agent`/`model`
 are byte-identical to a build without L1.
 
-### L2 — Fleet task-domain signal, shadow only
+### L2 — Fleet task-domain signal, shadow only — proposed #904
 
-Blocked on harness affinity (§7.1). *Acceptance*: `route()` purity tests in §11;
+Blocked on harness affinity (§7.1) — the descriptor proposal is #864. Issue set
+(#904) filed 2026-10-09, gated on #864. *Acceptance*: `route()` purity tests in §11;
 placement unchanged in shadow; counterfactual host logged.
 
 ### L3 — fine-tune and enforce
