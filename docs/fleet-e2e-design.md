@@ -113,7 +113,7 @@ makes.
 | 3 | Structural drift guard on the key sets, both directions | implemented |
 | 4 | Capacity changes underneath a live Fleet: finish a Run, re-probe, no stale cache | implemented |
 | 5 | Dispatch across the wire: submit through Fleet, Run read back from Mercury, idempotency, restart | implemented |
-| 6 | Event mirroring across the wire with the real `EventStream` | design |
+| 6 | Event mirroring across the wire with the real `EventStream` | design — proposed #903 |
 
 ## 6b. Two sharp edges this found by being wrong
 
