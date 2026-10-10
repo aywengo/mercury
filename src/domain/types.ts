@@ -739,6 +739,11 @@ export const EVENT_TYPES = new Set([
   // then fails with 'credential profile changed since creation'.
   'run.credential_profile_resolved',
   'run.credential_profile_changed',
+  // Laya selection record (issue #854, laya-integration-design §6.5, §13 L1-1). Appended in the
+  // Run-creation transaction by RunService.create ONLY when the request carries a valid
+  // `selection`; payload is the validated record itself. A Run created without `selection`
+  // emits nothing, exactly as before.
+  'run.selection_recorded',
 ]);
 
 /**

@@ -387,12 +387,12 @@ The "cloud agent" adapter: Devin, Copilot coding agent, OpenHands server, or any
 HTTP agent API. **Design in §5; implementation in
 `src/adapters/remoteAgentAdapter.ts` + `src/adapters/remoteAgentRegistry.ts`.**
 
-### Phase 8 — OpenHandsAdapter (concrete RemoteAgentAdapter) — *low priority*
+### Phase 8 — OpenHandsAdapter (concrete RemoteAgentAdapter) — *low priority* — proposed #902
 
 OpenHands exposes a REST API + event stream (`/api/sessions`, `/api/sessions/:id/events`).
 Implement as a thin config on top of RemoteAgentAdapter.
 
-### Phase 9 — DevinAdapter (concrete RemoteAgentAdapter) — *low priority*
+### Phase 9 — DevinAdapter (concrete RemoteAgentAdapter) — *low priority* — proposed #902
 
 Devin's API: create session → poll status → fetch events; webhooks for
 completion. Implement as a RemoteAgentAdapter config. Requires a Devin API key

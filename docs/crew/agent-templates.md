@@ -1,6 +1,8 @@
 # Agent Templates — persona-bearing agent definitions
 
-Status: **design only.** Nothing here is implemented. Extends
+Status: **design only.** Nothing here is implemented. Phase 0 is drafted
+(#911) and the manifest/store rung (Phase 2) is drafted (#917); both await an
+operator's `nightly:ready`. Extends
 [`role-presets.md`](role-presets.md); read that first.
 
 A Role Preset resolves *instruction + skills + agent + constraints* for one Run.

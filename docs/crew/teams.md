@@ -1,6 +1,7 @@
 # Agent Teams — mixed-harness orchestration
 
-Status: **partly implemented.** The Phase -1 prerequisite is done: a Run can
+Status: **partly implemented.** Phase 3 is drafted as proposal #918, awaiting
+an operator's `nightly:ready`. The Phase -1 prerequisite is done: a Run can
 carry zero skills, and skill selection respects the target agent's namespace
 (#507, closed by PRs #519 and #520 — `SelectOptions.allowFallback` lets
 `skillSelector` return `[]`, and `RunService` skips selection entirely for a
