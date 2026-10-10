@@ -169,6 +169,13 @@ export function planLayaSidecar(opts: { dataDir: string; pythonBin: string; venv
   return { venvDir, hfHome, logPath, serveCmd, port, envUrl: `http://127.0.0.1:${port}`, unitPath, unitLabel };
 }
 
+/** #851: whether launchctl print output means the job is NOT loaded — label-agnostic.
+ *  The quoted-label alternative is built from the plan's label, not hard-coded. */
+export function isLaunchdNotLoaded(output: string, label: string): boolean {
+  const quoted = `"${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}" is not loaded`;
+  return new RegExp(`service not loaded|could not find service|${quoted}`, 'i').test(output);
+}
+
 /** launchd plist (macOS), deterministic: same plan → same bytes (test-pinned). */
 export function renderLayaLaunchdPlist(plan: LayaPlan, apiKey: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
