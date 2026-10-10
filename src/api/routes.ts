@@ -329,6 +329,9 @@ export function createRoutes(deps: RoutesDeps): Router {
         // validation and the fail-closed capability check, so HTTP and in-process callers get
         // identical rules from one implementation.
         model: body.model,
+        // Forwarded unresolved, same seam as `model` (#854): RunService owns the strict schema
+        // validation, so HTTP and in-process callers get identical rules from one implementation.
+        selection: body.selection,
         idempotencyKey: typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined,
       });
       res.status(201).json({ runId: run.id, status: run.status });
@@ -378,6 +381,9 @@ export function createRoutes(deps: RoutesDeps): Router {
       // Sibling rather than a field on `run`, for the same reason `goal` is: the pack is a snapshot with
       // its own lifecycle, and folding it in would make `GET /api/runs` carry a blob nobody lists.
       knowledge: deps.runService.getKnowledge(run.id),
+      // Sibling rather than a field on `run` (#854): attribution with its own write path (the
+      // creation transaction), read back next to the model explainability data it complements.
+      selection: deps.runService.getSelection(run.id),
     });
   });
 
