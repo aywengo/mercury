@@ -99,7 +99,18 @@ The report is exactly one JSON line `{ pass, fail, real, flakes }`.
 node .agents/skills/nightly/next.ts run --repo aywengo/mercury [--dry-run]
 node .agents/skills/nightly/next.ts finish --repo aywengo/mercury --issue <n>
 node .agents/skills/nightly/next.ts blocked --repo aywengo/mercury --issue <n> --reason "<question>"
+node .agents/skills/nightly/next.ts propose --repo aywengo/mercury --source <doc#anchor> --title "<title>" --body-file <file>
 ```
+
+**Proposals (`propose`, #881).** On rung 4 the ONLY way to file a `nightly:proposed`
+issue is `propose` — dedupe is mechanical, not recalled. The body MUST carry a
+`## Source` section with the hidden marker `<!-- nightly-source: docs/crew/roadmap.md#8-phase-4 -->`
+(doc path + heading anchor). Before creating anything the command searches open AND closed
+issues for that marker plus an exact-title match: a match creates nothing and prints the
+existing number (a declined proposal is not re-proposed nightly; re-proposal needs a human to
+reopen it). A failed or capped search fails closed: no issue is filed, and the Run reports
+that the dedupe check could not run. One body template (the `## Source` shape); the free
+"Why this, now" form is dropped.
 
 `run` executes the N1-1 ladder (rung 0 resume, rung 1 trusted bugs, rung 2 trusted enhancements,
 rung 3 new @aywengo issues, rung 4 docs → proposals) and claims the chosen issue `nightly:in-progress` (already done by the selector before

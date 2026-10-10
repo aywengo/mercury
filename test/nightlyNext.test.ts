@@ -280,3 +280,114 @@ test('blocked exit: the body marker is written ONLY for issues the nightly ident
   const out = await blockIssue(failingIo, { repo: REPO, issue: 20, reason: 'still blocked' });
   assert.equal(out.commented, true, 'the blocked exit survives a body-marker failure');
 });
+
+// ---- rung-4 propose exit: mechanical dedupe (#881) ----
+
+import { proposeIssue, findExistingProposal, sourceMarker } from '../.agents/skills/nightly/next.ts';
+
+const KEY = 'docs/crew/roadmap.md#8-phase-4';
+const TITLE = 'Crew Phase 4: per-run MCP foundation';
+const BODY = `## Source\n\n\`${KEY}\`\n\n${sourceMarker(KEY)}\n\nScope text.`;
+
+/** A minimal io whose issue list is a flat array (pagination never exercised in these tests). */
+function proposeIo(all: unknown, opts: { listStatus?: number; postStatus?: number } = {}) {
+  const posts: { path: string; body?: unknown }[] = [];
+  const io = {
+    async get(path: string) {
+      if (path.startsWith(`/repos/${REPO}/issues?state=all`)) {
+        return { body: all, status: opts.listStatus ?? 200, link: null };
+      }
+      return { body: null, status: 200 };
+    },
+    async post(path: string, body: unknown) {
+      posts.push({ path, body });
+      return { body: { number: 42 }, status: opts.postStatus ?? 201 };
+    },
+    async postLabel() { return true; },
+    async deleteLabel() { return true; },
+  } as unknown as NextIo;
+  return { io, posts };
+}
+
+test('propose: an open issue with the same source key blocks creation (acceptance 1)', async () => {
+  const { io, posts } = proposeIo([{ number: 875, title: TITLE, body: `text\n${sourceMarker(KEY)}\n` }]);
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: BODY });
+  assert.equal(out.created, false);
+  assert.equal(out.checkRan, true);
+  assert.deepEqual(out.existing, [{ number: 875, matched: 'source' }]);
+  assert.equal(posts.length, 0, 'nothing is posted');
+});
+
+test('propose: a CLOSED issue with the source key also blocks (acceptance 2)', async () => {
+  const { io, posts } = proposeIo([{ number: 500, title: 'other title', state: 'closed', body: `${sourceMarker(KEY)}` }]);
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: BODY });
+  assert.equal(out.created, false);
+  assert.deepEqual(out.existing, [{ number: 500, matched: 'source' }]);
+  assert.equal(posts.length, 0);
+});
+
+test('propose: an exact-title match without a marker also blocks (acceptance 3, pre-fix drafts)', async () => {
+  const { io, posts } = proposeIo([{ number: 867, title: TITLE, body: 'Why this, now...' }]);
+  const out = await proposeIssue(io, { repo: REPO, source: 'docs/x.md#y', title: TITLE, body: BODY });
+  assert.equal(out.created, false);
+  assert.deepEqual(out.existing, [{ number: 867, matched: 'title' }]);
+  assert.equal(posts.length, 0);
+});
+
+test('propose: a failed search fails closed — no issue, checkRan false (acceptance 4)', async () => {
+  for (const listStatus of [500, 200]) {
+    const { io, posts } = proposeIo('not an array', { listStatus });
+    const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: BODY });
+    assert.equal(out.created, false);
+    assert.equal(out.checkRan, false);
+    assert.equal(posts.length, 0);
+  }
+});
+
+test('propose: no match files the issue labeled nightly:proposed with the marker in the body', async () => {
+  const { io, posts } = proposeIo([{ number: 1, title: 'unrelated', body: 'nothing here' }]);
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: BODY });
+  assert.equal(out.created, true);
+  assert.equal(out.number, 42);
+  const post = posts[0];
+  assert.ok(post.path.endsWith('/issues'));
+  assert.equal((post.body as { labels: string[] }).labels[0], 'nightly:proposed');
+  assert.ok((post.body as { body: string }).body.includes(sourceMarker(KEY)));
+});
+
+test('propose: a body without the source marker is refused before any write', async () => {
+  const { io, posts } = proposeIo([]);
+  await assert.rejects(
+    proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'no marker here' }),
+    /nightly-source/,
+  );
+  assert.equal(posts.length, 0);
+});
+
+test('findExistingProposal: a truncated page list fails closed (capped search, acceptance 4)', async () => {
+  const full = Array.from({ length: 100 }, (_, i) => ({ number: i + 1, title: `t${i}`, body: '' }));
+  const { io } = proposeIo(full);
+  assert.equal(await findExistingProposal(io, REPO, { source: KEY, title: TITLE }), null);
+});
+
+// ---- propose exit (rung-4 mechanical dedupe, #881) ----
+
+test('findExistingProposal: non-2xx and capped searches return null (fail closed)', async () => {
+  const bad = { async get() { return { body: [], status: 500 }; } } as unknown as NextIo;
+  assert.equal(await findExistingProposal(bad, REPO, { source: 'd.md#h', title: 'T' }), null);
+  const throws = { async get() { throw new Error('transport'); } } as unknown as NextIo;
+  assert.equal(await findExistingProposal(throws, REPO, { source: 'd.md#h', title: 'T' }), null);
+});
+
+test('proposeIssue: no match creates the issue labeled nightly:proposed with the marker', async () => {
+  const posts: unknown[] = [];
+  const io = {
+    async get() { return { body: [], status: 200, link: null }; },
+    async post(path: string, body: unknown) { posts.push({ path, body }); return { body: { number: 901 }, status: 201 }; },
+    async postLabel() { return true; },
+    async deleteLabel() { return true; },
+  } as unknown as NextIo;
+  const out = await proposeIssue(io, { repo: REPO, source: 'docs/crew/roadmap.md#9-phase-5', title: 'Crew Phase 5', body: `## Source\n\n${sourceMarker('docs/crew/roadmap.md#9-phase-5')}\n` });
+  assert.deepEqual({ created: out.created, number: out.number, checkRan: out.checkRan }, { created: true, number: 901, checkRan: true });
+  assert.equal((posts[0] as { body: { labels: string[] } }).body.labels[0], 'nightly:proposed');
+});
