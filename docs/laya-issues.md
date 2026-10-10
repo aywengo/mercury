@@ -21,7 +21,8 @@ terms of them; the Status table maps them to GitHub numbers.
 | L0-1 | #825 | — | #837 | `accc654` |
 | L0-2 | #826 | — | #838 | `5b79b0e` |
 | L0-3 | #830 | #825 | #839 | `e48c86a` |
-| L0-4 | #831 | #825, #830 | | |
+| L0-4 | #831 | #825, #830 | #840 | `7f1d300` |
+| L0-4 | #845 | #840 | #846 | `fcdcbae` |
 
 ## Findings that changed the design's P-1 sketch
 
@@ -304,3 +305,7 @@ nothing installed, no env keys written; re-run preserves an existing key.
 
 **Blocked by** L0-1, L0-3. **Likely files.** `install.sh`, `src/host/setup.ts`,
 `src/host/install.ts`, `docs/host-installer.md`.
+
+**Status (2026-10-05):** merged — #840 (`7f1d300`). Follow-up #845 (the
+versioned-venv-directories redesign replacing the in-place rebuild transaction)
+also merged — #846 (`fcdcbae`).

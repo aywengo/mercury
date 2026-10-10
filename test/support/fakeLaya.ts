@@ -48,7 +48,8 @@ export interface FakeLaya {
 /** Start a fake sidecar scripted per request: the Nth request gets script[N] (the LAST entry
  *  repeats for any request beyond the script). Auth: when apiKey is set, requests without the
  *  matching bearer get 401 and are still recorded. */
-export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKey?: string } = {}): Promise<FakeLaya> {
+export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKey?: string; port?: number; /** Script for bearer-LESS requests INSTEAD of the auto-401 gate (r28: transient anon failures). */ anonScript?: FakeLayaScriptEntry[] } = {}): Promise<FakeLaya> {
+  let anonCount = 0;
   const received: FakeLayaReceived[] = [];
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -59,9 +60,32 @@ export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKe
       try { body = raw.length > 0 ? JSON.parse(raw.toString('utf8')) : null; } catch { /* not JSON */ }
       received.push({ method: req.method ?? '', url: req.url ?? '', raw, body, headers: req.headers });
 
-      const auth = opts.apiKey !== undefined;
       const header = req.headers.authorization ?? '';
-      if (auth && header !== `Bearer ${opts.apiKey}`) {
+      // apiKey '*' = "auth enabled, any non-empty bearer accepted" (r21): the setup tests
+      // cannot know the wizard-generated key up front, but the readiness auth check requires
+      // that an EMPTY/missing bearer gets 401 while a real one passes.
+      const anyNonEmpty = opts.apiKey === '*';
+      const auth = opts.apiKey !== undefined;
+      const bearerless = !/^Bearer \S/.test(header);
+      if (bearerless && opts.anonScript) {
+        // r28: anon requests follow their own script (default would be a flat 401).
+        const entry = opts.anonScript[Math.min(anonCount, opts.anonScript.length - 1)] ?? {};
+        anonCount += 1;
+        const respondAnon = () => {
+          res.statusCode = entry.status ?? 200;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify(entry.json ?? {}));
+        };
+        // delayMs is honored here too (r53): an anon probe that answers SLOWLY exercises the
+        // client's deadline path inside the auth-proof loop.
+        if (entry.delayMs) {
+          setTimeout(respondAnon, entry.delayMs);
+          return;
+        }
+        respondAnon();
+        return;
+      }
+      if (auth && (anyNonEmpty ? !/^Bearer \S/.test(header) : header !== `Bearer ${opts.apiKey}`)) {
         res.statusCode = 401;
         res.end(JSON.stringify({ error: 'unauthorized' }));
         return;
@@ -89,7 +113,15 @@ export async function startFakeLaya(script: FakeLayaScriptEntry[], opts: { apiKe
       }
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve, reject) => {
+    // A bind failure (e.g. the fixed port already owned by a real sidecar) must reject the
+    // await, not escape as an unhandled 'error' event that aborts the test process (r16).
+    server.once('error', reject);
+    server.listen(opts.port ?? 0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
   const addr = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${addr.port}`,
