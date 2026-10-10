@@ -1,6 +1,9 @@
 # Fleet tenancy: projects over hosts
 
-Status: **Specification.** Nothing in this document is implemented. Following the convention of
+Status: **Specification.** Nothing in this document is implemented. The T0–T2 issue set was
+drafted as proposals on 2026-10-09 (#884–#890, nightly rung 4; see
+[`fleet-tenancy-issues.md`](fleet-tenancy-issues.md)) and awaits the operator's `nightly:ready`
+relabels. Following the convention of
 [fleet-design.md section 15](fleet-design.md#15-fleet-as-a-service): the present tense below describes
 the intended model, and only section 2 describes behaviour, which was verified against the tree at the
 time of writing.
@@ -326,18 +329,24 @@ surface moves.
 
 ### 10.3 Issue and PR sequence
 
-Filed in this order; each PR lands before the next issue is started:
+Filed in this order; each PR lands before the next issue is started.
 
-| Order | Issue title | PR branch |
-| --- | --- | --- |
-| 1 | `fleet: projects + project_members schema and ProjectStore` | `feat/fleet-tenancy-store` |
-| 2 | `fleet: project admin routes and CLI (behaviour-inert)` | `feat/fleet-tenancy-surface` |
-| 3 | `fleet: tenancy visibility rule in visibleHosts` | `feat/fleet-tenancy-scope` |
-| 4 | `fleet: tenancy startup warning and per-caller project list` | `feat/fleet-tenancy-warning` |
-| 5 | `fleet: prove metrics and event scoping under tenancy` | `feat/fleet-tenancy-surface-proof` |
-| 6 | `fleet: project reassignment and delete guards` | `feat/fleet-tenancy-guards` |
-| 7 | `fleet: fleet_runs.project_id bind-time snapshot` | `feat/fleet-tenancy-audit` |
-| 8 | T3 issues — filed only after open question 3 is decided | — |
+**Status: filed 2026-10-09** — nightly rung 4 drafted the T0–T2 issue set as proposals
+(#884–#890, labeled `nightly:proposed`; T3 stays unfiled, gated on open question 3).
+The set, its status table and the tree facts each issue builds on:
+[`fleet-tenancy-issues.md`](fleet-tenancy-issues.md). The issues await the operator's
+`nightly:ready` relabel; nothing is implemented until then.
+
+| Order | Issue title | Issue | PR branch |
+| --- | --- | --- | --- |
+| 1 | `fleet: projects + project_members schema and ProjectStore` | #884 | `feat/fleet-tenancy-store` |
+| 2 | `fleet: project admin routes and CLI (behaviour-inert)` | #885 | `feat/fleet-tenancy-surface` |
+| 3 | `fleet: tenancy visibility rule in visibleHosts` | #886 | `feat/fleet-tenancy-scope` |
+| 4 | `fleet: tenancy startup warning and per-caller project list` | #887 | `feat/fleet-tenancy-warning` |
+| 5 | `fleet: prove metrics and event scoping under tenancy` | #888 | `feat/fleet-tenancy-surface-proof` |
+| 6 | `fleet: project reassignment and delete guards` | #889 | `feat/fleet-tenancy-guards` |
+| 7 | `fleet: fleet_runs.project_id bind-time snapshot` | #890 | `feat/fleet-tenancy-audit` |
+| 8 | T3 issues — filed only after open question 3 is decided | — | — |
 
 ### 10.4 Testing strategy
 

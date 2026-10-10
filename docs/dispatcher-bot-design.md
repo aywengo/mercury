@@ -994,7 +994,9 @@ task fired 100 times on a fake clock produces exactly the Runs the policy
 allows, each attributable; a task whose Run sits in NEEDS_INPUT does not fire
 again. The `workspace-audit` skill now runs nightly, unattended.
 
-### Milestone B2 — event triggers and the read-only observer scope
+### Milestone B2 — event triggers and the read-only observer scope — proposed #906–#909 (nightly rung 4, 2026-10-09)
+
+*Issue set:* #906 (`statusChangedAt` prerequisite), #907 (trigger engine + coalesced poll + cursor), #908 (storm guards), #909 (the observer scope). Drafted only; nothing starts until an operator relabels an issue `nightly:ready`.
 
 - trigger matchers + coalesced polling + both cooldowns + chain depth +
   `includeBotRuns` + the API-derived dispatch cap; cursor state;
