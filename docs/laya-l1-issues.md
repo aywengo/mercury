@@ -12,9 +12,9 @@ regression test that fails on base, one PR. `L1-n` labels are kept below; the St
 | Doc | Issue | Blocked by | PR | Merge |
 | --- | --- | --- | --- | --- |
 | L1-0 | #853 | — | | |
-| L1-1 | #854 | — | | |
-| L1-2 | #855 | — | | |
-| L1-3 | #856 | — | | |
+| L1-1 | #854 | — | #865 (+ #882, service-level test) | `500c2f4` |
+| L1-2 | #855 | — | #861 | `d8940bd` |
+| L1-3 | #856 | — | #866 | |
 | L1-4 | #857 | #853, #854, #855, #856, #852 | | |
 
 ## Scope
