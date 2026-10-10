@@ -102,6 +102,15 @@ export interface CreateRunInput {
    * Only retry passes this; the HTTP surface does not expose it.
    */
   modelSource?: 'caller' | 'preset';
+  /**
+   * Optional Laya selection record (issue #854, laya-integration-design §6.5, §13 L1-1).
+   * Attribution only: it is stored as the `run.selection_recorded` event in the same
+   * transaction as `run.created` and never influences execution. Validated fail-closed in
+   * create() (strict v1 schema, at most 8 KiB serialized, `chosen` must match the effective
+   * agent/model) AFTER the idempotency-replay check, so a replayed key returns the original
+   * Run and its original record; the new body's `selection` is ignored, exactly like `model`.
+   */
+  selection?: unknown;
   idempotencyKey?: string;
 }
 
@@ -145,6 +154,163 @@ export interface RunServiceDeps {
   redactor?: Redactor;
 }
 
+
+// -- Laya selection record (#854, laya-integration-design §6.5, §13 L1-1) --
+// Strict schema v1. Every field is attribution; none may change execution, so unknown keys are
+// refused rather than stored: a record that silently carries extra fields is a schema the
+// server does not promise, and GET consumers would read it as one.
+const SELECTION_MAX_BYTES = 8 * 1024;
+const SELECTION_REASONS = [
+  'shadow',
+  'below_threshold',
+  'sidecar_unavailable',
+  'invalid_response',
+  'single_candidate',
+  'selected',
+] as const;
+/**
+ * Reasons that carry NO Laya pick (#866 review): the sidecar was not asked (single candidate)
+ * or gave no usable answer (unavailable, invalid). For these the record must not contain
+ * `laya`, `answerConfidence` or `distribution` -- inventing a pick would misreport, and
+ * requiring one made every failure dispatch unrecordable. Every other reason means Laya
+ * answered, so `laya` is required.
+ */
+const SELECTION_NO_PICK_REASONS = new Set(['sidecar_unavailable', 'invalid_response', 'single_candidate']);
+const SELECTION_KEYS = new Set([
+  'via',
+  'mode',
+  'chosen',
+  'laya',
+  'answerConfidence',
+  'distribution',
+  'candidatesOffered',
+  'candidatesFiltered',
+  'checkpoint',
+  'latencyMs',
+  'reason',
+]);
+
+/** One `{agent, model?}` endpoint inside a selection record. */
+function validateSelectionActor(value: unknown, label: string): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new ValidationError(`selection.${label} must be an object`);
+  }
+  const a = value as Record<string, unknown>;
+  for (const k of Object.keys(a)) {
+    if (k !== 'agent' && k !== 'model') {
+      throw new ValidationError(`selection.${label} has an unknown key: ${k}`);
+    }
+  }
+  if (typeof a.agent !== 'string' || a.agent.length === 0) {
+    throw new ValidationError(`selection.${label}.agent must be a non-empty string`);
+  }
+  if (a.model !== undefined && (typeof a.model !== 'string' || a.model.length === 0)) {
+    throw new ValidationError(`selection.${label}.model must be a non-empty string when present`);
+  }
+}
+
+function validateSelectionProbability(value: unknown, label: string): void {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
+    throw new ValidationError(`selection.${label} must be a finite probability in [0, 1]`);
+  }
+}
+
+/**
+ * Validate a `selection` request field (#854) against the effective agent/model and return it.
+ * Fail-closed: strict allowlisted keys, bounded size, finite probabilities, and `chosen` must
+ * equal what actually ran -- a record that disagrees with the Run it rides on can never be
+ * stored, so the record cannot misreport.
+ */
+export function validateSelection(
+  raw: unknown,
+  agent: string,
+  model: string | undefined,
+): Record<string, unknown> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new ValidationError('selection must be an object');
+  }
+  const s = raw as Record<string, unknown>;
+  let bytes: number;
+  try {
+    bytes = Buffer.byteLength(JSON.stringify(s), 'utf8');
+  } catch {
+    throw new ValidationError('selection must be JSON-serializable');
+  }
+  if (bytes > SELECTION_MAX_BYTES) {
+    throw new ValidationError(`selection must serialize to at most ${SELECTION_MAX_BYTES} bytes; got ${bytes}`);
+  }
+  for (const k of Object.keys(s)) {
+    if (!SELECTION_KEYS.has(k)) {
+      throw new ValidationError(`selection has an unknown key: ${k}`);
+    }
+  }
+  if (s.via !== 'laya') {
+    throw new ValidationError('selection.via must be "laya"');
+  }
+  if (s.mode !== 'shadow' && s.mode !== 'enforce') {
+    throw new ValidationError('selection.mode must be "shadow" or "enforce"');
+  }
+  if (s.reason === undefined || !SELECTION_REASONS.includes(s.reason as (typeof SELECTION_REASONS)[number])) {
+    throw new ValidationError(`selection.reason must be one of: ${SELECTION_REASONS.join(', ')}`);
+  }
+  validateSelectionActor(s.chosen, 'chosen');
+  if (SELECTION_NO_PICK_REASONS.has(s.reason as string)) {
+    for (const k of ['laya', 'answerConfidence', 'distribution'] as const) {
+      if (s[k] !== undefined) {
+        throw new ValidationError(`selection.${k} must be absent when reason is "${String(s.reason)}" (no Laya pick)`);
+      }
+    }
+  } else {
+    validateSelectionActor(s.laya, 'laya');
+  }
+  // `chosen` must match the request's effective agent and model (#854): a record that
+  // disagrees with what actually ran is refused, so the record can never misreport.
+  const chosen = s.chosen as { agent: string; model?: string };
+  if (chosen.agent !== agent) {
+    throw new ValidationError(
+      `selection.chosen.agent ${JSON.stringify(chosen.agent)} does not match the run's agent ${JSON.stringify(agent)}`,
+    );
+  }
+  if (chosen.model !== undefined && model === undefined) {
+    throw new ValidationError('selection.chosen.model was given, but the run has no model');
+  }
+  if (chosen.model === undefined && model !== undefined) {
+    throw new ValidationError('selection.chosen.model is missing, but the run has a model');
+  }
+  if (chosen.model !== undefined && chosen.model !== model) {
+    throw new ValidationError(
+      `selection.chosen.model ${JSON.stringify(chosen.model)} does not match the run's model ${JSON.stringify(model)}`,
+    );
+  }
+  if (s.answerConfidence !== undefined) validateSelectionProbability(s.answerConfidence, 'answerConfidence');
+  if (s.distribution !== undefined) {
+    if (typeof s.distribution !== 'object' || s.distribution === null || Array.isArray(s.distribution)) {
+      throw new ValidationError('selection.distribution must be an object');
+    }
+    const dist = s.distribution as Record<string, unknown>;
+    const keys = Object.keys(dist);
+    if (keys.length > 12) {
+      throw new ValidationError(`selection.distribution must have at most 12 entries; got ${keys.length}`);
+    }
+    for (const k of keys) {
+      if (k.length === 0) throw new ValidationError('selection.distribution keys must be non-empty');
+      validateSelectionProbability(dist[k], `distribution["${k}"]`);
+    }
+  }
+  for (const k of ['candidatesOffered', 'candidatesFiltered'] as const) {
+    if (s[k] !== undefined && (typeof s[k] !== 'number' || !Number.isInteger(s[k]) || (s[k] as number) < 0)) {
+      throw new ValidationError(`selection.${k} must be a non-negative integer`);
+    }
+  }
+  if (s.checkpoint !== undefined && (typeof s.checkpoint !== 'string' || s.checkpoint.length > 256)) {
+    throw new ValidationError('selection.checkpoint must be a string of at most 256 characters');
+  }
+  if (s.latencyMs !== undefined
+    && (typeof s.latencyMs !== 'number' || !Number.isFinite(s.latencyMs) || (s.latencyMs as number) < 0)) {
+    throw new ValidationError('selection.latencyMs must be a non-negative finite number');
+  }
+  return s;
+}
 
 export class RunService {
   private deps: RunServiceDeps;
@@ -206,6 +372,12 @@ export class RunService {
   /** Agent id used when create input omits `agent`. */
   defaultAgent(): string {
     return this.deps.defaultAgent;
+  }
+
+  /** Read the stored selection record, if any (#854). Sibling of `run`, like goal/preset. */
+  getSelection(runId: string): Record<string, unknown> | null {
+    const ev = this.deps.events.list(runId).find((e) => e.type === 'run.selection_recorded');
+    return ev ? (ev.payload as Record<string, unknown>) : null;
   }
 
   create(input: CreateRunInput): Run {
@@ -375,6 +547,18 @@ export class RunService {
         );
       }
     }
+
+    // Laya selection record (#854). Validated AFTER the idempotency-replay check (so a replayed
+    // key returns the original Run and its original record; the new body's `selection` is
+    // ignored, exactly like `model`) and after agent/model resolution, because `chosen` is
+    // checked against what actually resolved. Fail-closed: a record that cannot be trusted to
+    // describe what ran is refused, never partially stored. It is attribution only -- nothing
+    // here changes execution -- so the accepted set is a strict v1 schema, not a grab-bag.
+    // Only `undefined` counts as omitted: an explicit `null` fails the object check (Copilot
+    // review of #865) -- a documented object field may not smuggle a null past validation.
+    const selection = input.selection !== undefined
+      ? validateSelection(input.selection, agent, model)
+      : undefined;
 
     // Goal admission. Everything about this block is fail-closed, because the failure mode
     // this feature was designed against is accepting a goal and silently not honouring it
@@ -612,6 +796,11 @@ export class RunService {
           // copied model was not chosen by a caller, and the record must not change origin.
           const source = input.modelSource ?? (input.model !== undefined ? 'caller' : 'preset');
           this.deps.events.append(run.id, 'run.model_resolved', { model, source });
+        }
+        if (selection) {
+          // §6.5: the pick and its distribution recorded ON the Run, same transaction as the
+          // Run row (#854) -- a committed Run always carries its selection record.
+          this.deps.events.append(run.id, 'run.selection_recorded', selection);
         }
         if (goalState) {
           // runId is only known here, so the row is built after the run id exists.
