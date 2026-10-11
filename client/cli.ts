@@ -488,6 +488,7 @@ export async function run(argv: string[], io: Stdio): Promise<number> {
           skills: flagString(parsed.flags, '--skills'),
           goal: flagString(parsed.flags, '--goal'),
           notAfter: flagString(parsed.flags, '--not-after'),
+          workflow: flagString(parsed.flags, '--workflow'),
         },
         { stdinIsTty: io.stdinIsTty, readStdin: io.readStdin },
       );
@@ -665,7 +666,7 @@ export const COMMAND_FLAGS: Record<string, string[]> = {
   'agents list': [],
   'runs list': ['--limit', '--status', '--cursor'],
   'runs show': [],
-  'runs create': ['--file', '--task', '--repo', '--agent', '--skills', '--goal', '--not-after', '--idempotency-key'],
+  'runs create': ['--file', '--task', '--repo', '--agent', '--skills', '--goal', '--not-after', '--workflow', '--idempotency-key'],
   'runs input': ['--file', '--value'],
   'runs cancel': [],
   'runs retry': [],

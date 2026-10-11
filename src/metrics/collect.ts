@@ -427,7 +427,10 @@ export function collectMetrics(db: DatabaseSync, opts: CollectOptions = {}): Met
   // status set, the interesting zero case is "no preset Runs yet", where an EMPTY series is the
   // honest answer and every panel reads "no data" correctly.
   const presetRows = db
-    .prepare('SELECT preset_id AS id, COUNT(*) AS n FROM run_presets GROUP BY preset_id')
+    // Only Run-wide preset rows: a workflow writes one run_presets row PER STAGE (stage_index
+    // set), and counting those would report each stage as a preset Run -- several times for a
+    // template that repeats a preset (#842 review r5).
+    .prepare('SELECT preset_id AS id, COUNT(*) AS n FROM run_presets WHERE stage_index IS NULL GROUP BY preset_id')
     .all() as { id: string; n: number }[];
   const runsByPreset: Record<string, number> = {};
   for (const r of presetRows) runsByPreset[r.id] = Number(r.n);
