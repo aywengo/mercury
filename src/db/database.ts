@@ -369,7 +369,17 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE runs ADD COLUMN model TEXT;
   `,
-  // v14: the advisory Workflow Template snapshot (docs/crew/workflows.md section 5, issue #809).
+  // v14: the credential profile a Run resolved to at creation (CP-3, issue #807, design §5.4).
+  //
+  // Nullable, and null is a real answer, not a gap: "no profile matched" is every Run on a host
+  // without a profile file, and rows written before this column existed are NULL in exactly the
+  // same way. The claim-time parity check (worker.ts) compares a fresh resolution against this
+  // stored name, so a Run is never driven under an identity different from the one it was
+  // created with.
+  `
+  ALTER TABLE runs ADD COLUMN credential_profile TEXT;
+  `,
+  // v15: the advisory Workflow Template snapshot (docs/crew/workflows.md section 5, issue #809).
   //
   // One row per Run, written inside the Run-creation transaction next to run_skills and
   // run_presets: the exact template bytes, every template file, their canonical hash and the
@@ -393,7 +403,7 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_run_workflows_identity
     ON run_workflows(workflow_id, workflow_version);
   `,
-  // v15: distinguish workflow stage preset rows from the Run-wide preset row (#842 review).
+  // v16: distinguish workflow stage preset rows from the Run-wide preset row (#842 review).
   //
   // run_presets gained a second writer in #809: a workflow Run snapshots one preset per
   // referenced stage into the same table. The row carried no marker, so PresetStore.get() --
@@ -405,7 +415,7 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE run_presets ADD COLUMN stage_index INTEGER;
   `,
-  // v16: run_presets keyed per stage, not per Run (#842 review r2).
+  // v17: run_presets keyed per stage, not per Run (#842 review r2).
   //
   // The v12 table kept PRIMARY KEY (run_id), so a workflow whose template references presets
   // on TWO stages failed the second stage snapshot insert with UNIQUE constraint failed:
@@ -413,10 +423,10 @@ export const MIGRATIONS: string[] = [
   // all. Rebuild with a per-(Run, stage) key. The Run-wide slot stays at most one row via a
   // partial unique index: SQLite treats NULLs as distinct in a unique key, so the PK alone
   // would admit two run-wide rows; the index over `stage_index IS NULL` does not. Rows written
-  // before v15 have stage_index NULL and are exactly the run-wide rows, so the copy preserves
+  // before v16 have stage_index NULL and are exactly the run-wide rows, so the copy preserves
   // both shapes.
   `
-  CREATE TABLE run_presets_v16 (
+  CREATE TABLE run_presets_v17 (
     run_id          TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     preset_id       TEXT NOT NULL,
     preset_version  TEXT NOT NULL,
@@ -431,13 +441,13 @@ export const MIGRATIONS: string[] = [
     PRIMARY KEY (run_id, stage_index)
   );
 
-  INSERT INTO run_presets_v16
+  INSERT INTO run_presets_v17
     SELECT run_id, preset_id, preset_version, role, trust, content_hash,
            source_kind, source_commit, source_path, stage_index, snapshot_json
     FROM run_presets;
 
   DROP TABLE run_presets;
-  ALTER TABLE run_presets_v16 RENAME TO run_presets;
+  ALTER TABLE run_presets_v17 RENAME TO run_presets;
 
   CREATE INDEX IF NOT EXISTS idx_run_presets_identity
     ON run_presets(preset_id, preset_version);

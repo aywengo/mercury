@@ -40,6 +40,20 @@ export class NotFoundError extends Error {
   }
 }
 
+/** The caller may not do this at all, independent of resource state -> 403.
+ *
+ * Credential profiles (issue #807): a Run whose repository is claimed by a profile that does not
+ * list the caller's owner is refused before anything is stored, naming the profile and the
+ * reason (design §5.4). This is NOT the owner-scoping 404 rule inverted — the request itself
+ * names the repository, so refusing it confirms nothing the caller did not already know.
+ */
+export class ForbiddenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ForbiddenError';
+  }
+}
+
 /** The resource exists and the caller may touch it, but its current state forbids this -> 409.
  *
  * Cancelling a finished run or submitting input to a run that is not waiting are the cases.
