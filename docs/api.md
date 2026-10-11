@@ -146,7 +146,12 @@ carry any (validation rejects unknown keys). An unknown id is a `404` naming
 the preset; a preset whose files are invalid is a `400` carrying its findings.
 Running a task with a role is `POST /api/runs` with a `preset: { id, version? }`
 block ([role-presets.md](crew/role-presets.md) section 9); omitting the block
-keeps the Run payload exactly as it was before presets existed.
+keeps the Run payload exactly as it was before presets existed. The block is a
+closed shape: `id` must be a non-empty string, `version` when present a
+non-empty string, and any other key is a `400` naming the key and the allowed
+keys (with a did-you-mean hint for `versoin`-style typos), so a misspelled
+pin can never drop the pin silently (#859). A retried Run does not re-read the
+caller's preset block: it re-uses the parent's `presetSnapshot`.
 
 An advisory workflow Run is `POST /api/runs` with a `workflow: { id, version? }`
 block ([workflows.md](crew/workflows.md) section 3.1). The block is a closed shape:

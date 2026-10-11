@@ -361,6 +361,85 @@ test('per-run log lines carry the preset dimensions (id, version, trust); no-pre
   }
 });
 
+// -- #859: the preset block is a closed shape --
+
+// A builtin preset must exist for the happy-path checks; makeEnv's default env has none, so
+// each test writes a minimal preset and points the registry at its directory.
+function preset859Env(repoDir: string) {
+  const presetsDir = tempDir('mercury-presets-859-');
+  const dir = join(presetsDir, 'pinned');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'preset.json'), JSON.stringify({
+    schemaVersion: 1, id: 'pinned', version: '1.0.0',
+    description: 'closed-shape fixture preset', role: 'Pinned role',
+  }));
+  writeFileSync(join(dir, 'INSTRUCTION.md'), 'PINNED INSTRUCTION');
+  return makeEnv({ workspaceMode: 'copy', repoDir, presetsDir, workerEnabled: false });
+}
+
+test('the preset block is a closed shape: an unknown key is refused, never ignored (#859)', () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = preset859Env(repo);
+  try {
+    // A misspelled pin would otherwise resolve the CURRENT preset -- the downgrade the pin exists to catch.
+    assert.throws(
+      () => env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, preset: { id: 'pinned', versoin: '1.0.0' } as never }),
+      /preset has unknown key "versoin" \(did you mean 'version'\?\); allowed keys: id, version/,
+    );
+    assert.throws(
+      () => env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, preset: { id: 'pinned', skills: [] } as never }),
+      /preset has unknown key "skills"/,
+    );
+    assert.equal(env.runService.list({ ownerId: 'a', isAdmin: true, limit: 10 }).runs.length, 0, 'no Run row written');
+    // The two allowed keys still work.
+    const run = env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, preset: { id: 'pinned', version: '1.0.0' } });
+    assert.equal(env.runService.getPreset(run.id)!.version, '1.0.0');
+  } finally {
+    env.close();
+  }
+});
+
+test('the preset block field types are checked at the boundary (#859)', () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = preset859Env(repo);
+  try {
+    assert.throws(
+      () => env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, preset: { id: 42 } as never }),
+      /preset\.id must be a non-empty string/,
+    );
+    assert.throws(
+      () => env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, preset: 'reviewer' as never }),
+      /preset must be an object with an id/,
+    );
+    assert.throws(
+      () => env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, preset: ['reviewer'] as never }),
+      /preset must be an object with an id/,
+    );
+    assert.throws(
+      () => env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, preset: { id: 'pinned', version: '' } }),
+      /preset\.version must be a non-empty string when given/,
+    );
+    assert.equal(env.runService.list({ ownerId: 'a', isAdmin: true, limit: 10 }).runs.length, 0, 'no Run row written');
+  } finally {
+    env.close();
+  }
+});
+
+test('a preset-less Run and a plain { id } / { id, version } block behave as before (#859)', () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = preset859Env(repo);
+  try {
+    const plain = env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo } });
+    assert.equal(env.runService.getPreset(plain.id), null);
+    const noVersion = env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, preset: { id: 'pinned' } });
+    assert.equal(env.runService.getPreset(noVersion.id)!.version, '1.0.0');
+    const pinned = env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, preset: { id: 'pinned', version: '1.0.0' } });
+    assert.equal(env.runService.getPreset(pinned.id)!.version, '1.0.0');
+  } finally {
+    env.close();
+  }
+});
+
 test('AC 7: a preset with an instruction is rejected at creation on a roleInstruction-none agent', async () => {
   const repo = makeGitRepo(tempDir('mercury-repo-'));
   // A hermes-shaped adapter: no preset rendering, roleInstruction 'none', sandbox available.
