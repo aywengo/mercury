@@ -33,6 +33,7 @@ import type { KnowledgeBounds } from '../knowledge/validation.ts';
 import type { ContextKnowledgeBlock } from '../knowledge/types.ts';
 import type { Note } from '../knowledge/types.ts';
 import { tx } from '../db/database.ts';
+import { resolveProfile, type CredentialProfiles } from '../host/credentials-profiles.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { WorkspaceManager } from '../workspace/workspaceManager.ts';
 
@@ -129,6 +130,13 @@ export interface WorkerDeps {
   };
   /** Where harvested notes are made durable, in the same transaction that completes the Run. */
   knowledgeOutbox?: OutboxStore;
+  /**
+   * Credential profile loader (CP-3, issue #807). Optional: absent means profiles are not wired
+   * and the claim-time parity check never touches the filesystem. A function, not a value, so
+   * every claim re-reads the file (§5.4 — the file may have changed since the Run was created,
+   * and the re-check exists to catch exactly that).
+   */
+  credentialProfiles?: () => CredentialProfiles;
 }
 
 export class Worker {
@@ -333,6 +341,38 @@ export class Worker {
       // method's catch, whose bookkeeping handles the still-QUEUED case (it takes the claim
       // step before the terminal transition) and whose finally releases the lease, so a refusal
       // that cannot record itself still ends with the Run terminal and the lease released.
+      // Claim-time credential profile parity (CP-3, issue #807, design §5.4): the file may have
+      // changed since the Run was created. Re-resolving against the CURRENT file and comparing
+      // with the stored name is what guarantees the Run is never driven under a different
+      // identity — not under another profile, and not under "no profile" when it was created
+      // with one. A load failure is an error, never a silent "no profile" (§9).
+      //
+      // Placed INSIDE the try like the notAfter refusal below: a tx() failure lands in this
+      // method's catch, whose bookkeeping takes the claim step, records the failure and
+      // terminalizes the Run, and whose finally releases the lease. No auto-retry: retrying
+      // re-resolves through runService.retry, which refuses the same mismatch.
+      if (this.deps.credentialProfiles) {
+        const parity = this.checkCredentialProfileParity(current);
+        if (!parity.ok) {
+          const message = parity.message;
+          log.warn({ created: parity.created, now: parity.now }, 'credential profile changed since creation; refusing to start');
+          tx(this.deps.db, () => {
+            this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
+            this.deps.runs.setError(run.id, message, 'infrastructure');
+            this.deps.events.append(run.id, 'run.credential_profile_changed', {
+              runId: run.id,
+              createdAtResolution: parity.created,
+              claimTimeResolution: parity.now,
+            });
+            this.deps.events.append(run.id, 'error', { message });
+            this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
+            this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+          });
+          // NO auto-retry: the file state that caused the refusal would produce the same
+          // mismatch on the retry's own re-resolve (RunService.retry refuses it).
+          return;
+        }
+      }
       if (run.constraints.notAfter !== undefined) {
         const notAfterMs = Date.parse(run.constraints.notAfter);
         if (Number.isFinite(notAfterMs) && Date.now() >= notAfterMs) {
@@ -1272,6 +1312,59 @@ export class Worker {
     });
     log.error({ error, errorKind, ...durations }, 'run failed');
     await this.maybeAutoRetry(run, errorKind === 'infrastructure' ? 'infrastructure' : 'agent');
+  }
+
+  /**
+   * Claim-time credential profile parity (CP-3, issue #807, design §5.4): resolve the Run's
+   * repositories against the CURRENT profile file and compare with the name stored at creation.
+   *
+   * The resolution is the pure §5.3 function over the SAME stored (redacted) repository objects
+   * creation resolved, so the two readings can only differ when the file did. A refused
+   * resolution or an unreadable/invalid file fails the Run too — an error is never read as
+   * "no profile" (§9).
+   */
+  private checkCredentialProfileParity(run: Run): { ok: true } | { ok: false; message: string; created: string | null; now: string } {
+    const describe = (r: ReturnType<typeof resolveProfile>): string =>
+      r.outcome === 'profile' ? r.name : r.outcome === 'none' ? 'none' : `refused (${r.reason})`;
+    const createdName = run.credentialProfile ?? null;
+    try {
+      const { profiles } = this.deps.credentialProfiles!();
+      const resolution = resolveProfile(profiles, run.ownerId, [run.repository, ...(run.repositories ?? [])]);
+      if (resolution.outcome === 'refused') {
+        return {
+          ok: false,
+          message: `credential profile changed since creation (created under ${createdName ? `'${createdName}'` : 'no profile'}, now refused: ${resolution.message})`,
+          created: createdName,
+          now: describe(resolution),
+        };
+      }
+      const nowName = resolution.outcome === 'profile' ? resolution.name : null;
+      if (nowName !== createdName) {
+        return {
+          ok: false,
+          message: `credential profile changed since creation (created under ${createdName ? `'${createdName}'` : 'no profile'}, now ${nowName ? `'${nowName}'` : 'no profile'})`,
+          created: createdName,
+          now: describe(resolution),
+        };
+      }
+      return { ok: true };
+    } catch (err) {
+      // Unreadable or malformed file at claim time: an error, never "no profile" (§9). The
+      // detail (absolute path, mode, schema field) stays in the SERVER log; the persisted
+      // run.error and events carry only the generic reason, because a Run owner can read
+      // run.error and must not learn host configuration from it (Copilot review round 1 on
+      // #841).
+      this.deps.logger.warn(
+        { runId: run.id, error: String(err instanceof Error ? err.message : err) },
+        'credential profile file could not be read at claim time',
+      );
+      return {
+        ok: false,
+        message: 'credential profile changed since creation (the profile file could not be read or validated)',
+        created: createdName,
+        now: 'unreadable',
+      };
+    }
   }
 
   private async maybeAutoRetry(run: Run, kind: 'infrastructure' | 'agent'): Promise<void> {

@@ -65,8 +65,10 @@ const PROFILE_FIELDS: ReadonlySet<string> = new Set(['name', 'repositories', 'ow
  * `/*` after the owner is the org/user pattern. `localPath` repositories have no id and never
  * match a profile; they are not normalized here.
  */
-/** Redact the whole authority userinfo (with or without a password) before input reaches an error. */
-function redactUserInfo(s: string): string {
+/** Redact the whole authority userinfo (with or without a password) before input reaches an error.
+ * Exported for the CLI's argument diagnostics: `--repo`/`--repos` values can embed a credential in
+ * the userinfo, and `unknown argument '...'` echoes the raw flag text. */
+export function redactUserInfo(s: string): string {
   // '//<anything>@' -> '//[REDACTED]@': a bare token in the username slot (ftp://ghp_...@host)
   // must be covered too, not only user:password forms.
   return s.replace(/(\/\/)[^@\s/]+@/g, '$1[REDACTED]@');
@@ -76,9 +78,29 @@ export function normalizeRepositoryId(raw: string): string {
   const original = redactUserInfo(raw);
   let s = raw.trim();
   if (s === '') throw new Error('repository id is empty');
-  const scp = /^(?:ssh:\/\/)?git@([^/:]+):(.+?)$/i.exec(s);
-  if (scp) s = `${scp[1]}/${scp[2]}`;
-  else s = s.replace(/^(?:https|ssh):\/\//i, '');
+  // Three SSH spellings, parsed SEPARATELY because only one of them can carry a port (#841
+  // review round 4):
+  // - SSH URI 'ssh://git@host[:port]/owner/name': an explicit DEFAULT port ':22' is the same
+  //   endpoint as the portless form and is normalized away, so ':22' can neither bypass a
+  //   profile nor get a valid URL skipped. A NON-default port is a different endpoint and is
+  //   left in place, so it keeps failing the shape/host checks.
+  // - SCP 'git@host:owner/name': the colon is the PATH separator and there is NO port field.
+  //   In 'git@github.com:22/repo.git' the '22' is the owner; it must never be eaten as a port.
+  // - Bare 'git@host/owner/name' (an SSH URI with 'ssh://' already dropped): no port either.
+  // A user:password authority never matches git@, so credential-bearing URLs still fall through
+  // to the shape errors (with the userinfo redacted in `original`).
+  const sshUri = /^ssh:\/\/git@([^/:]+?)(?::22)?\/(.+)$/i.exec(s);
+  const scp = sshUri ? null : /^git@([^/:]+?)[:\/](.+)$/i.exec(s);
+  if (sshUri) s = `${sshUri[1]}/${sshUri[2]}`;
+  else if (scp) s = `${scp[1]}/${scp[2]}`;
+  else {
+    // HTTPS: an explicit DEFAULT port ':443' is the same endpoint as the portless URL -- the
+    // same rule as ':22' above, so 'https://github.com:443/owner/name' cannot skip a profile's
+    // owner restriction (#841 review round 4). Only for https, only the default port, and only
+    // when the authority has no userinfo (those keep failing the shape checks, redacted).
+    s = s.replace(/^(https:\/\/[^/@:]+):443(?=\/|$)/i, '$1');
+    s = s.replace(/^(?:https|ssh):\/\//i, '');
+  }
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) throw new Error(`unsupported repository URL scheme in '${original}'`);
   s = s.replace(/\.git\/?$/i, '');
   s = s.replace(/^www\./i, '');
@@ -336,4 +358,96 @@ export function validateCredentialProfiles(env: NodeJS.ProcessEnv = process.env)
   }
   lines.push({ ok: true, message: `${profiles.length} profile(s) valid` });
   return lines;
+}
+
+// ---------------------------------------------------------------------------
+// Resolution (CP-3, issue #807; design §5.3)
+// ---------------------------------------------------------------------------
+
+/** The four §5.3 outcomes for one Run. */
+export type ProfileResolution =
+  | { outcome: 'none' }
+  | { outcome: 'profile'; name: string }
+  | { outcome: 'refused'; reason: 'multiple-profiles' | 'owner-not-allowed'; profiles: string[]; message: string };
+
+/**
+ * Does this profile claim the id: an exact normalized match, or an owner-wide pattern
+ * (`host/owner/*`, the only wildcard form §5.2 allows) whose prefix the id sits under.
+ * Overlapping claims ACROSS profiles are refused at load, so a claimed id still maps to exactly
+ * one profile.
+ */
+function profileClaims(profile: CredentialProfile, id: string): boolean {
+  for (const repo of profile.repositories) {
+    if (repo === id) return true;
+    if (repo.endsWith('/*') && id.startsWith(repo.slice(0, -1)) && !id.endsWith('/*')) return true;
+  }
+  return false;
+}
+
+/**
+ * Which profile a Run uses, per design §5.3. `repositories` holds the Run's primary repository
+ * plus every entry of `repositories[]`; entries with no `url` (localPath-only, or empty) have no
+ * id and match nothing, so a Run can carry a public dependency checkout alongside a claimed repo.
+ *
+ * A `url` that does not normalize (malformed shape, or a redaction that replaced part of it) has
+ * no id and matches nothing — the same answer as pre-CP-3 — rather than refusing a Run that
+ * created fine before profiles existed. With no profile file loaded this function is never
+ * called — a host without profiles behaves exactly as before CP-3.
+ *
+ * The owner is compared case-insensitively (GitHub logins are case-insensitive; repository ids
+ * are already lowercased by normalizeRepositoryId). Profile `owners` are stored as written.
+ */
+export function resolveProfile(
+  profiles: ReadonlyArray<CredentialProfile>,
+  ownerId: string,
+  repositories: ReadonlyArray<{ url?: string; localPath?: string }>,
+): ProfileResolution {
+  if (profiles.length === 0) return { outcome: 'none' };
+  // The matched ids, kept for the owner-not-allowed message (normalizeRepositoryId redacts
+  // userinfo before an id can reach any message — never-print-values, §9).
+  const matched = new Map<string, string>(); // profile name -> one redacted id that matched it
+  for (const repo of repositories) {
+    if (typeof repo.url !== 'string' || repo.url.trim() === '') continue; // no id, matches nothing
+    // An id that does not normalize (a redacted or malformed URL, a scheme shape the §5.2 table
+    // does not know) has NO id: it matches nothing and is skipped. Both sides of the parity
+    // check (creation and claim) resolve the SAME stored bytes, so a skipped id is skipped
+    // identically on both sides — refusing here instead would turn a Run that pre-CP-3 created
+    // fine into a 500 whenever any profile exists, even on an unrelated repository.
+    let id: string;
+    try {
+      id = normalizeRepositoryId(repo.url);
+    } catch {
+      continue;
+    }
+    for (const profile of profiles) {
+      if (!profileClaims(profile, id)) continue;
+      // Overlapping patterns were refused at load (§5.2/§9), so an id can only ever match ONE
+      // profile; the first sighting names the refusal. The other ids are still inspected so a
+      // Run matching two DIFFERENT profiles reports the broader multiple-profiles refusal.
+      if (!matched.has(profile.name)) matched.set(profile.name, id);
+    }
+  }
+  if (matched.size === 0) return { outcome: 'none' };
+  if (matched.size > 1) {
+    const names = [...matched.keys()].sort();
+    return {
+      outcome: 'refused',
+      reason: 'multiple-profiles',
+      profiles: names,
+      message: `the Run's repositories match two different credential profiles (${names.map((n) => `'${n}'`).join(' and ')}); one Run, one identity`,
+    };
+  }
+  const [name] = matched.keys();
+  const profile = profiles.find((p) => p.name === name)!;
+  const owner = profile.owners.find((o) => o.toLowerCase() === ownerId.toLowerCase());
+  if (owner === undefined) {
+    const id = matched.get(name)!;
+    return {
+      outcome: 'refused',
+      reason: 'owner-not-allowed',
+      profiles: [name],
+      message: `credential profile '${name}' does not allow owner '${ownerId}' (repository ${id} is claimed by that profile)`,
+    };
+  }
+  return { outcome: 'profile', name };
 }
