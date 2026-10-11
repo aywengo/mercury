@@ -4,6 +4,7 @@ import {
   api, logout, currentUser, esc, fmtTime, fmtDuration, statusClass, goalLabel, goalGatesHtml, goalContractHtml,
   harnessLabel, repoLabel, shortId, pretty, sse, safeUrl,
 } from './app.js';
+import { mapStepEvents } from './steps.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -17,6 +18,8 @@ let stopSse = null;
 let user = null; // { ownerId, isAdmin } from /api/auth/me, or null -> bounce to login
 let agentCaps = null; // { [agentId]: { static: { toolEvents } } } from /api/agents, best-effort
 let toolNoteAdded = false; // one timeline note per page load, not one per renderRun() call
+let workflowStages = null; // planned steps from the stored snapshot, when the Run has a workflow
+const stepEvents = []; // agent-reported step.* events, for the planned-steps panel
 
 $('logout-btn').addEventListener('click', logout);
 
@@ -38,6 +41,10 @@ async function loadRun() {
   }
   renderRun(data.run, data.skills || [], data.goal, agentCaps);
   renderPreset(data.preset);
+  // Planned steps (issue #810): only workflow Runs have them. The stages come from the Run
+  // detail's stored snapshot; the reported state fills in as events load and stream in.
+  workflowStages = data.workflowStages || null;
+  renderWorkflowSteps();
   // Page through history until caught up (issue #54).
   //
   // The endpoint returns at most 1000 events per call, and `lastSequence` is the run's TRUE
@@ -257,7 +264,50 @@ function appendToolEventsNote() {
   tl.appendChild(row);
 }
 
+// The planned-steps panel (docs/crew/workflows.md section 3.1, issue #810). The label states
+// the advisory contract verbatim: these are agent-reported states, not Mercury enforcement.
+// A planned step with no reported event is "not reported" -- never "skipped" or "failed",
+// because Mercury does not know; the wording must not claim knowledge it lacks.
+const STEP_LABELS = {
+  'started': 'reported started',
+  'completed': 'reported completed',
+  'failed': 'reported failed',
+  'not-reported': 'not reported',
+};
+
+function renderWorkflowSteps() {
+  const section = $('workflow-steps-section');
+  if (!section) return;
+  if (!workflowStages || workflowStages.length === 0) {
+    section.classList.add('hidden');
+    return;
+  }
+  section.classList.remove('hidden');
+  const rows = mapStepEvents(workflowStages, stepEvents);
+  const host = $('workflow-steps');
+  host.innerHTML = '';
+  rows.forEach((row, i) => {
+    const el = document.createElement('div');
+    el.className = 'card';
+    const preset = row.preset ? `${esc(row.preset.id)}${row.preset.version ? ' v' + esc(row.preset.version) : ''}` : 'none';
+    el.innerHTML = `
+      <div class="row" style="margin-bottom:4px">
+        <strong>Step ${i + 1}: ${esc(row.id)}</strong>
+        <span class="badge ${row.status === 'failed' ? '' : 'muted'}">${esc(STEP_LABELS[row.status] || row.status)}</span>
+        <span class="spacer" style="flex:1"></span>
+        <span class="muted">preset: ${preset}</span>
+      </div>
+      <p style="margin:2px 0" class="muted">${esc(row.task || '')}</p>`;
+    host.appendChild(el);
+  });
+}
+
 function appendEvent(e) {
+  // Step events feed the planned-steps panel as well as the timeline.
+  if (e.type === 'step.started' || e.type === 'step.completed' || e.type === 'step.failed') {
+    stepEvents.push(e);
+    renderWorkflowSteps();
+  }
   const tl = $('timeline');
   const row = document.createElement('div');
   row.className = 'tl-row ' + e.type.replace(/[^a-z0-9-]/g, '-');

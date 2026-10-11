@@ -394,6 +394,11 @@ export function createRoutes(deps: RoutesDeps): Router {
       // identity a Run was created from -- never the template bytes, which stay in the
       // workspace -- or null for a Run without a workflow.
       workflow: deps.runService.getWorkflowIdentity(run.id),
+      // Sibling, same reason as `workflow` (#810): the planned steps from the STORED snapshot,
+      // so the dashboard's planned-steps panel can pair them with the agent-reported step
+      // events. Null for a Run without a workflow; read from run_workflows, never the live
+      // registry -- a template edited after creation must not rewrite this Run's panel.
+      workflowStages: deps.runService.getWorkflowStages(run.id),
       // Sibling rather than a field on `run` (#854): attribution with its own write path (the
       // creation transaction), read back next to the model explainability data it complements.
       selection: deps.runService.getSelection(run.id),
