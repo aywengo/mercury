@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { runNext, finishIssue, blockIssue, blockedAlready, type NextIo } from '../.agents/skills/nightly/next.ts';
+import { runNext, finishIssue, blockIssue, blockedAlready, proposeIssue, sourceKeyOf, type NextIo } from '../.agents/skills/nightly/next.ts';
 import type { GhIssue, LabelEvent } from '../.agents/skills/nightly/select.ts';
 
 const REPO = 'aywengo/mercury';
@@ -279,4 +279,106 @@ test('blocked exit: the body marker is written ONLY for issues the nightly ident
   const failingIo: NextIo = { ...failing.io, async patch() { throw new Error('network gone'); } };
   const out = await blockIssue(failingIo, { repo: REPO, issue: 20, reason: 'still blocked' });
   assert.equal(out.commented, true, 'the blocked exit survives a body-marker failure');
+});
+// ---- rung 4: the guarded propose exit (#881) ----
+
+/** An io for propose tests: a fixed issue-listing (state=all) plus recorded writes. `listStatus`
+ * fakes a broken search; `listPages` lets a test drive the page-cap path. */
+function proposeIo(existing: { number: number; title: string; body?: string | null }[] = [], opts: { listStatus?: number; listPages?: number } = {}) {
+  const calls: { method: string; path: string; body?: unknown }[] = [];
+  let page = 0;
+  const io: NextIo = {
+    async get(path) {
+      calls.push({ method: 'GET', path });
+      if (path.startsWith(`/repos/${REPO}/issues?state=all`)) {
+        if (opts.listStatus !== undefined) return { body: [], status: opts.listStatus };
+        page++;
+        if (opts.listPages !== undefined) {
+          return { body: Array.from({ length: 100 }, (_, i) => ({ number: 10_000 + i, title: `filler ${i}`, body: 'x' })), status: 200 };
+        }
+        return { body: existing, status: 200 };
+      }
+      return { body: null, status: 404 };
+    },
+    async post(path, body) {
+      calls.push({ method: 'POST', path, body });
+      const m = path.match(new RegExp(`^/repos/${REPO.replace('/', '\/')}/issues$`));
+      if (m) return { body: { number: 999 }, status: 201 };
+      return { body: {}, status: 201 };
+    },
+    async postLabel() { calls.push({ method: 'POST-LABEL', path: '(labels)' }); return true; },
+    async deleteLabel() { return true; },
+  };
+  return { io, calls };
+}
+
+const KEY = 'docs/crew/roadmap.md#8-phase-4';
+const TITLE = 'Crew Phase 4: per-run MCP foundation';
+
+test('propose: an open issue carrying the source key blocks creation and is reported (#881 ac1)', async () => {
+  const { io, calls } = proposeIo([{ number: 875, title: 'a differently-worded title', body: `stuff\n\n<!-- nightly-source: ${KEY} -->` }]);
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' });
+  assert.equal(out.created, false);
+  assert.equal(out.existing, 875);
+  assert.ok(!calls.some((c) => c.method === 'POST' && c.path.endsWith('/issues')), 'nothing was filed');
+});
+
+test('propose: a CLOSED issue with the key also blocks (a declined proposal is not re-proposed) (#881 ac2)', async () => {
+  const { io, calls } = proposeIo([{ number: 860, title: 'old title', body: `<!-- nightly-source: ${KEY} -->` }]);
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' });
+  assert.equal(out.created, false);
+  assert.equal(out.existing, 860);
+  assert.ok(!calls.some((c) => c.method === 'POST'));
+});
+
+test('propose: an exact-title match without a marker blocks (pre-fix drafts like #867) (#881 ac3)', async () => {
+  const { io, calls } = proposeIo([{ number: 867, title: ` ${TITLE} `, body: 'no marker here' }]);
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' });
+  assert.equal(out.created, false);
+  assert.equal(out.existing, 867);
+  assert.ok(!calls.some((c) => c.method === 'POST'));
+});
+
+test('propose: no match files the issue with the marker, then labels it nightly:proposed', async () => {
+  const { io, calls } = proposeIo([{ number: 1, title: 'unrelated', body: 'nope' }]);
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'the draft' });
+  assert.equal(out.created, true);
+  assert.equal(out.issue, 999);
+  const create = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'));
+  assert.ok(create, 'the issue was created');
+  const body = (create!.body as { body: string }).body;
+  assert.equal(sourceKeyOf(body), KEY, 'the filed body carries the source marker');
+  const label = calls.find((c) => c.method === 'POST-LABEL');
+  assert.ok(label, 'nightly:proposed is added');
+});
+
+test('propose: a failed search fails closed - nothing is filed (#881 ac4)', async () => {
+  const { io, calls } = proposeIo([], { listStatus: 502 });
+  await assert.rejects(
+    () => proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' }),
+    /dedupe search failed/,
+  );
+  assert.ok(!calls.some((c) => c.method === 'POST'));
+});
+
+test('propose: a search past the page cap fails closed, not "no match" (#881 ac4)', async () => {
+  const { io, calls } = proposeIo([], { listPages: 10 });
+  await assert.rejects(
+    () => proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' }),
+    /exceeded 10 pages/,
+  );
+  assert.ok(!calls.some((c) => c.method === 'POST'));
+});
+
+test('propose: empty source or title is rejected before any request', async () => {
+  const { io, calls } = proposeIo();
+  await assert.rejects(() => proposeIssue(io, { repo: REPO, source: '  ', title: TITLE, body: 'b' }), /non-empty --source/);
+  await assert.rejects(() => proposeIssue(io, { repo: REPO, source: KEY, title: '', body: 'b' }), /non-empty --title/);
+  assert.ok(!calls.some((c) => c.method === 'GET'), 'no search even started');
+});
+
+test('sourceKeyOf: extracts the key, tolerates absent bodies, ignores other markers', () => {
+  assert.equal(sourceKeyOf(`x\n<!-- nightly-source: docs/a.md#1-head -->\n`), 'docs/a.md#1-head');
+  assert.equal(sourceKeyOf(null), null);
+  assert.equal(sourceKeyOf('<!-- some-other-marker: x -->'), null);
 });

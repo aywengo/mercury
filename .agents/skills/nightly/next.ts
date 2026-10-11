@@ -32,6 +32,7 @@
  */
 
 import { basename } from 'node:path';
+import { readFileSync } from 'node:fs';
 
 import { runSelectorWith } from './select.ts';
 import { assertRepo, ghToken, ghGet, ghPost, ghPatch, FETCH_TIMEOUT_MS } from './shared.ts';
@@ -178,6 +179,83 @@ export async function blockedAlready(io: NextIo, opts: { repo: string; issue: nu
   return labels.includes(L_BLOCKED);
 }
 
+// ---- Rung 4: the guarded filing exit (#881) ----
+
+/** The machine-readable provenance marker every rung-4 draft carries (§6/#881): `<!-- nightly-source: <key> -->`. */
+export function sourceMarker(source: string): string {
+  return `<!-- nightly-source: ${source.trim()} -->`;
+}
+
+/** The stable source key extracted from an issue body, or null when the body has no marker. */
+export function sourceKeyOf(body: string | null | undefined): string | null {
+  const m = typeof body === 'string' ? body.match(/<!-- nightly-source: ([^\s>]+) -->/) : null;
+  return m ? m[1] : null;
+}
+
+/** The per-page search bound (#881 acceptance 4): a response that claims more pages than this
+ * fails closed - an unbounded backlog must never turn into "search found nothing, file away". */
+export const PROPOSE_SEARCH_MAX_PAGES = 10;
+
+/** Rung 4's only filing exit: dedupe by source key (open AND closed, all labels) plus an
+ * exact-title match (a pre-marker draft such as #867 must still block re-proposal), then file.
+ * Fail closed: a failed or over-cap search throws and NOTHING is created. */
+export async function proposeIssue(io: NextIo, opts: { repo: string; source: string; title: string; body: string }): Promise<{ created: boolean; existing?: number; issue?: number }> {
+  assertRepo(opts.repo);
+  const source = opts.source.trim();
+  if (source === '') throw new Error('propose needs a non-empty --source key (the docs path + heading anchor)');
+  const title = opts.title.trim();
+  if (title === '') throw new Error('propose needs a non-empty --title');
+  const titleEq = (a: string): boolean => a.trim() === title;
+
+  const found = await searchIssues(io, opts.repo, (n, body) => sourceKeyOf(body) === source || titleEq(n));
+  if (found !== null) {
+    // The search itself succeeded: a match (open or closed, any labels) blocks creation.
+    return { created: false, existing: found };
+  }
+
+  const marker = sourceMarker(source);
+  const fullBody = `${opts.body.replace(/\s+$/, '')}\n\n${marker}`;
+  const res = await io.post(`/repos/${opts.repo}/issues`, { title, body: fullBody });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`propose failed: POST /issues returned ${res.status} - nothing was filed`);
+  }
+  const created = (res.body as { number?: number } | null)?.number;
+  if (!Number.isInteger(created) || (created as number) <= 0) {
+    throw new Error(`propose failed: the issue-create response carried no issue number - nothing was filed`);
+  }
+  // Label the draft AFTER the create so a crash between the two writes leaves a visible
+  // (unlabeled) draft a human can relabel, never a claimed-looking nothing. The label add is
+  // idempotent (already-present -> false), so a rerun of the exit is safe.
+  const labeled = await io.postLabel(`/repos/${opts.repo}/issues/${created}/labels`, { labels: ['nightly:proposed'] });
+  if (!labeled) {
+    // Already labeled means a retry raced us; that is fine. A 422-validation failure would have
+    // thrown inside postLabel, same as the claim path.
+  }
+  return { created: true, issue: created };
+}
+
+/** List issues (state=all => open AND closed, all labels) page by page, matching with `match`:
+ * title + body. Returns the first matching issue NUMBER, null when a complete scan found none,
+ * and throws when the scan cannot be completed (fail closed, #881 acceptance 4). */
+async function searchIssues(io: NextIo, repo: string, match: (title: string, body: string | null) => boolean): Promise<number | null> {
+  for (let page = 1; page <= PROPOSE_SEARCH_MAX_PAGES; page++) {
+    const res = await io.get(`/repos/${repo}/issues?state=all&per_page=100&page=${page}`);
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`propose dedupe search failed: GET issues page ${page} returned ${res.status} - filing is refused`);
+    }
+    const items = (Array.isArray(res.body) ? res.body : []) as { number?: number; title?: string; body?: string | null; pull_request?: unknown }[];
+    if (items.length === 0) return null; // a complete scan, no match
+    for (const it of items) {
+      if (it.pull_request !== undefined) continue; // PRs are not proposal issues
+      if (!Number.isInteger(it.number)) continue;
+      if (match(it.title ?? '', it.body ?? null)) return it.number as number;
+    }
+    // More pages only exist when a full page came back (GitHub pagination contract).
+    if (items.length < 100) return null;
+  }
+  throw new Error(`propose dedupe search exceeded ${PROPOSE_SEARCH_MAX_PAGES} pages - filing is refused (fail closed, #881 acceptance 4)`);
+}
+
 // ---- GitHub I/O (thin, bounded, same shape as select.ts/e2e.ts) ----
 
 async function ghPostLabel(path: string, body: unknown, token: string): Promise<boolean> {
@@ -252,7 +330,17 @@ if (isMain) {
       if (!repo || !Number.isInteger(issue) || issue <= 0) throw new Error('usage: next.ts blocked --repo <owner/name> --issue <n> --reason "<question>"');
       return await blockIssue(realIo(process.env), { repo, issue, reason });
     }
-    throw new Error('usage: next.ts run|finish|blocked --repo <owner/name> [--dry-run] [--issue <n>] [--reason "..."]');
+    if (cmd === 'propose') {
+      const source = flag('--source') ?? '';
+      const title = flag('--title') ?? '';
+      const bodyFile = flag('--body-file') ?? '';
+      if (!repo || source === '' || title === '' || bodyFile === '') {
+        throw new Error('usage: next.ts propose --repo <owner/name> --source <key> --title <t> --body-file <p>');
+      }
+      const body = readFileSync(bodyFile, 'utf8');
+      return await proposeIssue(realIo(process.env), { repo, source, title, body });
+    }
+    throw new Error('usage: next.ts run|finish|blocked|propose --repo <owner/name> [--dry-run] [--issue <n>] [--source <key>] [--title <t>] [--body-file <p>] [--reason "..."]');
   })();
   work
     .then((out) => { process.stdout.write(JSON.stringify(out) + '\n'); })
