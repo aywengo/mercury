@@ -369,6 +369,16 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE runs ADD COLUMN model TEXT;
   `,
+  // v14: the credential profile a Run resolved to at creation (CP-3, issue #807, design §5.4).
+  //
+  // Nullable, and null is a real answer, not a gap: "no profile matched" is every Run on a host
+  // without a profile file, and rows written before this column existed are NULL in exactly the
+  // same way. The claim-time parity check (worker.ts) compares a fresh resolution against this
+  // stored name, so a Run is never driven under an identity different from the one it was
+  // created with.
+  `
+  ALTER TABLE runs ADD COLUMN credential_profile TEXT;
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;
