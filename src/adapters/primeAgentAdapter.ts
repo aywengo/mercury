@@ -138,6 +138,8 @@ export class PrimeAgentAdapter implements AgentAdapter {
       roleInstruction: 'prompt-reference',
       sandbox: true,
       mcp: 'none',
+      // Measured: buildPrompt() injects context.workflowPlan into the RPC payload (issue #809).
+      workflowPlan: true,
       // RPC mode carries tool callbacks, and the shared translator maps them to tool.started /
       // tool.completed / tool.failed (eventTranslation.ts). Observed on real Runs, not inferred:
       // `run_933c68e4684a498d` recorded 47 events including tool calls. The contrast with Hermes
@@ -588,6 +590,18 @@ function writeContextFile(workspacePath: string, context: RunContext): void {
         instructionPath: context.preset.instructionPath,
       },
     } : {}),
+    // Advisory workflow identity (docs/crew/workflows.md section 5, issue #809): id, version,
+    // hash and mode, so the agent sees which template bytes the plan was rendered from.
+    // Omitted when the Run has no workflow, keeping the file byte-identical otherwise.
+    ...(context.workflow ? {
+      workflow: {
+        id: context.workflow.id,
+        version: context.workflow.version,
+        mode: context.workflow.mode,
+        contentHash: context.workflow.contentHash,
+        stages: context.workflow.stages,
+      },
+    } : {}),
   }, null, 2));
 }
 
@@ -602,6 +616,18 @@ function buildPrompt(context: RunContext): string {
         `${context.preset.instructionPath} — read them before starting and follow them.`,
       ].join('\n')
     : '';
+  // Advisory workflow plan (docs/crew/workflows.md section 3.1, issue #809): the worker's
+  // deterministic render, framed with the advisory label. Omitted when the Run was not
+  // created from a template, so workflow-less prompts stay byte-identical.
+  const workflowBlock = context.workflowPlan
+    ? [
+        '',
+        'This Run carries an ADVISORY workflow plan (mode: advisory). Mercury does not enforce',
+        'its steps — they are guidance you report against with step events. The plan:',
+        '',
+        context.workflowPlan,
+      ].join('\n')
+    : '';
   return [
     'You are Mercury, an autonomous coding agent. Execute the task below inside this workspace.',
     '',
@@ -613,6 +639,7 @@ function buildPrompt(context: RunContext): string {
     `Work in this workspace (${workspace.path}). Make focused commits with clear messages as you make progress.`,
     'When the task is complete, reply with a concise summary of what you changed and why.',
     presetLine,
+    workflowBlock,
   ].filter((part) => part !== '').join('\n');
 }
 

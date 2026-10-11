@@ -41,6 +41,10 @@ export class FakeAgentAdapter implements AgentAdapter {
       perRunModel: true,
       sandbox: true,
       mcp: 'none',
+      // The double exercises workflow Runs end to end (issue #809 tests render and pass the
+      // plan), so every preset/workflow mechanism "works" here too -- declared rather than
+      // absent so the plan-channel gate sees an answer, not an omission.
+      workflowPlan: true,
     },
   };
   private cancelled = new Set<string>();
