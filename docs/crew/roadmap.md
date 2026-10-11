@@ -454,7 +454,7 @@ is optional if normal Git pull requests already provide sufficient workflow.
 ## 12. Phase 8 — advisory Workflow Templates
 
 **Status: complete (advisory)** — W-1 #808 (schema and registry, PR #838), W-2 #809 (one advisory
-Run from a template, PR #842), W-3 #810 (API and dashboard planned-steps view, PR pending review).
+Run from a template, PR #842), W-3 #810 (API and dashboard planned-steps view, PR #934).
 
 Estimate: **2–3 days**. Depends on Phase 3.
 
