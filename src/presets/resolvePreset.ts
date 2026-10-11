@@ -191,7 +191,7 @@ function resolveAgent(
  * available-skill list -- inputs this pure function does not have -- so the result carries an
  * `autoSelect` flag and RunService runs the selector.
  */
-function resolveSkillIds(
+export function resolveSkillIds(
   manifest: RolePresetManifest,
   caller: PresetCallerInput,
 ): { ids: string[]; autoSelect: boolean; cap: number } {

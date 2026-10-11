@@ -16,6 +16,8 @@ import type {
   AgentCapabilitySummary, AgentEvent, AgentExit, AgentHandle, AgentInput, ErrorKind, Run, RunContext, ResolvedSkill,
 } from '../domain/types.ts';
 import type { ResolvedRolePreset } from '../presets/types.ts';
+import type { ResolvedWorkflow as ResolvedWorkflowSnapshot } from '../runs/workflowStore.ts';
+import { renderPlan, isTruncated } from '../workflows/renderPlan.ts';
 import type { EventStore } from '../events/eventStore.ts';
 import type { Logger } from '../logger.ts';
 import { RunQueue, LEASE_EXPIRED_ERROR } from '../queue/runQueue.ts';
@@ -33,6 +35,7 @@ import type { KnowledgeBounds } from '../knowledge/validation.ts';
 import type { ContextKnowledgeBlock } from '../knowledge/types.ts';
 import type { Note } from '../knowledge/types.ts';
 import { tx } from '../db/database.ts';
+import { resolveProfile, type CredentialProfiles } from '../host/credentials-profiles.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { WorkspaceManager } from '../workspace/workspaceManager.ts';
 
@@ -129,6 +132,13 @@ export interface WorkerDeps {
   };
   /** Where harvested notes are made durable, in the same transaction that completes the Run. */
   knowledgeOutbox?: OutboxStore;
+  /**
+   * Credential profile loader (CP-3, issue #807). Optional: absent means profiles are not wired
+   * and the claim-time parity check never touches the filesystem. A function, not a value, so
+   * every claim re-reads the file (§5.4 — the file may have changed since the Run was created,
+   * and the re-check exists to catch exactly that).
+   */
+  credentialProfiles?: () => CredentialProfiles;
 }
 
 export class Worker {
@@ -324,6 +334,9 @@ export class Worker {
     // process running and a run that threw on a state transition unwound past any cleanup,
     // leaving a live agent writing into a workspace nobody was watching.
     let handle: AgentHandle | null = null;
+    // The rendered advisory plan (issue #809), captured before the prompt is assembled. Null
+    // when the Run was not created from a template, so the prompt stays byte-identical.
+    let renderedWorkflowPlan: string | null = null;
 
     try {
       // notAfter claim-time refusal (#731): a Run whose absolute deadline passed while it sat
@@ -333,6 +346,38 @@ export class Worker {
       // method's catch, whose bookkeeping handles the still-QUEUED case (it takes the claim
       // step before the terminal transition) and whose finally releases the lease, so a refusal
       // that cannot record itself still ends with the Run terminal and the lease released.
+      // Claim-time credential profile parity (CP-3, issue #807, design §5.4): the file may have
+      // changed since the Run was created. Re-resolving against the CURRENT file and comparing
+      // with the stored name is what guarantees the Run is never driven under a different
+      // identity — not under another profile, and not under "no profile" when it was created
+      // with one. A load failure is an error, never a silent "no profile" (§9).
+      //
+      // Placed INSIDE the try like the notAfter refusal below: a tx() failure lands in this
+      // method's catch, whose bookkeeping takes the claim step, records the failure and
+      // terminalizes the Run, and whose finally releases the lease. No auto-retry: retrying
+      // re-resolves through runService.retry, which refuses the same mismatch.
+      if (this.deps.credentialProfiles) {
+        const parity = this.checkCredentialProfileParity(current);
+        if (!parity.ok) {
+          const message = parity.message;
+          log.warn({ created: parity.created, now: parity.now }, 'credential profile changed since creation; refusing to start');
+          tx(this.deps.db, () => {
+            this.deps.runs.transition(run.id, 'STARTING', { leaseOwner: this.deps.workerId });
+            this.deps.runs.setError(run.id, message, 'infrastructure');
+            this.deps.events.append(run.id, 'run.credential_profile_changed', {
+              runId: run.id,
+              createdAtResolution: parity.created,
+              claimTimeResolution: parity.now,
+            });
+            this.deps.events.append(run.id, 'error', { message });
+            this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
+            this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+          });
+          // NO auto-retry: the file state that caused the refusal would produce the same
+          // mismatch on the retry's own re-resolve (RunService.retry refuses it).
+          return;
+        }
+      }
       if (run.constraints.notAfter !== undefined) {
         const notAfterMs = Date.parse(run.constraints.notAfter);
         if (Number.isFinite(notAfterMs) && Date.now() >= notAfterMs) {
@@ -411,6 +456,34 @@ export class Worker {
           byteCount: materialized.byteCount,
           instructionHash: createHash('sha256').update(presetSnapshot.instruction).digest('hex'),
         });
+      }
+
+      // Advisory workflow materialization (docs/crew/workflows.md section 5, issue #809): from
+      // the stored snapshot bytes, never a live registry read -- the snapshot is the source of
+      // truth and a template or preset edit after creation must not change what this Run
+      // renders. The rendered plan is prepended to the task prompt; steps stay agent-reported.
+      const workflowSnapshot = this.deps.runService.getWorkflow(run.id);
+      let workflowContext: RunContext['workflow'];
+      if (workflowSnapshot) {
+        const materialized = writeWorkflow(workspace.path, workflowSnapshot);
+        workflowContext = materialized.context;
+        // Stage guidance comes from the SNAPSHOTTED stage preset rows (section 3.1.1 rule 6),
+        // not from the live registry -- the same rule as the template itself.
+        const stageInstructions: Record<number, string | undefined> = {};
+        for (const stage of this.deps.runService.getWorkflowStagePresetSnapshots(run.id)) {
+          stageInstructions[stage.stageIndex] = stage.snapshot.instruction;
+        }
+        const plan = renderPlan(workflowSnapshot, run.agent, stageInstructions);
+        this.deps.events.append(run.id, 'workflow.materialized', {
+          workflowId: workflowSnapshot.id,
+          version: workflowSnapshot.version,
+          fileCount: Object.keys(workflowSnapshot.files).length,
+          byteCount: materialized.byteCount,
+          planHash: createHash('sha256').update(plan).digest('hex'),
+          stages: workflowSnapshot.stages.length,
+          truncated: isTruncated(plan),
+        });
+        renderedWorkflowPlan = plan;
       }
 
       // Exclude every generated path from the git view (section 9.4), for EVERY Run, not only pack
@@ -503,6 +576,8 @@ export class Worker {
         goal: this.deps.goals?.get(run.id) ?? undefined,
         ...(knowledgePointer ? { knowledge: knowledgePointer } : {}),
         ...(presetContext ? { preset: presetContext } : {}),
+        ...(workflowContext ? { workflow: workflowContext } : {}),
+        ...(renderedWorkflowPlan ? { workflowPlan: renderedWorkflowPlan } : {}),
       };
 
       // Resume wiring (roadmap p11): a retry run resumes the parent's agent
@@ -1274,6 +1349,59 @@ export class Worker {
     await this.maybeAutoRetry(run, errorKind === 'infrastructure' ? 'infrastructure' : 'agent');
   }
 
+  /**
+   * Claim-time credential profile parity (CP-3, issue #807, design §5.4): resolve the Run's
+   * repositories against the CURRENT profile file and compare with the name stored at creation.
+   *
+   * The resolution is the pure §5.3 function over the SAME stored (redacted) repository objects
+   * creation resolved, so the two readings can only differ when the file did. A refused
+   * resolution or an unreadable/invalid file fails the Run too — an error is never read as
+   * "no profile" (§9).
+   */
+  private checkCredentialProfileParity(run: Run): { ok: true } | { ok: false; message: string; created: string | null; now: string } {
+    const describe = (r: ReturnType<typeof resolveProfile>): string =>
+      r.outcome === 'profile' ? r.name : r.outcome === 'none' ? 'none' : `refused (${r.reason})`;
+    const createdName = run.credentialProfile ?? null;
+    try {
+      const { profiles } = this.deps.credentialProfiles!();
+      const resolution = resolveProfile(profiles, run.ownerId, [run.repository, ...(run.repositories ?? [])]);
+      if (resolution.outcome === 'refused') {
+        return {
+          ok: false,
+          message: `credential profile changed since creation (created under ${createdName ? `'${createdName}'` : 'no profile'}, now refused: ${resolution.message})`,
+          created: createdName,
+          now: describe(resolution),
+        };
+      }
+      const nowName = resolution.outcome === 'profile' ? resolution.name : null;
+      if (nowName !== createdName) {
+        return {
+          ok: false,
+          message: `credential profile changed since creation (created under ${createdName ? `'${createdName}'` : 'no profile'}, now ${nowName ? `'${nowName}'` : 'no profile'})`,
+          created: createdName,
+          now: describe(resolution),
+        };
+      }
+      return { ok: true };
+    } catch (err) {
+      // Unreadable or malformed file at claim time: an error, never "no profile" (§9). The
+      // detail (absolute path, mode, schema field) stays in the SERVER log; the persisted
+      // run.error and events carry only the generic reason, because a Run owner can read
+      // run.error and must not learn host configuration from it (Copilot review round 1 on
+      // #841).
+      this.deps.logger.warn(
+        { runId: run.id, error: String(err instanceof Error ? err.message : err) },
+        'credential profile file could not be read at claim time',
+      );
+      return {
+        ok: false,
+        message: 'credential profile changed since creation (the profile file could not be read or validated)',
+        created: createdName,
+        now: 'unreadable',
+      };
+    }
+  }
+
   private async maybeAutoRetry(run: Run, kind: 'infrastructure' | 'agent'): Promise<void> {
     if (kind !== 'infrastructure') return; // agent/task failures: manual retry only
     // Honor the per-run constraint (set at create time, defaulting to the global
@@ -1525,6 +1653,66 @@ export function writePreset(
     instructionPath,
     instruction: snapshot.instruction,
     ...(snapshot.effectiveAgent.model !== undefined ? { model: snapshot.effectiveAgent.model } : {}),
+    byteCount,
+  };
+}
+
+/**
+ * Materialize a Run's advisory Workflow Template from its STORED snapshot
+ * (docs/crew/workflows.md section 5, issue #809):
+ *
+ *   workspace/.mercury/workflow/workflow.json     (the verbatim template bytes)
+ *   workspace/.mercury/workflow/<relative files>  (every template file)
+ *   workspace/.mercury/workflow/PROVENANCE.json
+ *
+ * Exported for tests: the write side of the snapshot contract, next to writeSkills and
+ * writePreset. Every destination is contained (issue #58's write-side rule) and the snapshot's
+ * files map is the only input -- the live registry is never consulted here, because a template
+ * edit between creation and execution must not change the plan a queued Run renders.
+ *
+ * The return value carries the identity block the RunContext gets and each stage's guidance
+ * text as read from the workspace snapshot rows the caller resolved (kept here so the
+ * instruction extraction lives with the materialization).
+ */
+export function writeWorkflow(
+  workspacePath: string,
+  snapshot: ResolvedWorkflowSnapshot,
+): {
+  context: NonNullable<RunContext['workflow']>;
+  byteCount: number;
+} {
+  const workflowRoot = join(workspacePath, '.mercury', 'workflow');
+  let byteCount = 0;
+  for (const [rel, content] of Object.entries(snapshot.files)) {
+    // Contained on both halves, like writeSkills and writePreset. Snapshot keys are
+    // workflow-relative POSIX paths produced by the registry, but this is the write side and
+    // must not depend on that.
+    const dest = resolveContained(workflowRoot, rel);
+    mkdirSync(join(dest, '..'), { recursive: true });
+    writeFileSync(dest, content);
+    byteCount += Buffer.byteLength(content, 'utf8');
+  }
+  const provenance = {
+    workflowId: snapshot.id,
+    version: snapshot.version,
+    mode: snapshot.mode,
+    trust: snapshot.trust,
+    contentHash: snapshot.contentHash,
+    source: snapshot.source,
+    stages: snapshot.stages.length,
+  };
+  const provDest = resolveContained(workflowRoot, 'PROVENANCE.json');
+  writeFileSync(provDest, JSON.stringify(provenance, null, 2));
+  byteCount += Buffer.byteLength(JSON.stringify(provenance, null, 2), 'utf8');
+  return {
+    context: {
+      id: snapshot.id,
+      version: snapshot.version,
+      mode: snapshot.mode,
+      trust: snapshot.trust,
+      contentHash: snapshot.contentHash,
+      stages: snapshot.stages.length,
+    },
     byteCount,
   };
 }

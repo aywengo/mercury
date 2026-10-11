@@ -24,10 +24,12 @@ export interface CreateFlags {
   goal?: string;
   /** Absolute deadline (ISO-8601), counts queue time (#731). */
   notAfter?: string;
+  /** Advisory Workflow Template id (docs/crew/workflows.md §3.1, issue #809). */
+  workflow?: string;
 }
 
 /** Flags that describe request content, and therefore cannot accompany --file. */
-const REQUEST_FLAGS = ['--task', '--repo', '--agent', '--skills', '--goal', '--not-after'] as const;
+const REQUEST_FLAGS = ['--task', '--repo', '--agent', '--skills', '--goal', '--not-after', '--workflow'] as const;
 
 export interface ReadContext {
   stdinIsTty: boolean;
@@ -53,6 +55,7 @@ export function buildCreateRequest(flags: CreateFlags, read: ReadContext): Creat
     '--skills': 'skills',
     '--goal': 'goal',
     '--not-after': 'notAfter',
+    '--workflow': 'workflow',
   };
   const supplied = REQUEST_FLAGS.filter((name) => flags[REQUEST_FLAG_KEYS[name]] !== undefined);
 
@@ -97,6 +100,10 @@ export function buildCreateRequest(flags: CreateFlags, read: ReadContext): Creat
       throw new UsageError(`--not-after is not an ISO-8601 timestamp with an explicit UTC offset (Z or ±hh:mm): ${flags.notAfter}`);
     }
     request.constraints = { ...request.constraints, notAfter: flags.notAfter };
+  }
+  if (flags.workflow !== undefined) {
+    if (flags.workflow.trim() === '') throw new UsageError('--workflow got an empty id');
+    request.workflow = { id: flags.workflow.trim() };
   }
   if (flags.goal !== undefined) {
     try {

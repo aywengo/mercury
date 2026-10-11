@@ -148,6 +148,22 @@ Running a task with a role is `POST /api/runs` with a `preset: { id, version? }`
 block ([role-presets.md](crew/role-presets.md) section 9); omitting the block
 keeps the Run payload exactly as it was before presets existed.
 
+An advisory workflow Run is `POST /api/runs` with a `workflow: { id, version? }`
+block ([workflows.md](crew/workflows.md) section 3.1). The block is a closed shape:
+any key other than `id` and `version` is a `400`, so a misspelled `version` can never
+drop the pin silently. `workflow` and `preset` are mutually exclusive. Stage presets
+contribute only their *required* agent, model, sandbox demand, ceilings and required
+skills (section 3.1.1); capabilities are checked once, against the agent that performs
+every step. Refusals carry stable codes, including `WORKFLOW_NOT_FOUND`,
+`WORKFLOW_STAGE_PRESET_MISSING`, `WORKFLOW_STAGE_AGENT_CONFLICT`,
+`WORKFLOW_STAGE_MODEL_CONFLICT`, `WORKFLOW_STAGE_RESOURCE_CONFLICT` and
+`WORKFLOW_STAGE_SANDBOX_CONFLICT`.
+
+`GET /api/runs/:runId` returns a `workflow` sibling for every Run: the identity
+`{ id, version, contentHash, mode, stages }` read from the Run's snapshot, or `null`
+for a Run created without a workflow. Workflow stage snapshots are not preset Runs:
+`mercury_runs_by_preset` counts Run-wide presets only.
+
 ## Knowledge endpoints
 
 These endpoints are served only by processes that have `knowledgeStatus` or `knowledgeNotes`
@@ -306,6 +322,33 @@ agent to start or finish.
 Omitting `agent` selects `MERCURY_DEFAULT_AGENT` (default `fake`). Send an
 explicit id such as `"agent": "primeagent"` for a real coding Run. `GET
 /api/agents` returns `{ "agents": ["fake", "primeagent", ...], "defaultAgent": "fake" }`.
+
+### Credential profile
+
+`credentialProfile` (optional, nullable, read-only) names the credential profile the Run
+resolved to at creation, or `null` when no profile matched — which is every Run on a host
+without a profile file ([credential-profiles-design.md](credential-profiles-design.md) §5.3,
+§5.4, CP-3 #807). It is a NAME only: profile contents (env values, token names, git identity,
+file paths) never appear on the Run, its row, or its events.
+
+- Resolution: the profile file is read per decision — at creation, at claim, and at retry —
+  so an operator edit takes effect without a restart.
+- Refusal at creation: a Run whose repository is claimed by a profile that does not list the
+  caller's owner answers `403` naming the profile and the reason; repositories matching two
+  different profiles answer `403` the same way. The body never carries profile contents, env
+  names, or file paths.
+- Claim/resume parity: if the re-resolved result at claim time differs from the stored name
+  (profile removed, owner dropped, repository re-bound, or the file unreadable), the Run goes
+  terminal `FAILED` with `credential profile changed since creation` — it is never driven
+  under a different identity. The persisted reason is generic: a load failure's diagnostic
+  (absolute path, mode, schema field) stays in the server log, never in `run.error` or events.
+- Resolution reads the REDACTED repository references that are stored on the Run, so creation
+  and the claim-time re-read always resolve the same bytes. A repository reference whose
+  redacted form is not a valid `host/owner/name` id has no id on either side and consistently
+  matches no profile. Owner-wide patterns (`host/owner/*`) in a profile match exact
+  repository ids under that owner.
+- Retry parity: retrying a Run after its profile changed refuses the retry with the same
+  reason; create a new Run instead of resuming under a changed identity.
 
 ### Per-Run model
 

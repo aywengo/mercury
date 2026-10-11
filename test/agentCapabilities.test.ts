@@ -331,11 +331,12 @@ test('a declarative adapter with no goalSupport declares NO goals, and fails clo
   ] as [string, AgentAdapter][]) {
     // capabilities: undefined is explicit here. The shared fixtures now carry a capabilities block so
     // they model a realistic shipped config, and this test is about the ABSENT case.
-    // RPC is the one deliberate exception (#721): buildPrompt() renders the preset line
-    // unconditionally, so an undeclared RPC config still advertises the roleInstruction the
-    // adapter's own behavior guarantees — one key, never fabricated others.
+    // RPC is the one deliberate exception (#721, #809): buildPrompt() renders the preset line
+    // AND the advisory workflow-plan block unconditionally, so an undeclared RPC config still
+    // advertises the two channels the adapter's own behavior guarantees — two keys, never
+    // fabricated others.
     const expected = label === 'rpc'
-      ? { static: { roleInstruction: 'prompt-reference' } }
+      ? { static: { roleInstruction: 'prompt-reference', workflowPlan: true } }
       : {};
     assert.deepEqual(adapter.capabilities, expected, `${label}: a config with no goalSupport must declare nothing`);
     assert.deepEqual(declarationViolations(label, adapter), []);
