@@ -8,6 +8,20 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Per-Run persona channels (Phase 0 of docs/crew/agent-templates.md, #911).** A Run can carry a
+  `persona` block with two structured channels: `append` (text the adapter renders through its own
+  system-prompt surface — PrimeAgent appends `--append-system-prompt`, never replaces) and
+  workspace `files` (Hermes writes `SOUL.md`, which it auto-injects). The block is validated
+  fail-closed at creation against the agent's static capabilities with the same
+  unknown/undeclared/false wording `perRunModel` uses, snapshotted on the Run row (v18
+  `persona_json`), materialized/rendered at claim time, and recorded through
+  `run.persona_resolved` / `persona.materialized` events. Hermes declares
+  `personaFiles: ['SOUL.md']`; every other shipped adapter leaves both persona fields absent
+  (unverified, refused). A Run without a persona behaves byte-identically to before. The Agent
+  Template manifest (#917) and the real-Run persona proof remain open.
+
 ## [0.2.1] - 2026-10-01
 
 Patch release carrying the accumulated fixes from the first two weeks of the nightly self-development

@@ -80,6 +80,13 @@ export const CLAUDE_MD_FILE = 'CLAUDE.md';
  */
 export const CONTEXT_FILE = '.mercury-context.json';
 /**
+ * The Hermes persona file (docs/crew/agent-templates.md §3, #911): Hermes auto-injects a
+ * workspace `SOUL.md` (measured: `--ignore-rules` help text documents the injection). Generated
+ * per Run when a persona is requested, so it must be excluded from git exactly like the other
+ * adapter-written files -- a Run's persona has no business in a pull request.
+ */
+export const SOUL_MD_FILE = 'SOUL.md';
+/**
  * Every path Mercury generates into a workspace.
  *
  * Both harness files are listed even though each is written by exactly one adapter, because the
@@ -88,7 +95,7 @@ export const CONTEXT_FILE = '.mercury-context.json';
  * pull request -- the outcome section 9.4 exists to prevent, and K1's reason for refusing a second
  * copy of knowledge in git.
  */
-export const GENERATED_PATHS = ['.mercury/', `${SKILL_DIR}/`, AGENTS_MD_FILE, CLAUDE_MD_FILE, CONTEXT_FILE];
+export const GENERATED_PATHS = ['.mercury/', `${SKILL_DIR}/`, AGENTS_MD_FILE, CLAUDE_MD_FILE, SOUL_MD_FILE, CONTEXT_FILE];
 
 const SPECIFICITY: Record<string, number> = { path: 0, repo: 1, project: 2, agent: 3 };
 

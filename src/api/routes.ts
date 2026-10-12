@@ -337,6 +337,10 @@ export function createRoutes(deps: RoutesDeps): Router {
         // Forwarded unresolved for the same reason as `preset` (#823): RunService owns the shape
         // validation and the fail-closed capability check, so HTTP and in-process callers get
         // identical rules from one implementation.
+        // Forwarded unresolved, same seam as `model` (#823) and `preset`: RunService owns the
+        // persona shape validation and the fail-closed capability check, so HTTP and in-process
+        // callers get identical rules from one implementation.
+        persona: body.persona,
         model: body.model,
         // Forwarded unresolved, same seam as `model` (#854): RunService owns the strict schema
         // validation, so HTTP and in-process callers get identical rules from one implementation.
@@ -397,6 +401,9 @@ export function createRoutes(deps: RoutesDeps): Router {
       // Sibling rather than a field on `run` (#854): attribution with its own write path (the
       // creation transaction), read back next to the model explainability data it complements.
       selection: deps.runService.getSelection(run.id),
+      // The persona request as stored (Phase 0, #911) — null for a persona-less Run, never
+      // omitted, so clients can read it as a settled field.
+      persona: run.persona ?? null,
     });
   });
 

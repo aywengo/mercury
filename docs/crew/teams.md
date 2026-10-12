@@ -311,7 +311,12 @@ Crew tables start after the current last migration, per `README.md` §6.
    instead of a fallback set of Mercury ids the harness cannot resolve. See §3.
 1. **Phase 0 — per-Run capabilities** (`appendSystemPrompt`, `workspaceFiles`,
    `model`) on at least PrimeAgent and Hermes, proven by a real Run whose output
-   depends on the persona. Everything else is inert without this.
+   depends on the persona. **Channels shipped (#911):** a Run carries
+   `persona.append` (PrimeAgent: `--append-system-prompt`, measured argv flag)
+   and workspace persona files (Hermes: `SOUL.md`, measured auto-injection);
+   both are snapshotted on the Run and refused at creation when the adapter does
+   not declare the channel. Still open: the real-Run proof the phase gates on,
+   and the template manifest (#917) that would make personas distributable.
 2. **Phase 1 — capability advertisement** on `/api/agents`, plus a version or
    capability field on `/healthz`. Done: `/api/agents` returns a `capabilities`
    map carrying the static vocabulary beyond `goals` (#508, in

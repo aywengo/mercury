@@ -4,7 +4,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isTerminal, STUCK_CANDIDATE_STATUSES } from '../domain/stateMachine.ts';
 import { harnessMayRevise, translateHarnessGoal, type HarnessGoalReport } from '../domain/goalEvents.ts';
@@ -563,6 +563,18 @@ export class Worker {
         this.deps.events.append(run.id, 'sandbox.enabled', { policy: sandbox.describe(run) });
       }
 
+      // Persona materialization (docs/crew/agent-templates.md §4 Phase 0, issue #911). The file
+      // channel writes the SNAPSHOT bytes into the workspace before the agent starts; the append
+      // channel is rendered by the adapter itself. Both ride the Run row, never a live read.
+      let personaContext: RunContext['persona'];
+      if (run.persona && (run.persona.append !== undefined || (run.persona.files?.length ?? 0) > 0)) {
+        personaContext = writePersonaFiles(workspace.path, run.persona, log);
+        this.deps.events.append(run.id, 'persona.materialized', {
+          append: personaContext.append !== undefined,
+          files: personaContext.files?.map((f) => f.path) ?? [],
+        });
+      }
+
       const context: RunContext = {
         run,
         ...(run.model ? { model: run.model } : {}),
@@ -578,6 +590,7 @@ export class Worker {
         ...(presetContext ? { preset: presetContext } : {}),
         ...(workflowContext ? { workflow: workflowContext } : {}),
         ...(renderedWorkflowPlan ? { workflowPlan: renderedWorkflowPlan } : {}),
+        ...(personaContext ? { persona: personaContext } : {}),
       };
 
       // Resume wiring (roadmap p11): a retry run resumes the parent's agent
@@ -1654,6 +1667,51 @@ export function writePreset(
     instruction: snapshot.instruction,
     ...(snapshot.effectiveAgent.model !== undefined ? { model: snapshot.effectiveAgent.model } : {}),
     byteCount,
+  };
+}
+
+/**
+ * Materialize a Run's per-Run persona into the workspace (docs/crew/agent-templates.md §4
+ * Phase 0, issue #911). Exported for tests, like writePreset.
+ *
+ * Only the FILE channel writes here: files land at their declared workspace-relative paths via
+ * the same containment traversal writePreset uses, and a path that already exists is left alone
+ * and recorded as skipped rather than overwritten -- §9.4's tracked-file rule, applied to a
+ * persona. A skipped file stays on the returned context untouched (the adapter still receives
+ * it), but the event records the skip so the Run explains what the agent actually saw.
+ *
+ * The append channel passes through unchanged; its rendering is the adapter's job.
+ */
+export function writePersonaFiles(
+  workspacePath: string,
+  persona: NonNullable<Run['persona']>,
+  log?: { warn(fields: Record<string, unknown>, msg: string): void; info(fields: Record<string, unknown>, msg: string): void },
+): NonNullable<RunContext['persona']> {
+  const files: { path: string; content: string; skipped?: boolean }[] = [];
+  let byteCount = 0;
+  for (const f of persona.files ?? []) {
+    const dest = resolveContained(workspacePath, f.path);
+    let exists = false;
+    try {
+      lstatSync(dest);
+      exists = true;
+    } catch {
+      // absent -- the normal case
+    }
+    if (exists) {
+      files.push({ ...f, skipped: true });
+      log?.warn({ path: f.path }, 'persona file target already exists; left untouched');
+      continue;
+    }
+    mkdirSync(join(dest, '..'), { recursive: true });
+    writeFileSync(dest, f.content);
+    byteCount += Buffer.byteLength(f.content, 'utf8');
+    files.push({ ...f });
+  }
+  log?.info({ byteCount, files: files.length }, 'persona materialized');
+  return {
+    ...(persona.append !== undefined ? { append: persona.append } : {}),
+    ...(files.length > 0 ? { files } : {}),
   };
 }
 

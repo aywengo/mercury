@@ -134,6 +134,27 @@ test('skills are passed via --skill and written into the workspace', async () =>
   }
 });
 
+test('persona.append rides the RPC argv as --append-system-prompt (#911)', async () => {
+  const { context, workspacePath } = makeContext();
+  const argvFile = join(workspacePath, 'argv-persona.json');
+  process.env.MOCK_RPC_ARGV_FILE = argvFile;
+  const adapter = new PrimeAgentAdapter(MOCK, { args: [] });
+  try {
+    const handle = await adapter.start({
+      ...context,
+      persona: { append: 'You are a terse reviewer.' },
+    });
+    await collectAll(handle);
+    const argv = JSON.parse(readFileSync(argvFile, 'utf8')) as string[];
+    const i = argv.indexOf('--append-system-prompt');
+    assert.ok(i >= 0, `expected --append-system-prompt in ${JSON.stringify(argv)}`);
+    assert.equal(argv[i + 1], 'You are a terse reviewer.');
+  } finally {
+    delete process.env.MOCK_RPC_ARGV_FILE;
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});
+
 test('human input: extension_ui_request -> input.required -> sendInput -> completion', async () => {
   const { context } = makeContext();
   const adapter = new PrimeAgentAdapter(MOCK, { args: [] });

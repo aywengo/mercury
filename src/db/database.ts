@@ -455,6 +455,17 @@ export const MIGRATIONS: string[] = [
   CREATE UNIQUE INDEX IF NOT EXISTS idx_run_presets_runwide
     ON run_presets(run_id) WHERE stage_index IS NULL;
   `,
+  // v18: the per-Run persona (docs/crew/agent-templates.md §4 Phase 0, issue #911).
+  //
+  // One JSON column, exactly the shape the caller gave and the shape the worker materializes
+  // and adapters render. The snapshot contract is the column itself: the bytes are stored at
+  // creation and never re-read from a registry, so editing a template after creation cannot
+  // change what a queued Run presents as its persona. Null (and NULL) means no persona --
+  // rows written before this column existed are NULL in exactly the same way, and both render
+  // as "no persona".
+  `
+  ALTER TABLE runs ADD COLUMN persona_json TEXT;
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

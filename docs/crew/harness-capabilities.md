@@ -81,10 +81,13 @@ Extend the agent descriptor with two machine-readable blocks.
 **Capabilities** — what this harness can do. A closed vocabulary, because an open
 vocabulary degrades into prose and prose cannot be matched:
 
-- `persona.append` — accepts appended system prompt (`primeagent` yes; `hermes`
-  via profile file; `pi`/`omp` unknown until probed)
+- `persona.append` — accepts appended system prompt (`primeagent` yes,
+  rendered as `--append-system-prompt`, #911; `hermes` via file, no append flag
+  on the verified CLI; `pi`/`omp` unknown until probed)
 - `persona.workspaceFile` — reads persona from a workspace file
-  (`AGENTS.md`, `SOUL.md`, `CLAUDE.md`)
+  (`AGENTS.md`, `SOUL.md`, `CLAUDE.md`). Shipped for Hermes only:
+  `personaFiles: ['SOUL.md']` (#911), so a persona file at any other path is
+  refused at creation rather than silently ignored
 - `humanInput` — maps to `input.required` (already `input.enabled`)
 - `resume` — already `resume.enabled`
 - `mcp`, `subagents`, `modelSelection`

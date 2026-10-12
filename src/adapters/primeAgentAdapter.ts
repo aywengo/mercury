@@ -140,6 +140,13 @@ export class PrimeAgentAdapter implements AgentAdapter {
       mcp: 'none',
       // Measured: buildPrompt() injects context.workflowPlan into the RPC payload (issue #809).
       workflowPlan: true,
+      // Persona append (docs/crew/agent-templates.md §3, #911): `--append-system-prompt <text>`
+      // is on the verified surface of the installed binary (prime-agent --help, 0.9.7),
+      // repeatable, and appends rather than replaces. The hard rule from the same doc: never
+      // `--system-prompt` -- it replaces the prompt that carries PrimeAgent's tool-calling
+      // harness. Declared only for the append channel; no workspace persona file is read by
+      // PrimeAgent, so personaFiles stays absent (unverified ≠ none).
+      personaAppend: true,
       // RPC mode carries tool callbacks, and the shared translator maps them to tool.started /
       // tool.completed / tool.failed (eventTranslation.ts). Observed on real Runs, not inferred:
       // `run_933c68e4684a498d` recorded 47 events including tool calls. The contrast with Hermes
@@ -290,6 +297,13 @@ export class PrimeAgentAdapter implements AgentAdapter {
       '--session-dir', sessionDir,
       ...skillArgs,
       ...this.goalArgs(context),
+      // Persona append (#911): one repeatable flag per persona text, AFTER the goal args and
+      // BEFORE opts.args so an operator arg cannot silently reorder it. The capability was
+      // checked at creation (personaAppend !== true refused there); the empty-text case is
+      // refused by the same admission, so this can append unconditionally when present.
+      ...(context.persona?.append !== undefined
+        ? ['--append-system-prompt', context.persona.append]
+        : []),
       ...(this.opts.args ?? []),
       // Per-Run model LAST (#828): prime-agent applies last-flag-wins (measured), so appending
       // after the operator's args overrides an operator --model without stripping it.

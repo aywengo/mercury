@@ -22,7 +22,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENTS_MD_FILE, NOTES_FILE, containedPath } from '../knowledge/materialize.ts';
+import { AGENTS_MD_FILE, NOTES_FILE, SOUL_MD_FILE, containedPath } from '../knowledge/materialize.ts';
 import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import { probeVersion } from './versionProbe.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities, AgentVersionInfo } from '../domain/types.ts';
@@ -148,6 +148,13 @@ export class HermesAgentAdapter implements AgentAdapter {
       // Per-run model (#829, measured on 0.21.2): `-m` is per-invocation and survives `--resume`
       // (the session pins the first turn's model). Evidence in PR #836.
       perRunModel: true,
+      // Persona workspace-file channel (docs/crew/agent-templates.md §3, #911): Hermes
+      // auto-injects a workspace SOUL.md — measured on the installed binary, whose `--ignore-rules`
+      // help text documents "Skip auto-injection of AGENTS.md, SOUL.md, ..." — so start() can
+      // deliver a persona by writing that file and Hermes injects it itself. No append flag
+      // exists on the verified CLI, so personaAppend stays ABSENT (unverified ≠ false), and the
+      // file name is the only entry: a persona file at any other path is refused at creation.
+      personaFiles: [SOUL_MD_FILE],
     },
   };
   /** `hermes --version` prints "Hermes Agent v0.21.2 (2026.9.11) · upstream …", so the
@@ -238,6 +245,24 @@ export class HermesAgentAdapter implements AgentAdapter {
           writeFileSync(agentsMdPath, readFileSync(notesPath, 'utf8'));
         }
       }
+    }
+
+    // Persona file channel (docs/crew/agent-templates.md §3, #911): write the persona bytes as
+    // SOUL.md in the workspace root when the Run carries one. Same two guards the AGENTS.md
+    // channel uses -- lstat first (a symlink at the path is "something is already here", never
+    // followed), containedPath for the write (a symlinked workspace ROOT is invisible to lstat
+    // at the file path) -- plus the §9.4 rule a tracked or pre-existing SOUL.md always wins.
+    // Hermes injects the file itself; no argv change, which is exactly why this is the honest
+    // Hermes persona channel.
+    const personaFile = context.persona?.files?.find((f) => f.path === SOUL_MD_FILE && !f.skipped);
+    if (personaFile) {
+      if (!lstatExists(join(context.workspace.path, SOUL_MD_FILE))) {
+        const soulPath = containedPath(context.workspace.path, SOUL_MD_FILE);
+        writeFileSync(soulPath, personaFile.content);
+      }
+      // A pre-existing SOUL.md (tracked by the repository) is left untouched; the persona degrades
+      // to the other channel(s) or nothing, which the run.persona_resolved / persona.materialized
+      // events already record. Skipping silently here is the §9.4 behavior, not a failure.
     }
 
     const runId = context.run.id;

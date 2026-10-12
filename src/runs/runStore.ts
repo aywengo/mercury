@@ -34,6 +34,7 @@ export interface RunRow {
   agent_version_raw: string | null;
   agent_version_recorded: number;
   credential_profile: string | null;
+  persona_json: string | null;
 }
 
 export function rowToRun(row: RunRow): Run {
@@ -64,6 +65,9 @@ export function rowToRun(row: RunRow): Run {
     agentVersion: row.agent_version_recorded ? row.agent_version : null,
     agentVersionRaw: row.agent_version_recorded ? row.agent_version_raw : null,
     credentialProfile: row.credential_profile ?? null,
+    persona: row.persona_json
+      ? (JSON.parse(row.persona_json) as NonNullable<Run['persona']>)
+      : null,
   };
 }
 
@@ -100,8 +104,8 @@ export class RunStore {
         `INSERT INTO runs (
           id, owner_id, task, repository_json, repositories_json, workspace_branch, workspace_path, agent, status,
           attempt, retry_of, error, error_kind, constraints_json, created_at, started_at, completed_at,
-          lease_owner, lease_expires_at, cancellation_requested_at, final_commits_json, pr_url, model, credential_profile
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          lease_owner, lease_expires_at, cancellation_requested_at, final_commits_json, pr_url, model, credential_profile, persona_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.id, run.ownerId, run.task, JSON.stringify(run.repository), run.repositories ? JSON.stringify(run.repositories) : null,
@@ -109,6 +113,7 @@ export class RunStore {
         run.agent, run.status, run.attempt, run.retryOf, run.error, run.errorKind, JSON.stringify(run.constraints),
         run.createdAt, run.startedAt, run.completedAt, run.leaseOwner, run.leaseExpiresAt,
         run.cancellationRequestedAt, JSON.stringify(run.finalCommits), run.prUrl, run.model ?? null, run.credentialProfile ?? null,
+        run.persona ? JSON.stringify(run.persona) : null,
       );
   }
 

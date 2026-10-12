@@ -73,6 +73,46 @@ test('POST /api/runs with a preset creates the Run and GET detail returns the sn
   }
 });
 
+test('POST /api/runs forwards the persona block unresolved (the seam rule, #911)', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  class AppendCapable extends FakeAgentAdapter {
+    constructor() { super({ script: [] }); }
+    override capabilities = { static: { personaAppend: true } };
+  }
+  const env = makeEnv({
+    workspaceMode: 'copy', repoDir: repo, workerEnabled: false,
+    adapters: { primeagent: new AppendCapable() },
+  });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const base = `${url}/api/runs`;
+    const auth = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+    // A persona the adapter cannot receive is a 400 whose body is the SERVICE's message — the
+    // route forwarded the block, the validation lives in one place.
+    const refused = await (await fetch(base, {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({ ownerId: 'alice', task: 't', persona: { append: 'x' } }),
+    })).json() as { error?: string };
+    assert.match(refused.error ?? '', /personaAppend/);
+    // A valid persona creates the Run and rides the Run detail.
+    const ok = await fetch(base, {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({ ownerId: 'alice', task: 't2', agent: 'primeagent', persona: { append: 'Be terse.' } }),
+    });
+    assert.equal(ok.status, 201);
+    const { runId } = (await ok.json()) as { runId: string };
+    const detail = await (await fetch(`${base}/${runId}`, {
+      headers: { authorization: 'Bearer tok-alice' },
+    })).json() as { persona?: { append?: string } | null };
+    assert.deepEqual(detail.persona, { append: 'Be terse.' });
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
+
 test('POST /api/runs with an unknown preset id is a domain 404 naming the preset, not a 500', async () => {
   const repo = makeGitRepo(tempDir('mercury-repo-'));
   const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false });

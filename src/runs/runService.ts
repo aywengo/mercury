@@ -32,6 +32,7 @@ import { renderPlan } from '../workflows/renderPlan.ts';
 import type { ResolvedWorkflow } from './workflowStore.ts';
 import { selectPack, type PackSelection } from '../knowledge/pack.ts';
 import { KnowledgeRequestError, knowledgeCapabilityMessage, parseKnowledgeRequest } from '../knowledge/request.ts';
+import { PersonaRequestError, personaCapabilityMessage, parsePersonaRequest, type PersonaRequest } from './personaRequest.ts';
 import type { KnowledgeRequest } from '../knowledge/types.ts';
 import { resolveProfile, type CredentialProfiles } from '../host/credentials-profiles.ts';
 
@@ -137,6 +138,13 @@ export interface CreateRunInput {
    * Only retry passes this; the HTTP surface does not expose it.
    */
   modelSource?: 'caller' | 'preset';
+  /**
+   * Per-Run persona (docs/crew/agent-templates.md §4 Phase 0, issue #911). `undefined` means no
+   * persona and the Run behaves exactly as before. Validated and resolved fail-closed against
+   * the effective agent's static capabilities in create(), the same admission shape `model`
+   * uses; the validated bytes are stored on the Run row and never re-resolved.
+   */
+  persona?: unknown;
   /**
    * Optional Laya selection record (issue #854, laya-integration-design §6.5, §13 L1-1).
    * Attribution only: it is stored as the `run.selection_recorded` event in the same
@@ -1027,6 +1035,20 @@ export class RunService {
       }
     }
 
+    // Persona admission (docs/crew/agent-templates.md §4 Phase 0, issue #911): validated before
+    // anything is written, refused fail-closed when the effective agent does not declare the
+    // channel. The unknown/undeclared/false wording is the same one perRunModel and knowledge
+    // use, so a caller fixing one refusal already knows how to read the others. The check runs
+    // AFTER agent resolution (below) so `agent` is final; the request is only parsed here.
+    let personaRequest: PersonaRequest | null = null;
+    if (input.persona !== undefined && input.persona !== null) {
+      try {
+        personaRequest = parsePersonaRequest(input.persona);
+      } catch (err) {
+        throw new ValidationError(err instanceof PersonaRequestError ? err.message : String(err));
+      }
+    }
+
     // With a preset, the snapshot's effectiveConstraints ARE the Run's constraints: resolution
     // already merged the caller input with preset ceilings/defaults and system policy, and the
     // executed Run must match what the snapshot records (otherwise the snapshot documents
@@ -1116,6 +1138,49 @@ export class RunService {
     if (knowledgeRequest?.require && knowledgeCap === false) {
       throw new ValidationError(knowledgeCapabilityMessage(agent, 'the adapter does not declare knowledge support'));
     }
+    // Persona capability gate (issue #911), right after agent resolution: each requested channel
+    // must be declared on the agent's static block, measured or honestly absent. Absent means
+    // unverified -- refused, because a persona nobody renders is exactly the silent identity loss
+    // Phase 0 exists to prevent.
+    if (personaRequest) {
+      const stat = this.deps.agentCapabilities?.()[agent]?.static;
+      if (personaRequest.append !== undefined) {
+        if (stat?.personaAppend !== true) {
+          const declared = stat === undefined
+            ? 'unknown -- the agent has no declared static capabilities'
+            : stat.personaAppend === undefined
+              ? "undeclared -- the agent's static block omits personaAppend"
+              : "false -- the agent's static block declares personaAppend: false";
+          throw new ValidationError(
+            personaCapabilityMessage(agent, 'append', `personaAppend: ${declared}`),
+          );
+        }
+      }
+      if (personaRequest.files !== undefined) {
+        if (!Array.isArray(stat?.personaFiles) || stat!.personaFiles!.length === 0) {
+          const declared = stat === undefined
+            ? 'unknown -- the agent has no declared static capabilities'
+            : stat!.personaFiles === undefined
+              ? "undeclared -- the agent's static block omits personaFiles"
+              : `declared for ${JSON.stringify(stat!.personaFiles)} only`;
+          throw new ValidationError(
+            personaCapabilityMessage(agent, 'files', `personaFiles: ${declared}`),
+          );
+        }
+        // Every requested file must be a path the adapter actually reads (docs/crew/agent-templates.md
+        // §3: the rendering table names the file per backend). A file the harness never looks at
+        // would make the persona a silent no-op.
+        const declaredFiles = stat!.personaFiles!;
+        for (const f of personaRequest.files) {
+          if (!declaredFiles.includes(f.path)) {
+            throw new ValidationError(
+              personaCapabilityMessage(agent, 'files',
+                `the agent reads ${JSON.stringify(declaredFiles)}, not ${JSON.stringify(f.path)}`),
+            );
+          }
+        }
+      }
+    }
     // Computed inside the transaction below, because it reads the replica and the snapshot must be
     // consistent with the Run row that references it. Declared here so the event append can see it.
     let knowledgeSelection: PackSelection | null = null;
@@ -1148,6 +1213,7 @@ export class RunService {
       prUrl: null,
       model: model ?? null,
       credentialProfile,
+      persona: personaRequest,
     };
 
     try {
@@ -1226,6 +1292,15 @@ export class RunService {
           // copied model was not chosen by a caller, and the record must not change origin.
           const source = input.modelSource ?? (input.model !== undefined ? 'caller' : 'preset');
           this.deps.events.append(run.id, 'run.model_resolved', { model, source });
+        }
+        if (personaRequest) {
+          // Phase 0 explainability (issue #911): which persona channels the Run carries. Appended
+          // in the same transaction as the Run row; a persona-less Run appends nothing and stays
+          // byte-identical to pre-Phase-0 runs.
+          this.deps.events.append(run.id, 'run.persona_resolved', {
+            append: personaRequest.append !== undefined,
+            files: personaRequest.files?.map((f) => f.path) ?? [],
+          });
         }
         if (selection) {
           // §6.5: the pick and its distribution recorded ON the Run, same transaction as the
@@ -1644,6 +1719,11 @@ export class RunService {
       // work, exactly like the skill/preset snapshots. A parent WITHOUT a model stays without.
       model: original.model ?? undefined,
       ...(original.model && parentModelSource?.source ? { modelSource: parentModelSource.source } : {}),
+      // Retry re-attempts the SAME work (#911): the persona the parent carried is part of that
+      // work, exactly like the skill/preset snapshots. The parent's stored bytes are passed
+      // through the caller surface (already validated at the parent's creation), so the retry
+      // re-runs the same capability gate against the same agent.
+      persona: original.persona ?? undefined,
       skillSnapshots,
       ...(workflowSnapshot ? { workflowSnapshot } : {}),
       constraints: { ...original.constraints },

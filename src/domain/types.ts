@@ -122,6 +122,18 @@ export interface Run {
    * exactly the same way, and both render as "no profile".
    */
   credentialProfile?: string | null;
+  /**
+   * The per-Run persona this Run was created with (docs/crew/agent-templates.md §4 Phase 0,
+   * issue #911). Null when the caller supplied none — the common case, byte-identical to
+   * pre-Phase-0 Rows. The structured request the caller gave; adapters render it per their own
+   * verified surface and the snapshot contract lives in `personaResolved` below.
+   */
+  persona?: {
+    /** Text appended to the harness system prompt (rendered only by personaAppend adapters). */
+    append?: string;
+    /** Workspace-relative persona files, materialized from the SNAPSHOT bytes at claim. */
+    files?: { path: string; content: string }[];
+  } | null;
 }
 
 export interface ResolvedSkill {
@@ -277,6 +289,16 @@ export interface RunContext {
    * prompt they hand the harness.
    */
   workflowPlan?: string;
+  /**
+   * The per-Run persona (docs/crew/agent-templates.md §4 Phase 0, issue #911). Set by the
+   * worker from the Run row; adapters render it through their own verified surface and may
+   * read it here rather than from the Run row, which adapters never touch.
+   */
+  persona?: {
+    append?: string;
+    /** `skipped` is set by the worker when the target already existed and §9.4 left it alone. */
+    files?: { path: string; content: string; skipped?: boolean }[];
+  };
 }
 
 /**
@@ -767,6 +789,13 @@ export const EVENT_TYPES = new Set([
   // { model, source: 'caller' | 'preset' } -- the explainability record the L1 candidate list
   // builds on. A Run created without `model` emits nothing, exactly as before.
   'run.model_resolved',
+  // Per-Run persona resolution (docs/crew/agent-templates.md §4 Phase 0, issue #911). Appended in
+  // the Run-creation transaction by RunService.create ONLY when a persona was requested, payload
+  // { append: boolean, files: string[] } — which channels the Run carries. `persona.materialized`
+  // is appended by the worker when the file channel was written into the workspace, payload
+  // { append: boolean, files: string[] }. A persona-less Run emits neither.
+  'run.persona_resolved',
+  'persona.materialized',
   // Credential profile resolution (CP-3, issue #807, design §5.4). `run.credential_profile_resolved`
   // is appended in the Run-creation transaction ONLY when a profile resolved, payload
   // { profile: <name> } — the identity record, never the contents. `run.credential_profile_changed`

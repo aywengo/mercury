@@ -1,13 +1,19 @@
 # Agent Templates — persona-bearing agent definitions
 
-Status: **design only.** Nothing here is implemented. Phase 0 is drafted
-(#911) and the manifest/store rung (Phase 2) is drafted (#917); both await an
-operator's `nightly:ready`. Extends
+Status: **Phase 0 channels implemented (#911); the template manifest (§5) and
+store (§6) are still design**, drafted as #917 and awaiting an operator's
+`nightly:ready`. The two Phase-0 persona channels ship: a Run can carry
+`persona.append` (PrimeAgent renders it as `--append-system-prompt`) and
+workspace persona files (Hermes renders `SOUL.md`), both resolved fail-closed
+against the adapter's static capabilities and snapshotted on the Run. The
+real-Run persona proof (§4 acceptance) is still open, and no adapter declares
+`personaFiles` beyond Hermes's single `SOUL.md`. Extends
 [`role-presets.md`](role-presets.md); read that first.
 
 A Role Preset resolves *instruction + skills + agent + constraints* for one Run.
-It has no persona concept. This document adds one, and records why the persona
-cannot be delivered today.
+It has no persona concept. This document adds one: the per-Run persona request
+(§4) is live on `POST /api/runs`; the template layer that would distribute
+personas at scale is not.
 
 ## 1. The blocking fact: no backend can receive a per-run persona yet
 
