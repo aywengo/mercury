@@ -35,7 +35,8 @@ import type { KnowledgeBounds } from '../knowledge/validation.ts';
 import type { ContextKnowledgeBlock } from '../knowledge/types.ts';
 import type { Note } from '../knowledge/types.ts';
 import { tx } from '../db/database.ts';
-import { resolveProfile, type CredentialProfiles } from '../host/credentials-profiles.ts';
+import { resolveProfile, type CredentialProfile, type CredentialProfiles } from '../host/credentials-profiles.ts';
+import { buildRunEnvironment, CredentialSourceMissingError } from './runEnvironment.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { WorkspaceManager } from '../workspace/workspaceManager.ts';
 
@@ -563,8 +564,42 @@ export class Worker {
         this.deps.events.append(run.id, 'sandbox.enabled', { policy: sandbox.describe(run) });
       }
 
+      // Credential profiles CP-4 (issue #897, design sections 6.1, 6.2): build the Run's base
+      // environment in the four layers instead of passing process.env wholesale. The parity check
+      // above already resolved the SAME file, so re-resolving here against the same loader gives
+      // the same profile; a refusal cannot differ without the parity check having refused first.
+      // A `file:` secret missing at drive time fails the Run with the section 9 message.
+      let runEnv: Record<string, string> | undefined;
+      {
+        let profile: CredentialProfile | null = null;
+        if (this.deps.credentialProfiles) {
+          const { profiles } = this.deps.credentialProfiles();
+          const resolution = resolveProfile(profiles, run.ownerId, [run.repository, ...(run.repositories ?? [])]);
+          if (resolution.outcome === 'profile') {
+            profile = profiles.find((p) => p.name === resolution.name) ?? null;
+          } else if (resolution.outcome === 'refused') {
+            // Parity already handles the created/claim mismatch; a refusal at drive time with no
+            // change is impossible in practice, but fail closed rather than run unprofiled.
+            throw new Error(resolution.message);
+          }
+        }
+        const built = buildRunEnvironment({ workerEnv: process.env, runDir: workspace.path, profile });
+        runEnv = built.env;
+        if (built.secrets.length > 0) {
+          // Section 8: every value a profile injects joins the exact-value redaction set for this
+          // Run, whatever its length. Ignored when the redactor has no registration capability.
+          this.deps.redactor?.register?.(built.secrets);
+        }
+        this.deps.events.append(run.id, 'run.credential_profile_env_built', {
+          runId: run.id,
+          profile: profile?.name ?? null,
+          ...(profile?.git?.httpsToken ? { httpsTokenVar: profile.git.httpsToken } : {}),
+        });
+      }
+
       const context: RunContext = {
         run,
+        ...(runEnv ? { env: runEnv } : {}),
         ...(run.model ? { model: run.model } : {}),
         repository: run.repository,
         repositories: run.repositories,

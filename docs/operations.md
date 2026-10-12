@@ -342,9 +342,10 @@ appears in task text, Run events, or logs; Mercury's secret redactor is a
 safety net, not the mechanism. Rotate by replacing the credential in the
 harness environment.
 
-**Dedicated host (interim).** Mercury has one source-control identity per host
-today: local adapters pass the worker's whole environment to every Run. Until
-credential profiles (`docs/credential-profiles-design.md`) ship, the nightly
+**Dedicated host (interim).** Local Runs start on a stripped, profile-resolved
+environment (`docs/credential-profiles-design.md` §6.1): ambient `GH_*`/`GIT_*`
+credentials no longer reach a Run. Until credential profiles are configured on
+the host (CP-4 shipped the delivery; configure profiles per the design), the nightly
 identity runs on a host, or a separate Mercury instance under its own OS user,
 that serves nothing else: `MERCURY_API_TOKENS` holds only `bot-nightly` and the
 operator's token. `GH_TOKEN` lives in that host's `mercury.env` (0600); classic
