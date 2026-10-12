@@ -52,6 +52,14 @@ const DEFAULT_PATTERNS: SecretPattern[] = [
 export interface Redactor {
   redact(text: string): string;
   redactJson(value: unknown): unknown;
+  /**
+   * Register additional exact-value secrets AFTER construction (credential profiles CP-4,
+   * design section 8: every value a profile injects joins the exact-value redaction set for that
+   * Run, whatever its length). Values read at drive time cannot be known at boot, so the worker
+   * registers them when it builds the Run's environment. Optional: a redactor built without the
+   * registration capability simply ignores the call.
+   */
+  register?(secrets: string[]): void;
 }
 
 export function createRedactor(secrets: string[] = []): Redactor {
@@ -59,7 +67,7 @@ export function createRedactor(secrets: string[] = []): Redactor {
   // MERCURY_SECRETS=hush said so explicitly, and honouring that at any length is the contract.
   // A floor belongs on values we GUESS are secrets (see forwardedCredentialValues), where a short
   // one would blank ordinary text everywhere it appears.
-  const literalPatterns = secrets
+  let literalPatterns = secrets
     .filter((s) => s.length > 0)
     .map((s) => new RegExp(escapeRegExp(s), 'g'));
 
@@ -89,7 +97,17 @@ export function createRedactor(secrets: string[] = []): Redactor {
     return value;
   }
 
-  return { redact, redactJson };
+  function register(additional: string[]): void {
+    if (additional.length === 0) return;
+    literalPatterns = [
+      ...literalPatterns,
+      ...additional
+        .filter((s) => s.length > 0)
+        .map((s) => new RegExp(escapeRegExp(s), 'g')),
+    ];
+  }
+
+  return { redact, redactJson, register };
 }
 
 function escapeRegExp(s: string): string {

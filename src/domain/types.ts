@@ -202,6 +202,14 @@ export interface Workspace {
 export interface RunContext {
   run: Run;
   /**
+   * The complete base environment for a local agent process (credential profiles CP-4, design
+   * sections 6.1/6.2): the worker's environment minus GH_/GITHUB_/GIT_/MERCURY_ prefixes, host git/gh
+   * config isolation, and the resolved profile's env. Adapters that spawn local processes use
+   * this as the spawn base INSTEAD of process.env. Absent means the worker did not build one
+   * (tests, or a worker without the feature) and the adapter keeps today's behavior.
+   */
+  env?: Record<string, string>;
+  /**
    * The per-Run model override, when this Run carries one (#823). Adapters read `context.model`,
    * NEVER `context.preset.model`: the preset field stays for provenance. Absent when the Run has
    * no model so existing argv/config shapes are unchanged.
@@ -775,6 +783,9 @@ export const EVENT_TYPES = new Set([
   // then fails with 'credential profile changed since creation'.
   'run.credential_profile_resolved',
   'run.credential_profile_changed',
+  // CP-4 (issue #897, design section 6.1): the worker built the Run's layered environment;
+  // payload { profile: string | null, httpsTokenVar?: string } — names only, never values.
+  'run.credential_profile_env_built',
   // Laya selection record (issue #854, laya-integration-design §6.5, §13 L1-1). Appended in the
   // Run-creation transaction by RunService.create ONLY when the request carries a valid
   // `selection`; payload is the validated record itself. A Run created without `selection`

@@ -16,7 +16,7 @@ import {
   validateCredentialProfiles,
 } from '../src/host/credentials-profiles.ts';
 import { ForbiddenError } from '../src/domain/errors.ts';
-import { makeEnv, makeGitRepo, tempDir, waitFor } from './helpers.ts';
+import { makeEnv, makeGitRepo, tempDir, tempFile, waitFor } from './helpers.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -678,7 +678,14 @@ test('claim-time parity is silent when the file did not change (the mutation che
   const cfg = join(dir, 'cfg', 'mercury');
   const repo = makeGitRepo(join(dir, 'repo')); // the workspace needs a real local git repo
   mkdirSync(cfg, { recursive: true });
-  writeFileSync(join(cfg, 'credential-profiles.json'), JSON.stringify(CP));
+  // CP-4: the profile's file: source is READ at drive time, so this Run-complete path needs a
+  // source that exists. The shared CP fixture's `/run/secrets/...` path stays for the tests that
+  // only LOAD the file; this test points its own profile at a real one.
+  const tokenFile = join(dir, 'nightly.pat');
+  writeFileSync(tokenFile, 'ghp_parityok0123456789abcdefgh');
+  writeFileSync(join(cfg, 'credential-profiles.json'), JSON.stringify({
+    profiles: [{ ...CP.profiles[0], env: { GH_TOKEN: { file: tokenFile } } }],
+  }));
   chmodSync(join(cfg, 'credential-profiles.json'), 0o600);
   const env = makeEnv({
     credentialProfiles: () => loadCredentialProfiles({ XDG_CONFIG_HOME: join(dir, 'cfg') } as never),
@@ -894,4 +901,366 @@ test('host credentials resolve: a broken file is a refusal, never "none" (§9)',
   const r = await cli(['host', 'credentials', 'resolve', '--owner', 'o', '--repo', 'github.com/a/b'], { XDG_CONFIG_HOME: join(dir, 'cfg') });
   assert.equal(r.code, 1);
   assert.match(r.stdout, /refused: .*malformed JSON/);
+});
+
+
+
+// ---------------------------------------------------------------------------
+// CP-4 (issue #897, design sections 6.1, 6.2, 8, 9): the local Run environment
+// ---------------------------------------------------------------------------
+
+
+/** A minimal valid LocalAgentConfig for validator tests (CP-4 acceptance 5). */
+function jsonlConfigLite(): import('../src/adapters/localAgentAdapter.ts').LocalAgentConfig {
+  return {
+    id: 'lite',
+    description: 'minimal',
+    command: '/bin/true',
+    taskInput: { mode: 'arg', flag: '--task' },
+    output: { format: 'jsonl', stream: true, eventPath: 'type' },
+    eventMap: { started: 'step.started' },
+    cancel: { signal: 'SIGTERM', graceMs: 200 },
+  };
+}
+
+const MOCK_RPC = join(import.meta.dirname, 'fixtures', 'mock-prime-agent-rpc.mjs');
+
+
+import { buildRunEnvironment, CredentialSourceMissingError, renderGitconfig } from '../src/worker/runEnvironment.ts';
+import { isStrippedEnvName, STRIPPED_ENV_PREFIXES } from '../src/config.ts';
+import { validateLocalAgentConfig } from '../src/adapters/localAgentAdapter.ts';
+import { validateRpcAgentConfig } from '../src/adapters/rpcAgentAdapter.ts';
+import { execFileSync } from 'node:child_process';
+
+const PROFILE_WITH_GIT = {
+  profiles: [{
+    name: 'nightly',
+    repositories: ['github.com/aywengo/mercury'],
+    owners: ['bot-nightly'],
+    env: { GH_TOKEN: { value: 'ghp_cP4testtokenvalue0123456789' } },
+    git: { httpsToken: 'GH_TOKEN', authorName: 'mercury-nightly', authorEmail: 'nightly@example.com' },
+    sandbox: false,
+  }],
+};
+
+test('isStrippedEnvName covers the four layer-1 prefixes and nothing else', () => {
+  for (const name of ['GH_TOKEN', 'GITHUB_ACTIONS', 'GIT_CONFIG_GLOBAL', 'MERCURY_RUN_ID']) {
+    assert.ok(isStrippedEnvName(name), name);
+  }
+  for (const name of ['PATH', 'HOME', 'SHELL', 'LANG', 'GITHUBISH', 'VIRTUAL GH'.replace(' ', '')]) {
+    assert.equal(isStrippedEnvName(name), false, name);
+  }
+  assert.deepEqual([...STRIPPED_ENV_PREFIXES], ['GH_', 'GITHUB_', 'GIT_', 'MERCURY_']);
+});
+
+test('buildRunEnvironment: four layers — strip, isolation, profile env, GIT_AUTHOR/COMMITTER (§6.1, §6.2)', () => {
+  const dir = tempDir('cp4-env-');
+  const profile = PROFILE_WITH_GIT.profiles[0];
+  const built = buildRunEnvironment({
+    workerEnv: {
+      PATH: '/usr/bin:/bin', HOME: '/home/op', LANG: 'en_US.UTF-8',
+      GH_TOKEN: 'worker-secret', GITHUB_TOKEN: 'worker-secret', GIT_AUTHOR_NAME: 'worker', MERCURY_SECRETS: 'x',
+    } as never,
+    runDir: dir,
+    profile,
+  });
+  // Layer 1: worker env minus stripped names; ordinary names pass through.
+  assert.equal(built.env.PATH, '/usr/bin:/bin');
+  assert.equal(built.env.HOME, '/home/op');
+  assert.equal(built.env.LANG, 'en_US.UTF-8');
+  // (GH_TOKEN is then set again by layer 3; assert the strip via a name the profile does NOT set.)
+  assert.equal(built.env.GITHUB_TOKEN, undefined);
+  assert.equal(built.env.MERCURY_SECRETS, undefined);
+  assert.equal(built.env.GH_WORKER_ONLY, undefined);
+  // Layer 2: host-config isolation into the run dir.
+  assert.equal(built.env.GIT_CONFIG_GLOBAL, join(dir, 'gitconfig'));
+  assert.equal(built.env.GIT_CONFIG_NOSYSTEM, '1');
+  assert.equal(built.env.GH_CONFIG_DIR, join(dir, 'gh'));
+  assert.ok(existsSync(built.env.GIT_CONFIG_GLOBAL), 'the gitconfig file must exist');
+  // Layer 3: exactly the profile's variables.
+  assert.equal(built.env.GH_TOKEN, 'ghp_cP4testtokenvalue0123456789');
+  // Section 6.2: author/committer variables for tools that bypass config.
+  assert.equal(built.env.GIT_AUTHOR_NAME, 'mercury-nightly');
+  assert.equal(built.env.GIT_AUTHOR_EMAIL, 'nightly@example.com');
+  assert.equal(built.env.GIT_COMMITTER_NAME, 'mercury-nightly');
+  assert.equal(built.env.GIT_COMMITTER_EMAIL, 'nightly@example.com');
+  // The generated gitconfig carries the identity and the helper; the token appears only by NAME.
+  const gitconfig = readFileSync(built.gitconfigPath!, 'utf8');
+  assert.match(gitconfig, /name = mercury-nightly/);
+  assert.match(gitconfig, /email = nightly@example.com/);
+  assert.match(gitconfig, /credential "https:\/\/github\.com"/);
+  assert.match(gitconfig, /\$GH_TOKEN/);
+  assert.ok(!gitconfig.includes('ghp_'), 'the token value must never appear in the gitconfig');
+  // Section 8: the injected values join the exact-value redaction set.
+  const redactor = createRedactor([]);
+  redactor.register?.(built.secrets);
+  assert.equal(redactor.redact('token ghp_cP4testtokenvalue0123456789 leaked'), 'token [REDACTED] leaked');
+});
+
+test('acceptance 2: a no-profile Run cannot reach the host gitconfig credential helper', () => {
+  const dir = tempDir('cp4-noprofile-');
+  const home = join(dir, 'home');
+  mkdirSync(join(home, '.config', 'git'), { recursive: true });
+  // A host gitconfig whose credential helper would answer with a sentinel.
+  // The sentinel helper: a shell function git execs. Quotes must survive JSON-free YAML-free
+  // gitconfig parsing: git passes the value to 'sh -c' after stripping ONE level of double quotes.
+  const helperScript = join(home, 'helper.sh');
+  writeFileSync(helperScript, '#!/bin/sh\ncat ' + JSON.stringify(join(dir, 'sentinel.out')) + '\n');
+  chmodSync(helperScript, 0o755);
+  writeFileSync(join(dir, 'sentinel.out'), 'username=sentinel-user\npassword=SENTINEL-SECRET\n');
+  writeFileSync(join(home, '.gitconfig'), [
+    '[credential]',
+    `    helper = ${helperScript}`,
+  ].join('\n'));
+  const built = buildRunEnvironment({ workerEnv: { HOME: home, PATH: process.env.PATH ?? '/usr/bin:/bin' } as never, runDir: dir, profile: null });
+  // The empty gitconfig must EXIST: GIT_CONFIG_GLOBAL at an absent path is ignored by git.
+  assert.equal(readFileSync(built.gitconfigPath!, 'utf8'), '');
+  // A credential fill through the Run's environment gets nothing from the host helper.
+  // GIT_TERMINAL_PROMPT=0 makes a helper-less fill FAIL instead of prompting (there is no tty).
+  let failed = false;
+  let out = '';
+  try {
+    out = execFileSync('git', ['credential', 'fill'], {
+      env: { ...built.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/true' },
+      input: 'protocol=https\nhost=github.com\n\n',
+      encoding: 'utf8',
+    });
+  } catch (err) {
+    failed = true;
+    out = String((err as { stderr?: string }).stderr ?? '');
+    out += String((err as { stdout?: string }).stdout ?? '');
+  }
+  assert.ok(failed || out === '', `the Run env must not obtain credentials (got: ${out.slice(0, 120)})`);
+  assert.ok(!out.includes('SENTINEL-SECRET'), 'the host helper must not answer');
+  assert.ok(!out.includes('sentinel-user'));
+  // The host user still gets the sentinel from their own environment (the control half).
+  const hostOut = execFileSync('git', ['credential', 'fill'], {
+    env: { HOME: home, PATH: built.env.PATH ?? '', GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/true' },
+    input: 'protocol=https\nhost=github.com\n\n',
+    encoding: 'utf8',
+  });
+  assert.ok(hostOut.includes('SENTINEL-SECRET'), 'control: the host env still reaches the helper');
+});
+
+test('acceptance 3: a commit in a profile Run carries the profile author and committer', () => {
+  const dir = tempDir('cp4-commit-');
+  const repo = makeGitRepo(join(dir, 'repo'));
+  const profile = PROFILE_WITH_GIT.profiles[0];
+  const built = buildRunEnvironment({ workerEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: dir } as never, runDir: dir, profile });
+  execFileSync('git', ['-C', repo, 'commit', '--allow-empty', '-m', 'cp4'], { env: { ...built.env } });
+  const author = execFileSync('git', ['-C', repo, 'log', '-1', '--format=%an <%ae>'], { encoding: 'utf8' }).trim();
+  const committer = execFileSync('git', ['-C', repo, 'log', '-1', '--format=%cn <%ce>'], { encoding: 'utf8' }).trim();
+  assert.equal(author, 'mercury-nightly <nightly@example.com>');
+  assert.equal(committer, 'mercury-nightly <nightly@example.com>');
+});
+
+test('the generated gitconfig helper answers x-access-token + token from the env var (§6.2)', () => {
+  const dir = tempDir('cp4-helper-');
+  const profile = PROFILE_WITH_GIT.profiles[0];
+  const built = buildRunEnvironment({ workerEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin' } as never, runDir: dir, profile });
+  const out = execFileSync('git', ['credential', 'fill'], {
+    env: { ...built.env },
+    input: 'protocol=https\nhost=github.com\n\n',
+    encoding: 'utf8',
+  });
+  assert.match(out, /username=x-access-token/);
+  assert.match(out, /password=ghp_cP4testtokenvalue0123456789/);
+});
+
+test('acceptance 4: a file: secret missing or empty at drive time fails with the §9 message', () => {
+  const dir = tempDir('cp4-missing-');
+  const profile = {
+    name: 'nightly',
+    repositories: ['github.com/aywengo/mercury'],
+    owners: ['bot-nightly'],
+    env: { GH_TOKEN: { file: join(dir, 'absent.pat') } },
+    sandbox: false,
+  };
+  assert.throws(
+    () => buildRunEnvironment({ workerEnv: {}, runDir: dir, profile }),
+    (err: unknown) => err instanceof CredentialSourceMissingError
+      && err.message === "credential profile 'nightly': env GH_TOKEN source missing",
+  );
+  // An EMPTY file is the same refusal.
+  const emptyFile = join(dir, 'empty.pat');
+  writeFileSync(emptyFile, '\n');
+  assert.throws(
+    () => buildRunEnvironment({
+      workerEnv: {}, runDir: dir,
+      profile: { ...profile, env: { GH_TOKEN: { file: emptyFile } } },
+    }),
+    (err: unknown) => err instanceof CredentialSourceMissingError,
+  );
+  // A file with only a trailing newline after real content is fine (file hygiene, not content).
+  const tokenFile = join(dir, 'real.pat');
+  writeFileSync(tokenFile, 'ghp_realvalue0123456789abcdefgh\n');
+  const built = buildRunEnvironment({
+    workerEnv: {}, runDir: dir,
+    profile: { ...profile, env: { GH_TOKEN: { file: tokenFile } } },
+  });
+  assert.equal(built.env.GH_TOKEN, 'ghp_realvalue0123456789abcdefgh');
+});
+
+test('acceptance 5: adapter config.env naming a stripped variable is refused at load', () => {
+  const base = jsonlConfigLite();
+  assert.throws(
+    () => validateLocalAgentConfig({ ...base, env: { GH_TOKEN: 'x' } } as never),
+    /env 'GH_TOKEN' is reserved/,
+  );
+  assert.throws(
+    () => validateLocalAgentConfig({ ...base, env: { MERCURY_DB_PATH: 'x' } } as never),
+    /env 'MERCURY_DB_PATH' is reserved/,
+  );
+  // A non-stripped env name still loads.
+  validateLocalAgentConfig({ ...base, env: { AGENT_EXTRA: 'x' } } as never);
+});
+
+test('acceptance 5 (rpc): RpcAgentConfig env naming a stripped variable is refused at load', () => {
+  assert.throws(
+    () => validateRpcAgentConfig({ id: 'rpc1', command: 'x', env: { GITHUB_TOKEN: 'x' } } as never),
+    /env 'GITHUB_TOKEN' is reserved/,
+  );
+});
+
+test('worker: a profile Run drives the agent on the layered environment (acceptance 1, probe)', async () => {
+  const dir = tempDir('cp4-probe-');
+  const cfg = join(dir, 'cfg', 'mercury');
+  mkdirSync(cfg, { recursive: true });
+  const tokenFile = join(dir, 'nightly.pat');
+  writeFileSync(tokenFile, 'ghp_probevalue0123456789abcdefgh');
+  writeFileSync(join(cfg, 'credential-profiles.json'), JSON.stringify({
+    profiles: [{
+      name: 'nightly',
+      repositories: ['github.com/aywengo/mercury'],
+      owners: ['bot-nightly'],
+      env: { GH_TOKEN: { file: tokenFile } },
+      git: { httpsToken: 'GH_TOKEN', authorName: 'mercury-nightly', authorEmail: 'nightly@example.com' },
+      sandbox: false,
+    }],
+  }));
+  chmodSync(join(cfg, 'credential-profiles.json'), 0o600);
+  const repo = makeGitRepo(join(dir, 'repo'));
+  const envFile = tempFile('cp4-probe-env', 'json');
+  process.env.MOCK_RPC_MODE = 'happy';
+  process.env.MOCK_RPC_ENV_FILE = envFile;
+  process.env.MOCK_RPC_ENV_ALL = '1';
+  process.env.GH_TOKEN = 'worker-ambient-token-should-not-pass';
+  const loader = () => loadCredentialProfiles({ XDG_CONFIG_HOME: join(dir, 'cfg') } as never);
+  const env = makeEnv({
+    workspaceMode: 'copy',
+    repoDir: repo,
+    primeagent: { cmd: MOCK_RPC },
+    credentialProfiles: loader,
+  } as never);
+  try {
+    const run = env.runService.create({
+      ownerId: 'bot-nightly', task: 'x', agent: 'primeagent',
+      repository: { url: 'https://github.com/aywengo/mercury.git', localPath: repo },
+    });
+    assert.equal(run.credentialProfile, 'nightly');
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 20_000);
+    const spawnedEnv = JSON.parse(readFileSync(envFile, 'utf8')) as Record<string, string>;
+    // No GH_/GITHUB_/GIT_/MERCURY_ name from the worker survives — the mutation check: with the
+    // old `{ ...process.env }` spawn base, the ambient GH_TOKEN appears here and fails this test.
+    for (const [k, v] of Object.entries(spawnedEnv)) {
+      if (['MERCURY_RUN_ID', 'MERCURY_TRACE_ID', 'MERCURY_WORKER_ID'].includes(k)) continue; // adapter trace context
+      if (['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GH_CONFIG_DIR'].includes(k)) continue; // layer 2 isolation (§6.1)
+      if (k === 'GH_TOKEN') continue; // layer 3: the profile's own variable, asserted below
+      if (k.startsWith('GIT_AUTHOR_') || k.startsWith('GIT_COMMITTER_')) continue; // layer 3 identity (§6.2)
+      assert.ok(!isStrippedEnvName(k), `${k} must be stripped from the spawned environment`);
+      assert.ok(!String(v).includes('worker-ambient-token'), `${k} must not carry the worker ambient token`);
+    }
+    assert.ok(!('GH_TOKEN' in spawnedEnv) || spawnedEnv.GH_TOKEN !== 'worker-ambient-token-should-not-pass');
+    // Exactly the profile's variables: the injected token is present with the file's value.
+    assert.equal(spawnedEnv.GH_TOKEN, 'ghp_probevalue0123456789abcdefgh');
+    assert.equal(spawnedEnv.GIT_AUTHOR_NAME, 'mercury-nightly');
+    assert.equal(spawnedEnv.GIT_COMMITTER_EMAIL, 'nightly@example.com');
+    // Isolation layer landed in the run dir.
+    assert.ok(spawnedEnv.GIT_CONFIG_GLOBAL && existsSync(spawnedEnv.GIT_CONFIG_GLOBAL));
+    assert.equal(spawnedEnv.GIT_CONFIG_NOSYSTEM, '1');
+    assert.ok(spawnedEnv.GH_CONFIG_DIR && spawnedEnv.GH_CONFIG_DIR.includes('gh'));
+    // Ordinary environment still flows.
+    assert.ok(spawnedEnv.PATH, 'PATH passes through');
+    // The environment-built event names the profile, never a value.
+    const envEvent = env.events.list(run.id).find((e) => e.type === 'run.credential_profile_env_built');
+    assert.ok(envEvent, 'the env build is an event');
+    assert.equal((envEvent!.payload as { profile?: string }).profile, 'nightly');
+    assert.ok(!JSON.stringify(envEvent!.payload).includes('ghp_'), 'no token value in the event');
+  } finally {
+    env.close();
+    delete process.env.MOCK_RPC_MODE;
+    delete process.env.MOCK_RPC_ENV_FILE;
+    delete process.env.MOCK_RPC_ENV_ALL;
+    delete process.env.GH_TOKEN;
+  }
+});
+
+test('worker: a no-profile Run is isolated too (empty gitconfig, no host gitconfig leak)', async () => {
+  const dir = tempDir('cp4-run-noprofile-');
+  const repo = makeGitRepo(join(dir, 'repo'));
+  const envFile = tempFile('cp4-noprofile-env', 'json');
+  process.env.MOCK_RPC_MODE = 'happy';
+  process.env.MOCK_RPC_ENV_FILE = envFile;
+  process.env.MOCK_RPC_ENV_ALL = '1';
+  process.env.GH_TOKEN = 'worker-ambient-token-should-not-pass-2';
+  const env = makeEnv({
+    workspaceMode: 'copy',
+    repoDir: repo,
+    primeagent: { cmd: MOCK_RPC },
+  } as never);
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'primeagent', repository: { localPath: repo, baseBranch: 'main' },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 20_000);
+    const spawnedEnv = JSON.parse(readFileSync(envFile, 'utf8')) as Record<string, string>;
+    for (const [k, v] of Object.entries(spawnedEnv)) {
+      if (['MERCURY_RUN_ID', 'MERCURY_TRACE_ID', 'MERCURY_WORKER_ID'].includes(k)) continue;
+      if (['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GH_CONFIG_DIR'].includes(k)) continue; // layer 2
+      assert.ok(!isStrippedEnvName(k), `${k} must be stripped even without profiles`);
+      assert.ok(!String(v).includes('worker-ambient-token'), `${k} must not carry the worker ambient token`);
+    }
+    assert.ok(spawnedEnv.GIT_CONFIG_GLOBAL && existsSync(spawnedEnv.GIT_CONFIG_GLOBAL));
+  } finally {
+    env.close();
+    delete process.env.MOCK_RPC_MODE;
+    delete process.env.MOCK_RPC_ENV_FILE;
+    delete process.env.MOCK_RPC_ENV_ALL;
+    delete process.env.GH_TOKEN;
+  }
+});
+
+test('worker: a file: source missing at drive time fails the Run with the §9 message (acceptance 4, wired)', async () => {
+  const dir = tempDir('cp4-run-missing-');
+  const cfg = join(dir, 'cfg', 'mercury');
+  mkdirSync(cfg, { recursive: true });
+  writeFileSync(join(cfg, 'credential-profiles.json'), JSON.stringify({
+    profiles: [{
+      name: 'nightly',
+      repositories: ['github.com/aywengo/mercury'],
+      owners: ['bot-nightly'],
+      env: { GH_TOKEN: { file: join(dir, 'absent.pat') } },
+    }],
+  }));
+  chmodSync(join(cfg, 'credential-profiles.json'), 0o600);
+  const repo = makeGitRepo(join(dir, 'repo'));
+  const env = makeEnv({
+    workspaceMode: 'copy',
+    repoDir: repo,
+    credentialProfiles: () => loadCredentialProfiles({ XDG_CONFIG_HOME: join(dir, 'cfg') } as never),
+  } as never);
+  try {
+    const run = env.runService.create({
+      ownerId: 'bot-nightly', task: 'x', agent: 'fake',
+      repository: { url: 'https://github.com/aywengo/mercury.git', localPath: repo },
+    });
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    const row = env.runs.get(run.id)!;
+    assert.equal(row.status, 'FAILED');
+    assert.match(row.error ?? '', /credential profile 'nightly': env GH_TOKEN source missing/);
+  } finally {
+    env.worker.stop();
+    env.close();
+  }
 });
