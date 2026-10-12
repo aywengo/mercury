@@ -71,6 +71,11 @@ test('issue #621: generated paths are excluded from git even on a no-pack Run', 
     // Every generated path must be ignored by git in the run's workspace.
     const { execFileSync } = await import('node:child_process');
     const { GENERATED_PATHS } = await import('../src/knowledge/materialize.ts');
+    // The agent-state dirs can contain Run secrets (revoked GH_TOKEN in a kernel snapshot, #942);
+    // pin them so list edits cannot silently drop the exclusion.
+    for (const p of ['.mercury-sessions/', 'session-artifacts/']) {
+      assert.ok(GENERATED_PATHS.includes(p), `${p} must stay in GENERATED_PATHS`);
+    }
     for (const p of GENERATED_PATHS) {
       const out = execFileSync('git', ['check-ignore', p], {
         cwd: final.workspacePath, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],

@@ -88,7 +88,17 @@ export const CONTEXT_FILE = '.mercury-context.json';
  * pull request -- the outcome section 9.4 exists to prevent, and K1's reason for refusing a second
  * copy of knowledge in git.
  */
-export const GENERATED_PATHS = ['.mercury/', `${SKILL_DIR}/`, AGENTS_MD_FILE, CLAUDE_MD_FILE, CONTEXT_FILE];
+export const GENERATED_PATHS = [
+  '.mercury/',
+  `${SKILL_DIR}/`,
+  AGENTS_MD_FILE,
+  CLAUDE_MD_FILE,
+  CONTEXT_FILE,
+  // Agent session transcripts and kernel-state snapshots can carry Run secrets (the revoked
+  // GH_TOKEN appeared in a kernel-state snapshot, #942); they must never be committable.
+  '.mercury-sessions/',
+  'session-artifacts/',
+];
 
 const SPECIFICITY: Record<string, number> = { path: 0, repo: 1, project: 2, agent: 3 };
 
