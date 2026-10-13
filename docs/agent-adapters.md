@@ -6,6 +6,10 @@ How Mercury drives other coding agents, and the design for the generic
 Spec context: [ARCHITECTURE.md](../ARCHITECTURE.md) §8 (Agent Adapter), §9 (Run Context),
 §14 (events), §16 (durable execution), §29 (testing).
 
+Status (2026-10-14): the remaining concrete adapters are drafted, awaiting an operator's
+`nightly:ready` — Phase 1 as #878, Phase 4 as #879, Phase 5 as #895, Phases 8+9 as #902, and
+the Hermes persona renderer gap as #937.
+
 ---
 
 ## 1. The contract (recap)
@@ -129,7 +133,7 @@ contract returning a handle), and cancellation is raced into the drive loop so
 hanging agents can be cancelled promptly (E2E: 0.3s vs the previous timeout).
 Details in §7 "Known gaps".
 
-### Phase 1 — CodexAdapter (OpenAI Codex CLI) — *high priority*
+### Phase 1 — CodexAdapter (OpenAI Codex CLI) — *high priority* — proposed #878
 
 **Interface (verified):**
 
@@ -335,7 +339,7 @@ via stdin (nothing shell-interpreted).
 
 **Effort:** S–M (adapter + text parser + mock fixture + ~6 tests).
 
-### Phase 4 — GeminiAdapter (Google Gemini CLI) — *medium priority*
+### Phase 4 — GeminiAdapter (Google Gemini CLI) — *medium priority* — proposed #879
 
 **Interface (verified):**
 
@@ -354,7 +358,7 @@ message events, tool calls, final result. Map like ClaudeCodeAdapter.
 
 **Effort:** M (near-copy of ClaudeCodeAdapter).
 
-### Phase 5 — AiderAdapter (Aider) — *low priority*
+### Phase 5 — AiderAdapter (Aider) — *low priority* — proposed #895
 
 **Interface (well-known):**
 

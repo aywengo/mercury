@@ -5,7 +5,9 @@ which credentials it can use and which processes Mercury must supervise. It is
 not part of the Role Preset MVP.
 
 Status: **design only.** Claude currently supports one process-wide
-`MERCURY_CLAUDE_MCP_CONFIG`; Mercury does not have generic per-run MCP.
+`MERCURY_CLAUDE_MCP_CONFIG`; Mercury does not have generic per-run MCP. Phase 4 (the
+foundation) is drafted as proposal #875 and Phase 5 (reviewed read-only MCP) as #870
+(nightly rung 4, 2026-10-08); both await an operator's `nightly:ready`.
 
 Related: [`role-presets.md`](role-presets.md),
 [`preset-store.md`](preset-store.md), [`ARCHITECTURE.md`](../../ARCHITECTURE.md)
