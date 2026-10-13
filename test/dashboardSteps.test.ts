@@ -17,6 +17,14 @@ const stages = [
   { index: 2, id: 'review', task: 'Check it', preset: { id: 'reviewer' } },
 ];
 
+test('the advisory panel label is pinned verbatim in both HTML files', async () => {
+  const runHtml = await import('node:fs').then((fs) => fs.promises.readFile(new URL('../ui/run.html', import.meta.url), 'utf8'));
+  const workflowsHtml = await import('node:fs').then((fs) => fs.promises.readFile(new URL('../ui/workflows.html', import.meta.url), 'utf8'));
+  const label = 'agent-reported — not enforced by Mercury';
+  assert.ok(runHtml.includes(label), 'run.html must show the advisory label');
+  assert.ok(workflowsHtml.includes(label), 'workflows.html must show the advisory label');
+});
+
 test('unmatched planned steps are "not reported", never skipped or failed', () => {
   const rows: StepRow[] = mapStepEvents(stages, []);
   assert.deepEqual(rows.map((r) => r.status), ['not-reported', 'not-reported', 'not-reported']);

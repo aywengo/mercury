@@ -123,6 +123,65 @@ test('GET /api/workflows/:id returns stages with the presets they reference', as
   }
 });
 
+test('POST /api/workflows/:id/runs shares the create-run rate limit (429)', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false });
+  const stream = new EventStream(env.db, env.events, 10);
+  stream.start();
+  const app = createApp({
+    runService: env.runService,
+    events: env.events,
+    stream,
+    apiTokens: new Map([['tok-alice', 'alice']]),
+    adminToken: 'tok-admin',
+    rateLimits: { createRun: { windowMs: 60_000, max: 2 } },
+  });
+  const { url, close: stopSrv } = await listen(app);
+  try {
+    const base = url;
+    const post = (task: string) => fetch(`${base}/api/workflows/plan-implement-review/runs`, {
+      method: 'POST', headers: auth('tok-alice'),
+      body: JSON.stringify({ task, repository: { localPath: repo } }),
+    });
+    assert.equal((await post('a')).status, 201);
+    assert.equal((await post('b')).status, 201);
+    const third = await post('c');
+    assert.equal(third.status, 429);
+    assert.ok(Number(third.headers.get('retry-after')) > 0, 'Retry-After header');
+    assert.equal(((await third.json()) as { error: string }).error, 'rate limit exceeded');
+  } finally {
+    await stopSrv();
+    stream.stop();
+    env.close();
+  }
+});
+
+test('a non-string workflowVersion reaches strict validation instead of being dropped', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const base = url;
+    const bad = await fetch(`${base}/api/workflows/plan-implement-review/runs`, {
+      method: 'POST', headers: auth('tok-alice'),
+      body: JSON.stringify({ task: 'x', repository: { localPath: repo }, workflowVersion: 1 }),
+    });
+    // A numeric pin is preserved and refused by RunService's strict workflow validation --
+    // it must NOT silently become an unpinned head request.
+    assert.ok(bad.status === 400 || bad.status === 422, `non-string pin is refused, got ${bad.status}`);
+    const ok = await fetch(`${base}/api/workflows/plan-implement-review/runs`, {
+      method: 'POST', headers: auth('tok-alice'),
+      body: JSON.stringify({ task: 'x', repository: { localPath: repo }, workflowVersion: '1.0.0' }),
+    });
+    assert.equal(ok.status, 201);
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
+
 test('POST /api/workflows/:id/runs creates the Run through the W-2 path (same snapshot hash)', async () => {
   const repo = makeGitRepo(tempDir('mercury-repo-'));
   const env = makeEnv({ workspaceMode: 'copy', repoDir: repo, workerEnabled: false });

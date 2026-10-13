@@ -245,6 +245,11 @@ export function createApp(deps: ServerDeps): Express {
   });
   app.post('/api/runs', createRunLimiter);
 
+  // The workflow Run-creation endpoint writes the same queue as POST /api/runs, so it shares
+  // the limiter instance and the same per-owner+IP budget; mounted before the router so the
+  // POST inside it is covered.
+  app.post('/api/workflows/:workflowId/runs', createRunLimiter);
+
   app.use('/api', createWorkflowRoutes({
     runService: deps.runService,
     events: deps.events,

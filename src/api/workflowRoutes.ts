@@ -124,6 +124,9 @@ export function createWorkflowRoutes(deps: RoutesDeps): Router {
         res.status(400).json({ error: 'preset and workflow are mutually exclusive' });
         return;
       }
+      // Forward the pin UNRESOLVED: undefined means "no pin" (head), any supplied value --
+      // string or not -- reaches RunService.create's strict workflow validation, so a
+      // non-string pin is refused rather than silently unpinned.
       const version = body.workflowVersion;
       const run = deps.runService.create({
         ownerId: req.auth!.ownerId,
@@ -143,7 +146,7 @@ export function createWorkflowRoutes(deps: RoutesDeps): Router {
         selection: body.selection,
         workflow: {
           id: req.params.workflowId,
-          ...(typeof version === 'string' ? { version } : {}),
+          ...(version !== undefined ? { version: version as string } : {}),
         },
         idempotencyKey: typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined,
       });
