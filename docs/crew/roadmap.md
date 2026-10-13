@@ -317,6 +317,11 @@ presets improve task outcomes. If not, stop before MCP and Store complexity.
 Phase 8 (advisory workflows) is not behind this gate, because it adds no MCP or Store
 surface. Phases 4–7 are.
 
+The Measure block above has no data pipeline: `preset.selected` events are not joined with
+terminal status anywhere, so the gate cannot be evaluated today. A read-only measurement pass
+is drafted as proposal #932 (nightly rung 4, 2026-10-11) and awaits an operator's
+`nightly:ready`.
+
 ## 8. Phase 4 — per-run MCP foundation
 
 Estimate: **5–8 days**. Depends on Phase 2.
