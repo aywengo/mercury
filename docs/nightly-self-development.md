@@ -172,6 +172,15 @@ decision on *what* gets built. When every remaining unimplemented roadmap item
 already has an open `nightly:proposed` issue, rung 4 is a quiet no-op: it files
 nothing and ends the Run (recorded in #956, 2026-10-14).
 
+Filing is mechanical, not recalled (dedupe, #881): every draft carries an
+invisible `<!-- nightly-source: <docs/path#heading-anchor> -->` marker, and the
+only filing path is `next.ts propose`, which searches open **and** closed
+issues for that key (a visible `Source key:` line plus the hidden marker) or an
+exact title match before creating anything. A match blocks re-filing — a
+declined proposal stays declined until a human reopens it — and a failed,
+incomplete, or capped search files nothing. Without this, rung 4 filed the
+same roadmap item twice in one night (#867 and #875).
+
 ## 7. Skills
 
 - **`nightly-e2e`** (#739) — `npm run test:e2e` (the host needs Docker). Reruns

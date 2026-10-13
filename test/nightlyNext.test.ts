@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { runNext, finishIssue, blockIssue, blockedAlready, type NextIo } from '../.agents/skills/nightly/next.ts';
+import { runNext, finishIssue, blockIssue, blockedAlready, proposeIssue, sourceKeyOf, resetProposedThisRun, type NextIo } from '../.agents/skills/nightly/next.ts';
 import type { GhIssue, LabelEvent } from '../.agents/skills/nightly/select.ts';
 
 const REPO = 'aywengo/mercury';
@@ -279,4 +279,209 @@ test('blocked exit: the body marker is written ONLY for issues the nightly ident
   const failingIo: NextIo = { ...failing.io, async patch() { throw new Error('network gone'); } };
   const out = await blockIssue(failingIo, { repo: REPO, issue: 20, reason: 'still blocked' });
   assert.equal(out.commented, true, 'the blocked exit survives a body-marker failure');
+});
+// ---- rung 4: the guarded propose exit (#881) ----
+
+/** An io for propose tests: a fixed issue-listing (state=all) plus recorded writes. `listStatus`
+ * fakes a broken search; `listPages` lets a test drive the page-cap path. */
+/** A search-shape io: GET /search/issues returns hits for the key query and/or title query
+ * (decoded from the `q` parameter); every hit is then confirmed via GET /repos/.../issues/<n>.
+ * `searchStatus`/`incomplete` simulate the fail-closed paths; `deep` makes the matching hit
+ * reachable only past `listPagesCap` pages of the KEY query (the #928 review's page-cap
+ * scenario, which the old list scan could never reach). */
+function proposeIo(existing: { number: number; title: string; body?: string | null }[] = [], opts: { listStatus?: number; searchStatus?: number; incomplete?: boolean; searchHits?: { keyQuery?: { number: number }[]; titleQuery?: { number: number }[] }; deep?: number } = {}) {
+  const calls: { method: string; path: string; body?: unknown }[] = [];
+  const singleIssue = new Map<number, { number: number; title: string; body?: string | null }>();
+  for (const it of existing) singleIssue.set(it.number, it);
+  let keyPage = 0;
+  const io: NextIo = {
+    async get(path) {
+      calls.push({ method: 'GET', path });
+      if (path.startsWith('/search/issues?')) {
+        if (opts.searchStatus !== undefined) return { body: {}, status: opts.searchStatus };
+        if (opts.incomplete) return { body: { items: [], incomplete_results: true }, status: 200 };
+        const q = decodeURIComponent(path).match(/q=([^&]+)/)?.[1] ?? '';
+        const isKeyQuery = q.includes(KEY) && q.includes('Source key');
+        const hits = isKeyQuery ? (opts.searchHits?.keyQuery ?? []) : (opts.searchHits?.titleQuery ?? []);
+        if (isKeyQuery && opts.deep !== undefined) {
+          keyPage++;
+          // Pre-hit pages are FULL (100 items) so the scan continues to the next page.
+          if (keyPage < opts.deep) return { body: { items: Array.from({ length: 100 }, (_, i) => ({ number: 10_000 + i })), total_count: 10_100, incomplete_results: false }, status: 200 };
+          if (keyPage > 10) return { body: { items: Array.from({ length: 100 }, (_, i) => ({ number: 20_000 + i })), total_count: 20_100, incomplete_results: false }, status: 200 };
+          return { body: { items: hits, total_count: hits.length, incomplete_results: false }, status: 200 };
+        }
+        return { body: { items: hits, total_count: hits.length, incomplete_results: false }, status: 200 };
+      }
+      const single = path.match(new RegExp(`^/repos/${REPO.replace('/', '\\/')}/issues/(\\d+)$`));
+      if (single) {
+        const found = singleIssue.get(Number(single[1])) ?? null;
+        return { body: found, status: found ? 200 : 404 };
+      }
+      return { body: null, status: 404 };
+    },
+    async post(path, body) {
+      calls.push({ method: 'POST', path, body });
+      const m = path.match(new RegExp(`^/repos/${REPO.replace('/', '\\/')}/issues$`));
+      if (m) {
+        const b = body as { title: string; body: string };
+        singleIssue.set(999, { number: 999, title: b.title, body: b.body });
+        return { body: { number: 999 }, status: 201 };
+      }
+      return { body: {}, status: 201 };
+    },
+    async postLabel() { calls.push({ method: 'POST-LABEL', path: '(labels)' }); return true; },
+    async deleteLabel() { return true; },
+  };
+  return { io, calls };
+}
+
+const KEY = 'docs/crew/roadmap.md#8-phase-4';
+const TITLE = 'Crew Phase 4: per-run MCP foundation';
+
+test('propose: an open issue carrying the source key blocks creation and is reported (#881 ac1)', async () => {
+  resetProposedThisRun();
+  const { io, calls } = proposeIo([{ number: 875, title: 'a differently-worded title', body: `stuff\n\nSource key: ${KEY}\n<!-- nightly-source: ${KEY} -->` }],
+    { searchHits: { keyQuery: [{ number: 875 }] } });
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' });
+  assert.equal(out.created, false);
+  assert.equal(out.existing, 875);
+  assert.ok(!calls.some((c) => c.method === 'POST' && c.path.endsWith('/issues')), 'nothing was filed');
+});
+
+test('propose: the key match is confirmed via the hidden marker on the re-read body', async () => {
+  resetProposedThisRun();
+  // Search matched on the visible line; the confirmation re-read finds the hidden marker.
+  const { io, calls } = proposeIo([{ number: 875, title: 'x', body: `Source key: ${KEY}\n<!-- nightly-source: ${KEY} -->` }],
+    { searchHits: { keyQuery: [{ number: 875 }] } });
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' });
+  assert.equal(out.existing, 875);
+  assert.ok(calls.some((c) => c.path.endsWith('/issues/875')), 'the hit was confirmed by re-reading the body');
+});
+
+test('propose: a search hit that does NOT confirm on re-read does not block filing', async () => {
+  resetProposedThisRun();
+  // Stale/noisy index: search returns a hit, but the body carries a different key and a
+  // different title — the exact confirmation keeps filing unblocked.
+  const { io, calls } = proposeIo([{ number: 880, title: 'unrelated', body: '<!-- nightly-source: docs/other.md#x -->' }],
+    { searchHits: { keyQuery: [{ number: 880 }], titleQuery: [] } });
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'the draft' });
+  assert.equal(out.created, true);
+  assert.equal(out.issue, 999);
+});
+
+test('propose: a CLOSED issue with the key also blocks (a declined proposal is not re-proposed) (#881 ac2)', async () => {
+  resetProposedThisRun();
+  const { io, calls } = proposeIo([{ number: 860, title: 'old title', body: `Source key: ${KEY}\n<!-- nightly-source: ${KEY} -->` }],
+    { searchHits: { keyQuery: [{ number: 860 }] } });
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' });
+  assert.equal(out.created, false);
+  assert.equal(out.existing, 860);
+  assert.ok(!calls.some((c) => c.method === 'POST'));
+});
+
+test('propose: an exact-title match without a marker blocks (pre-fix drafts like #867) (#881 ac3)', async () => {
+  resetProposedThisRun();
+  const { io, calls } = proposeIo([{ number: 867, title: ` ${TITLE} `, body: 'no marker here' }],
+    { searchHits: { keyQuery: [], titleQuery: [{ number: 867 }] } });
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' });
+  assert.equal(out.created, false);
+  assert.equal(out.existing, 867);
+  assert.ok(!calls.some((c) => c.method === 'POST'));
+});
+
+test('propose: a match reachable only past 10 pages of search results is still found (#928 review)', async () => {
+  resetProposedThisRun();
+  // The old list scan threw "exceeded 10 pages" here and failed closed forever; the search
+  // path is bounded by what can match, so the duplicate is still caught.
+  const { io, calls } = proposeIo([{ number: 875, title: 'x', body: `Source key: ${KEY}\n<!-- nightly-source: ${KEY} -->` }],
+    { searchHits: { keyQuery: [{ number: 875 }] }, deep: 10 });
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' });
+  assert.equal(out.created, false);
+  assert.equal(out.existing, 875);
+  assert.ok(!calls.some((c) => c.method === 'POST'));
+});
+
+test('propose: no match files the issue with the visible key line AND the hidden marker, then labels it', async () => {
+  resetProposedThisRun();
+  const { io, calls } = proposeIo([{ number: 1, title: 'unrelated', body: 'nope' }]);
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'the draft' });
+  assert.equal(out.created, true);
+  assert.equal(out.issue, 999);
+  const create = calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'));
+  assert.ok(create, 'the issue was created');
+  const body = (create!.body as { body: string }).body;
+  assert.equal(sourceKeyOf(body), KEY, 'the filed body carries the hidden marker');
+  assert.ok(body.includes(`Source key: ${KEY}`), 'the filed body carries the visible key line (search-indexable)');
+  const label = calls.find((c) => c.method === 'POST-LABEL');
+  assert.ok(label, 'nightly:proposed is added');
+});
+
+test('propose: a failed search fails closed - nothing is filed (#881 ac4)', async () => {
+  resetProposedThisRun();
+  const { io, calls } = proposeIo([], { searchStatus: 502 });
+  await assert.rejects(
+    () => proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' }),
+    /dedupe search failed/,
+  );
+  assert.ok(!calls.some((c) => c.method === 'POST'));
+});
+
+test('propose: incomplete_results fails closed (a truncated index must never read as "no match") (#928 review)', async () => {
+  resetProposedThisRun();
+  const { io, calls } = proposeIo([], { incomplete: true });
+  await assert.rejects(
+    () => proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' }),
+    /incomplete_results/,
+  );
+  assert.ok(!calls.some((c) => c.method === 'POST'));
+});
+
+test('propose: empty source or title is rejected before any request', async () => {
+  resetProposedThisRun();
+  const { io, calls } = proposeIo();
+  await assert.rejects(() => proposeIssue(io, { repo: REPO, source: '  ', title: TITLE, body: 'b' }), /non-empty --source/);
+  await assert.rejects(() => proposeIssue(io, { repo: REPO, source: KEY, title: '', body: 'b' }), /non-empty --title/);
+  assert.ok(!calls.some((c) => c.method === 'GET'), 'no search even started');
+});
+
+test('propose: a source key with a space is refused (it could never be read back by sourceKeyOf) (#928 review)', async () => {
+  resetProposedThisRun();
+  const { io, calls } = proposeIo();
+  await assert.rejects(
+    () => proposeIssue(io, { repo: REPO, source: 'docs/a.md#head with space', title: TITLE, body: 'b' }),
+    /key outside it can never dedupe/i,
+  );
+  assert.ok(!calls.some((c) => c.method === 'GET'), 'refused before any request');
+  assert.ok(!calls.some((c) => c.method === 'POST'));
+});
+
+test('propose: a body that already carries a source marker is refused, not double-marked (#928 review)', async () => {
+  resetProposedThisRun();
+  const { io, calls } = proposeIo([]);
+  await assert.rejects(
+    () => proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: `draft\n\n<!-- nightly-source: docs/other.md#x -->` }),
+    /already carries/,
+  );
+  assert.ok(!calls.some((c) => c.method === 'POST'));
+});
+
+test('propose: two calls with the same key in one Run - the second does not create even without a search hit (#928 review)', async () => {
+  resetProposedThisRun();
+  // Search finds nothing (index lag within the same night), so the first call files #999;
+  // the per-Run record makes the second call report the existing issue instead of re-filing.
+  const first = proposeIo([]);
+  const out1 = await proposeIssue(first.io, { repo: REPO, source: KEY, title: TITLE, body: 'the draft' });
+  assert.equal(out1.created, true);
+  const second = proposeIo([]); // fresh io: search would find nothing (not indexed yet)
+  const out2 = await proposeIssue(second.io, { repo: REPO, source: KEY, title: TITLE, body: 'the draft again' });
+  assert.equal(out2.created, false);
+  assert.equal(out2.existing, 999);
+  assert.equal(out2.sameRun, true);
+  assert.ok(!second.calls.some((c) => c.method === 'POST'), 'nothing was re-filed');
+});
+
+test('sourceKeyOf: extracts the key, tolerates absent bodies, ignores other markers', () => {
+  assert.equal(sourceKeyOf(`x\n<!-- nightly-source: docs/a.md#1-head -->\n`), 'docs/a.md#1-head');
+  assert.equal(sourceKeyOf(null), null);
+  assert.equal(sourceKeyOf('<!-- some-other-marker: x -->'), null);
 });

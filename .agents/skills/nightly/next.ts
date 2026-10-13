@@ -32,6 +32,7 @@
  */
 
 import { basename } from 'node:path';
+import { readFileSync } from 'node:fs';
 
 import { runSelectorWith } from './select.ts';
 import { assertRepo, ghToken, ghGet, ghPost, ghPatch, FETCH_TIMEOUT_MS } from './shared.ts';
@@ -178,6 +179,160 @@ export async function blockedAlready(io: NextIo, opts: { repo: string; issue: nu
   return labels.includes(L_BLOCKED);
 }
 
+// ---- Rung 4: the guarded filing exit (#881) ----
+
+/** The provenance a rung-4 draft carries (§6/#881): a visible `Source key: <key>` line (what
+ * search indexes) and the hidden `<!-- nightly-source: <key> -->` marker (what `sourceKeyOf`
+ * reads back). */
+export function sourceMarker(source: string): string {
+  return `Source key: ${source.trim()}\n<!-- nightly-source: ${source.trim()} -->`;
+}
+
+/** The key charset (#928 review): a key outside it can never be read back by `sourceKeyOf`,
+ * so it can never dedupe — refuse it instead of filing a proposal that cannot be found. */
+const SOURCE_KEY_RE = /^[A-Za-z0-9._/#-]+$/;
+
+/** The stable source key extracted from an issue body, or null when the body has no marker. */
+export function sourceKeyOf(body: string | null | undefined): string | null {
+  const m = typeof body === 'string' ? body.match(/<!-- nightly-source: ([^\s>]+) -->/) : null;
+  return m ? m[1] : null;
+}
+
+/** The per-page search bound (#881 acceptance 4): a response that claims more pages than this
+ * fails closed - an unbounded backlog must never turn into "search found nothing, file away". */
+export const PROPOSE_SEARCH_MAX_PAGES = 10;
+
+/** Rung 4's only filing exit: dedupe by source key (open AND closed, all labels) plus an
+ * exact-title match (a pre-marker draft such as #867 must still block re-proposal), then file.
+ * Fail closed: a failed or over-cap search throws and NOTHING is created. */
+export async function proposeIssue(io: NextIo, opts: { repo: string; source: string; title: string; body: string }): Promise<{ created: boolean; existing?: number; issue?: number; sameRun?: boolean }> {
+  assertRepo(opts.repo);
+  const source = opts.source.trim();
+  if (source === '') throw new Error('propose needs a non-empty --source key (the docs path + heading anchor)');
+  const title = opts.title.trim();
+  if (title === '') throw new Error('propose needs a non-empty --title');
+  if (!SOURCE_KEY_RE.test(source)) {
+    throw new Error(`propose: --source must match ${SOURCE_KEY_RE.source} (a key outside it can never dedupe) - nothing was filed`);
+  }
+  const titleEq = (a: string): boolean => a.trim() === title;
+
+  // Same-night window (#928 review): a proposal filed earlier in THIS Run may not be in the
+  // search index yet. A per-Run record of keys already filed closes that gap.
+  if (PROPOSED_THIS_RUN.has(proposalKey(opts.repo, source))) {
+    return { created: false, existing: PROPOSED_THIS_RUN.get(proposalKey(opts.repo, source)) as number, sameRun: true };
+  }
+
+  const found = await searchIssues(io, opts.repo, source, title, titleEq);
+  if (found !== null) {
+    // The search itself succeeded: a match (open or closed, any labels) blocks creation.
+    return { created: false, existing: found };
+  }
+
+  if (opts.body.includes('nightly-source:')) {
+    // A body that already carries a provenance marker would read back under the WRONG key and
+    // create an undedupable duplicate (#928 review "should fix" 1). Refuse instead.
+    throw new Error('propose: the draft body already carries a nightly-source marker - refusing to double-mark - nothing was filed');
+  }
+  const marker = sourceMarker(source);
+  const fullBody = `${opts.body.replace(/\s+$/, '')}\n\n${marker}`;
+  const res = await io.post(`/repos/${opts.repo}/issues`, { title, body: fullBody });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`propose failed: POST /issues returned ${res.status} - nothing was filed`);
+  }
+  const created = (res.body as { number?: number } | null)?.number;
+  if (!Number.isInteger(created) || (created as number) <= 0) {
+    throw new Error(`propose failed: the issue-create response carried no issue number - nothing was filed`);
+  }
+  // Label the draft AFTER the create so a crash between the two writes leaves a visible
+  // (unlabeled) draft a human can relabel, never a claimed-looking nothing. The label add is
+  // idempotent (already-present -> false), so a rerun of the exit is safe.
+  const labeled = await io.postLabel(`/repos/${opts.repo}/issues/${created}/labels`, { labels: ['nightly:proposed'] });
+  if (!labeled) {
+    // Already labeled means a retry raced us; that is fine. A 422-validation failure would have
+    // thrown inside postLabel, same as the claim path.
+  }
+  PROPOSED_THIS_RUN.set(proposalKey(opts.repo, source), created as number);
+  return { created: true, issue: created };
+}
+
+function proposalKey(repo: string, source: string): string {
+  return `${repo}#${source}`;
+}
+
+/** The per-Run record of proposals this process already filed: a same-night re-proposal may
+ * predate search indexing (#928 review), so the in-Run record closes the window. */
+export const PROPOSED_THIS_RUN = new Map<string, number>();
+
+/** Test hook: clear the per-Run record between test cases. */
+export function resetProposedThisRun(): void {
+  PROPOSED_THIS_RUN.clear();
+}
+
+/** Dedupe search (#881, reworked per the #928 review): GitHub search scoped to issues, bounded
+ * by WHAT can match, not by repo age.
+ *
+ * - Primary: `repo + is:issue + "Source key: <key>"` — the visible provenance line; search does
+ *   not reliably index HTML comments.
+ * - Title fallback: `repo + is:issue + in:title "<title>"` — exact-compared client-side; it
+ *   covers pre-marker drafts such as #867.
+ *
+ * Every hit is CONFIRMED by re-reading the issue and running `sourceKeyOf` on its body (or the
+ * exact title comparison), so search-index noise never blocks and a stale index never slips a
+ * real duplicate past. Returns the first confirmed matching issue NUMBER, null when no hit
+ * confirms, and throws on any failure (non-2xx, `incomplete_results: true`, over-cap) — fail
+ * closed, nothing is filed (#881 acceptance 4). */
+async function searchIssues(io: NextIo, repo: string, source: string, title: string, titleEq: (t: string) => boolean): Promise<number | null> {
+  const queries = [
+    `repo:${repo} is:issue "${sourceKeyLine(source)}"`,
+    `repo:${repo} is:issue in:title "${titleQueryPhrase(title)}"`,
+  ];
+  const seen = new Set<number>();
+  for (const q of queries) {
+    for (let page = 1; page <= PROPOSE_SEARCH_MAX_PAGES; page++) {
+      const res = await io.get(`/search/issues?q=${encodeURIComponent(q)}&per_page=100&page=${page}`);
+      if (res.status < 200 || res.status >= 300) {
+        throw new Error(`propose dedupe search failed: search page ${page} returned ${res.status} - filing is refused`);
+      }
+      const payload = (res.body ?? {}) as { items?: unknown; incomplete_results?: boolean; total_count?: number };
+      if (payload.incomplete_results === true) {
+        throw new Error('propose dedupe search reported incomplete_results - filing is refused (fail closed, #881 acceptance 4)');
+      }
+      const items = (Array.isArray(payload.items) ? payload.items : []) as { number?: number }[];
+      for (const it of items) {
+        if (!Number.isInteger(it.number)) continue;
+        const n = it.number as number;
+        if (seen.has(n)) continue;
+        seen.add(n);
+        // Confirm each hit by re-reading the body: search can lag or match loosely; the
+        // exact sourceKeyOf/exact-title check keeps the block precise.
+        const single = await io.get(`/repos/${repo}/issues/${n}`);
+        if (single.status === 404) continue; // the hit vanished from the index; it cannot dedupe
+        if (single.status < 200 || single.status >= 300) {
+          throw new Error(`propose dedupe search failed: confirming issue ${n} returned ${single.status} - filing is refused`);
+        }
+        const body = (single.body as { body?: string | null; title?: string } | null);
+        if (sourceKeyOf(body?.body) === source || titleEq(body?.title ?? '')) return n;
+      }
+      // A partial page means the result set is exhausted for this query.
+      if (items.length < 100) break;
+      if (page === PROPOSE_SEARCH_MAX_PAGES) {
+        throw new Error(`propose dedupe search exceeded ${PROPOSE_SEARCH_MAX_PAGES} pages without exhausting the result set - filing is refused (fail closed, #881 acceptance 4)`);
+      }
+    }
+  }
+  return null;
+}
+
+/** The visible provenance line a filed draft carries (what GitHub search indexes). */
+function sourceKeyLine(source: string): string {
+  return `Source key: ${source}`;
+}
+
+/** The title-fallback query phrase: the exact proposed title, exact-compared client-side. */
+function titleQueryPhrase(title: string): string {
+  return title;
+}
+
 // ---- GitHub I/O (thin, bounded, same shape as select.ts/e2e.ts) ----
 
 async function ghPostLabel(path: string, body: unknown, token: string): Promise<boolean> {
@@ -252,7 +407,17 @@ if (isMain) {
       if (!repo || !Number.isInteger(issue) || issue <= 0) throw new Error('usage: next.ts blocked --repo <owner/name> --issue <n> --reason "<question>"');
       return await blockIssue(realIo(process.env), { repo, issue, reason });
     }
-    throw new Error('usage: next.ts run|finish|blocked --repo <owner/name> [--dry-run] [--issue <n>] [--reason "..."]');
+    if (cmd === 'propose') {
+      const source = flag('--source') ?? '';
+      const title = flag('--title') ?? '';
+      const bodyFile = flag('--body-file') ?? '';
+      if (!repo || source === '' || title === '' || bodyFile === '') {
+        throw new Error('usage: next.ts propose --repo <owner/name> --source <key> --title <t> --body-file <p>');
+      }
+      const body = readFileSync(bodyFile, 'utf8');
+      return await proposeIssue(realIo(process.env), { repo, source, title, body });
+    }
+    throw new Error('usage: next.ts run|finish|blocked|propose --repo <owner/name> [--dry-run] [--issue <n>] [--source <key>] [--title <t>] [--body-file <p>] [--reason "..."]');
   })();
   work
     .then((out) => { process.stdout.write(JSON.stringify(out) + '\n'); })
