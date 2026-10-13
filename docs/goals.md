@@ -1037,7 +1037,10 @@ Reasoning in [section 12](#12-non-goals).
 ### Still open
 
 **Does `unmet` fire often enough to matter?** Needs investigation, and Phase 1 now ships
-the counter that answers it rather than leaving the question to anecdote.
+the counter that answers it rather than leaving the question to anecdote. The read-only
+measurement pass that would answer it is drafted as proposal
+[#949](https://github.com/aywengo/mercury/issues/949) (nightly rung 4, 2026-10-14); it
+awaits an operator's `nightly:ready`.
 
 Two further questions surfaced while checking the capability surface, and unlike these
 they block implementation rather than funding:
