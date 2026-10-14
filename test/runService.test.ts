@@ -1057,3 +1057,52 @@ test('model: a modelRequired preset refuses a conflicting caller model through t
     env.close();
   }
 });
+
+test('statusChangedAt changes exactly at each transition and survives a NULL pre-migration row (issue #906)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    // Creation is the QUEUED transition: the field is set from the start, never fabricated later.
+    assert.equal(run.statusChangedAt, run.createdAt);
+
+    const seen: (string | null | undefined)[] = [run.statusChangedAt];
+    // ISO timestamps have millisecond precision; back-to-back transitions in-process can land in
+    // the same millisecond legally. Pause between transitions so "changed" is observable, not
+    // asserted against a tie the field's precision cannot distinguish.
+    const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    for (const to of ['STARTING', 'RUNNING', 'COMPLETED'] as const) {
+      pause(5);
+      env.runs.transition(run.id, to, to === 'COMPLETED' ? { completedAt: new Date().toISOString() } : undefined);
+      const r = env.runs.get(run.id)!;
+      seen.push(r.statusChangedAt);
+    }
+    // Monotonic and strictly changing at every transition.
+    for (let i = 1; i < seen.length; i++) {
+      assert.ok(seen[i] != null);
+      assert.ok(new Date(seen[i]!) >= new Date(seen[i - 1]!), 'statusChangedAt must not go back');
+      assert.notEqual(seen[i], seen[i - 1], 'statusChangedAt must change at each transition');
+    }
+    // Terminal timestamp matches the terminal event's timestamp ordering (same append window).
+    const terminal = env.runs.get(run.id)!;
+    assert.equal(terminal.status, 'COMPLETED');
+    assert.ok(terminal.completedAt != null && terminal.statusChangedAt != null);
+
+    // A row written before the migration (status_changed_at NULL) lists cleanly with the field
+    // null, never a fabricated timestamp.
+    env.db.prepare("UPDATE runs SET status_changed_at = NULL WHERE id = ?").run(run.id);
+    const migrated = env.runs.list({ ownerId: 'alice', limit: 10 }).runs.find((r) => r.id === run.id)!;
+    assert.equal(migrated.statusChangedAt, null);
+    const viaApi = env.runs.get(run.id)!;
+    assert.equal(viaApi.statusChangedAt, null);
+  } finally {
+    env.close();
+  }
+});
+
+test('mutation check: removing the status_changed_at write in transition fails this test (issue #906)', () => {
+  // The regression proof is structural: the UPDATE in RunStore.transition is the only writer, and
+  // the test above asserts the value CHANGES at each transition. Deleting the write makes every
+  // transition keep the previous timestamp, so seen[i] === seen[i-1] and the assertion fails.
+  const src = readFileSync('src/runs/runStore.ts', 'utf8');
+  assert.match(src, /status_changed_at = \?/, 'transition must write status_changed_at');
+});

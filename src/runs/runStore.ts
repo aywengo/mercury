@@ -27,6 +27,7 @@ export interface RunRow {
   lease_owner: string | null;
   lease_expires_at: string | null;
   cancellation_requested_at: string | null;
+  status_changed_at: string | null;
   final_commits_json: string;
   pr_url: string | null;
   model: string | null;
@@ -58,6 +59,7 @@ export function rowToRun(row: RunRow): Run {
     leaseOwner: row.lease_owner,
     leaseExpiresAt: row.lease_expires_at,
     cancellationRequestedAt: row.cancellation_requested_at,
+    statusChangedAt: row.status_changed_at,
     finalCommits: JSON.parse(row.final_commits_json) as string[],
     prUrl: row.pr_url,
     model: row.model ?? null,
@@ -100,15 +102,15 @@ export class RunStore {
         `INSERT INTO runs (
           id, owner_id, task, repository_json, repositories_json, workspace_branch, workspace_path, agent, status,
           attempt, retry_of, error, error_kind, constraints_json, created_at, started_at, completed_at,
-          lease_owner, lease_expires_at, cancellation_requested_at, final_commits_json, pr_url, model, credential_profile
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          lease_owner, lease_expires_at, cancellation_requested_at, status_changed_at, final_commits_json, pr_url, model, credential_profile
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.id, run.ownerId, run.task, JSON.stringify(run.repository), run.repositories ? JSON.stringify(run.repositories) : null,
         run.workspaceBranch, run.workspacePath,
         run.agent, run.status, run.attempt, run.retryOf, run.error, run.errorKind, JSON.stringify(run.constraints),
         run.createdAt, run.startedAt, run.completedAt, run.leaseOwner, run.leaseExpiresAt,
-        run.cancellationRequestedAt, JSON.stringify(run.finalCommits), run.prUrl, run.model ?? null, run.credentialProfile ?? null,
+        run.cancellationRequestedAt, run.statusChangedAt ?? null, JSON.stringify(run.finalCommits), run.prUrl, run.model ?? null, run.credentialProfile ?? null,
       );
   }
 
@@ -268,8 +270,11 @@ export class RunStore {
     const run = this.get(id);
     if (!run) throw new Error(`Run ${id} not found`);
     assertTransition(run.status, to);
-    const sets: string[] = ['status = ?'];
-    const params: (string | number | null)[] = [to];
+    // The transition timestamp rides the same single statement as the status write (issue #906):
+    // statusChangedAt is meaningless if it can lag or lead the status it describes, so no caller
+    // sets it and no other writer touches it. This is the only line in the codebase that updates it.
+    const sets: string[] = ['status = ?', 'status_changed_at = ?'];
+    const params: (string | number | null)[] = [to, new Date().toISOString()];
     if (extra) {
       for (const [k, v] of Object.entries(extra)) {
         const col = camelToSnake(k);

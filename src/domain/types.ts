@@ -81,6 +81,10 @@ export interface Run {
   leaseOwner: string | null;
   leaseExpiresAt: string | null;
   cancellationRequestedAt: string | null;
+  /** When the status last changed (B2-0, issue #906). Set only by RunStore.transition; absent or
+   *  NULL for rows written before the v18 migration -- consumers must treat it as absent, not
+   *  fabricated (no plausible provenance). Optional so Run literals predating the field stay valid. */
+  statusChangedAt?: string | null;
   finalCommits: string[];
   prUrl: string | null;
   /**

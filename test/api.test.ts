@@ -117,9 +117,11 @@ test('create + get + list with owner scoping', async () => {
 
       const got = await fetch(`${base}/api/runs/${runId}`, { headers });
       assert.equal(got.status, 200);
-      const body = (await got.json()) as { run: { status: string; ownerId: string } };
+      const body = (await got.json()) as { run: { status: string; ownerId: string; statusChangedAt: string | null } };
       assert.equal(body.run.status, 'QUEUED');
       assert.equal(body.run.ownerId, 'alice');
+      // The status-transition timestamp is served on the run endpoint (issue #906).
+      assert.ok(body.run.statusChangedAt != null, 'GET /api/runs/:runId serves statusChangedAt');
 
       // bob cannot see alice's run
       const bobHeaders = { authorization: 'Bearer tok-bob' };
@@ -127,8 +129,9 @@ test('create + get + list with owner scoping', async () => {
       assert.equal(forbidden.status, 404);
 
       const list = await fetch(`${base}/api/runs`, { headers });
-      const listBody = (await list.json()) as { runs: unknown[] };
+      const listBody = (await list.json()) as { runs: { statusChangedAt: string | null }[] };
       assert.equal(listBody.runs.length, 1);
+      assert.ok(listBody.runs[0].statusChangedAt != null, 'GET /api/runs serves statusChangedAt');
     } finally {
       await srv.close();
       closeStream();
