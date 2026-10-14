@@ -96,7 +96,10 @@ export interface CreateRunInput {
    * Role Preset selection (docs/crew/role-presets.md section 5). `undefined` means no preset
    * and the Run behaves exactly as before. Resolved in create() against the builtin registry;
    * a caller-supplied `version` is an optimistic guard against resolving an unexpected
-   * current definition.
+   * current definition. `undefined` is the only omitted value (#859 r2): an explicit `null`
+   * (or any other falsy value) is refused by the closed-shape check, never treated as absent
+   * -- a documented object field may not smuggle a null past validation, matching
+   * `selection` (Copilot review of #865) and `workflow`.
    */
   preset?: { id: string; version?: string };
   /**
@@ -518,7 +521,11 @@ export class RunService {
     // carries presetSnapshot skips resolution entirely -- same bytes as the parent, exactly
     // like skillSnapshots.
     let presetSnapshot: ResolvedRolePreset | null = input.presetSnapshot ?? null;
-    if (input.preset && !presetSnapshot) {
+    // `undefined` is the only omitted value (#859 r2): `input.preset &&` let explicit falsy
+    // blocks (`preset: null`, "" or 0) slip past the closed-shape check as preset-less Runs,
+    // leaving the documented "preset must be an object" contract open and the null branch in
+    // it dead. Match `selection` (#865) and `workflow`: presence is checked, then shape.
+    if (input.preset !== undefined && !presetSnapshot) {
       // Closed shape (#859): a retry never re-reads the caller's preset block (it uses
       // presetSnapshot, same bytes as the parent), so this validation only guards the
       // creation path that actually consumes the block.

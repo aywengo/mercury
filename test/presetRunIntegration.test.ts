@@ -419,6 +419,20 @@ test('the preset block field types are checked at the boundary (#859)', () => {
       () => env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, preset: { id: 'pinned', version: '' } }),
       /preset\.version must be a non-empty string when given/,
     );
+    // #859 r2: `undefined` is the only omitted value -- explicit falsy blocks are refused,
+    // never silently treated as a preset-less Run (Copilot finding on the truthiness guard).
+    assert.throws(
+      () => env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, preset: null as never }),
+      /preset must be an object with an id/,
+    );
+    assert.throws(
+      () => env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, preset: '' as never }),
+      /preset must be an object with an id/,
+    );
+    assert.throws(
+      () => env.runService.create({ ownerId: 'a', task: 't', repository: { localPath: repo }, preset: 0 as never }),
+      /preset must be an object with an id/,
+    );
     assert.equal(env.runService.list({ ownerId: 'a', isAdmin: true, limit: 10 }).runs.length, 0, 'no Run row written');
   } finally {
     env.close();
