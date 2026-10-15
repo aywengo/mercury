@@ -1467,9 +1467,9 @@ own rule was to add one only if hand-written parsing failed. It did not fail.
 
 Still open:
 
-- which TUI framework best satisfies the Milestone 5 gate;
-- whether real usage warrants crash-safe pending-create journaling;
-- whether Mercury should later expose an explicit API capabilities endpoint.
+- which TUI framework best satisfies the Milestone 5 gate — proposed (#896);
+- whether real usage warrants crash-safe pending-create journaling — proposed (#961);
+- whether Mercury should later expose an explicit API capabilities endpoint — proposed (#962).
 
 Changing any of these does not permit changing the core boundaries: HTTP/SSE is
 the protocol, Mercury stores Run truth, the CLI ships first, and the TUI reuses
