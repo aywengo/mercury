@@ -313,9 +313,15 @@ destroys the per-host view and is wrong for gauges like lease timestamps — and
 publishes `mercury_fleet_scrape_success{host}=0` rather than omitting the host, so a vanished host
 cannot be mistaken for an idle one.
 
-## 13. Upstream changes worth filing against Mercury
+## 13. Upstream changes worth filing against Mercury — proposed #945 (nightly rung 4, 2026-10-13)
 
 Fleet does not need these, but each removes a workaround. They belong in Mercury, not in Fleet.
+
+*Issue set:* #945 drafts items 1–3 as three independent issues (labels on Runs, locality
+declaration, completion webhook). Item 4 is already satisfied: `capabilities` has been
+advertised on `/api/agents` since #508 and `version` since the goal Phase 0a work, and the
+affinity descriptor that goes further is proposal #864. Drafted only; nothing starts until
+an operator relabels an issue `nightly:ready`.
 
 1. **Labels on Runs.** A `labels` JSON column plus `GET /api/runs?label=k=v`. Removes the biggest
    constraint in section 4: a child could then answer "which of these Runs are yours?" and Fleet's binding

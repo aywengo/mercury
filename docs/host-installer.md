@@ -63,6 +63,10 @@ Harness scope for v1 is whatever has a shipped adapter in `src/adapters/` at the
 
 Each milestone is one issue and one PR (issue-fix-loop). A milestone is done when its gate holds, not when its code merges.
 
+The four "⚠️ implemented, gate open" milestones (M1, M3, M4, M6) are verification work with no
+scheduled run; the gate-closure issue set is drafted as proposal #929 (nightly rung 4,
+2026-10-10) and awaits an operator's `nightly:ready`.
+
 ### M0 — Design doc
 
 This document. Done, apart from recording per-harness minimum versions from each adapter, which M2 needs and which belong in this file once read from the adapters.
