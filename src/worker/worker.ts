@@ -30,6 +30,7 @@ import { harvestRecords } from '../knowledge/harvestRecords.ts';
 import { harvestNative } from '../knowledge/harvestNative.ts';
 import { claimHash } from '../knowledge/validation.ts';
 import { createRedactor } from '../domain/redact.ts';
+import { redactRunArtifacts } from './artifactRedaction.ts';
 import type { OutboxStore } from '../knowledge/outbox.ts';
 import type { KnowledgeBounds } from '../knowledge/validation.ts';
 import type { ContextKnowledgeBlock } from '../knowledge/types.ts';
@@ -84,6 +85,13 @@ export interface WorkerDeps {
   alertWebhookUrl?: string | null;
   /** Optional secret redactor; run error messages are redacted at write time (issue #36). */
   redactor?: Redactor;
+  /**
+   * Secret values to scrub from agent artifacts at rest (issue #944): session transcripts and
+   * kernel-state snapshots under the Run workspace. The composition root passes the same layer
+   * the event redactor was built from -- declared MERCURY_SECRETS plus forwarded credential
+   * values -- so redaction at rest tracks exactly what Mercury hands to a Run.
+   */
+  artifactSecrets?: string[];
   /** Maximum time a run may wait for human input (MERCURY_INPUT_TIMEOUT_MS); 0 = no limit. */
   inputTimeoutMs: number;
   /** Runs in RUNNING/NEEDS_INPUT with no event activity beyond this are alerted (MERCURY_STUCK_RUN_THRESHOLD_MS); 0 = disabled. */
@@ -622,6 +630,19 @@ export class Worker {
           await handle.terminate();
         } catch (termErr) {
           log.warn({ error: String(termErr instanceof Error ? termErr.message : termErr) }, 'agent terminate before requeue failed');
+        }
+      }
+      // Scrub agent artifacts at rest (issue #944). The agent process is gone by here, so the
+      // files are stable; the pass is best-effort -- a redaction failure must not fail a run
+      // whose work is already done, it must leave something to read in the log.
+      if (this.deps.artifactSecrets && this.deps.artifactSecrets.length > 0) {
+        try {
+          const scrubbed = redactRunArtifacts(context.workspace.path, this.deps.artifactSecrets);
+          if (scrubbed > 0) {
+            log.info({ runId: run.id, files: scrubbed }, 'redacted secrets from agent artifacts');
+          }
+        } catch (scrubErr) {
+          log.warn({ error: String(scrubErr instanceof Error ? scrubErr.message : scrubErr) }, 'artifact redaction failed');
         }
       }
       await this.finalize(run, outcome, skills);

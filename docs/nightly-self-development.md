@@ -144,7 +144,15 @@ issue `nightly:blocked`, put the question in an issue comment, finish the Run.
    environment, never through task text, argv or events. Until credential
    profiles (`credential-profiles-design.md`) ship, this requires a host
    dedicated to the nightly identity (that design's §12), because local Runs
-   inherit the worker's whole environment.
+   inherit the worker's whole environment. Agent artifacts are also scrubbed at
+   rest (#944, follow-up to the #942 leak): after the agent process exits, the
+   worker rewrites every file under the Run workspace's `.mercury-sessions/`
+   and `session-artifacts/` with the declared secret values replaced — text
+   artifacts through the event redactor's chain (so a transcript reads like a
+   redacted event), binary kernel snapshots by an equal-length in-place swap
+   that keeps the pickle parseable. The redaction layer is the same one built
+   for events (MERCURY_SECRETS plus forwarded credential values), so what can
+   leave through an event cannot rest in an artifact either.
 6. **Budgets.** Per-Run caps are rules in the `nightly` skill ("Unattended
    limits"): at most 2 review rounds per PR, one PR per Run, one batched push
    per round, and a hand-off when the diff outgrows 3x its first passing
