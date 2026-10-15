@@ -128,7 +128,7 @@ instruction:
   creation and is reported, not re-filed. A failed, incomplete, or over-cap search fails
   closed: nothing is filed. The scan is key-driven (search `in:issue+"Source key: <key>"`,
   title via `in:title`, hits confirmed by re-reading the body), so the cap never binds on
-  repo size; a same-night re-proposal is caught by a per-Run record of keys already filed.
+  repo size; a same-night re-proposal is caught by a persistent record of keys already filed (`.mercury/nightly-proposals.json` in the Run workspace) — each `propose` invocation is a separate process, so an in-memory map cannot close that gap (Copilot review on #946). A corrupt record refuses to file (fail closed).
 - **`no-op`** (rung `none`): end the Run without changes.
 
 ## Unattended limits (every nightly Run)

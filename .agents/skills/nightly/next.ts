@@ -31,8 +31,8 @@
  * Output: exactly one JSON line. No dependencies; all I/O injectable.
  */
 
-import { basename } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { basename, dirname } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 
 import { runSelectorWith } from './select.ts';
 import { assertRepo, ghToken, ghGet, ghPost, ghPatch, FETCH_TIMEOUT_MS } from './shared.ts';
@@ -217,9 +217,18 @@ export async function proposeIssue(io: NextIo, opts: { repo: string; source: str
   const titleEq = (a: string): boolean => a.trim() === title;
 
   // Same-night window (#928 review): a proposal filed earlier in THIS Run may not be in the
-  // search index yet. A per-Run record of keys already filed closes that gap.
-  if (PROPOSED_THIS_RUN.has(proposalKey(opts.repo, source))) {
-    return { created: false, existing: PROPOSED_THIS_RUN.get(proposalKey(opts.repo, source)) as number, sameRun: true };
+  // search index yet. A persistent record of keys already filed closes that gap; the Copilot
+  // review on #946 found the in-memory map useless across CLI processes, because each
+  // documented `next.ts propose` invocation is a fresh Node process.
+  if (opts.body.includes('nightly-source:')) {
+    // A body that already carries a provenance marker would read back under the WRONG key and
+    // create an undedupable duplicate (#928 review "should fix" 1). Refuse instead. Checked
+    // before the record and the search: a double-marked body must never be filed under any path.
+    throw new Error('propose: the draft body already carries a nightly-source marker - refusing to double-mark - nothing was filed');
+  }
+  const memo = readProposedRecord(opts.repo, source);
+  if (memo !== null) {
+    return { created: false, existing: memo, sameRun: true };
   }
 
   const found = await searchIssues(io, opts.repo, source, title, titleEq);
@@ -228,11 +237,6 @@ export async function proposeIssue(io: NextIo, opts: { repo: string; source: str
     return { created: false, existing: found };
   }
 
-  if (opts.body.includes('nightly-source:')) {
-    // A body that already carries a provenance marker would read back under the WRONG key and
-    // create an undedupable duplicate (#928 review "should fix" 1). Refuse instead.
-    throw new Error('propose: the draft body already carries a nightly-source marker - refusing to double-mark - nothing was filed');
-  }
   const marker = sourceMarker(source);
   const fullBody = `${opts.body.replace(/\s+$/, '')}\n\n${marker}`;
   const res = await io.post(`/repos/${opts.repo}/issues`, { title, body: fullBody });
@@ -251,21 +255,70 @@ export async function proposeIssue(io: NextIo, opts: { repo: string; source: str
     // Already labeled means a retry raced us; that is fine. A 422-validation failure would have
     // thrown inside postLabel, same as the claim path.
   }
-  PROPOSED_THIS_RUN.set(proposalKey(opts.repo, source), created as number);
+  writeProposedRecord(opts.repo, source, created as number);
   return { created: true, issue: created };
 }
 
-function proposalKey(repo: string, source: string): string {
+/** The persistent record of proposals already filed (Copilot review on #946): a same-night
+ * re-proposal may predate search indexing (#928 review), and each documented `next.ts
+ * propose` invocation is a SEPARATE Node process, so the guard cannot be a process-local map.
+ * The record lives at `.mercury/nightly-proposals.json` in the current working directory —
+ * the Run workspace — written immediately after a successful create, read before any search.
+ * A read or parse failure is a refusal (fail closed): the search alone cannot prove absence.
+ * Absent file, absent key, or a non-positive number means "nothing recorded", which is a
+ * genuine miss rather than an error. */
+export const PROPOSED_RECORD_PATH = '.mercury/nightly-proposals.json';
+
+function isNodeErrWithCode(e: unknown, code: string): boolean {
+  return e !== null && typeof e === 'object' && 'code' in e && (e as { code?: unknown }).code === code;
+}
+
+function recordPath(): string {
+  return PROPOSED_RECORD_OVERRIDE ?? PROPOSED_RECORD_PATH;
+}
+
+function recordKeyFor(repo: string, source: string): string {
   return `${repo}#${source}`;
 }
 
-/** The per-Run record of proposals this process already filed: a same-night re-proposal may
- * predate search indexing (#928 review), so the in-Run record closes the window. */
-export const PROPOSED_THIS_RUN = new Map<string, number>();
+function readProposedRecord(repo: string, source: string): number | null {
+  let raw: string;
+  try {
+    raw = readFileSync(recordPath(), 'utf8');
+  } catch (e: unknown) {
+    if (isNodeErrWithCode(e, 'ENOENT')) return null;
+    throw new Error(`propose: cannot read ${recordPath()}: ${e instanceof Error ? e.message : String(e)} - filing is refused (fail closed)`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e: unknown) {
+    throw new Error(`propose: ${recordPath()} is not valid JSON: ${e instanceof Error ? e.message : String(e)} - filing is refused (fail closed)`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`propose: ${recordPath()} is not a JSON object - filing is refused (fail closed)`);
+  }
+  const v = (parsed as Record<string, unknown>)[recordKeyFor(repo, source)];
+  return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : null;
+}
 
-/** Test hook: clear the per-Run record between test cases. */
-export function resetProposedThisRun(): void {
-  PROPOSED_THIS_RUN.clear();
+function writeProposedRecord(repo: string, source: string, issue: number): void {
+  let parsed: Record<string, unknown> = {};
+  try {
+    const raw = readFileSync(recordPath(), 'utf8');
+    const p: unknown = JSON.parse(raw);
+    if (p !== null && typeof p === 'object' && !Array.isArray(p)) parsed = p as Record<string, unknown>;
+  } catch { /* absent or unreadable file: start a fresh object; the create already succeeded */ }
+  parsed[recordKeyFor(repo, source)] = issue;
+  mkdirSync(dirname(recordPath()), { recursive: true });
+  writeFileSync(recordPath(), `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
+}
+
+/** Test hook: point the persistent proposal record at a scratch file (tests run in the repo,
+ * where the real path must never be written). Pass null to restore the real path. */
+export let PROPOSED_RECORD_OVERRIDE: string | null = null;
+export function setProposedRecordPath(path: string | null): void {
+  PROPOSED_RECORD_OVERRIDE = path;
 }
 
 /** Dedupe search (#881, reworked per the #928 review): GitHub search scoped to issues, bounded

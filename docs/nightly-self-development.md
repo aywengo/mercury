@@ -178,8 +178,14 @@ only filing path is `next.ts propose`, which searches open **and** closed
 issues for that key (a visible `Source key:` line plus the hidden marker) or an
 exact title match before creating anything. A match blocks re-filing — a
 declined proposal stays declined until a human reopens it — and a failed,
-incomplete, or capped search files nothing. Without this, rung 4 filed the
-same roadmap item twice in one night (#867 and #875).
+incomplete, or capped search files nothing. Search needs an index, and each
+`propose` invocation is a separate process, so a create is also recorded in
+`.mercury/nightly-proposals.json` in the Run workspace; a later same-night
+invocation whose key is in the record refuses to file even before searching,
+and a record that cannot be read or parsed refuses to file too (fail closed).
+Without this, rung 4 filed the same roadmap item twice in one night (#867 and
+#875), and the first record was process-local, which the Copilot review on
+#946 showed cannot span CLI invocations.
 
 ## 7. Skills
 
