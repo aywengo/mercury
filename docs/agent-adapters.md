@@ -277,6 +277,10 @@ permission prompts surface as `user` events with `is_error`/permission payloads 
 prompt even if one were detected, so detecting it would produce a run waiting forever on input nobody
 can deliver. `sendInput()` throws with that explanation instead — the same documented-throw shape
 `HermesAgentAdapter` uses. Acceptance criteria 1, 2, 4, 5, 6, 7, 8 and 9 are met.
+The round-trip gap is drafted as proposal #951 (nightly rung 4, 2026-10-14): a capability
+probe that fails fast instead of stranding a run, and the gate for finishing criterion 3 when a
+CLI release ships a real input channel. Drafted only; nothing starts until an operator relabels
+it `nightly:ready`.
 
 ### Phase 3 — HermesAgentAdapter (Nous Research Hermes Agent) — ✅ **implemented**
 
