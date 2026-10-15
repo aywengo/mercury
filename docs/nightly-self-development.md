@@ -168,7 +168,9 @@ unimplemented item in a document's roadmap section, and **only drafts the issue
 set**, labeled `nightly:proposed` — the same pattern as
 `atlas-phase-5-6-issues.md`. Implementation starts on a later night, after
 @aywengo relabels an item `nightly:ready`. One night of latency buys a human
-decision on *what* gets built.
+decision on *what* gets built. When every remaining unimplemented roadmap item
+already has an open `nightly:proposed` issue, rung 4 is a quiet no-op: it files
+nothing and ends the Run (recorded in #956, 2026-10-14).
 
 ## 7. Skills
 
