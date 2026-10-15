@@ -14,7 +14,9 @@ by #722 (`2c8c0d5`); the C-3/C-4/C-5 follow-ups closed as #723 (`561d880`), #724
 when it had -- see [`../phase-0-issues.md`](../phase-0-issues.md) ("All acceptance criteria are now
 met") and the Recommended priority in [`../status.md`](../status.md); the later un-stamp in #726
 was the mirror image, stamping complete while AC 7/AC 8 were still open. Both drift modes are
-guarded by `test/crewDocsStatus.test.ts`.
+guarded by `test/crewDocsStatus.test.ts`. Phases 4-11 are each drafted as `nightly:proposed`
+issues (marked on the headings below); nothing is implemented until the operator relabels an
+issue `nightly:ready`.
 
 The status of Crew as a whole is owned by [`../status.md`](../status.md); this document keeps the phase
 breakdown and defers to it, so the two cannot disagree again the way they did here.
@@ -322,7 +324,7 @@ terminal status anywhere, so the gate cannot be evaluated today. A read-only mea
 is drafted as proposal #932 (nightly rung 4, 2026-10-11) and awaits an operator's
 `nightly:ready`.
 
-## 8. Phase 4 — per-run MCP foundation
+## 8. Phase 4 — per-run MCP foundation — proposed #875 (nightly rung 4, 2026-10-08)
 
 Estimate: **5–8 days**. Depends on Phase 2.
 
@@ -364,7 +366,7 @@ Estimate: **5–8 days**. Depends on Phase 2.
 
 Actual SRE policies, HTTP transport and user-provided MCP definitions.
 
-## 9. Phase 5 — reviewed read-only MCP
+## 9. Phase 5 — reviewed read-only MCP — proposed #870 (nightly rung 4, 2026-10-08)
 
 Estimate: **4–6 days**. Depends on Phase 4. Completes Milestone B.
 
@@ -392,7 +394,7 @@ Estimate: **4–6 days**. Depends on Phase 4. Completes Milestone B.
 Require a concrete SRE use case and an operator-owned MCP server policy. Do not
 build generic upload-driven MCP first.
 
-## 10. Phase 6 — read-only Git mirror
+## 10. Phase 6 — read-only Git mirror — proposed #873 (nightly rung 4, 2026-10-08)
 
 Estimate: **4–6 days**. Depends on Phases 3 and 5 when mirrored presets may use
 MCP.
@@ -427,7 +429,7 @@ MCP.
 
 User drafts, archives and publishing.
 
-## 11. Phase 7 — owner drafts and publishing
+## 11. Phase 7 — owner drafts and publishing — proposed #874 (nightly rung 4, 2026-10-08)
 
 Estimate: **5–8 days**. Depends on Phase 6. Completes Milestone C.
 
@@ -482,7 +484,7 @@ Estimate: **2–3 days**. Depends on Phase 3.
 Proceed to staged execution only when separate context/model/tool boundaries
 produce clear value over one well-instructed Run.
 
-## 13. Phase 9 — linear staged workflows
+## 13. Phase 9 — linear staged workflows — proposed #871 (nightly rung 4, 2026-10-08)
 
 Estimate: **8–12 days**. Depends on Phases 5 and 8.
 
@@ -510,7 +512,7 @@ Estimate: **8–12 days**. Depends on Phases 5 and 8.
 
 Parallel DAGs, loops, automatic summarization and subjective approval gates.
 
-## 14. Phase 10 — advanced gates and bounded loops
+## 14. Phase 10 — advanced gates and bounded loops — proposed #872 (nightly rung 4, 2026-10-08)
 
 Estimate: **5–8 days**. Depends on Phase 9. Completes Milestone D.
 
@@ -529,7 +531,7 @@ Estimate: **5–8 days**. Depends on Phase 9. Completes Milestone D.
 4. Coordinator restart preserves gate and loop position.
 5. A failed gate cannot be bypassed by changing a live template.
 
-## 15. Phase 11 — operations and hardening
+## 15. Phase 11 — operations and hardening — proposed #868 (CP-1) and #869 (CP-2) (nightly rung 4, 2026-10-08)
 
 Estimate: **2–4 days**, plus deployment-specific work. Depends on whichever
 milestones are selected.
