@@ -1,8 +1,18 @@
 # Fleet and dispatcher bots — issue set (FB0–FB3)
 
-**Draft — not filed.** Written 2026-10-16 for [`fleet-bots-design.md`](fleet-bots-design.md),
+**Filed 2026-10-16** (see Status). Written 2026-10-16 for [`fleet-bots-design.md`](fleet-bots-design.md),
 after its §9 decisions. Each issue follows `issue-fix-loop`: one issue, one PR, with a
-regression test that fails on base. `FB-n` labels are placeholders until filed.
+regression test that fails on base. `FB-n` labels are kept below; the Status table maps them to GitHub numbers.
+
+## Status — filed 2026-10-16
+
+| Doc | Issue | Blocked by | Ready | PR | Merge |
+| --- | --- | --- | --- | --- | --- |
+| FB0 | #970 | — | yes | | |
+| FB2a | #971 | — | yes | | |
+| FB1 | #972 | #970 | after blockers | | |
+| FB2b | #973 | #971 | after blockers | | |
+| FB3 | #974 | #972, #973, #929 | after blockers | | |
 
 ## Dependency graph
 

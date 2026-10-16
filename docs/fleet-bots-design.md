@@ -2,7 +2,7 @@
 
 Status: **design accepted 2026-10-16; nothing here is implemented.** Option A is the direction,
 and the four open decisions are settled (§9). It covers how bots relate to Fleet, and how Fleet
-learns which hosts can actually run a Crew Run. Issue set: [`fleet-bots-issues.md`](fleet-bots-issues.md). §2 describes the tree as verified on `main` at `89014c7`
+learns which hosts can actually run a Crew Run. Issue set: [`fleet-bots-issues.md`](fleet-bots-issues.md), filed as #970–#974. §2 describes the tree as verified on `main` at `89014c7`
 (2026-10-16); everything after it is intended behaviour.
 
 ## 1. The goal
