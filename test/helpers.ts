@@ -49,6 +49,8 @@ export function makeEnv(opts: {
   fakeScript?: FakeAgentConfig['script'];
   /** Redactor for the EventStore (production wiring passes one; tests default to none). */
   redactor?: import('../src/domain/redact.ts').Redactor;
+  /** Secret values the worker scrubs from agent artifacts at rest (issue #944). */
+  artifactSecrets?: string[];
   workspaceMode?: 'git-worktree' | 'copy';
   repoDir?: string;
   workerEnabled?: boolean;
@@ -223,6 +225,7 @@ export function makeEnv(opts: {
     retryBackoffMs: opts.retryBackoffMs ?? 50,
     sandbox: opts.sandbox,
     redactor: opts.redactor,
+    ...(opts.artifactSecrets ? { artifactSecrets: opts.artifactSecrets } : {}),
     // The worker needs the project id to render NOTES.md's header. Set only when a test asks for
     // knowledge, so every other test runs a worker that reads no knowledge table at all.
     ...(opts.knowledgeProject ? { knowledgeProject: opts.knowledgeProject } : {}),
