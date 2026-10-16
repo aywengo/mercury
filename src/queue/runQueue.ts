@@ -99,14 +99,17 @@ export class RunQueue {
   requeueForShutdown(runId: string, workerId: string): boolean {
     const sources = shutdownRequeueSources();
     const placeholders = sources.map(() => '?').join(', ');
+    // Every status write stamps status_changed_at (issue #906 review, item 1): a shutdown requeue
+    // is a real status change (RUNNING -> QUEUED) and the B2 trigger matcher reads the field as
+    // "waiting since", so a stale stamp here would make a requeued Run look older than it is.
     const res = this.db
       .prepare(
         `UPDATE runs
-         SET status = 'QUEUED', lease_owner = NULL, lease_expires_at = NULL, started_at = NULL
+         SET status = 'QUEUED', status_changed_at = ?, lease_owner = NULL, lease_expires_at = NULL, started_at = NULL
          WHERE id = ? AND lease_owner = ?
            AND status IN (${placeholders})`,
       )
-      .run(runId, workerId, ...sources);
+      .run(new Date().toISOString(), runId, workerId, ...sources);
     return res.changes === 1;
   }
 
@@ -235,11 +238,11 @@ export class RunQueue {
           // is M3, not this.
           const res = this.db
             .prepare(
-              `UPDATE runs SET status = 'FAILED', error = ?, error_kind = 'infrastructure', completed_at = ?,
+              `UPDATE runs SET status = 'FAILED', status_changed_at = ?, error = ?, error_kind = 'infrastructure', completed_at = ?,
                       lease_owner = NULL, lease_expires_at = NULL
                WHERE id = ? AND status = ?`,
             )
-            .run(LEASE_EXPIRED_ERROR, nowIso, row.id, row.status);
+            .run(nowIso, LEASE_EXPIRED_ERROR, nowIso, row.id, row.status);
           // Only report runs this worker actually transitioned (a concurrent
           // reaper or the owning worker's finalize may have won the race).
           if (res.changes === 1) {

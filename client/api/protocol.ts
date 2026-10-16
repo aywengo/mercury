@@ -60,6 +60,9 @@ export interface Run {
   leaseOwner: string | null;
   leaseExpiresAt: string | null;
   cancellationRequestedAt: string | null;
+  /** When the Run's status last changed (B2-0, issue #906). Null or absent for rows that predate
+   *  the server's v18 migration -- treat as unknown, never as a substitute for createdAt. */
+  statusChangedAt?: string | null;
   finalCommits: string[];
   prUrl: string | null;
   /**
