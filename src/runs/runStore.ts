@@ -276,6 +276,12 @@ export class RunStore {
     const sets: string[] = ['status = ?', 'status_changed_at = ?'];
     const params: (string | number | null)[] = [to, new Date().toISOString()];
     if (extra) {
+      if ('statusChangedAt' in extra) {
+        // Enforced, not just documented (issue #906 review, item 3): a caller-supplied
+        // statusChangedAt would add a second `status_changed_at = ?` to this SET and win
+        // silently under SQLite's last-binding-wins. The transition clock is the store's.
+        throw new Error('extra must not set statusChangedAt: it is written by transition itself');
+      }
       for (const [k, v] of Object.entries(extra)) {
         const col = camelToSnake(k);
         sets.push(`${col} = ?`);
