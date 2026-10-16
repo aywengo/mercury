@@ -134,6 +134,11 @@ unbounded wait has cost more wall-clock time here than any actual bug in this re
 
 ## Fixing issues
 
+**`PLAN.md` is the per-issue tracker.** Filing an issue set adds its rows; the PR that closes an
+issue marks its row `done` with that PR's number in the same PR (CI job `plan-tracker`); an issue
+closed without a PR is marked `done` or `dropped` by whoever closes it. See the "Rules" section of
+[`PLAN.md`](PLAN.md).
+
 Use [`.agents/skills/issue-fix-loop/SKILL.md`](.agents/skills/issue-fix-loop/SKILL.md). It is the
 single source of the procedure (analysis → scoped fix with a proven regression test → one PR →
 independent review with a bounded number of rounds → done or hand-off). Do not restate it
