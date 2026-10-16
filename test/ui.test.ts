@@ -30,7 +30,7 @@ async function listen(app: Express): Promise<{ port: number; close: () => Promis
 }
 
 test('UI files exist and are served without auth', async () => {
-  for (const f of ['index.html', 'run.html', 'roles.html', 'app.js', 'index.js', 'run.js', 'roles.js', 'style.css']) {
+  for (const f of ['index.html', 'run.html', 'roles.html', 'workflows.html', 'app.js', 'index.js', 'run.js', 'roles.js', 'workflows.js', 'steps.js', 'style.css']) {
     assert.ok(existsSync(join(UI_DIR, f)), `missing ui/${f}`);
   }
   const env = makeEnv({ workerEnabled: false });
