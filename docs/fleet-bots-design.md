@@ -1,8 +1,8 @@
 # Fleet and dispatcher bots — one master for many hosts
 
-Status: **proposal; nothing here is implemented.** It records a decision that has to be made
-before dispatcher bots run on every host: how bots relate to Fleet, and how Fleet learns which
-hosts can actually run a Crew Run. §2 describes the tree as verified on `main` at `89014c7`
+Status: **design accepted 2026-10-16; nothing here is implemented.** Option A is the direction,
+and the four open decisions are settled (§9). It covers how bots relate to Fleet, and how Fleet
+learns which hosts can actually run a Crew Run. Issue set: [`fleet-bots-issues.md`](fleet-bots-issues.md). §2 describes the tree as verified on `main` at `89014c7`
 (2026-10-16); everything after it is intended behaviour.
 
 ## 1. The goal
@@ -59,7 +59,7 @@ after placement. Fleet then reports a host error for a request another host coul
 
 ## 4. Options for bots and Fleet
 
-### Option A — bots stay on the host and may dispatch through Fleet (recommended)
+### Option A — bots stay on the host and may dispatch through Fleet (decided)
 
 The bot keeps its schedule, triggers, brain and state where they are. Only the *dispatch target*
 changes. A bot config gains:
@@ -80,7 +80,7 @@ Status mapping: Fleet's `UNKNOWN` (host unreachable, binding not confirmed) coun
 **non-terminal** for single-flight. A Run Fleet cannot see must still block the next fire, for the
 same reason a parked `NEEDS_INPUT` does (`scheduler.ts:66-69`).
 
-**Why recommended**
+**Why this option**
 
 - The change is confined to one interface with two calls; the scheduler, triggers and brain don't
   change.
@@ -138,7 +138,8 @@ filter:
 - **No snapshot** for the host → excluded, reason `availability unknown`.
 - **Reference missing, disabled, or at another pinned version** → excluded, reason
   `preset reviewer@1.2.0 not available (host has 1.1.0)`.
-- **Stale snapshot** (older than `FLEET_AVAILABILITY_STALE_MS`) → kept, with a finite soft-rank
+- **Unpinned reference** (`preset: {id}`) → matches any **enabled** version the host has (§9.2).
+- **Stale snapshot** (older than `FLEET_AVAILABILITY_STALE_MS`, default 3× the probe interval, §9.3) → kept, with a finite soft-rank
   penalty smaller than `KNOWLEDGE_STALE_PENALTY`, and named in `softRankNote` when it decides the
   outcome. Stale data can still be right, so it should rank lower rather than be refused.
 
@@ -220,15 +221,19 @@ installer's fresh-VM verification (#929), because it needs two clean hosts.
 - CP-4 (#897), so a host running several bots keeps identities apart;
 - B4 (#915), so bots are installed on every host. FB2 doesn't need B4, but "every host" does.
 
-## 9. Open decisions
+## 9. Decisions (2026-10-16)
 
-1. **Option A as the direction** (recommended), with B and C recorded as rejected for now.
-2. **Version semantics for the filter.** Should an unpinned reference (`preset: {id}`) match any
-   enabled version (recommended), or the newest version Fleet has seen anywhere?
-3. **The stale threshold** for availability snapshots. Recommended: 3× the probe interval, the
-   same shape as `FLEET_KNOWLEDGE_STALE_MS`.
-4. **Should Fleet expose the availability view** (`GET /fleet/hosts/:id/availability`) for
-   operators? Recommended: yes, read-only, as part of FB0.
+1. **Direction: option A.** Bots stay host-resident and may dispatch through Fleet
+   (`api.via: "fleet"`). Options B and C are recorded as rejected for now (§4).
+2. **Unpinned references match any enabled version.** `preset: {id}` or `workflow: {id}`
+   without a version qualifies a host that has that id enabled at any version. A pinned version
+   must match exactly. "Newest seen anywhere" was rejected: it would make placement depend on
+   other hosts' contents.
+3. **Stale threshold: 3× the probe interval.** This is the default for
+   `FLEET_AVAILABILITY_STALE_MS`, the same shape as `FLEET_KNOWLEDGE_STALE_MS`.
+4. **Read-only availability view per host.** `GET /fleet/hosts/:id/availability` returns the
+   latest snapshot, its probe time and whether it is stale. It is scoped to the caller's visible
+   hosts like every Fleet read, and ships with FB0.
 
 ## 10. References
 
