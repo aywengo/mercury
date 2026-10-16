@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { runNext, finishIssue, blockIssue, blockedAlready, proposeIssue, sourceKeyOf, type NextIo } from '../.agents/skills/nightly/next.ts';
+import { runNext, finishIssue, blockIssue, blockedAlready, proposeIssue, sourceKeyOf, resetProposeRunMemory, type NextIo } from '../.agents/skills/nightly/next.ts';
 import type { GhIssue, LabelEvent } from '../.agents/skills/nightly/select.ts';
 
 const REPO = 'aywengo/mercury';
@@ -282,21 +282,29 @@ test('blocked exit: the body marker is written ONLY for issues the nightly ident
 });
 // ---- rung 4: the guarded propose exit (#881) ----
 
-/** An io for propose tests: a fixed issue-listing (state=all) plus recorded writes. `listStatus`
- * fakes a broken search; `listPages` lets a test drive the page-cap path. */
-function proposeIo(existing: { number: number; title: string; body?: string | null }[] = [], opts: { listStatus?: number; listPages?: number } = {}) {
+/** An io for propose tests: search hits resolved from the given issue list (the search leg
+ * fetches each hit individually to confirm), plus recorded writes. `searchStatus` fakes a
+ * broken search; `incomplete` fakes the incomplete_results fail-closed flag. */
+function proposeIo(existing: { number: number; title: string; body?: string | null; pull_request?: unknown }[] = [], opts: { searchStatus?: number; incomplete?: boolean } = {}) {
   const calls: { method: string; path: string; body?: unknown }[] = [];
-  let page = 0;
   const io: NextIo = {
     async get(path) {
       calls.push({ method: 'GET', path });
-      if (path.startsWith(`/repos/${REPO}/issues?state=all`)) {
-        if (opts.listStatus !== undefined) return { body: [], status: opts.listStatus };
-        page++;
-        if (opts.listPages !== undefined) {
-          return { body: Array.from({ length: 100 }, (_, i) => ({ number: 10_000 + i, title: `filler ${i}`, body: 'x' })), status: 200 };
-        }
-        return { body: existing, status: 200 };
+      if (path.startsWith('/search/issues?')) {
+        if (opts.searchStatus !== undefined) return { body: {}, status: opts.searchStatus };
+        const q = new URL(path, 'https://x').searchParams.get('q') ?? '';
+        const term = (q.match(/"([^"]*)"/) ?? [])[1] ?? '';
+        const hits = q.includes('in:title')
+          ? existing
+          : existing.filter((e) => (e.body ?? '').includes(term));
+        // A search hit list is per-query; the io returns every known issue and lets the
+        // per-hit confirmation do the exact matching (mirrors the production contract).
+        return { body: { total_count: hits.length, incomplete_results: opts.incomplete ?? false, items: hits }, status: 200 };
+      }
+      const single = path.match(new RegExp('^/repos/' + REPO.replace('/', '\\/') + '/issues/(\\d+)$'));
+      if (single) {
+        const found = existing.find((i) => i.number === Number(single[1]));
+        return { body: found ?? null, status: found ? 200 : 404 };
       }
       return { body: null, status: 404 };
     },
@@ -316,7 +324,8 @@ const KEY = 'docs/crew/roadmap.md#8-phase-4';
 const TITLE = 'Crew Phase 4: per-run MCP foundation';
 
 test('propose: an open issue carrying the source key blocks creation and is reported (#881 ac1)', async () => {
-  const { io, calls } = proposeIo([{ number: 875, title: 'a differently-worded title', body: `stuff\n\n<!-- nightly-source: ${KEY} -->` }]);
+  resetProposeRunMemory();
+  const { io, calls } = proposeIo([{ number: 875, title: 'a differently-worded title', body: `stuff\n\nSource key: ${KEY}\n\n<!-- nightly-source: ${KEY} -->` }]);
   const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' });
   assert.equal(out.created, false);
   assert.equal(out.existing, 875);
@@ -324,6 +333,7 @@ test('propose: an open issue carrying the source key blocks creation and is repo
 });
 
 test('propose: a CLOSED issue with the key also blocks (a declined proposal is not re-proposed) (#881 ac2)', async () => {
+  resetProposeRunMemory();
   const { io, calls } = proposeIo([{ number: 860, title: 'old title', body: `<!-- nightly-source: ${KEY} -->` }]);
   const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' });
   assert.equal(out.created, false);
@@ -332,6 +342,7 @@ test('propose: a CLOSED issue with the key also blocks (a declined proposal is n
 });
 
 test('propose: an exact-title match without a marker blocks (pre-fix drafts like #867) (#881 ac3)', async () => {
+  resetProposeRunMemory();
   const { io, calls } = proposeIo([{ number: 867, title: ` ${TITLE} `, body: 'no marker here' }]);
   const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' });
   assert.equal(out.created, false);
@@ -339,7 +350,8 @@ test('propose: an exact-title match without a marker blocks (pre-fix drafts like
   assert.ok(!calls.some((c) => c.method === 'POST'));
 });
 
-test('propose: no match files the issue with the marker, then labels it nightly:proposed', async () => {
+test('propose: no match files the issue with the visible key line and marker, then labels it nightly:proposed', async () => {
+  resetProposeRunMemory();
   const { io, calls } = proposeIo([{ number: 1, title: 'unrelated', body: 'nope' }]);
   const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'the draft' });
   assert.equal(out.created, true);
@@ -348,12 +360,14 @@ test('propose: no match files the issue with the marker, then labels it nightly:
   assert.ok(create, 'the issue was created');
   const body = (create!.body as { body: string }).body;
   assert.equal(sourceKeyOf(body), KEY, 'the filed body carries the source marker');
+  assert.ok(body.includes(`Source key: ${KEY}`), 'the key is ALSO a visible line - search indexing of HTML comments is not relied on');
   const label = calls.find((c) => c.method === 'POST-LABEL');
   assert.ok(label, 'nightly:proposed is added');
 });
 
 test('propose: a failed search fails closed - nothing is filed (#881 ac4)', async () => {
-  const { io, calls } = proposeIo([], { listStatus: 502 });
+  resetProposeRunMemory();
+  const { io, calls } = proposeIo([], { searchStatus: 502 });
   await assert.rejects(
     () => proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' }),
     /dedupe search failed/,
@@ -361,13 +375,56 @@ test('propose: a failed search fails closed - nothing is filed (#881 ac4)', asyn
   assert.ok(!calls.some((c) => c.method === 'POST'));
 });
 
-test('propose: a search past the page cap fails closed, not "no match" (#881 ac4)', async () => {
-  const { io, calls } = proposeIo([], { listPages: 10 });
+test('propose: a search hit beyond 10 list pages is still found (review round on #928: the cap is the search API, not the age of the repo)', async () => {
+  resetProposeRunMemory();
+  // In the old list-scan this issue sat on page 11 of /issues and propose threw. The search
+  // leg reaches it regardless: hits come from the search index, never from a page walk.
+  const { io, calls } = proposeIo([{ number: 12_345, title: 'much later in the repo', body: `...\n\n<!-- nightly-source: ${KEY} -->` }]);
+  const out = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' });
+  assert.equal(out.created, false);
+  assert.equal(out.existing, 12_345);
+  assert.ok(!calls.some((c) => c.method === 'POST' && c.path.endsWith('/issues')));
+});
+
+test('propose: incomplete_results fails closed - a partial index never reads as "no match" (review round on #928)', async () => {
+  resetProposeRunMemory();
+  const { io, calls } = proposeIo([], { incomplete: true });
   await assert.rejects(
     () => proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'body' }),
-    /exceeded 10 pages/,
+    /incomplete_results/,
   );
   assert.ok(!calls.some((c) => c.method === 'POST'));
+});
+
+test('propose: a body that already carries a marker is refused (review round on #928, "should fix" 1)', async () => {
+  resetProposeRunMemory();
+  const { io, calls } = proposeIo([]);
+  await assert.rejects(
+    () => proposeIssue(io, { repo: REPO, source: 'docs/other.md#a', title: TITLE, body: 'draft\n\n<!-- nightly-source: docs/other.md#a -->' }),
+    /already carries a nightly-source marker/,
+  );
+  assert.ok(!calls.some((c) => c.method === 'POST'));
+});
+
+test('propose: a key with a space is refused - it could never be read back from the marker (review round on #928, "should fix" 2)', async () => {
+  resetProposeRunMemory();
+  const { io, calls } = proposeIo([]);
+  await assert.rejects(
+    () => proposeIssue(io, { repo: REPO, source: 'docs/x.md#two words', title: TITLE, body: 'b' }),
+    /outside \[A-Za-z0-9\._\/#-\]/,
+  );
+  assert.ok(!calls.some((c) => c.method === 'GET'), 'validation happens before any request');
+});
+
+test('propose: two calls with the same key in one Run, the second seeing no search hit yet, must not create twice (review round on #928: search-index lag)', async () => {
+  resetProposeRunMemory();
+  const { io, calls } = proposeIo([]); // search finds nothing even after the first filing
+  const first = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'the draft' });
+  assert.equal(first.created, true);
+  const second = await proposeIssue(io, { repo: REPO, source: KEY, title: TITLE, body: 'the draft again' });
+  assert.equal(second.created, false, 'the in-run memory blocks the second create');
+  assert.equal(second.existing, first.issue);
+  assert.equal(calls.filter((c) => c.method === 'POST' && c.path.endsWith('/issues')).length, 1, 'exactly one issue was filed');
 });
 
 test('propose: empty source or title is rejected before any request', async () => {

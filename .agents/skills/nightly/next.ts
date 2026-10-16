@@ -186,35 +186,62 @@ export function sourceMarker(source: string): string {
   return `<!-- nightly-source: ${source.trim()} -->`;
 }
 
+/** The key charset (--source validation, review round on #928): a key outside this set cannot
+ * round-trip through the marker regex, so it could never dedupe. Refuse it instead. */
+const SOURCE_KEY_RE = /^[A-Za-z0-9._/#-]+$/;
+
 /** The stable source key extracted from an issue body, or null when the body has no marker. */
 export function sourceKeyOf(body: string | null | undefined): string | null {
   const m = typeof body === 'string' ? body.match(/<!-- nightly-source: ([^\s>]+) -->/) : null;
   return m ? m[1] : null;
 }
 
-/** The per-page search bound (#881 acceptance 4): a response that claims more pages than this
- * fails closed - an unbounded backlog must never turn into "search found nothing, file away". */
-export const PROPOSE_SEARCH_MAX_PAGES = 10;
+/** The in-run memory of what THIS Run filed (review round on #928, search-index lag): GitHub's
+ * search index may not have seen an issue filed moments ago, so the same-key second `propose`
+ * call in one Run must never rely on the search alone. One module-level set per Run process. */
+const filedThisRun = new Map<string, number>();
 
-/** Rung 4's only filing exit: dedupe by source key (open AND closed, all labels) plus an
- * exact-title match (a pre-marker draft such as #867 must still block re-proposal), then file.
- * Fail closed: a failed or over-cap search throws and NOTHING is created. */
+/** Test hook: clear the in-run filed memory (a fresh Run starts with an empty memory). */
+export function resetProposeRunMemory(): void {
+  filedThisRun.clear();
+}
+
+/** Rung 4's only filing exit: dedupe by source key via the search API (open AND closed; PRs
+ * never count, review round on #928), with an exact-title fallback for pre-marker drafts such
+ * as #867, then file. The key goes into a VISIBLE line as well as the HTML comment - search
+ * indexing of comments is not something to rely on. Each search hit is confirmed by fetching
+ * the issue and re-deriving the key, so the check stays exact. Fail closed: a failed search or
+ * an `incomplete_results` response throws and NOTHING is created (#881 acceptance 4). */
 export async function proposeIssue(io: NextIo, opts: { repo: string; source: string; title: string; body: string }): Promise<{ created: boolean; existing?: number; issue?: number }> {
   assertRepo(opts.repo);
   const source = opts.source.trim();
   if (source === '') throw new Error('propose needs a non-empty --source key (the docs path + heading anchor)');
+  if (!SOURCE_KEY_RE.test(source)) {
+    throw new Error(`propose --source key "${source}" contains characters outside [A-Za-z0-9._/#-] - such a key cannot be read back from the marker and is refused (review round on #928)`);
+  }
   const title = opts.title.trim();
   if (title === '') throw new Error('propose needs a non-empty --title');
-  const titleEq = (a: string): boolean => a.trim() === title;
+  if (typeof opts.body === 'string' && /nightly-source/.test(opts.body)) {
+    // A draft that already carries a provenance marker would get a SECOND marker appended and
+    // then read back under the FIRST key (#928 review, "should fix" 1) - the next run files a
+    // duplicate. Refuse instead of guessing.
+    throw new Error('propose body already carries a nightly-source marker - one draft carries exactly one provenance marker; refusing to append another');
+  }
+  if (filedThisRun.has(source)) {
+    // Filed earlier THIS Run; the search index may lag, so the memory is authoritative here.
+    return { created: false, existing: filedThisRun.get(source) };
+  }
 
-  const found = await searchIssues(io, opts.repo, (n, body) => sourceKeyOf(body) === source || titleEq(n));
+  const titleEq = (a: string): boolean => a.trim() === title;
+  const found = await searchIssues(io, opts.repo, [
+    { q: `"${source}"`, confirm: (_n, _title, body) => sourceKeyOf(body) === source },
+    { q: `in:title "${title}"`, confirm: (n, t, b) => titleEq(t) },
+  ]);
   if (found !== null) {
-    // The search itself succeeded: a match (open or closed, any labels) blocks creation.
     return { created: false, existing: found };
   }
 
-  const marker = sourceMarker(source);
-  const fullBody = `${opts.body.replace(/\s+$/, '')}\n\n${marker}`;
+  const fullBody = `${opts.body.replace(/\s+$/, '')}\n\n## Source\n\nSource key: ${source}\n\n${sourceMarker(source)}`;
   const res = await io.post(`/repos/${opts.repo}/issues`, { title, body: fullBody });
   if (res.status < 200 || res.status >= 300) {
     throw new Error(`propose failed: POST /issues returned ${res.status} - nothing was filed`);
@@ -223,6 +250,7 @@ export async function proposeIssue(io: NextIo, opts: { repo: string; source: str
   if (!Number.isInteger(created) || (created as number) <= 0) {
     throw new Error(`propose failed: the issue-create response carried no issue number - nothing was filed`);
   }
+  filedThisRun.set(source, created as number);
   // Label the draft AFTER the create so a crash between the two writes leaves a visible
   // (unlabeled) draft a human can relabel, never a claimed-looking nothing. The label add is
   // idempotent (already-present -> false), so a rerun of the exit is safe.
@@ -234,26 +262,41 @@ export async function proposeIssue(io: NextIo, opts: { repo: string; source: str
   return { created: true, issue: created };
 }
 
-/** List issues (state=all => open AND closed, all labels) page by page, matching with `match`:
- * title + body. Returns the first matching issue NUMBER, null when a complete scan found none,
- * and throws when the scan cannot be completed (fail closed, #881 acceptance 4). */
-async function searchIssues(io: NextIo, repo: string, match: (title: string, body: string | null) => boolean): Promise<number | null> {
-  for (let page = 1; page <= PROPOSE_SEARCH_MAX_PAGES; page++) {
-    const res = await io.get(`/repos/${repo}/issues?state=all&per_page=100&page=${page}`);
+/** One search query leg: the raw query terms and the client-side confirmation applied to each
+ * hit (fetch the issue, re-derive the key / compare the title exactly). */
+interface SearchLeg {
+  q: string;
+  confirm: (n: number, title: string, body: string | null) => boolean;
+}
+
+/** Run the dedupe legs against GitHub's search API (`GET /search/issues`), oldest-independent:
+ * PRs never appear (`is:issue`) and never consume a page cap, so the scan no longer dies as the
+ * repo grows (#928 review blocker). Bounded at one page per leg (100 hits); a search that
+ * reports `incomplete_results` fails closed - a partial index must never read as "no match". */
+async function searchIssues(io: NextIo, repo: string, legs: SearchLeg[]): Promise<number | null> {
+  for (const leg of legs) {
+    const res = await io.get(`/search/issues?q=${encodeURIComponent(`repo:${repo} is:issue ${leg.q}`)}&per_page=100&sort=created&order=asc`);
     if (res.status < 200 || res.status >= 300) {
-      throw new Error(`propose dedupe search failed: GET issues page ${page} returned ${res.status} - filing is refused`);
+      throw new Error(`propose dedupe search failed: GET search/issues returned ${res.status} - filing is refused`);
     }
-    const items = (Array.isArray(res.body) ? res.body : []) as { number?: number; title?: string; body?: string | null; pull_request?: unknown }[];
-    if (items.length === 0) return null; // a complete scan, no match
-    for (const it of items) {
-      if (it.pull_request !== undefined) continue; // PRs are not proposal issues
-      if (!Number.isInteger(it.number)) continue;
-      if (match(it.title ?? '', it.body ?? null)) return it.number as number;
+    const payload = (res.body ?? {}) as { incomplete_results?: boolean; items?: { number?: number }[] };
+    if (payload.incomplete_results === true) {
+      throw new Error(`propose dedupe search reported incomplete_results - a partial index must not read as "no match"; filing is refused (fail closed, #881 acceptance 4)`);
     }
-    // More pages only exist when a full page came back (GitHub pagination contract).
-    if (items.length < 100) return null;
+    for (const hit of payload.items ?? []) {
+      if (!Number.isInteger(hit.number)) continue;
+      // Confirm each hit against the issue itself so the check stays exact even if the search
+      // index lags or paraphrases (review round on #928, "primary" bullet).
+      const single = await io.get(`/repos/${repo}/issues/${hit.number}`);
+      if (single.status < 200 || single.status >= 300) {
+        throw new Error(`propose dedupe search failed: confirming hit #${hit.number} returned ${single.status} - filing is refused`);
+      }
+      const full = (single.body ?? {}) as { title?: string; body?: string | null; pull_request?: unknown };
+      if (full.pull_request !== undefined) continue; // search lagged a recent PR over the is:issue filter
+      if (leg.confirm(hit.number as number, full.title ?? '', full.body ?? null)) return hit.number as number;
+    }
   }
-  throw new Error(`propose dedupe search exceeded ${PROPOSE_SEARCH_MAX_PAGES} pages - filing is refused (fail closed, #881 acceptance 4)`);
+  return null;
 }
 
 // ---- GitHub I/O (thin, bounded, same shape as select.ts/e2e.ts) ----
