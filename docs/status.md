@@ -15,7 +15,7 @@ control, retries, sandbox integration, metrics and deployment packaging.
 | --- | --- | --- | --- |
 | **Core Run path** (API, queue, worker, workspaces, events, dashboard) | Shipped | — | [`overview.md`](overview.md), [`ARCHITECTURE.md`](../ARCHITECTURE.md) |
 | **Per-Run model** | Shipped: `model` on `POST /api/runs`, persisted, retried; `perRunModel` measured on Claude, PrimeAgent (RPC + daemon) and Hermes | — | [`laya-integration-design.md`](laya-integration-design.md) §13 P-1 |
-| **Host installer** | M0–M6 implemented | Gate verification: fresh-VM run (M4) and checksum publishing (M6), #929 | [`host-installer.md`](host-installer.md), [`../PLAN.md`](../PLAN.md) |
+| **Host installer** | M0–M6 implemented | Gate verification: fresh-VM run (M4) and checksum publishing (M6), #929 | [`host-installer.md`](host-installer.md) |
 | **Crew: Role Presets** (Milestone A) | Complete | — | [`crew/roadmap.md`](crew/roadmap.md) §4–7 |
 | **Crew: advisory Workflow Templates** (Phase 8) | W-1 and W-2 shipped | W-3 (HTTP API + dashboard): PR #934 in review | [`crew/workflows.md`](crew/workflows.md), [`crew/roadmap.md`](crew/roadmap.md) §12 |
 | **Crew Phases 4–7, 9–11** (per-run MCP, git mirror, drafts, staged workflows, gates, ops) | Proposals #868–#875 | Waiting on destination-aware egress (#863) for MCP; Phase 9 vs Teams Phase 3 decision (#871/#918) | [`crew/roadmap.md`](crew/roadmap.md) §8–15 |
@@ -526,5 +526,6 @@ Named network destinations remain design-only. Do not treat recorded
 - Fleet: [`fleet-design.md`](fleet-design.md), [`fleet-bots-design.md`](fleet-bots-design.md);
 - Laya: [`laya-integration-design.md`](laya-integration-design.md);
 - credential profiles: [`credential-profiles-design.md`](credential-profiles-design.md);
-- host installer milestones: [`host-installer.md`](host-installer.md), [`../PLAN.md`](../PLAN.md);
+- per-issue state of every filed issue set: [`../PLAN.md`](../PLAN.md) (updated by the PR that closes each issue);
+- host installer milestones: [`host-installer.md`](host-installer.md);
 - current test outcome: `npm test`, not a stored count.
