@@ -87,7 +87,13 @@ async function createRun(id) {
   if (!task) { showError('Task is required.'); return; }
   const body = { task };
   if (repo) {
-    body.repository = { url: /^https?:\/\//.test(repo) ? repo : undefined, localPath: /^https?:\/\//.test(repo) ? undefined : repo, baseBranch: $('run-branch').value.trim() || 'main' };
+    // HTTP(S) and SSH/scp remotes are URLs; a bare path is a local path (PR #934 review:
+    // `git@host:org/repo.git` and `ssh://git@…` as `localPath` fail in worktree mode).
+    body.repository = {
+      url: /^https?:\/\/|^ssh:\/\/|^[^/@]+@[^:/]+:/.test(repo) ? repo : undefined,
+      localPath: /^https?:\/\/|^ssh:\/\/|^[^/@]+@[^:/]+:/.test(repo) ? undefined : repo,
+      baseBranch: $('run-branch').value.trim() || 'main',
+    };
   }
   try {
     const res = await api('/api/workflows/' + encodeURIComponent(id) + '/runs', { method: 'POST', json: true, body: JSON.stringify(body) });

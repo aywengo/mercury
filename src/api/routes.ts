@@ -62,7 +62,19 @@ export function sendError(res: Response, err: unknown, logger?: Logger): void {
     return;
   }
   if (err instanceof ValidationError) {
-    res.status(400).json({ error: err.message });
+    // Workflow errors carry the stable refusal codes the API docs promise (review of PR #934):
+    // a plain `{ error }` body drops `code`/`field` and `findings`, so clients cannot branch on
+    // them. Optional properties keep every other ValidationError body byte-identical.
+    const body: { error: string; code?: string; field?: string; findings?: unknown } = {
+      error: err.message,
+    };
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === 'string') body.code = code;
+    const field = (err as { field?: unknown }).field;
+    if (typeof field === 'string') body.field = field;
+    const findings = (err as { findings?: unknown }).findings;
+    if (findings !== undefined) body.findings = findings;
+    res.status(400).json(body);
     return;
   }
   // Unclassified: keep the detail server-side. The logger redacts, so a message containing a

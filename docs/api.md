@@ -159,6 +159,12 @@ every step. Refusals carry stable codes, including `WORKFLOW_NOT_FOUND`,
 `WORKFLOW_STAGE_MODEL_CONFLICT`, `WORKFLOW_STAGE_RESOURCE_CONFLICT` and
 `WORKFLOW_STAGE_SANDBOX_CONFLICT`.
 
+Every domain refusal body carries more than the message when the error has it:
+`{ error, code?, field?, findings? }`. `code` is the stable refusal code above,
+`field` names the input the code is about, and `findings` (validation of an invalid
+template) is the structured finding list. Clients branch on `code`, not on message
+text; the fields are absent, not null, when the error has none.
+
 `GET /api/runs/:runId` returns a `workflow` sibling for every Run: the identity
 `{ id, version, contentHash, mode, stages }` read from the Run's snapshot, or `null`
 for a Run created without a workflow. Workflow stage snapshots are not preset Runs:

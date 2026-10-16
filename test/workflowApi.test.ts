@@ -258,3 +258,60 @@ test('owner scoping: a foreign Run is 404, and no staged-mode group endpoint exi
     env.close();
   }
 });
+
+test('workflow refusal codes reach the client on both create paths (PR #934 review: sendError)', async () => {
+  const repo = makeGitRepo(tempDir('mercury-repo-'));
+  // A stage preset that REQUIRES the `hermes` agent, so `agent: "fake"` conflicts and the
+  // refusal must carry the stable code documented in docs/api.md -- previously only
+  // `{ error }` reached the client (sendError dropped `code`/`field`/`findings`).
+  const { mkdtempSync, writeFileSync, mkdirSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const home = mkdtempSync(join(tmpdir(), 'mercury-agentlock-'));
+  mkdirSync(join(home, 'presets'), { recursive: true });
+  mkdirSync(join(home, 'presets', 'agent-lock-hermes'));
+  writeFileSync(join(home, 'presets', 'agent-lock-hermes', 'preset.json'), JSON.stringify({
+    schemaVersion: 1, id: 'agent-lock-hermes', version: '1.0.0',
+    description: 'requires the hermes agent', role: 'Hermes lock',
+    agent: { required: true, id: 'hermes' },
+  }));
+  writeFileSync(join(home, 'presets', 'agent-lock-hermes', 'INSTRUCTION.md'), 'Do the step.');
+  mkdirSync(join(home, 'workflows'), { recursive: true });
+  mkdirSync(join(home, 'workflows', 'agent-lock'));
+  writeFileSync(join(home, 'workflows', 'agent-lock', 'workflow.json'), JSON.stringify({
+    schemaVersion: 1, id: 'agent-lock', version: '1.0.0',
+    description: 'one stage that requires hermes', mode: 'advisory',
+    stages: [{ id: 'only', preset: { id: 'agent-lock-hermes' }, task: 'do it' }],
+    maxStages: 3,
+  }));
+  const { FakeAgentAdapter } = await import('../src/adapters/fakeAgentAdapter.ts');
+  const env = makeEnv({
+    workspaceMode: 'copy', repoDir: repo, workerEnabled: false,
+    presetsDir: join(home, 'presets'),
+    workflowsDir: join(home, 'workflows'),
+    adapters: { hermes: new FakeAgentAdapter({ script: [] }) },
+  });
+  const api = makeApi(env);
+  const { url, close: stopSrv } = await listen(api.app);
+  try {
+    const base = url;
+    const post = (path: string, extra: Record<string, unknown>) => fetch(`${base}${path}`, {
+      method: 'POST', headers: auth('tok-alice'),
+      body: JSON.stringify({ task: 'x', repository: { localPath: repo }, agent: 'fake', ...extra }),
+    });
+    // The workflow block on POST /api/runs takes the workflow selection in the BODY; the
+    // dedicated route takes it from the URL. Same service path, same refusal either way.
+    for (const [path, extra] of [['/api/workflows/agent-lock/runs', {}], ['/api/runs', { workflow: { id: 'agent-lock' } }]] as const) {
+      const res = await post(path, extra);
+      assert.equal(res.status, 400, `${path} -> 400`);
+      const body = await res.json() as { error: string; code?: string; field?: string };
+      assert.equal(body.code, 'WORKFLOW_STAGE_AGENT_CONFLICT', `${path} carries the stable code`);
+      assert.equal(body.field, 'agent');
+      assert.ok(body.error, `${path} keeps the message`);
+    }
+  } finally {
+    await stopSrv();
+    api.close();
+    env.close();
+  }
+});
