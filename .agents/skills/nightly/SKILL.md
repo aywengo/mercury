@@ -121,7 +121,18 @@ instruction:
   host's relay's job — push, then `finish`. With two open PRs for one issue, continue the OLDER
   one and state the supersession on the newer.
 - **`draft-proposals`** (rung 4): draft `nightly:proposed` issues from a roadmap section in the
-  docs (§6) and NEVER implement — one night of latency buys a human decision.
+  docs (§6) and NEVER implement — one night of latency buys a human decision. Filing goes
+  through the guarded exit and nothing else:
+  `node .agents/skills/nightly/next.ts propose --repo aywengo/mercury --source <docs/path#anchor> --title "<t>" --body-file <f>`.
+  The body carries the key twice (the exit appends both): a visible `Source key: <key>` line
+  next to the `## Source` section and the marker `<!-- nightly-source: <key> -->`. Before
+  filing, the exit dedupes mechanically (#881): a search-API query (`repo:<repo> is:issue` +
+  the key, plus an exact-title fallback) covers open AND closed issues; PRs never appear, so
+  repo growth cannot exhaust a page cap (review round on #928). Each hit is confirmed by
+  fetching the issue and re-deriving the key. A match (even a declined, closed proposal)
+  blocks creation and is reported, not re-filed. A failed search or an `incomplete_results`
+  response fails closed: nothing is filed. A second `propose` for the same key in one Run is
+  blocked by an in-run memory of what was already filed (search-index lag).
 - **`no-op`** (rung `none`): end the Run without changes.
 
 ## Unattended limits (every nightly Run)
