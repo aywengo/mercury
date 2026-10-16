@@ -150,9 +150,17 @@ issue `nightly:blocked`, put the question in an issue comment, finish the Run.
    and `session-artifacts/` with the declared secret values replaced — text
    artifacts through the event redactor's chain (so a transcript reads like a
    redacted event), binary kernel snapshots by an equal-length in-place swap
-   that keeps the pickle parseable. The redaction layer is the same one built
+   that keeps the pickle parseable. The pass runs on every exit path — in the
+   finally, after the agent is terminated — so a Run that fails is scrubbed
+   too; a Run paused on `NEEDS_INPUT` is not scrubbed until it ends, since the
+   agent process is still alive. The redaction layer is the same one built
    for events (MERCURY_SECRETS plus forwarded credential values), so what can
-   leave through an event cannot rest in an artifact either.
+   leave through an event cannot rest in an artifact either. Known limits:
+   base64 copies of a declared value and of the `x-access-token:<value>` git
+   pair are covered; other encodings (percent-encoding in arbitrary positions,
+   hex) are not. Files larger than 256 MiB are skipped with a logged warning
+   rather than read whole. A Run a worker never finalizes (worker crash, lease
+   reaped by another worker) is not covered — tracked as a follow-up.
 6. **Budgets.** Per-Run caps are rules in the `nightly` skill ("Unattended
    limits"): at most 2 review rounds per PR, one PR per Run, one batched push
    per round, and a hand-off when the diff outgrows 3x its first passing

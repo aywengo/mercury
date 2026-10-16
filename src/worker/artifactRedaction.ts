@@ -8,7 +8,7 @@
 // choke point: after the agent process is gone, every artifact under the Run's workspace is
 // scrubbed of the values Mercury itself declared or forwarded.
 
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRedactor } from '../domain/redact.ts';
 
@@ -37,27 +37,86 @@ function redactBytes(buf: Buffer, secret: string): Buffer | null {
   return out;
 }
 
+// Strict decoder: a single invalid byte throws, which is the classification the review on
+// #965 asked for. `toString('utf8')` would silently replace invalid sequences with U+FFFD and
+// write that corruption back to disk when a secret is found.
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
+
+/**
+ * Text vs binary classification. A file is text only when it is strictly valid UTF-8 AND
+ * contains no NUL byte: a NUL-free file with an invalid UTF-8 sequence (many small pickles,
+ * protocol-0 pickles, compressed or encoded blobs) is binary, because routing it through the
+ * text path would rewrite the whole file with U+FFFD replacements far from the secret.
+ */
 function isBinary(buf: Buffer): boolean {
-  // Same heuristic as git: a NUL byte means binary. Transcripts are JSONL text; kernel
-  // snapshots are pickles and contain NULs.
-  return buf.includes(0);
+  if (buf.includes(0)) return true;
+  try {
+    strictUtf8.decode(buf);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/** Files larger than this are skipped with a logged warning instead of read whole (review on
+ * #965: readFileSync doubles a large kernel snapshot in memory during the swap). */
+export const MAX_ARTIFACT_FILE_BYTES = 256 * 1024 * 1024;
+
+export interface RedactArtifactsOptions {
+  maxFileBytes?: number;
+  /** Called when a file is skipped for size, so the caller can log it with the runId. */
+  onSkip?: (path: string, size: number) => void;
+}
+
+/**
+ * Encoded copies of a secret that appear in transcripts without the raw value (review on
+ * #965): base64 of the raw value, and base64 of the `x-access-token:<value>` pair git uses in
+ * URLs. Other encodings (percent-encoding in arbitrary positions, hex) remain a documented
+ * limitation, matching the event redactor's floor.
+ */
+function encodedVariants(values: string[]): string[] {
+  const out = new Set(values);
+  for (const v of values) {
+    out.add(Buffer.from(v, 'utf8').toString('base64'));
+    out.add(Buffer.from('x-access-token:' + v, 'utf8').toString('base64'));
+  }
+  return [...out];
 }
 
 /** Recursively scrub every file under the artifact dirs. Returns the number of files changed. */
-export function redactRunArtifacts(workspacePath: string, secrets: string[]): number {
+export function redactRunArtifacts(
+  workspacePath: string,
+  secrets: string[],
+  options: RedactArtifactsOptions = {},
+): number {
   const values = secrets.filter((s) => s.length > 0);
   if (values.length === 0) return 0;
+  // The needle set covers encoded copies (base64 of the value and of the x-access-token pair),
+  // so a transcript that only carries the credential in a git URL survives no better than one
+  // carrying it raw.
+  const needles = encodedVariants(values);
   // Text artifacts use the same chain as events: declared values plus the provider-key shapes,
   // so a bare key echoed into a transcript is caught even when no literal was declared.
-  const redactor = createRedactor(values);
+  const redactor = createRedactor(needles);
+  const maxFileBytes = options.maxFileBytes ?? MAX_ARTIFACT_FILE_BYTES;
   let scrubbed = 0;
   for (const dir of ARTIFACT_DIRS) {
     const root = join(workspacePath, dir);
     scrubbed += walk(root, (path) => {
+      let size: number;
+      try {
+        size = statSync(path).size;
+      } catch {
+        return false; // vanished between readdir and stat: nothing to scrub
+      }
+      if (size > maxFileBytes) {
+        options.onSkip?.(path, size);
+        return false;
+      }
       const buf = readFileSync(path);
       if (isBinary(buf)) {
         let out: Buffer | null = null;
-        for (const secret of values) {
+        for (const secret of needles) {
           const next = redactBytes(out ?? buf, secret);
           if (next) out = next;
         }
