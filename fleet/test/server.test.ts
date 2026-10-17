@@ -17,6 +17,7 @@ import { FLEET_PRODUCT, FLEET_VERSION } from '../version.ts';
 
 const CHILD_SECRET = 'child-secret-abcdef123456';
 const CALLER_TOKEN = 'caller-token-xyz789999';
+const BOB_TOKEN = 'bob-token-xyz789999';
 const ADMIN_TOKEN = 'admin-token-999888777';
 
 async function fakeMercury(healthy = true): Promise<{ url: string; close: () => Promise<void> }> {
@@ -66,6 +67,106 @@ async function startService(opts: { apiTokens?: string; env?: Record<string, str
   };
   return { base, svc, db, call, close: async () => { await svc.close(); db.close(); } };
 }
+
+test('GET /fleet/runs without new parameters is unchanged', async () => {
+  const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*` });
+  try {
+    seedHost(s.db, 'box-1');
+    s.db.prepare(
+      `INSERT INTO fleet_runs (fleet_run_id, host_id, owner_id, child_run_id, requested, created_at)
+       VALUES ('fr_o_1', 'box-1', 'alice', NULL, '{}', '2026-10-18T00:00:00.000Z')`,
+    ).run();
+    const r = await s.call('GET', '/fleet/runs', { token: CALLER_TOKEN });
+    assert.equal(r.status, 200);
+    assert.deepEqual(Object.keys(r.json), ['runs'], 'no owner/limit/cursor: exact old shape');
+    assert.equal(r.json.runs.length, 1);
+    assert.equal(r.json.runs[0].fleetRunId, 'fr_o_1');
+  } finally { await s.close(); }
+});
+
+test('GET /fleet/runs?owner=self returns only the caller bindings', async () => {
+  // Regression for #971: on base the parameter is ignored and both callers' Runs come back.
+  const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*,${BOB_TOKEN}:bob:*` });
+  try {
+    seedHost(s.db, 'box-1');
+    for (const [id, owner] of [['fr_a_1', 'alice'], ['fr_b_1', 'bob'], ['fr_a_2', 'alice']]) {
+      s.db.prepare(
+        `INSERT INTO fleet_runs (fleet_run_id, host_id, owner_id, child_run_id, requested, created_at)
+         VALUES (?, 'box-1', ?, NULL, '{}', '2026-10-18T00:00:00.000Z')`,
+      ).run(id, owner);
+    }
+    const r = await s.call('GET', '/fleet/runs?owner=self', { token: CALLER_TOKEN });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json.runs.map((x: any) => x.fleetRunId).sort(), ['fr_a_1', 'fr_a_2']);
+    const bob = await s.call('GET', '/fleet/runs?owner=self', { token: BOB_TOKEN });
+    assert.deepEqual(bob.json.runs.map((x: any) => x.fleetRunId), ['fr_b_1']);
+    assert.equal(bob.json.runs[0].ownerId, 'bob');
+  } finally { await s.close(); }
+});
+
+test('owner=<someone-else> is refused with 400', async () => {
+  const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*` });
+  try {
+    seedHost(s.db, 'box-1');
+    const r = await s.call('GET', '/fleet/runs?owner=bob', { token: CALLER_TOKEN });
+    assert.equal(r.status, 400);
+    const empty = await s.call('GET', '/fleet/runs?owner=', { token: CALLER_TOKEN });
+    assert.equal(empty.status, 200, 'an empty value is absent, not a free-form owner');
+  } finally { await s.close(); }
+});
+
+test('owner=self paging walks every Run exactly once, across pages, with a Run inserted mid-walk', async () => {
+  const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*` });
+  try {
+    seedHost(s.db, 'box-1');
+    const insert = s.db.prepare(
+      `INSERT INTO fleet_runs (fleet_run_id, host_id, owner_id, child_run_id, requested, created_at)
+       VALUES (?, 'box-1', 'alice', NULL, '{}', ?)`,
+    );
+    // Distinct timestamps so the keyset order is deterministic; same-timestamp ties fall to the id.
+    for (let i = 1; i <= 5; i++) {
+      insert.run(`fr_p_${i}`, new Date(Date.UTC(2026, 9, 18, 0, 0, i)).toISOString());
+    }
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let first = true;
+    for (;;) {
+      const q = new URLSearchParams({ owner: 'self', limit: '2' });
+      if (cursor) q.set('cursor', cursor);
+      const r = await s.call('GET', `/fleet/runs?${q}`, { token: CALLER_TOKEN });
+      assert.equal(r.status, 200);
+      seen.push(...r.json.runs.map((x: any) => x.fleetRunId));
+      if (first) {
+        // A new Run lands between pages, older than everything seen so far: it must appear
+        // exactly once on a later page, and no already-visited Run may repeat.
+        insert.run('fr_p_mid', new Date(Date.UTC(2026, 9, 18, 0, 0, 0)).toISOString());
+        first = false;
+      }
+      if (!r.json.nextCursor) break;
+      cursor = r.json.nextCursor;
+    }
+    assert.deepEqual(seen.sort(), ['fr_p_1', 'fr_p_2', 'fr_p_3', 'fr_p_4', 'fr_p_5', 'fr_p_mid']);
+  } finally { await s.close(); }
+});
+
+test('owner=self paging returns nextCursor only when a page was truncated', async () => {
+  const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*` });
+  try {
+    seedHost(s.db, 'box-1');
+    const insert = s.db.prepare(
+      `INSERT INTO fleet_runs (fleet_run_id, host_id, owner_id, child_run_id, requested, created_at)
+       VALUES (?, 'box-1', 'alice', NULL, '{}', ?)`,
+    );
+    insert.run('fr_c_1', '2026-10-18T00:00:01.000Z');
+    insert.run('fr_c_2', '2026-10-18T00:00:02.000Z');
+    const one = await s.call('GET', '/fleet/runs?owner=self&limit=2', { token: CALLER_TOKEN });
+    assert.deepEqual(Object.keys(one.json).sort(), ['nextCursor', 'runs']);
+    assert.equal(one.json.nextCursor, null);
+    const two = await s.call('GET', '/fleet/runs?owner=self&limit=1', { token: CALLER_TOKEN });
+    assert.equal(two.json.nextCursor, '2026-10-18T00:00:02.000Z|fr_c_2');
+    assert.deepEqual(two.json.runs.map((x: any) => x.fleetRunId), ['fr_c_2']);
+  } finally { await s.close(); }
+});
 
 test('/healthz reports fleet product and version', async () => {
   const s = await startService();

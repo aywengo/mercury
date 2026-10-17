@@ -224,6 +224,64 @@ export class BindingStore {
     }));
   }
 
+  /**
+   * Owner-scoped, keyset-paged listing for `GET /fleet/runs?owner=self` (issue #971).
+   *
+   * Keyset on (created_at, fleet_run_id) DESC with the id as tiebreaker: a plain OFFSET page shifts
+   * when a Run is inserted mid-walk, so a walker would see some Runs twice and miss others. The
+   * cursor format matches the host's `GET /api/runs`: `<createdAt>|<id>`.
+   */
+  listPaged(
+    hostIds: '*' | string[],
+    opts: { ownerId?: string; limit: number; cursor?: string },
+  ): { runs: BindingView[]; nextCursor: string | null } {
+    if (hostIds !== '*' && hostIds.length === 0) return { runs: [], nextCursor: null };
+    const clauses: string[] = [];
+    const args: (string | number)[] = [];
+    if (hostIds !== '*') {
+      clauses.push(`fleet_runs.host_id IN (${hostIds.map(() => '?').join(',')})`);
+      args.push(...hostIds);
+    }
+    if (opts.ownerId) {
+      clauses.push('fleet_runs.owner_id = ?');
+      args.push(opts.ownerId);
+    }
+    if (opts.cursor) {
+      const [createdAt, id] = opts.cursor.split('|');
+      clauses.push('(fleet_runs.created_at < ? OR (fleet_runs.created_at = ? AND fleet_runs.fleet_run_id < ?))');
+      args.push(createdAt, createdAt, id);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = this.db
+      .prepare(
+        `SELECT fleet_runs.*,
+                run_state.status AS state_status, run_state.cursor AS state_cursor,
+                run_state.last_seen_at AS state_last_seen_at, run_state.last_error AS state_last_error,
+                run_state.events_drained AS state_events_drained
+           FROM fleet_runs
+           LEFT JOIN run_state ON run_state.fleet_run_id = fleet_runs.fleet_run_id
+           ${where}
+          ORDER BY fleet_runs.created_at DESC, fleet_runs.fleet_run_id DESC
+          LIMIT ?`,
+      )
+      .all(...args, opts.limit + 1) as unknown as JoinedRow[];
+    const hasMore = rows.length > opts.limit;
+    const page = rows.slice(0, opts.limit).map((row) => ({
+      ...toBinding(row),
+      state: row.state_status === null || row.state_status === undefined
+        ? null
+        : {
+          fleetRunId: row.fleet_run_id, status: row.state_status, cursor: Number(row.state_cursor ?? 0),
+          lastSeenAt: row.state_last_seen_at ?? null, lastError: row.state_last_error ?? null,
+          eventsDrained: Number(row.state_events_drained ?? 0) === 1,
+        },
+    }));
+    const nextCursor = hasMore && page.length > 0
+      ? `${page[page.length - 1].createdAt}|${page[page.length - 1].fleetRunId}`
+      : null;
+    return { runs: page, nextCursor };
+  }
+
   recordState(input: RunStateWrite): void {
     this.db
       .prepare(

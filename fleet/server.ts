@@ -348,8 +348,28 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
     {
       method: 'GET', pattern: ['fleet', 'runs'],
       handle: (ctx, res) => {
-        const runs = dispatch.bindings.list(scopedHosts(ctx.caller, registry));
-        sendJson(res, 200, { runs });
+        const q = ctx.query;
+        const owner = q?.get('owner');
+        // owner=self scopes to the caller's own bindings. It is never a free-form owner value: a
+        // caller must not be able to list someone else's Runs by naming them (issue #971).
+        if (owner !== null && owner !== undefined && owner !== '' && owner !== 'self') {
+          throw new HttpError(400, `owner must be "self", got "${owner}"`);
+        }
+        const ownerId = owner === 'self' ? ctx.caller.ownerId : undefined;
+        const paged = ownerId !== undefined || q?.has('limit') || q?.has('cursor');
+        if (!paged) {
+          // No new parameters: byte-identical to the pre-#971 response.
+          const runs = dispatch.bindings.list(scopedHosts(ctx.caller, registry));
+          sendJson(res, 200, { runs });
+          return;
+        }
+        const limit = Math.max(1, Math.min(nonNegativeInt(q?.get('limit'), 50), 200));
+        const cursorParam = q?.get('cursor');
+        const cursor = typeof cursorParam === 'string' && cursorParam ? cursorParam : undefined;
+        const { runs, nextCursor } = dispatch.bindings.listPaged(scopedHosts(ctx.caller, registry), {
+          ownerId, limit, cursor,
+        });
+        sendJson(res, 200, { runs, nextCursor });
       },
     },
     {
