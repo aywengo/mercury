@@ -52,6 +52,7 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #881 | nightly: rung 4 files duplicate proposals; dedupe by source key before filing | in progress | #928, #946 |
 | #964 | nightly: report lists a one-night flake forever; the flake entry carries an absolute wo… | open | — |
 | #968 | nightly: resume PRs on the owner's changes-requested review, not only on Copilot findings | done | #969 |
+| #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | open | — |
 
 ## Dispatcher bots
 
