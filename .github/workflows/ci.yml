@@ -373,9 +373,34 @@ jobs:
             echo "dry-run must not write the plist" >&2; exit 1; }
 
   # Always reports a single status so narrative-only PRs are not stuck waiting on skipped required jobs.
+  # PLAN.md rule 2: a PR that closes an issue with a PLAN.md row must update that row in the same
+  # PR (state `done`, this PR's number). Runs on every pull request regardless of the path filters:
+  # a docs-only or code-only PR can close a tracked issue equally. It needs the PR's closing issues,
+  # which only the API knows, so it reads them with the workflow token (read-only).
+  plan-tracker:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: PLAN.md rows for issues this PR closes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json number,closingIssuesReferences > "$RUNNER_TEMP/pr.json"
+          node scripts/planTracker.ts "$RUNNER_TEMP/pr.json" PLAN.md
+
   ci:
     name: ci
-    needs: [changes, test, uninstalled-checkout-fails-clearly, docs-contract, host-installer, host-installer-macos, host-installer-containers]
+    needs: [changes, test, uninstalled-checkout-fails-clearly, docs-contract, host-installer, host-installer-macos, host-installer-containers, plan-tracker]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
@@ -392,10 +417,16 @@ jobs:
           HOSTJOB: ${{ needs.host-installer.result }}
           HOSTMACOS: ${{ needs.host-installer-macos.result }}
           HOSTCONT: ${{ needs.host-installer-containers.result }}
+          PLAN: ${{ needs.plan-tracker.result }}
         run: |
           set -e
           if [ "$CHANGES" != "success" ]; then
             echo "changes job did not succeed: $CHANGES" >&2
+            exit 1
+          fi
+          # Skipped on push (no PR to read); on a pull request it must succeed.
+          if [ "$PLAN" != "success" ] && [ "$PLAN" != "skipped" ]; then
+            echo "plan-tracker failed ($PLAN): update the PLAN.md row of every issue this PR closes" >&2
             exit 1
           fi
 

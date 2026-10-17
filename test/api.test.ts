@@ -1885,3 +1885,32 @@ test('GET /api/runs/:runId carries the workflow identity sibling (null for a Run
     env.close();
   }
 });
+
+// -- #859: the preset block is forwarded unresolved, so the closed-shape rule must hold at the HTTP seam --
+
+test('POST /api/runs refuses a preset block with an unknown key, with no Run row (#859)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const res = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ task: 't', agent: 'fake', preset: { id: 'reviewer', versoin: '1.0.0' } }),
+      });
+      assert.equal(res.status, 400, `expected 400, got ${res.status}`);
+      const body = (await res.json()) as { error?: string };
+      assert.match(body.error ?? '', /preset has unknown key "versoin"/, JSON.stringify(body));
+      const list = await fetch(`${base}/api/runs?limit=10`, { headers });
+      const runs = (await list.json()) as { runs: unknown[] };
+      assert.equal(runs.runs.length, 0, 'a rejected preset block left a Run behind');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
