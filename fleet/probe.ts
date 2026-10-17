@@ -357,6 +357,85 @@ export async function probeHost(target: ProbeTarget, fetchImpl: FetchLike = fetc
   };
 }
 
+/**
+ * One preset or workflow template as Fleet reads it from the host.
+ *
+ * Deliberately the short fields only: the availability snapshot answers "can this host run a Run
+ * naming preset X at version Y", not "what does the instruction say". Instruction text lives on the
+ * host's detail endpoint and is fetched at dispatch time, not mirrored here.
+ */
+export interface AvailabilityEntry {
+  id: string;
+  /** Semver string when the host reports one, null when it does not. */
+  version: string | null;
+  enabled: boolean;
+  contentHash: string | null;
+}
+
+function parseEntries(raw: unknown): AvailabilityEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item): AvailabilityEntry[] => {
+    if (typeof item !== 'object' || item === null) return [];
+    const o = item as Record<string, unknown>;
+    if (typeof o.id !== 'string' || !o.id) return [];
+    return [{
+      id: stripTerminalControls(o.id),
+      version: typeof o.version === 'string' ? stripTerminalControls(o.version) : null,
+      enabled: o.enabled === true,
+      contentHash: typeof o.contentHash === 'string' ? o.contentHash : null,
+    }];
+  });
+}
+
+export interface AvailabilityResult {
+  /**
+   * The preset list, or null when the read FAILED. Null is the load-bearing value: the registry keeps
+   * the previous snapshot and marks it stale rather than storing an empty list, because "host has
+   * nothing" and "Fleet could not see" must not look the same (fleet-bots-design.md section 5.1).
+   * A 404 is a definite answer ("not served"), not a failure, and yields [].
+   */
+  presets: AvailabilityEntry[] | null;
+  /**
+   * The workflow list, or null. Null covers both "the host does not serve /api/workflows" (404, the
+   * normal case until W-3 #934 ships) and a failed read; the registry keeps the previous value on
+   * failure and stores null on 404, so the two end in the same column for different reasons -- the
+   * column comment in migration v6 records why that is acceptable.
+   */
+  workflows: AvailabilityEntry[] | null;
+  /**
+   * True when the workflows read failed (non-2xx other than 404, or a transport error), as opposed
+   * to a 404 "not served" or a successful read. The registry needs the distinction: a failed read
+   * keeps the previous snapshot and marks it stale, a 404 stores null as the definite answer.
+   */
+  workflowsFailed: boolean;
+}
+
+/**
+ * Read the availability endpoints from one host. Never throws.
+ *
+ * Same credential and timeout as the rest of the probe, on the same timer: this is one more pair of
+ * reads the sweep already pays the round trip for, not a second service. Both reads are attempted
+ * independently -- a host that serves presets but answers 500 on workflows keeps its preset list and
+ * loses nothing to the partial failure.
+ */
+export async function probeAvailability(target: ProbeTarget, fetchImpl: FetchLike = fetch): Promise<AvailabilityResult> {
+  const presets = await call(fetchImpl, `${target.baseUrl}/api/presets`, target.token, target.timeoutMs);
+  const workflows = await call(fetchImpl, `${target.baseUrl}/api/workflows`, target.token, target.timeoutMs);
+  const presetsOk = presets.transportError === null && presets.status >= 200 && presets.status < 300;
+  const presetsNotFound = !presets.transportError && presets.status === 404;
+  const workflowsOk = workflows.transportError === null && workflows.status >= 200 && workflows.status < 300;
+  const workflowsNotFound = !workflows.transportError && workflows.status === 404;
+  return {
+    // 404 from a Mercury that has presets disabled is a truthful "none served", so it stores [] like an
+    // empty catalog. Any other non-2xx or a transport failure is "could not see" and stays null.
+    presets: presetsOk ? parseEntries((presets.json as { presets?: unknown } | null)?.presets)
+      : presetsNotFound ? [] : null,
+    workflows: workflowsOk ? parseEntries((workflows.json as { workflows?: unknown } | null)?.workflows)
+      : null,
+    workflowsFailed: !workflowsOk && !workflowsNotFound,
+  };
+}
+
 /** Run a probe and shape it into a registry record. */
 export async function probeAndRecord(
   target: ProbeTarget,

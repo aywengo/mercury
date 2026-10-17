@@ -6,6 +6,7 @@
  */
 
 import type { DatabaseSync } from 'node:sqlite';
+import type { AvailabilityEntry, AvailabilityResult } from './probe.ts';
 
 export type ProbeOutcome =
   | 'ok'
@@ -77,6 +78,22 @@ export interface ProbeRecord {
 
 export interface HostView extends HostRecord {
   probe: ProbeRecord | null;
+}
+
+/**
+ * The per-host availability snapshot (fleet-bots-design.md section 5.1, FB0 #970), as stored.
+ *
+ * `stale` is set by the last failed availability read; the view layer adds the age test against
+ * FLEET_AVAILABILITY_STALE_MS, because "read five minutes ago" and "read failed" are different ways
+ * to be stale and the view answers for both.
+ */
+export interface AvailabilitySnapshot {
+  hostId: string;
+  presets: AvailabilityEntry[];
+  /** Null when the host does not serve /api/workflows or Fleet has never read it successfully. */
+  workflows: AvailabilityEntry[] | null;
+  probedAt: string;
+  stale: boolean;
 }
 
 export class RegistryError extends Error {}
@@ -175,6 +192,24 @@ function rowToHost(row: HostRow): HostRecord {
     agentsCache: parseJson<string[]>(row.agents_cache, []),
     addedAt: row.added_at,
     lastSeenAt: row.last_seen_at,
+  };
+}
+
+interface AvailabilityRow {
+  host_id: string;
+  presets: string;
+  workflows: string | null;
+  probed_at: string;
+  stale: number;
+}
+
+function rowToAvailability(row: AvailabilityRow): AvailabilitySnapshot {
+  return {
+    hostId: row.host_id,
+    presets: parseJson<AvailabilityEntry[]>(row.presets, []),
+    workflows: row.workflows === null ? null : parseJson<AvailabilityEntry[]>(row.workflows, null as unknown as AvailabilityEntry[]),
+    probedAt: row.probed_at,
+    stale: row.stale === 1,
   };
 }
 
@@ -356,6 +391,59 @@ export class HostRegistry {
       // advisory cache honest without claiming the host was seen healthy.
       this.db.prepare('UPDATE hosts SET agents_cache = ? WHERE id = ?').run(JSON.stringify(rec.agents), rec.hostId);
     }
+  }
+
+  /**
+   * Record an availability read (FB0 #970).
+   *
+   * The rule that matters is in fleet-bots-design.md section 5.1: a failed read keeps the previous
+   * snapshot and marks it stale; it is NEVER replaced with an empty list, because "host has nothing"
+   * and "Fleet could not see" must not look the same. `presets: null` or a failed workflows read
+   * (`presetsOk false` on the workflows half -- expressed by the caller passing null for a failed
+   * list) means keep; a non-null list means replace and clear the stale flag.
+   *
+   * There is no "delete on failure": a snapshot Fleet could not refresh a minute ago is still the
+   * best available answer, and deleting it would turn one bad read into "availability unknown" for
+   * every routing decision until the next good one.
+   */
+  recordAvailability(hostId: string, result: AvailabilityResult, probedAt: string): void {
+    if (!this.get(hostId)) throw new RegistryError(`cannot record availability for unknown host ${hostId}`);
+    const previous = this.availabilityFor(hostId);
+    const failed = result.presets === null;
+    // The caller cannot distinguish "workflows read failed" from "not served" through the single null,
+    // so it passes the failure through failedReads; presets null implies failure of the whole read.
+    const workflowsKept = previous && (failed || result.workflowsFailed)
+      ? previous.workflows
+      : result.workflows;
+    const presets = failed ? (previous?.presets ?? []) : result.presets!;
+    this.db
+      .prepare(
+        `INSERT INTO host_availability (host_id, presets, workflows, probed_at, stale)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(host_id) DO UPDATE SET
+           presets = excluded.presets, workflows = excluded.workflows,
+           probed_at = excluded.probed_at, stale = excluded.stale`,
+      )
+      .run(
+        hostId,
+        JSON.stringify(presets),
+        workflowsKept === null ? null : JSON.stringify(workflowsKept),
+        probedAt,
+        failed || result.workflowsFailed ? 1 : 0,
+      );
+  }
+
+  availabilityFor(id: string): AvailabilitySnapshot | null {
+    const row = this.db.prepare('SELECT * FROM host_availability WHERE host_id = ?').get(id) as AvailabilityRow | undefined;
+    return row ? rowToAvailability(row) : null;
+  }
+
+  /** Drop cached availability rows for hosts that no longer exist. Same hygiene as pruneProbeCache. */
+  pruneAvailabilityCache(): number {
+    const res = this.db
+      .prepare('DELETE FROM host_availability WHERE host_id NOT IN (SELECT id FROM hosts)')
+      .run();
+    return Number(res.changes);
   }
 
   /** Drop cached probe rows for hosts that no longer exist. Cheap hygiene after an interrupted delete. */
