@@ -1275,3 +1275,203 @@ test('#968: ladder ordering puts owner change requests before older Copilot find
   assert.equal(s.rung, 0);
   assert.equal(s.issue, 11, 'the owner review wins over an older Copilot-findings PR');
 });
+
+// -- Red CI on the head (rung 0, #980): a nightly PR the bot pushed red resumes on the CI
+// signal alone, without waiting for a human review to restate what CI already says.
+
+// Fixture shaped like #965: a nightly PR whose head has a completed failing `ci` aggregate
+// check, failing job check runs, no reviews and no Copilot threads.
+function redCiIo(opts: {
+  ciStatus?: string;
+  ciConclusion?: string | null;
+  failingJobs?: { name: string; output?: string }[];
+  ownerReviews?: { state: string; commit_id: string }[];
+  copilotThreads?: number;
+  extraReadyIssue?: boolean;
+}) {
+  const trusted = issue({ number: 965, user: { login: 'aywengo' } });
+  const prList = [
+    { number: 1965, user: { login: 'mercury-nightly' }, created_at: '2026-10-15T22:35:00Z', head: { sha: 'sha965', ref: 'fix/issue-965-typecheck' } },
+  ];
+  const issues = [trusted];
+  if (opts.extraReadyIssue) issues.push(issue({ number: 975, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }, { name: 'priority: high' }] }));
+  const checkRuns = [
+    { name: 'ci', status: opts.ciStatus ?? 'completed', conclusion: opts.ciConclusion === undefined ? 'failure' : opts.ciConclusion },
+    ...(opts.failingJobs ?? []).map((j) => ({ name: j.name, status: 'completed', conclusion: 'failure', output: { text: j.output ?? '' } })),
+    { name: 'changes', status: 'completed', conclusion: 'success' },
+  ];
+  return {
+    async get(path: string) {
+      if (path.includes('/timeline')) {
+        return { body: [{ event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } }], link: null };
+      }
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/1965/reviews')) {
+        return { body: opts.ownerReviews ?? [], link: null };
+      }
+      if (path.includes('/check-runs?')) return { body: { check_runs: checkRuns }, link: null };
+      return { body: issues, link: null };
+    },
+    async post() { return true; },
+    async postJson() {
+      const n = opts.copilotThreads ?? 0;
+      const nodes = Array.from({ length: n }, () => ({ isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'sha965' } }] } }));
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: n, pageInfo: { hasNextPage: false }, nodes } } } } } };
+    },
+  };
+}
+
+test('#980: a nightly PR whose head has red ci resumes on the CI signal, reason names the failing jobs', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [
+      { name: 'test (node 22.18.0)' },
+      { name: 'host-installer' },
+      { name: 'plan-tracker' },
+    ],
+  }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0, 'red ci on the head is resume work without any review');
+  assert.equal(s.issue, 965);
+  assert.match(s.reason, /red ci on head sha965/);
+  assert.match(s.reason, /test \(node 22\.18\.0\)/);
+  assert.match(s.reason, /plan-tracker/);
+});
+
+test('#980: a `ci` check still in progress is not a signal', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(redCiIo({ ciStatus: 'in_progress', failingJobs: [] }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.rung, 0, 'wait for the verdict instead of resuming on a running check');
+});
+
+test('#980: an owner change request outranks red ci on another PR', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  // Two nightly PRs: PR 1 (older) has red ci, PR 2 (newer) has an owner change request.
+  const trusted = issue({ number: 965, user: { login: 'aywengo' } });
+  const trusted2 = issue({ number: 966, user: { login: 'aywengo' } });
+  const prList = [
+    { number: 1965, user: { login: 'mercury-nightly' }, created_at: '2026-10-15T22:35:00Z', head: { sha: 'sha965', ref: 'fix/issue-965-typecheck' } },
+    { number: 1966, user: { login: 'mercury-nightly' }, created_at: '2026-10-16T20:00:00Z', head: { sha: 'sha966', ref: 'fix/issue-966-other' } },
+  ];
+  const base = redCiIo({ failingJobs: [{ name: 'test (node 22.18.0)' }] }) as { get: (p: string) => Promise<unknown>; post: () => Promise<boolean>; postJson: (p: string, b: unknown) => Promise<{ status: number; body: unknown }> };
+  const io = {
+    async get(path: string) {
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/1965/reviews')) return { body: [], link: null };
+      if (path.includes('/pulls/1966/reviews')) return { body: [{ user: { login: 'aywengo' }, state: 'CHANGES_REQUESTED', commit_id: 'sha966' }], link: null };
+      if (path.includes('/commits/sha965/check-runs')) {
+        return { body: { check_runs: [
+          { name: 'ci', status: 'completed', conclusion: 'failure' },
+          { name: 'test (node 22.18.0)', status: 'completed', conclusion: 'failure' },
+        ] }, link: null };
+      }
+      if (path.includes('/check-runs?')) return { body: { check_runs: [] }, link: null };
+      return { body: [trusted, trusted2], link: null };
+    },
+    post: base.post,
+    async postJson(_p: string, body: unknown) {
+      const vars = (body as { variables: { number: number } }).variables;
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: 0, pageInfo: { hasNextPage: false }, nodes: [] } } } } } };
+    },
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 966, 'the owner change request wins over the older red-ci PR');
+});
+
+test('#980: a PR authored by someone else with red ci is not selected', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const trusted = issue({ number: 965, user: { login: 'aywengo' } });
+  const prList = [
+    { number: 1965, user: { login: 'someone-else' }, created_at: '2026-10-15T22:35:00Z', head: { sha: 'sha965', ref: 'fix/issue-965-typecheck' } },
+  ];
+  const io = redCiIo({ failingJobs: [{ name: 'test (node 22.18.0)' }] }) as { get: (p: string) => Promise<unknown> };
+  const origGet = io.get;
+  io.get = async (path: string) => {
+    if (path.includes('/pulls?')) return { body: prList, link: null };
+    return origGet(path);
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.rung, 0, 'red ci on a foreign PR is not nightly resume work');
+});
+
+test('#980: a failure confined to a known flake does not trigger a red-ci resume', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const { writeFileSync, mkdirSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tempDir } = await import('./helpers.ts');
+  const home = tempDir('nightly-flake-');
+  mkdirSync(join(home, 'mercury', 'nightly'), { recursive: true });
+  writeFileSync(join(home, 'mercury', 'nightly', 'e2e-flakes.json'), JSON.stringify({
+    fp1: { test: 'e2e/retries a flaky request', error: 'timeout', nights: ['2026-10-16'] },
+  }));
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [{ name: 'test (node 22.18.0)', output: '✖ e2e/retries a flaky request (12.3ms)' }],
+  }) as never, { REPO: 'aywengo/mercury', XDG_STATE_HOME: home }, true);
+  assert.notEqual(s.rung, 0, 'a known-flake-only red head waits for a human review instead of looping');
+});
+
+test('#980: a real failure next to a known flake still resumes', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const { writeFileSync, mkdirSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { tempDir } = await import('./helpers.ts');
+  const home = tempDir('nightly-flake-');
+  mkdirSync(join(home, 'mercury', 'nightly'), { recursive: true });
+  writeFileSync(join(home, 'mercury', 'nightly', 'e2e-flakes.json'), JSON.stringify({
+    fp1: { test: 'e2e/retries a flaky request', error: 'timeout', nights: ['2026-10-16'] },
+  }));
+  const s = await runSelectorWith(redCiIo({
+    failingJobs: [
+      { name: 'test (node 22.18.0)', output: '✖ e2e/retries a flaky request (12.3ms)' },
+      { name: 'plan-tracker' },
+    ],
+  }) as never, { REPO: 'aywengo/mercury', XDG_STATE_HOME: home }, true);
+  assert.equal(s.rung, 0, 'the plan-tracker failure is real work');
+  assert.match(s.reason, /plan-tracker/);
+});
+
+test('#980: ladder ordering puts owner changes first, then red ci, then Copilot findings', () => {
+  const c = [
+    cand(issue({ number: 10, labels: [{ name: 'nightly:ready' }] }), [labeled('aywengo', 'nightly:ready')]),
+    cand(issue({ number: 11, labels: [{ name: 'nightly:ready' }] }), [labeled('aywengo', 'nightly:ready')]),
+    cand(issue({ number: 12, labels: [{ name: 'nightly:ready' }] }), [labeled('aywengo', 'nightly:ready')]),
+  ];
+  const s = selectLadder(c, { ...TERMINAL, resume: [
+    { issue: 10, prNumber: 100, headSha: 'a', state: 'findings', createdAt: '2026-10-01T00:00:00Z' },
+    { issue: 12, prNumber: 102, headSha: 'c', state: 'red-ci', createdAt: '2026-10-06T00:00:00Z', failingJobs: 'test (node 24.x)' },
+    { issue: 11, prNumber: 101, headSha: 'b', state: 'owner-changes', createdAt: '2026-10-05T00:00:00Z' },
+  ] });
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 11, 'owner change request first');
+  const s2 = selectLadder(c, { ...TERMINAL, resume: [
+    { issue: 10, prNumber: 100, headSha: 'a', state: 'findings', createdAt: '2026-10-01T00:00:00Z' },
+    { issue: 12, prNumber: 102, headSha: 'c', state: 'red-ci', createdAt: '2026-10-06T00:00:00Z', failingJobs: 'test (node 24.x)' },
+  ] });
+  assert.equal(s2.issue, 12, 'red ci outranks older Copilot findings');
+});
+
+test('#980: redCiJobs pulls the failing job names under the required aggregate check', async () => {
+  const { redCiJobs } = await import('../.agents/skills/nightly/select.ts');
+  const runs = [
+    { name: 'ci', status: 'completed', conclusion: 'failure' },
+    { name: 'test (node 24.x)', status: 'completed', conclusion: 'failure' },
+    { name: 'changes', status: 'completed', conclusion: 'success' },
+    { name: 'docs-contract', status: 'completed', conclusion: 'skipped' },
+  ];
+  assert.deepEqual(redCiJobs(runs), ['test (node 24.x)']);
+  assert.equal(redCiJobs([{ name: 'ci', status: 'in_progress', conclusion: null }]), null, 'in progress is not a signal');
+  assert.equal(redCiJobs([{ name: 'ci', status: 'completed', conclusion: 'success' }]), null, 'green is not a signal');
+  assert.equal(redCiJobs([{ name: 'test (node 24.x)', status: 'completed', conclusion: 'failure' }]), null, 'no aggregate check: no signal');
+});
+
+test('#980: a capped check-runs scan fails the red-ci signal closed (no resume, issue stays reserved)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const io = redCiIo({ failingJobs: [{ name: 'test (node 22.18.0)' }] }) as { get: (p: string) => Promise<unknown> };
+  const origGet = io.get;
+  io.get = async (path: string) => {
+    if (path.includes('/check-runs?')) return { body: { check_runs: [] }, link: '<https://api.github.com/repos/aywengo/mercury/commits/sha965/check-runs?per_page=100&page=2>; rel="next"' };
+    return origGet(path);
+  };
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.rung, 0, 'unknown CI state never fakes a red-ci resume');
+});

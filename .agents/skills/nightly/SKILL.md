@@ -111,8 +111,14 @@ instruction:
   run the same loop: analysis, scoped implementation with tests, one PR. This skill (the nightly
   Run) plays the implementer role the loop's procedure assigns.
 - **`fix-loop` on rung 0 (resume, #819)**: the claimed issue already has an open nightly PR
-  whose head carries Copilot findings, or whose head carries @aywengo's changes-requested review
-  (#968; owner reviews resume first). Do NOT open a new PR: address the findings on the existing
+  whose head carries Copilot findings, whose head carries @aywengo's changes-requested review
+  (#968; owner reviews resume first), or whose head has red CI (#980): the required `ci` check
+  completed with conclusion `failure`, with the failing job names in the selection reason (a
+  check still in progress is not a signal; a failure confined to a known flake from the
+  nightly-e2e flake clock is not a signal on its own). For a red-CI resume, fetch the evidence
+  yourself before pushing: `gh run view <run-id> --log-failed` (trimmed) for the first failing
+  test or compiler lines, and re-run `npx tsc --noEmit -p .` and the full suite locally. Do NOT
+  open a new PR: address the findings on the existing
   branch (fix-loop step 5, at most 2 rounds, one batched push). For an owner review, the findings
   are the review BODY plus any inline threads: read `gh pr view <n> --json reviews` and the
   review threads, fix every point, then reply on the PR with a point-by-point answer (a body-only

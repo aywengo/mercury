@@ -119,6 +119,8 @@ question: <only when handed off>
   correct and passes its own test.
 - A regression test must be proven: it fails on the base, passes on the fix.
 - Fix at the single choke point so future callers cannot bypass it.
+- **Never push without `npx tsc --noEmit -p .` and the full test suite passing locally.** A head
+  that fails typecheck or CI wastes a review round and strands the PR red (#965).
 - Waived findings need a one-line reason; do not silently drop them.
 - Review findings are an issue source: each accepted-but-deferred finding gets its own issue
   with priority and a short write-up.

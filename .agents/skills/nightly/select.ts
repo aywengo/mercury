@@ -44,6 +44,7 @@
  */
 
 import { basename } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { REPO_RE, ghToken, ghGet as ghGetRaw, ghPost as ghPostRaw, ghDelete as ghDeleteRaw, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const TRUSTED_AUTHOR = 'aywengo';
@@ -103,11 +104,99 @@ export interface ResumeCandidate {
    *  the run resumes fix-loop step 5 on the issue.
    *  'owner-changes' = the owner's LATEST deciding review requests changes on THIS head (no
    *  commit pushed since), whether its remarks are inline or only in the review body (#968).
-   *  It outranks Copilot findings: the owner's review is the one that gates the merge. */
-  state: 'findings' | 'owner-changes';
+   *  It outranks Copilot findings: the owner's review is the one that gates the merge.
+   *  'red-ci' = the required aggregate `ci` check on THIS head completed with conclusion
+   *  failure (#980): the bot's own PR is red, and no review should be needed to say so. It
+   *  outranks Copilot findings; owner change requests still outrank it. */
+  state: 'findings' | 'owner-changes' | 'red-ci';
+  /** red-ci only: the failing job names on this head, comma-joined, for the selection reason. */
+  failingJobs?: string;
   /** Older first: with two open PRs for one issue the OLDER one is continued (the acceptance
    *  rule) and the newer must be superseded or closed by the Run. */
   createdAt: string;
+}
+
+// ---- red CI on the head (#980) ----
+
+/** The required aggregate check's exact job name (.github/workflows/ci.yml, job `ci`). */
+export const RED_CI_CHECK = 'ci';
+
+/** Recorded-shape check run (fields the selector reads). */
+export interface CheckRunShim {
+  name?: string | null;
+  status?: string | null;
+  conclusion?: string | null;
+  output?: { summary?: string | null; text?: string | null } | null;
+}
+
+/**
+ * The failing job names under the required aggregate check on one head, or null when there is
+ * NO signal: the aggregate check absent, still running (wait for the verdict, acceptance 2), or
+ * not failed. Only a COMPLETED aggregate with conclusion `failure` is a red-CI resume signal
+ * (#980); the failing jobs are the OTHER check runs with conclusion `failure` on the same head.
+ */
+export function redCiJobs(checkRuns: CheckRunShim[]): string[] | null {
+  const ci = checkRuns.find((c) => c.name === RED_CI_CHECK);
+  if (!ci || ci.status !== 'completed' || ci.conclusion !== 'failure') return null;
+  return checkRuns
+    .filter((c) => c.name !== undefined && c.name !== null && c.name !== RED_CI_CHECK && c.conclusion === 'failure')
+    .map((c) => c.name!);
+}
+
+/**
+ * Failing-test names mentioned in a check run's output: node --test's spec reporter marks a
+ * failure line `✖ <name> (<duration>)`; TAP marks it `not ok <n> - <name>`. Used only for the
+ * known-flake guard (#980 acceptance 5) — a job whose every named failing test is a recorded
+ * flake does not trigger a red-CI resume on its own.
+ */
+export function failingTestMentions(output: string): string[] {
+  const names: string[] = [];
+  for (const line of output.split('\n')) {
+    const spec = line.match(/^\s*(?:✖|✗)\s*(.+?)(?:\s*\(\d+(?:\.\d+)?\s*m?s\))?\s*$/);
+    const tap = line.match(/^\s*not ok \d+\s*-\s*(.+?)\s*$/);
+    const name = (spec?.[1] ?? tap?.[1] ?? '').trim();
+    if (name !== '') names.push(name);
+  }
+  return names;
+}
+
+/**
+ * Whether one failing job's output mentions ONLY known-flake tests. A job with no extractable
+ * failing-test names is a real failure (typecheck, plan-tracker and installer jobs rarely name
+ * tests) — fail toward resuming, never toward ignoring red CI.
+ */
+export function isFlakeConfinedJob(output: string, flakeTests: string[]): boolean {
+  const mentioned = failingTestMentions(output);
+  if (mentioned.length === 0) return false;
+  const known = (t: string): boolean => flakeTests.some((f) => f === t || f.includes(t) || t.includes(f));
+  return mentioned.every(known);
+}
+
+/**
+ * The nightly flake-clock state's recorded test names (the file e2e.ts writes at
+ * `<state-home>/mercury/nightly/e2e-flakes.json`, one entry per fingerprint). A missing, corrupt
+ * or unreadable file yields NO known flakes: the red-CI resume fires (fail toward acting on red
+ * CI, never toward ignoring it).
+ */
+export function loadFlakeTestNames(env: NodeJS.ProcessEnv, read?: (p: string) => string): string[] {
+  const base = env.XDG_STATE_HOME?.trim() !== '' && env.XDG_STATE_HOME ? env.XDG_STATE_HOME.trim()
+    : env.HOME?.trim() !== '' && env.HOME ? `${env.HOME.trim()}/.local/state` : '';
+  if (base === '') return [];
+  const p = `${base}/mercury/nightly/e2e-flakes.json`;
+  let raw: unknown;
+  try {
+    raw = JSON.parse((read ?? ((path: string) => readFileSync(path, 'utf8')))(p));
+  } catch {
+    return [];
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return [];
+  const names: string[] = [];
+  for (const entry of Object.values(raw as Record<string, unknown>)) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const test = (entry as { test?: unknown }).test;
+    if (typeof test === 'string' && test !== '') names.push(test);
+  }
+  return names;
 }
 
 export function issueLabels(issue: GhIssue): string[] {
@@ -251,13 +340,16 @@ export function selectLadder(
       const top = byIssue.get(r.issue);
       if (top === undefined || r.createdAt < top.createdAt) byIssue.set(r.issue, r);
     }
-    // Owner change requests first (#968), then Copilot findings; oldest-first within each.
-    const rank = (r: ResumeCandidate): number => (r.state === 'owner-changes' ? 0 : 1);
+    // Owner change requests first (#968), then red ci (#980), then Copilot findings;
+    // oldest-first within each tier.
+    const rank = (r: ResumeCandidate): number => (r.state === 'owner-changes' ? 0 : r.state === 'red-ci' ? 1 : 2);
     const ordered = [...byIssue.entries()].sort((a, b) => rank(a[1]) - rank(b[1]) || a[1].createdAt.localeCompare(b[1].createdAt));
     if (ordered.length > 0) {
       const [issue, r] = ordered[0]!;
       const what = r.state === 'owner-changes'
         ? `has @${TRUSTED_AUTHOR}'s changes-requested review on its head to address (review body and any inline threads)`
+        : r.state === 'red-ci'
+        ? `has red ci on head ${r.headSha}: ${r.failingJobs ?? 'unknown job'}`
         : 'has Copilot findings on its head to address';
       return {
         rung: 0,
@@ -733,6 +825,50 @@ export async function runSelectorWith(
           && !isExcluded(issueCandidate.issue)) {
           resume.push({ issue, prNumber: pr.number, headSha, state: 'owner-changes', createdAt: pr.created_at ?? '' });
           continue;
+        }
+        // Red CI on the CURRENT head (#980): the required aggregate check completed with
+        // conclusion failure. Check runs are GitHub metadata (names, statuses, conclusions and
+        // the failing job's output text for the known-flake guard) — never PR or comment text.
+        // A capped or failed scan fails closed for this PR's red-ci signal only: the Copilot
+        // review logic below still runs, and the issue stays reserved from new work either way.
+        {
+          let crPath: string | null = `/repos/${repo}/commits/${headSha}/check-runs?per_page=100`;
+          const checkRuns: CheckRunShim[] = [];
+          let crPages = 0;
+          let crComplete = false;
+          try {
+            while (crPath && crPages < 3) {
+              const { body, link } = (await io.get(crPath)) as { body: { check_runs?: CheckRunShim[] }; link?: string | null };
+              checkRuns.push(...(body.check_runs ?? []));
+              crPages++;
+              const next = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1]?.replace('https://api.github.com', '') ?? null;
+              // Stay on this resource: a next-link for a different list must not redirect the walk.
+              crPath = next !== null && next.startsWith('/repos/') && next.includes('/check-runs?') ? next : null;
+            }
+            crComplete = !crPath;
+          } catch (e) {
+            console.error(`resume scan: PR #${pr.number} check-runs failed: ${String(e instanceof Error ? e.message : e)}`);
+          }
+          if (crComplete) {
+            const failing = redCiJobs(checkRuns);
+            if (failing !== null && failing.length > 0) {
+              const flakeTests = loadFlakeTestNames(env);
+              const byName = new Map(checkRuns.filter((c) => typeof c.name === 'string').map((c) => [c.name!, c]));
+              const real = failing.filter((job) => {
+                const run = byName.get(job);
+                const output = `${run?.output?.summary ?? ''}\n${run?.output?.text ?? ''}`;
+                return !isFlakeConfinedJob(output, flakeTests);
+              });
+              if (real.length > 0) {
+                resume.push({ issue, prNumber: pr.number, headSha, state: 'red-ci', createdAt: pr.created_at ?? '', failingJobs: real.join(', ') });
+                continue;
+              }
+              // Every failing job is confined to known flakes (#980 acceptance 5): not a
+              // signal on its own — fall through so a Copilot review can still decide.
+            }
+          } else {
+            console.error(`resume scan: PR #${pr.number} check-runs capped; red ci not evaluated`);
+          }
         }
         const hasHeadReview = lastCopilot !== null && lastCopilot.commit_id === headSha;
         if (!hasHeadReview || lastCopilot === null) continue; // relay fetches the review first
