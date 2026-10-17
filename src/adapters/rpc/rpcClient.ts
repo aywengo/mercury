@@ -50,6 +50,12 @@ export interface RpcClientOptions {
   cwd?: string;
   /** Extra environment variables. */
   env?: Record<string, string>;
+  /**
+   * The COMPLETE environment for the child, replacing process.env as the spawn base
+   * (credential profiles CP-4). Set when the caller built a full environment; `env` is
+   * still merged on top. Absent = spawn over process.env exactly as before.
+   */
+  fullEnv?: Record<string, string>;
   /** Called for each stderr chunk (for logging). */
   onStderr?: (chunk: string) => void;
   /** Startup readiness delay before declaring the process healthy. */
@@ -114,7 +120,7 @@ export class RpcClient {
       try {
         child = spawn(this.opts.cmd, args, {
           cwd: this.opts.cwd,
-          env: { ...process.env, ...this.opts.env },
+          env: { ...(this.opts.fullEnv ?? process.env), ...this.opts.env },
           stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (err) {

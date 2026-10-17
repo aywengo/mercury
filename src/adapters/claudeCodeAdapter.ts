@@ -371,7 +371,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const proc = spawn(spawnCmd.cmd, spawnCmd.args, {
       cwd: ctx.workspace.path,
       // this.opts.env last so a test knob can always win.
-      env: { ...process.env, ...traceEnv, ...this.opts.env },
+      // CP-4 (issue #897): the worker-built base replaces process.env when present.
+      env: { ...(ctx.env ?? process.env), ...traceEnv, ...this.opts.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     session.proc = proc;

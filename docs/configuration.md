@@ -177,6 +177,24 @@ Mercury refuses administration, source-control and broad infrastructure
 credential families even when they are named in the custom list. See
 [`operations.md`](operations.md) for the boundary and network semantics.
 
+## Local Run environments (credential profiles)
+
+Every LOCAL Run's agent process is started on a built environment, not the worker's whole
+environment (credential profiles, [`credential-profiles-design.md`](credential-profiles-design.md) §6.1):
+
+1. the worker's environment minus every `GH_*`, `GITHUB_*`, `GIT_*` and `MERCURY_*` name;
+2. git/gh isolation into the Run workspace: `GIT_CONFIG_GLOBAL=<run-dir>/gitconfig`,
+   `GIT_CONFIG_NOSYSTEM=1`, `GH_CONFIG_DIR=<run-dir>/gh`, so the host user's credential helpers
+   and `gh` logins are out of reach even when no profile exists;
+3. the resolved credential profile's `env` (see `docs/credential-profiles-design.md`), including the
+   generated gitconfig with the profile's git identity and HTTPS credential helper;
+4. the adapter's `config.env`, last. Adapter config must not set a name layer 1 strips — a config
+   that does is refused when the host loads it.
+
+This is a behaviour change: a Run with no profile can no longer push or clone private repositories
+with the host user's ambient credentials. Bind the repositories to a credential profile instead
+(§12 of the design describes the migration from the dedicated-host interim).
+
 ## PrimeAgent
 
 | Variable | Default | Purpose |
