@@ -1015,10 +1015,15 @@ test('acceptance 2: a no-profile Run cannot reach the host gitconfig credential 
   const built = buildRunEnvironment({ workerEnv: { HOME: home, PATH: process.env.PATH ?? '/usr/bin:/bin' } as never, runDir: dir, profile: null });
   // The empty gitconfig must EXIST: GIT_CONFIG_GLOBAL at an absent path is ignored by git.
   assert.equal(readFileSync(built.gitconfigPath!, 'utf8'), '');
-  // A credential fill through the Run's environment gets nothing from the host helper.
-  // GIT_TERMINAL_PROMPT=0 makes a helper-less fill FAIL instead of prompting (there is no tty).
-  let failed = false;
+  // A credential fill through the Run's environment gets nothing from the host helper. With no
+  // helper configured, `git credential fill` echoes the query with EMPTY username and password
+  // (measured on git 2.49 locally and on the CI runner); a non-empty answer would mean the host
+  // gitconfig leaked in. With nothing to answer and GIT_TERMINAL_PROMPT=0 the fill may also FAIL
+  // ("could not read Username") — an askpass helper does not exist on every runner (/bin/true is
+  // absent on some macOS/runner combos), and a failed fill is just as isolated. Either way the
+  // sentinel must never appear.
   let out = '';
+  let failed = false;
   try {
     out = execFileSync('git', ['credential', 'fill'], {
       env: { ...built.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/true' },
@@ -1027,12 +1032,16 @@ test('acceptance 2: a no-profile Run cannot reach the host gitconfig credential 
     });
   } catch (err) {
     failed = true;
-    out = String((err as { stderr?: string }).stderr ?? '');
-    out += String((err as { stdout?: string }).stdout ?? '');
+    out = String((err as { stdout?: string }).stdout ?? '');
   }
-  assert.ok(failed || out === '', `the Run env must not obtain credentials (got: ${out.slice(0, 120)})`);
-  assert.ok(!out.includes('SENTINEL-SECRET'), 'the host helper must not answer');
-  assert.ok(!out.includes('sentinel-user'));
+  assert.ok(failed || out.trim() !== '', 'an empty answer from nothing at all is not expected here');
+  assert.ok(!out.includes('SENTINEL-SECRET'), `the host helper must not answer (got: ${out.slice(0, 200)})`);
+  assert.ok(!out.includes('sentinel-user'), 'the host helper username must not answer');
+  if (!failed) {
+    const got = Object.fromEntries(out.trim().split('\n').map((l) => l.split('=') as [string, string]));
+    assert.equal(got.username ?? '', '', `no username may come back (got: ${out.slice(0, 120)})`);
+    assert.equal(got.password ?? '', '', `no password may come back (got: ${out.slice(0, 120)})`);
+  }
   // The host user still gets the sentinel from their own environment (the control half).
   const hostOut = execFileSync('git', ['credential', 'fill'], {
     env: { HOME: home, PATH: built.env.PATH ?? '', GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/true' },
