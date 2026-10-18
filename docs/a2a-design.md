@@ -359,9 +359,12 @@ honours that rather than refusing it. **Terminal means the CHAIN, not the attemp
 (§6.4): an attempt that failed with an automatic retry pending is terminal while the work is
 not, so the wait continues through the backoff and reports the chain's state rather than
 ending on the attempt that happened to end first. The wait is bounded because every ATTEMPT
-is bounded — `maxDurationMs` is enforced and `notAfter` counts queue time — so the bound is
-one deadline per allowed attempt (`maxRetries + 1`): a blocking call cannot outlive the work
-it is waiting on. Clients that want to disconnect use `returnImmediately: true` and poll or
+is bounded — `maxDurationMs` is enforced and `notAfter` counts queue time — so the bound starts
+at one deadline per allowed attempt (`maxRetries + 1`). A retry backoff is not covered by that
+budget and can be longer than the margin it allows for, so the bound is corrected upward from
+each pending retry's own persisted due time (`runs.retry_due_at`, the same value the worker
+honours): the wait follows the chain's record of what it is going to do next rather than a
+config-derived guess, and still cannot outlive the work it is waiting on. Clients that want to disconnect use `returnImmediately: true` and poll or
 subscribe.
 
 ### 6.7 Content in, artifacts out
@@ -741,6 +744,17 @@ starts: whether remote-agent Runs need a workspace and repository (§7.1).
 A2A served from Fleet (§11, decision 4).
 
 ## 14. Revision history
+
+### 2026-10-18 (f) — A0-1 review round 2
+
+Two more findings, both about a check that did not cover every way of reaching the thing it
+guards. The Run-creation budget was matched on a case-sensitive path suffix, and Express routes
+case-insensitively with an optional trailing slash, so `/MESSAGE:SEND` and `/message:send/`
+reached the SDK's send route without spending it; the check now normalizes both the way Express
+does. And the blocking wait's budget excluded the retry backoff, so a backoff longer than the
+margin returned a `WORKING` task while another attempt was still coming; the bound now extends
+from the pending retry's persisted due time (§6.6). Both are covered by tests, the second with a
+backoff deliberately longer than the margin.
 
 ### 2026-10-18 (e) — A0-1 review round 1
 

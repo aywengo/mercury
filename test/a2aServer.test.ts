@@ -57,6 +57,7 @@ function makeApi(
     adminToken?: string | null;
     tokens?: [string, string][];
     rateLimits?: { createRun?: { windowMs: number; max: number } };
+    settleMarginMs?: number;
   } = {},
 ) {
   const stream = new EventStream(env.db, env.events, 10);
@@ -68,7 +69,14 @@ function makeApi(
     apiTokens: new Map(opts.tokens ?? [['tok-alice', 'alice'], ['tok-bob', 'bob']]),
     adminToken: opts.adminToken ?? null,
     ...(opts.rateLimits ? { rateLimits: opts.rateLimits } : {}),
-    ...(a2a ? { a2a: { runService: env.runService, config: a2a, version: '0.0.0-test' } } : {}),
+    ...(a2a ? {
+      a2a: {
+        runService: env.runService,
+        config: a2a,
+        version: '0.0.0-test',
+        ...(opts.settleMarginMs === undefined ? {} : { settleMarginMs: opts.settleMarginMs }),
+      },
+    } : {}),
   });
   return { app, close: () => stream.stop() };
 }
@@ -483,11 +491,59 @@ test('SendMessage draws on the SAME Run-creation budget as POST /api/runs', asyn
       assert.equal((await fetch(`${base}${A2A_PREFIX}/message:send`, {
         method: 'POST', headers: { ...ALICE, ...V1 }, body: sendBody({ messageId: 'm-other' }),
       })).status, 429);
+      // ... and the same budget by SPELLING. Express routes case-insensitively and ignores a trailing
+      // slash by default, so all four of these reach the SDK's send route; a case-sensitive suffix
+      // check skipped the limiter for every one of them. A 429 rather than a 404 is the evidence
+      // that the variant really does reach the route AND that the budget applies to it.
+      for (const path of [
+        '/message:send/', '/MESSAGE:SEND', '/message:send/',
+        '/tenant-a/message:send/', '/TENANT-A/MESSAGE:SEND',
+      ]) {
+        const res = await fetch(`${base}${A2A_PREFIX}${path}`, {
+          method: 'POST', headers: { ...ALICE, ...V1 }, body: sendBody({ messageId: `m-${path}` }),
+        });
+        assert.equal(res.status, 429, `POST ${path} must draw on the same budget, got ${res.status}`);
+      }
       // Cancelling is not Run creation and must not spend the budget: a caller at the limit still
       // has to be able to cancel.
       assert.notEqual((await fetch(`${base}${A2A_PREFIX}/tasks/nope:cancel`, {
         method: 'POST', headers: { ...ALICE, ...V1 }, body: '{}',
       })).status, 429);
+    } finally { await srv.close(); close(); }
+  } finally { env.close(); }
+});
+
+test('section 6.6: the blocking bound follows a persisted retry due time, not just the config budget', async () => {
+  // The margin is 100 ms here rather than the 5 s default, and the backoff (700 ms) is far longer
+  // than the resulting initial budget (2 x (100 + 100) = 400 ms). A wait bounded only by config
+  // would therefore return attempt 1's retry-pending WORKING task at ~400 ms. This is the case the
+  // earlier test could not reach: it used a backoff SHORTER than the default margin.
+  const env = makeEnv({
+    fakeScript: [{ exit: { code: 1, signal: null, reason: 'failed', errorKind: 'infrastructure' } }],
+    maxRetries: 1,
+    retryBackoffMs: 700,
+    pollMs: 25,
+  });
+  try {
+    const repo = tempRepo();
+    const config = a2aConfig(repo, {});
+    config.skills = [{ ...config.skills[0]!, template: { ...config.skills[0]!.template, constraints: { maxDurationMs: 100, maxRetries: 1 } } }];
+    const { app, close } = makeApi(env, config, { settleMarginMs: 100 });
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const started = Date.now();
+      const res = await fetch(`${base}${A2A_PREFIX}/message:send`, {
+        method: 'POST', headers: { ...ALICE, ...V1 },
+        body: JSON.stringify({ message: { messageId: 'm-long-backoff', role: 'ROLE_USER', parts: [{ text: 'do it' }], metadata: { skillId: SKILL_ID } } }),
+      });
+      const elapsed = Date.now() - started;
+      assert.equal(res.status, 200);
+      const task = ((await res.json()) as { task?: TaskBody & { status?: { state?: string } } }).task;
+      assert.ok(task?.id);
+      assert.equal(env.runs.listChain(task.id).length, 2, 'the wait must cover a backoff longer than the margin');
+      assert.ok(elapsed >= 700, `the wait must include the whole backoff, waited ${elapsed}ms`);
+      assert.equal(task.status?.state, 'TASK_STATE_FAILED', 'the wait must not end on the retry-pending attempt');
     } finally { await srv.close(); close(); }
   } finally { env.close(); }
 });

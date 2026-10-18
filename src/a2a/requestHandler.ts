@@ -32,11 +32,13 @@ import { requireUser } from './user.ts';
  *  a poll interval after finishing, long enough not to spin the CPU of a server hosting many. */
 const SETTLE_POLL_MS = 25;
 /** Added to the Run's own `maxDurationMs` for the blocking wait. Every Run is bounded, so the wait
- *  is bounded by construction (section 6.6); the margin covers the queue-to-terminal gap. */
-const SETTLE_MARGIN_MS = 5_000;
+ *  is bounded by construction (section 6.6); the margin covers the queue-to-terminal gap, which is
+ *  host-dependent (queue depth, worker poll interval), so it is overridable rather than fixed. */
+const DEFAULT_SETTLE_MARGIN_MS = 5_000;
 
 export function createA2aRequestHandler(deps: A2aDeps): A2ARequestHandler {
   const { runService, config, version } = deps;
+  const settleMarginMs = deps.settleMarginMs ?? DEFAULT_SETTLE_MARGIN_MS;
 
   return {
     async getAgentCard(): Promise<AgentCard> {
@@ -102,7 +104,7 @@ export function createA2aRequestHandler(deps: A2aDeps): A2ARequestHandler {
       }
       await waitForSettled(
         runService, run.id, user.ownerId, user.isAdmin,
-        run.constraints.maxDurationMs, run.constraints.maxRetries,
+        run.constraints.maxDurationMs, run.constraints.maxRetries, settleMarginMs,
       );
       return taskFor(runService, run.id, user.ownerId, user.isAdmin);
     },
@@ -216,22 +218,33 @@ async function waitForSettled(
   isAdmin: boolean,
   maxDurationMs: number,
   maxRetries: number,
+  settleMarginMs: number,
 ): Promise<void> {
-  // Bounded per ALLOWED ATTEMPT, not per Run: the wait now covers a retry backoff, and a chain may
-  // make `maxRetries + 1` attempts. Every attempt is bounded by its own `maxDurationMs`, so the
-  // whole wait still cannot outlive the work it is waiting on.
+  // Bounded per ALLOWED ATTEMPT, not per Run: the wait covers retry backoffs, and a chain may make
+  // `maxRetries + 1` attempts. Every attempt is bounded by its own `maxDurationMs`, so the whole
+  // wait still cannot outlive the work it is waiting on.
   const attempts = Math.max(1, maxRetries + 1);
-  const deadline = Date.now() + attempts * (maxDurationMs + SETTLE_MARGIN_MS);
+  let deadline = Date.now() + attempts * (maxDurationMs + settleMarginMs);
   while (Date.now() < deadline) {
     const chain = runService.getChain(taskId, ownerId, isAdmin);
     if (!chain) return;
     const latest = chain[chain.length - 1]!;
+    const state = chainState(chain);
     // `final` is the precise predicate (section 6.4): terminal AND childless AND no retry intended
     // AND no other attempt still live. An earlier version also returned on `isTerminal(latest)`,
     // which ended the wait during a retry BACKOFF and reported the failed attempt as the task --
     // exactly the terminal-or-interrupted contract section 6.6 exists to keep, since the task is
     // the chain and another attempt is coming.
-    if (chainState(chain).final || latest.status === 'NEEDS_INPUT') return;
+    if (state.final || latest.status === 'NEEDS_INPUT') return;
+    // A pending retry carries its own due time, persisted by the worker that decided it
+    // (`worker.ts autoRetryDueAt`, `retryBackoffMs * attempt`). Extending the bound to cover that
+    // backoff plus the attempt it starts is what keeps the wait honest when the backoff is longer
+    // than the margin above -- a config-derived budget cannot know it, and guessing low is how a
+    // blocking call returns a WORKING task while the work is still going to happen.
+    if (state.retryPending && latest.retryDueAt) {
+      const due = Date.parse(latest.retryDueAt);
+      if (Number.isFinite(due)) deadline = Math.max(deadline, due + maxDurationMs + settleMarginMs);
+    }
     await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_MS));
   }
 }

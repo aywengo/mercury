@@ -81,6 +81,14 @@ export interface A2aDeps {
   config: A2aConfig;
   /** The Mercury version reported on the card. */
   version: string;
+  /**
+   * The margin added to a Run's own deadline when a blocking `SendMessage` waits for it
+   * (section 6.6). It covers the queue-to-terminal gap, which is host-dependent -- queue depth and
+   * the worker's poll interval -- so an operator may need a different value than the default. The
+   * wait's bound is corrected upward from each attempt's own persisted retry due time, so this is a
+   * starting budget rather than the whole bound.
+   */
+  settleMarginMs?: number;
 }
 
 /**

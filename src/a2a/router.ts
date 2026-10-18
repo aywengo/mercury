@@ -98,10 +98,17 @@ export function requireA2aCaller(req: Request, res: Response, next: NextFunction
  * and its tenant form `/:tenant/message:send`, and those literals belong to the SDK. Every other
  * A2A POST (cancel, subscribe) is not Run creation and must not spend the budget -- a caller at the
  * limit has to stay able to cancel.
+ *
+ * The suffix is matched against a NORMALIZED path, because Express routes case-insensitively and
+ * ignores a trailing slash by default (`caseSensitive` and `strict` are both false). `/MESSAGE:SEND`
+ * and `/message:send/` therefore reach the SDK's send route and create a Run, so a check that
+ * skipped them would leave the budget bypassable by spelling. Normalizing the same two ways is what
+ * makes this a property of the ROUTE rather than of one way of writing it.
  */
 function a2aCreateRunLimiter(limiter: RequestHandler): RequestHandler {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (req.method === 'POST' && req.path.endsWith('/message:send')) {
+    const path = req.path.toLowerCase().replace(/\/+$/, '');
+    if (req.method === 'POST' && path.endsWith('/message:send')) {
       limiter(req, res, next);
       return;
     }
