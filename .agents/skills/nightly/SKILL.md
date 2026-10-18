@@ -106,6 +106,17 @@ rung 3 new @aywengo issues, rung 4 docs → proposals) and claims the chosen iss
 the report; `--dry-run` selects and reports WITHOUT claiming). The output's `action` is the Run's
 instruction:
 
+```bash
+node .agents/skills/nightly/next.ts propose --repo aywengo/mercury --source <doc#anchor> --title "<title>" --body-file <path>
+```
+
+Rung 4 files ONLY through `propose` (#881). The body file is the drafted prose; `propose`
+appends the required `## Source` section with the machine-readable marker
+`<!-- nightly-source:<key> -->`, then dedupes BEFORE creating anything: open AND closed issues
+are searched for the source key or an exact title match, a match files nothing and prints the
+existing number, and a failed or capped search throws (nothing filed). `--dry-run` runs the
+search and reports without creating.
+
 - **`fix-loop`** (rung 0–3): execute the `issue-fix-loop` procedure on the claimed issue — root
   cause, scoped fix with a regression test, one PR, independent review. Feature requests (rung 2)
   run the same loop: analysis, scoped implementation with tests, one PR. This skill (the nightly

@@ -172,6 +172,13 @@ decision on *what* gets built. When every remaining unimplemented roadmap item
 already has an open `nightly:proposed` issue, rung 4 is a quiet no-op: it files
 nothing and ends the Run (recorded in #956, 2026-10-14).
 
+Dedupe is mechanical, not recalled (#881): every draft is filed through
+`next.ts propose --source <doc#anchor> --title … --body-file …`, which appends
+the machine-readable marker `<!-- nightly-source:<key> -->` to the body and
+searches open AND closed issues for that key or an exact title match before
+creating anything. A match — open or closed — files nothing; a failed or
+capped search files nothing either (fail closed).
+
 ## 7. Skills
 
 - **`nightly-e2e`** (#739) — `npm run test:e2e` (the host needs Docker). Reruns
