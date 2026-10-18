@@ -187,15 +187,19 @@ Record: [`docs/fleet-tenancy-design.md`](docs/fleet-tenancy-design.md)
 
 Record: [`docs/a2a-design.md`](docs/a2a-design.md)
 
-No issues filed yet. A2A is an edge protocol only (design §2): Mercury as an A2A server, then
-an A2A client adapter; bots never talk to each other over A2A. Decisions settled 2026-10-18:
-server first, HTTP+JSON/REST binding, official JS SDK under boundary rules (design §11).
-Milestone order (design §13): **A0** prerequisites, SDK integration spike, origin field,
-mapping module, exposed-skill validation → **A1** minimal server → **A2** streaming and
-listing → **A3** client adapter → **A4** Fleet. Rows are added here when A0 is filed (Rule 1).
+A2A is an edge protocol only (design §2): Mercury as an A2A server, then an A2A client
+adapter; bots never talk to each other over A2A. Decisions settled 2026-10-18: server first,
+HTTP+JSON/REST binding, official JS SDK under boundary rules (design §11). Milestone order
+(design §13): **A0** → **A1** minimal server → **A2** streaming and listing → **A3** client
+adapter → **A4** Fleet. A0 filed 2026-10-18; #990 is blocked by #987.
 
 | Issue | Title | State | PR |
 | --- | --- | --- | --- |
+| #986 | A2A SDK integration spike: pin @a2a-js/sdk, decide the integration shape, coupling test… | open | — |
+| #987 | Retry chains: link retries atomically and make "retry pending" durable (A0-2) | open | — |
+| #988 | Server-stamped Run origin: a field no request body can set (A0-3) | open | — |
+| #990 | Pure Run-chain → A2A TaskState mapping, exhaustive over RunStatus (A0-4) | open | — |
+| #989 | Exposed-skill config, create-Run validation of every template, `host a2a validate` (A0-5) | open | — |
 
 ## Security follow-ups
 
