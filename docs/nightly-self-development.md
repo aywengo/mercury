@@ -179,22 +179,39 @@ The nightly identity cannot obtain a Copilot code review, measured 2026-10-18:
 So the request has to come from an identity with Copilot access, and it must not come from the
 nightly agent — handing the agent the owner's token is what the N0-1 identity split removed.
 `deploy/nightly/copilot-relay.sh` is that boundary: an operator-owned LaunchAgent
-(`com.mercury.copilot-relay.plist.template`, `StartInterval` 1200 s, matching the ladder's
-cadence) that re-requests Copilot on every open PR authored by `mercury-nightly` whose current
-head has no Copilot review, and refuses to run unless `gh` is authenticated as the owner. The
-nightly skill therefore pushes and finishes; the relay fetches the review, and the next night's
-resume scan sees it.
+(`com.mercury.copilot-relay.plist.template`) that re-requests Copilot on every open PR authored
+by `mercury-nightly` whose current head has no Copilot review, and refuses to run unless `gh` is
+authenticated as the owner. The nightly skill therefore pushes and finishes; the relay fetches
+the review, and the next night's resume scan sees it.
 
-**The relay logs a heartbeat on every run.** The first version logged only when it acted, so when
-launchd stopped spawning it on 2026-10-05 the log simply stopped — no error, nothing to tell
-"alive with no work" from "dead". Five nightly PRs then sat with no Copilot review for one to
-three days, and the resume scan skipped all of them (`select.ts` resumes only a PR whose head
-carries findings). Silence is now unambiguous; liveness is two commands:
+**It loops; it is not scheduled.** launchd's *scheduled* spawns do not fire while the `gui` domain
+is in "on-demand-only mode", which it is for long stretches on the nightly host. launchd says so
+itself and then never spawns:
+
+```
+launchd[1] [gui/501:] pending spawn, domain in on-demand-only mode: com.mercury.copilot-relay
+```
+
+The job sits at `pended nondemand spawn = interval` with a frozen `runs` count — `StartInterval`
+and `RunAtLoad` both do nothing, and a probe agent with a 60 s interval reproduced it: `runs = 0`
+after 70 s. That, not a bad request, is what killed the first relay on 2026-10-05. The agent is
+therefore `KeepAlive` and runs the script with `--watch`: one spawn is all it needs,
+`launchctl kickstart` can always force one, and the cadence belongs to the script. Install ends
+with `kickstart` for exactly this reason.
+
+**Every pass logs a heartbeat.** The first version logged only when it acted, so its silence was
+indistinguishable from a working relay with nothing to do — that is why the stall went unnoticed
+for twelve days, and why five nightly PRs sat with no Copilot review for one to three days while
+the resume scan skipped all of them (`select.ts` resumes only a PR whose head carries findings).
+Liveness is now two commands:
 
 ```bash
-launchctl print gui/$(id -u)/com.mercury.copilot-relay | grep -E 'runs|last exit'
+launchctl print gui/$(id -u)/com.mercury.copilot-relay | grep -E 'state|runs|last exit'
 tail -3 ~/.local/state/mercury/copilot-relay.log
 ```
+
+A heartbeat as the last log line with `state = running` means healthy. A stale heartbeat, or
+`state = not running`, means restart it (`kickstart`); `KeepAlive` covers a crash, not a bootout.
 
 ## 6. Docs → features, gated
 

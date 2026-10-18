@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { mkdtemp, writeFile, readFile, chmod, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -80,15 +80,28 @@ async function fixture(opts: {
   return { stateDir, log: join(stateDir, 'copilot-relay.log'), posted, env };
 }
 
-async function runRelay(env: NodeJS.ProcessEnv): Promise<{ code: number; log: string }> {
+async function runRelay(env: NodeJS.ProcessEnv, args: string[] = []): Promise<{ code: number; log: string }> {
   let code = 0;
   try {
-    await run('/bin/bash', [SCRIPT], { env, timeout: 60_000 });
+    await run('/bin/bash', [SCRIPT, ...args], { env, timeout: 60_000 });
   } catch (err) {
     code = (err as { code?: number }).code ?? 1;
   }
+  return { code, log: await readLog(env) };
+}
+
+async function readLog(env: NodeJS.ProcessEnv): Promise<string> {
   const logPath = join(String(env.MERCURY_RELAY_STATE_DIR), 'copilot-relay.log');
-  return { code, log: existsSync(logPath) ? await readFile(logPath, 'utf8') : '' };
+  return existsSync(logPath) ? await readFile(logPath, 'utf8') : '';
+}
+
+/** Run `--watch` for `ms`, then SIGTERM it. Returns the log it left behind. */
+async function runWatch(env: NodeJS.ProcessEnv, ms: number): Promise<string> {
+  const child = spawn('/bin/bash', [SCRIPT, '--watch'], { env });
+  await new Promise((r) => setTimeout(r, ms));
+  child.kill('SIGTERM');
+  await new Promise((r) => child.on('exit', r));
+  return readLog(env);
 }
 
 test('a PR whose head has no Copilot review is re-requested, and the run still writes a heartbeat', async () => {
@@ -145,4 +158,24 @@ test('a request that does not come back 2xx is logged as a failure and fails the
   assert.equal(code, 1, 'a failed request must not exit 0 - that is the silent failure again');
   assert.match(log, /ERROR: PR #982 head aaaa request failed \(HTTP\/2\.0 422 Unprocessable Entity\)/);
   assert.match(log, /0 re-requested, 0 already reviewed on head, 1 failed/);
+});
+
+test('--watch takes repeated passes, so launchd only has to spawn it once', async () => {
+  // The relay is a KeepAlive daemon precisely because launchd's scheduled spawns are unreliable on
+  // the nightly host (`gui` domain in "on-demand-only mode": StartInterval and RunAtLoad do not
+  // fire). If the loop ever stopped after one pass, the outage would come straight back.
+  const f = await fixture({ prs: '982 aaaa', reviewed: '982 aaaa\n' });
+  f.env.MERCURY_RELAY_INTERVAL = '1';
+  const log = await runWatch(f.env, 3000);
+  assert.match(log, /watch: starting, one pass every 1s \(pid \d+\)/);
+  const passes = log.split('\n').filter((l) => l.includes('run: 1 open PR(s)'));
+  assert.ok(passes.length >= 2, `expected at least two passes, saw ${passes.length}:\n${log}`);
+});
+
+test('an unknown argument is refused, not ignored', async () => {
+  // A typo in the plist's ProgramArguments must not silently become "run the default".
+  const f = await fixture({ prs: '' });
+  const { code, log } = await runRelay(f.env, ['--watc']);
+  assert.equal(code, 2);
+  assert.match(log, /ERROR: unknown argument '--watc'/);
 });
