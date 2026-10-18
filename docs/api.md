@@ -164,10 +164,66 @@ every step. Refusals carry stable codes, including `WORKFLOW_NOT_FOUND`,
 `WORKFLOW_STAGE_MODEL_CONFLICT`, `WORKFLOW_STAGE_RESOURCE_CONFLICT` and
 `WORKFLOW_STAGE_SANDBOX_CONFLICT`.
 
+Every domain refusal body carries more than the message when the error has it:
+`{ error, code?, field?, findings? }`. `code` is the stable refusal code above,
+`field` names the input the code is about, and `findings` (validation of an invalid
+template) is the structured finding list. Clients branch on `code`, not on message
+text; the fields are absent, not null, when the error has none.
+
 `GET /api/runs/:runId` returns a `workflow` sibling for every Run: the identity
 `{ id, version, contentHash, mode, stages }` read from the Run's snapshot, or `null`
 for a Run created without a workflow. Workflow stage snapshots are not preset Runs:
 `mercury_runs_by_preset` counts Run-wide presets only.
+
+## Workflow endpoints (advisory)
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/workflows` | List valid builtin advisory templates |
+| `GET` | `/api/workflows/:workflowId` | Inspect one template (stages, tasks, referenced presets) |
+| `POST` | `/api/workflows/:workflowId/runs` | Create the single advisory Run from a template |
+
+The staged-mode group endpoints (`/api/workflow-runs/*`) are Phase 9 and do
+not exist: there is no group table, no coordinator and no such route — a
+request to one is a `404` ([workflows.md](crew/workflows.md) section 14).
+
+Listing and inspecting a template is host configuration, so every
+authenticated caller may read it (the `/api/presets` rule).
+`GET /api/workflows` returns `{ workflows: [...] }` with `id`, `version`,
+`description`, `mode` (always `advisory` in this release), `trust`,
+`contentHash`, `stageCount`, `maxStages` and the template-relative source
+path. Adding `?includeInvalid=1` requires an admin token and appends
+`invalid: [...]` with the per-template validation findings — an invalid
+template is fixed by editing files on the host, which is an operator
+concern. Invalid templates never appear in the valid list.
+
+`GET /api/workflows/:workflowId` adds the ordered `stages`, each with its
+`id`, `task`, the `preset` reference from the manifest (or `null`), and
+`resolvedPreset` — the live preset registry's `{ id, version, role, enabled }`
+for display, or `null` when the reference does not resolve. An unknown id is
+a `404`; a template whose files are invalid is a `400` carrying its findings.
+
+`POST /api/workflows/:workflowId/runs` creates the Run through the W-2
+service path: the body is a Run-create body ([Create a Run](#create-a-run))
+with `task` required, and the workflow id comes from the URL. An optional
+`workflowVersion` pins the definition version; `workflow` and `preset` in
+the body are refused with a `400` (the id cannot be restated, and the two
+selections are mutually exclusive). The response is `201
+{ runId, status }`. Errors follow the Run-create rules — an unknown
+template is a `404` named by it; capability and resolution refusals carry
+the stable codes listed under `POST /api/runs`.
+
+**Step events (agent-reported).** Advisory steps are guidance, not
+enforcement. An agent reports progress with `step.started`,
+`step.completed` and `step.failed` events whose payload names the stage:
+`{ "stage": "<stage id>" }` (`stageId` and `step` are accepted as
+aliases). The dashboard maps reported events to planned steps by that
+stage id and labels the panel *agent-reported — not enforced by Mercury*;
+a planned step with no reported event shows as *not reported*, never as
+*skipped* or *failed* — Mercury does not know. `GET /api/runs/:runId`
+returns a `workflowStages` sibling for every workflow Run: the planned
+steps read from the Run's stored snapshot (`{ index, id, task, preset }`
+in template order), or `null` for a Run without a workflow.
 
 ## Knowledge endpoints
 
@@ -698,6 +754,10 @@ The static dashboard is served at `/`:
 - Run list supports creation, status filtering and periodic refresh;
 - Run details show repository, agent, constraints, skills, timeline, messages,
   tool/test activity, commits, PR and errors;
+- workflow Runs show a planned-steps panel labelled *agent-reported — not
+  enforced by Mercury*, with steps the agent did not report shown as *not
+  reported*;
+- a Workflows page browses advisory templates and creates a Run from one;
 - controls expose cancellation, retry and pending input;
 - static assets are public, while every data request remains authenticated.
 

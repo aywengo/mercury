@@ -62,7 +62,19 @@ export function sendError(res: Response, err: unknown, logger?: Logger): void {
     return;
   }
   if (err instanceof ValidationError) {
-    res.status(400).json({ error: err.message });
+    // Workflow errors carry the stable refusal codes the API docs promise (review of PR #934):
+    // a plain `{ error }` body drops `code`/`field` and `findings`, so clients cannot branch on
+    // them. Optional properties keep every other ValidationError body byte-identical.
+    const body: { error: string; code?: string; field?: string; findings?: unknown } = {
+      error: err.message,
+    };
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === 'string') body.code = code;
+    const field = (err as { field?: unknown }).field;
+    if (typeof field === 'string') body.field = field;
+    const findings = (err as { findings?: unknown }).findings;
+    if (findings !== undefined) body.findings = findings;
+    res.status(400).json(body);
     return;
   }
   // Unclassified: keep the detail server-side. The logger redacts, so a message containing a
@@ -394,6 +406,11 @@ export function createRoutes(deps: RoutesDeps): Router {
       // identity a Run was created from -- never the template bytes, which stay in the
       // workspace -- or null for a Run without a workflow.
       workflow: deps.runService.getWorkflowIdentity(run.id),
+      // Sibling, same reason as `workflow` (#810): the planned steps from the STORED snapshot,
+      // so the dashboard's planned-steps panel can pair them with the agent-reported step
+      // events. Null for a Run without a workflow; read from run_workflows, never the live
+      // registry -- a template edited after creation must not rewrite this Run's panel.
+      workflowStages: deps.runService.getWorkflowStages(run.id),
       // Sibling rather than a field on `run` (#854): attribution with its own write path (the
       // creation transaction), read back next to the model explainability data it complements.
       selection: deps.runService.getSelection(run.id),

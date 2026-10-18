@@ -97,7 +97,7 @@ Record: [`docs/crew/roadmap.md`](docs/crew/roadmap.md)
 | --- | --- | --- | --- |
 | #808 | Crew Phase 8 W-1: Workflow Template schema and builtin registry (advisory mode) | done | #812 |
 | #809 | Crew Phase 8 W-2: create one advisory Run from a template (snapshot-backed, determinist… | done | #842 |
-| #810 | Crew Phase 8 W-3: workflows API and dashboard planned-steps view (advisory) | in progress | #934 |
+| #810 | Crew Phase 8 W-3: workflows API and dashboard planned-steps view (advisory) | done | #934 |
 | #875 | Crew Phase 4: per-run MCP foundation (bindings, policy registries, run-scoped redaction… | open | — |
 | #870 | Crew Phase 5: reviewed read-only MCP — operator policy registries in use, enforced tool… | open | — |
 | #873 | Crew Phase 6: read-only Git mirror — bounded sync, immutable commit dirs, atomic pointe… | open | — |

@@ -1519,6 +1519,15 @@ export class RunService {
     return this.workflowStore().get(runId);
   }
 
+  /**
+   * The builtin workflow registry, or null when workflows are off. The W-3 API read surface
+   * (browse/inspect/create) goes through this accessor for the same reason presetRegistry()
+   * exists: the composition root stays the only place that knows how the registry is built.
+   */
+  workflowRegistry(): WorkflowRegistry | null {
+    return this.deps.workflows ?? null;
+  }
+
   /** The Run-detail view of a workflow Run (#809 acceptance 4): identity only, from the snapshot. */
   getWorkflowIdentity(runId: string): { id: string; version: string; contentHash: string; mode: 'advisory'; stages: number } | null {
     const wf = this.workflowStore().get(runId);
@@ -1572,6 +1581,24 @@ export class RunService {
       out.push({ stageIndex: i, snapshot });
     });
     return out;
+  }
+
+  /**
+   * The planned steps of a workflow Run, from the STORED snapshot (#810): the stage id, task
+   * and per-stage preset identity the dashboard's planned-steps panel renders next to the
+   * agent-reported step events. Read from `run_workflows`, never the live registry -- a
+   * template edited after creation must not change what this Run's panel shows. Null when the
+   * Run was not created from a template.
+   */
+  getWorkflowStages(runId: string): { index: number; id: string; task: string; preset: { id: string; version?: string } | null }[] | null {
+    const wf = this.getWorkflow(runId);
+    if (!wf) return null;
+    return wf.stages.map((stage, index) => ({
+      index,
+      id: stage.id,
+      task: stage.task,
+      preset: stage.preset ? { id: stage.preset.id, version: stage.preset.version } : null,
+    }));
   }
 
   submitInput(runId: string, ownerId: string, isAdmin: boolean, value: unknown): void {

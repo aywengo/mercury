@@ -12,6 +12,7 @@ import type { RunQueue } from '../queue/runQueue.ts';
 import type { RunService } from '../runs/runService.ts';
 import { createAuthMiddleware, requireAuth } from './auth.ts';
 import { createRoutes, sendError } from './routes.ts';
+import { createWorkflowRoutes } from './workflowRoutes.ts';
 import { createAuthRoutes } from './authRoutes.ts';
 import { createRateLimiter } from './rateLimit.ts';
 import { createSessionStore, type SessionStore } from './sessions.ts';
@@ -244,6 +245,17 @@ export function createApp(deps: ServerDeps): Express {
   });
   app.post('/api/runs', createRunLimiter);
 
+  // The workflow Run-creation endpoint writes the same queue as POST /api/runs, so it shares
+  // the limiter instance and the same per-owner+IP budget; mounted before the router so the
+  // POST inside it is covered.
+  app.post('/api/workflows/:workflowId/runs', createRunLimiter);
+
+  app.use('/api', createWorkflowRoutes({
+    runService: deps.runService,
+    events: deps.events,
+    stream: deps.stream,
+    logger: deps.logger,
+  }));
   app.use('/api', createRoutes({
     runService: deps.runService,
     events: deps.events,
