@@ -384,6 +384,15 @@ Omitting `agent` selects `MERCURY_DEFAULT_AGENT` (default `fake`). Send an
 explicit id such as `"agent": "primeagent"` for a real coding Run. `GET
 /api/agents` returns `{ "agents": ["fake", "primeagent", ...], "defaultAgent": "fake" }`.
 
+A body carrying a field only the server may write is refused with **400**, not
+silently ignored: `origin`, `ownerId`, `retryOf`, `attempt`, `status`. These are
+stamped by the server — `ownerId` from the authenticated token, `origin` from the
+surface that created the Run, `retryOf`/`attempt` by the retry link, `status` by the
+state machine — so a caller who sends one has misunderstood the request, and an
+attribution field that is quietly dropped is worse than one that is refused. The same
+rule applies to `POST /api/workflows/:workflowId/runs` and
+`POST /api/runs/:runId/retry`.
+
 ### Credential profile
 
 `credentialProfile` (optional, nullable, read-only) names the credential profile the Run
@@ -524,11 +533,16 @@ curl "http://127.0.0.1:3000/api/runs?status=RUNNING&limit=50" \
 Query fields:
 
 - `status` — one Run status;
+- `origin` — one server-stamped Run origin (`a2a`); an unknown or repeated value is a
+  **400**, never an empty page, because "you own no Runs of that origin" and "that is
+  not an origin" are different answers;
 - `limit` — clamped to `1..200`, default `50`;
 - `cursor` — opaque pagination cursor returned as `nextCursor`.
 
 Ordinary callers receive only their Runs. Admin callers receive all Runs.
-There is no client-supplied owner filter in the current route.
+There is no client-supplied owner filter in the current route. `origin` narrows the
+caller's own Runs; it is never an authorisation, so another owner's A2A Runs cannot be
+reached with it.
 
 Run detail:
 
@@ -548,6 +562,17 @@ before the v18 migration — treat it as unknown then, and never fall back to `c
 which measures when the Run was created, not how long it has been waiting in its current
 status. Consumers building "waiting since" logic on this field must read it from this field
 only; the trigger matcher (dispatcher-bot-design §6.1) depends on that.
+
+The Run object also carries `origin` (nullable, read-only): where the **server** says the Run
+came from (issue #988, A0-3), as `{ kind, ref }` — `kind` is the creating surface (`a2a` for the
+A2A task API) and `ref` is that surface's own identifier for the work, or `null` when it recorded
+none. It is `null` for every Run created by an HTTP client and for every Run that predates the
+v20 migration; nothing is backfilled, because an origin nobody recorded cannot be recovered and a
+guessed one would be indistinguishable from a real one. It is **not** `constraints.botTask`:
+`botTask` is a client-supplied hint the server never trusts, while `origin` is written by the
+creation transaction from a parameter no route populates — which is what lets A2A `ListTasks`
+select the caller's A2A chains without trusting anything the caller wrote. A retry inherits its
+parent's origin, so a chain does not change surface halfway.
 
 The Run object also carries `retryDueAt` (nullable, read-only): the time the recorded
 automatic-retry intent for this attempt becomes due (issue #987, A0-2). Non-null means the

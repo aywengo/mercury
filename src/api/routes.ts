@@ -5,7 +5,9 @@ import type { EventStore } from '../events/eventStore.ts';
 import type { EventStream } from '../events/eventStream.ts';
 import type { RunService } from '../runs/runService.ts';
 import { PresetValidationFailure } from '../presets/presetRegistry.ts';
-import type { RunStatus } from '../domain/types.ts';
+import type { RunOriginKind, RunStatus } from '../domain/types.ts';
+import { RUN_ORIGIN_KINDS } from '../domain/types.ts';
+import { findServerStampedField, serverStampedFieldMessage } from './serverStampedFields.ts';
 import { isTerminal } from '../domain/stateMachine.ts';
 import { requireAuth } from './auth.ts';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../domain/errors.ts';
@@ -114,6 +116,28 @@ export function parseLimit(raw: unknown, def: number, max: number): number {
 }
 
 const VALID_STATUSES = new Set<RunStatus>(['QUEUED', 'STARTING', 'RUNNING', 'NEEDS_INPUT', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT']);
+
+/**
+ * The `?origin=` filter, or undefined when absent (A0-3, issue #988).
+ *
+ * An unknown value is a 400 rather than an empty page: "you own no Runs of that origin" and "that
+ * is not an origin" are different answers, and a filter that conflates them reports a typo as a
+ * fact about the data.
+ *
+ * A repeated param (`?origin=a2a&origin=bot`) arrives as an array and is refused too, unlike
+ * parseLimit, where an ambiguous `limit` safely falls back to the default. Defaulting HERE would
+ * silently widen the result set to every origin, which is the opposite of what the caller asked
+ * for -- the safe direction for a filter is to refuse.
+ */
+export function parseOrigin(raw: unknown): RunOriginKind | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !(RUN_ORIGIN_KINDS as readonly string[]).includes(raw)) {
+    // The supplied value is deliberately not echoed: it is caller-controlled text and this body
+    // reaches the client.
+    throw new ValidationError(`unknown origin filter; known kinds: ${RUN_ORIGIN_KINDS.join(', ')}`);
+  }
+  return raw as RunOriginKind;
+}
 
 /**
  * Event types after which a run can never append again, so an SSE stream has said everything it
@@ -322,6 +346,10 @@ export function createRoutes(deps: RoutesDeps): Router {
   router.post('/runs', (req: Request, res: Response) => {
     const body = req.body ?? {};
     try {
+      // A body that carries a field only the server may write is refused, not quietly ignored
+      // (issue #988 acceptance 1). See src/api/serverStampedFields.ts.
+      const stamped = findServerStampedField(body);
+      if (stamped) throw new ValidationError(serverStampedFieldMessage(stamped));
       const run = deps.runService.create({
         ownerId: req.auth!.ownerId,
         task: body.task,
@@ -363,21 +391,27 @@ export function createRoutes(deps: RoutesDeps): Router {
 
   // GET /api/runs
   router.get('/runs', (req: Request, res: Response) => {
-    const status = typeof req.query.status === 'string' && VALID_STATUSES.has(req.query.status as RunStatus)
-      ? (req.query.status as RunStatus)
-      : undefined;
-    const limit = parseLimit(req.query.limit, 50, 200);
-    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
-    const { runs, nextCursor } = deps.runService.list({
-      ownerId: req.auth!.ownerId,
-      isAdmin: req.auth!.isAdmin,
-      status,
-      limit,
-      cursor,
-    });
-    // `goals` is parallel to `runs`, never merged into it: `runs` stays an array of Run, and a
-    // goal status must not become reachable as `run.status` (docs/goals.md 4).
-    res.json({ runs, nextCursor, goals: deps.runService.goalStatuses(runs.map((r) => r.id)) });
+    try {
+      const status = typeof req.query.status === 'string' && VALID_STATUSES.has(req.query.status as RunStatus)
+        ? (req.query.status as RunStatus)
+        : undefined;
+      const origin = parseOrigin(req.query.origin);
+      const limit = parseLimit(req.query.limit, 50, 200);
+      const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
+      const { runs, nextCursor } = deps.runService.list({
+        ownerId: req.auth!.ownerId,
+        isAdmin: req.auth!.isAdmin,
+        status,
+        origin,
+        limit,
+        cursor,
+      });
+      // `goals` is parallel to `runs`, never merged into it: `runs` stays an array of Run, and a
+      // goal status must not become reachable as `run.status` (docs/goals.md 4).
+      res.json({ runs, nextCursor, goals: deps.runService.goalStatuses(runs.map((r) => r.id)) });
+    } catch (err) {
+      sendError(res, err, deps.logger);
+    }
   });
 
   // GET /api/runs/:runId
@@ -481,6 +515,11 @@ export function createRoutes(deps: RoutesDeps): Router {
   // POST /api/runs/:runId/retry
   router.post('/runs/:runId/retry', (req: Request, res: Response) => {
     try {
+      // This route takes no body at all, and that is the point: the retry inherits the parent's
+      // origin (issue #988 acceptance 2), so a body cannot choose one. A body that tries is refused
+      // rather than ignored, for the same reason the create route refuses it.
+      const stamped = findServerStampedField(req.body);
+      if (stamped) throw new ValidationError(serverStampedFieldMessage(stamped));
       const run = deps.runService.retry(req.params.runId, req.auth!.ownerId, req.auth!.isAdmin);
       res.status(201).json({ runId: run.id, status: run.status, retryOf: run.retryOf });
     } catch (err) {

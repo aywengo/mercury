@@ -355,6 +355,64 @@ test('retry: an unexpected failure leaves the intent recorded, so recovery can t
   }
 });
 
+test('origin: create stamps it from the internal input, and the ROW keeps it (issue #988 acceptance 2)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake',
+      origin: { kind: 'a2a', ref: 'task-1' },
+    });
+    assert.deepEqual(run.origin, { kind: 'a2a', ref: 'task-1' });
+    // Re-read through the store: the returned object could be right while the row is not, and the
+    // row is what every other reader -- another process, a later request -- actually sees.
+    assert.deepEqual(env.runs.get(run.id)!.origin, { kind: 'a2a', ref: 'task-1' });
+
+    // A Run created without one reads null rather than a default kind: "no origin recorded" must
+    // not be indistinguishable from "created by a2a".
+    const plain = env.runService.create({ ownerId: 'alice', task: 'y', agent: 'fake' });
+    assert.equal(plain.origin, null);
+    assert.equal(env.runs.get(plain.id)!.origin, null);
+  } finally {
+    env.close();
+  }
+});
+
+test('origin: a retry inherits the parent origin and the filter stays owner-scoped (issue #988 acceptance 2, 3)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const parent = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake', origin: { kind: 'a2a', ref: 'task-1' },
+    });
+    env.runs.transition(parent.id, 'STARTING');
+    env.runs.transition(parent.id, 'FAILED', { completedAt: new Date().toISOString() });
+    const child = env.runService.retry(parent.id, 'alice', true);
+    assert.deepEqual(child.origin, { kind: 'a2a', ref: 'task-1' }, 'a retry is the same work, so the same provenance');
+    assert.deepEqual(env.runs.get(child.id)!.origin, { kind: 'a2a', ref: 'task-1' });
+
+    // One plain Run of the same owner, and one A2A Run of a DIFFERENT owner. The filter has to
+    // exclude both: the first because it has no origin, the second because an origin filter is
+    // never an authorisation.
+    const plain = env.runService.create({ ownerId: 'alice', task: 'plain', agent: 'fake' });
+    const foreign = env.runService.create({
+      ownerId: 'bob', task: 'theirs', agent: 'fake', origin: { kind: 'a2a', ref: 'task-2' },
+    });
+
+    const alice = env.runService.list({ ownerId: 'alice', isAdmin: false, origin: 'a2a', limit: 50 });
+    assert.deepEqual(alice.runs.map((r) => r.id).sort(), [parent.id, child.id].sort());
+    assert.ok(!alice.runs.some((r) => r.id === plain.id), 'a Run with no origin must not match an origin filter');
+    assert.ok(!alice.runs.some((r) => r.id === foreign.id), "another owner's A2A Runs must never appear");
+
+    // Admin sees every origin-matching Run, still narrowed by the filter.
+    const admin = env.runService.list({ ownerId: 'admin', isAdmin: true, origin: 'a2a', limit: 50 });
+    assert.deepEqual(admin.runs.map((r) => r.id).sort(), [parent.id, child.id, foreign.id].sort());
+
+    // No filter is unchanged: everything the caller can see, whatever its origin.
+    assert.equal(env.runService.list({ ownerId: 'alice', isAdmin: false, limit: 50 }).runs.length, 3);
+  } finally {
+    env.close();
+  }
+});
+
 test('retry: a second manual retry of one attempt is refused, so the chain stays linear (issue #987)', () => {
   const env = makeEnv({ workerEnabled: false });
   try {

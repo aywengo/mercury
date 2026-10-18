@@ -28,7 +28,7 @@ control, retries, sandbox integration, metrics and deployment packaging.
 | **Fleet** | Phases 0–6 shipped (registry, dispatch, sweep, events, routing, interaction, metrics), runs as a service | Fleet-and-bots FB1–FB3 (#972–#974) | [`fleet-design.md`](fleet-design.md) §12 |
 | **Fleet and bots** | Design accepted 2026-10-16 (option A: bots dispatch through Fleet); FB0 availability snapshot shipped (#978) | FB2a owner-scoped run list (#971), PR #982 in review | [`fleet-bots-design.md`](fleet-bots-design.md) |
 | **Fleet tenancy** | Specification; T0–T2 proposed (#884–#890) | Only needed for more than one Fleet operator | [`fleet-tenancy-design.md`](fleet-tenancy-design.md) |
-| **A2A integration** | Design settled 2026-10-18 (server-first, HTTP+JSON/REST binding); A0 filed as #986–#990 | A0 implementation: retry chains done (#987), #988–#990 next | [`a2a-design.md`](a2a-design.md) |
+| **A2A integration** | Design settled 2026-10-18 (server-first, HTTP+JSON/REST binding); A0 filed as #986–#990 | A0 implementation: retry chains (#987) and the server-stamped Run origin (#988) done; #989–#990 next | [`a2a-design.md`](a2a-design.md) |
 | **Distribution** | Five channels built by the release workflow | — | [`distribution.md`](distribution.md), below |
 | **Operator CLI** (`mercuryctl`) | Shipped | — | [`client.md`](client.md) |
 | **Operator TUI** | Deliberately not built | Gated on demonstrated need | [`cli-tui-design.md`](cli-tui-design.md) |

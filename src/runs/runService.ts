@@ -9,7 +9,7 @@ import { isTerminal } from '../domain/stateMachine.ts';
 import { TERMINAL_GOAL_STATUSES } from '../domain/goalEvents.ts';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError, isClassifiedError } from '../domain/errors.ts';
 import type { Redactor } from '../domain/redact.ts';
-import type { AgentCapabilitySummary, GoalState, GoalStatus, GoalSummary, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
+import type { AgentCapabilitySummary, GoalState, GoalStatus, GoalSummary, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunOrigin, RunOriginKind, RunStatus } from '../domain/types.ts';
 import { goalCapabilityMessage, goalFieldCapabilityMessage } from '../domain/goalSupport.ts';
 import { GoalValidationError, resolveGoalSpec } from '../domain/goalSpec.ts';
 import type { GoalStore } from './goalStore.ts';
@@ -99,6 +99,18 @@ export interface CreateRunInput {
    * has no intent to claim and simply clears whatever is recorded.
    */
   retryLink?: { retryOf: string; attempt: number; claimIntent: boolean };
+  /**
+   * INTERNAL — the server's own provenance stamp, never accepted from HTTP (A0-3, issue #988).
+   *
+   * No route populates this: both Run-creating routes forward named fields, and both refuse a body
+   * that carries `origin` outright, so a caller cannot set it by accident or on purpose. The write
+   * happens in the same INSERT as the row, like `retryLink`, because an origin that arrives as a
+   * follow-up UPDATE is an origin a concurrent reader can miss.
+   *
+   * `retryAttempt` passes the parent's origin through unchanged: a retry re-attempts the same work,
+   * so it is the same provenance, and a chain must not appear to change surface halfway.
+   */
+  origin?: RunOrigin | null;
   /**
    * Optional objective for the Run (docs/goals.md). `undefined` means no goal and the Run
    * behaves exactly as before. Validated and resolved against `task` in create(); an
@@ -1213,6 +1225,9 @@ export class RunService {
       prUrl: null,
       model: model ?? null,
       credentialProfile,
+      // Stamped by the creation transaction from an internal-only input (issue #988); `null` for
+      // every HTTP-created Run, which is every Run a client can make.
+      origin: input.origin ?? null,
     };
 
     try {
@@ -1396,10 +1411,11 @@ export class RunService {
     return run;
   }
 
-  list(opts: { ownerId: string; isAdmin: boolean; status?: RunStatus; limit: number; cursor?: string }) {
+  list(opts: { ownerId: string; isAdmin: boolean; status?: RunStatus; origin?: RunOriginKind; limit: number; cursor?: string }) {
     return this.deps.runs.list({
       ownerId: opts.isAdmin ? undefined : opts.ownerId,
       status: opts.status,
+      origin: opts.origin,
       limit: opts.limit,
       cursor: opts.cursor,
     });
@@ -1779,6 +1795,11 @@ export class RunService {
       // claiming the child -- can ever observe it as a fresh attempt 1 with no parent. `opts.auto`
       // decides whether this retry must claim a recorded intent; see retryLink above.
       retryLink: { retryOf: original.id, attempt: original.attempt + 1, claimIntent: opts.auto === true },
+      // A retry is the SAME work, so it carries the parent's provenance unchanged (issue #988
+      // acceptance 2). Inheriting rather than re-deriving is what keeps an A2A chain inside
+      // `ListTasks` after its first failure: a retry that lost the origin would drop out of the
+      // caller's A2A view at exactly the moment the caller is waiting for it.
+      origin: original.origin ?? null,
     });
     return created;
   }

@@ -39,6 +39,18 @@ export interface RunConstraints {
   allowedNetworks?: string[];
 }
 
+/**
+ * The surfaces the server itself can create a Run from, rather than an HTTP client (issue #988).
+ * A closed union: the server refuses an unknown value on `GET /api/runs?origin=` instead of
+ * answering with an empty page.
+ */
+export type RunOriginKind = 'a2a';
+
+export interface RunOrigin {
+  kind: RunOriginKind;
+  ref: string | null;
+}
+
 export interface Run {
   id: string;
   ownerId: string;
@@ -68,6 +80,11 @@ export interface Run {
    *  Null or absent for rows that predate the server's v19 migration, and for every attempt
    *  nobody decided to retry -- both mean "no retry pending". */
   retryDueAt?: string | null;
+  /** Where the SERVER says this Run came from (A0-3, issue #988), or null when it recorded none --
+   *  which is every Run created by an HTTP client, and every row that predates the server's v20
+   *  migration. Read-only: no request body can set it, and the server refuses one that tries.
+   *  Distinct from `constraints.botTask`, which is a client-supplied hint the server never trusts. */
+  origin?: RunOrigin | null;
   finalCommits: string[];
   prUrl: string | null;
   /**
