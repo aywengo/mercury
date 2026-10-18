@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Mercury copilot-relay -- LaunchAgent template for deploy/nightly/copilot-relay.sh.
+  Mercury copilot-relay: LaunchAgent template for deploy/nightly/copilot-relay.sh.
 
-  A LaunchAgent, not a Mercury service: it must run under the OPERATOR's `gh` credential, and the
-  nightly agent must not be able to reach that credential. `mercury host service install` does not
-  install it -- that surface owns the operator's `mercury.env` identity only, which is the
+  A LaunchAgent, not a Mercury service, because it must run under the OPERATOR's `gh` credential
+  and the nightly agent must not be able to reach that credential. `mercury host service install`
+  does not install it; that surface owns the operator's `mercury.env` identity only, which is the
   `mercury-nightly` token this relay exists to work around. See
   docs/nightly-self-development.md section 5.2.
 
-  KeepAlive + `--watch`, NOT StartInterval. launchd's scheduled spawns do not fire while the `gui`
-  domain is in "on-demand-only mode", which it is for long stretches on this host -- launchd logs
-  `pending spawn, domain in on-demand-only mode` and leaves the job at
+  KeepAlive plus the script's watch mode, NOT StartInterval. launchd's scheduled spawns do not
+  fire while the `gui` domain is in "on-demand-only mode", which it is for long stretches on this
+  host. launchd logs `pending spawn, domain in on-demand-only mode` and leaves the job at
   `pended nondemand spawn = interval` forever. That is how the first version of this relay died on
   2026-10-05. A KeepAlive daemon needs one spawn, and the script owns the cadence from then on.
 
@@ -33,7 +33,10 @@
     tail -3 ~/.local/state/mercury/copilot-relay.log
 
   If `state = not running` and the log's last line is a heartbeat, the daemon was killed rather
-  than scheduled: `kickstart` again. `KeepAlive` restarts it after a crash, not after a bootout.
+  than scheduled: kickstart it again. KeepAlive restarts it after a crash, not after a bootout.
+
+  This header avoids the double-hyphen sequence. XML forbids it inside a comment, and while
+  `plutil` is lenient, `xmllint` and Python's `plistlib` both reject the artifact.
 -->
 <plist version="1.0">
 <dict>

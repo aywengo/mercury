@@ -90,7 +90,10 @@ one_pass() {
   FAILED=0
   local prs total=0 requested=0 current=0 failed=0
   identity_ok || { FAILED=1; return 0; }
-  if ! prs="$("$GH" api "repos/$REPO/pulls?state=open&per_page=50" \
+  # --paginate: a fixed first page of open PRs is filtered by author here, so enough non-nightly
+  # PRs would crowd nightly work out of the scan entirely and the relay would report success while
+  # never looking at it.
+  if ! prs="$("$GH" api --paginate "repos/$REPO/pulls?state=open&per_page=100" \
         --jq '.[] | select(.user.login=="'"$AUTHOR"'") | "\(.number) \(.head.sha)"' 2>/dev/null)"; then
     log "ERROR: listing open PRs failed"
     FAILED=1
@@ -100,8 +103,18 @@ one_pass() {
   while read -r num head; do
     [ -z "$num" ] && continue
     total=$((total + 1))
-    last="$("$GH" api "repos/$REPO/pulls/$num/reviews?per_page=50" \
-          --jq '[.[] | select(.user.login=="'"$REVIEWER"'") | .commit_id] | last // ""' 2>/dev/null)"
+    # Fail closed. An unreadable review list is not evidence that the head needs a review: treating
+    # it as one would re-request a review that already exists every pass, and the successful POST
+    # would hide the broken lookup behind "0 failed". Skip the PR and say so instead.
+    if ! last="$("$GH" api --paginate "repos/$REPO/pulls/$num/reviews?per_page=100" \
+          --jq '.[] | select(.user.login=="'"$REVIEWER"'") | .commit_id' 2>/dev/null)"; then
+      log "ERROR: review lookup for PR #$num failed"
+      failed=$((failed + 1))
+      continue
+    fi
+    # Every matching commit across every page, oldest first, so the last line is the newest Copilot
+    # review. A current-head review on a later page is a review, not a stale head.
+    last="$(printf '%s\n' "$last" | grep -v '^[[:space:]]*$' | tail -1)"
     if [ "$last" = "$head" ]; then
       current=$((current + 1))
       continue
