@@ -69,7 +69,7 @@ Record: [`docs/dispatcher-bot-design.md`](docs/dispatcher-bot-design.md)
 | #735 | `host bot run`: the scheduler process (B1-1) | done | #757 |
 | #736 | `host bot dispatch` and `host bot status` (B1-2) | done | #758 |
 | #737 | Per-alias service install/uninstall (B1-3) | done | #761 |
-| #906 | dispatcher B2-0: statusChangedAt on GET /api/runs (the trigger-matcher prerequisite) | in progress | #959 |
+| #906 | dispatcher B2-0: statusChangedAt on GET /api/runs (the trigger-matcher prerequisite) | done | #959 |
 | #907 | dispatcher B2-1: trigger engine — matchers, one coalesced poll, cursor state; lift the… | open | — |
 | #908 | dispatcher B2-2: trigger storm guards — includeBotRuns, chain depth, both cooldowns, AP… | open | — |
 | #909 | dispatcher B2-3: the observer scope — a third posture in AuthContext, read-only across… | open | — |
