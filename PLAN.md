@@ -183,6 +183,20 @@ Record: [`docs/fleet-tenancy-design.md`](docs/fleet-tenancy-design.md)
 | #889 | fleet: project reassignment and delete guards, lost-visibility report (T2-1) | open | — |
 | #890 | fleet: fleet_runs.project_id bind-time snapshot, audit not authorization (T2-2) | open | — |
 
+## A2A integration
+
+Record: [`docs/a2a-design.md`](docs/a2a-design.md)
+
+No issues filed yet. A2A is an edge protocol only (design §2): Mercury as an A2A server, then
+an A2A client adapter; bots never talk to each other over A2A. Decisions settled 2026-10-18:
+server first, HTTP+JSON/REST binding, official JS SDK under boundary rules (design §11).
+Milestone order (design §13): **A0** prerequisites, SDK integration spike, origin field,
+mapping module, exposed-skill validation → **A1** minimal server → **A2** streaming and
+listing → **A3** client adapter → **A4** Fleet. Rows are added here when A0 is filed (Rule 1).
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+
 ## Security follow-ups
 
 Record: [`docs/status.md`](docs/status.md)
