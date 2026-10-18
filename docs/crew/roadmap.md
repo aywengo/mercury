@@ -460,8 +460,9 @@ is optional if normal Git pull requests already provide sufficient workflow.
 
 ## 12. Phase 8 — advisory Workflow Templates
 
-**Status: filed** — W-1 #808 (schema and registry), W-2 #809 (one advisory Run from a template),
-W-3 #810 (API and dashboard). Each issue gets `nightly:ready` once its predecessor merges.
+**Status: W-1 #808 and W-2 #809 merged (PRs #812, #842); W-3 #810 implemented in PR #934,
+in review. Each issue gets `nightly:ready` once its predecessor merges. The §12 decision gate
+stays open: whether separate stages add value is judged from usage, not from this phase.
 
 Estimate: **2–3 days**. Depends on Phase 3.
 
