@@ -2,8 +2,8 @@
 
 Status: **design; nothing is implemented.** §11 decisions 1–3 were settled on
 2026-10-18: **server first, HTTP+JSON/REST binding, official JavaScript SDK**. Milestone
-A0 (§13) may now be drafted into issues. Decisions 4–10 remain open; none of them blocks
-A0–A2.
+A0 (§13) is filed as #986–#990; A1–A4 are not filed. Decisions 4–10 remain open; none of
+them blocks A0–A2.
 
 ## 1. Summary
 
@@ -219,9 +219,11 @@ Rules:
 - **A failed attempt with a retry pending is not terminal.** It reports
   `TASK_STATE_WORKING`. A2A terminal states are final; reporting `FAILED` and then
   continuing would break every conforming client. The chain reports a terminal state
-  only when its latest attempt is terminal and no further attempt will be made. How the
-  worker schedules retries — and therefore how "retry pending" is detected without a
-  race — is verified in A0 (§13) before anything depends on it.
+  only when its latest attempt is terminal and no further attempt will be made. Checking
+  the tree showed this cannot be answered race-free today: the retry link is written
+  after the child Run is already queued, and auto-retry intent lives only in worker
+  memory during the backoff. #987 fixes both and adds a persisted `chainState` helper;
+  it also records here how a manual retry after a reported terminal state is treated.
 - **Idempotency.** `messageId` on a new-task message maps to the existing caller-supplied
   idempotency key, `a2a:<skill-id>:<messageId>`. Replay is already pinned over HTTP and
   already owner-scoped (#730): the same caller re-sending the same message gets the same
@@ -541,23 +543,28 @@ route (§6.3).
 
 ## 13. Roadmap
 
-Nothing below is filed yet. A0 is ready to be drafted into issues.
+A0 is filed as #986–#990, with rows in `PLAN.md`. A1–A4 are not filed yet.
 
 ### A0 — prerequisites, spike and pure pieces
 
-- **SDK integration spike** (§11, decision 3): pin a version; establish whether its
-  server request handler can be driven over `RunService` with no SDK-held state and
-  mounted on Mercury's existing HTTP server. Record the outcome here — handler-driven or
-  types-and-helpers — before A1 starts. Add the SDK and its coupling test.
-- Verify, against the code, before anything depends on it:
-  - how the worker schedules retries, and a race-free way to tell "retry pending" from
-    "final failure" (§6.4);
-  - that per-Run SSE carries everything §6.6's streaming operations need.
-- Design and land the **server-stamped origin field** (§6.4), which the dispatcher
-  design deferred until a consumer existed.
-- The pure mapping module: `RunStatus` chain → `TaskState`, exhaustive, with tests.
-- Exposed-skill config schema and `host a2a validate`, including create-Run validation
-  of every template.
+- **#986 (A0-1) — SDK integration spike** (§11, decision 3): pin a version; establish
+  whether its server request handler can be driven over `RunService` with no SDK-held
+  state and mounted on Mercury's existing HTTP server. Record the outcome here —
+  handler-driven or types-and-helpers — before A1 starts. Add the SDK and its coupling
+  test.
+- **#987 (A0-2) — retry chains**: link retries inside the child's insert transaction,
+  make auto-retry intent durable with restart recovery, and add the persisted
+  `chainState` helper (§6.4). Filed as a bug: the late link is a race independent of A2A.
+- **#988 (A0-3) — server-stamped origin field** (§6.4), which the dispatcher design
+  deferred until a consumer existed.
+- **#990 (A0-4) — the pure mapping module**: Run chain → `TaskState`, exhaustive, with
+  tests. Blocked by #987. Also adds the shutdown-requeue row to §6.5: an attempt that
+  has started stays `WORKING` when requeued, never `SUBMITTED`.
+- **#989 (A0-5) — exposed-skill config schema and `host a2a validate`**, with every
+  template validated by a create-request validator extracted from `RunService.create`;
+  `host bot validate` uses the same validator.
+- Not filed separately: checking that per-Run SSE carries everything §6.6's streaming
+  operations need. It belongs to A2's first issue, where streaming is built.
 
 *Acceptance*: the spike's outcome is recorded in §11 with evidence; the mapping module
 and skill validation are green; the retry-pending rule has a defined, tested source.
@@ -586,6 +593,12 @@ starts: whether remote-agent Runs need a workspace and repository (§7.1).
 A2A served from Fleet (§11, decision 4).
 
 ## 14. Revision history
+
+### 2026-10-18 (c) — A0 filed
+
+A0 filed as #986–#990 and recorded in `PLAN.md`. §6.4 now states what the retry check
+found (late retry link, in-memory retry intent) and points to #987. §13 maps each A0 item
+to its issue and notes that the SSE check moved to A2.
 
 ### 2026-10-18 (b) — decisions 1–3 settled
 
