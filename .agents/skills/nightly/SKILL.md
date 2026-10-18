@@ -111,8 +111,13 @@ instruction:
   run the same loop: analysis, scoped implementation with tests, one PR. This skill (the nightly
   Run) plays the implementer role the loop's procedure assigns.
 - **`fix-loop` on rung 0 (resume, #819)**: the claimed issue already has an open nightly PR
-  whose head carries Copilot findings. Do NOT open a new PR: address the findings on the existing
-  branch (fix-loop step 5, at most 2 rounds, one batched push). The Copilot re-request is the
+  whose head carries Copilot findings, or whose head carries @aywengo's changes-requested review
+  (#968; owner reviews resume first). Do NOT open a new PR: address the findings on the existing
+  branch (fix-loop step 5, at most 2 rounds, one batched push). For an owner review, the findings
+  are the review BODY plus any inline threads: read `gh pr view <n> --json reviews` and the
+  review threads, fix every point, then reply on the PR with a point-by-point answer (a body-only
+  review has no threads to resolve). Owner and Copilot rounds count together against the cap;
+  at the cap, hand off with the owner's open points instead of fixing. The Copilot re-request is the
   host's relay's job — push, then `finish`. With two open PRs for one issue, continue the OLDER
   one and state the supersession on the newer.
 - **`draft-proposals`** (rung 4): draft `nightly:proposed` issues from a roadmap section in the

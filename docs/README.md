@@ -85,6 +85,9 @@ fleet --version   # mercury-fleet 0.1.0
 
 - [`Fleet operator guide`](../fleet/README.md)
 - [`Fleet architecture and design`](fleet-design.md)
+- [`Fleet and dispatcher bots`](fleet-bots-design.md) — proposal: bots dispatch through
+  Fleet (`api.via: "fleet"`), and Fleet routes Crew Runs only to hosts that have the named
+  preset or workflow. Not implemented.
 - [`Fleet tenancy design`](fleet-tenancy-design.md) — projects as a partition over hosts: what
   tenancy must answer that host allowlists do not, the visibility rule, and the phased plan.
   Specification; not implemented.

@@ -1,10 +1,206 @@
-# PLAN — Host installer milestones
+# PLAN — Mercury issue tracker
 
-## M1 — Bootstrap skeleton — DONE ✅ (PR #629, commit ca287f9, issue #628)
-## M2 — Harness probe — DONE ✅ (PR #631, commit 5baf3c2, issue #630)
-## M3 — Configuration wizard — DONE ✅ (PR #633, commit 25fa7ce, issue #632)
+The per-issue record for every filed issue set, grouped by workstream.
+[`docs/status.md`](docs/status.md) is the one-page summary; each workstream's design doc
+(linked per section) owns the reasoning. This file answers "which issues of that set are done,
+and by which PR?".
 
-## M4 — Service and verification — DONE ✅ (PR #635, commit 0c6c90d, issue #634)
+## Rules
+
+1. **Filing an issue set adds its rows here,** in the same PR or commit that files it: `open`
+   state, PR `—`, under the workstream's section (create the section if it is new).
+2. **The PR that closes an issue updates its row in that PR:** state `done` and the PR number
+   (`#<n>`). Add the row first if the issue has none. CI enforces this. The `plan-tracker` job
+   fails a pull request whose closing issues (`Closes #N` / `Fixes #N`) have a row here that is
+   not `done` with that PR's number.
+3. **An issue closed without a PR** (a decision, a duplicate, a superseded proposal) has its row
+   updated by whoever closes it: `done` (decided or answered) or `dropped` (not planned), PR `—`.
+4. **States:** `open`, `in progress` (a PR is open), `done`, `dropped`. Nothing else.
+5. **One row per issue.** Titles may be shortened; the issue number is the key.
+
+The procedure lives in [`.agents/skills/issue-fix-loop/SKILL.md`](.agents/skills/issue-fix-loop/SKILL.md)
+(step 3); the check is `scripts/planTracker.ts`.
+
+## Host installer
+
+Record: [`docs/host-installer.md`](docs/host-installer.md)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #628 | Host installer M1: bootstrap skeleton (install.sh + mercury host install) | done | #629 |
+| #630 | M2: harness probe — mercury host probe --json with per-adapter minimum versions | done | #631 |
+| #632 | M3: configuration wizard — mercury host setup writes mercury.env atomically | done | #633 |
+| #634 | M4: service and verification — mercury host service + mercury host doctor | done | #635 |
+| #636 | M5: lifecycle — mercury host status/upgrade/uninstall + re-run guard | done | #637 |
+| #638 | M6: release hardening — bats suite, installer CI matrix, checksum, install docs | done | #639 |
+| #929 | Host installer: the four "gate open" milestones (M1, M3, M4, M6) are verification work… | open | — |
+
+## Nightly self-development
+
+Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #727 | Protect `main` and give the nightly host its own GitHub identity (N0-1) | done | #754 |
+| #728 | Nightly labels and the trust rule in the triage doc (N0-2) | done | #755 |
+| #738 | Deterministic ladder selection and trust check (N1-1) | done | #762 |
+| #739 | `nightly-e2e` skill (N1-2) | done | #766 |
+| #740 | `nightly-next` skill (N1-3) | done | #767 |
+| #741 | `nightly-report` skill (N1-4) | done | #768 |
+| #742 | Nightly bot config and first-night checklist (N1-5) | done | #774 |
+| #860 | nightly: derive the review-cap hand-off from current-head findings, not every round | in progress | #966 |
+| #881 | nightly: rung 4 files duplicate proposals; dedupe by source key before filing | in progress | #928, #946 |
+| #964 | nightly: report lists a one-night flake forever; the flake entry carries an absolute wo… | open | — |
+| #968 | nightly: resume PRs on the owner's changes-requested review, not only on Copilot findings | done | #969 |
+| #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | open | — |
+
+## Dispatcher bots
+
+Record: [`docs/dispatcher-bot-design.md`](docs/dispatcher-bot-design.md)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #729 | `parseTokens` truncates owners containing `:`; settle the bot owner-id form (B0-1) | done | #749 |
+| #730 | Pin idempotency replay over HTTP (B0-2) | done | #751 |
+| #731 | `constraints.notAfter`: an absolute deadline that counts queue time (B0-3) | done | #750 |
+| #732 | Hand-rolled cron evaluator and derived idempotency keys (B0-4) | done | #752 |
+| #733 | Bot config schema, credentials file and `host bot validate` (B0-5) | done | #756 |
+| #734 | `workspace-audit` skill, run by hand (B0-6) | done | #753 |
+| #735 | `host bot run`: the scheduler process (B1-1) | done | #757 |
+| #736 | `host bot dispatch` and `host bot status` (B1-2) | done | #758 |
+| #737 | Per-alias service install/uninstall (B1-3) | done | #761 |
+| #906 | dispatcher B2-0: statusChangedAt on GET /api/runs (the trigger-matcher prerequisite) | in progress | #959 |
+| #907 | dispatcher B2-1: trigger engine — matchers, one coalesced poll, cursor state; lift the… | open | — |
+| #908 | dispatcher B2-2: trigger storm guards — includeBotRuns, chain depth, both cooldowns, AP… | open | — |
+| #909 | dispatcher B2-3: the observer scope — a third posture in AuthContext, read-only across… | open | — |
+| #912 | dispatcher B3: the LLM brain — LLMConnection, closed action vocabulary, budgets, script… | open | — |
+| #915 | dispatcher B4: setup integration and hardening — host setup bots step, host doctor bots… | open | — |
+
+## Crew — Milestone A follow-ups
+
+Record: [`docs/crew/roadmap.md`](docs/crew/roadmap.md)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #720 | docs: roadmap and status claim Crew Milestone A complete while AC 7 and AC 8 are open (… | done | #726 |
+| #721 | Enforce the role-presets §8 capability vocabulary at Run creation — AC 7 (Crew C-1) | done | #743 |
+| #722 | Resume must carry the Role Preset like start does — AC 8 (Crew C-2) | done | #744 |
+| #723 | Preset network/resource ceilings: bridge rejects narrowing, none lets defaults widen (C… | done | #745 |
+| #724 | Skill resolution: code and role-presets §3.2 disagree — decide which moves (Crew C-4) | done | #746 |
+| #725 | Reject invalid CPU, memory and disk values before Run insert, §3.3 (Crew C-5) | done | #747 |
+
+## Crew — Workflow Templates and later phases
+
+Record: [`docs/crew/roadmap.md`](docs/crew/roadmap.md)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #808 | Crew Phase 8 W-1: Workflow Template schema and builtin registry (advisory mode) | done | #812 |
+| #809 | Crew Phase 8 W-2: create one advisory Run from a template (snapshot-backed, determinist… | done | #842 |
+| #810 | Crew Phase 8 W-3: workflows API and dashboard planned-steps view (advisory) | in progress | #934 |
+| #875 | Crew Phase 4: per-run MCP foundation (bindings, policy registries, run-scoped redaction… | open | — |
+| #870 | Crew Phase 5: reviewed read-only MCP — operator policy registries in use, enforced tool… | open | — |
+| #873 | Crew Phase 6: read-only Git mirror — bounded sync, immutable commit dirs, atomic pointe… | open | — |
+| #874 | Crew Phase 7: owner drafts and publishing — namespaced drafts, quotas, try-draft untrus… | open | — |
+| #871 | Crew Phase 9: linear staged workflows — coordinator, commit handoff, run-completed gate… | open | — |
+| #872 | Crew Phase 10: advanced gates and bounded loops — tests-pass and manual-approval gates,… | open | — |
+| #868 | Crew Phase 11 CP-1: CI schema linting for builtin preset and workflow manifests (operat… | open | — |
+| #869 | Crew Phase 11 CP-2: operator health endpoints, bounded-cardinality metrics, alerts, and… | open | — |
+
+## Teams
+
+Record: [`docs/crew/teams.md`](docs/crew/teams.md)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #911 | Teams Phase 0: deliver per-Run persona capabilities (appendSystemPrompt, workspaceFiles… | open | — |
+| #917 | Agent Templates Phase 2: manifest, fail-closed validation, owner-scoped template store… | open | — |
+| #918 | Teams Phase 3: bounded mixed-harness stages with artifact handoff and a status cache th… | open | — |
+
+## Credential profiles
+
+Record: [`docs/credential-profiles-design.md`](docs/credential-profiles-design.md)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #784 | Credential profiles CP-2: profile file schema, loader and `host credentials validate` (… | done | #799 |
+| #807 | Credential profiles CP-3: resolve a profile per Run, refuse disallowed owners, creation… | done | #841 |
+| #897 | Credential profiles CP-4: local adapter delivery — layered environment, isolated git/gh… | open | — |
+| #898 | Credential profiles CP-5: workspace clone and fetch use the resolved profile, not the h… | open | — |
+| #899 | Credential profiles CP-6: sandbox per-profile opt-in for profile credentials | open | — |
+| #900 | Credential profiles CP-7: exact-value redaction of profile values, doctor checks, docs… | open | — |
+| #954 | Credential profiles: the three §15 open questions are live — decide the no-profile defa… | open | — |
+
+## Laya
+
+Record: [`docs/laya-integration-design.md`](docs/laya-integration-design.md)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #823 | Run-level `model`: API surface, persistence, retry, adapter context (P1-1) | done | #832 |
+| #824 | Fleet: pin `model` pass-through (P1-5) | done | #833 |
+| #825 | Laya client and scripted fake sidecar (L0-1) | done | #837 |
+| #826 | Bot schema: `select` as a reserved key (L0-2) | done | #838 |
+| #827 | Claude Code: honour `context.model`, declare `perRunModel` after measurement (P1-2) | done | #834 |
+| #828 | PrimeAgent: per-Run model in RPC and daemon modes (P1-3) | done | #835 |
+| #829 | Hermes: measure per-Run model support; declare only if real (P1-4) | done | #836 |
+| #830 | `mercury doctor`: Laya line (L0-3) | done | #839 |
+| #831 | Host installer: opt-in Laya sidecar (L0-4) | done | #840 |
+| #845 | Laya sidecar: versioned venv directories instead of the in-place rebuild transaction (#… | done | #846 |
+| #849 | runs: refuse a per-Run model value that starts with a dash | done | #850 |
+| #851 | laya installer: label-agnostic launchd not-loaded check; bound the sweep to known data… | done | #862 |
+| #852 | Laya sidecar: first real-host install and verification on the Mac Studio | open | — |
+| #853 | Decide the "good selection" label rule before any shadow data exists (L1-0) | open | — |
+| #854 | Server: optional `selection` record on `POST /api/runs` (L1-1) | done | #865 |
+| #855 | Bot: candidate hard filter (pure) (L1-2) | done | #861 |
+| #856 | Bot: the Laya question and the decision rule (pure) (L1-3) | done | #866 |
+| #857 | Wire selection into both dispatch paths; lift the refusal for `shadow` (L1-4) | open | — |
+| #955 | Laya: the five open §12 decisions beyond the L1-0 label rule have no issue — checkpoint… | open | — |
+
+## Fleet and bots
+
+Record: [`docs/fleet-bots-design.md`](docs/fleet-bots-design.md)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #970 | Fleet: per-host availability snapshot and a read-only view (FB0) | open | — |
+| #971 | Fleet: owner-scoped, paged `GET /fleet/runs` (FB2a) | open | — |
+| #972 | Fleet: availability-aware routing filter (FB1) | open | — |
+| #973 | Bots: `FleetSchedulerClient` and `api.via: "fleet"` (FB2b) | open | — |
+| #974 | End to end: a bot on host A dispatches through Fleet to host B (FB3) | open | — |
+
+## Fleet tenancy
+
+Record: [`docs/fleet-tenancy-design.md`](docs/fleet-tenancy-design.md)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #884 | fleet: projects + project_members schema and ProjectStore | open | — |
+| #885 | fleet: project admin routes and CLI (behaviour-inert) | open | — |
+| #886 | fleet: tenancy visibility rule in visibleHosts (T1-1, the one behaviour change) | open | — |
+| #887 | fleet: tenancy startup warning and per-caller project list (T1-2) | open | — |
+| #888 | fleet: prove metrics and event scoping under tenancy (T1-3) | open | — |
+| #889 | fleet: project reassignment and delete guards, lost-visibility report (T2-1) | open | — |
+| #890 | fleet: fleet_runs.project_id bind-time snapshot, audit not authorization (T2-2) | open | — |
+
+## Security follow-ups
+
+Record: [`docs/status.md`](docs/status.md)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #942 | security: GitHub revoked the nightly GH_TOKEN ('mercury-pat') after a PR-description le… | done | — |
+| #944 | redactor: session transcripts and kernel-state snapshots store Run secrets unredacted | in progress | #965 |
+
+## Host installer — milestone notes (historical)
+
+The per-milestone notes kept before this file became the project-wide tracker.
+
+### M1 — Bootstrap skeleton — DONE ✅ (PR #629, commit ca287f9, issue #628)
+### M2 — Harness probe — DONE ✅ (PR #631, commit 5baf3c2, issue #630)
+### M3 — Configuration wizard — DONE ✅ (PR #633, commit 25fa7ce, issue #632)
+
+### M4 — Service and verification — DONE ✅ (PR #635, commit 0c6c90d, issue #634)
 - mercury host service install|status|uninstall (src/host/service.ts)
   - macOS launchd plist + wrapper that sources mercury.env (launchd has no EnvironmentFile)
   - Linux systemd user unit with EnvironmentFile, systemctl --user enable --now, linger hint
@@ -17,7 +213,7 @@
 - Copilot (4 comments) + independent review (2 blocking: smokeRun API shape, smoke repo)
   + fix-check APPROVE addressed
 
-## M5 — Lifecycle — DONE ✅ (PR #637, commit 7d5ef8c, issue #636)
+### M5 — Lifecycle — DONE ✅ (PR #637, commit 7d5ef8c, issue #636)
 - mercury host status (src/host/lifecycle.ts): read-only current state — configured?,
   env file, pinned version, harnesses, data dir, service presence (independent of env)
 - mercury host upgrade --version <v> --yes: npm install -g @aywengo/mercury@<v>, record
@@ -31,7 +227,7 @@
 - Copilot (8 comments) + independent review (F1-F9: uid interpolation, fsync, dirname,
   keep-data default, forgiving uninstall, --version required) + re-review APPROVE
 
-## M6 — Release hardening — DONE ✅ (PR #639, commit b103368, issue #638)
+### M6 — Release hardening — DONE ✅ (PR #639, commit b103368, issue #638)
 - bats test suite for install.sh (test/install.bats, 21 tests): flag parsing, dry-run,
   platform/prerequisite gates, confirmation, npm hand-off, structured log, json_escape
 - json_escape newline fix: awk splits on newlines so a newline in a log detail was
