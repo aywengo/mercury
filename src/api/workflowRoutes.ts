@@ -18,6 +18,8 @@
 import { Router } from 'express';
 import { requireAuth } from './auth.ts';
 import { sendError, type RoutesDeps } from './routes.ts';
+import { findServerStampedField, serverStampedFieldMessage } from './serverStampedFields.ts';
+import { ValidationError } from '../domain/errors.ts';
 import { WorkflowValidationFailure } from '../workflows/workflowRegistry.ts';
 import { WorkflowPresetResolutionError } from '../workflows/resolveWorkflow.ts';
 import type { LoadedWorkflow } from '../workflows/types.ts';
@@ -116,6 +118,11 @@ export function createWorkflowRoutes(deps: RoutesDeps): Router {
   router.post('/workflows/:workflowId/runs', (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     try {
+      // Same refusal as POST /api/runs (issue #988 acceptance 1): this route creates Runs too, so a
+      // body carrying a server-stamped field must not be quietly ignored here either. Checked before
+      // the workflow/preset conflicts so the answer does not depend on which key came first.
+      const stamped = findServerStampedField(body);
+      if (stamped) throw new ValidationError(serverStampedFieldMessage(stamped));
       if (body.workflow !== undefined) {
         res.status(400).json({ error: 'workflow comes from the URL path; pass workflowVersion to pin a version' });
         return;

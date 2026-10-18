@@ -484,6 +484,25 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE runs ADD COLUMN retry_due_at TEXT;
   CREATE INDEX IF NOT EXISTS idx_runs_retry_of ON runs(retry_of);
   `,
+  // v20: server-stamped Run origin (A0-3, issue #988). A2A `ListTasks` has to return the caller's
+  // A2A-created chains rather than every Run the caller owns, and that attribution must not rest on
+  // anything a client wrote: `constraints.botTask` is explicitly a client-supplied hint, never a
+  // trust boundary. `owner_id` was the only server-set attribution until this column pair.
+  //
+  // Two columns rather than a JSON blob because the filter is by kind alone (`?origin=a2a`), and a
+  // blob would make that a scan. Nullable and additive: rows written before this migration read
+  // NULL, which is "no origin recorded" -- nothing is backfilled, because an origin nobody recorded
+  // cannot be recovered by guessing, and a fabricated one would be indistinguishable from a real one
+  // to every consumer.
+  //
+  // The index follows the same rule as `idx_runs_status`: a column `RunStore.list` can filter by is
+  // indexed. The owner-scoped list is already served by idx_runs_owner_created, so this one earns its
+  // keep on the unscoped (admin) list.
+  `
+  ALTER TABLE runs ADD COLUMN origin_kind TEXT;
+  ALTER TABLE runs ADD COLUMN origin_ref TEXT;
+  CREATE INDEX IF NOT EXISTS idx_runs_origin_kind ON runs(origin_kind);
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

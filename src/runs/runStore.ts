@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tx } from '../db/database.ts';
 import { assertTransition, isTerminal } from '../domain/stateMachine.ts';
-import type { ErrorKind, RepositoryContext, Run, RunConstraints, RunStatus } from '../domain/types.ts';
+import type { ErrorKind, RepositoryContext, Run, RunConstraints, RunOriginKind, RunStatus } from '../domain/types.ts';
 
 export interface RunRow {
   id: string;
@@ -29,6 +29,8 @@ export interface RunRow {
   cancellation_requested_at: string | null;
   status_changed_at: string | null;
   retry_due_at: string | null;
+  origin_kind: string | null;
+  origin_ref: string | null;
   final_commits_json: string;
   pr_url: string | null;
   model: string | null;
@@ -62,6 +64,10 @@ export function rowToRun(row: RunRow): Run {
     cancellationRequestedAt: row.cancellation_requested_at,
     statusChangedAt: row.status_changed_at,
     retryDueAt: row.retry_due_at,
+    // A kind with no ref is representable (the surface had nothing to record); a ref with no kind is
+    // not, so the presence of `origin_kind` is what decides. Reading them as one field keeps a
+    // half-written pair from rendering as an origin with a null kind.
+    origin: row.origin_kind ? { kind: row.origin_kind as RunOriginKind, ref: row.origin_ref } : null,
     finalCommits: JSON.parse(row.final_commits_json) as string[],
     prUrl: row.pr_url,
     model: row.model ?? null,
@@ -104,8 +110,9 @@ export class RunStore {
         `INSERT INTO runs (
           id, owner_id, task, repository_json, repositories_json, workspace_branch, workspace_path, agent, status,
           attempt, retry_of, error, error_kind, constraints_json, created_at, started_at, completed_at,
-          lease_owner, lease_expires_at, cancellation_requested_at, status_changed_at, retry_due_at, final_commits_json, pr_url, model, credential_profile
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          lease_owner, lease_expires_at, cancellation_requested_at, status_changed_at, retry_due_at, final_commits_json, pr_url, model, credential_profile,
+          origin_kind, origin_ref
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.id, run.ownerId, run.task, JSON.stringify(run.repository), run.repositories ? JSON.stringify(run.repositories) : null,
@@ -113,6 +120,7 @@ export class RunStore {
         run.agent, run.status, run.attempt, run.retryOf, run.error, run.errorKind, JSON.stringify(run.constraints),
         run.createdAt, run.startedAt, run.completedAt, run.leaseOwner, run.leaseExpiresAt,
         run.cancellationRequestedAt, run.statusChangedAt ?? null, run.retryDueAt ?? null, JSON.stringify(run.finalCommits), run.prUrl, run.model ?? null, run.credentialProfile ?? null,
+        run.origin?.kind ?? null, run.origin?.ref ?? null,
       );
   }
 
@@ -121,7 +129,7 @@ export class RunStore {
     return row ? rowToRun(row) : null;
   }
 
-  list(opts: { ownerId?: string; status?: RunStatus; limit: number; cursor?: string }): { runs: Run[]; nextCursor: string | null } {
+  list(opts: { ownerId?: string; status?: RunStatus; origin?: RunOriginKind; limit: number; cursor?: string }): { runs: Run[]; nextCursor: string | null } {
     const clauses: string[] = [];
     const params: (string | number | null)[] = [];
     if (opts.ownerId) {
@@ -132,6 +140,14 @@ export class RunStore {
       clauses.push('status = ?');
       params.push(opts.status);
     }
+    // Server-stamped provenance (A0-3, issue #988). This is the A2A `ListTasks` query: the caller's
+    // A2A-created chains, narrowed by owner elsewhere in this same WHERE -- an origin filter is never
+    // an authorisation, and must not be usable to reach another owner's Runs.
+    if (opts.origin) {
+      clauses.push('origin_kind = ?');
+      params.push(opts.origin);
+    }
+
     // cursor format: "<createdAt>|<id>" (keyset pagination with id tiebreaker)
     if (opts.cursor) {
       const [createdAt, id] = opts.cursor.split('|');

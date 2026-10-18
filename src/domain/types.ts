@@ -141,6 +141,46 @@ export interface Run {
    * exactly the same way, and both render as "no profile".
    */
   credentialProfile?: string | null;
+  /**
+   * Where this Run came from, stamped by the SERVER at creation (A0-3, issue #988). `null` for
+   * every Run created by an HTTP client, and for rows written before the v20 migration -- nothing
+   * is backfilled or guessed, because an origin nobody recorded cannot be recovered.
+   *
+   * This is the attribution field `constraints.botTask` is NOT: `botTask` is a client-supplied
+   * hint, "never a trust boundary" (see RunConstraints), so no server decision may depend on it.
+   * `origin` is written by the creation transaction from a parameter no route populates, which is
+   * what lets A2A `ListTasks` return the caller's A2A chains without trusting anything the caller
+   * wrote. Retries inherit the parent's origin -- a retry is the same work, so it is the same
+   * provenance.
+   *
+   * Optional-with-null (not omitted) because rows written before the column existed are NULL in
+   * exactly the same way, and both mean "no origin recorded".
+   */
+  origin?: RunOrigin | null;
+}
+
+/**
+ * The surfaces a Run can be created FROM by the server itself, rather than by an HTTP client.
+ *
+ * A closed union on purpose: `?origin=` validates against it and refuses an unknown value instead
+ * of returning an empty page, because "no Runs of that origin" and "that is not an origin" are
+ * different answers and a filter must not conflate them.
+ */
+export type RunOriginKind = 'a2a';
+
+export const RUN_ORIGIN_KINDS: readonly RunOriginKind[] = ['a2a'];
+
+/**
+ * Server-stamped provenance for a Run (A0-3, issue #988).
+ *
+ * `kind` is which surface created it; `ref` is that surface's own identifier for the thing the Run
+ * serves (an A2A task id), or `null` when the surface has none to record. Both are server-written:
+ * no request body can set either, and a create body that carries `origin` is refused with a 400
+ * rather than silently dropped.
+ */
+export interface RunOrigin {
+  kind: RunOriginKind;
+  ref: string | null;
 }
 
 export interface ResolvedSkill {

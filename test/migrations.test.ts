@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { openDatabase, MIGRATIONS, BUSY_TIMEOUT_MS } from '../src/db/database.ts';
+import { RunStore } from '../src/runs/runStore.ts';
 import { tempDir } from './helpers.ts';
 
 test('migration v3: idempotency keys become owner-scoped with backfill (issue #8)', () => {
@@ -67,6 +68,49 @@ test('migration v3: idempotency keys become owner-scoped with backfill (issue #8
     assert.deepEqual(versions2.map((v) => v.version), versions.map((v) => v.version), 'reopen must not re-apply anything');
     db2.close();
     db3.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration v20: a row written before the origin columns reads null, not a fabricated origin (issue #988)', () => {
+  const dir = tempDir('mercury-migrate-v20-');
+  const dbPath = join(dir, 'test.db');
+  try {
+    // Seed a database as it stood at v19: every migration before v20 applied, and one Run already
+    // written. This is the only way to test the acceptance criterion "a pre-migration row reads
+    // null" -- a Run created by the CURRENT code cannot be a pre-migration row.
+    const db = new DatabaseSync(dbPath);
+    db.exec('PRAGMA journal_mode = WAL;');
+    db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );`);
+    const now = new Date().toISOString();
+    for (let v = 1; v <= 19; v++) {
+      db.exec(MIGRATIONS[v - 1]);
+      db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(v, now);
+    }
+    db.prepare(`INSERT INTO runs (id, owner_id, task, repository_json, agent, status, attempt, retry_of, error, error_kind,
+      constraints_json, created_at, started_at, completed_at, lease_owner, lease_expires_at,
+      cancellation_requested_at, final_commits_json, pr_url)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run('run-pre-v20', 'alice', 'x', '{}', 'fake', 'COMPLETED', 1, null, null, null,
+        '{"maxDurationMs":1000,"maxRetries":0}', now, null, now, null, null, null, '[]', null);
+    db.close();
+
+    const db2 = openDatabase(dbPath);
+    const versions = db2.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as { version: number }[];
+    assert.ok(versions.some((v) => v.version === 20), 'v20 must apply on top of a v19 database');
+    // The columns exist and are NULL for the pre-existing row -- additive, no backfill.
+    const raw = db2.prepare('SELECT origin_kind, origin_ref FROM runs WHERE id = ?').get('run-pre-v20') as
+      { origin_kind: string | null; origin_ref: string | null };
+    assert.equal(raw.origin_kind, null);
+    assert.equal(raw.origin_ref, null);
+
+    const run = new RunStore(db2).get('run-pre-v20')!;
+    assert.equal(run.origin, null, 'an unrecorded origin must read as null, never as a fabricated kind');
+    db2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

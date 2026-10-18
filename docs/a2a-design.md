@@ -267,9 +267,20 @@ Rules:
   decision (§11, decision 5).
 - **Origin marker.** `ListTasks` must return A2A tasks, not every Run the caller owns,
   and attribution must not depend on a client-set field. So A2A-created Runs carry a
-  **server-stamped origin** (`a2a`, plus the skill id). This is the first concrete
-  consumer for the server-stamped origin field `dispatcher-bot-design.md` §16 deferred;
-  that section's criterion is met by this design.
+  **server-stamped origin**: `Run.origin = { kind: 'a2a', ref: <the surface's own id> }`,
+  stored as `origin_kind`/`origin_ref` (#988). `kind` is what the `?origin=` filter reads,
+  so `ListTasks` is `GET /api/runs?origin=a2a` — owner-scoped like every other list, and
+  never an authorisation in itself. `ref` is free for the creating surface to fill; this
+  design fills it with the skill id.
+  - **No request body can set it.** `origin` is written by the same INSERT as the Run row,
+    from an internal-only `RunService.create` parameter, and both Run-creating routes plus
+    the retry route refuse a body that carries it with a 400 rather than dropping it. A
+    silently dropped attribution field is the failure this field exists to prevent, and a
+    client that believes it set one has no way to find out otherwise.
+  - **A retry inherits it**, unchanged: a retry is the same work, so a chain whose first
+    attempt failed must not leave the caller's A2A view at exactly the moment the caller is
+    waiting for it.
+  - This is the field `dispatcher-bot-design.md` §16 deferred; #988 resolved that entry.
 - **Mercury's SQLite Run store is the only task store.** No SDK-provided task store —
   in-memory or otherwise — holds A2A task state (§11, decision 3). A second store would
   disagree with the Run chain after the first restart.
