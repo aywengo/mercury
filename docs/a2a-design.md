@@ -1,9 +1,9 @@
 # A2A at Mercury's boundary
 
-Status: **draft design; nothing is implemented; not ready for implementation.**
-Decisions 1–3 in §11 must be settled before any implementation issue is filed. Until
-this line says otherwise, no issue should be drafted from this document, by a person or
-by the nightly ladder.
+Status: **design; nothing is implemented.** §11 decisions 1–3 were settled on
+2026-10-18: **server first, HTTP+JSON/REST binding, official JavaScript SDK**. Milestone
+A0 (§13) may now be drafted into issues. Decisions 4–10 remain open; none of them blocks
+A0–A2.
 
 ## 1. Summary
 
@@ -19,17 +19,18 @@ narrow:
 
 Two surfaces follow, and they are independent of each other:
 
-- **Mercury as an A2A server (§6).** An external A2A client sends a message; Mercury
-  turns it into a Run created from an operator-declared *exposed skill*, and reports the
-  Run back as an A2A task. A translation layer over the existing Run API, routed through
-  the existing credential resolver. No new execution path.
-- **Mercury as an A2A client (§7).** A new remote-agent kind in the existing registry: a
-  Run whose agent is an A2A endpoint sends the task to that endpoint and mirrors the
-  remote task's progress into Run events. Execution still goes only through adapters.
+- **Mercury as an A2A server (§6) — built first.** An external A2A client sends a
+  message; Mercury turns it into a Run created from an operator-declared *exposed skill*,
+  and reports the Run back as an A2A task. A translation layer over the existing Run API,
+  routed through the existing credential resolver. No new execution path.
+- **Mercury as an A2A client (§7) — built after the server.** A new remote-agent kind in
+  the existing registry: a Run whose agent is an A2A endpoint sends the task to that
+  endpoint and mirrors the remote task's progress into Run events. Execution still goes
+  only through adapters.
 
 ```mermaid
 flowchart LR
-    EXT1[External A2A client] -->|"A2A 1.0"| SRV
+    EXT1[External A2A client] -->|"A2A 1.0 · HTTP+JSON/REST"| SRV
     subgraph host [Mercury host]
         SRV[A2A server routes] -->|"resolveCredential → create Run"| RS[RunService]
         RS --> DB[(SQLite)]
@@ -103,6 +104,7 @@ request cannot name a bot or a bot's template.
 - **Not** in-task authorization (`TASK_STATE_AUTH_REQUIRED`) in either direction in v1.
 - **Not** multi-tenant routing (the spec's `tenant` field) in v1. One host, one tenant.
 - **Not** A2A versions before 1.0 (§5).
+- **Not** JSON-RPC or gRPC in v1 (§5, §11 decision 2).
 
 ## 5. Spec target and versioning
 
@@ -111,13 +113,15 @@ request cannot name a bot or a bot's template.
   `Major.Minor`, so Mercury speaks and advertises `1.0` and ignores patch numbers.
 - **Clients must send `A2A-Version: 1.0`.** The spec tells servers to read an empty
   header as 0.3. Mercury does not serve 0.3, so a request without the header, or with
-  any other version, gets `VersionNotSupportedError`. No silent fallback.
+  any other version, gets `VersionNotSupportedError`. No silent fallback — which also
+  means the SDK's opt-in v0.3 compatibility mode stays off (§11, decision 3).
 - **The client adapter (§7) sends `A2A-Version: 1.0` on every request** and refuses an
   agent whose card advertises no 1.0 interface.
-- **One protocol binding in v1.** The spec defines JSON-RPC, gRPC and HTTP+JSON/REST as
-  functionally equivalent. Mercury picks one for v1 (§11, decision 2), declares it in
-  `supportedInterfaces`, and can add another later without changing the mapping in §6.
-  gRPC is out for v1 regardless: it would be Mercury's first gRPC surface.
+- **Binding: HTTP+JSON/REST only in v1** (§11, decision 2). The spec defines JSON-RPC,
+  gRPC and HTTP+JSON/REST as functionally equivalent; Mercury declares exactly one REST
+  interface in `supportedInterfaces`, using the spec's §11 URL patterns and its SSE
+  streaming. JSON-RPC can be added later as a second interface over the same §6 mapping.
+  gRPC stays out: it would be Mercury's first gRPC surface.
 - **Normative source.** The spec names `spec/a2a.proto` as the single authoritative
   definition. Whatever Mercury implements is checked against the proto and the A2A
   project's conformance tests (§10), not against this document's paraphrase.
@@ -138,6 +142,7 @@ request cannot name a bot or a bot's template.
   (Run chain ⇄ A2A task). Serving it from Fleet is a later milestone (§13, A4) that
   depends on the Fleet dispatch path from `fleet-bots-design.md` existing; until then
   the host is the only A2A server.
+- **The SDK lives inside this layer and nowhere else** (§11, decision 3).
 
 ### 6.2 Exposed skills: the closed catalog
 
@@ -230,6 +235,9 @@ Rules:
   **server-stamped origin** (`a2a`, plus the skill id). This is the first concrete
   consumer for the server-stamped origin field `dispatcher-bot-design.md` §16 deferred;
   that section's criterion is met by this design.
+- **Mercury's SQLite Run store is the only task store.** No SDK-provided task store —
+  in-memory or otherwise — holds A2A task state (§11, decision 3). A second store would
+  disagree with the Run chain after the first restart.
 
 ### 6.5 State mapping
 
@@ -260,7 +268,10 @@ Rules:
 
 ### 6.6 Operations
 
-| A2A operation | v1 | Mercury behaviour |
+All operations are served over the HTTP+JSON/REST binding, at the spec's §11 URL patterns
+under the A2A prefix; streaming operations use the binding's SSE.
+
+| A2A operation | Milestone | Mercury behaviour |
 | --- | --- | --- |
 | `SendMessage`, new task | A1 | resolve exposed skill → create Run (§6.2, §6.4) → return `Task` |
 | `SendMessage`, `taskId` in `INPUT_REQUIRED` | A1 | text parts → input on the latest attempt (same path as the native input route) |
@@ -303,16 +314,19 @@ native API:
 ### 6.8 Agent cards
 
 - **Public card** at the spec's well-known URI: name, description, `supportedInterfaces`
-  (one interface, `1.0`, the chosen binding), the bearer security scheme, capabilities
-  (`streaming` once A2 ships, `pushNotifications: false`, `extendedAgentCard: true`), the
-  Mercury skill-selection extension (`required: true`), and **no skills**. Unauthenticated
-  callers learn that the host speaks A2A and how to authenticate, nothing about what work
-  it accepts.
+  (one interface: HTTP+JSON/REST, version `1.0`), the bearer security scheme,
+  capabilities (`streaming` once A2 ships, `pushNotifications: false`,
+  `extendedAgentCard: true`), the Mercury skill-selection extension (`required: true`),
+  and **no skills**. Unauthenticated callers learn that the host speaks A2A and how to
+  authenticate, nothing about what work it accepts.
 - **Extended card** (authenticated) lists exactly the exposed skills the caller's owner
   may invoke.
 - Card signing is a deferred decision (§11, decision 8).
 
 ## 7. Mercury as an A2A client
+
+Built after the server (§13, A3). The design is recorded now so the server's mapping
+module is written to serve both directions.
 
 ### 7.1 A remote-agent kind, not a new subsystem
 
@@ -335,14 +349,17 @@ A2A delegation is a new kind in the existing remote-agent registry
   entry is **refused** if the card's host, or any interface URL the card declares, is not
   in `allowedHosts`: a card must not be able to redirect Mercury's credential to another
   host. It is also refused if the card offers no `1.0` interface on the configured
-  binding.
+  binding. v1 supports the REST binding only, matching the server.
 - **Static capabilities**, declared honestly (`AgentStaticCapabilities`): `humanInput:
   true`, `resume: true`, `toolEvents: 'none'` (A2A execution is opaque by design),
   `skills: 'none'`, `perRunModel` absent, `roleInstruction: 'none'`, `workflowPlan`
   absent. Presets and workflows that need those therefore fail closed on an A2A agent
   through the checks that already exist.
 - Whether a remote-agent Run needs a local workspace at all — and therefore a
-  `repository` — is checked against existing remote-agent behaviour in A0, not assumed.
+  `repository` — is checked against existing remote-agent behaviour before A3, not
+  assumed.
+- The same SDK and the same boundary rules (§11, decision 3) apply: the SDK's client is
+  used inside the adapter and nowhere else.
 
 ### 7.2 Driving a Run
 
@@ -418,58 +435,83 @@ route (§6.3).
    waits bounded by Run deadlines.
 6. **Nothing leaves that the native API would not show** (§6.7): history from redacted
    events, artifacts from an allowlist of fields.
-7. **Client egress bounded to `allowedHosts`**, including every interface URL a remote
+7. **One source of truth**: the SQLite Run chain is the task; no SDK store (§6.4).
+8. **Client egress bounded to `allowedHosts`**, including every interface URL a remote
    card declares (§7.1, §7.5).
-8. **Credentials**: inbound bearer is an ordinary Mercury token; outbound secret is a
+9. **Credentials**: inbound bearer is an ordinary Mercury token; outbound secret is a
    redacted host secret sent to one validated host.
-9. **Fail closed**: wrong or missing `A2A-Version` → `VersionNotSupportedError`;
-   unsupported part, operation or capability → the spec's error, never an approximation.
+10. **Fail closed**: wrong or missing `A2A-Version` → `VersionNotSupportedError`;
+    unsupported part, operation, binding or capability → the spec's error, never an
+    approximation. The SDK's v0.3 compatibility path is not enabled.
 
 ## 10. Testing strategy
 
 1. **Conformance.** The server is tested against the A2A project's conformance suite for
-   the operations its milestone claims. A milestone does not claim an operation the
-   suite fails.
+   the operations its milestone claims, over the REST binding. A milestone does not claim
+   an operation the suite fails.
 2. **Contract tests, real server** (the #539/#680 lesson: route seams need route tests):
    - another owner's task id → `TaskNotFoundError`; admin and `bot-*` tokens refused;
    - same `messageId` twice → one task; same `messageId`, different owner → two;
    - a chain whose first attempt fails with a retry pending reports `WORKING`, then
      exactly one terminal state;
    - blocking `SendMessage` returns at `INPUT_REQUIRED`, and an input message resumes it;
-   - missing `A2A-Version` → `VersionNotSupportedError`;
+   - missing `A2A-Version`, and `A2A-Version: 0.3` → `VersionNotSupportedError`;
    - push-notification operations → `PushNotificationNotSupportedError`;
    - a skill whose template fails create-Run validation never appears on any card;
-   - a skill not allowed for the caller is absent from its card and not invokable.
-3. **Client adapter, against a scripted A2A stub**: each remote state in §7.3 produces
-   the stated Run outcome; a worker restart mid-task resumes with **zero** additional
-   `SendMessage` calls; a card declaring an interface on a non-allowed host is refused;
-   the outbound secret appears in no recorded event or session file.
-4. **Exhaustiveness**: the `RunStatus` → `TaskState` switch is a compile-time exhaustive
+   - a skill not allowed for the caller is absent from its card and not invokable;
+   - **a server restart between `SendMessage` and `GetTask` returns the same task in the
+     same state** — the test that proves no SDK store is holding state.
+3. **Coupling.** A coupling test, in the style of the existing ones, asserts that the
+   SDK package is imported only from the A2A boundary module (and, from A3, the `a2a`
+   adapter) — never from `RunService`, the worker, the store or the native API routes.
+4. **Client adapter (A3), against a scripted A2A stub**: each remote state in §7.3
+   produces the stated Run outcome; a worker restart mid-task resumes with **zero**
+   additional `SendMessage` calls; a card declaring an interface on a non-allowed host is
+   refused; the outbound secret appears in no recorded event or session file.
+5. **Exhaustiveness**: the `RunStatus` → `TaskState` switch is a compile-time exhaustive
    check, and a test asserts every `RunStatus` value has a row in §6.5's table.
-5. **Mutation discipline**, as in the other designs: each of these mutations must be
+6. **Mutation discipline**, as in the other designs: each of these mutations must be
    caught — drop the owner check on `GetTask`; derive task state from the latest attempt
    without the retry-pending rule; drop the skill from the idempotency key; let the
-   caller's request override the template's `repository`; send a re-`SendMessage` on
+   caller's request override the template's `repository`; read task state from an SDK
+   store instead of the Run chain; enable v0.3 compatibility; send a re-`SendMessage` on
    resume; skip the `allowedHosts` check on card interface URLs.
 
-## 11. Open decisions
+## 11. Decisions
 
-1. **Which side first.** Server (§6) or client adapter (§7). Criterion: a named
-   counterpart. If a specific external agent needs to hand work to Mercury, the server
-   leads; if a Run needs a specific external A2A agent, the client leads. The client is
-   the smaller first step; the server is the larger interop surface. **Blocking.**
-2. **Binding.** HTTP+JSON/REST or JSON-RPC for v1. Criterion: whatever the first
-   counterpart speaks. REST sits most naturally beside the existing API and its SSE;
-   JSON-RPC is what many existing clients reach for first. `supportedInterfaces` allows
-   adding the other later without touching §6's mapping. **Blocking.**
-3. **SDK or hand-rolled.** The official JavaScript SDK reached 1.0 general availability
-   in July 2026, implementing all three bindings. The repo has resisted dependencies
-   where a small tested hand-rolled version stays small (`cli-tui-design.md` §19), but
-   the spec requires derived forms to be regenerated from the proto, and hand-rolled
-   types drift. Criterion: if passing the conformance suite for A1's operations needs
-   more than a small, reviewable amount of hand-written protocol code, take the SDK at
-   the boundary only (types, validation, transport), never in `RunService`.
-   **Blocking.**
+### Settled 2026-10-18
+
+1. **Server first.** The server (§6) is built before the client adapter (§7). Roadmap
+   order is fixed: A0 → A1 → A2 → A3 (client) → A4 (Fleet).
+2. **HTTP+JSON/REST binding.** The only binding in v1, for server and client alike. It
+   sits beside the existing REST API and reuses its SSE model. JSON-RPC can be added
+   later as a second `supportedInterfaces` entry over the same mapping; that is a new
+   decision with its own criterion (a counterpart that speaks only JSON-RPC), not a
+   reopening of this one.
+3. **Official JavaScript SDK** (`@a2a-js/sdk`, 1.0 line, generally available since July
+   2026), under boundary rules that keep it from becoming Mercury's architecture:
+   - **Confined.** Imported only by the A2A boundary module (and from A3, the `a2a`
+     adapter). A coupling test enforces it (§10.3). `RunService`, the worker, the store
+     and the native routes never see an SDK type.
+   - **Not a store.** Mercury's Run chain is the only task store (§6.4). The SDK's own
+     task-store implementations are never instantiated. If the SDK's server seam requires
+     a store, Mercury supplies one implemented over `RunService` reads, and writes are
+     refused or routed to `RunService` — never kept.
+   - **Mounted on Mercury's server.** A2A routes are served by the existing Mercury HTTP
+     server under the A2A prefix, behind `resolveCredential`. If the SDK's server
+     integration assumes an HTTP framework Mercury does not already use, Mercury does not
+     adopt that framework: it uses the SDK for types, request and response validation,
+     error mapping and SSE wire helpers, and writes the thin REST routes itself.
+   - **1.0 only.** The SDK's opt-in v0.3 compatibility is not enabled (§5).
+   - **Pinned.** An exact version, upgraded deliberately and re-checked against the
+     conformance suite, not a caret range.
+
+   Which of the two integration shapes applies — SDK request handler driven over
+   `RunService`, or SDK types and helpers under hand-written routes — is the A0 spike
+   (§13). The rules above hold either way.
+
+### Open
+
 4. **Fleet as A2A server.** After the Fleet dispatch path exists; the task id then has to
    be Fleet-scoped and survive the host it ran on.
 5. **Multi-task contexts.** A `contextId` grouping several tasks, and follow-up tasks in
@@ -490,8 +532,8 @@ route (§6.3).
 ## 12. Definition of done
 
 - An external A2A 1.0 client can discover the host, authenticate, invoke an exposed
-  skill, follow the task through every state in §6.5 including an input round trip, and
-  cancel it — with every task visible as an ordinary Run.
+  skill over REST, follow the task through every state in §6.5 including an input round
+  trip, and cancel it — with every task visible as an ordinary Run.
 - A Mercury Run can delegate to an external A2A 1.0 agent, survive a worker restart
   without duplicating remote work, and finish with the outcome §7.3 specifies.
 - No route, card or registry entry exists on a host that did not configure one.
@@ -499,15 +541,17 @@ route (§6.3).
 
 ## 13. Roadmap
 
-Nothing below is filed. A0 cannot start until §11 decisions 1–3 are settled.
+Nothing below is filed yet. A0 is ready to be drafted into issues.
 
-### A0 — decisions, prerequisites and pure pieces
+### A0 — prerequisites, spike and pure pieces
 
-- Settle §11 decisions 1–3 and record them here.
+- **SDK integration spike** (§11, decision 3): pin a version; establish whether its
+  server request handler can be driven over `RunService` with no SDK-held state and
+  mounted on Mercury's existing HTTP server. Record the outcome here — handler-driven or
+  types-and-helpers — before A1 starts. Add the SDK and its coupling test.
 - Verify, against the code, before anything depends on it:
   - how the worker schedules retries, and a race-free way to tell "retry pending" from
     "final failure" (§6.4);
-  - whether remote-agent Runs need a workspace and repository (§7.1);
   - that per-Run SSE carries everything §6.6's streaming operations need.
 - Design and land the **server-stamped origin field** (§6.4), which the dispatcher
   design deferred until a consumer existed.
@@ -515,20 +559,27 @@ Nothing below is filed. A0 cannot start until §11 decisions 1–3 are settled.
 - Exposed-skill config schema and `host a2a validate`, including create-Run validation
   of every template.
 
-### A1 — minimal server (if decision 1 picks the server first)
+*Acceptance*: the spike's outcome is recorded in §11 with evidence; the mapping module
+and skill validation are green; the retry-pending rule has a defined, tested source.
+
+### A1 — minimal server
 
 Public and extended cards, `SendMessage` (blocking and non-blocking), `GetTask`,
 `CancelTask`, the `INPUT_REQUIRED` round trip, version enforcement, the refused-owner
-rule, `host doctor` line. Conformance suite green for those operations.
+rule, the `host doctor` line. REST binding only.
+
+*Acceptance*: conformance suite green for those operations over REST; every §10.2
+contract test green, including the restart test.
 
 ### A2 — streaming and listing
 
-`SendStreamingMessage`, `SubscribeToTask`, `ListTasks`.
+`SendStreamingMessage`, `SubscribeToTask`, `ListTasks`; `capabilities.streaming: true`
+on the card.
 
 ### A3 — client adapter
 
-The `a2a` remote-agent kind (§7). If decision 1 picks the client first, A3 is built
-directly after A0 and A1–A2 follow.
+The `a2a` remote-agent kind (§7), REST binding, same SDK boundary rules. Before it
+starts: whether remote-agent Runs need a workspace and repository (§7.1).
 
 ### A4 — Fleet
 
@@ -536,7 +587,19 @@ A2A served from Fleet (§11, decision 4).
 
 ## 14. Revision history
 
-### 2026-10-18 — first draft
+### 2026-10-18 (b) — decisions 1–3 settled
+
+| Area | Was | Now |
+| --- | --- | --- |
+| Status | draft, blocked on §11 decisions 1–3 | A0 may be drafted into issues |
+| §11.1 | open: server or client first | server first; roadmap order fixed |
+| §11.2, §5, §6.6, §6.8, §7.1 | open: REST or JSON-RPC | HTTP+JSON/REST only in v1, server and client |
+| §11.3 | open: SDK or hand-rolled | official JS SDK, confined, not a store, mounted on Mercury's server, 1.0 only, pinned |
+| §6.4, §9.7 | — | SQLite Run chain is the only task store |
+| §10 | — | restart test proving no SDK-held state; coupling test for the SDK; two SDK-related mutations |
+| §13 A0 | decisions + prerequisites | SDK integration spike added; client-side workspace check moved to A3 |
+
+### 2026-10-18 (a) — first draft
 
 Written in response to the question whether dispatcher bots and other bots should
 communicate over A2A. Answer recorded in §2: no — A2A belongs at Mercury's edge, and the
