@@ -264,10 +264,9 @@ test('workflow refusal codes reach the client on both create paths (PR #934 revi
   // A stage preset that REQUIRES the `hermes` agent, so `agent: "fake"` conflicts and the
   // refusal must carry the stable code documented in docs/api.md -- previously only
   // `{ error }` reached the client (sendError dropped `code`/`field`/`findings`).
-  const { mkdtempSync, writeFileSync, mkdirSync } = await import('node:fs');
+  const { writeFileSync, mkdirSync } = await import('node:fs');
   const { join } = await import('node:path');
-  const { tmpdir } = await import('node:os');
-  const home = mkdtempSync(join(tmpdir(), 'mercury-agentlock-'));
+  const home = tempDir('mercury-agentlock-');
   mkdirSync(join(home, 'presets'), { recursive: true });
   mkdirSync(join(home, 'presets', 'agent-lock-hermes'));
   writeFileSync(join(home, 'presets', 'agent-lock-hermes', 'preset.json'), JSON.stringify({
