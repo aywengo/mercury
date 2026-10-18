@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Mercury copilot-relay -- LaunchAgent template for deploy/nightly/copilot-relay.sh.
+
+  A LaunchAgent, not a Mercury service: it must run under the OPERATOR's `gh` credential, and the
+  nightly agent must not be able to reach that credential. `mercury host service install` does not
+  install it -- that surface owns the operator's `mercury.env` identity only, which is the
+  `mercury-nightly` token this relay exists to work around. See
+  docs/nightly-self-development.md section 5.2.
+
+  launchd expands no variables in a plist, so the two @@...@@ placeholders are substituted at
+  install time. Install with:
+
+    sed -e "s|@@SCRIPT@@|$PWD/deploy/nightly/copilot-relay.sh|" \
+        -e "s|@@STATE_DIR@@|$HOME/.local/state/mercury|" \
+        deploy/nightly/com.mercury.copilot-relay.plist.template \
+        > ~/Library/LaunchAgents/com.mercury.copilot-relay.plist
+    launchctl bootout gui/$(id -u)/com.mercury.copilot-relay 2>/dev/null
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mercury.copilot-relay.plist
+
+  Verify it is alive. The relay logs a heartbeat on EVERY run, so silence is unambiguous:
+
+    launchctl print gui/$(id -u)/com.mercury.copilot-relay | grep -E 'runs|last exit'
+    tail -3 ~/.local/state/mercury/copilot-relay.log
+
+  StartInterval 1200 matches the nightly ladder's own 20-minute cadence, so a re-request lands
+  within one ladder step of a push. RunAtLoad re-arms it on login.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mercury.copilot-relay</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@@SCRIPT@@</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>1200</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@@STATE_DIR@@/copilot-relay-launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>@@STATE_DIR@@/copilot-relay-launchd.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

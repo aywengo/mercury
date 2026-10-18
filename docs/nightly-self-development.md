@@ -160,6 +160,42 @@ issue `nightly:blocked`, put the question in an issue comment, finish the Run.
 `origin:e2e` — created (#728); meanings and the trust rule are in
 `docs/issue-triage.md`.
 
+### 5.2 The Copilot relay
+
+The nightly identity cannot obtain a Copilot code review, measured 2026-10-18:
+
+- `POST /pulls/<n>/requested_reviewers` with
+  `{"reviewers": ["copilot-pull-request-reviewer[bot]"]}` under the `mercury-nightly` token
+  returns **201 and creates no `review_requested` event**. The same call under the owner's token
+  registers and the review arrives. There is no field to check either way: the bot reviewer never
+  appears in the response's `requested_reviewers`, which is empty on success too, so the failure
+  is invisible to the caller. `gh pr edit --add-reviewer` is worse — it resolves the login over
+  GraphQL and fails outright with "The 'login' field requires one of the following scopes:
+  `['read:org']`".
+- The ruleset alternative does not cover it. The `copilot_code_review` rule requests a review
+  only "if the author has access to Copilot code review and AI credits", and nightly PRs are
+  authored by `mercury-nightly`.
+
+So the request has to come from an identity with Copilot access, and it must not come from the
+nightly agent — handing the agent the owner's token is what the N0-1 identity split removed.
+`deploy/nightly/copilot-relay.sh` is that boundary: an operator-owned LaunchAgent
+(`com.mercury.copilot-relay.plist.template`, `StartInterval` 1200 s, matching the ladder's
+cadence) that re-requests Copilot on every open PR authored by `mercury-nightly` whose current
+head has no Copilot review, and refuses to run unless `gh` is authenticated as the owner. The
+nightly skill therefore pushes and finishes; the relay fetches the review, and the next night's
+resume scan sees it.
+
+**The relay logs a heartbeat on every run.** The first version logged only when it acted, so when
+launchd stopped spawning it on 2026-10-05 the log simply stopped — no error, nothing to tell
+"alive with no work" from "dead". Five nightly PRs then sat with no Copilot review for one to
+three days, and the resume scan skipped all of them (`select.ts` resumes only a PR whose head
+carries findings). Silence is now unambiguous; liveness is two commands:
+
+```bash
+launchctl print gui/$(id -u)/com.mercury.copilot-relay | grep -E 'runs|last exit'
+tail -3 ~/.local/state/mercury/copilot-relay.log
+```
+
 ## 6. Docs → features, gated
 
 The rung where an autonomous loop is most likely to drift gets a human gate.

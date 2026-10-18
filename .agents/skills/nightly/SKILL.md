@@ -129,7 +129,11 @@ search and reports without creating.
   review threads, fix every point, then reply on the PR with a point-by-point answer (a body-only
   review has no threads to resolve). Owner and Copilot rounds count together against the cap;
   at the cap, hand off with the owner's open points instead of fixing. The Copilot re-request is the
-  host's relay's job — push, then `finish`. With two open PRs for one issue, continue the OLDER
+  host's relay's job — push, then `finish`. Do NOT spend turns on it: `issue-fix-loop` step 4's REST
+  call cannot succeed under the nightly token (GitHub answers 201 and ignores it, and the response
+  carries no field that could tell you), so a Run that retries it, or that reads the empty
+  `requested_reviewers` as proof the API cannot set the reviewer, only burns the night's budget
+  (docs/nightly-self-development.md §5.2). With two open PRs for one issue, continue the OLDER
   one and state the supersession on the newer.
 - **`draft-proposals`** (rung 4): draft `nightly:proposed` issues from a roadmap section in the
   docs (§6) and NEVER implement — one night of latency buys a human decision.
