@@ -742,14 +742,14 @@ await this.finalize(run, outcome, skills);
     try {
       const scrubbed = redactRunArtifacts(path, secrets, {
         onSkip: (file, size) => {
-          log.warn({ runId, file, size }, 'artifact too large for redaction; skipped');
+          this.log('warn', 'artifact too large for redaction; skipped', { runId, file, size });
         },
       });
       if (scrubbed > 0) {
-        log.info({ runId, files: scrubbed }, 'redacted secrets from agent artifacts');
+        this.log('info', 'redacted secrets from agent artifacts', { runId, files: scrubbed });
       }
     } catch (scrubErr) {
-      log.warn({ runId, error: String(scrubErr instanceof Error ? scrubErr.message : scrubErr) }, 'artifact redaction failed');
+      this.log('warn', 'artifact redaction failed', { runId, error: String(scrubErr instanceof Error ? scrubErr.message : scrubErr) });
     }
   }
 
