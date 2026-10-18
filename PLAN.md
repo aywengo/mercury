@@ -49,10 +49,10 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #741 | `nightly-report` skill (N1-4) | done | #768 |
 | #742 | Nightly bot config and first-night checklist (N1-5) | done | #774 |
 | #860 | nightly: derive the review-cap hand-off from current-head findings, not every round | in progress | #966 |
-| #881 | nightly: rung 4 files duplicate proposals; dedupe by source key before filing | in progress | #928, #946 |
+| #881 | nightly: rung 4 files duplicate proposals; dedupe by source key before filing | in progress | #984 |
 | #964 | nightly: report lists a one-night flake forever; the flake entry carries an absolute wo… | open | — |
 | #968 | nightly: resume PRs on the owner's changes-requested review, not only on Copilot findings | done | #969 |
-| #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | open | — |
+| #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | in progress | #981 |
 
 ## Dispatcher bots
 
@@ -125,7 +125,7 @@ Record: [`docs/credential-profiles-design.md`](docs/credential-profiles-design.m
 | --- | --- | --- | --- |
 | #784 | Credential profiles CP-2: profile file schema, loader and `host credentials validate` (… | done | #799 |
 | #807 | Credential profiles CP-3: resolve a profile per Run, refuse disallowed owners, creation… | done | #841 |
-| #897 | Credential profiles CP-4: local adapter delivery — layered environment, isolated git/gh… | open | — |
+| #897 | Credential profiles CP-4: local adapter delivery — layered environment, isolated git/gh… | in progress | #977 |
 | #898 | Credential profiles CP-5: workspace clone and fetch use the resolved profile, not the h… | open | — |
 | #899 | Credential profiles CP-6: sandbox per-profile opt-in for profile credentials | open | — |
 | #900 | Credential profiles CP-7: exact-value redaction of profile values, doctor checks, docs… | open | — |
@@ -164,7 +164,7 @@ Record: [`docs/fleet-bots-design.md`](docs/fleet-bots-design.md)
 | Issue | Title | State | PR |
 | --- | --- | --- | --- |
 | #970 | Fleet: per-host availability snapshot and a read-only view (FB0) | done | #978 |
-| #971 | Fleet: owner-scoped, paged `GET /fleet/runs` (FB2a) | open | — |
+| #971 | Fleet: owner-scoped, paged `GET /fleet/runs` (FB2a) | in progress | #982 |
 | #972 | Fleet: availability-aware routing filter (FB1) | open | — |
 | #973 | Bots: `FleetSchedulerClient` and `api.via: "fleet"` (FB2b) | open | — |
 | #974 | End to end: a bot on host A dispatches through Fleet to host B (FB3) | open | — |
@@ -182,6 +182,7 @@ Record: [`docs/fleet-tenancy-design.md`](docs/fleet-tenancy-design.md)
 | #888 | fleet: prove metrics and event scoping under tenancy (T1-3) | open | — |
 | #889 | fleet: project reassignment and delete guards, lost-visibility report (T2-1) | open | — |
 | #890 | fleet: fleet_runs.project_id bind-time snapshot, audit not authorization (T2-2) | open | — |
+| #983 | fleet: record the per-project Atlas credential-namespace decision before T3 (§11.3) | open | — |
 
 ## A2A integration
 
@@ -209,6 +210,7 @@ Record: [`docs/status.md`](docs/status.md)
 | --- | --- | --- | --- |
 | #942 | security: GitHub revoked the nightly GH_TOKEN ('mercury-pat') after a PR-description le… | done | — |
 | #944 | redactor: session transcripts and kernel-state snapshots store Run secrets unredacted | in progress | #965 |
+| #976 | artifact redaction: sweep workspaces of runs the worker never finalized | open | — |
 
 ## Host installer — milestone notes (historical)
 
