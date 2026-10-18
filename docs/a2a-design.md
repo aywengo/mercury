@@ -577,6 +577,71 @@ route (§6.3).
    `RunService`, or SDK types and helpers under hand-written routes — is the A0 spike
    (§13). The rules above hold either way.
 
+   **Outcome of the A0-1 spike (#986): handler-driven.** Pinned `@a2a-js/sdk@1.3.0`
+   (exact, no range). It declares ONE runtime dependency (`jose`) and seven OPTIONAL peer
+   dependencies. Measured with `npm install --omit=dev`, the production tree goes from **68
+   to 107 packages**: npm resolves the SDK's optional `@grpc/grpc-js` peer from the
+   lockfile — it is already there for the `testcontainers` devDependency — and installs
+   that tree (`protobufjs`, `yargs`, `@types/node`), none of which Mercury's REST-only
+   binding uses. The optional peers that are not already in the lockfile (`pg`, `kysely`,
+   `mysql2`, `better-sqlite3`, `@bufbuild/protobuf`) are NOT installed. Trimming that 39
+   is a release-artifact decision for the operator, filed as #999 rather than taken here;
+   it costs nothing functionally, but it is 39 packages on every `brew install`. The
+   SDK's server integration mounts on Mercury's existing Express app and is driven over
+   `RunService`; Mercury writes no A2A transport code of its own. The four open questions,
+   each answered by a test in `test/a2aServer.test.ts` that drives the real SDK over the
+   real app:
+
+   1. **Express 4, no second framework.** `@a2a-js/sdk/server/express` exports
+      `restHandler()` and `agentCardHandler()`, each returning a plain Express
+      `RequestHandler`; `express` is an optional peer accepting `^4.21.2 || ^5.1.0`, and
+      the tests run on the Express 4.22.2 Mercury already depends on. A request through the
+      REST binding is answered by the SDK — `Content-Type: application/a2a+json`, and
+      errors in the SDK's REST error body (`{"error":{"code":…,"status":…,"details":[{"reason":"TASK_NOT_FOUND"}]}}`)
+      — so no adapter or shim sits between them. No second framework and no major upgrade.
+   2. **No SDK task store.** The transport layer takes an `A2ARequestHandler` — a plain
+      12-method interface — and never touches a store itself, so Mercury implements it
+      directly over `RunService` with no store at all. The seam the SDK does offer
+      (`TaskStore`: `save`/`load`/`list`) is implementable as reads over Run chains with
+      **writes refused**: `src/a2a/taskStore.ts` projects Run rows for `load` and throws
+      `UnsupportedOperationError` from `save`, which is the behaviour the boundary rule
+      asks for rather than a placeholder. `InMemoryTaskStore` and
+      `@a2a-js/sdk/server/database` are never imported. This matters because
+      `DefaultRequestHandler` — the SDK's own handler — takes a `TaskStore` as a REQUIRED
+      constructor argument, so an SDK-shaped handler would have forced a store; the
+      interface seam is what lets Mercury avoid one.
+   3. **1.0 only, and the version gate is the CARD's.** `legacyCompat` is an opt-in option
+      on `restHandler`/`agentCardHandler`/`jsonRpcHandler`, and Mercury leaves it absent.
+      What actually enforces §5 is the card: the REST handler validates the `A2A-Version`
+      header against the card's `supportedInterfaces`, so a card declaring one `1.0`
+      interface makes a missing header, `0.3` and `2.0` alike fail with
+      `VersionNotSupportedError` (HTTP 400, `VERSION_NOT_SUPPORTED`) — from the 1.0
+      binding itself, in its own content type and error shape. Mercury does not
+      re-implement the check, and the agent card is deliberately NOT version-gated: a
+      client has to read the card to learn which version to send.
+      **Stated rather than overclaimed:** enabling `legacyCompat` is NOT observable for
+      these requests, because the card declares no v0.3 interface and the version check
+      refuses v0.3 on either path. So the mutation "enable v0.3 compatibility" (§10.6) is
+      caught only once a v0.3 interface can exist, and the card — not the option — is what
+      holds the line today.
+   4. **Mercury's auth runs first.** `requireAuth` is applied to the mount, so every REST
+      route answers Mercury's own 401 before the SDK sees the request — including
+      `/message:send`, `/tasks/:id` and `/tasks/:id:cancel`, and for an invalid token as
+      well as an absent one. The ONE exemption is the public agent card at
+      `/.well-known/agent-card.json`, which is mounted outside the gate and lists no
+      skills. The SDK's `userBuilder` is handed the credential the shared resolver (#140)
+      already resolved, and never authenticates anything itself.
+
+   What landed: the pinned dependency, `test/a2aCoupling.test.ts` (§10.3), this record,
+   and a minimal `src/a2a/` skeleton behind the off switch — the mount, the card builder,
+   the request handler, the read-only task store, and the Run-chain → `Task` projection.
+   The skill catalog, the on-disk config and `host a2a validate` remain A0-5 (#989); the
+   operations §6.6 assigns to A1 and A2 are refused with the spec's error for each
+   (`UnsupportedOperationError`, `PushNotificationNotSupportedError`) rather than answered
+   partially. A default-configured server exposes no A2A route and no agent card: the
+   switch is the absence of the config, and an enabled config with no exposed skill is
+   off too.
+
 ### Open
 
 4. **Fleet as A2A server.** After the Fleet dispatch path exists; the task id then has to
@@ -616,7 +681,9 @@ A0 is filed as #986–#990, with rows in `PLAN.md`. A1–A4 are not filed yet.
   whether its server request handler can be driven over `RunService` with no SDK-held
   state and mounted on Mercury's existing HTTP server. Record the outcome here —
   handler-driven or types-and-helpers — before A1 starts. Add the SDK and its coupling
-  test.
+  test. **Settled: handler-driven**, `@a2a-js/sdk@1.3.0`, recorded in §11 decision 3 with
+  the four answers and their evidence; the coupling test is `test/a2aCoupling.test.ts`.
+  A1 may start.
 - **#987 (A0-2) — retry chains**: link retries inside the child's insert transaction,
   make auto-retry intent durable with restart recovery, and add the persisted
   `chainState` helper (§6.4). Filed as a bug: the late link is a race independent of A2A.
@@ -658,6 +725,15 @@ starts: whether remote-agent Runs need a workspace and repository (§7.1).
 A2A served from Fleet (§11, decision 4).
 
 ## 14. Revision history
+
+### 2026-10-18 (d) — A0-1 spike settled: handler-driven
+
+`@a2a-js/sdk` pinned to `1.3.0` and its server integration mounted on Mercury's Express
+app. §11 decision 3 records the outcome and the four answers with their evidence
+(`test/a2aServer.test.ts`); §10.3's coupling test landed as `test/a2aCoupling.test.ts`.
+The SDK is confined to `src/a2a/`, the mount is off unless a config both enables it and
+exposes a skill, and the operations A1/A2 own are refused with the spec's error rather
+than answered partially.
 
 ### 2026-10-18 (c) — A0 filed
 
