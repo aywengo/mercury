@@ -133,6 +133,45 @@ export class RunStore {
     return row ? rowToRun(row) : null;
   }
 
+  /**
+   * Every attempt in the chain that contains `runId`, oldest first (A0-1, issue #986).
+   *
+   * A2A reports a task as a chain and calls it terminal only when no further attempt will be made
+   * (docs/a2a-design.md section 6.4), so a reader holding one Run id cannot answer the question:
+   * the answer is the latest attempt plus whether a retry is still pending, and `retry_of` points
+   * only DOWNWARD, from a child to its parent. Reading the whole chain needs the downward walk.
+   *
+   * Walks UP to the root first, so a caller that starts from any attempt sees the whole chain
+   * rather than the subtree below it. The upward walk is bounded by a visited set: a chain written
+   * by hand could link in a cycle, and a lookup that hangs the A2A server is worse than one that
+   * stops at the cycle.
+   */
+  listChain(runId: string): Run[] {
+    const lookup = this.db.prepare('SELECT id, retry_of FROM runs WHERE id = ?');
+    let root = lookup.get(runId) as { id: string; retry_of: string | null } | undefined;
+    if (!root) return [];
+    const seen = new Set<string>([root.id]);
+    while (root.retry_of && !seen.has(root.retry_of)) {
+      const parent = lookup.get(root.retry_of) as { id: string; retry_of: string | null } | undefined;
+      // A dangling link (the parent row is gone) ends the walk: report the chain that exists.
+      if (!parent) break;
+      seen.add(parent.id);
+      root = parent;
+    }
+    const rows = this.db
+      .prepare(
+        `WITH RECURSIVE chain(id) AS (
+           SELECT id FROM runs WHERE id = ?
+           UNION ALL
+           SELECT r.id FROM runs r JOIN chain c ON r.retry_of = c.id
+         )
+         SELECT runs.* FROM runs JOIN chain ON runs.id = chain.id
+         ORDER BY runs.attempt ASC, runs.created_at ASC, runs.id ASC`,
+      )
+      .all(root.id) as unknown as RunRow[];
+    return rows.map(rowToRun);
+  }
+
   list(opts: { ownerId?: string; status?: RunStatus; origin?: RunOriginKind; limit: number; cursor?: string }): { runs: Run[]; nextCursor: string | null } {
     const clauses: string[] = [];
     const params: (string | number | null)[] = [];

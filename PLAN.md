@@ -192,12 +192,13 @@ A2A is an edge protocol only (design §2): Mercury as an A2A server, then an A2A
 adapter; bots never talk to each other over A2A. Decisions settled 2026-10-18: server first,
 HTTP+JSON/REST binding, official JS SDK under boundary rules (design §11). Milestone order
 (design §13): **A0** → **A1** minimal server → **A2** streaming and listing → **A3** client
-adapter → **A4** Fleet. A0 filed 2026-10-18; #987 (retry chains) is done, and #988/#989/#990
-follow it.
+adapter → **A4** Fleet. A0 filed 2026-10-18; #986–#988 and #990 are done, and #989 follows
+them. The SDK spike settled **handler-driven** (§11 decision 3): `@a2a-js/sdk@1.3.0` mounted
+on Mercury's own Express app, so A1 can start.
 
 | Issue | Title | State | PR |
 | --- | --- | --- | --- |
-| #986 | A2A SDK integration spike: pin @a2a-js/sdk, decide the integration shape, coupling test… | open | — |
+| #986 | A2A SDK integration spike: pin @a2a-js/sdk, decide the integration shape, coupling test… | done | #1000 |
 | #987 | Retry chains: link retries atomically and make "retry pending" durable (A0-2) | done | #995 |
 | #988 | Server-stamped Run origin: a field no request body can set (A0-3) | done | #996 |
 | #990 | Pure Run-chain → A2A TaskState mapping, exhaustive over RunStatus (A0-4) | done | #998 |

@@ -1411,6 +1411,16 @@ export class RunService {
     return run;
   }
 
+  /**
+   * The whole attempt chain containing `runId`, owner-scoped exactly like `get`: null when the Run
+   * does not exist OR belongs to another owner (A0-1, issue #986). One reading of "may this caller
+   * see this task", so an A2A `GetTask` cannot be more permissive than the native route.
+   */
+  getChain(runId: string, ownerId: string, isAdmin: boolean): Run[] | null {
+    if (!this.get(runId, ownerId, isAdmin)) return null;
+    return this.deps.runs.listChain(runId);
+  }
+
   list(opts: { ownerId: string; isAdmin: boolean; status?: RunStatus; origin?: RunOriginKind; limit: number; cursor?: string }) {
     return this.deps.runs.list({
       ownerId: opts.isAdmin ? undefined : opts.ownerId,
