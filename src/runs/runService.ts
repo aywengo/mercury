@@ -7,7 +7,7 @@ import { validateModelShape } from '../domain/modelShape.ts';
 export { validateModelShape };
 import { isTerminal } from '../domain/stateMachine.ts';
 import { TERMINAL_GOAL_STATUSES } from '../domain/goalEvents.ts';
-import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../domain/errors.ts';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError, isClassifiedError } from '../domain/errors.ts';
 import type { Redactor } from '../domain/redact.ts';
 import type { AgentCapabilitySummary, GoalState, GoalStatus, GoalSummary, RepositoryContext, ResolvedSkill, Run, RunConstraints, RunStatus } from '../domain/types.ts';
 import { goalCapabilityMessage, goalFieldCapabilityMessage } from '../domain/goalSupport.ts';
@@ -1675,14 +1675,15 @@ export class RunService {
       return this.retryAttempt(original, opts);
     } catch (err) {
       // A recorded retry decision that cannot be honoured must not stay recorded: the chain is
-      // final, and the reason has to be readable (issue #987 acceptance 3). Only a DECIDED refusal
-      // counts -- a ConflictError from the budget or the parent's status, or a ValidationError from
-      // create()'s checks. A claim failure is not a refusal (another worker owns the retry, the
-      // chain is not final and the intent is already gone), and neither is an unexpected error: a
-      // failed database write is not an answer about whether the retry can happen, so the intent
-      // stays recorded and the next recovery sweep tries again rather than the chain being
-      // finalised by an error nobody decided on.
-      if (err instanceof ConflictError || err instanceof ValidationError) this.refuseRetryIntent(original, err);
+      // final, and the reason has to be readable (issue #987 acceptance 3). Only a CLASSIFIED
+      // outcome counts as a refusal -- the per-Run budget or the parent's status (ConflictError),
+      // a shape or parity check in create() (ValidationError), the credential profile no longer
+      // allowing the owner (ForbiddenError). A claim failure is not a refusal (another worker owns
+      // the retry, so the chain is not final and the intent is already gone), and neither is an
+      // unexpected error: a failed database write is not an answer about whether the retry can
+      // happen, so the intent stays recorded and the next recovery sweep tries again rather than
+      // the chain being finalised by an error nobody decided on.
+      if (isClassifiedError(err)) this.refuseRetryIntent(original.id, err);
       throw err;
     }
   }
@@ -1796,13 +1797,33 @@ export class RunService {
    * afterwards and produce a second child.
    */
   private claimRetryLink(link: { retryOf: string; attempt: number; claimIntent: boolean }): void {
-    const cleared = link.claimIntent
-      ? this.deps.db
-          .prepare('UPDATE runs SET retry_due_at = NULL WHERE id = ? AND retry_due_at IS NOT NULL')
-          .run(link.retryOf)
-      : this.deps.db.prepare('UPDATE runs SET retry_due_at = NULL WHERE id = ?').run(link.retryOf);
-    if (link.claimIntent && cleared.changes !== 1) {
-      throw new RetryClaimedError(`retry of ${link.retryOf} is already claimed`);
+    if (link.claimIntent) {
+      const cleared = this.deps.db
+        .prepare('UPDATE runs SET retry_due_at = NULL WHERE id = ? AND retry_due_at IS NOT NULL')
+        .run(link.retryOf);
+      if (cleared.changes !== 1) {
+        throw new RetryClaimedError(`retry of ${link.retryOf} is already claimed`);
+      }
+    } else {
+      this.deps.db.prepare('UPDATE runs SET retry_due_at = NULL WHERE id = ?').run(link.retryOf);
+    }
+    // One child per attempt. A chain is LINEAR -- attempt N+1 retries attempt N -- and that is not
+    // a convention, it is what makes `latest` well defined for a reader: two children of one
+    // attempt are two attempts with the same number, and chainState can then only guess which one
+    // speaks for the chain. Inserting the link atomically (above) did not by itself prevent that,
+    // because nothing rejected a second child.
+    //
+    // Checked INSIDE the child's transaction on purpose: tx() opens with BEGIN IMMEDIATE, so two
+    // concurrent retries of one attempt cannot both pass -- the second waits for the first to
+    // commit and then sees its child. An automatic retry cannot reach here with a child already
+    // present (the child's own transaction clears the intent, so the claim above fails first), so
+    // this is the manual path's guard. Pre-#987 data may already hold a fork; chainState stays
+    // honest about those rather than this refusing to run.
+    const existing = this.deps.db
+      .prepare('SELECT id FROM runs WHERE retry_of = ? LIMIT 1')
+      .get(link.retryOf) as { id: string } | undefined;
+    if (existing) {
+      throw new ConflictError(`Run ${link.retryOf} already has a retry (${existing.id})`);
     }
   }
 
@@ -1815,12 +1836,20 @@ export class RunService {
    * reasons (already COMPLETED, not terminal) is not an unhonoured retry DECISION, the caller
    * already has the error, and a Run's event log should not gain a line for every 409.
    */
-  private refuseRetryIntent(original: Run, err: unknown): void {
-    if ((original.retryDueAt ?? null) === null) return;
+  private refuseRetryIntent(runId: string, err: unknown): void {
     const reason = err instanceof Error ? err.message : String(err);
     tx(this.deps.db, () => {
-      this.deps.db.prepare('UPDATE runs SET retry_due_at = NULL WHERE id = ?').run(original.id);
-      this.deps.events.append(original.id, 'run.retry_refused', { runId: original.id, reason });
+      // Conditional, and the reason is recorded only when THIS call cleared the intent. A snapshot
+      // read before the transaction is not enough: two workers can both see a pending intent and
+      // both refuse it, and a refusal that arrives after another worker committed the child would
+      // report a refusal for an intent that WAS honoured. The UPDATE is the arbiter -- exactly one
+      // caller sees `changes === 1` -- and a Run with no intent is left untouched, so a manual
+      // retry refused for its own reasons (already COMPLETED, not terminal) adds no event.
+      const cleared = this.deps.db
+        .prepare('UPDATE runs SET retry_due_at = NULL WHERE id = ? AND retry_due_at IS NOT NULL')
+        .run(runId);
+      if (cleared.changes !== 1) return;
+      this.deps.events.append(runId, 'run.retry_refused', { runId, reason });
     });
   }
 

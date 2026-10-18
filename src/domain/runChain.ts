@@ -37,15 +37,26 @@ export interface ChainState {
 export function chainState(chain: readonly Run[]): ChainState {
   if (chain.length === 0) throw new Error('chainState requires at least one attempt');
   const latest = chain.reduce((best, run) => (isNewer(run, best) ? run : best));
-  const childless = !chain.some((run) => run.retryOf === latest.id);
+  const childless = (run: Run): boolean => !chain.some((candidate) => candidate.retryOf === run.id);
+  /** Terminal, childless and still holding a recorded retry intent: waiting, not finished. */
+  const pending = (run: Run): boolean =>
+    isTerminal(run.status) && childless(run) && (run.retryDueAt ?? null) !== null;
   const terminal = isTerminal(latest.status);
-  const retryPending = terminal && childless && (latest.retryDueAt ?? null) !== null;
+  const retryPending = pending(latest);
+  // "No further attempt will be made" is a statement about the WHOLE chain, not about the latest
+  // attempt. For a linear chain the two are the same -- and every chain this codebase writes is
+  // linear, because #987 writes the link in the child's insert and refuses a second child of one
+  // attempt. A forked chain does not: the newest attempt can be terminal and quiet while a SIBLING
+  // is still running or has a retry pending, and calling that final tells a client the work is over
+  // while it is not. So no attempt may be live -- non-terminal, or waiting on a retry.
+  const live = chain.some((run) => !isTerminal(run.status) || pending(run));
   return {
     latest,
     retryPending,
-    // A terminal attempt that already has a child is not final: the further attempt exists, it is
-    // simply not in the `latest` slot. Both flags false is the honest reading of that state.
-    final: terminal && childless && !retryPending,
+    // `retryPending` implies `live`, so a pending chain is never final; a terminal attempt that
+    // already has a child in the chain is not final either -- the further attempt exists, it is
+    // simply not in the `latest` slot. Both flags false is the honest reading of those states.
+    final: terminal && childless(latest) && !live,
   };
 }
 

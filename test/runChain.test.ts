@@ -137,6 +137,36 @@ test('chainState: an attempt that already has a child in the chain is neither fi
   assert.equal(state.final, false);
 });
 
+test('chainState: a fork with a live sibling is not final, whichever attempt is newest', () => {
+  // A forked chain -- data written before #987 allowed a second manual retry of one attempt. The
+  // newest attempt is terminal and quiet, but its sibling is still RUNNING: "no further attempt
+  // will be made" is false, so the chain must not read final.
+  const parent = attempt(1, 'FAILED');
+  const running = mkRun({ id: 'run_sibA', attempt: 2, retryOf: 'run_attempt1', status: 'RUNNING', createdAt: '2026-10-18T10:02:00.000Z' });
+  const quiet = mkRun({ id: 'run_sibB', attempt: 2, retryOf: 'run_attempt1', status: 'FAILED', createdAt: '2026-10-18T10:03:00.000Z' });
+  const state = chainState([parent, running, quiet]);
+  assert.equal(state.latest.id, 'run_sibB');
+  assert.equal(state.retryPending, false);
+  assert.equal(state.final, false, 'a sibling is still running, so the work is not over');
+});
+
+test('chainState: a fork whose quiet sibling has a retry pending is not final either', () => {
+  const parent = attempt(1, 'FAILED');
+  const pendingSibling = mkRun({
+    id: 'run_sibA', attempt: 2, retryOf: 'run_attempt1', status: 'FAILED',
+    retryDueAt: '2026-10-18T10:00:05.000Z', createdAt: '2026-10-18T10:02:00.000Z',
+  });
+  const quiet = mkRun({ id: 'run_sibB', attempt: 2, retryOf: 'run_attempt1', status: 'FAILED', createdAt: '2026-10-18T10:03:00.000Z' });
+  const state = chainState([parent, pendingSibling, quiet]);
+  assert.equal(state.latest.id, 'run_sibB');
+  assert.equal(state.final, false, 'a sibling still intends to retry, so the work is not over');
+
+  // Control: the same fork with the intent gone is final, so the assertion above is about the
+  // sibling's intent and not about forks in general.
+  const withoutIntent = mkRun({ ...pendingSibling, retryDueAt: null });
+  assert.equal(chainState([parent, withoutIntent, quiet]).final, true);
+});
+
 test('chainState: an empty chain is refused rather than answered', () => {
   assert.throws(() => chainState([]), /at least one attempt/);
 });

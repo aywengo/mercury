@@ -355,6 +355,107 @@ test('retry: an unexpected failure leaves the intent recorded, so recovery can t
   }
 });
 
+test('retry: a second manual retry of one attempt is refused, so the chain stays linear (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+
+    const first = env.runService.retry(run.id, 'alice', true);
+    assert.equal(first.retryOf, run.id);
+    // Two children of one attempt are two attempts with the same number: `latest` stops being well
+    // defined, and a chain that forked this way can report final while a sibling is still running.
+    assert.throws(
+      () => env.runService.retry(run.id, 'alice', true),
+      /already has a retry/,
+      'a second child of one attempt must be refused, not silently created',
+    );
+    const children = env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 20 }).runs.filter((r) => r.retryOf === run.id);
+    assert.equal(children.length, 1);
+    assert.equal(children[0]!.id, first.id);
+
+    // The chain is still retryable the linear way: retry the CHILD, not the parent again.
+    env.runs.transition(first.id, 'STARTING');
+    env.runs.transition(first.id, 'FAILED', { completedAt: new Date().toISOString() });
+    const second = env.runService.retry(first.id, 'alice', true);
+    assert.equal(second.retryOf, first.id);
+    assert.equal(second.attempt, 3);
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: a stale refusal records no event and does not clear an honoured intent (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', {
+      completedAt: new Date().toISOString(),
+      retryDueAt: new Date(Date.now() + 30_000).toISOString(),
+    });
+    // The snapshot a refuser holds when another worker's child committed in between: the Run as it
+    // looked BEFORE that transaction ran -- intent present, budget spent. Reading it before the
+    // transaction is exactly what makes an unconditional clear-and-record wrong.
+    const beforeChild = env.runs.get(run.id)!;
+    assert.notEqual(beforeChild.retryDueAt ?? null, null);
+    const child = env.runService.retry(run.id, 'alice', true);
+    assert.equal(env.runs.get(run.id)!.retryDueAt, null, 'the child transaction cleared the intent');
+
+    const stale = { ...beforeChild, attempt: beforeChild.constraints.maxRetries + 1 };
+    const realGet = env.runs.get.bind(env.runs);
+    env.runs.get = (id: string) => (id === run.id ? stale : realGet(id));
+    try {
+      assert.throws(() => env.runService.retry(run.id, 'alice', true, { auto: true }), /Max retries reached/);
+    } finally {
+      env.runs.get = realGet;
+    }
+
+    assert.equal(
+      env.events.list(run.id).some((e) => e.type === 'run.retry_refused'),
+      false,
+      'a refusal for an intent that was honoured must not be recorded',
+    );
+    assert.equal(env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 20 }).runs.filter((r) => r.retryOf === run.id).length, 1);
+    assert.equal(env.runs.get(child.id)!.retryOf, run.id);
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: two refusers of one intent record the reason once (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake', constraints: { maxRetries: 0 },
+    });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', {
+      completedAt: new Date().toISOString(),
+      retryDueAt: new Date(Date.now() + 30_000).toISOString(),
+    });
+
+    // Two workers that both read the pending intent before either committed. The UPDATE is the
+    // arbiter, so exactly one of them may clear it and record why.
+    const live = env.runs.get(run.id)!;
+    const realGet = env.runs.get.bind(env.runs);
+    env.runs.get = (id: string) => (id === run.id ? live : realGet(id));
+    try {
+      assert.throws(() => env.runService.retry(run.id, 'alice', true, { auto: true }), /Max retries reached/);
+      assert.throws(() => env.runService.retry(run.id, 'alice', true, { auto: true }), /Max retries reached/);
+    } finally {
+      env.runs.get = realGet;
+    }
+
+    assert.equal(env.runs.get(run.id)!.retryDueAt, null);
+    const refused = env.events.list(run.id).filter((e) => e.type === 'run.retry_refused');
+    assert.equal(refused.length, 1, `expected one refusal event, got ${refused.length}`);
+  } finally {
+    env.close();
+  }
+});
+
 test('retry: two workers holding the same stale pending read create exactly one child (issue #987)', () => {
   const env = makeEnv({ workerEnabled: false });
   try {

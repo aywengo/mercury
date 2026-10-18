@@ -67,3 +67,19 @@ export class ConflictError extends Error {
     this.name = 'ConflictError';
   }
 }
+
+/**
+ * True for the four classes above: an outcome the server CLASSIFIED, as opposed to a failure it did
+ * not (a driver error, a broken invariant, a bug).
+ *
+ * The distinction matters wherever a caller has to decide whether an error is an ANSWER. A retry
+ * refused because the budget is spent, the parent completed, or the credential profile no longer
+ * allows the owner is a decision, and the chain it belonged to is final. A failed database write is
+ * not: nothing decided anything, so the decision has to stay open and be tried again.
+ */
+export function isClassifiedError(err: unknown): boolean {
+  return err instanceof ValidationError
+    || err instanceof NotFoundError
+    || err instanceof ForbiddenError
+    || err instanceof ConflictError;
+}

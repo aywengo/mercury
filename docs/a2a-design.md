@@ -228,7 +228,12 @@ Rules:
     that creates the child, in that child's own transaction (`CreateRunInput.retryLink`,
     internal-only — no route can set it). There is no interval in which an attempt exists
     without its parent, so a worker in another process claiming the child never mistakes a
-    retry for a first attempt.
+    retry for a first attempt. The same transaction refuses a SECOND child of one attempt, so
+    a chain is **linear**: an attempt is retried at most once, which is what makes "the latest
+    attempt" a well-defined thing to report. A forked chain (data written before #987, when a
+    second manual retry of one attempt was allowed) is still read conservatively by
+    `chainState` — it reports final only when no attempt in the chain is running or waiting on
+    a retry, never merely because the newest one is quiet.
   - **A retry decision is durable.** When the worker decides to retry an infrastructure
     failure it records the due time as `runs.retry_due_at` in the same statement as the
     terminal status, and the transaction that creates the child is the one that clears it.
