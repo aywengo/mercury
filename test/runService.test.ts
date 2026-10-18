@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { openDatabase } from '../src/db/database.ts';
 import { makeEnv, tempDir, waitFor } from './helpers.ts';
 import type { AgentAdapter, RunConstraints } from '../src/domain/types.ts';
+import { hasStarted } from '../src/domain/types.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import { FakeAgentAdapter } from '../src/adapters/fakeAgentAdapter.ts';
 import { validateModelShape } from '../src/runs/runService.ts';
@@ -1466,6 +1467,49 @@ test('transition extra refuses a caller-supplied statusChangedAt (issue #906 rev
     const r = env.runs.get(run.id)!;
     assert.equal(r.status, 'QUEUED');
     assert.equal(r.statusChangedAt, run.createdAt);
+  } finally {
+    env.close();
+  }
+});
+
+test('a shutdown requeue clears startedAt but keeps firstStartedAt (A0-4, issue #990)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    const claimed = env.queue.claim('worker-1', 60_000);
+    assert.equal(claimed?.id, run.id);
+    env.runs.transition(run.id, 'STARTING');
+    const startedAt = new Date().toISOString();
+    env.runs.transition(run.id, 'RUNNING', { startedAt });
+    assert.equal(env.runs.get(run.id)!.firstStartedAt, startedAt, 'the first start rides the startedAt write');
+
+    assert.equal(env.queue.requeueForShutdown(run.id, 'worker-1'), true);
+    const requeued = env.runs.get(run.id)!;
+    assert.equal(requeued.status, 'QUEUED');
+    // Deliberate: the duration and queue-wait metrics measure the CURRENT execution, so the requeue
+    // must null this. It is also why the "has this attempt run" fact needs its own column.
+    assert.equal(requeued.startedAt, null, 'the requeue clears the current execution start');
+    assert.equal(requeued.firstStartedAt, startedAt, 'the fact that this attempt ran must survive the requeue');
+    assert.equal(hasStarted(requeued), true);
+
+    // A second execution moves `startedAt` and must NOT move the first-start stamp.
+    env.runs.transition(run.id, 'STARTING');
+    const second = new Date(Date.now() + 1000).toISOString();
+    env.runs.transition(run.id, 'RUNNING', { startedAt: second });
+    const rerun = env.runs.get(run.id)!;
+    assert.equal(rerun.startedAt, second, 'startedAt follows the current execution');
+    assert.equal(rerun.firstStartedAt, startedAt, 'firstStartedAt stays the FIRST');
+
+    // One writer, enforced rather than documented: a caller-supplied value would add a second
+    // assignment to the same SET and win silently under last-binding-wins.
+    assert.throws(
+      () => env.runs.transition(run.id, 'COMPLETED', { firstStartedAt: '2000-01-01T00:00:00.000Z' }),
+      /must not set firstStartedAt/,
+    );
+    // A Run that never reached RUNNING has no first start at all.
+    const never = env.runService.create({ ownerId: 'alice', task: 'y', agent: 'fake' });
+    assert.equal(env.runs.get(never.id)!.firstStartedAt, null);
+    assert.equal(hasStarted(env.runs.get(never.id)!), false);
   } finally {
     env.close();
   }

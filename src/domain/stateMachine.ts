@@ -68,9 +68,22 @@ export function assertTransition(from: RunStatus, to: RunStatus): void {
  * BEFORE the run transitions to STARTING, so a worker that dies in that window leaves a QUEUED run
  * holding a lease. That is why reapExpiredLeases clears rather than fails on QUEUED.
  */
-export const LEASE_HOLDING_STATUSES: readonly RunStatus[] = (
-  Object.keys(TRANSITIONS) as RunStatus[]
-).filter((s) => !isTerminal(s));
+/**
+ * Every status the machine knows, as a RUNTIME list, derived from the transition table (A0-4, issue
+ * #990).
+ *
+ * The table is typed `Record<RunStatus, ...>`, so its keys ARE the union -- which makes this the one
+ * copy that cannot drift from `RunStatus`. Tests that must cover every status iterate this instead
+ * of restating the eight strings; a hand-maintained copy is how "every status is mapped" becomes a
+ * claim about the copy rather than about the code.
+ *
+ * A missing key is a compile error, so a new status cannot be added without appearing here; a key
+ * that is not in the union is also a compile error. That is the whole guarantee, and it is why this
+ * is derived rather than declared.
+ */
+export const RUN_STATUSES: readonly RunStatus[] = Object.keys(TRANSITIONS) as RunStatus[];
+
+export const LEASE_HOLDING_STATUSES: readonly RunStatus[] = RUN_STATUSES.filter((s) => !isTerminal(s));
 
 /**
  * Statuses in which a worker is ACTUALLY executing a run it owns: it has left the queue and has not

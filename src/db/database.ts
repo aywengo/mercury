@@ -503,6 +503,42 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE runs ADD COLUMN origin_ref TEXT;
   CREATE INDEX IF NOT EXISTS idx_runs_origin_kind ON runs(origin_kind);
   `,
+  // v21: when this attempt FIRST began executing (A0-4, issue #990). `started_at` cannot answer
+  // that: a graceful-shutdown requeue (issue #51) nulls it on purpose so the duration and queue-wait
+  // metrics measure the current execution, which also erases the only persisted record that the
+  // attempt ran at all. Two readers need that fact -- the A2A state mapping (a task the caller saw
+  // WORKING must not go back to SUBMITTED on every deploy) and goal settlement (`attempted` must not
+  // read false for an attempt that ran for ten minutes and was then requeued and cancelled).
+  //
+  // Written by the same statement as `started_at`, with COALESCE so the FIRST value wins, and never
+  // cleared. A column rather than an event because the question is asked per-Run by a list endpoint
+  // (A2A `ListTasks`), where an event scan is a per-task query; and rather than reusing `started_at`
+  // because the requeue is a raw UPDATE in RunQueue that bypasses RunStore.transition, so "preserve
+  // it by not mentioning it there" would be a property of one SQL string that nothing checks.
+  //
+  // BACKFILLED, unlike the other additive columns here (status_changed_at, origin_kind). The
+  // difference is what the value is for. A missing measurement can stay missing: nothing is wrong
+  // with reporting "unknown duration". A missing fact is a wrong answer, and `hasStarted` falls back
+  // to `started_at` -- which the shutdown requeue clears. So for a Run that is already active when
+  // this migration runs, the fallback is the ONLY evidence that it executed, and the next requeue
+  // destroys it (PR #998 review round 1). Deferring the fallback to read time is the same backfill
+  // performed later, at a moment when the value may already be gone; doing it here is what makes it
+  // survive.
+  //
+  // Both sources are real records, and the event wins because it is the exact start the transition
+  // wrote. `started_at` follows for a row whose event is missing (pruned, or written by a build that
+  // did not emit one). A row that never ran has neither, so it stays NULL -- nothing is invented.
+  `
+  ALTER TABLE runs ADD COLUMN first_started_at TEXT;
+  UPDATE runs SET first_started_at = (
+    SELECT MIN(json_extract(e.payload_json, '$.startedAt'))
+      FROM events e WHERE e.run_id = runs.id AND e.type = 'run.started'
+  ) WHERE first_started_at IS NULL AND EXISTS (
+    SELECT 1 FROM events e WHERE e.run_id = runs.id AND e.type = 'run.started'
+  );
+  UPDATE runs SET first_started_at = started_at
+   WHERE first_started_at IS NULL AND started_at IS NOT NULL;
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

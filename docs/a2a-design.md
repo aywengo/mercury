@@ -291,7 +291,7 @@ Rules:
 
 | RunStatus | TaskState | Note |
 | --- | --- | --- |
-| `QUEUED` | `TASK_STATE_SUBMITTED` | |
+| `QUEUED` | `TASK_STATE_SUBMITTED` | never started; see the requeue row below |
 | `STARTING` | `TASK_STATE_SUBMITTED` | claimed, not yet driving |
 | `RUNNING` | `TASK_STATE_WORKING` | |
 | `NEEDS_INPUT` | `TASK_STATE_INPUT_REQUIRED` | interrupted state; §6.6 continues it |
@@ -299,6 +299,27 @@ Rules:
 | `FAILED` | `TASK_STATE_WORKING` if a retry is pending, else `TASK_STATE_FAILED` | includes `run.deadline_missed` (#731) |
 | `TIMED_OUT` | as `FAILED` | status message says timed out |
 | `CANCELLED` | `TASK_STATE_CANCELED` | |
+| `QUEUED` **or** `STARTING` after a shutdown requeue | `TASK_STATE_WORKING` | the attempt has already executed (#51) |
+
+- **A requeued attempt does not go back to `SUBMITTED`.** A graceful-shutdown requeue
+  (`RunQueue.requeueForShutdown`, #51) returns an active Run to `QUEUED`, and the
+  re-claiming worker passes it through `STARTING` again. The caller has already seen the
+  task as `WORKING`, and A2A gives no way to un-say that: reporting `SUBMITTED` would read
+  as the work restarting from nothing on every deploy. So an attempt that has executed stays
+  `TASK_STATE_WORKING` in both statuses.
+- **"Has executed" is read from `first_started_at`** (#990), written by the same statement
+  as `started_at` and never cleared. `started_at` cannot answer the question: the requeue
+  nulls it deliberately, so the duration and queue-wait metrics measure the current
+  execution rather than the sum of all of them. `Run.firstStartedAt` is that stamp, and
+  `hasStarted()` (`src/domain/types.ts`) is the one reading of it. Goal settlement (#489)
+  reads the same helper, so a requeued-then-cancelled attempt is not recorded as
+  `attempted: false`.
+- **The v21 migration backfills the stamp** from the first `run.started` event (the exact
+  start the transition recorded), or from `started_at` when the event is missing. A Run that
+  is already active when the upgrade runs must keep its evidence: leaving the column NULL
+  and reading `started_at` instead would lose it at the next shutdown requeue, which is
+  precisely the state this rule is about. A Run that never ran has neither record, so it
+  stays NULL and nothing is invented.
 
 - Mercury never emits `TASK_STATE_REJECTED`, `TASK_STATE_AUTH_REQUIRED` or
   `TASK_STATE_UNSPECIFIED` in v1. A request that cannot become a Run gets an error and

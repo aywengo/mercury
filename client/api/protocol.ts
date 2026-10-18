@@ -85,6 +85,11 @@ export interface Run {
    *  migration. Read-only: no request body can set it, and the server refuses one that tries.
    *  Distinct from `constraints.botTask`, which is a client-supplied hint the server never trusts. */
   origin?: RunOrigin | null;
+  /** When this attempt FIRST began executing (A0-4, issue #990), or null when it never has.
+   *  Unlike `startedAt`, this survives a shutdown requeue, so it answers "has this attempt ever
+   *  run?". Null also for rows that predate the server's v21 migration -- fall back to `startedAt`
+   *  then, which is what the server's own `hasStarted` helper does. */
+  firstStartedAt?: string | null;
   finalCommits: string[];
   prUrl: string | null;
   /**

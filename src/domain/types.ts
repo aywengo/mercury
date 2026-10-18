@@ -157,6 +157,48 @@ export interface Run {
    * exactly the same way, and both mean "no origin recorded".
    */
   origin?: RunOrigin | null;
+  /**
+   * When this attempt FIRST began executing (A0-4, issue #990). Written by the same statement that
+   * writes `startedAt`, and never cleared -- `COALESCE(first_started_at, ?)` keeps the first value.
+   *
+   * It exists because `startedAt` cannot answer "has this attempt executed?": a graceful-shutdown
+   * requeue (issue #51) sets `started_at = NULL` on purpose, so the duration and queue-wait metrics
+   * measure the CURRENT execution rather than the sum of all of them. That erases the only persisted
+   * record that the attempt ran at all, and two readers need it: the A2A state mapping must not
+   * report a task the caller saw `WORKING` as `SUBMITTED` again on every deploy, and goal settlement
+   * must not record `attempted: false` for an attempt that ran for ten minutes before being requeued
+   * and then cancelled.
+   *
+   * A column rather than a new event, and rather than `started_at` itself: the requeue is a raw
+   * UPDATE in `RunQueue.requeueForShutdown` that bypasses `RunStore.transition`, so "preserve the
+   * fact by not mentioning it there" would be a property of one SQL string that nothing checks.
+   * Nothing but `RunStore.transition` writes this column, and no code path clears it.
+   *
+   * Optional-with-null, and the v21 migration BACKFILLS it (from the first `run.started` event, or
+   * from `started_at`) precisely so that NULL means "never started" rather than "written before
+   * v21" -- the fallback in `hasStarted` cannot repair a row whose `started_at` a later requeue has
+   * already cleared.
+   */
+  firstStartedAt?: string | null;
+}
+
+/**
+ * True when this attempt has ever begun executing (A0-4, issue #990).
+ *
+ * The one reading of that question in the codebase, so the A2A state mapping and goal settlement
+ * cannot answer it differently.
+ *
+ * `firstStartedAt` is the answer: a column the shutdown requeue does not clear, backfilled by the
+ * v21 migration for every row that had already run. `startedAt` is the fallback, and after that
+ * migration it should not be reached -- it stays because it is the definition of the fact rather
+ * than a special case, and because reading only `firstStartedAt` would turn any Run object that
+ * lacks the field into a confident "never started" instead of a wrong one.
+ *
+ * `startedAt` alone is NOT an answer: a shutdown requeue clears it, so a requeued attempt would
+ * read as never-started -- which is the bug this function exists to close.
+ */
+export function hasStarted(run: Pick<Run, 'firstStartedAt' | 'startedAt'>): boolean {
+  return (run.firstStartedAt ?? run.startedAt ?? null) !== null;
 }
 
 /**
