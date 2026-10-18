@@ -22,7 +22,6 @@ import {
 import type { AgentCard, CancelTaskRequest, GetExtendedAgentCardRequest, GetTaskRequest, ListTasksRequest, ListTasksResponse, Message, Part, SendMessageRequest, StreamResponse, Task, TaskPushNotificationConfig, GetTaskPushNotificationConfigRequest, ListTaskPushNotificationConfigsRequest, ListTaskPushNotificationConfigsResponse, DeleteTaskPushNotificationConfigRequest, SubscribeToTaskRequest } from '@a2a-js/sdk';
 import type { A2ARequestHandler, ServerCallContext } from '@a2a-js/sdk/server';
 import { chainState } from '../domain/runChain.ts';
-import { isTerminal } from '../domain/stateMachine.ts';
 import { NotFoundError, ConflictError } from '../domain/errors.ts';
 import { buildExtendedAgentCard, buildPublicAgentCard } from './agentCard.ts';
 import { A2A_SKILL_ID_KEY, A2A_SKILL_SELECTION_EXTENSION, skillsForOwner, type A2aDeps, type A2aExposedSkill } from './config.ts';
@@ -64,6 +63,15 @@ export function createA2aRequestHandler(deps: A2aDeps): A2ARequestHandler {
         );
       }
 
+      // Section 6.4: v1 generates one contextId per task, so a caller-supplied one cannot be
+      // honoured. Accepting it would create the Run and then answer with a DIFFERENT context --
+      // silently doing work in a context the caller believes it chose.
+      if (message.contextId) {
+        throw new RequestMalformedError(
+          'A new task may not carry a contextId: Mercury generates one per task and cannot honour a caller-supplied one (docs/a2a-design.md section 6.4).',
+        );
+      }
+
       const skill = resolveSkill(config, user.ownerId, message, context);
       const text = textOf(message);
       const limit = skill.inputMaxChars ?? 8000;
@@ -73,7 +81,11 @@ export function createA2aRequestHandler(deps: A2aDeps): A2ARequestHandler {
 
       const run = runService.create({
         ownerId: user.ownerId,
-        task: skill.template.task.replace('{{input}}', text),
+        // A replacement FUNCTION, not a string: `String.replace` interprets `$&`, `$$`, `` $` ``
+        // and `$'` in a string replacement, so caller text containing any of them would reach the
+        // agent mangled -- and this is a coding agent, where a `$&` in a regex or a `$$` in a shell
+        // snippet is ordinary. The function returns the text literally.
+        task: skill.template.task.replace('{{input}}', () => text),
         repository: skill.template.repository,
         agent: skill.template.agent,
         constraints: skill.template.constraints,
@@ -88,7 +100,10 @@ export function createA2aRequestHandler(deps: A2aDeps): A2ARequestHandler {
       if (params.configuration?.returnImmediately === true) {
         return taskFor(runService, run.id, user.ownerId, user.isAdmin);
       }
-      await waitForSettled(runService, run.id, user.ownerId, user.isAdmin, run.constraints.maxDurationMs);
+      await waitForSettled(
+        runService, run.id, user.ownerId, user.isAdmin,
+        run.constraints.maxDurationMs, run.constraints.maxRetries,
+      );
       return taskFor(runService, run.id, user.ownerId, user.isAdmin);
     },
 
@@ -200,18 +215,23 @@ async function waitForSettled(
   ownerId: string,
   isAdmin: boolean,
   maxDurationMs: number,
+  maxRetries: number,
 ): Promise<void> {
-  const deadline = Date.now() + maxDurationMs + SETTLE_MARGIN_MS;
+  // Bounded per ALLOWED ATTEMPT, not per Run: the wait now covers a retry backoff, and a chain may
+  // make `maxRetries + 1` attempts. Every attempt is bounded by its own `maxDurationMs`, so the
+  // whole wait still cannot outlive the work it is waiting on.
+  const attempts = Math.max(1, maxRetries + 1);
+  const deadline = Date.now() + attempts * (maxDurationMs + SETTLE_MARGIN_MS);
   while (Date.now() < deadline) {
     const chain = runService.getChain(taskId, ownerId, isAdmin);
     if (!chain) return;
     const latest = chain[chain.length - 1]!;
+    // `final` is the precise predicate (section 6.4): terminal AND childless AND no retry intended
+    // AND no other attempt still live. An earlier version also returned on `isTerminal(latest)`,
+    // which ended the wait during a retry BACKOFF and reported the failed attempt as the task --
+    // exactly the terminal-or-interrupted contract section 6.6 exists to keep, since the task is
+    // the chain and another attempt is coming.
     if (chainState(chain).final || latest.status === 'NEEDS_INPUT') return;
-    // A retry pending on the latest attempt means the chain is not final, but the caller is waiting
-    // for THIS attempt's answer: report it now, in the WORKING state the mapping gives it, rather
-    // than holding the connection open through a backoff.
-    if (chainState(chain).retryPending) return;
-    if (isTerminal(latest.status)) return;
     await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_MS));
   }
 }

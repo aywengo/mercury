@@ -355,10 +355,14 @@ under the A2A prefix; streaming operations use the binding's SSE.
 
 **Blocking `SendMessage`.** The spec makes blocking the default: without
 `returnImmediately: true`, the call waits for a terminal or interrupted state. Mercury
-honours that rather than refusing it. The wait is bounded because every Run is bounded —
-`maxDurationMs` is enforced and `notAfter` counts queue time — so a blocking call
-cannot outlive its Run's own deadline. Clients that want to disconnect use
-`returnImmediately: true` and poll or subscribe.
+honours that rather than refusing it. **Terminal means the CHAIN, not the attempt**
+(§6.4): an attempt that failed with an automatic retry pending is terminal while the work is
+not, so the wait continues through the backoff and reports the chain's state rather than
+ending on the attempt that happened to end first. The wait is bounded because every ATTEMPT
+is bounded — `maxDurationMs` is enforced and `notAfter` counts queue time — so the bound is
+one deadline per allowed attempt (`maxRetries + 1`): a blocking call cannot outlive the work
+it is waiting on. Clients that want to disconnect use `returnImmediately: true` and poll or
+subscribe.
 
 ### 6.7 Content in, artifacts out
 
@@ -588,7 +592,19 @@ route (§6.3).
    is a release-artifact decision for the operator, filed as #999 rather than taken here;
    it costs nothing functionally, but it is 39 packages on every `brew install`. The
    SDK's server integration mounts on Mercury's existing Express app and is driven over
-   `RunService`; Mercury writes no A2A transport code of its own. The four open questions,
+   `RunService`; Mercury writes no A2A transport code of its own.
+
+   **Review round 1 closed five gaps between that outcome and the sections above**, each one
+   a rule already written down and not yet implemented, each now covered by a test that
+   drives the real app: the §6.3 refusal of admin and bot owners (which `requireAuth` alone
+   does not make — it ACCEPTS the admin token, and every handler passes `isAdmin` through);
+   the §6.4 refusal of a caller-supplied `contextId` on a new task; §6.6's chain-not-attempt
+   blocking wait; and the §6.1 requirement that A2A Run creation draw on the SAME
+   `createRunLimiter` instance as `POST /api/runs`, since `SendMessage` writes the same
+   queue. The fifth was not a missing rule but a wrong implementation of a written one: the
+   `{{input}}` substitution used a string replacement, so caller text containing `$&` or `$$`
+   reached the agent mangled — the one finding here that could have changed what an agent was
+   asked to do. The four open questions,
    each answered by a test in `test/a2aServer.test.ts` that drives the real SDK over the
    real app:
 
@@ -725,6 +741,15 @@ starts: whether remote-agent Runs need a workspace and repository (§7.1).
 A2A served from Fleet (§11, decision 4).
 
 ## 14. Revision history
+
+### 2026-10-18 (e) — A0-1 review round 1
+
+Five rules the spike stated but did not implement, all fixed in one push with a test each
+(§11 decision 3 lists them): the §6.3 refusal of admin and bot owners, the §6.4 refusal of a
+caller-supplied `contextId`, the §6.6 chain-not-attempt blocking wait, the §6.1 shared
+Run-creation budget, and the `{{input}}` substitution, which had been a string replacement
+and so mangled caller text containing `$&` or `$$`. §6.6's blocking paragraph now says the
+wait is bounded per allowed attempt, because it covers a retry backoff.
 
 ### 2026-10-18 (d) — A0-1 spike settled: handler-driven
 

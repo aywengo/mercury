@@ -6,7 +6,7 @@
 // EXTENDED card, behind authentication, lists exactly the skills the caller's owner may invoke.
 
 import type { AgentCard, AgentCapabilities, AgentExtension, AgentInterface, AgentSkill, SecurityScheme } from '@a2a-js/sdk';
-import { A2A_PREFIX, A2A_PROTOCOL_VERSION, A2A_SKILL_SELECTION_EXTENSION, type A2aConfig, type A2aExposedSkill } from './config.ts';
+import { A2A_PREFIX, A2A_PROTOCOL_VERSION, A2A_SKILL_ID_KEY, A2A_SKILL_SELECTION_EXTENSION, type A2aConfig, type A2aExposedSkill } from './config.ts';
 
 /** The card's security scheme name. Referenced by the interface's requirement and by clients. */
 export const A2A_BEARER_SCHEME = 'mercuryBearer';
@@ -24,7 +24,9 @@ const BEARER: SecurityScheme = {
 
 const SKILL_SELECTION_EXTENSION: AgentExtension = {
   uri: A2A_SKILL_SELECTION_EXTENSION,
-  description: `Skill id is carried in SendMessageRequest.metadata.${'skillId'}; the request must declare this extension.`,
+  // `message.metadata`, not `SendMessageRequest.metadata`: that is the field the handler reads, and
+  // a card that advertises the other one sends a compliant client into a malformed-request error.
+  description: `Skill id is carried in SendMessageRequest.message.metadata.${A2A_SKILL_ID_KEY}; the request must declare this extension.`,
   // Required: a client that does not declare it is refused rather than served a guess (section 6.2).
   required: true,
   params: undefined,

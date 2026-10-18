@@ -12,7 +12,8 @@ import { fileURLToPath } from 'node:url';
 import type { Express } from 'express';
 import { closeServer, createApp } from '../src/api/server.ts';
 import { EventStream } from '../src/events/eventStream.ts';
-import { A2A_AGENT_CARD_PATH, A2A_PREFIX, A2A_SKILL_SELECTION_EXTENSION, type A2aConfig } from '../src/a2a/config.ts';
+import { A2A_AGENT_CARD_PATH, A2A_PREFIX, A2A_SKILL_SELECTION_EXTENSION, BOT_OWNER_PREFIX, type A2aConfig } from '../src/a2a/config.ts';
+import { botOwnerId } from '../src/host/bots/keys.ts';
 import { createRunTaskStore } from '../src/a2a/taskStore.ts';
 import { makeEnv, makeGitRepo, tempDir } from './helpers.ts';
 
@@ -26,6 +27,9 @@ function tempRepo(): string {
 }
 
 function a2aConfig(repo: string, over: Partial<A2aConfig> = {}): A2aConfig {
+  // `maxRetries` is stated rather than left to a default: the blocking-wait test below turns on the
+  // difference between a terminal ATTEMPT and a final CHAIN, and that difference only exists when a
+  // retry is allowed.
   return {
     enabled: true,
     publicUrl: 'http://127.0.0.1:1',
@@ -38,7 +42,7 @@ function a2aConfig(repo: string, over: Partial<A2aConfig> = {}): A2aConfig {
         task: 'An external agent asked for the following.\n---\n{{input}}',
         repository: { localPath: repo, baseBranch: 'main' },
         agent: 'fake',
-        constraints: { maxDurationMs: 30_000 },
+        constraints: { maxDurationMs: 30_000, maxRetries: 0 },
       },
       inputMaxChars: 100,
     }],
@@ -46,15 +50,24 @@ function a2aConfig(repo: string, over: Partial<A2aConfig> = {}): A2aConfig {
   };
 }
 
-function makeApi(env: ReturnType<typeof makeEnv>, a2a?: A2aConfig) {
+function makeApi(
+  env: ReturnType<typeof makeEnv>,
+  a2a?: A2aConfig,
+  opts: {
+    adminToken?: string | null;
+    tokens?: [string, string][];
+    rateLimits?: { createRun?: { windowMs: number; max: number } };
+  } = {},
+) {
   const stream = new EventStream(env.db, env.events, 10);
   stream.start();
   const app = createApp({
     runService: env.runService,
     events: env.events,
     stream,
-    apiTokens: new Map([['tok-alice', 'alice'], ['tok-bob', 'bob']]),
-    adminToken: null,
+    apiTokens: new Map(opts.tokens ?? [['tok-alice', 'alice'], ['tok-bob', 'bob']]),
+    adminToken: opts.adminToken ?? null,
+    ...(opts.rateLimits ? { rateLimits: opts.rateLimits } : {}),
     ...(a2a ? { a2a: { runService: env.runService, config: a2a, version: '0.0.0-test' } } : {}),
   });
   return { app, close: () => stream.stop() };
@@ -285,5 +298,215 @@ test('a default-configured server exposes no A2A route and no agent card', async
         assert.equal((await fetch(`${base}/healthz`)).status, 200);
       } finally { await srv.close(); close(); }
     }
+  } finally { env.close(); }
+});
+
+
+// ---------------------------------------------------------------------------------------------
+// Review round 1 (#1000). Five findings, each one a behavior the design states and the spike did
+// not implement. Every one of them is driven through the real app, because each is a statement
+// about a REQUEST, not about a helper.
+// ---------------------------------------------------------------------------------------------
+
+/** The body the binding accepts for a new task, so the refusal tests are about the refusal. */
+function sendBody(over: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    message: { messageId: 'm1', role: 'ROLE_USER', parts: [{ text: 'hello' }], metadata: { skillId: SKILL_ID }, ...over },
+    configuration: { returnImmediately: true },
+  });
+}
+
+test('section 6.3: admin and bot credentials are refused on every A2A route, and only there', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close } = makeApi(env, a2aConfig(tempRepo()), {
+      adminToken: 'tok-admin',
+      tokens: [['tok-alice', 'alice'], ['tok-bot', 'bot-nightly']],
+    });
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const routes = [
+        ['GET', '/tasks/x'], ['POST', '/message:send'], ['POST', '/tasks/x:cancel'],
+        ['GET', '/tasks'], ['GET', '/extendedAgentCard'],
+      ] as const;
+      for (const [label, header] of [['admin', 'Bearer tok-admin'], ['bot', 'Bearer tok-bot']] as const) {
+        for (const [method, path] of routes) {
+          const res = await fetch(`${base}${A2A_PREFIX}${path}`, {
+            method,
+            headers: { authorization: header, 'content-type': 'application/json', ...V1 },
+            ...(method === 'POST' ? { body: '{}' } : {}),
+          });
+          assert.equal(res.status, 403, `${label} ${method} ${path} must be refused (section 6.3)`);
+        }
+      }
+      // The refusal is Mercury's, BEFORE the SDK: an A2A error body would mean the SDK answered,
+      // and `requireAuth` alone would have accepted the admin token and passed `isAdmin` on.
+      const refused = await fetch(`${base}${A2A_PREFIX}/tasks/x`, { headers: { authorization: 'Bearer tok-admin', ...V1 } });
+      assert.deepEqual(await refused.json(), { error: 'admin credentials are not accepted on A2A routes' });
+      const botRefused = await fetch(`${base}${A2A_PREFIX}/tasks/x`, { headers: { authorization: 'Bearer tok-bot', ...V1 } });
+      assert.deepEqual(await botRefused.json(), { error: 'bot credentials are not accepted on A2A routes' });
+
+      // The public card is the one exemption, and it is exempt from AUTHENTICATION -- so a credential
+      // that is refused everywhere else is simply not consulted here.
+      assert.equal((await fetch(`${base}${A2A_AGENT_CARD_PATH}`)).status, 200);
+      assert.equal((await fetch(`${base}${A2A_AGENT_CARD_PATH}`, { headers: { authorization: 'Bearer tok-admin' } })).status, 200);
+
+      // The refusal is keyed on the prefix the bot layer actually writes, pinned here against the
+      // helper that produces a real bot owner id: a rename on either side would otherwise turn the
+      // gate into a no-op that every test above still passes.
+      assert.ok(botOwnerId('nightly').startsWith(BOT_OWNER_PREFIX),
+        `BOT_OWNER_PREFIX must match the owner ids src/host/bots writes, got ${botOwnerId('nightly')}`);
+
+      // An ordinary owner is unaffected, and the refusal is A2A-SPECIFIC: the admin token is still
+      // admin on the native API, where seeing across owners is the point.
+      assert.equal((await fetch(`${base}${A2A_PREFIX}/extendedAgentCard`, { headers: { ...ALICE, ...V1 } })).status, 200);
+      assert.equal((await fetch(`${base}/api/runs`, { headers: { authorization: 'Bearer tok-admin' } })).status, 200);
+    } finally { await srv.close(); close(); }
+  } finally { env.close(); }
+});
+
+test('section 6.4: a new-task message carrying a contextId is rejected, not silently re-contexted', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close } = makeApi(env, a2aConfig(tempRepo()));
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const res = await fetch(`${base}${A2A_PREFIX}/message:send`, {
+        method: 'POST',
+        headers: { ...ALICE, ...V1 },
+        body: sendBody({ contextId: 'existing-context' }),
+      });
+      const body = await res.json() as RestError;
+      assert.equal(res.status, 400, 'a caller-supplied contextId must be refused');
+      assert.match(body.error?.message ?? '', /contextId/);
+      // The point of the refusal: accepting it would have created a Run and then answered with the
+      // ROOT RUN ID as the context -- work done in a context the caller believes it chose.
+      assert.equal(env.runs.list({ ownerId: 'alice', limit: 10 }).runs.length, 0, 'no Run may be created for a refused message');
+      // The refusal is about the field, not about sending: the same message without it is accepted.
+      const ok = await fetch(`${base}${A2A_PREFIX}/message:send`, {
+        method: 'POST', headers: { ...ALICE, ...V1 }, body: sendBody({ messageId: 'm2' }),
+      });
+      assert.equal(ok.status, 200);
+    } finally { await srv.close(); close(); }
+  } finally { env.close(); }
+});
+
+test('caller text reaches the agent literally, including $& and $$', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close } = makeApi(env, a2aConfig(tempRepo()));
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      // `String.replace` interprets these in a STRING replacement: `$&` is the matched text (here
+      // `{{input}}`), `$$` is one literal `$`. This is a coding agent, so both are ordinary input.
+      const text = 'Fix the regex /$&/ and the shell $$HOME, then `$1`.';
+      const res = await fetch(`${base}${A2A_PREFIX}/message:send`, {
+        method: 'POST', headers: { ...ALICE, ...V1 },
+        body: JSON.stringify({
+          message: { messageId: 'm-literal', role: 'ROLE_USER', parts: [{ text }], metadata: { skillId: SKILL_ID } },
+          configuration: { returnImmediately: true },
+        }),
+      });
+      assert.equal(res.status, 200);
+      const taskId = ((await res.json()) as { task?: TaskBody }).task?.id;
+      assert.ok(taskId);
+      const run = env.runs.get(taskId)!;
+      assert.ok(run.task.includes(text), `the caller's text must arrive unchanged, got: ${run.task}`);
+      assert.ok(!run.task.includes('{{input}}'), 'the placeholder must not survive as the matched text');
+    } finally { await srv.close(); close(); }
+  } finally { env.close(); }
+});
+
+test('section 6.6: a blocking SendMessage waits through a retry backoff and reports the CHAIN', async () => {
+  // An INFRASTRUCTURE failure is the kind the worker auto-retries (worker.ts autoRetryDueAt), so
+  // this is the one shape where a terminal attempt is not a final chain.
+  const env = makeEnv({
+    fakeScript: [{ exit: { code: 1, signal: null, reason: 'failed', errorKind: 'infrastructure' } }],
+    maxRetries: 1,
+    retryBackoffMs: 250,
+  });
+  try {
+    const repo = tempRepo();
+    const config = a2aConfig(repo, {});
+    config.skills = [{ ...config.skills[0]!, template: { ...config.skills[0]!.template, constraints: { maxDurationMs: 30_000, maxRetries: 1 } } }];
+    const { app, close } = makeApi(env, config);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const started = Date.now();
+      const res = await fetch(`${base}${A2A_PREFIX}/message:send`, {
+        method: 'POST', headers: { ...ALICE, ...V1 },
+        // NOT returnImmediately: this is the blocking path.
+        body: JSON.stringify({ message: { messageId: 'm-block', role: 'ROLE_USER', parts: [{ text: 'do it' }], metadata: { skillId: SKILL_ID } } }),
+      });
+      const elapsed = Date.now() - started;
+      assert.equal(res.status, 200);
+      const task = ((await res.json()) as { task?: TaskBody & { status?: { state?: string } } }).task;
+      assert.ok(task?.id);
+      // Both attempts ran: the wait covered the backoff instead of returning the failed attempt.
+      assert.equal(env.runs.listChain(task.id).length, 2, 'the blocking wait must cover the retry, not end on the failed attempt');
+      assert.ok(elapsed >= 250, `the wait must include the backoff, waited ${elapsed}ms`);
+      // And the reported state is the FINAL chain's, not the retry-pending WORKING of attempt 1.
+      // Protojson serializes the enum by NAME, so this is the name rather than its number.
+      assert.equal(task.status?.state, 'TASK_STATE_FAILED', 'a final chain of failed attempts reports FAILED');
+      // `retryPending` is gone from the metadata for the same reason.
+      assert.equal((task.metadata as { mercury?: { attempt?: number; retryPending?: boolean } })?.mercury?.attempt, 2);
+      assert.equal((task.metadata as { mercury?: { retryPending?: boolean } })?.mercury?.retryPending, false);
+    } finally { await srv.close(); close(); }
+  } finally { env.close(); }
+});
+
+test('SendMessage draws on the SAME Run-creation budget as POST /api/runs', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const repo = tempRepo();
+    const { app, close } = makeApi(env, a2aConfig(repo), { rateLimits: { createRun: { windowMs: 60_000, max: 1 } } });
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      // The budget is spent on the NATIVE route first, by the same owner. If A2A had its own
+      // limiter -- or none -- the SendMessage below would succeed.
+      const native = await fetch(`${base}/api/runs`, {
+        method: 'POST', headers: { ...ALICE, 'content-type': 'application/json' },
+        body: JSON.stringify({ task: 'native', repository: { localPath: repo, baseBranch: 'main' } }),
+      });
+      assert.equal(native.status, 201, `the native create must be the one that spends the budget, got ${native.status}`);
+      const res = await fetch(`${base}${A2A_PREFIX}/message:send`, {
+        method: 'POST', headers: { ...ALICE, ...V1 }, body: sendBody(),
+      });
+      assert.equal(res.status, 429, 'SendMessage must share the Run-creation budget, not bypass it');
+      // A DIFFERENT message id would otherwise be a fresh idempotency key, which is exactly the
+      // bypass this covers: distinct ids, one queue, no limit.
+      assert.equal((await fetch(`${base}${A2A_PREFIX}/message:send`, {
+        method: 'POST', headers: { ...ALICE, ...V1 }, body: sendBody({ messageId: 'm-other' }),
+      })).status, 429);
+      // Cancelling is not Run creation and must not spend the budget: a caller at the limit still
+      // has to be able to cancel.
+      assert.notEqual((await fetch(`${base}${A2A_PREFIX}/tasks/nope:cancel`, {
+        method: 'POST', headers: { ...ALICE, ...V1 }, body: '{}',
+      })).status, 429);
+    } finally { await srv.close(); close(); }
+  } finally { env.close(); }
+});
+
+test('the card advertises the field the handler actually reads', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const { app, close } = makeApi(env, a2aConfig(tempRepo()));
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const card = await (await fetch(`${base}${A2A_AGENT_CARD_PATH}`)).json() as {
+        capabilities?: { extensions?: { uri?: string; description?: string }[] };
+      };
+      const extension = card.capabilities?.extensions?.find((e) => e.uri === A2A_SKILL_SELECTION_EXTENSION);
+      assert.ok(extension, 'the required skill-selection extension must be on the card');
+      // `SendMessageRequest.message.metadata`, the path `resolveSkill` reads. Advertising
+      // `SendMessageRequest.metadata` sends a compliant client into a malformed-request error.
+      assert.match(extension.description ?? '', /SendMessageRequest\.message\.metadata\.skillId/);
+    } finally { await srv.close(); close(); }
   } finally { env.close(); }
 });

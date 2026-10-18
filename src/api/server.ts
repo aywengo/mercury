@@ -281,7 +281,9 @@ export function createApp(deps: ServerDeps): Express {
   // nor an agent card. The card is the one unauthenticated read; every A2A route is behind the same
   // gate /api uses.
   if (deps.a2a && a2aEnabled(deps.a2a.config)) {
-    mountA2a(app, deps.a2a);
+    // The SAME limiter instance as POST /api/runs: A2A's SendMessage creates Runs in the same queue,
+    // so it draws on the same per-owner+IP budget instead of a second one of its own.
+    mountA2a(app, deps.a2a, { createRunLimiter });
   }
 
   // Last-resort handler for anything that escaped a route (including middleware and body-parser

@@ -26,6 +26,13 @@ export const A2A_PROTOCOL_VERSION = '1.0';
 export const A2A_SKILL_SELECTION_EXTENSION = 'https://github.com/aywengo/mercury/a2a/extensions/skill-selection/v1';
 /** The `metadata` key the skill id travels in (section 6.2). */
 export const A2A_SKILL_ID_KEY = 'skillId';
+/**
+ * The bot owner-id prefix (`bot-<alias>`, `dispatcher-bot-design.md` section 4.2 -- the same form
+ * `src/host/bots/keys.ts` writes). Section 6.3 refuses every bot owner on every A2A route, so this
+ * is a security boundary rather than a naming convention; `test/a2aServer.test.ts` pins it against
+ * the helper that produces the real owner id, so the two cannot drift apart silently.
+ */
+export const BOT_OWNER_PREFIX = 'bot-';
 
 /**
  * One exposed skill: the operator's declaration of a piece of work an A2A caller may ask for
