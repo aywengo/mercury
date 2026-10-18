@@ -516,12 +516,28 @@ export const MIGRATIONS: string[] = [
   // because the requeue is a raw UPDATE in RunQueue that bypasses RunStore.transition, so "preserve
   // it by not mentioning it there" would be a property of one SQL string that nothing checks.
   //
-  // Nullable and additive, and deliberately WITHOUT a backfill: a row written before this migration
-  // has NULL here even when it ran, so readers fall back to `started_at` (see `hasStarted` in
-  // src/domain/types.ts). Fabricating a value from `started_at` would make the fallback unreadable
-  // and would claim a first-start time nobody recorded.
+  // BACKFILLED, unlike the other additive columns here (status_changed_at, origin_kind). The
+  // difference is what the value is for. A missing measurement can stay missing: nothing is wrong
+  // with reporting "unknown duration". A missing fact is a wrong answer, and `hasStarted` falls back
+  // to `started_at` -- which the shutdown requeue clears. So for a Run that is already active when
+  // this migration runs, the fallback is the ONLY evidence that it executed, and the next requeue
+  // destroys it (PR #998 review round 1). Deferring the fallback to read time is the same backfill
+  // performed later, at a moment when the value may already be gone; doing it here is what makes it
+  // survive.
+  //
+  // Both sources are real records, and the event wins because it is the exact start the transition
+  // wrote. `started_at` follows for a row whose event is missing (pruned, or written by a build that
+  // did not emit one). A row that never ran has neither, so it stays NULL -- nothing is invented.
   `
   ALTER TABLE runs ADD COLUMN first_started_at TEXT;
+  UPDATE runs SET first_started_at = (
+    SELECT MIN(json_extract(e.payload_json, '$.startedAt'))
+      FROM events e WHERE e.run_id = runs.id AND e.type = 'run.started'
+  ) WHERE first_started_at IS NULL AND EXISTS (
+    SELECT 1 FROM events e WHERE e.run_id = runs.id AND e.type = 'run.started'
+  );
+  UPDATE runs SET first_started_at = started_at
+   WHERE first_started_at IS NULL AND started_at IS NOT NULL;
   `,
 ];
 

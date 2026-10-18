@@ -311,10 +311,15 @@ Rules:
   as `started_at` and never cleared. `started_at` cannot answer the question: the requeue
   nulls it deliberately, so the duration and queue-wait metrics measure the current
   execution rather than the sum of all of them. `Run.firstStartedAt` is that stamp, and
-  `hasStarted()` (`src/domain/types.ts`) is the one reading of it — it falls back to
-  `started_at` for rows written before the v21 migration, which have no stamp even when they
-  ran. Goal settlement (#489) reads the same helper, so a requeued-then-cancelled attempt is
-  not recorded as `attempted: false`.
+  `hasStarted()` (`src/domain/types.ts`) is the one reading of it. Goal settlement (#489)
+  reads the same helper, so a requeued-then-cancelled attempt is not recorded as
+  `attempted: false`.
+- **The v21 migration backfills the stamp** from the first `run.started` event (the exact
+  start the transition recorded), or from `started_at` when the event is missing. A Run that
+  is already active when the upgrade runs must keep its evidence: leaving the column NULL
+  and reading `started_at` instead would lose it at the next shutdown requeue, which is
+  precisely the state this rule is about. A Run that never ran has neither record, so it
+  stays NULL and nothing is invented.
 
 - Mercury never emits `TASK_STATE_REJECTED`, `TASK_STATE_AUTH_REQUIRED` or
   `TASK_STATE_UNSPECIFIED` in v1. A request that cannot become a Run gets an error and

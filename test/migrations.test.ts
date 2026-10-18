@@ -7,6 +7,11 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { openDatabase, MIGRATIONS, BUSY_TIMEOUT_MS } from '../src/db/database.ts';
 import { RunStore } from '../src/runs/runStore.ts';
+import { RunQueue } from '../src/queue/runQueue.ts';
+import { EventStore } from '../src/events/eventStore.ts';
+import { GoalStore } from '../src/runs/goalStore.ts';
+import { settleGoalOnTerminal } from '../src/runs/goalSettlement.ts';
+import { hasStarted } from '../src/domain/types.ts';
 import { tempDir } from './helpers.ts';
 
 test('migration v3: idempotency keys become owner-scoped with backfill (issue #8)', () => {
@@ -110,6 +115,88 @@ test('migration v20: a row written before the origin columns reads null, not a f
 
     const run = new RunStore(db2).get('run-pre-v20')!;
     assert.equal(run.origin, null, 'an unrecorded origin must read as null, never as a fabricated kind');
+    db2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration v21: an active pre-v21 Run keeps its execution evidence across a shutdown requeue (issue #990 review, round 1)', () => {
+  // Copilot, PR #998 round 1 (major): the v21 column had no backfill, and `hasStarted` falls back to
+  // `started_at`. For a Run that is ALREADY active when the migration applies, that fallback is the
+  // only evidence that it ran -- and the shutdown requeue clears `started_at` a moment later, so the
+  // evidence is destroyed before anything reads it and the goal still settles as never attempted.
+  //
+  // So the fallback must be MATERIALISED at migration time, while the value still exists. This test
+  // is the whole path: pre-v21 active row -> migration -> shutdown requeue -> cancellation.
+  const dir = tempDir('mercury-migrate-v21-');
+  const dbPath = join(dir, 'test.db');
+  try {
+    const db = new DatabaseSync(dbPath);
+    db.exec('PRAGMA journal_mode = WAL;');
+    db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );`);
+    const now = new Date().toISOString();
+    for (let v = 1; v <= 20; v++) {
+      db.exec(MIGRATIONS[v - 1]);
+      db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)').run(v, now);
+    }
+    const insertRun = db.prepare(`INSERT INTO runs (id, owner_id, task, repository_json, agent, status,
+      attempt, retry_of, error, error_kind, constraints_json, created_at, started_at, completed_at,
+      lease_owner, lease_expires_at, cancellation_requested_at, final_commits_json, pr_url)
+      VALUES (?, 'alice', 'x', '{}', 'fake', ?, 1, NULL, NULL, NULL,
+        '{"maxDurationMs":1000,"maxRetries":0}', ?, ?, ?, ?, ?, NULL, '[]', NULL)`);
+    const T = (n: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, n)).toISOString();
+    // Active when the migration runs: the case the finding is about.
+    insertRun.run('run-active', 'RUNNING', T(0), T(3), null, 'w1', new Date(Date.now() + 60_000).toISOString());
+    // Terminal, never requeued: `started_at` still holds its only execution.
+    insertRun.run('run-done', 'COMPLETED', T(0), T(1), T(2), null, null);
+    // Never started: the backfill must invent nothing.
+    insertRun.run('run-queued-never', 'QUEUED', T(0), null, null, null, null);
+    // Ran, then was requeued BEFORE the migration, so `started_at` is already NULL. The only record
+    // left is the `run.started` event -- which is exactly why the backfill reads events too.
+    insertRun.run('run-requeued', 'QUEUED', T(0), null, null, null, null);
+    // Ran with no `run.started` event on record: the second backfill statement's only case, and the
+    // reason it is not redundant with the first.
+    insertRun.run('run-no-event', 'COMPLETED', T(0), T(2), T(3), null, null);
+    const ev = db.prepare(`INSERT INTO events (id, run_id, type, sequence, timestamp, payload_json)
+      VALUES (?, ?, 'run.started', 1, ?, ?)`);
+    ev.run('e-active', 'run-active', T(3), JSON.stringify({ runId: 'run-active', startedAt: T(3) }));
+    ev.run('e-done', 'run-done', T(1), JSON.stringify({ runId: 'run-done', startedAt: T(1) }));
+    ev.run('e-requeued', 'run-requeued', T(1), JSON.stringify({ runId: 'run-requeued', startedAt: T(1) }));
+    db.exec(`INSERT INTO run_goals (run_id, objective, status, source, updated_at)
+      VALUES ('run-active', 'obj', 'active', 'operator', '${now}')`);
+    db.close();
+
+    const db2 = openDatabase(dbPath);
+    const events = new EventStore(db2);
+    const goals = new GoalStore(db2);
+    const runs = new RunStore(db2, {
+      onTerminalTransition: (run, to) => settleGoalOnTerminal({ goals, events }, run, to),
+    });
+    const queue = new RunQueue(db2, runs);
+    const stamp = (id: string) =>
+      (db2.prepare('SELECT first_started_at FROM runs WHERE id = ?').get(id) as { first_started_at: string | null })
+        .first_started_at;
+
+    // The backfill restores the fact, from the event first (the exact recorded start) and from
+    // `started_at` second (for a row whose event is missing).
+    assert.equal(stamp('run-active'), T(3), 'an active pre-v21 Run must keep its execution evidence');
+    assert.equal(stamp('run-done'), T(1), 'a terminal pre-v21 Run must keep its execution evidence');
+    assert.equal(stamp('run-requeued'), T(1), 'a pre-v21 Run whose only record is the event must keep it too');
+    assert.equal(stamp('run-no-event'), T(2), 'and one whose only record is started_at must keep that');
+    assert.equal(stamp('run-queued-never'), null, 'the backfill must invent nothing for a Run that never ran');
+
+    // The finding's path: requeue the active Run, then cancel it before anything reclaims it.
+    assert.equal(queue.requeueForShutdown('run-active', 'w1'), true);
+    const requeued = runs.get('run-active')!;
+    assert.equal(requeued.startedAt, null, 'the requeue clears the current execution start');
+    assert.equal(hasStarted(requeued), true, 'and must not erase the fact that the attempt ran');
+    runs.transition('run-active', 'CANCELLED', { completedAt: new Date().toISOString() });
+    assert.equal(goals.get('run-active')?.attempted, true,
+      'an active Run requeued by the upgrade and then cancelled was still attempted');
     db2.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

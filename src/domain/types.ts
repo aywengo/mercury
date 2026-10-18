@@ -174,8 +174,10 @@ export interface Run {
    * fact by not mentioning it there" would be a property of one SQL string that nothing checks.
    * Nothing but `RunStore.transition` writes this column, and no code path clears it.
    *
-   * Optional-with-null because rows written before the v21 migration are NULL in exactly the same
-   * way as "never started" -- which is why `hasStarted` falls back to `startedAt`.
+   * Optional-with-null, and the v21 migration BACKFILLS it (from the first `run.started` event, or
+   * from `started_at`) precisely so that NULL means "never started" rather than "written before
+   * v21" -- the fallback in `hasStarted` cannot repair a row whose `started_at` a later requeue has
+   * already cleared.
    */
   firstStartedAt?: string | null;
 }
@@ -184,12 +186,16 @@ export interface Run {
  * True when this attempt has ever begun executing (A0-4, issue #990).
  *
  * The one reading of that question in the codebase, so the A2A state mapping and goal settlement
- * cannot answer it differently. `firstStartedAt` is the v21 answer; `startedAt` is the fallback for
- * rows written before that migration, which have no `firstStartedAt` even when they ran.
+ * cannot answer it differently.
  *
- * Neither field alone is right. `startedAt` is cleared by a shutdown requeue, so a requeued attempt
- * would read as never-started. `firstStartedAt` is absent on pre-v21 rows, so reading only it would
- * call every Run in an existing database never-started.
+ * `firstStartedAt` is the answer: a column the shutdown requeue does not clear, backfilled by the
+ * v21 migration for every row that had already run. `startedAt` is the fallback, and after that
+ * migration it should not be reached -- it stays because it is the definition of the fact rather
+ * than a special case, and because reading only `firstStartedAt` would turn any Run object that
+ * lacks the field into a confident "never started" instead of a wrong one.
+ *
+ * `startedAt` alone is NOT an answer: a shutdown requeue clears it, so a requeued attempt would
+ * read as never-started -- which is the bug this function exists to close.
  */
 export function hasStarted(run: Pick<Run, 'firstStartedAt' | 'startedAt'>): boolean {
   return (run.firstStartedAt ?? run.startedAt ?? null) !== null;

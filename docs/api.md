@@ -568,9 +568,11 @@ began executing (issue #990, A0-4). It differs from `startedAt`, which is the CU
 start and is cleared by a graceful-shutdown requeue so the duration and queue-wait metrics measure
 one execution rather than the sum of all of them. `firstStartedAt` is written by the same statement
 that writes `startedAt` and is never cleared, so it answers the one question `startedAt` cannot: has
-this attempt ever run? `null` means "never started" — or "the row predates the v21 migration", in
-which case read `startedAt` as the fallback (the server's own helper does exactly that). A reader
-must not use it to measure anything: after a requeue it is older than the current execution.
+this attempt ever run? `null` means "never started", and nothing else: the v21 migration backfills the column from the
+first `run.started` event (or from `started_at` when the event is missing), because a NULL left for
+a Run that had already executed would be destroyed by the next shutdown requeue before anything
+could read it. A reader must not use it to measure anything: after a requeue it is older than the
+current execution.
 
 The Run object also carries `origin` (nullable, read-only): where the **server** says the Run
 came from (issue #988, A0-3), as `{ kind, ref }` — `kind` is the creating surface (`a2a` for the
