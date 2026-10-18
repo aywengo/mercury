@@ -110,6 +110,43 @@ test('acceptance 4b: a failed list page fails closed and files nothing', async (
   assert.equal(calls.length, 0);
 });
 
+test('acceptance 4c: a 200 page whose body cannot be decoded fails closed and files nothing', async () => {
+  // `shared.ts` answers a 200 it cannot decode with `body: null`. The scan used `?? []`, so an
+  // unreadable page looked like an empty one: no match, walk over, and the duplicate gets filed.
+  // The status is 200 and the Link header is absent, so nothing else in the walk can notice.
+  const calls: { method: string; path: string; body?: unknown }[] = [];
+  const io: NextIo = {
+    async get() { return { body: null, status: 200, link: null }; },
+    async post(path, body) { calls.push({ method: 'POST', path, body }); return { body: { number: 1 }, status: 201 }; },
+    async postLabel() { return true; },
+    async deleteLabel() { return true; },
+  };
+  const bf = await bodyFile();
+  await assert.rejects(
+    () => proposeIssue(io, process.env, { repo: REPO, source: KEY, title: TITLE, bodyFile: bf }),
+    /not a list/,
+  );
+  assert.equal(calls.length, 0, 'fail closed: nothing filed');
+});
+
+test('acceptance 4d: a 200 page carrying a JSON object body fails closed too', async () => {
+  // The other shape of the same fallback: an error payload served with a 200. `?? []` handed it to
+  // `for...of` and surfaced as a TypeError, which is not the same as refusing to file.
+  const calls: { method: string; path: string; body?: unknown }[] = [];
+  const io: NextIo = {
+    async get() { return { body: { message: 'API rate limit exceeded' }, status: 200, link: null }; },
+    async post(path, body) { calls.push({ method: 'POST', path, body }); return { body: { number: 1 }, status: 201 }; },
+    async postLabel() { return true; },
+    async deleteLabel() { return true; },
+  };
+  const bf = await bodyFile();
+  await assert.rejects(
+    () => proposeIssue(io, process.env, { repo: REPO, source: KEY, title: TITLE, bodyFile: bf }),
+    /not a list/,
+  );
+  assert.equal(calls.length, 0, 'fail closed: nothing filed');
+});
+
 test('the happy path: no match -> the issue is created with nightly:proposed and the marker in the body', async () => {
   const { io, calls } = listIo([[issueShaped({ number: 1, title: 'unrelated', body: 'no marker', state: 'open' })]]);
   const bf = await bodyFile('Argument text.');

@@ -208,9 +208,9 @@ export interface ExistingMatch { issue: number; state: string; by: 'source' | 't
 
 /** Search open AND closed issues for the source key or an exact title match. Bounded at 10
  * pages of `state=all` (newest first, so recently filed duplicates are always inside the
- * window). A failed page or a pagination-cap hit THROWS (fail closed, #881 acceptance 4): the
- * caller files nothing and the report says the dedupe check could not run. Pull requests are
- * skipped. */
+ * window). A failed page, an unreadable page or a pagination-cap hit THROWS (fail closed, #881
+ * acceptance 4): the caller files nothing and the report says the dedupe check could not run.
+ * Pull requests are skipped. */
 export async function findExistingProposal(io: NextIo, opts: { repo: string; source: string; title: string }): Promise<ExistingMatch | null> {
   const marker = sourceMarker(opts.source);
   const title = opts.title.trim();
@@ -221,7 +221,15 @@ export async function findExistingProposal(io: NextIo, opts: { repo: string; sou
     if (res.status < 200 || res.status >= 300) {
       throw new Error(`dedupe search failed: GET ${listPath} -> ${res.status}; nothing is filed`);
     }
-    const items = (res.body ?? []) as { number: number; title?: string; body?: string | null; state?: string; pull_request?: unknown }[];
+    // `shared.ts` returns `body: null` when a 200 response cannot be decoded, and `?? []` read that
+    // as "this page listed nothing": the scan found no match, the walk reached its end, and
+    // `proposeIssue` filed a duplicate. An unreadable page is a failed search like any other --
+    // throw, so the caller files nothing. `Array.isArray` also refuses a JSON object body (an error
+    // payload served with a 200), which `?? []` passed to `for...of` as an unhelpful TypeError.
+    if (!Array.isArray(res.body)) {
+      throw new Error(`dedupe search failed: GET ${listPath} -> ${res.status} returned a body that is not a list; the page could not be read, so nothing is filed (fail closed, #881)`);
+    }
+    const items = res.body as { number: number; title?: string; body?: string | null; state?: string; pull_request?: unknown }[];
     for (const it of items) {
       if (it.pull_request) continue;
       if (typeof it.body === 'string' && it.body.includes(marker)) {
