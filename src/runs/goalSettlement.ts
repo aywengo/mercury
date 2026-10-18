@@ -1,4 +1,5 @@
 import type { Run, RunStatus } from '../domain/types.ts';
+import { hasStarted } from '../domain/types.ts';
 import type { GoalStore } from './goalStore.ts';
 
 /**
@@ -70,7 +71,12 @@ export function settleGoalOnTerminal(deps: GoalSettlementDeps, run: Run, to: Run
   // Mercury's inference would destroy the more truthful record and invent a verdict.
   if (goal.status !== 'active') return;
 
-  const started = run.startedAt !== null && run.startedAt !== undefined;
+  // `hasStarted`, not `run.startedAt !== null` (A0-4, issue #990): a graceful-shutdown requeue nulls
+  // `started_at` on purpose, so reading that field recorded `attempted: false` for an attempt that had
+  // run for ten minutes before being requeued and then cancelled while QUEUED. `hasStarted` reads the
+  // first-start stamp that the requeue does not clear, and falls back to `started_at` for rows written
+  // before that column existed.
+  const started = hasStarted(run);
   const now = (deps.now ?? (() => new Date().toISOString()))();
   // `attempted` rides in the same write as the status. It used to live only in the event below,
   // which left every aggregate surface counting a Run that never started in the same bucket as the

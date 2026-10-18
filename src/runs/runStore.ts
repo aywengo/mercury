@@ -31,6 +31,7 @@ export interface RunRow {
   retry_due_at: string | null;
   origin_kind: string | null;
   origin_ref: string | null;
+  first_started_at: string | null;
   final_commits_json: string;
   pr_url: string | null;
   model: string | null;
@@ -68,6 +69,9 @@ export function rowToRun(row: RunRow): Run {
     // not, so the presence of `origin_kind` is what decides. Reading them as one field keeps a
     // half-written pair from rendering as an origin with a null kind.
     origin: row.origin_kind ? { kind: row.origin_kind as RunOriginKind, ref: row.origin_ref } : null,
+    // No `?? startedAt` fallback here: the row is reported as stored, and `hasStarted` is where the
+    // pre-v21 fallback lives, so exactly one place decides that question.
+    firstStartedAt: row.first_started_at,
     finalCommits: JSON.parse(row.final_commits_json) as string[],
     prUrl: row.pr_url,
     model: row.model ?? null,
@@ -111,8 +115,8 @@ export class RunStore {
           id, owner_id, task, repository_json, repositories_json, workspace_branch, workspace_path, agent, status,
           attempt, retry_of, error, error_kind, constraints_json, created_at, started_at, completed_at,
           lease_owner, lease_expires_at, cancellation_requested_at, status_changed_at, retry_due_at, final_commits_json, pr_url, model, credential_profile,
-          origin_kind, origin_ref
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          origin_kind, origin_ref, first_started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.id, run.ownerId, run.task, JSON.stringify(run.repository), run.repositories ? JSON.stringify(run.repositories) : null,
@@ -120,7 +124,7 @@ export class RunStore {
         run.agent, run.status, run.attempt, run.retryOf, run.error, run.errorKind, JSON.stringify(run.constraints),
         run.createdAt, run.startedAt, run.completedAt, run.leaseOwner, run.leaseExpiresAt,
         run.cancellationRequestedAt, run.statusChangedAt ?? null, run.retryDueAt ?? null, JSON.stringify(run.finalCommits), run.prUrl, run.model ?? null, run.credentialProfile ?? null,
-        run.origin?.kind ?? null, run.origin?.ref ?? null,
+        run.origin?.kind ?? null, run.origin?.ref ?? null, run.firstStartedAt ?? null,
       );
   }
 
@@ -322,6 +326,13 @@ export class RunStore {
     const sets: string[] = ['status = ?', 'status_changed_at = ?'];
     const params: (string | number | null)[] = [to, new Date().toISOString()];
     if (extra) {
+      if ('firstStartedAt' in extra) {
+        // Same rule as statusChangedAt below, for the same reason: this column must have exactly one
+        // writer. A caller-supplied value would add a second `first_started_at = ?` to this SET and
+        // win silently under SQLite's last-binding-wins, letting a requeue or a replay move the
+        // "first started" stamp forward -- which is the whole fact the column exists to keep fixed.
+        throw new Error('extra must not set firstStartedAt: it is written by transition itself, from startedAt');
+      }
       if ('statusChangedAt' in extra) {
         // Enforced, not just documented (issue #906 review, item 3): a caller-supplied
         // statusChangedAt would add a second `status_changed_at = ?` to this SET and win
@@ -332,6 +343,16 @@ export class RunStore {
         const col = camelToSnake(k);
         sets.push(`${col} = ?`);
         params.push(v === null ? null : typeof v === 'object' ? JSON.stringify(v) : (v as string | number));
+      }
+      if ('startedAt' in extra) {
+        // `first_started_at` rides the SAME statement as `started_at`, so the two can never disagree
+        // about whether this attempt has executed (A0-4, issue #990). COALESCE keeps the FIRST value:
+        // the column answers "has this attempt ever begun", and the shutdown requeue that nulls
+        // `started_at` -- deliberately, so the metrics measure the current execution -- must not
+        // erase it. Written here and nowhere else, which is what makes that guarantee a property of
+        // the code rather than of one SQL string in RunQueue.
+        sets.push('first_started_at = COALESCE(first_started_at, ?)');
+        params.push(extra.startedAt as string);
       }
     }
     // Guard the write on the status we just validated (issue #48). Without it this

@@ -563,6 +563,15 @@ which measures when the Run was created, not how long it has been waiting in its
 status. Consumers building "waiting since" logic on this field must read it from this field
 only; the trigger matcher (dispatcher-bot-design §6.1) depends on that.
 
+The Run object also carries `firstStartedAt` (nullable, read-only): when this attempt **first**
+began executing (issue #990, A0-4). It differs from `startedAt`, which is the CURRENT execution's
+start and is cleared by a graceful-shutdown requeue so the duration and queue-wait metrics measure
+one execution rather than the sum of all of them. `firstStartedAt` is written by the same statement
+that writes `startedAt` and is never cleared, so it answers the one question `startedAt` cannot: has
+this attempt ever run? `null` means "never started" — or "the row predates the v21 migration", in
+which case read `startedAt` as the fallback (the server's own helper does exactly that). A reader
+must not use it to measure anything: after a requeue it is older than the current execution.
+
 The Run object also carries `origin` (nullable, read-only): where the **server** says the Run
 came from (issue #988, A0-3), as `{ kind, ref }` — `kind` is the creating surface (`a2a` for the
 A2A task API) and `ref` is that surface's own identifier for the work, or `null` when it recorded
