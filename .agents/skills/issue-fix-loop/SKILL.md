@@ -1,6 +1,6 @@
 ---
 name: issue-fix-loop
-version: 1.3.0
+version: 1.4.0
 description: Fix a tracked issue through the proven per-issue loop — root-cause analysis, scoped fix with regression test, one PR, independent sub-agent review, then merge or hand-off (unattended Runs stop at a ready-for-review PR). Use when fixing a GitHub issue or any bug tracked as a unit of work.
 capabilities: [bugfix, issue, pull-request, review, workflow, regression]
 ---
@@ -45,7 +45,11 @@ as a `blocked by` note rather than leaving it in prose.
    - **Size guard.** Note the diff size (lines added + removed) of the first version that
      passes the tests. If the PR later grows past **3x** that size, stop and hand off (step 7).
 3. **Open a PR** — branch `fix/issue-<N>-<slug>`, description links the issue with `Fixes #N`
-   and contains the assumptions list. Keep the diff scoped to the issue.
+   and contains the assumptions list. Keep the diff scoped to the issue. **Update `PLAN.md` in the
+   same PR:** set the issue's row to `done` with this PR's number (`#<n>`; push the row as soon as
+   the PR number exists), adding the row if the issue has none. The `plan-tracker` CI job fails the
+   PR otherwise. Filing new issues (a hand-off follow-up, review findings split out) adds their
+   rows as `open`. Rules: the "Rules" section at the top of `PLAN.md`.
 4. **Independent review** — two parts, both required.
    - **Request the Copilot reviewer on the PR — always, mechanically, not a choice.** Before the
      loop may leave this step (and after every push, see step 5):

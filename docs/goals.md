@@ -3,7 +3,8 @@
 **Status: partially implemented.** Phases 0a, 0, 1, 2, 3 and the implementable half of 4 are
 shipped. Phase 4's second half -- rendering harness-reported gate *outcomes* -- has no emitter to
 ship against and is blocked the same way Phase 5 is; Phase 5 is blocked upstream and Phase 6 is
-deferred. Concretely, today:
+drafted as proposal #914 (nightly rung 4, 2026-10-12; awaits an operator's `nightly:ready`).
+Concretely, today:
 
 | shipped | not shipped |
 | --- | --- |
@@ -986,7 +987,8 @@ and its error messages, and a client-side copy would drift.
 disable the goal fields with the reason attached rather than hiding them, and refuse to switch to an
 unsupported agent while a goal is filled in rather than silently discarding the input — have no code to
 enforce them yet, and they remain unbuilt. [#575](https://github.com/aywengo/mercury/issues/575) tracked them
-and is closed, so nothing currently tracks them. Whether the dashboard should set goals at all, or whether that
+and is closed; the surface is drafted as proposal #921 (nightly rung 4, 2026-10-12) — capability-gated
+create form, or a recorded decision to leave it out. Whether the dashboard should set goals at all, or whether that
 stays an operator action `mercuryctl` already covers, is not answered by the code either way.
 
 Nothing misleads an operator today: with no goal fields, the dashboard cannot accept a goal it will lose. The
@@ -1037,7 +1039,9 @@ Reasoning in [section 12](#12-non-goals).
 ### Still open
 
 **Does `unmet` fire often enough to matter?** Needs investigation, and Phase 1 now ships
-the counter that answers it rather than leaving the question to anecdote.
+the counter that answers it rather than leaving the question to anecdote. The investigation is
+drafted as proposal #949 (nightly rung 4, 2026-10-12): a read-only measurement pass over the
+existing gauge, with the verdict recorded back here.
 
 Two further questions surfaced while checking the capability surface, and unlike these
 they block implementation rather than funding:

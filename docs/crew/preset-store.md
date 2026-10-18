@@ -4,7 +4,9 @@ The Preset Store distributes reviewed Role Presets and supports owner-scoped
 drafts. It ships after builtin Role Presets and per-run MCP because upload and
 publishing introduce new filesystem, supply-chain and authorization boundaries.
 
-Status: **design only.**
+Status: **design only.** The sync half (roadmap Phase 6) is drafted as proposal #873 and
+the drafts-and-publishing half (Phase 7) as #874 (nightly rung 4, 2026-10-08); both await an
+operator's `nightly:ready`.
 
 Related: [`role-presets.md`](role-presets.md),
 [`mcp-security.md`](mcp-security.md), [`roadmap.md`](roadmap.md).

@@ -10,6 +10,11 @@ workspaces/
 # this in every Run workspace via .git/info/exclude; this covers interactive agent sessions.
 .mercury/
 
+# Nightly Run agent state (kernel snapshots, session transcripts) can contain Run secrets
+# (GH_TOKEN etc.); they live untracked inside every Run worktree and must never be committed.
+.mercury-sessions/
+session-artifacts/
+
 # fleet/test/published.test.ts mirrors the release workflow by copying the repo LICENSE into
 # fleet/ before packing, and removes it in `finally`. A `finally` does not run when the process is
 # killed, so an interrupted `npm run test:fleet` leaves this behind in the SOURCE tree (issue #438).
