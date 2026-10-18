@@ -198,7 +198,7 @@ on Mercury's own Express app, so A1 can start.
 
 | Issue | Title | State | PR |
 | --- | --- | --- | --- |
-| #986 | A2A SDK integration spike: pin @a2a-js/sdk, decide the integration shape, coupling test… | in progress | — |
+| #986 | A2A SDK integration spike: pin @a2a-js/sdk, decide the integration shape, coupling test… | done | #1000 |
 | #987 | Retry chains: link retries atomically and make "retry pending" durable (A0-2) | done | #995 |
 | #988 | Server-stamped Run origin: a field no request body can set (A0-3) | done | #996 |
 | #990 | Pure Run-chain → A2A TaskState mapping, exhaustive over RunStatus (A0-4) | done | #998 |
