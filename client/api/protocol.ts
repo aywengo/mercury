@@ -63,6 +63,11 @@ export interface Run {
   /** When the Run's status last changed (B2-0, issue #906). Null or absent for rows that predate
    *  the server's v18 migration -- treat as unknown, never as a substitute for createdAt. */
   statusChangedAt?: string | null;
+  /** When the recorded automatic-retry intent for this attempt becomes due (A0-2, issue #987).
+   *  Non-null means the attempt is terminal, a retry was decided, and it has not happened yet.
+   *  Null or absent for rows that predate the server's v19 migration, and for every attempt
+   *  nobody decided to retry -- both mean "no retry pending". */
+  retryDueAt?: string | null;
   finalCommits: string[];
   prUrl: string | null;
   /**

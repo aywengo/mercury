@@ -464,6 +464,26 @@ export const MIGRATIONS: string[] = [
   `
   ALTER TABLE runs ADD COLUMN status_changed_at TEXT;
   `,
+  // v19: the durable automatic-retry intent (A0-2, issue #987). The worker's decision to retry an
+  // infrastructure failure used to live only in its memory: it slept the backoff and then created
+  // the child, so a worker that died during the sleep left a failure nobody would ever retry and
+  // no reader could tell "retry pending" from "final". The column records the decision in the same
+  // transaction as the terminal transition, and holds the time the retry becomes due -- so a
+  // recovering worker needs no memory of the backoff that produced it.
+  //
+  // A column rather than a `run.retry_scheduled` event, because the intent is a property of the
+  // attempt that must commit WITH its status (a second writer is how status and intent disagree),
+  // because recovery is a query -- "due intents with no child" -- that an events scan cannot
+  // answer without a join, and because chainState must be pure over persisted ROW fields.
+  //
+  // Additive and nullable: rows written before the migration have NULL, which reads as "no intent
+  // recorded", exactly the pre-#987 meaning. The index is what makes recovery's anti-join
+  // ("no child yet") cheap; it is deliberately NOT unique, so a pre-#987 database that already
+  // holds two children for one attempt still migrates instead of refusing to start.
+  `
+  ALTER TABLE runs ADD COLUMN retry_due_at TEXT;
+  CREATE INDEX IF NOT EXISTS idx_runs_retry_of ON runs(retry_of);
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;
