@@ -455,6 +455,15 @@ export const MIGRATIONS: string[] = [
   CREATE UNIQUE INDEX IF NOT EXISTS idx_run_presets_runwide
     ON run_presets(run_id) WHERE stage_index IS NULL;
   `,
+  // v18: the Run status-transition timestamp (B2-0, issue #906). The trigger matcher must not
+  // approximate "waiting since" from createdAt (docs/dispatcher-bot-design.md section 6.1), so the
+  // Run row records when its status last changed. Additive and nullable: rows written before the
+  // migration have NULL and the field serializes as null, never a fabricated time. It is set ONLY
+  // by RunStore.transition -- the single state-machine write choke point -- plus at insert
+  // (creation is the QUEUED transition).
+  `
+  ALTER TABLE runs ADD COLUMN status_changed_at TEXT;
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

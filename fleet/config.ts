@@ -43,6 +43,14 @@ export interface FleetConfig {
    */
   knowledgeStaleMs: number;
   /**
+   * How old a host's availability snapshot may get before the view reports it stale
+   * (fleet-bots-design.md section 9.3). Defaults to 3x the probe interval, the same shape as the
+   * knowledge staleness threshold. Unlike the knowledge signal this does not need an off switch:
+   * staleness here never changes placement by itself, it is reported, and FB1 owns what routing
+   * does with it.
+   */
+  availabilityStaleMs: number;
+  /**
    * How often reconciliation re-reads every non-terminal Run (design section 7). Independent of the probe
    * interval on purpose: probing asks "is this machine up" for every host, reconciling asks "what is this Run
    * doing" for every Run, and a fleet with three hosts and two hundred Runs wants those on different clocks.
@@ -114,12 +122,14 @@ function defaultCredentialsFile(): string {
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): FleetConfig {
+  const probeIntervalMs = num(env['FLEET_PROBE_INTERVAL_MS'], 15_000);
   return {
     dbPath: env['FLEET_DB'] ?? 'fleet.db',
     credentialsFile: env['FLEET_CREDENTIALS_FILE'] ?? defaultCredentialsFile(),
-    probeIntervalMs: num(env['FLEET_PROBE_INTERVAL_MS'], 15_000),
+    probeIntervalMs,
     probeTimeoutMs: num(env['FLEET_PROBE_TIMEOUT_MS'], 5_000),
     knowledgeStaleMs: num(env['FLEET_KNOWLEDGE_STALE_MS'], 0),
+    availabilityStaleMs: num(env['FLEET_AVAILABILITY_STALE_MS'], 0) || probeIntervalMs * 3,
     sweepIntervalMs: num(env['FLEET_SWEEP_INTERVAL_MS'], 10_000),
     streamPollMs: num(env['FLEET_STREAM_POLL_MS'], 1000),
     atlasUrl: env.FLEET_ATLAS_URL?.replace(/\/+$/, '') || null,

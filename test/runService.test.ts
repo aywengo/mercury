@@ -1057,3 +1057,97 @@ test('model: a modelRequired preset refuses a conflicting caller model through t
     env.close();
   }
 });
+
+test('statusChangedAt changes exactly at each transition and survives a NULL pre-migration row (issue #906)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    // Creation is the QUEUED transition: the field is set from the start, never fabricated later.
+    assert.equal(run.statusChangedAt, run.createdAt);
+
+    const seen: (string | null | undefined)[] = [run.statusChangedAt];
+    // ISO timestamps have millisecond precision; back-to-back transitions in-process can land in
+    // the same millisecond legally. Pause between transitions so "changed" is observable, not
+    // asserted against a tie the field's precision cannot distinguish.
+    const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    for (const to of ['STARTING', 'RUNNING', 'COMPLETED'] as const) {
+      pause(5);
+      env.runs.transition(run.id, to, to === 'COMPLETED' ? { completedAt: new Date().toISOString() } : undefined);
+      const r = env.runs.get(run.id)!;
+      seen.push(r.statusChangedAt);
+    }
+    // Monotonic and strictly changing at every transition.
+    for (let i = 1; i < seen.length; i++) {
+      assert.ok(seen[i] != null);
+      assert.ok(new Date(seen[i]!) >= new Date(seen[i - 1]!), 'statusChangedAt must not go back');
+      assert.notEqual(seen[i], seen[i - 1], 'statusChangedAt must change at each transition');
+    }
+    // Terminal timestamp matches the terminal event's timestamp ordering (same append window).
+    const terminal = env.runs.get(run.id)!;
+    assert.equal(terminal.status, 'COMPLETED');
+    assert.ok(terminal.completedAt != null && terminal.statusChangedAt != null);
+
+    // A row written before the migration (status_changed_at NULL) lists cleanly with the field
+    // null, never a fabricated timestamp.
+    env.db.prepare("UPDATE runs SET status_changed_at = NULL WHERE id = ?").run(run.id);
+    const migrated = env.runs.list({ ownerId: 'alice', limit: 10 }).runs.find((r) => r.id === run.id)!;
+    assert.equal(migrated.statusChangedAt, null);
+    const viaApi = env.runs.get(run.id)!;
+    assert.equal(viaApi.statusChangedAt, null);
+  } finally {
+    env.close();
+  }
+});
+
+test('transition extra refuses a caller-supplied statusChangedAt (issue #906 review, item 3)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    assert.throws(
+      () => env.runs.transition(run.id, 'STARTING', { statusChangedAt: '2000-01-01T00:00:00.000Z' }),
+      /statusChangedAt/,
+    );
+    // The refused transition left the Run untouched: still QUEUED, stamp still the creation one.
+    const r = env.runs.get(run.id)!;
+    assert.equal(r.status, 'QUEUED');
+    assert.equal(r.statusChangedAt, run.createdAt);
+  } finally {
+    env.close();
+  }
+});
+
+test('every status write stamps statusChangedAt: shutdown requeue and lease reaper included (issue #906 review, item 1)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    // requeueForShutdown matches the lease owner, so take the lease the way a worker would,
+    // then move the run to STARTING like a claiming worker does.
+    const claimed = env.queue.claim('worker-1', 60_000);
+    assert.equal(claimed?.id, run.id);
+    env.runs.transition(run.id, 'STARTING');
+    const before = env.runs.get(run.id)!.statusChangedAt!;
+    const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    pause(5);
+
+    // Shutdown requeue moves STARTING back to QUEUED: a real status change, so the stamp moves.
+    assert.equal(env.queue.requeueForShutdown(run.id, 'worker-1'), true);
+    const requeued = env.runs.get(run.id)!;
+    assert.equal(requeued.status, 'QUEUED');
+    assert.ok(requeued.statusChangedAt != null && requeued.statusChangedAt > before,
+      'requeueForShutdown must advance statusChangedAt');
+
+    // Lease reaper marks an expired RUNNING run FAILED: also a status change.
+    env.runs.transition(run.id, 'STARTING');
+    env.db.prepare("UPDATE runs SET lease_expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(run.id);
+    const beforeReap = env.runs.get(run.id)!.statusChangedAt!;
+    pause(5);
+    const reaped = env.queue.reapExpiredLeases(Date.now());
+    assert.deepEqual(reaped, { requeued: [], failed: [run.id] });
+    const failed = env.runs.get(run.id)!;
+    assert.equal(failed.status, 'FAILED');
+    assert.ok(failed.statusChangedAt != null && failed.statusChangedAt > beforeReap,
+      'lease reaper must advance statusChangedAt');
+  } finally {
+    env.close();
+  }
+});
