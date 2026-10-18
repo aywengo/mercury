@@ -1173,6 +1173,7 @@ export class RunService {
       leaseOwner: null,
       leaseExpiresAt: null,
       cancellationRequestedAt: null,
+      statusChangedAt: now,
       finalCommits: [],
       prUrl: null,
       model: model ?? null,

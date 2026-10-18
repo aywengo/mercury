@@ -486,6 +486,13 @@ terminal artifacts and serialized skill records, plus the goal state as a siblin
 (`null` when the Run has no goal) and the knowledge pack snapshot (`null` when created
 without one).
 
+The Run object carries `statusChangedAt` (nullable, read-only): the time the Run's status
+last changed, written at every transition (issue #906, B2-0). It is `null` for Runs created
+before the v18 migration — treat it as unknown then, and never fall back to `createdAt`,
+which measures when the Run was created, not how long it has been waiting in its current
+status. Consumers building "waiting since" logic on this field must read it from this field
+only; the trigger matcher (dispatcher-bot-design §6.1) depends on that.
+
 ## Event history
 
 ```bash
