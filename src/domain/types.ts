@@ -85,6 +85,21 @@ export interface Run {
    *  NULL for rows written before the v18 migration -- consumers must treat it as absent, not
    *  fabricated (no plausible provenance). Optional so Run literals predating the field stay valid. */
   statusChangedAt?: string | null;
+  /**
+   * When the recorded automatic-retry intent for this attempt becomes due (A0-2, issue #987).
+   *
+   * Non-NULL means: this attempt is terminal, an automatic retry was DECIDED, and the retry has not
+   * happened yet. It is written by RunStore.transition -- in the same statement as the terminal
+   * status, so a terminal attempt and its intent can never disagree -- and cleared by the
+   * transaction that creates the child, or by the refusal that ends the chain instead.
+   *
+   * The value is a due TIME, not the scheduling time: recovery runs on a worker that has no memory
+   * of the backoff, so the row has to carry the answer rather than the inputs.
+   *
+   * Optional-with-null because rows written before the v19 migration are NULL in exactly the same
+   * way, and both mean "no intent recorded".
+   */
+  retryDueAt?: string | null;
   finalCommits: string[];
   prUrl: string | null;
   /**
@@ -784,6 +799,14 @@ export const EVENT_TYPES = new Set([
   // `selection`; payload is the validated record itself. A Run created without `selection`
   // emits nothing, exactly as before.
   'run.selection_recorded',
+  // A recorded automatic-retry decision that could not be honoured (A0-2, issue #987). Appended by
+  // RunService.retry when a RECORDED intent is refused -- the per-Run maxRetries budget, a
+  // COMPLETED parent, or the CP-3 credential-profile parity check (#807) -- in the SAME transaction
+  // that clears the intent, payload { runId, reason }. Without it an intended retry became a final
+  // failure recorded only as a worker log line, and no reader could tell "retry pending" from
+  // "final". There is deliberately no `run.retry_scheduled` event: the intent is a column on the
+  // attempt, because it has to commit WITH the terminal transition rather than beside it.
+  'run.retry_refused',
 ]);
 
 /**

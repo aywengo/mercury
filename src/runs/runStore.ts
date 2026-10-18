@@ -28,6 +28,7 @@ export interface RunRow {
   lease_expires_at: string | null;
   cancellation_requested_at: string | null;
   status_changed_at: string | null;
+  retry_due_at: string | null;
   final_commits_json: string;
   pr_url: string | null;
   model: string | null;
@@ -60,6 +61,7 @@ export function rowToRun(row: RunRow): Run {
     leaseExpiresAt: row.lease_expires_at,
     cancellationRequestedAt: row.cancellation_requested_at,
     statusChangedAt: row.status_changed_at,
+    retryDueAt: row.retry_due_at,
     finalCommits: JSON.parse(row.final_commits_json) as string[],
     prUrl: row.pr_url,
     model: row.model ?? null,
@@ -102,15 +104,15 @@ export class RunStore {
         `INSERT INTO runs (
           id, owner_id, task, repository_json, repositories_json, workspace_branch, workspace_path, agent, status,
           attempt, retry_of, error, error_kind, constraints_json, created_at, started_at, completed_at,
-          lease_owner, lease_expires_at, cancellation_requested_at, status_changed_at, final_commits_json, pr_url, model, credential_profile
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          lease_owner, lease_expires_at, cancellation_requested_at, status_changed_at, retry_due_at, final_commits_json, pr_url, model, credential_profile
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.id, run.ownerId, run.task, JSON.stringify(run.repository), run.repositories ? JSON.stringify(run.repositories) : null,
         run.workspaceBranch, run.workspacePath,
         run.agent, run.status, run.attempt, run.retryOf, run.error, run.errorKind, JSON.stringify(run.constraints),
         run.createdAt, run.startedAt, run.completedAt, run.leaseOwner, run.leaseExpiresAt,
-        run.cancellationRequestedAt, run.statusChangedAt ?? null, JSON.stringify(run.finalCommits), run.prUrl, run.model ?? null, run.credentialProfile ?? null,
+        run.cancellationRequestedAt, run.statusChangedAt ?? null, run.retryDueAt ?? null, JSON.stringify(run.finalCommits), run.prUrl, run.model ?? null, run.credentialProfile ?? null,
       );
   }
 
@@ -227,6 +229,34 @@ export class RunStore {
         ...(scoped ? [leaseOwner] : []),
         ...(bounded ? [limit] : []),
       ) as unknown as RunRow[];
+    return rows.map(rowToRun);
+  }
+
+  /**
+   * Attempts whose recorded automatic-retry intent has come due and that have no child yet
+   * (A0-2, issue #987). This is recovery's whole question, asked of the database rather than of a
+   * worker's memory: the worker that recorded the intent may be gone.
+   *
+   * The intent is recorded in the same statement as the terminal status and cleared in the same
+   * transaction that inserts the child, so `retry_due_at IS NOT NULL` already implies "terminal",
+   * and the anti-join is what excludes the intents a retry has since honoured. Comparing the ISO
+   * strings is safe because every timestamp Mercury stores is UTC ISO-8601 of equal width.
+   *
+   * Omitted limit => no LIMIT clause at all, the same convention as listIdle: a caller that does
+   * not ask for a bound must not silently receive a truncated page of pending retries.
+   */
+  listPendingRetries(dueBeforeIso: string, limit?: number): Run[] {
+    const bounded = limit !== undefined;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM runs r
+          WHERE r.retry_due_at IS NOT NULL
+            AND r.retry_due_at <= ?
+            AND NOT EXISTS (SELECT 1 FROM runs c WHERE c.retry_of = r.id)
+          ORDER BY r.retry_due_at ASC, r.id ASC
+          ${bounded ? 'LIMIT ?' : ''}`,
+      )
+      .all(...(bounded ? [dueBeforeIso, limit] : [dueBeforeIso])) as unknown as RunRow[];
     return rows.map(rowToRun);
   }
 

@@ -549,6 +549,15 @@ which measures when the Run was created, not how long it has been waiting in its
 status. Consumers building "waiting since" logic on this field must read it from this field
 only; the trigger matcher (dispatcher-bot-design §6.1) depends on that.
 
+The Run object also carries `retryDueAt` (nullable, read-only): the time the recorded
+automatic-retry intent for this attempt becomes due (issue #987, A0-2). Non-null means the
+attempt is terminal, a retry was decided, and it has not happened yet — the chain is waiting,
+not finished, and `POST /api/runs/:runId/retry` on it is a manual retry of work Mercury was
+already going to re-attempt. It is written in the same statement as the terminal status and
+cleared by the transaction that creates the retry, so a reader never sees it on a Run whose
+retry already exists. `null` (or absent, for Runs predating the v19 migration) means no retry
+was decided, which is the only state in which a terminal Run is genuinely final.
+
 ## Event history
 
 ```bash

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 import { NotFoundError } from '../src/domain/errors.ts';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -217,6 +218,201 @@ test('retry throws once per-run maxRetries is exhausted (issue #9)', () => {
   }
 });
 
+test('retry: the child carries retry_of and the bumped attempt in the INSERT that creates it (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+
+    // The window #987 is about. The child used to be committed by create()'s transaction and linked
+    // by a FOLLOW-UP update, so every reader -- including a worker in another process claiming the
+    // child -- could see a fresh attempt 1 with no parent. Observing the INSERT is observing that
+    // window: whatever the INSERT writes is what the committed row says, and with the link written
+    // outside it, this assertion sees `retryOf: null`.
+    const inserted: { id: string; retryOf: string | null; attempt: number }[] = [];
+    const realInsert = env.runs.insert.bind(env.runs);
+    env.runs.insert = (r) => {
+      inserted.push({ id: r.id, retryOf: r.retryOf, attempt: r.attempt });
+      realInsert(r);
+    };
+
+    const retried = env.runService.retry(run.id, 'alice', false);
+    assert.equal(inserted.length, 1, 'a retry must insert exactly one child row');
+    assert.equal(inserted[0]!.id, retried.id);
+    assert.equal(inserted[0]!.retryOf, run.id, 'the child was inserted without its parent link');
+    assert.equal(inserted[0]!.attempt, 2, 'the child was inserted with a reset attempt counter');
+
+    // The same answer from a second connection, i.e. from any other process: the row and its link
+    // became visible together, so there is no state in which the child exists unlinked.
+    const other = new DatabaseSync(join(env.dir, 'test.db'));
+    try {
+      const row = other.prepare('SELECT retry_of, attempt FROM runs WHERE id = ?').get(retried.id) as
+        | { retry_of: string | null; attempt: number }
+        | undefined;
+      assert.equal(row?.retry_of, run.id);
+      assert.equal(row?.attempt, 2);
+    } finally {
+      other.close();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: the terminal transition records the intent, and a refusal clears it with the reason (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'x',
+      agent: 'fake',
+      constraints: { maxRetries: 0 },
+    });
+    env.runs.transition(run.id, 'STARTING');
+    // Exactly what the worker does now: the decision rides the same statement as the status, so a
+    // terminal attempt and its intent can never disagree.
+    const dueAt = new Date(Date.now() + 30_000).toISOString();
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString(), retryDueAt: dueAt });
+    assert.equal(env.runs.get(run.id)!.retryDueAt, dueAt, 'the intent must be persisted by the transition');
+
+    // maxRetries: 0 means the retry the intent describes can never be honoured.
+    assert.throws(() => env.runService.retry(run.id, 'alice', true, { auto: true }), /Max retries reached/);
+
+    assert.equal(env.runs.get(run.id)!.retryDueAt, null, 'a refused retry must not leave the intent recorded');
+    const refused = env.events.list(run.id).filter((e) => e.type === 'run.retry_refused');
+    assert.equal(refused.length, 1, 'the refusal must be recorded on the Run');
+    assert.match(String((refused[0]!.payload as { reason: string }).reason), /Max retries reached/);
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: a refusal with no recorded intent records no run.retry_refused (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING');
+    env.runs.transition(run.id, 'COMPLETED', { completedAt: new Date().toISOString() });
+    assert.throws(() => env.runService.retry(run.id, 'alice', false), /completed/);
+    assert.equal(env.events.list(run.id).some((e) => e.type === 'run.retry_refused'), false);
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: a manual retry clears the recorded intent, so the automatic retry cannot fire twice (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', {
+      completedAt: new Date().toISOString(),
+      retryDueAt: new Date(Date.now() + 30_000).toISOString(),
+    });
+
+    const manual = env.runService.retry(run.id, 'alice', true);
+    assert.equal(manual.retryOf, run.id);
+    assert.equal(manual.attempt, 2);
+    assert.equal(env.runs.get(run.id)!.retryDueAt, null, 'the operator retried it, so the pending intent is gone');
+
+    // The worker's own automatic retry for the same attempt now finds nothing to claim: no second
+    // child, and no run.retry_refused either -- the chain is not final, the retry simply happened.
+    assert.throws(() => env.runService.retry(run.id, 'alice', true, { auto: true }), /already claimed/);
+    const children = env.runs.list({ ownerId: 'alice', limit: 50 }).runs.filter((r) => r.retryOf === run.id);
+    assert.equal(children.length, 1);
+    assert.equal(env.events.list(run.id).some((e) => e.type === 'run.retry_refused'), false);
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: an unexpected failure leaves the intent recorded, so recovery can try again (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    const dueAt = new Date(Date.now() + 30_000).toISOString();
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString(), retryDueAt: dueAt });
+
+    // A failure that is not an answer about whether the retry can happen: the write itself broke.
+    const realInsert = env.runs.insert.bind(env.runs);
+    env.runs.insert = () => {
+      throw new Error('database went away');
+    };
+    assert.throws(() => env.runService.retry(run.id, 'alice', true, { auto: true }), /database went away/);
+    env.runs.insert = realInsert;
+
+    assert.equal(env.runs.get(run.id)!.retryDueAt, dueAt, 'an error nobody decided on must not finalise the chain');
+    assert.equal(env.events.list(run.id).some((e) => e.type === 'run.retry_refused'), false);
+
+    // ...and the retry still happens once the write works again.
+    const child = env.runService.retry(run.id, 'alice', true, { auto: true });
+    assert.equal(child.retryOf, run.id);
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: two workers holding the same stale pending read create exactly one child (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', {
+      completedAt: new Date().toISOString(),
+      retryDueAt: new Date(Date.now() - 1).toISOString(),
+    });
+
+    // What two processes recovering the same attempt both see before either commits. Clearing the
+    // intent IS the claim, so the second worker must find it gone and create nothing.
+    const dueBefore = new Date().toISOString();
+    const seenByA = env.runs.listPendingRetries(dueBefore);
+    const seenByB = env.runs.listPendingRetries(dueBefore);
+    assert.equal(seenByA.length, 1);
+    assert.equal(seenByB.length, 1);
+
+    const winner = env.runService.retry(seenByA[0]!.id, seenByA[0]!.ownerId, true, { auto: true });
+    assert.throws(
+      () => env.runService.retry(seenByB[0]!.id, seenByB[0]!.ownerId, true, { auto: true }),
+      /already claimed/,
+      'the second worker must lose the claim rather than create a second retry',
+    );
+    const children = env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 20 }).runs.filter((r) => r.retryOf === run.id);
+    assert.equal(children.length, 1);
+    assert.equal(children[0]!.id, winner.id);
+  } finally {
+    env.close();
+  }
+});
+
+test('listPendingRetries returns due intents with no child, and nothing else (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const mk = (retryDueAt: string | null) => {
+      const r = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+      env.runs.transition(r.id, 'STARTING');
+      env.runs.transition(r.id, 'FAILED', { completedAt: new Date().toISOString(), retryDueAt });
+      return r;
+    };
+    const future = mk(new Date(Date.now() + 60_000).toISOString());
+    const due = mk(new Date(Date.now() - 1).toISOString());
+    const noIntent = mk(null);
+
+    const found = env.runs.listPendingRetries(new Date().toISOString()).map((r) => r.id);
+    assert.deepEqual(found, [due.id], 'only the due intent is recoverable');
+    assert.equal(found.includes(future.id), false, 'a backoff that has not elapsed is not due');
+    assert.equal(found.includes(noIntent.id), false, 'no intent means no retry was decided');
+
+    // Once the retry exists, the attempt stops being recoverable -- otherwise every sweep would
+    // create another child.
+    env.runService.retry(due.id, 'alice', true, { auto: true });
+    assert.deepEqual(env.runs.listPendingRetries(new Date().toISOString()).map((r) => r.id), []);
+  } finally {
+    env.close();
+  }
+});
 
 test('submitInput only allowed in NEEDS_INPUT', () => {
   const env = makeEnv({ workerEnabled: false });

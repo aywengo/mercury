@@ -1266,3 +1266,84 @@ test('the backlog claim releases, so a SECOND episode alerts again (issue #142)'
   assert.equal(env.queue.claimAlert('backlog', 'w2', 15 * 60 * 1000), true,
     'the next episode alerts, well inside the interval');
 });
+
+test('retry recovery: an intent whose worker died is honoured exactly once across two workers (issue #987)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  const repoDir = makeGitRepo(join(envDir(), 'repo-retry-recovery'));
+  const a = makeWorker(env, { workerId: 'rec-a', pollMs: 10, stuckCheckIntervalMs: 20 });
+  const b = makeWorker(env, { workerId: 'rec-b', pollMs: 10, stuckCheckIntervalMs: 20 });
+  try {
+    // The state a worker leaves behind when it dies during the backoff: the attempt is terminal and
+    // the retry decision it made is in the row, due, with no child. Nothing in memory is needed to
+    // finish the job, which is the whole point of recording the decision.
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repoDir } });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', {
+      completedAt: new Date().toISOString(),
+      retryDueAt: new Date(Date.now() - 1).toISOString(),
+    });
+
+    // Force the interleaving one process cannot produce on its own: each sweep is synchronous, so
+    // two workers in THIS process take turns and never both hold the same pending read. Two real
+    // processes do, and that is the race the claim exists for -- so every sweep is handed the row
+    // as it looked before either worker committed. With the claim removed, this test creates a
+    // second child and fails; the same interleaving is pinned deterministically in
+    // test/runService.test.ts.
+    const stale = [env.runs.get(run.id)!];
+    const realList = env.runs.listPendingRetries.bind(env.runs);
+    env.runs.listPendingRetries = () => stale;
+
+    a.start();
+    b.start();
+    const children = () => env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 20 }).runs.filter((r) => r.retryOf === run.id);
+    await waitFor(() => children().length >= 1, 15_000);
+    // Several more sweeps on BOTH workers, each still seeing a pending attempt to recover.
+    await sleep(400);
+    const made = children();
+    assert.equal(made.length, 1, `expected exactly one recovered retry, got ${made.length}`);
+    assert.equal(made[0]!.attempt, 2);
+    assert.equal(env.runs.get(run.id)!.retryDueAt, null, 'the honoured intent must be cleared');
+    env.runs.listPendingRetries = realList;
+  } finally {
+    a.stop();
+    b.stop();
+    env.close();
+  }
+});
+
+test('retry recovery: a worker restarted BEFORE the backoff elapsed retries once the intent comes due (issue #987)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  const repoDir = makeGitRepo(join(envDir(), 'repo-retry-restart'));
+  const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake', repository: { localPath: repoDir } });
+  const first = makeWorker(env, { workerId: 'restart-1', pollMs: 10, stuckCheckIntervalMs: 20 });
+  const second = makeWorker(env, { workerId: 'restart-2', pollMs: 10, stuckCheckIntervalMs: 20 });
+  try {
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', {
+      completedAt: new Date().toISOString(),
+      retryDueAt: new Date(Date.now() + 500).toISOString(),
+    });
+
+    // The worker that recorded the decision comes back up before the backoff has elapsed. It must
+    // NOT retry early -- the intent is not due -- and the pending state has to survive its death.
+    first.start();
+    await sleep(150);
+    first.stop();
+    assert.equal(
+      env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 20 }).runs.some((r) => r.retryOf === run.id),
+      false,
+      'a retry must not be created before its due time',
+    );
+    assert.notEqual(env.runs.get(run.id)!.retryDueAt ?? null, null, 'the intent must survive the restart');
+
+    second.start();
+    const children = () => env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 20 }).runs.filter((r) => r.retryOf === run.id);
+    await waitFor(() => children().length >= 1, 15_000);
+    await sleep(200);
+    assert.equal(children().length, 1);
+  } finally {
+    first.stop();
+    second.stop();
+    env.close();
+  }
+});

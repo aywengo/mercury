@@ -220,10 +220,38 @@ Rules:
   `TASK_STATE_WORKING`. A2A terminal states are final; reporting `FAILED` and then
   continuing would break every conforming client. The chain reports a terminal state
   only when its latest attempt is terminal and no further attempt will be made. Checking
-  the tree showed this cannot be answered race-free today: the retry link is written
-  after the child Run is already queued, and auto-retry intent lives only in worker
-  memory during the backoff. #987 fixes both and adds a persisted `chainState` helper;
-  it also records here how a manual retry after a reported terminal state is treated.
+  the tree showed that could not be answered race-free: the retry link was written after
+  the child Run was already queued, and auto-retry intent lived only in worker memory
+  during the backoff. **#987 fixed both**, and the answer is now read from persisted rows
+  alone:
+  - **The link is part of creation.** `retry_of` and `attempt` are written by the INSERT
+    that creates the child, in that child's own transaction (`CreateRunInput.retryLink`,
+    internal-only — no route can set it). There is no interval in which an attempt exists
+    without its parent, so a worker in another process claiming the child never mistakes a
+    retry for a first attempt.
+  - **A retry decision is durable.** When the worker decides to retry an infrastructure
+    failure it records the due time as `runs.retry_due_at` in the same statement as the
+    terminal status, and the transaction that creates the child is the one that clears it.
+    A worker that dies during the backoff therefore leaves a retryable attempt behind, and
+    recovery — on worker start-up and on the existing sweep timer — finishes the job
+    **exactly once across workers**: the clear IS the claim, so of N workers racing on one
+    attempt exactly one commits a child. A decision that cannot be honoured (per-Run
+    `maxRetries`, a `COMPLETED` parent, the CP-3 credential-profile parity check) clears the
+    intent and appends `run.retry_refused` with the reason, so "final" always has a stated
+    cause rather than a log line only.
+  - **`chainState(chain)`** (`src/domain/runChain.ts`) is pure over those fields and returns
+    `{ latest, retryPending, final }`, where `retryPending` is exactly "the latest attempt is
+    terminal, an intent is recorded, and it has no child". §6.5's `FAILED` row is this flag.
+- **A manual retry cannot un-finalise an A2A task.** An A2A task freezes at the first
+  terminal state it reports: `POST /api/runs/:id/retry` on a chain A2A has already reported
+  as terminal creates an attempt that is visible natively — in the Run list, in the chain,
+  and in `chainState` — but the task keeps reporting the state it already reported, and no
+  A2A event is emitted for the new attempt. Refusing the manual retry instead was considered
+  and rejected: it would stop a Mercury operator from re-running work they own and can see,
+  because of a transport binding, and it would put the freeze inside the retry path, where
+  every other caller (the dashboard, `mercuryctl`, the bots) would pay for it. The freeze
+  belongs to the A2A projection (§6.5), which applies it once, when it first reports a
+  terminal state for a task.
 - **Idempotency.** `messageId` on a new-task message maps to the existing caller-supplied
   idempotency key, `a2a:<skill-id>:<messageId>`. Replay is already pinned over HTTP and
   already owner-scoped (#730): the same caller re-sending the same message gets the same

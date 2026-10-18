@@ -81,6 +81,25 @@ export interface CreateRunInput {
    */
   retryCredentialProfile?: string | null;
   /**
+   * INTERNAL — retry only, never accepted from HTTP (the route forwards named fields only), and
+   * the ONLY way `retry_of` and `attempt` are ever set (A0-2, issue #987).
+   *
+   * Both values are written by the same INSERT as the child row, inside create()'s transaction.
+   * They used to be a follow-up `UPDATE` after create() returned, which left the child committed
+   * and visible as `retry_of = NULL, attempt = 1` for as long as it took to run the next
+   * statement: a worker in another process that claimed it in that window skipped resume
+   * (worker.ts reads `run.retryOf`) and restarted the maxRetries budget.
+   *
+   * `claimIntent` is the automatic-retry case. The parent's recorded retry intent (`retry_due_at`)
+   * IS the claim on the retry, so the transaction that creates the child must be the one that
+   * clears it: two workers recovering the same attempt then race on that single UPDATE, exactly
+   * one commits a child, and the loser gets RetryClaimedError and creates nothing. Because the
+   * clear and the insert commit together, a worker that dies mid-transaction rolls back both --
+   * there is no window in which the intent is gone and the child was never written. A manual retry
+   * has no intent to claim and simply clears whatever is recorded.
+   */
+  retryLink?: { retryOf: string; attempt: number; claimIntent: boolean };
+  /**
    * Optional objective for the Run (docs/goals.md). `undefined` means no goal and the Run
    * behaves exactly as before. Validated and resolved against `task` in create(); an
    * omitted objective defaults to the task text.
@@ -510,6 +529,19 @@ export class RunService {
     // dropped, because a dropped override silently executes with the wrong model.
     if (input.model !== undefined) {
       validateModelShape(input.model, 'model');
+    }
+    // Internal-only, so this is a fail-closed guard rather than a caller-facing rule (the same
+    // spirit as RunStore.transition refusing a caller-supplied statusChangedAt): a malformed link
+    // would silently corrupt the chain -- an attempt that disagrees with its parent, or a retry
+    // with no parent at all -- and nothing downstream could tell.
+    if (input.retryLink !== undefined) {
+      const { retryOf, attempt } = input.retryLink;
+      if (typeof retryOf !== 'string' || retryOf.length === 0 || !Number.isInteger(attempt) || attempt < 2) {
+        throw new ValidationError('retryLink requires a parent run id and an attempt of at least 2');
+      }
+      if (this.deps.runs.get(retryOf) === null) {
+        throw new ValidationError(`retryLink names a parent that does not exist: ${retryOf}`);
+      }
     }
     if (input.idempotencyKey) {
       const existing = this.findByIdempotencyKey(input.ownerId, input.idempotencyKey);
@@ -1162,8 +1194,11 @@ export class RunService {
       workspacePath: null,
       agent,
       status: 'QUEUED',
-      attempt: 1,
-      retryOf: null,
+      // Retry passes the parent's id and the bumped attempt here rather than updating the row
+      // afterwards (issue #987): the INSERT below is what makes the link exist, so the child is
+      // never observable without it.
+      attempt: input.retryLink?.attempt ?? 1,
+      retryOf: input.retryLink?.retryOf ?? null,
       error: null,
       errorKind: null,
       constraints,
@@ -1182,6 +1217,7 @@ export class RunService {
 
     try {
       tx(this.deps.db, () => {
+        if (input.retryLink) this.claimRetryLink(input.retryLink);
         this.deps.runs.insert(run);
         for (const skill of resolved) {
           this.deps.db
@@ -1630,8 +1666,29 @@ export class RunService {
   }
 
   retry(runId: string, ownerId: string, isAdmin: boolean, opts: { auto?: boolean } = {}): Run {
+    // The owner-scoped read comes FIRST and stays outside the try below: the refusal path writes to
+    // the Run it was refused for, so it must never run for a Run this caller cannot see
+    // (AGENTS.md: non-admin callers see only their Runs, 404 not 403).
     const original = this.get(runId, ownerId, isAdmin);
     if (!original) throw new NotFoundError('run not found');
+    try {
+      return this.retryAttempt(original, opts);
+    } catch (err) {
+      // A recorded retry decision that cannot be honoured must not stay recorded: the chain is
+      // final, and the reason has to be readable (issue #987 acceptance 3). Only a DECIDED refusal
+      // counts -- a ConflictError from the budget or the parent's status, or a ValidationError from
+      // create()'s checks. A claim failure is not a refusal (another worker owns the retry, the
+      // chain is not final and the intent is already gone), and neither is an unexpected error: a
+      // failed database write is not an answer about whether the retry can happen, so the intent
+      // stays recorded and the next recovery sweep tries again rather than the chain being
+      // finalised by an error nobody decided on.
+      if (err instanceof ConflictError || err instanceof ValidationError) this.refuseRetryIntent(original, err);
+      throw err;
+    }
+  }
+
+  private retryAttempt(original: Run, opts: { auto?: boolean }): Run {
+    const runId = original.id;
     if (!isTerminal(original.status)) throw new ConflictError(`Run not terminal (${original.status})`);
     if (original.status === 'COMPLETED') throw new ConflictError('Cannot retry a completed Run');
     if (original.attempt >= original.constraints.maxRetries + 1) {
@@ -1716,12 +1773,55 @@ export class RunService {
             tokenBudget: originalGoal.tokenBudget,
           }
         : undefined,
+      // The link is an INPUT to creation, not a follow-up write (issue #987): the INSERT that makes
+      // the child also makes it a retry, so no reader -- including a worker in another process
+      // claiming the child -- can ever observe it as a fresh attempt 1 with no parent. `opts.auto`
+      // decides whether this retry must claim a recorded intent; see retryLink above.
+      retryLink: { retryOf: original.id, attempt: original.attempt + 1, claimIntent: opts.auto === true },
     });
-    // link the retry to its original (retryOf) and bump the attempt counter
-    this.deps.db
-      .prepare('UPDATE runs SET retry_of = ?, attempt = ? WHERE id = ?')
-      .run(original.id, original.attempt + 1, created.id);
-    return this.deps.runs.get(created.id)!;
+    return created;
+  }
+
+  /**
+   * The parent's side of a retry link, inside the child's transaction (A0-2, issue #987).
+   *
+   * A claimed intent is the ONLY thing that authorises an automatic retry, and clearing it is what
+   * makes the retry exactly-once: the UPDATE is the claim, SQLite serialises it, and the loser of
+   * the race finds `retry_due_at` already NULL and creates nothing. Because this runs in the same
+   * transaction as the child's INSERT, a worker that dies between the two statements rolls back
+   * both -- the intent survives and recovery retries later, instead of the retry being lost.
+   *
+   * A manual retry has no intent to claim and clears whatever is recorded: the operator has decided
+   * the attempt is being retried now, so a worker's pending automatic retry for it must not fire
+   * afterwards and produce a second child.
+   */
+  private claimRetryLink(link: { retryOf: string; attempt: number; claimIntent: boolean }): void {
+    const cleared = link.claimIntent
+      ? this.deps.db
+          .prepare('UPDATE runs SET retry_due_at = NULL WHERE id = ? AND retry_due_at IS NOT NULL')
+          .run(link.retryOf)
+      : this.deps.db.prepare('UPDATE runs SET retry_due_at = NULL WHERE id = ?').run(link.retryOf);
+    if (link.claimIntent && cleared.changes !== 1) {
+      throw new RetryClaimedError(`retry of ${link.retryOf} is already claimed`);
+    }
+  }
+
+  /**
+   * End a recorded retry intent that retry() refused to honour (A0-2, issue #987 acceptance 3).
+   *
+   * Clearing the intent and recording the reason happen in ONE transaction, so a reader never sees
+   * a chain that is final without the reason why, or a reason on a chain that still claims to be
+   * pending. A Run with no recorded intent is left alone: a manual retry refused for its own
+   * reasons (already COMPLETED, not terminal) is not an unhonoured retry DECISION, the caller
+   * already has the error, and a Run's event log should not gain a line for every 409.
+   */
+  private refuseRetryIntent(original: Run, err: unknown): void {
+    if ((original.retryDueAt ?? null) === null) return;
+    const reason = err instanceof Error ? err.message : String(err);
+    tx(this.deps.db, () => {
+      this.deps.db.prepare('UPDATE runs SET retry_due_at = NULL WHERE id = ?').run(original.id);
+      this.deps.events.append(original.id, 'run.retry_refused', { runId: original.id, reason });
+    });
   }
 
   private findByIdempotencyKey(ownerId: string, key: string): Run | null {
@@ -1729,6 +1829,23 @@ export class RunService {
       .prepare('SELECT run_id FROM idempotency_keys WHERE owner = ? AND key = ?')
       .get(ownerId, key) as { run_id: string } | undefined;
     return row ? this.deps.runs.get(row.run_id) : null;
+  }
+}
+
+/**
+ * The automatic retry this caller was about to perform is already claimed (A0-2, issue #987).
+ *
+ * Thrown by create() when `retryLink.claimIntent` finds the parent's recorded intent already
+ * cleared, which is what two workers recovering the same attempt look like from the loser's side.
+ * It is deliberately NOT a ConflictError: it carries no HTTP status because no request can reach it
+ * (the HTTP retry route is a manual retry, and a manual retry claims nothing), and because the
+ * caller must treat it differently from a refusal -- the chain is NOT final, the retry simply
+ * belongs to someone else.
+ */
+export class RetryClaimedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RetryClaimedError';
   }
 }
 
