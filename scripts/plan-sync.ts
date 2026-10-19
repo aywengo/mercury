@@ -8,7 +8,7 @@
 // Idempotent by construction: a row already `done` with the PR number is left alone, and a commit
 // with no closing issues (including this workflow's own commit) changes nothing -- which is also
 // what stops the workflow from re-triggering itself forever. A concurrent plan-sync is handled by
-// rebasing and retrying the push.
+// regenerating the update against the fresh main and retrying the push.
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -36,7 +36,7 @@ for (const pr of prs) {
   // field in newer gh, and the REST PR object does not carry it, so the GraphQL query is the one
   // form that works on every runner.
   const refs = JSON.parse(
-    gh(['api', 'graphql', '-f', 'query=query($n:Int!){ repository(owner:"' + repo.split('/')[0] + '", name:"' + repo.split('/')[1] + '"){ pullRequest(number:$n){ closingIssuesReferences(first:10){ nodes{ number } } } } }', '-F', 'n=' + pr, '--jq', '.data.repository.pullRequest.closingIssuesReferences.nodes[].number']).trim(),
+    gh(['api', 'graphql', '-f', 'query=query($n:Int!){ repository(owner:"' + repo.split('/')[0] + '", name:"' + repo.split('/')[1] + '"){ pullRequest(number:$n){ closingIssuesReferences(first:10){ nodes{ number } } } } }', '-F', 'n=' + pr, '--jq', '.data.repository.pullRequest.closingIssuesReferences.nodes | map(.number)']).trim(),
   ) as number[];
   for (const issue of refs) closing.push({ issue, pr });
 }
@@ -51,26 +51,48 @@ if (errors.length) {
   console.error('plan-sync: PLAN.md is malformed:\n' + errors.join('\n'));
   process.exit(1);
 }
-const { plan: next, changed } = applyClosing(plan, closing);
+let { plan: next, changed } = applyClosing(plan, closing);
 if (!changed) {
   console.log(`plan-sync: no PLAN.md changes needed for ${closing.map((c) => `#${c.issue}`).join(', ')}`);
   process.exit(0);
 }
 
-writeFileSync('PLAN.md', next);
 const summary = closing.map((c) => `#${c.issue} via #${c.pr}`).join(', ');
 execFileSync('git', ['config', 'user.name', 'github-actions[bot]']);
 execFileSync('git', ['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com']);
-execFileSync('git', ['add', 'PLAN.md']);
-execFileSync('git', ['commit', '-m', `PLAN.md: mark ${summary} done (plan-sync)`]);
+
+// Build the plan-only commit from the current working tree.
+function commitPlan(): void {
+  writeFileSync('PLAN.md', next);
+  execFileSync('git', ['add', 'PLAN.md']);
+  execFileSync('git', ['commit', '-m', `PLAN.md: mark ${summary} done (plan-sync)`]);
+}
+commitPlan();
+
 for (let attempt = 0; attempt < 5; attempt++) {
   try {
     execFileSync('git', ['push', 'origin', 'HEAD:main']);
     console.log(`plan-sync: pushed PLAN.md update for ${summary}`);
     process.exit(0);
   } catch {
-    // A concurrent plan-sync landed first; rebase onto it and try again.
-    execFileSync('git', ['pull', '--rebase', 'origin', 'main']);
+    // A concurrent plan-sync landed first. Regenerate the update against the fresh main instead of
+    // rebasing the stale edit: two runs editing adjacent rows would otherwise hit the very merge
+    // conflict this workflow exists to remove. Discard our commit and re-apply to origin/main.
+    execFileSync('git', ['fetch', 'origin', 'main']);
+    execFileSync('git', ['reset', '--hard', 'origin/main']);
+    const fresh = readFileSync('PLAN.md', 'utf8');
+    const { errors: freshErrors } = parsePlan(fresh);
+    if (freshErrors.length) {
+      console.error('plan-sync: PLAN.md on main is malformed:\n' + freshErrors.join('\n'));
+      process.exit(1);
+    }
+    const applied = applyClosing(fresh, closing);
+    if (!applied.changed) {
+      console.log(`plan-sync: no PLAN.md changes needed for ${summary}`);
+      process.exit(0);
+    }
+    next = applied.plan;
+    commitPlan();
   }
 }
 console.error('plan-sync: could not push after 5 attempts');

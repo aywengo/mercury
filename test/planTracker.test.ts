@@ -8,7 +8,7 @@ const SAMPLE = [
   '| Issue | Title | State | PR |',
   '| --- | --- | --- | --- |',
   '| #10 | first | done | #11 |',
-  '| #12 | a title with an escaped \| pipe | open | — |',
+  '| #12 | a title with an escaped \\| pipe | open | — |',
   '| #13 | in flight | in progress | #14, #15 |',
   '| #16 | not tracked | untracked | — |',
 ].join('\n');
@@ -76,6 +76,22 @@ test('planTracker: applyClosing appends to an existing PR column and is idempote
   const again = applyClosing(plan, [{ issue: 13, pr: 99 }]);
   assert.equal(again.changed, false);
   assert.equal(again.plan, plan);
+});
+
+test('planTracker: applyClosing marks done even when the PR is already in the column (issue #1004)', () => {
+  // #13 is `in progress | #14, #15`. When #14 merges, the row must become `done` -- an existing PR
+  // number in a non-done state is NOT done (Copilot review round 1).
+  const { plan, changed } = applyClosing(SAMPLE, [{ issue: 13, pr: 14 }]);
+  assert.equal(changed, true);
+  const row = parsePlan(plan).rows.get(13)!;
+  assert.equal(row.state, 'done');
+  assert.deepEqual(row.prs, [14, 15], 'PR number is not duplicated');
+});
+
+test('planTracker: applyClosing keeps an escaped pipe in an updated title (issue #1004)', () => {
+  const { plan } = applyClosing(SAMPLE, [{ issue: 12, pr: 99 }]);
+  assert.match(plan, /escaped \\| pipe/, 'title retains its escaped pipe');
+  assert.doesNotMatch(plan, /escaped \| pipe/, 'no bare pipe in the title');
 });
 
 test('planTracker: applyClosing skips an untracked row and an issue with no row', () => {

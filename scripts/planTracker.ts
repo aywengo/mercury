@@ -106,11 +106,14 @@ function updateRow(line: string, pr: number): string {
   const m = ROW.exec(line.replace(/\\\|/g, '\u0000'));
   if (!m) return line;
   const issue = Number(m[1]);
-  const title = m[2]!.replace(/\u0000/g, '\|').trim();
+  const title = m[2]!.replace(/\u0000/g, '\\|').trim();
+  const state = m[3]!.trim();
   const prs = m[4]!.trim();
   const prsList = [...prs.matchAll(/#(\d+)/g)].map((x) => Number(x[1]));
-  if (prsList.includes(pr)) return line;
-  const newPrs = prsList.length ? `${prs}, #${pr}` : `#${pr}`;
+  // Already `done` with this PR: nothing to do. An existing PR number in any OTHER state (e.g.
+  // `in progress | #977`) is NOT done -- the row must become `done` when that PR merges.
+  if (state === 'done' && prsList.includes(pr)) return line;
+  const newPrs = prsList.includes(pr) ? prs : (prsList.length ? `${prs}, #${pr}` : `#${pr}`);
   return `| #${issue} | ${title} | done | ${newPrs} |`;
 }
 

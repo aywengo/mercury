@@ -25,12 +25,6 @@ The procedure lives in [`.agents/skills/issue-fix-loop/SKILL.md`](.agents/skills
 (step 3); the PR-time check is `scripts/planTracker.ts` and the post-merge update is
 `scripts/plan-sync.ts` (workflow `.github/workflows/plan-sync.yml`).
 
-## Tracker process
-
-| Issue | Title | State | PR |
-| --- | --- | --- | --- |
-| #1004 | PLAN.md: move the closing-row update to a post-merge commit; every open PR conflicts on adjacent rows | open | — |
-
 ## Host installer
 
 Record: [`docs/host-installer.md`](docs/host-installer.md)

@@ -10,6 +10,13 @@
 #
 # Idempotent: a commit with no closing issues (including this workflow's own commit) changes
 # nothing, so the workflow does not re-trigger itself.
+#
+# CI note: `actions/checkout` persists `github.token` for the later `git push`, and GitHub does not
+# fire `push` workflows for commits pushed with that token. So the generated PLAN.md commit does NOT
+# run `ci` (or this workflow again). That is intentional: the commit only rewrites PLAN.md row
+# states/PR columns, and the script validates PLAN.md with the same parser the PR-time check uses
+# before writing, so a malformed file cannot land. This is the documented policy exception to the
+# repo's "any push to main runs the full suite" rule.
 
 name: plan-sync
 
