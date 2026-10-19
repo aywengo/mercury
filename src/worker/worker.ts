@@ -30,6 +30,7 @@ import { harvestRecords } from '../knowledge/harvestRecords.ts';
 import { harvestNative } from '../knowledge/harvestNative.ts';
 import { claimHash } from '../knowledge/validation.ts';
 import { createRedactor } from '../domain/redact.ts';
+import { redactRunArtifacts } from './artifactRedaction.ts';
 import type { OutboxStore } from '../knowledge/outbox.ts';
 import type { KnowledgeBounds } from '../knowledge/validation.ts';
 import type { ContextKnowledgeBlock } from '../knowledge/types.ts';
@@ -84,6 +85,13 @@ export interface WorkerDeps {
   alertWebhookUrl?: string | null;
   /** Optional secret redactor; run error messages are redacted at write time (issue #36). */
   redactor?: Redactor;
+  /**
+   * Secret values to scrub from agent artifacts at rest (issue #944): session transcripts and
+   * kernel-state snapshots under the Run workspace. The composition root passes the same layer
+   * the event redactor was built from -- declared MERCURY_SECRETS plus forwarded credential
+   * values -- so redaction at rest tracks exactly what Mercury hands to a Run.
+   */
+  artifactSecrets?: string[];
   /** Maximum time a run may wait for human input (MERCURY_INPUT_TIMEOUT_MS); 0 = no limit. */
   inputTimeoutMs: number;
   /** Runs in RUNNING/NEEDS_INPUT with no event activity beyond this are alerted (MERCURY_STUCK_RUN_THRESHOLD_MS); 0 = disabled. */
@@ -352,6 +360,9 @@ export class Worker {
     // process running and a run that threw on a state transition unwound past any cleanup,
     // leaving a live agent writing into a workspace nobody was watching.
     let handle: AgentHandle | null = null;
+    // Captured when the workspace exists so the finally's artifact scrub (issue #944) can
+    // reach it on paths that threw before the context was built.
+    let workspacePath: string | null = null;
     // The rendered advisory plan (issue #809), captured before the prompt is assembled. Null
     // when the Run was not created from a template, so the prompt stays byte-identical.
     let renderedWorkflowPlan: string | null = null;
@@ -581,6 +592,7 @@ export class Worker {
         this.deps.events.append(run.id, 'sandbox.enabled', { policy: sandbox.describe(run) });
       }
 
+      workspacePath = workspace.path;
       const context: RunContext = {
         run,
         ...(run.model ? { model: run.model } : {}),
@@ -642,7 +654,7 @@ export class Worker {
           log.warn({ error: String(termErr instanceof Error ? termErr.message : termErr) }, 'agent terminate before requeue failed');
         }
       }
-      await this.finalize(run, outcome, skills);
+await this.finalize(run, outcome, skills);
     } catch (err) {
       const raw = String(err instanceof Error ? err.message : err);
       const message = this.deps.redactor ? this.deps.redactor.redact(raw) : raw;
@@ -731,7 +743,39 @@ export class Worker {
       } catch (disposeErr) {
         log.warn({ error: String(disposeErr instanceof Error ? disposeErr.message : disposeErr) }, 'adapter dispose failed');
       }
+      // Scrub agent artifacts at rest (issue #944). This sits in the finally, after terminate()
+      // and dispose, because that is the first point on EVERY exit path where the agent process
+      // is known to be gone (review blocker on #965: the scrub used to run only before
+      // finalize(), so a run that threw after the agent had written its transcript -- an adapter
+      // crash, a harness error -- finalized FAILED with its secrets still on disk; those are
+      // exactly the runs most likely to have dumped environment or debug output). The pass is
+      // best-effort: a redaction failure must not fail a run whose work is already done, it must
+      // leave something to read in the log.
+      if (workspacePath) {
+        this.scrubArtifacts(run.id, workspacePath);
+      }
       this.deps.queue.releaseLease(run.id, this.deps.workerId);
+    }
+  }
+
+  /**
+   * Best-effort at-rest redaction of the Run's agent artifacts (issue #944). Runs after the
+   * agent process is gone, so the files are stable.
+   */
+  private scrubArtifacts(runId: string, path: string): void {
+    const secrets = this.deps.artifactSecrets;
+    if (!secrets || secrets.length === 0) return;
+    try {
+      const scrubbed = redactRunArtifacts(path, secrets, {
+        onSkip: (file, size) => {
+          this.log('warn', 'artifact too large for redaction; skipped', { runId, file, size });
+        },
+      });
+      if (scrubbed > 0) {
+        this.log('info', 'redacted secrets from agent artifacts', { runId, files: scrubbed });
+      }
+    } catch (scrubErr) {
+      this.log('warn', 'artifact redaction failed', { runId, error: String(scrubErr instanceof Error ? scrubErr.message : scrubErr) });
     }
   }
 
