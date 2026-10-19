@@ -237,7 +237,10 @@ issues. Sections:
   ROOT without `/api` (e.g. `http://127.0.0.1:4620`) — the script appends `/api/runs` itself;
   a URL that already ends in `/api` silently yields an empty section. When unset the section
   is empty, not faked.
-- **Flakes** — the `nightly-e2e` flake-clock state (same state file).
+- **Flakes** — the `nightly-e2e` flake-clock state (same state file). Only entries with a night in
+  the last 14 nights are listed; the rest are counted once as `older entries: K` (#964). The state
+  file keeps every entry. Test names are shown repo-relative (`e2e/x.test.ts`), never as a worktree
+  path, including entries recorded before that normalization existed.
 
 The report is read-only except for the digest issue itself and the close
 of every OPEN digest titled `nightly report — D` with D strictly before the
