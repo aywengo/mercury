@@ -101,6 +101,41 @@ export function applyClosing(md: string, closing: { issue: number; pr: number }[
   return { plan: lines.join('\n'), changed };
 }
 
+/**
+ * Remove "in review" descriptions of merged PRs from `docs/status.md`.
+ *
+ * The status-consistency guard (`test/statusPlanConsistency.test.ts`) fails when status.md calls a
+ * merged PR "in review", and it derives "merged" from PLAN.md `done` rows. Before #1004 the closing
+ * PR set its own row `done`, so the guard fired on that PR and forced the status correction before
+ * merge. Now the row becomes `done` post-merge (plan-sync), so plan-sync must also fix status.md --
+ * otherwise the guard would fail on a later run. The two shapes mirror the guard's detectors exactly
+ * (`#N in review` and `in review (#N)` / `in review, #N`).
+ */
+export function syncStatusForMerged(
+  status: string,
+  mergedPrs: Set<number>,
+): { text: string; changed: boolean } {
+  let text = status;
+  let changed = false;
+  // "#99 in review" / "#99 PR in review" -> "#99 merged"
+  text = text.replace(/#(\d+)\s+(?:PR\s+)?in review/gi, (m, n) => {
+    if (mergedPrs.has(Number(n))) {
+      changed = true;
+      return `#${n} merged`;
+    }
+    return m;
+  });
+  // "in review (#99)" / "in review, #99" / "in review [#99]" -> "merged (...)"
+  text = text.replace(/in review\s*[,;([]?\s*#(\d+)/gi, (m, n) => {
+    if (mergedPrs.has(Number(n))) {
+      changed = true;
+      return m.replace(/in review/i, 'merged');
+    }
+    return m;
+  });
+  return { text, changed };
+}
+
 /** Rewrite one row line to `done` with `pr` in the PR column, if it is not already there. */
 function updateRow(line: string, pr: number): string {
   const m = ROW.exec(line.replace(/\\\|/g, '\u0000'));

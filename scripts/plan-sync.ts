@@ -5,14 +5,24 @@
 // PR's number -- in ONE commit, as the Actions bot. This is what replaced the per-PR row edit,
 // which made two open PRs in one workstream conflict on adjacent rows every time one merged first.
 //
+// It also keeps `docs/status.md` consistent: the status-consistency guard fails when status.md calls
+// a merged PR "in review", and "merged" is derived from PLAN.md `done` rows. Because the row becomes
+// `done` here (post-merge), plan-sync must remove the "in review" description of the PRs it marks
+// done, or the guard would fail on a later run.
+//
 // Idempotent by construction: a row already `done` with the PR number is left alone, and a commit
 // with no closing issues (including this workflow's own commit) changes nothing -- which is also
 // what stops the workflow from re-triggering itself forever. A concurrent plan-sync is handled by
 // regenerating the update against the fresh main and retrying the push.
+//
+// CI: `actions/checkout` persists `github.token` for the later `git push`, and GitHub does not fire
+// `push` workflows for commits pushed with that token. So after pushing, this workflow dispatches
+// `ci` via `workflow_dispatch` so the generated commit still runs the full suite (the repo's "any
+// push to main runs the full suite" policy).
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { applyClosing, parsePlan } from './planTracker.ts';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { applyClosing, parsePlan, syncStatusForMerged } from './planTracker.ts';
 
 const repo = process.env.GITHUB_REPOSITORY ?? '';
 const sha = process.env.GITHUB_SHA ?? '';
@@ -45,34 +55,56 @@ if (closing.length === 0) {
   process.exit(0);
 }
 
-const plan = readFileSync('PLAN.md', 'utf8');
-const { errors } = parsePlan(plan);
-if (errors.length) {
-  console.error('plan-sync: PLAN.md is malformed:\n' + errors.join('\n'));
-  process.exit(1);
-}
-let { plan: next, changed } = applyClosing(plan, closing);
-if (!changed) {
-  console.log(`plan-sync: no PLAN.md changes needed for ${closing.map((c) => `#${c.issue}`).join(', ')}`);
-  process.exit(0);
-}
-
 const summary = closing.map((c) => `#${c.issue} via #${c.pr}`).join(', ');
+const mergedPrs = new Set(closing.map((c) => c.pr));
 execFileSync('git', ['config', 'user.name', 'github-actions[bot]']);
 execFileSync('git', ['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com']);
 
-// Build the plan-only commit from the current working tree.
-function commitPlan(): void {
-  writeFileSync('PLAN.md', next);
+// Build the plan+status commit from the current working tree. Returns false when nothing changed.
+function buildCommit(): boolean {
+  const plan = readFileSync('PLAN.md', 'utf8');
+  const { errors } = parsePlan(plan);
+  if (errors.length) {
+    console.error('plan-sync: PLAN.md is malformed:\n' + errors.join('\n'));
+    process.exit(1);
+  }
+  const applied = applyClosing(plan, closing);
+  let nextStatus: string | undefined;
+  let statusChanged = false;
+  if (existsSync('docs/status.md')) {
+    const status = readFileSync('docs/status.md', 'utf8');
+    const synced = syncStatusForMerged(status, mergedPrs);
+    nextStatus = synced.text;
+    statusChanged = synced.changed;
+  }
+  if (!applied.changed && !statusChanged) {
+    console.log(`plan-sync: no PLAN.md/status.md changes needed for ${summary}`);
+    return false;
+  }
+  writeFileSync('PLAN.md', applied.plan);
   execFileSync('git', ['add', 'PLAN.md']);
+  if (statusChanged && nextStatus !== undefined) {
+    writeFileSync('docs/status.md', nextStatus);
+    execFileSync('git', ['add', 'docs/status.md']);
+  }
   execFileSync('git', ['commit', '-m', `PLAN.md: mark ${summary} done (plan-sync)`]);
+  return true;
 }
-commitPlan();
+
+if (!buildCommit()) process.exit(0);
 
 for (let attempt = 0; attempt < 5; attempt++) {
   try {
     execFileSync('git', ['push', 'origin', 'HEAD:main']);
     console.log(`plan-sync: pushed PLAN.md update for ${summary}`);
+    // The generated commit was pushed with github.token, which does not fire push workflows, so
+    // dispatch `ci` explicitly to run the full suite on it.
+    try {
+      gh(['workflow', 'run', 'ci.yml', '--repo', repo]);
+      console.log('plan-sync: dispatched ci on the generated commit');
+    } catch (e) {
+      console.warn('plan-sync: could not dispatch ci: ' + (e as Error).message);
+    }
     process.exit(0);
   } catch {
     // A concurrent plan-sync landed first. Regenerate the update against the fresh main instead of
@@ -80,19 +112,7 @@ for (let attempt = 0; attempt < 5; attempt++) {
     // conflict this workflow exists to remove. Discard our commit and re-apply to origin/main.
     execFileSync('git', ['fetch', 'origin', 'main']);
     execFileSync('git', ['reset', '--hard', 'origin/main']);
-    const fresh = readFileSync('PLAN.md', 'utf8');
-    const { errors: freshErrors } = parsePlan(fresh);
-    if (freshErrors.length) {
-      console.error('plan-sync: PLAN.md on main is malformed:\n' + freshErrors.join('\n'));
-      process.exit(1);
-    }
-    const applied = applyClosing(fresh, closing);
-    if (!applied.changed) {
-      console.log(`plan-sync: no PLAN.md changes needed for ${summary}`);
-      process.exit(0);
-    }
-    next = applied.plan;
-    commitPlan();
+    if (!buildCommit()) process.exit(0);
   }
 }
 console.error('plan-sync: could not push after 5 attempts');

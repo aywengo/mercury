@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { applyClosing, checkClosingIssues, parsePlan } from '../scripts/planTracker.ts';
+import { applyClosing, checkClosingIssues, parsePlan, syncStatusForMerged } from '../scripts/planTracker.ts';
 
 const SAMPLE = [
   '# PLAN',
@@ -98,6 +98,18 @@ test('planTracker: applyClosing skips an untracked row and an issue with no row'
   const { plan, changed } = applyClosing(SAMPLE, [{ issue: 16, pr: 99 }, { issue: 4242, pr: 99 }]);
   assert.equal(changed, false, 'nothing tracked to mark done');
   assert.equal(plan, SAMPLE);
+});
+
+test('planTracker: syncStatusForMerged removes "in review" for merged PRs, keeps others', () => {
+  const status = '1. **Merge what is in review:** artifact redaction (#965).\nCP-4 (#897): PR #977 in review.';
+  const { text, changed } = syncStatusForMerged(status, new Set([977]));
+  assert.equal(changed, true);
+  assert.match(text, /PR #977 merged/);
+  assert.doesNotMatch(text, /#977 in review/);
+  // A PR not in the set is left alone.
+  const untouched = syncStatusForMerged(status, new Set([999]));
+  assert.equal(untouched.changed, false);
+  assert.equal(untouched.text, status);
 });
 
 test('planTracker: the repository PLAN.md is well formed', () => {
