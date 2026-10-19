@@ -253,6 +253,21 @@ test('resume: a resumed attempt delivers a response carried only by the result e
   assert.deepEqual(types(second.events), ['run.started', 'agent.message'], 'the result text is delivered');
 });
 
+test('resume: a resumed attempt is not failed by the previous verdict when it emits no result (#997)', async () => {
+  // `resultIsError` is only overwritten by a `result` event. A resumed stream that ends without one
+  // (mode `noresult`: assistant text, exit 0) kept the previous attempt's failure and reported
+  // `failed` -- the error -> noresult transition the success-path test above cannot see.
+  const env: Record<string, string> = { MOCK_CLAUDE_MODE: 'error' };
+  const a = adapter({ env });
+  const ctx = makeContext();
+  assert.equal((await drain(await a.start(ctx))).exit.reason, 'failed');
+
+  env.MOCK_CLAUDE_MODE = 'noresult';
+  const second = await drain(await a.resume(ctx.run.id, ctx));
+  a.dispose(ctx.run.id);
+  assert.equal(second.exit.reason, 'completed', `resumed attempt reported ${JSON.stringify(second.exit)}`);
+});
+
 test('skipPermissions is OFF by default: the sandbox-only knob is never implicit', async () => {
   const argvFile = tempFile('claude-argv-', '.json');
   const a = adapter({ env: { MOCK_CLAUDE_MODE: 'argv', MOCK_CLAUDE_ARGV_FILE: argvFile } });

@@ -804,6 +804,12 @@ export class LocalAgentAdapter implements AgentAdapter {
     session.cancelled = false;
     session.terminated = false;
     rearmExitGate(session);
+    // Per-attempt state, cleared for the same reason (#997). `stdoutBuf` accumulates the WHOLE document
+    // for `output.format: 'json'`, so a stale buffer makes the resumed document unparseable. A stale
+    // `waitingForInput` makes handleExit() keep the resumed session alive for a sendInput() that will
+    // never come, so the resumed handle never settles at all.
+    session.stdoutBuf = '';
+    session.waitingForInput = false;
 
     const argv = [...(session.config.args ?? []), cfg.flag, sessionId];
     const traceEnv: Record<string, string> = { MERCURY_RUN_ID: runId, MERCURY_TRACE_ID: runId };

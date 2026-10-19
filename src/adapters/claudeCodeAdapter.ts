@@ -636,8 +636,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     session.terminated = false;
     rearmExitGate(session);
     // Per-attempt output state, cleared for the same reason (#997): a stale `emittedText` made the
-    // resumed attempt drop its own response when the text arrived only through the result event.
+    // resumed attempt drop its own response when the text arrived only through the result event, and a
+    // stale `resultIsError` failed the resumed attempt on the PREVIOUS attempt's verdict whenever the
+    // resumed stream carries no result event to overwrite it.
     session.emittedText = false;
+    session.resultIsError = false;
     // A retry runs in a fresh workspace; adopt the retry context wholesale so the resumed spawn
     // (task text, sandbox wrap, preset line) and the rewritten context file describe the SAME
     // run. In-process resumes pass no context and keep what start() wrote.
