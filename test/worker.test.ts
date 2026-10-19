@@ -572,6 +572,69 @@ test('auto-retry honors per-run maxRetries above the global default (issue #9)',
   }
 });
 
+test('auto-retry: the decision is durable before the backoff, so a worker that dies leaves a recoverable intent (issue #987)', async () => {
+  const env = makeEnv({ workerEnabled: false, maxRetries: 1, retryBackoffMs: 30, stuckCheckIntervalMs: 30 });
+  try {
+    // Stand in for a worker that dies between recording the decision and creating the retry: the
+    // decision was committed by the terminal transition, so it survives the death. Under the old
+    // design the only record of "retry pending" was the sleep the dead worker was sitting in.
+    const realRetry = env.runService.retry.bind(env.runService);
+    env.runService.retry = () => {
+      throw new Error('worker died before creating the retry');
+    };
+
+    // The decision must be PART of the terminal transition, not a write beside it. Read the row at
+    // the moment the transition returns -- still inside the worker's own transaction, before it
+    // commits -- so a separate UPDATE after that transaction leaves this NULL.
+    const intentAtTransition: (string | null)[] = [];
+    const realTransition = env.runs.transition.bind(env.runs);
+    env.runs.transition = (id, to, extra) => {
+      const updated = realTransition(id, to, extra);
+      if (to === 'FAILED') {
+        const row = env.db.prepare('SELECT retry_due_at FROM runs WHERE id = ?').get(id) as { retry_due_at: string | null };
+        intentAtTransition.push(row.retry_due_at);
+      }
+      return updated;
+    };
+
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'x',
+      agent: 'fake',
+      repository: { localPath: '/nonexistent/path' },
+    });
+    env.worker.start();
+    await waitFor(() => env.runs.get(run.id)!.status === 'FAILED', 10_000);
+    await sleep(150); // long enough for the (hooked) auto-retry to have run and failed
+
+    const failed = env.runs.get(run.id)!;
+    assert.equal(failed.errorKind, 'infrastructure');
+    assert.equal(intentAtTransition.length, 1, 'exactly one terminal transition');
+    assert.notEqual(intentAtTransition[0] ?? null, null, 'the intent must be written BY the terminal transition');
+    assert.notEqual(failed.retryDueAt ?? null, null, 'the terminal transition must record the retry intent');
+    // A due TIME, not the scheduling time: recovery runs on a worker that never saw the backoff.
+    assert.ok(
+      Date.parse(failed.retryDueAt!) > Date.parse(failed.completedAt!),
+      `retryDueAt (${failed.retryDueAt}) must be after completedAt (${failed.completedAt})`,
+    );
+    assert.equal(
+      env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 20 }).runs.some((r) => r.retryOf === run.id),
+      false,
+      'the hooked retry created nothing',
+    );
+
+    // The intent is what recovery works from: with the retry callable again, the next sweep creates
+    // the retry the dead worker never made.
+    env.runService.retry = realRetry;
+    await waitFor(
+      () => env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 20 }).runs.some((r) => r.retryOf === run.id),
+      10_000,
+    );
+  } finally {
+    env.close();
+  }
+});
+
 test('retry reuses the original base commit (section 21)', async () => {
   // unique temp dir (mkdtemp): a fixed name would leave a repo behind, and the
   // next run's `git commit` would find nothing to commit.

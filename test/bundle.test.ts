@@ -64,6 +64,37 @@ test('the bundle ships every bin target and a package.json to describe them', ()
   }
 });
 
+/**
+ * Every package reachable from a PRODUCTION dependency's own tree, by name.
+ *
+ * The devDependency check below needs this because "a devDependency is in the bundle" is not by
+ * itself evidence that --omit=dev stopped working: a production dependency may legitimately pull
+ * one in. `@a2a-js/sdk` does exactly that -- it declares `@grpc/grpc-js` as an OPTIONAL peer for its
+ * gRPC binding, npm resolves that peer from the lockfile (where the `testcontainers` devDependency
+ * already put it) and installs its tree, and `protobufjs` in that tree requires `@types/node`.
+ * Without this walk the guard would have to be deleted or allowlisted by hand.
+ *
+ * Walks `dependencies` AND `peerDependencies`, but only into entries the lockfile actually has:
+ * npm resolves an optional peer from what is already in the tree, so a peer that is not in the
+ * lockfile is not installed and must not make its own tree "reachable".
+ */
+function productionReachable(): Set<string> {
+  const lock = JSON.parse(readFileSync(join(ROOT, 'package-lock.json'), 'utf8')) as {
+    packages: Record<string, { dependencies?: Record<string, string>; peerDependencies?: Record<string, string> }>;
+  };
+  const reachable = new Set<string>();
+  const queue: string[] = [...Object.keys(pkg.dependencies ?? {})];
+  while (queue.length > 0) {
+    const name = queue.pop()!;
+    if (reachable.has(name)) continue;
+    reachable.add(name);
+    const entry = lock.packages[`node_modules/${name}`];
+    if (!entry) continue;
+    queue.push(...Object.keys(entry.dependencies ?? {}), ...Object.keys(entry.peerDependencies ?? {}));
+  }
+  return reachable;
+}
+
 test('the bundle vendors production dependencies but no devDependencies', () => {
   const { names } = buildBundle();
   assert.ok(names.some((n) => n.includes('/node_modules/')),
@@ -73,8 +104,16 @@ test('the bundle vendors production dependencies but no devDependencies', () => 
       `production dependency ${prod} is not vendored`);
   }
   // A devDependency in the bundle means --omit=dev stopped working; typescript is the largest
-  // one, so it is both the likely symptom and the expensive one.
+  // one, so it is both the likely symptom and the expensive one. A devDependency a production
+  // dependency's own tree requires is not that: it is a transitive production dependency that
+  // happens to share a name with one of ours.
+  const requiredByProd = productionReachable();
+  // Guard the guard, both ways: a walk that reaches nothing would silently exempt every
+  // devDependency, and one that reaches everything would never fail.
+  assert.ok(requiredByProd.has('jose'), "the production walk must descend into a production dependency's own tree (jose is @a2a-js/sdk's runtime dependency)");
+  assert.ok(!requiredByProd.has('typescript'), 'the production walk must not reach a dev-only tool, or it is walking everything');
   for (const dev of Object.keys(pkg.devDependencies ?? {})) {
+    if (requiredByProd.has(dev)) continue;
     assert.ok(!names.some((n) => n.includes(`/node_modules/${dev}/`)),
       `devDependency ${dev} leaked into the bundle`);
   }

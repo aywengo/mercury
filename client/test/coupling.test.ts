@@ -146,10 +146,12 @@ test('the client needs no agent backend and no server runtime to install', () =>
   }
   assert.deepEqual(offenders, [], `the client would need more than HTTP to run:\n${offenders.join('\n')}`);
 
-  // Production dependencies are what an operator installs. Naming the one that is legitimately here
+  // Production dependencies are what an operator installs. Naming each one that is legitimately here
   // means adding an agent SDK to `dependencies` fails this test rather than shipping into every install.
+  // Neither entry belongs to the client: express is the server, and @a2a-js/sdk is the server's A2A
+  // transport (src/a2a/, #986, confined by test/a2aCoupling.test.ts). The client is HTTP only.
   const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as { dependencies?: Record<string, string> };
   const deps = Object.keys(manifest.dependencies ?? {}).sort();
-  assert.deepEqual(deps, ['express'],
+  assert.deepEqual(deps, ['@a2a-js/sdk', 'express'],
     `unexpected production dependency; the client must not drag a backend into every install: ${deps.join(', ')}`);
 });

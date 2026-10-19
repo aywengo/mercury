@@ -164,10 +164,66 @@ every step. Refusals carry stable codes, including `WORKFLOW_NOT_FOUND`,
 `WORKFLOW_STAGE_MODEL_CONFLICT`, `WORKFLOW_STAGE_RESOURCE_CONFLICT` and
 `WORKFLOW_STAGE_SANDBOX_CONFLICT`.
 
+Every domain refusal body carries more than the message when the error has it:
+`{ error, code?, field?, findings? }`. `code` is the stable refusal code above,
+`field` names the input the code is about, and `findings` (validation of an invalid
+template) is the structured finding list. Clients branch on `code`, not on message
+text; the fields are absent, not null, when the error has none.
+
 `GET /api/runs/:runId` returns a `workflow` sibling for every Run: the identity
 `{ id, version, contentHash, mode, stages }` read from the Run's snapshot, or `null`
 for a Run created without a workflow. Workflow stage snapshots are not preset Runs:
 `mercury_runs_by_preset` counts Run-wide presets only.
+
+## Workflow endpoints (advisory)
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/workflows` | List valid builtin advisory templates |
+| `GET` | `/api/workflows/:workflowId` | Inspect one template (stages, tasks, referenced presets) |
+| `POST` | `/api/workflows/:workflowId/runs` | Create the single advisory Run from a template |
+
+The staged-mode group endpoints (`/api/workflow-runs/*`) are Phase 9 and do
+not exist: there is no group table, no coordinator and no such route — a
+request to one is a `404` ([workflows.md](crew/workflows.md) section 14).
+
+Listing and inspecting a template is host configuration, so every
+authenticated caller may read it (the `/api/presets` rule).
+`GET /api/workflows` returns `{ workflows: [...] }` with `id`, `version`,
+`description`, `mode` (always `advisory` in this release), `trust`,
+`contentHash`, `stageCount`, `maxStages` and the template-relative source
+path. Adding `?includeInvalid=1` requires an admin token and appends
+`invalid: [...]` with the per-template validation findings — an invalid
+template is fixed by editing files on the host, which is an operator
+concern. Invalid templates never appear in the valid list.
+
+`GET /api/workflows/:workflowId` adds the ordered `stages`, each with its
+`id`, `task`, the `preset` reference from the manifest (or `null`), and
+`resolvedPreset` — the live preset registry's `{ id, version, role, enabled }`
+for display, or `null` when the reference does not resolve. An unknown id is
+a `404`; a template whose files are invalid is a `400` carrying its findings.
+
+`POST /api/workflows/:workflowId/runs` creates the Run through the W-2
+service path: the body is a Run-create body ([Create a Run](#create-a-run))
+with `task` required, and the workflow id comes from the URL. An optional
+`workflowVersion` pins the definition version; `workflow` and `preset` in
+the body are refused with a `400` (the id cannot be restated, and the two
+selections are mutually exclusive). The response is `201
+{ runId, status }`. Errors follow the Run-create rules — an unknown
+template is a `404` named by it; capability and resolution refusals carry
+the stable codes listed under `POST /api/runs`.
+
+**Step events (agent-reported).** Advisory steps are guidance, not
+enforcement. An agent reports progress with `step.started`,
+`step.completed` and `step.failed` events whose payload names the stage:
+`{ "stage": "<stage id>" }` (`stageId` and `step` are accepted as
+aliases). The dashboard maps reported events to planned steps by that
+stage id and labels the panel *agent-reported — not enforced by Mercury*;
+a planned step with no reported event shows as *not reported*, never as
+*skipped* or *failed* — Mercury does not know. `GET /api/runs/:runId`
+returns a `workflowStages` sibling for every workflow Run: the planned
+steps read from the Run's stored snapshot (`{ index, id, task, preset }`
+in template order), or `null` for a Run without a workflow.
 
 ## Knowledge endpoints
 
@@ -328,6 +384,15 @@ Omitting `agent` selects `MERCURY_DEFAULT_AGENT` (default `fake`). Send an
 explicit id such as `"agent": "primeagent"` for a real coding Run. `GET
 /api/agents` returns `{ "agents": ["fake", "primeagent", ...], "defaultAgent": "fake" }`.
 
+A body carrying a field only the server may write is refused with **400**, not
+silently ignored: `origin`, `ownerId`, `retryOf`, `attempt`, `status`. These are
+stamped by the server — `ownerId` from the authenticated token, `origin` from the
+surface that created the Run, `retryOf`/`attempt` by the retry link, `status` by the
+state machine — so a caller who sends one has misunderstood the request, and an
+attribution field that is quietly dropped is worse than one that is refused. The same
+rule applies to `POST /api/workflows/:workflowId/runs` and
+`POST /api/runs/:runId/retry`.
+
 ### Credential profile
 
 `credentialProfile` (optional, nullable, read-only) names the credential profile the Run
@@ -468,11 +533,16 @@ curl "http://127.0.0.1:3000/api/runs?status=RUNNING&limit=50" \
 Query fields:
 
 - `status` — one Run status;
+- `origin` — one server-stamped Run origin (`a2a`); an unknown or repeated value is a
+  **400**, never an empty page, because "you own no Runs of that origin" and "that is
+  not an origin" are different answers;
 - `limit` — clamped to `1..200`, default `50`;
 - `cursor` — opaque pagination cursor returned as `nextCursor`.
 
 Ordinary callers receive only their Runs. Admin callers receive all Runs.
-There is no client-supplied owner filter in the current route.
+There is no client-supplied owner filter in the current route. `origin` narrows the
+caller's own Runs; it is never an authorisation, so another owner's A2A Runs cannot be
+reached with it.
 
 Run detail:
 
@@ -485,6 +555,44 @@ The response contains `{ run, skills, goal, knowledge }` — workspace, constrai
 terminal artifacts and serialized skill records, plus the goal state as a sibling of `run`
 (`null` when the Run has no goal) and the knowledge pack snapshot (`null` when created
 without one).
+
+The Run object carries `statusChangedAt` (nullable, read-only): the time the Run's status
+last changed, written at every transition (issue #906, B2-0). It is `null` for Runs created
+before the v18 migration — treat it as unknown then, and never fall back to `createdAt`,
+which measures when the Run was created, not how long it has been waiting in its current
+status. Consumers building "waiting since" logic on this field must read it from this field
+only; the trigger matcher (dispatcher-bot-design §6.1) depends on that.
+
+The Run object also carries `firstStartedAt` (nullable, read-only): when this attempt **first**
+began executing (issue #990, A0-4). It differs from `startedAt`, which is the CURRENT execution's
+start and is cleared by a graceful-shutdown requeue so the duration and queue-wait metrics measure
+one execution rather than the sum of all of them. `firstStartedAt` is written by the same statement
+that writes `startedAt` and is never cleared, so it answers the one question `startedAt` cannot: has
+this attempt ever run? `null` means "never started", and nothing else: the v21 migration backfills the column from the
+first `run.started` event (or from `started_at` when the event is missing), because a NULL left for
+a Run that had already executed would be destroyed by the next shutdown requeue before anything
+could read it. A reader must not use it to measure anything: after a requeue it is older than the
+current execution.
+
+The Run object also carries `origin` (nullable, read-only): where the **server** says the Run
+came from (issue #988, A0-3), as `{ kind, ref }` — `kind` is the creating surface (`a2a` for the
+A2A task API) and `ref` is that surface's own identifier for the work, or `null` when it recorded
+none. It is `null` for every Run created by an HTTP client and for every Run that predates the
+v20 migration; nothing is backfilled, because an origin nobody recorded cannot be recovered and a
+guessed one would be indistinguishable from a real one. It is **not** `constraints.botTask`:
+`botTask` is a client-supplied hint the server never trusts, while `origin` is written by the
+creation transaction from a parameter no route populates — which is what lets A2A `ListTasks`
+select the caller's A2A chains without trusting anything the caller wrote. A retry inherits its
+parent's origin, so a chain does not change surface halfway.
+
+The Run object also carries `retryDueAt` (nullable, read-only): the time the recorded
+automatic-retry intent for this attempt becomes due (issue #987, A0-2). Non-null means the
+attempt is terminal, a retry was decided, and it has not happened yet — the chain is waiting,
+not finished, and `POST /api/runs/:runId/retry` on it is a manual retry of work Mercury was
+already going to re-attempt. It is written in the same statement as the terminal status and
+cleared by the transaction that creates the retry, so a reader never sees it on a Run whose
+retry already exists. `null` (or absent, for Runs predating the v19 migration) means no retry
+was decided, which is the only state in which a terminal Run is genuinely final.
 
 ## Event history
 
@@ -691,6 +799,10 @@ The static dashboard is served at `/`:
 - Run list supports creation, status filtering and periodic refresh;
 - Run details show repository, agent, constraints, skills, timeline, messages,
   tool/test activity, commits, PR and errors;
+- workflow Runs show a planned-steps panel labelled *agent-reported — not
+  enforced by Mercury*, with steps the agent did not report shown as *not
+  reported*;
+- a Workflows page browses advisory templates and creates a Run from one;
 - controls expose cancellation, retry and pending input;
 - static assets are public, while every data request remains authenticated.
 

@@ -822,6 +822,17 @@ phasing is committed; the sizing is unchanged.
 **Open — named timezone support**: needs a tz database; wait for an operator to
 need it, then reconsider with the cron decision.
 
+**Decided — server-stamped Run origin, resolved by A2A (issue #988).** Runs carry
+`origin = { kind, ref }` (`origin_kind`/`origin_ref`), written by the creation
+transaction from an internal-only `RunService.create` parameter. No HTTP route can set
+it — a create or retry body carrying `origin` is a 400, not a silently dropped key — and
+a retry inherits its parent's origin. The criterion recorded here ("an operator or
+dashboard view that cannot answer 'who created this' from the owner column alone") was
+met by A2A `ListTasks`, which has to return the caller's A2A-created chains rather than
+every Run the caller owns: an attribution that a client can write cannot answer that
+(`constraints.botTask` is explicitly a hint, never a trust boundary). See
+[a2a-design.md](a2a-design.md) §6.4 and [api.md](api.md).
+
 Still open, with the criteria that would decide them:
 
 - **One copy of the bot token**: a server-side bot token file the server reads
@@ -838,9 +849,6 @@ Still open, with the criteria that would decide them:
   on the bot's own Runs. Criterion for relaxing: a case that cannot be expressed
   as a fixed answer set, plus a way to constrain free text that does not rely on
   prompt framing alone.
-- **Server-stamped origin field**: whether Runs need a machine-origin marker
-  beyond the bot's owner id. Criterion: an operator or dashboard view that
-  cannot answer "who created this" from the owner column alone.
 - **One process per bot vs a supervisor**: per-bot chosen for v1 (crash
   isolation, obvious failure story). Revisit if a host routinely runs >5 bots.
 - **Host-level `bot.note` event** (§7): needed only if operators want

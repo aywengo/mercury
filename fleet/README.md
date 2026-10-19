@@ -83,6 +83,7 @@ time on the wrong machine.
 | `FLEET_PROBE_TIMEOUT_MS` | `5000` | Per-request timeout. A hung host must not stall the sweep. |
 | `FLEET_ALLOW_INSECURE_CREDENTIALS` | unset | `1` bypasses the mode check. For filesystems that cannot do `0600`. |
 | `FLEET_KNOWLEDGE_STALE_MS` | `0` (off) | Age past which a host's knowledge replica ranks it BELOW a fresher host. A preference only: it can never stop a host taking work, and a fleet of one stale host still places on it. Needs the host's `GET /api/knowledge/status`, which is admin-only, so with an ordinary caller credential Fleet reads nothing and ranks nothing. |
+| `FLEET_AVAILABILITY_STALE_MS` | `3× FLEET_PROBE_INTERVAL_MS` | Age past which a host's availability snapshot is reported stale. Reported only: staleness never changes placement by itself — the routing filter is FB1 ([`docs/fleet-bots-design.md`](../docs/fleet-bots-design.md) §5.2). |
 
 > The default is laptop-shaped on purpose, for development. Fleet runs as a **service**
 > ([`docs/fleet-design.md` §15](../docs/fleet-design.md#15-fleet-as-a-service)), and a hardened unit sets
@@ -115,7 +116,8 @@ deployment someone should arrive at by omission.
 | `GET /metrics` | Prometheus rollup across hosts, every series relabelled `host="<hostId>"`. |
 | `GET\|POST /fleet/hosts` | List and register hosts. |
 | `POST /fleet/hosts/:id/enable`, `.../disable`, `DELETE /fleet/hosts/:id` | Include or exclude a host from sweeps. |
-| `POST /fleet/hosts/:id/probe` | Probe one host now. |
+| `POST /fleet/hosts/:id/probe` | Probe one host now. Also refreshes its availability snapshot when the host was reached. |
+| `GET /fleet/hosts/:id/availability` | The per-host availability snapshot (`presets`, `workflows`, `probedAt`, `stale`), scoped to the caller's visible hosts like every read. 404 when there is no snapshot yet. `stale` is true after a failed availability read (the previous values are kept, never emptied) or when the snapshot is older than `FLEET_AVAILABILITY_STALE_MS`. `workflows` is null until a host serves `GET /api/workflows` (W-3, #934); that 404 is "not served", not a failure. |
 | `POST /fleet/runs` | Submit a Run. Name a `host`, or omit it and let the router choose. |
 | `GET /fleet/runs` | Every Run across the fleet, one merged view. |
 | `GET /fleet/runs/:id` | One Run, with its binding and current child state. |

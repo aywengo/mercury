@@ -8,6 +8,80 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-18
+
+Two weeks of nightly self-development, plus four feature slices. The headline is **advisory Workflow
+Templates**: a template can now be listed, validated, snapshotted onto a Run, rendered into the agent's
+prompt, and viewed against the steps the agent reports. Also here: a per-Run `model`, credential
+profiles resolved per Run (CP-3), Fleet per-host availability (FB0), and the Laya sidecar.
+
+### Added
+
+- **Advisory Workflow Templates W-1 (#812).** `src/workflows/` — the template schema, structured
+  validation with stable `WORKFLOW_*` finding codes, and a registry over a shipped `workflows/<id>/`
+  directory. One builtin ships: `plan-implement-review` (architect plans, default agent implements,
+  `reviewer` reviews). `mode: staged` is refused by name — it is Phase 9.
+- **Create one advisory Run from a template W-2 (#842).** `RunService.create` accepts
+  `workflow: { id, version? }`, resolves every referenced preset, folds constraints to the narrowest
+  ceiling across stages, and takes the union of the stages' required skills. The creation transaction
+  snapshots the template bytes, files and hash (migration v14, `run_workflows`), so later edits cannot
+  change a Run. `src/workflows/renderPlan.ts` renders the plan deterministically; the worker
+  materializes it into `.mercury/workflow/` and appends `workflow.selected` / `workflow.materialized`.
+- **Advisory workflow API and dashboard planned-steps view W-3 (#934).** `GET /api/workflows`,
+  `GET /api/workflows/:workflowId`, `POST /api/workflows/:workflowId/runs`, plus a Workflows page and a
+  planned-steps panel on the Run detail. The panel is labelled "agent-reported — not enforced by
+  Mercury", and a planned step with no reported event reads *not reported*, never *skipped* or *failed*.
+- **Per-Run model (#823, #832–#836).** `POST /api/runs` accepts `model`; it is validated, persisted on
+  the `runs` row, carried through retry, and passed to every adapter. PrimeAgent and hermes emit `-m`,
+  Claude honours `context.model`. A model value that starts with a dash is refused (#849, #850), since
+  it reaches argv.
+- **Credential profiles CP-3 (#841).** `resolveProfile` decides which profile a Run uses, with the four
+  §5.3 outcomes (`none`, `profile <name>`, refused `multiple-profiles`, refused `owner-not-allowed`).
+  Resolution runs before anything is written. With no profile file present, nothing observable changes.
+- **Dispatcher bot candidate selection L1-1/L1-2/L1-3 (#865, #861, #866).** `POST /api/runs` accepts an
+  optional `selection` record (Laya's pick and distribution) and exposes it on the Run detail; a pure
+  candidate hard filter and the §6.3 question / §6.4 decision rule live in `src/host/bots/select.ts`.
+- **Fleet per-host availability FB0 (#978).** The prober reads `GET /api/presets` and
+  `GET /api/workflows` on the same sweep into a `host_availability` cache (Fleet migration v6). A
+  failed or partial read keeps the previous snapshot and marks it stale; a snapshot is never replaced
+  with an empty list on error.
+- **Laya sidecar (#825, #830, #831, #845).** `src/laya/` holds the wire contract, a zero-dependency
+  client with a stable failure vocabulary, and a scripted fake. The host installer asks
+  `Install the Laya sidecar?` — default **no** — and opt-in creates a versioned venv, a generated
+  `LAYA_API_KEY`, and the service unit; `host doctor` gains a Laya probe line.
+- **`runs.statusChangedAt` B2-0 (#959).** Migration v18 adds the column; `RunStore.transition` writes it
+  in the same UPDATE as the status it describes. Rows written before the migration serialize as `null`,
+  never fabricated.
+- **Bot task-level `select` (#826, #838).** A task may declare `select`, validated for shape and
+  reserved against collisions.
+
+### Fixed
+
+- **A misspelled preset version pin is refused, not ignored (#859, #935).** `body.preset` was forwarded
+  unresolved and read only for `id`/`version`, so `versoin` silently resolved the *current* preset —
+  the typo-and-downgrade case the pin exists to catch. The block is now shape-validated at the same
+  choke point as the workflow block, with a did-you-mean hint.
+- **Nightly host worktree state cannot be committed (#942, #943).** `.mercury-sessions/` and
+  `session-artifacts/` are excluded, so a bulk `git add -A` cannot commit agent session transcripts or
+  kernel-state snapshots, which can contain Run secrets.
+- **Host setup: label-agnostic launchd check and a bounded previous-venv sweep (#851, #862).** The
+  not-loaded check is built from the actual unit label instead of a hard-coded one, and a
+  `.laya-venv-prev` marker is trusted only inside installer data dirs.
+- **The Laya sidecar installs into versioned venv directories (#845, #846).** The service unit is the
+  only commit point; the previous venv is never moved or modified.
+
+### Changed
+
+- **`nightly` skills.** Rung 0 resumes an issue's open PR before claiming anything new (#819, #820); a
+  PR is resumed on the owner's changes-requested review, not only on Copilot findings (#968, #969);
+  leftover PRs with unmapped branches are resumed through closing issue references (#847, #848); rung 4
+  files proposals only through `next.ts propose` with source-key dedupe (#881, #984); the host Copilot
+  review relay is versioned in `deploy/nightly/` and runs as a `KeepAlive` loop with a heartbeat (#992).
+- **`PLAN.md` is the project-wide issue tracker (#975)**, and CI enforces that a closing PR updates it.
+  `docs/status.md` is refreshed against main and guarded against drift (#991).
+
+
+
 ## [0.2.1] - 2026-10-01
 
 Patch release carrying the accumulated fixes from the first two weeks of the nightly self-development

@@ -81,6 +81,25 @@ export interface Run {
   leaseOwner: string | null;
   leaseExpiresAt: string | null;
   cancellationRequestedAt: string | null;
+  /** When the status last changed (B2-0, issue #906). Set only by RunStore.transition; absent or
+   *  NULL for rows written before the v18 migration -- consumers must treat it as absent, not
+   *  fabricated (no plausible provenance). Optional so Run literals predating the field stay valid. */
+  statusChangedAt?: string | null;
+  /**
+   * When the recorded automatic-retry intent for this attempt becomes due (A0-2, issue #987).
+   *
+   * Non-NULL means: this attempt is terminal, an automatic retry was DECIDED, and the retry has not
+   * happened yet. It is written by RunStore.transition -- in the same statement as the terminal
+   * status, so a terminal attempt and its intent can never disagree -- and cleared by the
+   * transaction that creates the child, or by the refusal that ends the chain instead.
+   *
+   * The value is a due TIME, not the scheduling time: recovery runs on a worker that has no memory
+   * of the backoff, so the row has to carry the answer rather than the inputs.
+   *
+   * Optional-with-null because rows written before the v19 migration are NULL in exactly the same
+   * way, and both mean "no intent recorded".
+   */
+  retryDueAt?: string | null;
   finalCommits: string[];
   prUrl: string | null;
   /**
@@ -122,6 +141,88 @@ export interface Run {
    * exactly the same way, and both render as "no profile".
    */
   credentialProfile?: string | null;
+  /**
+   * Where this Run came from, stamped by the SERVER at creation (A0-3, issue #988). `null` for
+   * every Run created by an HTTP client, and for rows written before the v20 migration -- nothing
+   * is backfilled or guessed, because an origin nobody recorded cannot be recovered.
+   *
+   * This is the attribution field `constraints.botTask` is NOT: `botTask` is a client-supplied
+   * hint, "never a trust boundary" (see RunConstraints), so no server decision may depend on it.
+   * `origin` is written by the creation transaction from a parameter no route populates, which is
+   * what lets A2A `ListTasks` return the caller's A2A chains without trusting anything the caller
+   * wrote. Retries inherit the parent's origin -- a retry is the same work, so it is the same
+   * provenance.
+   *
+   * Optional-with-null (not omitted) because rows written before the column existed are NULL in
+   * exactly the same way, and both mean "no origin recorded".
+   */
+  origin?: RunOrigin | null;
+  /**
+   * When this attempt FIRST began executing (A0-4, issue #990). Written by the same statement that
+   * writes `startedAt`, and never cleared -- `COALESCE(first_started_at, ?)` keeps the first value.
+   *
+   * It exists because `startedAt` cannot answer "has this attempt executed?": a graceful-shutdown
+   * requeue (issue #51) sets `started_at = NULL` on purpose, so the duration and queue-wait metrics
+   * measure the CURRENT execution rather than the sum of all of them. That erases the only persisted
+   * record that the attempt ran at all, and two readers need it: the A2A state mapping must not
+   * report a task the caller saw `WORKING` as `SUBMITTED` again on every deploy, and goal settlement
+   * must not record `attempted: false` for an attempt that ran for ten minutes before being requeued
+   * and then cancelled.
+   *
+   * A column rather than a new event, and rather than `started_at` itself: the requeue is a raw
+   * UPDATE in `RunQueue.requeueForShutdown` that bypasses `RunStore.transition`, so "preserve the
+   * fact by not mentioning it there" would be a property of one SQL string that nothing checks.
+   * Nothing but `RunStore.transition` writes this column, and no code path clears it.
+   *
+   * Optional-with-null, and the v21 migration BACKFILLS it (from the first `run.started` event, or
+   * from `started_at`) precisely so that NULL means "never started" rather than "written before
+   * v21" -- the fallback in `hasStarted` cannot repair a row whose `started_at` a later requeue has
+   * already cleared.
+   */
+  firstStartedAt?: string | null;
+}
+
+/**
+ * True when this attempt has ever begun executing (A0-4, issue #990).
+ *
+ * The one reading of that question in the codebase, so the A2A state mapping and goal settlement
+ * cannot answer it differently.
+ *
+ * `firstStartedAt` is the answer: a column the shutdown requeue does not clear, backfilled by the
+ * v21 migration for every row that had already run. `startedAt` is the fallback, and after that
+ * migration it should not be reached -- it stays because it is the definition of the fact rather
+ * than a special case, and because reading only `firstStartedAt` would turn any Run object that
+ * lacks the field into a confident "never started" instead of a wrong one.
+ *
+ * `startedAt` alone is NOT an answer: a shutdown requeue clears it, so a requeued attempt would
+ * read as never-started -- which is the bug this function exists to close.
+ */
+export function hasStarted(run: Pick<Run, 'firstStartedAt' | 'startedAt'>): boolean {
+  return (run.firstStartedAt ?? run.startedAt ?? null) !== null;
+}
+
+/**
+ * The surfaces a Run can be created FROM by the server itself, rather than by an HTTP client.
+ *
+ * A closed union on purpose: `?origin=` validates against it and refuses an unknown value instead
+ * of returning an empty page, because "no Runs of that origin" and "that is not an origin" are
+ * different answers and a filter must not conflate them.
+ */
+export type RunOriginKind = 'a2a';
+
+export const RUN_ORIGIN_KINDS: readonly RunOriginKind[] = ['a2a'];
+
+/**
+ * Server-stamped provenance for a Run (A0-3, issue #988).
+ *
+ * `kind` is which surface created it; `ref` is that surface's own identifier for the thing the Run
+ * serves (an A2A task id), or `null` when the surface has none to record. Both are server-written:
+ * no request body can set either, and a create body that carries `origin` is refused with a 400
+ * rather than silently dropped.
+ */
+export interface RunOrigin {
+  kind: RunOriginKind;
+  ref: string | null;
 }
 
 export interface ResolvedSkill {
@@ -791,6 +892,14 @@ export const EVENT_TYPES = new Set([
   // `selection`; payload is the validated record itself. A Run created without `selection`
   // emits nothing, exactly as before.
   'run.selection_recorded',
+  // A recorded automatic-retry decision that could not be honoured (A0-2, issue #987). Appended by
+  // RunService.retry when a RECORDED intent is refused -- the per-Run maxRetries budget, a
+  // COMPLETED parent, or the CP-3 credential-profile parity check (#807) -- in the SAME transaction
+  // that clears the intent, payload { runId, reason }. Without it an intended retry became a final
+  // failure recorded only as a worker log line, and no reader could tell "retry pending" from
+  // "final". There is deliberately no `run.retry_scheduled` event: the intent is a column on the
+  // attempt, because it has to commit WITH the terminal transition rather than beside it.
+  'run.retry_refused',
 ]);
 
 /**
