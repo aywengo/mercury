@@ -54,7 +54,7 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #742 | Nightly bot config and first-night checklist (N1-5) | done | #774 |
 | #860 | nightly: derive the review-cap hand-off from current-head findings, not every round | in progress | #966 |
 | #881 | nightly: rung 4 files duplicate proposals; dedupe by source key before filing | done | #984 |
-| #964 | nightly: report lists a one-night flake forever; the flake entry carries an absolute wo… | open | — |
+| #964 | nightly: report lists a one-night flake forever; the flake entry carries an absolute wo… | done | #1013 |
 | #968 | nightly: resume PRs on the owner's changes-requested review, not only on Copilot findings | done | #969 |
 | #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | in progress | #981 |
 | #1001 | nightly: a claim whose Run ended with no PR and no comment is never released; rung 2 claims work with no ready signal | done | #1009 |
