@@ -117,9 +117,11 @@ test('create + get + list with owner scoping', async () => {
 
       const got = await fetch(`${base}/api/runs/${runId}`, { headers });
       assert.equal(got.status, 200);
-      const body = (await got.json()) as { run: { status: string; ownerId: string } };
+      const body = (await got.json()) as { run: { status: string; ownerId: string; statusChangedAt: string | null } };
       assert.equal(body.run.status, 'QUEUED');
       assert.equal(body.run.ownerId, 'alice');
+      // The status-transition timestamp is served on the run endpoint (issue #906).
+      assert.ok(body.run.statusChangedAt != null, 'GET /api/runs/:runId serves statusChangedAt');
 
       // bob cannot see alice's run
       const bobHeaders = { authorization: 'Bearer tok-bob' };
@@ -127,8 +129,9 @@ test('create + get + list with owner scoping', async () => {
       assert.equal(forbidden.status, 404);
 
       const list = await fetch(`${base}/api/runs`, { headers });
-      const listBody = (await list.json()) as { runs: unknown[] };
+      const listBody = (await list.json()) as { runs: { statusChangedAt: string | null }[] };
       assert.equal(listBody.runs.length, 1);
+      assert.ok(listBody.runs[0].statusChangedAt != null, 'GET /api/runs serves statusChangedAt');
     } finally {
       await srv.close();
       closeStream();
@@ -1903,6 +1906,121 @@ test('POST /api/runs refuses a preset block with an unknown key, with no Run row
       const list = await fetch(`${base}/api/runs?limit=10`, { headers });
       const runs = (await list.json()) as { runs: unknown[] };
       assert.equal(runs.runs.length, 0, 'a rejected preset block left a Run behind');
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('no Run-creating route can set a server-stamped origin (issue #988 acceptance 1)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    // The retry route needs a terminal parent, and that parent is created through the SERVICE --
+    // which is the whole point: the service can stamp an origin, and nothing reachable over HTTP
+    // can. The parent's own origin is what proves the retry path inherits rather than accepts one.
+    const parent = env.runService.create({
+      ownerId: 'alice', task: 'p', agent: 'fake', origin: { kind: 'a2a', ref: 'task-1' },
+    });
+    env.runs.transition(parent.id, 'STARTING');
+    env.runs.transition(parent.id, 'FAILED', { completedAt: new Date().toISOString() });
+
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const headers = { authorization: 'Bearer tok-alice', 'content-type': 'application/json' };
+      const before = env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 200 }).runs.length;
+
+      // EVERY route that can create a Run. The workflow id is deliberately one that does not exist:
+      // the refusal is checked before the template is resolved, so the 400 names the field rather
+      // than the missing template -- which is what makes this list exhaustive rather than a list of
+      // routes that happen to have a fixture.
+      const routes: { route: string; body: Record<string, unknown> }[] = [
+        { route: '/api/runs', body: { task: 't', agent: 'fake' } },
+        { route: '/api/workflows/wf-absent/runs', body: { task: 't', agent: 'fake' } },
+        { route: `/api/runs/${parent.id}/retry`, body: {} },
+      ];
+      const values: Record<string, unknown> = {
+        origin: { kind: 'a2a', ref: 'task-forged' },
+        ownerId: 'bob', retryOf: 'run-forged', attempt: 9, status: 'COMPLETED',
+      };
+      for (const { route, body } of routes) {
+        for (const [field, value] of Object.entries(values)) {
+          const res = await fetch(`${base}${route}`, {
+            method: 'POST', headers, body: JSON.stringify({ ...body, [field]: value }),
+          });
+          assert.equal(res.status, 400, `${route} with ${field}: expected 400, got ${res.status}`);
+          const payload = (await res.json()) as { error?: string };
+          assert.match(payload.error ?? '', new RegExp(`^${field} is set by the server`), `${route} with ${field}: ${JSON.stringify(payload)}`);
+        }
+      }
+
+      assert.equal(
+        env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 200 }).runs.length,
+        before,
+        'a refused body must not leave a Run behind',
+      );
+
+      // The same retry route with an EMPTY body still works, and the child inherits the parent's
+      // origin -- so the refusal above cost nothing but the forged field.
+      const ok = await fetch(`${base}/api/runs/${parent.id}/retry`, { method: 'POST', headers });
+      assert.equal(ok.status, 201);
+      const created = (await ok.json()) as { runId: string };
+      assert.deepEqual(env.runs.get(created.runId)!.origin, { kind: 'a2a', ref: 'task-1' });
+    } finally {
+      await srv.close();
+      closeStream();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('GET /api/runs?origin= filters by server-stamped origin and stays owner-scoped (issue #988 acceptance 3)', async () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const a2a = env.runService.create({ ownerId: 'alice', task: 'a', agent: 'fake', origin: { kind: 'a2a', ref: 'task-1' } });
+    const plain = env.runService.create({ ownerId: 'alice', task: 'b', agent: 'fake' });
+    const foreign = env.runService.create({ ownerId: 'bob', task: 'c', agent: 'fake', origin: { kind: 'a2a', ref: 'task-2' } });
+
+    const { app, close: closeStream } = makeApi(env, [['tok-alice', 'alice'], ['tok-bob', 'bob']]);
+    const srv = await listen(app);
+    try {
+      const base = `http://127.0.0.1:${srv.port}`;
+      const alice = { authorization: 'Bearer tok-alice' };
+      const bob = { authorization: 'Bearer tok-bob' };
+
+      const filtered = await fetch(`${base}/api/runs?origin=a2a&limit=50`, { headers: alice });
+      assert.equal(filtered.status, 200);
+      const body = (await filtered.json()) as { runs: { id: string; origin: unknown }[] };
+      assert.deepEqual(body.runs.map((r) => r.id), [a2a.id], "only alice's own A2A Run");
+      assert.deepEqual(body.runs[0]!.origin, { kind: 'a2a', ref: 'task-1' });
+
+      // Without the filter the list is unchanged: the owner's Runs, whatever their origin.
+      const all = (await (await fetch(`${base}/api/runs?limit=50`, { headers: alice })).json()) as { runs: { id: string }[] };
+      assert.deepEqual(all.runs.map((r) => r.id).sort(), [a2a.id, plain.id].sort());
+
+      // Read-only on the detail too, and null -- not a default kind -- for a Run without one.
+      const detail = (await (await fetch(`${base}/api/runs/${a2a.id}`, { headers: alice })).json()) as { run: { origin: unknown } };
+      assert.deepEqual(detail.run.origin, { kind: 'a2a', ref: 'task-1' });
+      const plainDetail = (await (await fetch(`${base}/api/runs/${plain.id}`, { headers: alice })).json()) as { run: { origin: unknown } };
+      assert.equal(plainDetail.run.origin, null);
+
+      // bob sees his own A2A Run and not alice's.
+      const bobList = (await (await fetch(`${base}/api/runs?origin=a2a`, { headers: bob })).json()) as { runs: { id: string }[] };
+      assert.deepEqual(bobList.runs.map((r) => r.id), [foreign.id]);
+
+      // An unknown or ambiguous value is a 400, never an empty page: "you own none of those" and
+      // "that is not an origin" are different answers.
+      for (const query of ['origin=bot', 'origin=a2a&origin=a2a', 'origin=', 'origin=A2A']) {
+        const bad = await fetch(`${base}/api/runs?${query}`, { headers: alice });
+        assert.equal(bad.status, 400, `?${query} must be refused, got ${bad.status}`);
+        const payload = (await bad.json()) as { error?: string };
+        assert.match(payload.error ?? '', /unknown origin filter/, JSON.stringify(payload));
+      }
     } finally {
       await srv.close();
       closeStream();

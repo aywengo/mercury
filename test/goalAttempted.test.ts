@@ -92,6 +92,30 @@ test('settlement records whether the Run ever started', () => {
   } finally { env.close(); }
 });
 
+test('settlement: a Run requeued by a shutdown and then cancelled still reads attempted (issue #990)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'a', task: 'the task', agent: 'fake' });
+    env.goals.insert({ runId: run.id, status: 'active', objective: 'obj', source: 'operator', updatedAt: 'u' });
+    // A deploy mid-run (issue #51): claim, start, then the worker hands the Run back to the queue.
+    // The requeue nulls `started_at` on purpose, so reading that field alone recorded
+    // `attempted: false` for an attempt that had run for ten minutes.
+    const claimed = env.queue.claim('w1', 60_000);
+    assert.equal(claimed?.id, run.id);
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING', { startedAt: new Date().toISOString() });
+    assert.equal(env.queue.requeueForShutdown(run.id, 'w1'), true);
+    assert.equal(env.runs.get(run.id)!.startedAt, null, 'the requeue clears the current execution start');
+
+    // Cancelled while QUEUED: terminal, and this attempt never re-entered RUNNING.
+    env.runs.transition(run.id, 'CANCELLED', { completedAt: new Date().toISOString() });
+    assert.equal(env.goals.get(run.id)?.attempted, true, 'an attempt that ran must not read as never attempted');
+    assert.equal(goalRow(env, run.id).attempted, 1);
+  } finally {
+    env.close();
+  }
+});
+
 test('an unsettled goal reads as unknown, never as false', () => {
   // The distinction between "no answer" and "answer: no" is the whole content of the fix.
   // Collapsing it would classify the entire open population as never-started -- the same class of

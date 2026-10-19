@@ -637,6 +637,45 @@ test('claim-time parity: editing the file between creation and claim fails the R
   }
 });
 
+test('retry: a profile that drops the owner refuses the retry, clears the intent and records why (issue #987)', () => {
+  // The refusal #807 adds to create() is a DECIDED outcome, not an unexpected failure: without it
+  // in the refused set, a retry the operator will never be allowed to make stays recorded and
+  // recovery re-attempts it on every sweep while the chain keeps reporting itself as pending.
+  const profiles: { name: string; repositories: string[]; owners: string[]; env: Record<string, unknown> }[] = [
+    { ...CP.profiles[0]!, owners: ['bot-nightly'] },
+  ];
+  const env = makeEnv({ workerEnabled: false, credentialProfiles: () => ({ profiles }) as never } as never);
+  try {
+    const run = env.runService.create({
+      ownerId: 'bot-nightly', task: 'x', agent: 'fake',
+      repository: { url: 'https://github.com/aywengo/mercury.git' },
+    });
+    assert.equal(run.credentialProfile, 'nightly');
+    env.runs.transition(run.id, 'STARTING');
+    const dueAt = new Date(Date.now() + 30_000).toISOString();
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString(), retryDueAt: dueAt });
+
+    // The operator drops the owner between the failure and the retry.
+    profiles[0]!.owners = ['someone-else'];
+    assert.throws(
+      () => env.runService.retry(run.id, 'bot-nightly', true, { auto: true }),
+      (err: unknown) => err instanceof ForbiddenError && /does not allow owner/.test(err.message),
+    );
+
+    assert.equal(env.runs.get(run.id)!.retryDueAt, null, 'a decided refusal must end the chain');
+    const refused = env.events.list(run.id).filter((e) => e.type === 'run.retry_refused');
+    assert.equal(refused.length, 1);
+    assert.match(String((refused[0]!.payload as { reason: string }).reason), /does not allow owner/);
+    assert.equal(
+      env.runService.list({ ownerId: 'bot-nightly', isAdmin: true, limit: 20 }).runs.some((r) => r.retryOf === run.id),
+      false,
+      'the refused retry must create nothing',
+    );
+  } finally {
+    env.close();
+  }
+});
+
 test('claim-time parity: an unreadable file persists only the generic reason, detail stays in the log (review round 1 on #841)', async () => {
   const dir = tempDir('cp3-parity-unreadable-');
   const cfg = join(dir, 'cfg', 'mercury');

@@ -49,7 +49,7 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #741 | `nightly-report` skill (N1-4) | done | #768 |
 | #742 | Nightly bot config and first-night checklist (N1-5) | done | #774 |
 | #860 | nightly: derive the review-cap hand-off from current-head findings, not every round | in progress | #966 |
-| #881 | nightly: rung 4 files duplicate proposals; dedupe by source key before filing | in progress | #928, #946 |
+| #881 | nightly: rung 4 files duplicate proposals; dedupe by source key before filing | done | #984 |
 | #964 | nightly: report lists a one-night flake forever; the flake entry carries an absolute wo… | open | — |
 | #968 | nightly: resume PRs on the owner's changes-requested review, not only on Copilot findings | done | #969 |
 | #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | done | #981 |
@@ -69,7 +69,7 @@ Record: [`docs/dispatcher-bot-design.md`](docs/dispatcher-bot-design.md)
 | #735 | `host bot run`: the scheduler process (B1-1) | done | #757 |
 | #736 | `host bot dispatch` and `host bot status` (B1-2) | done | #758 |
 | #737 | Per-alias service install/uninstall (B1-3) | done | #761 |
-| #906 | dispatcher B2-0: statusChangedAt on GET /api/runs (the trigger-matcher prerequisite) | in progress | #959 |
+| #906 | dispatcher B2-0: statusChangedAt on GET /api/runs (the trigger-matcher prerequisite) | done | #959 |
 | #907 | dispatcher B2-1: trigger engine — matchers, one coalesced poll, cursor state; lift the… | open | — |
 | #908 | dispatcher B2-2: trigger storm guards — includeBotRuns, chain depth, both cooldowns, AP… | open | — |
 | #909 | dispatcher B2-3: the observer scope — a third posture in AuthContext, read-only across… | open | — |
@@ -97,7 +97,7 @@ Record: [`docs/crew/roadmap.md`](docs/crew/roadmap.md)
 | --- | --- | --- | --- |
 | #808 | Crew Phase 8 W-1: Workflow Template schema and builtin registry (advisory mode) | done | #812 |
 | #809 | Crew Phase 8 W-2: create one advisory Run from a template (snapshot-backed, determinist… | done | #842 |
-| #810 | Crew Phase 8 W-3: workflows API and dashboard planned-steps view (advisory) | in progress | #934 |
+| #810 | Crew Phase 8 W-3: workflows API and dashboard planned-steps view (advisory) | done | #934 |
 | #875 | Crew Phase 4: per-run MCP foundation (bindings, policy registries, run-scoped redaction… | open | — |
 | #870 | Crew Phase 5: reviewed read-only MCP — operator policy registries in use, enforced tool… | open | — |
 | #873 | Crew Phase 6: read-only Git mirror — bounded sync, immutable commit dirs, atomic pointe… | open | — |
@@ -125,7 +125,7 @@ Record: [`docs/credential-profiles-design.md`](docs/credential-profiles-design.m
 | --- | --- | --- | --- |
 | #784 | Credential profiles CP-2: profile file schema, loader and `host credentials validate` (… | done | #799 |
 | #807 | Credential profiles CP-3: resolve a profile per Run, refuse disallowed owners, creation… | done | #841 |
-| #897 | Credential profiles CP-4: local adapter delivery — layered environment, isolated git/gh… | open | — |
+| #897 | Credential profiles CP-4: local adapter delivery — layered environment, isolated git/gh… | in progress | #977 |
 | #898 | Credential profiles CP-5: workspace clone and fetch use the resolved profile, not the h… | open | — |
 | #899 | Credential profiles CP-6: sandbox per-profile opt-in for profile credentials | open | — |
 | #900 | Credential profiles CP-7: exact-value redaction of profile values, doctor checks, docs… | open | — |
@@ -163,8 +163,8 @@ Record: [`docs/fleet-bots-design.md`](docs/fleet-bots-design.md)
 
 | Issue | Title | State | PR |
 | --- | --- | --- | --- |
-| #970 | Fleet: per-host availability snapshot and a read-only view (FB0) | open | — |
-| #971 | Fleet: owner-scoped, paged `GET /fleet/runs` (FB2a) | open | — |
+| #970 | Fleet: per-host availability snapshot and a read-only view (FB0) | done | #978 |
+| #971 | Fleet: owner-scoped, paged `GET /fleet/runs` (FB2a) | in progress | #982 |
 | #972 | Fleet: availability-aware routing filter (FB1) | open | — |
 | #973 | Bots: `FleetSchedulerClient` and `api.via: "fleet"` (FB2b) | open | — |
 | #974 | End to end: a bot on host A dispatches through Fleet to host B (FB3) | open | — |
@@ -182,6 +182,27 @@ Record: [`docs/fleet-tenancy-design.md`](docs/fleet-tenancy-design.md)
 | #888 | fleet: prove metrics and event scoping under tenancy (T1-3) | open | — |
 | #889 | fleet: project reassignment and delete guards, lost-visibility report (T2-1) | open | — |
 | #890 | fleet: fleet_runs.project_id bind-time snapshot, audit not authorization (T2-2) | open | — |
+| #983 | fleet: record the per-project Atlas credential-namespace decision before T3 (§11.3) | open | — |
+
+## A2A integration
+
+Record: [`docs/a2a-design.md`](docs/a2a-design.md)
+
+A2A is an edge protocol only (design §2): Mercury as an A2A server, then an A2A client
+adapter; bots never talk to each other over A2A. Decisions settled 2026-10-18: server first,
+HTTP+JSON/REST binding, official JS SDK under boundary rules (design §11). Milestone order
+(design §13): **A0** → **A1** minimal server → **A2** streaming and listing → **A3** client
+adapter → **A4** Fleet. A0 filed 2026-10-18; #986–#988 and #990 are done, and #989 follows
+them. The SDK spike settled **handler-driven** (§11 decision 3): `@a2a-js/sdk@1.3.0` mounted
+on Mercury's own Express app, so A1 can start.
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #986 | A2A SDK integration spike: pin @a2a-js/sdk, decide the integration shape, coupling test… | done | #1000 |
+| #987 | Retry chains: link retries atomically and make "retry pending" durable (A0-2) | done | #995 |
+| #988 | Server-stamped Run origin: a field no request body can set (A0-3) | done | #996 |
+| #990 | Pure Run-chain → A2A TaskState mapping, exhaustive over RunStatus (A0-4) | done | #998 |
+| #989 | Exposed-skill config, create-Run validation of every template, `host a2a validate` (A0-5) | open | — |
 
 ## Security follow-ups
 
@@ -191,6 +212,7 @@ Record: [`docs/status.md`](docs/status.md)
 | --- | --- | --- | --- |
 | #942 | security: GitHub revoked the nightly GH_TOKEN ('mercury-pat') after a PR-description le… | done | — |
 | #944 | redactor: session transcripts and kernel-state snapshots store Run secrets unredacted | in progress | #965 |
+| #976 | artifact redaction: sweep workspaces of runs the worker never finalized | open | — |
 
 ## Host installer — milestone notes (historical)
 

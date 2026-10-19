@@ -22,6 +22,7 @@ import { loadRepoUrlMap, routeRun, RoutingError, type RouteRepository } from './
 import { cancelRun, retryRun, sendInput, type InteractionDeps } from './interact.ts';
 import { mergeRollup, scrapeAll, type MetricsDeps } from './metrics.ts';
 import { createProber, type Prober } from './prober.ts';
+import { probeAvailability } from './probe.ts';
 import { createAtlasReader, type AtlasView } from './atlas.ts';
 import { CredentialError, type CredentialStore } from './credentials.ts';
 import type { Caller } from './auth.ts';
@@ -267,14 +268,49 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
         const host = registry.get(id);
         if (!host) throw new HttpError(404, 'no such host');
         const { probeAndRecord } = await import('./probe.ts');
+        const token = deps.credentials.secret(host.credentialRef);
         const rec = await probeAndRecord({
           hostId: id, baseUrl: host.baseUrl,
-          token: deps.credentials.secret(host.credentialRef),
+          token,
           timeoutMs: deps.config.probeTimeoutMs,
           knowledgeStaleMs: deps.config.knowledgeStaleMs,
         });
         registry.recordProbe(rec);
+        // Same rule as the sweep (fleet/prober.ts): a contacted host gets its availability read, so an
+        // on-demand probe refreshes the snapshot instead of leaving it to the timer.
+        if (['ok', 'not_serving', 'http_error'].includes(rec.outcome)) {
+          const availability = await probeAvailability(
+            { hostId: id, baseUrl: host.baseUrl, token, timeoutMs: deps.config.probeTimeoutMs },
+          );
+          registry.recordAvailability(id, availability, new Date().toISOString());
+        }
         sendJson(res, 200, { probe: rec });
+      },
+    },
+    {
+      // GET /fleet/hosts/:id/availability -- the per-host availability snapshot (FB0, #970;
+      // fleet-bots-design.md section 9.4, decision 4). Read-only, scoped like every Fleet read.
+      //
+      // Stale has two causes and the view answers for both: the last availability read failed
+      // (recordAvailability kept the previous values and set the flag), or the snapshot is older than
+      // FLEET_AVAILABILITY_STALE_MS. A host with no snapshot yet answers 404 rather than an empty
+      // snapshot, for the same reason remove() 404s: "no such host" and "nothing known about this
+      // host" must not look like data.
+      method: 'GET', pattern: ['fleet', 'hosts', ':id', 'availability'],
+      handle: (ctx, res) => {
+        const id = ctx.params[0]!;
+        if (!hostAllowed(ctx.caller, id)) throw new HttpError(404, 'no such host');
+        const snapshot = registry.availabilityFor(id);
+        if (!snapshot) throw new HttpError(404, 'no availability snapshot for this host');
+        const age = Date.now() - Date.parse(snapshot.probedAt);
+        const expired = !Number.isNaN(age) && age > deps.config.availabilityStaleMs;
+        sendJson(res, 200, {
+          hostId: snapshot.hostId,
+          presets: snapshot.presets,
+          workflows: snapshot.workflows,
+          probedAt: snapshot.probedAt,
+          stale: snapshot.stale || expired,
+        });
       },
     },
     {
