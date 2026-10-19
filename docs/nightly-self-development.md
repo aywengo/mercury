@@ -76,16 +76,29 @@ Each `nightly-next` Run evaluates, in order, and takes the first rung with work:
 
 1. **Trusted bugs** — `origin:e2e` issues and `nightly:ready` issues, by
    priority label then age.
-2. **Trusted features** (#800) — `enhancement` issues authored by @aywengo, or
-   whose CURRENT `enhancement` label was applied by @aywengo (the same
-   timeline-actor rule as `nightly:ready`), by priority label then age.
+2. **Trusted features** (#800, amended by #1001 decision A) — `enhancement` issues
+   authored by @aywengo, or whose CURRENT `enhancement` label was applied by
+   @aywengo (the same timeline-actor rule as `nightly:ready`), **and** labeled
+   `nightly:ready` by @aywengo, by priority label then age. An `enhancement` label
+   alone is not a work signal: mark the issue ready when its blockers are done.
+   Rung 1 already takes every trusted `nightly:ready` issue, so rung 2 is reached
+   only while rung 1 is gated off (tonight's E2E verdict still pending).
 3. **New @aywengo issues** — authored by @aywengo, not yet labeled.
 4. **Docs → proposals** — §6.
 
-Before selecting, the selector resets stale claims (#800): an issue whose
-CURRENT `nightly:in-progress` label event predates the current night's local
-midnight was left by a deadline-stopped Run; the label is removed so the issue
-is claimable again. A claim from tonight still excludes (a live Run holds it).
+Before selecting, the selector releases claims in two cases:
+
+- **Stale by the clock (#800).** An issue whose CURRENT `nightly:in-progress`
+  label event predates the current night's local midnight was left by a
+  deadline-stopped Run; the label is removed so the issue is claimable again.
+- **Dead Run, no output (#1001).** A claim from THIS night is released when the
+  claiming Run is over and produced nothing: no `nightly-next` Run other than
+  this one is non-terminal (read from the host API; `MERCURY_RUN_ID` is
+  excluded), no open nightly PR names the issue, and the nightly identity has
+  not commented on it since the claim. Without this, a Run that died at 00:21
+  without output held its issue for the rest of the night. A deadline-stopped
+  Run comments (§4.3), so its claim is left for the clock path; when the host
+  API is unset or unreadable, liveness is unknown and the claim is kept.
 
 Selection runs as code against the GitHub API
 (`.agents/skills/nightly/select.ts`, #738). The chosen issue is labeled

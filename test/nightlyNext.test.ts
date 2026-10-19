@@ -76,11 +76,22 @@ test('rung 1: a trusted nightly:ready issue is selected, claimed, and handed to 
   assert.deepEqual((claim!.body as { labels: string[] }).labels, ['nightly:in-progress']);
 });
 
-test('rung 2: a trusted enhancement issue is chosen and handed to the fix-loop (#800)', async () => {
+test('an enhancement WITHOUT nightly:ready is not claimed (#1001 decision A, the #972 case)', async () => {
   const issues = [issue({ number: 20, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }] })];
   const { io, calls } = ioWith(issues, {});
   const out = await runNext(io, ENV, { repo: REPO, dryRun: false });
-  assert.equal(out.rung, 2);
+  assert.notEqual(out.rung, 2, 'an enhancement label alone is no longer a work signal');
+  assert.notEqual(out.issue, 20);
+  assert.equal(calls.some((c) => c.method === 'POST-LABEL'), false, 'nothing is claimed');
+});
+
+test('a ready enhancement is chosen and handed to the fix-loop (#800 + #1001 decision A)', async () => {
+  const issues = [issue({ number: 20, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }, { name: 'nightly:ready' }] })];
+  const { io, calls } = ioWith(issues, { 20: [READY_EVENT] });
+  const out = await runNext(io, ENV, { repo: REPO, dryRun: false });
+  // A trusted ready issue is rung-1 work whatever else it carries; rung 2 is only what is left
+  // while tonight's e2e verdict is still pending.
+  assert.equal(out.rung, 1);
   assert.equal(out.issue, 20);
   assert.equal(out.action, 'fix-loop', 'a feature request runs the same issue-fix-loop as a bug');
   assert.ok(calls.some((c) => c.method === 'POST-LABEL'));

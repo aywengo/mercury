@@ -6,6 +6,8 @@
  *   - PRs opened tonight and issues filed tonight (GitHub search, repo-scoped, bounded).
  *   - Issues commented on tonight (candidates from the supported `updated:<range>` search,
  *     filtered by per-issue comment timestamps - GitHub search has no `commented:<range>`).
+ *   - Claims released tonight (#1001): issues whose `nightly:in-progress` claim the selector
+ *     released because the claiming Run ended with no PR and no comment.
  *   - Blocked items: open issues labeled `nightly:blocked` with their latest blocking question.
  *   - Runs stopped by `notAfter` (the §4.3 window end 06:00 local) — optional section, only when
  *     `MERCURY_REPORT_API_URL` + `MERCURY_REPORT_TOKEN` are set; the Mercury runs API is read
@@ -13,7 +15,7 @@
  *   - Flakes: the nightly-e2e flake clock (same state file) — recent fingerprint nights.
  *
  * Output: exactly one JSON line
- * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, blocked, runsStopped, flakes }`.
+ * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, claimsReleased, blocked, runsStopped, flakes }`.
  * No dependencies; all I/O injectable. Writes: the digest issue itself and the close of
  * every OPEN digest titled `nightly report — D` with D strictly BEFORE the report night - one
  * rule that self-heals failed closes on any later night and can never erase a newer report.
@@ -24,7 +26,7 @@
 
 import { basename } from 'node:path';
 import { loadFlakeState } from './e2e.ts';
-import { assertRepo, localDateString, nextDay, prevDay, ghGet, ghPost, ghPatch, ghToken, FETCH_TIMEOUT_MS } from './shared.ts';
+import { assertRepo, CLAIM_RELEASED_MARKER, localDateString, nextDay, prevDay, ghGet, ghPost, ghPatch, ghToken, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const L_REPORT = 'nightly:report';
 const L_BLOCKED = 'nightly:blocked';
@@ -46,6 +48,9 @@ export interface ReportData {
   prs: { number?: number; title: string; url?: string }[];
   issuesFiled: { number?: number; title: string; url?: string; author?: string }[];
   issuesCommented: { number?: number; title: string; url?: string }[];
+  /** #1001: issues whose `nightly:in-progress` claim the selector released tonight (a Run that
+   *  ended with no PR and no comment). */
+  claimsReleased: { number?: number }[];
   blocked: { number?: number; title: string; question?: string }[];
   runsStopped: { runId?: string; task?: string; status?: string }[];
   flakes: { fingerprint: string; test: string; nights: string[] }[];
@@ -218,6 +223,49 @@ export async function collectIssuesCommented(
   return candidates.filter((c) => c.number !== undefined && commentedNumbers.has(c.number));
 }
 
+/**
+ * Issues whose `nightly:in-progress` claim the SELECTOR released tonight (#1001): a Run that
+ * ended with no PR and no comment. The selector records the release in a comment carrying
+ * `CLAIM_RELEASED_MARKER`, so one repo-level comments listing answers the question - no
+ * per-issue timeline walk. Best-effort like the other reads: an unreadable page ends the scan
+ * with what was collected so far instead of failing the digest.
+ */
+export async function collectClaimsReleased(
+  io: ReportIo,
+  repo: string,
+  startMs: number,
+  endMs: number,
+): Promise<{ number?: number }[]> {
+  const released = new Set<number>();
+  let path: string | undefined = `/repos/${repo}/issues/comments?since=${encodeURIComponent(new Date(startMs).toISOString())}&per_page=100`;
+  for (let page = 0; page < 10 && path; page++) {
+    let res;
+    try {
+      res = await io.get(path);
+    } catch {
+      break; // transport error: keep what was scanned
+    }
+    if (res.status < 200 || res.status >= 300) break; // unreadable: section degrades
+    const comments = Array.isArray(res.body)
+      ? (res.body as { body?: unknown; created_at?: unknown; issue_url?: unknown }[]).filter(
+          (c): c is { body: string; created_at: string; issue_url: string } =>
+            c !== null && typeof c === 'object'
+            && typeof c.body === 'string' && typeof c.created_at === 'string' && typeof c.issue_url === 'string')
+      : [];
+    for (const c of comments) {
+      const ts = Date.parse(c.created_at);
+      if (Number.isNaN(ts) || ts < startMs || ts > endMs) continue;
+      if (!c.body.includes(CLAIM_RELEASED_MARKER)) continue;
+      const m = /\/issues\/(\d+)$/.exec(c.issue_url);
+      if (m) released.add(Number(m[1]));
+    }
+    if (comments.length < 100) break; // short page = last page
+    const next = /<([^>]+)>;\s*rel="next"/.exec(res.link ?? '');
+    path = next ? next[1].replace('https://api.github.com', '') : undefined;
+  }
+  return [...released].sort((a, b) => a - b).map((number) => ({ number }));
+}
+
 
 /** TIMED_OUT runs stopped by the §4.3 window end DURING the report night: cursor-paginated
  * (bounded), each candidate filtered by its constraints.notAfter falling on the report night's
@@ -375,6 +423,8 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   section('## PRs opened', () => list(data.prs, '_none_'));
   section('## Issues filed', () => list(data.issuesFiled, '_none_'));
   section('## Issues commented', () => list(data.issuesCommented, '_none_'));
+  section('## Claims released (Run ended with no PR and no comment)', () =>
+    bounded(data.claimsReleased.map((c) => `- #${c.number}`), '_none_'));
   section('## Blocked (nightly:blocked, waiting on a human)', () =>
     bounded(data.blocked.map((b) => `- #${b.number} ${escMd(b.title)}${b.question ? ` — question: ${escMd(b.question)}` : ''}`), '_none_'));
   section('## Runs stopped by notAfter (the 06:00 window end)', () =>
@@ -460,10 +510,11 @@ export async function runReport(
   const updatedCandidates = await search(io, opts.repo, `is:issue updated:${startIso}..${endIso}`);
   const issuesCommented = await collectIssuesCommented(io, opts.repo, updatedCandidates,
     win.startMs, win.endMs - 1000);
+  const claimsReleased = await collectClaimsReleased(io, opts.repo, win.startMs, win.endMs - 1000);
   const blocked = await collectBlocked(io, opts.repo);
   const runsStopped = io.mercury ? await collectRunsStopped(io.mercury, opts.night) : [];
   const flakes = collectFlakes(env, opts.night);
-  const data: ReportData = { prs, issuesFiled, issuesCommented, blocked, runsStopped, flakes };
+  const data: ReportData = { prs, issuesFiled, issuesCommented, claimsReleased, blocked, runsStopped, flakes };
 
   if (opts.dryRun) {
     return { night: opts.night, ...data };

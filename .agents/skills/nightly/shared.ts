@@ -41,6 +41,12 @@ export function prevDay(night: string): string {
 /** Every gh call is bounded: a hung fetch is indistinguishable from a slow one. */
 export const FETCH_TIMEOUT_MS = 30_000;
 
+/** The marker the selector puts on the comment it posts when it releases a dead Run's
+ * `nightly:in-progress` claim (#1001). The morning report reads it back from the repo-level
+ * comment listing, so a release is visible without a per-issue timeline walk. Lives here, not
+ * in select.ts, so report.ts can import it without depending on the selector. */
+export const CLAIM_RELEASED_MARKER = '<!-- nightly:claim-released -->';
+
 export function ghToken(env: NodeJS.ProcessEnv): string {
   const tok = env.GH_TOKEN || env.GITHUB_TOKEN || '';
   if (!tok) throw new Error('GH_TOKEN (or GITHUB_TOKEN) is required - even for --dry-run, which still runs the searches');
