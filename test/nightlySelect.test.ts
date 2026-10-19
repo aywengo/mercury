@@ -1275,3 +1275,179 @@ test('#968: ladder ordering puts owner change requests before older Copilot find
   assert.equal(s.rung, 0);
   assert.equal(s.issue, 11, 'the owner review wins over an older Copilot-findings PR');
 });
+
+
+// ---- #1001: a claim left by a Run that ended with no PR and no comment ----
+
+/** A fake host API for the liveness check (and the e2e gate, which reads the same list):
+ * `runs` is what /api/runs returns. Returns the base URL and a closer. */
+async function hostApi(runs: { id?: string; task?: string; status?: string }[]) {
+  const { createServer } = await import('node:http');
+  const srv = createServer((_req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ runs, nextCursor: null }));
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const addr = srv.address();
+  return { url: `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`, close: () => srv.close() };
+}
+
+/** The io a claim-release test needs: one claimed issue, no PRs, and a comment list. */
+function releaseIo(opts: {
+  issue: GhIssue;
+  claimEvent: LabelEvent;
+  comments?: { user?: { login?: string } }[];
+  pulls?: unknown[];
+  dels: string[];
+  posts: string[];
+}) {
+  return {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [opts.claimEvent], link: null };
+      if (path.includes('/comments')) return { body: opts.comments ?? [], link: null };
+      if (path.includes('/pulls?')) return { body: opts.pulls ?? [], link: null };
+      return { body: [opts.issue], link: null };
+    },
+    async post(path: string) { opts.posts.push(path); return true; },
+    async del(path: string) { opts.dels.push(path); return true; },
+  };
+}
+
+test('a claim whose Run ended with no PR and no comment is released and re-selectable (#1001)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'dead', task: 'nightly-next', status: 'FAILED' }]);
+  const claimed = issue({ number: 71, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  try {
+    const s = await runSelectorWith(
+      releaseIo({ issue: claimed, claimEvent, dels, posts }),
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' },
+      false,
+    );
+    assert.equal(s.issue, 71, 'the dead claim no longer excludes the issue');
+    assert.deepEqual(dels, ['/repos/aywengo/mercury/issues/71/labels/nightly%3Ain-progress'], 'the claim is removed');
+    assert.ok(posts.some((p) => p.endsWith('/issues/71/comments')), 'the release is recorded as a comment (the report reads it back)');
+  } finally {
+    host.close();
+  }
+});
+
+test('a claim from a Run that is still alive is never released (#1001)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'other', task: 'nightly-next', status: 'RUNNING' }]);
+  const claimed = issue({ number: 72, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  try {
+    const s = await runSelectorWith(
+      releaseIo({ issue: claimed, claimEvent, dels, posts }),
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' },
+      false,
+    );
+    assert.notEqual(s.issue, 72, 'a live Run still owns its claim');
+    assert.deepEqual(dels, [], 'nothing is deleted behind a live Run');
+  } finally {
+    host.close();
+  }
+});
+
+test('the selector does not count its OWN Run as alive (#1001)', async () => {
+  const { nightlyRunAlive } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'me', task: 'nightly-next', status: 'RUNNING' }]);
+  try {
+    assert.equal(
+      await nightlyRunAlive({ MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' }),
+      false,
+      'the Run asking the question is not a competitor for its own claim',
+    );
+    assert.equal(
+      await nightlyRunAlive({ MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't' }),
+      true,
+      'without a self id the same Run is alive',
+    );
+  } finally {
+    host.close();
+  }
+});
+
+test('a claim whose Run commented on the issue is not released (#1001)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'dead', task: 'nightly-next', status: 'FAILED' }]);
+  const claimed = issue({ number: 73, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  try {
+    const s = await runSelectorWith(
+      releaseIo({ issue: claimed, claimEvent, comments: [{ user: { login: 'mercury-nightly' } }], dels, posts }),
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' },
+      false,
+    );
+    assert.notEqual(s.issue, 73, 'a Run that commented produced output: the claim stays');
+    assert.deepEqual(dels, []);
+  } finally {
+    host.close();
+  }
+});
+
+test('a claim whose Run opened a PR is not released (#1001)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'dead', task: 'nightly-next', status: 'FAILED' }]);
+  const claimed = issue({ number: 74, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  try {
+    const s = await runSelectorWith(
+      releaseIo({
+        issue: claimed,
+        claimEvent,
+        pulls: [{ number: 900, user: { login: 'mercury-nightly' }, head: { ref: 'fix/issue-74-dead-run', sha: 'abc' }, created_at: '2026-10-18T00:30:00Z' }],
+        dels,
+        posts,
+      }),
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' },
+      false,
+    );
+    assert.notEqual(s.issue, 74, 'an open nightly PR means the Run produced output');
+    assert.deepEqual(dels, []);
+  } finally {
+    host.close();
+  }
+});
+
+test('an unreadable liveness check keeps the claim (fail closed, #1001)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const claimed = issue({ number: 75, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  // No host API configured: liveness is unknown, so the clock-only behaviour stands.
+  const s = await runSelectorWith(releaseIo({ issue: claimed, claimEvent, dels, posts }), { REPO: 'aywengo/mercury' }, false);
+  assert.notEqual(s.issue, 75);
+  assert.deepEqual(dels, [], 'unknown liveness never releases');
+});
+
+test('--dry-run reports the release without writing it (#1001)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'dead', task: 'nightly-next', status: 'FAILED' }]);
+  const claimed = issue({ number: 76, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  try {
+    const s = await runSelectorWith(
+      releaseIo({ issue: claimed, claimEvent, dels, posts }),
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' },
+      true,
+    );
+    assert.equal(s.issue, 76, 'the decision is reported');
+    assert.deepEqual(dels, [], 'dry-run writes nothing');
+    assert.deepEqual(posts, []);
+  } finally {
+    host.close();
+  }
+});

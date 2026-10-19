@@ -1,6 +1,6 @@
 ---
 name: nightly
-version: 1.3.1
+version: 1.4.0
 description: Deterministic ladder selection for the unattended nightly loop — decides the next issue from GitHub metadata only (author, labels, timeline label actor), never issue text, then claims it with nightly:in-progress.
 capabilities: [nightly, ladder, selection, trust, claim, triage, github, issues]
 ---
@@ -44,6 +44,26 @@ apply, #764), labeled `nightly:ready` by @aywengo, or carrying a CURRENT
 `enhancement` label applied by @aywengo (the trusted feature path, #800) — the
 actor comes from the timeline's labeled events. `nightly:in-progress`,
 `nightly:blocked` and `nightly:proposed` exclude an issue outright.
+
+## Releasing a claim (#1001)
+
+A claim is released in two cases, and both are decided from metadata only:
+
+- **Clock (§4.3).** A claim whose label event predates the current night's local midnight
+  was left by a deadline-stopped Run; the label is removed before selecting.
+- **Dead Run, no output (#1001).** A claim from THIS night whose claiming Run is over and
+  produced nothing is released too, so a Run that died at 00:21 does not hold its issue
+  for the rest of the night. "Over" is read from the host API (`MERCURY_API_URL` +
+  `MERCURY_API_TOKEN`): no `nightly-next` Run other than this one is non-terminal
+  (`MERCURY_RUN_ID` is excluded — the selector runs inside the Run it is deciding for).
+  "Produced nothing" means no open nightly PR on the issue and no comment by the nightly
+  identity after the claim. A deadline-stopped Run comments (§4.3), so its claim is
+  *not* released here — the report lists it instead. When the host API is unset or
+  unreadable, liveness is unknown and the claim is kept.
+
+The release removes the label and posts a comment carrying
+`<!-- nightly:claim-released -->`, which `nightly-report` reads back from the repo-level
+comment listing as its **Claims released** section.
 
 ## Claim
 
@@ -178,7 +198,8 @@ are never edited — so `nightly-report` reads the question from the issue listi
 comment request. On success run `finish` — every exit path this skill controls removes
 `nightly:in-progress`. A Run stopped by its deadline keeps the claim (§4.3);
 `nightly-report` lists it and the next night's selector removes the stale claim
-(#800) before selecting.
+(#800) before selecting — and a Run that ended with no PR and no comment loses its claim at the
+NEXT SELECTION instead of at midnight (#1001).
 
 ## Report (`report.ts`, N1-4)
 
@@ -200,6 +221,8 @@ issues. Sections:
 
 - **PRs opened** and **issues filed** tonight (GitHub search, repo-scoped).
 - **Issues commented** tonight.
+- **Claims released** tonight (#1001) — issues whose `nightly:in-progress` claim the selector
+  released because the claiming Run ended with no PR and no comment.
 - **Blocked** — open `nightly:blocked` issues with their blocking question (the never-asks exit
   from `next.ts`).
 - **Runs stopped by notAfter** — the §4.3 window end. Read from the Mercury runs API

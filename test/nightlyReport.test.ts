@@ -1119,3 +1119,72 @@ test('questionFromBody: verbatim reason, whitespace-trimmed; empty or absent mar
   // A stale marker followed by MORE body text is not the trailing marker: no false positive.
   assert.equal(questionFromBody('<!-- nightly:blocking-question\nx\n-->\n\nreal body text'), undefined);
 });
+
+// ---- #1001: claims the selector released tonight ----
+
+test('collectClaimsReleased lists only in-window comments carrying the release marker (#1001)', async () => {
+  const { collectClaimsReleased } = await import('../.agents/skills/nightly/report.ts');
+  const { CLAIM_RELEASED_MARKER } = await import('../.agents/skills/nightly/shared.ts');
+  const win = nightWindow('2026-09-26');
+  const inWindow = new Date(win.startMs + 30 * 60_000).toISOString();
+  const beforeWindow = new Date(win.startMs - 60_000).toISOString();
+  const afterWindow = new Date(win.endMs + 60_000).toISOString();
+  const paths: string[] = [];
+  const io: ReportIo = {
+    async get(path) {
+      paths.push(path);
+      return {
+        body: [
+          { body: `${CLAIM_RELEASED_MARKER}\nreleased`, created_at: inWindow, issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/81' },
+          // Same marker twice for one issue: listed once.
+          { body: `${CLAIM_RELEASED_MARKER}\nreleased`, created_at: inWindow, issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/81' },
+          { body: 'just a comment', created_at: inWindow, issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/82' },
+          { body: `${CLAIM_RELEASED_MARKER}\nreleased`, created_at: beforeWindow, issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/83' },
+          { body: `${CLAIM_RELEASED_MARKER}\nreleased`, created_at: afterWindow, issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/84' },
+          { body: `${CLAIM_RELEASED_MARKER}\nreleased`, created_at: inWindow, issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/80' },
+        ],
+        status: 200,
+      };
+    },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  const out = await collectClaimsReleased(io, REPO, win.startMs, win.endMs - 1000);
+  assert.deepEqual(out, [{ number: 80 }, { number: 81 }], 'marker only, inside the window only, once per issue, ascending');
+  assert.equal(paths.length, 1, 'one repo-level listing, no per-issue walk');
+});
+
+test('collectClaimsReleased degrades to what it read when the listing fails (#1001)', async () => {
+  const { collectClaimsReleased } = await import('../.agents/skills/nightly/report.ts');
+  const win = nightWindow('2026-09-26');
+  const io: ReportIo = {
+    async get() { return { body: { message: 'boom' }, status: 500 }; },
+    async post() { return { body: {}, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+  };
+  assert.deepEqual(await collectClaimsReleased(io, REPO, win.startMs, win.endMs - 1000), [], 'an unreadable listing never fails the digest');
+});
+
+test('the digest renders the claims-released section (#1001)', async () => {
+  const { runReport } = await import('../.agents/skills/nightly/report.ts');
+  const win = nightWindow('2026-09-26');
+  const inWindow = new Date(win.startMs + 30 * 60_000).toISOString();
+  const { CLAIM_RELEASED_MARKER } = await import('../.agents/skills/nightly/shared.ts');
+  const { io, calls } = ioWith({});
+  const io2: ReportIo = {
+    ...io,
+    async get(path) {
+      if (path.includes('/issues/comments?since=')) {
+        return { body: [{ body: CLAIM_RELEASED_MARKER, created_at: inWindow, issue_url: 'https://api.github.com/repos/aywengo/mercury/issues/91' }], status: 200 };
+      }
+      return io.get(path);
+    },
+  };
+  const res = await runReport(io2, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.deepEqual(res.claimsReleased, [{ number: 91 }]);
+  // The digest issue is the POST to /issues: its body carries the new section.
+  const digest = calls.find((c) => c.method === 'POST' && /\/issues$/.test(c.path));
+  const body = (digest?.body as { body?: string } | undefined)?.body ?? '';
+  assert.match(body, /## Claims released \(Run ended with no PR and no comment\)/);
+  assert.match(body, /- #91/);
+});
