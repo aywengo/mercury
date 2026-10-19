@@ -1230,7 +1230,8 @@ test('worker: a profile Run drives the agent on the layered environment (accepta
     assert.ok(!spawnedEnv.GIT_CONFIG_GLOBAL.startsWith(ws), 'the generated gitconfig is not inside the workspace');
     assert.ok(!spawnedEnv.GH_CONFIG_DIR.startsWith(ws), 'GH_CONFIG_DIR is not inside the workspace');
     assert.ok(!existsSync(join(ws, 'gitconfig')) && !existsSync(join(ws, 'gh')), 'nothing generated lands in the worktree');
-    assert.ok(!existsSync(spawnedEnv.GIT_CONFIG_GLOBAL), 'the per-Run config dir is removed when the Run ends');
+    // Removal happens in the worker's finally, just after the COMPLETED transition: wait for it.
+    await waitFor(() => !existsSync(spawnedEnv.GIT_CONFIG_GLOBAL), 5_000);
     assert.equal(spawnedEnv.GIT_SSH_COMMAND, NO_SSH_COMMAND);
     assert.equal(spawnedEnv.GIT_CONFIG_NOSYSTEM, '1');
     assert.ok(spawnedEnv.GH_CONFIG_DIR && spawnedEnv.GH_CONFIG_DIR.includes('gh'));
@@ -1281,7 +1282,8 @@ test('worker: a no-profile Run is isolated too (empty gitconfig, no host gitconf
     assert.ok(!spawnedEnv.GIT_CONFIG_GLOBAL.startsWith(ws), 'the generated gitconfig is not inside the workspace');
     assert.ok(!spawnedEnv.GH_CONFIG_DIR.startsWith(ws), 'GH_CONFIG_DIR is not inside the workspace');
     assert.ok(!existsSync(join(ws, 'gitconfig')) && !existsSync(join(ws, 'gh')), 'nothing generated lands in the worktree');
-    assert.ok(!existsSync(spawnedEnv.GIT_CONFIG_GLOBAL), 'the per-Run config dir is removed when the Run ends');
+    // Removal happens in the worker's finally, just after the COMPLETED transition: wait for it.
+    await waitFor(() => !existsSync(spawnedEnv.GIT_CONFIG_GLOBAL), 5_000);
     assert.equal(spawnedEnv.GIT_SSH_COMMAND, NO_SSH_COMMAND);
   } finally {
     env.close();

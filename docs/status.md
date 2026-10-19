@@ -38,7 +38,7 @@ control, retries, sandbox integration, metrics and deployment packaging.
 The target architecture is Crew, host bots and the dispatcher bot running on every host, with
 Fleet deciding where work runs ([`fleet-bots-design.md`](fleet-bots-design.md)). In order:
 
-1. **Merge what is in review:** artifact redaction (#965). W-3 (#934) and B2-0 (#959) merged 2026-10-18.
+1. **Done:** artifact redaction (#965), W-3 (#934) and B2-0 (#959).
 2. **CP-4 (#897):** a layered Run environment with the strict no-profile default, so several bots
    or identities on one host cannot leak credentials into each other.
 3. **B4 (#915):** host setup installs and configures bots, which is what puts them on every host.
@@ -215,7 +215,8 @@ incident (#942). Keep exactly one identity's token in a host's `mercury.env` unt
 Mercury redacts known patterns and exact credentials it forwards. It cannot
 guarantee removal of an unknown secret that it never observed or a value
 transformed by a malicious agent. Agent artifacts at rest (session transcripts,
-kernel-state snapshots) are not yet scrubbed; that is #944, PR #965 in review.
+kernel-state snapshots) are scrubbed after every Run on every exit path (#944, #965); Runs
+whose worker never finished them are swept by #976 (open).
 
 Minimal credential forwarding and network isolation remain the primary
 boundaries.
