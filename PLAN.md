@@ -211,7 +211,7 @@ Record: [`docs/status.md`](docs/status.md)
 | Issue | Title | State | PR |
 | --- | --- | --- | --- |
 | #942 | security: GitHub revoked the nightly GH_TOKEN ('mercury-pat') after a PR-description le… | done | — |
-| #944 | redactor: session transcripts and kernel-state snapshots store Run secrets unredacted | in progress | #965 |
+| #944 | redactor: session transcripts and kernel-state snapshots store Run secrets unredacted | done | #965 |
 | #976 | artifact redaction: sweep workspaces of runs the worker never finalized | open | — |
 
 ## Repository process
