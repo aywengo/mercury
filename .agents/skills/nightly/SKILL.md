@@ -1,6 +1,6 @@
 ---
 name: nightly
-version: 1.4.0
+version: 1.5.0
 description: Deterministic ladder selection for the unattended nightly loop — decides the next issue from GitHub metadata only (author, labels, timeline label actor), never issue text, then claims it with nightly:in-progress.
 capabilities: [nightly, ladder, selection, trust, claim, triage, github, issues]
 ---
@@ -25,9 +25,13 @@ Output: exactly one JSON line.
   then age. Gated on
   tonight's `nightly-e2e` Run being terminal (`MERCURY_API_URL` +
   `MERCURY_API_TOKEN`; unset = gate passed).
-- `{"rung":2,"issue":123,"reason":"..."}` — trusted feature requests (#800):
-  `enhancement` issues authored by @aywengo, or whose CURRENT `enhancement`
-  label was applied by @aywengo (timeline actor), priority label then age.
+- `{"rung":2,"issue":123,"reason":"..."}` — trusted feature requests (#800, amended by
+  #1001 decision A): `enhancement` issues authored by @aywengo, or whose CURRENT
+  `enhancement` label was applied by @aywengo (timeline actor), **and** `nightly:ready`
+  by @aywengo — priority label then age. An `enhancement` label alone is NOT a work
+  signal: the operator marks an enhancement ready when its blockers are done. Because
+  rung 1 already takes every trusted `nightly:ready` issue, rung 2 is reached only while
+  rung 1 is gated off (tonight's `nightly-e2e` Run is not terminal).
 - `{"rung":3,"issue":123,"reason":"..."}` — new @aywengo issues, no labels yet,
   oldest first.
 - `{"rung":4,"reason":"..."}` — docs → proposals (§6): the nightly drafts the
@@ -42,8 +46,11 @@ identity `mercury-nightly` from E2E (the issue's AUTHOR is
 its timeline actor — a label alone is provenance anyone with triage access can
 apply, #764), labeled `nightly:ready` by @aywengo, or carrying a CURRENT
 `enhancement` label applied by @aywengo (the trusted feature path, #800) — the
-actor comes from the timeline's labeled events. `nightly:in-progress`,
-`nightly:blocked` and `nightly:proposed` exclude an issue outright.
+actor comes from the timeline's labeled events. An `enhancement` label is no
+longer enough on its own: since #1001 decision A rung 2 also requires
+`nightly:ready` by @aywengo, so parking an enhancement is simply not marking it
+ready. `nightly:in-progress`, `nightly:blocked` and `nightly:proposed` exclude an
+issue outright.
 
 ## Releasing a claim (#1001)
 

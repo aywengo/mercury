@@ -76,9 +76,13 @@ Each `nightly-next` Run evaluates, in order, and takes the first rung with work:
 
 1. **Trusted bugs** — `origin:e2e` issues and `nightly:ready` issues, by
    priority label then age.
-2. **Trusted features** (#800) — `enhancement` issues authored by @aywengo, or
-   whose CURRENT `enhancement` label was applied by @aywengo (the same
-   timeline-actor rule as `nightly:ready`), by priority label then age.
+2. **Trusted features** (#800, amended by #1001 decision A) — `enhancement` issues
+   authored by @aywengo, or whose CURRENT `enhancement` label was applied by
+   @aywengo (the same timeline-actor rule as `nightly:ready`), **and** labeled
+   `nightly:ready` by @aywengo, by priority label then age. An `enhancement` label
+   alone is not a work signal: mark the issue ready when its blockers are done.
+   Rung 1 already takes every trusted `nightly:ready` issue, so rung 2 is reached
+   only while rung 1 is gated off (tonight's E2E verdict still pending).
 3. **New @aywengo issues** — authored by @aywengo, not yet labeled.
 4. **Docs → proposals** — §6.
 

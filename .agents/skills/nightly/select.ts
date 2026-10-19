@@ -17,7 +17,9 @@
  *      API with the same token the Run was created with): no new autonomous work starts while
  *      the E2E verdict for tonight is still open.
  *   2. Trusted features — `enhancement` issues the trusted author filed, or whose CURRENT
- *      `enhancement` label carries @aywengo as its timeline actor, priority then age (#800).
+ *      `enhancement` label carries @aywengo as its timeline actor, AND `nightly:ready` by
+ *      @aywengo, priority then age (#800; the ready requirement is #1001 decision A). An
+ *      `enhancement` label alone is no longer a work signal.
  *   3. New @aywengo issues — authored by @aywengo, no labels at all, oldest first.
  *   4. Docs → proposals (§6) — reported as `rung: 4` with no issue: the nightly drafts the
  *      issue set itself; selection has nothing to claim.
@@ -300,20 +302,32 @@ export function selectLadder(
 
   // Rung 2: trusted feature requests (#800) — `enhancement` issues authored by @aywengo, or
   // whose CURRENT enhancement label was applied by @aywengo (timeline-verified), priority then
-  // age. An operator-filed feature request is autonomous work the same way a filed bug is: the
-  // author's authorship is the trust root, and the review gate (never merge without review)
-  // still applies to whatever the night builds.
+  // age. The review gate (never merge without review) still applies to whatever the night builds.
+  //
+  // #1001 decision A (@aywengo, 2026-10-19): rung 2 ADDITIONALLY requires `nightly:ready` by the
+  // trusted author. An `enhancement` label is no longer a work signal on its own - #972 was
+  // claimed at 00:21 while its body still said "Not `nightly:ready` yet: relabel when its
+  // blockers merge", the opposite of what the operator asked for. The operator now marks an
+  // enhancement ready when its blockers are done.
+  //
+  // Consequence, and the only thing that distinguishes rung 2 from rung 1 now: rung 1 already
+  // takes EVERY trusted `nightly:ready` issue, so a ready enhancement is normally claimed there.
+  // Rung 2 fires only while rung 1 is gated off (tonight's `nightly-e2e` Run is not terminal) -
+  // it no longer widens WHAT is claimed, only WHEN an explicitly ready enhancement may start.
+  // The gate bypass is pre-existing (#800's rung 2 was always unconditional); this change only
+  // narrows who may use it.
   const rung2 = eligible
     .filter((c) => {
       const labels = issueLabels(c.issue);
-      return (issueAuthor(c.issue) === TRUSTED_AUTHOR && labels.includes(L_ENH)) || c.enhByTrusted;
+      return c.readyByTrusted
+        && ((issueAuthor(c.issue) === TRUSTED_AUTHOR && labels.includes(L_ENH)) || c.enhByTrusted);
     })
     .sort((a, b) => priorityRank(a.issue) - priorityRank(b.issue) || ageKey(a.issue) - ageKey(b.issue));
   if (rung2.length > 0) {
     const top = rung2[0]!;
     const reason = top.enhByTrusted
-      ? `enhancement issue #${top.issue.number} (trusted: labeled enhancement by @${TRUSTED_AUTHOR}), priority ${priorityRank(top.issue) < PRIORITY_ORDER.length ? PRIORITY_ORDER[priorityRank(top.issue)] : 'none'}, oldest-first`
-      : `enhancement issue #${top.issue.number} (trusted: filed by @${TRUSTED_AUTHOR}), priority ${priorityRank(top.issue) < PRIORITY_ORDER.length ? PRIORITY_ORDER[priorityRank(top.issue)] : 'none'}, oldest-first`;
+      ? `enhancement issue #${top.issue.number} (trusted: labeled enhancement by @${TRUSTED_AUTHOR}, nightly:ready by @${TRUSTED_AUTHOR}), priority ${priorityRank(top.issue) < PRIORITY_ORDER.length ? PRIORITY_ORDER[priorityRank(top.issue)] : 'none'}, oldest-first`
+      : `enhancement issue #${top.issue.number} (trusted: filed by @${TRUSTED_AUTHOR}, nightly:ready by @${TRUSTED_AUTHOR}), priority ${priorityRank(top.issue) < PRIORITY_ORDER.length ? PRIORITY_ORDER[priorityRank(top.issue)] : 'none'}, oldest-first`;
     return { rung: 2, issue: top.issue.number, reason };
   }
 

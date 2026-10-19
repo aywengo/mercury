@@ -608,40 +608,63 @@ test('a capped open-issue list reports rung 4, never a false none (round-9 revie
 
 // ---- #800: the enhancement rung and the stale-claim reset ----
 
-test('rung 2: a trusted-author enhancement issue is selected, priority then age (#800)', () => {
-  const older = issue({ number: 11, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }], created_at: '2026-09-21T00:00:00Z' });
-  const newerHigh = issue({ number: 12, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }, { name: 'priority: high' }], created_at: '2026-09-23T00:00:00Z' });
-  const s = selectLadder([cand(older), cand(newerHigh)], TERMINAL);
+// #1001 decision A (@aywengo, 2026-10-19): rung 2 additionally requires `nightly:ready`.
+// Rung 1 already takes every trusted ready issue, so rung 2 is only reachable while rung 1 is
+// gated off - the tests below close the gate where they mean to exercise rung 2 itself.
+const GATED_OFF = { e2eRunTerminal: false };
+const readyTl = [labeled('aywengo', 'nightly:ready')];
+
+test('rung 2: an enhancement WITHOUT nightly:ready is never claimed (#1001 decision A, the #972 case)', () => {
+  // #972 was claimed at 00:21 while its body still said "Not nightly:ready yet". An
+  // `enhancement` label alone is no longer a work signal.
+  const enh = issue({ number: 11, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }] });
+  for (const opts of [TERMINAL, GATED_OFF]) {
+    const s = selectLadder([cand(enh)], opts);
+    assert.notEqual(s.rung, 2, 'never rung 2 without a ready label');
+    assert.notEqual(s.issue, 11, 'the issue is not claimed');
+  }
+});
+
+test('rung 2: a ready enhancement is claimed, priority then age (#800 + #1001 decision A)', () => {
+  const older = issue({ number: 11, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }, { name: 'nightly:ready' }], created_at: '2026-09-21T00:00:00Z' });
+  const newerHigh = issue({ number: 12, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }, { name: 'nightly:ready' }, { name: 'priority: high' }], created_at: '2026-09-23T00:00:00Z' });
+  // With tonight's verdict in, rung 1 takes it: a ready issue is rung-1 work regardless of labels.
+  const s1 = selectLadder([cand(older, readyTl), cand(newerHigh, readyTl)], TERMINAL);
+  assert.equal(s1.rung, 1);
+  assert.equal(s1.issue, 12, 'priority: high beats age');
+  // With the gate still open, rung 2 is what is left - and it orders the same way.
+  const s = selectLadder([cand(older, readyTl), cand(newerHigh, readyTl)], GATED_OFF);
   assert.equal(s.rung, 2);
-  assert.equal(s.issue, 12, 'priority: high beats age inside the rung');
+  assert.equal(s.issue, 12);
   assert.match(s.reason, /enhancement issue #12/);
-  const s2 = selectLadder([cand(older)], TERMINAL);
+  assert.match(s.reason, /nightly:ready by @aywengo/);
+  const s2 = selectLadder([cand(older, readyTl)], GATED_OFF);
   assert.equal(s2.issue, 11, 'then oldest first');
   assert.match(s2.reason, /filed by @aywengo/);
 });
 
 test('rung 2: an enhancement label from an unverified actor on a foreign issue is NOT eligible (#800)', () => {
   // Same discipline as nightly:ready (#764): a label anyone can apply is not provenance. A
-  // foreign-authored issue with a foreign-applied enhancement label stays out of the ladder.
-  const foreign = issue({ number: 13, user: { login: 'random-dev' }, labels: [{ name: 'enhancement' }] });
-  const s = selectLadder([cand(foreign, [labeled('random-dev', 'enhancement')])], TERMINAL);
+  // foreign-authored issue with a foreign-applied enhancement AND ready label stays out.
+  const foreign = issue({ number: 13, user: { login: 'random-dev' }, labels: [{ name: 'enhancement' }, { name: 'nightly:ready' }] });
+  const s = selectLadder([cand(foreign, [labeled('random-dev', 'enhancement'), labeled('random-dev', 'nightly:ready')])], GATED_OFF);
   assert.equal(s.rung === 'none' || s.rung === 4, true, 'falls through to the docs rung, never rung 2');
 });
 
 test('rung 2: an @aywengo-applied enhancement label trusts a foreign-author issue (#800)', () => {
-  const nightlyAuthored = issue({ number: 14, user: { login: 'mercury-nightly' }, labels: [{ name: 'enhancement' }] });
-  const s = selectLadder([cand(nightlyAuthored, [labeled('aywengo', 'enhancement')])], TERMINAL);
+  const nightlyAuthored = issue({ number: 14, user: { login: 'mercury-nightly' }, labels: [{ name: 'enhancement' }, { name: 'nightly:ready' }] });
+  const s = selectLadder([cand(nightlyAuthored, [labeled('aywengo', 'enhancement'), ...readyTl])], GATED_OFF);
   assert.equal(s.rung, 2);
   assert.equal(s.issue, 14);
   assert.match(s.reason, /labeled enhancement by @aywengo/);
 });
 
-test('rung 2 keeps its place after rung 1: ready still wins over enhancement (#800)', () => {
-  const enh = issue({ number: 15, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }], created_at: '2026-09-20T00:00:00Z' });
-  const ready = issue({ number: 16, labels: [{ name: 'nightly:ready' }], created_at: '2026-09-25T00:00:00Z' });
-  const s = selectLadder([cand(enh), cand(ready, [labeled('aywengo', 'nightly:ready')])], TERMINAL);
-  assert.equal(s.rung, 1);
-  assert.equal(s.issue, 16);
+test('rung 2: a ready label applied by someone other than @aywengo does not qualify an enhancement (#1001 decision A)', () => {
+  // The ready requirement is the same trust root as rung 1's: the ACTOR of the current label.
+  const enh = issue({ number: 15, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }, { name: 'nightly:ready' }] });
+  const s = selectLadder([cand(enh, [labeled('random-dev', 'nightly:ready')])], GATED_OFF);
+  assert.notEqual(s.rung, 2);
+  assert.notEqual(s.issue, 15, 'an untrusted ready label is not a ready signal');
 });
 
 test('a stale nightly:in-progress claim is reset and the issue becomes selectable (#800)', async () => {
