@@ -4,7 +4,8 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isTerminal, STUCK_CANDIDATE_STATUSES } from '../domain/stateMachine.ts';
 import { harnessMayRevise, translateHarnessGoal, type HarnessGoalReport } from '../domain/goalEvents.ts';
@@ -353,6 +354,11 @@ export class Worker {
     // process running and a run that threw on a state transition unwound past any cleanup,
     // leaving a live agent writing into a workspace nobody was watching.
     let handle: AgentHandle | null = null;
+    // CP-4 review blocker 1 (#977): the generated gitconfig and GH_CONFIG_DIR live in a per-Run
+    // 0700 directory OUTSIDE the workspace, so an agent's `git add -A` cannot commit them, a
+    // `gh auth login` cannot drop a token file into the worktree, and the agent cannot rewrite
+    // its own credential policy in place. Removed in the finally on every exit path.
+    let runEnvDir: string | null = null;
     // The rendered advisory plan (issue #809), captured before the prompt is assembled. Null
     // when the Run was not created from a template, so the prompt stays byte-identical.
     let renderedWorkflowPlan: string | null = null;
@@ -601,7 +607,8 @@ export class Worker {
             throw new Error(resolution.message);
           }
         }
-        const built = buildRunEnvironment({ workerEnv: process.env, runDir: workspace.path, profile });
+        runEnvDir = mkdtempSync(join(tmpdir(), 'mercury-run-env-')); // mkdtemp creates it 0700
+        const built = buildRunEnvironment({ workerEnv: process.env, runDir: runEnvDir, profile });
         runEnv = built.env;
         if (built.secrets.length > 0) {
           // Section 8: every value a profile injects joins the exact-value redaction set for this
@@ -746,6 +753,14 @@ export class Worker {
           await handle.terminate();
         } catch (termErr) {
           log.warn({ error: String(termErr instanceof Error ? termErr.message : termErr) }, 'agent terminate failed');
+        }
+      }
+      // After terminate(): the agent no longer reads its gitconfig or gh config (#977 review).
+      if (runEnvDir) {
+        try {
+          rmSync(runEnvDir, { recursive: true, force: true });
+        } catch (rmErr) {
+          log.warn({ runId: run.id, error: String(rmErr instanceof Error ? rmErr.message : rmErr) }, 'run environment dir cleanup failed');
         }
       }
       // Release the adapter's per-run state LAST (issues #62, #97). Every adapter keyed a

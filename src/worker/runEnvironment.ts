@@ -60,12 +60,26 @@ function readSecretFile(profileName: string, varName: string, path: string): str
  * appears in the file. The helper shell references the variable by NAME; the variable itself is
  * injected into the Run environment by the profile's `env` layer.
  */
+/** Quote a gitconfig value: wrap in double quotes, escape backslash and quote (git-config(1)).
+ *  Control characters are refused at load (credentials-profiles.ts), so a value can never start
+ *  a new section; quoting keeps `;`, `#` and leading/trailing space literal (#977 review). */
+function gitconfigValue(v: string): string {
+  return '"' + v.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+}
+
+/** CP-4 review blocker 2 (#977): ssh for git with no agent, no keys and no config. The host's
+ *  `~/.ssh` and its agent socket would otherwise authenticate a Run that matches no profile,
+ *  defeating the strict default (#954). Profiles in CP-4 carry HTTPS credentials only; an SSH
+ *  profile is CP-5's business and would replace this command explicitly. */
+export const NO_SSH_COMMAND =
+  'ssh -F /dev/null -o IdentityAgent=none -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o BatchMode=yes';
+
 export function renderGitconfig(profile: CredentialProfile): string {
   const lines: string[] = [];
   if (profile.git?.authorName || profile.git?.authorEmail) {
     lines.push('[user]');
-    if (profile.git.authorName) lines.push(`\tname = ${profile.git.authorName}`);
-    if (profile.git.authorEmail) lines.push(`\temail = ${profile.git.authorEmail}`);
+    if (profile.git.authorName) lines.push(`\tname = ${gitconfigValue(profile.git.authorName)}`);
+    if (profile.git.authorEmail) lines.push(`\temail = ${gitconfigValue(profile.git.authorEmail)}`);
   }
   if (profile.git?.httpsToken) {
     // One section per distinct host, so the helper is scoped to the profile's repositories only.
@@ -119,8 +133,11 @@ export function buildRunEnvironment(opts: {
   for (const [name, value] of Object.entries(opts.workerEnv)) {
     if (value === undefined) continue;
     if (isStrippedEnvName(name)) continue;
+    // The ssh agent socket is a source-control credential channel too (#977 review).
+    if (name === 'SSH_AUTH_SOCK') continue;
     env[name] = value;
   }
+  env.GIT_SSH_COMMAND = NO_SSH_COMMAND;
 
   const gitconfigPath = join(opts.runDir, 'gitconfig');
   const ghConfigDir = join(opts.runDir, 'gh');
