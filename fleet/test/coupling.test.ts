@@ -227,9 +227,17 @@ test('the guard sees the whole fleet tree, not a lucky subset', () => {
 });
 
 test('Fleet adds no dependencies of its own', () => {
+  // Fleet's own manifest is the direct statement of the rule, so it is asserted first: Fleet needs
+  // only Node, and the whole point of the coupling rule above is that it stays that way.
+  const fleetPkg = JSON.parse(readFileSync(join(FLEET_DIR, 'package.json'), 'utf8')) as { dependencies?: Record<string, string> };
+  assert.deepEqual(fleetPkg.dependencies ?? {}, {}, 'fleet/package.json must declare no runtime dependencies');
+
+  // The root's list is the drift guard: each entry belongs to the SERVER and is named here, so a
+  // dependency added for Fleet's convenience fails this test instead of landing quietly. express is
+  // the HTTP server; @a2a-js/sdk is the A2A boundary's transport, confined to src/a2a/ by
+  // test/a2aCoupling.test.ts (#986).
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as { dependencies?: Record<string, string> };
-  // express belongs to Mercury. If Fleet ever needs its own dependency that is a deliberate decision, not drift.
-  assert.deepEqual(Object.keys(pkg.dependencies ?? {}), ['express']);
+  assert.deepEqual(Object.keys(pkg.dependencies ?? {}).sort(), ['@a2a-js/sdk', 'express']);
 });
 
 test('the guard reads imports, not prose', async () => {

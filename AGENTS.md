@@ -95,6 +95,7 @@ unbounded wait has cost more wall-clock time here than any actual bug in this re
 | `src/metrics/` | `/metrics` projection: SQL aggregates over runs/events + Prometheus text format |
 | `src/presets/` | Role presets (Crew): registry, resolution, validation |
 | `src/knowledge/` | Atlas client side: knowledge packs materialized into workspaces, note harvest |
+| `src/a2a/` | A2A binding: pure chain → task-state mapping (`docs/a2a-design.md` §6.5). No SDK here |
 | `src/laya/` | Laya sidecar client (host-side; a Fleet-local client is an L2 decision — Fleet never imports `src/`): typed fail-closed `/v1/systemone` contract |
 | `src/host/` | Host installer: setup wizard, service install, doctor, dispatcher bots |
 | `.agents/skills/` | The skill library (one `SKILL.md` per skill; no credentials) |
@@ -133,6 +134,11 @@ unbounded wait has cost more wall-clock time here than any actual bug in this re
   in `finally`.
 
 ## Fixing issues
+
+**`PLAN.md` is the per-issue tracker.** Filing an issue set adds its rows; the PR that closes an
+issue marks its row `done` with that PR's number in the same PR (CI job `plan-tracker`); an issue
+closed without a PR is marked `done` or `dropped` by whoever closes it. See the "Rules" section of
+[`PLAN.md`](PLAN.md).
 
 Use [`.agents/skills/issue-fix-loop/SKILL.md`](.agents/skills/issue-fix-loop/SKILL.md). It is the
 single source of the procedure (analysis → scoped fix with a proven regression test → one PR →

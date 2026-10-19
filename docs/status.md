@@ -1,11 +1,53 @@
-# Current status and limitations
+# Current status, roadmap and limitations
+
+Last reviewed: **2026-10-18** against `main`. This is the one page that answers "where is
+Mercury as a whole?". Each workstream keeps its own detailed record in its design doc. This page
+summarises them, names the next step for each, and lists the limitations a user hits today. When
+a workstream's own doc and this page disagree, the workstream doc wins; fix this page.
 
 Mercury implements the complete single-host durable Run path: API, SQLite
 queue, worker, isolated workspaces, agent adapters, events, dashboard, human
 control, retries, sandbox integration, metrics and deployment packaging.
 
-This page records active limitations without the long historical completion
-list previously kept in the root README.
+## Workstreams at a glance
+
+| Workstream | State | Next step | Record |
+| --- | --- | --- | --- |
+| **Core Run path** (API, queue, worker, workspaces, events, dashboard) | Shipped | — | [`overview.md`](overview.md), [`ARCHITECTURE.md`](../ARCHITECTURE.md) |
+| **Per-Run model** | Shipped: `model` on `POST /api/runs`, persisted, retried; `perRunModel` measured on Claude, PrimeAgent (RPC + daemon) and Hermes | — | [`laya-integration-design.md`](laya-integration-design.md) §13 P-1 |
+| **Host installer** | M0–M6 implemented | Gate verification: fresh-VM run (M4) and checksum publishing (M6), #929 | [`host-installer.md`](host-installer.md) |
+| **Crew: Role Presets** (Milestone A) | Complete | — | [`crew/roadmap.md`](crew/roadmap.md) §4–7 |
+| **Crew: advisory Workflow Templates** (Phase 8) | W-1, W-2 and W-3 shipped | — | [`crew/workflows.md`](crew/workflows.md), [`crew/roadmap.md`](crew/roadmap.md) §12 |
+| **Crew Phases 4–7, 9–11** (per-run MCP, git mirror, drafts, staged workflows, gates, ops) | Proposals #868–#875 | Waiting on destination-aware egress (#863) for MCP; Phase 9 vs Teams Phase 3 decision (#871/#918) | [`crew/roadmap.md`](crew/roadmap.md) §8–15 |
+| **Teams** | Phase −1 done; Phases 0–3 proposed (#911, #917, #918) | Operator decision on #918 vs #871 | [`crew/teams.md`](crew/teams.md) |
+| **Knowledge base (Atlas)** | Shipped, both directions observed on real agents | Retention policy (open question) | [`knowledge-base.md`](knowledge-base.md), below |
+| **Dispatcher bots** | B0 + B1 shipped; B2-0 (`statusChangedAt` on the Run row, #959) shipped; one nightly bot runs unattended on one host | B2 triggers B2-1..B2-3 (#907–#909); B3 brain (#912) and B4 setup integration (#915) proposed | [`dispatcher-bot-design.md`](dispatcher-bot-design.md) |
+| **Nightly self-development** | Running every night as `mercury-nightly`; resumes on owner change requests (#968) | #964 (flake report window), #881 (duplicate-proposal guard, PR #984), #980 (resume on red CI, PR #981) | [`nightly-self-development.md`](nightly-self-development.md) |
+| **Credential profiles** | CP-2 + CP-3 shipped (resolution per Run); strict no-profile default decided (#954) | CP-4 layered Run environment (#897), PR #977 in review | [`credential-profiles-design.md`](credential-profiles-design.md) |
+| **Laya** (System-1 selection) | P-1 and L0 shipped; L1-1..L1-3 shipped | L1-4 wiring (#857), blocked on the label rule (#853) and a real-host sidecar run (#852) | [`laya-integration-design.md`](laya-integration-design.md) |
+| **Fleet** | Phases 0–6 shipped (registry, dispatch, sweep, events, routing, interaction, metrics), runs as a service | Fleet-and-bots FB1–FB3 (#972–#974) | [`fleet-design.md`](fleet-design.md) §12 |
+| **Fleet and bots** | Design accepted 2026-10-16 (option A: bots dispatch through Fleet); FB0 availability snapshot shipped (#978) | FB2a owner-scoped run list (#971), PR #982 in review | [`fleet-bots-design.md`](fleet-bots-design.md) |
+| **Fleet tenancy** | Specification; T0–T2 proposed (#884–#890) | Only needed for more than one Fleet operator | [`fleet-tenancy-design.md`](fleet-tenancy-design.md) |
+| **A2A integration** | Design settled 2026-10-18 (server-first, HTTP+JSON/REST binding); A0 filed as #986–#990 | A0 implementation: retry chains (#987), the server-stamped Run origin (#988) and the task-state mapping (#990) done; #986 and #989 next | [`a2a-design.md`](a2a-design.md) |
+| **Distribution** | Five channels built by the release workflow | — | [`distribution.md`](distribution.md), below |
+| **Operator CLI** (`mercuryctl`) | Shipped | — | [`client.md`](client.md) |
+| **Operator TUI** | Deliberately not built | Gated on demonstrated need | [`cli-tui-design.md`](cli-tui-design.md) |
+
+## Critical path: Crew and bots on every host, Fleet as master
+
+The target architecture is Crew, host bots and the dispatcher bot running on every host, with
+Fleet deciding where work runs ([`fleet-bots-design.md`](fleet-bots-design.md)). In order:
+
+1. **Merge what is in review:** artifact redaction (#965). W-3 (#934) and B2-0 (#959) merged 2026-10-18.
+2. **CP-4 (#897):** a layered Run environment with the strict no-profile default, so several bots
+   or identities on one host cannot leak credentials into each other.
+3. **B4 (#915):** host setup installs and configures bots, which is what puts them on every host.
+4. **Installer gate verification (#929):** one fresh VM, so a new host comes up without hand-fixing.
+5. **Fleet and bots, FB0–FB3 (#970–#974):** availability-aware routing, bots dispatching
+   through Fleet, and a two-host end-to-end test.
+
+Not on this path: shared storage or a multi-host control plane (#925). Fleet's model,
+independent hosts with Fleet as a client, does not need it.
 
 ## Supported baseline
 
@@ -15,7 +57,8 @@ The production baseline is:
 - one local SQLite database shared by API and workers;
 - separate `server` and `worker` processes;
 - `fake` as the create-Run default when `agent` is omitted (`MERCURY_DEFAULT_AGENT`);
-- PrimeAgent RPC as the supported coding-agent transport;
+- PrimeAgent RPC as the default coding-agent transport (daemon mode is protocol-verified but
+  not the default; see below);
 - Git-worktree isolation;
 - optional Docker or Podman sandboxing;
 - bearer-token or browser-session authentication;
@@ -123,12 +166,11 @@ be treated as a promise.
 
 ### PrimeAgent daemon mode
 
-The daemon adapter exists but is not production-ready. Verification against
-PrimeAgent 0.8.1 found incompatibilities in framing, command envelope, session
-identity and socket selection.
-
-Mock-based daemon tests do not prove real-daemon compatibility. RPC remains the
-supported default. See [`daemon-agent-sessions.md`](daemon-agent-sessions.md).
+The daemon adapter is implemented and protocol-verified against a real supervisor (PrimeAgent
+0.9.1, daemon protocol v7), and it carries a per-Run model in its session `create` config (#828).
+RPC remains the default and the only path exercised by default. Snapshot fallback, reattach,
+session reuse, multi-tenancy and supervisor provisioning are still design-only, gated on the open
+decisions in [`daemon-agent-sessions.md`](daemon-agent-sessions.md) §12, not on code.
 
 ### Local repository paths
 
@@ -160,11 +202,20 @@ and `mercuryctl agents list` renders the goal column. The dashboard gap was reco
 dashboard goal-setting as deliberately out of scope is still not decided anywhere a contributor
 can read.
 
+### Source-control credentials per Run
+
+Credential profiles resolve a profile per Run (CP-3), but the layered Run environment (CP-4,
+#897) is not built yet. Until it is, a Run that matches **no** profile inherits the host's
+`GH_TOKEN` and other source-control variables. That is the opposite of the decided strict
+default (#954), and it is how Runs acted as the owner account during the 2026-10-12 token
+incident (#942). Keep exactly one identity's token in a host's `mercury.env` until CP-4 ships.
+
 ### Redaction is mitigation
 
 Mercury redacts known patterns and exact credentials it forwards. It cannot
 guarantee removal of an unknown secret that it never observed or a value
-transformed by a malicious agent.
+transformed by a malicious agent. Agent artifacts at rest (session transcripts,
+kernel-state snapshots) are not yet scrubbed; that is #944, PR #965 in review.
 
 Minimal credential forwarding and network isolation remain the primary
 boundaries.
@@ -186,6 +237,59 @@ preset ceilings can only narrow and defaults are checked against them at load (`
 skill resolution matches §3.2 with an explicit empty caller list meaning "no skills"
 (`e35ffbc`), and malformed CPU/memory/disk values are rejected before the Run is inserted
 (`8507642`). The per-fix records live in [`crew/roadmap.md`](crew/roadmap.md).
+
+### Advisory Workflow Templates (Crew Phase 8, W-1 and W-2)
+
+A Run can be created from a builtin Workflow Template with `workflow: { id, version? }` on
+`POST /api/runs`. The template's stages are rendered as an advisory plan for **one** Run on **one**
+agent; stage presets contribute only their *required* agent, model, sandbox demand, ceilings and
+required skills, and capabilities are checked once against the agent that performs every step.
+The block is a closed shape (unknown keys are refused), the template snapshot is stored per Run,
+and Run detail returns the workflow identity. Staged (multi-Run) workflows are Phase 9 and not
+built. Record: [`crew/workflows.md`](crew/workflows.md) (W-1 #808, W-2 #809 via #842).
+
+### Per-Run model selection
+
+`POST /api/runs` accepts `model`. It is validated (no whitespace, control characters or leading
+`-`), persisted on the Run, carried by retry, emitted as `run.model_resolved` with its source
+(caller or preset), and refused at creation on an agent without `perRunModel`. Claude Code,
+PrimeAgent (RPC and daemon) and Hermes declare `perRunModel` from real-binary measurements. Fleet
+forwards `model` unchanged. Record: [`laya-integration-design.md`](laya-integration-design.md) §13.
+
+### Dispatcher bots (B0 and B1)
+
+Host-resident bots run scheduled tasks against their own host's API: a config schema, a
+scheduler with single-flight and derived idempotency keys, manual fire, status, and per-alias
+service install, all under `src/host/bots/`. The nightly self-development bot runs unattended on
+one host as `mercury-nightly`. Event triggers, the observer scope, the LLM brain and setup
+integration (B2–B4) are not built. Record: [`dispatcher-bot-design.md`](dispatcher-bot-design.md).
+
+### Credential profiles (CP-2 and CP-3)
+
+Profiles map repositories to source-control credentials per Run, are loaded from a 0600 config,
+resolved at Run creation (with owner restrictions and SCP/SSH/HTTPS URL normalization), recorded
+on the Run, and preserved across claim and retry. The layered Run environment that would make the
+strict default real is CP-4 (see *Source-control credentials per Run* above). Record:
+[`credential-profiles-design.md`](credential-profiles-design.md).
+
+### Laya groundwork (P-1, L0, L1-1 to L1-3)
+
+An opt-in, loopback-only Laya sidecar can be installed by host setup (versioned venv directories,
+its own 0600 `laya-credentials.json`), checked by `mercury host doctor`, and called through a
+fail-closed client. Bot configs accept a `select` block, still refused until L1-4. A Run can carry
+a `selection` record (`run.selection_recorded`), and the bot-side hard filter and decision rule
+exist as pure functions. Nothing selects a harness or model yet. Record:
+[`laya-integration-design.md`](laya-integration-design.md).
+
+### Fleet (phases 0–6)
+
+Fleet federates independent hosts over HTTP. It has a host registry with a prober, dispatch with
+an explicit host and durable bindings, reconciliation with `UNKNOWN` handling, event
+aggregation with SSE, routing (locality, agent, labels, capacity, and a soft knowledge-freshness
+signal), input/cancel/retry through Fleet, and a relabelled metrics rollup. It runs as a service
+with its own caller authentication. It forwards `preset`, `workflow`, `model` and `selection`
+unchanged, but does not yet know which presets or workflows a host has (FB0/FB1). Record:
+[`fleet-design.md`](fleet-design.md) §12, operator guide [`../fleet/README.md`](../fleet/README.md).
 
 ### Knowledge base (Atlas)
 
@@ -350,18 +454,35 @@ dashboard, and that need has not been demonstrated. See
 [`cli-tui-design.md`](cli-tui-design.md) for the architecture, protocol
 contracts and milestone roadmap.
 
-### Crew (beyond Milestone A)
+### Crew (beyond Milestone A and advisory workflows)
 
-Crew is staged as four products (see [`crew/README.md`](crew/README.md)). Builtin Role
-Presets are implemented (above). The remaining three are design-only:
+Crew is staged as four products (see [`crew/README.md`](crew/README.md)). Builtin Role Presets
+and advisory Workflow Templates (W-1, W-2, W-3) are implemented (above). Still design
+only, each drafted as a proposal in [`crew/roadmap.md`](crew/roadmap.md):
 
-1. generic per-run MCP with enforceable policy;
-2. Git-backed preset distribution and owner drafts;
-3. bounded Workflow Templates.
+1. generic per-run MCP with enforceable policy (Phases 4–5, #875, #870), gated on
+   destination-aware egress (#863);
+2. Git-backed preset distribution and owner drafts (Phases 6–7, #873, #874);
+3. staged and gated workflows (Phases 9–10, #871, #872), overlapping Teams Phase 3 (#918), so
+   one of the two must be chosen first.
 
-Milestone A's own open items — fail-closed capability checks (#721), resume parity
-(#722), ceiling fixes (#723) and the skill-semantics decision (#724) — are tracked in
-[`crew-milestone-a-followups.md`](crew-milestone-a-followups.md).
+Milestone A's follow-ups (#721–#724) are closed.
+
+### Dispatcher bots B2–B4
+
+Event triggers and the read-only observer scope (B2; B2-0 shipped as #959), the LLM brain (B3, #912)
+and setup integration and hardening (B4, #915). See
+[`dispatcher-bot-design.md`](dispatcher-bot-design.md).
+
+### Fleet and bots
+
+Bots dispatching through Fleet (`api.via: "fleet"`) and availability-aware routing. The design
+is accepted; FB0 shipped as #978, and FB1–FB3 are filed as #972–#974. See [`fleet-bots-design.md`](fleet-bots-design.md).
+
+### Teams
+
+Persona-backed teams over Crew presets and templates. Phases 0–3 are proposals (#911, #917,
+#918). See [`crew/teams.md`](crew/teams.md).
 
 ### OIDC/SSO
 
@@ -376,15 +497,16 @@ Named network destinations remain design-only. Do not treat recorded
 
 ## Recommended priority
 
-1. Add identity and shared API state only when multi-user or multi-API
-   deployment requires it.
-2. Add destination-aware network policy before generic HTTP MCP. This gates Crew
-   Milestone B: `allowedNetworks` names do not yet restrict destinations, so
-   per-run MCP would be advertised on top of a boundary that does not hold.
-3. Reverify and repair daemon mode only if resident PrimeAgent sessions provide
-   concrete value over RPC.
-4. Close the Crew Milestone A follow-ups (#721-#724) before Milestone B. Milestone B
-   also waits on item 2 above.
+1. **Finish the critical path above,** in order. Each step unblocks the next, and steps 1–3 are
+   what make "bots on every host" safe.
+2. **Decide #853 (the L1-0 label rule).** It is the only thing gating Laya L1-4 apart from the
+   real-host sidecar run (#852).
+3. **Decide Teams Phase 3 vs Crew Phase 9 (#918, #871)** before either is built, so there is one
+   stage engine, not two.
+4. **Add destination-aware network policy (#863)** before generic HTTP MCP. It gates Crew
+   Milestone B: `allowedNetworks` names do not yet restrict destinations.
+5. **Add identity and shared API state** only when multi-user or multi-API deployment requires
+   it (OIDC/SSO, #876).
 
 ## Sources of truth
 
@@ -393,4 +515,11 @@ Named network destinations remain design-only. Do not treat recorded
 - deployment: [`deploy/README.md`](../deploy/README.md);
 - daemon verification: [`daemon-agent-sessions.md`](daemon-agent-sessions.md);
 - Crew phases: [`crew/roadmap.md`](crew/roadmap.md);
+- dispatcher bots and the nightly loop: [`dispatcher-bot-design.md`](dispatcher-bot-design.md),
+  [`nightly-self-development.md`](nightly-self-development.md);
+- Fleet: [`fleet-design.md`](fleet-design.md), [`fleet-bots-design.md`](fleet-bots-design.md);
+- Laya: [`laya-integration-design.md`](laya-integration-design.md);
+- credential profiles: [`credential-profiles-design.md`](credential-profiles-design.md);
+- per-issue state of every filed issue set: [`../PLAN.md`](../PLAN.md) (updated by the PR that closes each issue);
+- host installer milestones: [`host-installer.md`](host-installer.md);
 - current test outcome: `npm test`, not a stored count.

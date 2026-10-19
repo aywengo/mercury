@@ -100,8 +100,11 @@ export interface ResumeCandidate {
   prNumber: number;
   headSha: string;
   /** 'findings' = a Copilot review exists on this head and its verdict is not approval-class;
-   *  the run resumes fix-loop step 5 on the issue. */
-  state: 'findings';
+   *  the run resumes fix-loop step 5 on the issue.
+   *  'owner-changes' = the owner's LATEST deciding review requests changes on THIS head (no
+   *  commit pushed since), whether its remarks are inline or only in the review body (#968).
+   *  It outranks Copilot findings: the owner's review is the one that gates the merge. */
+  state: 'findings' | 'owner-changes';
   /** Older first: with two open PRs for one issue the OLDER one is continued (the acceptance
    *  rule) and the newer must be superseded or closed by the Run. */
   createdAt: string;
@@ -248,13 +251,18 @@ export function selectLadder(
       const top = byIssue.get(r.issue);
       if (top === undefined || r.createdAt < top.createdAt) byIssue.set(r.issue, r);
     }
-    const ordered = [...byIssue.entries()].sort((a, b) => a[1].createdAt.localeCompare(b[1].createdAt));
+    // Owner change requests first (#968), then Copilot findings; oldest-first within each.
+    const rank = (r: ResumeCandidate): number => (r.state === 'owner-changes' ? 0 : 1);
+    const ordered = [...byIssue.entries()].sort((a, b) => rank(a[1]) - rank(b[1]) || a[1].createdAt.localeCompare(b[1].createdAt));
     if (ordered.length > 0) {
       const [issue, r] = ordered[0]!;
+      const what = r.state === 'owner-changes'
+        ? `has @${TRUSTED_AUTHOR}'s changes-requested review on its head to address (review body and any inline threads)`
+        : 'has Copilot findings on its head to address';
       return {
         rung: 0,
         issue,
-        reason: `resume: PR #${r.prNumber} (branch fix/issue-${issue}) has Copilot findings on its head to address (fix-loop step 5, at most 2 rounds); oldest-first${byIssue.size > 1 ? `; ${byIssue.size - 1} more PR(s) waiting` : ''}`,
+        reason: `resume: PR #${r.prNumber} (branch fix/issue-${issue}) ${what} (fix-loop step 5, at most 2 rounds); ${r.state === 'owner-changes' ? 'owner reviews first, then ' : ''}oldest-first${byIssue.size > 1 ? `; ${byIssue.size - 1} more PR(s) waiting` : ''}`,
       };
     }
   }
@@ -416,6 +424,8 @@ export interface CopilotHeadFinding {
 export interface CopilotHeadState {
   complete: boolean;
   lastCopilot: { commit_id?: string | null; state?: string | null; submitted_at?: string | null } | null;
+  /** The owner's latest CHANGES_REQUESTED / APPROVED / DISMISSED review (#968), or null. */
+  lastOwner: { commit_id?: string | null; state?: string | null } | null;
   findings: CopilotHeadFinding[];
 }
 
@@ -430,7 +440,7 @@ export async function copilotHeadState(
   headSha: string,
   logPrefix = 'resume scan',
 ): Promise<CopilotHeadState> {
-  const out: CopilotHeadState = { complete: true, lastCopilot: null, findings: [] };
+  const out: CopilotHeadState = { complete: true, lastCopilot: null, lastOwner: null, findings: [] };
   // Last Copilot review on this PR (REST, bounded at 5 pages).
   let rvPath: string | null = `/repos/${repo}/pulls/${prNumber}/reviews?per_page=50`;
   let rvPages = 0;
@@ -440,6 +450,13 @@ export async function copilotHeadState(
       for (const rv of body ?? []) {
         // Exact login: a lookalike account (copilot-pull-request-reviewer-x) must neither
         // replace the last review nor fake a verdict (#820 r5).
+        // The owner's LATEST deciding review (#968). COMMENTED/PENDING do not change a PR's
+        // review decision on GitHub, so they never override an earlier CHANGES_REQUESTED.
+        if (rv.user?.login === TRUSTED_AUTHOR
+          && (rv.state === 'CHANGES_REQUESTED' || rv.state === 'APPROVED' || rv.state === 'DISMISSED')) {
+          out.lastOwner = rv; // exact login, same trust root as the ladder; oldest-first pages
+          continue;
+        }
         if (rv.user?.login !== COPILOT_REVIEWER) continue;
         out.lastCopilot = rv; // pages are oldest-first; keep the last seen
       }
@@ -755,6 +772,15 @@ export async function runSelectorWith(
         const headState = await copilotHeadState(io as unknown as Parameters<typeof copilotHeadState>[0], repo, pr.number, headSha);
         const lastCopilot = headState.lastCopilot;
         if (!headState.complete) continue; // fail closed for THIS PR: no resume, but the issue stays reserved
+        // Owner change request on the CURRENT head (#968): resume regardless of Copilot. A commit
+        // pushed after the review moves the head, so an answered review waits for re-review
+        // instead of being resumed again. Excluded issues never resume.
+        const lastOwner = headState.lastOwner;
+        if (lastOwner !== null && lastOwner.state === 'CHANGES_REQUESTED' && lastOwner.commit_id === headSha
+          && !isExcluded(issueCandidate.issue)) {
+          resume.push({ issue, prNumber: pr.number, headSha, state: 'owner-changes', createdAt: pr.created_at ?? '' });
+          continue;
+        }
         const hasHeadReview = lastCopilot !== null && lastCopilot.commit_id === headSha;
         if (!hasHeadReview || lastCopilot === null) continue; // relay fetches the review first
         if (lastCopilot.state === 'APPROVED') continue; // awaiting merge; not resume work

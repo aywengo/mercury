@@ -1185,3 +1185,93 @@ test('runSelectorWith: a lookalike account cannot fake the verdict or the findin
   assert.equal(s.rung, 0, 'the genuine review with unresolved findings resumes');
   assert.equal(s.issue, 400);
 });
+
+// #968: the owner's changes-requested review is resume work, not only Copilot findings.
+function ownerReviewIo(opts: {
+  ownerReviews: { state: string; commit_id: string }[];
+  copilotThreads?: number;
+  extraReadyIssue?: boolean;
+}) {
+  const trusted = issue({ number: 959, user: { login: 'aywengo' } });
+  const prList = [
+    { number: 1959, user: { login: 'mercury-nightly' }, created_at: '2026-10-14T22:35:00Z', head: { sha: 'headA', ref: 'fix/issue-959-status-changed-at' } },
+  ];
+  const issues = [trusted];
+  if (opts.extraReadyIssue) issues.push(issue({ number: 970, user: { login: 'aywengo' }, labels: [{ name: 'nightly:ready' }, { name: 'priority: high' }] }));
+  return {
+    async get(path: string) {
+      if (path.includes('/timeline')) {
+        return { body: [{ event: 'labeled', actor: { login: 'aywengo' }, label: { name: 'nightly:ready' } }], link: null };
+      }
+      if (path.includes('/pulls?')) return { body: prList, link: null };
+      if (path.includes('/pulls/1959/reviews')) {
+        return { body: opts.ownerReviews.map((r) => ({ user: { login: 'aywengo' }, ...r })), link: null };
+      }
+      return { body: issues, link: null };
+    },
+    async post() { return true; },
+    async postJson() {
+      const n = opts.copilotThreads ?? 0;
+      const nodes = Array.from({ length: n }, () => ({ isResolved: false, isOutdated: false, comments: { nodes: [{ author: { login: 'copilot-pull-request-reviewer' }, originalCommit: { oid: 'headA' } }] } }));
+      return { status: 200, body: { data: { repository: { pullRequest: { reviewThreads: { totalCount: n, pageInfo: { hasNextPage: false }, nodes } } } } } };
+    },
+  };
+}
+
+test('#968: the owner\'s CHANGES_REQUESTED review on the current head resumes the PR (no Copilot review at all)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(ownerReviewIo({ ownerReviews: [{ state: 'CHANGES_REQUESTED', commit_id: 'headA' }] }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 959);
+  assert.match(s.reason, /PR #1959/);
+  assert.match(s.reason, /@aywengo's changes-requested review/);
+});
+
+test('#968: a commit pushed after the owner review waits for re-review instead of resuming again', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(ownerReviewIo({ ownerReviews: [{ state: 'CHANGES_REQUESTED', commit_id: 'olderSha' }] }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.rung, 0, 'the head moved past the review: not resume work');
+});
+
+test('#968: a later owner APPROVED supersedes the change request; a later COMMENTED does not', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const approved = await runSelectorWith(ownerReviewIo({ ownerReviews: [
+    { state: 'CHANGES_REQUESTED', commit_id: 'headA' }, { state: 'APPROVED', commit_id: 'headA' },
+  ] }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(approved.rung, 0, 'approved: awaiting merge');
+  const commented = await runSelectorWith(ownerReviewIo({ ownerReviews: [
+    { state: 'CHANGES_REQUESTED', commit_id: 'headA' }, { state: 'COMMENTED', commit_id: 'headA' },
+  ] }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(commented.rung, 0, 'a comment does not lift a change request');
+});
+
+test('#968: an owner change request outranks a newer nightly:ready issue, even a high-priority one', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const s = await runSelectorWith(ownerReviewIo({ ownerReviews: [{ state: 'CHANGES_REQUESTED', commit_id: 'headA' }], extraReadyIssue: true }) as never, { REPO: 'aywengo/mercury' }, true);
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 959);
+});
+
+test('#968: a CHANGES_REQUESTED review from anyone but the owner does not resume', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const io = ownerReviewIo({ ownerReviews: [] });
+  const get = io.get;
+  io.get = async (path: string) => (path.includes('/pulls/1959/reviews')
+    ? { body: [{ user: { login: 'someone-else' }, state: 'CHANGES_REQUESTED', commit_id: 'headA' }], link: null }
+    : get(path));
+  const s = await runSelectorWith(io as never, { REPO: 'aywengo/mercury' }, true);
+  assert.notEqual(s.rung, 0);
+});
+
+test('#968: ladder ordering puts owner change requests before older Copilot findings', () => {
+  const c = [
+    cand(issue({ number: 10, labels: [{ name: 'nightly:ready' }] }), [labeled('aywengo', 'nightly:ready')]),
+    cand(issue({ number: 11, labels: [{ name: 'nightly:ready' }] }), [labeled('aywengo', 'nightly:ready')]),
+  ];
+  const s = selectLadder(c, { ...TERMINAL, resume: [
+    { issue: 10, prNumber: 100, headSha: 'a', state: 'findings', createdAt: '2026-10-01T00:00:00Z' },
+    { issue: 11, prNumber: 101, headSha: 'b', state: 'owner-changes', createdAt: '2026-10-05T00:00:00Z' },
+  ] });
+  assert.equal(s.rung, 0);
+  assert.equal(s.issue, 11, 'the owner review wins over an older Copilot-findings PR');
+});

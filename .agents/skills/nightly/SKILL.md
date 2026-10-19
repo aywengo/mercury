@@ -106,14 +106,34 @@ rung 3 new @aywengo issues, rung 4 docs → proposals) and claims the chosen iss
 the report; `--dry-run` selects and reports WITHOUT claiming). The output's `action` is the Run's
 instruction:
 
+```bash
+node .agents/skills/nightly/next.ts propose --repo aywengo/mercury --source <doc#anchor> --title "<title>" --body-file <path>
+```
+
+Rung 4 files ONLY through `propose` (#881). The body file is the drafted prose; `propose`
+appends the required `## Source` section with the machine-readable marker
+`<!-- nightly-source:<key> -->`, then dedupes BEFORE creating anything: open AND closed issues
+are searched for the source key or an exact title match, a match files nothing and prints the
+existing number, and a failed or capped search throws (nothing filed). `--dry-run` runs the
+search and reports without creating.
+
 - **`fix-loop`** (rung 0–3): execute the `issue-fix-loop` procedure on the claimed issue — root
   cause, scoped fix with a regression test, one PR, independent review. Feature requests (rung 2)
   run the same loop: analysis, scoped implementation with tests, one PR. This skill (the nightly
   Run) plays the implementer role the loop's procedure assigns.
 - **`fix-loop` on rung 0 (resume, #819)**: the claimed issue already has an open nightly PR
-  whose head carries Copilot findings. Do NOT open a new PR: address the findings on the existing
-  branch (fix-loop step 5, at most 2 rounds, one batched push). The Copilot re-request is the
-  host's relay's job — push, then `finish`. With two open PRs for one issue, continue the OLDER
+  whose head carries Copilot findings, or whose head carries @aywengo's changes-requested review
+  (#968; owner reviews resume first). Do NOT open a new PR: address the findings on the existing
+  branch (fix-loop step 5, at most 2 rounds, one batched push). For an owner review, the findings
+  are the review BODY plus any inline threads: read `gh pr view <n> --json reviews` and the
+  review threads, fix every point, then reply on the PR with a point-by-point answer (a body-only
+  review has no threads to resolve). Owner and Copilot rounds count together against the cap;
+  at the cap, hand off with the owner's open points instead of fixing. The Copilot re-request is the
+  host's relay's job — push, then `finish`. Do NOT spend turns on it: `issue-fix-loop` step 4's REST
+  call cannot succeed under the nightly token (GitHub answers 201 and ignores it, and the response
+  carries no field that could tell you), so a Run that retries it, or that reads the empty
+  `requested_reviewers` as proof the API cannot set the reviewer, only burns the night's budget
+  (docs/nightly-self-development.md §5.2). With two open PRs for one issue, continue the OLDER
   one and state the supersession on the newer.
 - **`draft-proposals`** (rung 4): draft `nightly:proposed` issues from a roadmap section in the
   docs (§6) and NEVER implement — one night of latency buys a human decision.

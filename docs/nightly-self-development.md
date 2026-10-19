@@ -160,6 +160,59 @@ issue `nightly:blocked`, put the question in an issue comment, finish the Run.
 `origin:e2e` — created (#728); meanings and the trust rule are in
 `docs/issue-triage.md`.
 
+### 5.2 The Copilot relay
+
+The nightly identity cannot obtain a Copilot code review, measured 2026-10-18:
+
+- `POST /pulls/<n>/requested_reviewers` with
+  `{"reviewers": ["copilot-pull-request-reviewer[bot]"]}` under the `mercury-nightly` token
+  returns **201 and creates no `review_requested` event**. The same call under the owner's token
+  registers and the review arrives. There is no field to check either way: the bot reviewer never
+  appears in the response's `requested_reviewers`, which is empty on success too, so the failure
+  is invisible to the caller. `gh pr edit --add-reviewer` is worse — it resolves the login over
+  GraphQL and fails outright with "The 'login' field requires one of the following scopes:
+  `['read:org']`".
+- The ruleset alternative does not cover it. The `copilot_code_review` rule requests a review
+  only "if the author has access to Copilot code review and AI credits", and nightly PRs are
+  authored by `mercury-nightly`.
+
+So the request has to come from an identity with Copilot access, and it must not come from the
+nightly agent — handing the agent the owner's token is what the N0-1 identity split removed.
+`deploy/nightly/copilot-relay.sh` is that boundary: an operator-owned LaunchAgent
+(`com.mercury.copilot-relay.plist.template`) that re-requests Copilot on every open PR authored
+by `mercury-nightly` whose current head has no Copilot review, and refuses to run unless `gh` is
+authenticated as the owner. The nightly skill therefore pushes and finishes; the relay fetches
+the review, and the next night's resume scan sees it.
+
+**It loops; it is not scheduled.** launchd's *scheduled* spawns do not fire while the `gui` domain
+is in "on-demand-only mode", which it is for long stretches on the nightly host. launchd says so
+itself and then never spawns:
+
+```
+launchd[1] [gui/501:] pending spawn, domain in on-demand-only mode: com.mercury.copilot-relay
+```
+
+The job sits at `pended nondemand spawn = interval` with a frozen `runs` count — `StartInterval`
+and `RunAtLoad` both do nothing, and a probe agent with a 60 s interval reproduced it: `runs = 0`
+after 70 s. That, not a bad request, is what killed the first relay on 2026-10-05. The agent is
+therefore `KeepAlive` and runs the script with `--watch`: one spawn is all it needs,
+`launchctl kickstart` can always force one, and the cadence belongs to the script. Install ends
+with `kickstart` for exactly this reason.
+
+**Every pass logs a heartbeat.** The first version logged only when it acted, so its silence was
+indistinguishable from a working relay with nothing to do — that is why the stall went unnoticed
+for twelve days, and why five nightly PRs sat with no Copilot review for one to three days while
+the resume scan skipped all of them (`select.ts` resumes only a PR whose head carries findings).
+Liveness is now two commands:
+
+```bash
+launchctl print gui/$(id -u)/com.mercury.copilot-relay | grep -E 'state|runs|last exit'
+tail -3 ~/.local/state/mercury/copilot-relay.log
+```
+
+A heartbeat as the last log line with `state = running` means healthy. A stale heartbeat, or
+`state = not running`, means restart it (`kickstart`); `KeepAlive` covers a crash, not a bootout.
+
 ## 6. Docs → features, gated
 
 The rung where an autonomous loop is most likely to drift gets a human gate.
@@ -171,6 +224,13 @@ set**, labeled `nightly:proposed` — the same pattern as
 decision on *what* gets built. When every remaining unimplemented roadmap item
 already has an open `nightly:proposed` issue, rung 4 is a quiet no-op: it files
 nothing and ends the Run (recorded in #956, 2026-10-14).
+
+Dedupe is mechanical, not recalled (#881): every draft is filed through
+`next.ts propose --source <doc#anchor> --title … --body-file …`, which appends
+the machine-readable marker `<!-- nightly-source:<key> -->` to the body and
+searches open AND closed issues for that key or an exact title match before
+creating anything. A match — open or closed — files nothing; a failed or
+capped search files nothing either (fail closed).
 
 ## 7. Skills
 

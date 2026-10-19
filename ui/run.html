@@ -12,6 +12,7 @@
 <header>
   <h1><a href="/">⚡ Mercury</a></h1>
   <span class="muted" id="run-title">run</span>
+  <a href="/workflows.html">Workflows</a>
   <span class="spacer"></span>
   <span class="user" id="user-label"></span>
   <button class="secondary small" id="logout-btn">logout</button>
@@ -72,6 +73,11 @@
     <h3 id="input-title">Input required</h3>
     <p id="input-message" class="muted"></p>
     <div id="input-controls"></div>
+  </div>
+
+  <div id="workflow-steps-section" class="hidden">
+    <h2 class="section">Planned steps <span class="muted">agent-reported — not enforced by Mercury</span></h2>
+    <div id="workflow-steps"></div>
   </div>
 
   <h2 class="section">Event timeline <span class="muted" id="live-indicator"></span></h2>

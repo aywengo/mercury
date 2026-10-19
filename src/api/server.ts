@@ -11,7 +11,10 @@ import type { EventStream } from '../events/eventStream.ts';
 import type { RunQueue } from '../queue/runQueue.ts';
 import type { RunService } from '../runs/runService.ts';
 import { createAuthMiddleware, requireAuth } from './auth.ts';
+import { a2aEnabled, type A2aDeps } from '../a2a/config.ts';
+import { mountA2a } from '../a2a/router.ts';
 import { createRoutes, sendError } from './routes.ts';
+import { createWorkflowRoutes } from './workflowRoutes.ts';
 import { createAuthRoutes } from './authRoutes.ts';
 import { createRateLimiter } from './rateLimit.ts';
 import { createSessionStore, type SessionStore } from './sessions.ts';
@@ -44,6 +47,12 @@ export interface ServerDeps {
   knowledgeStatus?: () => KnowledgeStatus;
   /** See RoutesDeps.knowledgeNotes. */
   knowledgeNotes?: (body: unknown) => OperatorNoteOutcome;
+  /**
+   * The A2A boundary (docs/a2a-design.md section 6.1). ABSENT means the surface does not exist:
+   * no routes, no agent card. Supplied but not enabled (or with no exposed skill) is the same.
+   * The composition root decides; nothing here reads the environment.
+   */
+  a2a?: A2aDeps;
   /** Optional session store override (default: in-memory Map, see sessions.ts). */
   sessions?: SessionStore;
   /** Optional run queue for the /healthz/workers endpoint (worker health, Mercury.md section 25). */
@@ -244,6 +253,17 @@ export function createApp(deps: ServerDeps): Express {
   });
   app.post('/api/runs', createRunLimiter);
 
+  // The workflow Run-creation endpoint writes the same queue as POST /api/runs, so it shares
+  // the limiter instance and the same per-owner+IP budget; mounted before the router so the
+  // POST inside it is covered.
+  app.post('/api/workflows/:workflowId/runs', createRunLimiter);
+
+  app.use('/api', createWorkflowRoutes({
+    runService: deps.runService,
+    events: deps.events,
+    stream: deps.stream,
+    logger: deps.logger,
+  }));
   app.use('/api', createRoutes({
     runService: deps.runService,
     events: deps.events,
@@ -255,6 +275,16 @@ export function createApp(deps: ServerDeps): Express {
     // answer 404 forever while every unit test that calls the underlying function directly stays green.
     knowledgeNotes: deps.knowledgeNotes,
   }));
+
+  // The A2A boundary (docs/a2a-design.md section 6.1). Mounted only when the operator enabled it
+  // AND at least one skill is exposed, so a default-configured server exposes neither an A2A route
+  // nor an agent card. The card is the one unauthenticated read; every A2A route is behind the same
+  // gate /api uses.
+  if (deps.a2a && a2aEnabled(deps.a2a.config)) {
+    // The SAME limiter instance as POST /api/runs: A2A's SendMessage creates Runs in the same queue,
+    // so it draws on the same per-owner+IP budget instead of a second one of its own.
+    mountA2a(app, deps.a2a, { createRunLimiter });
+  }
 
   // Last-resort handler for anything that escaped a route (including middleware and body-parser
   // failures). It used to answer `500 { error: err.message }`, which pushed raw internals --
