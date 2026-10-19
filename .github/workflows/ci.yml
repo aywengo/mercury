@@ -48,8 +48,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # plan-sync dispatches this on the generated PLAN.md commit (pushed with github.token, which does
-  # not fire push workflows), so the post-merge tracker update still runs the full suite.
+  # Manual runs (e.g. to re-run the full suite on main). plan-sync no longer dispatches this: its
+  # push uses the operator PAT, which fires `push` workflows and runs `ci` automatically.
   workflow_dispatch:
 
 # A newer push to the same ref supersedes an older run; cancel it rather than burn runners.

@@ -15,10 +15,8 @@
 // what stops the workflow from re-triggering itself forever. A concurrent plan-sync is handled by
 // regenerating the update against the fresh main and retrying the push.
 //
-// CI: `actions/checkout` persists `github.token` for the later `git push`, and GitHub does not fire
-// `push` workflows for commits pushed with that token. So after pushing, this workflow dispatches
-// `ci` via `workflow_dispatch` so the generated commit still runs the full suite (the repo's "any
-// push to main runs the full suite" policy).
+// CI: the push uses the operator PAT, so it fires `push` workflows and `ci` runs on the generated
+// commit automatically (the repo's "any push to main runs the full suite" policy).
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -97,14 +95,8 @@ for (let attempt = 0; attempt < 5; attempt++) {
   try {
     execFileSync('git', ['push', 'origin', 'HEAD:main']);
     console.log(`plan-sync: pushed PLAN.md update for ${summary}`);
-    // The generated commit was pushed with github.token, which does not fire push workflows, so
-    // dispatch `ci` explicitly to run the full suite on it.
-    try {
-      gh(['workflow', 'run', 'ci.yml', '--repo', repo]);
-      console.log('plan-sync: dispatched ci on the generated commit');
-    } catch (e) {
-      console.warn('plan-sync: could not dispatch ci: ' + (e as Error).message);
-    }
+    // The push uses the operator PAT, so it fires `push` workflows: `ci` runs on the generated
+    // commit automatically (the repo's "any push to main runs the full suite" policy).
     process.exit(0);
   } catch {
     // A concurrent plan-sync landed first. Regenerate the update against the fresh main instead of

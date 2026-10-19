@@ -14,10 +14,8 @@
 # Idempotent: a commit with no closing issues (including this workflow's own commit) changes
 # nothing, so the workflow does not re-trigger itself.
 #
-# CI: `actions/checkout` persists `github.token` for the later `git push`, and GitHub does not fire
-# `push` workflows for commits pushed with that token. So after pushing, this workflow dispatches
-# `ci` via `workflow_dispatch` (needs `actions: write`) so the generated commit still runs the full
-# suite -- the repo's "any push to main runs the full suite" policy.
+# CI: the push uses the operator PAT, so it fires `push` workflows and `ci` runs on the generated
+# commit automatically (the repo's "any push to main runs the full suite" policy).
 
 name: plan-sync
 
@@ -27,7 +25,6 @@ on:
 
 permissions:
   contents: write
-  actions: write
   pull-requests: read
   issues: read
 
