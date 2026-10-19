@@ -378,10 +378,12 @@ jobs:
             echo "dry-run must not write the plist" >&2; exit 1; }
 
   # Always reports a single status so narrative-only PRs are not stuck waiting on skipped required jobs.
-  # PLAN.md rule 2: a PR that closes an issue with a PLAN.md row must update that row in the same
-  # PR (state `done`, this PR's number). Runs on every pull request regardless of the path filters:
-  # a docs-only or code-only PR can close a tracked issue equally. It needs the PR's closing issues,
-  # which only the API knows, so it reads them with the workflow token (read-only).
+  # PLAN.md rule 1 at PR time: a PR that closes an issue must have a PLAN.md row for it (or mark it
+  # untracked). Setting the row `done` is the post-merge `plan-sync` workflow's job (issue #1004), so
+  # a feature PR that does not touch PLAN.md passes as long as its closing issues are tracked. Runs on
+  # every pull request regardless of the path filters: a docs-only or code-only PR can close a tracked
+  # issue equally. It needs the PR's closing issues, which only the API knows, so it reads them with
+  # the workflow token (read-only).
   plan-tracker:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -431,7 +433,7 @@ jobs:
           fi
           # Skipped on push (no PR to read); on a pull request it must succeed.
           if [ "$PLAN" != "success" ] && [ "$PLAN" != "skipped" ]; then
-            echo "plan-tracker failed ($PLAN): update the PLAN.md row of every issue this PR closes" >&2
+            echo "plan-tracker failed ($PLAN): every issue this PR closes must have a PLAN.md row (or be marked untracked)" >&2
             exit 1
           fi
 

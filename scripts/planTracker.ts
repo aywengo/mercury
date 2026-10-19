@@ -1,17 +1,22 @@
 // PLAN.md tracker check (PLAN.md "Rules" 2 and 4).
 //
-// A pull request that closes an issue (`Closes #N` / `Fixes #N`, i.e. GitHub's
-// closingIssuesReferences) must update that issue's PLAN.md row in the same PR: state `done` and the
-// PR's own number in the PR column. Issues without a row pass, because not every issue belongs to a
-// tracked issue set. The whole file is also checked for well-formed rows: a known state and no
-// duplicate issue rows. A malformed tracker is a failure on every PR, not only the one that broke it.
+// The tracker has two readers with different jobs:
+//
+//   - PR time (`plan-tracker` in ci.yml): a pull request that closes an issue (`Closes #N` /
+//     `Fixes #N`, i.e. GitHub's closingIssuesReferences) must have a PLAN.md row for that issue
+//     (rule 1), or mark it explicitly untracked. It does NOT have to set the row `done` -- that
+//     moved to the post-merge workflow (issue #1004), because two open PRs in one workstream
+//     touching adjacent rows conflicted on every merge that landed first. The whole file is also
+//     checked for well-formed rows: a known state and no duplicate issue rows.
+//   - Post-merge (`plan-sync` workflow): reads the merged PR's closing issues and sets each
+//     tracked row to `done` with that PR's number, in one commit on main.
 //
 // Usage (CI): node scripts/planTracker.ts <pr.json> <PLAN.md>
 //   pr.json = `gh pr view <n> --json number,closingIssuesReferences`
 
 import { readFileSync } from 'node:fs';
 
-export const PLAN_STATES = ['open', 'in progress', 'done', 'dropped'] as const;
+export const PLAN_STATES = ['open', 'in progress', 'done', 'dropped', 'untracked'] as const;
 
 export interface PlanRow {
   issue: number;
@@ -47,20 +52,66 @@ export function parsePlan(md: string): { rows: Map<number, PlanRow>; errors: str
   return { rows, errors };
 }
 
-/** Rule 2: every closing issue that has a row must be `done` with this PR's number. */
-export function checkClosingIssues(rows: Map<number, PlanRow>, prNumber: number, closing: number[]): string[] {
+/**
+ * Rule 1 at PR time: every closing issue must have a row, or be explicitly untracked.
+ *
+ * The row's STATE is not checked here: setting it `done` is the post-merge workflow's job (#1004),
+ * so a feature PR that touches no PLAN.md row still passes as long as its closing issues are
+ * tracked. An issue with no row fails, naming the issue and pointing at rule 1.
+ */
+export function checkClosingIssues(rows: Map<number, PlanRow>, closing: number[]): string[] {
   const errors: string[] = [];
   for (const issue of closing) {
     const row = rows.get(issue);
-    if (!row) continue;
-    if (row.state !== 'done' || !row.prs.includes(prNumber)) {
+    if (!row) {
       errors.push(
-        `PLAN.md:${row.line}: this PR closes #${issue}, so its row must read state "done" with #${prNumber} ` +
-        `in the PR column (found state "${row.state}", PR ${row.prs.length ? row.prs.map((p) => '#' + p).join(', ') : '—'})`,
+        `this PR closes #${issue}, which has no PLAN.md row; add one (rule 1) or mark it untracked`,
       );
     }
   }
   return errors;
+}
+
+/**
+ * The post-merge update: set each closing issue's row to `done` with the merged PR's number.
+ *
+ * Skips an issue with no row (nothing to mark) and an explicitly untracked row (rule 4: untracked
+ * means "not part of a tracked set", so it stays untracked). Returns the updated document and
+ * whether anything changed, so the workflow can avoid committing when there is nothing to do --
+ * which is also what stops the workflow from re-triggering itself forever.
+ */
+export function applyClosing(md: string, closing: { issue: number; pr: number }[]): { plan: string; changed: boolean } {
+  const { rows } = parsePlan(md);
+  const targets = new Map<number, number>(); // line -> pr
+  for (const c of closing) {
+    const row = rows.get(c.issue);
+    if (!row || row.state === 'untracked') continue;
+    targets.set(row.line, c.pr);
+  }
+  if (targets.size === 0) return { plan: md, changed: false };
+  const lines = md.split('\n');
+  let changed = false;
+  for (const [line, pr] of targets) {
+    const updated = updateRow(lines[line - 1]!, pr);
+    if (updated !== lines[line - 1]) {
+      lines[line - 1] = updated;
+      changed = true;
+    }
+  }
+  return { plan: lines.join('\n'), changed };
+}
+
+/** Rewrite one row line to `done` with `pr` in the PR column, if it is not already there. */
+function updateRow(line: string, pr: number): string {
+  const m = ROW.exec(line.replace(/\\\|/g, '\u0000'));
+  if (!m) return line;
+  const issue = Number(m[1]);
+  const title = m[2]!.replace(/\u0000/g, '\|').trim();
+  const prs = m[4]!.trim();
+  const prsList = [...prs.matchAll(/#(\d+)/g)].map((x) => Number(x[1]));
+  if (prsList.includes(pr)) return line;
+  const newPrs = prsList.length ? `${prs}, #${pr}` : `#${pr}`;
+  return `| #${issue} | ${title} | done | ${newPrs} |`;
 }
 
 function main(argv: string[]): number {
@@ -79,7 +130,7 @@ function main(argv: string[]): number {
   }
   const closing = (pr.closingIssuesReferences ?? []).map((r) => r.number).filter((n): n is number => Number.isInteger(n));
   const { rows, errors } = parsePlan(readFileSync(planPath, 'utf8'));
-  errors.push(...checkClosingIssues(rows, pr.number!, closing));
+  errors.push(...checkClosingIssues(rows, closing));
   if (errors.length) {
     for (const e of errors) console.error(e);
     console.error(`\nPLAN.md rules: see the "Rules" section at the top of PLAN.md.`);

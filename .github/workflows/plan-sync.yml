@@ -1,0 +1,39 @@
+# plan-sync: mark PLAN.md rows done after a PR merges (issue #1004).
+#
+# The per-PR row edit (old PLAN.md rule 2) made two open PRs in one workstream conflict on
+# adjacent rows every time one merged first. The row update now happens HERE, after merge, in one
+# commit as the Actions bot. `main` requires pull requests, so this workflow's push needs a bypass:
+# the Actions token is on the `main-protection` ruleset's bypass list (RepositoryRole "Actions",
+# bypass_mode "always"). That is a broad grant -- any workflow that requests `contents: write` can
+# push to main -- which is acceptable here because workflows already run arbitrary code on push and
+# the token's contents permission is read-only unless a workflow asks for write.
+#
+# Idempotent: a commit with no closing issues (including this workflow's own commit) changes
+# nothing, so the workflow does not re-trigger itself.
+
+name: plan-sync
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+  issues: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: Mark closing issues done
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: node scripts/plan-sync.ts
