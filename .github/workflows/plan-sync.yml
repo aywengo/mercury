@@ -37,12 +37,15 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Checkout with the operator PAT so the persisted git credential (and the Authorization
+          # header checkout writes) is the bypass identity, not the GITHUB_TOKEN. A remote override
+          # alone would not work: checkout's persisted Authorization header takes precedence over a
+          # token in the remote URL, so the push would still use the GITHUB_TOKEN and be rejected.
+          token: ${{ secrets.PLAN_SYNC_TOKEN }}
       - uses: actions/setup-node@v4
         with:
           node-version: '24.x'
-      - name: Configure push identity (operator PAT bypasses the ruleset)
-        run: |
-          git remote set-url origin https://x-access-token:${{ secrets.PLAN_SYNC_TOKEN }}@github.com/${{ github.repository }}.git
       - name: Mark closing issues done
         env:
           GH_TOKEN: ${{ github.token }}
