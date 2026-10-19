@@ -214,6 +214,14 @@ Record: [`docs/status.md`](docs/status.md)
 | #944 | redactor: session transcripts and kernel-state snapshots store Run secrets unredacted | in progress | #965 |
 | #976 | artifact redaction: sweep workspaces of runs the worker never finalized | open | — |
 
+## Repository process
+
+Record: [`PLAN.md`](PLAN.md) (rules above)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #1004 | PLAN.md: move the closing-row update to a post-merge commit; open PRs conflict on adjacent rows | open | — |
+
 ## Host installer — milestone notes (historical)
 
 The per-milestone notes kept before this file became the project-wide tracker.
