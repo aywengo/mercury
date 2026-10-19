@@ -8,12 +8,25 @@
  */
 
 import { readFileSync } from 'node:fs';
-import type { HostView } from './registry.ts';
+import type { AvailabilitySnapshot, HostView } from './registry.ts';
 
 export interface RouteRepository {
   url?: string;
   localPath?: string;
   ref?: string;
+}
+
+/**
+ * The Crew reference a Run names (fleet-bots-design.md section 5.2, FB1 #972).
+ *
+ * `version` is optional, and an absent one matches ANY enabled version a host carries (section 9.2).
+ * "Newest seen anywhere" was rejected there for a reason worth keeping: it would make placement
+ * depend on what some OTHER host happens to have, which is not something this request asked about.
+ */
+export interface RouteCrewReference {
+  kind: 'preset' | 'workflow';
+  id: string;
+  version?: string;
 }
 
 export interface RouteRequest {
@@ -23,6 +36,12 @@ export interface RouteRequest {
   /** Selector: a host must carry every pair listed. */
   labels?: Record<string, string>;
   repository?: RouteRepository;
+  /**
+   * The preset or workflow the Run names. Derived by the SERVER from the request body's own `preset`
+   * or `workflow` block, never from a separate field: a caller who could state the reference twice
+   * could contradict itself, and the filter would then place work on a host the child refuses.
+   */
+  crew?: RouteCrewReference;
 }
 
 export interface Exclusion {
@@ -49,6 +68,14 @@ export interface RouteDecision {
   /** The repository payload to send the child, after any rewrite. */
   repository: RouteRepository | undefined;
   considered: string[];
+  /**
+   * Every host the hard filters rejected, with the reason -- the same shape a RoutingError carries.
+   *
+   * A placement is only explainable if the hosts it did NOT choose are as visible as the one it did:
+   * an operator reading "the Run went to gpu-box" learns nothing about the host that was excluded for
+   * a missing preset, which is exactly the fact they need when the placement surprises them.
+   */
+  exclusions: Exclusion[];
 }
 
 export class RoutingError extends Error {
@@ -77,6 +104,23 @@ export interface RouterOptions {
    * from the filter that depends on it.
    */
   resolveCloneUrl?: (localPath: string) => string | null;
+  /**
+   * The per-host availability snapshot (FB0 #970), or null when Fleet has never read one.
+   *
+   * Injected rather than read from the registry so the router stays pure over the facts it is given:
+   * a test states a fleet and its snapshots exactly, and asserts what the router SAID about each host.
+   * Absent means "Fleet can see no host's availability", which excludes every host once the request
+   * names a Crew reference -- the honest answer, and the same one a host with no snapshot gets.
+   */
+  availability?: (hostId: string) => AvailabilitySnapshot | null;
+  /**
+   * Age past which a snapshot counts as stale for the SOFT rank (FLEET_AVAILABILITY_STALE_MS,
+   * section 9.3). Stale data can still be right, so it ranks lower rather than being refused.
+   *
+   * 0 or absent disables the age test. The snapshot's own `stale` flag -- the last read FAILED -- still
+   * counts even then, because that is information rather than a clock that has run out.
+   */
+  availabilityStaleMs?: number;
 }
 
 /**
@@ -109,6 +153,16 @@ function declaresPath(host: HostView, localPath: string): boolean {
 const KNOWLEDGE_STALE_PENALTY = 100;
 
 /**
+ * Ceiling on what a stale availability snapshot costs in the soft rank.
+ *
+ * Finite, and below KNOWLEDGE_STALE_PENALTY, because availability is already a HARD filter: this is
+ * only the tie-break between hosts that all passed it. An old snapshot can still be right, so it must
+ * not outweigh what Fleet knows about the machine's load -- and it must never approach the weight of
+ * a signal that is itself deliberately kept softer than every hard constraint.
+ */
+const AVAILABILITY_STALE_PENALTY_MAX = 50;
+
+/**
  * Age of a host's knowledge replica in ms, or null when Fleet has no opinion.
  *
  * Null is the important answer and it covers four different situations that must all be neutral: the
@@ -128,22 +182,107 @@ function knowledgeAgeMs(host: HostView, staleMs: number, now: number): number | 
 }
 
 /**
+ * Age of a host's availability snapshot in ms, or null when the timestamp cannot be read.
+ *
+ * Null is not treated as fresh: a snapshot Fleet cannot date is exactly the kind of "I do not know"
+ * the penalty exists for, and the caller decides what to do with it (the age test simply cannot fire).
+ */
+function snapshotAgeMs(snapshot: AvailabilitySnapshot, now: number): number | null {
+  const at = Date.parse(snapshot.probedAt);
+  return Number.isFinite(at) ? Math.max(0, now - at) : null;
+}
+
+/**
+ * Cost of a host's availability snapshot in the soft rank.
+ *
+ * Zero for a snapshot Fleet read successfully and recently. Otherwise the penalty grows with how stale
+ * the snapshot is -- one point per threshold period -- and is capped below KNOWLEDGE_STALE_PENALTY.
+ * Graded rather than flat on purpose: #972's acceptance 4 asks for the FRESHEST of several stale hosts
+ * to win, and a flat penalty would hand that decision to the capacity score and the id tie-break
+ * instead. A snapshot whose last read FAILED (the registry's `stale` flag) always costs at least one
+ * point, so a host Fleet could not refresh ranks below one it could, even a second later.
+ */
+function availabilityPenalty(snapshot: AvailabilitySnapshot | null, staleMs: number, now: number): number {
+  if (!snapshot) return 0;
+  const age = snapshotAgeMs(snapshot, now);
+  const expired = staleMs > 0 && age !== null && age > staleMs;
+  if (!snapshot.stale && !expired) return 0;
+  const periods = staleMs > 0 && age !== null ? Math.floor(age / staleMs) : 0;
+  return Math.min(AVAILABILITY_STALE_PENALTY_MAX, Math.max(1, periods));
+}
+
+/**
+ * The presets Fleet may route on, or null for "could not see".
+ *
+ * A stale row holding an EMPTY list is FB0's placeholder for a first availability read that failed
+ * (`recordAvailability` writes `[]` with stale=1 when there is no previous snapshot), so it reads as
+ * unknown rather than as "this host has nothing" -- the FB0 review note on #972. The direction of the
+ * error matters: calling it unknown excludes a host that might have served the Run and says so, while
+ * calling it empty would claim a fact Fleet never learned.
+ */
+function presetEntries(snapshot: AvailabilitySnapshot): AvailabilitySnapshot['presets'] | null {
+  if (snapshot.stale && snapshot.presets.length === 0) return null;
+  return snapshot.presets;
+}
+
+/** Why a host cannot serve the reference, or null when it can. `unknown` marks "Fleet could not see". */
+interface CrewProblem {
+  reason: string;
+  unknown: boolean;
+}
+
+function crewProblem(crew: RouteCrewReference, snapshot: AvailabilitySnapshot | null): CrewProblem | null {
+  if (!snapshot) {
+    return { reason: 'availability unknown: Fleet holds no snapshot for this host', unknown: true };
+  }
+  const entries = crew.kind === 'preset' ? presetEntries(snapshot) : snapshot.workflows;
+  if (entries === null) {
+    return {
+      reason: `${crew.kind} availability unknown: no ${crew.kind} list was ever read successfully from this host`,
+      unknown: true,
+    };
+  }
+  const have = entries.filter((e) => e.id === crew.id);
+  if (have.length === 0) {
+    const known = entries.length
+      ? entries.map((e) => `${e.id}${e.version ? `@${e.version}` : ''}`).join(', ')
+      : 'none';
+    return { reason: `${crew.kind} ${crew.id} not available (host has ${known})`, unknown: false };
+  }
+  if (crew.version) {
+    // Pinned: the exact version, and enabled (section 9.2).
+    if (have.some((e) => e.version === crew.version && e.enabled)) return null;
+    const versions = have.map((e) => `${e.version ?? 'no version'}${e.enabled ? '' : ' (disabled)'}`).join(', ');
+    return { reason: `${crew.kind} ${crew.id}@${crew.version} not available (host has ${versions})`, unknown: false };
+  }
+  // Unpinned: any enabled version qualifies (section 9.2).
+  if (have.some((e) => e.enabled)) return null;
+  const versions = have.map((e) => e.version ?? 'no version').join(', ');
+  return { reason: `${crew.kind} ${crew.id} is disabled on this host (versions: ${versions})`, unknown: false };
+}
+
+/**
  * Score a host for preference. Lower is better.
  *
  * Only reached when several hosts survive the hard filters, and it can never override one: capacity is a
  * preference, locality is a constraint. A null capacity means the host has not been probed recently, which is
  * treated as neutral rather than free -- an unprobed host must not look like the emptiest machine in the fleet.
+ *
+ * `availabilityCost` is passed in rather than computed here because the caller needs the same number to
+ * explain the placement afterwards; recomputing it would be a second chance to disagree with itself.
  */
-function score(host: HostView, staleMs: number, now: number): number {
+function score(host: HostView, staleMs: number, now: number, availabilityCost = 0): number {
   const p = host.probe;
-  if (!p || p.outcome !== 'ok') return 1_000;
+  if (!p || p.outcome !== 'ok') return 1_000 + availabilityCost;
   const active = p.activeRuns ?? 0;
   const queued = p.queueDepth ?? 0;
   const workers = p.workerCount ?? 1;
   // One unit of headroom per worker keeps a big machine from being penalised for its capacity.
   const headroom = Math.max(0, active + queued - workers);
   const age = knowledgeAgeMs(host, staleMs, now);
-  return active * 2 + queued + headroom + (age !== null && age > staleMs ? KNOWLEDGE_STALE_PENALTY : 0);
+  return active * 2 + queued + headroom
+    + (age !== null && age > staleMs ? KNOWLEDGE_STALE_PENALTY : 0)
+    + availabilityCost;
 }
 
 function bad(field: string, value: unknown): never {
@@ -170,6 +309,16 @@ function validateRequest(request: RouteRequest): void {
       if (typeof v !== 'string') bad(`labels.${k}`, v);
     }
   }
+  if (request.crew !== undefined) {
+    const c = request.crew;
+    if (typeof c !== 'object' || c === null || Array.isArray(c)) bad('crew', c);
+    if (c.kind !== 'preset' && c.kind !== 'workflow') {
+      throw new RoutingError(
+        `crew.kind must be "preset" or "workflow", got ${JSON.stringify(c.kind) ?? typeof c.kind}`, 400, []);
+    }
+    if (typeof c.id !== 'string' || !c.id) bad('crew.id', c.id);
+    if (c.version !== undefined && (typeof c.version !== 'string' || !c.version)) bad('crew.version', c.version);
+  }
 }
 
 export function routeRun(
@@ -183,10 +332,14 @@ export function routeRun(
   validateRequest(request);
 
   const staleMs = opts.knowledgeStaleMs ?? 0;
+  const availStaleMs = opts.availabilityStaleMs ?? 0;
   const now = opts.now?.() ?? Date.now();
 
   const considered = hosts.map((h) => h.id);
   const exclusions: Exclusion[] = [];
+  // Counted so the refusal can tell an operator whose fleet is simply unread ("wait for a probe") apart
+  // from one whose hosts genuinely lack the preset -- the same courtesy the locality hint below extends.
+  let unknownAvailability = 0;
 
   if (hosts.length === 0) {
     throw new RoutingError('no hosts are registered with Fleet', 400, []);
@@ -218,6 +371,9 @@ export function routeRun(
       rewroteLocalPath: explicitUrl !== null,
       repository: explicitUrl ? { ...request.repository, url: explicitUrl, localPath: undefined } : request.repository,
       considered,
+      // No filter ran, so there is nothing to report: naming a host bypasses every one of them
+      // (section 6 keeps this escape hatch for exactly that reason).
+      exclusions: [],
     };
   }
 
@@ -228,7 +384,7 @@ export function routeRun(
   const rewritten = !repo?.url && localPath ? opts.resolveCloneUrl?.(normalizePath(localPath)) ?? null : null;
   const localityConstrained = Boolean(localPath) && !repo?.url && !rewritten;
 
-  const survivors: { host: HostView; score: number }[] = [];
+  const survivors: { host: HostView; score: number; snapshot: AvailabilitySnapshot | null }[] = [];
   for (const host of hosts) {
     if (!host.enabled) {
       exclusions.push({ hostId: host.id, reason: 'disabled' });
@@ -266,7 +422,21 @@ export function routeRun(
       });
       continue;
     }
-    survivors.push({ host, score: score(host, staleMs, now) });
+    // Availability is the last hard filter, and the only one that needs data from outside the request:
+    // a Run that names a preset or a workflow can only go where that definition exists (section 5.2).
+    // It runs AFTER the cheaper filters so a host ruled out for a missing label is not re-described
+    // here, and so the snapshot lookup happens only for hosts still in contention.
+    const snapshot = request.crew ? opts.availability?.(host.id) ?? null : null;
+    if (request.crew) {
+      const problem = crewProblem(request.crew, snapshot);
+      if (problem) {
+        if (problem.unknown) unknownAvailability += 1;
+        exclusions.push({ hostId: host.id, reason: problem.reason });
+        continue;
+      }
+    }
+    const availabilityCost = availabilityPenalty(snapshot, availStaleMs, now);
+    survivors.push({ host, score: score(host, staleMs, now, availabilityCost), snapshot });
   }
 
   if (survivors.length === 0) {
@@ -278,6 +448,10 @@ export function routeRun(
       `no host can run this task. ${hosts.length} considered:\n${lines}`
         + (localityConstrained
           ? '\nDeclare the path on a host (fleet hosts edit --local-path), or give a git url so locality stops mattering.'
+          : '')
+        + (unknownAvailability > 0
+          ? `\n${unknownAvailability} of those hosts have no readable availability snapshot: Fleet learns`
+            + ' presets and workflows from its prober (fleet hosts probe <id>).'
           : ''),
       400,
       exclusions,
@@ -292,15 +466,32 @@ export function routeRun(
   // staleness of every candidate would bury the one case an operator needs, which is "this is why the
   // Run went to the machine you did not expect".
   let softRankNote: string | null = null;
-  if (staleMs > 0 && survivors.length > 1) {
-    const withoutSignal = [...survivors].sort(
+  if (survivors.length > 1) {
+    const withoutSignals = [...survivors].sort(
       (a, b) => score(a.host, 0, now) - score(b.host, 0, now) || a.host.id.localeCompare(b.host.id),
     );
-    if (withoutSignal[0]!.host.id !== chosen.host.id) {
-      const age = knowledgeAgeMs(withoutSignal[0]!.host, staleMs, now);
-      softRankNote =
-        `knowledge staleness: preferred ${chosen.host.id} over ${withoutSignal[0]!.host.id}, ` +
-        `whose replica is ${Math.floor((age ?? 0) / 1000)}s old (threshold ${Math.floor(staleMs / 1000)}s)`;
+    const passedOver = withoutSignals[0]!;
+    if (passedOver.host.id !== chosen.host.id) {
+      // Whichever soft signals were in play, this host is the one they moved the Run off. Each signal
+      // names itself, so a note about availability staleness can never be read as a knowledge one.
+      const notes: string[] = [];
+      const age = knowledgeAgeMs(passedOver.host, staleMs, now);
+      if (age !== null && age > staleMs) {
+        notes.push(
+          `knowledge staleness: preferred ${chosen.host.id} over ${passedOver.host.id}, ` +
+          `whose replica is ${Math.floor(age / 1000)}s old (threshold ${Math.floor(staleMs / 1000)}s)`,
+        );
+      }
+      if (availabilityPenalty(passedOver.snapshot, availStaleMs, now) > 0) {
+        const snapshotAge = passedOver.snapshot ? snapshotAgeMs(passedOver.snapshot, now) : null;
+        const when = snapshotAge === null ? 'age unknown' : `${Math.floor(snapshotAge / 1000)}s old`;
+        notes.push(
+          `availability staleness: preferred ${chosen.host.id} over ${passedOver.host.id}, ` +
+          `whose snapshot is ${when}`
+            + (availStaleMs > 0 ? ` (threshold ${Math.floor(availStaleMs / 1000)}s)` : ''),
+        );
+      }
+      softRankNote = notes.length > 0 ? notes.join('; ') : null;
     }
   }
   const repository: RouteRepository | undefined = rewritten
@@ -313,6 +504,7 @@ export function routeRun(
     rewroteLocalPath: rewritten !== null,
     repository,
     considered,
+    exclusions,
   };
 }
 
