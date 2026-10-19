@@ -4,7 +4,7 @@
 //
 //   MOCK_LOCAL_MODE      happy | input | input-flag | fail | hang | json | text | resume | leak
 //   MOCK_LOCAL_ARGV_FILE write process.argv.slice(2) as JSON
-//   MOCK_LOCAL_ENV_FILE  write MERCURY_* env vars as JSON
+//   MOCK_LOCAL_ENV_FILE  write MERCURY_* env vars as JSON (ALL env with MOCK_LOCAL_ENV_ALL=1)
 //   MOCK_LOCAL_SESSION_FILE write the session id as plain text
 //
 // Modes:
@@ -27,9 +27,10 @@ if (process.env.MOCK_LOCAL_ARGV_FILE) {
   writeFileSync(process.env.MOCK_LOCAL_ARGV_FILE, JSON.stringify(argv, null, 2));
 }
 if (process.env.MOCK_LOCAL_ENV_FILE) {
+  // MOCK_LOCAL_ENV_ALL=1 dumps the COMPLETE spawned environment (credential profiles CP-4 tests).
   const env = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (k.startsWith('MERCURY_')) env[k] = v;
+    if (process.env.MOCK_LOCAL_ENV_ALL === '1' || k.startsWith('MERCURY_')) env[k] = v;
   }
   writeFileSync(process.env.MOCK_LOCAL_ENV_FILE, JSON.stringify(env, null, 2));
 }

@@ -177,6 +177,39 @@ Mercury refuses administration, source-control and broad infrastructure
 credential families even when they are named in the custom list. See
 [`operations.md`](operations.md) for the boundary and network semantics.
 
+## Local Run environments (credential profiles)
+
+Every LOCAL Run's agent process is started on a built environment, not the worker's whole
+environment (credential profiles, [`credential-profiles-design.md`](credential-profiles-design.md) §6.1):
+
+1. the worker's environment minus every `GH_*`, `GITHUB_*`, `GIT_*` and `MERCURY_*` name, and
+   minus `SSH_AUTH_SOCK`;
+2. git/gh isolation in a per-Run 0700 directory **outside** the workspace (removed when the Run
+   ends): `GIT_CONFIG_GLOBAL=<run-dir>/gitconfig`, `GIT_CONFIG_NOSYSTEM=1`,
+   `GH_CONFIG_DIR=<run-dir>/gh`, and `GIT_SSH_COMMAND` set to an `ssh` with no agent, no keys and
+   no config. The host user's credential helpers, `gh` logins, ssh agent and `~/.ssh` keys are out
+   of reach even when no profile exists;
+3. the resolved credential profile's `env` (see `docs/credential-profiles-design.md`), including the
+   generated gitconfig with the profile's git identity and HTTPS credential helper;
+4. the adapter's `config.env`, last. Adapter config must not set a name layer 1 strips — a config
+   that does is refused when the host loads it.
+
+This is a behaviour change: a Run with no profile can no longer push or clone private repositories
+with the host user's ambient credentials. Bind the repositories to a credential profile instead
+(§12 of the design describes the migration from the dedicated-host interim).
+
+**Redaction of profile values.** Every value from a `file:` source, the variable named by
+`git.httpsToken`, and any `value:` whose name says it is a secret (`TOKEN`, `SECRET`, `PASSWORD`,
+`KEY`, `PAT`, `AUTH`, `CREDENTIAL`, `COOKIE`, `SESSION`) joins the exact-value redaction set, once.
+Other `value:` entries are configuration (for example `GH_HOST=github.com`) and are never
+redacted: redacting them would rewrite every repository URL on the host. Name a secret literal
+accordingly, or move it to a `file:` source.
+
+**Not covered: `~/.netrc`.** git's HTTPS transport can still read the host user's `~/.netrc` when
+no credential helper answers, and no environment variable turns that off. Keep no `~/.netrc` entry
+for a source-control host on a Mercury host, or treat such an entry as available to every Run.
+SSH credentials for a profile are CP-5's scope; in CP-4 profiles carry HTTPS credentials only.
+
 ## PrimeAgent
 
 | Variable | Default | Purpose |

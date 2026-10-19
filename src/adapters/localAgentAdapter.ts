@@ -13,6 +13,7 @@ import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunC
 import { probeVersion } from './versionProbe.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 import { assertNoUnknownKeys, CAPABILITIES_SCHEMA, GOAL_SUPPORT_SCHEMA, assertCapabilities, leaf, object, openMap, type ConfigSchema, type ExactKeys } from './configSchema.ts';
+import { isStrippedEnvName } from '../config.ts';
 
 // --- config schema (docs/agent-adapters.md section 4.1) ---------------------
 
@@ -197,6 +198,15 @@ export function validateLocalAgentConfig(cfg: LocalAgentConfig): void {
   if (cfg.input && !['stdin', 'flag', 'prompt-file'].includes(cfg.input.mode)) err('input.mode must be stdin|flag|prompt-file');
   if (cfg.input?.mode === 'flag' && !cfg.input.flag) err('input.flag required for mode=flag');
   if (cfg.input?.mode === 'prompt-file' && !cfg.input.filePath) err('input.filePath required for mode=prompt-file');
+  // Credential profiles CP-4 (issue #897, design section 6.1 layer 4 / section 9): adapter config
+  // must not bring back what profiles govern. Refused at LOAD, so the host refuses to start.
+  if (cfg.env) {
+    for (const name of Object.keys(cfg.env)) {
+      if (isStrippedEnvName(name)) {
+        err(`env '${name}' is reserved (GH_*/GITHUB_*/GIT_*/MERCURY_* are governed by credential profiles); adapter config must not set it`);
+      }
+    }
+  }
   if (cfg.resume && !['stdout', 'file', 'event'].includes(cfg.resume.sessionIdSource)) err('resume.sessionIdSource must be stdout|file|event');
   if (cfg.resume?.sessionIdSource === 'event' && !cfg.resume.sessionIdPath) err('resume.sessionIdPath required for sessionIdSource=event');
 }
@@ -206,6 +216,10 @@ export function validateLocalAgentConfig(cfg: LocalAgentConfig): void {
 interface Session {
   runId: string;
   config: LocalAgentConfig;
+  /** CP-4 (#897; #977 review): the worker-built base environment from context.env. Every spawn
+   *  for this session -- start, the flag-mode input respawn, resume -- uses it, so a respawn can
+   *  never fall back to the worker's process.env. */
+  baseEnv?: Record<string, string>;
   proc: ChildProcessWithoutNullStreams | null;
   workspacePath: string;
   done: boolean;
@@ -373,6 +387,7 @@ export class LocalAgentAdapter implements AgentAdapter {
 
     let started = false;
     try {
+      if (context.env) session.baseEnv = context.env;
       this.spawnProcess(session, spawnCmd.cmd, spawnCmd.args, workspacePath, traceEnv);
       started = true;
     } catch (err) {
@@ -401,10 +416,15 @@ export class LocalAgentAdapter implements AgentAdapter {
     args: string[],
     cwd: string,
     extraEnv: Record<string, string> = {},
+    baseEnv?: Record<string, string>,
   ): void {
+    // CP-4 (issue #897): context.env, when the worker built it, replaces process.env as the
+    // spawn base — it already carries the four layer-1..3 sections of the design. Without it
+    // (tests, feature off) the behavior is exactly as before.
+    const envBase = baseEnv ?? session.baseEnv ?? { ...process.env };
     const proc = spawn(cmd, args, {
       cwd: session.config.cwd ?? cwd,
-      env: { ...process.env, ...extraEnv, ...session.config.env },
+      env: { ...envBase, ...extraEnv, ...session.config.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     session.proc = proc;
@@ -762,6 +782,9 @@ export class LocalAgentAdapter implements AgentAdapter {
       };
       this.sessions.set(runId, session);
     }
+    // A retry resumes with the retry's context: adopt its env. A context-free resume keeps the
+    // env start() recorded (#977 review).
+    if (context?.env) session.baseEnv = context.env;
     const cfg = session.config.resume;
     if (!cfg) throw new Error(`Agent ${session.config.id} does not support resume`);
 

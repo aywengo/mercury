@@ -282,7 +282,8 @@ export class HermesAgentAdapter implements AgentAdapter {
 
     const proc = spawn(spawnCmd.cmd, spawnCmd.args, {
       cwd: context.workspace.path,
-      env: { ...process.env, ...traceEnv, ...this.opts.env },
+      // CP-4 (issue #897): the worker-built base replaces process.env when present.
+      env: { ...(context.env ?? process.env), ...traceEnv, ...this.opts.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     session.proc = proc;

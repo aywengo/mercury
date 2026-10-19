@@ -125,7 +125,7 @@ Record: [`docs/credential-profiles-design.md`](docs/credential-profiles-design.m
 | --- | --- | --- | --- |
 | #784 | Credential profiles CP-2: profile file schema, loader and `host credentials validate` (… | done | #799 |
 | #807 | Credential profiles CP-3: resolve a profile per Run, refuse disallowed owners, creation… | done | #841 |
-| #897 | Credential profiles CP-4: local adapter delivery — layered environment, isolated git/gh… | in progress | #977 |
+| #897 | Credential profiles CP-4: local adapter delivery — layered environment, isolated git/gh… | done | #977 |
 | #898 | Credential profiles CP-5: workspace clone and fetch use the resolved profile, not the h… | open | — |
 | #899 | Credential profiles CP-6: sandbox per-profile opt-in for profile credentials | open | — |
 | #900 | Credential profiles CP-7: exact-value redaction of profile values, doctor checks, docs… | open | — |

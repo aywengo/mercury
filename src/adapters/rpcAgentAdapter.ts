@@ -25,6 +25,7 @@ import type { SandboxManager } from '../sandbox/sandboxManager.ts';
 import { CONTEXT_FILE, NOTES_FILE } from '../knowledge/materialize.ts';
 import type { ContextKnowledgeBlock } from '../knowledge/types.ts';
 import { assertNoUnknownKeys, CAPABILITIES_SCHEMA, GOAL_SUPPORT_SCHEMA, assertCapabilities, leaf, object, openMap, type ExactKeys } from './configSchema.ts';
+import { isStrippedEnvName } from '../config.ts';
 
 const SESSION_DIR_NAME = '.mercury-sessions';
 const SESSION_PATH_FILE = '.mercury-session-path';
@@ -153,6 +154,15 @@ export function validateRpcAgentConfig(cfg: RpcAgentConfig): void {
   if (cfg.input?.dialogMethods !== undefined && !Array.isArray(cfg.input.dialogMethods)) {
     err('input.dialogMethods must be an array of method strings');
   }
+  // Credential profiles CP-4 (issue #897, design section 6.1 layer 4 / section 9): adapter config
+  // must not bring back what profiles govern. Refused at LOAD, so the host refuses to start.
+  if (cfg.env) {
+    for (const name of Object.keys(cfg.env)) {
+      if (isStrippedEnvName(name)) {
+        err(`env '${name}' is reserved (GH_*/GITHUB_*/GIT_*/MERCURY_* are governed by credential profiles); adapter config must not set it`);
+      }
+    }
+  }
 }
 
 // --- session state ----------------------------------------------------------
@@ -169,6 +179,9 @@ interface Session {
    *  (#722, AC 8): the resume prompt names the role instruction the way the first prompt did. */
   preset?: NonNullable<RunContext['preset']>;
   client: RpcClient | null;
+  /** CP-4 (#897; #977 review): the worker-built base env, reused by every spawn of this session,
+   *  including a context-free resume -- never the worker's process.env. */
+  baseEnv?: Record<string, string>;
   workspacePath: string;
   sessionFile: string | null;
   translator: EventTranslator;
@@ -290,11 +303,13 @@ export class RpcAgentAdapter implements AgentAdapter {
     });
   }
 
-  private spawnClient(session: Session, argv: { cmd: string; args: string[] }): RpcClient {
+  private spawnClient(session: Session, argv: { cmd: string; args: string[] }, baseEnv?: Record<string, string>): RpcClient {
+    // CP-4 (issue #897): the worker-built base replaces process.env when present.
     const client = new RpcClient({
       cmd: argv.cmd,
       args: argv.args,
       cwd: this.cfg.cwd ?? session.workspacePath,
+      ...((baseEnv ?? session.baseEnv) ? { fullEnv: baseEnv ?? session.baseEnv } : {}),
       env: { ...this.traceEnv(session.runId), ...(this.cfg.env ?? {}) },
       readyDelayMs: this.cfg.protocol?.readyDelayMs,
       modeFlag: this.cfg.protocol?.modeFlag,
@@ -321,6 +336,7 @@ export class RpcAgentAdapter implements AgentAdapter {
       constraints: context.constraints,
       ...(context.knowledge ? { knowledge: context.knowledge } : {}),
       ...(context.preset ? { preset: context.preset } : {}),
+      ...(context.env ? { baseEnv: context.env } : {}),
       client: null,
       workspacePath,
       sessionFile: null,
@@ -483,6 +499,7 @@ export class RpcAgentAdapter implements AgentAdapter {
     const args = argv.args.filter((a) => a !== resumeFlag && a !== sessionDir);
     args.push('--resume', sessionFile);
 
+    if (context?.env) session.baseEnv = context.env; // retry: adopt; context-free: keep (#977 review)
     const client = this.spawnClient(session, { cmd: argv.cmd, args });
     session.done = false;
     session.cancelled = false;

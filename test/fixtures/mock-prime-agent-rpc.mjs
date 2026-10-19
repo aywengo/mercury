@@ -51,7 +51,11 @@ if (argvFile) {
 
 const envFile = process.env.MOCK_RPC_ENV_FILE;
 if (envFile) {
-  const mercuryEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('MERCURY_')));
+  // MOCK_RPC_ENV_ALL=1 dumps the COMPLETE spawned environment (credential profiles CP-4 tests
+  // read the whole base env, not just the MERCURY_ subset).
+  const mercuryEnv = Object.fromEntries(Object.entries(process.env).filter(
+    ([k]) => process.env.MOCK_RPC_ENV_ALL === '1' || k.startsWith('MERCURY_'),
+  ));
   writeFileSync(envFile, JSON.stringify(mercuryEnv));
 }
 

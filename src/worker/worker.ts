@@ -4,7 +4,8 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isTerminal, STUCK_CANDIDATE_STATUSES } from '../domain/stateMachine.ts';
 import { harnessMayRevise, translateHarnessGoal, type HarnessGoalReport } from '../domain/goalEvents.ts';
@@ -36,7 +37,8 @@ import type { KnowledgeBounds } from '../knowledge/validation.ts';
 import type { ContextKnowledgeBlock } from '../knowledge/types.ts';
 import type { Note } from '../knowledge/types.ts';
 import { tx } from '../db/database.ts';
-import { resolveProfile, type CredentialProfiles } from '../host/credentials-profiles.ts';
+import { resolveProfile, type CredentialProfile, type CredentialProfiles } from '../host/credentials-profiles.ts';
+import { buildRunEnvironment, CredentialSourceMissingError } from './runEnvironment.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { WorkspaceManager } from '../workspace/workspaceManager.ts';
 
@@ -360,6 +362,11 @@ export class Worker {
     // process running and a run that threw on a state transition unwound past any cleanup,
     // leaving a live agent writing into a workspace nobody was watching.
     let handle: AgentHandle | null = null;
+    // CP-4 review blocker 1 (#977): the generated gitconfig and GH_CONFIG_DIR live in a per-Run
+    // 0700 directory OUTSIDE the workspace, so an agent's `git add -A` cannot commit them, a
+    // `gh auth login` cannot drop a token file into the worktree, and the agent cannot rewrite
+    // its own credential policy in place. Removed in the finally on every exit path.
+    let runEnvDir: string | null = null;
     // Captured when the workspace exists so the finally's artifact scrub (issue #944) can
     // reach it on paths that threw before the context was built.
     let workspacePath: string | null = null;
@@ -592,9 +599,44 @@ export class Worker {
         this.deps.events.append(run.id, 'sandbox.enabled', { policy: sandbox.describe(run) });
       }
 
+      // Credential profiles CP-4 (issue #897, design sections 6.1, 6.2): build the Run's base
+      // environment in the four layers instead of passing process.env wholesale. The parity check
+      // above already resolved the SAME file, so re-resolving here against the same loader gives
+      // the same profile; a refusal cannot differ without the parity check having refused first.
+      // A `file:` secret missing at drive time fails the Run with the section 9 message.
+      let runEnv: Record<string, string> | undefined;
+      {
+        let profile: CredentialProfile | null = null;
+        if (this.deps.credentialProfiles) {
+          const { profiles } = this.deps.credentialProfiles();
+          const resolution = resolveProfile(profiles, run.ownerId, [run.repository, ...(run.repositories ?? [])]);
+          if (resolution.outcome === 'profile') {
+            profile = profiles.find((p) => p.name === resolution.name) ?? null;
+          } else if (resolution.outcome === 'refused') {
+            // Parity already handles the created/claim mismatch; a refusal at drive time with no
+            // change is impossible in practice, but fail closed rather than run unprofiled.
+            throw new Error(resolution.message);
+          }
+        }
+        runEnvDir = mkdtempSync(join(tmpdir(), 'mercury-run-env-')); // mkdtemp creates it 0700
+        const built = buildRunEnvironment({ workerEnv: process.env, runDir: runEnvDir, profile });
+        runEnv = built.env;
+        if (built.secrets.length > 0) {
+          // Section 8: every value a profile injects joins the exact-value redaction set for this
+          // Run, whatever its length. Ignored when the redactor has no registration capability.
+          this.deps.redactor?.register?.(built.secrets);
+        }
+        this.deps.events.append(run.id, 'run.credential_profile_env_built', {
+          runId: run.id,
+          profile: profile?.name ?? null,
+          ...(profile?.git?.httpsToken ? { httpsTokenVar: profile.git.httpsToken } : {}),
+        });
+      }
+
       workspacePath = workspace.path;
       const context: RunContext = {
         run,
+        ...(runEnv ? { env: runEnv } : {}),
         ...(run.model ? { model: run.model } : {}),
         repository: run.repository,
         repositories: run.repositories,
@@ -723,6 +765,14 @@ await this.finalize(run, outcome, skills);
           await handle.terminate();
         } catch (termErr) {
           log.warn({ error: String(termErr instanceof Error ? termErr.message : termErr) }, 'agent terminate failed');
+        }
+      }
+      // After terminate(): the agent no longer reads its gitconfig or gh config (#977 review).
+      if (runEnvDir) {
+        try {
+          rmSync(runEnvDir, { recursive: true, force: true });
+        } catch (rmErr) {
+          log.warn({ runId: run.id, error: String(rmErr instanceof Error ? rmErr.message : rmErr) }, 'run environment dir cleanup failed');
         }
       }
       // Release the adapter's per-run state LAST (issues #62, #97). Every adapter keyed a
