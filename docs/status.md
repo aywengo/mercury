@@ -26,7 +26,7 @@ control, retries, sandbox integration, metrics and deployment packaging.
 | **Credential profiles** | CP-2 + CP-3 shipped (resolution per Run); strict no-profile default decided (#954) | CP-4 layered Run environment (#897) (PR #977) | [`credential-profiles-design.md`](credential-profiles-design.md) |
 | **Laya** (System-1 selection) | P-1 and L0 shipped; L1-1..L1-3 shipped | L1-4 wiring (#857), blocked on the label rule (#853) and a real-host sidecar run (#852) | [`laya-integration-design.md`](laya-integration-design.md) |
 | **Fleet** | Phases 0–6 shipped (registry, dispatch, sweep, events, routing, interaction, metrics), runs as a service | Fleet-and-bots FB1–FB3 (#972–#974) | [`fleet-design.md`](fleet-design.md) §12 |
-| **Fleet and bots** | Design accepted 2026-10-16 (option A: bots dispatch through Fleet); FB0 availability snapshot shipped (#978) | FB2a owner-scoped run list (#971), PR #982 in review | [`fleet-bots-design.md`](fleet-bots-design.md) |
+| **Fleet and bots** | Design accepted 2026-10-16 (option A: bots dispatch through Fleet); FB0 availability snapshot shipped (#978) | FB2a owner-scoped run list (#971) (PR #982) | [`fleet-bots-design.md`](fleet-bots-design.md) |
 | **Fleet tenancy** | Specification; T0–T2 proposed (#884–#890) | Only needed for more than one Fleet operator | [`fleet-tenancy-design.md`](fleet-tenancy-design.md) |
 | **A2A integration** | Design settled 2026-10-18 (server-first, HTTP+JSON/REST binding); A0 filed as #986–#990 | A0 implementation: retry chains (#987), the server-stamped Run origin (#988) and the task-state mapping (#990) done; #986 and #989 next | [`a2a-design.md`](a2a-design.md) |
 | **Distribution** | Five channels built by the release workflow | — | [`distribution.md`](distribution.md), below |
