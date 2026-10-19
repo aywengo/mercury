@@ -76,6 +76,23 @@ function nonNegativeInt(raw: string | null | undefined, fallback: number): numbe
 }
 
 /**
+ * A keyset cursor is `<createdAt>|<fleetRunId>`; anything else is a client error, not a database one.
+ *
+ * An absent or empty value is no cursor at all. A value that is present but not two non-empty
+ * components is rejected here: the keyset split would leave the id undefined, and node:sqlite answers a
+ * bind of undefined with a throw -- a caller's typo surfaced as a 500. Validating at the route, where
+ * the caller's input arrives, keeps the storage layer free of HTTP concerns and every caller guarded.
+ */
+function parseCursor(raw: string | null | undefined): string | undefined {
+  if (raw === null || raw === undefined || raw === '') return undefined;
+  const parts = raw.split('|');
+  if (parts.length !== 2 || parts[0] === '' || parts[1] === '') {
+    throw new HttpError(400, 'cursor must be "<createdAt>|<fleetRunId>"');
+  }
+  return raw;
+}
+
+/**
  * Unwrap the optional { input: ... } wrapper without losing a genuine null, and without rejecting a body that
  * is a bare string, number, array or null -- the child accepts any JSON value.
  */
@@ -364,8 +381,7 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
           return;
         }
         const limit = Math.max(1, Math.min(nonNegativeInt(q?.get('limit'), 50), 200));
-        const cursorParam = q?.get('cursor');
-        const cursor = typeof cursorParam === 'string' && cursorParam ? cursorParam : undefined;
+        const cursor = parseCursor(q?.get('cursor'));
         const { runs, nextCursor } = dispatch.bindings.listPaged(scopedHosts(ctx.caller, registry), {
           ownerId, limit, cursor,
         });

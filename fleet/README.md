@@ -117,7 +117,7 @@ deployment someone should arrive at by omission.
 | `POST /fleet/hosts/:id/enable`, `.../disable`, `DELETE /fleet/hosts/:id` | Include or exclude a host from sweeps. |
 | `POST /fleet/hosts/:id/probe` | Probe one host now. |
 | `POST /fleet/runs` | Submit a Run. Name a `host`, or omit it and let the router choose. |
-| `GET /fleet/runs` | Every Run across the fleet, one merged view. With `owner=self`, `limit` and `cursor`: only the caller's Runs, keyset-paged (newest first, `nextCursor`). Any other `owner` value is a 400. |
+| `GET /fleet/runs` | Every Run across the fleet, one merged view. With `owner=self`, `limit` and `cursor`: only the caller's Runs, keyset-paged (newest first, `nextCursor`). Any other `owner` value is a 400, and so is a `cursor` that is not `<createdAt>|<fleetRunId>`. |
 | `GET /fleet/runs/:id` | One Run, with its binding and current child state. |
 | `GET /fleet/runs/:id/events`, `.../stream` | Aggregated history and SSE for a fleet Run. |
 | `POST /fleet/runs/:id/input`, `.../cancel`, `.../retry` | Answer, cancel, or retry through Fleet. |

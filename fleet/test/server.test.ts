@@ -149,6 +149,33 @@ test('owner=self paging walks every Run exactly once, across pages, with a Run i
   } finally { await s.close(); }
 });
 
+test('a malformed cursor is refused with 400 rather than reaching SQLite', async () => {
+  // Copilot review on #982: `cursor=bad` has no `|`, so the keyset split left `id` undefined and
+  // node:sqlite threw -- a client's typo answered as HTTP 500. A cursor is client input: validate it
+  // before the query. Only reachable with a visible host and a binding, because with none the query
+  // is skipped entirely.
+  const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*` });
+  try {
+    seedHost(s.db, 'box-1');
+    s.db.prepare(
+      `INSERT INTO fleet_runs (fleet_run_id, host_id, owner_id, child_run_id, requested, created_at)
+       VALUES ('fr_m_1', 'box-1', 'alice', NULL, '{}', '2026-10-18T00:00:00.000Z')`,
+    ).run();
+    for (const bad of ['bad', '2026-10-18T00:00:00.000Z', '|', '2026-10-18T00:00:00.000Z|', '|fr_m_1', 'a|b|c']) {
+      const r = await s.call('GET', `/fleet/runs?owner=self&cursor=${encodeURIComponent(bad)}`, { token: CALLER_TOKEN });
+      assert.equal(r.status, 400, `cursor=${bad} must be a client error, not a 500`);
+      assert.ok(!Array.isArray(r.json?.runs), `cursor=${bad} answered with a page anyway`);
+    }
+    // A well-formed cursor still pages, and an empty one is absent rather than malformed.
+    const ok = await s.call('GET', '/fleet/runs?owner=self&cursor=2026-10-18T00:00:00.000Z|fr_m_1', { token: CALLER_TOKEN });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.json.runs, []);
+    const empty = await s.call('GET', '/fleet/runs?owner=self&cursor=', { token: CALLER_TOKEN });
+    assert.equal(empty.status, 200, 'an empty cursor is absent, not malformed');
+    assert.equal(empty.json.runs.length, 1);
+  } finally { await s.close(); }
+});
+
 test('owner=self paging returns nextCursor only when a page was truncated', async () => {
   const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*` });
   try {
