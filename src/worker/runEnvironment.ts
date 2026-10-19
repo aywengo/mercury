@@ -71,6 +71,13 @@ function gitconfigValue(v: string): string {
  *  `~/.ssh` and its agent socket would otherwise authenticate a Run that matches no profile,
  *  defeating the strict default (#954). Profiles in CP-4 carry HTTPS credentials only; an SSH
  *  profile is CP-5's business and would replace this command explicitly. */
+/** Names whose `value:` is treated as a secret: the profile's HTTPS token variable, or a name
+ *  that says what it is. Everything from a `file:` source is a secret regardless. */
+const SECRET_NAME_RE = /(TOKEN|SECRET|PASSWORD|PASSWD|PASS|KEY|PAT|AUTH|CREDENTIAL|COOKIE|SESSION)/i;
+export function isSecretEnvName(name: string, profile: CredentialProfile): boolean {
+  return name === profile.git?.httpsToken || SECRET_NAME_RE.test(name);
+}
+
 export const NO_SSH_COMMAND =
   'ssh -F /dev/null -o IdentityAgent=none -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o BatchMode=yes';
 
@@ -169,7 +176,10 @@ export function buildRunEnvironment(opts: {
     }
     if (spec.value !== undefined) {
       env[name] = spec.value;
-      secrets.push(spec.value);
+      // A literal `value:` is configuration unless it is the HTTPS token or names itself a secret
+      // (#977 review): registering `GH_HOST=github.com` redacted every repository URL on the
+      // host, before profile resolution, for every Run. `file:` sources are always secrets.
+      if (isSecretEnvName(name, opts.profile)) secrets.push(spec.value);
     } else if (spec.file !== undefined) {
       const value = readSecretFile(opts.profile.name, name, spec.file);
       env[name] = value;

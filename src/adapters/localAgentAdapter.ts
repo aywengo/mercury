@@ -216,6 +216,10 @@ export function validateLocalAgentConfig(cfg: LocalAgentConfig): void {
 interface Session {
   runId: string;
   config: LocalAgentConfig;
+  /** CP-4 (#897; #977 review): the worker-built base environment from context.env. Every spawn
+   *  for this session -- start, the flag-mode input respawn, resume -- uses it, so a respawn can
+   *  never fall back to the worker's process.env. */
+  baseEnv?: Record<string, string>;
   proc: ChildProcessWithoutNullStreams | null;
   workspacePath: string;
   done: boolean;
@@ -383,7 +387,8 @@ export class LocalAgentAdapter implements AgentAdapter {
 
     let started = false;
     try {
-      this.spawnProcess(session, spawnCmd.cmd, spawnCmd.args, workspacePath, traceEnv, context.env);
+      if (context.env) session.baseEnv = context.env;
+      this.spawnProcess(session, spawnCmd.cmd, spawnCmd.args, workspacePath, traceEnv);
       started = true;
     } catch (err) {
       // spawn failure (e.g. command not found) must fail the run, not hang it
@@ -416,7 +421,7 @@ export class LocalAgentAdapter implements AgentAdapter {
     // CP-4 (issue #897): context.env, when the worker built it, replaces process.env as the
     // spawn base — it already carries the four layer-1..3 sections of the design. Without it
     // (tests, feature off) the behavior is exactly as before.
-    const envBase = baseEnv ?? { ...process.env };
+    const envBase = baseEnv ?? session.baseEnv ?? { ...process.env };
     const proc = spawn(cmd, args, {
       cwd: session.config.cwd ?? cwd,
       env: { ...envBase, ...extraEnv, ...session.config.env },
@@ -777,6 +782,9 @@ export class LocalAgentAdapter implements AgentAdapter {
       };
       this.sessions.set(runId, session);
     }
+    // A retry resumes with the retry's context: adopt its env. A context-free resume keeps the
+    // env start() recorded (#977 review).
+    if (context?.env) session.baseEnv = context.env;
     const cfg = session.config.resume;
     if (!cfg) throw new Error(`Agent ${session.config.id} does not support resume`);
 

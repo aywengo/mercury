@@ -434,6 +434,9 @@ export class PrimeAgentAdapter implements AgentAdapter {
     // attempts, a pack materialized after a crash). Adopt the retry context's pointers the same
     // way createSession() would have (#722).
     if (context?.preset) session.preset = context.preset;
+    // CP-4 (#977 review): a retry resume arrives on a fresh session that start() never saw, so
+    // adopt the retry's env here; a context-free resume keeps the env start() recorded.
+    if (context?.env) session.baseEnv = context.env;
     // Per-Run model on resume (#828): a retry's context.model replaces the first attempt's;
     // an in-process resume without a context keeps the model start() persisted on the session.
     if (context?.model) session.model = context.model;

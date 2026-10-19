@@ -1361,3 +1361,27 @@ test('CP-4 review (#977): no Run gets the host ssh agent or keys; values are quo
   write({ ...base, env: { GH_TOKEN: { value: 'v' } }, git: { authorEmail: 'a@b.c\r\n' } });
   assert.throws(() => loadCredentialProfiles({ XDG_CONFIG_HOME: join(dir, 'cfg') } as never), /authorEmail must not contain control characters/);
 });
+
+test('CP-4 review (#977): only secret profile values are redacted, once; config values like GH_HOST are not', () => {
+  const dir = tempDir('cp4-redact-');
+  const tokenFile = join(dir, 'pat');
+  writeFileSync(tokenFile, 'ghp_secretvalue0123456789abcdef');
+  const profile = {
+    name: 'p', repositories: ['github.com/o/r'], owners: ['a'], sandbox: false,
+    env: { GH_TOKEN: { file: tokenFile }, GH_HOST: { value: 'github.com' }, NPM_TOKEN: { value: 'npm_literal_secret_123' } },
+    git: { httpsToken: 'GH_TOKEN' },
+  } as never;
+  const built = buildRunEnvironment({ workerEnv: { PATH: '/usr/bin:/bin' } as never, runDir: dir, profile });
+  assert.ok(built.secrets.includes('ghp_secretvalue0123456789abcdef'), 'file: sources are secrets');
+  assert.ok(built.secrets.includes('npm_literal_secret_123'), 'a value: whose name says TOKEN is a secret');
+  assert.ok(!built.secrets.includes('github.com'), 'GH_HOST is configuration, never a redaction pattern');
+
+  // The shared redactor: a repository URL survives a profiled Run, and re-registering adds nothing.
+  const r = createRedactor([]);
+  r.register!(built.secrets);
+  assert.equal(r.redact('https://github.com/o/r.git'), 'https://github.com/o/r.git');
+  assert.ok(!r.redact('token ghp_secretvalue0123456789abcdef').includes('ghp_secretvalue'));
+  const before = r.redact('x');
+  for (let i = 0; i < 50; i++) r.register!(built.secrets); // a long-lived worker, 50 Runs
+  assert.equal(r.redact('x'), before);
+});

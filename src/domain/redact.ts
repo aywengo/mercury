@@ -97,14 +97,14 @@ export function createRedactor(secrets: string[] = []): Redactor {
     return value;
   }
 
+  // Values already registered: a long-lived worker re-registers the same profile token on every
+  // Run, and each duplicate regex would be kept and applied to every later string (#977 review).
+  const registered = new Set<string>();
   function register(additional: string[]): void {
-    if (additional.length === 0) return;
-    literalPatterns = [
-      ...literalPatterns,
-      ...additional
-        .filter((s) => s.length > 0)
-        .map((s) => new RegExp(escapeRegExp(s), 'g')),
-    ];
+    const fresh = additional.filter((s) => s.length > 0 && !registered.has(s));
+    if (fresh.length === 0) return;
+    for (const s of fresh) registered.add(s);
+    literalPatterns = [...literalPatterns, ...fresh.map((s) => new RegExp(escapeRegExp(s), 'g'))];
   }
 
   return { redact, redactJson, register };

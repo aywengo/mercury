@@ -615,3 +615,52 @@ test('the drain grace releases the pipes it truncated (issue #166)', () => {
     assert.match(release, /stderr\.on\('error'/, `${rel}: stderr needs an error listener before destroy`);
   }
 });
+
+// CP-4 (#897; #977 review): every respawn reuses the worker-built env, never process.env.
+test('CP-4: the flag-mode input respawn and a context-free resume reuse the worker-built env', async () => {
+  const envFile = tempFile('cp4-local-env', 'json');
+  process.env.CP4_AMBIENT = 'worker-ambient-should-not-pass';
+  try {
+    // flag-mode input: start -> input.required -> sendInput respawns with --answer
+    const { context } = makeContext();
+    const runEnv = { PATH: process.env.PATH ?? '/usr/bin:/bin', CP4_MARKER: 'from-run-env' };
+    const adapter = new LocalAgentAdapter(jsonlConfig({
+      args: [MOCK],
+      env: { MOCK_LOCAL_MODE: 'input-flag', MOCK_LOCAL_ENV_FILE: envFile, MOCK_LOCAL_ENV_ALL: '1' },
+      input: { mode: 'flag', flag: '--answer', promptEvent: 'ask' },
+    }));
+    const handle = await adapter.start({ ...context, env: runEnv });
+    const it = handle.events[Symbol.asyncIterator]();
+    let next = await it.next();
+    while (!next.done) {
+      if (next.value.type === 'input.required') {
+        writeFileSync(envFile, '{}'); // the respawn must rewrite it
+        await adapter.sendInput(handle.runId, { value: 'yes', at: new Date().toISOString() });
+      }
+      next = await it.next();
+    }
+    await handle.exit;
+    // The respawn writes its env file at startup; exit can settle before that (same as the
+    // input-flag argv test above), so wait for the rewrite.
+    const nonEmpty = (f: string) => { try { return Object.keys(JSON.parse(readFileSync(f, 'utf8')) as object).length > 0; } catch { return false; } };
+    await waitFor(() => nonEmpty(envFile));
+    const respawned = JSON.parse(readFileSync(envFile, 'utf8')) as Record<string, string>;
+    assert.equal(respawned.CP4_MARKER, 'from-run-env', 'the input respawn ran on the worker-built env');
+    assert.equal(respawned.CP4_AMBIENT, undefined, 'the input respawn did not fall back to process.env');
+
+    // context-free resume
+    const env2 = tempFile('cp4-local-env-resume', 'json');
+    const { context: c2 } = makeContext();
+    const a2 = new LocalAgentAdapter(jsonlConfig({ args: [MOCK], env: { MOCK_LOCAL_ENV_FILE: env2, MOCK_LOCAL_ENV_ALL: '1' } }));
+    const h2 = await a2.start({ ...c2, env: runEnv });
+    await collectAll(h2);
+    writeFileSync(env2, '{}');
+    await a2.resume(h2.runId);
+    await waitFor(() => nonEmpty(env2));
+    const resumed = JSON.parse(readFileSync(env2, 'utf8')) as Record<string, string>;
+    assert.equal(resumed.CP4_MARKER, 'from-run-env', 'the resume ran on the worker-built env');
+    assert.equal(resumed.CP4_AMBIENT, undefined, 'the resume did not fall back to process.env');
+  } finally {
+    delete process.env.CP4_AMBIENT;
+  }
+});

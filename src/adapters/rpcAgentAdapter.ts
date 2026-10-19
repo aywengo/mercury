@@ -179,6 +179,9 @@ interface Session {
    *  (#722, AC 8): the resume prompt names the role instruction the way the first prompt did. */
   preset?: NonNullable<RunContext['preset']>;
   client: RpcClient | null;
+  /** CP-4 (#897; #977 review): the worker-built base env, reused by every spawn of this session,
+   *  including a context-free resume -- never the worker's process.env. */
+  baseEnv?: Record<string, string>;
   workspacePath: string;
   sessionFile: string | null;
   translator: EventTranslator;
@@ -306,7 +309,7 @@ export class RpcAgentAdapter implements AgentAdapter {
       cmd: argv.cmd,
       args: argv.args,
       cwd: this.cfg.cwd ?? session.workspacePath,
-      ...(baseEnv ? { fullEnv: baseEnv } : {}),
+      ...((baseEnv ?? session.baseEnv) ? { fullEnv: baseEnv ?? session.baseEnv } : {}),
       env: { ...this.traceEnv(session.runId), ...(this.cfg.env ?? {}) },
       readyDelayMs: this.cfg.protocol?.readyDelayMs,
       modeFlag: this.cfg.protocol?.modeFlag,
@@ -333,6 +336,7 @@ export class RpcAgentAdapter implements AgentAdapter {
       constraints: context.constraints,
       ...(context.knowledge ? { knowledge: context.knowledge } : {}),
       ...(context.preset ? { preset: context.preset } : {}),
+      ...(context.env ? { baseEnv: context.env } : {}),
       client: null,
       workspacePath,
       sessionFile: null,
@@ -360,7 +364,7 @@ export class RpcAgentAdapter implements AgentAdapter {
 
     const session = this.createSession(context);
     const argv = this.buildArgv(context, sessionDir);
-    const client = this.spawnClient(session, argv, context.env);
+    const client = this.spawnClient(session, argv);
 
     let started = false;
     try {
@@ -495,7 +499,8 @@ export class RpcAgentAdapter implements AgentAdapter {
     const args = argv.args.filter((a) => a !== resumeFlag && a !== sessionDir);
     args.push('--resume', sessionFile);
 
-    const client = this.spawnClient(session, { cmd: argv.cmd, args }, context?.env);
+    if (context?.env) session.baseEnv = context.env; // retry: adopt; context-free: keep (#977 review)
+    const client = this.spawnClient(session, { cmd: argv.cmd, args });
     session.done = false;
     session.cancelled = false;
     session.terminated = false;

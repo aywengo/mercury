@@ -198,6 +198,13 @@ This is a behaviour change: a Run with no profile can no longer push or clone pr
 with the host user's ambient credentials. Bind the repositories to a credential profile instead
 (§12 of the design describes the migration from the dedicated-host interim).
 
+**Redaction of profile values.** Every value from a `file:` source, the variable named by
+`git.httpsToken`, and any `value:` whose name says it is a secret (`TOKEN`, `SECRET`, `PASSWORD`,
+`KEY`, `PAT`, `AUTH`, `CREDENTIAL`, `COOKIE`, `SESSION`) joins the exact-value redaction set, once.
+Other `value:` entries are configuration (for example `GH_HOST=github.com`) and are never
+redacted: redacting them would rewrite every repository URL on the host. Name a secret literal
+accordingly, or move it to a `file:` source.
+
 **Not covered: `~/.netrc`.** git's HTTPS transport can still read the host user's `~/.netrc` when
 no credential helper answers, and no environment variable turns that off. Keep no `~/.netrc` entry
 for a source-control host on a Mercury host, or treat such an entry as available to every Run.
