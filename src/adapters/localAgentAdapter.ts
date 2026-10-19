@@ -8,7 +8,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
+import { beginResumedAttempt, createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentGoalSupport, AgentCapabilities, AgentStaticCapabilities, AgentVersionInfo } from '../domain/types.ts';
 import { probeVersion } from './versionProbe.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
@@ -797,10 +797,19 @@ export class LocalAgentAdapter implements AgentAdapter {
     }
     if (!sessionId) throw new Error(`No session id for run ${runId}; use retry-from-scratch`);
 
+    // #997: detach the previous process and drop the observations that belonged to it, or the
+    // resumed session settles on the PREVIOUS attempt's exit while the new child is still starting.
+    beginResumedAttempt(session);
     session.done = false;
     session.cancelled = false;
     session.terminated = false;
     rearmExitGate(session);
+    // Per-attempt state, cleared for the same reason (#997). `stdoutBuf` accumulates the WHOLE document
+    // for `output.format: 'json'`, so a stale buffer makes the resumed document unparseable. A stale
+    // `waitingForInput` makes handleExit() keep the resumed session alive for a sendInput() that will
+    // never come, so the resumed handle never settles at all.
+    session.stdoutBuf = '';
+    session.waitingForInput = false;
 
     const argv = [...(session.config.args ?? []), cfg.flag, sessionId];
     const traceEnv: Record<string, string> = { MERCURY_RUN_ID: runId, MERCURY_TRACE_ID: runId };
