@@ -1389,3 +1389,21 @@ test('acceptance 5: filed issue titles and report lines carry the repo-relative 
     cleanup();
   }
 });
+
+test('#964: the same test flaking in two Runs with different worktree paths is ONE fingerprint on two nights', async () => {
+  // The second half of #964. If the per-Run worktree path fed the fingerprint, a test that flakes in
+  // different Runs would never reach FLAKE_FILE_NIGHTS and the flake would never be filed. #821 made
+  // fingerprintOf normalize first; this pins that, because the fix is invisible unless it is asserted.
+  const runA = '/Users/roman/mercury-workspaces/worktrees/run_aaaaaaaaaaaa/e2e/knowledge.test.ts';
+  const runB = '/Users/roman/mercury-workspaces/worktrees/run_bbbbbbbbbbbb/e2e/knowledge.test.ts';
+  const error = 'AssertionError [ERR_ASSERTION]: expected 1 to equal 2';
+  const fpA = await fingerprintOf(runA, error);
+  const fpB = await fingerprintOf(runB, error);
+  assert.equal(fpA, fpB, 'the worktree path must not feed the fingerprint');
+
+  const state: FlakeState = {};
+  assert.equal(recordFlakeNight(state, fpA, normalizeTestName(runA), error, '2026-10-14'), 1);
+  assert.equal(recordFlakeNight(state, fpB, normalizeTestName(runB), error, '2026-10-15'), 2, 'one entry, two nights');
+  assert.deepEqual(Object.keys(state), [fpA], 'two Runs, one flake clock entry');
+  assert.equal(state[fpA]!.test, 'e2e/knowledge.test.ts', 'the entry carries the repo-relative name');
+});

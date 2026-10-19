@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { runReport, collectBlocked, collectRunsStopped, collectFlakes, blockingQuestion, questionFromBody, defaultNight, collectIssuesCommented, nightWindow, NIGHT_END, type ReportIo } from '../.agents/skills/nightly/report.ts';
+import { runReport, collectBlocked, collectRunsStopped, collectFlakes, flakesInWindow, blockingQuestion, questionFromBody, defaultNight, collectIssuesCommented, nightWindow, NIGHT_END, type ReportIo } from '../.agents/skills/nightly/report.ts';
 import { localDateString } from '../.agents/skills/nightly/e2e.ts';
 import { tempDir } from './helpers.ts';
 
@@ -1187,4 +1187,89 @@ test('the digest renders the claims-released section (#1001)', async () => {
   const body = (digest?.body as { body?: string } | undefined)?.body ?? '';
   assert.match(body, /## Claims released \(Run ended with no PR and no comment\)/);
   assert.match(body, /- #91/);
+});
+
+// ---- #964: the flake section is windowed, and legacy absolute paths are normalized ----------
+
+/** Write a flake-clock state file into a fresh XDG_STATE_HOME and return the env carrying it. */
+function flakeEnv(state: Record<string, { test: string; error: string; nights: string[] }>): NodeJS.ProcessEnv {
+  const dir = tempDir('nightly-flake-window');
+  const stateDir = join(dir, 'mercury', 'nightly');
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, 'e2e-flakes.json'), JSON.stringify(state));
+  return { ...ENV, XDG_STATE_HOME: dir };
+}
+
+/** The digest body the fake io received. */
+function postedBody(calls: Recorded[]): string {
+  return String((calls.find((c) => c.method === 'POST' && c.path.endsWith('/issues'))!.body as { body: string }).body);
+}
+
+test('#964: a one-night flake older than the window is not listed; the digest counts it once', async () => {
+  // The literal entry from the issue: one flake night on 2026-09-29, still listed on 2026-10-15
+  // and on every night since, so a reader was told every morning that a flake exists.
+  const env = flakeEnv({
+    '2cb878c3444c585a': {
+      test: '/Users/roman/mercury-workspaces/worktrees/run_dab0bc9b41f54f27/e2e/knowledge.test.ts',
+      error: 'Error: boom',
+      nights: ['2026-09-29'],
+    },
+  });
+  const { io, calls } = ioWith({});
+  const out = await runReport(io, env, { repo: REPO, night: '2026-10-15', dryRun: false });
+
+  assert.deepEqual(out.flakes, [], 'no flake line for an entry outside the window');
+  assert.equal(out.flakesOlder, 1);
+  const body = postedBody(calls);
+  assert.doesNotMatch(body, /2cb878c3444c585a/, 'the stale fingerprint is not listed');
+  assert.match(body, /older entries: 1/);
+});
+
+test('#964: a flake inside the window is still listed, with no "older" note', async () => {
+  const env = flakeEnv({ fp_fresh: { test: 'e2e/knowledge.test.ts', error: 'Error: boom', nights: ['2026-10-10'] } });
+  const { io, calls } = ioWith({});
+  const out = await runReport(io, env, { repo: REPO, night: '2026-10-15', dryRun: false });
+
+  assert.equal(out.flakes.length, 1);
+  assert.equal(out.flakesOlder, 0);
+  const body = postedBody(calls);
+  assert.match(body, /fp_fresh/);
+  assert.doesNotMatch(body, /older entries/, 'nothing was held back');
+});
+
+test('#964: the window is the last 14 nights, inclusive at both ends', async () => {
+  const flakes = [
+    { fingerprint: 'edge_in', test: 'a', nights: ['2026-10-02'] },
+    { fingerprint: 'edge_out', test: 'b', nights: ['2026-10-01'] },
+    { fingerprint: 'recurring', test: 'c', nights: ['2026-08-01', '2026-10-14'] },
+  ];
+  const { visible, older } = flakesInWindow(flakes, '2026-10-15');
+  assert.deepEqual(visible.map((f) => f.fingerprint), ['edge_in', 'recurring'],
+    'one night inside the window is enough, even for an entry that first flaked months ago');
+  assert.equal(older, 1);
+  // A short window makes the boundary explicit rather than relying on the constant's value:
+  // 2 nights covers 2026-10-14..15, which drops the 10-02 entry and keeps the recurring one.
+  const short = flakesInWindow(flakes, '2026-10-15', 2);
+  assert.deepEqual(short.visible.map((f) => f.fingerprint), ['recurring']);
+  assert.equal(short.older, 2);
+});
+
+test('#964: the digest shows the repo-relative test path, never the worktree path', async () => {
+  // Entries recorded before #821's normalization still carry the absolute path of one Run's
+  // checkout. The fingerprint never included it (fingerprintOf normalizes before hashing), so this
+  // is the display half: normalize at report time, or the path stays in every digest forever.
+  const env = flakeEnv({
+    fp_legacy: {
+      test: '/Users/roman/mercury-workspaces/worktrees/run_dab0bc9b41f54f27/e2e/knowledge.test.ts',
+      error: 'Error: boom',
+      nights: ['2026-10-14'],
+    },
+  });
+  const { io, calls } = ioWith({});
+  const out = await runReport(io, env, { repo: REPO, night: '2026-10-15', dryRun: false });
+
+  assert.equal(out.flakes[0]!.test, 'e2e/knowledge.test.ts');
+  const body = postedBody(calls);
+  assert.match(body, /e2e\/knowledge\.test\.ts/);
+  assert.doesNotMatch(body, /worktrees|\/Users\//, 'no machine path reaches the digest');
 });
