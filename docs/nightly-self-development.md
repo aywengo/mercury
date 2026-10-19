@@ -70,6 +70,16 @@ terminal before taking rung 1 (bugs it may be about to file).
 The bot config implementing this schedule is #742
 (`deploy/nightly-bot.json.example`).
 
+**Model.** Each task template may carry an explicit `model`; `resolveTemplate` copies it into the
+Run-create body, so the Run records a per-Run model (#823) and the adapter passes it to the agent.
+The host pins it there rather than relying on the CLI's own default: a nightly Run is unattended, so
+a default that changes under it changes what the night does, and the model that produced a PR is
+then not the model in any config. The operator's current pin is `GLM-5.3-Flash-oQ8e-mtp` (omlx) on
+all three tasks. `prime-agent models` lists the ids the CLI accepts; `primeagent` declares
+`perRunModel: true`, so the value reaches `--model`. A config change is read **once at bot start** —
+restart the bot (`launchctl kickstart -k gui/$(id -u)/com.mercury.bot.nightly`) or the running
+process keeps the old schedule.
+
 ### 4.2 The ladder
 
 Each `nightly-next` Run evaluates, in order, and takes the first rung with work:
