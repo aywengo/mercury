@@ -18,7 +18,7 @@ import { DispatchError, recoverPending, refreshStates, submitRun, type DispatchD
 import { startSweeper, type SweeperHandle, type SweepEvent } from './sweep.ts';
 import { listMirroredEvents, type EventMirrorDeps } from './events.ts';
 import { startEventStream } from './stream.ts';
-import { loadRepoUrlMap, routeRun, RoutingError, type RouteRepository } from './routing.ts';
+import { loadRepoUrlMap, routeRun, RoutingError, type RouteCrewReference, type RouteRepository } from './routing.ts';
 import { cancelRun, retryRun, sendInput, type InteractionDeps } from './interact.ts';
 import { mergeRollup, scrapeAll, type MetricsDeps } from './metrics.ts';
 import { createProber, type Prober } from './prober.ts';
@@ -55,6 +55,31 @@ function bodyObject(body: unknown): Record<string, unknown> {
     throw new HttpError(400, 'request body must be a JSON object');
   }
   return body as Record<string, unknown>;
+}
+
+/**
+ * The Crew reference a Run body names, or undefined when it names none.
+ *
+ * Derived from the body's OWN `preset` / `workflow` block, never from a separate field
+ * (fleet-bots-design.md section 5.2): a caller who could state the reference twice could contradict
+ * itself, and the filter would then place the Run on a host the child refuses.
+ *
+ * Only an object block with a non-empty string id is read as a reference, and a body naming BOTH
+ * blocks is left unfiltered. Both cases are the child's to answer -- the two blocks are mutually
+ * exclusive, Fleet does not own that validation, and filtering on one of two contradictory selections
+ * would place work a host cannot serve. The version rides through untouched so a caller who pins a
+ * non-string one gets a 400 about their own body instead of a silently dropped pin.
+ */
+function crewReferenceFrom(body: Record<string, unknown>): RouteCrewReference | undefined {
+  const named = (['preset', 'workflow'] as const)
+    .map((kind) => ({ kind, block: body[kind] }))
+    .filter((b) => b.block !== undefined && b.block !== null);
+  if (named.length !== 1) return undefined;
+  const { kind, block } = named[0]!;
+  if (typeof block !== 'object' || Array.isArray(block)) return undefined;
+  const fields = block as Record<string, unknown>;
+  if (typeof fields.id !== 'string' || !fields.id) return undefined;
+  return { kind, id: fields.id, version: fields.version as string | undefined };
 }
 
 /** The standard Idempotency-Key header, accepted alongside an in-body equivalent. */
@@ -350,8 +375,16 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
             // must be a 400 about the caller's body, not a request that silently loses its filter.
             labels: b.labels as Record<string, string> | undefined,
             repository: b.repository as RouteRepository | undefined,
+            crew: crewReferenceFrom(b),
           },
-            { resolveCloneUrl, knowledgeStaleMs: deps.config.knowledgeStaleMs },
+            {
+              resolveCloneUrl,
+              knowledgeStaleMs: deps.config.knowledgeStaleMs,
+              availabilityStaleMs: deps.config.availabilityStaleMs,
+              // The registry is the only source of snapshots (FB0, #970). Scoping is implicit: the router
+              // asks only about the hosts it was handed, and it was handed this caller's visible set.
+              availability: (hostId) => registry.availabilityFor(hostId),
+            },
           );
         } catch (err) {
           // A routing failure names every host considered and why each was excluded. Swallowing that into a
@@ -367,6 +400,14 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
           // Logged as well as returned. The response reaches whoever submitted the Run; the log is how
           // anyone looking later can explain where a Run went, which is the 3am case section 4 names.
           deps.logger.info('placement', { hostId: decision.hostId, note: decision.softRankNote });
+        }
+        if (decision.exclusions.length > 0) {
+          // The same 3am question, one step further: which hosts were RULED OUT and why. Section 6 already
+          // returns this as data on a refusal; a placement that succeeded is the case where nobody thinks to
+          // ask until the Run fails on a host that should never have been a candidate.
+          deps.logger.info('placement exclusions', {
+            hostId: decision.hostId, exclusions: decision.exclusions,
+          });
         }
         const requested: Record<string, unknown> = { ...b, ...(decision.repository ? { repository: decision.repository } : {}) };
         if (!decision.repository) delete requested.repository;

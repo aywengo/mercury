@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { HostView } from '../registry.ts';
+import type { AvailabilitySnapshot, HostView } from '../registry.ts';
 import { routeRun, RoutingError } from '../routing.ts';
 
 /**
@@ -296,4 +296,216 @@ test('capacity still outranks freshness when the gap is real', () => {
   ];
   const d = routeRun(hosts, {}, opts);
   assert.equal(d.hostId, 'stale-but-idle');
+});
+
+
+// --- availability as a HARD filter (fleet-bots-design.md section 5.2, FB1 #972) --------------------
+
+const entry = (id: string, version: string | null, enabled = true) => ({ id, version, enabled, contentHash: null });
+const snap = (over: Partial<AvailabilitySnapshot> = {}): AvailabilitySnapshot => ({
+  hostId: 'x', presets: [], workflows: null, probedAt: new Date(NOW).toISOString(), stale: false, ...over,
+});
+/** The router's availability lookup, stated as data so each test can say exactly what Fleet has read. */
+const knows = (map: Record<string, AvailabilitySnapshot>) => (id: string) => map[id] ?? null;
+const crewOpts = (map: Record<string, AvailabilitySnapshot>) =>
+  ({ availability: knows(map), availabilityStaleMs: HOUR, now: () => NOW });
+
+test('a Crew reference places only on a host that has it, and the rejected host is recorded', () => {
+  // Acceptance 1. The ids are chosen so the ORDINARY tie-break picks the host without the preset: with
+  // the filter inert, the Run lands on 'a-without' and this fails, which is the whole point of stating
+  // the fixture this way rather than letting the right host win for an unrelated reason.
+  const hosts = [host('a-without'), host('z-reviewer')];
+  const d = routeRun(
+    hosts,
+    { crew: { kind: 'preset', id: 'reviewer' } },
+    crewOpts({ 'a-without': snap({ presets: [entry('implementer', '2.0.0')] }),
+               'z-reviewer': snap({ presets: [entry('reviewer', '1.0.0')] }) }),
+  );
+  assert.equal(d.hostId, 'z-reviewer');
+  assert.deepEqual(d.considered, ['a-without', 'z-reviewer']);
+  // The exclusion is DATA on a successful decision, not only on a refusal: "why not the other host" is
+  // the question an operator asks when the placement surprises them.
+  assert.equal(d.exclusions.length, 1);
+  assert.equal(d.exclusions[0]!.hostId, 'a-without');
+  assert.match(d.exclusions[0]!.reason, /preset reviewer not available \(host has implementer@2\.0\.0\)/);
+});
+
+test('a pinned version must match exactly; an unpinned one takes any enabled version', () => {
+  // Acceptance 2, both halves in one fixture so neither can pass by accident.
+  const hosts = [host('older', {})];
+  const at = (version: string) => crewOpts({ older: snap({ presets: [entry('reviewer', version)] }) });
+  assert.equal(routeRun(hosts, { crew: { kind: 'preset', id: 'reviewer' } }, at('1.1.0')).hostId, 'older');
+  assert.equal(
+    routeRun(hosts, { crew: { kind: 'preset', id: 'reviewer', version: '1.1.0' } }, at('1.1.0')).hostId, 'older');
+  const pinned = (() => {
+    try { routeRun(hosts, { crew: { kind: 'preset', id: 'reviewer', version: '1.2.0' } }, at('1.1.0')); return null; }
+    catch (e) { return e as RoutingError; }
+  })();
+  assert.ok(pinned, 'a pin that no host satisfies must refuse rather than place');
+  assert.match(pinned!.exclusions[0]!.reason, /reviewer@1\.2\.0 not available \(host has 1\.1\.0\)/);
+});
+
+test('a disabled preset excludes the host, pinned or not', () => {
+  // Acceptance 3. The unpinned case is the one worth stating separately: "any version qualifies" must not
+  // become "any version, enabled or not".
+  const off = crewOpts({ off: snap({ presets: [entry('reviewer', '1.0.0', false)] }) });
+  for (const crew of [{ kind: 'preset', id: 'reviewer' } as const,
+                      { kind: 'preset', id: 'reviewer', version: '1.0.0' } as const]) {
+    const err = (() => {
+      try { routeRun([host('off')], { crew }, off); return null; } catch (e) { return e as RoutingError; }
+    })();
+    assert.ok(err, `${JSON.stringify(crew)} must not place on a host where the preset is disabled`);
+    assert.match(err!.exclusions[0]!.reason, /disabled/);
+  }
+});
+
+test('with every snapshot stale, the freshest host wins and the note names staleness', () => {
+  // Acceptance 4. Both ids are chosen so the ordinary tie-break prefers the STALER host ('a-...'), so the
+  // assertion can only pass if staleness itself reordered them.
+  const hosts = [host('a-stale'), host('z-fresher')];
+  const both = crewOpts({
+    'a-stale': snap({ presets: [entry('reviewer', '1.0.0')], probedAt: new Date(NOW - 5 * HOUR).toISOString() }),
+    'z-fresher': snap({ presets: [entry('reviewer', '1.0.0')], probedAt: new Date(NOW - 2 * HOUR).toISOString() }),
+  });
+  const d = routeRun(hosts, { crew: { kind: 'preset', id: 'reviewer' } }, both);
+  assert.equal(d.hostId, 'z-fresher');
+  assert.match(d.softRankNote!, /availability staleness/);
+  assert.match(d.softRankNote!, /a-stale/, 'the note must name the host it passed over');
+});
+
+test('a stale snapshot is a penalty, never a filter: a fleet of one stale host still places', () => {
+  // The invariant the hard filter must not swallow. Stale data can still be right, and refusing on it
+  // would turn one missed probe sweep into every Run refused.
+  const hosts = [host('only-box')];
+  const opts = crewOpts({
+    'only-box': snap({ presets: [entry('reviewer', '1.0.0')], probedAt: new Date(NOW - 9 * HOUR).toISOString() }),
+  });
+  assert.equal(routeRun(hosts, { crew: { kind: 'preset', id: 'reviewer' } }, opts).hostId, 'only-box');
+  // And the same host, stale by the registry's own flag rather than by age.
+  const flagged = crewOpts({ 'only-box': snap({ presets: [entry('reviewer', '1.0.0')], stale: true }) });
+  assert.equal(routeRun(hosts, { crew: { kind: 'preset', id: 'reviewer' } }, flagged).hostId, 'only-box');
+});
+
+test('a host Fleet has never read is excluded as unknown, not as empty', () => {
+  // Section 5.2's first rule. The distinction is the FB0 lesson: "host has nothing" and "Fleet could not
+  // see" must not look the same, because only one of them is a reason to give up on the host.
+  const hosts = [host('read'), host('never-read')];
+  const d = routeRun(
+    hosts,
+    { crew: { kind: 'preset', id: 'reviewer' } },
+    crewOpts({ read: snap({ presets: [entry('reviewer', '1.0.0')] }) }),
+  );
+  assert.equal(d.hostId, 'read');
+  assert.match(d.exclusions[0]!.reason, /availability unknown/);
+});
+
+test('a stale row holding an empty list is unknown, not "has nothing"', () => {
+  // FB0's review note on #972: recordAvailability writes `presets: []` with stale=1 when the FIRST read
+  // failed, so an empty list under the stale flag is a placeholder for data Fleet never obtained.
+  const hosts = [host('only-box')];
+  const err = (() => {
+    try {
+      routeRun(hosts, { crew: { kind: 'preset', id: 'reviewer' } },
+        crewOpts({ 'only-box': snap({ presets: [], stale: true }) }));
+      return null;
+    } catch (e) { return e as RoutingError; }
+  })();
+  assert.ok(err, 'the host must be excluded');
+  assert.match(err!.exclusions[0]!.reason, /availability unknown/);
+  assert.doesNotMatch(err!.exclusions[0]!.reason, /not available/,
+    'claiming the host has no reviewer would assert a fact Fleet never learned');
+  assert.match(err!.message, /no readable availability snapshot/,
+    'the refusal must tell the operator to probe, not to edit presets');
+});
+
+test('an explicitly named host bypasses the availability filter', () => {
+  // Acceptance 5, and the escape hatch section 6 keeps for every filter.
+  const hosts = [host('no-preset'), host('other')];
+  const d = routeRun(hosts, { host: 'no-preset', crew: { kind: 'preset', id: 'reviewer' } }, crewOpts({}));
+  assert.equal(d.hostId, 'no-preset');
+  assert.deepEqual(d.exclusions, [], 'no filter ran, so there is nothing to report');
+});
+
+test('with no host qualifying, the refusal lists every host with its reason', () => {
+  // Acceptance 6. The reasons must be DIFFERENT from each other, or a single templated line would pass.
+  const hosts = [host('empty'), host('disabled'), host('pinned-out'), host('unread')];
+  const err = (() => {
+    try {
+      routeRun(hosts, { crew: { kind: 'preset', id: 'reviewer', version: '1.2.0' } },
+        crewOpts({
+          empty: snap({ presets: [] }),
+          disabled: snap({ presets: [entry('reviewer', '1.2.0', false)] }),
+          'pinned-out': snap({ presets: [entry('reviewer', '1.1.0')] }),
+        }));
+      return null;
+    } catch (e) { return e as RoutingError; }
+  })();
+  assert.ok(err, 'no host can run this task');
+  assert.equal(err!.status, 400);
+  assert.deepEqual(err!.exclusions.map((e) => e.hostId), ['empty', 'disabled', 'pinned-out', 'unread']);
+  const reasons = Object.fromEntries(err!.exclusions.map((e) => [e.hostId, e.reason]));
+  assert.match(reasons.empty!, /not available \(host has none\)/);
+  assert.match(reasons.disabled!, /disabled/);
+  assert.match(reasons['pinned-out']!, /1\.2\.0 not available \(host has 1\.1\.0\)/);
+  assert.match(reasons.unread!, /availability unknown/);
+  assert.equal(new Set(Object.values(reasons)).size, 4, 'each host is accounted for in its own terms');
+});
+
+test('a workflow reference uses the workflow list, and an unserved one is unknown', () => {
+  // W-3 (#934) is not in every host yet: a host answering 404 on /api/workflows stores null, which is
+  // "Fleet cannot see workflows here", not "this host has no workflows".
+  const hosts = [host('serves'), host('predates-w3')];
+  const d = routeRun(
+    hosts,
+    { crew: { kind: 'workflow', id: 'review' } },
+    crewOpts({
+      serves: snap({ workflows: [entry('review', '1.0.0')] }),
+      'predates-w3': snap({ workflows: null }),
+    }),
+  );
+  assert.equal(d.hostId, 'serves');
+  assert.match(d.exclusions[0]!.reason, /workflow availability unknown/);
+  // The same list is not consulted for a preset reference: the two catalogs are separate.
+  const presetErr = (() => {
+    try {
+      routeRun([host('serves')], { crew: { kind: 'preset', id: 'review' } },
+        crewOpts({ serves: snap({ workflows: [entry('review', '1.0.0')] }) }));
+      return null;
+    } catch (e) { return e as RoutingError; }
+  })();
+  assert.ok(presetErr, 'a workflow template is not a preset');
+  assert.match(presetErr!.exclusions[0]!.reason, /preset review not available/);
+});
+
+test('malformed Crew references are a 400 about the caller body, not a crash', () => {
+  const hosts = [host('a')];
+  const bad: Array<[string, unknown]> = [
+    ['crew as array', { crew: [] }],
+    ['crew as string', { crew: 'reviewer' }],
+    ['kind unknown', { crew: { kind: 'skill', id: 'reviewer' } }],
+    ['id missing', { crew: { kind: 'preset' } }],
+    ['id empty', { crew: { kind: 'preset', id: '' } }],
+    ['version empty', { crew: { kind: 'preset', id: 'reviewer', version: '' } }],
+    ['version non-string', { crew: { kind: 'preset', id: 'reviewer', version: 5 } }],
+  ];
+  for (const [label, req] of bad) {
+    let err: RoutingError | null = null;
+    try { routeRun(hosts, req as never); } catch (e) { err = e as RoutingError; }
+    assert.ok(err, `${label} must be rejected`);
+    assert.equal(err!.status, 400, `${label} must be a client error, got ${err!.status}`);
+  }
+});
+
+test('the availability filter cannot place a Run on a host the caller cannot see', () => {
+  // The lookup is asked only about hosts already in the caller's visible set, so a snapshot for a hidden
+  // host can never widen a caller's reach -- stated here because the lookup is the one new input the
+  // router takes from outside the request.
+  const d = routeRun(
+    [host('visible')],
+    { crew: { kind: 'preset', id: 'reviewer' } },
+    crewOpts({ visible: snap({ presets: [entry('reviewer', '1.0.0')] }),
+               hidden: snap({ presets: [entry('reviewer', '1.0.0')] }) }),
+  );
+  assert.equal(d.hostId, 'visible');
+  assert.deepEqual(d.considered, ['visible']);
 });

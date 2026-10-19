@@ -632,6 +632,67 @@ function seedHost(db: DatabaseSync, id: string, opts: { localPaths?: string[]; l
     new Date().toISOString());
 }
 
+/** Record a host's availability snapshot, bypassing the prober to keep the routing test focused. */
+function seedAvailability(db: DatabaseSync, id: string, presets: unknown[], stale = 0): void {
+  db.prepare(
+    `INSERT INTO host_availability (host_id, presets, workflows, probed_at, stale) VALUES (?, ?, NULL, ?, ?)`,
+  ).run(id, JSON.stringify(presets), new Date().toISOString(), stale);
+}
+
+const PRESET = (id: string, version: string, enabled = true) => ({ id, version, enabled, contentHash: 'h' });
+
+test('the Crew reference comes from the body, and it decides where the Run goes', async () => {
+  // The reference is DERIVED from the body's own `preset` block (fleet-bots-design.md section 5.2): a
+  // separate field could contradict it, and the filter would then place work on a host that refuses it.
+  // The two hosts are seeded so the ordinary id tie-break prefers 'gpu-box': the preset-less request
+  // landing there is what makes the preset request landing on 'laptop' evidence of the filter.
+  const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*` });
+  try {
+    seedHost(s.db, 'laptop');
+    seedHost(s.db, 'gpu-box');
+    seedAvailability(s.db, 'laptop', [PRESET('reviewer', '1.0.0')]);
+    seedAvailability(s.db, 'gpu-box', [PRESET('implementer', '2.0.0')]);
+
+    const withoutPreset = await s.call('POST', '/fleet/runs', { token: CALLER_TOKEN, body: { task: 'x' } });
+    assert.equal(withoutPreset.status, 201);
+    assert.equal(withoutPreset.json.hostId, 'gpu-box', 'with no Crew reference nothing filters on availability');
+
+    const withPreset = await s.call('POST', '/fleet/runs', {
+      token: CALLER_TOKEN, body: { task: 'x', preset: { id: 'reviewer' } },
+    });
+    assert.equal(withPreset.status, 201);
+    assert.equal(withPreset.json.hostId, 'laptop', 'the only host whose snapshot carries reviewer');
+
+    const pinnedOut = await s.call('POST', '/fleet/runs', {
+      token: CALLER_TOKEN, body: { task: 'x', preset: { id: 'reviewer', version: '9.9.9' } },
+    });
+    assert.equal(pinnedOut.status, 400);
+    assert.deepEqual(pinnedOut.json.details.map((d: any) => d.hostId).sort(), ['gpu-box', 'laptop']);
+    assert.ok(pinnedOut.json.details.every((d: any) => /not available/.test(d.reason)));
+  } finally { await s.close(); }
+});
+
+test('a Crew Run is refused, with every reason, when Fleet has read no availability at all', async () => {
+  // Section 5.2: no snapshot means excluded as unknown. Placing anyway is what the issue exists to stop --
+  // the host would refuse the Run after placement, and the caller would never learn which host could have
+  // taken it.
+  const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*` });
+  try {
+    seedHost(s.db, 'laptop');
+    seedHost(s.db, 'gpu-box');
+    const r = await s.call('POST', '/fleet/runs', {
+      token: CALLER_TOKEN, body: { task: 'x', workflow: { id: 'review' } },
+    });
+    assert.equal(r.status, 400);
+    assert.equal(r.json.details.length, 2, 'every considered host is accounted for');
+    assert.ok(r.json.details.every((d: any) => /availability unknown/.test(d.reason)));
+    assert.match(r.json.error, /no readable availability snapshot/);
+    // Nothing was written: a refused submission leaves no binding behind.
+    const list = await s.call('GET', '/fleet/runs', { token: CALLER_TOKEN });
+    assert.equal(list.json.runs.length, 0);
+  } finally { await s.close(); }
+});
+
 test('routing places work without the caller naming a host', async () => {
   const s = await startService({ apiTokens: `${CALLER_TOKEN}:alice:*` });
   try {
