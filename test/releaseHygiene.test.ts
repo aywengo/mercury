@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { spawn, spawnSync } from 'node:child_process';
 import { join, relative } from 'node:path';
 import { HOST_PRODUCT, HOST_VERSION } from '../src/version.ts';
+import { COMMAND_FLAGS, IMPLEMENTED } from '../client/cli.ts';
 import { makeGitRepo, tempDir } from './helpers.ts';
 
 const ROOT = join(import.meta.dirname, '..');
@@ -122,6 +123,36 @@ test('host release notes do not deny that the CLI ships in them', () => {
   // fixed bin.mercury, so a doc that still says it cannot run is now false.
   assert.ok(!/bin\.mercury`? still points at a TypeScript file/i.test(notes),
     'host notes repeat a gap that #243 closed');
+});
+
+test('host release notes name CLI commands and flags that exist', () => {
+  // 0.2.1 and 0.2.2 both shipped `mercuryctl run <id>` and `--host`. Neither exists: the command is
+  // `runs show`, and the endpoint flag is `--url`. An operator copying the line gets a usage error
+  // rather than a wrong answer, but the release notes are the install instructions, so a line that
+  // cannot run is a defect in the shipped artifact. Checked against the client's own tables rather
+  // than reviewed, because prose review is what let the same two lines ship twice.
+  const notes = read(`docs/releases/host/${pkg.version}.md`);
+  const globals = new Set([
+    '--profile', '--url', '--timeout', '--json', '--no-color', '--yes', '--help', '-h', '--version', '-V',
+  ]);
+  const lines = notes.split('\n').filter((l) => /^mercuryctl\s/.test(l.trim()));
+  assert.ok(lines.length > 0, 'the notes must show how to run the client that ships here');
+  for (const line of lines) {
+    const path: string[] = [];
+    for (const token of line.trim().split(/\s+/).slice(1)) {
+      if (token.startsWith('-') || token.startsWith('<')) break;
+      path.push(token);
+    }
+    const command = path.join(' ');
+    if (command === '') continue; // globals only, e.g. `mercuryctl --version`
+    assert.ok(IMPLEMENTED.has(command),
+      `host release notes use \`mercuryctl ${command}\`, which this build does not implement`);
+    const accepted = new Set([...(COMMAND_FLAGS[command] ?? []), ...globals]);
+    for (const flag of line.match(/(?<![\w-])--?[A-Za-z][\w-]*/g) ?? []) {
+      assert.ok(accepted.has(flag),
+        `host release notes pass \`${flag}\` to \`mercuryctl ${command}\`, which does not accept it`);
+    }
+  }
 });
 
 test('mercury --version prints mercury-host <version> and does not start a server', async () => {

@@ -21,7 +21,7 @@ import { renderPlan, isTruncated } from '../workflows/renderPlan.ts';
 import type { EventStore } from '../events/eventStore.ts';
 import type { Logger } from '../logger.ts';
 import { RunQueue, LEASE_EXPIRED_ERROR } from '../queue/runQueue.ts';
-import type { RunService } from '../runs/runService.ts';
+import { RetryClaimedError, type RunService } from '../runs/runService.ts';
 import { RunStore } from '../runs/runStore.ts';
 import type { GoalStore } from '../runs/goalStore.ts';
 import { GENERATED_PATHS, NOTES_FILE, excludeFromGit, materializeKnowledge } from '../knowledge/materialize.ts';
@@ -149,6 +149,13 @@ export interface WorkerDeps {
   credentialProfiles?: () => CredentialProfiles;
 }
 
+/**
+ * Pending retries recovered per sweep (issue #987). Bounded so one sweep cannot hold the worker for
+ * an unbounded time; anything past the bound is due on the next sweep, which is a second later at
+ * worst. The alternative -- an unbounded list -- makes the sweep's cost a function of the backlog.
+ */
+const RETRY_RECOVERY_BATCH = 50;
+
 export class Worker {
   private running = false;
   // Set by stop(). Unlike `running`, which only stops the claim loop from picking up NEW
@@ -204,13 +211,24 @@ export class Worker {
     });
     // Stuck-run checks run on their own timer: the claim loop is blocked while a
     // run executes, and a stuck run is by definition one that is executing.
-    if ((this.deps.stuckRunThresholdMs ?? 0) > 0) {
-      this.stuckTimer = setInterval(
-        () => this.checkStuckRuns(),
-        this.deps.stuckCheckIntervalMs ?? 60_000,
-      );
-      this.stuckTimer.unref?.();
-    }
+    //
+    // Retry-intent recovery shares this timer (issue #987). It has the same shape -- a sweep that
+    // must run WHILE a Run executes -- and it needs a PERIODIC pass, not just the start-up one
+    // below: a worker that restarts during a retry's backoff finds nothing due at start-up, so
+    // without the timer the intent it inherited would only ever be honoured by the next restart.
+    // The timer therefore runs unconditionally; only the stuck-run ALERT is gated on its
+    // threshold, and checkStuckRuns already returns immediately when that is 0.
+    this.stuckTimer = setInterval(
+      () => {
+        this.recoverPendingRetries();
+        this.checkStuckRuns();
+      },
+      this.deps.stuckCheckIntervalMs ?? 60_000,
+    );
+    this.stuckTimer.unref?.();
+    // A worker that takes over from one that died owes the retries that worker decided on but
+    // never created (issue #987): the intent is in the database, so it survives the restart.
+    this.recoverPendingRetries();
     // Backlog alerting gets its own timer for the same reason stuck-run checks do (AGENTS.md:
     // "periodic work that must run *while* a Run executes" needs its own timer). Driven from the
     // claim loop it was sampled once per iteration, and an iteration is `await this.execute(run)`
@@ -660,8 +678,13 @@ await this.finalize(run, outcome, skills);
         // EventStore.append and RunStore writes are both re-entrant under tx() (depth-tracked),
         // so nesting inside an outer transaction is safe.
         //
-        // maybeAutoRetry stays OUTSIDE: it is async, tx() is synchronous, and creating a retry
-        // run is a separate decision that must not roll back the failure record it responds to.
+        // The retry DECISION is taken here, before the transition, and recorded BY it (#987): the
+        // intent has to commit with the status it belongs to, or a worker that dies between the two
+        // leaves an infrastructure failure nobody can call "retry pending" and no worker will ever
+        // retry. maybeAutoRetry itself stays OUTSIDE: it is async, tx() is synchronous, and creating
+        // a retry run is a separate decision that must not roll back the failure record it responds
+        // to.
+        const retryDueAt = this.autoRetryDueAt(run, 'infrastructure');
         tx(this.deps.db, () => {
           // The claim-time notAfter refusal (#731) can land in this catch with the run still
           // QUEUED — its refusal tx() can fail (BEGIN IMMEDIATE hitting SQLITE_BUSY, or a
@@ -676,9 +699,12 @@ await this.finalize(run, outcome, skills);
           this.deps.runs.setError(run.id, message, 'infrastructure');
           this.deps.events.append(run.id, 'error', { message });
           this.deps.events.append(run.id, 'run.failed', { runId: run.id, error: message, kind: 'infrastructure' });
-          this.deps.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+          this.deps.runs.transition(run.id, 'FAILED', {
+            completedAt: new Date().toISOString(),
+            retryDueAt,
+          });
         });
-        await this.maybeAutoRetry(run, 'infrastructure');
+        await this.maybeAutoRetry(run, retryDueAt);
       }
     } finally {
       // Terminate on EVERY exit path -- success, cancellation, timeout, lease loss, and the
@@ -1378,6 +1404,7 @@ await this.finalize(run, outcome, skills);
     // The adapter's attribution decides the kind, and therefore whether the run is retried. Hardcoding
     // 'agent' here is what made a supervisor shutdown permanent (issue #188).
     const errorKind: ErrorKind = outcome.errorKind ?? 'agent';
+    const retryDueAt = this.autoRetryDueAt(run, errorKind === 'infrastructure' ? 'infrastructure' : 'agent');
     tx(this.deps.db, () => {
       this.deps.runs.setError(run.id, error, errorKind);
       this.deps.events.append(run.id, 'error', { message: error });
@@ -1387,10 +1414,10 @@ await this.finalize(run, outcome, skills);
         kind: errorKind,
         durationMs: durations.agentDurationMs,
       });
-      this.deps.runs.transition(run.id, 'FAILED', { completedAt: now });
+      this.deps.runs.transition(run.id, 'FAILED', { completedAt: now, retryDueAt });
     });
     log.error({ error, errorKind, ...durations }, 'run failed');
-    await this.maybeAutoRetry(run, errorKind === 'infrastructure' ? 'infrastructure' : 'agent');
+    await this.maybeAutoRetry(run, retryDueAt);
   }
 
   /**
@@ -1446,19 +1473,70 @@ await this.finalize(run, outcome, skills);
     }
   }
 
-  private async maybeAutoRetry(run: Run, kind: 'infrastructure' | 'agent'): Promise<void> {
-    if (kind !== 'infrastructure') return; // agent/task failures: manual retry only
+  /**
+   * The automatic-retry decision, taken BEFORE the terminal transition so that transition can
+   * record it (A0-2, issue #987). Returns the time the retry becomes due, or null for "no retry".
+   *
+   * The value is a due TIME rather than "now plus a backoff the caller must remember": recovery
+   * runs on a worker that never saw this decision, so the row has to carry the answer, not the
+   * inputs. Nothing here is durable -- the caller writes it in the same statement as the status.
+   */
+  private autoRetryDueAt(run: Run, kind: 'infrastructure' | 'agent'): string | null {
+    if (kind !== 'infrastructure') return null; // agent/task failures: manual retry only
     // Honor the per-run constraint (set at create time, defaulting to the global
     // config value); maxRetries = retries allowed after the initial attempt.
-    const maxRetries = run.constraints.maxRetries;
-    if (run.attempt > maxRetries) return;
+    if (run.attempt > run.constraints.maxRetries) return null;
+    return new Date(Date.now() + this.deps.retryBackoffMs * run.attempt).toISOString();
+  }
+
+  /**
+   * Honour an automatic-retry decision this worker just recorded (issue #987).
+   *
+   * `retryDueAt` is the value the terminal transition wrote, so the wait is the REMAINDER of the
+   * backoff rather than a second full one, and a decision that is already due does not sleep at
+   * all. The retry itself claims the recorded intent (RunService.claimRetryLink): if a recovering
+   * worker got there first, the claim fails and this pass is a no-op instead of a second child.
+   */
+  private async maybeAutoRetry(run: Run, retryDueAt: string | null): Promise<void> {
+    if (retryDueAt === null) return;
     const log = this.logger(run.id);
-    log.info({ attempt: run.attempt, maxRetries }, 'scheduling automatic retry');
-    await sleep(this.deps.retryBackoffMs * run.attempt);
+    log.info({ attempt: run.attempt, maxRetries: run.constraints.maxRetries, retryDueAt }, 'scheduling automatic retry');
+    await sleep(Math.max(0, Date.parse(retryDueAt) - Date.now()));
     try {
       this.deps.runService.retry(run.id, run.ownerId, true, { auto: true });
     } catch (err) {
+      if (err instanceof RetryClaimedError) {
+        // Another worker owns this retry -- a recovery pass claimed the intent while this one
+        // slept. Not a refusal: the chain is not final and the intent is already gone.
+        log.info({}, 'automatic retry already claimed by another worker');
+        return;
+      }
+      // retry() has already cleared the intent and appended run.retry_refused with this reason.
       log.warn({ error: String(err) }, 'auto retry failed');
+    }
+  }
+
+  /**
+   * Attempts whose recorded retry intent came due while nobody was there to honour it (#987).
+   *
+   * The intent is durable, so this IS the whole recovery mechanism: the worker that decided to
+   * retry may have died during its backoff, and the row -- not that worker's memory -- is what
+   * says the retry is still owed. Exactly-once is the claim inside retry(): the transaction that
+   * creates the child is the one that clears the intent, so of N workers running this pass exactly
+   * one commits a child per attempt and the losers see RetryClaimedError.
+   */
+  private recoverPendingRetries(): void {
+    const due = this.deps.runs.listPendingRetries(new Date().toISOString(), RETRY_RECOVERY_BATCH);
+    for (const run of due) {
+      const log = this.logger(run.id);
+      try {
+        const child = this.deps.runService.retry(run.id, run.ownerId, true, { auto: true });
+        log.info({ child: child.id, retryDueAt: run.retryDueAt }, 'recovered a pending automatic retry');
+      } catch (err) {
+        if (err instanceof RetryClaimedError) continue; // another worker got there first
+        // retry() has cleared the intent and recorded the reason on the Run; the chain is final.
+        log.warn({ error: String(err) }, 'pending automatic retry could not be honoured');
+      }
     }
   }
 

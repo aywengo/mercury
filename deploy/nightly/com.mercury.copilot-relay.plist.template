@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Mercury copilot-relay: LaunchAgent template for deploy/nightly/copilot-relay.sh.
+
+  A LaunchAgent, not a Mercury service, because it must run under the OPERATOR's `gh` credential
+  and the nightly agent must not be able to reach that credential. `mercury host service install`
+  does not install it; that surface owns the operator's `mercury.env` identity only, which is the
+  `mercury-nightly` token this relay exists to work around. See
+  docs/nightly-self-development.md section 5.2.
+
+  KeepAlive plus the script's watch mode, NOT StartInterval. launchd's scheduled spawns do not
+  fire while the `gui` domain is in "on-demand-only mode", which it is for long stretches on this
+  host. launchd logs `pending spawn, domain in on-demand-only mode` and leaves the job at
+  `pended nondemand spawn = interval` forever. That is how the first version of this relay died on
+  2026-10-05. A KeepAlive daemon needs one spawn, and the script owns the cadence from then on.
+
+  launchd expands no variables in a plist, so the @@...@@ placeholders are substituted at install
+  time. `kickstart` is part of the install on purpose: in on-demand-only mode the bootstrap alone
+  leaves the job pending. Install with:
+
+    sed -e "s|@@SCRIPT@@|$PWD/deploy/nightly/copilot-relay.sh|" \
+        -e "s|@@STATE_DIR@@|$HOME/.local/state/mercury|" \
+        deploy/nightly/com.mercury.copilot-relay.plist.template \
+        > ~/Library/LaunchAgents/com.mercury.copilot-relay.plist
+    launchctl bootout gui/$(id -u)/com.mercury.copilot-relay 2>/dev/null
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mercury.copilot-relay.plist
+    launchctl kickstart -k gui/$(id -u)/com.mercury.copilot-relay
+
+  Verify it is alive. The relay logs a heartbeat on EVERY pass, so silence is unambiguous:
+
+    launchctl print gui/$(id -u)/com.mercury.copilot-relay | grep -E 'state|runs|last exit'
+    tail -3 ~/.local/state/mercury/copilot-relay.log
+
+  If `state = not running` and the log's last line is a heartbeat, the daemon was killed rather
+  than scheduled: kickstart it again. KeepAlive restarts it after a crash, not after a bootout.
+
+  This header avoids the double-hyphen sequence. XML forbids it inside a comment, and while
+  `plutil` is lenient, `xmllint` and Python's `plistlib` both reject the artifact.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mercury.copilot-relay</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@@SCRIPT@@</string>
+    <string>--watch</string>
+  </array>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@@STATE_DIR@@/copilot-relay-launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>@@STATE_DIR@@/copilot-relay-launchd.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

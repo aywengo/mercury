@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tx } from '../db/database.ts';
 import { assertTransition, isTerminal } from '../domain/stateMachine.ts';
-import type { ErrorKind, RepositoryContext, Run, RunConstraints, RunStatus } from '../domain/types.ts';
+import type { ErrorKind, RepositoryContext, Run, RunConstraints, RunOriginKind, RunStatus } from '../domain/types.ts';
 
 export interface RunRow {
   id: string;
@@ -27,6 +27,11 @@ export interface RunRow {
   lease_owner: string | null;
   lease_expires_at: string | null;
   cancellation_requested_at: string | null;
+  status_changed_at: string | null;
+  retry_due_at: string | null;
+  origin_kind: string | null;
+  origin_ref: string | null;
+  first_started_at: string | null;
   final_commits_json: string;
   pr_url: string | null;
   model: string | null;
@@ -58,6 +63,15 @@ export function rowToRun(row: RunRow): Run {
     leaseOwner: row.lease_owner,
     leaseExpiresAt: row.lease_expires_at,
     cancellationRequestedAt: row.cancellation_requested_at,
+    statusChangedAt: row.status_changed_at,
+    retryDueAt: row.retry_due_at,
+    // A kind with no ref is representable (the surface had nothing to record); a ref with no kind is
+    // not, so the presence of `origin_kind` is what decides. Reading them as one field keeps a
+    // half-written pair from rendering as an origin with a null kind.
+    origin: row.origin_kind ? { kind: row.origin_kind as RunOriginKind, ref: row.origin_ref } : null,
+    // No `?? startedAt` fallback here: the row is reported as stored, and `hasStarted` is where the
+    // pre-v21 fallback lives, so exactly one place decides that question.
+    firstStartedAt: row.first_started_at,
     finalCommits: JSON.parse(row.final_commits_json) as string[],
     prUrl: row.pr_url,
     model: row.model ?? null,
@@ -100,15 +114,17 @@ export class RunStore {
         `INSERT INTO runs (
           id, owner_id, task, repository_json, repositories_json, workspace_branch, workspace_path, agent, status,
           attempt, retry_of, error, error_kind, constraints_json, created_at, started_at, completed_at,
-          lease_owner, lease_expires_at, cancellation_requested_at, final_commits_json, pr_url, model, credential_profile
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          lease_owner, lease_expires_at, cancellation_requested_at, status_changed_at, retry_due_at, final_commits_json, pr_url, model, credential_profile,
+          origin_kind, origin_ref, first_started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.id, run.ownerId, run.task, JSON.stringify(run.repository), run.repositories ? JSON.stringify(run.repositories) : null,
         run.workspaceBranch, run.workspacePath,
         run.agent, run.status, run.attempt, run.retryOf, run.error, run.errorKind, JSON.stringify(run.constraints),
         run.createdAt, run.startedAt, run.completedAt, run.leaseOwner, run.leaseExpiresAt,
-        run.cancellationRequestedAt, JSON.stringify(run.finalCommits), run.prUrl, run.model ?? null, run.credentialProfile ?? null,
+        run.cancellationRequestedAt, run.statusChangedAt ?? null, run.retryDueAt ?? null, JSON.stringify(run.finalCommits), run.prUrl, run.model ?? null, run.credentialProfile ?? null,
+        run.origin?.kind ?? null, run.origin?.ref ?? null, run.firstStartedAt ?? null,
       );
   }
 
@@ -117,7 +133,46 @@ export class RunStore {
     return row ? rowToRun(row) : null;
   }
 
-  list(opts: { ownerId?: string; status?: RunStatus; limit: number; cursor?: string }): { runs: Run[]; nextCursor: string | null } {
+  /**
+   * Every attempt in the chain that contains `runId`, oldest first (A0-1, issue #986).
+   *
+   * A2A reports a task as a chain and calls it terminal only when no further attempt will be made
+   * (docs/a2a-design.md section 6.4), so a reader holding one Run id cannot answer the question:
+   * the answer is the latest attempt plus whether a retry is still pending, and `retry_of` points
+   * only DOWNWARD, from a child to its parent. Reading the whole chain needs the downward walk.
+   *
+   * Walks UP to the root first, so a caller that starts from any attempt sees the whole chain
+   * rather than the subtree below it. The upward walk is bounded by a visited set: a chain written
+   * by hand could link in a cycle, and a lookup that hangs the A2A server is worse than one that
+   * stops at the cycle.
+   */
+  listChain(runId: string): Run[] {
+    const lookup = this.db.prepare('SELECT id, retry_of FROM runs WHERE id = ?');
+    let root = lookup.get(runId) as { id: string; retry_of: string | null } | undefined;
+    if (!root) return [];
+    const seen = new Set<string>([root.id]);
+    while (root.retry_of && !seen.has(root.retry_of)) {
+      const parent = lookup.get(root.retry_of) as { id: string; retry_of: string | null } | undefined;
+      // A dangling link (the parent row is gone) ends the walk: report the chain that exists.
+      if (!parent) break;
+      seen.add(parent.id);
+      root = parent;
+    }
+    const rows = this.db
+      .prepare(
+        `WITH RECURSIVE chain(id) AS (
+           SELECT id FROM runs WHERE id = ?
+           UNION ALL
+           SELECT r.id FROM runs r JOIN chain c ON r.retry_of = c.id
+         )
+         SELECT runs.* FROM runs JOIN chain ON runs.id = chain.id
+         ORDER BY runs.attempt ASC, runs.created_at ASC, runs.id ASC`,
+      )
+      .all(root.id) as unknown as RunRow[];
+    return rows.map(rowToRun);
+  }
+
+  list(opts: { ownerId?: string; status?: RunStatus; origin?: RunOriginKind; limit: number; cursor?: string }): { runs: Run[]; nextCursor: string | null } {
     const clauses: string[] = [];
     const params: (string | number | null)[] = [];
     if (opts.ownerId) {
@@ -128,6 +183,14 @@ export class RunStore {
       clauses.push('status = ?');
       params.push(opts.status);
     }
+    // Server-stamped provenance (A0-3, issue #988). This is the A2A `ListTasks` query: the caller's
+    // A2A-created chains, narrowed by owner elsewhere in this same WHERE -- an origin filter is never
+    // an authorisation, and must not be usable to reach another owner's Runs.
+    if (opts.origin) {
+      clauses.push('origin_kind = ?');
+      params.push(opts.origin);
+    }
+
     // cursor format: "<createdAt>|<id>" (keyset pagination with id tiebreaker)
     if (opts.cursor) {
       const [createdAt, id] = opts.cursor.split('|');
@@ -228,6 +291,34 @@ export class RunStore {
     return rows.map(rowToRun);
   }
 
+  /**
+   * Attempts whose recorded automatic-retry intent has come due and that have no child yet
+   * (A0-2, issue #987). This is recovery's whole question, asked of the database rather than of a
+   * worker's memory: the worker that recorded the intent may be gone.
+   *
+   * The intent is recorded in the same statement as the terminal status and cleared in the same
+   * transaction that inserts the child, so `retry_due_at IS NOT NULL` already implies "terminal",
+   * and the anti-join is what excludes the intents a retry has since honoured. Comparing the ISO
+   * strings is safe because every timestamp Mercury stores is UTC ISO-8601 of equal width.
+   *
+   * Omitted limit => no LIMIT clause at all, the same convention as listIdle: a caller that does
+   * not ask for a bound must not silently receive a truncated page of pending retries.
+   */
+  listPendingRetries(dueBeforeIso: string, limit?: number): Run[] {
+    const bounded = limit !== undefined;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM runs r
+          WHERE r.retry_due_at IS NOT NULL
+            AND r.retry_due_at <= ?
+            AND NOT EXISTS (SELECT 1 FROM runs c WHERE c.retry_of = r.id)
+          ORDER BY r.retry_due_at ASC, r.id ASC
+          ${bounded ? 'LIMIT ?' : ''}`,
+      )
+      .all(...(bounded ? [dueBeforeIso, limit] : [dueBeforeIso])) as unknown as RunRow[];
+    return rows.map(rowToRun);
+  }
+
   transition(id: string, to: RunStatus, extra?: Partial<Omit<Run, 'error' | 'errorKind'>>): Run {
     // The status write and any terminal side effect commit or roll back together. tx() is
     // re-entrant, so a caller already inside a transaction keeps the atomicity it arranged
@@ -268,13 +359,39 @@ export class RunStore {
     const run = this.get(id);
     if (!run) throw new Error(`Run ${id} not found`);
     assertTransition(run.status, to);
-    const sets: string[] = ['status = ?'];
-    const params: (string | number | null)[] = [to];
+    // The transition timestamp rides the same single statement as the status write (issue #906):
+    // statusChangedAt is meaningless if it can lag or lead the status it describes, so no caller
+    // sets it and no other writer touches it. This is the only line in the codebase that updates it.
+    const sets: string[] = ['status = ?', 'status_changed_at = ?'];
+    const params: (string | number | null)[] = [to, new Date().toISOString()];
     if (extra) {
+      if ('firstStartedAt' in extra) {
+        // Same rule as statusChangedAt below, for the same reason: this column must have exactly one
+        // writer. A caller-supplied value would add a second `first_started_at = ?` to this SET and
+        // win silently under SQLite's last-binding-wins, letting a requeue or a replay move the
+        // "first started" stamp forward -- which is the whole fact the column exists to keep fixed.
+        throw new Error('extra must not set firstStartedAt: it is written by transition itself, from startedAt');
+      }
+      if ('statusChangedAt' in extra) {
+        // Enforced, not just documented (issue #906 review, item 3): a caller-supplied
+        // statusChangedAt would add a second `status_changed_at = ?` to this SET and win
+        // silently under SQLite's last-binding-wins. The transition clock is the store's.
+        throw new Error('extra must not set statusChangedAt: it is written by transition itself');
+      }
       for (const [k, v] of Object.entries(extra)) {
         const col = camelToSnake(k);
         sets.push(`${col} = ?`);
         params.push(v === null ? null : typeof v === 'object' ? JSON.stringify(v) : (v as string | number));
+      }
+      if ('startedAt' in extra) {
+        // `first_started_at` rides the SAME statement as `started_at`, so the two can never disagree
+        // about whether this attempt has executed (A0-4, issue #990). COALESCE keeps the FIRST value:
+        // the column answers "has this attempt ever begun", and the shutdown requeue that nulls
+        // `started_at` -- deliberately, so the metrics measure the current execution -- must not
+        // erase it. Written here and nowhere else, which is what makes that guarantee a property of
+        // the code rather than of one SQL string in RunQueue.
+        sets.push('first_started_at = COALESCE(first_started_at, ?)');
+        params.push(extra.startedAt as string);
       }
     }
     // Guard the write on the status we just validated (issue #48). Without it this
