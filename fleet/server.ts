@@ -102,6 +102,23 @@ function nonNegativeInt(raw: string | null | undefined, fallback: number): numbe
 }
 
 /**
+ * A keyset cursor is `<createdAt>|<fleetRunId>`; anything else is a client error, not a database one.
+ *
+ * An absent or empty value is no cursor at all. A value that is present but not two non-empty
+ * components is rejected here: the keyset split would leave the id undefined, and node:sqlite answers a
+ * bind of undefined with a throw -- a caller's typo surfaced as a 500. Validating at the route, where
+ * the caller's input arrives, keeps the storage layer free of HTTP concerns and every caller guarded.
+ */
+function parseCursor(raw: string | null | undefined): string | undefined {
+  if (raw === null || raw === undefined || raw === '') return undefined;
+  const parts = raw.split('|');
+  if (parts.length !== 2 || parts[0] === '' || parts[1] === '') {
+    throw new HttpError(400, 'cursor must be "<createdAt>|<fleetRunId>"');
+  }
+  return raw;
+}
+
+/**
  * Unwrap the optional { input: ... } wrapper without losing a genuine null, and without rejecting a body that
  * is a bare string, number, array or null -- the child accepts any JSON value.
  */
@@ -425,8 +442,27 @@ export function buildRoutes(deps: FleetServerDeps): { routes: Route[]; prober: P
     {
       method: 'GET', pattern: ['fleet', 'runs'],
       handle: (ctx, res) => {
-        const runs = dispatch.bindings.list(scopedHosts(ctx.caller, registry));
-        sendJson(res, 200, { runs });
+        const q = ctx.query;
+        const owner = q?.get('owner');
+        // owner=self scopes to the caller's own bindings. It is never a free-form owner value: a
+        // caller must not be able to list someone else's Runs by naming them (issue #971).
+        if (owner !== null && owner !== undefined && owner !== '' && owner !== 'self') {
+          throw new HttpError(400, `owner must be "self", got "${owner}"`);
+        }
+        const ownerId = owner === 'self' ? ctx.caller.ownerId : undefined;
+        const paged = ownerId !== undefined || q?.has('limit') || q?.has('cursor');
+        if (!paged) {
+          // No new parameters: byte-identical to the pre-#971 response.
+          const runs = dispatch.bindings.list(scopedHosts(ctx.caller, registry));
+          sendJson(res, 200, { runs });
+          return;
+        }
+        const limit = Math.max(1, Math.min(nonNegativeInt(q?.get('limit'), 50), 200));
+        const cursor = parseCursor(q?.get('cursor'));
+        const { runs, nextCursor } = dispatch.bindings.listPaged(scopedHosts(ctx.caller, registry), {
+          ownerId, limit, cursor,
+        });
+        sendJson(res, 200, { runs, nextCursor });
       },
     },
     {
