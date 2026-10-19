@@ -225,7 +225,7 @@ Record: [`PLAN.md`](PLAN.md) (rules above)
 | Issue | Title | State | PR |
 | --- | --- | --- | --- |
 | #1004 | PLAN.md: move the closing-row update to a post-merge commit; open PRs conflict on adjacent rows | done | #1005 |
-| #1007 | scratch: verify plan-sync marks a closing issue done (issue #1004 e2e) | open | — |
+| #1007 | scratch: verify plan-sync marks a closing issue done (issue #1004 e2e) | done | #1008 |
 
 ## Host installer — milestone notes (historical)
 
