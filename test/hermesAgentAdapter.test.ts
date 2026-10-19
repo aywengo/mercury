@@ -239,6 +239,28 @@ test('resume: respawns with --resume <sessionId>', async () => {
   assert.equal(argv[argv.indexOf('--resume') + 1], 'sess-abc123');
 });
 
+test('resume: the resumed attempt delivers its OWN output, not the previous attempt\'s exit (#997)', async () => {
+  // #997: resume() reset `done` and re-armed the exit gate, but left `stdoutEnded`, `exitInfo` and
+  // `stdoutFlushed` set from the PREVIOUS process. Any late event from that process then settled the
+  // resumed session on stale state: the handle reported `completed` while the new child was still
+  // running, and flushStdout() no-oped because the previous attempt had already flushed. A retried
+  // Run delivered ZERO events and looked successful -- this is the production half of #997.
+  const { context } = makeContext();
+  const a = adapter({ env: { MOCK_HERMES_MODE: 'resume', MOCK_HERMES_SESSION: 'sess-r1' } });
+  const handle = await a.start(context);
+  const first = await collectAll(handle);
+  assert.equal(first.events.length, 1, 'the first attempt delivers its response');
+
+  const h2 = await a.resume(handle.runId);
+  const second = await collectAll(h2);
+  assert.equal(second.exit.reason, 'completed');
+  assert.equal(second.events.length, 1, 'the resumed attempt must deliver its own response');
+  // Exact equality, not a match: a stale `stdoutBuf` would prepend the FIRST attempt's response to
+  // the resumed one, which a substring match would happily accept.
+  assert.equal((second.events[0]!.payload as { text: string }).text, 'Resumed session sess-r1');
+  a.dispose(context.run.id);
+});
+
 test('resume without session id -> throws', async () => {
   const { context } = makeContext();
   const a = adapter({ env: { MOCK_HERMES_MODE: 'fail' } });

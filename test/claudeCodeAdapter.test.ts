@@ -205,6 +205,54 @@ test('per-Run model: resume re-emits --model from the session context (#827)', a
   }
 });
 
+test('resume: the resumed attempt delivers its OWN output, not the previous attempt\'s exit (#997)', async () => {
+  // #997's production half, for claude: resume() left exitInfo/stdoutEnded/emittedText set from the
+  // previous process, so the resumed handle settled on the PREVIOUS attempt's exit -- reporting
+  // `completed` while the new child was still starting, with zero events delivered. `emittedText`
+  // alone also suppresses the resumed attempt's own result text.
+  const a = adapter({ env: { MOCK_CLAUDE_MODE: 'resume' } });
+  const ctx = makeContext();
+  const first = await drain(await a.start(ctx));
+  // The fixture's resume mode emits init + assistant text + result (a resumed CLI replays its own
+  // stream under a NEW session id), so the tool pair is absent by construction.
+  assert.deepEqual(types(first.events), ['run.started', 'agent.message']);
+
+  const second = await drain(await a.resume(ctx.run.id, ctx));
+  a.dispose(ctx.run.id);
+  assert.equal(second.exit.reason, 'completed');
+  assert.deepEqual(types(second.events), ['run.started', 'agent.message'],
+    'the resumed attempt delivers its own stream, not an empty one');
+});
+
+test('resume: a resumed attempt is not failed by the PREVIOUS attempt\'s verdict (#997)', async () => {
+  // `resultIsError` is per-attempt. Left set from a failed first attempt, it made the resumed attempt
+  // report `failed` on its own successful stream -- the retry could never recover.
+  const env: Record<string, string> = { MOCK_CLAUDE_MODE: 'error' };
+  const a = adapter({ env });
+  const ctx = makeContext();
+  const first = await drain(await a.start(ctx));
+  assert.equal(first.exit.reason, 'failed', 'the first attempt really failed');
+
+  env.MOCK_CLAUDE_MODE = 'success'; // the resumed spawn reads the same env object
+  const second = await drain(await a.resume(ctx.run.id, ctx));
+  a.dispose(ctx.run.id);
+  assert.equal(second.exit.reason, 'completed', `resumed attempt reported ${JSON.stringify(second.exit)}`);
+});
+
+test('resume: a resumed attempt delivers a response carried only by the result event (#997)', async () => {
+  // `emittedText` is per-attempt. Left set, the resumed attempt believed it had already emitted its
+  // text and dropped the only copy -- the result event.
+  const env: Record<string, string> = { MOCK_CLAUDE_MODE: 'success' };
+  const a = adapter({ env });
+  const ctx = makeContext();
+  await drain(await a.start(ctx));
+
+  env.MOCK_CLAUDE_MODE = 'resultonly';
+  const second = await drain(await a.resume(ctx.run.id, ctx));
+  a.dispose(ctx.run.id);
+  assert.deepEqual(types(second.events), ['run.started', 'agent.message'], 'the result text is delivered');
+});
+
 test('skipPermissions is OFF by default: the sandbox-only knob is never implicit', async () => {
   const argvFile = tempFile('claude-argv-', '.json');
   const a = adapter({ env: { MOCK_CLAUDE_MODE: 'argv', MOCK_CLAUDE_ARGV_FILE: argvFile } });

@@ -324,6 +324,24 @@ test('resume: respawns with --resume <sessionId> captured from events', async ()
   assert.ok(argv[argv.indexOf('--resume') + 1].startsWith('sess-'));
 });
 
+test('resume: the resumed attempt delivers its OWN output, not the previous attempt\'s exit (#997)', async () => {
+  // Same defect as hermes/claude (#997): a stale exitInfo/stdoutEnded from the previous process
+  // settles the resumed session before its own child has written anything.
+  const argvFile = tempFile('argv-resume-own', 'json');
+  const adapter = new LocalAgentAdapter(jsonlConfig({ env: { MOCK_LOCAL_MODE: 'resume', MOCK_LOCAL_ARGV_FILE: argvFile } }));
+  const { context } = makeContext();
+  const handle = await adapter.start(context);
+  const first = await collectAll(handle);
+  assert.ok(first.events.length > 0, 'the first attempt delivers events');
+
+  const h2 = await adapter.resume(handle.runId);
+  const second = await collectAll(h2);
+  assert.equal(second.exit.reason, 'completed');
+  assert.ok(second.events.length > 0, 'the resumed attempt must deliver its own events');
+  assert.ok(second.events.some((e) => e.type === 'agent.message'), 'including its own message');
+  adapter.dispose(context.run.id);
+});
+
 test('resume without session id -> throws', async () => {
   const { context } = makeContext();
   const adapter = new LocalAgentAdapter(jsonlConfig({

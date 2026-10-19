@@ -161,6 +161,7 @@ Record: [`docs/laya-integration-design.md`](docs/laya-integration-design.md)
 | #856 | Bot: the Laya question and the decision rule (pure) (L1-3) | done | #866 |
 | #857 | Wire selection into both dispatch paths; lift the refusal for `shadow` (L1-4) | open | — |
 | #955 | Laya: the five open §12 decisions beyond the L1-0 label rule have no issue — checkpoint… | open | — |
+| #997 | Adapter resume: the resumed attempt settles on the PREVIOUS attempt's exit and drops its own output (hermes #829, claude #827) | open | — |
 
 ## Fleet and bots
 

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { settleExit, rearmExitGate, createExitGate } from '../src/adapters/exitSettlement.ts';
+import { beginResumedAttempt, settleExit, rearmExitGate, createExitGate } from '../src/adapters/exitSettlement.ts';
 import type { AgentExit } from '../src/domain/types.ts';
 
 // Issue #148 (R2-12). Round 1 promised a shared adapter base as remediation step 9 and marked it
@@ -170,4 +170,92 @@ test('the shared module is the only place that owns the settlement logic', () =>
   };
   walk(new URL('../src/', import.meta.url).pathname);
   assert.deepEqual(others, [], 'settleExit() must have exactly one definition in src/');
+});
+
+// ---- #997: a resumed attempt must not inherit the previous attempt's observations ----------
+
+/** A stand-in for a child process: records listener churn and stream teardown. */
+function fakeProc() {
+  const log: string[] = [];
+  const stream = (name: string) => ({
+    removeAllListeners(ev?: string) { log.push(`${name}.remove:${ev ?? '*'}`); },
+    on(ev: string) { log.push(`${name}.on:${ev}`); },
+    destroy() { log.push(`${name}.destroy`); },
+  });
+  return {
+    log,
+    proc: {
+      removeAllListeners(ev?: string) { log.push(`proc.remove:${ev ?? '*'}`); },
+      on(ev: string) { log.push(`proc.on:${ev}`); },
+      stdout: stream('stdout'),
+      stderr: stream('stderr'),
+    },
+  };
+}
+
+test('beginResumedAttempt clears the previous attempt\'s exit, stdout and drain state (#997)', () => {
+  // #997: resume() re-armed the exit gate but left `exitInfo` and `stdoutEnded` set from the previous
+  // process. settleWhenDrained() needs BOTH, so the first late event from that process settled the
+  // resumed session on the previous attempt's exit while the new child was still starting.
+  const { proc } = fakeProc();
+  const timer = setTimeout(() => {}, 60_000);
+  timer.unref?.();
+  const session = {
+    ...createExitGate(),
+    proc,
+    exitInfo: { code: 0, signal: null },
+    stdoutEnded: true,
+    drainTimer: timer,
+  };
+  settleExit(session, { code: 0, signal: null, reason: 'completed' });
+  rearmExitGate(session);
+
+  beginResumedAttempt(session);
+  assert.equal(session.proc, null, 'the previous child is detached');
+  assert.equal(session.exitInfo, null, 'the previous exit must not settle the resumed attempt');
+  assert.equal(session.stdoutEnded, false, 'the new child has not ended its stdout yet');
+  assert.equal(session.drainTimer, null, 'a pending grace timer would settle the new attempt early');
+});
+
+test('beginResumedAttempt detaches the previous child, so its late events cannot touch the new attempt (#997)', () => {
+  // Clearing the fields alone is not enough: a late 'close' from the old process would set
+  // stdoutEnded = true again and defeat the #166 drain guard for the NEW child. Both halves are
+  // asserted here, because either one alone leaves a hole.
+  const { proc, log } = fakeProc();
+  const session = {
+    ...createExitGate(),
+    proc,
+    exitInfo: { code: 1, signal: null },
+    stdoutEnded: true,
+    drainTimer: null,
+  };
+  beginResumedAttempt(session);
+
+  for (const ev of ['exit', 'close', 'error']) {
+    assert.ok(log.includes(`proc.remove:${ev}`), `the old child's ${ev} listener must be removed`);
+  }
+  for (const stream of ['stdout', 'stderr']) {
+    for (const ev of ['data', 'end', 'error']) {
+      assert.ok(log.includes(`${stream}.remove:${ev}`), `the old ${stream} ${ev} listener must be removed`);
+    }
+  }
+  // A destroyed stream can still emit 'error'; an unhandled one is an uncaught exception that would
+  // take the worker down over a run that already settled.
+  assert.ok(log.includes('proc.on:error'), 'a no-op error listener replaces the removed one');
+  assert.ok(log.includes('stdout.on:error') && log.includes('stderr.on:error'));
+  // No reader left on a still-running previous child would block it forever on a full pipe.
+  assert.ok(log.includes('stdout.destroy') && log.includes('stderr.destroy'), 'the abandoned pipes are released');
+});
+
+test('every stdio adapter detaches on resume (structural, #997)', () => {
+  // The same bug existed in three adapters with a byte-identical resume() preamble, which is the
+  // pattern exitSettlement.ts was created to stop repeating. A new stdio adapter that spawns in
+  // resume() without this call reintroduces #997 for its backend.
+  const stdio = adapterSources().filter(({ code }) => {
+    const live = stripComments(code);
+    return live.includes('async resume(') && live.includes('spawnProcess(');
+  });
+  assert.ok(stdio.length >= 3, `expected at least three stdio adapters, found ${stdio.map((s) => s.name).join(', ')}`);
+  const missing = stdio.filter(({ code }) => !stripComments(code).includes('beginResumedAttempt(session)')).map((s) => s.name);
+  assert.deepEqual(missing, [], 'a stdio adapter resumes without beginResumedAttempt(); see #997');
 });

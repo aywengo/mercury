@@ -529,6 +529,16 @@ resume?(runId):
     captured from the previous run (stdout/event/file)
 ```
 
+> **Resume starts a NEW attempt (#997).** A resumed session reuses the same session object, so
+> every observation that describes the *previous* child must be cleared before the replacement
+> spawns: call `beginResumedAttempt(session)` from `src/adapters/exitSettlement.ts` (it detaches
+> the old process, clears `exitInfo`/`stdoutEnded`/any drain timer) and then clear your own
+> per-attempt output flag (`stdoutFlushed`, `emittedText`, ...). Without the detach, a late
+> `close` from the old process marks the new attempt's stdout ended; without the clears, the
+> resumed handle settles on the previous attempt's exit and reports `completed` with no output.
+> `test/adapterExitSettlement.test.ts` enforces the call for every adapter that spawns in
+> `resume()`.
+
 > **Note:** the worker emits `run.started` itself, so mapping `started → run.started`
 > in `eventMap` duplicates it. Prefer `step.started` (or omit the mapping).
 > Flag-mode input: the agent exits after asking; `sendInput` waits for the exit,
