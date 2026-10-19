@@ -157,7 +157,8 @@ flowchart TD
   H1 --> A[Filter: /api/agents includes<br/>requested agent]
   H2 --> A
   A --> L[Filter: label selectors match]
-  L --> C{More than<br/>one host?}
+  L --> V[Filter: named preset or workflow<br/>is present and enabled]
+  V --> C{More than<br/>one host?}
   C -->|yes| S[Score: queueDepth, activeRuns,<br/>lease-expiry headroom]
   C -->|one| B[Bind]
   S --> B
@@ -180,6 +181,15 @@ idempotency key — which is what makes a retry safe rather than a second paid a
 **Locality is declared, never inferred.** Fleet cannot see a child's disk (section 4.2). If an operator
 forgets to declare a path, routing fails loudly with a clear reason. The alternative — try each host until
 one works — spends agent budget on guesses.
+
+**Availability is a constraint, and Fleet's own reading of the host is the evidence.** A Run that names a
+preset or a workflow can only run where that definition exists, enabled, and at the pinned version when one
+is pinned. Fleet derives the reference from the request body's own `preset` / `workflow` block — never from
+a separate field, which a caller could contradict — and filters on the per-host availability snapshot the
+prober maintains ([`fleet-bots-design.md`](fleet-bots-design.md) §5.2). A host Fleet has never read is
+excluded as `availability unknown`, because "this host has nothing" and "Fleet could not see" must not look
+the same (section 7). A **stale** snapshot only ranks the host lower: stale data can still be right, and
+refusing on it would turn one missed probe sweep into every Crew Run refused.
 
 ### The escape hatch worth building first
 
