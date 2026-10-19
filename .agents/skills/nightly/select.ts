@@ -857,19 +857,26 @@ export async function runSelectorWith(
         if (commented !== false) continue; // true = it commented; null = unreadable, keep the claim
         if (!dryRun) {
           if (!io.del) throw new Error('claim release needs io.del; the injected transport lacks it');
+          // Label FIRST, and its own failure path: the issue must become selectable even if the
+          // record comment fails. (Comment-then-label would be worse: a comment after the claim
+          // reads as "the Run produced output", so a failed delete could never be retried.)
           try {
-            // Label FIRST: the issue must become selectable even if the report comment fails.
-            // (Comment-then-label would be worse: a comment after the claim reads as "the Run
-            // produced output", so a failed delete could never be retried.)
             await io.del(`/repos/${repo}/issues/${claim.number}/labels/${encodeURIComponent(L_IN_PROGRESS)}`);
+          } catch (e) {
+            // The claim is still on the issue: keep it excluded. Fail closed for THIS issue only,
+            // the rest of the night still selects.
+            console.error(`claim release failed for #${claim.number}: ${String(e instanceof Error ? e.message : e)}`);
+            continue;
+          }
+          // The label is gone (or was already absent): the issue IS selectable now, so a failed
+          // record must not keep it excluded for the rest of the night. The release itself is
+          // what matters; the comment only makes it visible to the report.
+          try {
             await io.post(`/repos/${repo}/issues/${claim.number}/comments`, {
               body: `${CLAIM_RELEASED_MARKER}\nThe nightly released the \`${L_IN_PROGRESS}\` claim on this issue: the Run that claimed it ended without opening a PR and without commenting, so the issue is selectable again (#1001).`,
             });
           } catch (e) {
-            // Fail closed for THIS issue only: it stays claimed and excluded, the rest of the
-            // night still selects.
-            console.error(`claim release failed for #${claim.number}: ${String(e instanceof Error ? e.message : e)}`);
-            continue;
+            console.error(`claim release comment failed for #${claim.number}: ${String(e instanceof Error ? e.message : e)}`);
           }
         }
         // Released (or, in a dry run, would be): drop the label from the candidate's view.

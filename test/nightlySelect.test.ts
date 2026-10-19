@@ -1451,3 +1451,40 @@ test('--dry-run reports the release without writing it (#1001)', async () => {
     host.close();
   }
 });
+
+
+test('a failed release COMMENT still makes the issue selectable (label-first, #1009 r1)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'dead', task: 'nightly-next', status: 'FAILED' }]);
+  const claimed = issue({ number: 77, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [claimEvent], link: null };
+      if (path.includes('/comments')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: [], link: null };
+      return { body: [claimed], link: null };
+    },
+    async post(path: string) {
+      posts.push(path);
+      // The release record fails; the claim label add afterwards must still work.
+      if (path.endsWith('/comments')) throw new Error('HTTP 503');
+      return true;
+    },
+    async del(path: string) { dels.push(path); return true; },
+  };
+  try {
+    const s = await runSelectorWith(
+      io,
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' },
+      false,
+    );
+    assert.deepEqual(dels, ['/repos/aywengo/mercury/issues/77/labels/nightly%3Ain-progress'], 'the claim was released on GitHub');
+    assert.ok(posts.some((p) => p.endsWith('/comments')), 'the record was attempted');
+    assert.equal(s.issue, 77, 'a failed record must not keep a released issue excluded for the night');
+  } finally {
+    host.close();
+  }
+});
