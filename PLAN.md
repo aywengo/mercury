@@ -9,17 +9,21 @@ and by which PR?".
 
 1. **Filing an issue set adds its rows here,** in the same PR or commit that files it: `open`
    state, PR `—`, under the workstream's section (create the section if it is new).
-2. **The PR that closes an issue updates its row in that PR:** state `done` and the PR number
-   (`#<n>`). Add the row first if the issue has none. CI enforces this. The `plan-tracker` job
-   fails a pull request whose closing issues (`Closes #N` / `Fixes #N`) have a row here that is
-   not `done` with that PR's number.
+2. **The PR that closes an issue adds its row if the issue has none** (rule 1); it does NOT set
+   the row `done`. The `plan-sync` workflow (on push to `main`) sets each closing issue's row to
+   `done` with the merged PR's number, in one commit. This is what keeps two open PRs in one
+   workstream from conflicting on adjacent rows. The `plan-tracker` job fails a pull request whose
+   closing issues (`Closes #N` / `Fixes #N`) have no row here, unless the row is marked `untracked`.
 3. **An issue closed without a PR** (a decision, a duplicate, a superseded proposal) has its row
    updated by whoever closes it: `done` (decided or answered) or `dropped` (not planned), PR `—`.
-4. **States:** `open`, `in progress` (a PR is open), `done`, `dropped`. Nothing else.
+4. **States:** `open`, `in progress` (a PR is open), `done`, `dropped`, `untracked`. Nothing else.
+   `untracked` means the issue is explicitly not part of a tracked set; the `plan-sync` workflow
+   leaves it alone.
 5. **One row per issue.** Titles may be shortened; the issue number is the key.
 
 The procedure lives in [`.agents/skills/issue-fix-loop/SKILL.md`](.agents/skills/issue-fix-loop/SKILL.md)
-(step 3); the check is `scripts/planTracker.ts`.
+(step 3); the PR-time check is `scripts/planTracker.ts` and the post-merge update is
+`scripts/plan-sync.ts` (workflow `.github/workflows/plan-sync.yml`).
 
 ## Host installer
 
