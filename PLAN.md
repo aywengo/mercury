@@ -165,7 +165,7 @@ Record: [`docs/fleet-bots-design.md`](docs/fleet-bots-design.md)
 | --- | --- | --- | --- |
 | #970 | Fleet: per-host availability snapshot and a read-only view (FB0) | done | #978 |
 | #971 | Fleet: owner-scoped, paged `GET /fleet/runs` (FB2a) | in progress | #982 |
-| #972 | Fleet: availability-aware routing filter (FB1) | open | — |
+| #972 | Fleet: availability-aware routing filter (FB1) | done | #1002 |
 | #973 | Bots: `FleetSchedulerClient` and `api.via: "fleet"` (FB2b) | open | — |
 | #974 | End to end: a bot on host A dispatches through Fleet to host B (FB3) | open | — |
 
