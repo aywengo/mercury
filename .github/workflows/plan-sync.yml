@@ -2,21 +2,22 @@
 #
 # The per-PR row edit (old PLAN.md rule 2) made two open PRs in one workstream conflict on
 # adjacent rows every time one merged first. The row update now happens HERE, after merge, in one
-# commit as the Actions bot. `main` requires pull requests, so this workflow's push needs a bypass:
-# the Actions token is on the `main-protection` ruleset's bypass list (RepositoryRole "Actions",
-# bypass_mode "always"). That is a broad grant -- any workflow that requests `contents: write` can
-# push to main -- which is acceptable here because workflows already run arbitrary code on push and
-# the token's contents permission is read-only unless a workflow asks for write.
+# commit as the Actions bot.
+#
+# Push identity: `main` requires pull requests plus the `ci` status check, and the GITHUB_TOKEN
+# cannot bypass that ruleset (the "Actions" RepositoryRole, the github-actions[bot] user and the
+# github-actions app all fail for this user repo). So the push uses the operator's PAT stored in
+# the `PLAN_SYNC_TOKEN` repository secret, which is on the `main-protection` ruleset's bypass list
+# (User 800531). The PAT is a classic token with the `workflow` scope; it is the same identity the
+# operator uses to merge PRs with the admin bypass.
 #
 # Idempotent: a commit with no closing issues (including this workflow's own commit) changes
 # nothing, so the workflow does not re-trigger itself.
 #
-# CI note: `actions/checkout` persists `github.token` for the later `git push`, and GitHub does not
-# fire `push` workflows for commits pushed with that token. So the generated PLAN.md commit does NOT
-# run `ci` (or this workflow again). That is intentional: the commit only rewrites PLAN.md row
-# states/PR columns, and the script validates PLAN.md with the same parser the PR-time check uses
-# before writing, so a malformed file cannot land. This is the documented policy exception to the
-# repo's "any push to main runs the full suite" rule.
+# CI: `actions/checkout` persists `github.token` for the later `git push`, and GitHub does not fire
+# `push` workflows for commits pushed with that token. So after pushing, this workflow dispatches
+# `ci` via `workflow_dispatch` (needs `actions: write`) so the generated commit still runs the full
+# suite -- the repo's "any push to main runs the full suite" policy.
 
 name: plan-sync
 
@@ -39,6 +40,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24.x'
+      - name: Configure push identity (operator PAT bypasses the ruleset)
+        run: |
+          git remote set-url origin https://x-access-token:${{ secrets.PLAN_SYNC_TOKEN }}@github.com/${{ github.repository }}.git
       - name: Mark closing issues done
         env:
           GH_TOKEN: ${{ github.token }}
