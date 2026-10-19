@@ -57,7 +57,7 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #964 | nightly: report lists a one-night flake forever; the flake entry carries an absolute wo… | open | — |
 | #968 | nightly: resume PRs on the owner's changes-requested review, not only on Copilot findings | done | #969 |
 | #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | in progress | #981 |
-| #1001 | nightly: a claim whose Run ended with no PR and no comment is never released; rung 2 claims work with no ready signal | open | — |
+| #1001 | nightly: a claim whose Run ended with no PR and no comment is never released; rung 2 claims work with no ready signal | done | #1009 |
 
 ## Dispatcher bots
 
