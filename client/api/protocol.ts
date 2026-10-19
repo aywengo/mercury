@@ -39,6 +39,18 @@ export interface RunConstraints {
   allowedNetworks?: string[];
 }
 
+/**
+ * The surfaces the server itself can create a Run from, rather than an HTTP client (issue #988).
+ * A closed union: the server refuses an unknown value on `GET /api/runs?origin=` instead of
+ * answering with an empty page.
+ */
+export type RunOriginKind = 'a2a';
+
+export interface RunOrigin {
+  kind: RunOriginKind;
+  ref: string | null;
+}
+
 export interface Run {
   id: string;
   ownerId: string;
@@ -60,6 +72,24 @@ export interface Run {
   leaseOwner: string | null;
   leaseExpiresAt: string | null;
   cancellationRequestedAt: string | null;
+  /** When the Run's status last changed (B2-0, issue #906). Null or absent for rows that predate
+   *  the server's v18 migration -- treat as unknown, never as a substitute for createdAt. */
+  statusChangedAt?: string | null;
+  /** When the recorded automatic-retry intent for this attempt becomes due (A0-2, issue #987).
+   *  Non-null means the attempt is terminal, a retry was decided, and it has not happened yet.
+   *  Null or absent for rows that predate the server's v19 migration, and for every attempt
+   *  nobody decided to retry -- both mean "no retry pending". */
+  retryDueAt?: string | null;
+  /** Where the SERVER says this Run came from (A0-3, issue #988), or null when it recorded none --
+   *  which is every Run created by an HTTP client, and every row that predates the server's v20
+   *  migration. Read-only: no request body can set it, and the server refuses one that tries.
+   *  Distinct from `constraints.botTask`, which is a client-supplied hint the server never trusts. */
+  origin?: RunOrigin | null;
+  /** When this attempt FIRST began executing (A0-4, issue #990), or null when it never has.
+   *  Unlike `startedAt`, this survives a shutdown requeue, so it answers "has this attempt ever
+   *  run?". Null also for rows that predate the server's v21 migration -- fall back to `startedAt`
+   *  then, which is what the server's own `hasStarted` helper does. */
+  firstStartedAt?: string | null;
   finalCommits: string[];
   prUrl: string | null;
   /**

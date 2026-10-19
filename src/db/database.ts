@@ -455,6 +455,90 @@ export const MIGRATIONS: string[] = [
   CREATE UNIQUE INDEX IF NOT EXISTS idx_run_presets_runwide
     ON run_presets(run_id) WHERE stage_index IS NULL;
   `,
+  // v18: the Run status-transition timestamp (B2-0, issue #906). The trigger matcher must not
+  // approximate "waiting since" from createdAt (docs/dispatcher-bot-design.md section 6.1), so the
+  // Run row records when its status last changed. Additive and nullable: rows written before the
+  // migration have NULL and the field serializes as null, never a fabricated time. It is set ONLY
+  // by RunStore.transition -- the single state-machine write choke point -- plus at insert
+  // (creation is the QUEUED transition).
+  `
+  ALTER TABLE runs ADD COLUMN status_changed_at TEXT;
+  `,
+  // v19: the durable automatic-retry intent (A0-2, issue #987). The worker's decision to retry an
+  // infrastructure failure used to live only in its memory: it slept the backoff and then created
+  // the child, so a worker that died during the sleep left a failure nobody would ever retry and
+  // no reader could tell "retry pending" from "final". The column records the decision in the same
+  // transaction as the terminal transition, and holds the time the retry becomes due -- so a
+  // recovering worker needs no memory of the backoff that produced it.
+  //
+  // A column rather than a `run.retry_scheduled` event, because the intent is a property of the
+  // attempt that must commit WITH its status (a second writer is how status and intent disagree),
+  // because recovery is a query -- "due intents with no child" -- that an events scan cannot
+  // answer without a join, and because chainState must be pure over persisted ROW fields.
+  //
+  // Additive and nullable: rows written before the migration have NULL, which reads as "no intent
+  // recorded", exactly the pre-#987 meaning. The index is what makes recovery's anti-join
+  // ("no child yet") cheap; it is deliberately NOT unique, so a pre-#987 database that already
+  // holds two children for one attempt still migrates instead of refusing to start.
+  `
+  ALTER TABLE runs ADD COLUMN retry_due_at TEXT;
+  CREATE INDEX IF NOT EXISTS idx_runs_retry_of ON runs(retry_of);
+  `,
+  // v20: server-stamped Run origin (A0-3, issue #988). A2A `ListTasks` has to return the caller's
+  // A2A-created chains rather than every Run the caller owns, and that attribution must not rest on
+  // anything a client wrote: `constraints.botTask` is explicitly a client-supplied hint, never a
+  // trust boundary. `owner_id` was the only server-set attribution until this column pair.
+  //
+  // Two columns rather than a JSON blob because the filter is by kind alone (`?origin=a2a`), and a
+  // blob would make that a scan. Nullable and additive: rows written before this migration read
+  // NULL, which is "no origin recorded" -- nothing is backfilled, because an origin nobody recorded
+  // cannot be recovered by guessing, and a fabricated one would be indistinguishable from a real one
+  // to every consumer.
+  //
+  // The index follows the same rule as `idx_runs_status`: a column `RunStore.list` can filter by is
+  // indexed. The owner-scoped list is already served by idx_runs_owner_created, so this one earns its
+  // keep on the unscoped (admin) list.
+  `
+  ALTER TABLE runs ADD COLUMN origin_kind TEXT;
+  ALTER TABLE runs ADD COLUMN origin_ref TEXT;
+  CREATE INDEX IF NOT EXISTS idx_runs_origin_kind ON runs(origin_kind);
+  `,
+  // v21: when this attempt FIRST began executing (A0-4, issue #990). `started_at` cannot answer
+  // that: a graceful-shutdown requeue (issue #51) nulls it on purpose so the duration and queue-wait
+  // metrics measure the current execution, which also erases the only persisted record that the
+  // attempt ran at all. Two readers need that fact -- the A2A state mapping (a task the caller saw
+  // WORKING must not go back to SUBMITTED on every deploy) and goal settlement (`attempted` must not
+  // read false for an attempt that ran for ten minutes and was then requeued and cancelled).
+  //
+  // Written by the same statement as `started_at`, with COALESCE so the FIRST value wins, and never
+  // cleared. A column rather than an event because the question is asked per-Run by a list endpoint
+  // (A2A `ListTasks`), where an event scan is a per-task query; and rather than reusing `started_at`
+  // because the requeue is a raw UPDATE in RunQueue that bypasses RunStore.transition, so "preserve
+  // it by not mentioning it there" would be a property of one SQL string that nothing checks.
+  //
+  // BACKFILLED, unlike the other additive columns here (status_changed_at, origin_kind). The
+  // difference is what the value is for. A missing measurement can stay missing: nothing is wrong
+  // with reporting "unknown duration". A missing fact is a wrong answer, and `hasStarted` falls back
+  // to `started_at` -- which the shutdown requeue clears. So for a Run that is already active when
+  // this migration runs, the fallback is the ONLY evidence that it executed, and the next requeue
+  // destroys it (PR #998 review round 1). Deferring the fallback to read time is the same backfill
+  // performed later, at a moment when the value may already be gone; doing it here is what makes it
+  // survive.
+  //
+  // Both sources are real records, and the event wins because it is the exact start the transition
+  // wrote. `started_at` follows for a row whose event is missing (pruned, or written by a build that
+  // did not emit one). A row that never ran has neither, so it stays NULL -- nothing is invented.
+  `
+  ALTER TABLE runs ADD COLUMN first_started_at TEXT;
+  UPDATE runs SET first_started_at = (
+    SELECT MIN(json_extract(e.payload_json, '$.startedAt'))
+      FROM events e WHERE e.run_id = runs.id AND e.type = 'run.started'
+  ) WHERE first_started_at IS NULL AND EXISTS (
+    SELECT 1 FROM events e WHERE e.run_id = runs.id AND e.type = 'run.started'
+  );
+  UPDATE runs SET first_started_at = started_at
+   WHERE first_started_at IS NULL AND started_at IS NOT NULL;
+  `,
 ];
 
 export const BUSY_TIMEOUT_MS = 5_000;

@@ -169,6 +169,32 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE host_probe ADD COLUMN knowledge_pull_at TEXT;
     `,
   },
+  {
+    version: 6,
+    sql: `
+      -- CACHE, like host_probe: rebuildable by one sweep of successful availability reads.
+      --
+      -- The per-host availability snapshot (fleet-bots-design.md section 5.1, FB0 #970): what presets and
+      -- workflow templates the host serves, read from /api/presets and /api/workflows on the probe timer
+      -- with the same credential.
+      --
+      -- presets is JSON, '[]' when the host answered but serves none. workflows is NULL both when the host
+      -- answers 404 ("not served", a definite answer that arrives with W-3 #934) and when Fleet has never
+      -- read it successfully; those are told apart by presets/probed_at/stale, not by this column.
+      --
+      -- stale = 1 means the last availability read FAILED: the row keeps the previous values rather than
+      -- being emptied or deleted, because "host has nothing" and "Fleet could not see" must not look the
+      -- same (section 5.1). The view layer also treats an old probed_at as stale; this flag is for the
+      -- failure the sweep just saw.
+      CREATE TABLE IF NOT EXISTS host_availability (
+        host_id      TEXT PRIMARY KEY REFERENCES hosts(id) ON DELETE CASCADE,
+        presets      TEXT NOT NULL DEFAULT '[]',
+        workflows    TEXT,
+        probed_at    TEXT NOT NULL,
+        stale        INTEGER NOT NULL DEFAULT 0
+      );
+    `,
+  },
 ];
 
 export interface FleetDb {

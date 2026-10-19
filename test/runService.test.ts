@@ -1,11 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 import { NotFoundError } from '../src/domain/errors.ts';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDatabase } from '../src/db/database.ts';
 import { makeEnv, tempDir, waitFor } from './helpers.ts';
 import type { AgentAdapter, RunConstraints } from '../src/domain/types.ts';
+import { hasStarted } from '../src/domain/types.ts';
 import { createRedactor } from '../src/domain/redact.ts';
 import { FakeAgentAdapter } from '../src/adapters/fakeAgentAdapter.ts';
 import { validateModelShape } from '../src/runs/runService.ts';
@@ -217,6 +219,360 @@ test('retry throws once per-run maxRetries is exhausted (issue #9)', () => {
   }
 });
 
+test('retry: the child carries retry_of and the bumped attempt in the INSERT that creates it (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+
+    // The window #987 is about. The child used to be committed by create()'s transaction and linked
+    // by a FOLLOW-UP update, so every reader -- including a worker in another process claiming the
+    // child -- could see a fresh attempt 1 with no parent. Observing the INSERT is observing that
+    // window: whatever the INSERT writes is what the committed row says, and with the link written
+    // outside it, this assertion sees `retryOf: null`.
+    const inserted: { id: string; retryOf: string | null; attempt: number }[] = [];
+    const realInsert = env.runs.insert.bind(env.runs);
+    env.runs.insert = (r) => {
+      inserted.push({ id: r.id, retryOf: r.retryOf, attempt: r.attempt });
+      realInsert(r);
+    };
+
+    const retried = env.runService.retry(run.id, 'alice', false);
+    assert.equal(inserted.length, 1, 'a retry must insert exactly one child row');
+    assert.equal(inserted[0]!.id, retried.id);
+    assert.equal(inserted[0]!.retryOf, run.id, 'the child was inserted without its parent link');
+    assert.equal(inserted[0]!.attempt, 2, 'the child was inserted with a reset attempt counter');
+
+    // The same answer from a second connection, i.e. from any other process: the row and its link
+    // became visible together, so there is no state in which the child exists unlinked.
+    const other = new DatabaseSync(join(env.dir, 'test.db'));
+    try {
+      const row = other.prepare('SELECT retry_of, attempt FROM runs WHERE id = ?').get(retried.id) as
+        | { retry_of: string | null; attempt: number }
+        | undefined;
+      assert.equal(row?.retry_of, run.id);
+      assert.equal(row?.attempt, 2);
+    } finally {
+      other.close();
+    }
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: the terminal transition records the intent, and a refusal clears it with the reason (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'x',
+      agent: 'fake',
+      constraints: { maxRetries: 0 },
+    });
+    env.runs.transition(run.id, 'STARTING');
+    // Exactly what the worker does now: the decision rides the same statement as the status, so a
+    // terminal attempt and its intent can never disagree.
+    const dueAt = new Date(Date.now() + 30_000).toISOString();
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString(), retryDueAt: dueAt });
+    assert.equal(env.runs.get(run.id)!.retryDueAt, dueAt, 'the intent must be persisted by the transition');
+
+    // maxRetries: 0 means the retry the intent describes can never be honoured.
+    assert.throws(() => env.runService.retry(run.id, 'alice', true, { auto: true }), /Max retries reached/);
+
+    assert.equal(env.runs.get(run.id)!.retryDueAt, null, 'a refused retry must not leave the intent recorded');
+    const refused = env.events.list(run.id).filter((e) => e.type === 'run.retry_refused');
+    assert.equal(refused.length, 1, 'the refusal must be recorded on the Run');
+    assert.match(String((refused[0]!.payload as { reason: string }).reason), /Max retries reached/);
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: a refusal with no recorded intent records no run.retry_refused (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'RUNNING');
+    env.runs.transition(run.id, 'COMPLETED', { completedAt: new Date().toISOString() });
+    assert.throws(() => env.runService.retry(run.id, 'alice', false), /completed/);
+    assert.equal(env.events.list(run.id).some((e) => e.type === 'run.retry_refused'), false);
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: a manual retry clears the recorded intent, so the automatic retry cannot fire twice (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', {
+      completedAt: new Date().toISOString(),
+      retryDueAt: new Date(Date.now() + 30_000).toISOString(),
+    });
+
+    const manual = env.runService.retry(run.id, 'alice', true);
+    assert.equal(manual.retryOf, run.id);
+    assert.equal(manual.attempt, 2);
+    assert.equal(env.runs.get(run.id)!.retryDueAt, null, 'the operator retried it, so the pending intent is gone');
+
+    // The worker's own automatic retry for the same attempt now finds nothing to claim: no second
+    // child, and no run.retry_refused either -- the chain is not final, the retry simply happened.
+    assert.throws(() => env.runService.retry(run.id, 'alice', true, { auto: true }), /already claimed/);
+    const children = env.runs.list({ ownerId: 'alice', limit: 50 }).runs.filter((r) => r.retryOf === run.id);
+    assert.equal(children.length, 1);
+    assert.equal(env.events.list(run.id).some((e) => e.type === 'run.retry_refused'), false);
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: an unexpected failure leaves the intent recorded, so recovery can try again (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    const dueAt = new Date(Date.now() + 30_000).toISOString();
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString(), retryDueAt: dueAt });
+
+    // A failure that is not an answer about whether the retry can happen: the write itself broke.
+    const realInsert = env.runs.insert.bind(env.runs);
+    env.runs.insert = () => {
+      throw new Error('database went away');
+    };
+    assert.throws(() => env.runService.retry(run.id, 'alice', true, { auto: true }), /database went away/);
+    env.runs.insert = realInsert;
+
+    assert.equal(env.runs.get(run.id)!.retryDueAt, dueAt, 'an error nobody decided on must not finalise the chain');
+    assert.equal(env.events.list(run.id).some((e) => e.type === 'run.retry_refused'), false);
+
+    // ...and the retry still happens once the write works again.
+    const child = env.runService.retry(run.id, 'alice', true, { auto: true });
+    assert.equal(child.retryOf, run.id);
+  } finally {
+    env.close();
+  }
+});
+
+test('origin: create stamps it from the internal input, and the ROW keeps it (issue #988 acceptance 2)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake',
+      origin: { kind: 'a2a', ref: 'task-1' },
+    });
+    assert.deepEqual(run.origin, { kind: 'a2a', ref: 'task-1' });
+    // Re-read through the store: the returned object could be right while the row is not, and the
+    // row is what every other reader -- another process, a later request -- actually sees.
+    assert.deepEqual(env.runs.get(run.id)!.origin, { kind: 'a2a', ref: 'task-1' });
+
+    // A Run created without one reads null rather than a default kind: "no origin recorded" must
+    // not be indistinguishable from "created by a2a".
+    const plain = env.runService.create({ ownerId: 'alice', task: 'y', agent: 'fake' });
+    assert.equal(plain.origin, null);
+    assert.equal(env.runs.get(plain.id)!.origin, null);
+  } finally {
+    env.close();
+  }
+});
+
+test('origin: a retry inherits the parent origin and the filter stays owner-scoped (issue #988 acceptance 2, 3)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const parent = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake', origin: { kind: 'a2a', ref: 'task-1' },
+    });
+    env.runs.transition(parent.id, 'STARTING');
+    env.runs.transition(parent.id, 'FAILED', { completedAt: new Date().toISOString() });
+    const child = env.runService.retry(parent.id, 'alice', true);
+    assert.deepEqual(child.origin, { kind: 'a2a', ref: 'task-1' }, 'a retry is the same work, so the same provenance');
+    assert.deepEqual(env.runs.get(child.id)!.origin, { kind: 'a2a', ref: 'task-1' });
+
+    // One plain Run of the same owner, and one A2A Run of a DIFFERENT owner. The filter has to
+    // exclude both: the first because it has no origin, the second because an origin filter is
+    // never an authorisation.
+    const plain = env.runService.create({ ownerId: 'alice', task: 'plain', agent: 'fake' });
+    const foreign = env.runService.create({
+      ownerId: 'bob', task: 'theirs', agent: 'fake', origin: { kind: 'a2a', ref: 'task-2' },
+    });
+
+    const alice = env.runService.list({ ownerId: 'alice', isAdmin: false, origin: 'a2a', limit: 50 });
+    assert.deepEqual(alice.runs.map((r) => r.id).sort(), [parent.id, child.id].sort());
+    assert.ok(!alice.runs.some((r) => r.id === plain.id), 'a Run with no origin must not match an origin filter');
+    assert.ok(!alice.runs.some((r) => r.id === foreign.id), "another owner's A2A Runs must never appear");
+
+    // Admin sees every origin-matching Run, still narrowed by the filter.
+    const admin = env.runService.list({ ownerId: 'admin', isAdmin: true, origin: 'a2a', limit: 50 });
+    assert.deepEqual(admin.runs.map((r) => r.id).sort(), [parent.id, child.id, foreign.id].sort());
+
+    // No filter is unchanged: everything the caller can see, whatever its origin.
+    assert.equal(env.runService.list({ ownerId: 'alice', isAdmin: false, limit: 50 }).runs.length, 3);
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: a second manual retry of one attempt is refused, so the chain stays linear (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', { completedAt: new Date().toISOString() });
+
+    const first = env.runService.retry(run.id, 'alice', true);
+    assert.equal(first.retryOf, run.id);
+    // Two children of one attempt are two attempts with the same number: `latest` stops being well
+    // defined, and a chain that forked this way can report final while a sibling is still running.
+    assert.throws(
+      () => env.runService.retry(run.id, 'alice', true),
+      /already has a retry/,
+      'a second child of one attempt must be refused, not silently created',
+    );
+    const children = env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 20 }).runs.filter((r) => r.retryOf === run.id);
+    assert.equal(children.length, 1);
+    assert.equal(children[0]!.id, first.id);
+
+    // The chain is still retryable the linear way: retry the CHILD, not the parent again.
+    env.runs.transition(first.id, 'STARTING');
+    env.runs.transition(first.id, 'FAILED', { completedAt: new Date().toISOString() });
+    const second = env.runService.retry(first.id, 'alice', true);
+    assert.equal(second.retryOf, first.id);
+    assert.equal(second.attempt, 3);
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: a stale refusal records no event and does not clear an honoured intent (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', {
+      completedAt: new Date().toISOString(),
+      retryDueAt: new Date(Date.now() + 30_000).toISOString(),
+    });
+    // The snapshot a refuser holds when another worker's child committed in between: the Run as it
+    // looked BEFORE that transaction ran -- intent present, budget spent. Reading it before the
+    // transaction is exactly what makes an unconditional clear-and-record wrong.
+    const beforeChild = env.runs.get(run.id)!;
+    assert.notEqual(beforeChild.retryDueAt ?? null, null);
+    const child = env.runService.retry(run.id, 'alice', true);
+    assert.equal(env.runs.get(run.id)!.retryDueAt, null, 'the child transaction cleared the intent');
+
+    const stale = { ...beforeChild, attempt: beforeChild.constraints.maxRetries + 1 };
+    const realGet = env.runs.get.bind(env.runs);
+    env.runs.get = (id: string) => (id === run.id ? stale : realGet(id));
+    try {
+      assert.throws(() => env.runService.retry(run.id, 'alice', true, { auto: true }), /Max retries reached/);
+    } finally {
+      env.runs.get = realGet;
+    }
+
+    assert.equal(
+      env.events.list(run.id).some((e) => e.type === 'run.retry_refused'),
+      false,
+      'a refusal for an intent that was honoured must not be recorded',
+    );
+    assert.equal(env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 20 }).runs.filter((r) => r.retryOf === run.id).length, 1);
+    assert.equal(env.runs.get(child.id)!.retryOf, run.id);
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: two refusers of one intent record the reason once (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'x', agent: 'fake', constraints: { maxRetries: 0 },
+    });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', {
+      completedAt: new Date().toISOString(),
+      retryDueAt: new Date(Date.now() + 30_000).toISOString(),
+    });
+
+    // Two workers that both read the pending intent before either committed. The UPDATE is the
+    // arbiter, so exactly one of them may clear it and record why.
+    const live = env.runs.get(run.id)!;
+    const realGet = env.runs.get.bind(env.runs);
+    env.runs.get = (id: string) => (id === run.id ? live : realGet(id));
+    try {
+      assert.throws(() => env.runService.retry(run.id, 'alice', true, { auto: true }), /Max retries reached/);
+      assert.throws(() => env.runService.retry(run.id, 'alice', true, { auto: true }), /Max retries reached/);
+    } finally {
+      env.runs.get = realGet;
+    }
+
+    assert.equal(env.runs.get(run.id)!.retryDueAt, null);
+    const refused = env.events.list(run.id).filter((e) => e.type === 'run.retry_refused');
+    assert.equal(refused.length, 1, `expected one refusal event, got ${refused.length}`);
+  } finally {
+    env.close();
+  }
+});
+
+test('retry: two workers holding the same stale pending read create exactly one child (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    env.runs.transition(run.id, 'STARTING');
+    env.runs.transition(run.id, 'FAILED', {
+      completedAt: new Date().toISOString(),
+      retryDueAt: new Date(Date.now() - 1).toISOString(),
+    });
+
+    // What two processes recovering the same attempt both see before either commits. Clearing the
+    // intent IS the claim, so the second worker must find it gone and create nothing.
+    const dueBefore = new Date().toISOString();
+    const seenByA = env.runs.listPendingRetries(dueBefore);
+    const seenByB = env.runs.listPendingRetries(dueBefore);
+    assert.equal(seenByA.length, 1);
+    assert.equal(seenByB.length, 1);
+
+    const winner = env.runService.retry(seenByA[0]!.id, seenByA[0]!.ownerId, true, { auto: true });
+    assert.throws(
+      () => env.runService.retry(seenByB[0]!.id, seenByB[0]!.ownerId, true, { auto: true }),
+      /already claimed/,
+      'the second worker must lose the claim rather than create a second retry',
+    );
+    const children = env.runService.list({ ownerId: 'alice', isAdmin: true, limit: 20 }).runs.filter((r) => r.retryOf === run.id);
+    assert.equal(children.length, 1);
+    assert.equal(children[0]!.id, winner.id);
+  } finally {
+    env.close();
+  }
+});
+
+test('listPendingRetries returns due intents with no child, and nothing else (issue #987)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const mk = (retryDueAt: string | null) => {
+      const r = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+      env.runs.transition(r.id, 'STARTING');
+      env.runs.transition(r.id, 'FAILED', { completedAt: new Date().toISOString(), retryDueAt });
+      return r;
+    };
+    const future = mk(new Date(Date.now() + 60_000).toISOString());
+    const due = mk(new Date(Date.now() - 1).toISOString());
+    const noIntent = mk(null);
+
+    const found = env.runs.listPendingRetries(new Date().toISOString()).map((r) => r.id);
+    assert.deepEqual(found, [due.id], 'only the due intent is recoverable');
+    assert.equal(found.includes(future.id), false, 'a backoff that has not elapsed is not due');
+    assert.equal(found.includes(noIntent.id), false, 'no intent means no retry was decided');
+
+    // Once the retry exists, the attempt stops being recoverable -- otherwise every sweep would
+    // create another child.
+    env.runService.retry(due.id, 'alice', true, { auto: true });
+    assert.deepEqual(env.runs.listPendingRetries(new Date().toISOString()).map((r) => r.id), []);
+  } finally {
+    env.close();
+  }
+});
 
 test('submitInput only allowed in NEEDS_INPUT', () => {
   const env = makeEnv({ workerEnabled: false });
@@ -1053,6 +1409,143 @@ test('model: a modelRequired preset refuses a conflicting caller model through t
       /preset requires model "the-only-model"; caller asked for "caller-model"/,
     );
     assert.equal(env.runs.list({ ownerId: 'alice', limit: 10 }).runs.length, 0, 'no Run row written');
+  } finally {
+    env.close();
+  }
+});
+
+test('statusChangedAt changes exactly at each transition and survives a NULL pre-migration row (issue #906)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    // Creation is the QUEUED transition: the field is set from the start, never fabricated later.
+    assert.equal(run.statusChangedAt, run.createdAt);
+
+    const seen: (string | null | undefined)[] = [run.statusChangedAt];
+    // ISO timestamps have millisecond precision; back-to-back transitions in-process can land in
+    // the same millisecond legally. Pause between transitions so "changed" is observable, not
+    // asserted against a tie the field's precision cannot distinguish.
+    const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    for (const to of ['STARTING', 'RUNNING', 'COMPLETED'] as const) {
+      pause(5);
+      env.runs.transition(run.id, to, to === 'COMPLETED' ? { completedAt: new Date().toISOString() } : undefined);
+      const r = env.runs.get(run.id)!;
+      seen.push(r.statusChangedAt);
+    }
+    // Monotonic and strictly changing at every transition.
+    for (let i = 1; i < seen.length; i++) {
+      assert.ok(seen[i] != null);
+      assert.ok(new Date(seen[i]!) >= new Date(seen[i - 1]!), 'statusChangedAt must not go back');
+      assert.notEqual(seen[i], seen[i - 1], 'statusChangedAt must change at each transition');
+    }
+    // Terminal timestamp matches the terminal event's timestamp ordering (same append window).
+    const terminal = env.runs.get(run.id)!;
+    assert.equal(terminal.status, 'COMPLETED');
+    assert.ok(terminal.completedAt != null && terminal.statusChangedAt != null);
+
+    // A row written before the migration (status_changed_at NULL) lists cleanly with the field
+    // null, never a fabricated timestamp.
+    env.db.prepare("UPDATE runs SET status_changed_at = NULL WHERE id = ?").run(run.id);
+    const migrated = env.runs.list({ ownerId: 'alice', limit: 10 }).runs.find((r) => r.id === run.id)!;
+    assert.equal(migrated.statusChangedAt, null);
+    const viaApi = env.runs.get(run.id)!;
+    assert.equal(viaApi.statusChangedAt, null);
+  } finally {
+    env.close();
+  }
+});
+
+test('transition extra refuses a caller-supplied statusChangedAt (issue #906 review, item 3)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    assert.throws(
+      () => env.runs.transition(run.id, 'STARTING', { statusChangedAt: '2000-01-01T00:00:00.000Z' }),
+      /statusChangedAt/,
+    );
+    // The refused transition left the Run untouched: still QUEUED, stamp still the creation one.
+    const r = env.runs.get(run.id)!;
+    assert.equal(r.status, 'QUEUED');
+    assert.equal(r.statusChangedAt, run.createdAt);
+  } finally {
+    env.close();
+  }
+});
+
+test('a shutdown requeue clears startedAt but keeps firstStartedAt (A0-4, issue #990)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    const claimed = env.queue.claim('worker-1', 60_000);
+    assert.equal(claimed?.id, run.id);
+    env.runs.transition(run.id, 'STARTING');
+    const startedAt = new Date().toISOString();
+    env.runs.transition(run.id, 'RUNNING', { startedAt });
+    assert.equal(env.runs.get(run.id)!.firstStartedAt, startedAt, 'the first start rides the startedAt write');
+
+    assert.equal(env.queue.requeueForShutdown(run.id, 'worker-1'), true);
+    const requeued = env.runs.get(run.id)!;
+    assert.equal(requeued.status, 'QUEUED');
+    // Deliberate: the duration and queue-wait metrics measure the CURRENT execution, so the requeue
+    // must null this. It is also why the "has this attempt run" fact needs its own column.
+    assert.equal(requeued.startedAt, null, 'the requeue clears the current execution start');
+    assert.equal(requeued.firstStartedAt, startedAt, 'the fact that this attempt ran must survive the requeue');
+    assert.equal(hasStarted(requeued), true);
+
+    // A second execution moves `startedAt` and must NOT move the first-start stamp.
+    env.runs.transition(run.id, 'STARTING');
+    const second = new Date(Date.now() + 1000).toISOString();
+    env.runs.transition(run.id, 'RUNNING', { startedAt: second });
+    const rerun = env.runs.get(run.id)!;
+    assert.equal(rerun.startedAt, second, 'startedAt follows the current execution');
+    assert.equal(rerun.firstStartedAt, startedAt, 'firstStartedAt stays the FIRST');
+
+    // One writer, enforced rather than documented: a caller-supplied value would add a second
+    // assignment to the same SET and win silently under last-binding-wins.
+    assert.throws(
+      () => env.runs.transition(run.id, 'COMPLETED', { firstStartedAt: '2000-01-01T00:00:00.000Z' }),
+      /must not set firstStartedAt/,
+    );
+    // A Run that never reached RUNNING has no first start at all.
+    const never = env.runService.create({ ownerId: 'alice', task: 'y', agent: 'fake' });
+    assert.equal(env.runs.get(never.id)!.firstStartedAt, null);
+    assert.equal(hasStarted(env.runs.get(never.id)!), false);
+  } finally {
+    env.close();
+  }
+});
+
+test('every status write stamps statusChangedAt: shutdown requeue and lease reaper included (issue #906 review, item 1)', () => {
+  const env = makeEnv({ workerEnabled: false });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'x', agent: 'fake' });
+    // requeueForShutdown matches the lease owner, so take the lease the way a worker would,
+    // then move the run to STARTING like a claiming worker does.
+    const claimed = env.queue.claim('worker-1', 60_000);
+    assert.equal(claimed?.id, run.id);
+    env.runs.transition(run.id, 'STARTING');
+    const before = env.runs.get(run.id)!.statusChangedAt!;
+    const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    pause(5);
+
+    // Shutdown requeue moves STARTING back to QUEUED: a real status change, so the stamp moves.
+    assert.equal(env.queue.requeueForShutdown(run.id, 'worker-1'), true);
+    const requeued = env.runs.get(run.id)!;
+    assert.equal(requeued.status, 'QUEUED');
+    assert.ok(requeued.statusChangedAt != null && requeued.statusChangedAt > before,
+      'requeueForShutdown must advance statusChangedAt');
+
+    // Lease reaper marks an expired RUNNING run FAILED: also a status change.
+    env.runs.transition(run.id, 'STARTING');
+    env.db.prepare("UPDATE runs SET lease_expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(run.id);
+    const beforeReap = env.runs.get(run.id)!.statusChangedAt!;
+    pause(5);
+    const reaped = env.queue.reapExpiredLeases(Date.now());
+    assert.deepEqual(reaped, { requeued: [], failed: [run.id] });
+    const failed = env.runs.get(run.id)!;
+    assert.equal(failed.status, 'FAILED');
+    assert.ok(failed.statusChangedAt != null && failed.statusChangedAt > beforeReap,
+      'lease reaper must advance statusChangedAt');
   } finally {
     env.close();
   }

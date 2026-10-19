@@ -8,7 +8,7 @@
  */
 
 import type { HostRegistry, ProbeRecord } from './registry.ts';
-import { probeAndRecord } from './probe.ts';
+import { probeAndRecord, probeAvailability } from './probe.ts';
 
 export interface ProberOptions {
   registry: HostRegistry;
@@ -30,6 +30,16 @@ export interface Prober {
   stop: () => void;
   readonly running: boolean;
 }
+
+/**
+ * Outcomes after which the availability endpoints are worth asking. Every excluded outcome means the
+ * sweep learned nothing that could have reached the preset catalog: no answer at all (unreachable,
+ * timeout), not a Mercury (not_mercury), shapes this build cannot read (incompatible), or the
+ * credential refused before any authenticated call could succeed (unauthorized). not_serving and
+ * http_error keep it: the host is up and holds a token we hold too, so a failed /api/presets is a
+ * real observation about availability and must mark the snapshot stale rather than be skipped.
+ */
+const CONTACTED: ReadonlySet<ProbeRecord['outcome']> = new Set(['ok', 'not_serving', 'http_error']);
 
 export function createProber(opts: ProberOptions): Prober {
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -64,6 +74,18 @@ export function createProber(opts: ProberOptions): Prober {
               opts.fetchImpl,
             );
             opts.registry.recordProbe(rec);
+            // Availability reads ride the sweep (fleet-bots-design.md section 5.1): same timer, same
+            // credential, same timeout. Skipped when the sweep never really reached the host or the
+            // credential was refused -- both leave the previous snapshot untouched, which is the
+            // correct "no new information" answer; a reachable host whose deeper reads fail is the
+            // case recordAvailability's keep-previous-and-stale rule exists for.
+            if (CONTACTED.has(rec.outcome)) {
+              const availability = await probeAvailability(
+                { hostId: host.id, baseUrl: host.baseUrl, token, timeoutMs: opts.timeoutMs },
+                opts.fetchImpl,
+              );
+              opts.registry.recordAvailability(host.id, availability, new Date().toISOString());
+            }
             return rec;
           } catch (err) {
             // probeAndRecord classifies rather than throwing, so this is a bug or an unexpected rejection.

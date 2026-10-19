@@ -27,6 +27,7 @@
  *   node next.ts run    [--repo owner/name] [--dry-run]
  *   node next.ts finish --repo owner/name --issue N
  *   node next.ts blocked --repo owner/name --issue N --reason "…"
+ *   node next.ts propose --repo owner/name --source <key> --title "…" --body-file <path>  (#881)
  *
  * Output: exactly one JSON line. No dependencies; all I/O injectable.
  */
@@ -178,6 +179,100 @@ export async function blockedAlready(io: NextIo, opts: { repo: string; issue: nu
   return labels.includes(L_BLOCKED);
 }
 
+// ---- rung 4: the guarded propose exit (#881) ----
+
+/** The required machine-readable provenance marker (#881). The `## Source` section a proposal
+ * body carries is prose; THIS marker is the dedupe key: exact, greppable, and written by
+ * `propose` itself so it cannot drift from the body. Key shape: doc path plus heading anchor,
+ * e.g. `docs/crew/roadmap.md#8-phase-4`. */
+export function sourceMarker(source: string): string {
+  return `<!-- nightly-source:${source} -->`;
+}
+
+function validateSource(source: string): string {
+  const key = source.trim();
+  if (key === '' || /\s/.test(key)) {
+    throw new Error('--source must be a single token: the doc path plus heading anchor (e.g. docs/crew/roadmap.md#8-phase-4)');
+  }
+  if (!key.includes('/') || !key.includes('#')) {
+    throw new Error(`--source must be "<doc path>#<heading anchor>"; got '${key}'`);
+  }
+  if (key.length > 300) throw new Error('--source is unreasonably long (cap 300 chars)');
+  return key;
+}
+
+/** A previous proposal that blocks creation: the source key OR the exact (trimmed) title.
+ * An open AND a closed match both block - a declined proposal is not re-proposed nightly;
+ * re-proposal needs a human to reopen it (#881 acceptance 2). */
+export interface ExistingMatch { issue: number; state: string; by: 'source' | 'title' }
+
+/** Search open AND closed issues for the source key or an exact title match. Bounded at 10
+ * pages of `state=all` (newest first, so recently filed duplicates are always inside the
+ * window). A failed page, an unreadable page or a pagination-cap hit THROWS (fail closed, #881
+ * acceptance 4): the caller files nothing and the report says the dedupe check could not run.
+ * Pull requests are skipped. */
+export async function findExistingProposal(io: NextIo, opts: { repo: string; source: string; title: string }): Promise<ExistingMatch | null> {
+  const marker = sourceMarker(opts.source);
+  const title = opts.title.trim();
+  if (title === '') throw new Error('a proposal needs a non-empty --title');
+  let listPath: string | null = `/repos/${opts.repo}/issues?state=all&per_page=100`;
+  for (let page = 0; page < 10 && listPath; page++) {
+    const res = await io.get(listPath);
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`dedupe search failed: GET ${listPath} -> ${res.status}; nothing is filed`);
+    }
+    // `shared.ts` returns `body: null` when a 200 response cannot be decoded, and `?? []` read that
+    // as "this page listed nothing": the scan found no match, the walk reached its end, and
+    // `proposeIssue` filed a duplicate. An unreadable page is a failed search like any other --
+    // throw, so the caller files nothing. `Array.isArray` also refuses a JSON object body (an error
+    // payload served with a 200), which `?? []` passed to `for...of` as an unhelpful TypeError.
+    if (!Array.isArray(res.body)) {
+      throw new Error(`dedupe search failed: GET ${listPath} -> ${res.status} returned a body that is not a list; the page could not be read, so nothing is filed (fail closed, #881)`);
+    }
+    const items = res.body as { number: number; title?: string; body?: string | null; state?: string; pull_request?: unknown }[];
+    for (const it of items) {
+      if (it.pull_request) continue;
+      if (typeof it.body === 'string' && it.body.includes(marker)) {
+        return { issue: it.number, state: it.state ?? 'unknown', by: 'source' };
+      }
+      if (typeof it.title === 'string' && it.title.trim() === title) {
+        return { issue: it.number, state: it.state ?? 'unknown', by: 'title' };
+      }
+    }
+    const next = res.link?.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
+    listPath = next ? next.replace('https://api.github.com', '') : null;
+    if (page === 9 && listPath) {
+      throw new Error('dedupe search hit its 10-page cap; the remaining issues were not checked, so nothing is filed (fail closed, #881)');
+    }
+  }
+  return null;
+}
+
+/** The ONLY way rung 4 files a proposal (#881): dedupe first (open AND closed, by source key or
+ * exact title), then create with `nightly:proposed`. A match creates nothing and reports the
+ * existing issue; a failed search throws (nothing filed). The body comes from a file so the
+ * drafted prose never rides the command line. `--dry-run` runs the dedupe search and reports
+ * what WOULD happen without creating anything. */
+export async function proposeIssue(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: string; source: string; title: string; bodyFile: string; dryRun?: boolean }): Promise<{ created: boolean; issue?: number; existing?: ExistingMatch }> {
+  assertRepo(opts.repo);
+  const source = validateSource(opts.source);
+  const { readFile } = await import('node:fs/promises');
+  const drafted = await readFile(opts.bodyFile, 'utf8');
+  if (drafted.trim() === '') throw new Error('--body-file is empty; a proposal carries its argument');
+  const marker = sourceMarker(source);
+  const body = drafted.includes(marker) ? drafted : `${drafted.replace(/\s*$/, '')}\n\n## Source\n\n${marker}\n`;
+  const existing = await findExistingProposal(io, { repo: opts.repo, source, title: opts.title });
+  if (existing) return { created: false, existing };
+  if (opts.dryRun) return { created: false };
+  const res = await io.post(`/repos/${opts.repo}/issues`, { title: opts.title.trim(), body, labels: ['nightly:proposed'] });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`proposal creation failed: POST /issues -> ${res.status}`);
+  }
+  const num = (res.body as { number?: number })?.number;
+  if (!Number.isInteger(num)) throw new Error(`proposal creation returned no issue number (POST -> ${res.status})`);
+  return { created: true, issue: num as number };
+}
+
 // ---- GitHub I/O (thin, bounded, same shape as select.ts/e2e.ts) ----
 
 async function ghPostLabel(path: string, body: unknown, token: string): Promise<boolean> {
@@ -246,13 +341,22 @@ if (isMain) {
       if (!repo || !Number.isInteger(issue) || issue <= 0) throw new Error('usage: next.ts finish --repo <owner/name> --issue <n>');
       return await finishIssue(realIo(process.env), { repo, issue });
     }
+    if (cmd === 'propose') {
+      const source = flag('--source') ?? '';
+      const title = flag('--title') ?? '';
+      const bodyFile = flag('--body-file') ?? '';
+      if (!repo || !source || !title || !bodyFile) {
+        throw new Error('usage: next.ts propose --repo <owner/name> --source <doc#anchor> --title "<title>" --body-file <path>');
+      }
+      return await proposeIssue(realIo(process.env), process.env, { repo, source, title, bodyFile, dryRun: args.includes('--dry-run') });
+    }
     if (cmd === 'blocked') {
       const issue = Number(flag('--issue'));
       const reason = flag('--reason') ?? '';
       if (!repo || !Number.isInteger(issue) || issue <= 0) throw new Error('usage: next.ts blocked --repo <owner/name> --issue <n> --reason "<question>"');
       return await blockIssue(realIo(process.env), { repo, issue, reason });
     }
-    throw new Error('usage: next.ts run|finish|blocked --repo <owner/name> [--dry-run] [--issue <n>] [--reason "..."]');
+    throw new Error('usage: next.ts run|finish|blocked|propose --repo <owner/name> [--dry-run] [--issue <n>] [--reason "..."] [--source <doc#anchor>] [--title "..."] [--body-file <path>]');
   })();
   work
     .then((out) => { process.stdout.write(JSON.stringify(out) + '\n'); })

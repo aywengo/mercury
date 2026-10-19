@@ -29,6 +29,7 @@ const ROUTES_SRC = readFileSync(new URL('../src/api/routes.ts', import.meta.url)
 const MOUNTS: Record<string, string> = {
   'routes.ts': '/api',
   'authRoutes.ts': '/api/auth',
+  'workflowRoutes.ts': '/api',
 };
 
 /** Every route the API serves, with the path a caller would actually request. */
