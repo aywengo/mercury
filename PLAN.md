@@ -224,7 +224,7 @@ Record: [`PLAN.md`](PLAN.md) (rules above)
 
 | Issue | Title | State | PR |
 | --- | --- | --- | --- |
-| #1004 | PLAN.md: move the closing-row update to a post-merge commit; open PRs conflict on adjacent rows | open | — |
+| #1004 | PLAN.md: move the closing-row update to a post-merge commit; open PRs conflict on adjacent rows | done | #1005 |
 
 ## Host installer — milestone notes (historical)
 
