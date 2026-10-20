@@ -15,11 +15,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { loadBotConfig, type BotConfig } from './config.ts';
 import { readBotCredentials } from './credentials.ts';
+import { makeFleetClient } from './fleetClient.ts';
+import { probeHealth } from './http.ts';
 import { tick, type SchedulerClient, type BotRunView, type DispatchRequest } from './scheduler.ts';
 
 const TICK_MS = 60_000;
-const PROBE_ATTEMPTS = 5;
-const PROBE_BACKOFF_CAP_MS = 15_000;
 
 export function botStatePath(alias: string, env: NodeJS.ProcessEnv = process.env): string {
   // Same alias vocabulary as the config loader — these helpers are exported, so an unvalidated
@@ -68,24 +68,8 @@ export function makeBotClient(cfg: BotConfig, env: NodeJS.ProcessEnv = process.e
   }
   return {
     baseUrl,
-    async probeHealth(): Promise<void> {
-      // Capped backoff: 5 attempts, 15 s cap (§10 start ordering). Throw only after the last.
-      let lastErr: Error | undefined;
-      for (let attempt = 1; attempt <= PROBE_ATTEMPTS; attempt++) {
-        try {
-          const res = await fetch(`${baseUrl}/healthz`, { signal: AbortSignal.timeout(timeoutMs) });
-          if (res.ok) return;
-          lastErr = new Error(`/healthz answered ${res.status}`);
-        } catch (err) {
-          lastErr = err as Error;
-        }
-        if (attempt < PROBE_ATTEMPTS) {
-          const delay = Math.min(2 ** (attempt - 1) * 1000, PROBE_BACKOFF_CAP_MS);
-          await new Promise((r) => setTimeout(r, delay));
-        }
-      }
-      throw new Error(`API unreachable after ${PROBE_ATTEMPTS} attempts: ${lastErr?.message ?? 'unknown'}`);
-    },
+    // Capped backoff: 5 attempts, 15 s cap (§10 start ordering). Shared with the Fleet client.
+    probeHealth: () => probeHealth(baseUrl, timeoutMs),
     async listOwnRuns(limit = 200, cursor?: string | null): Promise<{ runs: BotRunView[]; nextCursor: string | null }> {
       const cur = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
       const res = await call(`/api/runs?limit=${limit}${cur}`);
@@ -110,6 +94,21 @@ export function makeBotClient(cfg: BotConfig, env: NodeJS.ProcessEnv = process.e
   };
 }
 
+/**
+ * The scheduler client this bot's config asks for (FB2b, #973).
+ *
+ * `api.via: "fleet"` dispatches through Fleet; everything else — including a config that never
+ * mentions `via` — uses the host client unchanged. The two clients are interchangeable because
+ * they implement the same two-call `SchedulerClient`, which is what makes option A a small change
+ * (docs/fleet-bots-design.md §4).
+ */
+export function makeSchedulerClient(
+  cfg: BotConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): SchedulerClient & { baseUrl: string; probeHealth(): Promise<void> } {
+  return cfg.api.via === 'fleet' ? makeFleetClient(cfg, env) : makeBotClient(cfg, env);
+}
+
 export interface RunBotOptions {
   now?: () => number;
   tickFn?: typeof tick;
@@ -124,9 +123,9 @@ export async function runBot(alias: string, env: NodeJS.ProcessEnv = process.env
   const now = opts.now ?? (() => Date.now());
   const tickFn = opts.tickFn ?? tick;
   const cfg = loadBotConfig(alias, env);
-  const client = makeBotClient(cfg, env);
+  const client = makeSchedulerClient(cfg, env);
   await client.probeHealth();
-  log(`bot=${alias} api=${client.baseUrl} tasks=${cfg.tasks.length} healthz ok`);
+  log(`bot=${alias} api=${client.baseUrl} via=${cfg.api.via ?? 'host'} tasks=${cfg.tasks.length} healthz ok`);
   for (const w of cfg.warnings) log(`bot=${alias} config warn: ${w}`);
   let stopping = false;
   let exitCode = 0;
