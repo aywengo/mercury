@@ -133,6 +133,12 @@ not take it twice.
   06:00. The report task's own deadline is 07:00 - a 06:00 deadline would be in
   the past at fire time and the Run would never start.
 
+- **A morning with no report is noticed off-host** (#1020). The `nightly-watchdog` GitHub
+  Actions workflow runs at 06:30 UTC (after the report's 07:00 local deadline in both seasons). If
+  `nightly report — <date>` does not exist, it opens `nightly: no report for <date>` with a host
+  checklist; the next report closes it. Every other nightly signal comes from the host and goes
+  silent with it, as on 2026-10-19→20 when the host was down.
+
 ### 4.4 Nightly Runs never ask
 
 `singleFlight` skips on any non-terminal status, NEEDS_INPUT included. A

@@ -1,0 +1,98 @@
+# nightly-watchdog: say so when a morning has no nightly report.
+#
+# Every signal about a night comes from the nightly host itself (the report, Run events, stopped
+# Runs). When the host, its worker or the bot service is down -- as on the night of 2026-10-19->20,
+# when the Mac Studio was off -- all of them are silent together, and silence looks exactly like a
+# quiet night. This job runs on GitHub's schedule, independent of the host.
+#
+# Timing: the report task fires 06:05 Europe/Warsaw with a 07:00 deadline
+# (docs/nightly-self-development.md section 4.3). 06:30 UTC is 08:30 CEST / 07:30 CET, so the
+# check always runs after that deadline, in both seasons.
+#
+# Missing report -> one open issue `nightly: no report for <date>` (never a duplicate).
+# Report present  -> any open alarm for that date or an earlier one is closed, naming the report.
+#
+# Token: the workflow's own GITHUB_TOKEN with issues: write and nothing else -- no PAT, no
+# repository contents, nothing the nightly identity could misuse.
+
+name: nightly-watchdog
+
+on:
+  schedule:
+    - cron: '30 6 * * *'
+  workflow_dispatch:
+    inputs:
+      night:
+        description: 'Report date to check (YYYY-MM-DD). Default: today in Europe/Warsaw.'
+        required: false
+
+permissions:
+  issues: write
+
+concurrency:
+  group: nightly-watchdog
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Look for this morning's nightly report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NIGHT_INPUT: ${{ inputs.night }}
+        run: |
+          set -euo pipefail
+          night="${NIGHT_INPUT:-}"
+          if [ -z "$night" ]; then night="$(TZ=Europe/Warsaw date +%F)"; fi
+          if ! printf '%s' "$night" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+            echo "not a date: $night" >&2
+            exit 1
+          fi
+          report_title="nightly report — $night"
+          alarm_prefix="nightly: no report for "
+          alarm_title="${alarm_prefix}${night}"
+
+          # Listing by label, not search: search indexing can lag, the label list cannot.
+          report=$(gh issue list --state all --label 'nightly:report' --limit 20 --json number,title \
+            | jq -r --arg t "$report_title" '[.[] | select(.title == $t)][0].number // empty')
+          alarms=$(gh issue list --state open --label nightly --limit 100 --json number,title \
+            | jq -r --arg p "$alarm_prefix" '.[] | select(.title | startswith($p)) | "\(.number)\t\(.title | ltrimstr($p))"')
+
+          if [ -n "$report" ]; then
+            echo "report for $night: #$report"
+            # Close alarms for this night and earlier: a report proves the host is back.
+            printf '%s\n' "$alarms" | while IFS="$(printf '\t')" read -r num date; do
+              [ -n "$num" ] || continue
+              if [ "$date" \< "$night" ] || [ "$date" = "$night" ]; then
+                gh issue close "$num" --comment "The nightly host reported again: #$report (\`$report_title\`)."
+                echo "closed alarm #$num ($date)"
+              fi
+            done
+            exit 0
+          fi
+
+          if printf '%s\n' "$alarms" | cut -f2 | grep -qxF "$night"; then
+            echo "no report for $night; alarm already open"
+            exit 0
+          fi
+
+          body_file="$(mktemp)"
+          cat > "$body_file" <<EOF
+          No nightly report was filed for **$night** (\`$report_title\`, label \`nightly:report\`), checked at $(date -u +%FT%TZ) by the nightly-watchdog workflow.
+
+          The report task fires at 06:05 Europe/Warsaw with a 07:00 deadline, so a missing report almost always means nothing ran that night. Every other nightly signal comes from the same host and goes quiet with it.
+
+          **Check the nightly host:**
+
+          - Is the machine up and awake (it was simply off on 2026-10-19→20)?
+          - Are the services loaded: \`launchctl list | grep mercury\` (worker and \`com.mercury.bot.nightly\`)?
+          - \`mercury host doctor\` and \`mercury host bot status --alias nightly\`.
+          - Did a Run start but fail before the report: \`mercury runs list\`, or the dashboard, for Runs since 00:00.
+
+          This issue closes itself on the next morning that has a report.
+          EOF
+          gh issue create --title "$alarm_title" --label nightly --label bug --label 'priority: high' --body-file "$body_file"
+          echo "opened alarm for $night"
