@@ -104,3 +104,86 @@ export function rearmExitGate<T extends ExitGateHolder>(session: T): T {
   session.exitSettled = gate.exitSettled;
   return session;
 }
+
+/**
+ * The per-attempt stdio state that a resumed session must NOT inherit.
+ *
+ * Structural for the same reason as ExitSettleable: each adapter's Session carries its own extra
+ * fields, and satisfying this shape is all that beginResumedAttempt() needs.
+ */
+export interface ResumedAttemptState extends ExitGateHolder {
+  /** The previous attempt's child, if any. Detached and cleared. */
+  proc: ResumableChild | null;
+  /** The previous attempt's exit. Cleared: a resumed attempt must observe its OWN exit. */
+  exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null;
+  /** Cleared: the previous attempt's stdout has ended, the new attempt's has not started. */
+  stdoutEnded: boolean;
+  /** Cleared: a pending grace timer would settle the new attempt on the old attempt's exit. */
+  drainTimer: ReturnType<typeof setTimeout> | null;
+}
+
+/** The slice of a ChildProcess beginResumedAttempt() touches. */
+interface ResumableChild {
+  removeAllListeners(event?: string): unknown;
+  on(event: 'error', listener: (err: unknown) => void): unknown;
+  stdout: ResumableStream | null;
+  stderr: ResumableStream | null;
+}
+
+interface ResumableStream {
+  removeAllListeners(event?: string): unknown;
+  on(event: 'error', listener: (err: unknown) => void): unknown;
+  destroy(): void;
+}
+
+/**
+ * Detach the previous attempt's process and clear the observations that belonged to it.
+ *
+ * Call this from resume(), BEFORE spawning the replacement child. It is the fix for #997, which was a
+ * production defect and not only a flaky test: resume() re-armed the exit gate but left `exitInfo`,
+ * `stdoutEnded` and any drain timer set from the previous process. Any late event from that process
+ * -- a 'close' that lands one tick after the test read the exit -- then ran settleWhenDrained() on
+ * the RESUMED session with the PREVIOUS attempt's exit, while the new child was still starting. The
+ * retried Run reported `completed` and delivered zero events.
+ *
+ * Two halves, and both are needed:
+ *
+ * 1. DETACH. Clearing the fields alone is not enough: the old process's 'close' would still fire
+ *    `stdoutEnded = true` on the new attempt, which defeats the #166 drain guard for the new child.
+ * 2. CLEAR. Detaching alone is not enough either: the fields are still true, so the new child's
+ *    'exit' settles before its stdout has been read.
+ *
+ * The old streams are destroyed rather than left attached, for the reason releasePipes() gives: with
+ * no reader, a still-running previous child would block forever on a full pipe instead of exiting.
+ * A no-op 'error' listener goes on first, because a destroyed stream can still emit one and an
+ * unhandled 'error' on a stream is an uncaught exception that would take the worker down.
+ *
+ * Adapter-specific per-attempt fields (`stdoutFlushed`, `emittedText`, `resultIsError`, `stdoutBuf`,
+ * `waitingForInput`, ...) are cleared by the adapter immediately after this call: they are not
+ * shared, and each one silently suppresses the resumed attempt's own output if left set.
+ */
+export function beginResumedAttempt<T extends ResumedAttemptState>(session: T): T {
+  const previous = session.proc;
+  if (previous) {
+    previous.removeAllListeners('exit');
+    previous.removeAllListeners('close');
+    previous.removeAllListeners('error');
+    previous.on('error', () => {});
+    for (const stream of [previous.stdout, previous.stderr]) {
+      if (!stream) continue;
+      stream.removeAllListeners('data');
+      stream.removeAllListeners('end');
+      stream.removeAllListeners('error');
+      stream.on('error', () => {});
+      stream.destroy();
+    }
+  }
+  session.proc = null;
+  session.exitInfo = null;
+  session.stdoutEnded = false;
+  if (session.drainTimer) {
+    clearTimeout(session.drainTimer);
+    session.drainTimer = null;
+  }
+  return session;
+}

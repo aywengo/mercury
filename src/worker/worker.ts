@@ -4,7 +4,8 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isTerminal, STUCK_CANDIDATE_STATUSES } from '../domain/stateMachine.ts';
 import { harnessMayRevise, translateHarnessGoal, type HarnessGoalReport } from '../domain/goalEvents.ts';
@@ -30,12 +31,14 @@ import { harvestRecords } from '../knowledge/harvestRecords.ts';
 import { harvestNative } from '../knowledge/harvestNative.ts';
 import { claimHash } from '../knowledge/validation.ts';
 import { createRedactor } from '../domain/redact.ts';
+import { redactRunArtifacts } from './artifactRedaction.ts';
 import type { OutboxStore } from '../knowledge/outbox.ts';
 import type { KnowledgeBounds } from '../knowledge/validation.ts';
 import type { ContextKnowledgeBlock } from '../knowledge/types.ts';
 import type { Note } from '../knowledge/types.ts';
 import { tx } from '../db/database.ts';
-import { resolveProfile, type CredentialProfiles } from '../host/credentials-profiles.ts';
+import { resolveProfile, type CredentialProfile, type CredentialProfiles } from '../host/credentials-profiles.ts';
+import { buildRunEnvironment, CredentialSourceMissingError } from './runEnvironment.ts';
 import type { SkillRegistry } from '../skills/skillRegistry.ts';
 import type { WorkspaceManager } from '../workspace/workspaceManager.ts';
 
@@ -84,6 +87,13 @@ export interface WorkerDeps {
   alertWebhookUrl?: string | null;
   /** Optional secret redactor; run error messages are redacted at write time (issue #36). */
   redactor?: Redactor;
+  /**
+   * Secret values to scrub from agent artifacts at rest (issue #944): session transcripts and
+   * kernel-state snapshots under the Run workspace. The composition root passes the same layer
+   * the event redactor was built from -- declared MERCURY_SECRETS plus forwarded credential
+   * values -- so redaction at rest tracks exactly what Mercury hands to a Run.
+   */
+  artifactSecrets?: string[];
   /** Maximum time a run may wait for human input (MERCURY_INPUT_TIMEOUT_MS); 0 = no limit. */
   inputTimeoutMs: number;
   /** Runs in RUNNING/NEEDS_INPUT with no event activity beyond this are alerted (MERCURY_STUCK_RUN_THRESHOLD_MS); 0 = disabled. */
@@ -352,6 +362,14 @@ export class Worker {
     // process running and a run that threw on a state transition unwound past any cleanup,
     // leaving a live agent writing into a workspace nobody was watching.
     let handle: AgentHandle | null = null;
+    // CP-4 review blocker 1 (#977): the generated gitconfig and GH_CONFIG_DIR live in a per-Run
+    // 0700 directory OUTSIDE the workspace, so an agent's `git add -A` cannot commit them, a
+    // `gh auth login` cannot drop a token file into the worktree, and the agent cannot rewrite
+    // its own credential policy in place. Removed in the finally on every exit path.
+    let runEnvDir: string | null = null;
+    // Captured when the workspace exists so the finally's artifact scrub (issue #944) can
+    // reach it on paths that threw before the context was built.
+    let workspacePath: string | null = null;
     // The rendered advisory plan (issue #809), captured before the prompt is assembled. Null
     // when the Run was not created from a template, so the prompt stays byte-identical.
     let renderedWorkflowPlan: string | null = null;
@@ -581,8 +599,44 @@ export class Worker {
         this.deps.events.append(run.id, 'sandbox.enabled', { policy: sandbox.describe(run) });
       }
 
+      // Credential profiles CP-4 (issue #897, design sections 6.1, 6.2): build the Run's base
+      // environment in the four layers instead of passing process.env wholesale. The parity check
+      // above already resolved the SAME file, so re-resolving here against the same loader gives
+      // the same profile; a refusal cannot differ without the parity check having refused first.
+      // A `file:` secret missing at drive time fails the Run with the section 9 message.
+      let runEnv: Record<string, string> | undefined;
+      {
+        let profile: CredentialProfile | null = null;
+        if (this.deps.credentialProfiles) {
+          const { profiles } = this.deps.credentialProfiles();
+          const resolution = resolveProfile(profiles, run.ownerId, [run.repository, ...(run.repositories ?? [])]);
+          if (resolution.outcome === 'profile') {
+            profile = profiles.find((p) => p.name === resolution.name) ?? null;
+          } else if (resolution.outcome === 'refused') {
+            // Parity already handles the created/claim mismatch; a refusal at drive time with no
+            // change is impossible in practice, but fail closed rather than run unprofiled.
+            throw new Error(resolution.message);
+          }
+        }
+        runEnvDir = mkdtempSync(join(tmpdir(), 'mercury-run-env-')); // mkdtemp creates it 0700
+        const built = buildRunEnvironment({ workerEnv: process.env, runDir: runEnvDir, profile });
+        runEnv = built.env;
+        if (built.secrets.length > 0) {
+          // Section 8: every value a profile injects joins the exact-value redaction set for this
+          // Run, whatever its length. Ignored when the redactor has no registration capability.
+          this.deps.redactor?.register?.(built.secrets);
+        }
+        this.deps.events.append(run.id, 'run.credential_profile_env_built', {
+          runId: run.id,
+          profile: profile?.name ?? null,
+          ...(profile?.git?.httpsToken ? { httpsTokenVar: profile.git.httpsToken } : {}),
+        });
+      }
+
+      workspacePath = workspace.path;
       const context: RunContext = {
         run,
+        ...(runEnv ? { env: runEnv } : {}),
         ...(run.model ? { model: run.model } : {}),
         repository: run.repository,
         repositories: run.repositories,
@@ -642,7 +696,7 @@ export class Worker {
           log.warn({ error: String(termErr instanceof Error ? termErr.message : termErr) }, 'agent terminate before requeue failed');
         }
       }
-      await this.finalize(run, outcome, skills);
+await this.finalize(run, outcome, skills);
     } catch (err) {
       const raw = String(err instanceof Error ? err.message : err);
       const message = this.deps.redactor ? this.deps.redactor.redact(raw) : raw;
@@ -713,6 +767,14 @@ export class Worker {
           log.warn({ error: String(termErr instanceof Error ? termErr.message : termErr) }, 'agent terminate failed');
         }
       }
+      // After terminate(): the agent no longer reads its gitconfig or gh config (#977 review).
+      if (runEnvDir) {
+        try {
+          rmSync(runEnvDir, { recursive: true, force: true });
+        } catch (rmErr) {
+          log.warn({ runId: run.id, error: String(rmErr instanceof Error ? rmErr.message : rmErr) }, 'run environment dir cleanup failed');
+        }
+      }
       // Release the adapter's per-run state LAST (issues #62, #97). Every adapter keyed a
       // session by runId and nothing ever removed it, so a long-lived worker accumulated one
       // Session -- run row, RPC client, stderr buffer, event queue -- per run for the lifetime
@@ -731,7 +793,39 @@ export class Worker {
       } catch (disposeErr) {
         log.warn({ error: String(disposeErr instanceof Error ? disposeErr.message : disposeErr) }, 'adapter dispose failed');
       }
+      // Scrub agent artifacts at rest (issue #944). This sits in the finally, after terminate()
+      // and dispose, because that is the first point on EVERY exit path where the agent process
+      // is known to be gone (review blocker on #965: the scrub used to run only before
+      // finalize(), so a run that threw after the agent had written its transcript -- an adapter
+      // crash, a harness error -- finalized FAILED with its secrets still on disk; those are
+      // exactly the runs most likely to have dumped environment or debug output). The pass is
+      // best-effort: a redaction failure must not fail a run whose work is already done, it must
+      // leave something to read in the log.
+      if (workspacePath) {
+        this.scrubArtifacts(run.id, workspacePath);
+      }
       this.deps.queue.releaseLease(run.id, this.deps.workerId);
+    }
+  }
+
+  /**
+   * Best-effort at-rest redaction of the Run's agent artifacts (issue #944). Runs after the
+   * agent process is gone, so the files are stable.
+   */
+  private scrubArtifacts(runId: string, path: string): void {
+    const secrets = this.deps.artifactSecrets;
+    if (!secrets || secrets.length === 0) return;
+    try {
+      const scrubbed = redactRunArtifacts(path, secrets, {
+        onSkip: (file, size) => {
+          this.log('warn', 'artifact too large for redaction; skipped', { runId, file, size });
+        },
+      });
+      if (scrubbed > 0) {
+        this.log('info', 'redacted secrets from agent artifacts', { runId, files: scrubbed });
+      }
+    } catch (scrubErr) {
+      this.log('warn', 'artifact redaction failed', { runId, error: String(scrubErr instanceof Error ? scrubErr.message : scrubErr) });
     }
   }
 

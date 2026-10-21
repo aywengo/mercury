@@ -9,17 +9,21 @@ and by which PR?".
 
 1. **Filing an issue set adds its rows here,** in the same PR or commit that files it: `open`
    state, PR `—`, under the workstream's section (create the section if it is new).
-2. **The PR that closes an issue updates its row in that PR:** state `done` and the PR number
-   (`#<n>`). Add the row first if the issue has none. CI enforces this. The `plan-tracker` job
-   fails a pull request whose closing issues (`Closes #N` / `Fixes #N`) have a row here that is
-   not `done` with that PR's number.
+2. **The PR that closes an issue adds its row if the issue has none** (rule 1); it does NOT set
+   the row `done`. The `plan-sync` workflow (on push to `main`) sets each closing issue's row to
+   `done` with the merged PR's number, in one commit. This is what keeps two open PRs in one
+   workstream from conflicting on adjacent rows. The `plan-tracker` job fails a pull request whose
+   closing issues (`Closes #N` / `Fixes #N`) have no row here, unless the row is marked `untracked`.
 3. **An issue closed without a PR** (a decision, a duplicate, a superseded proposal) has its row
    updated by whoever closes it: `done` (decided or answered) or `dropped` (not planned), PR `—`.
-4. **States:** `open`, `in progress` (a PR is open), `done`, `dropped`. Nothing else.
+4. **States:** `open`, `in progress` (a PR is open), `done`, `dropped`, `untracked`. Nothing else.
+   `untracked` means the issue is explicitly not part of a tracked set; the `plan-sync` workflow
+   leaves it alone.
 5. **One row per issue.** Titles may be shortened; the issue number is the key.
 
 The procedure lives in [`.agents/skills/issue-fix-loop/SKILL.md`](.agents/skills/issue-fix-loop/SKILL.md)
-(step 3); the check is `scripts/planTracker.ts`.
+(step 3); the PR-time check is `scripts/planTracker.ts` and the post-merge update is
+`scripts/plan-sync.ts` (workflow `.github/workflows/plan-sync.yml`).
 
 ## Host installer
 
@@ -50,9 +54,10 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #742 | Nightly bot config and first-night checklist (N1-5) | done | #774 |
 | #860 | nightly: derive the review-cap hand-off from current-head findings, not every round | in progress | #966 |
 | #881 | nightly: rung 4 files duplicate proposals; dedupe by source key before filing | done | #984 |
-| #964 | nightly: report lists a one-night flake forever; the flake entry carries an absolute wo… | open | — |
+| #964 | nightly: report lists a one-night flake forever; the flake entry carries an absolute wo… | done | #1013 |
 | #968 | nightly: resume PRs on the owner's changes-requested review, not only on Copilot findings | done | #969 |
-| #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | done | #981 |
+| #980 | nightly: resume its own PRs when the required ci check is red, not only on reviews | in progress | #981 |
+| #1001 | nightly: a claim whose Run ended with no PR and no comment is never released; rung 2 claims work with no ready signal | done | #1009 |
 
 ## Dispatcher bots
 
@@ -125,7 +130,7 @@ Record: [`docs/credential-profiles-design.md`](docs/credential-profiles-design.m
 | --- | --- | --- | --- |
 | #784 | Credential profiles CP-2: profile file schema, loader and `host credentials validate` (… | done | #799 |
 | #807 | Credential profiles CP-3: resolve a profile per Run, refuse disallowed owners, creation… | done | #841 |
-| #897 | Credential profiles CP-4: local adapter delivery — layered environment, isolated git/gh… | in progress | #977 |
+| #897 | Credential profiles CP-4: local adapter delivery — layered environment, isolated git/gh… | done | #977 |
 | #898 | Credential profiles CP-5: workspace clone and fetch use the resolved profile, not the h… | open | — |
 | #899 | Credential profiles CP-6: sandbox per-profile opt-in for profile credentials | open | — |
 | #900 | Credential profiles CP-7: exact-value redaction of profile values, doctor checks, docs… | open | — |
@@ -156,6 +161,7 @@ Record: [`docs/laya-integration-design.md`](docs/laya-integration-design.md)
 | #856 | Bot: the Laya question and the decision rule (pure) (L1-3) | done | #866 |
 | #857 | Wire selection into both dispatch paths; lift the refusal for `shadow` (L1-4) | open | — |
 | #955 | Laya: the five open §12 decisions beyond the L1-0 label rule have no issue — checkpoint… | open | — |
+| #997 | Adapter resume: the resumed attempt settles on the PREVIOUS attempt's exit and drops its own output (hermes #829, claude #827) | done | #1011 |
 
 ## Fleet and bots
 
@@ -164,7 +170,7 @@ Record: [`docs/fleet-bots-design.md`](docs/fleet-bots-design.md)
 | Issue | Title | State | PR |
 | --- | --- | --- | --- |
 | #970 | Fleet: per-host availability snapshot and a read-only view (FB0) | done | #978 |
-| #971 | Fleet: owner-scoped, paged `GET /fleet/runs` (FB2a) | in progress | #982 |
+| #971 | Fleet: owner-scoped, paged `GET /fleet/runs` (FB2a) | done | #982 |
 | #972 | Fleet: availability-aware routing filter (FB1) | done | #1002 |
 | #973 | Bots: `FleetSchedulerClient` and `api.via: "fleet"` (FB2b) | open | — |
 | #974 | End to end: a bot on host A dispatches through Fleet to host B (FB3) | open | — |
@@ -211,7 +217,7 @@ Record: [`docs/status.md`](docs/status.md)
 | Issue | Title | State | PR |
 | --- | --- | --- | --- |
 | #942 | security: GitHub revoked the nightly GH_TOKEN ('mercury-pat') after a PR-description le… | done | — |
-| #944 | redactor: session transcripts and kernel-state snapshots store Run secrets unredacted | in progress | #965 |
+| #944 | redactor: session transcripts and kernel-state snapshots store Run secrets unredacted | done | #965 |
 | #976 | artifact redaction: sweep workspaces of runs the worker never finalized | open | — |
 
 ## Repository process
@@ -220,7 +226,8 @@ Record: [`PLAN.md`](PLAN.md) (rules above)
 
 | Issue | Title | State | PR |
 | --- | --- | --- | --- |
-| #1004 | PLAN.md: move the closing-row update to a post-merge commit; open PRs conflict on adjacent rows | open | — |
+| #1004 | PLAN.md: move the closing-row update to a post-merge commit; open PRs conflict on adjacent rows | done | #1005 |
+| #1007 | scratch: verify plan-sync marks a closing issue done (issue #1004 e2e) | done | #1008 |
 
 ## Host installer — milestone notes (historical)
 

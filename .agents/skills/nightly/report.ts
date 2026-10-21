@@ -6,6 +6,8 @@
  *   - PRs opened tonight and issues filed tonight (GitHub search, repo-scoped, bounded).
  *   - Issues commented on tonight (candidates from the supported `updated:<range>` search,
  *     filtered by per-issue comment timestamps - GitHub search has no `commented:<range>`).
+ *   - Claims released tonight (#1001): issues whose `nightly:in-progress` claim the selector
+ *     released because the claiming Run ended with no PR and no comment.
  *   - Blocked items: open issues labeled `nightly:blocked` with their latest blocking question.
  *   - Runs stopped by `notAfter` (the §4.3 window end 06:00 local) — optional section, only when
  *     `MERCURY_REPORT_API_URL` + `MERCURY_REPORT_TOKEN` are set; the Mercury runs API is read
@@ -13,7 +15,7 @@
  *   - Flakes: the nightly-e2e flake clock (same state file) — recent fingerprint nights.
  *
  * Output: exactly one JSON line
- * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, blocked, runsStopped, flakes }`.
+ * `{ night, issue, closedPrevious, prs, issuesFiled, issuesCommented, claimsReleased, blocked, runsStopped, flakes }`.
  * No dependencies; all I/O injectable. Writes: the digest issue itself and the close of
  * every OPEN digest titled `nightly report — D` with D strictly BEFORE the report night - one
  * rule that self-heals failed closes on any later night and can never erase a newer report.
@@ -23,8 +25,8 @@
  */
 
 import { basename } from 'node:path';
-import { loadFlakeState } from './e2e.ts';
-import { assertRepo, localDateString, nextDay, prevDay, ghGet, ghPost, ghPatch, ghToken, FETCH_TIMEOUT_MS } from './shared.ts';
+import { loadFlakeState, normalizeTestName } from './e2e.ts';
+import { assertRepo, CLAIM_RELEASED_MARKER, localDateString, nextDay, prevDay, ghGet, ghPost, ghPatch, ghToken, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const L_REPORT = 'nightly:report';
 const L_BLOCKED = 'nightly:blocked';
@@ -46,9 +48,15 @@ export interface ReportData {
   prs: { number?: number; title: string; url?: string }[];
   issuesFiled: { number?: number; title: string; url?: string; author?: string }[];
   issuesCommented: { number?: number; title: string; url?: string }[];
+  /** #1001: issues whose `nightly:in-progress` claim the selector released tonight (a Run that
+   *  ended with no PR and no comment). */
+  claimsReleased: { number?: number }[];
   blocked: { number?: number; title: string; question?: string }[];
   runsStopped: { runId?: string; task?: string; status?: string }[];
   flakes: { fingerprint: string; test: string; nights: string[] }[];
+  /** #964: flake-clock entries held back because their last night is older than the report window.
+   *  The state file keeps them; the digest only says how many there are. */
+  flakesOlder?: number;
 }
 
 export interface ReportResult extends ReportData {
@@ -218,6 +226,49 @@ export async function collectIssuesCommented(
   return candidates.filter((c) => c.number !== undefined && commentedNumbers.has(c.number));
 }
 
+/**
+ * Issues whose `nightly:in-progress` claim the SELECTOR released tonight (#1001): a Run that
+ * ended with no PR and no comment. The selector records the release in a comment carrying
+ * `CLAIM_RELEASED_MARKER`, so one repo-level comments listing answers the question - no
+ * per-issue timeline walk. Best-effort like the other reads: an unreadable page ends the scan
+ * with what was collected so far instead of failing the digest.
+ */
+export async function collectClaimsReleased(
+  io: ReportIo,
+  repo: string,
+  startMs: number,
+  endMs: number,
+): Promise<{ number?: number }[]> {
+  const released = new Set<number>();
+  let path: string | undefined = `/repos/${repo}/issues/comments?since=${encodeURIComponent(new Date(startMs).toISOString())}&per_page=100`;
+  for (let page = 0; page < 10 && path; page++) {
+    let res;
+    try {
+      res = await io.get(path);
+    } catch {
+      break; // transport error: keep what was scanned
+    }
+    if (res.status < 200 || res.status >= 300) break; // unreadable: section degrades
+    const comments = Array.isArray(res.body)
+      ? (res.body as { body?: unknown; created_at?: unknown; issue_url?: unknown }[]).filter(
+          (c): c is { body: string; created_at: string; issue_url: string } =>
+            c !== null && typeof c === 'object'
+            && typeof c.body === 'string' && typeof c.created_at === 'string' && typeof c.issue_url === 'string')
+      : [];
+    for (const c of comments) {
+      const ts = Date.parse(c.created_at);
+      if (Number.isNaN(ts) || ts < startMs || ts > endMs) continue;
+      if (!c.body.includes(CLAIM_RELEASED_MARKER)) continue;
+      const m = /\/issues\/(\d+)$/.exec(c.issue_url);
+      if (m) released.add(Number(m[1]));
+    }
+    if (comments.length < 100) break; // short page = last page
+    const next = /<([^>]+)>;\s*rel="next"/.exec(res.link ?? '');
+    path = next ? next[1].replace('https://api.github.com', '') : undefined;
+  }
+  return [...released].sort((a, b) => a - b).map((number) => ({ number }));
+}
+
 
 /** TIMED_OUT runs stopped by the §4.3 window end DURING the report night: cursor-paginated
  * (bounded), each candidate filtered by its constraints.notAfter falling on the report night's
@@ -297,15 +348,55 @@ function newestNight(nights: string[]): string {
 }
 
 /** Flake-clock entries as of `night`: only nights <= the report night (a backfill run with an
- * older --night must not display future dates), most recent last-night first. */
+ * older --night must not display future dates), most recent last-night first.
+ *
+ * The `test` name is normalized for DISPLAY (#964): entries recorded before #821's normalization
+ * still carry the absolute worktree path (`…/worktrees/run_<hex>/e2e/x.test.ts`), and that path
+ * names one Run's checkout. The fingerprint never included it — fingerprintOf() normalizes before
+ * hashing (#821) — so this is the display half only. */
 export function collectFlakes(env: NodeJS.ProcessEnv, night: string): { fingerprint: string; test: string; nights: string[] }[] {
   const state = loadFlakeState(env);
   return Object.entries(state)
-    .map(([fingerprint, entry]) => ({ fingerprint, test: entry.test, nights: entry.nights.filter((n) => n <= night) }))
+    .map(([fingerprint, entry]) => ({ fingerprint, test: normalizeTestName(entry.test), nights: entry.nights.filter((n) => n <= night) }))
     .filter((f) => f.nights.length > 0)
     // recordFlakeNight APPENDS, so a backfill can leave nights unsorted: the sort key must be
     // the MAX of the filtered nights, not the last stored element.
     .sort((a, b) => newestNight(b.nights).localeCompare(newestNight(a.nights)));
+}
+
+/** How many nights back the digest shows a flake (#964). The state file keeps every entry: a flake
+ * from three weeks ago is not news, and leaving it in the section every morning buries a REAL new
+ * flake next to it. 14 nights matches the review horizon. */
+export const FLAKE_REPORT_WINDOW_NIGHTS = 14;
+
+/** `night` shifted by `days` (negative = earlier), as YYYY-MM-DD. */
+function shiftNight(night: string, days: number): string {
+  const d = new Date(`${night}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Split flake-clock entries into the ones the digest should show and the count it should only
+ * mention (#964).
+ *
+ * An entry is shown when at least one of its nights falls inside `[night - (window-1), night]`.
+ * Filtering by the entry's LAST night instead would hide a flake that is still recurring every few
+ * weeks, which is exactly the kind of flake a reader wants to see.
+ */
+export function flakesInWindow(
+  flakes: { fingerprint: string; test: string; nights: string[] }[],
+  night: string,
+  windowNights: number = FLAKE_REPORT_WINDOW_NIGHTS,
+): { visible: { fingerprint: string; test: string; nights: string[] }[]; older: number } {
+  const from = shiftNight(night, -(windowNights - 1));
+  const visible: { fingerprint: string; test: string; nights: string[] }[] = [];
+  let older = 0;
+  for (const f of flakes) {
+    if (f.nights.some((n) => n >= from && n <= night)) visible.push(f);
+    else older += 1;
+  }
+  return { visible, older };
 }
 
 /** Escape Markdown-significant characters in user-controlled text (titles, questions) so a
@@ -375,19 +466,28 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   section('## PRs opened', () => list(data.prs, '_none_'));
   section('## Issues filed', () => list(data.issuesFiled, '_none_'));
   section('## Issues commented', () => list(data.issuesCommented, '_none_'));
+  section('## Claims released (Run ended with no PR and no comment)', () =>
+    bounded(data.claimsReleased.map((c) => `- #${c.number}`), '_none_'));
   section('## Blocked (nightly:blocked, waiting on a human)', () =>
     bounded(data.blocked.map((b) => `- #${b.number} ${escMd(b.title)}${b.question ? ` — question: ${escMd(b.question)}` : ''}`), '_none_'));
   section('## Runs stopped by notAfter (the 06:00 window end)', () =>
     bounded(data.runsStopped.map((r) => `- ${codeSpan(r.runId ?? '')} — ${codeSpan(r.task ?? '')}`), '_none_'));
-  section('## Flakes (nightly-e2e clock)', () =>
-    bounded(data.flakes.map((f) => {
+  section('## Flakes (nightly-e2e clock)', () => {
+    const flakeLines = data.flakes.map((f) => {
       // State-derived text: flatten newlines BEFORE other rendering so a tampered entry or a
       // newline-bearing test name cannot inject headings/lists into the public digest. Night
       // entries must look like YYYY-MM-DD; malformed ones are dropped from the line.
       const nights = f.nights.filter((n) => /^\d{4}-\d{2}-\d{2}$/.test(n)).map((n) => codeSpan(n, 10));
       const test = escMd(f.test.replace(/[\r\n]+/g, ' '));
       return `- ${codeSpan(f.fingerprint, 16)} ${test} — nights: ${nights.join(', ')}`;
-    }), '_none_'));
+    });
+    // #964: say once, rather than list every morning, how many entries are outside the window.
+    const older = data.flakesOlder ?? 0;
+    if (older > 0) {
+      flakeLines.push(`- _older entries: ${older} (last ${FLAKE_REPORT_WINDOW_NIGHTS} nights shown; the flake clock keeps them)_`);
+    }
+    return bounded(flakeLines, '_none_');
+  });
   lines.push('---', "_Closed by tomorrow night's report._");
   return lines.join('\n');
 }
@@ -460,10 +560,12 @@ export async function runReport(
   const updatedCandidates = await search(io, opts.repo, `is:issue updated:${startIso}..${endIso}`);
   const issuesCommented = await collectIssuesCommented(io, opts.repo, updatedCandidates,
     win.startMs, win.endMs - 1000);
+  const claimsReleased = await collectClaimsReleased(io, opts.repo, win.startMs, win.endMs - 1000);
   const blocked = await collectBlocked(io, opts.repo);
   const runsStopped = io.mercury ? await collectRunsStopped(io.mercury, opts.night) : [];
-  const flakes = collectFlakes(env, opts.night);
-  const data: ReportData = { prs, issuesFiled, issuesCommented, blocked, runsStopped, flakes };
+  // #964: the digest shows the last FLAKE_REPORT_WINDOW_NIGHTS nights and only counts the rest.
+  const { visible: flakes, older: flakesOlder } = flakesInWindow(collectFlakes(env, opts.night), opts.night);
+  const data: ReportData = { prs, issuesFiled, issuesCommented, claimsReleased, blocked, runsStopped, flakes, flakesOlder };
 
   if (opts.dryRun) {
     return { night: opts.night, ...data };

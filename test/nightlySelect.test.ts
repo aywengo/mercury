@@ -608,40 +608,63 @@ test('a capped open-issue list reports rung 4, never a false none (round-9 revie
 
 // ---- #800: the enhancement rung and the stale-claim reset ----
 
-test('rung 2: a trusted-author enhancement issue is selected, priority then age (#800)', () => {
-  const older = issue({ number: 11, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }], created_at: '2026-09-21T00:00:00Z' });
-  const newerHigh = issue({ number: 12, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }, { name: 'priority: high' }], created_at: '2026-09-23T00:00:00Z' });
-  const s = selectLadder([cand(older), cand(newerHigh)], TERMINAL);
+// #1001 decision A (@aywengo, 2026-10-19): rung 2 additionally requires `nightly:ready`.
+// Rung 1 already takes every trusted ready issue, so rung 2 is only reachable while rung 1 is
+// gated off - the tests below close the gate where they mean to exercise rung 2 itself.
+const GATED_OFF = { e2eRunTerminal: false };
+const readyTl = [labeled('aywengo', 'nightly:ready')];
+
+test('rung 2: an enhancement WITHOUT nightly:ready is never claimed (#1001 decision A, the #972 case)', () => {
+  // #972 was claimed at 00:21 while its body still said "Not nightly:ready yet". An
+  // `enhancement` label alone is no longer a work signal.
+  const enh = issue({ number: 11, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }] });
+  for (const opts of [TERMINAL, GATED_OFF]) {
+    const s = selectLadder([cand(enh)], opts);
+    assert.notEqual(s.rung, 2, 'never rung 2 without a ready label');
+    assert.notEqual(s.issue, 11, 'the issue is not claimed');
+  }
+});
+
+test('rung 2: a ready enhancement is claimed, priority then age (#800 + #1001 decision A)', () => {
+  const older = issue({ number: 11, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }, { name: 'nightly:ready' }], created_at: '2026-09-21T00:00:00Z' });
+  const newerHigh = issue({ number: 12, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }, { name: 'nightly:ready' }, { name: 'priority: high' }], created_at: '2026-09-23T00:00:00Z' });
+  // With tonight's verdict in, rung 1 takes it: a ready issue is rung-1 work regardless of labels.
+  const s1 = selectLadder([cand(older, readyTl), cand(newerHigh, readyTl)], TERMINAL);
+  assert.equal(s1.rung, 1);
+  assert.equal(s1.issue, 12, 'priority: high beats age');
+  // With the gate still open, rung 2 is what is left - and it orders the same way.
+  const s = selectLadder([cand(older, readyTl), cand(newerHigh, readyTl)], GATED_OFF);
   assert.equal(s.rung, 2);
-  assert.equal(s.issue, 12, 'priority: high beats age inside the rung');
+  assert.equal(s.issue, 12);
   assert.match(s.reason, /enhancement issue #12/);
-  const s2 = selectLadder([cand(older)], TERMINAL);
+  assert.match(s.reason, /nightly:ready by @aywengo/);
+  const s2 = selectLadder([cand(older, readyTl)], GATED_OFF);
   assert.equal(s2.issue, 11, 'then oldest first');
   assert.match(s2.reason, /filed by @aywengo/);
 });
 
 test('rung 2: an enhancement label from an unverified actor on a foreign issue is NOT eligible (#800)', () => {
   // Same discipline as nightly:ready (#764): a label anyone can apply is not provenance. A
-  // foreign-authored issue with a foreign-applied enhancement label stays out of the ladder.
-  const foreign = issue({ number: 13, user: { login: 'random-dev' }, labels: [{ name: 'enhancement' }] });
-  const s = selectLadder([cand(foreign, [labeled('random-dev', 'enhancement')])], TERMINAL);
+  // foreign-authored issue with a foreign-applied enhancement AND ready label stays out.
+  const foreign = issue({ number: 13, user: { login: 'random-dev' }, labels: [{ name: 'enhancement' }, { name: 'nightly:ready' }] });
+  const s = selectLadder([cand(foreign, [labeled('random-dev', 'enhancement'), labeled('random-dev', 'nightly:ready')])], GATED_OFF);
   assert.equal(s.rung === 'none' || s.rung === 4, true, 'falls through to the docs rung, never rung 2');
 });
 
 test('rung 2: an @aywengo-applied enhancement label trusts a foreign-author issue (#800)', () => {
-  const nightlyAuthored = issue({ number: 14, user: { login: 'mercury-nightly' }, labels: [{ name: 'enhancement' }] });
-  const s = selectLadder([cand(nightlyAuthored, [labeled('aywengo', 'enhancement')])], TERMINAL);
+  const nightlyAuthored = issue({ number: 14, user: { login: 'mercury-nightly' }, labels: [{ name: 'enhancement' }, { name: 'nightly:ready' }] });
+  const s = selectLadder([cand(nightlyAuthored, [labeled('aywengo', 'enhancement'), ...readyTl])], GATED_OFF);
   assert.equal(s.rung, 2);
   assert.equal(s.issue, 14);
   assert.match(s.reason, /labeled enhancement by @aywengo/);
 });
 
-test('rung 2 keeps its place after rung 1: ready still wins over enhancement (#800)', () => {
-  const enh = issue({ number: 15, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }], created_at: '2026-09-20T00:00:00Z' });
-  const ready = issue({ number: 16, labels: [{ name: 'nightly:ready' }], created_at: '2026-09-25T00:00:00Z' });
-  const s = selectLadder([cand(enh), cand(ready, [labeled('aywengo', 'nightly:ready')])], TERMINAL);
-  assert.equal(s.rung, 1);
-  assert.equal(s.issue, 16);
+test('rung 2: a ready label applied by someone other than @aywengo does not qualify an enhancement (#1001 decision A)', () => {
+  // The ready requirement is the same trust root as rung 1's: the ACTOR of the current label.
+  const enh = issue({ number: 15, user: { login: 'aywengo' }, labels: [{ name: 'enhancement' }, { name: 'nightly:ready' }] });
+  const s = selectLadder([cand(enh, [labeled('random-dev', 'nightly:ready')])], GATED_OFF);
+  assert.notEqual(s.rung, 2);
+  assert.notEqual(s.issue, 15, 'an untrusted ready label is not a ready signal');
 });
 
 test('a stale nightly:in-progress claim is reset and the issue becomes selectable (#800)', async () => {
@@ -1274,6 +1297,219 @@ test('#968: ladder ordering puts owner change requests before older Copilot find
   ] });
   assert.equal(s.rung, 0);
   assert.equal(s.issue, 11, 'the owner review wins over an older Copilot-findings PR');
+});
+
+
+// ---- #1001: a claim left by a Run that ended with no PR and no comment ----
+
+/** A fake host API for the liveness check (and the e2e gate, which reads the same list):
+ * `runs` is what /api/runs returns. Returns the base URL and a closer. */
+async function hostApi(runs: { id?: string; task?: string; status?: string }[]) {
+  const { createServer } = await import('node:http');
+  const srv = createServer((_req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ runs, nextCursor: null }));
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const addr = srv.address();
+  return { url: `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`, close: () => srv.close() };
+}
+
+/** The io a claim-release test needs: one claimed issue, no PRs, and a comment list. */
+function releaseIo(opts: {
+  issue: GhIssue;
+  claimEvent: LabelEvent;
+  comments?: { user?: { login?: string } }[];
+  pulls?: unknown[];
+  dels: string[];
+  posts: string[];
+}) {
+  return {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [opts.claimEvent], link: null };
+      if (path.includes('/comments')) return { body: opts.comments ?? [], link: null };
+      if (path.includes('/pulls?')) return { body: opts.pulls ?? [], link: null };
+      return { body: [opts.issue], link: null };
+    },
+    async post(path: string) { opts.posts.push(path); return true; },
+    async del(path: string) { opts.dels.push(path); return true; },
+  };
+}
+
+test('a claim whose Run ended with no PR and no comment is released and re-selectable (#1001)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'dead', task: 'nightly-next', status: 'FAILED' }]);
+  const claimed = issue({ number: 71, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  try {
+    const s = await runSelectorWith(
+      releaseIo({ issue: claimed, claimEvent, dels, posts }),
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' },
+      false,
+    );
+    assert.equal(s.issue, 71, 'the dead claim no longer excludes the issue');
+    assert.deepEqual(dels, ['/repos/aywengo/mercury/issues/71/labels/nightly%3Ain-progress'], 'the claim is removed');
+    assert.ok(posts.some((p) => p.endsWith('/issues/71/comments')), 'the release is recorded as a comment (the report reads it back)');
+  } finally {
+    host.close();
+  }
+});
+
+test('a claim from a Run that is still alive is never released (#1001)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'other', task: 'nightly-next', status: 'RUNNING' }]);
+  const claimed = issue({ number: 72, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  try {
+    const s = await runSelectorWith(
+      releaseIo({ issue: claimed, claimEvent, dels, posts }),
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' },
+      false,
+    );
+    assert.notEqual(s.issue, 72, 'a live Run still owns its claim');
+    assert.deepEqual(dels, [], 'nothing is deleted behind a live Run');
+  } finally {
+    host.close();
+  }
+});
+
+test('the selector does not count its OWN Run as alive (#1001)', async () => {
+  const { nightlyRunAlive } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'me', task: 'nightly-next', status: 'RUNNING' }]);
+  try {
+    assert.equal(
+      await nightlyRunAlive({ MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' }),
+      false,
+      'the Run asking the question is not a competitor for its own claim',
+    );
+    assert.equal(
+      await nightlyRunAlive({ MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't' }),
+      true,
+      'without a self id the same Run is alive',
+    );
+  } finally {
+    host.close();
+  }
+});
+
+test('a claim whose Run commented on the issue is not released (#1001)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'dead', task: 'nightly-next', status: 'FAILED' }]);
+  const claimed = issue({ number: 73, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  try {
+    const s = await runSelectorWith(
+      releaseIo({ issue: claimed, claimEvent, comments: [{ user: { login: 'mercury-nightly' } }], dels, posts }),
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' },
+      false,
+    );
+    assert.notEqual(s.issue, 73, 'a Run that commented produced output: the claim stays');
+    assert.deepEqual(dels, []);
+  } finally {
+    host.close();
+  }
+});
+
+test('a claim whose Run opened a PR is not released (#1001)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'dead', task: 'nightly-next', status: 'FAILED' }]);
+  const claimed = issue({ number: 74, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  try {
+    const s = await runSelectorWith(
+      releaseIo({
+        issue: claimed,
+        claimEvent,
+        pulls: [{ number: 900, user: { login: 'mercury-nightly' }, head: { ref: 'fix/issue-74-dead-run', sha: 'abc' }, created_at: '2026-10-18T00:30:00Z' }],
+        dels,
+        posts,
+      }),
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' },
+      false,
+    );
+    assert.notEqual(s.issue, 74, 'an open nightly PR means the Run produced output');
+    assert.deepEqual(dels, []);
+  } finally {
+    host.close();
+  }
+});
+
+test('an unreadable liveness check keeps the claim (fail closed, #1001)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const claimed = issue({ number: 75, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  // No host API configured: liveness is unknown, so the clock-only behaviour stands.
+  const s = await runSelectorWith(releaseIo({ issue: claimed, claimEvent, dels, posts }), { REPO: 'aywengo/mercury' }, false);
+  assert.notEqual(s.issue, 75);
+  assert.deepEqual(dels, [], 'unknown liveness never releases');
+});
+
+test('--dry-run reports the release without writing it (#1001)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'dead', task: 'nightly-next', status: 'FAILED' }]);
+  const claimed = issue({ number: 76, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  try {
+    const s = await runSelectorWith(
+      releaseIo({ issue: claimed, claimEvent, dels, posts }),
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' },
+      true,
+    );
+    assert.equal(s.issue, 76, 'the decision is reported');
+    assert.deepEqual(dels, [], 'dry-run writes nothing');
+    assert.deepEqual(posts, []);
+  } finally {
+    host.close();
+  }
+});
+
+
+test('a failed release COMMENT still makes the issue selectable (label-first, #1009 r1)', async () => {
+  const { runSelectorWith } = await import('../.agents/skills/nightly/select.ts');
+  const host = await hostApi([{ id: 'dead', task: 'nightly-next', status: 'FAILED' }]);
+  const claimed = issue({ number: 77, user: { login: 'aywengo' }, labels: [{ name: 'nightly:in-progress' }] });
+  const claimEvent = { event: 'labeled', actor: { login: 'mercury-nightly' }, label: { name: 'nightly:in-progress' }, created_at: new Date().toISOString() };
+  const dels: string[] = [];
+  const posts: string[] = [];
+  const io = {
+    async get(path: string) {
+      if (path.includes('/timeline')) return { body: [claimEvent], link: null };
+      if (path.includes('/comments')) return { body: [], link: null };
+      if (path.includes('/pulls?')) return { body: [], link: null };
+      return { body: [claimed], link: null };
+    },
+    async post(path: string) {
+      posts.push(path);
+      // The release record fails; the claim label add afterwards must still work.
+      if (path.endsWith('/comments')) throw new Error('HTTP 503');
+      return true;
+    },
+    async del(path: string) { dels.push(path); return true; },
+  };
+  try {
+    const s = await runSelectorWith(
+      io,
+      { REPO: 'aywengo/mercury', MERCURY_API_URL: host.url, MERCURY_API_TOKEN: 't', MERCURY_RUN_ID: 'me' },
+      false,
+    );
+    assert.deepEqual(dels, ['/repos/aywengo/mercury/issues/77/labels/nightly%3Ain-progress'], 'the claim was released on GitHub');
+    assert.ok(posts.some((p) => p.endsWith('/comments')), 'the record was attempted');
+    assert.equal(s.issue, 77, 'a failed record must not keep a released issue excluded for the night');
+  } finally {
+    host.close();
+  }
 });
 
 // -- Red CI on the head (rung 0, #980): a nightly PR the bot pushed red resumes on the CI

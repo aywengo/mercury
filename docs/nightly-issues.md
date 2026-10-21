@@ -389,7 +389,10 @@ return.
 `npm run test:e2e`; rerun each failure once; fingerprint real failures (test name + normalized error,
 volatile ids and paths stripped); comment on the issue carrying the fingerprint, or file a new
 `origin:e2e` issue with the fingerprint in a hidden marker. Flakes are listed in the report, and filed
-only when the same fingerprint flakes on three nights.
+only when the same fingerprint flakes on three nights. The report lists only entries with a night in
+the last 14 nights and counts the rest (`older entries: K`, #964); the state file keeps them all. The
+test name is normalized to a repo-relative path before it is fingerprinted and displayed, so the same
+test flaking in two Runs with different worktree paths is one entry.
 
 ### Acceptance
 

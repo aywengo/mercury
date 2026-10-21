@@ -76,6 +76,8 @@ interface Session {
   runId: string;
   run: Run;
   constraints: RunConstraints;
+  /** The worker-built base environment from the start() context, reused by resume (CP-4). */
+  baseEnv?: Record<string, string>;
   /** The preset pointer from the Run's context, kept so the resume prompt names the role
    *  instruction the way the first prompt did (#722, docs/crew/role-presets.md section 8). */
   preset?: NonNullable<RunContext['preset']>;
@@ -237,6 +239,8 @@ export class PrimeAgentAdapter implements AgentAdapter {
     mkdirSync(sessionDir, { recursive: true });
 
     const session = this.createSession(context);
+    // CP-4: keep the worker-built base so resume() re-spawns with the SAME environment.
+    session.baseEnv = context.env;
 
     const skillArgs: string[] = [];
     for (const skill of context.skills) {
@@ -299,6 +303,7 @@ export class PrimeAgentAdapter implements AgentAdapter {
       cmd: spawnCmd.cmd,
       args: spawnCmd.args,
       cwd: workspacePath,
+      ...(context.env ? { fullEnv: context.env } : {}),
       env: mercuryTraceEnv(runId, this.opts.workerId),
       onStderr: (chunk) => {
         try {
@@ -429,6 +434,9 @@ export class PrimeAgentAdapter implements AgentAdapter {
     // attempts, a pack materialized after a crash). Adopt the retry context's pointers the same
     // way createSession() would have (#722).
     if (context?.preset) session.preset = context.preset;
+    // CP-4 (#977 review): a retry resume arrives on a fresh session that start() never saw, so
+    // adopt the retry's env here; a context-free resume keeps the env start() recorded.
+    if (context?.env) session.baseEnv = context.env;
     // Per-Run model on resume (#828): a retry's context.model replaces the first attempt's;
     // an in-process resume without a context keeps the model start() persisted on the session.
     if (context?.model) session.model = context.model;
@@ -459,6 +467,7 @@ export class PrimeAgentAdapter implements AgentAdapter {
       cmd: spawnCmd.cmd,
       args: spawnCmd.args,
       cwd: session.workspacePath,
+      ...(session.baseEnv ? { fullEnv: session.baseEnv } : {}),
       env: mercuryTraceEnv(session.runId, this.opts.workerId),
       onStderr: (chunk) => {
         try {

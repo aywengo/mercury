@@ -583,10 +583,13 @@ async function main(): Promise<void> {
   // the provider credentials this process may hand to a Run. The second layer is what makes
   // redaction track forwarding instead of guessing at key shapes -- if the sandbox can pass a key
   // to an agent, that key cannot come back out through an event.
-  const redactor = createRedactor([
+  // The same layer is handed to the worker for at-rest artifact redaction (issue #944), so a
+  // transcript or kernel snapshot cannot hold a value the event redactor would have caught.
+  const secretValues = [
     ...config.secrets,
     ...forwardedCredentialValues(process.env, config.sandboxEnv),
-  ]);
+  ];
+  const redactor = createRedactor(secretValues);
   const logger = createLogger(redactor, config.logLevel);
 
   // A forwarded credential below the length floor is handed to an untrusted agent and NOT scrubbed.
@@ -1065,6 +1068,7 @@ async function main(): Promise<void> {
       inputTimeoutMs: config.inputTimeoutMs,
       stuckRunThresholdMs: config.stuckRunThresholdMs,
       redactor,
+      artifactSecrets: secretValues,
       stuckCheckIntervalMs: config.stuckCheckIntervalMs,
       retryBackoffMs: config.retryBackoffMs,
       backlogAlertThreshold: config.backlogAlertThreshold,

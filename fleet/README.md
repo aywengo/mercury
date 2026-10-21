@@ -119,7 +119,7 @@ deployment someone should arrive at by omission.
 | `POST /fleet/hosts/:id/probe` | Probe one host now. Also refreshes its availability snapshot when the host was reached. |
 | `GET /fleet/hosts/:id/availability` | The per-host availability snapshot (`presets`, `workflows`, `probedAt`, `stale`), scoped to the caller's visible hosts like every read. 404 when there is no snapshot yet. `stale` is true after a failed availability read (the previous values are kept, never emptied) or when the snapshot is older than `FLEET_AVAILABILITY_STALE_MS`. `workflows` is null until a host serves `GET /api/workflows` (W-3, #934); that 404 is "not served", not a failure. |
 | `POST /fleet/runs` | Submit a Run. Name a `host`, or omit it and let the router choose. A body carrying a `preset` or `workflow` block is placed only on a host whose availability snapshot has that definition enabled (FB1, [#972](https://github.com/aywengo/mercury/issues/972)); a host Fleet has never read is excluded as `availability unknown`, and the refusal lists every host with its reason. |
-| `GET /fleet/runs` | Every Run across the fleet, one merged view. |
+| `GET /fleet/runs` | Every Run across the fleet, one merged view. With `owner=self`, `limit` and `cursor`: only the caller's Runs, keyset-paged (newest first, `nextCursor`). Any other `owner` value is a 400, and so is a `cursor` that is not `<createdAt>|<fleetRunId>`. |
 | `GET /fleet/runs/:id` | One Run, with its binding and current child state. |
 | `GET /fleet/runs/:id/events`, `.../stream` | Aggregated history and SSE for a fleet Run. |
 | `POST /fleet/runs/:id/input`, `.../cancel`, `.../retry` | Answer, cancel, or retry through Fleet. |

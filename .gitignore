@@ -14,6 +14,8 @@ workspaces/
 # (GH_TOKEN etc.); they live untracked inside every Run worktree and must never be committed.
 .mercury-sessions/
 session-artifacts/
+# The adapter writes the resume pointer at the workspace root (primeAgentAdapter.ts).
+.mercury-session-path
 
 # fleet/test/published.test.ts mirrors the release workflow by copying the repo LICENSE into
 # fleet/ before packing, and removes it in `finally`. A `finally` does not run when the process is

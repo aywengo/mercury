@@ -19,6 +19,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
+import { syncStatusForMerged } from '../scripts/planTracker.ts';
 import { join } from 'node:path';
 
 // Read explicitly rather than by looping a directory: the CI guard that requires every docs-reading
@@ -111,6 +112,20 @@ test('status.md names the A2A workstream and links a design doc that exists', ()
   assert.ok(row, 'the at-a-glance table must carry an A2A integration row');
   assert.match(row!, /a2a-design\.md/, 'the row must link the design doc');
   assert.match(row!, /#986/, 'the row must name the filed issue set');
+});
+
+test('status.md stays consistent across the pre-merge/post-merge lifecycle (issue #1004)', () => {
+  // The closing PR no longer sets its PLAN row `done` (that moved to plan-sync), so at PR time the
+  // row is `open` and the guard must pass even if status.md still calls the PR "in review" -- the
+  // PR can merge. After merge, plan-sync marks the row `done` AND removes the "in review"
+  // description, so the guard still passes on the generated commit instead of failing a later run.
+  const prePlan = '| #99 | something | open | — |';
+  const preStatus = '1. **Merge what is in review:** CP-4 in review (#99).';
+  assert.deepEqual([...inReviewMentions(preStatus, mergedPrNumbers(prePlan))], [], 'pre-merge: PR can merge');
+  const donePlan = prePlan.replace('open', 'done | #99');
+  const synced = syncStatusForMerged(preStatus, new Set([99]));
+  assert.equal(synced.changed, true);
+  assert.deepEqual([...inReviewMentions(synced.text, mergedPrNumbers(donePlan))], [], 'post-merge: guard stays green');
 });
 
 test('status.md does not describe the workflow refusal codes as missing', () => {

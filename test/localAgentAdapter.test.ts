@@ -324,6 +324,80 @@ test('resume: respawns with --resume <sessionId> captured from events', async ()
   assert.ok(argv[argv.indexOf('--resume') + 1].startsWith('sess-'));
 });
 
+test('resume: the resumed attempt delivers its OWN output, not the previous attempt\'s exit (#997)', async () => {
+  // Same defect as hermes/claude (#997): a stale exitInfo/stdoutEnded from the previous process
+  // settles the resumed session before its own child has written anything.
+  const argvFile = tempFile('argv-resume-own', 'json');
+  const adapter = new LocalAgentAdapter(jsonlConfig({ env: { MOCK_LOCAL_MODE: 'resume', MOCK_LOCAL_ARGV_FILE: argvFile } }));
+  const { context } = makeContext();
+  const handle = await adapter.start(context);
+  const first = await collectAll(handle);
+  assert.ok(first.events.length > 0, 'the first attempt delivers events');
+
+  const h2 = await adapter.resume(handle.runId);
+  const second = await collectAll(h2);
+  assert.equal(second.exit.reason, 'completed');
+  assert.ok(second.events.length > 0, 'the resumed attempt must deliver its own events');
+  assert.ok(second.events.some((e) => e.type === 'agent.message'), 'including its own message');
+  adapter.dispose(context.run.id);
+});
+
+test('resume: a json-mode resumed attempt parses its OWN document, not the previous one (#997)', async () => {
+  // `output.format: 'json'` accumulates the WHOLE document in `session.stdoutBuf`. Left set, the
+  // resumed child's document is appended to the previous one, the parse fails, and a successful
+  // resumed attempt delivers nothing.
+  const { context, workspacePath } = makeContext();
+  const adapter = new LocalAgentAdapter(jsonlConfig({
+    args: [MOCK],
+    env: { MOCK_LOCAL_MODE: 'json', MOCK_LOCAL_SESSION_FILE: join(workspacePath, 'sid.txt') },
+    output: { format: 'json', stream: false },
+    eventMap: { message: 'agent.message', completed: 'result' },
+    resume: { flag: '--resume', sessionIdSource: 'file', sessionIdPath: 'sid.txt' },
+  }));
+  const handle = await adapter.start(context);
+  const first = await collectAll(handle);
+  assert.ok(first.events.some((e) => e.type === 'agent.message'), 'the first document parses');
+
+  const h2 = await adapter.resume(handle.runId);
+  const second = await collectAll(h2);
+  adapter.dispose(context.run.id);
+  assert.equal(second.exit.reason, 'completed');
+  const msg = second.events.find((e) => e.type === 'agent.message');
+  assert.ok(msg, 'the resumed document must parse on its own');
+  assert.equal((msg!.payload as { text: string }).text, 'hi from json');
+});
+
+test('resume: a pending flag-mode input from the previous attempt does not block the resumed exit (#997)', async () => {
+  // handleExit() returns early while `waitingForInput` is set, so sendInput() can respawn with the
+  // answer flag. Left set across a resume, the resumed attempt exits and the handle NEVER settles --
+  // the worker waits for the stuck-run reaper instead.
+  const { context, workspacePath } = makeContext();
+  const env: Record<string, string> = {
+    MOCK_LOCAL_MODE: 'input-flag',
+    MOCK_LOCAL_SESSION_FILE: join(workspacePath, 'sid.txt'),
+  };
+  const adapter = new LocalAgentAdapter(jsonlConfig({
+    args: [MOCK],
+    env,
+    input: { mode: 'flag', flag: '--answer', promptEvent: 'ask' },
+    resume: { flag: '--resume', sessionIdSource: 'file', sessionIdPath: 'sid.txt' },
+  }));
+  const handle = await adapter.start(context);
+  // Drain up to the prompt and stop: the session stays alive, `waitingForInput` stays true.
+  for await (const ev of handle.events) {
+    if (ev.type === 'input.required') break;
+  }
+
+  env.MOCK_LOCAL_MODE = 'text'; // the resumed attempt finishes without ever asking again
+  const h2 = await adapter.resume(handle.runId);
+  const outcome = await Promise.race([
+    collectAll(h2).then((r) => r.exit.reason),
+    new Promise((r) => setTimeout(() => r('timeout'), 3000)),
+  ]);
+  adapter.dispose(context.run.id);
+  assert.equal(outcome, 'completed', 'the resumed handle must settle, not wait for an input that never comes');
+});
+
 test('resume without session id -> throws', async () => {
   const { context } = makeContext();
   const adapter = new LocalAgentAdapter(jsonlConfig({
@@ -613,5 +687,54 @@ test('the drain grace releases the pipes it truncated (issue #166)', () => {
     // would take the worker down over a run that had already settled.
     assert.match(release, /stdout\.on\('error'/, `${rel}: stdout needs an error listener before destroy`);
     assert.match(release, /stderr\.on\('error'/, `${rel}: stderr needs an error listener before destroy`);
+  }
+});
+
+// CP-4 (#897; #977 review): every respawn reuses the worker-built env, never process.env.
+test('CP-4: the flag-mode input respawn and a context-free resume reuse the worker-built env', async () => {
+  const envFile = tempFile('cp4-local-env', 'json');
+  process.env.CP4_AMBIENT = 'worker-ambient-should-not-pass';
+  try {
+    // flag-mode input: start -> input.required -> sendInput respawns with --answer
+    const { context } = makeContext();
+    const runEnv = { PATH: process.env.PATH ?? '/usr/bin:/bin', CP4_MARKER: 'from-run-env' };
+    const adapter = new LocalAgentAdapter(jsonlConfig({
+      args: [MOCK],
+      env: { MOCK_LOCAL_MODE: 'input-flag', MOCK_LOCAL_ENV_FILE: envFile, MOCK_LOCAL_ENV_ALL: '1' },
+      input: { mode: 'flag', flag: '--answer', promptEvent: 'ask' },
+    }));
+    const handle = await adapter.start({ ...context, env: runEnv });
+    const it = handle.events[Symbol.asyncIterator]();
+    let next = await it.next();
+    while (!next.done) {
+      if (next.value.type === 'input.required') {
+        writeFileSync(envFile, '{}'); // the respawn must rewrite it
+        await adapter.sendInput(handle.runId, { value: 'yes', at: new Date().toISOString() });
+      }
+      next = await it.next();
+    }
+    await handle.exit;
+    // The respawn writes its env file at startup; exit can settle before that (same as the
+    // input-flag argv test above), so wait for the rewrite.
+    const nonEmpty = (f: string) => { try { return Object.keys(JSON.parse(readFileSync(f, 'utf8')) as object).length > 0; } catch { return false; } };
+    await waitFor(() => nonEmpty(envFile));
+    const respawned = JSON.parse(readFileSync(envFile, 'utf8')) as Record<string, string>;
+    assert.equal(respawned.CP4_MARKER, 'from-run-env', 'the input respawn ran on the worker-built env');
+    assert.equal(respawned.CP4_AMBIENT, undefined, 'the input respawn did not fall back to process.env');
+
+    // context-free resume
+    const env2 = tempFile('cp4-local-env-resume', 'json');
+    const { context: c2 } = makeContext();
+    const a2 = new LocalAgentAdapter(jsonlConfig({ args: [MOCK], env: { MOCK_LOCAL_ENV_FILE: env2, MOCK_LOCAL_ENV_ALL: '1' } }));
+    const h2 = await a2.start({ ...c2, env: runEnv });
+    await collectAll(h2);
+    writeFileSync(env2, '{}');
+    await a2.resume(h2.runId);
+    await waitFor(() => nonEmpty(env2));
+    const resumed = JSON.parse(readFileSync(env2, 'utf8')) as Record<string, string>;
+    assert.equal(resumed.CP4_MARKER, 'from-run-env', 'the resume ran on the worker-built env');
+    assert.equal(resumed.CP4_AMBIENT, undefined, 'the resume did not fall back to process.env');
+  } finally {
+    delete process.env.CP4_AMBIENT;
   }
 });

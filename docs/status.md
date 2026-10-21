@@ -23,10 +23,10 @@ control, retries, sandbox integration, metrics and deployment packaging.
 | **Knowledge base (Atlas)** | Shipped, both directions observed on real agents | Retention policy (open question) | [`knowledge-base.md`](knowledge-base.md), below |
 | **Dispatcher bots** | B0 + B1 shipped; B2-0 (`statusChangedAt` on the Run row, #959) shipped; one nightly bot runs unattended on one host | B2 triggers B2-1..B2-3 (#907–#909); B3 brain (#912) and B4 setup integration (#915) proposed | [`dispatcher-bot-design.md`](dispatcher-bot-design.md) |
 | **Nightly self-development** | Running every night as `mercury-nightly`; resumes on owner change requests (#968) | #964 (flake report window), #881 (duplicate-proposal guard, PR #984), #980 (resume on red CI, PR #981) | [`nightly-self-development.md`](nightly-self-development.md) |
-| **Credential profiles** | CP-2 + CP-3 shipped (resolution per Run); strict no-profile default decided (#954) | CP-4 layered Run environment (#897), PR #977 in review | [`credential-profiles-design.md`](credential-profiles-design.md) |
+| **Credential profiles** | CP-2 + CP-3 shipped (resolution per Run); strict no-profile default decided (#954) | CP-4 layered Run environment (#897) (PR #977) | [`credential-profiles-design.md`](credential-profiles-design.md) |
 | **Laya** (System-1 selection) | P-1 and L0 shipped; L1-1..L1-3 shipped | L1-4 wiring (#857), blocked on the label rule (#853) and a real-host sidecar run (#852) | [`laya-integration-design.md`](laya-integration-design.md) |
 | **Fleet** | Phases 0–6 shipped (registry, dispatch, sweep, events, routing, interaction, metrics), runs as a service | Fleet-and-bots FB1–FB3 (#972–#974) | [`fleet-design.md`](fleet-design.md) §12 |
-| **Fleet and bots** | Design accepted 2026-10-16 (option A: bots dispatch through Fleet); FB0 availability snapshot shipped (#978) | FB2a owner-scoped run list (#971), PR #982 in review | [`fleet-bots-design.md`](fleet-bots-design.md) |
+| **Fleet and bots** | Design accepted 2026-10-16 (option A: bots dispatch through Fleet); FB0 availability snapshot shipped (#978) | FB2a owner-scoped run list (#971) (PR #982) | [`fleet-bots-design.md`](fleet-bots-design.md) |
 | **Fleet tenancy** | Specification; T0–T2 proposed (#884–#890) | Only needed for more than one Fleet operator | [`fleet-tenancy-design.md`](fleet-tenancy-design.md) |
 | **A2A integration** | Design settled 2026-10-18 (server-first, HTTP+JSON/REST binding); A0 filed as #986–#990 | A0 implementation: retry chains (#987), the server-stamped Run origin (#988) and the task-state mapping (#990) done; #986 and #989 next | [`a2a-design.md`](a2a-design.md) |
 | **Distribution** | Five channels built by the release workflow | — | [`distribution.md`](distribution.md), below |
@@ -38,7 +38,7 @@ control, retries, sandbox integration, metrics and deployment packaging.
 The target architecture is Crew, host bots and the dispatcher bot running on every host, with
 Fleet deciding where work runs ([`fleet-bots-design.md`](fleet-bots-design.md)). In order:
 
-1. **Merge what is in review:** artifact redaction (#965). W-3 (#934) and B2-0 (#959) merged 2026-10-18.
+1. **Done:** artifact redaction (#965), W-3 (#934) and B2-0 (#959).
 2. **CP-4 (#897):** a layered Run environment with the strict no-profile default, so several bots
    or identities on one host cannot leak credentials into each other.
 3. **B4 (#915):** host setup installs and configures bots, which is what puts them on every host.
@@ -215,7 +215,8 @@ incident (#942). Keep exactly one identity's token in a host's `mercury.env` unt
 Mercury redacts known patterns and exact credentials it forwards. It cannot
 guarantee removal of an unknown secret that it never observed or a value
 transformed by a malicious agent. Agent artifacts at rest (session transcripts,
-kernel-state snapshots) are not yet scrubbed; that is #944, PR #965 in review.
+kernel-state snapshots) are scrubbed after every Run on every exit path (#944, #965); Runs
+whose worker never finished them are swept by #976 (open).
 
 Minimal credential forwarding and network isolation remain the primary
 boundaries.

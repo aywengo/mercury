@@ -224,6 +224,19 @@ function num(value: string | undefined, fallback: number): number {
  * declarative local/remote/rpc registries are fleet-defined agents; neither is a host
  * harness, so the allowlist never filters them.
  */
+/**
+ * Environment-name prefixes a local Run NEVER inherits from the worker (credential profiles
+ * CP-4, docs/credential-profiles-design.md section 6.1 layer 1). Everything else passes through,
+ * so PATH and ordinary tool configuration keep working. Adapter `config.env` is refused at load
+ * when it sets one of these names: adapter config must not bring back what profiles govern
+ * (section 9).
+ */
+export const STRIPPED_ENV_PREFIXES = ['GH_', 'GITHUB_', 'GIT_', 'MERCURY_'] as const;
+
+export function isStrippedEnvName(name: string): boolean {
+  return STRIPPED_ENV_PREFIXES.some((p) => name.startsWith(p));
+}
+
 export const HOST_HARNESSES = ['primeagent', 'hermes', 'claude'] as const;
 
 /** Parse MERCURY_HARNESSES: unset/empty = null (every shipped harness enabled). */

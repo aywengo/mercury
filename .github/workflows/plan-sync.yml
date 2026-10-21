@@ -1,0 +1,51 @@
+# plan-sync: mark PLAN.md rows done after a PR merges (issue #1004).
+#
+# The per-PR row edit (old PLAN.md rule 2) made two open PRs in one workstream conflict on
+# adjacent rows every time one merged first. The row update now happens HERE, after merge, in one
+# commit as the Actions bot.
+#
+# Push identity: `main` requires pull requests plus the `ci` status check, and the GITHUB_TOKEN
+# cannot bypass that ruleset (the "Actions" RepositoryRole, the github-actions[bot] user and the
+# github-actions app all fail for this user repo). So the push uses the operator's PAT stored in
+# the `PLAN_SYNC_TOKEN` repository secret, which is on the `main-protection` ruleset's bypass list
+# (User 800531). The PAT is a classic token with the `workflow` scope; it is the same identity the
+# operator uses to merge PRs with the admin bypass.
+#
+# Idempotent: a commit with no closing issues (including this workflow's own commit) changes
+# nothing, so the workflow does not re-trigger itself.
+#
+# CI: the push uses the operator PAT, so it fires `push` workflows and `ci` runs on the generated
+# commit automatically (the repo's "any push to main runs the full suite" policy).
+
+name: plan-sync
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+  issues: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Checkout with the operator PAT so the persisted git credential (and the Authorization
+          # header checkout writes) is the bypass identity, not the GITHUB_TOKEN. A remote override
+          # alone would not work: checkout's persisted Authorization header takes precedence over a
+          # token in the remote URL, so the push would still use the GITHUB_TOKEN and be rejected.
+          token: ${{ secrets.PLAN_SYNC_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: Mark closing issues done
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: node scripts/plan-sync.ts
