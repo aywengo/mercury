@@ -585,22 +585,24 @@ jobs:
             curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
               "https://registry.npmjs.org/${pkg_esc}/${version}" || echo 000
           }
-          version_live="000"
-          if [ "${DRY_RUN:-}" != "true" ]; then
-            version_live=$(npm_version_http)
-            if [ "$npm_ok" = "1" ] && [ "$npm_verb" != "stage publish" ] && [ "$version_live" != "200" ]; then
-              # This run published the version itself, so the registry is expected to serve it. The
-              # packument lags a publish by a few seconds, and one probe taken immediately would put
-              # "not confirmed" on the body of a version that IS installable -- a false negative is
-              # still a false statement about what a reader can install. Retry briefly before
-              # concluding anything. Bounded, so a registry that is down costs seconds, not the job.
-              attempt=0
-              while [ "$attempt" -lt 5 ] && [ "$version_live" != "200" ]; do
-                attempt=$((attempt + 1))
-                sleep 2
-                version_live=$(npm_version_http)
-              done
-            fi
+          # Probed on every path, including a rehearsal: the fail-last messages below read this answer,
+          # and a rehearsal whose dry-run publish failed must report the registry's answer rather than
+          # a 000 the step never asked for.
+          version_live=$(npm_version_http)
+          # A run that just published directly expects the registry to serve the version. The packument
+          # can lag the publish by a few seconds, and one probe taken immediately would put "not
+          # confirmed" on the body of a version that IS installable -- a false negative is still a false
+          # statement about what a reader can install. Retry briefly before concluding anything.
+          # Bounded, so a registry that is down costs seconds, not the job. Not in a rehearsal: nothing
+          # was submitted, so there is no publish for the registry to catch up with.
+          if [ "${DRY_RUN:-}" != "true" ] && [ "$npm_ok" = "1" ] \
+            && [ "$npm_verb" != "stage publish" ] && [ "$version_live" != "200" ]; then
+            attempt=0
+            while [ "$attempt" -lt 5 ] && [ "$version_live" != "200" ]; do
+              attempt=$((attempt + 1))
+              sleep 2
+              version_live=$(npm_version_http)
+            done
           fi
           if [ "${DRY_RUN:-}" = "true" ]; then
             # A rehearsal submitted nothing, so it has no channel state to describe. Every section

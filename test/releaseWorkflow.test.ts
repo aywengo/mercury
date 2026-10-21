@@ -193,10 +193,12 @@ function runTag(
           + '    chmod +x "$prefix/node_modules/.bin/atlas"\n'
           + '    exit 0 ;;\n'
           + 'esac\n'
-          // Scoped to the submission: --provenance appears only on the publish/stage call. Failing
-          // on every npm call instead also killed `npm ci`, which made three tests fail for a reason
-          // that had nothing to do with what they were checking.
-          + 'case "$*" in\n  *--provenance*) if [ -n "${STUB_NPM_SUBMIT_ERR:-}" ]; then printf "%s\\n" "${STUB_NPM_SUBMIT_ERR}" >&2; fi; exit "${STUB_NPM_SUBMIT_RC:-0}" ;;\nesac\nexit 0\n'
+          // Scoped to the submission: --provenance appears on the real publish/stage call and
+          // --dry-run on the rehearsal's. Failing on every npm call instead also killed `npm ci`,
+          // which made three tests fail for a reason that had nothing to do with what they were
+          // checking. A fleet or atlas rehearsal carries no --provenance, so without --dry-run here
+          // no rehearsal could exercise a failed submission at all.
+          + 'case "$*" in\n  *--provenance*|*--dry-run*) if [ -n "${STUB_NPM_SUBMIT_ERR:-}" ]; then printf "%s\\n" "${STUB_NPM_SUBMIT_ERR}" >&2; fi; exit "${STUB_NPM_SUBMIT_RC:-0}" ;;\nesac\nexit 0\n'
         : `#!/bin/sh\necho "${cmd} $*" >> "${tmp}/calls.log"\nexit 0\n`;
       writeFileSync(stub, body);
       chmodSync(stub, 0o755);
@@ -836,6 +838,25 @@ test('a publish the registry serves only on a later probe is not called unconfir
   assert.ok(!/does not serve/.test(r.notesOut),
     `a lagging registry is not a version that is missing:\n${r.notesOut}`);
   assert.ok(!/awaiting maintainer approval/.test(r.notesOut), 'and a direct publish was not staged');
+});
+
+test('a failed rehearsal reports the registry answer, not a 000 it never asked for', () => {
+  // The fail-last messages read `version_live`, so a rehearsal that skipped the probe reports "the
+  // registry returned HTTP 000" -- a statement about the network that was never observed, in the
+  // message an operator reads to decide whether the release path works. The probe therefore runs on
+  // every path; only the propagation retry is skipped in a rehearsal, because nothing was submitted
+  // for the registry to catch up with.
+  const r = runTag(`fleet-v${V}`, {
+    notes: [`fleet/${V}.md`], event: 'workflow_dispatch', rehearsalProduct: 'fleet',
+    npmFails: true, pkgVersionHttp: '404',
+  });
+  assert.equal(r.status, 1, 'a rehearsal whose submission failed still goes red');
+  assert.ok(!/No such file or directory/.test(r.stderr),
+    `a rehearsal must not grep a log it never wrote:\n${r.stderr}`);
+  assert.match(r.stderr, /is not on the registry/,
+    `the message must carry the probe's answer:\n${r.stderr}`);
+  assert.ok(!/did not answer \(HTTP 000\)/.test(r.stderr),
+    `a probe that did run must not be reported as unanswered:\n${r.stderr}`);
 });
 
 test('a rehearsal does not read a submission log it never wrote', () => {
