@@ -463,8 +463,14 @@ export async function copilotHeadState(
   let rvPages = 0;
   try {
     while (rvPath && rvPages < 5) {
-      const { body, link } = (await io.get(rvPath) as { body: unknown; link?: string | null }) as { body: { user?: { login?: string | null }; commit_id?: string | null; state?: string | null; submitted_at?: string | null }[]; link?: string | null };
-      for (const rv of body ?? []) {
+      const page = (await io.get(rvPath)) as { body: unknown; link?: string | null };
+      // A 200 whose body could not be decoded (`shared.ghGet` returns `body: null`) is a FAILED
+      // review read, not an empty review list. Reading it as empty left `complete` true, so a
+      // caller's hand-off claimed "no last Copilot review" on a broken read (Copilot, #966).
+      if (!Array.isArray(page.body)) throw new Error(`GET ${rvPath} returned a body that is not a list`);
+      const body = page.body as { user?: { login?: string | null }; commit_id?: string | null; state?: string | null; submitted_at?: string | null }[];
+      const link = page.link;
+      for (const rv of body) {
         // Exact login: a lookalike account (copilot-pull-request-reviewer-x) must neither
         // replace the last review nor fake a verdict (#820 r5).
         // The owner's LATEST deciding review (#968). COMMENTED/PENDING do not change a PR's

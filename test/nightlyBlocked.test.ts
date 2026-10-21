@@ -15,6 +15,8 @@ function makeIo(opts: {
   reviewsStatus?: number;
   threadsStatus?: number;
   pulls?: { body: unknown; status: number };
+  /** The commit the last Copilot review was submitted against; defaults to the PR head. */
+  reviewCommit?: string;
 }): { io: NextIo; log: Recorded } {
   const log: Recorded = { labelPosts: 0, comments: [], labelDeletes: 0, patches: [] };
   const io: NextIo = {
@@ -26,7 +28,7 @@ function makeIo(opts: {
       if (path.includes(`/pulls/${PR}/reviews`)) {
         const status = opts.reviewsStatus ?? 200;
         if (status !== 200) return { body: null, status, link: null };
-        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: HEAD, state: 'CHANGES_REQUESTED', submitted_at: '2026-10-05T00:44:00Z' }], status: 200, link: null };
+        return { body: [{ user: { login: 'copilot-pull-request-reviewer[bot]' }, commit_id: opts.reviewCommit ?? HEAD, state: 'CHANGES_REQUESTED', submitted_at: '2026-10-05T00:44:00Z' }], status: 200, link: null };
       }
       return { body: { number: 860, user: { login: 'aywengo' }, body: 'issue body', labels: [] }, status: 200, link: null };
     },
@@ -140,4 +142,49 @@ test('statedFindingCounts: narrow - prose numbers (issue/PR numbers) never trip 
   assert.deepEqual(statedFindingCounts('11 unresolved copilot findings remain'), [11]);
   assert.deepEqual(statedFindingCounts('open findings: 3 on the head'), [3]);
   assert.deepEqual(statedFindingCounts('no counts here'), []);
+});
+
+// ---- Copilot review round 4 on PR #966: the three open findings ----
+
+test('blocked --pr: a reason that names the PR after its count is not refused (#966)', async () => {
+  const { io, log } = makeIo({ reviewThreads: { totalCount: 6, pageInfo: { hasNextPage: false }, nodes: threadNodes() } });
+  // "2 open findings on PR #842": the old count regexes read 842 as a second count and refused.
+  await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: '2 open findings on PR #842; how should the store contract be shaped?', pr: PR });
+  assert.equal(log.comments.length, 1, 'the matching count is accepted and the hand-off is posted');
+  assert.equal(log.labelPosts, 1);
+  assert.match(log.comments[0]!, /- open findings on this head: 2/);
+});
+
+test('blocked --pr: the head line shows the FETCHED PR head, not the reviewed commit (#966)', async () => {
+  // The review was submitted on sha-head-1; the PR has since advanced to HEAD (sha-head-2).
+  const { io, log } = makeIo({ reviewThreads: { totalCount: 6, pageInfo: { hasNextPage: false }, nodes: threadNodes() }, reviewCommit: 'sha-head-1' });
+  await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR });
+  const body = log.comments[0]!;
+  assert.match(body, /- head: sha-head-2/, 'the current head is the fetched head');
+  assert.match(body, /- last Copilot review: sha-head-1 at 2026-10-05T00:44:00Z/, 'the reviewed commit keeps its own line');
+  assert.doesNotMatch(body, /- head: sha-head-1/);
+});
+
+test('blocked --pr: the head line still shows the fetched head when no Copilot review exists (#966)', async () => {
+  const { io, log } = makeIo({ reviewThreads: { totalCount: 0, pageInfo: { hasNextPage: false }, nodes: [] }, reviewsStatus: 200 });
+  // Strip the Copilot review: only the PR-head read remains.
+  const get = io.get;
+  io.get = async (path: string) => (path.includes(`/pulls/${PR}/reviews`) ? { body: [], status: 200, link: null } : get(path));
+  await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR });
+  const body = log.comments[0]!;
+  assert.match(body, /- head: sha-head-2/, 'never "unknown" while the head was fetched');
+  assert.match(body, /- last Copilot review: none/);
+});
+
+test('blocked --pr: a failed reviews read fails closed instead of reporting an authoritative count (#966)', async () => {
+  // A non-JSON 502 body arrives as `body: null`; the thread query succeeds. Reading that as an
+  // empty review list made the hand-off authoritative ("no last Copilot review", a derived count).
+  const { io, log } = makeIo({ reviewThreads: { totalCount: 6, pageInfo: { hasNextPage: false }, nodes: threadNodes() }, reviewsStatus: 502 });
+  const res = await blockIssue(io, { repo: 'aywengo/mercury', issue: 860, reason: 'review-round cap reached', pr: PR });
+  assert.equal(res.commented, true);
+  assert.equal(log.labelPosts, 1, 'the issue is still labeled nightly:blocked');
+  const body = log.comments[0]!;
+  assert.match(body, /could NOT be derived/);
+  assert.doesNotMatch(body, /open findings on this head: \d/);
+  assert.doesNotMatch(body, /last Copilot review: none/);
 });

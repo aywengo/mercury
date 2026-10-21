@@ -129,8 +129,14 @@ export async function finishIssue(io: NextIo, opts: { repo: string; issue: numbe
 
 /** A review-cap hand-off's derived count, stated in --reason by the agent (#860). */
 const REASON_COUNT_RES = [
-  /(\d+)\s+(?:open\s+|unresolved\s+|remaining\s+|blocking\s+)*(?:copilot\s+|review\s+)*findings/gi,
-  /(?:open|unresolved|remaining|blocking)\s+findings\D{0,20}?(\d+)/gi,
+  // "11 open findings", "11 unresolved Copilot findings remain". The number must START a token
+  // (`(?<![\\d#])`): a `#842`-style reference is never a count, and the engine must not restart
+  // mid-number ("842" -> "42").
+  /(?<![\d#])(\d+)\s+(?:open\s+|unresolved\s+|remaining\s+|blocking\s+)*(?:copilot\s+|review\s+)*findings/gi,
+  // "open findings: 3", "findings = 3" - an EXPLICIT separator only. A looser form read the PR
+  // number in "2 open findings on PR #842" as a second count (842), so a valid hand-off was
+  // refused before it labeled or commented (Copilot, #966).
+  /\bfindings\s*[:=]\s*(\d+)/gi,
 ] as const;
 
 /** The finding counts the agent's reason EXPLICITLY states (empty = none stated - fine; the
@@ -147,13 +153,15 @@ export function statedFindingCounts(reason: string): number[] {
   return counts;
 }
 
-/** The appended block text for a derived (complete) head state. */
-function derivedFindingsBlock(pr: number, state: CopilotHeadState): string {
+/** The appended block text for a derived (complete) head state. `headSha` is the PR head that was
+ * FETCHED and that the findings were filtered against - not the commit of the last review, which
+ * lags whenever a push followed the review (Copilot, #966). */
+function derivedFindingsBlock(pr: number, headSha: string, state: CopilotHeadState): string {
   const lines: string[] = [
     '',
     '',
     `**Current-head Copilot findings on PR #${pr} (derived from the PR, not recalled):**`,
-    `- head: ${state.lastCopilot?.commit_id ?? 'unknown'}`,
+    `- head: ${headSha}`,
     `- last Copilot review: ${state.lastCopilot?.commit_id ?? 'none'}${state.lastCopilot?.submitted_at ? ` at ${state.lastCopilot.submitted_at}` : ''}`,
     `- open findings on this head: ${state.findings.length}`,
   ];
@@ -194,7 +202,24 @@ export async function blockIssue(io: NextIo, opts: { repo: string; issue: number
     }
     const headSha = (prRes.body as { head?: { sha?: string | null } | null })?.head?.sha ?? '';
     if (!headSha) throw new Error(`blocked --pr: PR #${opts.pr} has no head sha; cannot derive current-head findings`);
-    const state = await copilotHeadState(io, opts.repo, opts.pr, headSha, 'blocked --pr');
+    // The shared helper treats an unreadable review page as an EMPTY one: it reads `body ?? []`
+    // and never checks the status, so a 502/503 with a non-JSON body would look like "no last
+    // Copilot review" and keep `complete` true. Fail the read here instead (the same status check
+    // `runNext` applies to its transport) so it reaches the helper's fail-closed path (Copilot, #966).
+    const state = await copilotHeadState(
+      {
+        get: async (path: string) => {
+          const res = await io.get(path);
+          if (res.status < 200 || res.status >= 300) throw new Error(`GET ${path} -> ${res.status}`);
+          return res;
+        },
+        postJson: io.postJson ? async (path: string, body: unknown) => await io.postJson!(path, body) : undefined,
+      },
+      opts.repo,
+      opts.pr,
+      headSha,
+      'blocked --pr',
+    );
     if (state.complete) {
       // Refuse unsourced counts (#860 acceptance 2): a stated count that differs from the
       // derived one means the reason was recalled, not derived - refuse BEFORE any write.
@@ -202,7 +227,7 @@ export async function blockIssue(io: NextIo, opts: { repo: string; issue: number
       if (stated.some((n) => n !== state.findings.length)) {
         throw new Error(`blocked --pr: the reason states finding count(s) [${stated.join(', ')}] but PR #${opts.pr}'s current head has ${state.findings.length} open Copilot finding(s); derive the reason from the PR (blocked --pr) instead of recalling earlier rounds - nothing was posted`);
       }
-      question = reason + derivedFindingsBlock(opts.pr, state);
+      question = reason + derivedFindingsBlock(opts.pr, headSha, state);
     } else {
       // Fail closed (#860 acceptance 3): the count is unknown, the caveat says so.
       question = reason + underivedFindingsBlock(opts.pr);
