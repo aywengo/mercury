@@ -161,7 +161,12 @@ The procedure below stays for the next product that needs it.
 
 8. **A green run does not mean the version is installable.** The job submits with `npm stage publish`,
    which defers proof-of-presence to a maintainer, so `npm install` will not resolve the version until it
-   is approved. The release body names the id and gives the command:
+   is approved. The body does not infer that from the command, though: it asks the registry what it
+   serves for this version and writes the pending-approval notice only when the answer is "not served
+   yet". A staged version that is already live (approved minutes earlier, or published outside CI) is
+   left alone, and a direct `npm publish` that reported success while the registry does not serve the
+   version is disclosed as unconfirmed rather than described as awaiting approval. When it is pending,
+   the body names the id and gives the command:
 
    ```bash
    npm stage approve <stage-id>     # needs a 2FA code; run it locally
