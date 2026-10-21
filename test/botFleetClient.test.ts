@@ -13,7 +13,7 @@ import { mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from './helpers.ts';
 import { loadBotConfig, type BotConfig, type BotTaskConfig } from '../src/host/bots/config.ts';
-import { readBotCredentials } from '../src/host/bots/credentials.ts';
+import { readBotCredentials, type BotTokenPair } from '../src/host/bots/credentials.ts';
 import { makeFleetClient, bindingToBotRun, FLEET_UNKNOWN } from '../src/host/bots/fleetClient.ts';
 import { makeSchedulerClient } from '../src/host/bots/process.ts';
 import { dispatchKey, scheduledWallMinuteId } from '../src/host/bots/keys.ts';
@@ -101,7 +101,12 @@ async function startFakeFleet(): Promise<FakeFleet> {
           send(fake.forceCreateStatus, { error: 'forced' });
           return;
         }
-        const key = (req.headers['idempotency-key'] as string | undefined) ?? null;
+        const parsed = JSON.parse(raw || '{}') as Record<string, unknown>;
+        // Same precedence as the real Fleet (fleet/server.ts): a non-empty body `idempotency` wins
+        // over the `Idempotency-Key` header. Modelling it here is what lets the regression test
+        // below prove a template-level value cannot silently take over the derived key.
+        const bodyIdem = typeof parsed.idempotency === 'string' && parsed.idempotency !== '' ? parsed.idempotency : null;
+        const key = bodyIdem ?? ((req.headers['idempotency-key'] as string | undefined) ?? null);
         const existing = key === null ? undefined : fake.bindings.find((b) => b.ownerId === ownerId && b.key === key);
         if (existing) {
           // §4: a replayed key answers 200 with the ORIGINAL binding — no second Run.
@@ -113,7 +118,7 @@ async function startFakeFleet(): Promise<FakeFleet> {
           ownerId,
           hostId: 'host-a',
           key,
-          requested: JSON.parse(raw || '{}') as Record<string, unknown>,
+          requested: parsed,
           // Distinct timestamps keep the keyset order deterministic across the paging test.
           createdAt: new Date(Date.UTC(2026, 5, 10, 0, 0, seq)).toISOString(),
           state: null,
@@ -162,8 +167,14 @@ async function startFakeFleet(): Promise<FakeFleet> {
   return fake;
 }
 
-/** A config home holding bot-credentials.json (0600) for the fleet-via bot. */
-function configHome(entries: Record<string, { api: string; fleet?: string }>): { dir: string; cleanup: () => void } {
+/**
+ * A config home holding bot-credentials.json (0600) for the fleet-via bot.
+ *
+ * The entry type is `BotTokenPair`, where `api` is OPTIONAL: one test below deliberately writes a
+ * Fleet-only entry to prove `readBotCredentials` still refuses it at runtime (the `api` token stays
+ * required by the reader, not by the fixture's type).
+ */
+function configHome(entries: Record<string, BotTokenPair>): { dir: string; cleanup: () => void } {
   const dir = tempDir('bot-fleet-creds-');
   mkdirSync(join(dir, 'mercury'), { recursive: true });
   const path = join(dir, 'mercury', 'bot-credentials.json');
@@ -313,6 +324,41 @@ test('a fire through Fleet creates exactly one Run; a crash-retry with the same 
     assert.equal(fleet.bindings.length, 1, 'the retry created no second Run');
     // The bot's own payload is what Fleet stores, so single-flight still sees its task name.
     assert.equal(fleet.bindings[0]!.requested.constraints !== undefined, true);
+  } finally {
+    home.cleanup();
+    await fleet.close();
+  }
+});
+
+test('a template-level `idempotency` cannot take over the derived fire key (review r4331407356)', async () => {
+  const fleet = await startFakeFleet();
+  const home = configHome({ ops: { api: 'tok-host-ops', fleet: 'fleet-token-ops' } });
+  try {
+    const client = makeFleetClient(cfg(fleet.base, [task()], 'fleet'), { XDG_CONFIG_HOME: home.dir });
+    const fireA = Date.UTC(2026, 5, 10, 3, 15, 0);
+    const fireB = fireA + MIN;
+    // A task template may carry `idempotency` (it is inert on the host path: src/api/routes.ts reads
+    // the header only). Fleet prefers a non-empty body field, so an unstripped body would make the
+    // second fire replay the first binding instead of creating a Run — a bot that silently stops
+    // dispatching after its first fire.
+    const mk = (fire: number): DispatchRequest => ({
+      taskName: 'nightly', fireMs: fire, wallMinute: scheduledWallMinuteId(fire, 'UTC'),
+      key: dispatchKey('ops', 'nightly', fire, 'UTC'),
+      body: { task: 'maintenance', idempotency: 'nightly', constraints: { botTask: 'nightly' } },
+    });
+    const a = await client.createRun(mk(fireA));
+    const b = await client.createRun(mk(fireB));
+    assert.equal(a.replayed, false);
+    assert.equal(b.replayed, false, 'the second fire is a NEW Run, not a replay of the first');
+    assert.notEqual(b.runId, a.runId);
+    assert.equal(fleet.bindings.length, 2, 'two distinct fire keys -> two Fleet Runs');
+    // The key Fleet bound is the derived one, never the template's static value.
+    assert.deepEqual(
+      fleet.bindings.map((x) => x.key),
+      [mk(fireA).key, mk(fireB).key],
+      'the Idempotency-Key header stays authoritative',
+    );
+    assert.equal(fleet.bindings[0]!.requested.idempotency, undefined, 'the template field never reaches Fleet');
   } finally {
     home.cleanup();
     await fleet.close();

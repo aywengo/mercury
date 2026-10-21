@@ -107,10 +107,17 @@ export function makeFleetClient(cfg: BotConfig, env: NodeJS.ProcessEnv = process
       };
     },
     async createRun(req: DispatchRequest): Promise<{ runId: string; replayed: boolean }> {
+      // The derived key is the ONLY correct idempotency value (§5.2), so a template that carries its
+      // own `idempotency` field must not reach the wire: Fleet prefers a non-empty body
+      // `idempotency` over the `Idempotency-Key` header (fleet/server.ts), and a static template
+      // value would make every later fire replay the first binding instead of creating a Run. The
+      // host path is immune because its route reads the header only, so stripping the field here
+      // keeps the two dispatch targets identical.
+      const { idempotency: _templateIdempotency, ...body } = req.body;
       const res = await call('/fleet/runs', {
         method: 'POST',
         headers: { 'idempotency-key': req.key },
-        body: JSON.stringify(req.body),
+        body: JSON.stringify(body),
       });
       // Exactly 201 (created) or 200 (replay). Anything else — 202/204 included — is refused before
       // res.json(), so a contract break cannot be read as a dispatch.
