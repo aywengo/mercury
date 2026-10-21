@@ -6,7 +6,8 @@
  *
  *   - rung 1: trusted `origin:e2e` / `nightly:ready` issues (priority, then age)
  *   - rung 2: trusted `enhancement` issues — authored by @aywengo or labeled enhancement by
- *     @aywengo (timeline actor) — priority, then age (#800)
+ *     @aywengo (timeline actor) AND `nightly:ready` by @aywengo — priority, then age
+ *     (#800; the ready requirement is #1001 decision A)
  *   - rung 3: new @aywengo issues, not yet labeled (age)
  *   - rung 4: docs → proposals — DRAFT ONLY (§6): the agent drafts `nightly:proposed` issues and
  *     never implements.

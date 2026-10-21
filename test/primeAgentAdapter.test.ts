@@ -628,3 +628,25 @@ test('a skills directory that is a symlink out of the workspace is refused (issu
     adapter.cancel(context.run.id).catch(() => {});
   }
 });
+
+// CP-4 (#897; #977 review): a retry resumes on a fresh session start() never saw; it must adopt
+// the retry context's env instead of falling back to process.env.
+test('CP-4: a retry resume (no prior start) runs on the retry context env', async () => {
+  const { context, workspacePath } = makeContext();
+  const envFile = join(workspacePath, 'env-retry.json');
+  const sessionFile = join(workspacePath, 'session.jsonl');
+  writeFileSync(sessionFile, JSON.stringify({ ok: true }));
+  const runEnv = { PATH: process.env.PATH ?? '/usr/bin:/bin', CP4_MARKER: 'from-retry-env', MOCK_RPC_ENV_FILE: envFile, MOCK_RPC_ENV_ALL: '1' };
+  const adapter = new PrimeAgentAdapter(MOCK);
+  process.env.CP4_AMBIENT = 'worker-ambient-should-not-pass';
+  try {
+    const handle = await adapter.resume(context.run.id, { ...context, env: runEnv, resumeSessionFile: sessionFile });
+    await collectAll(handle);
+    const env = JSON.parse(readFileSync(envFile, 'utf8')) as Record<string, string>;
+    assert.equal(env.CP4_MARKER, 'from-retry-env', 'the retry resume ran on the retry env');
+    assert.equal(env.CP4_AMBIENT, undefined, 'the retry resume did not fall back to process.env');
+  } finally {
+    delete process.env.CP4_AMBIENT;
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});

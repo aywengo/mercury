@@ -70,22 +70,45 @@ terminal before taking rung 1 (bugs it may be about to file).
 The bot config implementing this schedule is #742
 (`deploy/nightly-bot.json.example`).
 
+**Model.** Each task template may carry an explicit `model`; `resolveTemplate` copies it into the
+Run-create body, so the Run records a per-Run model (#823) and the adapter passes it to the agent.
+The host pins it there rather than relying on the CLI's own default: a nightly Run is unattended, so
+a default that changes under it changes what the night does, and the model that produced a PR is
+then not the model in any config. The operator's current pin is `GLM-5.3-Flash-oQ8e-mtp` (omlx) on
+all three tasks. `prime-agent models` lists the ids the CLI accepts; `primeagent` declares
+`perRunModel: true`, so the value reaches `--model`. A config change is read **once at bot start** —
+restart the bot (`launchctl kickstart -k gui/$(id -u)/com.mercury.bot.nightly`) or the running
+process keeps the old schedule.
+
 ### 4.2 The ladder
 
 Each `nightly-next` Run evaluates, in order, and takes the first rung with work:
 
 1. **Trusted bugs** — `origin:e2e` issues and `nightly:ready` issues, by
    priority label then age.
-2. **Trusted features** (#800) — `enhancement` issues authored by @aywengo, or
-   whose CURRENT `enhancement` label was applied by @aywengo (the same
-   timeline-actor rule as `nightly:ready`), by priority label then age.
+2. **Trusted features** (#800, amended by #1001 decision A) — `enhancement` issues
+   authored by @aywengo, or whose CURRENT `enhancement` label was applied by
+   @aywengo (the same timeline-actor rule as `nightly:ready`), **and** labeled
+   `nightly:ready` by @aywengo, by priority label then age. An `enhancement` label
+   alone is not a work signal: mark the issue ready when its blockers are done.
+   Rung 1 already takes every trusted `nightly:ready` issue, so rung 2 is reached
+   only while rung 1 is gated off (tonight's E2E verdict still pending).
 3. **New @aywengo issues** — authored by @aywengo, not yet labeled.
 4. **Docs → proposals** — §6.
 
-Before selecting, the selector resets stale claims (#800): an issue whose
-CURRENT `nightly:in-progress` label event predates the current night's local
-midnight was left by a deadline-stopped Run; the label is removed so the issue
-is claimable again. A claim from tonight still excludes (a live Run holds it).
+Before selecting, the selector releases claims in two cases:
+
+- **Stale by the clock (#800).** An issue whose CURRENT `nightly:in-progress`
+  label event predates the current night's local midnight was left by a
+  deadline-stopped Run; the label is removed so the issue is claimable again.
+- **Dead Run, no output (#1001).** A claim from THIS night is released when the
+  claiming Run is over and produced nothing: no `nightly-next` Run other than
+  this one is non-terminal (read from the host API; `MERCURY_RUN_ID` is
+  excluded), no open nightly PR names the issue, and the nightly identity has
+  not commented on it since the claim. Without this, a Run that died at 00:21
+  without output held its issue for the rest of the night. A deadline-stopped
+  Run comments (§4.3), so its claim is left for the clock path; when the host
+  API is unset or unreadable, liveness is unknown and the claim is kept.
 
 Selection runs as code against the GitHub API
 (`.agents/skills/nightly/select.ts`, #738). The chosen issue is labeled
@@ -144,7 +167,23 @@ issue `nightly:blocked`, put the question in an issue comment, finish the Run.
    environment, never through task text, argv or events. Until credential
    profiles (`credential-profiles-design.md`) ship, this requires a host
    dedicated to the nightly identity (that design's §12), because local Runs
-   inherit the worker's whole environment.
+   inherit the worker's whole environment. Agent artifacts are also scrubbed at
+   rest (#944, follow-up to the #942 leak): after the agent process exits, the
+   worker rewrites every file under the Run workspace's `.mercury-sessions/`
+   and `session-artifacts/` with the declared secret values replaced — text
+   artifacts through the event redactor's chain (so a transcript reads like a
+   redacted event), binary kernel snapshots by an equal-length in-place swap
+   that keeps the pickle parseable. The pass runs on every exit path — in the
+   finally, after the agent is terminated — so a Run that fails is scrubbed
+   too; a Run paused on `NEEDS_INPUT` is not scrubbed until it ends, since the
+   agent process is still alive. The redaction layer is the same one built
+   for events (MERCURY_SECRETS plus forwarded credential values), so what can
+   leave through an event cannot rest in an artifact either. Known limits:
+   base64 copies of a declared value and of the `x-access-token:<value>` git
+   pair are covered; other encodings (percent-encoding in arbitrary positions,
+   hex) are not. Files larger than 256 MiB are skipped with a logged warning
+   rather than read whole. A Run a worker never finalizes (worker crash, lease
+   reaped by another worker) is not covered — tracked as a follow-up.
 6. **Budgets.** Per-Run caps are rules in the `nightly` skill ("Unattended
    limits"): at most 2 review rounds per PR, one PR per Run, one batched push
    per round, and a hand-off when the diff outgrows 3x its first passing

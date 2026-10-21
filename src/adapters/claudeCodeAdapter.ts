@@ -38,7 +38,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
+import { beginResumedAttempt, createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import { isRecord } from './eventTranslation.ts';
 import { probeVersion } from './versionProbe.ts';
 import { CLAUDE_MD_FILE, CONTEXT_FILE, NOTES_FILE, containedPath } from '../knowledge/materialize.ts';
@@ -371,7 +371,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const proc = spawn(spawnCmd.cmd, spawnCmd.args, {
       cwd: ctx.workspace.path,
       // this.opts.env last so a test knob can always win.
-      env: { ...process.env, ...traceEnv, ...this.opts.env },
+      // CP-4 (issue #897): the worker-built base replaces process.env when present.
+      env: { ...(ctx.env ?? process.env), ...traceEnv, ...this.opts.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     session.proc = proc;
@@ -627,10 +628,19 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       this.sessions.set(runId, session);
     }
     if (!session.sessionId) throw new Error(`No session id for run ${runId}; use retry-from-scratch`);
+    // #997: detach the previous process and drop the observations that belonged to it, or the
+    // resumed session settles on the PREVIOUS attempt's exit while the new child is still starting.
+    beginResumedAttempt(session);
     session.done = false;
     session.cancelled = false;
     session.terminated = false;
     rearmExitGate(session);
+    // Per-attempt output state, cleared for the same reason (#997): a stale `emittedText` made the
+    // resumed attempt drop its own response when the text arrived only through the result event, and a
+    // stale `resultIsError` failed the resumed attempt on the PREVIOUS attempt's verdict whenever the
+    // resumed stream carries no result event to overwrite it.
+    session.emittedText = false;
+    session.resultIsError = false;
     // A retry runs in a fresh workspace; adopt the retry context wholesale so the resumed spawn
     // (task text, sandbox wrap, preset line) and the rewritten context file describe the SAME
     // run. In-process resumes pass no context and keep what start() wrote.

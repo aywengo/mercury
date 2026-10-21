@@ -285,6 +285,13 @@ The first draft claimed classic GitHub tokens (`ghp_` …) were not redacted by 
 `domain/redact.ts:48` (`gh[pousr]_`), pinned by `test/redact.test.ts:129`. §2, §8, §12 and §14 were
 corrected.
 
+### 2026-10-12: CP-4 landed (#897)
+
+§6.1 and §6.2 are implemented: local adapters spawn on the layered environment, every Run is
+isolated from the host user's git/gh configuration, and the generated gitconfig carries the
+profile's identity and credential helper. §6.3 (workspace clone/fetch, CP-5) and §7 (sandbox
+opt-in, CP-6) are separate issues.
+
 ### 2026-09-26: initial specification
 
 Written after the nightly identity was created. It records the interim (§12) that is in use

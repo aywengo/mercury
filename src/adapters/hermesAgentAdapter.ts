@@ -23,7 +23,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AGENTS_MD_FILE, NOTES_FILE, containedPath } from '../knowledge/materialize.ts';
-import { createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
+import { beginResumedAttempt, createExitGate, rearmExitGate, settleExit } from './exitSettlement.ts';
 import { probeVersion } from './versionProbe.ts';
 import type { AgentAdapter, AgentEvent, AgentExit, AgentHandle, AgentInput, RunContext, AgentCapabilities, AgentVersionInfo } from '../domain/types.ts';
 import type { SandboxManager } from '../sandbox/sandboxManager.ts';
@@ -282,7 +282,8 @@ export class HermesAgentAdapter implements AgentAdapter {
 
     const proc = spawn(spawnCmd.cmd, spawnCmd.args, {
       cwd: context.workspace.path,
-      env: { ...process.env, ...traceEnv, ...this.opts.env },
+      // CP-4 (issue #897): the worker-built base replaces process.env when present.
+      env: { ...(context.env ?? process.env), ...traceEnv, ...this.opts.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     session.proc = proc;
@@ -502,11 +503,17 @@ export class HermesAgentAdapter implements AgentAdapter {
       this.sessions.set(runId, session);
     }
     if (!session.sessionId) throw new Error(`No session id for run ${runId}; use retry-from-scratch`);
+    // #997: detach the previous process and drop the observations that belonged to it, or the
+    // resumed session settles on the PREVIOUS attempt's exit while the new child is still starting.
+    beginResumedAttempt(session);
     session.done = false;
     session.cancelled = false;
     session.terminated = false;
     rearmExitGate(session);
+    // Per-attempt output state, cleared for the same reason (#997): a stale `stdoutFlushed` makes
+    // flushStdout() a no-op, so the resumed attempt's whole response was dropped.
     session.stdoutBuf = '';
+    session.stdoutFlushed = false;
     const argv = this.buildArgv(session.context, session.sessionId);
     this.spawnProcess(session, session.context, argv);
 

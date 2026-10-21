@@ -13,6 +13,7 @@
 //   argv         print the argv it was given, exit 0 (asserts flag construction)
 //   split        emit one real line split across two writes, to test JSONL straddling
 //   resume       emit a DIFFERENT session id, as the real CLI does on -r
+//   resultonly   init + result only: the response arrives solely through the result event
 //   hang         emit init then never finish (cancel/terminate tests)
 //   noresult     emit assistant text but no result event, exit 0
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
@@ -90,6 +91,14 @@ async function main() {
     process.stdout.write(REAL_SUCCESS[2] + '\n');
     process.stdout.write(REAL_SUCCESS[4] + '\n');
     await new Promise((r) => setTimeout(r, 10));
+    process.exit(0);
+  }
+
+  if (MODE === 'resultonly') {
+    // Init + result only, no assistant text block: the result event is the ONLY carrier of the
+    // response. A resumed attempt that still believes it already emitted text drops it (#997).
+    process.stdout.write(REAL_SUCCESS[0] + '\n');
+    process.stdout.write(REAL_SUCCESS[4] + '\n');
     process.exit(0);
   }
 

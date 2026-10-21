@@ -17,7 +17,9 @@
  *      API with the same token the Run was created with): no new autonomous work starts while
  *      the E2E verdict for tonight is still open.
  *   2. Trusted features — `enhancement` issues the trusted author filed, or whose CURRENT
- *      `enhancement` label carries @aywengo as its timeline actor, priority then age (#800).
+ *      `enhancement` label carries @aywengo as its timeline actor, AND `nightly:ready` by
+ *      @aywengo, priority then age (#800; the ready requirement is #1001 decision A). An
+ *      `enhancement` label alone is no longer a work signal.
  *   3. New @aywengo issues — authored by @aywengo, no labels at all, oldest first.
  *   4. Docs → proposals (§6) — reported as `rung: 4` with no issue: the nightly drafts the
  *      issue set itself; selection has nothing to claim.
@@ -38,13 +40,16 @@
  * Usage: `node .agents/skills/nightly/select.ts --repo aywengo/mercury [--dry-run]`
  * Environment: GH_TOKEN (or GITHUB_TOKEN) for the GitHub API; MERCURY_API_URL + the bot's API
  * token for the nightly-e2e terminal check (rung 1 gate; when unset the gate is treated as
- * passed — the e2e Run may simply not exist on this host).
+ * passed — the e2e Run may simply not exist on this host) and for the claim-release liveness
+ * check (#1001; when unset a claim is never released early — liveness is unknown, not "nobody
+ * is running"). MERCURY_RUN_ID (set by the adapter) identifies THIS Run so the liveness check
+ * does not count the Run asking the question as a competitor for its own claim.
  *
  * No dependencies. Fetch only.
  */
 
 import { basename } from 'node:path';
-import { REPO_RE, ghToken, ghGet as ghGetRaw, ghPost as ghPostRaw, ghDelete as ghDeleteRaw, FETCH_TIMEOUT_MS } from './shared.ts';
+import { REPO_RE, CLAIM_RELEASED_MARKER, ghToken, ghGet as ghGetRaw, ghPost as ghPostRaw, ghDelete as ghDeleteRaw, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const TRUSTED_AUTHOR = 'aywengo';
 /** The hosted Copilot reviewer's exact login (aywengo/mercury reviews). Exact match everywhere:
@@ -297,20 +302,32 @@ export function selectLadder(
 
   // Rung 2: trusted feature requests (#800) — `enhancement` issues authored by @aywengo, or
   // whose CURRENT enhancement label was applied by @aywengo (timeline-verified), priority then
-  // age. An operator-filed feature request is autonomous work the same way a filed bug is: the
-  // author's authorship is the trust root, and the review gate (never merge without review)
-  // still applies to whatever the night builds.
+  // age. The review gate (never merge without review) still applies to whatever the night builds.
+  //
+  // #1001 decision A (@aywengo, 2026-10-19): rung 2 ADDITIONALLY requires `nightly:ready` by the
+  // trusted author. An `enhancement` label is no longer a work signal on its own - #972 was
+  // claimed at 00:21 while its body still said "Not `nightly:ready` yet: relabel when its
+  // blockers merge", the opposite of what the operator asked for. The operator now marks an
+  // enhancement ready when its blockers are done.
+  //
+  // Consequence, and the only thing that distinguishes rung 2 from rung 1 now: rung 1 already
+  // takes EVERY trusted `nightly:ready` issue, so a ready enhancement is normally claimed there.
+  // Rung 2 fires only while rung 1 is gated off (tonight's `nightly-e2e` Run is not terminal) -
+  // it no longer widens WHAT is claimed, only WHEN an explicitly ready enhancement may start.
+  // The gate bypass is pre-existing (#800's rung 2 was always unconditional); this change only
+  // narrows who may use it.
   const rung2 = eligible
     .filter((c) => {
       const labels = issueLabels(c.issue);
-      return (issueAuthor(c.issue) === TRUSTED_AUTHOR && labels.includes(L_ENH)) || c.enhByTrusted;
+      return c.readyByTrusted
+        && ((issueAuthor(c.issue) === TRUSTED_AUTHOR && labels.includes(L_ENH)) || c.enhByTrusted);
     })
     .sort((a, b) => priorityRank(a.issue) - priorityRank(b.issue) || ageKey(a.issue) - ageKey(b.issue));
   if (rung2.length > 0) {
     const top = rung2[0]!;
     const reason = top.enhByTrusted
-      ? `enhancement issue #${top.issue.number} (trusted: labeled enhancement by @${TRUSTED_AUTHOR}), priority ${priorityRank(top.issue) < PRIORITY_ORDER.length ? PRIORITY_ORDER[priorityRank(top.issue)] : 'none'}, oldest-first`
-      : `enhancement issue #${top.issue.number} (trusted: filed by @${TRUSTED_AUTHOR}), priority ${priorityRank(top.issue) < PRIORITY_ORDER.length ? PRIORITY_ORDER[priorityRank(top.issue)] : 'none'}, oldest-first`;
+      ? `enhancement issue #${top.issue.number} (trusted: labeled enhancement by @${TRUSTED_AUTHOR}, nightly:ready by @${TRUSTED_AUTHOR}), priority ${priorityRank(top.issue) < PRIORITY_ORDER.length ? PRIORITY_ORDER[priorityRank(top.issue)] : 'none'}, oldest-first`
+      : `enhancement issue #${top.issue.number} (trusted: filed by @${TRUSTED_AUTHOR}, nightly:ready by @${TRUSTED_AUTHOR}), priority ${priorityRank(top.issue) < PRIORITY_ORDER.length ? PRIORITY_ORDER[priorityRank(top.issue)] : 'none'}, oldest-first`;
     return { rung: 2, issue: top.issue.number, reason };
   }
 
@@ -512,6 +529,83 @@ export async function copilotHeadState(
   return out;
 }
 
+/**
+ * Whether a `nightly-next` Run is ALIVE right now (#1001) - the liveness half of the claim-release
+ * decision: a claim is released only when no Run can still own it.
+ *
+ * `true`  - at least one non-terminal nightly-next Run exists other than THIS one. The selector
+ *           runs INSIDE the Run it is deciding for, so its own Run (MERCURY_RUN_ID) is excluded;
+ *           without that exclusion the current Run would always look alive and nothing would ever
+ *           be released.
+ * `false` - no nightly-next Run is alive: every claim belongs to a Run that has ended.
+ * `null`  - liveness cannot be determined (the host API is unset, half-configured, unreachable or
+ *           the walk hit its page cap). Callers must FAIL CLOSED and keep the claim: releasing a
+ *           live Run's claim is the one outcome this check exists to prevent.
+ */
+export async function nightlyRunAlive(env: NodeJS.ProcessEnv): Promise<boolean | null> {
+  const url = env.MERCURY_API_URL;
+  const token = env.MERCURY_API_TOKEN;
+  if (!url || !token) return null; // unset or half-configured: unknown, never "nobody is running"
+  const self = env.MERCURY_RUN_ID ?? '';
+  const TERMINAL = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'];
+  let cursor: string | null = null;
+  for (let page = 0; page < 20; page++) {
+    const qs = new URLSearchParams({ limit: '100' });
+    if (cursor) qs.set('cursor', cursor);
+    try {
+      const res = await fetch(`${url.replace(/\/$/, '')}/api/runs?${qs}`, {
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) return null; // configured but unevaluable: unknown
+      const body = (await res.json()) as { runs?: { id?: string; task?: string; status?: string }[]; nextCursor?: string | null };
+      for (const r of body.runs ?? []) {
+        if (!(r.task ?? '').includes('nightly-next')) continue;
+        if (self !== '' && r.id === self) continue; // this Run is not a competitor for its own claim
+        if (!TERMINAL.includes(r.status ?? '')) return true;
+      }
+      const next = body.nextCursor ?? null;
+      if (!next) return false; // the list ended: no live nightly-next Run
+      cursor = next;
+    } catch {
+      return null; // unreachable host: unknown
+    }
+  }
+  return null; // page cap with pages beyond: the list was not fully read
+}
+
+/**
+ * Whether the nightly identity commented on `issue` at/after `since` (#1001) - the "no comment
+ * from that Run" half of the claim-release decision. GitHub's `since` filter does the time cut,
+ * so any returned comment by the identity is a comment from the claiming Run's own night.
+ * `null` = the comment list could not be read (the caller keeps the claim).
+ */
+async function nightlyCommentedSince(
+  io: { get: (path: string) => Promise<unknown> },
+  repo: string,
+  issue: number,
+  since: string,
+): Promise<boolean | null> {
+  type Comment = { user?: { login?: string | null } | null };
+  let path: string | null = `/repos/${repo}/issues/${issue}/comments?since=${encodeURIComponent(since)}&per_page=100`;
+  for (let page = 0; page < 3 && path; page++) {
+    let body: Comment[];
+    let link: string | null | undefined;
+    try {
+      const res = (await io.get(path)) as { body: Comment[]; link?: string | null };
+      body = res.body;
+      link = res.link;
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(body)) return null; // unreadable page: unknown, never "no comment"
+    if (body.some((c) => c.user?.login === NIGHTLY_IDENTITY)) return true;
+    const next = link?.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
+    path = next ? next.replace('https://api.github.com', '') : null;
+  }
+  return path === null ? false : null; // a page cap with pages beyond: unknown
+}
+
 /** The full pipeline over an INJECTED fetch-like transport (tests pass recordings; main passes ghGet/ghPost).
  * io.post returns true when the claim label was newly added, false when it was already present.
  * io.del returns true on 2xx and false when the label was absent (the stale-claim reset). */
@@ -549,6 +643,9 @@ export async function runSelectorWith(
   }
   const real = issues.filter((i) => !i.pull_request);
   const candidates: Candidate[] = [];
+  /** Claims applied during THIS night (#1001): their claiming Run may already be over, but the
+   * release decision needs the open-PR scan below, so it is deferred until that scan is done. */
+  const claimedTonight: { number: number; claimedAt: string }[] = [];
   for (const issue of real) {
     // The timeline is a security input for BOTH actor-checked trust clauses (nightly:ready by
     // @aywengo; origin:e2e by the nightly identity): walk it (bounded) when it can change the
@@ -565,6 +662,8 @@ export async function runSelectorWith(
     let e2eByNightly = false;
     let enhByTrusted = false;
     let staleClaim = false;
+    /** The claim's label-event time when it belongs to THIS night: the deferred #1001 check. */
+    let claimTonightAt: string | null = null;
     if (needTimeline) {
       const timeline: LabelEvent[] = [];
       let tlPath: string | null = `/repos/${repo}/issues/${issue.number}/timeline?per_page=100`;
@@ -593,7 +692,12 @@ export async function runSelectorWith(
         const claimedAt = lastLabeledAt(timeline, L_IN_PROGRESS);
         if (labels.includes(L_IN_PROGRESS) && claimedAt !== null) {
           const t0 = Date.parse(claimedAt);
-          if (Number.isFinite(t0) && t0 < nightStartLocal()) {
+          if (Number.isFinite(t0) && t0 >= nightStartLocal()) {
+            // A claim from THIS night. The clock cannot tell a live Run from one that died at
+            // 00:21 without output (#1001), so the decision is deferred to the release pass
+            // below, which knows both the host's live-Run state and the open-PR scan.
+            claimTonightAt = claimedAt;
+          } else if (Number.isFinite(t0)) {
             staleClaim = true;
             if (!dryRun) {
               if (!io.del) throw new Error('stale claim reset needs io.del; the injected transport lacks it');
@@ -617,6 +721,7 @@ export async function runSelectorWith(
     const effectiveLabels = staleClaim ? labels.filter((l) => l !== L_IN_PROGRESS) : labels;
     const effectiveIssue = staleClaim ? { ...issue, labels: effectiveLabels.map((name) => ({ name })) } : issue;
     candidates.push({ issue: effectiveIssue, readyByTrusted, e2eByNightly, enhByTrusted });
+    if (claimTonightAt !== null) claimedTonight.push({ number: issue.number, claimedAt: claimTonightAt });
   }
   const e2eTerminal = await e2eRunTerminal(env);
   // Resume candidates (#819): open PRs authored by the nightly identity whose branch names an
@@ -792,6 +897,57 @@ export async function runSelectorWith(
         if (pr.supersededBy.length > 0) {
           console.error(`resume scan: PR #${pr.number} continues for issue #${issue}; newer duplicate(s) superseded: ${pr.supersededBy.map((n) => '#' + n).join(', ')}`);
         }
+      }
+    }
+  }
+  // #1001: release a claim whose claiming Run ended with no PR and no comment. The clock reset
+  // above frees such a claim only at the NEXT local midnight, so a Run that died at 00:21
+  // without output holds its issue for the rest of the night (and rung 2 could not re-claim it
+  // once the operator marked it ready). The evidence is metadata only:
+  //   - liveness: no nightly-next Run is alive (nightlyRunAlive; unknown keeps the claim),
+  //   - output:   an open nightly PR on the issue (pendingReviewIssues, from the scan above) or a
+  //               comment by the nightly identity after the claim.
+  // A claim with EITHER is left alone: a deadline-stopped Run comments (§4.3) and is the
+  // report's business, not the selector's.
+  if (claimedTonight.length > 0) {
+    const alive = await nightlyRunAlive(env);
+    if (alive === false) {
+      for (const claim of claimedTonight) {
+        if (pendingReviewIssues.has(claim.number)) continue; // the Run opened a PR: it produced output
+        const commented = await nightlyCommentedSince(io, repo, claim.number, claim.claimedAt);
+        if (commented !== false) continue; // true = it commented; null = unreadable, keep the claim
+        if (!dryRun) {
+          if (!io.del) throw new Error('claim release needs io.del; the injected transport lacks it');
+          // Label FIRST, and its own failure path: the issue must become selectable even if the
+          // record comment fails. (Comment-then-label would be worse: a comment after the claim
+          // reads as "the Run produced output", so a failed delete could never be retried.)
+          try {
+            await io.del(`/repos/${repo}/issues/${claim.number}/labels/${encodeURIComponent(L_IN_PROGRESS)}`);
+          } catch (e) {
+            // The claim is still on the issue: keep it excluded. Fail closed for THIS issue only,
+            // the rest of the night still selects.
+            console.error(`claim release failed for #${claim.number}: ${String(e instanceof Error ? e.message : e)}`);
+            continue;
+          }
+          // The label is gone (or was already absent): the issue IS selectable now, so a failed
+          // record must not keep it excluded for the rest of the night. The release itself is
+          // what matters; the comment only makes it visible to the report.
+          try {
+            await io.post(`/repos/${repo}/issues/${claim.number}/comments`, {
+              body: `${CLAIM_RELEASED_MARKER}\nThe nightly released the \`${L_IN_PROGRESS}\` claim on this issue: the Run that claimed it ended without opening a PR and without commenting, so the issue is selectable again (#1001).`,
+            });
+          } catch (e) {
+            console.error(`claim release comment failed for #${claim.number}: ${String(e instanceof Error ? e.message : e)}`);
+          }
+        }
+        // Released (or, in a dry run, would be): drop the label from the candidate's view.
+        const idx = candidates.findIndex((c) => c.issue.number === claim.number);
+        if (idx === -1) continue;
+        const cur = candidates[idx]!;
+        candidates[idx] = {
+          ...cur,
+          issue: { ...cur.issue, labels: issueLabels(cur.issue).filter((l) => l !== L_IN_PROGRESS).map((name) => ({ name })) },
+        };
       }
     }
   }

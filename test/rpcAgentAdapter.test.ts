@@ -576,3 +576,32 @@ test('the started adapter without a pack sends the base prompt (mock captures th
     adapter.cancel(context.run.id).catch(() => {});
   }
 });
+
+// CP-4 (#897; #977 review): a context-free resume reuses the env start() received.
+test('CP-4: a context-free resume reuses the worker-built env, never process.env', async () => {
+  const { context, workspacePath } = makeContext();
+  const envFile = join(workspacePath, 'env-resume.json');
+  const runEnv = { PATH: process.env.PATH ?? '/usr/bin:/bin', CP4_MARKER: 'from-run-env', MOCK_RPC_ENV_FILE: envFile, MOCK_RPC_ENV_ALL: '1' };
+  const adapter = new RpcAgentAdapter(piConfig());
+  process.env.CP4_AMBIENT = 'worker-ambient-should-not-pass';
+  try {
+    const handle = await adapter.start({ ...context, env: runEnv });
+    await collectAll(handle);
+    await adapter.cancel(context.run.id).catch(() => {});
+    writeFileSync(envFile, '{}');
+    await adapter.resume(context.run.id);
+    const deadline = Date.now() + 5_000;
+    let env: Record<string, string> = {};
+    while (Date.now() < deadline) {
+      try { env = JSON.parse(readFileSync(envFile, 'utf8')) as Record<string, string>; } catch { /* not yet */ }
+      if (Object.keys(env).length > 0) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.equal(env.CP4_MARKER, 'from-run-env', 'the resumed process ran on the worker-built env');
+    assert.equal(env.CP4_AMBIENT, undefined, 'the resume did not fall back to process.env');
+    await adapter.cancel(context.run.id).catch(() => {});
+  } finally {
+    delete process.env.CP4_AMBIENT;
+    adapter.cancel(context.run.id).catch(() => {});
+  }
+});

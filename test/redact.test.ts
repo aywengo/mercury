@@ -257,10 +257,18 @@ test('the CLI wires forwarded credentials into the redactor (issue #214)', () =>
   // and nothing stops a refactor from rebuilding the redactor as createRedactor(config.secrets) and
   // leaving every piece green while the exact-value layer silently vanishes from production.
   const cli = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+  // The layer is built once and feeds BOTH the event redactor and the worker's at-rest
+  // artifact redaction (issue #944): a value that cannot leave through an event must not
+  // rest in a session transcript or kernel snapshot either.
   assert.match(
     cli,
-    /createRedactor\(\s*\[[^)]*forwardedCredentialValues/s,
-    'cli.ts must pass forwardedCredentialValues() into createRedactor()',
+    /secretValues\s*=\s*\[[^)]*forwardedCredentialValues[^\]]*\][\s\S]{0,400}?createRedactor\(secretValues\)/s,
+    'cli.ts must build one secret layer with forwardedCredentialValues() and pass it to createRedactor()',
+  );
+  assert.match(
+    cli,
+    /artifactSecrets:\s*secretValues/,
+    'cli.ts must pass the same secret layer to the worker for artifact redaction (issue #944)',
   );
 });
 
