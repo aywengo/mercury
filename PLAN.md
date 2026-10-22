@@ -234,7 +234,7 @@ Record: [`PLAN.md`](PLAN.md) (rules above)
 | --- | --- | --- | --- |
 | #1004 | PLAN.md: move the closing-row update to a post-merge commit; open PRs conflict on adjacent rows | done | #1005 |
 | #1007 | scratch: verify plan-sync marks a closing issue done (issue #1004 e2e) | done | #1008 |
-| #1032 | migrate: schema_migrations can claim a version whose objects are missing, and every Run creation then returns 500 | open | — |
+| #1032 | migrate: schema_migrations can claim a version whose objects are missing, and every Run creation then returns 500 | done | #1034 |
 
 ## Host installer — milestone notes (historical)
 
