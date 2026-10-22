@@ -60,6 +60,7 @@ Record: [`docs/nightly-self-development.md`](docs/nightly-self-development.md)
 | #1020 | nightly: nothing notices a night with no report (host down 2026-10-19→20) | done | #1021 |
 | #1023 | URGENT nightly host runs Mercury 0.2.0/0.2.1: stale skills; resume Runs commit but never push | done | — |
 | #1024 | nightly: flag Runs that end with unpushed commits or without finish/blocked; report the loaded skill version | in progress | #1025 |
+| #1026 | nightly: #1024 follow-ups from the #1025 round-2 review (scan budget, host-wide unpushed section, ledger temp race, doc drift) | open | — |
 | #1001 | nightly: a claim whose Run ended with no PR and no comment is never released; rung 2 claims work with no ready signal | done | #1009 |
 
 ## Dispatcher bots
