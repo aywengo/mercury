@@ -1,6 +1,6 @@
 ---
 name: nightly
-version: 1.5.0
+version: 1.6.2
 description: Deterministic ladder selection for the unattended nightly loop — decides the next issue from GitHub metadata only (author, labels, timeline label actor), never issue text, then claims it with nightly:in-progress.
 capabilities: [nightly, ladder, selection, trust, claim, triage, github, issues]
 ---
@@ -195,6 +195,13 @@ Nightly-specific rules on top of `issue-fix-loop`:
   Run carries `notAfter`. Do not write code that defends against concurrent nightly Runs or
   against the deadline — that is the scheduler's job.
 
+**Never stops on a progress message.** A nightly Run is not done until it has PUSHED the branch,
+commented on the PR, and called `finish` (or `blocked`). A "here is where I got to" message is
+never an exit path: `run_84a35e1f57ae4df4` (2026-10-22) committed, reported progress and ended,
+and the night's work sat in a worktree on no remote branch (#1023, #1024). `next.ts` records the
+claim and the terminal call in the Run ledger, and the morning report lists every Run that
+claimed work and never called either — so stopping early is now visible, not free.
+
 **Never asks (§4.4):** a nightly Run must end without NEEDS_INPUT. When in doubt — ambiguous
 acceptance criteria, a needed credential or design decision, an unmerged dependency, a limit
 from the table above — run `blocked --reason "<the question>"`: it labels the issue
@@ -241,6 +248,36 @@ issues. Sections:
   the last 14 nights are listed; the rest are counted once as `older entries: K` (#964). The state
   file keeps every entry. Test names are shown repo-relative (`e2e/x.test.ts`), never as a worktree
   path, including entries recorded before that normalization existed.
+- **Runs that ended with unpushed commits** (#1024) — Runs whose `run.unpushed_commits` event
+  names commits reachable from no remote branch. The record is written when a Run COMPLETES;
+  a Run stopped by `notAfter` (`TIMED_OUT`) or failed mid-work keeps its commits in the same
+  worktree but emits nothing, so read that row's worktree before GC when a night ends badly. Each line carries the Run id, the branch it was
+  meant for, the commits and the worktree path, so the work can be recovered by hand. Mercury
+  never pushes on an agent's behalf; this section is the recovery pointer.
+- **nightly-next Runs that never called finish/blocked** (#1024) — Runs that claimed an issue
+  (`next.ts run`) and never reached a terminal call, read from the Run ledger
+  (`${XDG_STATE_HOME:-~/.local/state}/mercury/nightly/run-ledger.json`, written by `next.ts`).
+  Each line carries the Run id, the issue and the worktree path. A progress message is not an
+  exit path.
+
+Both sections are empty on a clean night, and their headings still render, so "nothing to
+report" is visibly different from "the check did not run".
+
+The digest also opens with a **version line** (#1023, #1024): the host's Mercury version
+(`/healthz`) and the `issue-fix-loop` version the night's Runs loaded, read from their
+`skill.completed` events. When the loaded version is older than the one in `.agents/skills/` on
+`main` (contents API), the line becomes a **stale-skills warning** instead of a plain record. It is
+always rendered when a loaded version is known — "which host, which procedure?" is the question
+nobody could answer during the week the 1.2.0 gap stayed invisible — and an unknown version is
+never reported as staleness.
+
+Both new sections are scoped to the digest's repository: the runs API is host-wide, so a Run whose
+`repository.url` names another repository is skipped before its events are read. Only an
+identifiable URL excludes a Run — a local checkout path does not establish identity (it can be
+renamed), so such a Run is kept rather than hidden. The scan reads each Run's event TAIL via `lastSequence`,
+because `skill.completed` and `run.unpushed_commits` are the last events of a Run — paging forward
+from sequence 1 would miss them on any Run longer than 1000 events — and it stops at a 60 s
+wall-clock budget so it can never crowd out filing the digest.
 
 The report is read-only except for the digest issue itself and the close
 of every OPEN digest titled `nightly report — D` with D strictly before the
