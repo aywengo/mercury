@@ -1,6 +1,6 @@
 ---
 name: nightly
-version: 1.6.1
+version: 1.6.2
 description: Deterministic ladder selection for the unattended nightly loop — decides the next issue from GitHub metadata only (author, labels, timeline label actor), never issue text, then claims it with nightly:in-progress.
 capabilities: [nightly, ladder, selection, trust, claim, triage, github, issues]
 ---
@@ -272,8 +272,9 @@ nobody could answer during the week the 1.2.0 gap stayed invisible — and an un
 never reported as staleness.
 
 Both new sections are scoped to the digest's repository: the runs API is host-wide, so a Run whose
-`repository` names another repository is skipped before its events are read (an unidentifiable
-repository is kept rather than hidden). The scan reads each Run's event TAIL via `lastSequence`,
+`repository.url` names another repository is skipped before its events are read. Only an
+identifiable URL excludes a Run — a local checkout path does not establish identity (it can be
+renamed), so such a Run is kept rather than hidden. The scan reads each Run's event TAIL via `lastSequence`,
 because `skill.completed` and `run.unpushed_commits` are the last events of a Run — paging forward
 from sequence 1 would miss them on any Run longer than 1000 events — and it stops at a 60 s
 wall-clock budget so it can never crowd out filing the digest.

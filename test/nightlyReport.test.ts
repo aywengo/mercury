@@ -1628,29 +1628,56 @@ test('#1024 review r2: another repository\'s Run is not published in this digest
   assert.deepEqual(runs.map((r) => r.runId), ['run_here', 'run_unknown']);
 });
 
-test('runMatchesRepo: url forms, local checkouts, and unknown identities', () => {
+test('runMatchesRepo: only an identifiable URL can exclude a Run', () => {
   assert.equal(runMatchesRepo({ url: 'https://github.com/aywengo/mercury.git' }, 'aywengo/mercury'), true);
   assert.equal(runMatchesRepo({ url: 'https://github.com/aywengo/mercury' }, 'aywengo/mercury'), true);
   assert.equal(runMatchesRepo({ url: 'git@github.com:aywengo/mercury.git' }, 'aywengo/mercury'), true);
   assert.equal(runMatchesRepo({ url: 'https://github.com/aywengo/mercury.git' }, 'aywengo/other'), false);
+  // A local checkout directory name does NOT establish repository identity: it can be renamed
+  // (`/srv/checkouts/mercury-main` for `aywengo/mercury`). Such a Run is kept, never hidden.
   assert.equal(runMatchesRepo({ localPath: '/tmp/fixtures/mercury' }, 'aywengo/mercury'), true);
-  assert.equal(runMatchesRepo({ localPath: '/tmp/fixtures/elsewhere' }, 'aywengo/mercury'), false);
-  // Unknown identity: included, never silently dropped.
+  assert.equal(runMatchesRepo({ localPath: '/srv/checkouts/mercury-main' }, 'aywengo/mercury'), true);
+  assert.equal(runMatchesRepo({ localPath: '/tmp/fixtures/elsewhere' }, 'aywengo/mercury'), true);
   assert.equal(runMatchesRepo({}, 'aywengo/mercury'), true);
   assert.equal(runMatchesRepo(null, 'aywengo/mercury'), true);
   assert.equal(runMatchesRepo({ url: 'not a url' }, 'aywengo/mercury'), true);
+  // A URL WINS over a localPath: an identifiable mismatch still excludes.
+  assert.equal(runMatchesRepo({ url: 'https://github.com/aywengo/other.git', localPath: '/srv/mercury' }, 'aywengo/mercury'), false);
 });
 
-test('#1024 review r2: the scan budget is enforced while processing a page, not only per page', async () => {
-  // Four Runs on one page, each event request slow enough to blow the budget: the scan must stop and
+test('#1024 review r2: a renamed local checkout keeps both signals (a path is not an identity)', async () => {
+  const mercury = mercuryWith({
+    runs: [
+      // The digest's repository, checked out under a directory that is not named `mercury`.
+      { id: 'run_renamed', createdAt: atInNight('2026-09-26'), workspacePath: '/ws/renamed', repository: { localPath: '/srv/checkouts/mercury-main' } },
+      { id: 'run_other', createdAt: atInNight('2026-09-26'), workspacePath: '/ws/other', repository: { url: 'https://github.com/aywengo/other.git' } },
+    ],
+    events: {
+      run_renamed: [
+        { type: 'skill.completed', payload: { skill: 'issue-fix-loop', version: '1.4.0' } },
+        { type: 'run.unpushed_commits', payload: { branch: 'fix/x', commits: ['abc'] } },
+      ],
+      run_other: [{ type: 'run.unpushed_commits', payload: { branch: 'fix/y', commits: ['def'] } }],
+    },
+  });
+  const runs = await scanNightRuns(mercury, '2026-09-26', { repo: 'aywengo/mercury' });
+  assert.deepEqual(runs.map((r) => r.runId), ['run_renamed'], 'the identifiable mismatch is dropped, the renamed checkout kept');
+  assert.deepEqual(runs[0]!.unpushed, { branch: 'fix/x', commits: ['abc'] });
+  assert.deepEqual(runs[0]!.skills, [{ skill: 'issue-fix-loop', version: '1.4.0' }]);
+});
+
+test('#1024 review r2: the scan budget is enforced per Run and per request, not only per page', async () => {
+  // Four Runs on ONE page, each event request slow enough to blow the budget: the scan must stop and
   // return what it has, because the digest Run has its own 15-minute limit and must still file.
+  // Every request must also carry a timeout capped at what is left of the budget -- a fixed 30 s
+  // per-request timeout cannot honour a 60 s scan budget.
+  const timeouts: (number | undefined)[] = [];
   const slow: NonNullable<ReportIo['mercury']> = {
-    async get(path) {
+    async get(path, opts) {
+      timeouts.push(opts?.timeoutMs);
       if (path.startsWith('/api/runs?')) {
         return {
-          body: {
-            runs: ['a', 'b', 'c', 'd'].map((id) => ({ id: `run_${id}`, createdAt: atInNight('2026-09-26') })),
-          },
+          body: { runs: ['a', 'b', 'c', 'd'].map((id) => ({ id: `run_${id}`, createdAt: atInNight('2026-09-26') })) },
           status: 200,
         };
       }
@@ -1658,9 +1685,14 @@ test('#1024 review r2: the scan budget is enforced while processing a page, not 
       return { body: { events: [], lastSequence: 0 }, status: 200 };
     },
   };
+  const started = Date.now();
   const runs = await scanNightRuns(slow, '2026-09-26', { budgetMs: 50 });
+  const elapsed = Date.now() - started;
   assert.ok(runs.length < 4, `the budget stopped the scan early (got ${runs.length} of 4)`);
   assert.ok(runs.length >= 1, 'and it still returned the Runs it managed to read');
+  assert.ok(elapsed < 2_000, `the scan did not walk every Run (${elapsed} ms)`);
+  assert.ok(timeouts.every((t) => typeof t === 'number' && t > 0 && t <= 30_000),
+    `every request carries a bounded timeout: ${JSON.stringify(timeouts)}`);
 });
 
 test('#1024 review r2: the version line is rendered on a CURRENT night too, not only when stale', async () => {

@@ -38,9 +38,11 @@ export interface ReportIo {
   post(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
   /** PATCH (issue close) — separate so tests can record it distinctly. */
   patch(path: string, body: unknown): Promise<{ body: unknown; status: number }>;
-  /** Mercury runs API (optional source). */
+  /** Mercury runs API (optional source). `timeoutMs` lets a caller cap a request at the time it
+   *  has left in its own budget (#1024 review: a fixed 30 s timeout per request cannot honour a
+   *  60 s scan budget). */
   mercury?: {
-    get(path: string): Promise<{ body: unknown; status: number }>;
+    get(path: string, opts?: { timeoutMs?: number }): Promise<{ body: unknown; status: number }>;
   };
 }
 
@@ -397,12 +399,11 @@ export function runMatchesRepo(repository: { url?: unknown; localPath?: unknown 
     const m = /github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?$/.exec(repository.url);
     if (m) return `${m[1]}/${m[2]}`.toLowerCase() === target;
   }
-  if (typeof repository.localPath === 'string' && repository.localPath !== '') {
-    // A local checkout: the directory name is all there is. Compared against the repo NAME only,
-    // because the owner is not in a path.
-    const name = repository.localPath.replace(/[\/]+$/, '').split(/[\/]/).pop() ?? '';
-    return name.toLowerCase() === target.split('/')[1];
-  }
+  // A local checkout does NOT establish repository identity: the directory can be named anything
+  // (`/srv/checkouts/mercury-main` for `aywengo/mercury`), and `url` is optional. Rejecting on a
+  // basename mismatch would silently hide that Run's unpushed commits and loaded skill version --
+  // the opposite of what this section exists for. Only an identifiable URL can exclude a Run
+  // (#1024 review, Copilot r2).
   return true;
 }
 
@@ -427,13 +428,16 @@ export async function scanNightRuns(
   const win = nightWindow(night);
   const maxRuns = opts.maxRuns ?? 40; // one nightly host runs a handful of Runs a night
   const deadline = Date.now() + (opts.budgetMs ?? 60_000);
+  /** What is left of the budget, as a request timeout. Every request is capped by it, so a slow
+   *  host cannot spend the digest Run's 15-minute limit on this scan. */
+  const requestBudget = (): { timeoutMs: number } => ({ timeoutMs: Math.max(1, Math.min(deadline - Date.now(), 30_000)) });
   const out: NightRun[] = [];
   let path: string | undefined = '/api/runs?limit=100';
   for (let page = 0; page < 10 && path && out.length < maxRuns; page++) {
     if (Date.now() > deadline) return out;
     let res: Awaited<ReturnType<typeof mercury.get>>;
     try {
-      res = await mercury.get(path);
+      res = await mercury.get(path, requestBudget());
     } catch {
       return out; // transport error: keep what was scanned
     }
@@ -455,7 +459,7 @@ export async function scanNightRuns(
       // Another repository's Run is not this digest's business -- and its worktree path and commit
       // ids must not be published here.
       if (opts.repo !== undefined && !runMatchesRepo(run.repository, opts.repo)) continue;
-      const scanned = await scanRunEvents(mercury, run.id, deadline);
+      const scanned = await scanRunEvents(mercury, run.id, deadline, requestBudget);
       out.push({
         runId: run.id,
         ...(run.task ? { task: run.task } : {}),
@@ -487,6 +491,7 @@ async function scanRunEvents(
   mercury: NonNullable<ReportIo['mercury']>,
   runId: string,
   deadline: number,
+  requestBudget: () => { timeoutMs: number },
 ): Promise<{ unpushed?: { branch?: string; commits: string[] }; skills: { skill: string; version: string }[] }> {
   const skills: { skill: string; version: string }[] = [];
   let unpushed: { branch?: string; commits: string[] } | undefined;
@@ -508,7 +513,7 @@ async function scanRunEvents(
   // 1. How long is the stream? One event is enough to learn `lastSequence`.
   let lastSequence: number | undefined;
   try {
-    const head = await mercury.get(`/api/runs/${runId}/events?limit=1`);
+    const head = await mercury.get(`/api/runs/${runId}/events?limit=1`, requestBudget());
     if (head.status >= 200 && head.status < 300) {
       const body = head.body as { lastSequence?: unknown; events?: unknown } | null;
       if (body && typeof body === 'object' && typeof body.lastSequence === 'number' && Number.isFinite(body.lastSequence)) {
@@ -527,7 +532,7 @@ async function scanRunEvents(
   // 2. The tail: the newest page, which carries the completion records for any Run length.
   const after = Math.max(0, lastSequence - EVENTS_PAGE_CAP);
   try {
-    const tail = await mercury.get(`/api/runs/${runId}/events?after=${after}&limit=${EVENTS_PAGE_CAP}`);
+    const tail = await mercury.get(`/api/runs/${runId}/events?after=${after}&limit=${EVENTS_PAGE_CAP}`, requestBudget());
     if (tail.status >= 200 && tail.status < 300) {
       parse((tail.body as { events?: unknown } | null)?.events);
     }
@@ -1034,10 +1039,13 @@ function mercuryFromEnv(env: NodeJS.ProcessEnv): ReportIo['mercury'] | undefined
   const token = env.MERCURY_REPORT_TOKEN;
   if (!url || !token) return undefined; // the section is omitted, not faked
   return {
-    get: async (path) => {
+    get: async (path, opts) => {
+      // A caller with a budget caps its own requests: never longer than the shared default, never
+      // longer than what it has left (#1024 review).
+      const timeout = Math.max(1, Math.min(opts?.timeoutMs ?? FETCH_TIMEOUT_MS, FETCH_TIMEOUT_MS));
       const res = await fetch(`${url.replace(/\/+$/, '')}${path}`, {
         headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeout),
       });
       return { body: await res.json().catch(() => null), status: res.status };
     },
