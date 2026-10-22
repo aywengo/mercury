@@ -36,6 +36,14 @@ Creating a Run without `agent` uses `fake` (no coding-agent CLI). Migrations app
 when the process opens the database; `npm run migrate` is a verify/apply CLI, not a
 required first-run step.
 
+`mercury migrate` also **verifies** the result: it compares the live schema against one built from
+scratch by the same migration list, and exits non-zero naming any table, column, index or trigger
+that `schema_migrations` records as applied but the database does not have. A database can reach that
+state through a restore or a hand edit, and until #1032 the only symptom was every Run creation
+failing later with a missing column. The refusal prints the repair (`sqlite3 <db> ".backup <db>.bak"`
+first, then the missing objects); objects the migrations do not create are logged as a warning and do
+not fail the command.
+
 The QuickStart inline environment is for loopback only. Tokens and secret values
 must come from a protected environment file or secret manager in any shared or
 networked install. Do not place them in command-line arguments, repository files
