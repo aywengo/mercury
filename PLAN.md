@@ -38,6 +38,7 @@ Record: [`docs/host-installer.md`](docs/host-installer.md)
 | #636 | M5: lifecycle — mercury host status/upgrade/uninstall + re-run guard | done | #637 |
 | #638 | M6: release hardening — bats suite, installer CI matrix, checksum, install docs | done | #639 |
 | #929 | Host installer: the four "gate open" milestones (M1, M3, M4, M6) are verification work… | open | — |
+| #1029 | release: the formula push to main is refused by the ruleset, so every release leaves Homebrew… | open | — |
 
 ## Nightly self-development
 
@@ -213,6 +214,7 @@ on Mercury's own Express app, so A1 can start.
 | #988 | Server-stamped Run origin: a field no request body can set (A0-3) | done | #996 |
 | #990 | Pure Run-chain → A2A TaskState mapping, exhaustive over RunStatus (A0-4) | done | #998 |
 | #989 | Exposed-skill config, create-Run validation of every template, `host a2a validate` (A0-5) | open | — |
+| #1030 | test: a2aServer section 6.6 blocking-bound test is timing-flaky and can block a release PR | open | — |
 
 ## Security follow-ups
 
