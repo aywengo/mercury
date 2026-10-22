@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { runReport, collectBlocked, collectRunsStopped, collectFlakes, flakesInWindow, blockingQuestion, questionFromBody, defaultNight, collectIssuesCommented, nightWindow, NIGHT_END, scanNightRuns, unpushedCommitsFrom, loadedSkillVersion, compareVersions, staleSkillsNote, collectRunsWithoutTerminalCall, type ReportIo, type NightRun } from '../.agents/skills/nightly/report.ts';
+import { runReport, collectBlocked, collectRunsStopped, collectFlakes, flakesInWindow, blockingQuestion, questionFromBody, defaultNight, collectIssuesCommented, nightWindow, NIGHT_END, scanNightRuns, unpushedCommitsFrom, loadedSkillVersion, compareVersions, staleSkillsNote, runMatchesRepo, collectRunsWithoutTerminalCall, type ReportIo, type NightRun } from '../.agents/skills/nightly/report.ts';
 import { recordRunClaim, recordRunTerminal } from '../.agents/skills/nightly/shared.ts';
 import { localDateString } from '../.agents/skills/nightly/e2e.ts';
 import { tempDir } from './helpers.ts';
@@ -1283,18 +1283,31 @@ test('#964: the digest shows the repo-relative test path, never the worktree pat
 
 /** A Mercury API double: `runs` for the night listing, `events` per run id, `healthz` version. */
 function mercuryWith(opts: {
-  runs: { id: string; task?: string; createdAt?: string; workspacePath?: string | null }[];
+  runs: { id: string; task?: string; createdAt?: string; workspacePath?: string | null; repository?: { url?: string; localPath?: string } }[];
   events?: Record<string, { type: string; payload?: unknown }[]>;
   hostVersion?: string;
   failEventsFor?: string[];
 }): NonNullable<ReportIo['mercury']> {
+  // Mirrors the real endpoint (src/api/routes.ts GET /runs/:id/events): sequence numbers from 1,
+  // `after` is exclusive, `limit` caps the page, and `lastSequence` is the run's true maximum. The
+  // digest reads the TAIL via lastSequence, so a double that ignored those parameters would pass
+  // while the production path missed every completion record.
   return {
     async get(path) {
       if (path === '/healthz') return { body: opts.hostVersion ? { ok: true, version: opts.hostVersion } : {}, status: 200 };
       if (path.startsWith('/api/runs?')) return { body: { runs: opts.runs }, status: 200 };
-      const id = path.match(/\/api\/runs\/([^/]+)\/events/)?.[1];
-      if (id && opts.failEventsFor?.includes(id)) return { body: null, status: 500 };
-      return { body: { events: (id ? opts.events?.[id] : undefined) ?? [], hasMore: false, nextCursor: 0 }, status: 200 };
+      const m = /\/api\/runs\/([^/]+)\/events(?:\?(.*))?$/.exec(path);
+      if (!m) return { body: null, status: 404 };
+      const id = m[1]!;
+      if (opts.failEventsFor?.includes(id)) return { body: null, status: 500 };
+      const all = (opts.events?.[id] ?? []).map((e, i) => ({ ...e, sequence: i + 1 }));
+      const params = new URLSearchParams(m[2] ?? '');
+      const after = Number(params.get('after') ?? 0) || 0;
+      const limit = Math.min(Math.max(Number(params.get('limit') ?? 1000) || 1000, 1), 1000);
+      const page = all.filter((e) => e.sequence > after).slice(0, limit);
+      const nextCursor = page.length > 0 ? page[page.length - 1]!.sequence : after;
+      const lastSequence = all.length;
+      return { body: { events: page, lastSequence, nextCursor, hasMore: nextCursor < lastSequence }, status: 200 };
     },
   };
 }
@@ -1387,7 +1400,8 @@ test('#1024 acceptance 6: a clean night renders both new sections as none and no
   assert.deepEqual(out.runsWithoutTerminalCall, []);
   assert.equal(out.skillVersions!.stale, false);
   const body = bodies[0]!;
-  assert.ok(!body.includes('**Stale skills.**'), 'no staleness note when the loaded version matches main');
+  assert.ok(!body.includes('**Stale skills.**'), 'no staleness warning when the loaded version matches main');
+  assert.ok(body.includes('`issue-fix-loop` 1.4.0 loaded'), 'but the loaded procedure is still stated');
   assert.ok(body.includes('## Runs that ended with unpushed commits\n_none_'), 'the section still renders, empty');
   assert.ok(body.includes('## nightly-next Runs that never called finish/blocked\n_none_'));
 });
@@ -1571,4 +1585,106 @@ test('#1024 review r1: the run scan stops at the first page older than the night
   const runs = await scanNightRuns(mercury, '2026-09-26');
   assert.deepEqual(runs.map((r) => r.runId), ['run_new']);
   assert.equal(pages.filter((p) => p.startsWith('/api/runs?')).length, 1, 'the older page is never requested');
+});
+
+test('#1024 review r2: completion records beyond page ten are still found (the tail, not the head)', async () => {
+  // The records the digest needs are the LAST events of a Run: `skill.completed` and
+  // `run.unpushed_commits` are appended in the completion transaction. The endpoint caps a page at
+  // 1000, so a Run with 10,500 tool events would hide them behind ten pages of history -- the exact
+  // Runs a nightly produces. `lastSequence` + an `after` jump reads the tail instead.
+  const filler = Array.from({ length: 10_500 }, (_, i) => ({ type: 'tool.completed', payload: { i } }));
+  const mercury = mercuryWith({
+    runs: [{ id: 'run_long', createdAt: atInNight('2026-09-26'), workspacePath: '/ws/long' }],
+    events: {
+      run_long: [
+        ...filler,
+        { type: 'skill.completed', payload: { skill: 'issue-fix-loop', version: '1.2.0' } },
+        { type: 'run.unpushed_commits', payload: { branch: 'fix/long', commits: ['deadbeef'] } },
+        { type: 'run.completed', payload: {} },
+      ],
+    },
+  });
+  const runs = await scanNightRuns(mercury, '2026-09-26');
+  assert.deepEqual(runs[0]!.unpushed, { branch: 'fix/long', commits: ['deadbeef'] });
+  assert.deepEqual(runs[0]!.skills, [{ skill: 'issue-fix-loop', version: '1.2.0' }]);
+});
+
+test('#1024 review r2: another repository\'s Run is not published in this digest', async () => {
+  const mercury = mercuryWith({
+    runs: [
+      { id: 'run_here', createdAt: atInNight('2026-09-26'), workspacePath: '/ws/here', repository: { url: 'https://github.com/aywengo/mercury.git' } },
+      { id: 'run_elsewhere', createdAt: atInNight('2026-09-26'), workspacePath: '/ws/elsewhere', repository: { url: 'https://github.com/aywengo/other.git' } },
+      { id: 'run_unknown', createdAt: atInNight('2026-09-26'), workspacePath: '/ws/unknown' },
+    ],
+    events: {
+      run_here: [{ type: 'run.unpushed_commits', payload: { branch: 'fix/a', commits: ['aaa'] } }],
+      run_elsewhere: [{ type: 'run.unpushed_commits', payload: { branch: 'fix/b', commits: ['bbb'] } }],
+      run_unknown: [{ type: 'run.unpushed_commits', payload: { branch: 'fix/c', commits: ['ccc'] } }],
+    },
+  });
+  const runs = await scanNightRuns(mercury, '2026-09-26', { repo: 'aywengo/mercury' });
+  // The other repository is dropped; an UNKNOWN identity is kept (hiding it would silently empty
+  // the section on a host whose Runs carry no url).
+  assert.deepEqual(runs.map((r) => r.runId), ['run_here', 'run_unknown']);
+});
+
+test('runMatchesRepo: url forms, local checkouts, and unknown identities', () => {
+  assert.equal(runMatchesRepo({ url: 'https://github.com/aywengo/mercury.git' }, 'aywengo/mercury'), true);
+  assert.equal(runMatchesRepo({ url: 'https://github.com/aywengo/mercury' }, 'aywengo/mercury'), true);
+  assert.equal(runMatchesRepo({ url: 'git@github.com:aywengo/mercury.git' }, 'aywengo/mercury'), true);
+  assert.equal(runMatchesRepo({ url: 'https://github.com/aywengo/mercury.git' }, 'aywengo/other'), false);
+  assert.equal(runMatchesRepo({ localPath: '/tmp/fixtures/mercury' }, 'aywengo/mercury'), true);
+  assert.equal(runMatchesRepo({ localPath: '/tmp/fixtures/elsewhere' }, 'aywengo/mercury'), false);
+  // Unknown identity: included, never silently dropped.
+  assert.equal(runMatchesRepo({}, 'aywengo/mercury'), true);
+  assert.equal(runMatchesRepo(null, 'aywengo/mercury'), true);
+  assert.equal(runMatchesRepo({ url: 'not a url' }, 'aywengo/mercury'), true);
+});
+
+test('#1024 review r2: the scan budget is enforced while processing a page, not only per page', async () => {
+  // Four Runs on one page, each event request slow enough to blow the budget: the scan must stop and
+  // return what it has, because the digest Run has its own 15-minute limit and must still file.
+  const slow: NonNullable<ReportIo['mercury']> = {
+    async get(path) {
+      if (path.startsWith('/api/runs?')) {
+        return {
+          body: {
+            runs: ['a', 'b', 'c', 'd'].map((id) => ({ id: `run_${id}`, createdAt: atInNight('2026-09-26') })),
+          },
+          status: 200,
+        };
+      }
+      await new Promise((r) => setTimeout(r, 200)); // every event request costs 200 ms
+      return { body: { events: [], lastSequence: 0 }, status: 200 };
+    },
+  };
+  const runs = await scanNightRuns(slow, '2026-09-26', { budgetMs: 50 });
+  assert.ok(runs.length < 4, `the budget stopped the scan early (got ${runs.length} of 4)`);
+  assert.ok(runs.length >= 1, 'and it still returned the Runs it managed to read');
+});
+
+test('#1024 review r2: the version line is rendered on a CURRENT night too, not only when stale', async () => {
+  const bodies: string[] = [];
+  const io: ReportIo = {
+    async get(path) {
+      if (path.startsWith('/search/issues?')) return { body: { items: [] }, status: 200 };
+      if (path.includes('/issues/comments?since=')) return { body: [], status: 200 };
+      if (path.includes('/contents/')) {
+        return { body: { encoding: 'base64', content: Buffer.from('---\nversion: 1.4.0\n---\n').toString('base64') }, status: 200 };
+      }
+      return { body: [], status: 200 };
+    },
+    async post(_path, body) { bodies.push((body as { body: string }).body); return { body: { number: 906 }, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+    mercury: mercuryWith({
+      runs: [{ id: 'run_cur', createdAt: atInNight('2026-09-26') }],
+      events: { run_cur: [{ type: 'skill.completed', payload: { skill: 'issue-fix-loop', version: '1.4.0' } }] },
+      hostVersion: '0.2.2',
+    }),
+  };
+  await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  const first = bodies[0]!.split('\n')[2]!;
+  assert.ok(first.includes('host Mercury 0.2.2'), 'the host version is stated on a current night');
+  assert.ok(first.includes('1.4.0'), 'and the procedure version the night loaded');
+  assert.ok(!first.includes('Stale'), 'without a false staleness warning');
 });

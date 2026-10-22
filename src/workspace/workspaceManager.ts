@@ -336,7 +336,21 @@ export class WorkspaceManager {
       const { stdout: notOnRemote } = await this.git(['-C', workspacePath, 'rev-list', ...range, '--not', '--remotes']);
       const reachable = new Set(notOnRemote.split('\n').map((l) => l.trim()).filter(Boolean));
       // Intersect with `commits` so the payload stays a subset of what `run.completed` recorded.
-      return { branch, commits: commits.filter((c) => reachable.has(c)) };
+      const stranded = commits.filter((c) => reachable.has(c));
+      if (stranded.length === 0) return none;
+      // The branch the work is actually on, not the one the workspace was created with: an agent
+      // that creates `fix/issue-<n>` (or checks out an existing PR branch) commits there, and the
+      // caller only knows `agent/<runId>` (#1024 review, Copilot r1). A detached HEAD keeps the
+      // caller's value, which is the branch the worktree was built from.
+      let actual = branch;
+      try {
+        const { stdout: headRef } = await this.git(['-C', workspacePath, 'rev-parse', '--abbrev-ref', 'HEAD']);
+        const name = headRef.trim();
+        if (name !== '' && name !== 'HEAD') actual = name;
+      } catch {
+        // keep the caller's branch name
+      }
+      return { branch: actual, commits: stranded };
     } catch {
       // An unreadable repository reports nothing rather than everything: a false "you forgot to
       // push" on every Run is worse than a missed one, and the Run itself is already final.

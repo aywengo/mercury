@@ -1,6 +1,6 @@
 ---
 name: nightly
-version: 1.6.0
+version: 1.6.1
 description: Deterministic ladder selection for the unattended nightly loop — decides the next issue from GitHub metadata only (author, labels, timeline label actor), never issue text, then claims it with nightly:in-progress.
 capabilities: [nightly, ladder, selection, trust, claim, triage, github, issues]
 ---
@@ -263,11 +263,20 @@ issues. Sections:
 Both sections are empty on a clean night, and their headings still render, so "nothing to
 report" is visibly different from "the check did not run".
 
-The digest also opens with a **stale-skills** line when the night's Runs loaded an older
-`issue-fix-loop` than `main` carries (#1023, #1024): the loaded version comes from their
-`skill.completed` events, `main`'s from the skill file through the contents API, and the host's
-Mercury version from `/healthz`. An unknown version is never reported as staleness — the line
-appears only when both sides are known and the loaded one is older.
+The digest also opens with a **version line** (#1023, #1024): the host's Mercury version
+(`/healthz`) and the `issue-fix-loop` version the night's Runs loaded, read from their
+`skill.completed` events. When the loaded version is older than the one in `.agents/skills/` on
+`main` (contents API), the line becomes a **stale-skills warning** instead of a plain record. It is
+always rendered when a loaded version is known — "which host, which procedure?" is the question
+nobody could answer during the week the 1.2.0 gap stayed invisible — and an unknown version is
+never reported as staleness.
+
+Both new sections are scoped to the digest's repository: the runs API is host-wide, so a Run whose
+`repository` names another repository is skipped before its events are read (an unidentifiable
+repository is kept rather than hidden). The scan reads each Run's event TAIL via `lastSequence`,
+because `skill.completed` and `run.unpushed_commits` are the last events of a Run — paging forward
+from sequence 1 would miss them on any Run longer than 1000 events — and it stops at a 60 s
+wall-clock budget so it can never crowd out filing the digest.
 
 The report is read-only except for the digest issue itself and the close
 of every OPEN digest titled `nightly report — D` with D strictly before the

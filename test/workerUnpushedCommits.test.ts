@@ -164,3 +164,82 @@ test('#1024 review r1: only the RUN\'s commits are reported, not unreachable bas
     env.close();
   }
 });
+
+/** The same double, but it first switches to a real feature branch -- what a nightly fix-loop does. */
+function branchSwitchingAgent(): AgentAdapter {
+  return {
+    id: 'git-fake',
+    capabilities: { static: { skills: 'none', humanInput: false, resume: false, toolEvents: 'none', roleInstruction: 'none', perRunModel: false, sandbox: false, mcp: 'none', workflowPlan: false } },
+    async start(context: RunContext): Promise<AgentHandle> {
+      const dir = context.workspace.path;
+      execFileSync('git', ['-C', dir, 'checkout', '-q', '-b', 'fix/issue-999-thing'], { timeout: 30_000 });
+      writeFileSync(join(dir, 'change.txt'), 'work\n');
+      execFileSync('git', ['-C', dir, 'add', 'change.txt'], { timeout: 30_000 });
+      execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'the work'], { timeout: 30_000 });
+      return {
+        runId: context.run.id,
+        events: (async function* () { /* no agent events */ })(),
+        exit: Promise.resolve({ code: 0, signal: null, reason: 'completed' }),
+        terminate: async () => {},
+      };
+    },
+  } as unknown as AgentAdapter;
+}
+
+/** An agent that reads and changes nothing. */
+function idleAgent(): AgentAdapter {
+  return {
+    id: 'git-fake',
+    capabilities: { static: { skills: 'none', humanInput: false, resume: false, toolEvents: 'none', roleInstruction: 'none', perRunModel: false, sandbox: false, mcp: 'none', workflowPlan: false } },
+    async start(context: RunContext): Promise<AgentHandle> {
+      return {
+        runId: context.run.id,
+        events: (async function* () { /* nothing */ })(),
+        exit: Promise.resolve({ code: 0, signal: null, reason: 'completed' }),
+        terminate: async () => {},
+      };
+    },
+  } as unknown as AgentAdapter;
+}
+
+test('#1024 review r2: the branch named is the one the work is on, not the one the workspace started on', async () => {
+  // The workspace is created on `agent/<runId>`; a fix-loop Run then creates `fix/issue-<n>` and
+  // commits there. Naming `agent/<runId>` would point a reader at a branch still sitting on the
+  // base commit.
+  const { seed, origin } = repoWithRemote();
+  const env = makeEnv({ workspaceMode: 'git-worktree', repoDir: seed, adapters: { 'git-fake': branchSwitchingAgent() } });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice', task: 'work on a feature branch', agent: 'git-fake',
+      repository: { url: origin, localPath: seed, baseBranch: 'main' },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 30_000);
+    const payload = env.events.list(run.id, 0, 200)
+      .find((e) => e.type === 'run.unpushed_commits')!.payload as { branch: string; commits: string[] };
+    assert.equal(payload.branch, 'fix/issue-999-thing');
+    assert.notEqual(payload.branch, `agent/${run.id}`);
+    assert.equal(payload.commits.length, 1);
+  } finally {
+    env.close();
+  }
+});
+
+test('#1024 review r2: an unpublished base with no new commits reports nothing', async () => {
+  // A read-only Run on a repository whose base commit is on no remote branch. `recordCommits` still
+  // lists that base commit, so an unscoped check would blame the Run for work it never did.
+  const dir = tempDir('mercury-1024-idle-');
+  const origin = join(dir, 'origin.git');
+  execFileSync('git', ['init', '--bare', '-q', origin], { timeout: 30_000 });
+  const seed = makeGitRepo(join(dir, 'seed'));
+  execFileSync('git', ['-C', seed, 'remote', 'add', 'origin', origin], { timeout: 30_000 });
+  execFileSync('git', ['-C', seed, 'push', '-q', 'origin', 'HEAD:refs/heads/other'], { timeout: 60_000 });
+  const env = makeEnv({ workspaceMode: 'git-worktree', repoDir: seed, adapters: { 'git-fake': idleAgent() } });
+  try {
+    const run = env.runService.create({ ownerId: 'alice', task: 'read only', agent: 'git-fake', repository: { url: origin, localPath: seed, baseBranch: 'main' } });
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 30_000);
+    assert.deepEqual(env.events.list(run.id, 0, 200).filter((e) => e.type === 'run.unpushed_commits'), [],
+      'a Run that made no commit strands nothing');
+  } finally {
+    env.close();
+  }
+});

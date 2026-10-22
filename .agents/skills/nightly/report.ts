@@ -378,6 +378,34 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
  *  cost a night of work (#1023). */
 export const NIGHTLY_PROCEDURE_SKILL = 'issue-fix-loop';
 
+/** The events endpoint's page cap (src/api/routes.ts `parseLimit`). */
+const EVENTS_PAGE_CAP = 1000;
+
+/**
+ * Does a Run's repository identity name `repo` (`owner/name`)?
+ *
+ * Used to keep one repository's digest from publishing another's Runs (#1024 review, Copilot r1):
+ * the runs API is host-wide while a digest is per-repo. An UNKNOWN identity (no url and no
+ * localPath, or an unparsable url) is included rather than hidden -- a digest that silently drops
+ * the night's Runs because their repository could not be named is worse than one that lists an
+ * extra line, and the same policy as the ledger's `repo` filter.
+ */
+export function runMatchesRepo(repository: { url?: unknown; localPath?: unknown } | null | undefined, repo: string): boolean {
+  if (repository === null || repository === undefined || typeof repository !== 'object') return true;
+  const target = repo.toLowerCase();
+  if (typeof repository.url === 'string' && repository.url !== '') {
+    const m = /github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?$/.exec(repository.url);
+    if (m) return `${m[1]}/${m[2]}`.toLowerCase() === target;
+  }
+  if (typeof repository.localPath === 'string' && repository.localPath !== '') {
+    // A local checkout: the directory name is all there is. Compared against the repo NAME only,
+    // because the owner is not in a path.
+    const name = repository.localPath.replace(/[\/]+$/, '').split(/[\/]/).pop() ?? '';
+    return name.toLowerCase() === target.split('/')[1];
+  }
+  return true;
+}
+
 /**
  * The night's Runs, with the two things the digest reads from their event streams (#1024):
  * a `run.unpushed_commits` record and the `skill.completed` versions each Run actually loaded.
@@ -387,17 +415,17 @@ export const NIGHTLY_PROCEDURE_SKILL = 'issue-fix-loop';
  * listing or an unreadable event page drops that Run (or ends the scan) instead of failing the
  * digest -- a report that refuses to file because one Run's events timed out is worse than a
  * report with one Run missing.
+ *
+ * Every loop checks `deadline`, not just the listing walk: the digest Run has its own 15-minute
+ * limit and must file. `repo` scopes the scan, because the runs API is host-wide.
  */
 export async function scanNightRuns(
   mercury: NonNullable<ReportIo['mercury']>,
   night: string,
-  opts: { maxRuns?: number; budgetMs?: number } = {},
+  opts: { maxRuns?: number; budgetMs?: number; repo?: string } = {},
 ): Promise<NightRun[]> {
   const win = nightWindow(night);
   const maxRuns = opts.maxRuns ?? 40; // one nightly host runs a handful of Runs a night
-  // A wall-clock budget for the whole scan. This is the code path that must always file the digest,
-  // and each request is bounded at 30 s: without a deadline, 40 Runs x 10 event pages could add
-  // twenty minutes to it -- the failure the digest body's size budget exists to prevent.
   const deadline = Date.now() + (opts.budgetMs ?? 60_000);
   const out: NightRun[] = [];
   let path: string | undefined = '/api/runs?limit=100';
@@ -410,17 +438,24 @@ export async function scanNightRuns(
       return out; // transport error: keep what was scanned
     }
     if (res.status < 200 || res.status >= 300) return out;
-    const body = res.body as { runs?: { id?: string; task?: string; createdAt?: string; workspacePath?: string | null }[]; nextCursor?: string } | null;
+    const body = res.body as {
+      runs?: { id?: string; task?: string; createdAt?: string; workspacePath?: string | null; repository?: { url?: unknown; localPath?: unknown } }[];
+      nextCursor?: string;
+    } | null;
     if (body === null || typeof body !== 'object' || !Array.isArray(body.runs)) return out;
     let sawOlderThanWindow = false;
     for (const run of body.runs) {
       if (out.length >= maxRuns) break;
+      if (Date.now() > deadline) return out;
       if (!run.id) continue;
       // The night is a LOCAL window [00:00, 06:00): a Run created at 07:00 is daytime work.
       const created = run.createdAt ? Date.parse(run.createdAt) : NaN;
       if (!Number.isNaN(created) && created < win.startMs) sawOlderThanWindow = true;
       if (Number.isNaN(created) || created < win.startMs || created >= win.endMs) continue;
-      const scanned = await scanRunEvents(mercury, run.id);
+      // Another repository's Run is not this digest's business -- and its worktree path and commit
+      // ids must not be published here.
+      if (opts.repo !== undefined && !runMatchesRepo(run.repository, opts.repo)) continue;
+      const scanned = await scanRunEvents(mercury, run.id, deadline);
       out.push({
         runId: run.id,
         ...(run.task ? { task: run.task } : {}),
@@ -438,31 +473,27 @@ export async function scanNightRuns(
   return out;
 }
 
-/** One Run's event stream, reduced to the two facts the digest reads. Bounded page walk (the
- *  events endpoint caps a page at 1000) and never throws: an unreadable page keeps what was seen. */
+/**
+ * One Run's event stream, reduced to the two facts the digest reads.
+ *
+ * The records it wants are the LAST events of a Run: `skill.completed` and `run.unpushed_commits`
+ * are appended in the completion transaction, immediately before `run.completed`. Paging forward
+ * from sequence 1 therefore misses them exactly on the long Runs that matter -- the endpoint caps a
+ * page at 1000 events, so a Run with 10,000 tool events hides its own completion records. Ask for
+ * `lastSequence` first (one cheap `limit=1` request) and then read the TAIL. Two requests, bounded,
+ * and correct for any Run length.
+ */
 async function scanRunEvents(
   mercury: NonNullable<ReportIo['mercury']>,
   runId: string,
+  deadline: number,
 ): Promise<{ unpushed?: { branch?: string; commits: string[] }; skills: { skill: string; version: string }[] }> {
   const skills: { skill: string; version: string }[] = [];
   let unpushed: { branch?: string; commits: string[] } | undefined;
-  let path: string | undefined = `/api/runs/${runId}/events`;
-  for (let page = 0; page < 10 && path; page++) {
-    let res: Awaited<ReturnType<typeof mercury.get>>;
-    try {
-      res = await mercury.get(path);
-    } catch {
-      break;
-    }
-    if (res.status < 200 || res.status >= 300) break;
-    const body = res.body as {
-      events?: { type?: string; payload?: { branch?: unknown; commits?: unknown; skill?: unknown; version?: unknown } }[];
-      nextCursor?: number;
-      hasMore?: boolean;
-    } | null;
-    if (body === null || typeof body !== 'object' || !Array.isArray(body.events)) break;
-    for (const ev of body.events) {
-      const p = ev.payload;
+  const parse = (events: unknown): void => {
+    if (!Array.isArray(events)) return;
+    for (const ev of events as { type?: string; payload?: { branch?: unknown; commits?: unknown; skill?: unknown; version?: unknown } }[]) {
+      const p = ev?.payload;
       if (!p) continue;
       if (ev.type === 'run.unpushed_commits' && Array.isArray(p.commits)) {
         const commits = p.commits.filter((c): c is string => typeof c === 'string' && c !== '');
@@ -472,10 +503,36 @@ async function scanRunEvents(
         skills.push({ skill: p.skill, version: p.version });
       }
     }
-    const events = body.events;
-    path = body.hasMore && body.nextCursor !== undefined && events.length > 0
-      ? `/api/runs/${runId}/events?after=${body.nextCursor}`
-      : undefined;
+  };
+
+  // 1. How long is the stream? One event is enough to learn `lastSequence`.
+  let lastSequence: number | undefined;
+  try {
+    const head = await mercury.get(`/api/runs/${runId}/events?limit=1`);
+    if (head.status >= 200 && head.status < 300) {
+      const body = head.body as { lastSequence?: unknown; events?: unknown } | null;
+      if (body && typeof body === 'object' && typeof body.lastSequence === 'number' && Number.isFinite(body.lastSequence)) {
+        lastSequence = body.lastSequence;
+      }
+      // A run with a single event: the head request already carried it.
+      if (lastSequence === 1) parse((body as { events?: unknown } | null)?.events);
+    }
+  } catch {
+    return { ...(unpushed ? { unpushed } : {}), skills }; // transport error: nothing to report
+  }
+
+  if (lastSequence === undefined || lastSequence <= 1) return { ...(unpushed ? { unpushed } : {}), skills };
+  if (Date.now() > deadline) return { ...(unpushed ? { unpushed } : {}), skills };
+
+  // 2. The tail: the newest page, which carries the completion records for any Run length.
+  const after = Math.max(0, lastSequence - EVENTS_PAGE_CAP);
+  try {
+    const tail = await mercury.get(`/api/runs/${runId}/events?after=${after}&limit=${EVENTS_PAGE_CAP}`);
+    if (tail.status >= 200 && tail.status < 300) {
+      parse((tail.body as { events?: unknown } | null)?.events);
+    }
+  } catch {
+    // keep what the head request gave us
   }
   return { ...(unpushed ? { unpushed } : {}), skills };
 }
@@ -569,14 +626,31 @@ async function hostVersionOf(mercury: NonNullable<ReportIo['mercury']>): Promise
   }
 }
 
-/** The one-line staleness note the digest opens with (#1024 acceptance 5). Absent when nothing is
- *  known to be stale: an unknown version is not evidence of an old one. */
-export function staleSkillsNote(record: SkillVersionRecord | undefined): string | undefined {
-  if (!record || !record.stale || record.loaded === undefined || record.main === undefined) return undefined;
-  // escMd on every value: the versions come from a skill file and from an API response, and a
-  // version string is not a place to discover that a `**` or a link can reach the digest body.
+/**
+ * The version line the digest opens with (#1024).
+ *
+ * The issue asks for two things and they are different: the header STATES the host version and the
+ * procedure the night's Runs loaded, and it SAYS SO when that is older than `main`. A current night
+ * still has to answer "which host, which procedure?" -- that is the question nobody could answer
+ * during the week the 1.2.0 gap stayed invisible. So the line is always rendered when a record
+ * exists; only the warning form is conditional. An unknown side is never rendered as staleness.
+ *
+ * escMd on every value: the versions come from a skill file and from an API response, and a version
+ * string is not a place to discover that a `**` or a link can reach the digest body.
+ */
+export function skillVersionsNote(record: SkillVersionRecord | undefined): string | undefined {
+  if (!record || record.loaded === undefined) return undefined;
   const host = record.hostVersion ? ` (host Mercury ${escMd(record.hostVersion)})` : '';
-  return `**Stale skills.** The night's Runs loaded \`${record.skill}\` ${escMd(record.loaded)}${host}, while \`main\` has ${escMd(record.main)}. The nightly ran an old procedure; upgrade the host (#1023).`;
+  if (record.stale && record.main !== undefined) {
+    return `**Stale skills.** The night's Runs loaded \`${record.skill}\` ${escMd(record.loaded)}${host}, while \`main\` has ${escMd(record.main)}. The nightly ran an old procedure; upgrade the host (#1023).`;
+  }
+  const main = record.main !== undefined ? `; \`main\` has ${escMd(record.main)}` : '';
+  return `_Ran on host Mercury ${escMd(record.hostVersion ?? 'unknown')}; \`${record.skill}\` ${escMd(record.loaded)} loaded${main}._`;
+}
+
+/** Kept as the narrow predicate (tests and callers that only care whether the night is stale). */
+export function staleSkillsNote(record: SkillVersionRecord | undefined): string | undefined {
+  return record?.stale ? skillVersionsNote(record) : undefined;
 }
 
 /**
@@ -680,10 +754,11 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   // many items were omitted.
   const BUDGET = 60_000;
   const lines: string[] = [`# nightly report — ${night}`, ''];
-  // #1024: the staleness note is the FIRST line of the digest. The 1.2.0-vs-1.4.0 gap stayed
-  // invisible for a week because nothing said it out loud; a reader must hit it before the lists.
-  const stale = staleSkillsNote(data.skillVersions);
-  if (stale) lines.push(stale, '');
+  // #1024: the version line is the FIRST line of the digest -- the staleness warning when the
+  // loaded procedure is old, the plain record otherwise. The 1.2.0-vs-1.4.0 gap stayed invisible
+  // for a week because nothing said it out loud; a reader must hit it before the lists.
+  const versionLine = skillVersionsNote(data.skillVersions);
+  if (versionLine) lines.push(versionLine, '');
   if (note) lines.push(`_${note}_`, '');
   let size = lines.join('\n').length;
   const fits = (s: string): boolean => {
@@ -844,7 +919,7 @@ export async function runReport(
   const runsStopped = io.mercury ? await collectRunsStopped(io.mercury, opts.night) : [];
   // #1024: one pass over the night's Runs feeds both the unpushed-commit section and the
   // loaded-skill header. Without the Mercury API neither is knowable, and neither is faked.
-  const nightRuns = io.mercury ? await scanNightRuns(io.mercury, opts.night) : [];
+  const nightRuns = io.mercury ? await scanNightRuns(io.mercury, opts.night, { repo: opts.repo }) : [];
   const unpushedCommits = unpushedCommitsFrom(nightRuns);
   const loaded = loadedSkillVersion(nightRuns, NIGHTLY_PROCEDURE_SKILL);
   const mainVersion = loaded !== undefined ? await repoSkillVersion(io, opts.repo, NIGHTLY_PROCEDURE_SKILL) : undefined;
