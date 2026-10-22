@@ -126,3 +126,41 @@ test('#1024: a repository with no remote never reports unpushed commits', async 
     env.close();
   }
 });
+
+test('#1024 review r1: only the RUN\'s commits are reported, not unreachable base history', async () => {
+  // `recordCommits` is `git log -n 20` from HEAD: the base history is in that list too. It is
+  // normally filtered out because the base is reachable from a remote ref, but that is a property
+  // of the repository, not of the Run. Here the base commit sits on no remote branch (the remote
+  // has a different branch only), so an unscoped check would name the base commit as stranded work
+  // for a Run that never touched it.
+  const dir = tempDir('mercury-1024-base-');
+  const origin = join(dir, 'origin.git');
+  execFileSync('git', ['init', '--bare', '-q', origin], { timeout: 30_000 });
+  const seed = makeGitRepo(join(dir, 'seed'));
+  execFileSync('git', ['-C', seed, 'remote', 'add', 'origin', origin], { timeout: 30_000 });
+  // Only the FIRST commit reaches the remote, and under a different branch name.
+  execFileSync('git', ['-C', seed, 'push', '-q', 'origin', 'HEAD:refs/heads/other'], { timeout: 60_000 });
+  writeFileSync(join(seed, 'base-only.txt'), 'base work\n');
+  execFileSync('git', ['-C', seed, 'add', 'base-only.txt'], { timeout: 30_000 });
+  execFileSync('git', ['-C', seed, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'base only'], { timeout: 30_000 });
+  const baseOnly = execFileSync('git', ['-C', seed, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 30_000 }).trim();
+
+  const env = makeEnv({ workspaceMode: 'git-worktree', repoDir: seed, adapters: { 'git-fake': gitAgent({ push: false }) } });
+  try {
+    const run = env.runService.create({
+      ownerId: 'alice',
+      task: 'one commit on an unpublished base',
+      agent: 'git-fake',
+      repository: { url: origin, localPath: seed, baseBranch: 'main' },
+    });
+    await waitFor(() => env.runs.get(run.id)!.status === 'COMPLETED', 30_000);
+    const payload = env.events.list(run.id, 0, 200)
+      .find((e) => e.type === 'run.unpushed_commits')!.payload as { commits: string[] };
+    const ws = env.runs.get(run.id)!.workspacePath!;
+    const head = execFileSync('git', ['-C', ws, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 30_000 }).trim();
+    assert.deepEqual(payload.commits, [head], 'the Run\'s own commit only');
+    assert.ok(!payload.commits.includes(baseOnly), 'the unreachable BASE commit is not the Run\'s work');
+  } finally {
+    env.close();
+  }
+});

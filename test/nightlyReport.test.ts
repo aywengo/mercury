@@ -1272,7 +1272,11 @@ test('#964: the digest shows the repo-relative test path, never the worktree pat
   assert.equal(out.flakes[0]!.test, 'e2e/knowledge.test.ts');
   const body = postedBody(calls);
   assert.match(body, /e2e\/knowledge\.test\.ts/);
-  assert.doesNotMatch(body, /worktrees|\/Users\//, 'no machine path reaches the digest');
+  // The rule is about the FLAKE section, and #1024 narrowed it deliberately: the unpushed-commit
+  // and missing-terminal sections name a worktree path on purpose, because the reader has to be
+  // able to recover the work. This fixture has no such Run, so the assertion still holds here --
+  // do not "restore" the rule for the whole digest.
+  assert.doesNotMatch(body, /worktrees|\/Users\//, 'no machine path reaches the FLAKE section');
 });
 
 // ---- #1024: unpushed commits, missing terminal calls, loaded skill versions ----
@@ -1525,4 +1529,46 @@ test('#1024: the loaded version is the one most Runs reported (one odd Run canno
     { runId: 'a', skills: [{ skill: 'issue-fix-loop', version: '1.4.0' }] },
     { runId: 'b', skills: [{ skill: 'issue-fix-loop', version: '1.2.0' }] },
   ], 'issue-fix-loop'), '1.2.0');
+});
+
+test('#1024 review r1: the ledger is scoped to the digest\'s repository', () => {
+  // The ledger is one host-wide file; a digest is per-repo. Without the filter, a host running the
+  // nightly loop for two repositories publishes B's un-finished Run in A's report.
+  const stateHome = tempDir('mercury-ledger-repo-');
+  const env = { XDG_STATE_HOME: stateHome };
+  const at = new Date(nightWindow('2026-09-26').startMs + 3_600_000);
+  recordRunClaim(env, { runId: 'run_a', issue: 1, cwd: '/ws/a', repo: 'aywengo/mercury', at });
+  recordRunClaim(env, { runId: 'run_b', issue: 2, cwd: '/ws/b', repo: 'aywengo/other', at });
+  recordRunClaim(env, { runId: 'run_legacy', issue: 3, cwd: '/ws/c', at }); // no repo field
+  assert.deepEqual(collectRunsWithoutTerminalCall(env, '2026-09-26', 'aywengo/mercury').map((r) => r.runId), ['run_a', 'run_legacy']);
+  assert.deepEqual(collectRunsWithoutTerminalCall(env, '2026-09-26', 'aywengo/other').map((r) => r.runId), ['run_b', 'run_legacy']);
+  // An unscoped call keeps every entry (the CLI path that predates the argument).
+  assert.equal(collectRunsWithoutTerminalCall(env, '2026-09-26').length, 3);
+});
+
+test('#1024 review r1: the run scan stops at the first page older than the night window', async () => {
+  // The listing is newest-first. Paging past the window would walk the host's whole history and
+  // still find nothing; the scan must stop, and it must still return the in-window Run.
+  const pages: string[] = [];
+  const mercury: NonNullable<ReportIo['mercury']> = {
+    async get(path) {
+      pages.push(path);
+      if (path.startsWith('/api/runs?')) {
+        return {
+          body: {
+            runs: [
+              { id: 'run_new', createdAt: atInNight('2026-09-26'), workspacePath: '/ws/new' },
+              { id: 'run_old', createdAt: atInNight('2026-09-20'), workspacePath: '/ws/old' },
+            ],
+            nextCursor: 'more',
+          },
+          status: 200,
+        };
+      }
+      return { body: { events: [], hasMore: false }, status: 200 };
+    },
+  };
+  const runs = await scanNightRuns(mercury, '2026-09-26');
+  assert.deepEqual(runs.map((r) => r.runId), ['run_new']);
+  assert.equal(pages.filter((p) => p.startsWith('/api/runs?')).length, 1, 'the older page is never requested');
 });

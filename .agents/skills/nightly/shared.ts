@@ -1,16 +1,16 @@
 // Shared plumbing for the nightly skill scripts (#769): repo validation, date-window helpers,
-// the GitHub fetch primitives, and the nightly-next Run ledger (#1024). One copy exists so the regex-drift review finding on #768
-// (select.ts/next.ts loose form vs e2e.ts/report.ts strict form) cannot recur. The scripts run
-// standalone via `node .agents/skills/nightly/<x>.ts`, so these stay dependency-free (node stdlib
-// + fetch) and each script imports only what it uses.
+// the GitHub fetch primitives, and the nightly-next Run ledger (#1024). One copy exists so the
+// regex-drift review finding on #768 (select.ts/next.ts loose form vs e2e.ts/report.ts strict form)
+// cannot recur. The scripts run standalone via `node .agents/skills/nightly/<x>.ts`, so these stay
+// dependency-free (node stdlib + fetch) and each script imports only what it uses.
+
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname } from 'node:path';
 
 /** Repo validation: segments must START alphanumeric, so '..' can never reach a URL segment.
  * This is the STRICT form introduced in #739/#741 review; select.ts/next.ts previously carried a
  * looser form that accepted dot-leading segments (e.g. '..') - one regex, everywhere, now. */
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname } from 'node:path';
-
 export const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
 /** Throws unless `repo` is exactly owner/name with alphanumeric-leading segments. */
@@ -71,6 +71,9 @@ export interface RunLedgerEntry {
   issue?: number;
   /** Where the Run worked (`process.cwd()` when `next.ts` ran) - the recovery path. */
   cwd?: string;
+  /** The repository the claim was made in (`owner/name`). The digest is per-repo, so an entry
+   *  without this would let one repository's digest list another repository's un-finished Run. */
+  repo?: string;
   /** ISO instant of the claim. */
   claimedAt: string;
   terminal?: 'finish' | 'blocked';
@@ -112,6 +115,7 @@ export function loadRunLedger(env: NodeJS.ProcessEnv): RunLedgerEntry[] {
     const entry: RunLedgerEntry = { runId: e.runId, claimedAt: e.claimedAt };
     if (typeof e.issue === 'number' && Number.isInteger(e.issue) && e.issue > 0) entry.issue = e.issue;
     if (typeof e.cwd === 'string' && e.cwd !== '') entry.cwd = e.cwd;
+    if (typeof e.repo === 'string' && e.repo !== '') entry.repo = e.repo;
     if (e.terminal === 'finish' || e.terminal === 'blocked') entry.terminal = e.terminal;
     if (typeof e.terminalAt === 'string') entry.terminalAt = e.terminalAt;
     out.push(entry);
@@ -122,13 +126,19 @@ export function loadRunLedger(env: NodeJS.ProcessEnv): RunLedgerEntry[] {
 function saveRunLedger(env: NodeJS.ProcessEnv, entries: RunLedgerEntry[]): void {
   const p = runLedgerPath(env);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(entries.slice(-RUN_LEDGER_CAP), null, 2), { mode: 0o600 });
+  // Write-then-rename, not a direct write: the realistic torn write is the one this feature is
+  // about -- the Run killed at its notAfter deadline WHILE `next.ts` writes. A truncated file
+  // reads as an empty ledger, which would silently empty the "never called finish/blocked" section
+  // for the very night it matters.
+  const tmp = `${p}.tmp`;
+  writeFileSync(tmp, JSON.stringify(entries.slice(-RUN_LEDGER_CAP), null, 2), { mode: 0o600 });
+  renameSync(tmp, p);
   chmodSync(p, 0o600);
 }
 
 /** Record a claim. Returns false when there is no Run id to record (a manual invocation), and
  *  never throws: the exit path and the selection both matter more than the ledger. */
-export function recordRunClaim(env: NodeJS.ProcessEnv, entry: { runId?: string; issue?: number; cwd?: string; at?: Date }): boolean {
+export function recordRunClaim(env: NodeJS.ProcessEnv, entry: { runId?: string; issue?: number; cwd?: string; repo?: string; at?: Date }): boolean {
   const runId = entry.runId;
   if (!runId) return false;
   try {
@@ -137,6 +147,7 @@ export function recordRunClaim(env: NodeJS.ProcessEnv, entry: { runId?: string; 
       runId,
       ...(entry.issue !== undefined ? { issue: entry.issue } : {}),
       ...(entry.cwd ? { cwd: entry.cwd } : {}),
+      ...(entry.repo ? { repo: entry.repo } : {}),
       claimedAt: (entry.at ?? new Date()).toISOString(),
     });
     saveRunLedger(env, entries);

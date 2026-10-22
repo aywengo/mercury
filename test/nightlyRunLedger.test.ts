@@ -5,6 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { runNext, finishIssue, blockIssue, type NextIo } from '../.agents/skills/nightly/next.ts';
 import { loadRunLedger, recordRunClaim, recordRunTerminal, runLedgerPath, RUN_LEDGER_CAP } from '../.agents/skills/nightly/shared.ts';
@@ -120,4 +121,24 @@ test('#1024: the ledger is capped, newest entries kept', () => {
   assert.equal(ledger.length, RUN_LEDGER_CAP);
   assert.equal(ledger[ledger.length - 1]!.runId, `run_${RUN_LEDGER_CAP + 4}`);
   assert.ok(runLedgerPath(env).endsWith('/mercury/nightly/run-ledger.json'));
+});
+
+test('#1024 review r1: an exit call writes only under the env it is given, never the ambient home', async () => {
+  // The blocking finding: with an `env = process.env` default, every caller that forgot the
+  // argument wrote to the HOST's real ledger -- and inside a nightly Run that meant `npm test`
+  // closed the Run's own claim, so the report could never list it.
+  const own = tempDir('mercury-ledger-own-');
+  const other = tempDir('mercury-ledger-other-');
+  recordRunClaim({ XDG_STATE_HOME: own }, { runId: 'run_a', issue: 5, cwd: '/ws/a' });
+  await finishIssue(ioWith([]), { repo: REPO, issue: 5 }, { XDG_STATE_HOME: other, MERCURY_RUN_ID: 'run_a' });
+  assert.equal(loadRunLedger({ XDG_STATE_HOME: own })[0]!.terminal, undefined,
+    'the Run\'s own claim is untouched by an exit call that was given a different env');
+  assert.deepEqual(loadRunLedger({ XDG_STATE_HOME: other }), [], 'and nothing is invented in the other home');
+});
+
+test('#1024 review r1: the exit paths have no process.env default', () => {
+  // Pinned in source, because the failure mode is a call site that silently writes to the host's
+  // ledger. A default is the mechanism; removing it is the fix.
+  const src = readFileSync(new URL('../.agents/skills/nightly/next.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /export async function (finishIssue|blockIssue)\([^)]*env: NodeJS\.ProcessEnv = process\.env/);
 });

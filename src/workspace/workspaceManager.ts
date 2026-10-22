@@ -306,25 +306,36 @@ export class WorkspaceManager {
    * committed and never pushed looked exactly like a finished Run, and nothing flagged it.
    *
    * Only `refs/remotes/*` are consulted, deliberately. A `git fetch` here would bound the
-   * finalize path by the remote's latency for a signal that is already local: a push from this
-   * worktree updates this repository's own remote-tracking ref, so after a real push the commit
-   * is reachable and nothing is reported. A repository with NO remote refs at all (a local
-   * fixture, a copy-mode host) returns nothing rather than everything -- there is no branch the
-   * commits were meant for, and a finalize path that flags every local run would be noise.
+   * finalize path by the remote's latency for a signal that is already local: a push to a
+   * CONFIGURED remote from this worktree updates this repository's own remote-tracking ref, so
+   * after a real push the commit is reachable and nothing is reported.
+   *
+   * Known limit of that choice: a push by URL (`git push <url> HEAD:refs/heads/x`) or through a
+   * remote with no fetch refspec leaves no remote-tracking ref behind, so such a Run reads as
+   * unpushed. That direction is the safe one -- a false alarm in a digest, never a missed night --
+   * and the alternative is a network fetch in the finalize path. A repository with NO remote refs
+   * at all (a local fixture, a copy-mode host) returns nothing rather than everything: there is
+   * no branch the commits were meant for, and flagging every local Run would be noise.
    *
    * One `rev-list` call, not one `merge-base` per (commit, ref) pair: the latter is a subprocess
    * per pair and this repository has dozens of remote branches.
    */
-  async unpushedCommits(workspacePath: string, commits: string[], branch: string): Promise<{ branch: string; commits: string[] }> {
+  async unpushedCommits(workspacePath: string, commits: string[], branch: string, baseCommit?: string | null): Promise<{ branch: string; commits: string[] }> {
     const none = { branch, commits: [] as string[] };
     if (commits.length === 0) return none;
     try {
       const { stdout } = await this.git(['-C', workspacePath, 'for-each-ref', '--format=%(refname)', 'refs/remotes']);
       if (stdout.split('\n').map((l) => l.trim()).filter(Boolean).length === 0) return none;
+      // Scope to the RUN's commits, not "the last 20 commits in the worktree". `commits` comes from
+      // `git log -n 20`, which on a repository whose base branch has no remote-tracking ref would
+      // name the base history too -- a Run that made no commits at all would be reported as having
+      // stranded twenty. `baseCommit..HEAD` is the same range the knowledge harvesters use.
+      const range: string[] = baseCommit && baseCommit !== 'copy' ? [`${baseCommit}..HEAD`] : commits;
       // Positive revisions FIRST: `--not` reverses every revision argument after it, so
       // `rev-list --not --remotes <sha>` excludes the sha itself and always prints nothing.
-      const { stdout: notOnRemote } = await this.git(['-C', workspacePath, 'rev-list', ...commits, '--not', '--remotes']);
+      const { stdout: notOnRemote } = await this.git(['-C', workspacePath, 'rev-list', ...range, '--not', '--remotes']);
       const reachable = new Set(notOnRemote.split('\n').map((l) => l.trim()).filter(Boolean));
+      // Intersect with `commits` so the payload stays a subset of what `run.completed` recorded.
       return { branch, commits: commits.filter((c) => reachable.has(c)) };
     } catch {
       // An unreadable repository reports nothing rather than everything: a false "you forgot to

@@ -249,7 +249,9 @@ issues. Sections:
   file keeps every entry. Test names are shown repo-relative (`e2e/x.test.ts`), never as a worktree
   path, including entries recorded before that normalization existed.
 - **Runs that ended with unpushed commits** (#1024) — Runs whose `run.unpushed_commits` event
-  names commits reachable from no remote branch. Each line carries the Run id, the branch it was
+  names commits reachable from no remote branch. The record is written when a Run COMPLETES;
+  a Run stopped by `notAfter` (`TIMED_OUT`) or failed mid-work keeps its commits in the same
+  worktree but emits nothing, so read that row's worktree before GC when a night ends badly. Each line carries the Run id, the branch it was
   meant for, the commits and the worktree path, so the work can be recovered by hand. Mercury
   never pushes on an agent's behalf; this section is the recovery pointer.
 - **nightly-next Runs that never called finish/blocked** (#1024) — Runs that claimed an issue

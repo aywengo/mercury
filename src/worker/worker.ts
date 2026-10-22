@@ -1291,6 +1291,7 @@ await this.finalize(run, outcome, skills);
           current.workspacePath,
           commits,
           current.workspaceBranch ?? `agent/${run.id}`,
+          current.repository.baseCommit,
         )
         : { branch: current.workspaceBranch ?? `agent/${run.id}`, commits: [] as string[] };
 

@@ -113,7 +113,7 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: 
     // work and never called `finish`/`blocked`. Best-effort - a selection is not worth failing
     // over an unwritable state file - and skipped on --dry-run, which claims nothing.
     if (!opts.dryRun) {
-      recordRunClaim(env, { runId: env.MERCURY_RUN_ID, issue: selection.issue, cwd: process.cwd() });
+      recordRunClaim(env, { runId: env.MERCURY_RUN_ID, issue: selection.issue, cwd: process.cwd(), repo: opts.repo });
     }
     // Rung 0 (resume, #819) is fix-loop step 5: address the pending Copilot findings on the
     // PR the earlier night opened, one batched push, then the relay fetches the fresh review.
@@ -125,8 +125,13 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: 
   return { rung: 'none', reason: selection.reason, action: 'no-op' };
 }
 
-/** The success exit path: the fix-loop finished (PR open/merged, or nothing actionable). */
-export async function finishIssue(io: NextIo, opts: { repo: string; issue: number }, env: NodeJS.ProcessEnv = process.env): Promise<{ removed: boolean }> {
+/** The success exit path: the fix-loop finished (PR open/merged, or nothing actionable).
+ *
+ * `env` is REQUIRED and has no `process.env` default on purpose (#1024 review r1): with a default,
+ * every caller that forgets it writes to the host's REAL Run ledger. Inside a nightly Run that
+ * means `npm test` -- which calls these exits with a fake io -- stamped the Run's own claim
+ * `finish`, so the morning report could never list the Run it exists to catch. */
+export async function finishIssue(io: NextIo, opts: { repo: string; issue: number }, env: NodeJS.ProcessEnv): Promise<{ removed: boolean }> {
   assertRepo(opts.repo);
   const removed = await io.deleteLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels/${encodeURIComponent(L_IN_PROGRESS)}`);
   // The Run ledger (#1024): this is the terminal call the morning report looks for. Recorded even
@@ -136,7 +141,7 @@ export async function finishIssue(io: NextIo, opts: { repo: string; issue: numbe
 }
 
 /** The never-asks exit path: hand the question to a human via GitHub, remove the claim, finish. */
-export async function blockIssue(io: NextIo, opts: { repo: string; issue: number; reason: string }, env: NodeJS.ProcessEnv = process.env): Promise<{ removed: boolean; newlyLabeled: boolean; commented: boolean }> {
+export async function blockIssue(io: NextIo, opts: { repo: string; issue: number; reason: string }, env: NodeJS.ProcessEnv): Promise<{ removed: boolean; newlyLabeled: boolean; commented: boolean }> {
   assertRepo(opts.repo);
   const reason = opts.reason.trim();
   if (reason === '') throw new Error('a blocked exit needs a non-empty --reason (the question a human must answer)');

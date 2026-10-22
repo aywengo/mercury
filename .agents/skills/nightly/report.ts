@@ -391,13 +391,18 @@ export const NIGHTLY_PROCEDURE_SKILL = 'issue-fix-loop';
 export async function scanNightRuns(
   mercury: NonNullable<ReportIo['mercury']>,
   night: string,
-  opts: { maxRuns?: number } = {},
+  opts: { maxRuns?: number; budgetMs?: number } = {},
 ): Promise<NightRun[]> {
   const win = nightWindow(night);
   const maxRuns = opts.maxRuns ?? 40; // one nightly host runs a handful of Runs a night
+  // A wall-clock budget for the whole scan. This is the code path that must always file the digest,
+  // and each request is bounded at 30 s: without a deadline, 40 Runs x 10 event pages could add
+  // twenty minutes to it -- the failure the digest body's size budget exists to prevent.
+  const deadline = Date.now() + (opts.budgetMs ?? 60_000);
   const out: NightRun[] = [];
   let path: string | undefined = '/api/runs?limit=100';
   for (let page = 0; page < 10 && path && out.length < maxRuns; page++) {
+    if (Date.now() > deadline) return out;
     let res: Awaited<ReturnType<typeof mercury.get>>;
     try {
       res = await mercury.get(path);
@@ -407,11 +412,13 @@ export async function scanNightRuns(
     if (res.status < 200 || res.status >= 300) return out;
     const body = res.body as { runs?: { id?: string; task?: string; createdAt?: string; workspacePath?: string | null }[]; nextCursor?: string } | null;
     if (body === null || typeof body !== 'object' || !Array.isArray(body.runs)) return out;
+    let sawOlderThanWindow = false;
     for (const run of body.runs) {
       if (out.length >= maxRuns) break;
       if (!run.id) continue;
       // The night is a LOCAL window [00:00, 06:00): a Run created at 07:00 is daytime work.
       const created = run.createdAt ? Date.parse(run.createdAt) : NaN;
+      if (!Number.isNaN(created) && created < win.startMs) sawOlderThanWindow = true;
       if (Number.isNaN(created) || created < win.startMs || created >= win.endMs) continue;
       const scanned = await scanRunEvents(mercury, run.id);
       out.push({
@@ -422,7 +429,11 @@ export async function scanNightRuns(
         skills: scanned.skills,
       });
     }
-    path = body.nextCursor ? `/api/runs?limit=100&cursor=${encodeURIComponent(body.nextCursor)}` : undefined;
+    // The listing is newest-first, so once a page carries a Run older than the window everything
+    // after it is older too: stop instead of paging through the host's whole history.
+    path = body.nextCursor && !sawOlderThanWindow
+      ? `/api/runs?limit=100&cursor=${encodeURIComponent(body.nextCursor)}`
+      : undefined;
   }
   return out;
 }
@@ -568,9 +579,17 @@ export function staleSkillsNote(record: SkillVersionRecord | undefined): string 
   return `**Stale skills.** The night's Runs loaded \`${record.skill}\` ${escMd(record.loaded)}${host}, while \`main\` has ${escMd(record.main)}. The nightly ran an old procedure; upgrade the host (#1023).`;
 }
 
-/** nightly-next Runs that claimed an issue and never called `finish` or `blocked` (#1024). Read
- *  from the Run ledger `next.ts` writes: a claim during the night window with no terminal call. */
-export function collectRunsWithoutTerminalCall(env: NodeJS.ProcessEnv, night: string): { runId: string; issue?: number; cwd?: string }[] {
+/**
+ * nightly-next Runs that claimed an issue and never called `finish` or `blocked` (#1024). Read
+ * from the Run ledger `next.ts` writes: a claim during the night window with no terminal call.
+ *
+ * `repo` scopes it to the digest's repository. The ledger is host-wide, one file per host, while a
+ * digest is per-repo: without the filter a host running the nightly loop for two repositories would
+ * publish repository B's un-finished Run (with B's worktree path) in repository A's report. Entries
+ * written before the field existed carry no repo and are shown -- dropping them would hide exactly
+ * the older claims this section is for.
+ */
+export function collectRunsWithoutTerminalCall(env: NodeJS.ProcessEnv, night: string, repo?: string): { runId: string; issue?: number; cwd?: string }[] {
   const win = nightWindow(night);
   return loadRunLedger(env)
     .filter((e) => {
@@ -578,6 +597,7 @@ export function collectRunsWithoutTerminalCall(env: NodeJS.ProcessEnv, night: st
       return !Number.isNaN(at) && at >= win.startMs && at < win.endMs;
     })
     .filter((e) => e.terminal === undefined)
+    .filter((e) => repo === undefined || e.repo === undefined || e.repo === repo)
     .map((e) => ({
       runId: e.runId,
       ...(e.issue !== undefined ? { issue: e.issue } : {}),
@@ -713,14 +733,9 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   section('## PRs opened', () => list(data.prs, '_none_'));
   section('## Issues filed', () => list(data.issuesFiled, '_none_'));
   section('## Issues commented', () => list(data.issuesCommented, '_none_'));
-  section('## Claims released (Run ended with no PR and no comment)', () =>
-    bounded(data.claimsReleased.map((c) => `- #${c.number}`), '_none_'));
-  section('## Blocked (nightly:blocked, waiting on a human)', () =>
-    bounded(data.blocked.map((b) => `- #${b.number} ${escMd(b.title)}${b.question ? ` — question: ${escMd(b.question)}` : ''}`), '_none_'));
-  section('## Runs stopped by notAfter (the 06:00 window end)', () =>
-    bounded(data.runsStopped.map((r) => `- ${codeSpan(r.runId ?? '')} — ${codeSpan(r.task ?? '')}`), '_none_'));
-  // #1024: the two shapes that ended a night with nothing to show. Both name the Run and the
-  // worktree, because the point of the section is that a human can recover the work by hand.
+  // #1024: the two recovery sections render EARLY, right after the claims-released list. `section()`
+  // drops a heading once the 60 KB budget is gone, and these two carry the acceptance criteria that
+  // make a lost night visible -- they must not be the ones an oversized night truncates away.
   section('## Runs that ended with unpushed commits', () =>
     bounded(data.unpushedCommits.map((r) => {
       const shas = r.commits.slice(0, 5).map((c) => codeSpan(c.slice(0, 7), 12)).join(', ');
@@ -730,6 +745,12 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   section('## nightly-next Runs that never called finish/blocked', () =>
     bounded(data.runsWithoutTerminalCall.map((r) =>
       `- ${codeSpan(r.runId)}${r.issue !== undefined ? ` — issue #${r.issue}` : ''}${r.cwd ? ` — worktree ${codeSpan(r.cwd)}` : ''}`), '_none_'));
+  section('## Claims released (Run ended with no PR and no comment)', () =>
+    bounded(data.claimsReleased.map((c) => `- #${c.number}`), '_none_'));
+  section('## Blocked (nightly:blocked, waiting on a human)', () =>
+    bounded(data.blocked.map((b) => `- #${b.number} ${escMd(b.title)}${b.question ? ` — question: ${escMd(b.question)}` : ''}`), '_none_'));
+  section('## Runs stopped by notAfter (the 06:00 window end)', () =>
+    bounded(data.runsStopped.map((r) => `- ${codeSpan(r.runId ?? '')} — ${codeSpan(r.task ?? '')}`), '_none_'));
   section('## Flakes (nightly-e2e clock)', () => {
     const flakeLines = data.flakes.map((f) => {
       // State-derived text: flatten newlines BEFORE other rendering so a tampered entry or a
@@ -836,7 +857,7 @@ export async function runReport(
         ...(mainVersion !== undefined ? { main: mainVersion } : {}),
         stale: mainVersion !== undefined && compareVersions(loaded, mainVersion) < 0,
       };
-  const runsWithoutTerminalCall = collectRunsWithoutTerminalCall(env, opts.night);
+  const runsWithoutTerminalCall = collectRunsWithoutTerminalCall(env, opts.night, opts.repo);
   // #964: the digest shows the last FLAKE_REPORT_WINDOW_NIGHTS nights and only counts the rest.
   const { visible: flakes, older: flakesOlder } = flakesInWindow(collectFlakes(env, opts.night), opts.night);
   const data: ReportData = {
