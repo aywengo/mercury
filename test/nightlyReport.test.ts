@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { runReport, collectBlocked, collectRunsStopped, collectFlakes, flakesInWindow, blockingQuestion, questionFromBody, defaultNight, collectIssuesCommented, nightWindow, NIGHT_END, type ReportIo } from '../.agents/skills/nightly/report.ts';
+import { runReport, collectBlocked, collectRunsStopped, collectFlakes, flakesInWindow, blockingQuestion, questionFromBody, defaultNight, collectIssuesCommented, nightWindow, NIGHT_END, scanNightRuns, unpushedCommitsFrom, loadedSkillVersion, compareVersions, staleSkillsNote, collectRunsWithoutTerminalCall, type ReportIo, type NightRun } from '../.agents/skills/nightly/report.ts';
+import { recordRunClaim, recordRunTerminal } from '../.agents/skills/nightly/shared.ts';
 import { localDateString } from '../.agents/skills/nightly/e2e.ts';
 import { tempDir } from './helpers.ts';
 
@@ -1272,4 +1273,256 @@ test('#964: the digest shows the repo-relative test path, never the worktree pat
   const body = postedBody(calls);
   assert.match(body, /e2e\/knowledge\.test\.ts/);
   assert.doesNotMatch(body, /worktrees|\/Users\//, 'no machine path reaches the digest');
+});
+
+// ---- #1024: unpushed commits, missing terminal calls, loaded skill versions ----
+
+/** A Mercury API double: `runs` for the night listing, `events` per run id, `healthz` version. */
+function mercuryWith(opts: {
+  runs: { id: string; task?: string; createdAt?: string; workspacePath?: string | null }[];
+  events?: Record<string, { type: string; payload?: unknown }[]>;
+  hostVersion?: string;
+  failEventsFor?: string[];
+}): NonNullable<ReportIo['mercury']> {
+  return {
+    async get(path) {
+      if (path === '/healthz') return { body: opts.hostVersion ? { ok: true, version: opts.hostVersion } : {}, status: 200 };
+      if (path.startsWith('/api/runs?')) return { body: { runs: opts.runs }, status: 200 };
+      const id = path.match(/\/api\/runs\/([^/]+)\/events/)?.[1];
+      if (id && opts.failEventsFor?.includes(id)) return { body: null, status: 500 };
+      return { body: { events: (id ? opts.events?.[id] : undefined) ?? [], hasMore: false, nextCursor: 0 }, status: 200 };
+    },
+  };
+}
+
+/** The night window's own instants, so the fixture is timezone-independent. */
+function atInNight(night: string, hour = 1): string {
+  const win = nightWindow(night);
+  return new Date(win.startMs + hour * 3_600_000).toISOString();
+}
+
+test('#1024: scanNightRuns reads run.unpushed_commits and skill.completed, scoped to the night', async () => {
+  const mercury = mercuryWith({
+    runs: [
+      { id: 'run_in', task: 'nightly-next', createdAt: atInNight('2026-09-26'), workspacePath: '/ws/run_in' },
+      // Daytime work: outside the [00:00, 06:00) window, so it belongs to no night.
+      { id: 'run_day', task: 'nightly-next', createdAt: atInNight('2026-09-26', 9), workspacePath: '/ws/run_day' },
+    ],
+    events: {
+      run_in: [
+        { type: 'skill.completed', payload: { skill: 'issue-fix-loop', version: '1.2.0' } },
+        { type: 'run.unpushed_commits', payload: { branch: 'agent/run_in', commits: ['aaaa1111', 'bbbb2222'] } },
+        { type: 'run.completed', payload: { commits: ['aaaa1111'] } },
+      ],
+    },
+  });
+  const runs = await scanNightRuns(mercury, '2026-09-26');
+  assert.deepEqual(runs.map((r) => r.runId), ['run_in']);
+  assert.deepEqual(runs[0]!.unpushed, { branch: 'agent/run_in', commits: ['aaaa1111', 'bbbb2222'] });
+  assert.deepEqual(runs[0]!.skills, [{ skill: 'issue-fix-loop', version: '1.2.0' }]);
+  assert.deepEqual(unpushedCommitsFrom(runs), [{ runId: 'run_in', branch: 'agent/run_in', commits: ['aaaa1111', 'bbbb2222'], workspacePath: '/ws/run_in' }]);
+});
+
+test('#1024: a Run whose events are unreadable is dropped, not fatal', async () => {
+  const mercury = mercuryWith({
+    runs: [{ id: 'run_bad', createdAt: atInNight('2026-09-26') }],
+    failEventsFor: ['run_bad'],
+  });
+  const runs = await scanNightRuns(mercury, '2026-09-26');
+  // The Run is still listed (its existence is a fact); it simply carries no record.
+  assert.deepEqual(runs, [{ runId: 'run_bad', skills: [] }]);
+});
+
+test('#1024 acceptance 2: the report lists the Run with its worktree path (result JSON)', async () => {
+  // The exact shape of the night that was missed: run_84a35e1f57ae4df4 committed and never pushed.
+  const io: ReportIo = {
+    async get(path) {
+      if (path.startsWith('/search/issues?')) return { body: { items: [] }, status: 200 };
+      if (path.includes('/issues/comments?since=')) return { body: [], status: 200 };
+      return { body: [], status: 200 };
+    },
+    async post() { return { body: { number: 901 }, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+    mercury: mercuryWith({
+      runs: [{ id: 'run_84a35e1f57ae4df4', task: 'nightly-next', createdAt: atInNight('2026-09-26'), workspacePath: '/Users/roman/mercury-workspaces/worktrees/run_84a35e1f57ae4df4' }],
+      events: {
+        run_84a35e1f57ae4df4: [{ type: 'run.unpushed_commits', payload: { branch: 'fix/issue-973-fleet-scheduler-client', commits: ['0bd8435d419fe921618dce07ea54386f80c8d1ee'] } }],
+      },
+    }),
+  };
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
+  assert.deepEqual(out.unpushedCommits, [{
+    runId: 'run_84a35e1f57ae4df4',
+    branch: 'fix/issue-973-fleet-scheduler-client',
+    commits: ['0bd8435d419fe921618dce07ea54386f80c8d1ee'],
+    workspacePath: '/Users/roman/mercury-workspaces/worktrees/run_84a35e1f57ae4df4',
+  }]);
+});
+
+test('#1024 acceptance 6: a clean night renders both new sections as none and no staleness note', async () => {
+  const stateHome = tempDir('mercury-1024-clean-');
+  const bodies: string[] = [];
+  const io: ReportIo = {
+    async get(path) {
+      if (path.startsWith('/search/issues?')) return { body: { items: [] }, status: 200 };
+      if (path.includes('/issues/comments?since=')) return { body: [], status: 200 };
+      if (path.includes('/contents/')) {
+        return { body: { encoding: 'base64', content: Buffer.from('---\nversion: 1.4.0\n---\n').toString('base64') }, status: 200 };
+      }
+      return { body: [], status: 200 };
+    },
+    async post(_path, body) { bodies.push((body as { body: string }).body); return { body: { number: 905 }, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+    mercury: mercuryWith({
+      runs: [{ id: 'run_good', createdAt: atInNight('2026-09-26'), workspacePath: '/ws/run_good' }],
+      events: { run_good: [{ type: 'skill.completed', payload: { skill: 'issue-fix-loop', version: '1.4.0' } }] },
+    }),
+  };
+  const out = await runReport(io, { ...ENV, XDG_STATE_HOME: stateHome }, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.deepEqual(out.unpushedCommits, []);
+  assert.deepEqual(out.runsWithoutTerminalCall, []);
+  assert.equal(out.skillVersions!.stale, false);
+  const body = bodies[0]!;
+  assert.ok(!body.includes('**Stale skills.**'), 'no staleness note when the loaded version matches main');
+  assert.ok(body.includes('## Runs that ended with unpushed commits\n_none_'), 'the section still renders, empty');
+  assert.ok(body.includes('## nightly-next Runs that never called finish/blocked\n_none_'));
+});
+
+test('#1024: the digest body carries both new sections with the recovery paths', async () => {
+  const stateHome = tempDir('mercury-1024-state-');
+  // The ledger is written by next.ts; here the claim is recorded directly, which is the same file
+  // and the same shape the report reads.
+  recordRunClaim({ XDG_STATE_HOME: stateHome, MERCURY_RUN_ID: 'run_noexit' }, {
+    runId: 'run_noexit', issue: 1023, cwd: '/ws/run_noexit', at: new Date(nightWindow('2026-09-26').startMs + 3_600_000),
+  });
+  const bodies: string[] = [];
+  const io: ReportIo = {
+    async get(path) {
+      if (path.startsWith('/search/issues?')) return { body: { items: [] }, status: 200 };
+      if (path.includes('/issues/comments?since=')) return { body: [], status: 200 };
+      return { body: [], status: 200 };
+    },
+    async post(_path, body) {
+      bodies.push((body as { body: string }).body);
+      return { body: { number: 902 }, status: 201 };
+    },
+    async patch() { return { body: {}, status: 200 }; },
+    mercury: mercuryWith({
+      runs: [{ id: 'run_unpushed', createdAt: atInNight('2026-09-26'), workspacePath: '/ws/run_unpushed' }],
+      events: { run_unpushed: [{ type: 'run.unpushed_commits', payload: { branch: 'fix/thing', commits: ['abcdef1234567890'] } }] },
+    }),
+  };
+  const out = await runReport(io, { ...ENV, XDG_STATE_HOME: stateHome }, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.deepEqual(out.runsWithoutTerminalCall, [{ runId: 'run_noexit', issue: 1023, cwd: '/ws/run_noexit' }]);
+  const body = bodies[0]!;
+  assert.ok(body.includes('## Runs that ended with unpushed commits'), 'the unpushed section is rendered');
+  assert.ok(body.includes('`run_unpushed`'), 'the Run id is named');
+  assert.ok(body.includes('`fix/thing`'), 'the branch is named');
+  assert.ok(body.includes('`abcdef1`'), 'the commit is named');
+  assert.ok(body.includes('/ws/run_unpushed'), 'the worktree is named, so the work is recoverable');
+  assert.ok(body.includes('## nightly-next Runs that never called finish/blocked'), 'the missing-terminal section is rendered');
+  assert.ok(body.includes('`run_noexit`') && body.includes('#1023'), 'the Run and its issue are named');
+});
+
+test('#1024: a terminal call removes the Run from the missing-terminal section', () => {
+  const stateHome = tempDir('mercury-1024-state2-');
+  const env = { XDG_STATE_HOME: stateHome };
+  const at = new Date(nightWindow('2026-09-26').startMs + 3_600_000);
+  recordRunClaim(env, { runId: 'run_done', issue: 7, at });
+  recordRunClaim(env, { runId: 'run_silent', issue: 8, at });
+  assert.equal(recordRunTerminal(env, 'run_done', 'finish'), true);
+  assert.deepEqual(collectRunsWithoutTerminalCall(env, '2026-09-26').map((r) => r.runId), ['run_silent']);
+});
+
+test('#1024: a claim from another night is not this night\'s missing terminal call', () => {
+  const stateHome = tempDir('mercury-1024-state3-');
+  const env = { XDG_STATE_HOME: stateHome };
+  recordRunClaim(env, { runId: 'run_yesterday', issue: 9, at: new Date(nightWindow('2026-09-25').startMs + 3_600_000) });
+  assert.deepEqual(collectRunsWithoutTerminalCall(env, '2026-09-26'), []);
+});
+
+test('#1024: a corrupt ledger reads as empty, never as a crash', () => {
+  const stateHome = tempDir('mercury-1024-state4-');
+  mkdirSync(join(stateHome, 'mercury', 'nightly'), { recursive: true });
+  writeFileSync(join(stateHome, 'mercury', 'nightly', 'run-ledger.json'), '{not json');
+  assert.deepEqual(collectRunsWithoutTerminalCall({ XDG_STATE_HOME: stateHome }, '2026-09-26'), []);
+});
+
+test('#1024: a stale loaded skill version is stated in the digest\'s first line', async () => {
+  const bodies: string[] = [];
+  const io: ReportIo = {
+    async get(path) {
+      if (path.startsWith('/search/issues?')) return { body: { items: [] }, status: 200 };
+      if (path.includes('/issues/comments?since=')) return { body: [], status: 200 };
+      if (path.includes('/contents/.agents/skills/issue-fix-loop/SKILL.md')) {
+        return { body: { encoding: 'base64', content: Buffer.from('---\nname: issue-fix-loop\nversion: 1.4.0\n---\n').toString('base64') }, status: 200 };
+      }
+      return { body: [], status: 200 };
+    },
+    async post(_path, body) { bodies.push((body as { body: string }).body); return { body: { number: 903 }, status: 201 }; },
+    async patch() { return { body: {}, status: 200 }; },
+    mercury: mercuryWith({
+      runs: [{ id: 'run_old', createdAt: atInNight('2026-09-26') }],
+      events: { run_old: [{ type: 'skill.completed', payload: { skill: 'issue-fix-loop', version: '1.2.0' } }] },
+      hostVersion: '0.2.1',
+    }),
+  };
+  const out = await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: false });
+  assert.deepEqual(out.skillVersions, { hostVersion: '0.2.1', skill: 'issue-fix-loop', loaded: '1.2.0', main: '1.4.0', stale: true });
+  const lines = bodies[0]!.split('\n');
+  assert.ok(lines[0]!.startsWith('# nightly report'), 'the heading stays first');
+  assert.ok(lines[2]!.startsWith('**Stale skills.**'), 'the staleness note is the first content line');
+  assert.ok(lines[2]!.includes('1.2.0') && lines[2]!.includes('1.4.0'), 'both versions are named');
+  assert.ok(lines[2]!.includes('0.2.1'), 'the host version is named');
+});
+
+test('#1024: an up-to-date or unknown version says nothing', async () => {
+  const sameNight = async (mainVersion: string | undefined, loaded: string | undefined) => {
+    const io: ReportIo = {
+      async get(path) {
+        if (path.startsWith('/search/issues?')) return { body: { items: [] }, status: 200 };
+        if (path.includes('/issues/comments?since=')) return { body: [], status: 200 };
+        if (path.includes('/contents/')) {
+          return mainVersion === undefined
+            ? { body: null, status: 404 }
+            : { body: { encoding: 'base64', content: Buffer.from(`---\nversion: ${mainVersion}\n---\n`).toString('base64') }, status: 200 };
+        }
+        return { body: [], status: 200 };
+      },
+      async post() { return { body: { number: 904 }, status: 201 }; },
+      async patch() { return { body: {}, status: 200 }; },
+      mercury: mercuryWith({
+        runs: [{ id: 'run_v', createdAt: atInNight('2026-09-26') }],
+        events: loaded === undefined ? {} : { run_v: [{ type: 'skill.completed', payload: { skill: 'issue-fix-loop', version: loaded } }] },
+      }),
+    };
+    return await runReport(io, ENV, { repo: REPO, night: '2026-09-26', dryRun: true });
+  };
+  assert.equal((await sameNight('1.4.0', '1.4.0')).skillVersions!.stale, false, 'equal versions are not stale');
+  assert.equal((await sameNight('1.4.0', '1.10.0')).skillVersions!.stale, false, '1.10.0 is NEWER than 1.4.0');
+  assert.equal((await sameNight(undefined, '1.2.0')).skillVersions!.stale, false, 'an unreadable main is not a claim of staleness');
+  assert.equal((await sameNight('1.4.0', undefined)).skillVersions, undefined, 'no loaded version: no record at all');
+  assert.equal(staleSkillsNote(undefined), undefined);
+});
+
+test('#1024: compareVersions is numeric per segment, not lexical', () => {
+  assert.equal(compareVersions('1.10.0', '1.4.0'), 1);
+  assert.equal(compareVersions('1.4.0', '1.4.0'), 0);
+  assert.equal(compareVersions('1.2.0', '1.4.0'), -1);
+  assert.equal(compareVersions('1.4', '1.4.0'), 0, 'a missing segment is 0');
+});
+
+test('#1024: the loaded version is the one most Runs reported (one odd Run cannot flip it)', () => {
+  const runs: NightRun[] = [
+    { runId: 'a', skills: [{ skill: 'issue-fix-loop', version: '1.4.0' }] },
+    { runId: 'b', skills: [{ skill: 'issue-fix-loop', version: '1.4.0' }] },
+    { runId: 'c', skills: [{ skill: 'issue-fix-loop', version: '1.2.0' }] },
+    { runId: 'd', skills: [{ skill: 'other', version: '9.9.9' }] },
+  ];
+  assert.equal(loadedSkillVersion(runs, 'issue-fix-loop'), '1.4.0');
+  // A tie resolves to the OLDER version: the header exists to surface staleness, not hide it.
+  assert.equal(loadedSkillVersion([
+    { runId: 'a', skills: [{ skill: 'issue-fix-loop', version: '1.4.0' }] },
+    { runId: 'b', skills: [{ skill: 'issue-fix-loop', version: '1.2.0' }] },
+  ], 'issue-fix-loop'), '1.2.0');
 });

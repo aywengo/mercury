@@ -1,6 +1,6 @@
 ---
 name: issue-fix-loop
-version: 1.4.0
+version: 1.5.0
 description: Fix a tracked issue through the proven per-issue loop — root-cause analysis, scoped fix with regression test, one PR, independent sub-agent review, then merge or hand-off (unattended Runs stop at a ready-for-review PR). Use when fixing a GitHub issue or any bug tracked as a unit of work.
 capabilities: [bugfix, issue, pull-request, review, workflow, regression]
 ---
@@ -17,6 +17,12 @@ capabilities: [bugfix, issue, pull-request, review, workflow, regression]
 5. Implement the issue's acceptance criteria — not every failure mode you can imagine (step 2).
 6. Stop and hand off (step 7) instead of guessing. An unfinished PR with a clear question beats
    a finished PR built on a guess.
+7. **A Run is not done until the work is PUSHED, the PR is commented, and the calling skill's
+   exit has run** (`finish` or `blocked`). A progress message, a "here is where I got to" summary
+   or an end-of-turn note is NEVER a stopping point: a Run that commits and stops leaves its work
+   in a worktree, and `run_84a35e1f57ae4df4` (2026-10-22) lost a night that way — Mercury recorded
+   it `COMPLETED` while the commits sat on no remote branch (#1023, #1024). Before you end any
+   turn, ask: is the branch pushed, is the PR updated, and has the exit path run?
 
 ## Order of work
 

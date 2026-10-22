@@ -26,7 +26,7 @@
 
 import { basename } from 'node:path';
 import { loadFlakeState, normalizeTestName } from './e2e.ts';
-import { assertRepo, CLAIM_RELEASED_MARKER, localDateString, nextDay, prevDay, ghGet, ghPost, ghPatch, ghToken, FETCH_TIMEOUT_MS } from './shared.ts';
+import { assertRepo, CLAIM_RELEASED_MARKER, localDateString, nextDay, prevDay, ghGet, ghPost, ghPatch, ghToken, loadRunLedger, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const L_REPORT = 'nightly:report';
 const L_BLOCKED = 'nightly:blocked';
@@ -44,6 +44,32 @@ export interface ReportIo {
   };
 }
 
+/** One of the night's Runs, as the digest needs to see it (#1024): what it recorded about
+ *  unpushed commits, and which skill versions it actually loaded. */
+export interface NightRun {
+  runId: string;
+  task?: string;
+  workspacePath?: string;
+  /** `run.unpushed_commits` payload, when the Run emitted one. */
+  unpushed?: { branch?: string; commits: string[] };
+  /** `skill.completed` payloads: the versions the Run really loaded, not the ones on disk now. */
+  skills: { skill: string; version: string }[];
+}
+
+/** The skill-version record the digest header states (#1024 acceptance 5). */
+export interface SkillVersionRecord {
+  /** The host's own Mercury version (`/healthz`), when the Mercury API is configured. */
+  hostVersion?: string;
+  /** The skill the header speaks about (the nightly procedure). */
+  skill: string;
+  /** The version the night's Runs loaded, from their `skill.completed` events. */
+  loaded?: string;
+  /** The version in the repository's `.agents/skills/<skill>/SKILL.md` on `main`. */
+  main?: string;
+  /** True only when BOTH are known and `loaded` is older: an unknown side is not a claim. */
+  stale: boolean;
+}
+
 export interface ReportData {
   prs: { number?: number; title: string; url?: string }[];
   issuesFiled: { number?: number; title: string; url?: string; author?: string }[];
@@ -53,6 +79,12 @@ export interface ReportData {
   claimsReleased: { number?: number }[];
   blocked: { number?: number; title: string; question?: string }[];
   runsStopped: { runId?: string; task?: string; status?: string }[];
+  /** #1024: Runs that committed and never pushed, with the worktree to recover from. */
+  unpushedCommits: { runId: string; branch?: string; commits: string[]; workspacePath?: string }[];
+  /** #1024: nightly-next Runs that claimed work and never called `finish`/`blocked`. */
+  runsWithoutTerminalCall: { runId: string; issue?: number; cwd?: string }[];
+  /** #1024: the loaded-vs-main skill record, when the Mercury API answered. */
+  skillVersions?: SkillVersionRecord;
   flakes: { fingerprint: string; test: string; nights: string[] }[];
   /** #964: flake-clock entries held back because their last night is older than the report window.
    *  The state file keeps them; the digest only says how many there are. */
@@ -342,6 +374,217 @@ export async function collectRunsStopped(mercury: NonNullable<ReportIo['mercury'
   return out;
 }
 
+/** The nightly procedure whose version the header compares: the one whose staleness has already
+ *  cost a night of work (#1023). */
+export const NIGHTLY_PROCEDURE_SKILL = 'issue-fix-loop';
+
+/**
+ * The night's Runs, with the two things the digest reads from their event streams (#1024):
+ * a `run.unpushed_commits` record and the `skill.completed` versions each Run actually loaded.
+ *
+ * One pass, because both sections and the header need per-Run events and the runs API is the only
+ * place they exist. Best-effort throughout, like every other Mercury read here: an unreadable
+ * listing or an unreadable event page drops that Run (or ends the scan) instead of failing the
+ * digest -- a report that refuses to file because one Run's events timed out is worse than a
+ * report with one Run missing.
+ */
+export async function scanNightRuns(
+  mercury: NonNullable<ReportIo['mercury']>,
+  night: string,
+  opts: { maxRuns?: number } = {},
+): Promise<NightRun[]> {
+  const win = nightWindow(night);
+  const maxRuns = opts.maxRuns ?? 40; // one nightly host runs a handful of Runs a night
+  const out: NightRun[] = [];
+  let path: string | undefined = '/api/runs?limit=100';
+  for (let page = 0; page < 10 && path && out.length < maxRuns; page++) {
+    let res: Awaited<ReturnType<typeof mercury.get>>;
+    try {
+      res = await mercury.get(path);
+    } catch {
+      return out; // transport error: keep what was scanned
+    }
+    if (res.status < 200 || res.status >= 300) return out;
+    const body = res.body as { runs?: { id?: string; task?: string; createdAt?: string; workspacePath?: string | null }[]; nextCursor?: string } | null;
+    if (body === null || typeof body !== 'object' || !Array.isArray(body.runs)) return out;
+    for (const run of body.runs) {
+      if (out.length >= maxRuns) break;
+      if (!run.id) continue;
+      // The night is a LOCAL window [00:00, 06:00): a Run created at 07:00 is daytime work.
+      const created = run.createdAt ? Date.parse(run.createdAt) : NaN;
+      if (Number.isNaN(created) || created < win.startMs || created >= win.endMs) continue;
+      const scanned = await scanRunEvents(mercury, run.id);
+      out.push({
+        runId: run.id,
+        ...(run.task ? { task: run.task } : {}),
+        ...(run.workspacePath ? { workspacePath: run.workspacePath } : {}),
+        ...(scanned.unpushed ? { unpushed: scanned.unpushed } : {}),
+        skills: scanned.skills,
+      });
+    }
+    path = body.nextCursor ? `/api/runs?limit=100&cursor=${encodeURIComponent(body.nextCursor)}` : undefined;
+  }
+  return out;
+}
+
+/** One Run's event stream, reduced to the two facts the digest reads. Bounded page walk (the
+ *  events endpoint caps a page at 1000) and never throws: an unreadable page keeps what was seen. */
+async function scanRunEvents(
+  mercury: NonNullable<ReportIo['mercury']>,
+  runId: string,
+): Promise<{ unpushed?: { branch?: string; commits: string[] }; skills: { skill: string; version: string }[] }> {
+  const skills: { skill: string; version: string }[] = [];
+  let unpushed: { branch?: string; commits: string[] } | undefined;
+  let path: string | undefined = `/api/runs/${runId}/events`;
+  for (let page = 0; page < 10 && path; page++) {
+    let res: Awaited<ReturnType<typeof mercury.get>>;
+    try {
+      res = await mercury.get(path);
+    } catch {
+      break;
+    }
+    if (res.status < 200 || res.status >= 300) break;
+    const body = res.body as {
+      events?: { type?: string; payload?: { branch?: unknown; commits?: unknown; skill?: unknown; version?: unknown } }[];
+      nextCursor?: number;
+      hasMore?: boolean;
+    } | null;
+    if (body === null || typeof body !== 'object' || !Array.isArray(body.events)) break;
+    for (const ev of body.events) {
+      const p = ev.payload;
+      if (!p) continue;
+      if (ev.type === 'run.unpushed_commits' && Array.isArray(p.commits)) {
+        const commits = p.commits.filter((c): c is string => typeof c === 'string' && c !== '');
+        // Keep the LAST record: a resumed Run can emit more than one, and the newest is the truth.
+        unpushed = { ...(typeof p.branch === 'string' && p.branch !== '' ? { branch: p.branch } : {}), commits };
+      } else if (ev.type === 'skill.completed' && typeof p.skill === 'string' && typeof p.version === 'string') {
+        skills.push({ skill: p.skill, version: p.version });
+      }
+    }
+    const events = body.events;
+    path = body.hasMore && body.nextCursor !== undefined && events.length > 0
+      ? `/api/runs/${runId}/events?after=${body.nextCursor}`
+      : undefined;
+  }
+  return { ...(unpushed ? { unpushed } : {}), skills };
+}
+
+/** Runs that ended with commits on no remote branch, with the worktree to recover them from. */
+export function unpushedCommitsFrom(runs: NightRun[]): { runId: string; branch?: string; commits: string[]; workspacePath?: string }[] {
+  const out: { runId: string; branch?: string; commits: string[]; workspacePath?: string }[] = [];
+  for (const run of runs) {
+    if (run.unpushed === undefined || run.unpushed.commits.length === 0) continue;
+    out.push({
+      runId: run.runId,
+      ...(run.unpushed.branch ? { branch: run.unpushed.branch } : {}),
+      commits: run.unpushed.commits,
+      ...(run.workspacePath ? { workspacePath: run.workspacePath } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * The version of `skill` the night's Runs loaded: the value most Runs reported (a Run that loaded
+ * nothing does not vote), so one odd Run cannot make the whole night look stale or fresh. Ties go
+ * to the OLDER version, because the header exists to surface staleness, not to hide it.
+ */
+export function loadedSkillVersion(runs: NightRun[], skill: string): string | undefined {
+  const counts = new Map<string, number>();
+  for (const run of runs) {
+    for (const s of run.skills) {
+      if (s.skill !== skill) continue;
+      counts.set(s.version, (counts.get(s.version) ?? 0) + 1);
+    }
+  }
+  let best: string | undefined;
+  let bestCount = 0;
+  for (const [version, count] of counts) {
+    if (count > bestCount || (count === bestCount && best !== undefined && compareVersions(version, best) < 0)) {
+      best = version;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+/** Numeric dotted comparison: '1.10.0' is NEWER than '1.4.0' (string compare says otherwise).
+ *  Non-numeric segments compare as strings, which is enough for the SKILL.md `version:` field. */
+export function compareVersions(a: string, b: string): number {
+  const pa = a.split('.');
+  const pb = b.split('.');
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? '0';
+    const y = pb[i] ?? '0';
+    const nx = /^\d+$/.test(x) ? Number(x) : undefined;
+    const ny = /^\d+$/.test(y) ? Number(y) : undefined;
+    if (nx !== undefined && ny !== undefined) {
+      if (nx !== ny) return nx < ny ? -1 : 1;
+      continue;
+    }
+    if (x === y) continue;
+    return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/** The `version:` field of a skill's SKILL.md on `main`, read through the contents API. Best
+ *  effort: an unreadable file is "unknown", never "current". */
+export async function repoSkillVersion(io: ReportIo, repo: string, skill: string, ref = 'main'): Promise<string | undefined> {
+  const path = `/repos/${repo}/contents/.agents/skills/${skill}/SKILL.md?ref=${ref}`;
+  let res: { body: unknown; status: number };
+  try {
+    res = await io.get(path);
+  } catch {
+    return undefined;
+  }
+  if (res.status < 200 || res.status >= 300) return undefined;
+  const body = res.body as { content?: unknown; encoding?: unknown } | null;
+  if (body === null || typeof body !== 'object' || typeof body.content !== 'string') return undefined;
+  const text = Buffer.from(body.content, body.encoding === 'base64' ? 'base64' : 'utf8').toString('utf8');
+  const m = /^version:\s*(\S+)\s*$/m.exec(text);
+  return m?.[1];
+}
+
+/** The host's own version from `/healthz` (public, and the same base URL the runs API uses). */
+async function hostVersionOf(mercury: NonNullable<ReportIo['mercury']>): Promise<string | undefined> {
+  try {
+    const res = await mercury.get('/healthz');
+    if (res.status < 200 || res.status >= 300) return undefined;
+    const body = res.body as { version?: unknown } | null;
+    return body && typeof body === 'object' && typeof body.version === 'string' ? body.version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The one-line staleness note the digest opens with (#1024 acceptance 5). Absent when nothing is
+ *  known to be stale: an unknown version is not evidence of an old one. */
+export function staleSkillsNote(record: SkillVersionRecord | undefined): string | undefined {
+  if (!record || !record.stale || record.loaded === undefined || record.main === undefined) return undefined;
+  // escMd on every value: the versions come from a skill file and from an API response, and a
+  // version string is not a place to discover that a `**` or a link can reach the digest body.
+  const host = record.hostVersion ? ` (host Mercury ${escMd(record.hostVersion)})` : '';
+  return `**Stale skills.** The night's Runs loaded \`${record.skill}\` ${escMd(record.loaded)}${host}, while \`main\` has ${escMd(record.main)}. The nightly ran an old procedure; upgrade the host (#1023).`;
+}
+
+/** nightly-next Runs that claimed an issue and never called `finish` or `blocked` (#1024). Read
+ *  from the Run ledger `next.ts` writes: a claim during the night window with no terminal call. */
+export function collectRunsWithoutTerminalCall(env: NodeJS.ProcessEnv, night: string): { runId: string; issue?: number; cwd?: string }[] {
+  const win = nightWindow(night);
+  return loadRunLedger(env)
+    .filter((e) => {
+      const at = Date.parse(e.claimedAt);
+      return !Number.isNaN(at) && at >= win.startMs && at < win.endMs;
+    })
+    .filter((e) => e.terminal === undefined)
+    .map((e) => ({
+      runId: e.runId,
+      ...(e.issue !== undefined ? { issue: e.issue } : {}),
+      ...(e.cwd ? { cwd: e.cwd } : {}),
+    }));
+}
+
 /** The most recent night in a (possibly unsorted, e.g. after a backfill) night list. */
 function newestNight(nights: string[]): string {
   return nights.reduce((acc, n) => (n > acc ? n : acc), nights[0] ?? '');
@@ -417,6 +660,10 @@ function digestBody(night: string, data: ReportData, note?: string): string {
   // many items were omitted.
   const BUDGET = 60_000;
   const lines: string[] = [`# nightly report — ${night}`, ''];
+  // #1024: the staleness note is the FIRST line of the digest. The 1.2.0-vs-1.4.0 gap stayed
+  // invisible for a week because nothing said it out loud; a reader must hit it before the lists.
+  const stale = staleSkillsNote(data.skillVersions);
+  if (stale) lines.push(stale, '');
   if (note) lines.push(`_${note}_`, '');
   let size = lines.join('\n').length;
   const fits = (s: string): boolean => {
@@ -472,6 +719,17 @@ function digestBody(night: string, data: ReportData, note?: string): string {
     bounded(data.blocked.map((b) => `- #${b.number} ${escMd(b.title)}${b.question ? ` — question: ${escMd(b.question)}` : ''}`), '_none_'));
   section('## Runs stopped by notAfter (the 06:00 window end)', () =>
     bounded(data.runsStopped.map((r) => `- ${codeSpan(r.runId ?? '')} — ${codeSpan(r.task ?? '')}`), '_none_'));
+  // #1024: the two shapes that ended a night with nothing to show. Both name the Run and the
+  // worktree, because the point of the section is that a human can recover the work by hand.
+  section('## Runs that ended with unpushed commits', () =>
+    bounded(data.unpushedCommits.map((r) => {
+      const shas = r.commits.slice(0, 5).map((c) => codeSpan(c.slice(0, 7), 12)).join(', ');
+      const more = r.commits.length > 5 ? ` (+${r.commits.length - 5} more)` : '';
+      return `- ${codeSpan(r.runId)}${r.branch ? ` on ${codeSpan(r.branch)}` : ''} — ${r.commits.length} commit${r.commits.length === 1 ? '' : 's'}: ${shas}${more}${r.workspacePath ? ` — worktree ${codeSpan(r.workspacePath)}` : ''}`;
+    }), '_none_'));
+  section('## nightly-next Runs that never called finish/blocked', () =>
+    bounded(data.runsWithoutTerminalCall.map((r) =>
+      `- ${codeSpan(r.runId)}${r.issue !== undefined ? ` — issue #${r.issue}` : ''}${r.cwd ? ` — worktree ${codeSpan(r.cwd)}` : ''}`), '_none_'));
   section('## Flakes (nightly-e2e clock)', () => {
     const flakeLines = data.flakes.map((f) => {
       // State-derived text: flatten newlines BEFORE other rendering so a tampered entry or a
@@ -563,9 +821,29 @@ export async function runReport(
   const claimsReleased = await collectClaimsReleased(io, opts.repo, win.startMs, win.endMs - 1000);
   const blocked = await collectBlocked(io, opts.repo);
   const runsStopped = io.mercury ? await collectRunsStopped(io.mercury, opts.night) : [];
+  // #1024: one pass over the night's Runs feeds both the unpushed-commit section and the
+  // loaded-skill header. Without the Mercury API neither is knowable, and neither is faked.
+  const nightRuns = io.mercury ? await scanNightRuns(io.mercury, opts.night) : [];
+  const unpushedCommits = unpushedCommitsFrom(nightRuns);
+  const loaded = loadedSkillVersion(nightRuns, NIGHTLY_PROCEDURE_SKILL);
+  const mainVersion = loaded !== undefined ? await repoSkillVersion(io, opts.repo, NIGHTLY_PROCEDURE_SKILL) : undefined;
+  const skillVersions: SkillVersionRecord | undefined = loaded === undefined
+    ? undefined
+    : {
+        ...(io.mercury ? { hostVersion: await hostVersionOf(io.mercury) } : {}),
+        skill: NIGHTLY_PROCEDURE_SKILL,
+        loaded,
+        ...(mainVersion !== undefined ? { main: mainVersion } : {}),
+        stale: mainVersion !== undefined && compareVersions(loaded, mainVersion) < 0,
+      };
+  const runsWithoutTerminalCall = collectRunsWithoutTerminalCall(env, opts.night);
   // #964: the digest shows the last FLAKE_REPORT_WINDOW_NIGHTS nights and only counts the rest.
   const { visible: flakes, older: flakesOlder } = flakesInWindow(collectFlakes(env, opts.night), opts.night);
-  const data: ReportData = { prs, issuesFiled, issuesCommented, claimsReleased, blocked, runsStopped, flakes, flakesOlder };
+  const data: ReportData = {
+    prs, issuesFiled, issuesCommented, claimsReleased, blocked, runsStopped,
+    unpushedCommits, runsWithoutTerminalCall, ...(skillVersions ? { skillVersions } : {}),
+    flakes, flakesOlder,
+  };
 
   if (opts.dryRun) {
     return { night: opts.night, ...data };

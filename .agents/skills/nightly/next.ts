@@ -36,7 +36,7 @@
 import { basename } from 'node:path';
 
 import { runSelectorWith } from './select.ts';
-import { assertRepo, ghToken, ghGet, ghPost, ghPatch, FETCH_TIMEOUT_MS } from './shared.ts';
+import { assertRepo, ghToken, ghGet, ghPost, ghPatch, recordRunClaim, recordRunTerminal, FETCH_TIMEOUT_MS } from './shared.ts';
 
 const L_IN_PROGRESS = 'nightly:in-progress';
 const L_BLOCKED = 'nightly:blocked';
@@ -109,6 +109,12 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: 
     opts.dryRun,
   );
   if (selection.rung === 0 || selection.rung === 1 || selection.rung === 2 || selection.rung === 3) {
+    // The Run ledger (#1024): record the claim so the morning report can name a Run that claimed
+    // work and never called `finish`/`blocked`. Best-effort - a selection is not worth failing
+    // over an unwritable state file - and skipped on --dry-run, which claims nothing.
+    if (!opts.dryRun) {
+      recordRunClaim(env, { runId: env.MERCURY_RUN_ID, issue: selection.issue, cwd: process.cwd() });
+    }
     // Rung 0 (resume, #819) is fix-loop step 5: address the pending Copilot findings on the
     // PR the earlier night opened, one batched push, then the relay fetches the fresh review.
     return { ...selection, action: 'fix-loop' };
@@ -120,14 +126,17 @@ export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: 
 }
 
 /** The success exit path: the fix-loop finished (PR open/merged, or nothing actionable). */
-export async function finishIssue(io: NextIo, opts: { repo: string; issue: number }): Promise<{ removed: boolean }> {
+export async function finishIssue(io: NextIo, opts: { repo: string; issue: number }, env: NodeJS.ProcessEnv = process.env): Promise<{ removed: boolean }> {
   assertRepo(opts.repo);
   const removed = await io.deleteLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels/${encodeURIComponent(L_IN_PROGRESS)}`);
+  // The Run ledger (#1024): this is the terminal call the morning report looks for. Recorded even
+  // when the label was already gone - the exit path RAN, which is the fact the report reads.
+  recordRunTerminal(env, env.MERCURY_RUN_ID, 'finish');
   return { removed };
 }
 
 /** The never-asks exit path: hand the question to a human via GitHub, remove the claim, finish. */
-export async function blockIssue(io: NextIo, opts: { repo: string; issue: number; reason: string }): Promise<{ removed: boolean; newlyLabeled: boolean; commented: boolean }> {
+export async function blockIssue(io: NextIo, opts: { repo: string; issue: number; reason: string }, env: NodeJS.ProcessEnv = process.env): Promise<{ removed: boolean; newlyLabeled: boolean; commented: boolean }> {
   assertRepo(opts.repo);
   const reason = opts.reason.trim();
   if (reason === '') throw new Error('a blocked exit needs a non-empty --reason (the question a human must answer)');
@@ -167,6 +176,9 @@ export async function blockIssue(io: NextIo, opts: { repo: string; issue: number
     // Body marker is an optimization; the comment already carries the question.
   }
   const removed = await io.deleteLabel(`/repos/${opts.repo}/issues/${opts.issue}/labels/${encodeURIComponent(L_IN_PROGRESS)}`);
+  // The Run ledger (#1024): `blocked` IS a terminal call - the never-asks exit is a finished Run,
+  // and the report must not list it beside Runs that simply stopped mid-sentence.
+  recordRunTerminal(env, env.MERCURY_RUN_ID, 'blocked');
   return { removed, newlyLabeled, commented };
 }
 
@@ -340,7 +352,7 @@ if (isMain) {
     if (cmd === 'finish') {
       const issue = Number(flag('--issue'));
       if (!repo || !Number.isInteger(issue) || issue <= 0) throw new Error('usage: next.ts finish --repo <owner/name> --issue <n>');
-      return await finishIssue(realIo(process.env), { repo, issue });
+      return await finishIssue(realIo(process.env), { repo, issue }, process.env);
     }
     if (cmd === 'propose') {
       const source = flag('--source') ?? '';
@@ -355,7 +367,7 @@ if (isMain) {
       const issue = Number(flag('--issue'));
       const reason = flag('--reason') ?? '';
       if (!repo || !Number.isInteger(issue) || issue <= 0) throw new Error('usage: next.ts blocked --repo <owner/name> --issue <n> --reason "<question>"');
-      return await blockIssue(realIo(process.env), { repo, issue, reason });
+      return await blockIssue(realIo(process.env), { repo, issue, reason }, process.env);
     }
     throw new Error('usage: next.ts run|finish|blocked|propose --repo <owner/name> [--dry-run] [--issue <n>] [--reason "..."] [--source <doc#anchor>] [--title "..."] [--body-file <path>]');
   })();

@@ -1281,6 +1281,19 @@ await this.finalize(run, outcome, skills);
       // the duration. Everything that must be atomic is in the tx below.
       const commits = current.workspacePath ? await this.deps.workspace.recordCommits(current.workspacePath) : [];
 
+      // Issue #1024: a Run that committed and never pushed ended exactly like a finished Run, and
+      // the commits stayed in the worktree. Read here, next to recordCommits, because this is the
+      // last moment the workspace is guaranteed to exist; emitted inside the transaction below so
+      // the record commits with the terminal state or not at all. Read-only: Mercury never pushes
+      // on the agent's behalf.
+      const unpushed = current.workspacePath
+        ? await this.deps.workspace.unpushedCommits(
+          current.workspacePath,
+          commits,
+          current.workspaceBranch ?? `agent/${run.id}`,
+        )
+        : { branch: current.workspaceBranch ?? `agent/${run.id}`, commits: [] as string[] };
+
       // Tier-1 harvest (section 7.1), read here because this is the last moment the workspace is
       // guaranteed to exist. It runs before the transaction rather than inside it because it does file
       // I/O and validation, neither of which may hold a write lock -- but its RESULT is inserted inside,
@@ -1389,6 +1402,9 @@ await this.finalize(run, outcome, skills);
             });
           }
         }
+        if (unpushed.commits.length > 0) {
+          this.deps.events.append(run.id, 'run.unpushed_commits', { branch: unpushed.branch, commits: unpushed.commits });
+        }
         this.deps.runs.transition(run.id, 'COMPLETED', { completedAt: now });
         this.deps.events.append(run.id, 'run.completed', {
           runId: run.id,
@@ -1423,6 +1439,12 @@ await this.finalize(run, outcome, skills);
           accepted: native.accepted.length, rejected: native.rejected.length,
           files: native.filesSeen, failed: native.failed,
         }, 'harness-native paragraphs harvested from workspace');
+      }
+      if (unpushed.commits.length > 0) {
+        // Operator-visible in the worker log too, not only in the timeline: the whole failure mode
+        // this addresses is work that sat in a worktree with nobody looking at the Run.
+        log.warn({ branch: unpushed.branch, commits: unpushed.commits.length, workspace: current.workspacePath },
+          'run completed with commits that are on no remote branch');
       }
       log.info({ commits: commits.length, ...durations }, 'run completed');
       return;

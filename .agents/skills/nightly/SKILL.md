@@ -1,6 +1,6 @@
 ---
 name: nightly
-version: 1.5.0
+version: 1.6.0
 description: Deterministic ladder selection for the unattended nightly loop — decides the next issue from GitHub metadata only (author, labels, timeline label actor), never issue text, then claims it with nightly:in-progress.
 capabilities: [nightly, ladder, selection, trust, claim, triage, github, issues]
 ---
@@ -195,6 +195,13 @@ Nightly-specific rules on top of `issue-fix-loop`:
   Run carries `notAfter`. Do not write code that defends against concurrent nightly Runs or
   against the deadline — that is the scheduler's job.
 
+**Never stops on a progress message.** A nightly Run is not done until it has PUSHED the branch,
+commented on the PR, and called `finish` (or `blocked`). A "here is where I got to" message is
+never an exit path: `run_84a35e1f57ae4df4` (2026-10-22) committed, reported progress and ended,
+and the night's work sat in a worktree on no remote branch (#1023, #1024). `next.ts` records the
+claim and the terminal call in the Run ledger, and the morning report lists every Run that
+claimed work and never called either — so stopping early is now visible, not free.
+
 **Never asks (§4.4):** a nightly Run must end without NEEDS_INPUT. When in doubt — ambiguous
 acceptance criteria, a needed credential or design decision, an unmerged dependency, a limit
 from the table above — run `blocked --reason "<the question>"`: it labels the issue
@@ -241,6 +248,24 @@ issues. Sections:
   the last 14 nights are listed; the rest are counted once as `older entries: K` (#964). The state
   file keeps every entry. Test names are shown repo-relative (`e2e/x.test.ts`), never as a worktree
   path, including entries recorded before that normalization existed.
+- **Runs that ended with unpushed commits** (#1024) — Runs whose `run.unpushed_commits` event
+  names commits reachable from no remote branch. Each line carries the Run id, the branch it was
+  meant for, the commits and the worktree path, so the work can be recovered by hand. Mercury
+  never pushes on an agent's behalf; this section is the recovery pointer.
+- **nightly-next Runs that never called finish/blocked** (#1024) — Runs that claimed an issue
+  (`next.ts run`) and never reached a terminal call, read from the Run ledger
+  (`${XDG_STATE_HOME:-~/.local/state}/mercury/nightly/run-ledger.json`, written by `next.ts`).
+  Each line carries the Run id, the issue and the worktree path. A progress message is not an
+  exit path.
+
+Both sections are empty on a clean night, and their headings still render, so "nothing to
+report" is visibly different from "the check did not run".
+
+The digest also opens with a **stale-skills** line when the night's Runs loaded an older
+`issue-fix-loop` than `main` carries (#1023, #1024): the loaded version comes from their
+`skill.completed` events, `main`'s from the skill file through the contents API, and the host's
+Mercury version from `/healthz`. An unknown version is never reported as staleness — the line
+appears only when both sides are known and the loaded one is older.
 
 The report is read-only except for the digest issue itself and the close
 of every OPEN digest titled `nightly report — D` with D strictly before the

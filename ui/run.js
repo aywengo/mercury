@@ -332,6 +332,7 @@ function appendEvent(e) {
     pendingInput = null;
     $('input-panel').classList.add('hidden');
   }
+  if (e.type === 'run.unpushed_commits') renderUnpushedBadge(e.payload);
   if (e.type === 'run.completed' || e.type === 'run.failed' || e.type === 'run.cancelled' || e.type === 'run.timed_out') {
     stopSse?.();
     loadRun(); // refresh final state
@@ -340,6 +341,24 @@ function appendEvent(e) {
   // whatever it was when the page loaded and the timeline disagrees with it -- two views of the
   // same Run saying different things, which is the failure this feature exists to prevent.
   if (e.type.startsWith('goal.')) loadRun();
+}
+
+/**
+ * #1024: the Run detail marker for a Run that committed and never pushed.
+ *
+ * The status badge said COMPLETED and that was the entire problem: the work existed and nobody
+ * could see it. The badge names the count and the branch; the payload in the timeline below
+ * carries the SHAs. Rendered from the event, so a reloaded page shows it exactly as the live one
+ * did -- the event stream is the only source, there is no second state to drift.
+ */
+function renderUnpushedBadge(payload) {
+  const el = $('unpushed-badge');
+  if (!el) return;
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const commits = Array.isArray(p.commits) ? p.commits : [];
+  const branch = typeof p.branch === 'string' && p.branch ? p.branch : '';
+  const title = `commits on no remote branch${branch ? ` (meant for ${branch})` : ''}: ${commits.join(', ')}`;
+  el.innerHTML = `<span class="badge status-unpushed" title="${esc(title)}">unpushed ${commits.length}</span>`;
 }
 
 function connectSse() {
