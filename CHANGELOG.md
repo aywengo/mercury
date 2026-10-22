@@ -8,6 +8,54 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-22
+
+A short release carrying what merged after 0.2.2: the A2A binding, the layered local Run environment,
+redaction of agent artifacts at rest, and the two nightly-loop fixes that stop a Run from ending
+silently.
+
+### Added
+
+- **A2A binding A0-1..A0-4 (#995, #996, #998, #1000).** `@a2a-js/sdk` pinned at `1.3.0` and its REST
+  binding mounted on Mercury's server (`src/a2a/`, enabled by `MERCURY_A2A_*`). The Run chain maps to
+  an A2A task state exhaustively over `RunStatus`, a Run carries a server-only origin so the binding
+  can filter by it, and a retry links its predecessor inside the insert transaction so the retry
+  intent survives a crash.
+- **Layered local Run environment CP-4 (#977, `src/worker/runEnvironment.ts`).** A local Run's base
+  environment is built in the four layers of the credential-profiles design instead of the worker's
+  `process.env` wholesale, with an isolated `GH_CONFIG_DIR` and a generated gitconfig. A `file:`
+  credential source that is missing at drive time fails the Run; it never falls back to the worker's
+  environment.
+- **`run.unpushed_commits` (#1024, #1025).** On COMPLETED the worker compares the workspace's
+  `HEAD` with its remote-tracking refs over the Run's own `baseCommit..HEAD`, and records the branch
+  and the commits that were never pushed. The Run detail shows an `unpushed N` badge. Nothing is
+  pushed and no fetch is made in the finalize path.
+
+### Changed
+
+- **A resumed attempt settles its own exit (#997, #1011).** A resumed session no longer inherits the
+  previous attempt's exit gate, so a resume that ends without a goal report is FAILED rather than
+  inheriting the first attempt's success.
+
+### Fixed
+
+- **Secrets are redacted from agent artifacts at rest (#944, #965).** Session transcripts
+  (`.mercury-sessions/*.jsonl`) and the other agent-state directories are rewritten through the same
+  redactor the event store uses before the workspace is kept.
+
+### Nightly tooling
+
+These ship inside the package's skill library (`.agents/skills/`), so they reach a host on upgrade.
+
+- `issue-fix-loop` 1.5.0: a Run is not done until it pushed, commented on the PR, and called the exit
+  path — a progress message is never a stopping point.
+- `nightly` 1.6.2: the digest gained "Runs that ended with unpushed commits" and "Runs that never
+  called finish/blocked", both naming the Run and its worktree; it always states the host version and
+  the loaded `issue-fix-loop` version and warns when that is older than `main`.
+- The flake section is windowed to the night and normalizes test paths (#964, #1013), a claim whose
+  Run ended with no PR and no comment is released (#1001, #1009), and a workflow opens an issue on a
+  morning with no nightly report (#1020, #1021).
+
 ## [0.2.2] - 2026-10-18
 
 Two weeks of nightly self-development, plus four feature slices. The headline is **advisory Workflow
