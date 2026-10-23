@@ -570,12 +570,138 @@ jobs:
           # job then correctly says "already on the registry" while the body said "not on the npm
           # registry" and "unavailable by every channel". Both sentences were in the same run. Ask the
           # registry which is true rather than inferring installability from this job's exit status.
-          version_live="000"
-          if [ "$npm_ok" = "0" ]; then
-            version_live=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
-              "https://registry.npmjs.org/${pkg_esc}/${version}" || echo 000)
+          #
+          # The same rule governs a SUCCESSFUL submission (#994). The verb this run used is a statement
+          # about the COMMAND, not about the outcome: `npm stage publish` defers proof-of-presence to a
+          # maintainer, so the version may be live anyway -- approved after the submit, or published
+          # before by someone else -- and a body that read the verb and wrote "awaiting maintainer
+          # approval" then sends a reader to Homebrew for no reason. Measured on host-v0.2.2: the body
+          # said awaiting approval while the registry served 0.2.2 and `latest` pointed at it.
+          #
+          # So probe the registry for THIS version and branch on the ANSWER. The verb survives only to
+          # word the one case the answer cannot explain on its own: a version the registry does not
+          # serve, staged or not.
+          npm_version_http() {
+            curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+              "https://registry.npmjs.org/${pkg_esc}/${version}" || echo 000
+          }
+          # Probed on every path, including a rehearsal: the fail-last messages below read this answer,
+          # and a rehearsal whose dry-run publish failed must report the registry's answer rather than
+          # a 000 the step never asked for.
+          version_live=$(npm_version_http)
+          # A run that just published directly expects the registry to serve the version. The packument
+          # can lag the publish by a few seconds, and one probe taken immediately would put "not
+          # confirmed" on the body of a version that IS installable -- a false negative is still a false
+          # statement about what a reader can install. Retry briefly before concluding anything.
+          # Bounded, so a registry that is down costs seconds, not the job. Not in a rehearsal: nothing
+          # was submitted, so there is no publish for the registry to catch up with.
+          if [ "${DRY_RUN:-}" != "true" ] && [ "$npm_ok" = "1" ] \
+            && [ "$npm_verb" != "stage publish" ] && [ "$version_live" != "200" ]; then
+            attempt=0
+            while [ "$attempt" -lt 5 ] && [ "$version_live" != "200" ]; do
+              attempt=$((attempt + 1))
+              sleep 2
+              version_live=$(npm_version_http)
+            done
           fi
-          if [ "$npm_ok" = "0" ] && [ "$version_live" = "200" ]; then
+          if [ "${DRY_RUN:-}" = "true" ]; then
+            # A rehearsal submitted nothing, so it has no channel state to describe. Every section
+            # below is a claim about what a registry serves, and there is no honest version of that
+            # claim for a run that never submitted anything. The notes are discarded here anyway (no
+            # release is created), but a "pending approval" line written by a rehearsal is exactly the
+            # assertion-without-observation this block exists to remove -- and the stage-id grep below
+            # would read a submission log the rehearsal never wrote.
+            :
+          elif [ "$npm_ok" = "1" ] && [ "$version_live" = "200" ]; then
+            # Observed: the registry serves this version, so the `npm install` line already in the
+            # notes is true and needs no qualifier. Silent is the correct output -- a section saying
+            # "published" would repeat the claim the notes already make, and "awaiting approval" would
+            # contradict the probe (#994).
+            :
+          elif [ "$npm_ok" = "1" ] && [ "$npm_verb" = "stage publish" ]; then
+            # npm prints "(staged with id <uuid>)" and approval is `npm stage approve <uuid>`, which
+            # needs a 2FA code and so can never be done by this job. Naming the id turns "go find it in
+            # the UI" into one command, and makes it obvious which staged version this run created when
+            # several are waiting. The shape is npm's own UUID_REGEX from lib/utils/validate-uuid.js, so
+            # what we extract is exactly what `npm stage approve` will accept -- a looser class would
+            # happily capture a 36-char hex digest and print a command that errors out. -i mirrors the
+            # /i on npm's own regex: the registry generates the id, so its case is not ours to assume.
+            # The log is read only when it exists: a run that submitted nothing has no id to name, and
+            # grepping the missing file put "No such file or directory" in the log of every rehearsal.
+            stage_id=""
+            if [ -f "$npm_log" ]; then
+              stage_id=$(grep -oiEm1 'staged with id [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$npm_log" | awk '{print $NF}' || true)
+            fi
+            {
+              echo ""
+              echo "## npm package awaiting maintainer approval"
+              echo ""
+              echo "This run **staged** the package on the npm registry, so a maintainer still has to"
+              echo "approve it."
+              echo ""
+              # Only a 404 on the version itself licenses "the registry does not serve it". A 000 from
+              # curl, a 403 or a 5xx says nothing, and the sentence that follows is the reason a reader
+              # waits instead of installing -- so it carries the answer it is based on.
+              if [ "$version_live" = "404" ]; then
+                echo "The registry does not serve this version yet, and staged publishing defers"
+                echo "proof-of-presence to a maintainer, so \`npm install\` will not resolve it until"
+                echo "it is approved."
+              else
+                echo "The registry could not confirm this version (HTTP \`${version_live}\`), so"
+                echo "nothing here shows it is installable. Staged publishing defers proof-of-presence"
+                echo "to a maintainer: check the staged package before announcing this version."
+              fi
+              if [ -n "$stage_id" ]; then
+                echo ""
+                echo "\`\`\`bash"
+                echo "npm stage approve $stage_id     # needs a 2FA code; run it locally"
+                echo "\`\`\`"
+                echo ""
+                echo "Or on npmjs.com under **Published packages -> Staged packages**."
+              else
+                echo "Approve it on npmjs.com under **Published packages -> Staged packages**."
+              fi
+              echo ""
+              if [ "$product" = "host" ] && [ "$formula_live" = "200" ]; then
+                echo "The assets attached to this release and the Homebrew formula are already live and"
+                echo "need no npm approval."
+              elif [ "$product" = "host" ]; then
+                echo "The asset attached to this release is live and needs no npm approval. The Homebrew"
+                echo "formula could not be confirmed (HTTP ${formula_live}); check it before offering"
+                echo "\`brew install\` to users."
+              else
+                echo "Nothing else is attached to this release and there is no Homebrew formula for"
+                echo "${product_display}, so approval on npmjs.com is the only way this version becomes installable."
+              fi
+            } >> "$notes"
+          elif [ "$npm_ok" = "1" ]; then
+            # npm reported success and the registry still does not serve the version. Naming the
+            # discrepancy is the only honest option: staying silent leaves the notes' `npm install`
+            # line standing as if it resolved, and "awaiting approval" would assert a staging state a
+            # direct publish never had.
+            # Same discipline as above: a 404 licenses "does not serve it", anything else is an
+            # unanswered question, and the body must not turn one into the other.
+            if [ "$version_live" = "404" ]; then
+              VERSION_WHY="the registry does not serve it (HTTP 404)"
+            else
+              VERSION_WHY="the registry could not confirm it (HTTP \`${version_live}\`)"
+            fi
+            {
+              echo ""
+              echo "## npm package: published, but not confirmed on the registry"
+              echo ""
+              echo "\`npm ${npm_verb}\` reported success for \`${pkg_name}@${version}\`, but"
+              echo "${VERSION_WHY} when asked afterwards, so the \`npm install\` instruction above"
+              echo "may not resolve. Confirm it before offering it:"
+              echo ""
+              echo "\`\`\`bash"
+              echo "npm view ${pkg_name}@${version} version"
+              echo "\`\`\`"
+              echo ""
+              echo "The job is not marked failed: npm reported no error, and a registry that lags a"
+              echo "publish is not a release defect. Treat the npm channel as unconfirmed."
+            } >> "$notes"
+          elif [ "$version_live" = "200" ]; then
             {
               echo ""
               echo "## npm package: this version is published, but not by this run"
@@ -594,7 +720,7 @@ jobs:
               echo ""
               echo "The job that produced this release is marked failed so the discrepancy stays visible."
             } >> "$notes"
-          elif [ "$npm_ok" = "0" ]; then
+          else
             {
               echo ""
               echo "## npm package not available for this release"
@@ -642,45 +768,6 @@ jobs:
               fi
               echo ""
               echo "The job that produced this release is marked failed so the npm gap stays visible."
-            } >> "$notes"
-          elif [ "$npm_verb" = "stage publish" ]; then
-            # npm prints "(staged with id <uuid>)" and approval is `npm stage approve <uuid>`, which
-            # needs a 2FA code and so can never be done by this job. Naming the id turns "go find it in
-            # the UI" into one command, and makes it obvious which staged version this run created when
-            # several are waiting. The shape is npm's own UUID_REGEX from lib/utils/validate-uuid.js, so
-            # what we extract is exactly what `npm stage approve` will accept -- a looser class would
-            # happily capture a 36-char hex digest and print a command that errors out. -i mirrors the
-            # /i on npm's own regex: the registry generates the id, so its case is not ours to assume.
-            stage_id=$(grep -oiEm1 'staged with id [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$npm_log" | awk '{print $NF}' || true)
-            {
-              echo ""
-              echo "## npm package awaiting maintainer approval"
-              echo ""
-              echo "This run **staged** the package on the npm registry. Staged publishing defers"
-              echo "proof-of-presence to a maintainer, so \`npm install\` will not resolve this version"
-              echo "until it is approved."
-              if [ -n "$stage_id" ]; then
-                echo ""
-                echo "\`\`\`bash"
-                echo "npm stage approve $stage_id     # needs a 2FA code; run it locally"
-                echo "\`\`\`"
-                echo ""
-                echo "Or on npmjs.com under **Published packages -> Staged packages**."
-              else
-                echo "Approve it on npmjs.com under **Published packages -> Staged packages**."
-              fi
-              echo ""
-              if [ "$product" = "host" ] && [ "$formula_live" = "200" ]; then
-                echo "The assets attached to this release and the Homebrew formula are already live and"
-                echo "need no npm approval."
-              elif [ "$product" = "host" ]; then
-                echo "The asset attached to this release is live and needs no npm approval. The Homebrew"
-                echo "formula could not be confirmed (HTTP ${formula_live}); check it before offering"
-                echo "\`brew install\` to users."
-              else
-                echo "Nothing else is attached to this release and there is no Homebrew formula for"
-                echo "${product_display}, so approval on npmjs.com is the only way this version becomes installable."
-              fi
             } >> "$notes"
           fi
 

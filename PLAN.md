@@ -229,6 +229,14 @@ Record: [`docs/status.md`](docs/status.md)
 | #944 | redactor: session transcripts and kernel-state snapshots store Run secrets unredacted | done | #965 |
 | #976 | artifact redaction: sweep workspaces of runs the worker never finalized | open | — |
 
+## Release workflow
+
+Record: [`docs/releasing.md`](docs/releasing.md)
+
+| Issue | Title | State | PR |
+| --- | --- | --- | --- |
+| #994 | release: the npm notes section asserts an approval state it never observed | open | — |
+
 ## Repository process
 
 Record: [`PLAN.md`](PLAN.md) (rules above)
