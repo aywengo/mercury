@@ -32,7 +32,7 @@
         "singleFlight": true,
         "onMiss": "skip",
         "template": {
-          "task": "nightly-next {{fire.date}} {{fire.time}}: take the top rung of the nightly ladder per .agents/skills/nightly/SKILL.md (next.ts); finish or mark blocked; never ask; stay inside the 06:00 window.",
+          "task": "nightly-next {{fire.date}} {{fire.time}}: run the model preflight (model.ts) per .agents/skills/nightly/SKILL.md, then take the top rung of the nightly ladder (next.ts --task nightly-next); if the preflight fails, claim nothing and report the record; finish or mark blocked; never ask; stay inside the 06:00 window.",
           "notAfterAt": "06:00",
           "constraints": {
             "maxDurationMs": 14400000,

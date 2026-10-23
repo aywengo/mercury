@@ -25,7 +25,7 @@
  * comment, and the next night's report lists it.
  *
  * Subcommands:
- *   node next.ts run    [--repo owner/name] [--dry-run]
+ *   node next.ts run    [--repo owner/name] [--dry-run] [--task <bot task> | --model <id>]
  *   node next.ts finish --repo owner/name --issue N
  *   node next.ts blocked --repo owner/name --issue N --reason "…"
  *   node next.ts propose --repo owner/name --source <key> --title "…" --body-file <path>  (#881)
@@ -35,6 +35,7 @@
 
 import { basename } from 'node:path';
 
+import { checkModel, defaultApiKey, defaultEndpoint, resolveTaskModel, type ModelCheck } from './model.ts';
 import { runSelectorWith } from './select.ts';
 import { assertRepo, ghToken, ghGet, ghPost, ghPatch, recordRunClaim, recordRunTerminal, FETCH_TIMEOUT_MS } from './shared.ts';
 
@@ -80,9 +81,40 @@ export interface NextSelection {
 }
 
 /** Every entry point interpolates repo into API paths: one strict owner/name check. */
+/**
+ * The preflight failed, so NOTHING was claimed. Carries the record so the CLI can print it and the
+ * Run leaves a readable "model unavailable" line instead of an unexplained non-zero exit (#1040).
+ */
+export class ModelUnavailableError extends Error {
+  readonly record: ModelCheck;
+  constructor(record: ModelCheck) {
+    super(`model ${record.status}: ${record.model} at ${record.endpoint}${record.reason ? ` — ${record.reason}` : ''}; nothing claimed`);
+    this.name = 'ModelUnavailableError';
+    this.record = record;
+  }
+}
+
+export interface RunNextOptions {
+  repo: string;
+  dryRun: boolean;
+  /** The model the Run will use. When set (directly, or through `task`), the endpoint is checked
+   * BEFORE the ladder runs, because the ladder's last act is a CLAIM: a model that cannot answer
+   * must not leave an issue `nightly:in-progress` for the rest of the night. */
+  model?: string;
+  /** A bot task whose pinned `template.model` is the model to check (`--task nightly-next`). */
+  task?: string;
+  /** Test seam for the preflight. */
+  checkModel?: (model: string) => Promise<ModelCheck>;
+}
+
 /** Run the ladder (with claim) and report what the agent should do. */
-export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: { repo: string; dryRun: boolean }): Promise<NextSelection> {
+export async function runNext(io: NextIo, env: NodeJS.ProcessEnv, opts: RunNextOptions): Promise<NextSelection> {
   assertRepo(opts.repo);
+  const model = opts.model ?? (opts.task ? resolveTaskModel(opts.task) : undefined);
+  if (model !== undefined) {
+    const check = await (opts.checkModel ?? ((m: string) => checkModel({ model: m, baseUrl: defaultEndpoint(), apiKey: defaultApiKey() })))(model);
+    if (check.status !== 'ok') throw new ModelUnavailableError(check);
+  }
   const selection = await runSelectorWith(
     {
       // Fail loud on non-2xx reads: the selector assumes its transport throws (its own ghGet
@@ -341,7 +373,7 @@ function realIo(env: NodeJS.ProcessEnv): NextIo {
 
 // ---- CLI ----
 
-const isMain = process.argv[1] && import.meta.url.endsWith(basename(process.argv[1]));
+const isMain = process.argv[1] !== undefined && import.meta.url.endsWith(basename(process.argv[1]));
 if (isMain) {
   const args = process.argv.slice(2);
   const cmd = args[0];
@@ -352,7 +384,12 @@ if (isMain) {
   const repo = flag('--repo') ?? process.env.REPO ?? '';
   const work = (async (): Promise<unknown> => {
     if (cmd === 'run') {
-      return await runNext(realIo(process.env), process.env, { repo, dryRun: args.includes('--dry-run') });
+      return await runNext(realIo(process.env), process.env, {
+        repo,
+        dryRun: args.includes('--dry-run'),
+        model: flag('--model'),
+        task: flag('--task'),
+      });
     }
     if (cmd === 'finish') {
       const issue = Number(flag('--issue'));
@@ -379,6 +416,9 @@ if (isMain) {
   work
     .then((out) => { process.stdout.write(JSON.stringify(out) + '\n'); })
     .catch((e: unknown) => {
+      // The preflight record goes to STDOUT as the one JSON line, so a failed night leaves a
+      // machine-readable reason next to the human message (#1040).
+      if (e instanceof ModelUnavailableError) process.stdout.write(JSON.stringify(e.record) + '\n');
       console.error(String(e instanceof Error ? e.message : e));
       process.exit(1);
     });

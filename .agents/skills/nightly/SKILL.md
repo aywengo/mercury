@@ -1,8 +1,8 @@
 ---
 name: nightly
-version: 1.6.2
+version: 1.7.0
 description: Deterministic ladder selection for the unattended nightly loop — decides the next issue from GitHub metadata only (author, labels, timeline label actor), never issue text, then claims it with nightly:in-progress.
-capabilities: [nightly, ladder, selection, trust, claim, triage, github, issues]
+capabilities: [nightly, ladder, selection, trust, claim, triage, github, issues, model-preflight]
 ---
 
 # nightly — ladder selection
@@ -120,13 +120,52 @@ on its own file to separate flakes from defects, then:
 
 The report is exactly one JSON line `{ pass, fail, real, flakes }`.
 
+## Model preflight (`model.ts`, #1040)
+
+```bash
+node .agents/skills/nightly/model.ts check --task nightly-next
+```
+
+A crashed or reloading model server does not fail a Run when it is created: the Run starts, this
+skill is followed, `next.ts run` CLAIMS an issue, and only then does the first model call fail. On
+2026-10-23 oMLX was down and 17 Runs failed **after** claiming, so the morning held nothing but
+failures and stale claims.
+
+The preflight asks one question — "would a model call work right now?" — and answers with a record,
+not an exception:
+
+```json
+{"status":"ok","model":"Qwen3.8-27B-MLX-bf16-mtp","endpoint":"http://127.0.0.1:8000"}
+{"status":"unreachable","model":"…","endpoint":"…","reason":"fetch failed (ECONNREFUSED)"}
+{"status":"unauthorized","model":"…","endpoint":"…","reason":"/admin/api/models -> 401"}
+{"status":"model-missing","model":"…","endpoint":"…","reason":"12 model(s) listed, none named '…'"}
+```
+
+Exit codes: `0` ok, `1` not usable (refused, timeout, 401/403, 5xx, unparseable listing), `2` the
+model is not on the server, `64` usage. The model id is read from the bot task that runs it
+(`--task nightly-next` → that task's `template.model`), so the pin keeps one home. `--model <id>`
+overrides it; `--base-url`/`--api-key` default to the local oMLX (`OMLX_BASE_URL`, `OMLX_API_KEY`,
+else `~/.prime/agent/models.json`).
+
+**`next.ts run` runs this itself** when given `--task` or `--model`, BEFORE the ladder and therefore
+before the claim: on any non-ok record it prints the record as its JSON line, exits 1, and claims
+nothing. Running `model.ts check` first is still worthwhile — it names the reason in one line
+instead of a failed Run — but the claim is protected either way.
+
+**When the preflight fails, do not work around it.** Do not claim, do not retry the endpoint, do
+not fall back to another model. Report the record and end the Run; the night produces one clear
+"model unavailable" line, and the next night starts clean.
+
 ## Next (`next.ts`, N1-3)
 
 ```bash
-node .agents/skills/nightly/next.ts run --repo aywengo/mercury [--dry-run]
+node .agents/skills/nightly/next.ts run --repo aywengo/mercury --task nightly-next [--dry-run]
 node .agents/skills/nightly/next.ts finish --repo aywengo/mercury --issue <n>
 node .agents/skills/nightly/next.ts blocked --repo aywengo/mercury --issue <n> --reason "<question>"
 ```
+
+`--task nightly-next` is what turns on the model preflight above; without it `run` checks nothing
+(the tests and `--dry-run` do not need a live model server).
 
 `run` executes the N1-1 ladder (rung 0 resume, rung 1 trusted bugs, rung 2 trusted enhancements,
 rung 3 new @aywengo issues, rung 4 docs → proposals) and claims the chosen issue `nightly:in-progress` (already done by the selector before
